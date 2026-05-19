@@ -966,7 +966,7 @@ UPDATE recovery_point='finished', status='success'|'error'  ← transitionToFini
 | `kind='new'` (no prior row) | Standard flow: execute → executed → finished |
 | `recovered`, `recovery_point='finished'` | Return cached `SkillRunResult` reconstructed from the row. Runtime never touched. |
 | `recovered`, `recovery_point='executed'` | Skip execute, replay output validation against stored output, transition to `finished`. Persist-failure retries land here. |
-| `recovered`, `recovery_point='started'` | Prior attempt crashed mid-execute. Throw `SkillInflightCrashedError` — conservative default, since re-executing could double-fire non-idempotent side effects. Operator inspects the orphan row. Future manifest flag `idempotent_invocation: true` would opt into optimistic re-execute. |
+| `recovered`, `recovery_point='started'` | In-flight: either the prior attempt crashed mid-execute, or another worker is currently executing this same key. The runner can't tell those apart from the row state alone. Throw `SkillInflightError` — conservative refusal in both cases, since re-executing risks double-firing non-idempotent side effects (and in the concurrent case, the original is still running and will eventually finalize). Operator inspects. Future manifest flag `idempotent_invocation: true` would opt into optimistic re-execute. A heartbeat predicate (`created_at < now() - interval 'N min'`) would let the runner discriminate at runtime; deferred. |
 
 **Caller key conventions** (deterministic per logical fire):
 

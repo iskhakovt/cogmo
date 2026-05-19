@@ -10,7 +10,7 @@ import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import {
   InputValidationError,
   mapManifestResourceLimits,
-  SkillInflightCrashedError,
+  SkillInflightError,
   SkillRunnerImpl,
 } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
@@ -643,10 +643,14 @@ inputs:
       expect(reloaded?.status).toBe("success");
     });
 
-    it("recovered row with recovery_point='started' throws SkillInflightCrashedError", async () => {
-      // Mid-execute crash. The runner refuses to re-execute (conservative
-      // default) — the caller decides whether to surface, retry, or
-      // clear the orphan row.
+    it("recovered row with recovery_point='started' throws SkillInflightError", async () => {
+      // Row in `recovery_point='started'` can mean either (a) a prior
+      // attempt crashed mid-execute, or (b) another worker is currently
+      // executing this same key. The runner can't tell those apart from
+      // the row alone — both refuse re-execution, both surface the same
+      // typed error. This test seeds the row directly via
+      // `startOrRecoverRun` (no real execute), which is the test
+      // equivalent of either scenario.
       const runner = await makeRunner();
       await runner.__registerForTests({
         name: "echo",
@@ -659,7 +663,7 @@ inputs:
           skillId: skill?.id ?? "",
           trigger: "cron",
           inputs: { x: 1 },
-          idempotencyKey: "skill-cron:echo:crashed",
+          idempotencyKey: "skill-cron:echo:inflight",
         }),
       );
 
@@ -667,9 +671,9 @@ inputs:
         runner.invoke({
           name: "echo",
           inputs: { x: 1 },
-          idempotencyKey: "skill-cron:echo:crashed",
+          idempotencyKey: "skill-cron:echo:inflight",
         }),
-      ).rejects.toThrow(SkillInflightCrashedError);
+      ).rejects.toThrow(SkillInflightError);
 
       // Row stays as-is — operator inspects and decides.
       const reloaded = await tx((trx) => store.getRun(trx, row.id));

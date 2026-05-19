@@ -77,15 +77,17 @@ export interface SkillRunRow {
   error: string | null;
   /**
    * Per-run wall-clock + peak-memory metrics. Null while the run is in
-   * `status='running'`; populated by `updateRunResult` at finalisation
-   * time. Shape: {@link SkillRunResourceUsage}.
+   * `recovery_point='started'`; populated by `transitionToExecuted` when
+   * the worker returns. Shape: {@link SkillRunResourceUsage}.
    */
   resourceUsage: SkillRunResourceUsage | null;
   /**
    * Caller-supplied deterministic token. Null for one-shot invocations
-   * (CLI, ad-hoc tests). When present, the partial unique index on this
-   * column plus the {@link recoveryPoint} state machine give exactly-once
-   * execution semantics across retries — see `runner.invoke`.
+   * (CLI, ad-hoc tests). When present, the `uniq_skill_runs_idempotency_key`
+   * UNIQUE constraint plus the {@link recoveryPoint} state machine give
+   * exactly-once execution semantics across retries — see `runner.invoke`.
+   * Postgres's default NULL-not-equal semantics let null-key rows coexist
+   * freely under the same constraint.
    */
   idempotencyKey: string | null;
   /**
@@ -148,21 +150,6 @@ export interface InsertRunParams {
    * {@link SkillStore.startOrRecoverRun}.
    */
   idempotencyKey?: string;
-}
-
-export interface UpdateRunResultParams {
-  id: string;
-  status: SkillRunStatus;
-  output: unknown | null;
-  error: string | null;
-  /**
-   * Per-run metrics — `wallClockMs` is always set by the caller (host-side
-   * derived from `finishedAt - createdAt`); `peakMemoryBytes` is null
-   * when the runtime didn't surface a `rusage` block (tier-1 Pyodide,
-   * synthesised tier-2 timeouts/crashes). See {@link SkillRunResourceUsage}.
-   */
-  resourceUsage: SkillRunResourceUsage;
-  finishedAt: Date;
 }
 
 export interface RecordContextCallParams {
@@ -369,7 +356,6 @@ export interface SkillStore {
 
   // --- skill_runs ---
   insertRun(tx: Transaction, params: InsertRunParams): Promise<SkillRunRow>;
-  updateRunResult(tx: Transaction, params: UpdateRunResultParams): Promise<void>;
   getRun(tx: Transaction, id: string): Promise<SkillRunRow | undefined>;
 
   /**
@@ -952,19 +938,6 @@ export class DrizzleSkillStore implements SkillStore {
     return { kind: "recovered", row: single(existing) };
   }
 
-  async updateRunResult(tx: Transaction, params: UpdateRunResultParams): Promise<void> {
-    await tx
-      .update(skillRuns)
-      .set({
-        status: params.status,
-        output: params.output,
-        error: params.error,
-        resourceUsage: params.resourceUsage,
-        finishedAt: params.finishedAt,
-      })
-      .where(eq(skillRuns.id, params.id));
-  }
-
   async transitionToExecuted(
     tx: Transaction,
     params: {
@@ -975,7 +948,13 @@ export class DrizzleSkillStore implements SkillStore {
       finishedAt: Date;
     },
   ): Promise<void> {
-    await tx
+    // Guard the transition on the current recovery_point so a
+    // programmer error (calling transitionToExecuted on a row that has
+    // already moved past 'started') surfaces as an assertion failure
+    // instead of silently regressing the row. The UPDATE matches zero
+    // rows when the precondition fails; we re-select to discriminate
+    // "row vanished" from "row in wrong state" for a useful message.
+    const updated = await tx
       .update(skillRuns)
       .set({
         output: params.output,
@@ -984,7 +963,13 @@ export class DrizzleSkillStore implements SkillStore {
         finishedAt: params.finishedAt,
         recoveryPoint: "executed",
       })
-      .where(eq(skillRuns.id, params.id));
+      .where(and(eq(skillRuns.id, params.id), eq(skillRuns.recoveryPoint, "started")))
+      .returning({ id: skillRuns.id });
+    if (updated.length === 0) {
+      throw new Error(
+        `transitionToExecuted(${params.id}): row not found or recovery_point != 'started'`,
+      );
+    }
   }
 
   async transitionToFinished(
@@ -996,7 +981,10 @@ export class DrizzleSkillStore implements SkillStore {
       error: string | null;
     },
   ): Promise<void> {
-    await tx
+    // Guard the transition on `recovery_point='executed'`. Same
+    // rationale as transitionToExecuted — catch out-of-order calls
+    // at the DB layer instead of silently regressing the row.
+    const updated = await tx
       .update(skillRuns)
       .set({
         status: params.status,
@@ -1004,7 +992,13 @@ export class DrizzleSkillStore implements SkillStore {
         error: params.error,
         recoveryPoint: "finished",
       })
-      .where(eq(skillRuns.id, params.id));
+      .where(and(eq(skillRuns.id, params.id), eq(skillRuns.recoveryPoint, "executed")))
+      .returning({ id: skillRuns.id });
+    if (updated.length === 0) {
+      throw new Error(
+        `transitionToFinished(${params.id}): row not found or recovery_point != 'executed'`,
+      );
+    }
   }
 
   async getRun(tx: Transaction, id: string): Promise<SkillRunRow | undefined> {

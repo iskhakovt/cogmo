@@ -361,13 +361,20 @@ describe("DrizzleSkillStore", () => {
       expect(calls[1]?.target).toBeNull();
 
       await tx((trx) =>
-        store.updateRunResult(trx, {
+        store.transitionToExecuted(trx, {
           id: run.id,
-          status: "success",
           output: { echo: 8 },
           error: null,
           resourceUsage: { wallClockMs: 42, peakMemoryBytes: 1_048_576 },
           finishedAt: new Date(),
+        }),
+      );
+      await tx((trx) =>
+        store.transitionToFinished(trx, {
+          id: run.id,
+          status: "success",
+          output: { echo: 8 },
+          error: null,
         }),
       );
 
@@ -388,13 +395,20 @@ describe("DrizzleSkillStore", () => {
         }),
       );
       await tx((trx) =>
-        store.updateRunResult(trx, {
+        store.transitionToExecuted(trx, {
           id: run.id,
-          status: "error",
           output: null,
           error: "Boom",
           resourceUsage: { wallClockMs: 7, peakMemoryBytes: null },
           finishedAt: new Date(),
+        }),
+      );
+      await tx((trx) =>
+        store.transitionToFinished(trx, {
+          id: run.id,
+          status: "error",
+          output: null,
+          error: "Boom",
         }),
       );
       const reloaded = await tx((trx) => store.getRun(trx, run.id));
@@ -473,7 +487,7 @@ describe("DrizzleSkillStore", () => {
       ).rejects.toThrow(/inputs must not be null/);
     });
 
-    it("output:null on updateRunResult round-trips correctly", async () => {
+    it("output:null on transitionToFinished round-trips correctly", async () => {
       const skill = await seedSkill();
       const run = await tx((trx) =>
         store.insertRun(trx, {
@@ -483,13 +497,20 @@ describe("DrizzleSkillStore", () => {
         }),
       );
       await tx((trx) =>
-        store.updateRunResult(trx, {
+        store.transitionToExecuted(trx, {
           id: run.id,
-          status: "success",
           output: null,
           error: null,
           resourceUsage: { wallClockMs: 1, peakMemoryBytes: null },
           finishedAt: new Date(),
+        }),
+      );
+      await tx((trx) =>
+        store.transitionToFinished(trx, {
+          id: run.id,
+          status: "success",
+          output: null,
+          error: null,
         }),
       );
       const after = await tx((trx) => store.getRun(trx, run.id));
@@ -507,15 +528,14 @@ describe("DrizzleSkillStore", () => {
       expect(run.status).toBe("running");
     });
 
-    it("updateRunResult persists both wall-clock and peak-memory", async () => {
+    it("transitionToExecuted persists both wall-clock and peak-memory", async () => {
       const skill = await seedSkill();
       const run = await tx((trx) =>
         store.insertRun(trx, { skillId: skill.id, trigger: "cron", inputs: {} }),
       );
       await tx((trx) =>
-        store.updateRunResult(trx, {
+        store.transitionToExecuted(trx, {
           id: run.id,
-          status: "success",
           output: { ok: true },
           error: null,
           resourceUsage: { wallClockMs: 123, peakMemoryBytes: 5_242_880 },
@@ -526,15 +546,14 @@ describe("DrizzleSkillStore", () => {
       expect(reloaded?.resourceUsage).toEqual({ wallClockMs: 123, peakMemoryBytes: 5_242_880 });
     });
 
-    it("updateRunResult tolerates peakMemoryBytes=null (tier-1 / timeout paths)", async () => {
+    it("transitionToExecuted tolerates peakMemoryBytes=null (tier-1 / timeout paths)", async () => {
       const skill = await seedSkill();
       const run = await tx((trx) =>
         store.insertRun(trx, { skillId: skill.id, trigger: "manual", inputs: {} }),
       );
       await tx((trx) =>
-        store.updateRunResult(trx, {
+        store.transitionToExecuted(trx, {
           id: run.id,
-          status: "error",
           output: null,
           error: "wall_clock_exceeded",
           resourceUsage: { wallClockMs: 30_000, peakMemoryBytes: null },
@@ -554,9 +573,8 @@ describe("DrizzleSkillStore", () => {
       // at the type level) but Zod rejects at the store boundary.
       await expect(
         tx((trx) =>
-          store.updateRunResult(trx, {
+          store.transitionToExecuted(trx, {
             id: run.id,
-            status: "success",
             output: null,
             error: null,
             resourceUsage: { wallClockMs: -1, peakMemoryBytes: null },
@@ -819,10 +837,11 @@ describe("DrizzleSkillStore", () => {
       expect(reloaded?.status).toBe("success");
     });
 
-    it("partial unique index allows multiple null-key rows for the same skill", async () => {
-      // CLI / ad-hoc invocations land with idempotency_key=NULL. The
-      // partial unique index `WHERE idempotency_key IS NOT NULL` must
-      // not constrain these — they should be free to coexist.
+    it("UNIQUE constraint allows multiple null-key rows for the same skill", async () => {
+      // CLI / ad-hoc invocations land with idempotency_key=NULL. Postgres
+      // default NULL-not-equal semantics under UNIQUE constraints let
+      // null-key rows coexist freely — non-null keys collide, nulls
+      // don't. Verifies the constraint definition matches the intent.
       const skill = await seedSkill();
       const a = await tx((trx) =>
         store.insertRun(trx, { skillId: skill.id, trigger: "manual", inputs: {} }),

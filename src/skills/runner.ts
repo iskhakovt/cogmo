@@ -970,6 +970,17 @@ export class SkillRunnerImpl implements SkillRunner {
       throw new SandboxUnavailableError(opts.name);
     }
 
+    // Empty-string idempotency keys would all collide on the UNIQUE
+    // constraint as if they were the same key — a silent contract bug
+    // for any caller that constructs a key from optional fields and
+    // forgets to validate. Refuse explicitly so the failure surfaces at
+    // the API boundary, not deep in the recovery branch.
+    if (opts.idempotencyKey === "") {
+      throw new InputValidationError(
+        `idempotencyKey must be a non-empty string when provided (skill '${opts.name}')`,
+      );
+    }
+
     const trigger: SkillRunTrigger = opts.trigger ?? "manual";
 
     // --- Start or recover the run row ---
@@ -989,13 +1000,17 @@ export class SkillRunnerImpl implements SkillRunner {
     let savedOutput: unknown | null = null;
     let savedError: string | null = null;
 
-    if (opts.idempotencyKey !== undefined) {
+    // Hoist the key out so the narrowed `string` type survives across
+    // the `runInTx` closure (TS doesn't always retain narrowing through
+    // captured `opts.idempotencyKey` references inside an async lambda).
+    const idempotencyKey = opts.idempotencyKey;
+    if (idempotencyKey !== undefined) {
       const { kind, row } = await this.#runInTx((tx) =>
         this.#store.startOrRecoverRun(tx, {
           skillId: skill.id,
           trigger,
           inputs: opts.inputs,
-          idempotencyKey: opts.idempotencyKey ?? "",
+          idempotencyKey,
         }),
       );
       runId = row.id;
@@ -1008,18 +1023,19 @@ export class SkillRunnerImpl implements SkillRunner {
         // Terminal cached result. Reconstruct SkillRunResult shape and
         // return without touching the runtime or the row.
         log.info(
-          { runId, skillName: opts.name, idempotencyKey: opts.idempotencyKey },
+          { runId, skillName: opts.name, idempotencyKey },
           "replaying cached terminal skill run (recovery_point=finished)",
         );
         return reconstructFinishedResult(runId, row.status, savedOutput, savedError);
       }
       if (kind === "recovered" && recoveryPoint === "started") {
-        // Prior attempt crashed mid-execute. Re-executing would risk
-        // double-firing non-idempotent side effects (ctx.memory.write,
-        // outbound HTTP, etc.) without the manifest having opted in.
-        // Surface a typed error so the caller (cron-fire-handler etc.)
-        // can decide whether to skip or escalate.
-        throw new SkillInflightCrashedError(opts.name, runId);
+        // The row is in flight: either a prior attempt crashed
+        // mid-execute, or another worker is currently executing this
+        // same key. The runner can't tell those apart — both leave the
+        // row at `recovery_point='started'`. Conservative refusal in
+        // both cases: re-executing risks double-firing non-idempotent
+        // side effects (ctx.memory.write, outbound HTTP, etc.).
+        throw new SkillInflightError(opts.name, runId);
       }
       // kind === 'new' (fresh start) OR kind === 'recovered' &&
       // recovery_point === 'executed' (execute succeeded last time, just
@@ -1039,7 +1055,7 @@ export class SkillRunnerImpl implements SkillRunner {
         skillName: opts.name,
         tier: skill.tier,
         trigger,
-        ...(opts.idempotencyKey !== undefined && { idempotencyKey: opts.idempotencyKey }),
+        ...(idempotencyKey !== undefined && { idempotencyKey }),
         ...(recoveryPoint !== "started" && { resumingFrom: recoveryPoint }),
       },
       recoveryPoint === "started" ? "invoking skill" : "resuming skill from executed phase",
@@ -1549,23 +1565,37 @@ export class SandboxUnavailableError extends Error {
 
 /**
  * `runner.invoke` recovered an existing run row whose `recovery_point` is
- * still `started` — meaning the prior attempt crashed mid-execute and the
- * runtime never reported back. Re-executing now would risk double-firing
- * non-idempotent side effects (ctx.memory.write, outbound HTTP, file
- * writes); the conservative default is to surface the situation to the
- * caller. The Stripe pattern this implements does the same — see
+ * still `started`. Two situations produce this state and the runner can't
+ * tell them apart from the row alone:
+ *
+ *   1. **Crashed mid-execute.** Prior attempt died after the INSERT but
+ *      before the executed-transition wrote back. No worker is doing the
+ *      work — the row is an orphan and the caller can retry once
+ *      operators clear it (or the future `idempotent_invocation: true`
+ *      manifest flag opts into optimistic re-execute).
+ *   2. **Concurrent in-flight.** Another worker is actively executing
+ *      this same key right now; the bus-dedup window was crossed and the
+ *      retry landed on a live row. No crash, just contention.
+ *
+ * The conservative default in both cases is to refuse re-execution and
+ * surface a typed error: re-executing case (1) is a recovery, but in
+ * case (2) it would double-fire side effects (ctx.memory.write, outbound
+ * HTTP, file writes) while the original is still in flight. The Stripe
+ * pattern this implements takes the same posture — see
  * brandur.org/idempotency-keys → "Resumed transactions."
  *
- * Carries the orphan `runId` so operators can inspect / clean up. A future
- * manifest flag (`idempotent_invocation: true`) would let the runner
- * optimistically re-execute instead of throwing — for skills whose
- * authors explicitly opt in.
+ * Carries the run `runId` so operators can inspect. Discriminating
+ * crash from concurrency at runtime would need a heartbeat (e.g.
+ * `recovery_point='started' AND created_at < now() - interval 'N min'`);
+ * deferred until either failure mode shows up in practice.
  */
-export class SkillInflightCrashedError extends Error {
+export class SkillInflightError extends Error {
   readonly runId: string;
   constructor(name: string, runId: string) {
-    super(`skill '${name}' has an in-flight run (id=${runId}) from a prior attempt that crashed`);
-    this.name = "SkillInflightCrashedError";
+    super(
+      `skill '${name}' has an in-flight run (id=${runId}) — prior attempt may have crashed mid-execute or another worker is currently executing`,
+    );
+    this.name = "SkillInflightError";
     this.runId = runId;
   }
 }

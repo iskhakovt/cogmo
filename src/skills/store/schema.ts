@@ -37,8 +37,11 @@ export const skillRunTrigger = pgEnum("skill_run_trigger", ["manual", "cron", "e
  * idempotency-key replay path inside `runner.invoke`:
  *
  *   - `started` — row inserted; execute hasn't completed. A retry that
- *     sees this state assumes the prior attempt crashed mid-execute
- *     (conservative; non-idempotent side effects must not double-fire).
+ *     sees this state refuses re-execution: the original may have
+ *     crashed mid-execute OR another worker may be currently executing
+ *     this same key. Either way, re-executing would risk double-firing
+ *     non-idempotent side effects. See `SkillInflightError` in
+ *     `runner.ts` for the discrimination rationale.
  *   - `executed` — execute completed and its result is committed
  *     (output/error/rusage/finished_at). Output validation + final
  *     `status` write may not have happened yet. A retry replays only
