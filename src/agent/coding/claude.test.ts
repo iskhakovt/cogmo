@@ -268,6 +268,111 @@ describe("ClaudeCodeBackend.plan", () => {
     assertKind(text, "text_delta");
     expect(text.text).toBe("hello");
   });
+
+  describe("ExitPlanMode permission round-trip", () => {
+    // Mirrors what Claude Code emits when plan mode completes:
+    // text_delta → tool_use(ExitPlanMode) → control_request → result.
+    // The runner must reply `behavior: "allow"` on stdin or the CLI
+    // blocks until its 5-min idle timeout.
+    const EXIT_PLAN_MODE_FIXTURE = [
+      '{"type":"system","subtype":"init","session_id":"sess-epm","model":"claude-sonnet-4"}',
+      '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"## Plan\\n"}}}',
+      '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"1. add foo\\n"}}}',
+      '{"type":"assistant","message":{"role":"assistant","content":[' +
+        '{"type":"tool_use","id":"toolu_epm","name":"ExitPlanMode","input":{"plan":"## Plan\\n1. add foo\\n"}}' +
+        "]}}",
+      '{"type":"control_request","request_id":"req_epm","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"## Plan\\n1. add foo\\n"}}}',
+      '{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.012,"usage":{"input_tokens":420,"output_tokens":86}}',
+      "",
+    ].join("\n");
+
+    it("auto-allows ExitPlanMode and writes the control_response to stdin", async () => {
+      const { container, stdinChunks } = fakeContainer(EXIT_PLAN_MODE_FIXTURE);
+      const events = await collect(new ClaudeCodeBackend().plan({ task, repo, container }));
+
+      // permission_request must not escape the runner.
+      expect(events.find((e) => e.kind === "permission_request")).toBeUndefined();
+
+      const planReady = events.find((e) => e.kind === "plan_ready");
+      assertKind(planReady, "plan_ready");
+      expect(planReady.plan).toBe("## Plan\n1. add foo\n");
+
+      const lines = stdinChunks
+        .join("")
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0);
+      expect(lines.length).toBeGreaterThanOrEqual(2);
+      const responseFrame = ControlResponseFrameSchema.parse(JSON.parse(lines[1] ?? "{}"));
+      expect(responseFrame.type).toBe("control_response");
+      expect(responseFrame.response.request_id).toBe("req_epm");
+      expect(responseFrame.response.subtype).toBe("success");
+      expect(responseFrame.response.response).toEqual({ behavior: "allow" });
+    });
+
+    // Regression assertion: a control_response must land on stdin
+    // *after* the user prompt. If stdin closed prematurely (the bug),
+    // only the user prompt would appear.
+    it("keeps stdin open until the control_response is written (regression)", async () => {
+      const { container, stdinChunks } = fakeContainer(EXIT_PLAN_MODE_FIXTURE);
+      await collect(new ClaudeCodeBackend().plan({ task, repo, container }));
+
+      const frames = stdinChunks
+        .join("")
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0)
+        .map((l) => TaggedFrameSchema.parse(JSON.parse(l)));
+      const types = frames.map((f) => f.type);
+      expect(types[0]).toBe("user");
+      expect(types).toContain("control_response");
+    });
+
+    it("auto-allows non-ExitPlanMode plan-mode tools (e.g. Write to the CLI's plan file)", async () => {
+      // CLI 2.1.x routes intermediate Read/Write/Bash through the same
+      // control channel — denying breaks the CLI's own plan-completion
+      // protocol (Write to ~/.claude/plans/<task>.md before ExitPlanMode).
+      const fixture = [
+        '{"type":"system","subtype":"init","session_id":"sess-write","model":"m"}',
+        '{"type":"control_request","request_id":"req_write","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"/home/vscode/.claude/plans/task.md","content":"## Plan"}}}',
+        '{"type":"result","subtype":"success","is_error":false}',
+        "",
+      ].join("\n");
+      const { container, stdinChunks } = fakeContainer(fixture);
+      const events = await collect(new ClaudeCodeBackend().plan({ task, repo, container }));
+
+      expect(events.find((e) => e.kind === "permission_request")).toBeUndefined();
+
+      const lines = stdinChunks
+        .join("")
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0);
+      const responseFrame = ControlResponseFrameSchema.parse(JSON.parse(lines[1] ?? "{}"));
+      expect(responseFrame.response.response).toEqual({ behavior: "allow" });
+    });
+
+    it("dedupes duplicate control_request frames for the same request_id", async () => {
+      const fixture = [
+        '{"type":"system","subtype":"init","session_id":"sess-dup","model":"m"}',
+        '{"type":"control_request","request_id":"req_dup","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{}}}',
+        '{"type":"control_request","request_id":"req_dup","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{}}}',
+        '{"type":"result","subtype":"success","is_error":false}',
+        "",
+      ].join("\n");
+      const { container, stdinChunks } = fakeContainer(fixture);
+      await collect(new ClaudeCodeBackend().plan({ task, repo, container }));
+
+      const controlResponses = stdinChunks
+        .join("")
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0)
+        .map((l) => TaggedFrameSchema.parse(JSON.parse(l)))
+        .filter((f) => f.type === "control_response");
+      expect(controlResponses.length).toBe(1);
+    });
+  });
 });
 
 // Execute mode fixture: Claude resumes a session, narrates ("Adding foo()..."),

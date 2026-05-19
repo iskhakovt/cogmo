@@ -36,7 +36,7 @@ RUN corepack enable \
 # src/agent/coding/claude.ts depends on. Bump deliberately in the same PR
 # that bumps the parser, so the next cogmo release ships matched code +
 # image at the same semver. Never `latest`.
-ARG CLAUDE_CODE_VERSION=2.1.119
+ARG CLAUDE_CODE_VERSION=2.1.138
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
  && claude --version
 
