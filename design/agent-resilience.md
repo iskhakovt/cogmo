@@ -218,7 +218,7 @@ The degraded reply is persisted as a normal assistant message (role `assistant`,
 
 The forensic record of *what the model produced before degrading* lives in the `agent.repair` / `agent.degrade` structured logs (see Telemetry below), not in `messages`. The `messages` table is the conversation transcript; structured logs are the failure audit.
 
-#### Tools-free synthesis on degrade `[proposed]`
+#### Tools-free synthesis on degrade `[confirmed]`
 
 The fixed text above is the conservative baseline — no LLM call, deterministic, no failure modes. But it tells the user nothing about *what* the model was trying to do or *why* it stopped. A user who asked for an image and got "I had trouble generating a clean response" can't tell whether to rephrase, switch model, give up, or wait.
 
@@ -243,6 +243,8 @@ Telemetry:
 Single event name, `ok: boolean` for outcome — no separate `synthesis_failed` event. Downstream queries count failures as `event == "agent.degrade.synthesis" AND ok == false`. The underlying `agent.degrade` log fires regardless of synthesis outcome (the turn is degrading either way); the synthesis event is the per-attempt forensic record.
 
 **Provider-outage falls through cleanly.** When the synthesis call hits a Class A failure on a dead provider, it returns `ok: false` and the fixed string is posted. A spike in `synthesis ok: false` correlated with provider-outage telemetry is *not* a synthesis-logic bug — the synthesis path inherits the failing turn's provider, so any upstream unavailability propagates here. Investigate the upstream symptom in that case, not the synthesis code.
+
+**Cost amplification on long contexts.** The synthesis call re-sends the full conversation history to produce a 1–3 sentence reply. For iteration-cap degrades — where the turn ran long *because the context grew* — that's a non-trivial re-send. The `tokens_in` field on `agent.degrade.synthesis` quantifies it per call; if a future telemetry pass shows a fat tail (large `tokens_in` correlated with `subtype: null` / `reason: "iteration_cap"`), the response is to compact before synthesis, not to skip it — the user is still owed an explanation. Skipping synthesis on long contexts trades a known cost for an unknown UX regression.
 
 ### Outside the agent loop
 

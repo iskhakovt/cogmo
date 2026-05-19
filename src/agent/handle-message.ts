@@ -36,7 +36,7 @@ import type { ImageToolsLoader } from "./image-tools-loader.js";
 import type { AgentLoopResult, StreamingAgentLoopParams } from "./loop.js";
 import type { PromptSource } from "./prompt.js";
 import { shouldSkipRecall } from "./recall-gate.js";
-import { degradedReplyText } from "./repair.js";
+import { synthesizeDegradedReply } from "./repair.js";
 import { createSchedulingService } from "./scheduling/scheduling-service.js";
 import type { Service } from "./service.js";
 import { createService } from "./service.js";
@@ -778,7 +778,19 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         // closes with a coherent message rather than silence. See
         // design/agent-resilience.md → Degraded reply.
         if (result.degraded) {
-          const apology = degradedReplyText(result.degraded.subtype);
+          // One tools-free LLM call summarizes the failure in user-facing
+          // terms (what was attempted, what went wrong, one next step).
+          // Falls through to the fixed string on any synthesis failure
+          // (timeout, refusal, provider outage). See
+          // design/agent-resilience.md → Tools-free synthesis on degrade.
+          const { text: apology } = await synthesizeDegradedReply({
+            provider,
+            model: result.model,
+            messages: result.messages,
+            reason: result.degraded.reason,
+            subtype: result.degraded.subtype,
+            log: turnLogger,
+          });
           await delivery.push({ type: "text_delta", text: apology });
           result = {
             ...result,

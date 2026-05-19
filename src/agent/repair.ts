@@ -24,9 +24,11 @@
 
 import { createHash } from "node:crypto";
 import canonicalize from "canonicalize";
+import type { Logger } from "pino";
 import * as R from "remeda";
 import { ProviderProtocolError } from "../llm/errors.js";
 import { RefusalError } from "../llm/fallback.js";
+import type { LlmProvider } from "../llm/provider.js";
 import type { ContentBlock, Message, StopReason, ToolUseBlock } from "../llm/types.js";
 
 /**
@@ -245,6 +247,198 @@ export function degradedReplyText(subtype: DegradeSubtype | null): string {
     return "The model declined that request. Try rephrasing, or switch model with `/model`.";
   }
   return "I had trouble generating a clean response — the model returned an output I couldn't process. Could you rephrase or try again?";
+}
+
+/**
+ * Default wall-clock cap for {@link synthesizeDegradedReply}. The user
+ * is already waiting on a failed turn — tighter than a normal request
+ * budget so the apology doesn't extend the perceived hang.
+ */
+export const DEGRADED_SYNTHESIS_TIMEOUT_MS = 5000;
+
+/**
+ * Inputs to {@link synthesizeDegradedReply}. The `messages` slice is the
+ * full conversation history at the point of degrade — the model needs
+ * it to know what the user asked and what was attempted. `reason` and
+ * `subtype` come from {@link AgentLoopResult.degraded}.
+ */
+export interface SynthesizeDegradedReplyDeps {
+  provider: LlmProvider;
+  model: string;
+  messages: ReadonlyArray<Message>;
+  reason: string;
+  subtype: DegradeSubtype | null;
+  log: Logger;
+  /** Wall-clock cap; defaults to {@link DEGRADED_SYNTHESIS_TIMEOUT_MS}. */
+  timeoutMs?: number;
+}
+
+export interface SynthesizeDegradedReplyResult {
+  /** Text to post as the user-facing degraded reply. */
+  text: string;
+  /** `true` when the synthesis LLM call returned usable text. */
+  ok: boolean;
+}
+
+/**
+ * One-shot, tools-free LLM call that produces a user-facing explanation
+ * of why the turn degraded. Replaces the fixed {@link degradedReplyText}
+ * baseline with a model-generated 1–3 sentence reply naming what was
+ * attempted, what went wrong, and one concrete next step.
+ *
+ * Constraints (all enforced at the callsite; see
+ * `design/agent-resilience.md` → Tools-free synthesis on degrade):
+ *
+ * - `tools: []` at the API level — defends against the model trying to
+ *   call a tool from a stale system instruction.
+ * - `temperature: 0` — predictability matters more than variety on a
+ *   failure reply.
+ * - Single attempt, no Class C repair — if it fails for any reason
+ *   (timeout, refusal, provider outage), fall back to the fixed string
+ *   and emit `agent.degrade.synthesis` with `ok: false`.
+ * - Wall-clock cap via `Promise.race`. The underlying request may
+ *   continue dangling after the race — acceptable for the rare
+ *   degrade-path; revisit with `AbortSignal` plumbing if cost
+ *   telemetry shows the waste matters.
+ * - Same provider as the failing turn — switching providers on the
+ *   apology message is a non-sequitur; the conversation is already
+ *   paying for that model's quirks.
+ *
+ * Provider-outage during synthesis falls through cleanly to the fixed
+ * string. A `synthesis ok: false` spike correlated with provider-outage
+ * events is an upstream symptom, not a synthesis-logic bug.
+ */
+export async function synthesizeDegradedReply(
+  deps: SynthesizeDegradedReplyDeps,
+): Promise<SynthesizeDegradedReplyResult> {
+  const { provider, model, messages, reason, subtype, log } = deps;
+  const timeoutMs = deps.timeoutMs ?? DEGRADED_SYNTHESIS_TIMEOUT_MS;
+
+  const reasonHuman = humanReasonForDegrade(subtype, reason);
+  const systemPrompt =
+    `You hit a stopping condition before completing the user's most recent request: ${reasonHuman}.\n\n` +
+    "Tools are disabled for this reply. Write a 1–3 sentence message to the user covering: " +
+    "(1) what you were trying to do, (2) what went wrong, " +
+    "(3) one concrete next step they can take (rephrase, try a different model, try later, etc.). " +
+    "Be direct. No verbose apology, no caveats about being an AI.";
+
+  const fallback = degradedReplyText(subtype);
+
+  const start = Date.now();
+  let timeoutId: NodeJS.Timeout | undefined;
+  try {
+    const response = await Promise.race([
+      provider.chat({
+        model,
+        system: systemPrompt,
+        messages: [...messages],
+        tools: [],
+        temperature: 0,
+        maxTokens: 512,
+      }),
+      new Promise<never>((_resolve, reject) => {
+        timeoutId = setTimeout(() => reject(new SynthesisTimeoutError(timeoutMs)), timeoutMs);
+      }),
+    ]);
+
+    const text = response.content
+      .filter((b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text")
+      .map((b) => b.text)
+      .join("")
+      .trim();
+
+    if (text.length === 0) {
+      log.warn(
+        {
+          event: "agent.degrade.synthesis",
+          reason,
+          subtype,
+          tokensIn: response.usage.inputTokens,
+          tokensOut: response.usage.outputTokens,
+          durationMs: Date.now() - start,
+          ok: false,
+          fallback: "empty_text",
+        },
+        "degraded synthesis returned empty text — falling back to fixed string",
+      );
+      return { text: fallback, ok: false };
+    }
+
+    log.warn(
+      {
+        event: "agent.degrade.synthesis",
+        reason,
+        subtype,
+        tokensIn: response.usage.inputTokens,
+        tokensOut: response.usage.outputTokens,
+        durationMs: Date.now() - start,
+        ok: true,
+      },
+      "degraded synthesis produced reply",
+    );
+    return { text, ok: true };
+  } catch (err) {
+    log.warn(
+      {
+        event: "agent.degrade.synthesis",
+        reason,
+        subtype,
+        durationMs: Date.now() - start,
+        ok: false,
+        fallback:
+          err instanceof SynthesisTimeoutError
+            ? "timeout"
+            : err instanceof RefusalError
+              ? "refusal"
+              : err instanceof ProviderProtocolError
+                ? "protocol"
+                : "error",
+        err,
+      },
+      "degraded synthesis failed — falling back to fixed string",
+    );
+    return { text: fallback, ok: false };
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+  }
+}
+
+/** Raised when {@link synthesizeDegradedReply}'s wall-clock cap fires. */
+export class SynthesisTimeoutError extends Error {
+  constructor(public readonly timeoutMs: number) {
+    super(`degraded synthesis exceeded ${timeoutMs}ms wall-clock cap`);
+    this.name = "SynthesisTimeoutError";
+  }
+}
+
+/**
+ * Human-readable rendering of a degrade `(subtype, reason)` pair for
+ * the synthesis system prompt. The loop's `reason` string is internal
+ * (e.g. `"stuck_loop"`, `"iteration_cap"`); the model gets a sentence
+ * it can quote back to the user.
+ */
+function humanReasonForDegrade(subtype: DegradeSubtype | null, reason: string): string {
+  switch (subtype) {
+    case "empty_end_turn":
+      return "you produced an empty turn where a response was expected";
+    case "stream_truncation":
+      return "your response stream was truncated mid-tool-call and the recovery replay also failed to parse";
+    case "refusal":
+      return "you declined the request on policy grounds";
+    case "stuck_loop":
+      return "the loop detected the same tool call repeated three times in a row without observable progress";
+    case "stuck_loop_cumulative":
+      return "the loop detected the same tool call recurring across iterations without observable progress";
+    case null:
+      // Iteration-cap backstop. `reason: "iteration_cap"` is the only
+      // null-subtype path today; enumerate explicitly rather than
+      // interpolating `reason` so a future caller passing user-derived
+      // text can't slip prompt content into the system message.
+      if (reason === "iteration_cap") {
+        return "the conversation hit its iteration-count limit before producing a final reply";
+      }
+      return "the conversation hit an unspecified stopping condition";
+  }
 }
 
 /**
