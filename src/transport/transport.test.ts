@@ -2007,4 +2007,163 @@ describe("createTransport", () => {
       expect(c._unsafeUnwrapErr()).toEqual({ code: "sandbox_disabled" });
     });
   });
+
+  describe("evolution namespace", () => {
+    function buildEvolutionTransport(
+      opts: {
+        identity?: { userId: string } | null;
+        session?: { conversationId: string } | null;
+        conv?: { id: string; userId: string } | null;
+        events?: ReadonlyArray<unknown>;
+        event?: unknown | null;
+        triggerReflection?: (id: string) => Promise<never>;
+      } = {},
+    ) {
+      const listEvolutionEvents = vi.fn().mockResolvedValue(opts.events ?? []);
+      const getEvolutionEvent = vi.fn().mockResolvedValue(opts.event ?? null);
+      const getConversation = vi.fn().mockResolvedValue(opts.conv ?? null);
+      const agentStore = mockAgentStore({
+        listEvolutionEvents,
+        getEvolutionEvent,
+        getConversation,
+      });
+      const transportStore = mockTransportStore({
+        resolveUser: vi
+          .fn()
+          .mockResolvedValue(opts.identity === undefined ? { userId: "user-1" } : opts.identity),
+        resolveSession: vi.fn().mockResolvedValue(opts.session ?? null),
+      });
+      const inngestSend = vi.fn().mockResolvedValue(undefined);
+      const inngest = { send: inngestSend } as never;
+      const mockEvent = {
+        create: vi.fn((data: unknown) => ({ name: "inbound/arrived", data })),
+      } as unknown as typeof inboundArrived;
+      const transport = createTransport({
+        channelId: "ch-1",
+        defaultUserId: "user-1",
+        defaultProfileId: "profile-1",
+        runInTx: fakeRunInTx,
+        transportStore,
+        agentStore,
+        inngest,
+        inboundArrived: mockEvent,
+        attachments: { upload: vi.fn(), download: vi.fn() } as never,
+        idleTimeoutMs: 0,
+        ...(opts.triggerReflection && { triggerReflection: opts.triggerReflection }),
+      });
+      return { transport, listEvolutionEvents, getEvolutionEvent };
+    }
+
+    it("listEvents: rejects unknown identity", async () => {
+      const { transport } = buildEvolutionTransport({ identity: null });
+      const res = await transport.evolution.listEvents("ghost", { limit: 10 });
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+    });
+
+    it("listEvents: returns mapped rows when identity resolves", async () => {
+      const { transport, listEvolutionEvents } = buildEvolutionTransport({
+        events: [
+          {
+            id: "evt-1",
+            userId: "user-1",
+            conversationId: "c1",
+            triggeredBy: "idle",
+            payload: {},
+            createdAt: new Date(),
+          },
+        ],
+      });
+      const res = await transport.evolution.listEvents("h", { limit: 10 });
+      expect(res.isOk()).toBe(true);
+      expect(listEvolutionEvents).toHaveBeenCalled();
+    });
+
+    it("getEvent: returns null when no row found", async () => {
+      const { transport } = buildEvolutionTransport({ event: null });
+      const res = await transport.evolution.getEvent("h", "evt-x");
+      expect(res.isOk()).toBe(true);
+      expect(res._unsafeUnwrap()).toBeNull();
+    });
+
+    it("getEvent: returns identity_rejected when identity missing", async () => {
+      const { transport } = buildEvolutionTransport({ identity: null });
+      const res = await transport.evolution.getEvent("h", "evt-x");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+    });
+
+    it("triggerReflection: evolution_unavailable when wiring missing", async () => {
+      const { transport } = buildEvolutionTransport({});
+      const res = await transport.evolution.triggerReflection("h", "addr");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "evolution_unavailable" });
+    });
+
+    it("triggerReflection: identity_rejected", async () => {
+      const trigger = vi.fn();
+      const { transport } = buildEvolutionTransport({ identity: null, triggerReflection: trigger });
+      const res = await transport.evolution.triggerReflection("h", "addr");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+      expect(trigger).not.toHaveBeenCalled();
+    });
+
+    it("triggerReflection: no_session when no session", async () => {
+      const trigger = vi.fn();
+      const { transport } = buildEvolutionTransport({
+        identity: { userId: "user-1" },
+        session: null,
+        triggerReflection: trigger,
+      });
+      const res = await transport.evolution.triggerReflection("h", "addr");
+      expect(res._unsafeUnwrap()).toEqual({ status: "no_session" });
+      expect(trigger).not.toHaveBeenCalled();
+    });
+
+    it("triggerReflection: no_session when conversation owner mismatches", async () => {
+      const trigger = vi.fn();
+      const { transport } = buildEvolutionTransport({
+        identity: { userId: "user-1" },
+        session: { conversationId: "c1" },
+        conv: { id: "c1", userId: "other-user" },
+        triggerReflection: trigger,
+      });
+      const res = await transport.evolution.triggerReflection("h", "addr");
+      expect(res._unsafeUnwrap()).toEqual({ status: "no_session" });
+      expect(trigger).not.toHaveBeenCalled();
+    });
+
+    it("triggerReflection: skipped reason passes through", async () => {
+      const trigger = vi.fn().mockResolvedValue({ status: "skipped", reason: "drained_zero" });
+      const { transport } = buildEvolutionTransport({
+        identity: { userId: "user-1" },
+        session: { conversationId: "c1" },
+        conv: { id: "c1", userId: "user-1" },
+        triggerReflection: trigger,
+      });
+      const res = await transport.evolution.triggerReflection("h", "addr");
+      expect(res._unsafeUnwrap()).toEqual({ status: "skipped", reason: "drained_zero" });
+    });
+
+    it("triggerReflection: processed → emits eventId + counts", async () => {
+      const trigger = vi.fn().mockResolvedValue({
+        status: "processed",
+        eventId: "evt-99",
+        corrections: { extracted: 1, reinforced: 2, promoted: 3 },
+        memories: { extracted: 4 },
+        drained: { drained: 5 },
+      });
+      const { transport } = buildEvolutionTransport({
+        identity: { userId: "user-1" },
+        session: { conversationId: "c1" },
+        conv: { id: "c1", userId: "user-1" },
+        triggerReflection: trigger,
+      });
+      const res = await transport.evolution.triggerReflection("h", "addr");
+      expect(res._unsafeUnwrap()).toMatchObject({
+        status: "processed",
+        eventId: "evt-99",
+        memoryCount: 4,
+        drained: 5,
+        ruleChanges: { extracted: 1, reinforced: 2, promoted: 3 },
+      });
+    });
+  });
 });

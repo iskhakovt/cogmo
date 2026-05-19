@@ -394,3 +394,160 @@ describe("cogmo model — flag parsing", () => {
     expect(store.addModelProvider).not.toHaveBeenCalled();
   });
 });
+
+describe("cogmo model — dispatcher", () => {
+  it("rejects unknown commands with exit code 1 and the usage banner", async () => {
+    const { io, err } = makeIo();
+    const code = await runModelCli(
+      ["bogus"],
+      { runInTx: tx as never, agentStore: makeStore() },
+      io,
+    );
+    expect(code).toBe(1);
+    expect(err.join("\n")).toMatch(/Unknown command: bogus/);
+    expect(err.join("\n")).toMatch(/Usage: cogmo model/);
+  });
+
+  it("`model add` with no model name returns 2 and prints usage", async () => {
+    const { io, err } = makeIo();
+    const code = await runModelCli(["add"], { runInTx: tx as never, agentStore: makeStore() }, io);
+    expect(code).toBe(2);
+    expect(err.join("\n")).toMatch(/Usage: cogmo model add/);
+  });
+
+  it("`model remove` with no model name returns 2 and prints usage", async () => {
+    const { io, err } = makeIo();
+    const code = await runModelCli(
+      ["remove"],
+      { runInTx: tx as never, agentStore: makeStore() },
+      io,
+    );
+    expect(code).toBe(2);
+    expect(err.join("\n")).toMatch(/Usage: cogmo model remove/);
+  });
+
+  it("`model remove <m>` with no routing rows returns 1", async () => {
+    const { io, err } = makeIo();
+    const code = await runModelCli(
+      ["remove", "ghost"],
+      { runInTx: tx as never, agentStore: makeStore() },
+      io,
+    );
+    expect(code).toBe(1);
+    expect(err.join("\n")).toMatch(/No routing rows for model "ghost"/);
+  });
+
+  it("`model remove <m> --provider <p>` where p isn't routed returns 1", async () => {
+    const store = makeStore({
+      rowsByModel: {
+        m: [
+          {
+            id: "r1",
+            name: "p1",
+            type: "anthropic",
+            baseUrl: null,
+            secretId: "s",
+            attrs: {},
+            position: 0,
+            contextWindow: null,
+            maxOutputTokens: null,
+          },
+        ],
+      },
+    });
+    const { io, err } = makeIo();
+    const code = await runModelCli(
+      ["remove", "m", "--provider", "p-other"],
+      { runInTx: tx as never, agentStore: store },
+      io,
+    );
+    expect(code).toBe(1);
+    expect(err.join("\n")).toMatch(/not routed via provider "p-other"/);
+  });
+
+  it("traps thrown errors mid-dispatch (parseFlags) and surfaces exit code 2", async () => {
+    const { io, err } = makeIo();
+    const code = await runModelCli(
+      // `--position` requires a value but none follows.
+      ["add", "m", "--provider", "p", "--position"],
+      { runInTx: tx as never, agentStore: makeStore({ providers: [] }) },
+      io,
+    );
+    expect(code).toBe(2);
+    expect(err.join("\n")).toMatch(/--position requires a value/);
+  });
+
+  it("surfaces addModelRouting errors as exit code 1", async () => {
+    const store = makeStore({
+      providers: [{ id: "p1", name: "openrouter", type: "openai_compatible" }],
+    });
+    const addModelProvider = vi.spyOn(store, "addModelProvider");
+    addModelProvider.mockRejectedValue(new Error("conflicting position"));
+    const { io, err } = makeIo();
+    const code = await runModelCli(
+      ["add", "m", "--provider", "openrouter"],
+      { runInTx: tx as never, agentStore: store },
+      io,
+    );
+    expect(code).toBe(1);
+    expect(err.join("\n")).toMatch(/Failed to add model routing: conflicting position/);
+  });
+
+  it("--model + --provider filter narrows `list` output", async () => {
+    const store = makeStore({
+      rowsByModel: {
+        a: [
+          {
+            id: "r1",
+            name: "p1",
+            type: "anthropic",
+            baseUrl: null,
+            secretId: "s",
+            attrs: {},
+            position: 0,
+            contextWindow: null,
+            maxOutputTokens: null,
+          },
+        ],
+        b: [
+          {
+            id: "r2",
+            name: "p2",
+            type: "anthropic",
+            baseUrl: null,
+            secretId: "s",
+            attrs: {},
+            position: 0,
+            contextWindow: null,
+            maxOutputTokens: null,
+          },
+        ],
+      },
+    });
+    const { io, out } = makeIo();
+    await runModelCli(
+      ["list", "--model", "a", "--provider", "p1"],
+      { runInTx: tx as never, agentStore: store },
+      io,
+    );
+    expect(out.join("\n")).toContain("a\tp1");
+    expect(out.join("\n")).not.toContain("b\tp2");
+  });
+
+  it("`--position N` flag round-trips into addModelRouting", async () => {
+    const store = makeStore({
+      providers: [{ id: "p1", name: "openrouter", type: "openai_compatible" }],
+    });
+    const { io } = makeIo();
+    const code = await runModelCli(
+      ["add", "m", "--provider", "openrouter", "--position", "3"],
+      { runInTx: tx as never, agentStore: store },
+      io,
+    );
+    expect(code).toBe(0);
+    expect(store.addModelProvider).toHaveBeenCalledWith(
+      FAKE_TX,
+      expect.objectContaining({ position: 3 }),
+    );
+  });
+});

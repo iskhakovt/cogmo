@@ -295,6 +295,141 @@ describe("ProfileDialogs - isolation", () => {
  * `model_unavailable` branch is covered by `surfaces create errors` further
  * up; this block fills in the rest.
  */
+describe("ProfileDialogs - additional edge cases", () => {
+  it("startNew with empty name replies with usage hint", async () => {
+    const transport = transportWith({});
+    const dialogs = new ProfileDialogs();
+    const ctx = mkCtx();
+    await dialogs.startNew(transport, ctx, "");
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("Usage: /profile new"));
+    expect(dialogs.has(ctx.chat.id)).toBe(false);
+  });
+
+  it("startEdit with empty name replies with usage hint", async () => {
+    const transport = transportWith({});
+    const dialogs = new ProfileDialogs();
+    const ctx = mkCtx();
+    await dialogs.startEdit(transport, ctx, "");
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("Usage: /profile edit"));
+  });
+
+  it("startNew surfaces a list() transport error and does not seed a dialog", async () => {
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(err({ code: "identity_rejected" as const })),
+      },
+    });
+    const dialogs = new ProfileDialogs();
+    const ctx = mkCtx();
+    await dialogs.startNew(transport, ctx, "coder");
+    expect(dialogs.has(ctx.chat.id)).toBe(false);
+  });
+
+  it("startEdit surfaces a list() transport error", async () => {
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(err({ code: "identity_rejected" as const })),
+      },
+    });
+    const dialogs = new ProfileDialogs();
+    const ctx = mkCtx();
+    await dialogs.startEdit(transport, ctx, "coder");
+    expect(dialogs.has(ctx.chat.id)).toBe(false);
+  });
+
+  it("model step rejects empty input and stays in `model` step", async () => {
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(ok([])),
+      },
+      models: { list: vi.fn().mockResolvedValue([]) },
+    });
+    const dialogs = new ProfileDialogs();
+    await dialogs.startNew(transport, mkCtx(), "coder");
+    await dialogs.handleMessage(transport, mkCtx("a system prompt"));
+    const ctx = mkCtx("");
+    await dialogs.handleMessage(transport, ctx);
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("Reply with a model name"));
+    expect(dialogs.has(ctx.chat.id)).toBe(true);
+  });
+
+  it("warns when picked model isn't in the available list", async () => {
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(ok([])),
+      },
+      models: { list: vi.fn().mockResolvedValue(["claude-sonnet-4-6", "gpt-4o"]) },
+    });
+    const dialogs = new ProfileDialogs();
+    await dialogs.startNew(transport, mkCtx(), "coder");
+    await dialogs.handleMessage(transport, mkCtx("a system prompt"));
+    const ctx = mkCtx("ollama/llama");
+    await dialogs.handleMessage(transport, ctx);
+    expect(ctx.reply.mock.calls.at(-1)?.[0]).toContain(
+      '"ollama/llama" isn\'t in the current model list',
+    );
+  });
+
+  it("confirm step: neither 'save' nor 'cancel' keeps dialog alive with hint", async () => {
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(ok([])),
+      },
+      models: { list: vi.fn().mockResolvedValue(["claude-sonnet-4-6"]) },
+    });
+    const dialogs = new ProfileDialogs();
+    await dialogs.startNew(transport, mkCtx(), "coder");
+    await dialogs.handleMessage(transport, mkCtx("prompt"));
+    await dialogs.handleMessage(transport, mkCtx("claude-sonnet-4-6"));
+    const ctx = mkCtx("maybe");
+    await dialogs.handleMessage(transport, ctx);
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("Reply 'save'"));
+    expect(dialogs.has(ctx.chat.id)).toBe(true);
+  });
+
+  it("confirm 'cancel' (lowercase) clears state", async () => {
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(ok([])),
+      },
+      models: { list: vi.fn().mockResolvedValue([]) },
+    });
+    const dialogs = new ProfileDialogs();
+    await dialogs.startNew(transport, mkCtx(), "coder");
+    await dialogs.handleMessage(transport, mkCtx("prompt"));
+    await dialogs.handleMessage(transport, mkCtx("claude-sonnet-4-6"));
+    const ctx = mkCtx("cancel");
+    await dialogs.handleMessage(transport, ctx);
+    expect(ctx.reply).toHaveBeenCalledWith("Cancelled.");
+    expect(dialogs.has(ctx.chat.id)).toBe(false);
+  });
+
+  it("edit: 'skip' at model step retains current model, then save calls update with only basePrompt", async () => {
+    const existing = mkProfile({
+      id: "p-1",
+      name: "coder",
+      basePrompt: "old",
+      model: "claude-sonnet-4-6",
+    });
+    const update = vi.fn().mockResolvedValue(ok({ ...existing, basePrompt: "new" }));
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(ok([existing])),
+        update,
+      },
+      models: { list: vi.fn().mockResolvedValue(["claude-sonnet-4-6"]) },
+    });
+    const dialogs = new ProfileDialogs();
+    await dialogs.startEdit(transport, mkCtx(), "coder");
+    await dialogs.handleMessage(transport, mkCtx("new"));
+    await dialogs.handleMessage(transport, mkCtx("skip"));
+    const ctx = mkCtx("save");
+    await dialogs.handleMessage(transport, ctx);
+    expect(update).toHaveBeenCalledWith("1", "p-1", { basePrompt: "new" });
+    expect(ctx.reply.mock.calls.at(-1)?.[0]).toContain("updated");
+  });
+});
+
 describe("ProfileDialogs - friendlyError mapping", () => {
   async function driveSaveError(errorPayload: {
     code: string;
