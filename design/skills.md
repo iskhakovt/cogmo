@@ -559,7 +559,7 @@ type EnableResult =
 
 Two cost surfaces, measured separately:
 
-**Compute** — `skill_runs.wall_clock_ms` from dispatcher; peak memory from cgroup stats (container tier) or isolate stats (WASM). Cheap to track, captures almost all "bad skill burned the machine" cases.
+**Compute** — `skill_runs.resource_usage` JSONB blob (`SkillRunResourceUsageSchema`) carries `wallClockMs` (always set, host-derived from `finishedAt - createdAt`) and `peakMemoryBytes` (nullable). Tier-2 populates `peakMemoryBytes` from `getrusage(RUSAGE_SELF).ru_maxrss * 1024` inside `runner.py` just before emitting `task_result` — Linux `ru_maxrss` is in kilobytes. Tier-1 (Pyodide WASM) leaves `peakMemoryBytes` null because `getrusage` is process-wide and would inflate under concurrent workers; tier-2 synthesised results (wall-clock kill, supervisor watchdog) also leave it null since the synthesised path never sees the child's rusage. Cheap to track, captures almost all "bad skill burned the machine" cases.
 
 **External / $ cost** — anything Cogmo actually pays for:
 
@@ -910,15 +910,16 @@ skill_deploys (
 )
 
 skill_runs (
-  id          UUID v7 PK,
-  skill_id    UUID NOT NULL REFERENCES skills(id),
-  trigger     skill_run_trigger NOT NULL,
-  inputs      JSONB NOT NULL,              -- SkillInvocationInputsSchema (matches skill's declared input JSON Schema at invoke time; Zod layer is pass-through)
-  status      skill_run_status NOT NULL,
-  output      JSONB,                       -- nullable: null on error. SkillInvocationOutputSchema when present (matches skill's declared output JSON Schema).
-  error       TEXT,                        -- nullable: null on success
-  started_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-  finished_at TIMESTAMPTZ                  -- nullable: null while running
+  id             UUID v7 PK,
+  skill_id       UUID NOT NULL REFERENCES skills(id),
+  trigger        skill_run_trigger NOT NULL,
+  inputs         JSONB NOT NULL,           -- SkillInvocationInputsSchema (matches skill's declared input JSON Schema at invoke time; Zod layer is pass-through)
+  status         skill_run_status NOT NULL,
+  output         JSONB,                    -- nullable: null on error. SkillInvocationOutputSchema when present (matches skill's declared output JSON Schema).
+  error          TEXT,                     -- nullable: null on success
+  resource_usage JSONB,                    -- nullable: SkillRunResourceUsageSchema. { wallClockMs, peakMemoryBytes }. Written at finalisation; null while running.
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at    TIMESTAMPTZ               -- nullable: null while running
 )
 
 skill_context_calls (
@@ -940,6 +941,7 @@ skill_context_calls (
 - `skills.effects` — `SkillEffectsSchema = z.array(z.enum(SKILL_EFFECTS))`.
 - `skill_deploys.classifier_log` — `ClassifierLogSchema = z.object({ risk_tier, declared_effects, detected_effects, declared_secrets, validation_errors, classifier_version })`. Fully Cogmo-controlled, fully schema'd.
 - `skill_runs.inputs` / `skill_runs.output` — `SkillInvocationInputsSchema` / `SkillInvocationOutputSchema`. Pass-through `z.unknown()` wrappers at the store layer; the per-skill schema is whatever the skill declared in its manifest and is validated at invoke (the store just needs "valid JSON").
+- `skill_runs.resource_usage` — `SkillRunResourceUsageSchema = z.object({ wallClockMs: z.number().int().nonnegative(), peakMemoryBytes: z.number().int().nonnegative().nullable() })`. Populated at finalisation; null while running. Extensible to CPU / IO / fork counts via Zod-schema additions without a migration.
 
 ## Module structure `[proposed]`
 

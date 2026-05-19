@@ -44,6 +44,13 @@ export type TaskInvoke = z.infer<typeof TaskInvokeSchema>;
  * (wall-clock kill, child died abnormally) also leave it unset — they
  * never saw the child's rusage. The host fills in `wallClockMs`
  * separately and writes the combined blob to `skill_runs.resource_usage`.
+ *
+ * Boundary translation: this protocol schema uses `.optional()` (field
+ * may be absent on the wire) while the storage schema
+ * `SkillRunResourceUsageSchema` uses `.nullable()` (field must be
+ * present, may be null). `runner.invoke` bridges the two with
+ * `result.rusage?.peakMemoryBytes ?? null` — wire-absence + tier-1 +
+ * synthesised-result all collapse to the same `null` on disk.
  */
 const RuntimeRusageSchema = z.object({
   peakMemoryBytes: z.number().int().nonnegative().optional(),
