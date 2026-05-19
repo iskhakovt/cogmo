@@ -101,6 +101,14 @@ export interface DaytonaSandboxClientOptions {
   apiUrl?: string;
   /** Optional org id when the API key is scoped to multiple orgs. */
   organizationId?: string;
+  /**
+   * Override per-call session-id randomness threaded into every
+   * `DaytonaSandboxSession` this client mints. Conformance tests
+   * pin a deterministic value so record/replay's `(method, path)`
+   * FIFO matching stays stable across runs. Production wiring
+   * leaves this undefined and `randomUUID` governs.
+   */
+  random?: () => string;
 }
 
 interface CreateOptions extends DaytonaSandboxClientOptions {
@@ -171,6 +179,7 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
    * Logged at warn-level so configuration drift surfaces operationally.
    */
   #resourcesByImage = new Map<string, ResourceLimits>();
+  #random: (() => string) | undefined;
 
   private constructor(opts: CreateOptions) {
     const config: ConstructorParameters<typeof Daytona>[0] = {
@@ -180,6 +189,7 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
     if (opts.organizationId) config.organizationId = opts.organizationId;
     this.#daytona = new Daytona(config);
     this.#instanceId = opts.instanceId;
+    this.#random = opts.random;
   }
 
   static async create(opts: CreateOptions): Promise<DaytonaSandboxClient> {
@@ -640,6 +650,7 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
     return new DaytonaSandboxSession({
       state: { type: "daytona", taskId, sandboxId: sdkSandbox.id },
       sdkSandbox,
+      ...(this.#random && { random: this.#random }),
     });
   }
 

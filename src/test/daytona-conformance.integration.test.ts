@@ -17,16 +17,24 @@
  *     journaling HTTP request/response pairs + WS frames into the
  *     fixture file. Same test body runs — what records is what replays.
  *
- * Two scenarios pin different wire surfaces:
- *   - `create-exec-delete` — happy path: inline `echo`, exit 0, single
- *     stdout WS frame. Covers create + process session +
- *     executeSessionCommand + WS log stream + exit-code lookup +
- *     cleanup.
- *   - `python-upload-fail` — unhappy path: `fs.uploadFiles` for a
- *     Python script that writes to stdout AND stderr then `sys.exit(2)`.
- *     Covers the multipart upload endpoint, stderr WS demux, multi-
- *     frame streaming, and non-zero exit code retrieval — three WS
- *     gaps the happy-path scenario doesn't reach.
+ * Four scenarios pin different wire surfaces:
+ *   - `create-exec-delete` — happy path at the SDK level: inline
+ *     `echo`, exit 0, single stdout WS frame. Covers create +
+ *     process session + executeSessionCommand + WS log stream +
+ *     exit-code lookup + cleanup.
+ *   - `python-upload-fail` — unhappy path at the SDK level:
+ *     `fs.uploadFiles` for a Python script that writes to stdout AND
+ *     stderr then `sys.exit(2)`. Covers the multipart upload endpoint,
+ *     stderr WS demux, multi-frame streaming, and non-zero exit code
+ *     retrieval.
+ *   - `wrapper-success` — happy path at the wrapper level: drives
+ *     `session.exec(["echo", "wrapper-hello"])` through
+ *     `DaytonaSandboxClient` → `DaytonaSandboxSession.execStreaming`
+ *     → `startExecStreaming` → `buildShellCommand`. Catches
+ *     regressions in shell-quoting / lifecycle ordering that the
+ *     SDK-level scenarios bypass.
+ *   - `wrapper-stderr-nonzero` — wrapper-level stderr demux + non-zero
+ *     exit through the buffered `ExecResult` shape.
  *
  * Fixture re-record trigger: a failing test in CI → SDK or wire
  * drifted since the last recording → operator re-records and commits.
@@ -45,6 +53,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { Daytona } from "@daytonaio/sdk";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { DaytonaSandboxClient } from "../sandbox/daytona/client.js";
 import { DaytonaMock, type DaytonaMockOptions } from "./daytona-mock.js";
 
 const FIXTURE_DIR = "./test/fixtures/daytona";
@@ -146,6 +155,60 @@ function makeDaytonaClient(mock: DaytonaMock, recordable: boolean): Daytona {
         organizationId: process.env.DAYTONA_ORGANIZATION_ID,
       }),
   });
+}
+
+/**
+ * Cogmo wrapper client for wrapper-level scenarios. Threads a
+ * deterministic counter-backed random source so the per-exec session
+ * IDs are stable between record and replay — `(method, path)` FIFO
+ * matching in `DaytonaMock` requires identical URL paths across runs.
+ */
+async function makeWrapperClient(
+  mock: DaytonaMock,
+  recordable: boolean,
+  scenarioName: string,
+): Promise<DaytonaSandboxClient> {
+  let seq = 0;
+  return DaytonaSandboxClient.create({
+    apiKey: recordable ? (process.env.DAYTONA_API_KEY ?? "") : "test-key",
+    apiUrl: mock.url,
+    instanceId: "conformance",
+    random: () => `${scenarioName}-${++seq}`,
+    ...(recordable &&
+      process.env.DAYTONA_ORGANIZATION_ID && {
+        organizationId: process.env.DAYTONA_ORGANIZATION_ID,
+      }),
+  });
+}
+
+const WRAPPER_TASK_ID = "wrapper-conf";
+// Mirror skills tier-2's `DEFAULT_RESOURCE_LIMITS` so the recorded
+// fixture exercises the wrapper at production-typical limits and the
+// snapshot Daytona bakes during record doesn't pay 3 GiB platform
+// default storage. See `src/skills/worker-sysbox/host.ts`.
+const WRAPPER_RESOURCE_LIMITS = {
+  cpus: 1,
+  memory_bytes: 512 * 1024 * 1024,
+  pids: 256,
+  disk_bytes: 1024 * 1024 * 1024,
+};
+
+function wrapperSpec(): {
+  taskId: string;
+  image: string;
+  resourceLimits: typeof WRAPPER_RESOURCE_LIMITS;
+  expiresAt: Date;
+} {
+  return {
+    taskId: WRAPPER_TASK_ID,
+    image: "python:3.14-slim",
+    resourceLimits: WRAPPER_RESOURCE_LIMITS,
+    // Fixed five minutes — `autoStopInterval` derivation uses
+    // `Math.ceil((expiresAt - now) / 60_000)`, so the same wall-clock
+    // delta gives the same value in record and replay. Body-side only;
+    // doesn't affect URL matching but keeps the recorded body stable.
+    expiresAt: new Date(Date.now() + 5 * 60 * 1000),
+  };
 }
 
 const makeConformanceLabels = (): Record<string, string> => ({
@@ -334,6 +397,100 @@ describe("Daytona conformance — python-upload-fail", () => {
 
       await sandbox.process.deleteSession(sessionId);
       await sandbox.delete();
+
+      if (scenario.recordable) {
+        await mock.endScenario();
+      }
+    },
+    120_000,
+  );
+
+  it.skipIf(scenario.runnable)(
+    "fixture missing — set RECORD=1 + DAYTONA_API_KEY and re-run to capture",
+    () => {
+      expect(scenario.fixtureExists).toBe(false);
+      expect(IS_RECORD).toBe(false);
+    },
+  );
+});
+
+// ─── Scenario 3: wrapper-level happy path ───────────────────────────
+
+/**
+ * The first two scenarios drive `@daytonaio/sdk` directly with hand-
+ * rolled command strings. Production code goes through Cogmo's wrapper
+ * (`DaytonaSandboxClient` → `DaytonaSandboxSession.execStreaming` →
+ * `startExecStreaming` → `buildShellCommand`). Without coverage of that
+ * path against real Daytona traffic, regressions in `buildShellCommand`
+ * quoting or `startExecStreaming` lifecycle ordering surface only in
+ * production. This scenario asserts the full wrapper stack round-trips
+ * a bare echo end-to-end.
+ */
+describe("Daytona conformance — wrapper-success", () => {
+  const scenario = setupScenario("wrapper-success");
+
+  beforeAll(scenario.init);
+  afterAll(scenario.shutdown);
+
+  it.skipIf(!scenario.runnable)(
+    "session.exec routes through buildShellCommand + startExecStreaming and returns exitCode 0",
+    async () => {
+      const mock = scenario.getMock();
+      const client = await makeWrapperClient(mock, scenario.recordable, "wrapper-success");
+      const session = await client.create(wrapperSpec());
+
+      const result = await session.exec(["echo", "wrapper-hello"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("wrapper-hello");
+      expect(result.stderr).toBe("");
+
+      await client.delete(session);
+
+      if (scenario.recordable) {
+        await mock.endScenario();
+      }
+    },
+    120_000,
+  );
+
+  it.skipIf(scenario.runnable)(
+    "fixture missing — set RECORD=1 + DAYTONA_API_KEY and re-run to capture",
+    () => {
+      expect(scenario.fixtureExists).toBe(false);
+      expect(IS_RECORD).toBe(false);
+    },
+  );
+});
+
+// ─── Scenario 4: wrapper-level stderr demux + non-zero exit ─────────
+
+/**
+ * Covers the WS stdout/stderr demux through the wrapper's `PassThrough`
+ * streams and non-zero exit-code propagation through the buffered
+ * `ExecResult`. The `sh -c "..."` form forces `buildShellCommand` to
+ * quote the script body — a regression that breaks shell quoting (or
+ * re-introduces the `exec` builtin) would either fail to emit "out" /
+ * "err" or hang Daytona's session-completion detection.
+ */
+describe("Daytona conformance — wrapper-stderr-nonzero", () => {
+  const scenario = setupScenario("wrapper-stderr-nonzero");
+
+  beforeAll(scenario.init);
+  afterAll(scenario.shutdown);
+
+  it.skipIf(!scenario.runnable)(
+    "session.exec demuxes stdout/stderr and surfaces non-zero exit through ExecResult",
+    async () => {
+      const mock = scenario.getMock();
+      const client = await makeWrapperClient(mock, scenario.recordable, "wrapper-stderr-nonzero");
+      const session = await client.create(wrapperSpec());
+
+      const result = await session.exec(["sh", "-c", "echo out; echo err >&2; exit 3"]);
+      expect(result.exitCode).toBe(3);
+      expect(result.stdout).toContain("out");
+      expect(result.stderr).toContain("err");
+
+      await client.delete(session);
 
       if (scenario.recordable) {
         await mock.endScenario();

@@ -1,0 +1,5 @@
+Two new scenarios in `daytona-conformance.integration.test.ts` route `session.exec` through `DaytonaSandboxClient` → `DaytonaSandboxSession.execStreaming` → `startExecStreaming` → `buildShellCommand` against real Daytona traffic. `wrapper-success` covers the happy path (echo round-trip, exitCode 0); `wrapper-stderr-nonzero` covers WS stdout/stderr demux through the wrapper's `PassThrough` streams and non-zero exit through the buffered `ExecResult`. Catches Daytona-wrapper regressions that the existing SDK-direct scenarios bypass.
+
+Adds a `random?: () => string` injection slot to `DaytonaSandboxClientOptions`, plumbed through `DaytonaSandboxSession` → `startExecStreaming` so conformance tests can pin the per-call session-id randomness. Defaults to `randomUUID`; production wiring leaves it undefined.
+
+Fixtures (`test/fixtures/daytona/wrapper-success.json`, `wrapper-stderr-nonzero.json`) are not in this PR. The scenarios skip with marker tests until an operator records them via `RECORD=1 DAYTONA_API_KEY=dty_... pnpm test:integration src/test/daytona-conformance.integration.test.ts`.
