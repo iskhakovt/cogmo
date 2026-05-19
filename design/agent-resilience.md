@@ -108,7 +108,7 @@ Rules:
 - **Inbounds are NOT consumed.** The in-cooldown skip path returns `{ status: "skipped", reason: "cooldown" }` before loading inbounds (matching today's `errored` skip-path shape at `handle-message.ts:235`). The inbounds stay unbatched. When cooldown elapses, the next `inbound/ready` loads the entire backlog as one batch — the user's cooldown-era messages get a real response as part of the next successful turn. Pile-up semantic, not consume-and-acknowledge.
 - **Model is NOT invoked.** The in-cooldown reply is a hand-built text response; no tokens spent. Cooldown's whole point is to stop burning tokens on something that just failed.
 
-### Clear triggers `[proposed]`
+### Clear triggers `[confirmed]`
 
 `cooldown_state` clears (becomes `NULL`) on any of:
 
