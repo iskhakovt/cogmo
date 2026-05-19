@@ -1,7 +1,8 @@
 /**
  * Context window management — ephemeral compaction pipeline.
  *
- * Three strategies applied gentlest-first:
+ * Four strategies applied gentlest-first:
+ * 0. Same-tool supersession (count-based, unconditional check)
  * 1. Clear old tool results (60% of budget)
  * 2. Summarize conversation prefix (80% of budget)
  * 3. Truncate oldest messages (95% of budget)
@@ -35,11 +36,13 @@ export interface ContextManagerDeps {
 }
 
 export interface CompactionEvent {
-  strategies: ("clear_tool_results" | "summarize" | "truncate")[];
+  strategies: ("compact_same_tool_clusters" | "clear_tool_results" | "summarize" | "truncate")[];
   tokensBefore: number;
   tokensAfter: number;
   toolResultsCleared: number;
   messagesSummarized: number;
+  sameToolClustersCompacted: number;
+  sameToolResultsSuperseded: number;
 }
 
 export interface CompactResult {
@@ -54,6 +57,13 @@ const TRUNCATE_THRESHOLD = 0.95;
 
 const DEFAULT_KEEP_TOOL_RESULTS = 5;
 const DEFAULT_KEEP_TURNS = 6;
+
+// Strategy 0 defaults — see design/context-management.md → Strategy 0.
+// triggerCount = retainRecent + retainFirst + 2 → first fire compacts
+// 2 results, making the cache-invalidation cost worthwhile.
+const DEFAULT_RETAIN_RECENT = 2;
+const DEFAULT_RETAIN_FIRST = 1;
+const DEFAULT_TRIGGER_COUNT = 5;
 
 export const SUMMARIZATION_PROMPT = `Summarize the conversation below. You MUST preserve:
 1. All user decisions and stated preferences
@@ -81,9 +91,28 @@ export async function compactMessages(
   let result = [...messages];
   let toolResultsCleared = 0;
   let messagesSummarized = 0;
+  let sameToolClustersCompacted = 0;
+  let sameToolResultsSuperseded = 0;
 
   const count = (msgs: Message[]) =>
     countTokens({ model: "", system, messages: msgs, ...(tools && { tools }) });
+
+  // Strategy 0: Same-tool supersession (count-based, no token threshold).
+  // Cheap O(N) scan that mutates only when a per-tool cluster has at
+  // least `triggerCount` results — most turns this is a no-op. The
+  // transform never increases token count, so subsequent threshold
+  // checks remain correct.
+  const supersession = compactSameToolClusters(result, {
+    retainRecent: DEFAULT_RETAIN_RECENT,
+    retainFirst: DEFAULT_RETAIN_FIRST,
+    triggerCount: DEFAULT_TRIGGER_COUNT,
+  });
+  if (supersession.resultsCompacted > 0) {
+    result = supersession.messages;
+    sameToolClustersCompacted = supersession.clusters;
+    sameToolResultsSuperseded = supersession.resultsCompacted;
+    strategies.push("compact_same_tool_clusters");
+  }
 
   let tokens = await count(result);
   const tokensBefore = tokens;
@@ -129,6 +158,8 @@ export async function compactMessages(
       tokensAfter: tokens,
       toolResultsCleared,
       messagesSummarized,
+      sameToolClustersCompacted,
+      sameToolResultsSuperseded,
     };
     logger.info(event, "context compaction applied");
     return { messages: result, didCompact: true, event };
@@ -165,6 +196,151 @@ export function shouldSkipCounting(
 // --- Internal strategies ---
 
 const CLEARED_PLACEHOLDER = "[Cleared — call tool again if needed]";
+
+interface SupersessionOpts {
+  retainRecent: number;
+  retainFirst: number;
+  triggerCount: number;
+}
+
+interface SupersessionResult {
+  messages: Message[];
+  clusters: number;
+  resultsCompacted: number;
+}
+
+interface ToolResultPos {
+  msgIdx: number;
+  blockIdx: number;
+  toolUseId: string;
+}
+
+/**
+ * Strategy 0 — same-tool supersession. For each tool whose `tool_result`
+ * blocks in `messages` total at least `triggerCount`, replace the
+ * middle results (between `retainFirst` at the front and `retainRecent`
+ * at the back) with a single aggregate-summary string. Arg shapes are
+ * read from the paired `tool_use.input` via an id-to-name index so
+ * previously-compacted blocks still contribute the original call's
+ * context to the new summary.
+ *
+ * Cardinal rule: only `tool_result.content` is mutated; `tool_use`
+ * blocks are left intact. Anthropic's tool_use ↔ tool_result pairing
+ * invariant holds by construction. The earliest-positioned tool_result
+ * for each tool is preserved verbatim across all subsequent passes
+ * ("sticky first") — every pass identifies it by position in the
+ * message array, never by content.
+ *
+ * See `design/context-management.md` → Strategy 0: Same-Tool
+ * Supersession.
+ */
+export function compactSameToolClusters(
+  messages: ReadonlyArray<Message>,
+  opts: SupersessionOpts,
+): SupersessionResult {
+  const { retainRecent, retainFirst, triggerCount } = opts;
+
+  // Index every tool_use block by id → { name, input }.
+  const toolUseById = new Map<string, { name: string; input: unknown }>(
+    R.pipe(
+      messages,
+      R.flatMap((msg) =>
+        msg.role === "assistant" && Array.isArray(msg.content) ? msg.content : [],
+      ),
+      R.filter((b) => b.type === "tool_use"),
+      R.map((b) => {
+        const tu = b as Extract<ContentBlock, { type: "tool_use" }>;
+        return [tu.id, { name: tu.name, input: tu.input }] as const;
+      }),
+    ),
+  );
+
+  // Walk every tool_result block, resolve its tool name via the paired
+  // tool_use, bucket by tool name. Preserves the order they appear in
+  // the message array (oldest → newest), which is the order
+  // `retainFirst` / `retainRecent` slice against.
+  const positionsByTool = new Map<string, ToolResultPos[]>();
+  for (let msgIdx = 0; msgIdx < messages.length; msgIdx++) {
+    const msg = messages[msgIdx];
+    if (!msg || msg.role !== "user" || typeof msg.content === "string") continue;
+    for (let blockIdx = 0; blockIdx < msg.content.length; blockIdx++) {
+      const block = msg.content[blockIdx];
+      if (!block || block.type !== "tool_result") continue;
+      const toolUse = toolUseById.get(block.toolUseId);
+      if (!toolUse) continue;
+      const list = positionsByTool.get(toolUse.name) ?? [];
+      list.push({ msgIdx, blockIdx, toolUseId: block.toolUseId });
+      positionsByTool.set(toolUse.name, list);
+    }
+  }
+
+  // For each cluster over threshold, build the summary string and
+  // record per-position replacements.
+  const replacements = new Map<string, string>(); // "msgIdx:blockIdx" -> new content
+  let clusters = 0;
+  let resultsCompacted = 0;
+
+  for (const [toolName, positions] of positionsByTool) {
+    if (positions.length < triggerCount) continue;
+    const middleStart = retainFirst;
+    const middleEnd = positions.length - retainRecent;
+    if (middleEnd <= middleStart) continue;
+
+    const middle = positions.slice(middleStart, middleEnd);
+    const argShapes = middle.map((p) => formatToolUseArgs(toolUseById.get(p.toolUseId)?.input));
+    const summary =
+      `[Same-tool cluster: ${middle.length} prior \`${toolName}\` results compacted — calls: ` +
+      `${argShapes.join("; ")}. Latest ${retainRecent} verbatim below.]`;
+
+    for (const pos of middle) {
+      replacements.set(`${pos.msgIdx}:${pos.blockIdx}`, summary);
+      resultsCompacted++;
+    }
+    clusters++;
+  }
+
+  if (replacements.size === 0) {
+    return { messages: [...messages], clusters: 0, resultsCompacted: 0 };
+  }
+
+  // Apply replacements. Only allocate new message/content arrays for
+  // messages that actually had a block rewritten — other messages
+  // (assistant text, untouched user turns) keep their identity.
+  const result = messages.map((msg, msgIdx) => {
+    if (typeof msg.content === "string") return msg;
+    let modified = false;
+    const newContent = msg.content.map((block, blockIdx) => {
+      const replacement = replacements.get(`${msgIdx}:${blockIdx}`);
+      if (replacement === undefined) return block;
+      modified = true;
+      return { ...block, content: replacement };
+    });
+    return modified ? { ...msg, content: newContent } : msg;
+  });
+
+  return { messages: result, clusters, resultsCompacted };
+}
+
+/**
+ * Compact one-line representation of a `tool_use.input` for the
+ * supersession summary text. Falls back to a JSON-ish render for shapes
+ * that don't look like a simple-string-keyed bag.
+ */
+function formatToolUseArgs(input: unknown): string {
+  if (input === null || typeof input !== "object") return JSON.stringify(input);
+  const entries = Object.entries(input as Record<string, unknown>);
+  if (entries.length === 0) return "{}";
+  // Pick the first string-valued entry as the most descriptive
+  // (query, prompt, path, etc.); fall back to JSON for the rest.
+  const stringEntry = entries.find(([, v]) => typeof v === "string" && v.length > 0);
+  if (stringEntry) {
+    const [k, v] = stringEntry as [string, string];
+    const trimmed = v.length > 80 ? `${v.slice(0, 77)}…` : v;
+    return `${k}: ${JSON.stringify(trimmed)}`;
+  }
+  const json = JSON.stringify(input);
+  return json.length > 100 ? `${json.slice(0, 97)}…` : json;
+}
 
 function clearToolResults(
   messages: Message[],

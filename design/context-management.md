@@ -1,4 +1,4 @@
-# Context Window Management `[proposed]`
+# Context Window Management `[confirmed]`
 
 ## Problem
 
@@ -60,7 +60,7 @@ The fast-path optimization (persisting `inputTokens` on assistant messages) avoi
 
 Three strategies, applied in order from gentlest to most aggressive. Each has a trigger threshold expressed as a fraction of the budget.
 
-### Strategy 0: Same-Tool Supersession `[trigger: count-based] [proposed]`
+### Strategy 0: Same-Tool Supersession `[trigger: count-based] [confirmed]`
 
 The three strategies below are **budget-pressure-triggered** — they fire when the conversation approaches the context limit. They do not fire when a single turn calls the same tool many times at low overall budget utilization: eight `generate_image` results at 30% of the budget evade Strategy 1 entirely.
 
@@ -121,7 +121,7 @@ In the same load-time compaction pipeline as Strategies 1–3, applied **before*
 
 #### Confidence
 
-Marked `[proposed]` because the K thresholds (per-tool retain count, summary template detail level) are intuitions. Real data — turns where attention dilution caused user-visible degradation — should validate or tune these before promoting. The structural shape (supersession-triggered, in-place rewrite, prior-results-only) is the design constraint; the constants are tunable.
+Structural shape (supersession-triggered, in-place rewrite, prior-results-only) is `[confirmed]` — that's the design constraint and the implementation matches. The numeric defaults (`retainRecent: 2`, `retainFirst: 1`, `triggerCount: 5`) remain tunable; real data on attention dilution would justify revising them, but the shape stays the same.
 
 ### Strategy 1: Clear Tool Results `[trigger: 60%]`
 
