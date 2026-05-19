@@ -61,7 +61,7 @@ import { DrizzleMcpStore } from "./mcp/store/index.js";
 import { HindsightMemoryProvider } from "./memory/hindsight.js";
 import { DAYTONA_API_KEY_SECRET } from "./sandbox/daytona/auth.js";
 import { createSandboxBackend } from "./sandbox/factory.js";
-import { CogmoSocketProxy, type SandboxClient } from "./sandbox/index.js";
+import { CogmoSocketProxy, type ResourceLimits, type SandboxClient } from "./sandbox/index.js";
 import { createSandboxReaper } from "./sandbox/reaper.js";
 import { DrizzleSandboxStore } from "./sandbox/store/index.js";
 import { deriveMasterKey, parseMasterKey } from "./secrets/encryption.js";
@@ -71,6 +71,7 @@ import { bootstrapSkillsRepo, ensureSkillsCodingRepo } from "./skills/repo.js";
 import { SkillRunnerImpl } from "./skills/runner.js";
 import { registerSkillTool, SKILLS_PROMPT_GUIDANCE } from "./skills/skills-tool.js";
 import { DrizzleSkillStore } from "./skills/store/index.js";
+import { DEFAULT_RESOURCE_LIMITS as SKILLS_DEFAULT_RESOURCE_LIMITS } from "./skills/worker-sysbox/host.js";
 import type { AttachmentStore } from "./transport/attachment-store.js";
 import { createAttachmentStore } from "./transport/attachment-store.js";
 import { createDeliveryRouter } from "./transport/delivery-router.js";
@@ -210,6 +211,17 @@ export const NO_SANDBOX: SandboxDeps = {
   sandboxInstanceId: null,
   sandboxDocker: null,
 };
+
+/**
+ * Coding-delegation sandboxes (devbase image). 2 cpu / 2 GiB fits
+ * `claude` CLI + a TS compile + pnpm install. `disk_bytes` omitted —
+ * Daytona's 3 GiB default has headroom over the ~1.5 GiB devbase image.
+ */
+const DEFAULT_CODING_RESOURCE_LIMITS = {
+  cpus: 2,
+  memory_bytes: 2 * 1024 * 1024 * 1024,
+  pids: 256,
+} as const;
 
 /**
  * Skill runner + its construction inputs. Returned by `bootstrapSkillRunner`.
@@ -541,7 +553,13 @@ export async function bootstrapSandbox(
     // task arrivals share the in-flight promise via
     // `ensureImagePresent`'s memoisation. Failures evict the cache so
     // the task path retries on its own.
-    scheduleSandboxImageWarm(sandbox, [env.COGMO_DEVBASE_IMAGE, env.COGMO_SKILLS_IMAGE]);
+    // Pair each image with its consumer's limits — baked into the
+    // snapshot at warm time; the `daytona.create({ snapshot })` path
+    // has no per-session override.
+    scheduleSandboxImageWarm(sandbox, [
+      { image: env.COGMO_DEVBASE_IMAGE, resourceLimits: DEFAULT_CODING_RESOURCE_LIMITS },
+      { image: env.COGMO_SKILLS_IMAGE, resourceLimits: SKILLS_DEFAULT_RESOURCE_LIMITS },
+    ]);
     logger.info(
       {
         instanceId: sandboxInstanceId,
@@ -555,28 +573,63 @@ export async function bootstrapSandbox(
 }
 
 /**
- * Fire-and-forget image prewarm. On Daytona this drives
- * `snapshot.create({ name, image })` so the named snapshot reaches
- * `ACTIVE` state before the first task references it. On Local-Docker
- * this is a cheap inspect + pull. Errors are logged but never bubbled —
- * the call site is boot (we don't want a transient provider hiccup to
- * fail `cogmo serve` startup), and `ensureImagePresent` is idempotent
- * + retryable, so the per-task `step.run("ensure-image-present")` will
- * pick up wherever boot left off.
+ * Background prewarm at boot. Owns retries (`coding-task-start` pins
+ * `retries: 0`); on exhaustion the per-task `ensureImagePresent`
+ * triggers a fresh cycle via cache eviction.
  */
-function scheduleSandboxImageWarm(sandbox: SandboxClient, images: ReadonlyArray<string>): void {
-  for (const image of images) {
-    void sandbox.ensureImagePresent(image).then(
-      () => {
-        logger.info({ image }, "sandbox image warm complete");
-      },
-      (err: unknown) => {
+export interface SandboxImageWarmSpec {
+  image: string;
+  /** Baked into the snapshot at warm time; the snapshot path inherits these forever. */
+  resourceLimits: ResourceLimits;
+}
+
+export function scheduleSandboxImageWarm(
+  sandbox: SandboxClient,
+  specs: ReadonlyArray<SandboxImageWarmSpec>,
+): void {
+  for (const spec of specs) {
+    void retryBootWarm(sandbox, spec.image, spec.resourceLimits);
+  }
+}
+
+/** ~20 attempts × ~60s cap ≈ 20 min ceiling. Exported for tests only. */
+export const BOOT_WARM_MAX_ATTEMPTS = 20;
+const BOOT_WARM_MIN_DELAY_MS = 5_000;
+const BOOT_WARM_MAX_DELAY_MS = 60_000;
+const BOOT_WARM_JITTER_MS = 1_000;
+
+/** Not `withRetry` — p-retry's internal setTimeout isn't unrefed and would block SIGTERM. */
+async function retryBootWarm(
+  sandbox: SandboxClient,
+  image: string,
+  resourceLimits: ResourceLimits,
+): Promise<void> {
+  for (let attempt = 1; attempt <= BOOT_WARM_MAX_ATTEMPTS; attempt++) {
+    try {
+      await sandbox.ensureImagePresent(image, resourceLimits);
+      logger.info({ image, attempt }, "sandbox image warm complete");
+      return;
+    } catch (err) {
+      const isLastAttempt = attempt === BOOT_WARM_MAX_ATTEMPTS;
+      if (isLastAttempt) {
         logger.warn(
-          { err, image },
-          "background sandbox image warm failed — task path will retry on first use",
+          { err, image, attemptsTaken: BOOT_WARM_MAX_ATTEMPTS },
+          "background sandbox image warm exhausted retries — task path will retry on first use",
         );
-      },
-    );
+        return;
+      }
+      // 5s, 10s, 20s, 40s, 60s (capped); + up to 1s jitter.
+      const exp = Math.min(BOOT_WARM_MAX_DELAY_MS, BOOT_WARM_MIN_DELAY_MS * 2 ** (attempt - 1));
+      const delay = exp + Math.floor(Math.random() * BOOT_WARM_JITTER_MS);
+      logger.warn(
+        { err, image, attempt, retryInMs: delay },
+        "background sandbox image warm failed — scheduling retry",
+      );
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, delay);
+        t.unref();
+      });
+    }
   }
 }
 
@@ -660,7 +713,7 @@ export async function bootstrapRuntime(
       // dirty/unpushed worktrees to `refs/cogmo-wip/<taskId>` on failure.
       secretsStore: core.secretsStore,
       devbaseImage: env.COGMO_DEVBASE_IMAGE,
-      defaultResourceLimits: { cpus: 2, memory_bytes: 2 * 1024 * 1024 * 1024, pids: 256 },
+      defaultResourceLimits: DEFAULT_CODING_RESOURCE_LIMITS,
       taskTtlMs: env.CODING_TASK_IDLE_TTL_MINUTES * 60 * 1000,
       worktreesDir: env.COGMO_WORKTREES_DIR,
       openPlanStream: async (taskId: string): Promise<PlanStreamHandle> => ({
