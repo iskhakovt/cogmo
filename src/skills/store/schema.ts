@@ -7,7 +7,7 @@ import {
   pgTable,
   text,
   timestamp,
-  uniqueIndex,
+  unique,
   uuid,
 } from "drizzle-orm/pg-core";
 import { jsonbZod, pk, ts } from "../../db/helpers.js";
@@ -182,13 +182,13 @@ export const skillRuns = pgTable(
   },
   (t) => [
     index("idx_skill_runs_skill_id").on(t.skillId),
-    // Partial unique index — null idempotency_key entries (CLI / tests) are
-    // unconstrained. Concurrent attempts with the same key race on this
-    // index; the loser's INSERT no-ops via `ON CONFLICT DO NOTHING` and
-    // the caller re-selects the existing row to recover state.
-    uniqueIndex("uniq_skill_runs_idempotency_key")
-      .on(t.idempotencyKey)
-      .where(sql`idempotency_key IS NOT NULL`),
+    // Plain UNIQUE constraint — Postgres treats NULLs as not-equal under
+    // default unique semantics, so multiple null-key rows (CLI / tests)
+    // coexist freely while non-null keys are constrained to one row.
+    // Concurrent attempts with the same key race here; the loser's
+    // INSERT no-ops via `ON CONFLICT DO NOTHING` and the caller
+    // re-selects the existing row.
+    unique("uniq_skill_runs_idempotency_key").on(t.idempotencyKey),
   ],
 );
 

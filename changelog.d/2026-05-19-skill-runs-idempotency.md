@@ -6,13 +6,13 @@ Industry research before committing: Temporal recommends "make activities idempo
 
 Adopted pattern: Brandur's recovery_point. Three new pieces:
 
-- `skill_runs.idempotency_key TEXT` — partial unique index `WHERE idempotency_key IS NOT NULL`. Null for one-shot CLI/test invocations; set for retry-driven callers.
+- `skill_runs.idempotency_key TEXT` — plain `UNIQUE(idempotency_key)` constraint. Postgres treats nulls as not-equal in unique constraints by default, so multiple null-key rows (CLI / tests) coexist while non-null keys collide. Chosen over a partial unique index — identical semantics, smaller `ON CONFLICT` surface area, no `WHERE` predicate dance.
 - `skill_runs.recovery_point` (new `skill_run_recovery_point` pgEnum: `'started' | 'executed' | 'finished'`) — Stripe-pattern phase marker. Inserted in `'started'`; transitions atomically to `'executed'` (with output/error/rusage/finished_at) after the worker returns; to `'finished'` (with status) after output validation.
 - Migration `0043_skill_runs_idempotency_key.sql` — schema additions + a backfill UPDATE that flips pre-existing terminal rows (finished_at IS NOT NULL) to `recovery_point='finished'`. Idempotent; guarded against re-application.
 
 Store: three new methods on `SkillStore`:
 
-- `startOrRecoverRun(tx, {skillId, trigger, inputs, idempotencyKey}) → {kind: 'new' | 'recovered', row}` — `INSERT ... ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING *`; on zero rows, `SELECT ... FOR UPDATE` the existing row so concurrent retries serialise. Postgres requires the WHERE predicate on ON CONFLICT to match the partial index for arbiter inference — drizzle's `onConflictDoNothing({target, where})` handles this.
+- `startOrRecoverRun(tx, {skillId, trigger, inputs, idempotencyKey}) → {kind: 'new' | 'recovered', row}` — `INSERT ... ON CONFLICT (idempotency_key) DO NOTHING RETURNING *`; on zero rows, `SELECT ... FOR UPDATE` the existing row so concurrent retries serialise.
 - `transitionToExecuted(tx, {id, output, error, resourceUsage, finishedAt})` — atomic phase advance writing the execute payload.
 - `transitionToFinished(tx, {id, status, output, error})` — atomic phase advance writing the terminal status.
 

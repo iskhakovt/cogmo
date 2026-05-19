@@ -918,7 +918,7 @@ skill_runs (
   output          JSONB,                    -- nullable: null on error. SkillInvocationOutputSchema when present (matches skill's declared output JSON Schema).
   error           TEXT,                     -- nullable: null on success
   resource_usage  JSONB,                    -- nullable: SkillRunResourceUsageSchema. { wallClockMs, peakMemoryBytes }. Written at finalisation; null while running.
-  idempotency_key TEXT,                     -- nullable: null for one-shot CLI/test invocations. Partial UNIQUE on (idempotency_key) WHERE idempotency_key IS NOT NULL — see Exactly-once invocation.
+  idempotency_key TEXT,                     -- nullable: null for one-shot CLI/test invocations. UNIQUE(idempotency_key) — Postgres NULLs-are-not-equal default allows multiple null rows; see Exactly-once invocation.
   recovery_point  skill_run_recovery_point NOT NULL DEFAULT 'started',  -- 'started' | 'executed' | 'finished' — drives the replay branches in runner.invoke.
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   finished_at     TIMESTAMPTZ               -- nullable: null while running
@@ -976,7 +976,7 @@ UPDATE recovery_point='finished', status='success'|'error'  ← transitionToFini
 | Agent-loop tool dispatch *(deferred — needs toolUseId plumbed through Service)* | `skill-tool:${conversationId}:${toolUseId}` |
 | CLI / one-shot tests | Omit (no retry context) |
 
-**Race safety.** Concurrent attempts with the same key are serialised by Postgres's partial unique index `uniq_skill_runs_idempotency_key WHERE idempotency_key IS NOT NULL`. `startOrRecoverRun` uses `INSERT ... ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING *`; the loser of the race gets zero rows back and follows up with `SELECT ... FOR UPDATE` to lock the existing row for its own transition.
+**Race safety.** Concurrent attempts with the same key are serialised by the `uniq_skill_runs_idempotency_key` UNIQUE constraint on `skill_runs.idempotency_key`. Postgres's default unique-constraint semantics treat NULLs as not-equal — multiple null-key rows (CLI / tests) coexist freely while non-null keys are constrained to one row. `startOrRecoverRun` uses `INSERT ... ON CONFLICT (idempotency_key) DO NOTHING RETURNING *`; the loser of the race gets zero rows back and follows up with `SELECT ... FOR UPDATE` to lock the existing row for its own transition. Plain UNIQUE was chosen over a partial unique index `(idempotency_key) WHERE idempotency_key IS NOT NULL` because both give identical semantics for this case but plain UNIQUE drops the `WHERE` predicate dance from every `ON CONFLICT` site — and from the comments explaining it. ([Postgres docs](https://www.postgresql.org/docs/current/ddl-constraints.html#DDL-CONSTRAINTS-UNIQUE-CONSTRAINTS) confirm the NULL-not-equal default.)
 
 **Why DB-level over framework-level (Inngest step.run boundaries).** Framework-agnostic — survives engine swaps, works under Inngest today and bare `setTimeout` for CLI runs. Avoids Inngest's `Jsonify<Awaited<T>>` return-type friction. One code path for all callers. Survives crashes the framework can't see (LangGraph's specific critique). See PR #303 review thread and the [decision summary in todo](todo.md).
 

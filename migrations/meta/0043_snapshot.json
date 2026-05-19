@@ -1,5 +1,5 @@
 {
-  "id": "311dd25f-1ff7-45df-8617-bc805c235e7b",
+  "id": "d9250080-914c-4f4c-ac83-a29b079d3fd0",
   "prevId": "eba15127-d9be-4d34-997c-35f17d153cfd",
   "version": "7",
   "dialect": "postgresql",
@@ -2958,22 +2958,6 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
-        },
-        "uniq_skill_runs_idempotency_key": {
-          "name": "uniq_skill_runs_idempotency_key",
-          "columns": [
-            {
-              "expression": "idempotency_key",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "idempotency_key IS NOT NULL",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
         }
       },
       "foreignKeys": {
@@ -2988,7 +2972,13 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "uniq_skill_runs_idempotency_key": {
+          "name": "uniq_skill_runs_idempotency_key",
+          "nullsNotDistinct": false,
+          "columns": ["idempotency_key"]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false

@@ -919,13 +919,13 @@ export class DrizzleSkillStore implements SkillStore {
     if (params.inputs === null || params.inputs === undefined) {
       throw new Error("startOrRecoverRun: inputs must not be null/undefined");
     }
-    // ON CONFLICT DO NOTHING — when a row with the same key already
-    // exists, the INSERT no-ops and RETURNING yields zero rows. The
-    // caller then re-selects with FOR UPDATE to lock the existing row.
-    // Postgres requires `ON CONFLICT` against a partial unique index to
-    // spell out the index's WHERE predicate so the planner can infer the
-    // arbiter (`infer_arbiter_indexes` error 42P10 otherwise). Match the
-    // `uniq_skill_runs_idempotency_key` definition exactly.
+    // ON CONFLICT DO NOTHING against the `uniq_skill_runs_idempotency_key`
+    // UNIQUE constraint. Postgres default NULL semantics treat nulls as
+    // not-equal in unique constraints, so multiple null-key rows
+    // (CLI / tests) coexist; non-null keys collide and the no-op path
+    // fires. RETURNING yields zero rows on collision; the caller
+    // re-selects with FOR UPDATE to lock the existing row for its own
+    // transition.
     const inserted = await tx
       .insert(skillRuns)
       .values({
@@ -935,10 +935,7 @@ export class DrizzleSkillStore implements SkillStore {
         status: "running",
         idempotencyKey: params.idempotencyKey,
       })
-      .onConflictDoNothing({
-        target: skillRuns.idempotencyKey,
-        where: sql`idempotency_key IS NOT NULL`,
-      })
+      .onConflictDoNothing({ target: skillRuns.idempotencyKey })
       .returning();
     if (inserted.length > 0) {
       return { kind: "new", row: single(inserted) };
