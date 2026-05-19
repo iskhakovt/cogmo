@@ -54,6 +54,11 @@ function normalizeContent(text: string): string {
       // descriptive infix without breaking fixture matching across runs.
       // Word boundary prevents accidentally matching inside other tokens.
       .replace(/\btest-(?:[a-z]+-)?\d{10,}\b/g, "test-[ID]")
+      // Claude Code's plan-mode system-reminder embeds a per-session
+      // random slug (`.claude/plans/task-<title>-<adj>-<noun>.md`) into
+      // every turn's user message — collapse to a stable token so
+      // record/replay matching doesn't miss after the first turn.
+      .replace(/\.claude\/plans\/task-[a-z0-9-]+\.md/g, ".claude/plans/task-[SLUG].md")
   );
 }
 
@@ -80,7 +85,7 @@ export function createMock(): LLMock {
   const mock = new LLMock({
     port: 0,
     host: "0.0.0.0",
-    logLevel: recording ? "info" : "silent",
+    logLevel: recording ? "info" : process.env.LLMOCK_DEBUG === "1" ? "debug" : "silent",
     strict: !recording,
     requestTransform,
     ...(recording && {

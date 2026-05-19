@@ -81,7 +81,7 @@ type CodingEvent =
   | { kind: "complete"; exitCode: number; usage?: BackendUsage; isError: boolean };
 ```
 
-Two concrete impls: `ClaudeCodeBackend` (slices 1+2), `CodexBackend` (later). Selection per-task via `coding_tasks.backend`. `execute(ctx, sessionId)` resumes a prior session via `claude --resume <sid> --permission-mode acceptEdits` — there is no separate `resume()` method; both subcommands take the same flags. `permission_request` is reserved for slice 3 when the stream-json gate ships.
+Two concrete impls: `ClaudeCodeBackend` (slices 1+2), `CodexBackend` (later). Selection per-task via `coding_tasks.backend`. `execute(ctx, sessionId)` resumes a prior session via `claude --resume <sid>` (default permission mode — stream-json control channel gates every tool call); there is no separate `resume()` method, both subcommands take the same flags. `permission_request` is emitted in execute mode and surfaced to the orchestrator's tool gate; plan mode handles its own permission round-trips inline (CLI 2.x routes `Read`/`Write`/`ExitPlanMode` through the same control channel — see [Tool gate](#tool-gate-confirmed) for the policy-aware execute-mode path).
 
 ## Prompt Construction `[proposed]`
 
