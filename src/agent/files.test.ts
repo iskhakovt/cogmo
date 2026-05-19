@@ -138,6 +138,17 @@ describe("createFileService.read", () => {
     await expect(files.read("f")).rejects.toThrow("network error");
   });
 
+  it("re-throws non-NotFound errors from HEAD (via write existence check)", async () => {
+    const { client } = s3Mock({
+      head: () => {
+        throw new Error("head exploded");
+      },
+    });
+    const files = createFileService(client, "bucket");
+
+    await expect(files.write("f.md", "x")).rejects.toThrow("head exploded");
+  });
+
   it("truncates oversized content and appends a marker", async () => {
     const huge = "x".repeat(150_000);
     const { client } = s3Mock({ get: () => ({ Body: body(huge), LastModified: T0 }) });
@@ -250,9 +261,19 @@ describe("createFileService.write", () => {
   });
 
   it("writing populates the read cache so a subsequent edit works without re-reading", async () => {
-    // HEAD defaults to NotFound — the write creates a new file, then edit
-    // operates on the cached bytes from that write without an extra read.
-    const { client, calls } = s3Mock();
+    // Stateful HEAD: starts as NotFound (so write creates), flips to Found
+    // after PUT (so the follow-up edit sees the file as still present).
+    let exists = false;
+    const { client, calls } = s3Mock({
+      head: () => {
+        if (!exists) throw new NotFound({ $metadata: {}, message: "" });
+        return { LastModified: T0 };
+      },
+      put: () => {
+        exists = true;
+        return {};
+      },
+    });
     const files = createFileService(client, "bucket");
 
     await files.write("notes/n.md", "alpha beta gamma");
@@ -265,6 +286,35 @@ describe("createFileService.write", () => {
 });
 
 describe("createFileService.edit", () => {
+  it("rejects edit when the file no longer exists on disk since the read", async () => {
+    // GET succeeds for the initial read; HEAD on the subsequent edit returns
+    // NotFound, modelling an external deletion between read and edit. Edit
+    // must surface this rather than silently recreating the file from cache.
+    const { client } = s3Mock({
+      get: () => ({ Body: body("contents"), LastModified: T0 }),
+    });
+    const files = createFileService(client, "bucket");
+
+    await files.read("f.md");
+    await expect(files.edit("f.md", "contents", "new contents")).rejects.toThrow(
+      "no longer exists",
+    );
+  });
+
+  it("rejects edit with an empty old_string at the service layer", async () => {
+    // Defense in depth: the tool schema rejects empty strings with Zod, but a
+    // direct service caller (e.g. a skill) goes around the schema and the
+    // service must still refuse.
+    const { client } = s3Mock({
+      head: () => ({ LastModified: T0 }),
+      get: () => ({ Body: body("contents"), LastModified: T0 }),
+    });
+    const files = createFileService(client, "bucket");
+
+    await files.read("f.md");
+    await expect(files.edit("f.md", "", "x")).rejects.toThrow("must be non-empty");
+  });
+
   it("rejects edit when the file was not read first", async () => {
     const { client } = s3Mock({ head: () => ({ LastModified: T0 }) });
     const files = createFileService(client, "bucket");

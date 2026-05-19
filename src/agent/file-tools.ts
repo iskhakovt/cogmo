@@ -44,7 +44,10 @@ export const editFile = defineTool({
     "Fails if the file has been modified since you read it.",
   schema: z.object({
     path: z.string().describe("File path (e.g. 'notes/meeting.md')"),
-    old_string: z.string().describe("Exact text to find. Must be unique unless replace_all."),
+    old_string: z
+      .string()
+      .min(1)
+      .describe("Exact text to find. Must be non-empty and unique unless replace_all."),
     new_string: z.string().describe("Replacement text. May be empty to delete `old_string`."),
     replace_all: z
       .boolean()

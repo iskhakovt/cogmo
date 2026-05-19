@@ -109,14 +109,11 @@ export function createFileService(
    *
    * On a benign mtime bump (mtime advanced, content unchanged — e.g.
    * a re-upload of identical bytes), the cached timestamp is refreshed
-   * and the operation proceeds. A `null` head means the file vanished
-   * externally; the operation is allowed to proceed and (re-)create it.
+   * and the operation proceeds. Callers pass a non-null `head` — write
+   * guards on existence before calling, and edit rejects null itself
+   * with a more specific message.
    */
-  async function assertFresh(
-    path: string,
-    kind: "edit" | "overwrite",
-    head: Date | null,
-  ): Promise<void> {
+  async function assertFresh(path: string, kind: "edit" | "overwrite", head: Date): Promise<void> {
     const entry = readState.get(path);
     if (!entry) {
       throw new Error(
@@ -128,7 +125,6 @@ export function createFileService(
         `Cannot ${kind} ${path}: the last read returned a truncated view (file is larger than ${MAX_READ_LENGTH} bytes).`,
       );
     }
-    if (!head) return;
     if (head.getTime() <= entry.lastModified.getTime()) return;
     // mtime advanced — verify content actually changed before failing.
     const fresh = await fetchObject(path);
@@ -176,6 +172,11 @@ export function createFileService(
       if (head) await assertFresh(path, "overwrite", head);
       await putObject(path, content);
       // Reflect the write in the read cache — the caller now knows the current bytes.
+      // lastModified is the client clock, not S3's: PutObjectCommandOutput
+      // doesn't carry LastModified, and a HEAD-after-PUT to capture it adds a
+      // round-trip we don't pay for. If S3's stamp lands slightly ahead of
+      // client time, the next op's mtime check triggers a content-compare GET
+      // that matches and refreshes the cache — perf nit, not a correctness gap.
       readState.set(path, {
         content,
         lastModified: new Date(),
@@ -190,7 +191,15 @@ export function createFileService(
       opts?: { replaceAll?: boolean },
     ): Promise<void> {
       const replaceAll = opts?.replaceAll ?? false;
+      if (oldString === "") {
+        throw new Error(`Cannot edit ${path}: old_string must be non-empty.`);
+      }
       const head = await headExisting(path);
+      if (!head) {
+        throw new Error(
+          `Cannot edit ${path}: the file no longer exists. Use write_file to create it.`,
+        );
+      }
       await assertFresh(path, "edit", head);
       // assertFresh guarantees a cached entry for `path`.
       const entry = readState.get(path);
@@ -215,6 +224,7 @@ export function createFileService(
         next = current.replace(oldString, newString);
       }
       await putObject(path, next);
+      // Same client-clock caveat as `write` — see the comment there.
       readState.set(path, {
         content: next,
         lastModified: new Date(),
