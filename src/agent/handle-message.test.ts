@@ -919,6 +919,7 @@ describe("createHandleMessage", () => {
   it("clears cooldown_state on a successful turn that started cooling down", async () => {
     const longAgo = new Date(Date.now() - 10 * 60_000).toISOString();
     const clearCooldown = vi.fn();
+    const step = mockStep();
     const deps = mockDeps({
       agentStore: mockAgentStore({
         getConversation: vi.fn().mockResolvedValue({
@@ -938,10 +939,26 @@ describe("createHandleMessage", () => {
     });
     await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
-      step: mockStep(),
+      step,
       runId: testRunId,
     });
     expect(clearCooldown).toHaveBeenCalledWith(expect.anything(), "conv-1");
+    // Telemetry — `conversation/cooldown/cleared` fires after persist
+    // commits. `elapsedCooldownSeconds` is wall-clock distance from
+    // `lastErroredAt` to now; greater than 60s here because the test
+    // anchor is 10 minutes ago.
+    const clearedCall = step.sendEvent.mock.calls.find(
+      (c) => (c[1] as { name?: string }).name === "conversation/cooldown/cleared",
+    );
+    expect(clearedCall?.[0]).toBe("emit-cooldown-cleared");
+    expect(clearedCall?.[1]).toMatchObject({
+      name: "conversation/cooldown/cleared",
+      data: {
+        conversationId: "conv-1",
+        clearedBy: "success",
+        elapsedCooldownSeconds: expect.any(Number),
+      },
+    });
   });
 
   // Closed state (no prior cooldown) — successful turns must NOT

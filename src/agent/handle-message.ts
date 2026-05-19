@@ -3,6 +3,7 @@ import type { Transactor } from "../db/index.js";
 import { inngest } from "../inngest/client.js";
 import {
   buildConversationErroredEvent,
+  conversationCooldownCleared,
   conversationDegraded,
   inboundReady,
   responseReady,
@@ -906,6 +907,24 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           return inserted;
         });
       });
+
+      // Half-open success: cooldown was cleared inside the persist tx.
+      // Emit `conversation/cooldown/cleared` as a separate durable step
+      // AFTER persist commits so the event can't fire on a rolled-back
+      // tx. Same pattern as the degrade emit below. Pre-tx
+      // `conv.cooldownState` carries `lastErroredAt` for the elapsed
+      // calculation. See design/agent-resilience.md → Telemetry.
+      if (wasCoolingDown && conv.cooldownState !== null) {
+        const cooldownState = conv.cooldownState;
+        await step.sendEvent(
+          "emit-cooldown-cleared",
+          conversationCooldownCleared.create({
+            conversationId,
+            clearedBy: "success",
+            elapsedCooldownSeconds: (Date.now() - Date.parse(cooldownState.lastErroredAt)) / 1000,
+          }),
+        );
+      }
 
       // Emit the degrade signal as a separate durable step after persist —
       // `step.sendEvent` provides exactly-once delivery, same pattern as

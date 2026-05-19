@@ -137,6 +137,78 @@ describe("createRecoverConversation", () => {
     warnSpy.mockRestore();
   });
 
+  // Telemetry — `conversation/cooldown/entered` fires after the
+  // durable cooldown write. Payload carries the derived `causeClass`
+  // (NonRetriableError → "B" here), the full curve state, and a
+  // bus-dedup `id: cooldown-entered-${runId}` so an Inngest retry of
+  // this function (or a future second emitter for the same failed
+  // run) doesn't double-fire downstream consumers. See
+  // design/agent-resilience.md → Telemetry.
+  it("emits conversation/cooldown/entered after the cooldown write", async () => {
+    const agentStore = mockAgentStore();
+    const fn = createRecoverConversation({ runInTx: fakeRunInTx, agentStore });
+    const step = mockStep();
+    await invokeInngestFn<RecoverConversationCtx>(fn, { event: baseEvent, step });
+    const sendCalls = step.sendEvent.mock.calls;
+    const enteredCall = sendCalls.find(
+      (c) => (c[1] as { name?: string }).name === "conversation/cooldown/entered",
+    );
+    expect(enteredCall).toBeDefined();
+    expect(enteredCall?.[0]).toBe("emit-cooldown-entered");
+    expect(enteredCall?.[1]).toMatchObject({
+      name: "conversation/cooldown/entered",
+      id: "cooldown-entered-run-failed-1",
+      data: {
+        conversationId: "conv-1",
+        runId: "run-failed-1",
+        cooldownSeconds: 60,
+        consecutiveFailures: 1,
+        causeClass: "B",
+      },
+    });
+  });
+
+  it("maps WorkerDeath errorClass to causeClass A in the emitted event", async () => {
+    const agentStore = mockAgentStore();
+    const fn = createRecoverConversation({ runInTx: fakeRunInTx, agentStore });
+    const step = mockStep();
+    await invokeInngestFn<RecoverConversationCtx>(fn, {
+      event: { data: { ...baseEvent.data, errorClass: "WorkerDeath", causeClass: null } },
+      step,
+    });
+    const enteredCall = step.sendEvent.mock.calls.find(
+      (c) => (c[1] as { name?: string }).name === "conversation/cooldown/entered",
+    );
+    expect(enteredCall?.[1]).toMatchObject({ data: { causeClass: "A" } });
+  });
+
+  it("falls back to causeClass 'bug' for unrecognised errorClass values", async () => {
+    const agentStore = mockAgentStore();
+    const fn = createRecoverConversation({ runInTx: fakeRunInTx, agentStore });
+    const step = mockStep();
+    await invokeInngestFn<RecoverConversationCtx>(fn, {
+      event: { data: { ...baseEvent.data, errorClass: "RandomError" } },
+      step,
+    });
+    const enteredCall = step.sendEvent.mock.calls.find(
+      (c) => (c[1] as { name?: string }).name === "conversation/cooldown/entered",
+    );
+    expect(enteredCall?.[1]).toMatchObject({ data: { causeClass: "bug" } });
+  });
+
+  it("does NOT emit cooldown/entered when conversation_not_found short-circuits", async () => {
+    const agentStore = mockAgentStore({
+      getConversation: vi.fn().mockResolvedValue(undefined),
+    });
+    const fn = createRecoverConversation({ runInTx: fakeRunInTx, agentStore });
+    const step = mockStep();
+    await invokeInngestFn<RecoverConversationCtx>(fn, { event: baseEvent, step });
+    const enteredCall = step.sendEvent.mock.calls.find(
+      (c) => (c[1] as { name?: string }).name === "conversation/cooldown/entered",
+    );
+    expect(enteredCall).toBeUndefined();
+  });
+
   // Idempotency-under-duplicate-events documentation.
   //
   // The bus-level dedup guard (`buildConversationErroredEvent` bakes in

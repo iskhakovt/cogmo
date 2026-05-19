@@ -22,7 +22,11 @@
 
 import type { Transactor } from "../db/index.js";
 import { inngest } from "../inngest/client.js";
-import { conversationErrored } from "../inngest/events.js";
+import {
+  buildConversationCooldownEnteredEvent,
+  conversationErrored,
+  deriveCauseClass,
+} from "../inngest/events.js";
 import { logger } from "../logger.js";
 import { nextCooldownState } from "./cooldown.js";
 import type { AgentStore } from "./store/index.js";
@@ -43,7 +47,7 @@ export function createRecoverConversation(deps: RecoverConversationDeps) {
       concurrency: { limit: 1, key: "event.data.conversationId" },
     },
     async ({ event, step }) => {
-      const { conversationId, errorClass, causeClass, errorMessage } = event.data;
+      const { conversationId, runId, errorClass, causeClass, errorMessage } = event.data;
 
       const result = await step.run("write-cooldown", async () => {
         // Capture `now` outside `runInTx` so a 40001 retry inside the
@@ -69,6 +73,26 @@ export function createRecoverConversation(deps: RecoverConversationDeps) {
         );
         return { status: "skipped", reason: "conversation_not_found" };
       }
+
+      // Telemetry — emit AFTER the write step succeeds so the event
+      // can't fire on a rolled-back tx. Separate step so the explicit
+      // bus-dedup `id` (`cooldown-entered-${runId}`) is the only thing
+      // protecting against double-emit on outer-retry of this function;
+      // `retries: 0` makes that protection load-bearing only when a
+      // second emitter for the same failed run lands (none today, but
+      // the helper bakes the id in so future ones can't drift).
+      // See design/agent-resilience.md → Telemetry.
+      await step.sendEvent(
+        "emit-cooldown-entered",
+        buildConversationCooldownEnteredEvent({
+          conversationId,
+          runId,
+          lastErroredAt: result.state.lastErroredAt,
+          cooldownSeconds: result.state.cooldownSeconds,
+          consecutiveFailures: result.state.consecutiveFailures,
+          causeClass: deriveCauseClass(errorClass),
+        }),
+      );
 
       logger.warn(
         {
