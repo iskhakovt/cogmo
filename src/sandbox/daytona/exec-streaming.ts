@@ -234,16 +234,21 @@ export async function startExecStreaming(args: {
         stdout.end();
         stderr.end();
         if (onClose) onClose();
-        await cleanupSession();
-        if (timedOut) {
-          reject(timedOut);
-          return;
-        }
-        if (disposed) {
-          reject(new DisposedError());
-          return;
-        }
+        // `getSessionCommand` returns 404 once the session is deleted,
+        // so cleanup MUST run after the fetch on the natural-success
+        // path. `try/finally` runs `cleanupSession()` exactly once on
+        // every settle path (timedOut, disposed, success, fetch-error)
+        // — symmetric without inverting the order the success path
+        // depends on.
         try {
+          if (timedOut) {
+            reject(timedOut);
+            return;
+          }
+          if (disposed) {
+            reject(new DisposedError());
+            return;
+          }
           const cmd = await daytonaProcess.getSessionCommand(sessionId, commandId);
           if (cmd.exitCode === undefined || cmd.exitCode === null) {
             reject(
@@ -256,6 +261,8 @@ export async function startExecStreaming(args: {
           resolve({ exitCode: cmd.exitCode });
         } catch (err) {
           reject(err as Error);
+        } finally {
+          await cleanupSession();
         }
       })
       .catch(async (err: Error) => {

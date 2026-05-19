@@ -1,4 +1,4 @@
-import type { Process } from "@daytonaio/sdk";
+import { DaytonaNotFoundError, type Process } from "@daytonaio/sdk";
 import { describe, expect, it, vi } from "vitest";
 import { ExecTimeoutError } from "../index.js";
 import { DisposedError, startExecStreaming } from "./exec-streaming.js";
@@ -21,7 +21,18 @@ interface Script {
 
 function fakeProcess(script: Script): Process {
   const createSession = vi.fn(async () => undefined);
-  const deleteSession = vi.fn(async () => undefined);
+  // Track deleted sessions so `getSessionCommand` can 404 once
+  // `deleteSession` has been called — mirrors live Daytona, where the
+  // session row is gone post-delete and any subsequent fetch returns
+  // 404. The unit suite catches lifecycle-ordering regressions only
+  // when the mock reflects this; the pre-2026-05-19 mock returned the
+  // exit code regardless, and a wrong cleanup-before-fetch ordering
+  // passed CI for a full release as a result.
+  const deletedSessions = new Set<string>();
+  const deleteSession = vi.fn(async (sid: string) => {
+    deletedSessions.add(sid);
+    return undefined;
+  });
   const sendSessionCommandInput = vi.fn(async () => undefined);
   const executeSessionCommand = vi.fn(async () => ({
     cmdId: script.cmdId ?? "cmd-fake",
@@ -30,11 +41,16 @@ function fakeProcess(script: Script): Process {
     stderr: "",
     exitCode: undefined as number | undefined,
   }));
-  const getSessionCommand = vi.fn(async () => ({
-    id: "cmd-fake",
-    command: "true",
-    exitCode: script.exitCode ?? 0,
-  }));
+  const getSessionCommand = vi.fn(async (sid: string) => {
+    if (deletedSessions.has(sid)) {
+      throw new DaytonaNotFoundError("session not found", 404);
+    }
+    return {
+      id: "cmd-fake",
+      command: "true",
+      exitCode: script.exitCode ?? 0,
+    };
+  });
   const getSessionCommandLogs = vi.fn(
     async (
       _sid: string,
@@ -376,6 +392,51 @@ describe("startExecStreaming", () => {
     // Wait one tick for the cleanup chained off the WS resolve.
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(proc.deleteSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("natural-success lifecycle ordering: getSessionCommand fires BEFORE deleteSession", async () => {
+    // Daytona's `getSessionCommand` returns 404 once the session is
+    // deleted. Any cleanup-before-fetch ordering on the success path
+    // breaks every successful exec call. The strengthened fake mirrors
+    // this — `getSessionCommand` after `deleteSession` throws
+    // `DaytonaNotFoundError`. This test pins the relative order so a
+    // future refactor that lifts cleanup back above the fetch (the
+    // PR #267 regression class) surfaces here.
+    const order: string[] = [];
+    const proc = fakeProcess({ wsResolve: { stdoutChunks: ["ok\n"] }, exitCode: 7 });
+    vi.mocked(proc.getSessionCommand).mockImplementation(async () => {
+      order.push("getSessionCommand");
+      return { id: "cmd-fake", command: "true", exitCode: 7 };
+    });
+    vi.mocked(proc.deleteSession).mockImplementation(async () => {
+      order.push("deleteSession");
+      return undefined;
+    });
+
+    const handle = await startExecStreaming({
+      process: proc,
+      sessionIdPrefix: "p",
+      cmd: ["true"],
+      opts: {},
+    });
+    handle.stdout.on("data", () => {});
+    const result = await handle.wait();
+
+    expect(result.exitCode).toBe(7);
+    expect(order).toEqual(["getSessionCommand", "deleteSession"]);
+  });
+
+  it("strengthened fake: a wrong cleanup-before-fetch ordering would 404 on getSessionCommand", async () => {
+    // Contract test for the test double itself. Pins the fake's
+    // load-bearing invariant: after `deleteSession(sid)`, any
+    // `getSessionCommand(sid, ...)` throws `DaytonaNotFoundError`.
+    // Without this, a regression in the SUT that reverts to
+    // cleanup-before-fetch would pass CI silently.
+    const proc = fakeProcess({ exitCode: 0 });
+    await proc.deleteSession("sid-x");
+    await expect(proc.getSessionCommand("sid-x", "cmd-x")).rejects.toBeInstanceOf(
+      DaytonaNotFoundError,
+    );
   });
 
   it("upstream WS error rejects wait() AND deletes the session (no leak on real failure)", async () => {
