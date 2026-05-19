@@ -685,6 +685,18 @@ describe("synthesizeDegradedReply", () => {
     );
   });
 
+  it("clears the timeout timer on the success path — no dangling setTimeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const provider = providerThat(async () => textResponse("ok"));
+      const result = await synthesizeDegradedReply({ ...baseDeps(), provider, timeoutMs: 5000 });
+      expect(result.ok).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not throw on any failure path — degrade-the-degrade is forbidden", async () => {
     // The orchestrator treats this call as best-effort; throwing here
     // would propagate up and fail the whole turn after the loop already

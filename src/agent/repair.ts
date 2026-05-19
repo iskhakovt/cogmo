@@ -325,6 +325,7 @@ export async function synthesizeDegradedReply(
   const fallback = degradedReplyText(subtype);
 
   const start = Date.now();
+  let timeoutId: NodeJS.Timeout | undefined;
   try {
     const response = await Promise.race([
       provider.chat({
@@ -335,9 +336,9 @@ export async function synthesizeDegradedReply(
         temperature: 0,
         maxTokens: 512,
       }),
-      new Promise<never>((_resolve, reject) =>
-        setTimeout(() => reject(new SynthesisTimeoutError(timeoutMs)), timeoutMs),
-      ),
+      new Promise<never>((_resolve, reject) => {
+        timeoutId = setTimeout(() => reject(new SynthesisTimeoutError(timeoutMs)), timeoutMs);
+      }),
     ]);
 
     const text = response.content
@@ -377,7 +378,6 @@ export async function synthesizeDegradedReply(
     );
     return { text, ok: true };
   } catch (err) {
-    const errMessage = err instanceof Error ? err.message : String(err);
     log.warn(
       {
         event: "agent.degrade.synthesis",
@@ -393,11 +393,13 @@ export async function synthesizeDegradedReply(
               : err instanceof ProviderProtocolError
                 ? "protocol"
                 : "error",
-        err: errMessage,
+        err,
       },
       "degraded synthesis failed — falling back to fixed string",
     );
     return { text: fallback, ok: false };
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
   }
 }
 
