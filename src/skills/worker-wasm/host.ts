@@ -1,7 +1,7 @@
 import { MessageChannel, Worker } from "node:worker_threads";
 import { logger } from "../../logger.js";
 import { CtxError, type CtxHandler, Dispatcher, type RpcTransport } from "../dispatcher.js";
-import type { TaskInvoke, TaskResult } from "../protocol.js";
+import type { RuntimeRusage, TaskInvoke, TaskResult } from "../protocol.js";
 
 const log = logger.child({ component: "skills.worker.wasm" });
 
@@ -31,6 +31,13 @@ export interface RunOnWorkerResult {
   output?: unknown;
   /** Set when ok=false. */
   error?: string;
+  /**
+   * Per-task rusage from the runtime when present. Tier 1 (Pyodide WASM)
+   * doesn't fill this — `getrusage` is process-wide and would inflate
+   * under concurrent workers — but the host still propagates it when the
+   * supervisor surfaces one in the future.
+   */
+  rusage?: RuntimeRusage;
 }
 
 /**
@@ -177,7 +184,10 @@ export async function runOnWorker(params: RunOnWorkerParams): Promise<RunOnWorke
 }
 
 function resultToReturn(result: TaskResult): RunOnWorkerResult {
-  return result.ok ? { ok: true, output: result.output } : { ok: false, error: result.error };
+  const base = result.ok
+    ? ({ ok: true, output: result.output } as const)
+    : ({ ok: false, error: result.error } as const);
+  return result.rusage ? { ...base, rusage: result.rusage } : base;
 }
 
 /**

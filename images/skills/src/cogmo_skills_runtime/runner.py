@@ -13,11 +13,26 @@ same time; the bridge correlates host replies by `id`.
 import asyncio
 import inspect
 import json
+import resource
 import sys
 import traceback
 import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, BinaryIO, TextIO
+
+
+def _current_rusage() -> dict[str, int]:
+    """Snapshot the current process's resource usage as a JSON-serialisable dict.
+
+    Called immediately before each `task_result` emit so the host gets the
+    child's peak memory at completion time. Linux `ru_maxrss` is reported
+    in kilobytes; we scale to bytes for protocol consistency. macOS would
+    report bytes already — irrelevant in practice since the production
+    runtime is Linux containers, but we don't unit-test this on macOS for
+    that reason.
+    """
+    ru = resource.getrusage(resource.RUSAGE_SELF)
+    return {"peakMemoryBytes": int(ru.ru_maxrss) * 1024}
 
 
 class CtxError(Exception):
@@ -231,6 +246,7 @@ async def _main(
                 "id": task_id,
                 "ok": False,
                 "error": f"SyntaxError: {e.msg} (line {e.lineno})",
+                "rusage": _current_rusage(),
             },
         )
         stdin_task.cancel()
@@ -245,6 +261,7 @@ async def _main(
                 "id": task_id,
                 "ok": False,
                 "error": "skill must define `async def run(inputs, ctx)`",
+                "rusage": _current_rusage(),
             },
         )
         stdin_task.cancel()
@@ -253,7 +270,16 @@ async def _main(
     ctx = Ctx(bridge)
     try:
         output = await run_fn(inputs, ctx)
-        _send_sync(out, {"type": "task_result", "id": task_id, "ok": True, "output": output})
+        _send_sync(
+            out,
+            {
+                "type": "task_result",
+                "id": task_id,
+                "ok": True,
+                "output": output,
+                "rusage": _current_rusage(),
+            },
+        )
     except CtxError as e:
         _send_sync(
             out,
@@ -262,6 +288,7 @@ async def _main(
                 "id": task_id,
                 "ok": False,
                 "error": f"{e.kind}: {e.message}",
+                "rusage": _current_rusage(),
             },
         )
     except Exception as e:
@@ -273,6 +300,7 @@ async def _main(
                 "ok": False,
                 "error": f"{type(e).__name__}: {e}",
                 "traceback": traceback.format_exc(),
+                "rusage": _current_rusage(),
             },
         )
     finally:

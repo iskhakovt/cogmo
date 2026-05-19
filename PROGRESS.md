@@ -134,7 +134,7 @@ The agent extends its own capabilities — authors small Python programs ("skill
 ### P3.5 — Telemetry & cost
 
 - [x] `skill_context_calls` audit log — every `ctx.*` RPC persisted with method + target (name only, never value), indexed by `run_id`; retention policy deferred
-- [ ] `skill_runs` tracking — `wall_clock_ms`, peak memory (cgroup/isolate stats), Inngest step-wrapped for exactly-once. P3.1 records `status`, `output`/`error`, `started_at`/`finished_at` only.
+- [x] `skill_runs` tracking — `resource_usage` JSONB column on `skill_runs` (`SkillRunResourceUsageSchema`, validated on read+write via `jsonbZod`). `wallClockMs` is host-derived from `finishedAt - createdAt` and always set; `peakMemoryBytes` rides back via the `task_result.rusage` block populated by tier-2 `runner.py` calling `getrusage(RUSAGE_SELF).ru_maxrss * 1024` just before emit. Tier-1 (Pyodide WASM) leaves `peakMemoryBytes=null` — `getrusage` is process-wide and would inflate under concurrent workers; tier-2 synthesised results (wall-clock kill, supervisor watchdog) also leave it null. See changelog `2026-05-19-skill-runs-resource-usage.md`.
 - [ ] Cost accounting — LLM tokens via `ctx.llm.complete()` (pricing table per model), declared `cost_per_call_usd` summed per run, dispatcher enforces daily/monthly budgets from `SKILL.md.budget`. Blocked on `ctx.llm.complete` (P3.2 remainder).
 
 ### P3.6 — Deferred (future `[research]`)

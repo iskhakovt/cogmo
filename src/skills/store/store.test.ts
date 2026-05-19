@@ -366,6 +366,7 @@ describe("DrizzleSkillStore", () => {
           status: "success",
           output: { echo: 8 },
           error: null,
+          resourceUsage: { wallClockMs: 42, peakMemoryBytes: 1_048_576 },
           finishedAt: new Date(),
         }),
       );
@@ -374,6 +375,7 @@ describe("DrizzleSkillStore", () => {
       expect(reloaded?.status).toBe("success");
       expect(reloaded?.output).toEqual({ echo: 8 });
       expect(reloaded?.finishedAt).toBeInstanceOf(Date);
+      expect(reloaded?.resourceUsage).toEqual({ wallClockMs: 42, peakMemoryBytes: 1_048_576 });
     });
 
     it("records an error result with null output", async () => {
@@ -391,6 +393,7 @@ describe("DrizzleSkillStore", () => {
           status: "error",
           output: null,
           error: "Boom",
+          resourceUsage: { wallClockMs: 7, peakMemoryBytes: null },
           finishedAt: new Date(),
         }),
       );
@@ -485,11 +488,82 @@ describe("DrizzleSkillStore", () => {
           status: "success",
           output: null,
           error: null,
+          resourceUsage: { wallClockMs: 1, peakMemoryBytes: null },
           finishedAt: new Date(),
         }),
       );
       const after = await tx((trx) => store.getRun(trx, run.id));
       expect(after?.output).toBeNull();
+    });
+  });
+
+  describe("resource_usage round-trip", () => {
+    it("insertRun starts with resourceUsage=null (status='running')", async () => {
+      const skill = await seedSkill();
+      const run = await tx((trx) =>
+        store.insertRun(trx, { skillId: skill.id, trigger: "manual", inputs: {} }),
+      );
+      expect(run.resourceUsage).toBeNull();
+      expect(run.status).toBe("running");
+    });
+
+    it("updateRunResult persists both wall-clock and peak-memory", async () => {
+      const skill = await seedSkill();
+      const run = await tx((trx) =>
+        store.insertRun(trx, { skillId: skill.id, trigger: "cron", inputs: {} }),
+      );
+      await tx((trx) =>
+        store.updateRunResult(trx, {
+          id: run.id,
+          status: "success",
+          output: { ok: true },
+          error: null,
+          resourceUsage: { wallClockMs: 123, peakMemoryBytes: 5_242_880 },
+          finishedAt: new Date(),
+        }),
+      );
+      const reloaded = await tx((trx) => store.getRun(trx, run.id));
+      expect(reloaded?.resourceUsage).toEqual({ wallClockMs: 123, peakMemoryBytes: 5_242_880 });
+    });
+
+    it("updateRunResult tolerates peakMemoryBytes=null (tier-1 / timeout paths)", async () => {
+      const skill = await seedSkill();
+      const run = await tx((trx) =>
+        store.insertRun(trx, { skillId: skill.id, trigger: "manual", inputs: {} }),
+      );
+      await tx((trx) =>
+        store.updateRunResult(trx, {
+          id: run.id,
+          status: "error",
+          output: null,
+          error: "wall_clock_exceeded",
+          resourceUsage: { wallClockMs: 30_000, peakMemoryBytes: null },
+          finishedAt: new Date(),
+        }),
+      );
+      const reloaded = await tx((trx) => store.getRun(trx, run.id));
+      expect(reloaded?.resourceUsage).toEqual({ wallClockMs: 30_000, peakMemoryBytes: null });
+    });
+
+    it("rejects negative wallClockMs at the Zod boundary", async () => {
+      const skill = await seedSkill();
+      const run = await tx((trx) =>
+        store.insertRun(trx, { skillId: skill.id, trigger: "manual", inputs: {} }),
+      );
+      // Negative wallClockMs passes TypeScript (z.number().int() is just `number`
+      // at the type level) but Zod rejects at the store boundary.
+      await expect(
+        tx((trx) =>
+          store.updateRunResult(trx, {
+            id: run.id,
+            status: "success",
+            output: null,
+            error: null,
+            resourceUsage: { wallClockMs: -1, peakMemoryBytes: null },
+            finishedAt: new Date(),
+          }),
+        ),
+      ).rejects.toThrow();
     });
   });
 

@@ -98,12 +98,12 @@ class TestRunOneTaskInChild:
         _run_one_task_in_child(task)
         captured = capsys.readouterr()
         result = json.loads(captured.out.strip())
-        assert result == {
-            "type": "task_result",
-            "id": "t-echo",
-            "ok": True,
-            "output": {"echo": 42},
-        }
+        # Subset assertion — every task_result also carries `rusage` from the
+        # runner. Shape covered in test_runner.py's TestRusage.
+        assert result["type"] == "task_result"
+        assert result["id"] == "t-echo"
+        assert result["ok"] is True
+        assert result["output"] == {"echo": 42}
 
     def test_writes_task_result_for_skill_with_syntax_error(self, capsys: pytest.CaptureFixture[str]) -> None:
         task = {
@@ -205,9 +205,7 @@ class TestDispatchOneTask:
         _dispatch_one_task(task, "t-ok", sent.append)
         assert sent == []
 
-    def test_child_exits_nonzero_synthesizes_child_died(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_child_exits_nonzero_synthesizes_child_died(self, capsys: pytest.CaptureFixture[str]) -> None:
         # Skill calls `os._exit(139)` — simulates SIGSEGV exit code from a
         # crashed C extension. Process exits before runner can write
         # task_result. Supervisor must synthesize `child_died: exit=139`.
@@ -257,5 +255,3 @@ class TestDispatchOneTask:
         error = result["error"]
         assert isinstance(error, str)
         assert "child_died: signal=" in error
-
-

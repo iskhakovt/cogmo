@@ -126,6 +126,53 @@ describe("TaskResultSchema (discriminated)", () => {
   it("rejects missing ok", () => {
     expect(() => TaskResultSchema.parse({ type: "task_result", id: "t", output: 1 })).toThrow();
   });
+
+  it("accepts task_result with rusage on the ok variant", () => {
+    const r = TaskResultSchema.parse({
+      type: "task_result",
+      id: "t",
+      ok: true,
+      output: 42,
+      rusage: { peakMemoryBytes: 2_097_152 },
+    });
+    expect(r).toMatchObject({ ok: true, rusage: { peakMemoryBytes: 2_097_152 } });
+  });
+
+  it("accepts task_result with rusage on the err variant", () => {
+    const r = TaskResultSchema.parse({
+      type: "task_result",
+      id: "t",
+      ok: false,
+      error: "boom",
+      rusage: { peakMemoryBytes: 1024 },
+    });
+    expect(r).toMatchObject({ ok: false, rusage: { peakMemoryBytes: 1024 } });
+  });
+
+  it("accepts task_result without rusage (synthesised supervisor results)", () => {
+    // Supervisor timeouts / SIGKILL paths synthesise the task_result
+    // without the child's rusage — the field is optional by design.
+    const r = TaskResultSchema.parse({
+      type: "task_result",
+      id: "t",
+      ok: false,
+      error: "wall_clock_exceeded",
+    });
+    expect(r).toMatchObject({ ok: false });
+    expect((r as { rusage?: unknown }).rusage).toBeUndefined();
+  });
+
+  it("rejects negative peakMemoryBytes inside rusage", () => {
+    expect(() =>
+      TaskResultSchema.parse({
+        type: "task_result",
+        id: "t",
+        ok: true,
+        output: null,
+        rusage: { peakMemoryBytes: -1 },
+      }),
+    ).toThrow();
+  });
 });
 
 describe("CtxCallSchema", () => {

@@ -200,3 +200,28 @@ export type ClassifierLog = z.infer<typeof ClassifierLogSchema>;
  */
 export const SkillInvocationInputsSchema = JsonValueSchema;
 export const SkillInvocationOutputSchema = JsonValueSchema;
+
+/**
+ * Per-run resource metrics persisted as JSONB on `skill_runs.resource_usage`.
+ * Populated by the host at finalisation time:
+ *
+ * - `wallClockMs` — `finishedAt - createdAt` for every run, including
+ *   timeouts and crashes. Always set.
+ * - `peakMemoryBytes` — `resource.getrusage(RUSAGE_SELF).ru_maxrss * 1024`
+ *   reported by the tier-2 supervisor's per-task child before it emits
+ *   `task_result`. Linux `ru_maxrss` is in kilobytes, so we scale to
+ *   bytes for consistency. `null` for tier-1 (Pyodide WASM heap is
+ *   process-wide via `getrusage` — would inflate under concurrent
+ *   workers), and `null` for tier-2 runs that didn't complete normally
+ *   (wall-clock kill, crash) since the supervisor synthesises the
+ *   `task_result` without rusage in those cases.
+ *
+ * Shape mirrors `coding_tasks.resource_usage` — one blob per "what the
+ * sandbox cost us." Adding CPU time / I/O bytes / fork count later is a
+ * Zod-schema extension, no migration.
+ */
+export const SkillRunResourceUsageSchema = z.object({
+  wallClockMs: z.number().int().nonnegative(),
+  peakMemoryBytes: z.number().int().nonnegative().nullable(),
+});
+export type SkillRunResourceUsage = z.infer<typeof SkillRunResourceUsageSchema>;

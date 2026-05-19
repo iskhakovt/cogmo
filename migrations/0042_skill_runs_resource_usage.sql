@@ -1,0 +1,1 @@
+ALTER TABLE "skill_runs" ADD COLUMN "resource_usage" jsonb;

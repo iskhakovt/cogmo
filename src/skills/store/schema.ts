@@ -9,6 +9,7 @@ import {
   SkillInvocationInputsSchema,
   SkillInvocationOutputSchema,
   SkillIoSchema,
+  SkillRunResourceUsageSchema,
 } from "../types.js";
 
 // --- Enums ---
@@ -120,6 +121,12 @@ export const skillRuns = pgTable(
     status: skillRunStatus("status").notNull(),
     output: jsonbZod("output", SkillInvocationOutputSchema), // null on error
     error: text("error"),
+    /**
+     * Per-run wall-clock + peak-memory metrics. Null while the run is in
+     * `status='running'`; written at finalisation time by the host. Shape
+     * defined by {@link SkillRunResourceUsageSchema} in `../types.ts`.
+     */
+    resourceUsage: jsonbZod("resource_usage", SkillRunResourceUsageSchema),
     // CLAUDE.md mandates `created_at` on every table; for an append-only run
     // log the row's creation time IS the start-of-execution time.
     createdAt: ts(),
