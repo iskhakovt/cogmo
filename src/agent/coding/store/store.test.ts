@@ -4,6 +4,7 @@ import type { Database, Transactor } from "../../../db/index.js";
 import { DrizzleSandboxStore } from "../../../sandbox/store/index.js";
 import type { ContainerLabels, ResourceLimits } from "../../../sandbox/types.js";
 import { createTestDatabase, truncateAll } from "../../../test/pglite.js";
+import { DrizzleAgentStore } from "../../store/index.js";
 import { type CodingBackend, type CodingTaskStatus, DrizzleCodingStore } from "./index.js";
 
 let db: Database;
@@ -11,11 +12,13 @@ let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleCodingStore;
 let sandboxStore: DrizzleSandboxStore;
+let agentStore: DrizzleAgentStore;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
   store = new DrizzleCodingStore();
   sandboxStore = new DrizzleSandboxStore();
+  agentStore = new DrizzleAgentStore();
 });
 
 afterEach(async () => {
@@ -1246,6 +1249,72 @@ describe("DrizzleCodingStore", () => {
       const rows = await tx((trx) => store.listToolDecisionsForTask(trx, taskId));
       expect(rows).toHaveLength(2);
       expect(rows.map((r) => `${r.scope}/${r.decision}`)).toEqual(["once/allow", "task/deny"]);
+    });
+  });
+
+  describe("getCodingAutoapproveModeForTask", () => {
+    async function seedTaskWithProfile(autoapprove: "off" | "on"): Promise<string> {
+      const repoId = await seedRepo(`repo-${Math.random().toString(36).slice(2)}`);
+      const user = await tx((trx) => agentStore.createUser(trx));
+      const profile = await tx((trx) =>
+        agentStore.createProfile(trx, {
+          userId: user.id,
+          name: `prof-${Math.random().toString(36).slice(2)}`,
+          basePrompt: "x",
+          model: "claude-haiku-4-5-20251001",
+          toolSet: [],
+        }),
+      );
+      if (autoapprove === "on") {
+        await tx((trx) =>
+          agentStore.updateProfile(trx, profile.id, { codingAutoapproveMode: "on" }),
+        );
+      }
+      const conv = await tx((trx) =>
+        agentStore.createConversation(trx, {
+          userId: user.id,
+          profileId: profile.id,
+          isPrivate: true,
+        }),
+      );
+      const task = await tx((trx) =>
+        store.insertTask(trx, {
+          repoId,
+          conversationId: conv.id,
+          goal: "x",
+          triggerSource: "user",
+          backend: "claude",
+          allowPrivilegedRunc: false,
+        }),
+      );
+      return task.id;
+    }
+
+    it("returns 'on' when the joined profile has autoapprove enabled", async () => {
+      const taskId = await seedTaskWithProfile("on");
+      const mode = await tx((trx) => store.getCodingAutoapproveModeForTask(trx, taskId));
+      expect(mode).toBe("on");
+    });
+
+    it("returns 'off' (the default) when the profile hasn't been toggled", async () => {
+      const taskId = await seedTaskWithProfile("off");
+      const mode = await tx((trx) => store.getCodingAutoapproveModeForTask(trx, taskId));
+      expect(mode).toBe("off");
+    });
+
+    it("returns null when the task has no conversation (evolution / signal-pipeline triggers)", async () => {
+      const repoId = await seedRepo(`repo-${Math.random().toString(36).slice(2)}`);
+      const task = await tx((trx) =>
+        store.insertTask(trx, {
+          repoId,
+          goal: "x",
+          triggerSource: "evolution",
+          backend: "claude",
+          allowPrivilegedRunc: false,
+        }),
+      );
+      const mode = await tx((trx) => store.getCodingAutoapproveModeForTask(trx, task.id));
+      expect(mode).toBeNull();
     });
   });
 });

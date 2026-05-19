@@ -1042,6 +1042,13 @@ async function runExecuteStreaming(
   let failureReason: string | undefined;
   let usage: BackendUsage | undefined;
 
+  // Resolved once per execute run. Profile-toggle changes mid-task don't
+  // take effect until the next task — acceptable since the user toggling
+  // mid-task is rare and the tool gate would otherwise need a DB round
+  // trip per permission_request.
+  const autoApproveMode =
+    (await runInTx((tx) => store.getCodingAutoapproveModeForTask(tx, task.id))) ?? "off";
+
   const handle = await backend.execute({ task, repo, container }, sessionId);
   for await (const event of handle.events) {
     switch (event.kind) {
@@ -1064,6 +1071,7 @@ async function runExecuteStreaming(
           requestId: event.requestId,
           tool: event.tool,
           input: (event.input ?? {}) as Record<string, unknown>,
+          autoApproveMode,
           store,
           runInTx,
           stepWaitForEvent,
@@ -1094,6 +1102,12 @@ interface HandlePermissionRequestParams {
   requestId: string;
   tool: string;
   input: Record<string, unknown>;
+  /**
+   * Profile-level setting resolved once per execute run. `"on"` flips a
+   * `policy.evaluate → prompt` decision to allow, skipping the Telegram
+   * round trip. `"off"` keeps the current behavior.
+   */
+  autoApproveMode: "off" | "on";
   store: CodingStore;
   runInTx: Transactor;
   stepWaitForEvent: StepWaitForEvent;
@@ -1128,7 +1142,17 @@ interface HandlePermissionRequestParams {
 async function handlePermissionRequest(
   params: HandlePermissionRequestParams,
 ): Promise<PermissionResponse> {
-  const { taskId, requestId, tool, input, store, runInTx, stepWaitForEvent, inngest } = params;
+  const {
+    taskId,
+    requestId,
+    tool,
+    input,
+    autoApproveMode,
+    store,
+    runInTx,
+    stepWaitForEvent,
+    inngest,
+  } = params;
   const taskLog = log.child({ taskId, requestId });
   const call = { tool, input };
   const pattern = canonicalPattern(call);
@@ -1154,7 +1178,22 @@ async function handlePermissionRequest(
     return { behavior: "deny", message: result.reason };
   }
 
-  // 3. Prompt path — emit the request event, wait for the user's tap.
+  // 3. Auto-approve — the policy would prompt, but this profile opted out
+  // of the Telegram round trip. `policy.deny` is unchanged (genuinely
+  // dangerous calls still deny); only the prompt set flips to allow.
+  // Audit lands in `coding_tool_decisions` as scope=once + decision=allow
+  // (same shape as a `policy.allow` row), so the audit log doesn't
+  // distinguish today — the profile setting is the audit at one level up.
+  if (autoApproveMode === "on") {
+    taskLog.info(
+      { tool, pattern, reason: result.reason },
+      "tool gate: profile autoapprove — skipping Telegram prompt",
+    );
+    await persistDecision(store, runInTx, taskId, tool, pattern, "allow", "once");
+    return { behavior: "allow" };
+  }
+
+  // 4. Prompt path — emit the request event, wait for the user's tap.
   const requestIdShort = shortenRequestId(requestId);
   await inngest.send({
     name: codingTaskPermissionRequested.name,

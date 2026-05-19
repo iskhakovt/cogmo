@@ -1,6 +1,7 @@
 import { and, asc, count, desc, eq, inArray, ne, notInArray, sql } from "drizzle-orm";
 import { single } from "../../../db/helpers.js";
 import type { Transaction } from "../../../db/index.js";
+import { conversations, profiles } from "../../store/schema.js";
 import {
   type DevcontainerSpec,
   type PrMetadata,
@@ -354,6 +355,18 @@ export interface CodingStore {
     tx: Transaction,
     taskId: string,
   ): Promise<readonly CodingToolDecisionRow[]>;
+
+  // --- Tool-gate context ---
+
+  /**
+   * Resolve a task's effective `coding_autoapprove_mode` by walking
+   * `coding_tasks → conversations → profiles`. Returns `null` when the
+   * task has no conversation (evolution / signal-pipeline triggers) —
+   * those run with the default `off` semantics since there's no user
+   * profile to consult. Used by the orchestrator's tool gate to
+   * short-circuit prompt-worthy decisions when the profile opts in.
+   */
+  getCodingAutoapproveModeForTask(tx: Transaction, taskId: string): Promise<"off" | "on" | null>;
 }
 
 export class DrizzleCodingStore implements CodingStore {
@@ -740,6 +753,20 @@ export class DrizzleCodingStore implements CodingStore {
       .from(codingToolDecisions)
       .where(eq(codingToolDecisions.taskId, taskId))
       .orderBy(asc(codingToolDecisions.createdAt));
+  }
+
+  async getCodingAutoapproveModeForTask(
+    tx: Transaction,
+    taskId: string,
+  ): Promise<"off" | "on" | null> {
+    const rows = await tx
+      .select({ mode: profiles.codingAutoapproveMode })
+      .from(codingTasks)
+      .innerJoin(conversations, eq(codingTasks.conversationId, conversations.id))
+      .innerJoin(profiles, eq(conversations.profileId, profiles.id))
+      .where(eq(codingTasks.id, taskId))
+      .limit(1);
+    return rows[0]?.mode ?? null;
   }
 
   async cancelTaskIfActive(
