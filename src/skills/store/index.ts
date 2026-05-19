@@ -1,7 +1,13 @@
 import { and, asc, eq, isNotNull, lte, sql } from "drizzle-orm";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
-import type { ClassifierLog, SkillEffects, SkillInputs, SkillIo } from "../types.js";
+import type {
+  ClassifierLog,
+  SkillEffects,
+  SkillInputs,
+  SkillIo,
+  SkillRunResourceUsage,
+} from "../types.js";
 import { skillContextCalls, skillDeploys, skillRuns, skills } from "./schema.js";
 
 /**
@@ -67,6 +73,12 @@ export interface SkillRunRow {
   status: SkillRunStatus;
   output: unknown | null;
   error: string | null;
+  /**
+   * Per-run wall-clock + peak-memory metrics. Null while the run is in
+   * `status='running'`; populated by `updateRunResult` at finalisation
+   * time. Shape: {@link SkillRunResourceUsage}.
+   */
+  resourceUsage: SkillRunResourceUsage | null;
   createdAt: Date;
   finishedAt: Date | null;
 }
@@ -119,6 +131,13 @@ export interface UpdateRunResultParams {
   status: SkillRunStatus;
   output: unknown | null;
   error: string | null;
+  /**
+   * Per-run metrics — `wallClockMs` is always set by the caller (host-side
+   * derived from `finishedAt - createdAt`); `peakMemoryBytes` is null
+   * when the runtime didn't surface a `rusage` block (tier-1 Pyodide,
+   * synthesised tier-2 timeouts/crashes). See {@link SkillRunResourceUsage}.
+   */
+  resourceUsage: SkillRunResourceUsage;
   finishedAt: Date;
 }
 
@@ -820,6 +839,7 @@ export class DrizzleSkillStore implements SkillStore {
         status: params.status,
         output: params.output,
         error: params.error,
+        resourceUsage: params.resourceUsage,
         finishedAt: params.finishedAt,
       })
       .where(eq(skillRuns.id, params.id));

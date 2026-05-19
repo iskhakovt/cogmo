@@ -44,12 +44,12 @@ class TestHappyPath:
             inputs={"x": 21},
             task_id="t-double",
         )
-        assert result == {
-            "type": "task_result",
-            "id": "t-double",
-            "ok": True,
-            "output": {"doubled": 42},
-        }
+        # Subset assertion — `rusage` is also present on every result; its
+        # shape is covered separately in TestRusage.
+        assert result["type"] == "task_result"
+        assert result["id"] == "t-double"
+        assert result["ok"] is True
+        assert result["output"] == {"doubled": 42}
 
     @pytest.mark.asyncio
     async def test_returns_none_output(self) -> None:
@@ -113,6 +113,40 @@ class TestErrors:
         )
         assert result["ok"] is False
         assert "async def run" in result["error"]
+
+
+class TestRusage:
+    """`rusage.peakMemoryBytes` lands on every task_result the runner emits.
+
+    The host reads it back into `skill_runs.resource_usage.peakMemoryBytes`.
+    Linux `ru_maxrss` is in kilobytes; the runner multiplies by 1024 so
+    the host sees bytes. The Python tests don't pin the exact value
+    (varies with the test runner's RSS) — only the shape: a positive int.
+    """
+
+    @pytest.mark.asyncio
+    async def test_rusage_on_ok_result(self) -> None:
+        result = await _drive(
+            body="async def run(inputs, ctx):\n    return inputs\n",
+            inputs={"ok": True},
+            task_id="t-rusage-ok",
+        )
+        assert result["ok"] is True
+        assert "rusage" in result
+        assert isinstance(result["rusage"]["peakMemoryBytes"], int)
+        assert result["rusage"]["peakMemoryBytes"] > 0
+
+    @pytest.mark.asyncio
+    async def test_rusage_on_error_result(self) -> None:
+        result = await _drive(
+            body="async def run(inputs, ctx):\n    raise ValueError('boom')\n",
+            inputs={},
+            task_id="t-rusage-err",
+        )
+        assert result["ok"] is False
+        assert "rusage" in result
+        assert isinstance(result["rusage"]["peakMemoryBytes"], int)
+        assert result["rusage"]["peakMemoryBytes"] > 0
 
 
 class TestCtxBridge:
