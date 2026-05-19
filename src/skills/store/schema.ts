@@ -1,4 +1,5 @@
-import { boolean, index, pgEnum, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { boolean, check, index, pgEnum, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { jsonbZod, pk, ts } from "../../db/helpers.js";
 import { userIdentities } from "../../transport/store/schema.js";
 import {
@@ -37,19 +38,44 @@ export const skillDeployStatus = pgEnum("skill_deploy_status", [
  * the commit pin — invocation always reads `SKILL.md` and `skill.py` from this
  * sha, not from a working tree.
  */
-export const skills = pgTable("skills", {
-  id: pk(),
-  name: text("name").notNull().unique(),
-  tier: skillTier("tier").notNull(),
-  riskTier: skillRiskTier("risk_tier").notNull(),
-  effects: jsonbZod("effects", SkillEffectsSchema).notNull(),
-  schedule: text("schedule"), // cron expression; null = not scheduled
-  gitSha: text("git_sha").notNull(),
-  inputs: jsonbZod("inputs", SkillInputsSchema).notNull(),
-  outputs: jsonbZod("outputs", SkillIoSchema), // null for side-effect-only skills
-  disabled: boolean("disabled").notNull().default(false),
-  createdAt: ts(),
-});
+export const skills = pgTable(
+  "skills",
+  {
+    id: pk(),
+    name: text("name").notNull().unique(),
+    tier: skillTier("tier").notNull(),
+    riskTier: skillRiskTier("risk_tier").notNull(),
+    effects: jsonbZod("effects", SkillEffectsSchema).notNull(),
+    schedule: text("schedule"), // cron expression; null = not scheduled
+    /**
+     * Next scheduled fire time in UTC. Populated by register/approve/rollback
+     * via `computeNextRun(schedule, env.USER_TIMEZONE, now())` whenever
+     * `schedule` is non-null; otherwise null. The ticker (`skill-cron-ticker`)
+     * locks rows whose `next_run_at <= now()` and advances the column in the
+     * same transaction. The `(schedule IS NULL) = (next_run_at IS NULL)`
+     * invariant is enforced by `chk_skills_next_run_at_iff_schedule` below.
+     */
+    nextRunAt: timestamp("next_run_at", { withTimezone: true }),
+    /** Last fire timestamp. Null = never fired. */
+    lastFiredAt: timestamp("last_fired_at", { withTimezone: true }),
+    gitSha: text("git_sha").notNull(),
+    inputs: jsonbZod("inputs", SkillInputsSchema).notNull(),
+    outputs: jsonbZod("outputs", SkillIoSchema), // null for side-effect-only skills
+    disabled: boolean("disabled").notNull().default(false),
+    createdAt: ts(),
+  },
+  (t) => [
+    // Partial index over scheduled, enabled rows — the ticker's hot path. A
+    // composite (disabled, next_run_at) index over the full table would scan
+    // unscheduled rows on every tick; partial keeps the b-tree to just the
+    // O(scheduled) rows that can actually fire.
+    index("idx_skills_due").on(t.nextRunAt).where(sql`schedule IS NOT NULL AND disabled = false`),
+    check(
+      "chk_skills_next_run_at_iff_schedule",
+      sql`(${t.schedule} IS NULL) = (${t.nextRunAt} IS NULL)`,
+    ),
+  ],
+);
 
 /**
  * Append-only deploy history. One row per `register` attempt that produces a

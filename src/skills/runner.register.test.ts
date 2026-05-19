@@ -1141,6 +1141,7 @@ effects:
             riskTier: "notify",
             effects: [],
             schedule: null,
+            scheduleNextRunAt: null,
             branchTipSha: "0000000000000000000000000000000000000abc",
             inputs: { type: "object", properties: {} },
             outputs: null,

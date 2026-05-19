@@ -1,8 +1,22 @@
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, isNotNull, lte, sql } from "drizzle-orm";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
 import type { ClassifierLog, SkillEffects, SkillInputs, SkillIo } from "../types.js";
 import { skillContextCalls, skillDeploys, skillRuns, skills } from "./schema.js";
+
+/**
+ * Throws if `schedule` and `scheduleNextRunAt` aren't both null or both
+ * non-null. Surfaces as a TypeError before the SQL round-trip, instead of
+ * letting the `chk_skills_next_run_at_iff_schedule` CHECK constraint fail
+ * with an opaque Postgres error.
+ */
+function assertScheduleInvariant(schedule: string | null, scheduleNextRunAt: Date | null): void {
+  if ((schedule === null) !== (scheduleNextRunAt === null)) {
+    throw new TypeError(
+      `schedule and scheduleNextRunAt must agree on null-ness (got schedule=${schedule === null ? "null" : "string"}, scheduleNextRunAt=${scheduleNextRunAt === null ? "null" : "Date"})`,
+    );
+  }
+}
 
 export type SkillTier = "wasm" | "container";
 export type SkillRiskTier = "auto" | "notify" | "approve";
@@ -17,6 +31,14 @@ export interface SkillRow {
   riskTier: SkillRiskTier;
   effects: SkillEffects;
   schedule: string | null;
+  /**
+   * Next scheduled fire time in UTC. Set whenever `schedule` is non-null
+   * (enforced by `chk_skills_next_run_at_iff_schedule`); null otherwise.
+   * The ticker queries this column.
+   */
+  nextRunAt: Date | null;
+  /** Last fire timestamp. Null = never fired. */
+  lastFiredAt: Date | null;
   gitSha: string;
   inputs: SkillInputs;
   outputs: SkillIo | null;
@@ -65,6 +87,13 @@ export interface InsertSkillParams {
   riskTier: SkillRiskTier;
   effects: SkillEffects;
   schedule: string | null;
+  /**
+   * Required to be non-null iff `schedule` is non-null — enforced by the
+   * `chk_skills_next_run_at_iff_schedule` constraint at the DB boundary. The
+   * store layer additionally asserts the invariant pre-write to surface the
+   * mismatch as a clear TypeError instead of a Postgres CHECK violation.
+   */
+  scheduleNextRunAt: Date | null;
   gitSha: string;
   inputs: SkillInputs;
   outputs: SkillIo | null;
@@ -122,6 +151,8 @@ export interface ExecuteRegisterParams {
   riskTier: SkillRiskTier;
   effects: SkillEffects;
   schedule: string | null;
+  /** Non-null iff `schedule` is non-null. See {@link InsertSkillParams}. */
+  scheduleNextRunAt: Date | null;
   branchTipSha: string;
   inputs: SkillInputs;
   outputs: SkillIo | null;
@@ -173,6 +204,8 @@ export interface ExecuteApproveParams {
   riskTier: SkillRiskTier;
   effects: SkillEffects;
   schedule: string | null;
+  /** Non-null iff `schedule` is non-null. See {@link InsertSkillParams}. */
+  scheduleNextRunAt: Date | null;
   inputs: SkillInputs;
   outputs: SkillIo | null;
   applyFilesystem(): Promise<void>;
@@ -191,6 +224,8 @@ export interface ExecuteRollbackParams {
   riskTier: SkillRiskTier;
   effects: SkillEffects;
   schedule: string | null;
+  /** Non-null iff `schedule` is non-null. See {@link InsertSkillParams}. */
+  scheduleNextRunAt: Date | null;
   inputs: SkillInputs;
   outputs: SkillIo | null;
   classifierLog: ClassifierLog;
@@ -225,6 +260,38 @@ export interface SkillStore {
   ): Promise<boolean>;
   updateSkillSha(tx: Transaction, params: { id: string; gitSha: string }): Promise<void>;
   setSkillDisabled(tx: Transaction, params: { id: string; disabled: boolean }): Promise<void>;
+
+  /**
+   * Lock and return up to `limit` rows whose `next_run_at <= now`, are not
+   * disabled, and have a non-null `schedule`. Ordered by `next_run_at` ASC.
+   * Uses `FOR UPDATE SKIP LOCKED` so concurrent ticker invocations don't
+   * double-pick the same row.
+   *
+   * Caller MUST advance every returned row in the same transaction via
+   * {@link advanceSkillSchedule}; otherwise the row re-fires on the next
+   * tick.
+   *
+   * Replay-safety: the return value is captured inside the ticker's
+   * `step.run("lock-and-advance", ...)`, so Inngest replays the cached
+   * result on retry rather than re-executing the body.
+   */
+  lockDueScheduledSkills(
+    tx: Transaction,
+    params: { now: Date; limit: number },
+  ): Promise<readonly SkillRow[]>;
+
+  /**
+   * Stamp `last_fired_at` to the timestamp that just fired and advance
+   * `next_run_at` to the next occurrence. Caller computes `nextRunAt` from
+   * croner. Both columns are written together to maintain the
+   * `chk_skills_next_run_at_iff_schedule` invariant — this method is only
+   * valid for rows with a non-null `schedule`.
+   */
+  advanceSkillSchedule(
+    tx: Transaction,
+    id: string,
+    params: { lastFiredAt: Date; nextRunAt: Date },
+  ): Promise<void>;
   /** P3.3: atomic register flow — see {@link ExecuteRegisterParams}. */
   executeRegister(tx: Transaction, params: ExecuteRegisterParams): Promise<ExecuteRegisterResult>;
   /** P3.3: atomic approve flow for an `approve`-tier pending deploy. */
@@ -271,6 +338,7 @@ export class DrizzleSkillStore implements SkillStore {
   // --- skills ---
 
   async insertSkill(tx: Transaction, params: InsertSkillParams): Promise<SkillRow> {
+    assertScheduleInvariant(params.schedule, params.scheduleNextRunAt);
     return single(
       await tx
         .insert(skills)
@@ -280,6 +348,7 @@ export class DrizzleSkillStore implements SkillStore {
           riskTier: params.riskTier,
           effects: params.effects,
           schedule: params.schedule,
+          nextRunAt: params.scheduleNextRunAt,
           gitSha: params.gitSha,
           inputs: params.inputs,
           outputs: params.outputs,
@@ -335,10 +404,42 @@ export class DrizzleSkillStore implements SkillStore {
     await tx.update(skills).set({ disabled: params.disabled }).where(eq(skills.id, params.id));
   }
 
+  async lockDueScheduledSkills(
+    tx: Transaction,
+    params: { now: Date; limit: number },
+  ): Promise<readonly SkillRow[]> {
+    return tx
+      .select()
+      .from(skills)
+      .where(
+        and(
+          eq(skills.disabled, false),
+          isNotNull(skills.schedule),
+          isNotNull(skills.nextRunAt),
+          lte(skills.nextRunAt, params.now),
+        ),
+      )
+      .orderBy(asc(skills.nextRunAt))
+      .limit(params.limit)
+      .for("update", { skipLocked: true });
+  }
+
+  async advanceSkillSchedule(
+    tx: Transaction,
+    id: string,
+    params: { lastFiredAt: Date; nextRunAt: Date },
+  ): Promise<void> {
+    await tx
+      .update(skills)
+      .set({ lastFiredAt: params.lastFiredAt, nextRunAt: params.nextRunAt })
+      .where(eq(skills.id, id));
+  }
+
   async executeRegister(
     tx: Transaction,
     params: ExecuteRegisterParams,
   ): Promise<ExecuteRegisterResult> {
+    assertScheduleInvariant(params.schedule, params.scheduleNextRunAt);
     // Serialize concurrent registers on the same skill name. Released at
     // tx commit/rollback.
     await tx.execute(
@@ -411,6 +512,7 @@ export class DrizzleSkillStore implements SkillStore {
             riskTier: params.riskTier,
             effects: params.effects,
             schedule: params.schedule,
+            nextRunAt: params.scheduleNextRunAt,
             gitSha: params.branchTipSha,
             inputs: params.inputs,
             outputs: params.outputs,
@@ -437,6 +539,7 @@ export class DrizzleSkillStore implements SkillStore {
           riskTier: params.riskTier,
           effects: params.effects,
           schedule: params.schedule,
+          nextRunAt: params.scheduleNextRunAt,
           gitSha: params.branchTipSha,
           inputs: params.inputs,
           outputs: params.outputs,
@@ -473,6 +576,7 @@ export class DrizzleSkillStore implements SkillStore {
     tx: Transaction,
     params: ExecuteApproveParams,
   ): Promise<ExecuteRegisterResult> {
+    assertScheduleInvariant(params.schedule, params.scheduleNextRunAt);
     const deployRows = await tx
       .select()
       .from(skillDeploys)
@@ -518,6 +622,7 @@ export class DrizzleSkillStore implements SkillStore {
         riskTier: params.riskTier,
         effects: params.effects,
         schedule: params.schedule,
+        nextRunAt: params.scheduleNextRunAt,
         inputs: params.inputs,
         outputs: params.outputs,
       })
@@ -581,6 +686,7 @@ export class DrizzleSkillStore implements SkillStore {
     tx: Transaction,
     params: ExecuteRollbackParams,
   ): Promise<ExecuteRegisterResult> {
+    assertScheduleInvariant(params.schedule, params.scheduleNextRunAt);
     await tx.execute(
       sql`SELECT pg_advisory_xact_lock(hashtext(${`skill_register:${params.name}`})::bigint)`,
     );
@@ -608,6 +714,7 @@ export class DrizzleSkillStore implements SkillStore {
         riskTier: params.riskTier,
         effects: params.effects,
         schedule: params.schedule,
+        nextRunAt: params.scheduleNextRunAt,
         inputs: params.inputs,
         outputs: params.outputs,
       })
