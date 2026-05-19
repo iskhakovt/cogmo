@@ -20,6 +20,7 @@ import * as schema from "../db/schemas.js";
 import { HindsightMemoryProvider } from "../memory/hindsight.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../secrets/store/index.js";
+import { mockFilesService } from "../test/factories.js";
 import { SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
 
@@ -60,11 +61,7 @@ async function makeRunner() {
     runInTx: tx,
     secretsStore,
     memory,
-    files: {
-      read: async () => "",
-      write: async () => {},
-      list: async () => [],
-    },
+    files: mockFilesService(),
     user: { id: "it-user", timezone: "UTC" },
     memoryBankId: BANK_ID,
   });

@@ -1,15 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import type { MemoryProvider } from "../memory/provider.js";
 import { expectDefined } from "../test/assertions.js";
+import { mockFilesService } from "../test/factories.js";
 import type { Service } from "./service.js";
 import { createService } from "./service.js";
 import type { ProfileMemoryScope } from "./store/schema.js";
 
-const stubFiles: Service["files"] = {
-  read: async () => "",
-  write: async () => {},
-  list: async () => [],
-};
+const stubFiles: Service["files"] = mockFilesService();
 
 const stubCoreMemory: Service["coreMemory"] = {
   get: async () => [],

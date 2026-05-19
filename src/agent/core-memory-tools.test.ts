@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { mockFilesService } from "../test/factories.js";
 import { coreMemoryRead, coreMemoryUpdate } from "./core-memory-tools.js";
 import type { Service } from "./service.js";
 
@@ -10,11 +11,7 @@ function mockService(coreOverrides?: Partial<Service["coreMemory"]>): Service {
       reflect: vi.fn().mockResolvedValue({ answer: "" }),
       stageRetain: vi.fn().mockResolvedValue(undefined),
     },
-    files: {
-      read: vi.fn().mockResolvedValue(""),
-      write: vi.fn().mockResolvedValue(undefined),
-      list: vi.fn().mockResolvedValue([]),
-    },
+    files: mockFilesService(),
     coreMemory: {
       get: vi.fn().mockResolvedValue([]),
       update: vi.fn().mockResolvedValue(undefined),

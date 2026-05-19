@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { MemoryProvider } from "../memory/provider.js";
+import { mockFilesService } from "../test/factories.js";
 import { memoryRecall, memoryReflect, memoryRetain, memoryTools } from "./memory-tools.js";
 import type { Service } from "./service.js";
 import { createService } from "./service.js";
@@ -13,11 +14,7 @@ function mockService(overrides?: Partial<Service["memory"]>): Service {
       stageRetain: vi.fn().mockResolvedValue(undefined),
       ...overrides,
     },
-    files: {
-      read: vi.fn().mockResolvedValue(""),
-      write: vi.fn().mockResolvedValue(undefined),
-      list: vi.fn().mockResolvedValue([]),
-    },
+    files: mockFilesService(),
     coreMemory: {
       get: vi.fn().mockResolvedValue([]),
       update: vi.fn().mockResolvedValue(undefined),
@@ -200,11 +197,7 @@ describe("memory tools through a scope-filtered Service", () => {
       { compartments: ["work", "technical"], trust: ["first-party"] },
       null,
       [],
-      {
-        read: vi.fn().mockResolvedValue(""),
-        write: vi.fn().mockResolvedValue(undefined),
-        list: vi.fn().mockResolvedValue([]),
-      },
+      mockFilesService(),
       { get: vi.fn().mockResolvedValue([]), update: vi.fn().mockResolvedValue(undefined) },
       vi.fn().mockResolvedValue(undefined),
     );

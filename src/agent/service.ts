@@ -75,6 +75,12 @@ export interface Service {
   files: {
     read(path: string): Promise<string>;
     write(path: string, content: string): Promise<void>;
+    edit(
+      path: string,
+      oldString: string,
+      newString: string,
+      opts?: { replaceAll?: boolean },
+    ): Promise<void>;
     list(prefix?: string): Promise<FileEntry[]>;
   };
   coreMemory: {
