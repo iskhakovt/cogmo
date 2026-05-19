@@ -56,7 +56,7 @@
         },
         "bodyJson": {
           "id": "9a309117-7bc5-4c8c-8586-1e1899151c3c",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "name": "9a309117-7bc5-4c8c-8586-1e1899151c3c",
           "target": "eu",
           "user": "daytona",
@@ -94,7 +94,7 @@
             "updatedAt": "2026-05-19T15:22:42.390Z",
             "snapshotRef": "daytona-ad0a6586b65a3a9e71f295663014f38da2214a76db66a876872e82e92ea5a88f:daytona"
           },
-          "runnerId": "c2277f41-60c8-453e-810d-6f501864fc5a",
+          "runnerId": "11111111-1111-1111-1111-111111111111",
           "toolboxProxyUrl": "http://__daytona_mock__/toolbox"
         }
       }
@@ -138,7 +138,7 @@
         },
         "bodyJson": {
           "id": "9a309117-7bc5-4c8c-8586-1e1899151c3c",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "name": "9a309117-7bc5-4c8c-8586-1e1899151c3c",
           "target": "eu",
           "snapshot": null,
@@ -180,7 +180,7 @@
             "snapshotRef": "daytona-ad0a6586b65a3a9e71f295663014f38da2214a76db66a876872e82e92ea5a88f:daytona"
           },
           "daemonVersion": null,
-          "runnerId": "c2277f41-60c8-453e-810d-6f501864fc5a",
+          "runnerId": "11111111-1111-1111-1111-111111111111",
           "toolboxProxyUrl": "https://proxy.app-eu.daytona.io/toolbox"
         }
       }
@@ -224,7 +224,7 @@
         },
         "bodyJson": {
           "id": "9a309117-7bc5-4c8c-8586-1e1899151c3c",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "name": "9a309117-7bc5-4c8c-8586-1e1899151c3c",
           "target": "eu",
           "snapshot": null,
@@ -266,7 +266,7 @@
             "snapshotRef": "daytona-ad0a6586b65a3a9e71f295663014f38da2214a76db66a876872e82e92ea5a88f:daytona"
           },
           "daemonVersion": null,
-          "runnerId": "c2277f41-60c8-453e-810d-6f501864fc5a",
+          "runnerId": "11111111-1111-1111-1111-111111111111",
           "toolboxProxyUrl": "https://proxy.app-eu.daytona.io/toolbox"
         }
       }
@@ -310,7 +310,7 @@
         },
         "bodyJson": {
           "id": "9a309117-7bc5-4c8c-8586-1e1899151c3c",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "name": "9a309117-7bc5-4c8c-8586-1e1899151c3c",
           "target": "eu",
           "snapshot": null,
@@ -352,7 +352,7 @@
             "snapshotRef": "daytona-ad0a6586b65a3a9e71f295663014f38da2214a76db66a876872e82e92ea5a88f:daytona"
           },
           "daemonVersion": null,
-          "runnerId": "c2277f41-60c8-453e-810d-6f501864fc5a",
+          "runnerId": "11111111-1111-1111-1111-111111111111",
           "toolboxProxyUrl": "https://proxy.app-eu.daytona.io/toolbox"
         }
       }
@@ -396,7 +396,7 @@
         },
         "bodyJson": {
           "id": "9a309117-7bc5-4c8c-8586-1e1899151c3c",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "name": "9a309117-7bc5-4c8c-8586-1e1899151c3c",
           "target": "eu",
           "snapshot": null,
@@ -438,7 +438,7 @@
             "snapshotRef": "daytona-ad0a6586b65a3a9e71f295663014f38da2214a76db66a876872e82e92ea5a88f:daytona"
           },
           "daemonVersion": null,
-          "runnerId": "c2277f41-60c8-453e-810d-6f501864fc5a",
+          "runnerId": "11111111-1111-1111-1111-111111111111",
           "toolboxProxyUrl": "https://proxy.app-eu.daytona.io/toolbox"
         }
       }
@@ -482,7 +482,7 @@
         },
         "bodyJson": {
           "id": "9a309117-7bc5-4c8c-8586-1e1899151c3c",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "name": "9a309117-7bc5-4c8c-8586-1e1899151c3c",
           "target": "eu",
           "snapshot": null,
@@ -524,7 +524,7 @@
             "snapshotRef": "daytona-ad0a6586b65a3a9e71f295663014f38da2214a76db66a876872e82e92ea5a88f:daytona"
           },
           "daemonVersion": "v0.177.0-prod-reaper-patch",
-          "runnerId": "c2277f41-60c8-453e-810d-6f501864fc5a",
+          "runnerId": "11111111-1111-1111-1111-111111111111",
           "toolboxProxyUrl": "https://proxy.app-eu.daytona.io/toolbox"
         }
       }
@@ -697,7 +697,7 @@
         },
         "bodyJson": {
           "id": "9a309117-7bc5-4c8c-8586-1e1899151c3c",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "name": "DESTROYED_9a309117-7bc5-4c8c-8586-1e1899151c3c_1779204357856",
           "target": "eu",
           "snapshot": null,
@@ -731,7 +731,7 @@
           "createdAt": "2026-05-19T15:25:54.364Z",
           "updatedAt": "2026-05-19T15:25:57.858Z",
           "daemonVersion": "v0.177.0-prod-reaper-patch",
-          "runnerId": "c2277f41-60c8-453e-810d-6f501864fc5a",
+          "runnerId": "11111111-1111-1111-1111-111111111111",
           "toolboxProxyUrl": "https://proxy.app-eu.daytona.io/toolbox"
         }
       }

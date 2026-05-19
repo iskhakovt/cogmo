@@ -41,7 +41,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -105,7 +105,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -169,7 +169,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -233,7 +233,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -297,7 +297,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -361,7 +361,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -425,7 +425,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -489,7 +489,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -553,7 +553,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -617,7 +617,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -681,7 +681,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -745,7 +745,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -809,7 +809,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -873,7 +873,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -937,7 +937,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -1001,7 +1001,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -1065,7 +1065,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -1129,7 +1129,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -1193,7 +1193,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -1257,7 +1257,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -1321,7 +1321,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -1385,7 +1385,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -1449,7 +1449,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -1513,7 +1513,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -1577,7 +1577,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -1641,7 +1641,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -1705,7 +1705,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -1769,7 +1769,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -1833,7 +1833,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -1897,7 +1897,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -1961,7 +1961,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -2025,7 +2025,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -2089,7 +2089,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -2153,7 +2153,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -2217,7 +2217,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -2281,7 +2281,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -2345,7 +2345,7 @@
         },
         "bodyJson": {
           "id": "1aeced40-1078-4568-8a93-9f69ff0b833d",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -2454,7 +2454,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -2516,7 +2516,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -2535,7 +2535,7 @@
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "initialRunnerId": "11111111-1111-1111-1111-111111111111",
           "ref": null,
           "androidDevice": false
         }
@@ -2580,7 +2580,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -2599,7 +2599,7 @@
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "initialRunnerId": "11111111-1111-1111-1111-111111111111",
           "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
           "androidDevice": false
         }
@@ -2644,7 +2644,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -2663,7 +2663,7 @@
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "initialRunnerId": "11111111-1111-1111-1111-111111111111",
           "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
           "androidDevice": false
         }
@@ -2708,7 +2708,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -2727,7 +2727,7 @@
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "initialRunnerId": "11111111-1111-1111-1111-111111111111",
           "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
           "androidDevice": false
         }
@@ -2772,7 +2772,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -2791,7 +2791,7 @@
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "initialRunnerId": "11111111-1111-1111-1111-111111111111",
           "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
           "androidDevice": false
         }
@@ -2836,7 +2836,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -2855,7 +2855,7 @@
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "initialRunnerId": "11111111-1111-1111-1111-111111111111",
           "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
           "androidDevice": false
         }
@@ -2900,7 +2900,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -2919,7 +2919,7 @@
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "initialRunnerId": "11111111-1111-1111-1111-111111111111",
           "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
           "androidDevice": false
         }
@@ -2964,7 +2964,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -2983,7 +2983,7 @@
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "initialRunnerId": "11111111-1111-1111-1111-111111111111",
           "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
           "androidDevice": false
         }
@@ -3028,7 +3028,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -3047,7 +3047,7 @@
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "initialRunnerId": "11111111-1111-1111-1111-111111111111",
           "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
           "androidDevice": false
         }
@@ -3092,7 +3092,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -3111,7 +3111,7 @@
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "initialRunnerId": "11111111-1111-1111-1111-111111111111",
           "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
           "androidDevice": false
         }
@@ -3156,7 +3156,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -3175,7 +3175,7 @@
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "initialRunnerId": "11111111-1111-1111-1111-111111111111",
           "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
           "androidDevice": false
         }
@@ -3220,7 +3220,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -3239,7 +3239,7 @@
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "initialRunnerId": "11111111-1111-1111-1111-111111111111",
           "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
           "androidDevice": false
         }
@@ -3284,7 +3284,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -3303,7 +3303,7 @@
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "initialRunnerId": "11111111-1111-1111-1111-111111111111",
           "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
           "androidDevice": false
         }
@@ -3348,7 +3348,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -3367,7 +3367,7 @@
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "initialRunnerId": "11111111-1111-1111-1111-111111111111",
           "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
           "androidDevice": false
         }
@@ -3412,7 +3412,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -3431,7 +3431,7 @@
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "initialRunnerId": "11111111-1111-1111-1111-111111111111",
           "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
           "androidDevice": false
         }
@@ -3476,7 +3476,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -3495,7 +3495,7 @@
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "initialRunnerId": "11111111-1111-1111-1111-111111111111",
           "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
           "androidDevice": false
         }
@@ -3540,7 +3540,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -3559,7 +3559,7 @@
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "initialRunnerId": "11111111-1111-1111-1111-111111111111",
           "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
           "androidDevice": false
         }
@@ -3604,7 +3604,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -3623,7 +3623,7 @@
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "initialRunnerId": "11111111-1111-1111-1111-111111111111",
           "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
           "androidDevice": false
         }
@@ -3668,7 +3668,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -3687,7 +3687,7 @@
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "initialRunnerId": "11111111-1111-1111-1111-111111111111",
           "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
           "androidDevice": false
         }
@@ -3732,7 +3732,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -3751,7 +3751,7 @@
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "initialRunnerId": "11111111-1111-1111-1111-111111111111",
           "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
           "androidDevice": false
         }
@@ -3796,7 +3796,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -3815,7 +3815,7 @@
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "initialRunnerId": "11111111-1111-1111-1111-111111111111",
           "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
           "androidDevice": false
         }
@@ -3860,7 +3860,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -3879,7 +3879,7 @@
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "initialRunnerId": "11111111-1111-1111-1111-111111111111",
           "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
           "androidDevice": false
         }
@@ -3924,7 +3924,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -3943,7 +3943,7 @@
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "initialRunnerId": "11111111-1111-1111-1111-111111111111",
           "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
           "androidDevice": false
         }
@@ -3988,7 +3988,7 @@
         },
         "bodyJson": {
           "id": "81cf5925-07a6-4307-85b3-71f1ca0597ef",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
           "imageName": "python:3.14-slim",
@@ -4007,7 +4007,7 @@
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "initialRunnerId": "11111111-1111-1111-1111-111111111111",
           "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
           "androidDevice": false
         }
@@ -4064,7 +4064,7 @@
         },
         "bodyJson": {
           "id": "be6891c0-323a-4aa5-bf70-ce3c69192adb",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "name": "be6891c0-323a-4aa5-bf70-ce3c69192adb",
           "target": "eu",
           "snapshot": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
@@ -4095,7 +4095,7 @@
           "createdAt": "2026-05-19T15:27:18.368Z",
           "updatedAt": "2026-05-19T15:27:18.368Z",
           "lastActivityAt": "2026-05-19T15:27:18.368Z",
-          "runnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "runnerId": "11111111-1111-1111-1111-111111111111",
           "toolboxProxyUrl": "http://__daytona_mock__/toolbox"
         }
       }
@@ -4139,7 +4139,7 @@
         },
         "bodyJson": {
           "id": "be6891c0-323a-4aa5-bf70-ce3c69192adb",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "name": "be6891c0-323a-4aa5-bf70-ce3c69192adb",
           "target": "eu",
           "snapshot": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
@@ -4173,7 +4173,7 @@
           "updatedAt": "2026-05-19T15:28:12.571Z",
           "lastActivityAt": "2026-05-19T15:28:12.574Z",
           "daemonVersion": "v0.177.0-prod-reaper-patch",
-          "runnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "runnerId": "11111111-1111-1111-1111-111111111111",
           "toolboxProxyUrl": "https://proxy.app-eu.daytona.io/toolbox"
         }
       }
@@ -4351,7 +4351,7 @@
           "items": [
             {
               "id": "be6891c0-323a-4aa5-bf70-ce3c69192adb",
-              "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+              "organizationId": "00000000-0000-0000-0000-000000000000",
               "name": "be6891c0-323a-4aa5-bf70-ce3c69192adb",
               "target": "eu",
               "snapshot": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
@@ -4385,7 +4385,7 @@
               "updatedAt": "2026-05-19T15:28:12.571Z",
               "lastActivityAt": "2026-05-19T15:28:12.574Z",
               "daemonVersion": "v0.177.0-prod-reaper-patch",
-              "runnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+              "runnerId": "11111111-1111-1111-1111-111111111111",
               "toolboxProxyUrl": "https://proxy.app-eu.daytona.io/toolbox"
             }
           ],
@@ -4434,7 +4434,7 @@
         },
         "bodyJson": {
           "id": "be6891c0-323a-4aa5-bf70-ce3c69192adb",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "name": "DESTROYED_be6891c0-323a-4aa5-bf70-ce3c69192adb_1779204494844",
           "target": "eu",
           "snapshot": "cogmo-python-3.14-slim-79eab4bf-r-502ea054",
@@ -4467,7 +4467,7 @@
           "createdAt": "2026-05-19T15:27:18.368Z",
           "updatedAt": "2026-05-19T15:28:14.846Z",
           "daemonVersion": "v0.177.0-prod-reaper-patch",
-          "runnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "runnerId": "11111111-1111-1111-1111-111111111111",
           "toolboxProxyUrl": "https://proxy.app-eu.daytona.io/toolbox"
         }
       }

@@ -95,7 +95,7 @@
         },
         "bodyJson": {
           "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -157,7 +157,7 @@
         },
         "bodyJson": {
           "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -221,7 +221,7 @@
         },
         "bodyJson": {
           "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -285,7 +285,7 @@
         },
         "bodyJson": {
           "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -349,7 +349,7 @@
         },
         "bodyJson": {
           "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -413,7 +413,7 @@
         },
         "bodyJson": {
           "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -477,7 +477,7 @@
         },
         "bodyJson": {
           "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -541,7 +541,7 @@
         },
         "bodyJson": {
           "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -605,7 +605,7 @@
         },
         "bodyJson": {
           "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -669,7 +669,7 @@
         },
         "bodyJson": {
           "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -733,7 +733,7 @@
         },
         "bodyJson": {
           "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -797,7 +797,7 @@
         },
         "bodyJson": {
           "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -861,7 +861,7 @@
         },
         "bodyJson": {
           "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
@@ -937,7 +937,7 @@
         },
         "bodyJson": {
           "id": "69fab865-a902-477e-ab31-f9835ee49154",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "name": "69fab865-a902-477e-ab31-f9835ee49154",
           "target": "eu",
           "snapshot": "cogmo-python-3.14-slim-79eab4bf",
@@ -968,7 +968,7 @@
           "createdAt": "2026-05-19T15:28:33.532Z",
           "updatedAt": "2026-05-19T15:28:33.532Z",
           "lastActivityAt": "2026-05-19T15:28:33.532Z",
-          "runnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "runnerId": "11111111-1111-1111-1111-111111111111",
           "toolboxProxyUrl": "http://__daytona_mock__/toolbox"
         }
       }
@@ -1012,7 +1012,7 @@
         },
         "bodyJson": {
           "id": "69fab865-a902-477e-ab31-f9835ee49154",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "name": "69fab865-a902-477e-ab31-f9835ee49154",
           "target": "eu",
           "snapshot": "cogmo-python-3.14-slim-79eab4bf",
@@ -1046,7 +1046,7 @@
           "updatedAt": "2026-05-19T15:28:36.719Z",
           "lastActivityAt": "2026-05-19T15:28:36.722Z",
           "daemonVersion": "v0.177.0-prod-reaper-patch",
-          "runnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "runnerId": "11111111-1111-1111-1111-111111111111",
           "toolboxProxyUrl": "https://proxy.app-eu.daytona.io/toolbox"
         }
       }
@@ -1224,7 +1224,7 @@
           "items": [
             {
               "id": "69fab865-a902-477e-ab31-f9835ee49154",
-              "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+              "organizationId": "00000000-0000-0000-0000-000000000000",
               "name": "69fab865-a902-477e-ab31-f9835ee49154",
               "target": "eu",
               "snapshot": "cogmo-python-3.14-slim-79eab4bf",
@@ -1258,7 +1258,7 @@
               "updatedAt": "2026-05-19T15:28:36.719Z",
               "lastActivityAt": "2026-05-19T15:28:36.722Z",
               "daemonVersion": "v0.177.0-prod-reaper-patch",
-              "runnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+              "runnerId": "11111111-1111-1111-1111-111111111111",
               "toolboxProxyUrl": "https://proxy.app-eu.daytona.io/toolbox"
             }
           ],
@@ -1307,7 +1307,7 @@
         },
         "bodyJson": {
           "id": "69fab865-a902-477e-ab31-f9835ee49154",
-          "organizationId": "a65fcb3b-abfa-4f3b-9f34-a07c19d514a3",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
           "name": "DESTROYED_69fab865-a902-477e-ab31-f9835ee49154_1779204519693",
           "target": "eu",
           "snapshot": "cogmo-python-3.14-slim-79eab4bf",
@@ -1340,7 +1340,7 @@
           "createdAt": "2026-05-19T15:28:33.532Z",
           "updatedAt": "2026-05-19T15:28:39.696Z",
           "daemonVersion": "v0.177.0-prod-reaper-patch",
-          "runnerId": "6c95336c-a62e-4120-9767-3968234f400b",
+          "runnerId": "11111111-1111-1111-1111-111111111111",
           "toolboxProxyUrl": "https://proxy.app-eu.daytona.io/toolbox"
         }
       }
