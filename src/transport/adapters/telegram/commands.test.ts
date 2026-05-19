@@ -2392,6 +2392,36 @@ describe("/profile autoapprove subcommand", () => {
     expect(ctx.reply.mock.calls[0]?.[0]).toContain('No profile named "ghost"');
   });
 
+  it("transport.profiles.update error surfaces to the user without crashing", async () => {
+    // The `res.isErr()` branch in replyProfileAutoapprove was previously
+    // untested. Most natural trigger today: trying to flip autoapprove
+    // on an org profile returns `access_denied` per Transport's
+    // org-profile-read-only invariant. We mock the error surface
+    // directly to keep the test focused on the command's reply path.
+    const update = vi.fn().mockResolvedValue(
+      err({
+        code: "access_denied",
+        reason: "org profiles are read-only via Transport",
+      }),
+    );
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(ok([makeProfile({ userId: null, name: "shared" })])),
+        update,
+      },
+    });
+    const ctx = mkCtx("autoapprove shared on");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(update).toHaveBeenCalledTimes(1);
+    const reply = ctx.reply.mock.calls[0]?.[0] ?? "";
+    // Doesn't render the success-shape "Autoapprove for ..." line.
+    expect(reply).not.toContain('Autoapprove for "shared"');
+    // Surfaces something — the actual error text comes from `errorMessage`
+    // and is identical across all subcommands; the contract here is
+    // "any non-empty failure surface, not a crash."
+    expect(reply.length).toBeGreaterThan(0);
+  });
+
   it("ambiguous profile name replies with disambiguation hint without writing", async () => {
     // Two org profiles sharing a name is the practical trigger — both
     // user_id IS NULL, so `resolveProfileByName`'s "pick the owned one"

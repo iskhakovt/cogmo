@@ -703,6 +703,60 @@ describe("tool gate wiring", () => {
     expect(log[0]?.pattern).toBe("Bash(git push *)");
   });
 
+  it("profile autoapprove=on applies to every prompt-worthy call in the run", async () => {
+    // Pins the "resolved once per execute run" optimization at the
+    // behavioral layer: every subsequent prompt-worthy permission_request
+    // must hit the autoapprove path, not just the first. If a future
+    // refactor accidentally moves the resolve onto a per-request path
+    // and breaks caching, the wiring still works — but if it accidentally
+    // moves to "resolve only for the first call," only this multi-call
+    // test would catch that regression.
+    const { task } = await seedRepoAndTaskWithAutoapprove();
+    const { sandbox } = fakeSandbox();
+    const { backend, handle } = fakeBackend([
+      { kind: "session_started", sessionId: "sess-x" },
+      {
+        kind: "permission_request",
+        requestId: "req_push_1",
+        tool: "Bash",
+        input: { command: "git push origin cogmo/abc" },
+      },
+      {
+        kind: "permission_request",
+        requestId: "req_publish_1",
+        tool: "Bash",
+        input: { command: "npm publish" },
+      },
+      {
+        kind: "permission_request",
+        requestId: "req_push_2",
+        tool: "Bash",
+        input: { command: "git push origin cogmo/abc --force-with-lease" },
+      },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+
+    const inngestSend = vi.fn().mockResolvedValue(undefined);
+    const stepWaitForEvent = vi.fn();
+    await runCodingExecute({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend }),
+      stepRun,
+      stepSendEvent,
+      stepWaitForEvent,
+      inngest: { send: inngestSend } as unknown as Inngest,
+    });
+
+    expect(inngestSend.mock.calls.map((c) => c[0].name)).not.toContain(
+      "coding/task/permission-requested",
+    );
+    expect(stepWaitForEvent).not.toHaveBeenCalled();
+    expect(handle.responses.map((r) => r.response.behavior)).toEqual(["allow", "allow", "allow"]);
+    const log = await tx((trx) => store.listToolDecisionsForTask(trx, task.id));
+    expect(log).toHaveLength(3);
+    expect(log.every((r) => r.decision === "allow" && r.scope === "once")).toBe(true);
+  });
+
   it("decision-log task-scoped deny beats profile autoapprove=on", async () => {
     // Pins the gate's evaluation order: replay first, then policy, then
     // autoapprove. A prior user-tapped "Deny for task" on a pattern

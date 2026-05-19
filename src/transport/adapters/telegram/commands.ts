@@ -1432,7 +1432,7 @@ async function replyProfileAutoapprove(
 function formatAutoapprove(name: string, mode: "off" | "on"): string {
   const tail =
     mode === "on"
-      ? "on — coding-delegation prompt-worthy tool calls auto-approve (policy.deny still denies)"
+      ? "on — git push / gh writes / publishes auto-approve (container + proxy still gate dangerous ops)"
       : "off — coding-delegation prompts route through Telegram";
   return `Autoapprove for "${name}": ${tail}`;
 }

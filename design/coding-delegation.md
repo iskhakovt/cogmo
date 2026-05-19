@@ -524,7 +524,7 @@ Compound commands prompt if any sub-command is in the prompt set (worst-case win
 
 1. **Decision-log replay** — task-scoped user decisions win first. A `scope=task, decision=deny` row beats profile autoapprove (pinned by test).
 2. **Static `policy.evaluate`** — `allow` / `deny` short-circuit before the autoapprove check.
-3. **Profile autoapprove** — when the resolved mode is `on` and the policy said `prompt`, return `allow` and persist `scope=once, decision=allow` (same row shape as a `policy.allow`; the profile setting is the audit at one level up).
+3. **Profile autoapprove** — when the resolved mode is `on` and the policy said `prompt`, return `allow` and persist `scope=once, decision=allow`. **The in-table audit is intentionally lossy at this point**: the row shape is identical to a `policy.allow` row, so a future compliance reviewer can't tell from `coding_tool_decisions` alone whether `Bash(git push *)` was auto-allowed by static policy (impossible — `git push` is in the prompt set) or by profile bypass. The profile's `coding_autoapprove_mode` is the higher-level audit; the row count under the prompt-worthy pattern set is the lower bound on how many bypasses happened. Adding a `decided_by` column would close the gap but isn't worth the schema churn today.
 4. **Telegram prompt** — fallback for `prompt` decisions when autoapprove is `off`.
 
 Toggle via `/profile autoapprove <name> [on|off]` (Telegram). The model is told nothing — its view of the gate is identical whether autoapprove is on or off, which is intentional (the user opts into "skip my prompts," not into nudging the model to take more liberties).
