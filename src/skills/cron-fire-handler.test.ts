@@ -1,16 +1,19 @@
 /**
  * Fire-handler unit tests via `InngestTestEngine`. Covers the dispatch
  * branch matrix: success, runner-side error (run row persisted, no retry),
- * skill-not-found / skill-disabled / invalid-inputs skipped reasons, and
- * the replay-safety contract on the `dispatch` step.
+ * the four skipped reasons (skill_not_found / skill_disabled /
+ * invalid_inputs / sandbox_unavailable), and the replay-safety contract
+ * on the `dispatch` step.
  */
 
 import { InngestTestEngine } from "@inngest/test";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import { inngest } from "../inngest/client.js";
 import { createSkillCronFireHandler } from "./cron-fire-handler.js";
 import {
   InputValidationError,
+  SandboxUnavailableError,
   SkillDisabledError,
   SkillNotFoundError,
   type SkillRunner,
@@ -26,39 +29,24 @@ const baseEvent = {
   },
 } as const;
 
-function fakeRunner(over: Partial<SkillRunner> = {}): SkillRunner {
-  return {
-    register: vi.fn(),
-    approveDeploy: vi.fn(),
-    denyDeploy: vi.fn(),
-    rollback: vi.fn(),
-    deregister: vi.fn(),
-    enable: vi.fn(),
-    list: vi.fn(),
-    listAll: vi.fn(),
-    listToolDefs: vi.fn(),
-    invoke: vi.fn(),
-    ...over,
-  } as SkillRunner;
-}
-
 afterEach(() => {
   vi.useRealTimers();
 });
 
 describe("createSkillCronFireHandler", () => {
   it("invokes the runner with empty inputs and trigger='cron', returns completed/success", async () => {
-    const invoke = vi.fn().mockResolvedValue({
+    const runner = mock<SkillRunner>();
+    runner.invoke.mockResolvedValue({
       runId: "run-7",
       status: "success",
       output: { message: "ok" },
     });
-    const fn = createSkillCronFireHandler({ runner: fakeRunner({ invoke }) }, inngest);
+    const fn = createSkillCronFireHandler({ runner }, inngest);
 
     const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
 
     expect(result).toEqual({ status: "completed", runId: "run-7", runStatus: "success" });
-    expect(invoke).toHaveBeenCalledWith({
+    expect(runner.invoke).toHaveBeenCalledWith({
       name: "morning-brief",
       inputs: {},
       trigger: "cron",
@@ -68,12 +56,9 @@ describe("createSkillCronFireHandler", () => {
   it("returns completed/error when the skill itself fails — does NOT throw, doesn't burn retries", async () => {
     // runner.invoke writes the failure into skill_runs; the handler reflects
     // it back as runStatus='error' so the cron continues firing tomorrow.
-    const invoke = vi.fn().mockResolvedValue({
-      runId: "run-err",
-      status: "error",
-      error: "boom",
-    });
-    const fn = createSkillCronFireHandler({ runner: fakeRunner({ invoke }) }, inngest);
+    const runner = mock<SkillRunner>();
+    runner.invoke.mockResolvedValue({ runId: "run-err", status: "error", error: "boom" });
+    const fn = createSkillCronFireHandler({ runner }, inngest);
 
     const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
 
@@ -81,8 +66,9 @@ describe("createSkillCronFireHandler", () => {
   });
 
   it("skips with reason 'skill_not_found' when the row was deregistered between tick and fire", async () => {
-    const invoke = vi.fn().mockRejectedValue(new SkillNotFoundError("morning-brief"));
-    const fn = createSkillCronFireHandler({ runner: fakeRunner({ invoke }) }, inngest);
+    const runner = mock<SkillRunner>();
+    runner.invoke.mockRejectedValue(new SkillNotFoundError("morning-brief"));
+    const fn = createSkillCronFireHandler({ runner }, inngest);
 
     const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
 
@@ -90,12 +76,26 @@ describe("createSkillCronFireHandler", () => {
   });
 
   it("skips with reason 'skill_disabled' when the row was disabled between tick and fire", async () => {
-    const invoke = vi.fn().mockRejectedValue(new SkillDisabledError("morning-brief"));
-    const fn = createSkillCronFireHandler({ runner: fakeRunner({ invoke }) }, inngest);
+    const runner = mock<SkillRunner>();
+    runner.invoke.mockRejectedValue(new SkillDisabledError("morning-brief"));
+    const fn = createSkillCronFireHandler({ runner }, inngest);
 
     const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
 
     expect(result).toMatchObject({ status: "skipped", reason: "skill_disabled" });
+  });
+
+  it("skips with reason 'sandbox_unavailable' when a container-tier skill fires without a sandbox wired", async () => {
+    // Permanent misconfiguration (deployment without SANDBOX_RUNTIME).
+    // Without classifying this we'd burn the full retries: 2 budget every
+    // tick for a condition that won't self-heal between attempts.
+    const runner = mock<SkillRunner>();
+    runner.invoke.mockRejectedValue(new SandboxUnavailableError("morning-brief"));
+    const fn = createSkillCronFireHandler({ runner }, inngest);
+
+    const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
+
+    expect(result).toMatchObject({ status: "skipped", reason: "sandbox_unavailable" });
   });
 
   it("propagates a plain Error whose message coincidentally contains 'skill not found' — discriminates by class, not substring", async () => {
@@ -103,10 +103,9 @@ describe("createSkillCronFireHandler", () => {
     // matcher: a deeper-layer error whose text mentions the phrase must
     // NOT be classified as skill_not_found. Only `SkillNotFoundError`
     // counts.
-    const invoke = vi
-      .fn()
-      .mockRejectedValue(new Error("registry lookup failed: skill not found in cache"));
-    const fn = createSkillCronFireHandler({ runner: fakeRunner({ invoke }) }, inngest);
+    const runner = mock<SkillRunner>();
+    runner.invoke.mockRejectedValue(new Error("registry lookup failed: skill not found in cache"));
+    const fn = createSkillCronFireHandler({ runner }, inngest);
 
     const { error } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
     expect((error as { message?: string } | undefined)?.message).toMatch(/registry lookup failed/);
@@ -116,12 +115,11 @@ describe("createSkillCronFireHandler", () => {
     // Manifest-author foot-gun: declaring required inputs on a cron-triggered
     // skill. Surfaces here as a non-retrying skipped result so the operator
     // sees the misconfiguration in logs instead of an Inngest retry storm.
-    const invoke = vi
-      .fn()
-      .mockRejectedValue(
-        new InputValidationError("inputs failed schema validation: missing required field 'x'"),
-      );
-    const fn = createSkillCronFireHandler({ runner: fakeRunner({ invoke }) }, inngest);
+    const runner = mock<SkillRunner>();
+    runner.invoke.mockRejectedValue(
+      new InputValidationError("inputs failed schema validation: missing required field 'x'"),
+    );
+    const fn = createSkillCronFireHandler({ runner }, inngest);
 
     const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
 
@@ -129,8 +127,9 @@ describe("createSkillCronFireHandler", () => {
   });
 
   it("propagates unknown errors so Inngest's retry budget catches transient failures", async () => {
-    const invoke = vi.fn().mockRejectedValue(new Error("docker daemon unreachable"));
-    const fn = createSkillCronFireHandler({ runner: fakeRunner({ invoke }) }, inngest);
+    const runner = mock<SkillRunner>();
+    runner.invoke.mockRejectedValue(new Error("docker daemon unreachable"));
+    const fn = createSkillCronFireHandler({ runner }, inngest);
 
     const { error } = await new InngestTestEngine({
       function: fn,
@@ -145,7 +144,7 @@ describe("createSkillCronFireHandler", () => {
   });
 
   it("pins the function configuration (event trigger, retries, concurrency)", () => {
-    const fn = createSkillCronFireHandler({ runner: fakeRunner() }, inngest);
+    const fn = createSkillCronFireHandler({ runner: mock<SkillRunner>() }, inngest);
     expect(fn.opts.id).toBe("skill-cron-fire");
     expect(fn.opts.retries).toBe(2);
     expect(fn.opts.concurrency).toEqual({ limit: 1, key: "event.data.skillId" });
@@ -154,8 +153,9 @@ describe("createSkillCronFireHandler", () => {
   });
 
   it("does NOT re-run dispatch when Inngest replays with a cached step result", async () => {
-    const invoke = vi.fn().mockRejectedValue(new Error("must not run"));
-    const fn = createSkillCronFireHandler({ runner: fakeRunner({ invoke }) }, inngest);
+    const runner = mock<SkillRunner>();
+    runner.invoke.mockRejectedValue(new Error("must not run"));
+    const fn = createSkillCronFireHandler({ runner }, inngest);
 
     await new InngestTestEngine({
       function: fn,
@@ -168,6 +168,6 @@ describe("createSkillCronFireHandler", () => {
       ],
     }).execute();
 
-    expect(invoke).not.toHaveBeenCalled();
+    expect(runner.invoke).not.toHaveBeenCalled();
   });
 });

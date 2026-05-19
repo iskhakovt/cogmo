@@ -656,7 +656,6 @@ export async function bootstrapSkillRunner(
     ...(sandbox.sandbox && { sandbox: sandbox.sandbox }),
     tier2Image: env.COGMO_SKILLS_IMAGE,
     user: { id: core.user.id, timezone: env.USER_TIMEZONE },
-    userTimezone: env.USER_TIMEZONE,
     memoryBankId: core.user.id,
     skillsRepoPath: env.COGMO_SKILLS_PATH,
     // Cache Pyodide's pre-built packages under the skills repo's git dir

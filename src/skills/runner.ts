@@ -276,12 +276,13 @@ export interface SkillRunnerOptions {
     >
   >;
   /**
-   * IANA timezone used to evaluate `manifest.schedule` cron expressions at
-   * register/approve/rollback time. Wired from `env.USER_TIMEZONE` in
-   * production; tests default to `"UTC"` for parity with the manifest's
-   * own cron-string conventions.
+   * Clock override for testability. Used by the lifecycle paths
+   * (`register` / `approveDeploy` / `rollback`) that seed `next_run_at`
+   * from the manifest's cron. Defaults to `() => new Date()`. Matches the
+   * `now` injection on the cron ticker — keeps the test surface uniform
+   * across the module.
    */
-  userTimezone?: string;
+  clock?: () => Date;
 }
 
 interface SkillSourceCacheEntry {
@@ -309,7 +310,7 @@ export class SkillRunnerImpl implements SkillRunner {
   #pyodidePackageCacheDir: string | undefined;
   #sandbox: SandboxClient | undefined;
   #tier2Image: string;
-  #userTimezone: string;
+  #clock: () => Date;
   /**
    * Lazily-created warm pool over `#sandbox`. Created on first tier-2
    * invocation, not at boot — keeps cogmo serve startup independent of
@@ -354,19 +355,21 @@ export class SkillRunnerImpl implements SkillRunner {
     this.#sandbox = opts.sandbox;
     this.#tier2Image = opts.tier2Image ?? DEFAULT_TIER2_IMAGE;
     this.#poolOptions = opts.poolOptions;
-    this.#userTimezone = opts.userTimezone ?? "UTC";
+    this.#clock = opts.clock ?? (() => new Date());
     this.#ajv = new Ajv({ allErrors: true, strict: false });
   }
 
   /**
-   * Compute the first occurrence of the manifest's `schedule` after `now`,
-   * using the runner's configured timezone. Returns null when the manifest
-   * has no schedule — preserves the all-or-none invariant on
-   * `(schedule, scheduleNextRunAt)`.
+   * Compute the first occurrence of the manifest's `schedule` after the
+   * current clock tick, using the user's timezone. Returns null when the
+   * manifest has no schedule — preserves the all-or-none invariant on
+   * `(schedule, scheduleNextRunAt)`. The timezone is sourced from
+   * `this.#user.timezone` (single source of truth — the bootstrap path
+   * sets it from `env.USER_TIMEZONE`).
    */
   #computeScheduleNextRunAt(schedule: string | null): Date | null {
     if (schedule === null) return null;
-    return computeNextRun(schedule, this.#userTimezone, new Date());
+    return computeNextRun(schedule, this.#user.timezone, this.#clock());
   }
 
   static async create(opts: SkillRunnerOptions): Promise<SkillRunnerImpl> {
@@ -941,9 +944,7 @@ export class SkillRunnerImpl implements SkillRunner {
     }
 
     if (skill.tier === "container" && !this.#sandbox) {
-      throw new Error(
-        `skill '${opts.name}' is tier=container but no sandbox is configured (set SANDBOX_RUNTIME)`,
-      );
+      throw new SandboxUnavailableError(opts.name);
     }
 
     const run = await this.#runInTx((tx) =>
@@ -1420,6 +1421,21 @@ export class SkillDisabledError extends Error {
   constructor(name: string) {
     super(`skill is disabled: ${name}`);
     this.name = "SkillDisabledError";
+  }
+}
+
+/**
+ * `invoke` was called on a `tier: container` skill but no sandbox is wired
+ * (e.g. `SANDBOX_RUNTIME` unset in the deployment). Permanent
+ * misconfiguration — won't self-heal between retry attempts. The
+ * cron-fire-handler discriminates this via `instanceof` to short-circuit
+ * the retry budget into a `skipped: sandbox_unavailable` result, same
+ * shape as {@link InputValidationError}'s `invalid_inputs` skip.
+ */
+export class SandboxUnavailableError extends Error {
+  constructor(name: string) {
+    super(`skill '${name}' is tier=container but no sandbox is configured (set SANDBOX_RUNTIME)`);
+    this.name = "SandboxUnavailableError";
   }
 }
 

@@ -115,6 +115,7 @@ export async function runSkillCronTick(
       const due = await deps.store.lockDueScheduledSkills(tx, { now, limit: batchSize });
       const events: FirePayload[] = [];
       for (const row of due) {
+        assertScheduledRow(row);
         events.push(buildFirePayload(row));
         await deps.store.advanceSkillSchedule(
           tx,
@@ -127,12 +128,25 @@ export async function runSkillCronTick(
   );
 }
 
-function buildFirePayload(row: SkillRow): FirePayload {
-  if (row.nextRunAt === null) {
-    // Unreachable under the partial index + CHECK constraint — defense
-    // against future shape drift that bypasses the store layer.
-    throw new Error(`skill ${row.id}: locked by ticker with next_run_at=null — invariant violated`);
+/**
+ * Narrow a locked row down to the type the downstream helpers expect.
+ * The partial index + `chk_skills_next_run_at_iff_schedule` CHECK make
+ * `schedule = null` and `nextRunAt = null` unreachable for a row the
+ * ticker locked — this guard catches future shape drift that bypasses
+ * either guarantee and asserts the invariant once instead of relitigating
+ * it inside every helper.
+ */
+function assertScheduledRow(
+  row: SkillRow,
+): asserts row is SkillRow & { schedule: string; nextRunAt: Date } {
+  if (row.schedule === null || row.nextRunAt === null) {
+    throw new Error(
+      `skill ${row.id}: schedule/nextRunAt null on a locked row — invariant violated`,
+    );
   }
+}
+
+function buildFirePayload(row: SkillRow & { nextRunAt: Date }): FirePayload {
   return {
     skillId: row.id,
     skillName: row.name,
@@ -145,15 +159,10 @@ function buildFirePayload(row: SkillRow): FirePayload {
 }
 
 function computeAdvance(
-  row: SkillRow,
+  row: SkillRow & { schedule: string; nextRunAt: Date },
   now: Date,
   userTimezone: string,
 ): { lastFiredAt: Date; nextRunAt: Date } {
-  if (row.schedule === null || row.nextRunAt === null) {
-    throw new Error(
-      `skill ${row.id}: schedule/nextRunAt null on a locked row — invariant violated`,
-    );
-  }
   // Skip-ahead policy: advance to the first occurrence strictly after
   // now(). One fire per outage window, no backfill.
   const nextRunAt = computeNextRun(row.schedule, userTimezone, now);

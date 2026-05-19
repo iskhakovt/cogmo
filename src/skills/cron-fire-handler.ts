@@ -20,6 +20,7 @@ import { skillCronFire } from "../inngest/events.js";
 import { logger } from "../logger.js";
 import {
   InputValidationError,
+  SandboxUnavailableError,
   SkillDisabledError,
   SkillNotFoundError,
   type SkillRunner,
@@ -35,7 +36,7 @@ type DispatchResult =
   | { status: "completed"; runId: string; runStatus: "success" | "error" }
   | {
       status: "skipped";
-      reason: "skill_not_found" | "skill_disabled" | "invalid_inputs";
+      reason: "skill_not_found" | "skill_disabled" | "invalid_inputs" | "sandbox_unavailable";
       detail?: string;
     };
 
@@ -78,6 +79,9 @@ export function createSkillCronFireHandler(deps: SkillCronFireDeps, inngest: Inn
           }
           if (e instanceof InputValidationError) {
             return { status: "skipped", reason: "invalid_inputs", detail: msg };
+          }
+          if (e instanceof SandboxUnavailableError) {
+            return { status: "skipped", reason: "sandbox_unavailable", detail: msg };
           }
           // Anything else (sandbox transient, DB blip) propagates so
           // Inngest's `retries: 2` budget kicks in.
