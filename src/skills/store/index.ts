@@ -29,6 +29,8 @@ export type SkillRiskTier = "auto" | "notify" | "approve";
 export type SkillRunStatus = "running" | "success" | "error";
 export type SkillRunTrigger = "manual" | "cron" | "event";
 export type SkillDeployStatus = "pending_approval" | "approved" | "denied" | "live" | "rolled_back";
+/** See {@link skillRunRecoveryPoint} in schema.ts for the per-state contract. */
+export type SkillRunRecoveryPoint = "started" | "executed" | "finished";
 
 export interface SkillRow {
   id: string;
@@ -79,6 +81,20 @@ export interface SkillRunRow {
    * time. Shape: {@link SkillRunResourceUsage}.
    */
   resourceUsage: SkillRunResourceUsage | null;
+  /**
+   * Caller-supplied deterministic token. Null for one-shot invocations
+   * (CLI, ad-hoc tests). When present, the partial unique index on this
+   * column plus the {@link recoveryPoint} state machine give exactly-once
+   * execution semantics across retries — see `runner.invoke`.
+   */
+  idempotencyKey: string | null;
+  /**
+   * Stripe-pattern phase marker. `started` → row inserted, execute may
+   * not have completed; `executed` → execute completed and its result
+   * committed; `finished` → row terminal. Drives `runner.invoke`'s
+   * replay branches.
+   */
+  recoveryPoint: SkillRunRecoveryPoint;
   createdAt: Date;
   finishedAt: Date | null;
 }
@@ -124,6 +140,14 @@ export interface InsertRunParams {
   skillId: string;
   trigger: SkillRunTrigger;
   inputs: unknown;
+  /**
+   * Optional deterministic token. When provided, the row is inserted with
+   * an `ON CONFLICT DO NOTHING` clause against
+   * `uniq_skill_runs_idempotency_key`; the caller distinguishes "we
+   * inserted" from "someone else holds the row" via
+   * {@link SkillStore.startOrRecoverRun}.
+   */
+  idempotencyKey?: string;
 }
 
 export interface UpdateRunResultParams {
@@ -347,6 +371,59 @@ export interface SkillStore {
   insertRun(tx: Transaction, params: InsertRunParams): Promise<SkillRunRow>;
   updateRunResult(tx: Transaction, params: UpdateRunResultParams): Promise<void>;
   getRun(tx: Transaction, id: string): Promise<SkillRunRow | undefined>;
+
+  /**
+   * Race-safe lookup-or-create for a keyed run. Used by `runner.invoke`
+   * when an idempotency key is supplied:
+   *
+   *   - `kind: 'new'` — the row didn't exist; we just inserted it in
+   *     `recovery_point='started'`. Caller proceeds with execute.
+   *   - `kind: 'recovered'` — the row existed (either a prior attempt
+   *     that crashed, or a successful run being replayed). Caller
+   *     branches on `row.recoveryPoint`.
+   *
+   * Implementation: `INSERT ... ON CONFLICT (idempotency_key) DO NOTHING
+   * RETURNING *`; when zero rows return, follow up with `SELECT ... FOR
+   * UPDATE` so the recovered row is locked for the caller's transition.
+   */
+  startOrRecoverRun(
+    tx: Transaction,
+    params: { skillId: string; trigger: SkillRunTrigger; inputs: unknown; idempotencyKey: string },
+  ): Promise<{ kind: "new" | "recovered"; row: SkillRunRow }>;
+
+  /**
+   * Atomic transition `started → executed`. Writes the executed payload
+   * (output / error / rusage / finished_at) in the same UPDATE that
+   * advances `recovery_point`. Caller wraps in `runInTx`. A retry whose
+   * cached `executed` row already exists short-circuits this write via
+   * the row-state check inside `runner.invoke`.
+   */
+  transitionToExecuted(
+    tx: Transaction,
+    params: {
+      id: string;
+      output: unknown | null;
+      error: string | null;
+      resourceUsage: SkillRunResourceUsage;
+      finishedAt: Date;
+    },
+  ): Promise<void>;
+
+  /**
+   * Atomic transition `executed → finished`. Writes the terminal `status`
+   * (which the execute step doesn't have — output validation runs after)
+   * and flips `recovery_point` to `finished`. Output is overwritten with
+   * `null` when output validation rejected the executed payload.
+   */
+  transitionToFinished(
+    tx: Transaction,
+    params: {
+      id: string;
+      status: SkillRunStatus;
+      output: unknown | null;
+      error: string | null;
+    },
+  ): Promise<void>;
 
   // --- skill_context_calls ---
   recordContextCall(tx: Transaction, params: RecordContextCallParams): Promise<void>;
@@ -827,9 +904,55 @@ export class DrizzleSkillStore implements SkillStore {
           trigger: params.trigger,
           inputs: params.inputs,
           status: "running",
+          ...(params.idempotencyKey !== undefined && {
+            idempotencyKey: params.idempotencyKey,
+          }),
         })
         .returning(),
     );
+  }
+
+  async startOrRecoverRun(
+    tx: Transaction,
+    params: { skillId: string; trigger: SkillRunTrigger; inputs: unknown; idempotencyKey: string },
+  ): Promise<{ kind: "new" | "recovered"; row: SkillRunRow }> {
+    if (params.inputs === null || params.inputs === undefined) {
+      throw new Error("startOrRecoverRun: inputs must not be null/undefined");
+    }
+    // ON CONFLICT DO NOTHING — when a row with the same key already
+    // exists, the INSERT no-ops and RETURNING yields zero rows. The
+    // caller then re-selects with FOR UPDATE to lock the existing row.
+    // Postgres requires `ON CONFLICT` against a partial unique index to
+    // spell out the index's WHERE predicate so the planner can infer the
+    // arbiter (`infer_arbiter_indexes` error 42P10 otherwise). Match the
+    // `uniq_skill_runs_idempotency_key` definition exactly.
+    const inserted = await tx
+      .insert(skillRuns)
+      .values({
+        skillId: params.skillId,
+        trigger: params.trigger,
+        inputs: params.inputs,
+        status: "running",
+        idempotencyKey: params.idempotencyKey,
+      })
+      .onConflictDoNothing({
+        target: skillRuns.idempotencyKey,
+        where: sql`idempotency_key IS NOT NULL`,
+      })
+      .returning();
+    if (inserted.length > 0) {
+      return { kind: "new", row: single(inserted) };
+    }
+    // Recovered: prior attempt holds the row. Lock for our subsequent
+    // UPDATE so concurrent retries serialize on this row instead of
+    // racing.
+    const existing = await tx
+      .select()
+      .from(skillRuns)
+      .where(eq(skillRuns.idempotencyKey, params.idempotencyKey))
+      .limit(1)
+      .for("update");
+    return { kind: "recovered", row: single(existing) };
   }
 
   async updateRunResult(tx: Transaction, params: UpdateRunResultParams): Promise<void> {
@@ -841,6 +964,48 @@ export class DrizzleSkillStore implements SkillStore {
         error: params.error,
         resourceUsage: params.resourceUsage,
         finishedAt: params.finishedAt,
+      })
+      .where(eq(skillRuns.id, params.id));
+  }
+
+  async transitionToExecuted(
+    tx: Transaction,
+    params: {
+      id: string;
+      output: unknown | null;
+      error: string | null;
+      resourceUsage: SkillRunResourceUsage;
+      finishedAt: Date;
+    },
+  ): Promise<void> {
+    await tx
+      .update(skillRuns)
+      .set({
+        output: params.output,
+        error: params.error,
+        resourceUsage: params.resourceUsage,
+        finishedAt: params.finishedAt,
+        recoveryPoint: "executed",
+      })
+      .where(eq(skillRuns.id, params.id));
+  }
+
+  async transitionToFinished(
+    tx: Transaction,
+    params: {
+      id: string;
+      status: SkillRunStatus;
+      output: unknown | null;
+      error: string | null;
+    },
+  ): Promise<void> {
+    await tx
+      .update(skillRuns)
+      .set({
+        status: params.status,
+        output: params.output,
+        error: params.error,
+        recoveryPoint: "finished",
       })
       .where(eq(skillRuns.id, params.id));
   }

@@ -910,16 +910,18 @@ skill_deploys (
 )
 
 skill_runs (
-  id             UUID v7 PK,
-  skill_id       UUID NOT NULL REFERENCES skills(id),
-  trigger        skill_run_trigger NOT NULL,
-  inputs         JSONB NOT NULL,           -- SkillInvocationInputsSchema (matches skill's declared input JSON Schema at invoke time; Zod layer is pass-through)
-  status         skill_run_status NOT NULL,
-  output         JSONB,                    -- nullable: null on error. SkillInvocationOutputSchema when present (matches skill's declared output JSON Schema).
-  error          TEXT,                     -- nullable: null on success
-  resource_usage JSONB,                    -- nullable: SkillRunResourceUsageSchema. { wallClockMs, peakMemoryBytes }. Written at finalisation; null while running.
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-  finished_at    TIMESTAMPTZ               -- nullable: null while running
+  id              UUID v7 PK,
+  skill_id        UUID NOT NULL REFERENCES skills(id),
+  trigger         skill_run_trigger NOT NULL,
+  inputs          JSONB NOT NULL,           -- SkillInvocationInputsSchema (matches skill's declared input JSON Schema at invoke time; Zod layer is pass-through)
+  status          skill_run_status NOT NULL,
+  output          JSONB,                    -- nullable: null on error. SkillInvocationOutputSchema when present (matches skill's declared output JSON Schema).
+  error           TEXT,                     -- nullable: null on success
+  resource_usage  JSONB,                    -- nullable: SkillRunResourceUsageSchema. { wallClockMs, peakMemoryBytes }. Written at finalisation; null while running.
+  idempotency_key TEXT,                     -- nullable: null for one-shot CLI/test invocations. Partial UNIQUE on (idempotency_key) WHERE idempotency_key IS NOT NULL — see Exactly-once invocation.
+  recovery_point  skill_run_recovery_point NOT NULL DEFAULT 'started',  -- 'started' | 'executed' | 'finished' — drives the replay branches in runner.invoke.
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at     TIMESTAMPTZ               -- nullable: null while running
 )
 
 skill_context_calls (
@@ -942,6 +944,41 @@ skill_context_calls (
 - `skill_deploys.classifier_log` — `ClassifierLogSchema = z.object({ risk_tier, declared_effects, detected_effects, declared_secrets, validation_errors, classifier_version })`. Fully Cogmo-controlled, fully schema'd.
 - `skill_runs.inputs` / `skill_runs.output` — `SkillInvocationInputsSchema` / `SkillInvocationOutputSchema`. Pass-through `z.unknown()` wrappers at the store layer; the per-skill schema is whatever the skill declared in its manifest and is validated at invoke (the store just needs "valid JSON").
 - `skill_runs.resource_usage` — `SkillRunResourceUsageSchema = z.object({ wallClockMs: z.number().int().nonnegative(), peakMemoryBytes: z.number().int().nonnegative().nullable() })`. Populated at finalisation; null while running. Extensible to CPU / IO / fork counts via Zod-schema additions without a migration.
+
+## Exactly-once invocation `[confirmed]`
+
+`runner.invoke` honours an optional `idempotencyKey: string` parameter. When set, the runner participates in a database-level state machine that gives **exactly-once execution** semantics across retries — without coupling to any specific workflow engine. Pattern is Brandur Leach's [Stripe-like Idempotency Keys in Postgres](https://brandur.org/idempotency-keys) (atomic phases + recovery points), chosen over framework-level step-splitting after [research across Temporal, Inngest, LangGraph, and the transactional-outbox literature](https://exactly-once.github.io/posts/side-effects/) concluded that DB-level idempotency is the canonical answer.
+
+**State machine.** `skill_runs.recovery_point` ranges over three states, advanced by atomic UPDATEs inside `runInTx`:
+
+```
+INSERT recovery_point='started'  ← startOrRecoverRun, atomic
+  ↓ execute skill body (non-idempotent, side-effecting)
+UPDATE recovery_point='executed', output/error/resource_usage/finished_at  ← transitionToExecuted, atomic
+  ↓ output validation (pure, deterministic)
+UPDATE recovery_point='finished', status='success'|'error'  ← transitionToFinished, atomic
+```
+
+**Recovery branches.** Every `runner.invoke({idempotencyKey})` calls `startOrRecoverRun` first:
+
+| recovered row state | runner action |
+|-|-|
+| `kind='new'` (no prior row) | Standard flow: execute → executed → finished |
+| `recovered`, `recovery_point='finished'` | Return cached `SkillRunResult` reconstructed from the row. Runtime never touched. |
+| `recovered`, `recovery_point='executed'` | Skip execute, replay output validation against stored output, transition to `finished`. Persist-failure retries land here. |
+| `recovered`, `recovery_point='started'` | Prior attempt crashed mid-execute. Throw `SkillInflightCrashedError` — conservative default, since re-executing could double-fire non-idempotent side effects. Operator inspects the orphan row. Future manifest flag `idempotent_invocation: true` would opt into optimistic re-execute. |
+
+**Caller key conventions** (deterministic per logical fire):
+
+| Caller | Key shape |
+|-|-|
+| `skill-cron-fire` handler | `skill-cron:${skillId}:${scheduledFor}` — same shape as the event-bus dedup id |
+| Agent-loop tool dispatch *(deferred — needs toolUseId plumbed through Service)* | `skill-tool:${conversationId}:${toolUseId}` |
+| CLI / one-shot tests | Omit (no retry context) |
+
+**Race safety.** Concurrent attempts with the same key are serialised by Postgres's partial unique index `uniq_skill_runs_idempotency_key WHERE idempotency_key IS NOT NULL`. `startOrRecoverRun` uses `INSERT ... ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING RETURNING *`; the loser of the race gets zero rows back and follows up with `SELECT ... FOR UPDATE` to lock the existing row for its own transition.
+
+**Why DB-level over framework-level (Inngest step.run boundaries).** Framework-agnostic — survives engine swaps, works under Inngest today and bare `setTimeout` for CLI runs. Avoids Inngest's `Jsonify<Awaited<T>>` return-type friction. One code path for all callers. Survives crashes the framework can't see (LangGraph's specific critique). See PR #303 review thread and the [decision summary in todo](todo.md).
 
 ## Module structure `[proposed]`
 

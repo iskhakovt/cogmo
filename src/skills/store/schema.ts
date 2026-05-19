@@ -1,5 +1,15 @@
 import { sql } from "drizzle-orm";
-import { boolean, check, index, pgEnum, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import {
+  boolean,
+  check,
+  index,
+  pgEnum,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+} from "drizzle-orm/pg-core";
 import { jsonbZod, pk, ts } from "../../db/helpers.js";
 import { userIdentities } from "../../transport/store/schema.js";
 import {
@@ -21,6 +31,29 @@ export const skillRiskTier = pgEnum("skill_risk_tier", ["auto", "notify", "appro
 export const skillRunStatus = pgEnum("skill_run_status", ["running", "success", "error"]);
 
 export const skillRunTrigger = pgEnum("skill_run_trigger", ["manual", "cron", "event"]);
+
+/**
+ * Stripe-pattern recovery point for `skill_runs`. Drives the
+ * idempotency-key replay path inside `runner.invoke`:
+ *
+ *   - `started` — row inserted; execute hasn't completed. A retry that
+ *     sees this state assumes the prior attempt crashed mid-execute
+ *     (conservative; non-idempotent side effects must not double-fire).
+ *   - `executed` — execute completed and its result is committed
+ *     (output/error/rusage/finished_at). Output validation + final
+ *     `status` write may not have happened yet. A retry replays only
+ *     the cheap finalize step against the cached execute payload.
+ *   - `finished` — `status` set, audit row terminal. A retry returns the
+ *     cached result without touching the runtime.
+ *
+ * See `design/skills.md` → Exactly-once invocation. Pattern derives from
+ * brandur.org/idempotency-keys (atomic phases + recovery points).
+ */
+export const skillRunRecoveryPoint = pgEnum("skill_run_recovery_point", [
+  "started",
+  "executed",
+  "finished",
+]);
 
 export const skillDeployStatus = pgEnum("skill_deploy_status", [
   "pending_approval",
@@ -127,12 +160,36 @@ export const skillRuns = pgTable(
      * defined by {@link SkillRunResourceUsageSchema} in `../types.ts`.
      */
     resourceUsage: jsonbZod("resource_usage", SkillRunResourceUsageSchema),
+    /**
+     * Caller-supplied deterministic-per-fire token. Set when the run is
+     * driven by a context that may retry (cron-fire dispatcher, agent-loop
+     * tool call); null when the invocation is one-shot (CLI, ad-hoc
+     * tests). The partial unique index below makes `runner.invoke` safe
+     * against duplicate fires for the same logical trigger.
+     */
+    idempotencyKey: text("idempotency_key"),
+    /**
+     * Stripe-pattern phase marker. See `skillRunRecoveryPoint` enum
+     * docstring. Defaults to `started` on insert; transitions to
+     * `executed` after the worker returns; to `finished` after the row
+     * is terminal.
+     */
+    recoveryPoint: skillRunRecoveryPoint("recovery_point").notNull().default("started"),
     // CLAUDE.md mandates `created_at` on every table; for an append-only run
     // log the row's creation time IS the start-of-execution time.
     createdAt: ts(),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
   },
-  (t) => [index("idx_skill_runs_skill_id").on(t.skillId)],
+  (t) => [
+    index("idx_skill_runs_skill_id").on(t.skillId),
+    // Partial unique index — null idempotency_key entries (CLI / tests) are
+    // unconstrained. Concurrent attempts with the same key race on this
+    // index; the loser's INSERT no-ops via `ON CONFLICT DO NOTHING` and
+    // the caller re-selects the existing row to recover state.
+    uniqueIndex("uniq_skill_runs_idempotency_key")
+      .on(t.idempotencyKey)
+      .where(sql`idempotency_key IS NOT NULL`),
+  ],
 );
 
 /**

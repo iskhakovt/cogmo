@@ -27,6 +27,8 @@ import type {
   InsertSkillParams,
   SkillRiskTier,
   SkillRow,
+  SkillRunRecoveryPoint,
+  SkillRunStatus,
   SkillRunTrigger,
   SkillStore,
   SkillTier,
@@ -206,6 +208,22 @@ export interface SkillRunner {
     name: string;
     inputs: unknown;
     trigger?: SkillRunTrigger;
+    /**
+     * Deterministic-per-fire token. When provided, `runner.invoke` honours
+     * the Stripe-pattern recovery_point state machine: a retry with the
+     * same key resolves to the existing run row and replays only the
+     * pending phase (or returns the cached terminal result). When omitted,
+     * the invocation is one-shot — no idempotency guarantee, no
+     * cross-attempt deduplication.
+     *
+     * Suggested key shapes (deterministic across retries of the same
+     * logical fire):
+     *   - cron-fire: `skill-cron:${skillId}:${scheduledFor}`
+     *   - agent-loop tool call: `skill-tool:${conversationId}:${toolUseId}`
+     *
+     * See design/skills.md → Exactly-once invocation.
+     */
+    idempotencyKey?: string;
   }): Promise<SkillRunResult>;
 }
 
@@ -922,7 +940,12 @@ export class SkillRunnerImpl implements SkillRunner {
     name: string;
     inputs: unknown;
     trigger?: SkillRunTrigger;
+    idempotencyKey?: string;
   }): Promise<SkillRunResult> {
+    // --- Pre-flight (cheap, idempotent reads; re-runs freely on retry) ---
+    // Typed-error throws here happen *before* any DB write. The cron-fire
+    // handler etc. catch them at the function-handler level and return
+    // non-retrying skipped results without touching state.
     const skill = await this.#runInTx((tx) => this.#store.getSkillByName(tx, opts.name));
     if (!skill) {
       throw new SkillNotFoundError(opts.name);
@@ -947,55 +970,183 @@ export class SkillRunnerImpl implements SkillRunner {
       throw new SandboxUnavailableError(opts.name);
     }
 
-    const run = await this.#runInTx((tx) =>
-      this.#store.insertRun(tx, {
-        skillId: skill.id,
-        trigger: opts.trigger ?? "manual",
-        inputs: opts.inputs,
+    const trigger: SkillRunTrigger = opts.trigger ?? "manual";
+
+    // --- Start or recover the run row ---
+    //
+    // Keyed path: `startOrRecoverRun` inserts a fresh row with
+    // `recovery_point='started'` and returns `kind: 'new'`. If a row with
+    // the same key already exists (prior crashed attempt, or a successful
+    // run being replayed), it returns `kind: 'recovered'` with the row
+    // locked FOR UPDATE.
+    //
+    // Non-keyed path: plain `insertRun` → fresh row every call. No
+    // exactly-once semantic; the runner behaves identically to the
+    // pre-idempotency contract.
+    let runId: string;
+    let runCreatedAt: Date;
+    let recoveryPoint: SkillRunRecoveryPoint;
+    let savedOutput: unknown | null = null;
+    let savedError: string | null = null;
+
+    if (opts.idempotencyKey !== undefined) {
+      const { kind, row } = await this.#runInTx((tx) =>
+        this.#store.startOrRecoverRun(tx, {
+          skillId: skill.id,
+          trigger,
+          inputs: opts.inputs,
+          idempotencyKey: opts.idempotencyKey ?? "",
+        }),
+      );
+      runId = row.id;
+      runCreatedAt = row.createdAt;
+      recoveryPoint = row.recoveryPoint;
+      savedOutput = row.output;
+      savedError = row.error;
+
+      if (kind === "recovered" && recoveryPoint === "finished") {
+        // Terminal cached result. Reconstruct SkillRunResult shape and
+        // return without touching the runtime or the row.
+        log.info(
+          { runId, skillName: opts.name, idempotencyKey: opts.idempotencyKey },
+          "replaying cached terminal skill run (recovery_point=finished)",
+        );
+        return reconstructFinishedResult(runId, row.status, savedOutput, savedError);
+      }
+      if (kind === "recovered" && recoveryPoint === "started") {
+        // Prior attempt crashed mid-execute. Re-executing would risk
+        // double-firing non-idempotent side effects (ctx.memory.write,
+        // outbound HTTP, etc.) without the manifest having opted in.
+        // Surface a typed error so the caller (cron-fire-handler etc.)
+        // can decide whether to skip or escalate.
+        throw new SkillInflightCrashedError(opts.name, runId);
+      }
+      // kind === 'new' (fresh start) OR kind === 'recovered' &&
+      // recovery_point === 'executed' (execute succeeded last time, just
+      // finalize). Both fall through.
+    } else {
+      const run = await this.#runInTx((tx) =>
+        this.#store.insertRun(tx, { skillId: skill.id, trigger, inputs: opts.inputs }),
+      );
+      runId = run.id;
+      runCreatedAt = run.createdAt;
+      recoveryPoint = "started";
+    }
+
+    log.info(
+      {
+        runId,
+        skillName: opts.name,
+        tier: skill.tier,
+        trigger,
+        ...(opts.idempotencyKey !== undefined && { idempotencyKey: opts.idempotencyKey }),
+        ...(recoveryPoint !== "started" && { resumingFrom: recoveryPoint }),
+      },
+      recoveryPoint === "started" ? "invoking skill" : "resuming skill from executed phase",
+    );
+
+    // --- Execute phase (skipped on `recovery_point='executed'` replay) ---
+    if (recoveryPoint === "started") {
+      const ctxHandler = new DefaultCtxHandler({
+        manifest: cached.manifest,
+        runId,
+        user: this.#user,
+        memoryBankId: this.#memoryBankId,
+        secretsStore: this.#secretsStore,
+        runInTx: this.#runInTx,
+        memory: this.#memory,
+        files: this.#files,
+        recordContextCall: (call) => this.#runInTx((tx) => this.#store.recordContextCall(tx, call)),
+      });
+
+      const result = await this.#dispatchToRuntime(skill, cached, opts.inputs, ctxHandler, runId);
+      const finishedAt = new Date();
+      // Build the resource_usage blob once — `wallClockMs` is always derived
+      // from the host-side timestamps; `peakMemoryBytes` rides whatever the
+      // runtime contributed via `result.rusage` (tier-2 populates it from
+      // `getrusage`, tier-1 leaves it unset and we store null).
+      const resourceUsage = {
+        wallClockMs: Math.max(0, finishedAt.getTime() - runCreatedAt.getTime()),
+        peakMemoryBytes: result.rusage?.peakMemoryBytes ?? null,
+      };
+      savedOutput = result.ok ? (result.output ?? null) : null;
+      savedError = result.ok ? null : (result.error ?? "unknown_error");
+      await this.#runInTx((tx) =>
+        this.#store.transitionToExecuted(tx, {
+          id: runId,
+          output: savedOutput,
+          error: savedError,
+          resourceUsage,
+          finishedAt,
+        }),
+      );
+    }
+
+    // --- Validate + finalize phase (runs for new + recovered-executed
+    // alike). Output validation is pure, so replaying it on a recovered
+    // row produces the same verdict as the original attempt — safe.
+    let finalStatus: SkillRunStatus;
+    let finalOutput: unknown | null = savedOutput;
+    let finalError: string | null = savedError;
+    if (savedError !== null) {
+      finalStatus = "error";
+    } else {
+      const outputErr = this.#validateOutput(cached, savedOutput, opts.name);
+      if (outputErr !== null) {
+        finalStatus = "error";
+        finalOutput = null;
+        finalError = outputErr;
+      } else {
+        finalStatus = "success";
+      }
+    }
+
+    await this.#runInTx((tx) =>
+      this.#store.transitionToFinished(tx, {
+        id: runId,
+        status: finalStatus,
+        output: finalOutput,
+        error: finalError,
       }),
     );
 
-    log.info(
-      { runId: run.id, skillName: opts.name, tier: skill.tier, trigger: opts.trigger ?? "manual" },
-      "invoking skill",
-    );
+    return reconstructFinishedResult(runId, finalStatus, finalOutput, finalError);
+  }
 
-    const ctxHandler = new DefaultCtxHandler({
-      manifest: cached.manifest,
-      runId: run.id,
-      user: this.#user,
-      memoryBankId: this.#memoryBankId,
-      secretsStore: this.#secretsStore,
-      runInTx: this.#runInTx,
-      memory: this.#memory,
-      files: this.#files,
-      recordContextCall: (call) => this.#runInTx((tx) => this.#store.recordContextCall(tx, call)),
-    });
-
+  /**
+   * Per-tier dispatch to the worker runtime. Extracted from `invoke` so
+   * the execute path stays readable — every line above is pre-flight or
+   * recovery branching, every line after is finalize.
+   */
+  async #dispatchToRuntime(
+    skill: SkillRow,
+    cached: SkillSourceCacheEntry,
+    inputs: unknown,
+    ctxHandler: DefaultCtxHandler,
+    taskId: string,
+  ): Promise<RunOnWorkerResult | InvokeResult> {
     const wallClockS = cached.manifest.resources?.wall_clock_s;
     // Switch + `never` exhaustiveness so a future SkillTier value (added to
     // the pgEnum) is a compile-time miss here rather than a silent route
     // through the sysbox path.
-    let result: RunOnWorkerResult | InvokeResult;
     switch (skill.tier) {
       case "wasm":
-        result = await runOnWorker({
-          taskId: run.id,
+        return runOnWorker({
+          taskId,
           skillName: skill.name,
           body: cached.body,
-          inputs: opts.inputs,
+          inputs,
           ...(wallClockS !== undefined && { wallClockS }),
           ...(this.#pyodidePackageCacheDir && {
             packageCacheDir: this.#pyodidePackageCacheDir,
           }),
           ctxHandler,
         });
-        break;
       case "container": {
         const sandbox = this.#sandbox;
         if (!sandbox) {
-          // Caught above by `tier === "container" && !sandbox`; this
-          // guard narrows for the call below.
+          // Caught above in invoke by `tier === "container" && !sandbox`;
+          // this guard narrows for the call below.
           throw new Error("invariant: sandbox unset on container tier path");
         }
         // Per-skill resource overrides are honoured via a one-shot
@@ -1007,11 +1158,11 @@ export class SkillRunnerImpl implements SkillRunner {
         const overrides = mapManifestResourceLimits(cached.manifest.resources);
         const isolation = cached.manifest.isolation;
         if (overrides.cpus !== undefined || overrides.memory_bytes !== undefined) {
-          result = await runOnSysboxContainer({
-            taskId: run.id,
+          return runOnSysboxContainer({
+            taskId,
             skillName: skill.name,
             body: cached.body,
-            inputs: opts.inputs,
+            inputs,
             ...(wallClockS !== undefined && { wallClockS }),
             ...(isolation !== undefined && { isolation }),
             resourceLimits: overrides,
@@ -1019,77 +1170,23 @@ export class SkillRunnerImpl implements SkillRunner {
             sandbox,
             ctxHandler,
           });
-        } else {
-          const pool = await this.#ensurePool();
-          result = await pool.invoke({
-            taskId: run.id,
-            skillName: skill.name,
-            body: cached.body,
-            inputs: opts.inputs,
-            ...(wallClockS !== undefined && { wallClockS }),
-            ...(isolation !== undefined && { isolation }),
-            ctxHandler,
-          });
         }
-        break;
+        const pool = await this.#ensurePool();
+        return pool.invoke({
+          taskId,
+          skillName: skill.name,
+          body: cached.body,
+          inputs,
+          ...(wallClockS !== undefined && { wallClockS }),
+          ...(isolation !== undefined && { isolation }),
+          ctxHandler,
+        });
       }
       default: {
         const _exhaustive: never = skill.tier;
         throw new Error(`unhandled skill tier: ${_exhaustive as string}`);
       }
     }
-
-    const finishedAt = new Date();
-    // Build the resource_usage blob once — `wallClockMs` is always derived
-    // from the host-side timestamps; `peakMemoryBytes` rides whatever the
-    // runtime contributed via `result.rusage` (tier-2 populates it from
-    // `getrusage`, tier-1 leaves it unset and we store null).
-    const resourceUsage = {
-      wallClockMs: Math.max(0, finishedAt.getTime() - run.createdAt.getTime()),
-      peakMemoryBytes: result.rusage?.peakMemoryBytes ?? null,
-    };
-    if (result.ok) {
-      const outputsValidationErr = this.#validateOutput(cached, result.output, opts.name);
-      if (outputsValidationErr !== null) {
-        await this.#runInTx((tx) =>
-          this.#store.updateRunResult(tx, {
-            id: run.id,
-            status: "error",
-            output: null,
-            error: outputsValidationErr,
-            resourceUsage,
-            finishedAt,
-          }),
-        );
-        return { runId: run.id, status: "error", error: outputsValidationErr };
-      }
-      await this.#runInTx((tx) =>
-        this.#store.updateRunResult(tx, {
-          id: run.id,
-          status: "success",
-          output: result.output ?? null,
-          error: null,
-          resourceUsage,
-          finishedAt,
-        }),
-      );
-      return { runId: run.id, status: "success", output: result.output };
-    }
-    await this.#runInTx((tx) =>
-      this.#store.updateRunResult(tx, {
-        id: run.id,
-        status: "error",
-        output: null,
-        error: result.error ?? "unknown_error",
-        resourceUsage,
-        finishedAt,
-      }),
-    );
-    return {
-      runId: run.id,
-      status: "error",
-      ...(result.error !== undefined && { error: result.error }),
-    };
   }
 
   // --- Test-only helper ---
@@ -1448,6 +1545,55 @@ export class SandboxUnavailableError extends Error {
     super(`skill '${name}' is tier=container but no sandbox is configured (set SANDBOX_RUNTIME)`);
     this.name = "SandboxUnavailableError";
   }
+}
+
+/**
+ * `runner.invoke` recovered an existing run row whose `recovery_point` is
+ * still `started` — meaning the prior attempt crashed mid-execute and the
+ * runtime never reported back. Re-executing now would risk double-firing
+ * non-idempotent side effects (ctx.memory.write, outbound HTTP, file
+ * writes); the conservative default is to surface the situation to the
+ * caller. The Stripe pattern this implements does the same — see
+ * brandur.org/idempotency-keys → "Resumed transactions."
+ *
+ * Carries the orphan `runId` so operators can inspect / clean up. A future
+ * manifest flag (`idempotent_invocation: true`) would let the runner
+ * optimistically re-execute instead of throwing — for skills whose
+ * authors explicitly opt in.
+ */
+export class SkillInflightCrashedError extends Error {
+  readonly runId: string;
+  constructor(name: string, runId: string) {
+    super(`skill '${name}' has an in-flight run (id=${runId}) from a prior attempt that crashed`);
+    this.name = "SkillInflightCrashedError";
+    this.runId = runId;
+  }
+}
+
+/**
+ * Rebuild the public `SkillRunResult` shape from the four fields the
+ * `finished` row carries. Centralised so the three return sites (cached
+ * replay + new-success + new-error) stay byte-identical and downstream
+ * callers can rely on the same shape regardless of which path produced it.
+ */
+function reconstructFinishedResult(
+  runId: string,
+  status: SkillRunStatus,
+  output: unknown | null,
+  error: string | null,
+): SkillRunResult {
+  if (status === "success") {
+    return {
+      runId,
+      status: "success",
+      ...(output !== null && { output }),
+    };
+  }
+  return {
+    runId,
+    status: "error",
+    ...(error !== null && { error }),
+  };
 }
 
 function rejectedResult(gitSha: string, reason: string): RegisterResult {

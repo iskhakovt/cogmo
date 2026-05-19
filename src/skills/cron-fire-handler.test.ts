@@ -50,6 +50,11 @@ describe("createSkillCronFireHandler", () => {
       name: "morning-brief",
       inputs: {},
       trigger: "cron",
+      // Deterministic per fire (skillId + scheduledFor). Same key the
+      // event-bus dedup uses, so a retry after bus-dedup miss still
+      // resolves to the same run row in `runner.invoke`'s
+      // recovery_point branch.
+      idempotencyKey: `skill-cron:${baseEvent.data.skillId}:${baseEvent.data.scheduledFor}`,
     });
   });
 

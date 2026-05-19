@@ -712,4 +712,141 @@ describe("DrizzleSkillStore", () => {
       expect(after?.nextRunAt?.toISOString()).toBe(nextRunAt.toISOString());
     });
   });
+
+  describe("startOrRecoverRun + recovery_point transitions", () => {
+    it("kind='new' on first call; row starts in recovery_point='started'", async () => {
+      const skill = await seedSkill({ name: "with-key" });
+      const result = await tx((trx) =>
+        store.startOrRecoverRun(trx, {
+          skillId: skill.id,
+          trigger: "cron",
+          inputs: { x: 1 },
+          idempotencyKey: "skill-cron:abc:2026-06-01T09:00:00.000Z",
+        }),
+      );
+      expect(result.kind).toBe("new");
+      expect(result.row.recoveryPoint).toBe("started");
+      expect(result.row.idempotencyKey).toBe("skill-cron:abc:2026-06-01T09:00:00.000Z");
+      expect(result.row.status).toBe("running");
+      expect(result.row.resourceUsage).toBeNull();
+    });
+
+    it("kind='recovered' on second call with same key — returns the existing row", async () => {
+      const skill = await seedSkill({ name: "with-key" });
+      const key = "skill-cron:abc:2026-06-01T09:00:00.000Z";
+      const first = await tx((trx) =>
+        store.startOrRecoverRun(trx, {
+          skillId: skill.id,
+          trigger: "cron",
+          inputs: { x: 1 },
+          idempotencyKey: key,
+        }),
+      );
+      const second = await tx((trx) =>
+        store.startOrRecoverRun(trx, {
+          skillId: skill.id,
+          trigger: "cron",
+          inputs: { x: 1 },
+          idempotencyKey: key,
+        }),
+      );
+      expect(second.kind).toBe("recovered");
+      expect(second.row.id).toBe(first.row.id);
+      expect(second.row.recoveryPoint).toBe("started");
+    });
+
+    it("transitionToExecuted advances recovery_point and writes the payload", async () => {
+      const skill = await seedSkill();
+      const { row } = await tx((trx) =>
+        store.startOrRecoverRun(trx, {
+          skillId: skill.id,
+          trigger: "cron",
+          inputs: {},
+          idempotencyKey: "k-1",
+        }),
+      );
+      const finishedAt = new Date("2026-06-01T09:00:42Z");
+      await tx((trx) =>
+        store.transitionToExecuted(trx, {
+          id: row.id,
+          output: { echo: 42 },
+          error: null,
+          resourceUsage: { wallClockMs: 42, peakMemoryBytes: 1_048_576 },
+          finishedAt,
+        }),
+      );
+      const reloaded = await tx((trx) => store.getRun(trx, row.id));
+      expect(reloaded?.recoveryPoint).toBe("executed");
+      expect(reloaded?.output).toEqual({ echo: 42 });
+      expect(reloaded?.error).toBeNull();
+      expect(reloaded?.resourceUsage).toEqual({ wallClockMs: 42, peakMemoryBytes: 1_048_576 });
+      expect(reloaded?.finishedAt?.toISOString()).toBe(finishedAt.toISOString());
+      // Status is NOT touched by the executed transition — validation
+      // hasn't run yet, so the terminal state isn't known. Stays
+      // 'running' until transitionToFinished.
+      expect(reloaded?.status).toBe("running");
+    });
+
+    it("transitionToFinished sets status and advances recovery_point", async () => {
+      const skill = await seedSkill();
+      const { row } = await tx((trx) =>
+        store.startOrRecoverRun(trx, {
+          skillId: skill.id,
+          trigger: "cron",
+          inputs: {},
+          idempotencyKey: "k-2",
+        }),
+      );
+      await tx((trx) =>
+        store.transitionToExecuted(trx, {
+          id: row.id,
+          output: { echo: 1 },
+          error: null,
+          resourceUsage: { wallClockMs: 1, peakMemoryBytes: null },
+          finishedAt: new Date(),
+        }),
+      );
+      await tx((trx) =>
+        store.transitionToFinished(trx, {
+          id: row.id,
+          status: "success",
+          output: { echo: 1 },
+          error: null,
+        }),
+      );
+      const reloaded = await tx((trx) => store.getRun(trx, row.id));
+      expect(reloaded?.recoveryPoint).toBe("finished");
+      expect(reloaded?.status).toBe("success");
+    });
+
+    it("partial unique index allows multiple null-key rows for the same skill", async () => {
+      // CLI / ad-hoc invocations land with idempotency_key=NULL. The
+      // partial unique index `WHERE idempotency_key IS NOT NULL` must
+      // not constrain these — they should be free to coexist.
+      const skill = await seedSkill();
+      const a = await tx((trx) =>
+        store.insertRun(trx, { skillId: skill.id, trigger: "manual", inputs: {} }),
+      );
+      const b = await tx((trx) =>
+        store.insertRun(trx, { skillId: skill.id, trigger: "manual", inputs: {} }),
+      );
+      expect(a.id).not.toBe(b.id);
+      expect(a.idempotencyKey).toBeNull();
+      expect(b.idempotencyKey).toBeNull();
+    });
+
+    it("explicit idempotencyKey on insertRun stamps the column", async () => {
+      const skill = await seedSkill();
+      const row = await tx((trx) =>
+        store.insertRun(trx, {
+          skillId: skill.id,
+          trigger: "cron",
+          inputs: {},
+          idempotencyKey: "explicit-key",
+        }),
+      );
+      expect(row.idempotencyKey).toBe("explicit-key");
+      expect(row.recoveryPoint).toBe("started");
+    });
+  });
 });
