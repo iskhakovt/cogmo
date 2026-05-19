@@ -13,6 +13,7 @@ on:
       - "src/agent/coding/**"
       - "src/skills/**"
       - "images/skills/**"
+      - "images/devbase/**"
       - "docker-bake.hcl"
       - ".github/workflows/sysbox-e2e.yml"
       - "package.json"
@@ -23,16 +24,20 @@ on:
       - "src/agent/coding/**"
       - "src/skills/**"
       - "images/skills/**"
+      - "images/devbase/**"
       - "docker-bake.hcl"
       - ".github/workflows/sysbox-e2e.yml"
       - "package.json"
       - "pnpm-lock.yaml"
   workflow_dispatch:
 
-# Note: paths include `images/skills/**` and `docker-bake.hcl` because the
-# bake step builds the skills image as part of the test setup. Image-only
-# changes (Dockerfile bumps, bake refactors) ALSO trigger images-pr-check.yml
-# in parallel; the two are independent and exercise different things.
+# Note: paths include `images/skills/**`, `images/devbase/**`, and
+# `docker-bake.hcl` because the bake step builds both the skills image and
+# the devbase image as part of the test setup. Image-only changes
+# (Dockerfile bumps, bake refactors) ALSO trigger images-pr-check.yml in
+# parallel; the two are independent and exercise different things — this
+# job runs the CLI-against-real-binary integration test, the PR-check job
+# only verifies the image builds.
 
 concurrency:
   group: sysbox-e2e-${{ github.ref }}
@@ -90,14 +95,17 @@ jobs:
 
       - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
-      # Bake `cogmo-skills` into the local daemon so the integration test
-      # runs against the artifact this commit would produce — not against
-      # `python:3.14-slim` from Docker Hub. `--load` keeps it unpushed (no
-      # registry pollution); `cache-from` shares the GHA cache populated by
+      # Bake `cogmo-skills` AND `cogmo-devbase` into the local daemon so
+      # the integration tests run against the artifacts this commit would
+      # produce — not against `python:3.14-slim` from Docker Hub
+      # (skills) or whatever Claude Code CLI version is on the developer's
+      # PATH (devbase). `--load` keeps them unpushed (no registry
+      # pollution); `cache-from` shares the GHA cache populated by
       # `publish.yml` on release, so steady-state cost is roughly a
-      # `docker pull`. `VERSION=test` tags the image as `cogmo-skills:test`
-      # (matched by the integration test's `SKILLS_IMAGE` constant).
-      - name: Build cogmo-skills (load locally for tests)
+      # `docker pull`. `VERSION=test` tags the images as
+      # `cogmo-skills:test` and `cogmo-devbase:test` (matched by the
+      # integration tests' image constants).
+      - name: Build cogmo-skills + cogmo-devbase (load locally for tests)
         uses: docker/bake-action@a66e1c87e2eca0503c343edf1d208c716d54b8a8 # v7.1.0
         env:
           VERSION: test
@@ -109,17 +117,18 @@ jobs:
         with:
           source: .
           files: ./docker-bake.hcl
-          targets: skills
+          targets: skills,devbase
           load: true
 
-      - name: Run sysbox-flavoured supervisor + skills tests
+      - name: Run sysbox-flavoured supervisor + skills + coding-CLI tests
         env:
           SANDBOX_RUNTIME: sysbox
           TESTCONTAINERS_RYUK_DISABLED: "true"
         run: |
           pnpm test:integration \
             src/sandbox/supervisor.sysbox.integration.test.ts \
-            src/skills/runner.sysbox.integration.test.ts
+            src/skills/runner.sysbox.integration.test.ts \
+            src/agent/coding/claude-cli.integration.test.ts
 
       - uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2 # v3.0.0
         if: always()
