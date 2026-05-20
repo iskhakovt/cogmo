@@ -4,7 +4,6 @@ import type { Database, Transactor } from "../../../db/index.js";
 import { DrizzleSandboxStore } from "../../../sandbox/store/index.js";
 import type { ContainerLabels, ResourceLimits } from "../../../sandbox/types.js";
 import { createTestDatabase, truncateAll } from "../../../test/pglite.js";
-import { DrizzleAgentStore } from "../../store/index.js";
 import { type CodingBackend, type CodingTaskStatus, DrizzleCodingStore } from "./index.js";
 
 let db: Database;
@@ -12,13 +11,11 @@ let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleCodingStore;
 let sandboxStore: DrizzleSandboxStore;
-let agentStore: DrizzleAgentStore;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
   store = new DrizzleCodingStore();
   sandboxStore = new DrizzleSandboxStore();
-  agentStore = new DrizzleAgentStore();
 });
 
 afterEach(async () => {
@@ -1136,195 +1133,6 @@ describe("DrizzleCodingStore", () => {
       // Original failure preserved — cancel didn't overwrite it.
       expect(reloaded?.status).toBe("failed");
       expect(reloaded?.failureReason).toBe("claude exit code 2");
-    });
-  });
-
-  describe("tool decisions", () => {
-    let taskCounter = 0;
-    async function seedTask(): Promise<string> {
-      taskCounter += 1;
-      const repoId = await seedRepo(`tool-decisions-${taskCounter}`);
-      const task = await tx((trx) =>
-        store.insertTask(trx, {
-          repoId,
-          goal: "g",
-          triggerSource: "user",
-          backend: "claude",
-          allowPrivilegedRunc: false,
-        }),
-      );
-      return task.id;
-    }
-
-    it("inserts a decision and reads it back", async () => {
-      const taskId = await seedTask();
-      const row = await tx((trx) =>
-        store.insertToolDecision(trx, {
-          taskId,
-          tool: "Bash",
-          pattern: "Bash(git push origin *)",
-          decision: "allow",
-          scope: "task",
-        }),
-      );
-      expect(row.taskId).toBe(taskId);
-      expect(row.tool).toBe("Bash");
-      expect(row.pattern).toBe("Bash(git push origin *)");
-      expect(row.decision).toBe("allow");
-      expect(row.scope).toBe("task");
-      expect(row.createdAt).toBeInstanceOf(Date);
-    });
-
-    it("rejects an unknown task_id (FK constraint)", async () => {
-      await expect(
-        tx((trx) =>
-          store.insertToolDecision(trx, {
-            taskId: "019d0000-0000-7000-8000-0000000000ff",
-            tool: "Bash",
-            pattern: "Bash(rm -rf *)",
-            decision: "deny",
-            scope: "task",
-          }),
-        ),
-      ).rejects.toThrow();
-    });
-
-    it("listToolDecisionsForTask returns rows oldest-first, scoped by task", async () => {
-      const taskA = await seedTask();
-      const taskB = await seedTask();
-      const first = await tx((trx) =>
-        store.insertToolDecision(trx, {
-          taskId: taskA,
-          tool: "Bash",
-          pattern: "Bash(git push *)",
-          decision: "allow",
-          scope: "task",
-        }),
-      );
-      const second = await tx((trx) =>
-        store.insertToolDecision(trx, {
-          taskId: taskA,
-          tool: "Bash",
-          pattern: "Bash(curl -X POST *)",
-          decision: "deny",
-          scope: "task",
-        }),
-      );
-      // Cross-task row to verify scoping.
-      await tx((trx) =>
-        store.insertToolDecision(trx, {
-          taskId: taskB,
-          tool: "Bash",
-          pattern: "Bash(rm -rf *)",
-          decision: "deny",
-          scope: "once",
-        }),
-      );
-
-      const rows = await tx((trx) => store.listToolDecisionsForTask(trx, taskA));
-      expect(rows.map((r) => r.id)).toEqual([first.id, second.id]);
-      expect(rows.map((r) => r.decision)).toEqual(["allow", "deny"]);
-    });
-
-    it("supports both scope and decision enums independently", async () => {
-      const taskId = await seedTask();
-      await tx((trx) =>
-        store.insertToolDecision(trx, {
-          taskId,
-          tool: "Edit",
-          pattern: "request-id-abc",
-          decision: "allow",
-          scope: "once",
-        }),
-      );
-      await tx((trx) =>
-        store.insertToolDecision(trx, {
-          taskId,
-          tool: "Bash",
-          pattern: "Bash(npm publish)",
-          decision: "deny",
-          scope: "task",
-        }),
-      );
-      const rows = await tx((trx) => store.listToolDecisionsForTask(trx, taskId));
-      expect(rows).toHaveLength(2);
-      expect(rows.map((r) => `${r.scope}/${r.decision}`)).toEqual(["once/allow", "task/deny"]);
-    });
-  });
-
-  describe("getCodingAutoapproveModeForTask", () => {
-    async function seedTaskWithProfile(autoapprove: "off" | "on"): Promise<string> {
-      const repoId = await seedRepo(`repo-${Math.random().toString(36).slice(2)}`);
-      const user = await tx((trx) => agentStore.createUser(trx));
-      const profile = await tx((trx) =>
-        agentStore.createProfile(trx, {
-          userId: user.id,
-          name: `prof-${Math.random().toString(36).slice(2)}`,
-          basePrompt: "x",
-          model: "claude-haiku-4-5-20251001",
-          toolSet: [],
-        }),
-      );
-      if (autoapprove === "on") {
-        await tx((trx) =>
-          agentStore.updateProfile(trx, profile.id, { codingAutoapproveMode: "on" }),
-        );
-      }
-      const conv = await tx((trx) =>
-        agentStore.createConversation(trx, {
-          userId: user.id,
-          profileId: profile.id,
-          isPrivate: true,
-        }),
-      );
-      const task = await tx((trx) =>
-        store.insertTask(trx, {
-          repoId,
-          conversationId: conv.id,
-          goal: "x",
-          triggerSource: "user",
-          backend: "claude",
-          allowPrivilegedRunc: false,
-        }),
-      );
-      return task.id;
-    }
-
-    it("returns 'on' when the joined profile has autoapprove enabled", async () => {
-      const taskId = await seedTaskWithProfile("on");
-      const mode = await tx((trx) => store.getCodingAutoapproveModeForTask(trx, taskId));
-      expect(mode).toBe("on");
-    });
-
-    it("returns 'off' (the default) when the profile hasn't been toggled", async () => {
-      const taskId = await seedTaskWithProfile("off");
-      const mode = await tx((trx) => store.getCodingAutoapproveModeForTask(trx, taskId));
-      expect(mode).toBe("off");
-    });
-
-    it("returns null when the task has no conversation (evolution / signal-pipeline triggers)", async () => {
-      const repoId = await seedRepo(`repo-${Math.random().toString(36).slice(2)}`);
-      const task = await tx((trx) =>
-        store.insertTask(trx, {
-          repoId,
-          goal: "x",
-          triggerSource: "evolution",
-          backend: "claude",
-          allowPrivilegedRunc: false,
-        }),
-      );
-      const mode = await tx((trx) => store.getCodingAutoapproveModeForTask(trx, task.id));
-      expect(mode).toBeNull();
-    });
-
-    it("returns null for a task id that doesn't exist", async () => {
-      // The orchestrator's `??  'off'` fallback turns this into the safe
-      // default — pinning the null return so a future refactor that
-      // changes the join shape can't silently flip the fallback.
-      const mode = await tx((trx) =>
-        store.getCodingAutoapproveModeForTask(trx, "00000000-0000-7000-8000-deadbeef0000"),
-      );
-      expect(mode).toBeNull();
     });
   });
 });

@@ -1,6 +1,5 @@
 import { err, ok } from "neverthrow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { PERMISSION_CALLBACK_REGEX } from "../../../agent/coding/permission-keyboard.js";
 import { PLAN_CALLBACK_REGEX } from "../../../agent/coding/plan-keyboard.js";
 import { SKILLS_APPROVAL_CALLBACK_REGEX } from "../../../skills/skills-keyboard.js";
 import { mockAttachmentStore, mockTransport } from "../../../test/factories.js";
@@ -1288,7 +1287,6 @@ describe("telegram adapter", () => {
     // Pinned UUIDs for callback data — must match the regex shape.
     const TASK_ID = "00000000-0000-0000-0000-000000000001";
     const PENDING_ID = "00000000-0000-0000-0000-000000000002";
-    const REQUEST_ID_SHORT = "abc123";
 
     function makeCallbackCtx(data: string, fromId = 111) {
       return {
@@ -1343,42 +1341,6 @@ describe("telegram adapter", () => {
 
       expect(transport.coding.approvePlan).toHaveBeenCalled();
       expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Approved" });
-    });
-
-    it("permission: deny → respondPermission with decision=deny, scope=once", async () => {
-      const { transport } = await createAdapter();
-      const ctx = makeCallbackCtx(`perm:${TASK_ID}:${REQUEST_ID_SHORT}:d`);
-
-      const handler = handlers.get(`callbackQuery:${PERMISSION_CALLBACK_REGEX.source}`);
-      await handler(ctx);
-
-      expect(transport.coding.respondPermission).toHaveBeenCalledWith(
-        {
-          taskId: TASK_ID,
-          requestIdShort: REQUEST_ID_SHORT,
-          decision: "deny",
-          scope: "once",
-        },
-        "111",
-      );
-      expect(ctx.editMessageText).toHaveBeenCalledWith("❌ Denied.", {
-        reply_markup: { inline_keyboard: [] },
-      });
-      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Denied" });
-    });
-
-    it("permission: allow_task → respondPermission with decision=allow, scope=task", async () => {
-      const { transport } = await createAdapter();
-      const ctx = makeCallbackCtx(`perm:${TASK_ID}:${REQUEST_ID_SHORT}:t`);
-
-      const handler = handlers.get(`callbackQuery:${PERMISSION_CALLBACK_REGEX.source}`);
-      await handler(ctx);
-
-      expect(transport.coding.respondPermission).toHaveBeenCalledWith(
-        expect.objectContaining({ decision: "allow", scope: "task" }),
-        "111",
-      );
-      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Allowed for task" });
     });
 
     it("skill approval: approve → skills.approveDeploy, edit shows skill name + git sha", async () => {

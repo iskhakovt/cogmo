@@ -36,17 +36,6 @@ export const pendingMemorySource = pgEnum("pending_memory_source", ["live_retain
 export const voiceMode = pgEnum("voice_mode", ["auto", "always", "never"]);
 
 /**
- * Per-profile auto-approve mode for coding-delegation permission prompts.
- * `off` (default) preserves the policy gate's Telegram round trip for
- * prompt-worthy operations (`git push`, `gh pr/issue` mutations, publishes,
- * external HTTP writes). `on` short-circuits the prompt path to allow —
- * useful for trusted profiles where the user accepts the cost of unattended
- * mutations in exchange for not interrupting a delegated task. The static
- * `policy.deny` set still denies; only the `prompt` decision flips to allow.
- */
-export const codingAutoapproveMode = pgEnum("coding_autoapprove_mode", ["off", "on"]);
-
-/**
  * Zod schema for `conversations.cooldown_state`. The column's column
  * comment carries the lifecycle and atomicity contract; see also
  * `design/agent-resilience.md` → Auto-repair.
@@ -508,15 +497,6 @@ export const profiles = pgTable(
      */
     streamChunkChars: integer("stream_chunk_chars").notNull().default(4000),
     streamEdits: boolean("stream_edits").notNull().default(true),
-    /**
-     * Bypass the Telegram permission round trip during coding-delegation
-     * tool gating. See `codingAutoapproveMode` enum docstring for the
-     * trade-off. Toggled via the `/profile autoapprove <name> on|off`
-     * Telegram subcommand.
-     */
-    codingAutoapproveMode: codingAutoapproveMode("coding_autoapprove_mode")
-      .notNull()
-      .default("off"),
     toolSet: jsonbZod("tool_set", ToolSetSchema).notNull(),
     memoryScope: jsonbZod("memory_scope", ProfileMemoryScopeSchema), // null = no restriction
     /**
