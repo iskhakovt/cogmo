@@ -2522,6 +2522,79 @@ describe("/profile autoapprove subcommand", () => {
     expect(update).not.toHaveBeenCalled();
     expect(ctx.reply.mock.calls[0]?.[0]).toContain('No profile named "ghost"');
   });
+
+  it("trailing token that isn't on/off becomes part of the profile name (show form)", async () => {
+    // The `case "autoapprove":` parser treats the last token as the
+    // action only when it's literally `on` or `off`; anything else
+    // becomes part of the profile name, and the command falls into the
+    // show form (no `update` write). Pins the parse rule so a profile
+    // named "two words" doesn't get corrupted by a stray token.
+    const update = vi.fn();
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(ok([makeProfile({ name: "two words" })])),
+        update,
+      },
+    });
+    const ctx = mkCtx("autoapprove two words");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(update).not.toHaveBeenCalled();
+    const reply = ctx.reply.mock.calls[0]?.[0] ?? "";
+    expect(reply).toContain('Autoapprove for "two words"');
+  });
+
+  it("transport.profiles.update error surfaces to the user without crashing", async () => {
+    // Most natural trigger: trying to flip autoapprove on an org profile
+    // returns `access_denied` per Transport's org-profile-read-only
+    // invariant. Mock the error surface directly to keep the test
+    // focused on the command's reply path.
+    const update = vi.fn().mockResolvedValue(
+      err({
+        code: "access_denied",
+        reason: "org profiles are read-only via Transport",
+      }),
+    );
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(ok([makeProfile({ userId: null, name: "shared" })])),
+        update,
+      },
+    });
+    const ctx = mkCtx("autoapprove shared on");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(update).toHaveBeenCalledTimes(1);
+    const reply = ctx.reply.mock.calls[0]?.[0] ?? "";
+    // Doesn't render the success-shape "Autoapprove for ..." line.
+    expect(reply).not.toContain('Autoapprove for "shared"');
+    // Surfaces something — the actual error text comes from `errorMessage`
+    // and is identical across all subcommands; the contract here is
+    // "any non-empty failure surface, not a crash."
+    expect(reply.length).toBeGreaterThan(0);
+  });
+
+  it("ambiguous profile name replies with disambiguation hint without writing", async () => {
+    // Two org profiles sharing a name is the practical trigger — both
+    // user_id IS NULL, so `resolveProfileByName`'s "pick the owned one"
+    // tiebreaker can't help and the resolver surfaces ambiguous.
+    const update = vi.fn();
+    const transport = transportWith({
+      profiles: {
+        list: vi
+          .fn()
+          .mockResolvedValue(
+            ok([
+              makeProfile({ id: "p1", userId: null, name: "shared" }),
+              makeProfile({ id: "p2", userId: null, name: "shared" }),
+            ]),
+          ),
+        update,
+      },
+    });
+    const ctx = mkCtx("autoapprove shared on");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(update).not.toHaveBeenCalled();
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain("shared");
+  });
 });
 
 describe("formatScope", () => {
