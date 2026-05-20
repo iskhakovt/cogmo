@@ -85,8 +85,6 @@ function fakeCodingStore(overrides: Partial<CodingStore> = {}): CodingStore {
     transitionTaskStatus: vi.fn(),
     approvePlanIfPending: vi.fn(),
     cancelTaskIfActive: vi.fn(),
-    insertToolDecision: vi.fn(),
-    listToolDecisionsForTask: vi.fn(async () => []),
     ...overrides,
   } as CodingStore;
 }

@@ -306,8 +306,9 @@ function makeDeps(
 }
 
 // `inngest` is required by both runCodingTask and runCodingExecute for
-// emit-task-failed / emit-cli-done / coding/task/permission-requested.
-// Defined here so both describe blocks can share it.
+// emit-task-failed, emit-cli-done, and the autoapprove path's
+// coding/task/plan-approved emit. Defined here so both describe blocks
+// can share it.
 const fakeInngestShared = { send: vi.fn().mockResolvedValue(undefined) };
 const stepSendEvent = makeStepSendEvent(fakeInngestShared);
 
@@ -523,6 +524,118 @@ describe("runCodingTask", () => {
     });
     expect(result.status).toBe("awaiting_approval");
 
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.planApprovedAt).toBeNull();
+    expect(sentEvents.find((e) => e.name === "coding/task/plan-approved")).toBeUndefined();
+  });
+
+  it("autoapprove=on race: concurrent cancel between set-status-awaiting and auto-approve wins, no plan-approved emit", async () => {
+    // Pins the race-safe contract from the design doc: if the user taps
+    // Cancel after the plan finalizes but before the auto-approve step
+    // commits, `approvePlanIfPending` observes `status != awaiting_approval`
+    // and returns `not_pending`. The orchestrator logs and skips the
+    // emit; the cancellation stands.
+    const repo = await seedRepo();
+    const task = await seedUserTaskWithAutoapprove(repo, "on", "race");
+
+    const { sandbox } = fakeSandbox();
+    const backend = backendYielding([
+      { kind: "session_started", sessionId: "sess-RACE" },
+      { kind: "plan_ready", plan: "## Plan\n1. Do X\n" },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+
+    // Inject a cancel between set-status-awaiting and auto-approve-plan
+    // by wrapping stepRun. `cancelTaskIfActive` flips status to
+    // `cancelled` directly via the store (no Telegram round trip).
+    const interceptingStepRun = (async (id: string, fn: () => Promise<unknown>) => {
+      if (id === "auto-approve-plan") {
+        await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user cancelled"));
+      }
+      return fn();
+    }) as unknown as typeof stepRun;
+
+    const sentEvents: { name: string }[] = [];
+    const recordingStepSendEvent = (async (_: string, payload: unknown) => {
+      sentEvents.push(payload as { name: string });
+      return { ids: [] };
+    }) as never;
+
+    await runCodingTask({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend }),
+      stepRun: interceptingStepRun,
+      stepSendEvent: recordingStepSendEvent,
+    });
+
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.status).toBe("cancelled");
+    expect(reloaded?.planApprovedAt).toBeNull();
+    // No plan-approved event: the auto-approve step observed
+    // `not_pending` and skipped the emit.
+    expect(sentEvents.find((e) => e.name === "coding/task/plan-approved")).toBeUndefined();
+  });
+
+  it("autoapprove=on does NOT fire for evolution-triggered tasks even when the joined profile has it on", async () => {
+    // Defensive: today, evolution tasks have no conversation so the
+    // store join returns null, and the orchestrator's `triggerSource ===
+    // 'user'` guard means autoapprove never even gets resolved. This
+    // test pins both invariants by stitching together an unnatural
+    // combo (evolution trigger + conversation + autoapprove=on) and
+    // asserting the auto-approve emit doesn't fire.
+    const repo = await seedRepo();
+    const user = await tx((trx) => agentStore.createUser(trx));
+    const profile = await tx((trx) =>
+      agentStore.createProfile(trx, {
+        userId: user.id,
+        name: `evo-${Math.random().toString(36).slice(2)}`,
+        basePrompt: "x",
+        model: "claude-haiku-4-5-20251001",
+        toolSet: [],
+      }),
+    );
+    await tx((trx) => agentStore.updateProfile(trx, profile.id, { codingAutoapproveMode: "on" }));
+    const conv = await tx((trx) =>
+      agentStore.createConversation(trx, {
+        userId: user.id,
+        profileId: profile.id,
+        isPrivate: true,
+      }),
+    );
+    const task = await tx((trx) =>
+      store.insertTask(trx, {
+        repoId: repo.id,
+        conversationId: conv.id,
+        goal: "evolution-driven task",
+        triggerSource: "evolution",
+        triggerRef: "evo-1",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      }),
+    );
+
+    const { sandbox } = fakeSandbox();
+    const backend = backendYielding([
+      { kind: "session_started", sessionId: "sess-EVO" },
+      { kind: "plan_ready", plan: "auto-plan" },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+
+    const sentEvents: { name: string }[] = [];
+    const recordingStepSendEvent = (async (_: string, payload: unknown) => {
+      sentEvents.push(payload as { name: string });
+      return { ids: [] };
+    }) as never;
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend }),
+      stepRun,
+      stepSendEvent: recordingStepSendEvent,
+    });
+    // Evolution path lands at `executing` directly per the existing
+    // trigger-source branch — the autoapprove path is not consulted.
+    expect(result.status).toBe("executing");
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.planApprovedAt).toBeNull();
     expect(sentEvents.find((e) => e.name === "coding/task/plan-approved")).toBeUndefined();

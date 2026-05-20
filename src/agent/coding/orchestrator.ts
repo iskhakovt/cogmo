@@ -30,7 +30,14 @@ export type { StepRun, StepSendEvent } from "../../inngest/index.js";
  */
 export interface PlanStreamHandle {
   appendText(delta: string): Promise<void>;
-  finalize(plan: string): Promise<void>;
+  /**
+   * Finalize the plan stream. `autoApproved` propagates the profile's
+   * `coding_autoapprove_mode = 'on'` decision to subscribers (the
+   * Telegram progress renderer skips the approve/revise/cancel keyboard
+   * when set, since the orchestrator will emit `coding/task/plan-approved`
+   * unattended in the next step).
+   */
+  finalize(plan: string, opts?: { autoApproved?: boolean }): Promise<void>;
   fail(reason: string): Promise<void>;
 }
 
@@ -454,18 +461,21 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     );
     // Same wrap as the failure-path notification above — once status is
     // committed, a subscriber error must not regress the task to failed.
-    await planStream.finalize(result.plan ?? "").catch((streamErr: unknown) => {
-      taskLog.warn(
-        { err: streamErr },
-        `plan stream finalize notification failed (task already ${nextStatus})`,
-      );
-    });
+    const willAutoApprove = task.triggerSource === "user" && autoapproveMode === "on";
+    await planStream
+      .finalize(result.plan ?? "", { autoApproved: willAutoApprove })
+      .catch((streamErr: unknown) => {
+        taskLog.warn(
+          { err: streamErr },
+          `plan stream finalize notification failed (task already ${nextStatus})`,
+        );
+      });
     // Auto-approve: same effect as the Telegram approve callback. Uses
     // `approvePlanIfPending` so the path is atomic with concurrent
     // cancels/manual approvals — if the user managed to tap Cancel in the
     // microseconds between `set-status-awaiting` and this step, the
     // approve becomes a no-op and the task stays cancelled.
-    if (task.triggerSource === "user" && autoapproveMode === "on") {
+    if (willAutoApprove) {
       const approvedAt = new Date();
       const approveResult = await stepRun("auto-approve-plan", () =>
         runInTx((tx) => store.approvePlanIfPending(tx, taskId, approvedAt)),
@@ -602,8 +612,11 @@ export interface CodingExecuteResult {
 
 /**
  * Inngest function that consumes `coding/task/plan-approved` and runs
- * `claude --resume <sid> --permission-mode acceptEdits` in the same
- * task container (recreating it if the reaper got it first).
+ * `claude -p --resume <sid>` in the same task container (recreating it
+ * if the reaper got it first). No `--permission-mode` flag — the
+ * sandbox is the security boundary, the CLI runs to completion against
+ * its `--allowedTools` defaults inside the isolated container, and the
+ * stream-json output drives the user-visible progress feed.
  *
  * Same retries=0 reasoning as the plan function: file edits inside the
  * container are not idempotent under retry. A failed run leaves the

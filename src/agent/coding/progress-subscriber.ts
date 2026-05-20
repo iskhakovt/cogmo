@@ -120,9 +120,13 @@ export function startCodingProgressSubscriber(args: SubscriberArgs): () => void 
       case "plan_finalized":
         state.phase = "awaiting_approval";
         state.body = event.plan;
-        // Force a post (bypass throttle) so the keyboard arrives with
-        // the final plan body, not a stale interim edit.
-        await postOrEdit(buildPlanKeyboard(taskId));
+        // Force a post (bypass throttle) so the final plan body lands
+        // before execute_started arrives. The approve/revise/cancel
+        // keyboard is suppressed when the plan orchestrator is about to
+        // auto-approve — those buttons would be misleading (Approve is
+        // a no-op against an already-approved plan, and a stray Cancel
+        // tap mid-execute is action-at-a-distance).
+        await postOrEdit(event.autoApproved ? undefined : buildPlanKeyboard(taskId));
         break;
       case "execute_started":
         state.phase = "executing";

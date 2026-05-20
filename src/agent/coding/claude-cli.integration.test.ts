@@ -271,4 +271,106 @@ describe("ClaudeCodeBackend against cogmo-devbase:test", () => {
     // + image pull + the actual plan run.
     6 * 60_000,
   );
+
+  // Execute-mode coverage against the real binary. The wrapper now closes
+  // stdin immediately after the prompt in execute mode too (previously
+  // kept open for the dead-code control_response path) — this test pins
+  // that `claude --resume <sid>` honours the EOF shutdown signal and
+  // emits `complete` without idle-timing-out. Plan runs first to capture
+  // a real session id; execute resumes it. Both phases need recorded
+  // llmock fixtures; the test is `.skip`d until the next `RECORD=1` pass
+  // lands fresh `/v1/messages` recordings for the execute leg.
+  //
+  // To enable: `RECORD=1 ANTHROPIC_API_KEY=… pnpm test:integration` on a
+  // machine with API credentials, commit the new fixture files under
+  // `recordings/`, and flip `it.skip` to `it`. Pure pass-through CI
+  // replays for free thereafter.
+  it.skip(
+    "execute flow resumes a real session and completes without wedging on close-stdin",
+    async (ctx) => {
+      if (!imagePresent) {
+        ctx.skip();
+        return;
+      }
+      const { sandbox } = await bootSandbox();
+      const homeVolume = uniqueName("cogmo-task-home");
+      homeVolumes.push(homeVolume);
+      const taskId = "019e5000-0000-7000-8000-000000000002";
+
+      const baseUrl = llmockUrlForContainer();
+
+      if (!workspaceTmp) throw new Error("workspaceTmp not initialized — beforeAll skipped?");
+
+      const session = await sandbox.create({
+        taskId,
+        worktree: { type: "host-path", hostPath: workspaceTmp },
+        homeVolume: { volumeName: homeVolume },
+        image: DEVBASE_IMAGE,
+        resourceLimits: RESOURCE_LIMITS,
+        expiresAt: new Date(Date.now() + 5 * 60_000),
+        env: {
+          ANTHROPIC_BASE_URL: baseUrl,
+          ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? "sk-ant-fake",
+          ANTHROPIC_MODEL: "claude-haiku-4-5-20251001",
+          MAX_THINKING_TOKENS: "0",
+        },
+      });
+
+      // Plan phase first to mint a session id. The CLI persists the
+      // session under the home volume, which the execute leg resumes
+      // by pointing `--resume` at the captured id.
+      const backend = new ClaudeCodeBackend();
+      let sessionId: string | undefined;
+      const planEvents: CodingEvent[] = [];
+      try {
+        for await (const event of backend.plan({
+          task: makeTask(taskId),
+          repo,
+          container: session,
+        })) {
+          planEvents.push(event);
+          if (event.kind === "session_started") sessionId = event.sessionId;
+        }
+      } finally {
+        // Keep the sandbox alive for the execute leg — only sweep on test
+        // teardown via the `afterAll` instance-id cleanup.
+      }
+      if (!sessionId) throw new Error("plan phase did not emit session_started");
+
+      const executeTask = { ...makeTask(taskId), sessionId };
+      const startedAt = Date.now();
+      const executeEvents: CodingEvent[] = [];
+      try {
+        for await (const event of backend.execute(
+          { task: executeTask, repo, container: session },
+          sessionId,
+        )) {
+          executeEvents.push(event);
+        }
+      } finally {
+        await sandbox.deleteByTaskId(taskId);
+      }
+
+      const elapsedMs = Date.now() - startedAt;
+      const kinds = executeEvents.map((e) => e.kind);
+
+      // Same shutdown-contract pin as the plan test: reaching this point
+      // proves stdin EOF propagated and the CLI didn't sit on its idle
+      // timer. session_started fires from `--resume`'s init event.
+      expect(kinds).toContain("session_started");
+      expect(kinds).toContain("complete");
+
+      // Execute mode should emit at least one tool_call against the
+      // planted greet.ts — even a trivial JSDoc addition routes
+      // through Read + Edit. If a future model variant inlines its
+      // edit into the response without calling tools, loosen this to
+      // just-no-permission_request (which is structurally impossible
+      // anyway since the type was removed).
+      const toolCalls = executeEvents.flatMap((e) => (e.kind === "tool_call" ? [e.tool] : []));
+      expect(toolCalls.length).toBeGreaterThan(0);
+
+      console.log(`claude-cli execute-mode events (${elapsedMs}ms): ${kinds.join(" → ")}`);
+    },
+    6 * 60_000,
+  );
 });
