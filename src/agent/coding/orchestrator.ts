@@ -476,18 +476,29 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     // microseconds between `set-status-awaiting` and this step, the
     // approve becomes a no-op and the task stays cancelled.
     if (willAutoApprove) {
-      const approvedAt = new Date();
-      const approveResult = await stepRun("auto-approve-plan", () =>
-        runInTx((tx) => store.approvePlanIfPending(tx, taskId, approvedAt)),
-      );
+      // Generate `approvedAt` INSIDE the step so the cached return on a
+      // future replay carries the original timestamp — otherwise a
+      // retry after the DB write but before the emit would persist
+      // an `approvedAt` from attempt 1 while emitting one from attempt 2,
+      // and downstream consumers see a row/event timestamp mismatch.
+      // `retries: 0` makes this defensive today; pinning it here closes
+      // the footgun if retries ever loosen.
+      const approveResult = await stepRun("auto-approve-plan", async () => {
+        const approvedAt = new Date();
+        const result = await runInTx((tx) => store.approvePlanIfPending(tx, taskId, approvedAt));
+        return { ...result, approvedAt: approvedAt.toISOString() };
+      });
       if (approveResult.kind === "approved") {
-        await stepSendEvent(
-          "emit-plan-approved",
-          codingTaskPlanApproved.create({
+        await stepSendEvent("emit-plan-approved", {
+          ...codingTaskPlanApproved.create({
             taskId,
-            approvedAt: approvedAt.toISOString(),
+            approvedAt: approveResult.approvedAt,
           }),
-        );
+          // Idempotency id matches the `task-failed-<taskId>` shape on the
+          // catch-path emit; ensures bus-level dedup on the off-chance the
+          // step is reached more than once (e.g. a future retry change).
+          id: `plan-approved-${taskId}`,
+        });
         taskLog.info("plan auto-approved via profile autoapprove=on");
       } else {
         taskLog.info(
