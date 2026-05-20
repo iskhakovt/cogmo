@@ -12,7 +12,7 @@ Cogmo:
 
 1. Creates a sandboxed task container (worktree, git identity, tools).
 2. Runs `claude -p` in plan mode first; posts the plan to Telegram with Approve / Revise / Cancel buttons (user-initiated tasks; automated triggers skip this gate).
-3. On approval, executes the plan. Dangerous tool calls route to Telegram as approve/deny prompts via the stream-json permission channel (see *Autonomy Gates → Tool gate*).
+3. On approval, executes the plan. Tool calls run unattended inside the sandbox container — the sandbox isolation is the security boundary, not a runtime permission gate (see *Autonomy Gates → Sandbox isolation*).
 4. Verifies (typecheck, lint, tests), commits, pushes, opens a draft PR.
 5. Sends the PR URL to Telegram for final review.
 
@@ -81,7 +81,7 @@ type CodingEvent =
   | { kind: "complete"; exitCode: number; usage?: BackendUsage; isError: boolean };
 ```
 
-Two concrete impls: `ClaudeCodeBackend` (slices 1+2), `CodexBackend` (later). Selection per-task via `coding_tasks.backend`. `execute(ctx, sessionId)` resumes a prior session via `claude --resume <sid>` (default permission mode — stream-json control channel gates every tool call); there is no separate `resume()` method, both subcommands take the same flags. `permission_request` is emitted in execute mode and surfaced to the orchestrator's tool gate; plan mode handles its own permission round-trips inline (CLI 2.x routes `Read`/`Write`/`ExitPlanMode` through the same control channel — see [Tool gate](#tool-gate-confirmed) for the policy-aware execute-mode path).
+Two concrete impls: `ClaudeCodeBackend` (slices 1+2), `CodexBackend` (later). Selection per-task via `coding_tasks.backend`. Both `plan(ctx)` and `execute(ctx, sessionId)` return `AsyncIterable<CodingEvent>` directly — there is no bidirectional control-channel handle. `execute` resumes a prior session via `claude --resume <sid>`; session id is captured during the plan phase. Neither runner passes `--permission-prompt-tool stdio`, so the CLI resolves every tool decision locally and emits no `control_request` frames. Both runners write the prompt as a single stream-json `user` frame and immediately close stdin — the CLI treats stdin EOF as the graceful-shutdown signal under `--input-format stream-json`. See [Sandbox isolation](#sandbox-isolation-confirmed) for the security-boundary rationale.
 
 ## Prompt Construction `[proposed]`
 
@@ -481,7 +481,7 @@ A timeout fire is mapped to a task-level failure by the caller — `checkoutFeat
 
 ## Autonomy Gates `[proposed]`
 
-Three gates, mapped onto Cogmo's existing `explicit_permission` rules. Plan gate is `[confirmed]` (slice 2); tool gate is `[confirmed]` (slice 3); merge gate remains `[proposed]`.
+Two gates remain: plan approval (human reviews + approves the plan before execute) and merge (human reviews + merges the draft PR). The execute phase runs unattended inside the sandbox container — there is no per-tool-call runtime permission gate.
 
 ### Plan gate `[confirmed]`
 
@@ -498,36 +498,35 @@ This keeps automated self-improvement flows non-blocking while preserving a huma
 
 **Approval idempotency.** `approvePlanIfPending` is atomic: a second tap returns `task_already_approved` without re-emitting the event. Telegram surfaces the duplicate as "already approved" toast and no state change.
 
-### Tool gate `[confirmed]`
+### Sandbox isolation `[confirmed]`
 
-During execute phase. Every tool call the CLI wants to run is gated against our policy before it executes.
+During execute phase. **The sandbox container is the security boundary.** There is no runtime per-tool-call permission gate; the CLI runs to completion against its prompt without bidirectional control-channel back-pressure. Two reasons this is the right call:
 
-**Mechanism: stream-json `control_request` bidirectional.** Claude Code's `PreToolUse` hook runs as a synchronous subprocess with a default ~60s timeout — not workable when the user is asleep or away from Telegram for hours. Slice 3.0d drops `--permission-mode acceptEdits` so the CLI emits `control_request` frames with `subtype: can_use_tool` on stdout for every tool call; Cogmo writes a `control_response` back on stdin. The CLI blocks until each request is answered, so the orchestrator's policy + decision-log + Telegram round trip drives back-pressure naturally. Same channel is how we inject follow-up messages during a multi-turn task.
+1. **The CLI doesn't expose the gate we'd need without explicit opt-in.** Anthropic's stream-json control protocol routes per-tool decisions through stdin/stdout only when `--permission-prompt-tool stdio` is passed (verified by reading the `@anthropic-ai/claude-agent-sdk` source: the SDK adds that flag only when a `canUseTool` callback is supplied, and OAuth-token auth is ToS-blocked from using the Agent SDK at all). Cogmo's CLI invocation doesn't pass it, so the CLI resolves every tool decision locally; a wrapper that reads `control_request` frames and writes `control_response` is reading frames that never arrive.
+2. **The blast radius is bounded by sandbox + credential hygiene.** sysbox / Daytona isolates the filesystem; the Docker socket proxy blocks privileged / host-net / host-path / dangerous-caps creates; the configured `github_identity:<name>` PAT is the only credential capable of reaching outside, and the PAT's GitHub permissions cap what `git push` / `gh` can do. The remaining surface is "Claude burns cycles on a long-running command" — bounded by the per-task wall-clock and idle timeouts on `claude -p`.
 
-**Defaults are loose. The container + Docker proxy + sysbox runtime are the security boundary; the gate is for visibility into externally-visible side effects, not in-container damage prevention** (the container's ephemerality is the recovery story; genuinely-dangerous things like `Privileged=true`, host-net, host-path binds, dangerous caps are blocked at the proxy layer where they belong).
+**CLI invocation contract:**
 
-Policy:
+| Flag | Plan | Execute | Why |
+|-|-|-|-|
+| `-p` | ✅ | ✅ | Headless mode. |
+| `--output-format stream-json` | ✅ | ✅ | Required for stream-json output. |
+| `--input-format stream-json` | ✅ | ✅ | Lets us frame the prompt as a `{type:"user"}` JSON line. |
+| `--include-partial-messages` | ✅ | ✅ | Streams `text_delta`s so the user sees progress. |
+| `--verbose` | ✅ | ✅ | Required by `--output-format stream-json`. |
+| `--permission-mode plan` | ✅ | ❌ | Plan mode is read-only by CLI contract. |
+| `--resume <sessionId>` | ❌ | ✅ | Execute resumes the plan-phase session. |
+| `--permission-prompt-tool stdio` | ❌ | ❌ | Would open the bidirectional control channel. We don't want it — sandbox is the boundary. |
+| `--bare` | ❌ | ❌ | Skips CLAUDE.md / hooks / MCP / skills / plugins auto-discovery. Skipped because we *do* want the repo's CLAUDE.md to influence Claude (if the repo ships one). Reconsider per-repo if the auto-discovery cost matters. |
 
-- **Always allow:** all file ops anywhere in container (Read/Edit/Write/Glob/Grep/MultiEdit/NotebookEdit), all read-only Bash, test/build/lint/format/typecheck, package installs (`pnpm install`, `cargo build`, `pip install`, etc.), local docker actions (`docker ps`, `docker run`, `docker compose up`), in-container `rm`. Most calls hit always-allow and reply in microseconds with no Telegram round trip.
-- **Prompt:** narrow set of external state changes — `git push`, `gh pr create / merge / review / close / edit / comment / ready / reopen`, `gh issue` mutations, `gh release / repo create / delete / edit`, `npm/pnpm/yarn publish | unpublish`, `cargo publish | yank`, `uv publish`, `twine upload | publish`, HTTP writes via `curl -X POST/PUT/DELETE/PATCH` or `wget --post-data` to non-localhost URLs.
-- **Deny:** empty static set. The proxy + sysbox boundary handles the genuinely-dangerous side. The decision log can still record an explicit user-denied response (`scope=once`, `decision=deny`).
+**Shutdown contract.** Stream-json input mode uses **stdin EOF as the CLI's graceful-shutdown signal** (documented in the community Go SDK protocol notes, observed in the SDK source's single-turn close path). Both runners write the user prompt as a single line, then immediately close stdin — the CLI finishes streaming its output and exits cleanly. Closing stdin *after* the `result` event arrives doesn't work reliably: the post-`result` close needs to traverse the remote-exec stdin proxy (Daytona's session-command WebSocket) faster than the 5-minute idle timer, which it often doesn't.
 
-Compound commands prompt if any sub-command is in the prompt set (worst-case wins): `pnpm test && git push` shows the push explicitly rather than letting it ride a blanket allow.
+**External reach.** What can actually escape the sandbox today:
+- **`git push` / `gh` writes** — bounded by the PAT's GitHub scope. Mitigation: provision the bot account with write access only to repos in `coding_repos`.
+- **Outbound HTTP** — the container has network egress. Cost surface (API spend), not safety surface.
+- **`docker run` via the proxy** — child containers inherit the proxy policy (no privileged, no host-net, no host-path); same cap as the parent.
 
-**Telegram surface.** Prompts are inline-keyboard messages: **Once** / **Task** / **Deny**. callback_data uses single-char wire codes (`o`/`t`/`d`) to fit Telegram's 64-byte limit alongside a full UUID taskId + 16-char requestId prefix. Identity-checked: `callback.from.id` resolves via `transportStore.resolveUser` and must match the conversation owner.
-
-**Decision log replay.** Each user response writes a row to `coding_tool_decisions` (per-task). On every subsequent request, the orchestrator builds a canonical pattern (`Bash(git push *)`, `Bash(gh pr create *)`, etc.) and replays the log newest-first; the most recent task-scoped match wins immediately, no Telegram round trip. Audit-only `once`-scoped rows are ignored on replay. No "Allow forever" / cross-task scope — that's the static policy's territory, edited out-of-band by the user (avoids the "poisoned plan in task A normalises a dangerous pattern for task B" failure mode).
-
-**Block indefinitely on Telegram outage.** Slice 3 design: the CLI just waits. Implementation uses a 7-day `step.waitForEvent` timeout as an abandoned-task safety net, not a deny-on-timeout. If a prompt hits the safety-net deny, it's logged for surfacing to the operator.
-
-**Per-profile auto-approve.** `profiles.coding_autoapprove_mode` (enum `off`/`on`, default `off`) lets a user opt a profile out of the Telegram round trip for prompt-worthy calls. Resolved once per execute run via `coding_tasks → conversations → profiles`; resolves to `off` when the task has no conversation (evolution / signal-pipeline triggers). Order of evaluation in `handlePermissionRequest`:
-
-1. **Decision-log replay** — task-scoped user decisions win first. A `scope=task, decision=deny` row beats profile autoapprove (pinned by test).
-2. **Static `policy.evaluate`** — `allow` / `deny` short-circuit before the autoapprove check.
-3. **Profile autoapprove** — when the resolved mode is `on` and the policy said `prompt`, return `allow` and persist `scope=once, decision=allow`. **The in-table audit is intentionally lossy at this point**: the row shape is identical to a `policy.allow` row, so a future compliance reviewer can't tell from `coding_tool_decisions` alone whether `Bash(git push *)` was auto-allowed by static policy (impossible — `git push` is in the prompt set) or by profile bypass. The profile's `coding_autoapprove_mode` is the higher-level audit; the row count under the prompt-worthy pattern set is the lower bound on how many bypasses happened. Adding a `decided_by` column would close the gap but isn't worth the schema churn today.
-4. **Telegram prompt** — fallback for `prompt` decisions when autoapprove is `off`.
-
-Toggle via `/profile autoapprove <name> [on|off]` (Telegram). The model is told nothing — its view of the gate is identical whether autoapprove is on or off, which is intentional (the user opts into "skip my prompts," not into nudging the model to take more liberties).
+No deny list, no auto-approve, no decision log, no Telegram inline keyboard, no `coding_tool_decisions` table. The user sees `tool_call` / `tool_result` events render in the task's progress stream — observability without runtime pause-points.
 
 ### Merge gate `[confirmed]`
 
@@ -709,9 +708,8 @@ Ship order. Each phase is independently useful — stop at any point and the pri
 
 1. **Sandbox primitives.** `containers`, `cogmo_instances`, `networks`, `volumes` tables; sibling-container creation against host daemon with sysbox runtime; label injection; root-task cascade on teardown; reaper cron (TTL + orphan + stale-row passes). Proxy is **body-level pass-through** on `POST /containers/create` (no `HostConfig` filtering yet — P2 adds the Privileged/NetworkMode/Binds/CapAdd denies). Endpoint-category blocks (`/swarm/*`, `/plugins/*`, `/nodes/*`) are *always on* regardless of phase — they're structural, not body policy.
 2. **Claude backend, plan-only.** Subprocess wrap with `--permission-mode plan`, JSONL parsing, session capture. Stream plan text to Telegram. Emit `plan_ready` with inline keyboard. No execute path wired yet.
-3. **Plan approval + execute.** Approval writes `plan_approved_at`, orchestrator resumes session with `--permission-mode acceptEdits`. Text-delta streaming into a single edited Telegram message.
-4. **Tool gate.** Permission prompts over `stream-json` stdin → Telegram inline keyboards → decision back to stdin. Default policy table from Autonomy Gates applies.
-5. **Verify + push + draft PR.** In-container `pnpm typecheck && pnpm lint && pnpm test`, git commit + sign + push, `gh pr create --draft`. Teardown policy (worktree persistence table) executes. Resource usage written to `coding_tasks.resource_usage`.
+3. **Plan approval + execute.** Approval writes `plan_approved_at`, orchestrator resumes the session via `--resume <sid>`. Text-delta streaming into a single edited Telegram message. Tool calls render as observability events (`tool_call` / `tool_result`); the sandbox container is the security boundary.
+4. **Verify + push + draft PR.** In-container `pnpm typecheck && pnpm lint && pnpm test`, git commit + sign + push, `gh pr create --draft`. Teardown policy (worktree persistence table) executes. Resource usage written to `coding_tasks.resource_usage`.
 
 After (5): end-to-end working flow for the single-backend, trusted-repo case.
 

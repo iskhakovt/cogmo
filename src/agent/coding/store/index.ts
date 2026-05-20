@@ -1,7 +1,6 @@
 import { and, asc, count, desc, eq, inArray, ne, notInArray, sql } from "drizzle-orm";
 import { single } from "../../../db/helpers.js";
 import type { Transaction } from "../../../db/index.js";
-import { conversations, profiles } from "../../store/schema.js";
 import {
   type DevcontainerSpec,
   type PrMetadata,
@@ -9,7 +8,7 @@ import {
   ResourceUsageSchema,
   type WorktreeAssignment,
 } from "../types.js";
-import { codingRepos, codingTasks, codingToolDecisions } from "./schema.js";
+import { codingRepos, codingTasks } from "./schema.js";
 
 export type CodingBackend = "claude" | "codex";
 export type CodingTriggerSource = "user" | "evolution" | "signal_pipeline";
@@ -24,9 +23,6 @@ export type CodingTaskStatus =
   | "pr_open"
   | "failed"
   | "cancelled";
-
-export type ToolDecision = "allow" | "deny";
-export type DecisionScope = "once" | "task";
 
 const TERMINAL_STATUSES: ReadonlyArray<CodingTaskStatus> = [
   "pr_open",
@@ -60,16 +56,6 @@ export interface CodingRepoRow {
   identityName: string;
   /** Wall-clock cap for the post-hoc verify step (slice 4.0e). */
   verifyTimeoutSeconds: number;
-  createdAt: Date;
-}
-
-export interface CodingToolDecisionRow {
-  id: string;
-  taskId: string;
-  tool: string;
-  pattern: string;
-  decision: ToolDecision;
-  scope: DecisionScope;
   createdAt: Date;
 }
 
@@ -327,46 +313,6 @@ export interface CodingStore {
     | { kind: "already_terminal"; status: CodingTaskStatus }
     | { kind: "not_found" }
   >;
-
-  // --- Tool decisions ---
-
-  /**
-   * Record a permission decision for a task. `pattern` is the canonical
-   * matcher that future requests will be checked against (when scope=`task`)
-   * or the resolved request id (when scope=`once`, audit only).
-   */
-  insertToolDecision(
-    tx: Transaction,
-    params: {
-      taskId: string;
-      tool: string;
-      pattern: string;
-      decision: ToolDecision;
-      scope: DecisionScope;
-    },
-  ): Promise<CodingToolDecisionRow>;
-
-  /**
-   * List all decisions for a task, ordered oldest-first. The orchestrator's
-   * tool-gate replays this list against incoming permission_request events
-   * and applies the first matching `task`-scoped row.
-   */
-  listToolDecisionsForTask(
-    tx: Transaction,
-    taskId: string,
-  ): Promise<readonly CodingToolDecisionRow[]>;
-
-  // --- Tool-gate context ---
-
-  /**
-   * Resolve a task's effective `coding_autoapprove_mode` by walking
-   * `coding_tasks → conversations → profiles`. Returns `null` when the
-   * task has no conversation (evolution / signal-pipeline triggers) —
-   * those run with the default `off` semantics since there's no user
-   * profile to consult. Used by the orchestrator's tool gate to
-   * short-circuit prompt-worthy decisions when the profile opts in.
-   */
-  getCodingAutoapproveModeForTask(tx: Transaction, taskId: string): Promise<"off" | "on" | null>;
 }
 
 export class DrizzleCodingStore implements CodingStore {
@@ -717,56 +663,6 @@ export class DrizzleCodingStore implements CodingStore {
     }
     await tx.update(codingTasks).set({ planApprovedAt: approvedAt }).where(eq(codingTasks.id, id));
     return { kind: "approved" as const, conversationId: row.conversationId };
-  }
-
-  async insertToolDecision(
-    tx: Transaction,
-    params: {
-      taskId: string;
-      tool: string;
-      pattern: string;
-      decision: ToolDecision;
-      scope: DecisionScope;
-    },
-  ): Promise<CodingToolDecisionRow> {
-    const row = single(
-      await tx
-        .insert(codingToolDecisions)
-        .values({
-          taskId: params.taskId,
-          tool: params.tool,
-          pattern: params.pattern,
-          decision: params.decision,
-          scope: params.scope,
-        })
-        .returning(),
-    );
-    return row;
-  }
-
-  async listToolDecisionsForTask(
-    tx: Transaction,
-    taskId: string,
-  ): Promise<readonly CodingToolDecisionRow[]> {
-    return tx
-      .select()
-      .from(codingToolDecisions)
-      .where(eq(codingToolDecisions.taskId, taskId))
-      .orderBy(asc(codingToolDecisions.createdAt));
-  }
-
-  async getCodingAutoapproveModeForTask(
-    tx: Transaction,
-    taskId: string,
-  ): Promise<"off" | "on" | null> {
-    const rows = await tx
-      .select({ mode: profiles.codingAutoapproveMode })
-      .from(codingTasks)
-      .innerJoin(conversations, eq(codingTasks.conversationId, conversations.id))
-      .innerJoin(profiles, eq(conversations.profileId, profiles.id))
-      .where(eq(codingTasks.id, taskId))
-      .limit(1);
-    return rows[0]?.mode ?? null;
   }
 
   async cancelTaskIfActive(

@@ -114,7 +114,6 @@ Reference: `src/sandbox/supervisor.test.ts` "stopTask still calls cleanupAskpass
 
 Cross-module contracts that no single module test can verify:
 - Every `setTaskStatus(...)` produces the corresponding `coding/task/<status>` event on the bus.
-- Every tool permission decision produces a `coding_tool_decisions` row with the correct scope.
 - Every `ctx.*` skill RPC produces a `skill_context_calls` audit row with method + target.
 
 These belong in **integration tests** that exercise the orchestrator + event bus + audit table together, not in module-isolated unit tests.

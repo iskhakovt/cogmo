@@ -158,16 +158,7 @@ export interface Profile {
    * and falls back to a native typing indicator while in flight.
    */
   streamEdits: boolean;
-  /**
-   * When `on`, the coding-delegation tool gate skips the Telegram permission
-   * round trip for prompt-worthy operations (`git push`, `gh pr/issue`
-   * mutations, publishes, external HTTP writes) and auto-allows. The
-   * `policy.deny` set still denies. Toggled via `/profile autoapprove`.
-   */
-  codingAutoapproveMode: CodingAutoapproveMode;
 }
-
-export type CodingAutoapproveMode = "off" | "on";
 
 export interface ProfileUpdates {
   name?: string;
@@ -181,7 +172,6 @@ export interface ProfileUpdates {
   memoryScope?: ProfileMemoryScope | null;
   streamChunkChars?: number;
   streamEdits?: boolean;
-  codingAutoapproveMode?: CodingAutoapproveMode;
 }
 
 /** Per-user registry row for `profiles.profile_class`. */
@@ -1446,7 +1436,6 @@ export class DrizzleAgentStore implements AgentStore {
         profileClass: profiles.profileClass,
         streamChunkChars: profiles.streamChunkChars,
         streamEdits: profiles.streamEdits,
-        codingAutoapproveMode: profiles.codingAutoapproveMode,
       })
       .from(profiles)
       .where(eq(profiles.id, profileId))
@@ -1492,7 +1481,6 @@ export class DrizzleAgentStore implements AgentStore {
           profileClass: profiles.profileClass,
           streamChunkChars: profiles.streamChunkChars,
           streamEdits: profiles.streamEdits,
-          codingAutoapproveMode: profiles.codingAutoapproveMode,
         }),
       );
       return row as Profile;
@@ -1516,7 +1504,6 @@ export class DrizzleAgentStore implements AgentStore {
         profileClass: profiles.profileClass,
         streamChunkChars: profiles.streamChunkChars,
         streamEdits: profiles.streamEdits,
-        codingAutoapproveMode: profiles.codingAutoapproveMode,
       })
       .from(profiles)
       .where(or(isNull(profiles.userId), eq(profiles.userId, userId)))
@@ -1561,7 +1548,6 @@ export class DrizzleAgentStore implements AgentStore {
           profileClass: profiles.profileClass,
           streamChunkChars: profiles.streamChunkChars,
           streamEdits: profiles.streamEdits,
-          codingAutoapproveMode: profiles.codingAutoapproveMode,
         });
       return single(rows) as Profile;
     });

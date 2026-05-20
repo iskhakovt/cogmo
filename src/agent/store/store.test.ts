@@ -111,7 +111,6 @@ describe("DrizzleAgentStore", () => {
         profileClass: null,
         streamChunkChars: 4000,
         streamEdits: true,
-        codingAutoapproveMode: "off",
       });
     });
 

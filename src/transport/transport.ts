@@ -18,7 +18,6 @@ import {
 } from "../agent/store/errors.js";
 import type {
   AgentStore,
-  CodingAutoapproveMode,
   ConversationSummary,
   CustomCompartment,
   EvolutionEventRow,
@@ -90,13 +89,6 @@ export interface ProfileInput {
    */
   streamChunkChars?: number;
   streamEdits?: boolean;
-  /**
-   * Coding-delegation tool gate. `"on"` skips the Telegram permission round
-   * trip for prompt-worthy operations (`git push`, `gh pr/issue` mutations,
-   * publishes, external HTTP writes); `policy.deny` still denies. Toggled
-   * via `/profile autoapprove`. Default `"off"`.
-   */
-  codingAutoapproveMode?: CodingAutoapproveMode;
   // summarizationModel / extractionModel are profile-level fields in the DB but not yet exposed
   // via Transport — /profile edit doesn't cover them. Add back here when the dialog does.
 }
@@ -648,22 +640,6 @@ export interface Transport {
       taskId: string,
       tapperPlatformHandle: string,
       reason: string,
-    ): Promise<Result<{ taskId: string }, TransportError>>;
-    /**
-     * Tool-gate response — emitted when the user taps a button on the
-     * permission inline keyboard. Identity-checked against the
-     * conversation owner. Transport just emits the
-     * `coding/task/permission-decision` event; the orchestrator's
-     * `step.waitForEvent` resumes on it.
-     */
-    respondPermission(
-      params: {
-        taskId: string;
-        requestIdShort: string;
-        decision: "allow" | "deny";
-        scope: "once" | "task";
-      },
-      tapperPlatformHandle: string,
     ): Promise<Result<{ taskId: string }, TransportError>>;
   };
 
@@ -2033,28 +2009,6 @@ export function createTransport(deps: {
           case "not_found":
             return err({ code: "task_not_found" as const, taskId });
         }
-      },
-      async respondPermission(params, tapperPlatformHandle) {
-        if (!codingStore) return err({ code: "sandbox_disabled" as const });
-        const identityCheck = await checkTaskOwnership(params.taskId, tapperPlatformHandle);
-        if (identityCheck.isErr()) return err(identityCheck.error);
-        // No DB transition here — the orchestrator's `step.waitForEvent`
-        // resumes on this Inngest event and applies (decision, scope) to
-        // the decision log itself. Idempotency at this layer would
-        // require de-duplicating the event; not necessary because the
-        // orchestrator's wait matches on `requestId` and only the first
-        // arriving event satisfies the wait. Subsequent taps emit but
-        // don't unblock anything — they're harmless.
-        await inngest.send({
-          name: "coding/task/permission-decision",
-          data: {
-            taskId: params.taskId,
-            requestId: params.requestIdShort,
-            decision: params.decision,
-            scope: params.scope,
-          },
-        });
-        return ok({ taskId: params.taskId });
       },
     },
 

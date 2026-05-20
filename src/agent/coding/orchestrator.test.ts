@@ -229,27 +229,16 @@ function backendYielding(events: CodingEvent[]): CodingBackend {
     plan: async function* () {
       for (const ev of events) yield ev;
     },
-    execute: async () => {
-      throw new Error("execute not exercised by this test — use executeBackendYielding");
-    },
+    execute: () => throwingPlan("execute not exercised by this test — use executeBackendYielding"),
   };
 }
 
-function executeBackendYielding(
-  events: CodingEvent[],
-  respondPermission: (
-    requestId: string,
-    response: { behavior: "allow" | "deny" },
-  ) => Promise<void> = async () => {},
-): CodingBackend {
+function executeBackendYielding(events: CodingEvent[]): CodingBackend {
   return {
     plan: () => throwingPlan("plan not exercised by this test — use backendYielding"),
-    execute: async () => ({
-      events: (async function* () {
-        for (const ev of events) yield ev;
-      })(),
-      respondPermission,
-    }),
+    execute: async function* () {
+      for (const ev of events) yield ev;
+    },
   };
 }
 
@@ -630,9 +619,7 @@ describe("runCodingTask", () => {
       plan: () => {
         throw new Error("backend exploded");
       },
-      execute: async () => {
-        throw new Error("not used");
-      },
+      execute: () => throwingPlan("execute not used in this test"),
     };
     const sendCalls: { eventName: string; whenStatus: string | null }[] = [];
     const stepSendEventThrowing = (async (_: string, payload: unknown) => {
@@ -672,9 +659,7 @@ describe("runCodingTask", () => {
       plan: () => {
         throw new Error("backend exploded");
       },
-      execute: async () => {
-        throw new Error("not used");
-      },
+      execute: () => throwingPlan("execute not used in this test"),
     };
     const payloads: unknown[] = [];
     const capturingStepSendEvent = (async (_: string, payload: unknown) => {
@@ -745,9 +730,7 @@ describe("runCodingTask", () => {
       plan: () => {
         throw new Error("backend exploded");
       },
-      execute: async () => {
-        throw new Error("not used");
-      },
+      execute: () => throwingPlan("execute not used in this test"),
     };
     // First UPDATE call (`set-status-planning` inside the try) succeeds;
     // the SECOND call (the catch path's status="failed" write) throws.
@@ -929,10 +912,7 @@ async function seedExecutableTask(
 
 // Shared fakes for the runCodingExecute tests. The pending_verify path
 // emits `coding/task/cli-done` (slice 4.0h handoff) — a no-op send is
-// required to avoid the orchestrator throwing on the emit step. The
-// tool gate isn't exercised here (no permission_request events in these
-// backends), so `stepWaitForEvent` is a stub that never fires.
-const fakeStepWaitForEvent = (async () => null) as any;
+// required to avoid the orchestrator throwing on the emit step.
 const fakeInngest = fakeInngestShared;
 
 describe("runCodingExecute", () => {
@@ -969,7 +949,6 @@ describe("runCodingExecute", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
       stepRun,
-      stepWaitForEvent: fakeStepWaitForEvent,
       stepSendEvent,
       inngest: fakeInngest,
     });
@@ -1014,7 +993,6 @@ describe("runCodingExecute", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
       stepRun,
-      stepWaitForEvent: fakeStepWaitForEvent,
       stepSendEvent,
       inngest: fakeInngest,
     });
@@ -1059,7 +1037,6 @@ describe("runCodingExecute", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
       stepRun,
-      stepWaitForEvent: fakeStepWaitForEvent,
       stepSendEvent,
       inngest: fakeInngest,
     });
@@ -1095,7 +1072,6 @@ describe("runCodingExecute", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
       stepRun,
-      stepWaitForEvent: fakeStepWaitForEvent,
       stepSendEvent: capturingStepSendEvent,
       inngest: fakeInngest,
     });
@@ -1121,7 +1097,6 @@ describe("runCodingExecute", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend }),
       stepRun,
-      stepWaitForEvent: fakeStepWaitForEvent,
       stepSendEvent,
       inngest: fakeInngest,
     });
@@ -1153,7 +1128,6 @@ describe("runCodingExecute", () => {
           openExecuteStream: async () => NULL_EXECUTE_STREAM,
         }),
         stepRun,
-        stepWaitForEvent: fakeStepWaitForEvent,
         stepSendEvent,
         inngest: fakeInngest,
       }),
@@ -1178,7 +1152,6 @@ describe("runCodingExecute", () => {
         taskId: task.id,
         deps: makeDeps({ sandbox, backend: executeBackendYielding([]) }),
         stepRun,
-        stepWaitForEvent: fakeStepWaitForEvent,
         stepSendEvent,
         inngest: fakeInngest,
       }),
@@ -1192,7 +1165,6 @@ describe("runCodingExecute", () => {
         taskId: "019d0000-0000-7000-8000-000000000099",
         deps: makeDeps({ sandbox, backend: executeBackendYielding([]) }),
         stepRun,
-        stepWaitForEvent: fakeStepWaitForEvent,
         stepSendEvent,
         inngest: fakeInngest,
       }),
@@ -1233,7 +1205,6 @@ describe("runCodingExecute", () => {
         secretsStore: fakeSecrets,
       }),
       stepRun,
-      stepWaitForEvent: fakeStepWaitForEvent,
       stepSendEvent,
       inngest: fakeInngest,
     });
@@ -1270,7 +1241,6 @@ describe("runCodingExecute", () => {
         secretsStore: fakeSecrets,
       }),
       stepRun,
-      stepWaitForEvent: fakeStepWaitForEvent,
       stepSendEvent,
       inngest: fakeInngest,
     });
@@ -1299,9 +1269,7 @@ describe("runCodingExecute", () => {
     };
     const throwingBackend: CodingBackend = {
       plan: () => emptyPlan,
-      execute: async () => {
-        throw new Error("backend exploded");
-      },
+      execute: () => throwingPlan("backend exploded"),
     };
     const sendCalls: { eventName: string; whenStatus: string | null }[] = [];
     const stepSendEventThrowing = (async (_: string, payload: unknown) => {
@@ -1318,7 +1286,6 @@ describe("runCodingExecute", () => {
         taskId: task.id,
         deps: makeDeps({ sandbox, backend: throwingBackend }),
         stepRun,
-        stepWaitForEvent: fakeStepWaitForEvent,
         stepSendEvent: stepSendEventThrowing,
         inngest: fakeInngest,
       }),
