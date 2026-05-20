@@ -424,21 +424,26 @@ describe("runCodingTask", () => {
     expect(createCalls).toHaveLength(0);
   });
 
-  it("profile coding_autoapprove_mode=on auto-approves the plan and emits coding/task/plan-approved", async () => {
-    const repo = await seedRepo();
+  async function seedUserTaskWithAutoapprove(
+    repo: CodingRepoRow,
+    mode: "off" | "on",
+    namePrefix: string,
+  ): Promise<CodingTaskRow> {
     // Seed user + profile + conversation + task so the join in
     // getCodingAutoapproveModeForTask resolves to the profile we toggle.
     const user = await tx((trx) => agentStore.createUser(trx));
     const profile = await tx((trx) =>
       agentStore.createProfile(trx, {
         userId: user.id,
-        name: `auto-${Math.random().toString(36).slice(2)}`,
+        name: `${namePrefix}-${Math.random().toString(36).slice(2)}`,
         basePrompt: "x",
         model: "claude-haiku-4-5-20251001",
         toolSet: [],
       }),
     );
-    await tx((trx) => agentStore.updateProfile(trx, profile.id, { codingAutoapproveMode: "on" }));
+    if (mode === "on") {
+      await tx((trx) => agentStore.updateProfile(trx, profile.id, { codingAutoapproveMode: "on" }));
+    }
     const conv = await tx((trx) =>
       agentStore.createConversation(trx, {
         userId: user.id,
@@ -446,16 +451,21 @@ describe("runCodingTask", () => {
         isPrivate: true,
       }),
     );
-    const task = await tx((trx) =>
+    return tx((trx) =>
       store.insertTask(trx, {
         repoId: repo.id,
         conversationId: conv.id,
-        goal: "auto-approved task",
+        goal: `${namePrefix} task`,
         triggerSource: "user",
         backend: "claude",
         allowPrivilegedRunc: false,
       }),
     );
+  }
+
+  it("profile coding_autoapprove_mode=on auto-approves the plan and emits coding/task/plan-approved", async () => {
+    const repo = await seedRepo();
+    const task = await seedUserTaskWithAutoapprove(repo, "on", "auto");
 
     const { sandbox } = fakeSandbox();
     const backend = backendYielding([
@@ -490,34 +500,7 @@ describe("runCodingTask", () => {
 
   it("profile coding_autoapprove_mode=off keeps the Telegram round trip (no auto plan-approved emit)", async () => {
     const repo = await seedRepo();
-    const user = await tx((trx) => agentStore.createUser(trx));
-    const profile = await tx((trx) =>
-      agentStore.createProfile(trx, {
-        userId: user.id,
-        name: `manual-${Math.random().toString(36).slice(2)}`,
-        basePrompt: "x",
-        model: "claude-haiku-4-5-20251001",
-        toolSet: [],
-      }),
-    );
-    // Default is "off" — no update call.
-    const conv = await tx((trx) =>
-      agentStore.createConversation(trx, {
-        userId: user.id,
-        profileId: profile.id,
-        isPrivate: true,
-      }),
-    );
-    const task = await tx((trx) =>
-      store.insertTask(trx, {
-        repoId: repo.id,
-        conversationId: conv.id,
-        goal: "manual approval task",
-        triggerSource: "user",
-        backend: "claude",
-        allowPrivilegedRunc: false,
-      }),
-    );
+    const task = await seedUserTaskWithAutoapprove(repo, "off", "manual");
 
     const { sandbox } = fakeSandbox();
     const backend = backendYielding([

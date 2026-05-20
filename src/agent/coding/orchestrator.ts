@@ -436,13 +436,16 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     // until the human approves via Telegram — UNLESS the profile has
     // `coding_autoapprove_mode='on'`, in which case we stamp
     // `plan_approved_at` and emit `coding/task/plan-approved` directly
-    // (same code path the Telegram approve callback takes). Resolved here
-    // so the autoapprove decision sits inside the durable plan-orchestrator
-    // run; null mode (task without conversation — non-user triggers) is
-    // treated as `off` and never reaches this branch anyway.
+    // (same code path the Telegram approve callback takes). Null mode
+    // (task without conversation — non-user triggers) is treated as `off`
+    // and never reaches this branch anyway. Wrapped in `stepRun` so a
+    // future loosening of `retries: 0` on this function doesn't quietly
+    // turn a transient DB blip into a fresh CLI invocation on replay.
     const autoapproveMode =
       task.triggerSource === "user"
-        ? ((await runInTx((tx) => store.getCodingAutoapproveModeForTask(tx, taskId))) ?? "off")
+        ? ((await stepRun("resolve-autoapprove-mode", () =>
+            runInTx((tx) => store.getCodingAutoapproveModeForTask(tx, taskId)),
+          )) ?? "off")
         : "off";
     const nextStatus: CodingOrchestratorResult["status"] =
       task.triggerSource === "user" ? "awaiting_approval" : "executing";
