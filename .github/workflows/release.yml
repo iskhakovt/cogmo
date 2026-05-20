@@ -100,7 +100,10 @@ jobs:
     needs: [release]
     if: needs.release.outputs.new_release_published == 'true'
     uses: ./.github/workflows/publish.yml
-    # Keep in sync with the docker job in publish.yml.
+    # Union of permissions across publish.yml's jobs — reusable-workflow
+    # permissions are capped by the caller, so the trivy scan job's
+    # security-events: write must be granted here too. Keep in sync.
     permissions:
       contents: read
       packages: write
+      security-events: write
