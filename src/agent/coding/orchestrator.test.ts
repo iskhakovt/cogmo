@@ -18,6 +18,7 @@ import type { SecretsStore } from "../../secrets/store/index.js";
 import { expectDefined } from "../../test/assertions.js";
 import { makeStepRun, makeStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
+import { DrizzleAgentStore } from "../store/index.js";
 import type { CodingBackend, CodingEvent } from "./backend.js";
 import {
   type CodingOrchestratorDeps,
@@ -36,6 +37,7 @@ let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleCodingStore;
 let sandboxStore: DrizzleSandboxStore;
+let agentStore: DrizzleAgentStore;
 let instanceId: string;
 let baseDir: string;
 let repoPath: string;
@@ -44,6 +46,7 @@ beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
   store = new DrizzleCodingStore();
   sandboxStore = new DrizzleSandboxStore();
+  agentStore = new DrizzleAgentStore();
 
   baseDir = mkdtempSync(join(tmpdir(), "cogmo-orch-test-"));
   repoPath = join(baseDir, "repo");
@@ -419,6 +422,127 @@ describe("runCodingTask", () => {
       expect(result.failureReason).toMatch(/claude_code_oauth_token/);
     }
     expect(createCalls).toHaveLength(0);
+  });
+
+  it("profile coding_autoapprove_mode=on auto-approves the plan and emits coding/task/plan-approved", async () => {
+    const repo = await seedRepo();
+    // Seed user + profile + conversation + task so the join in
+    // getCodingAutoapproveModeForTask resolves to the profile we toggle.
+    const user = await tx((trx) => agentStore.createUser(trx));
+    const profile = await tx((trx) =>
+      agentStore.createProfile(trx, {
+        userId: user.id,
+        name: `auto-${Math.random().toString(36).slice(2)}`,
+        basePrompt: "x",
+        model: "claude-haiku-4-5-20251001",
+        toolSet: [],
+      }),
+    );
+    await tx((trx) => agentStore.updateProfile(trx, profile.id, { codingAutoapproveMode: "on" }));
+    const conv = await tx((trx) =>
+      agentStore.createConversation(trx, {
+        userId: user.id,
+        profileId: profile.id,
+        isPrivate: true,
+      }),
+    );
+    const task = await tx((trx) =>
+      store.insertTask(trx, {
+        repoId: repo.id,
+        conversationId: conv.id,
+        goal: "auto-approved task",
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      }),
+    );
+
+    const { sandbox } = fakeSandbox();
+    const backend = backendYielding([
+      { kind: "session_started", sessionId: "sess-AUTO" },
+      { kind: "plan_ready", plan: "## Plan\n1. Do X\n" },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+
+    const sentEvents: { name: string; data: unknown }[] = [];
+    const recordingStepSendEvent = (async (_: string, payload: unknown) => {
+      sentEvents.push(payload as { name: string; data: unknown });
+      return { ids: [] };
+    }) as never;
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend }),
+      stepRun,
+      stepSendEvent: recordingStepSendEvent,
+    });
+    // Status stays at awaiting_approval (the execute orchestrator
+    // transitions it to executing on the event we just emitted).
+    expect(result.status).toBe("awaiting_approval");
+
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.planApprovedAt).toBeInstanceOf(Date);
+    // The auto-approve emit landed.
+    const approvedEvents = sentEvents.filter((e) => e.name === "coding/task/plan-approved");
+    expect(approvedEvents).toHaveLength(1);
+    expect(approvedEvents[0]?.data).toMatchObject({ taskId: task.id });
+  });
+
+  it("profile coding_autoapprove_mode=off keeps the Telegram round trip (no auto plan-approved emit)", async () => {
+    const repo = await seedRepo();
+    const user = await tx((trx) => agentStore.createUser(trx));
+    const profile = await tx((trx) =>
+      agentStore.createProfile(trx, {
+        userId: user.id,
+        name: `manual-${Math.random().toString(36).slice(2)}`,
+        basePrompt: "x",
+        model: "claude-haiku-4-5-20251001",
+        toolSet: [],
+      }),
+    );
+    // Default is "off" — no update call.
+    const conv = await tx((trx) =>
+      agentStore.createConversation(trx, {
+        userId: user.id,
+        profileId: profile.id,
+        isPrivate: true,
+      }),
+    );
+    const task = await tx((trx) =>
+      store.insertTask(trx, {
+        repoId: repo.id,
+        conversationId: conv.id,
+        goal: "manual approval task",
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      }),
+    );
+
+    const { sandbox } = fakeSandbox();
+    const backend = backendYielding([
+      { kind: "session_started", sessionId: "sess-MANUAL" },
+      { kind: "plan_ready", plan: "## Plan\n1. Do X\n" },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+
+    const sentEvents: { name: string }[] = [];
+    const recordingStepSendEvent = (async (_: string, payload: unknown) => {
+      sentEvents.push(payload as { name: string });
+      return { ids: [] };
+    }) as never;
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend }),
+      stepRun,
+      stepSendEvent: recordingStepSendEvent,
+    });
+    expect(result.status).toBe("awaiting_approval");
+
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.planApprovedAt).toBeNull();
+    expect(sentEvents.find((e) => e.name === "coding/task/plan-approved")).toBeUndefined();
   });
 
   it("automated trigger (evolution) auto-advances to executing", async () => {

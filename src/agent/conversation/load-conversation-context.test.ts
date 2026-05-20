@@ -23,6 +23,7 @@ function profile(overrides: Partial<Profile> = {}): Profile {
     profileClass: null,
     streamChunkChars: 4000,
     streamEdits: true,
+    codingAutoapproveMode: "off",
     ...overrides,
   };
 }

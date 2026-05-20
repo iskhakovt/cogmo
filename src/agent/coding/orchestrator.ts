@@ -140,7 +140,8 @@ interface RunParams {
    * Durable bus emit. Used in the in-worker catch path so a transient
    * send blip surfaces as a function failure (caught by the
    * `coding-task-reconcile` system-event subscriber) rather than a
-   * silently-swallowed `coding/task/failed` event.
+   * silently-swallowed `coding/task/failed` event. Also used by the
+   * auto-approve path to emit `coding/task/plan-approved`.
    */
   stepSendEvent: StepSendEvent;
 }
@@ -431,8 +432,18 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     );
 
     // For automated triggers (evolution, signal_pipeline) we'd auto-advance
-    // straight to executing. Slice 1 only handles the user trigger path —
-    // park at awaiting_approval until the human approves via Telegram.
+    // straight to executing. User-triggered tasks park at awaiting_approval
+    // until the human approves via Telegram — UNLESS the profile has
+    // `coding_autoapprove_mode='on'`, in which case we stamp
+    // `plan_approved_at` and emit `coding/task/plan-approved` directly
+    // (same code path the Telegram approve callback takes). Resolved here
+    // so the autoapprove decision sits inside the durable plan-orchestrator
+    // run; null mode (task without conversation — non-user triggers) is
+    // treated as `off` and never reaches this branch anyway.
+    const autoapproveMode =
+      task.triggerSource === "user"
+        ? ((await runInTx((tx) => store.getCodingAutoapproveModeForTask(tx, taskId))) ?? "off")
+        : "off";
     const nextStatus: CodingOrchestratorResult["status"] =
       task.triggerSource === "user" ? "awaiting_approval" : "executing";
     await stepRun("set-status-awaiting", () =>
@@ -446,6 +457,32 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
         `plan stream finalize notification failed (task already ${nextStatus})`,
       );
     });
+    // Auto-approve: same effect as the Telegram approve callback. Uses
+    // `approvePlanIfPending` so the path is atomic with concurrent
+    // cancels/manual approvals — if the user managed to tap Cancel in the
+    // microseconds between `set-status-awaiting` and this step, the
+    // approve becomes a no-op and the task stays cancelled.
+    if (task.triggerSource === "user" && autoapproveMode === "on") {
+      const approvedAt = new Date();
+      const approveResult = await stepRun("auto-approve-plan", () =>
+        runInTx((tx) => store.approvePlanIfPending(tx, taskId, approvedAt)),
+      );
+      if (approveResult.kind === "approved") {
+        await stepSendEvent(
+          "emit-plan-approved",
+          codingTaskPlanApproved.create({
+            taskId,
+            approvedAt: approvedAt.toISOString(),
+          }),
+        );
+        taskLog.info("plan auto-approved via profile autoapprove=on");
+      } else {
+        taskLog.info(
+          { kind: approveResult.kind },
+          "auto-approve skipped — task no longer awaiting approval",
+        );
+      }
+    }
     return { status: nextStatus, plan: result.plan ?? "" };
   } catch (err) {
     const reason = (err as Error).message;

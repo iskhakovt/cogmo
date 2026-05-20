@@ -1,6 +1,7 @@
 import { and, asc, count, desc, eq, inArray, ne, notInArray, sql } from "drizzle-orm";
 import { single } from "../../../db/helpers.js";
 import type { Transaction } from "../../../db/index.js";
+import { conversations, profiles } from "../../store/schema.js";
 import {
   type DevcontainerSpec,
   type PrMetadata,
@@ -313,6 +314,17 @@ export interface CodingStore {
     | { kind: "already_terminal"; status: CodingTaskStatus }
     | { kind: "not_found" }
   >;
+
+  /**
+   * Resolve a task's effective `coding_autoapprove_mode` by walking
+   * `coding_tasks → conversations → profiles`. Returns `null` when the
+   * task has no conversation (evolution / signal-pipeline triggers) —
+   * the plan orchestrator treats null as `off` since those triggers
+   * already bypass the plan-approval gate by design. Used by the plan
+   * orchestrator to decide whether to auto-stamp `plan_approved_at` once
+   * the plan text is persisted.
+   */
+  getCodingAutoapproveModeForTask(tx: Transaction, taskId: string): Promise<"off" | "on" | null>;
 }
 
 export class DrizzleCodingStore implements CodingStore {
@@ -697,5 +709,19 @@ export class DrizzleCodingStore implements CodingStore {
       .set({ status: "cancelled", failureReason: reason })
       .where(eq(codingTasks.id, id));
     return { kind: "cancelled" as const, conversationId: row.conversationId };
+  }
+
+  async getCodingAutoapproveModeForTask(
+    tx: Transaction,
+    taskId: string,
+  ): Promise<"off" | "on" | null> {
+    const rows = await tx
+      .select({ mode: profiles.codingAutoapproveMode })
+      .from(codingTasks)
+      .innerJoin(conversations, eq(codingTasks.conversationId, conversations.id))
+      .innerJoin(profiles, eq(conversations.profileId, profiles.id))
+      .where(eq(codingTasks.id, taskId))
+      .limit(1);
+    return rows[0]?.mode ?? null;
   }
 }

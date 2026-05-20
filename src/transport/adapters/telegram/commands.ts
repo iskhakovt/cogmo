@@ -81,6 +81,9 @@ const USAGE = {
     "  /profile stream <name> chunk=500 edits=off              → both at once\n" +
     "                                                          (use chunk=N edits=on|off — the = is required;\n" +
     "                                                          'chunk 500' without = becomes part of the name)\n" +
+    "  /profile autoapprove <name>                             → show current coding-delegation plan autoapprove\n" +
+    "  /profile autoapprove <name> on                          → auto-approve plans (skip Telegram round trip)\n" +
+    "  /profile autoapprove <name> off                         → require Telegram approve tap before execute (default)\n" +
     `  Compartments: ${CORE_LIST}\n` +
     "  Trust:        first-party, any",
   classes:
@@ -320,6 +323,16 @@ export async function handleProfile(
       // That lets a profile literally named `clear` be addressed here.
       const { name, streamTokens } = splitStreamArgs(rest);
       return replyProfileStream(transport, ctx, handle, name, streamTokens);
+    }
+    case "autoapprove": {
+      // Last token is the action (`on`/`off`) when present; everything
+      // before is the profile name. Without an action the command shows
+      // current state. A profile literally named `on` or `off` is
+      // unaddressable here (same trade-off as `class … clear`).
+      const last = rest[rest.length - 1]?.toLowerCase();
+      const action = last === "on" || last === "off" ? last : undefined;
+      const name = action ? rest.slice(0, -1).join(" ") : rest.join(" ");
+      return replyProfileAutoapprove(transport, ctx, handle, name, action);
     }
     default:
       await ctx.reply(USAGE.profile);
@@ -1382,6 +1395,62 @@ function formatStreamPrefs(name: string, chunk: number, edits: boolean): string 
     ? "edits on (mid-message edits + banners)"
     : "edits off (append-only; typing indicator for progress)";
   return `Stream prefs for "${name}":\n  chunk: ${chunk} chars\n  ${editsLine}`;
+}
+
+// ── /profile autoapprove ──────────────────────────────────────────────
+
+/**
+ * `/profile autoapprove <name> [on|off]`. With no action, prints the
+ * current mode. With `on`/`off`, flips the profile's plan-gate
+ * autoapprove: `on` skips the Telegram approve/revise/cancel round trip
+ * after the plan streams and auto-approves; `off` (default) keeps the
+ * round trip.
+ */
+async function replyProfileAutoapprove(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+  handle: string,
+  name: string,
+  action: "on" | "off" | undefined,
+): Promise<void> {
+  if (!name) {
+    await ctx.reply(USAGE.profile);
+    return;
+  }
+  const resolved = await resolveProfileByName(transport, handle, name);
+  if (resolved.kind === "error") {
+    await ctx.reply(errorMessage(resolved.error));
+    return;
+  }
+  if (resolved.kind === "none") {
+    await ctx.reply(`No profile named "${name}".`);
+    return;
+  }
+  if (resolved.kind === "ambiguous") {
+    await ctx.reply(ambiguityMessage(name, resolved.matches));
+    return;
+  }
+  const profile = resolved.profile;
+  if (action === undefined) {
+    await ctx.reply(formatAutoapprove(profile.name, profile.codingAutoapproveMode));
+    return;
+  }
+  const res = await transport.profiles.update(handle, profile.id, {
+    codingAutoapproveMode: action,
+  });
+  if (res.isErr()) {
+    await ctx.reply(errorMessage(res.error));
+    return;
+  }
+  await ctx.reply(formatAutoapprove(res.value.name, res.value.codingAutoapproveMode));
+}
+
+function formatAutoapprove(name: string, mode: "off" | "on"): string {
+  const tail =
+    mode === "on"
+      ? "on — plans auto-approve once persisted (no Telegram round trip)"
+      : "off — Telegram approve tap required before execute";
+  return `Autoapprove for "${name}": ${tail}`;
 }
 
 // ── /profile class + /classes ─────────────────────────────────────────

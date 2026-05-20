@@ -192,6 +192,7 @@ describe("createTransport", () => {
           profileClass: null,
           streamChunkChars: 4000,
           streamEdits: true,
+          codingAutoapproveMode: "off",
         }),
       });
       const { transport } = setup({ agentStore });
@@ -299,6 +300,7 @@ describe("createTransport", () => {
           profileClass: null,
           streamChunkChars: 4000,
           streamEdits: true,
+          codingAutoapproveMode: "off",
         }),
       });
       const { transport } = setup({ transportStore, agentStore });
@@ -1969,6 +1971,7 @@ describe("createTransport", () => {
         profileClass: null,
         streamChunkChars: 4000,
         streamEdits: true,
+        codingAutoapproveMode: "off",
       });
       const agentStore = mockAgentStore({
         getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),

@@ -36,6 +36,20 @@ export const pendingMemorySource = pgEnum("pending_memory_source", ["live_retain
 export const voiceMode = pgEnum("voice_mode", ["auto", "always", "never"]);
 
 /**
+ * Per-profile auto-approve for the coding-delegation **plan gate**. `off`
+ * (default) preserves the Telegram approve/revise/cancel round trip after
+ * the plan streams; `on` stamps `plan_approved_at` and emits
+ * `coding/task/plan-approved` automatically once the plan text is
+ * persisted, so execute starts without waiting on a button tap. Toggled
+ * via `/profile autoapprove`. Visibility is preserved — the plan still
+ * streams to Telegram; only the approval round trip is skipped.
+ *
+ * Scope is limited to `triggerSource = 'user'` tasks: evolution /
+ * signal-pipeline triggers already bypass plan approval by design.
+ */
+export const codingAutoapproveMode = pgEnum("coding_autoapprove_mode", ["off", "on"]);
+
+/**
  * Zod schema for `conversations.cooldown_state`. The column's column
  * comment carries the lifecycle and atomicity contract; see also
  * `design/agent-resilience.md` → Auto-repair.
@@ -497,6 +511,14 @@ export const profiles = pgTable(
      */
     streamChunkChars: integer("stream_chunk_chars").notNull().default(4000),
     streamEdits: boolean("stream_edits").notNull().default(true),
+    /**
+     * Auto-approve coding-delegation plans without waiting for the Telegram
+     * round trip. See `codingAutoapproveMode` enum docstring. Toggled via
+     * `/profile autoapprove <name> on|off`.
+     */
+    codingAutoapproveMode: codingAutoapproveMode("coding_autoapprove_mode")
+      .notNull()
+      .default("off"),
     toolSet: jsonbZod("tool_set", ToolSetSchema).notNull(),
     memoryScope: jsonbZod("memory_scope", ProfileMemoryScopeSchema), // null = no restriction
     /**
