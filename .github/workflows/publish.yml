@@ -244,9 +244,13 @@ jobs:
     permissions:
       contents: read
       packages: read
-      # Upload SARIF to code-scanning. Without this, the action fails with
-      # "Resource not accessible by integration" on the upload step.
+      # Upload SARIF to code-scanning. Without `security-events: write`,
+      # the action fails on the upload itself. Without `actions: read`,
+      # the action fails earlier when it calls GET /actions/runs/{id} to
+      # enrich the SARIF with run metadata — same "Resource not accessible
+      # by integration" error, but on the workflow-runs endpoint.
       security-events: write
+      actions: read
     strategy:
       fail-fast: false
       matrix:

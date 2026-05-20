@@ -101,9 +101,12 @@ jobs:
     if: needs.release.outputs.new_release_published == 'true'
     uses: ./.github/workflows/publish.yml
     # Union of permissions across publish.yml's jobs — reusable-workflow
-    # permissions are capped by the caller, so the trivy scan job's
-    # security-events: write must be granted here too. Keep in sync.
+    # permissions are capped by the caller, so anything a nested job needs
+    # must be granted here too. The trivy scan job needs security-events
+    # for SARIF upload and actions: read so codeql-action can fetch run
+    # metadata via GET /actions/runs/{id}. Keep in sync with publish.yml.
     permissions:
       contents: read
       packages: write
       security-events: write
+      actions: read
