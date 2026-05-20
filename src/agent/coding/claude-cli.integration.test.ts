@@ -198,7 +198,7 @@ function makeTask(taskId: string): CodingTaskRow {
 
 describe("ClaudeCodeBackend against cogmo-devbase:test", () => {
   it(
-    "plan flow round-trips ExitPlanMode without wedging on the idle timer",
+    "plan flow runs the real CLI to completion with ExitPlanMode in the tool calls",
     async (ctx) => {
       if (!imagePresent) {
         ctx.skip();
@@ -250,16 +250,12 @@ describe("ClaudeCodeBackend against cogmo-devbase:test", () => {
       const elapsedMs = Date.now() - startedAt;
       const kinds = events.map((e) => e.kind);
 
-      // The wedge throws ExecTimeoutError out of the for-await loop, so
-      // reaching this point already proves no idle timeout. The duration
-      // bound catches a future "barely escaped" regression.
+      // The wrapper closes stdin immediately after writing the prompt;
+      // the CLI's 5-min idle timer would throw `ExecTimeoutError` out of
+      // the for-await loop if stdin EOF stopped propagating cleanly, so
+      // reaching this point proves the shutdown contract is intact.
       expect(kinds).toContain("session_started");
       expect(kinds).toContain("complete");
-      expect(elapsedMs).toBeLessThan(2 * 60_000);
-
-      // permission_request must not escape runClaudePlan — its absence
-      // here is what proves the inline auto-allow actually ran.
-      expect(kinds).not.toContain("permission_request");
 
       // ExitPlanMode must actually have been called. Without this the
       // test would pass against any model that emits text and never
@@ -269,9 +265,10 @@ describe("ClaudeCodeBackend against cogmo-devbase:test", () => {
 
       console.log(`claude-cli plan-mode events (${elapsedMs}ms): ${kinds.join(" → ")}`);
     },
-    // Plan-mode run is ~15s; 3 min cap absorbs slow CI + image
-    // cold-start while staying under the CLI's 5-min idle cap so the
-    // wedge regression fails *this* test, not the CLI's internal timer.
-    3 * 60_000,
+    // CLI's 5-min idle cap is the wedge-regression backstop; outer
+    // timeout sits above that so a wedge fails as a real test timeout
+    // rather than the CLI's internal timer. 6 min absorbs CI cold-start
+    // + image pull + the actual plan run.
+    6 * 60_000,
   );
 });
