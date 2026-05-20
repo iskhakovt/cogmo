@@ -1,0 +1,26 @@
+# CodeQL configuration. Used by .github/workflows/codeql.yml — the
+# presence of a custom workflow auto-deactivates "default setup," so
+# this file owns scan scope.
+#
+# We exclude test code from analysis because:
+#   - Vitest tests, mocks, and fixtures intentionally simulate attacker
+#     inputs (SSRF, command injection, XSS reflection) to verify the
+#     real code guards against them. CodeQL flags the simulation, not
+#     the guard.
+#   - Test mocks (`src/test/`) and recorded fixtures (`test/fixtures/`)
+#     are not shipped — `Dockerfile` excludes them via `.dockerignore`.
+#   - Vendored OSS (`vendor/`) is not maintained here; upstream owns
+#     its security posture.
+
+name: "cogmo CodeQL config"
+
+paths-ignore:
+  - "**/*.test.ts"
+  - "**/*.test.js"
+  - "src/test/**"
+  - "test/**"
+  - "vendor/**"
+  - "coverage/**"
+  - "dist/**"
+  - "build/**"
+  - "migrations/meta/**"

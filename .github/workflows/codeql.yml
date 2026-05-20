@@ -1,0 +1,50 @@
+name: CodeQL
+
+# Pushing this workflow auto-deactivates GitHub's "default setup" — the
+# advanced setup defined here takes over and respects the path filters
+# in `.github/codeql/codeql-config.yml`.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly at 04:00 UTC Monday — matches default-setup cadence.
+    - cron: "0 4 * * 1"
+
+permissions: {}
+
+# One CodeQL run per ref. PR pushes that arrive before the previous run
+# finishes cancel it; main is sequential to keep the Security tab
+# coherent.
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      security-events: write
+      packages: read
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Mirrors what default-setup auto-detected for this repo.
+        language: [actions, javascript-typescript, python]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: github/codeql-action/init@458d36d7d4f47d0dd16ca424c1d3cda0060f1360 # v3.35.5
+        with:
+          languages: ${{ matrix.language }}
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - uses: github/codeql-action/analyze@458d36d7d4f47d0dd16ca424c1d3cda0060f1360 # v3.35.5
+        with:
+          category: "/language:${{ matrix.language }}"
