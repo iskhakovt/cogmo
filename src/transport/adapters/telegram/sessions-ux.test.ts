@@ -32,6 +32,7 @@ function mkProfile(overrides: Partial<Profile> & { id: string; name: string }): 
     profileClass: null,
     streamChunkChars: 4000,
     streamEdits: true,
+    codingAutoapproveMode: "off",
     ...overrides,
   };
 }

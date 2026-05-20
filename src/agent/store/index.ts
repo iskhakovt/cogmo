@@ -158,7 +158,17 @@ export interface Profile {
    * and falls back to a native typing indicator while in flight.
    */
   streamEdits: boolean;
+  /**
+   * When `on`, the plan orchestrator auto-stamps `plan_approved_at` and
+   * emits `coding/task/plan-approved` once the plan text is persisted,
+   * skipping the Telegram approve/revise/cancel round trip. The plan
+   * still streams to Telegram for visibility. Default `off`. Toggled via
+   * `/profile autoapprove`.
+   */
+  codingAutoapproveMode: CodingAutoapproveMode;
 }
+
+export type CodingAutoapproveMode = "off" | "on";
 
 export interface ProfileUpdates {
   name?: string;
@@ -172,6 +182,7 @@ export interface ProfileUpdates {
   memoryScope?: ProfileMemoryScope | null;
   streamChunkChars?: number;
   streamEdits?: boolean;
+  codingAutoapproveMode?: CodingAutoapproveMode;
 }
 
 /** Per-user registry row for `profiles.profile_class`. */
@@ -1436,6 +1447,7 @@ export class DrizzleAgentStore implements AgentStore {
         profileClass: profiles.profileClass,
         streamChunkChars: profiles.streamChunkChars,
         streamEdits: profiles.streamEdits,
+        codingAutoapproveMode: profiles.codingAutoapproveMode,
       })
       .from(profiles)
       .where(eq(profiles.id, profileId))
@@ -1481,6 +1493,7 @@ export class DrizzleAgentStore implements AgentStore {
           profileClass: profiles.profileClass,
           streamChunkChars: profiles.streamChunkChars,
           streamEdits: profiles.streamEdits,
+          codingAutoapproveMode: profiles.codingAutoapproveMode,
         }),
       );
       return row as Profile;
@@ -1504,6 +1517,7 @@ export class DrizzleAgentStore implements AgentStore {
         profileClass: profiles.profileClass,
         streamChunkChars: profiles.streamChunkChars,
         streamEdits: profiles.streamEdits,
+        codingAutoapproveMode: profiles.codingAutoapproveMode,
       })
       .from(profiles)
       .where(or(isNull(profiles.userId), eq(profiles.userId, userId)))
@@ -1548,6 +1562,7 @@ export class DrizzleAgentStore implements AgentStore {
           profileClass: profiles.profileClass,
           streamChunkChars: profiles.streamChunkChars,
           streamEdits: profiles.streamEdits,
+          codingAutoapproveMode: profiles.codingAutoapproveMode,
         });
       return single(rows) as Profile;
     });

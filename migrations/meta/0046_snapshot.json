@@ -1,5 +1,5 @@
 {
-  "id": "6da3af84-a484-4d90-80d3-d87a47cf9a9d",
+  "id": "9d1bacb1-0b34-4d69-9194-8e5922aceff2",
   "prevId": "cd634bc8-fafc-426c-85b7-faa29c14279f",
   "version": "7",
   "dialect": "postgresql",
@@ -1365,6 +1365,14 @@
           "primaryKey": false,
           "notNull": true,
           "default": true
+        },
+        "coding_autoapprove_mode": {
+          "name": "coding_autoapprove_mode",
+          "type": "coding_autoapprove_mode",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'off'"
         },
         "tool_set": {
           "name": "tool_set",
@@ -3590,6 +3598,11 @@
       "name": "auto_recall_mode",
       "schema": "public",
       "values": ["off", "always", "heuristic", "llm"]
+    },
+    "public.coding_autoapprove_mode": {
+      "name": "coding_autoapprove_mode",
+      "schema": "public",
+      "values": ["off", "on"]
     },
     "public.evolution_trigger": {
       "name": "evolution_trigger",
