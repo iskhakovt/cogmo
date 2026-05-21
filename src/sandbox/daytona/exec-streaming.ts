@@ -3,6 +3,7 @@ import { PassThrough } from "node:stream";
 import type { Process } from "@daytonaio/sdk";
 import { logger } from "../../logger.js";
 import { type ExecOptions, type ExecStreamingHandle, ExecTimeoutError } from "../index.js";
+import { shellEscape } from "./shell-quote.js";
 
 const log = logger.child({ component: "sandbox.daytona.exec-streaming" });
 
@@ -372,13 +373,4 @@ function buildShellCommand(cmd: readonly string[], opts: ExecOptions): string {
   const cdPrefix = opts.workingDir ? `cd ${shellEscape(opts.workingDir)} && ` : "";
   const argv = cmd.map(shellEscape).join(" ");
   return `${cdPrefix}${envPrefix}${argv}`;
-}
-
-/**
- * Single-quote-escape for safe bash interpolation. POSIX rule: `'foo'` is
- * literal; embedded `'` becomes `'"'"'`. Cheaper than reaching for shellac
- * for one helper.
- */
-function shellEscape(s: string): string {
-  return `'${s.replaceAll("'", "'\"'\"'")}'`;
 }

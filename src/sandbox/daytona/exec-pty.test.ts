@@ -355,6 +355,96 @@ describe("startExecPty", () => {
     expect(err).toBeInstanceOf(DisposedError);
   });
 
+  it("dispose() mid-upload kills the PTY once it lands, doesn't run the exec to completion", async () => {
+    const ptyCtrl = fakePty();
+    const fsCtrl = fakeFs();
+    const procCtrl = fakeProcess(ptyCtrl);
+
+    // Hold the upload open so we can call dispose() after stdin.end()
+    // has triggered startPty but before createPty has been awaited.
+    let releaseUpload!: () => void;
+    fsCtrl.fs.uploadFile.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseUpload = resolve;
+        }),
+    );
+
+    const handle = await startExecPty({
+      process: procCtrl.process,
+      fs: fsCtrl.fs,
+      sessionIdPrefix: "p",
+      cmd: ["sleep", "999"],
+      opts: { attachStdin: true },
+      random: deterministicRandom(),
+    });
+    handle.stdin?.end();
+    // Let startPty enter `await fs.uploadFile(...)`.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const failure = handle.wait().catch((err: Error) => err);
+    // Dispose while the upload is still in flight; pty is still
+    // undefined. The race the fix closes: after the upload releases,
+    // startPty must NOT create a PTY that then runs the exec.
+    const disposed = handle.dispose();
+    releaseUpload();
+    await disposed;
+
+    const err = await failure;
+    expect(err).toBeInstanceOf(DisposedError);
+    // PTY was never created (disposed check fires before createPty).
+    expect(procCtrl.process.createPty).not.toHaveBeenCalled();
+    expect(ptyCtrl.killed).toBe(false);
+    // sendInput never ran — no shell command was dispatched.
+    expect(ptyCtrl.sendInputs).toHaveLength(0);
+  });
+
+  it("dispose() after createPty but before sendInput kills the new PTY", async () => {
+    const ptyCtrl = fakePty();
+    const fsCtrl = fakeFs();
+
+    // Hold createPty open to control timing.
+    let releaseCreate!: () => void;
+    const proc = {
+      createPty: vi.fn(async (options: { onData: (data: Uint8Array) => void | Promise<void> }) => {
+        await new Promise<void>((resolve) => {
+          releaseCreate = resolve;
+        });
+        ptyCtrl.emitData = (chunk: string | Uint8Array): void => {
+          const bytes = typeof chunk === "string" ? new TextEncoder().encode(chunk) : chunk;
+          void options.onData(bytes);
+        };
+        return ptyCtrl.pty;
+      }),
+    } satisfies PtyProcessClient;
+
+    const handle = await startExecPty({
+      process: proc,
+      fs: fsCtrl.fs,
+      sessionIdPrefix: "p",
+      cmd: ["sleep", "999"],
+      opts: { attachStdin: true },
+      random: deterministicRandom(),
+    });
+    handle.stdin?.end();
+    // Let startPty finish upload and enter `await createPty(...)`.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const failure = handle.wait().catch((err: Error) => err);
+    const disposed = handle.dispose();
+    releaseCreate();
+    await disposed;
+
+    const err = await failure;
+    expect(err).toBeInstanceOf(DisposedError);
+    // PTY was created, then immediately killed by the post-createPty
+    // disposed check in startPty.
+    expect(proc.createPty).toHaveBeenCalledTimes(1);
+    expect(ptyCtrl.killed).toBe(true);
+    expect(ptyCtrl.sendInputs).toHaveLength(0);
+  });
+
   it("dispose() before stdin.end() rejects wait() with DisposedError", async () => {
     const ptyCtrl = fakePty();
     const fsCtrl = fakeFs();

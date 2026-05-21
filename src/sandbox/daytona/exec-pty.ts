@@ -4,6 +4,7 @@ import type { PtyHandle } from "@daytonaio/sdk";
 import { logger } from "../../logger.js";
 import { type ExecOptions, type ExecStreamingHandle, ExecTimeoutError } from "../index.js";
 import { DisposedError } from "./exec-streaming.js";
+import { shellEscape, shellEscapeArgv } from "./shell-quote.js";
 
 const log = logger.child({ component: "sandbox.daytona.exec-pty" });
 
@@ -163,7 +164,14 @@ export async function startExecPty(args: {
   const exitPromise = new Promise<{ exitCode: number }>((resolve, reject) => {
     const startPty = async (): Promise<void> => {
       const stdinPayload = Buffer.concat(stdinBuffers);
+      // Check `disposed` after every await so a caller that calls
+      // `dispose()` while the IIFE is mid-flight (between stdin.end()
+      // and pty.sendInput) doesn't end up running the exec to
+      // completion in the background — the PTY would otherwise be
+      // born after dispose's `if (pty)` check ran and saw undefined.
+      if (disposed) throw new DisposedError();
       await fs.uploadFile(stdinPayload, stdinPath);
+      if (disposed) throw new DisposedError();
 
       pty = await daytonaProcess.createPty({
         id: sessionId,
@@ -173,7 +181,15 @@ export async function startExecPty(args: {
         rows: PTY_ROWS,
         onData: handleOnData,
       });
+      if (disposed) {
+        await pty.kill().catch(() => undefined);
+        throw new DisposedError();
+      }
       await pty.waitForConnection();
+      if (disposed) {
+        await pty.kill().catch(() => undefined);
+        throw new DisposedError();
+      }
 
       // Arm timers after the WS is up — they bound the running exec,
       // not the createPty handshake.
@@ -193,7 +209,7 @@ export async function startExecPty(args: {
       // code, no marker parsing needed. Stdin redirected from the
       // uploaded tmpfile (real pipe FD → kernel-level EOF when
       // exhausted). Stderr to a tmpfile so onData is clean stdout.
-      const shellLine = `exec ${shellQuoteArgv(cmd)} < ${shellQuote(stdinPath)} 2> ${shellQuote(stderrPath)}\n`;
+      const shellLine = `exec ${shellEscapeArgv(cmd)} < ${shellEscape(stdinPath)} 2> ${shellEscape(stderrPath)}\n`;
       await pty.sendInput(shellLine);
     };
 
@@ -303,13 +319,4 @@ export async function startExecPty(args: {
     wait: () => exitPromise,
     dispose,
   };
-}
-
-/** POSIX single-quote escape for safe interpolation into a shell line. */
-function shellQuote(s: string): string {
-  return `'${s.replaceAll("'", "'\"'\"'")}'`;
-}
-
-function shellQuoteArgv(argv: readonly string[]): string {
-  return argv.map(shellQuote).join(" ");
 }
