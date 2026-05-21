@@ -8,7 +8,7 @@
   "files": {
     "includes": ["**", "!test/fixtures"]
   },
-  "plugins": ["biome-plugins/no-unsafe-cast.grit"],
+  "plugins": ["./biome-plugins/no-unsafe-cast.grit"],
   "formatter": {
     "indentStyle": "space",
     "indentWidth": 2,
