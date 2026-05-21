@@ -163,12 +163,19 @@ describe("e2e smoke", () => {
         expiresAt: new Date(Date.now() - 5 * 60 * 1000),
       })
       .returning({ id: boundaryPending.id });
+    const pendingId = pending!.id;
 
     const store = new DrizzleTransportStore();
     const tx = transactor(db);
-    const expired = await tx((trx) =>
-      store.listExpiredBoundaryPending(trx, new Date(Date.now() - 60_000)),
-    );
-    expect(expired.some((r) => r.id === pending!.id)).toBe(true);
+    try {
+      const expired = await tx((trx) =>
+        store.listExpiredBoundaryPending(trx, new Date(Date.now() - 60_000)),
+      );
+      expect(expired).toContainEqual(
+        expect.objectContaining({ id: pendingId, channelId, platformAddress }),
+      );
+    } finally {
+      await db.delete(boundaryPending).where(eq(boundaryPending.id, pendingId));
+    }
   });
 });
