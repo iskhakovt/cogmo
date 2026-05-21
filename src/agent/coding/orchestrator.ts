@@ -438,16 +438,16 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       runInTx((tx) => store.setTaskPlan(tx, taskId, result.plan ?? "")),
     );
 
-    // For automated triggers (evolution, signal_pipeline) we'd auto-advance
-    // straight to executing. User-triggered tasks park at awaiting_approval
-    // until the human approves via Telegram — UNLESS the profile has
+    // Automated triggers (evolution, signal_pipeline) advance straight to
+    // executing. User-triggered tasks park at awaiting_approval until the
+    // human approves via Telegram — UNLESS the profile has
     // `coding_autoapprove_mode='on'`, in which case we stamp
     // `plan_approved_at` and emit `coding/task/plan-approved` directly
     // (same code path the Telegram approve callback takes). Null mode
-    // (task without conversation — non-user triggers) is treated as `off`
-    // and never reaches this branch anyway. Wrapped in `stepRun` so a
-    // future loosening of `retries: 0` on this function doesn't quietly
-    // turn a transient DB blip into a fresh CLI invocation on replay.
+    // (task without conversation — non-user triggers) reads as `off` and
+    // never reaches this branch anyway. Wrapped in `stepRun` so a future
+    // loosening of `retries: 0` on this function doesn't quietly turn a
+    // transient DB blip into a fresh CLI invocation on replay.
     const autoapproveMode =
       task.triggerSource === "user"
         ? ((await stepRun("resolve-autoapprove-mode", () =>
@@ -494,9 +494,10 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
             taskId,
             approvedAt: approveResult.approvedAt,
           }),
-          // Idempotency id matches the `task-failed-<taskId>` shape on the
-          // catch-path emit; ensures bus-level dedup on the off-chance the
-          // step is reached more than once (e.g. a future retry change).
+          // Idempotency id follows the same `<verb>-<taskId>` shape as
+          // the catch-path `task-failed-<taskId>` emit; ensures bus-level
+          // dedup on the off-chance the step fires more than once (e.g. a
+          // future retry change).
           id: `plan-approved-${taskId}`,
         });
         taskLog.info("plan auto-approved via profile autoapprove=on");

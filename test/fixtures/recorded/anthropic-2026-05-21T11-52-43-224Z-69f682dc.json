@@ -1,0 +1,102 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<system-reminder>\n## Exited Plan Mode\n\nYou have exited plan mode. You can now make edits, run tools, and take actions.\n</system-reminder>\n# Approved\nThe plan you proposed has been approved. Proceed with the implementation.\n\n# Reminders\n- Stay on the current branch and inside /workspace.\n- Git credentials are NOT available — do not `git push` or `gh pr create`.\n  Cogmo handles push and PR opening after verifying your work.\n- When you believe the task is done, run the verify command and report\n  the result. If it fails, iterate.\n\n# Verify command\necho verify",
+        "model": "claude-haiku-4-5",
+        "turnIndex": 4,
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "I'll now add the JSDoc comment to the greet function.",
+        "toolCalls": [
+          {
+            "name": "Edit",
+            "arguments": "{\"file_path\": \"/workspace/greet.ts\", \"old_string\": \"export function greet(name: string): string {\\n  return `Hello, ${name}!`;\\n}\", \"new_string\": \"/**\\n * Greets a person by name.\\n * @param name - The name of the person to greet\\n * @returns A greeting string formatted as \\\"Hello, {name}!\\\"\\n */\\nexport function greet(name: string): string {\\n  return `Hello, ${name}!`;\\n}\"}",
+            "id": "toolu_01HkqFxmuC9ZCZqk3kLKggxe"
+          }
+        ]
+      },
+      "recordedTimings": {
+        "ttftMs": 1,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          277,
+          24,
+          0,
+          0,
+          190,
+          0,
+          0,
+          0,
+          0,
+          209,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          9,
+          0,
+          0,
+          251,
+          1,
+          0,
+          0,
+          1,
+          0,
+          1,
+          2,
+          0,
+          1,
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          23,
+          0
+        ],
+        "totalDurationMs": 997
+      },
+      "metadata": {
+        "systemHash": "5208f8ed",
+        "toolsHash": "003dd945"
+      }
+    }
+  ]
+}

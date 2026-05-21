@@ -257,6 +257,12 @@ describe("ClaudeCodeBackend against cogmo-devbase:test", () => {
       expect(kinds).toContain("session_started");
       expect(kinds).toContain("complete");
 
+      // Wedge-regression bound. Healthy replay finishes well under a
+      // minute; sitting on the CLI's 5-min idle backstop would report as
+      // a slow CI build under the outer `6 * 60_000` only. Pinning to
+      // 4 min keeps the failure mode "wedge detected", not "CI was slow".
+      expect(elapsedMs).toBeLessThan(4 * 60_000);
+
       // ExitPlanMode must actually have been called. Without this the
       // test would pass against any model that emits text and never
       // exits plan mode (the workspace-empty failure case).
@@ -272,20 +278,13 @@ describe("ClaudeCodeBackend against cogmo-devbase:test", () => {
     6 * 60_000,
   );
 
-  // Execute-mode coverage against the real binary. The wrapper now closes
-  // stdin immediately after the prompt in execute mode too (previously
-  // kept open for the dead-code control_response path) — this test pins
-  // that `claude --resume <sid>` honours the EOF shutdown signal and
-  // emits `complete` without idle-timing-out. Plan runs first to capture
-  // a real session id; execute resumes it. Both phases need recorded
-  // llmock fixtures; the test is `.skip`d until the next `RECORD=1` pass
-  // lands fresh `/v1/messages` recordings for the execute leg.
-  //
-  // To enable: `RECORD=1 ANTHROPIC_API_KEY=… pnpm test:integration` on a
-  // machine with API credentials, commit the new fixture files under
-  // `recordings/`, and flip `it.skip` to `it`. Pure pass-through CI
-  // replays for free thereafter.
-  it.skip(
+  // Execute-mode shutdown contract: `claude --resume <sid>` must honour
+  // the same stdin-EOF shutdown signal as plan mode and emit `complete`
+  // without sitting on the 5-min idle timer. Plan runs first to mint a
+  // real session id; execute resumes it. Both phases run against
+  // recorded llmock fixtures — re-record with `RECORD=1` if the CLI
+  // version bumps and the request bodies drift.
+  it(
     "execute flow resumes a real session and completes without wedging on close-stdin",
     async (ctx) => {
       if (!imagePresent) {
@@ -360,12 +359,13 @@ describe("ClaudeCodeBackend against cogmo-devbase:test", () => {
       expect(kinds).toContain("session_started");
       expect(kinds).toContain("complete");
 
+      // Wedge-regression bound. See the plan test for the rationale —
+      // 4 min stays well under the CLI's 5-min idle backstop.
+      expect(elapsedMs).toBeLessThan(4 * 60_000);
+
       // Execute mode should emit at least one tool_call against the
       // planted greet.ts — even a trivial JSDoc addition routes
-      // through Read + Edit. If a future model variant inlines its
-      // edit into the response without calling tools, loosen this to
-      // just-no-permission_request (which is structurally impossible
-      // anyway since the type was removed).
+      // through Read + Edit.
       const toolCalls = executeEvents.flatMap((e) => (e.kind === "tool_call" ? [e.tool] : []));
       expect(toolCalls.length).toBeGreaterThan(0);
 

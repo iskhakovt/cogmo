@@ -186,7 +186,9 @@ async function* runClaudeSession(
 /**
  * Frame the prompt as a stream-json user message and write it. Both modes
  * close stdin immediately after this returns; the CLI treats stdin EOF as
- * the graceful shutdown signal under `--input-format stream-json`.
+ * the graceful shutdown signal under `--input-format stream-json`. The
+ * contract is pinned by `claude-cli.integration.test.ts` (plan flow);
+ * re-verify there at any CLI version bump.
  */
 function writeUserMessage(stdin: Writable, prompt: string): void {
   const userMessage = {

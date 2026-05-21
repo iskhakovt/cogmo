@@ -6,6 +6,7 @@
  * and bind-mounts the returned socket path.
  */
 import type { PassThrough } from "node:stream";
+import type { ContainerInfo } from "dockerode";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { mock, mockDeep } from "vitest-mock-extended";
 import type { Database, Transactor } from "../db/index.js";
@@ -18,6 +19,19 @@ import type { TaskScope } from "./proxy/types.js";
 import { DrizzleSandboxStore } from "./store/index.js";
 import { LABEL_INSTANCE, LABEL_MANAGED } from "./supervisor.js";
 import type { ResourceLimits } from "./types.js";
+
+/**
+ * Build a typed `ContainerInfo` stub via `mock<T>()` from vitest-mock-extended,
+ * then pin the fields reconcile reads. No `as unknown as` cast required —
+ * the mock proxy auto-fills the rest of the dockerode-library bookkeeping
+ * we never touch.
+ */
+function containerInfoStub(id: string, labels: Record<string, string>): ContainerInfo {
+  const stub = mock<ContainerInfo>();
+  Object.defineProperty(stub, "Id", { value: id, configurable: true });
+  Object.defineProperty(stub, "Labels", { value: labels, configurable: true });
+  return stub;
+}
 
 const RESOURCE_LIMITS: ResourceLimits = {
   cpus: 0.5,
@@ -440,7 +454,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
 
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     // Custom docker stub: kill rejects with a non-recoverable error
-    // (statusCode 500 — not the 304/409/404 the supervisor swallows). The
+    // (statusCode 500 — not the 304/404 the supervisor swallows). The
     // error must propagate out of the for-loop into the finally without
     // skipping cleanupAskpass.
     const start = vi.fn(async () => {});
@@ -1172,10 +1186,10 @@ describe("LocalDockerSandboxClient — reconcileCrashedInstances", () => {
     const current = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     const { docker } = mockDockerFacade();
     docker.listContainers.mockResolvedValue([
-      {
-        Id: "docker-foreign",
-        Labels: { [LABEL_MANAGED]: "true", [LABEL_INSTANCE]: "00000000-0000-7000-8000-deadbeef" },
-      } as unknown as import("dockerode").ContainerInfo,
+      containerInfoStub("docker-foreign", {
+        [LABEL_MANAGED]: "true",
+        [LABEL_INSTANCE]: "00000000-0000-7000-8000-deadbeef",
+      }),
     ]);
 
     const sandbox = await LocalDockerSandboxClient.create({
@@ -1196,10 +1210,7 @@ describe("LocalDockerSandboxClient — reconcileCrashedInstances", () => {
     const current = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 2 }));
     const { docker, container } = mockDockerFacade();
     docker.listContainers.mockResolvedValue([
-      {
-        Id: "docker-stale",
-        Labels: { [LABEL_MANAGED]: "true", [LABEL_INSTANCE]: stale.id },
-      } as unknown as import("dockerode").ContainerInfo,
+      containerInfoStub("docker-stale", { [LABEL_MANAGED]: "true", [LABEL_INSTANCE]: stale.id }),
     ]);
     container.kill.mockResolvedValue(undefined);
     container.remove.mockResolvedValue(undefined);
