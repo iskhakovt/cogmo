@@ -167,6 +167,7 @@ describe("runReap — TTL pass", () => {
 
   it.each([
     { code: 304, label: "304 ('container already stopped')" },
+    { code: 409, label: "409 ('container is not running')" },
     { code: 404, label: "404 ('no such container')" },
   ])("swallows kill rejection with statusCode $label", async ({ code }) => {
     const { docker, removeCalls } = fakeDocker({
@@ -184,19 +185,24 @@ describe("runReap — TTL pass", () => {
     expect((await tx((trx) => store.getContainer(trx, cogmoId)))?.status).toBe("reaped");
   });
 
-  it("swallows 404 on remove (container removed out-of-band between kill and remove)", async () => {
+  it.each([
+    { code: 404, label: "404 ('no such container')" },
+    { code: 409, label: "409 ('removal already in progress')" },
+  ])("swallows remove rejection with statusCode $label", async ({ code }) => {
+    // 409 is moby's `SetRemovalInProgress` race-protection (daemon/delete.go);
+    // fires when reaper + `deleteByTaskId` hit the same container.
     const { docker, killCalls } = fakeDocker({
-      containers: [{ Id: "c-rm-gone", Labels: labels() }],
-      failRemove: new Map([["c-rm-gone", 404]]),
+      containers: [{ Id: "c-rm-race", Labels: labels() }],
+      failRemove: new Map([["c-rm-race", code]]),
     });
     const cogmoId = await insertContainer({
-      dockerId: "c-rm-gone",
+      dockerId: "c-rm-race",
       ttlMs: -1000,
       status: "running",
     });
     const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
     expect(result.ttlReaped).toBe(1);
-    expect(killCalls).toEqual(["c-rm-gone"]);
+    expect(killCalls).toEqual(["c-rm-race"]);
     expect((await tx((trx) => store.getContainer(trx, cogmoId)))?.status).toBe("reaped");
   });
 
@@ -562,7 +568,7 @@ describe("runReap — concurrent invocation", () => {
 
     // Every TTL-expired container is killed at least once. The exact
     // count may be 1 or 2 per container depending on interleave —
-    // `killAndRemove` is tolerant of repeats (statusCode 304/404 are
+    // `killAndRemove` is tolerant of repeats (statusCode 304/409/404 are
     // swallowed), so we only assert coverage.
     expect(new Set(killCalls)).toEqual(new Set(["c-a", "c-b"]));
     expect(new Set(removeCalls)).toEqual(new Set(["c-a", "c-b"]));

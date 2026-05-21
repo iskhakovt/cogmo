@@ -454,7 +454,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
 
     const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
     // Custom docker stub: kill rejects with a non-recoverable error
-    // (statusCode 500 — not the 304/404 the supervisor swallows). The
+    // (statusCode 500 — not the 304/409/404 the supervisor swallows). The
     // error must propagate out of the for-loop into the finally without
     // skipping cleanupAskpass.
     const start = vi.fn(async () => {});
