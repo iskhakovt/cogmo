@@ -219,7 +219,8 @@ async function killAndRemove(docker: Docker, dockerId: string): Promise<void> {
     await c.kill({ signal: "SIGTERM" });
   } catch (err) {
     const e = err as { statusCode?: number };
-    if (e.statusCode !== 304 && e.statusCode !== 404) throw err;
+    // 304 / 409 = already stopped (engine version varies), 404 = gone — all fine
+    if (e.statusCode !== 304 && e.statusCode !== 409 && e.statusCode !== 404) throw err;
   }
   try {
     await c.remove({ force: true });

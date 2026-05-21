@@ -58,7 +58,9 @@ interface DockerSideContainer {
  * Stub Docker enough to drive the reaper. Tracks killed/removed ids per
  * resource so tests can assert order + count.
  */
-function fakeDocker(opts: { containers?: DockerSideContainer[]; failKill?: Set<string> } = {}): {
+function fakeDocker(
+  opts: { containers?: DockerSideContainer[]; failKill?: Map<string, number> } = {},
+): {
   docker: Docker;
   killCalls: string[];
   removeCalls: string[];
@@ -74,8 +76,9 @@ function fakeDocker(opts: { containers?: DockerSideContainer[]; failKill?: Set<s
     listContainers: vi.fn(async () => containers),
     getContainer: (id: string) => ({
       kill: vi.fn(async () => {
-        if (opts.failKill?.has(id)) {
-          throw Object.assign(new Error("nope"), { statusCode: 304 });
+        const code = opts.failKill?.get(id);
+        if (code !== undefined) {
+          throw Object.assign(new Error("nope"), { statusCode: code });
         }
         killCalls.push(id);
       }),
@@ -152,6 +155,29 @@ describe("runReap — TTL pass", () => {
     expect(removeCalls).toEqual(["c1"]);
     const reloaded = await tx((trx) => store.getContainer(trx, cogmoId));
     expect(reloaded?.status).toBe("reaped");
+  });
+
+  it.each([
+    { code: 304, label: "304 (legacy 'not modified')" },
+    { code: 409, label: "409 ('container is not running')" },
+    { code: 404, label: "404 ('no such container')" },
+  ])("swallows kill rejection with statusCode $label", async ({ code }) => {
+    // The Docker engine returns 409 when killing a stopped container; older
+    // versions returned 304. 404 covers a container removed out-of-band.
+    // All three are benign for a reap path whose goal is "ensure gone".
+    const { docker, removeCalls } = fakeDocker({
+      containers: [{ Id: "c-gone", Labels: labels() }],
+      failKill: new Map([["c-gone", code]]),
+    });
+    const cogmoId = await insertContainer({
+      dockerId: "c-gone",
+      ttlMs: -1000,
+      status: "running",
+    });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
+    expect(result.ttlReaped).toBe(1);
+    expect(removeCalls).toEqual(["c-gone"]);
+    expect((await tx((trx) => store.getContainer(trx, cogmoId)))?.status).toBe("reaped");
   });
 
   it("does not reap containers with future TTL", async () => {
@@ -516,7 +542,7 @@ describe("runReap — concurrent invocation", () => {
 
     // Every TTL-expired container is killed at least once. The exact
     // count may be 1 or 2 per container depending on interleave —
-    // `killAndRemove` is tolerant of repeats (statusCode 304/404 are
+    // `killAndRemove` is tolerant of repeats (statusCode 304/409/404 are
     // swallowed), so we only assert coverage.
     expect(new Set(killCalls)).toEqual(new Set(["c-a", "c-b"]));
     expect(new Set(removeCalls)).toEqual(new Set(["c-a", "c-b"]));
