@@ -55,6 +55,14 @@ const log = logger.child({ component: "sandbox.daytona.client" });
 const LABEL_TASK = "cogmo.task";
 const LABEL_ROLE = "cogmo.role";
 
+/**
+ * In-container mount point for the skills-tier-2 deps cache. Must match
+ * the LocalDocker supervisor's `DEPS_CACHE_VOLUME_TARGET` and
+ * `SKILL_VENVS_DIR` in `src/skills/deps.ts` — the populator writes
+ * `<target>/<lockfile-hash>/` and the supervisor reads the same path.
+ */
+const DEPS_CACHE_VOLUME_TARGET = "/skill-venvs";
+
 /** Refresh the sandbox's auto-stop activity timer this often, while a session is live. */
 const KEEPALIVE_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -185,6 +193,15 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
    * Logged at warn-level so configuration drift surfaces operationally.
    */
   #resourcesByImage = new Map<string, ResourceLimits>();
+  /**
+   * Daytona volume id cache keyed by volume name. `daytona.volume.get`
+   * is a network call against the provider's volumes API; the volume
+   * id is stable across calls, so we resolve once and reuse for every
+   * subsequent session create. In-flight lookups are deduplicated so
+   * concurrent first-callers share one resolve.
+   */
+  #volumeIdByName = new Map<string, string>();
+  #volumeResolves = new Map<string, Promise<string>>();
   #random: (() => string) | undefined;
 
   private constructor(opts: CreateOptions) {
@@ -424,6 +441,19 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
         "DaytonaSandboxClient.create: SessionSpec.homeVolume is unused — Daytona auto-persists sandbox FS across stop/start cycles. Drop the field.",
       );
     }
+
+    // Resolve the deps-cache volume up front. `daytona.volume.get(name,
+    // true)` is get-or-create — the first session for a given name
+    // pays the create round-trip; subsequent calls hit our local
+    // `#volumeIdByName` cache. Concurrent first-callers dedupe on
+    // `#volumeResolves`. Resolves go BEFORE `daytona.create` so a
+    // create-failure path doesn't leak a billable sandbox alongside an
+    // unmounted volume.
+    let volumes: Array<{ volumeId: string; mountPath: string }> | undefined;
+    if (spec.depsCacheVolume) {
+      const volumeId = await this.#resolveVolumeId(spec.depsCacheVolume.volumeName);
+      volumes = [{ volumeId, mountPath: DEPS_CACHE_VOLUME_TARGET }];
+    }
     if (spec.allowPrivilegedRunc) {
       throw new Error(
         "DaytonaSandboxClient.create: SessionSpec.allowPrivilegedRunc is Local-Docker-specific — Daytona uses the provider's runtime",
@@ -470,6 +500,7 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
         autoStopInterval,
         resources: resourcesFromLimits(spec.resourceLimits),
         ...(envVars && { envVars }),
+        ...(volumes && { volumes }),
       });
     let sdkSandbox: DaytonaSdkSandbox;
     if (warmedSnapshot) {
@@ -479,6 +510,7 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
           labels,
           autoStopInterval,
           ...(envVars && { envVars }),
+          ...(volumes && { volumes }),
         });
       } catch (err) {
         // The cache holds the snapshot name from the last successful
@@ -679,6 +711,34 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
    * sandbox back, intent is unclear), the ticker fires unconditionally
    * and only stops on `delete` / `shutdown`.
    */
+  /**
+   * Get-or-create the deps-cache volume by name, returning its id.
+   * `daytona.volume.get(name, true)` is the SDK's idempotent
+   * get-or-create — exists → return; missing → create-then-return.
+   * Cached by name in `#volumeIdByName`; concurrent first-callers
+   * dedupe on the in-flight promise stored in `#volumeResolves`. A
+   * failed resolve clears the in-flight slot so the next caller
+   * retries — a transient Daytona blip during the first session
+   * shouldn't poison every subsequent session.
+   */
+  async #resolveVolumeId(name: string): Promise<string> {
+    const cached = this.#volumeIdByName.get(name);
+    if (cached !== undefined) return cached;
+    const inFlight = this.#volumeResolves.get(name);
+    if (inFlight) return inFlight;
+    const promise = (async () => {
+      try {
+        const volume = await this.#daytona.volume.get(name, true);
+        this.#volumeIdByName.set(name, volume.id);
+        return volume.id;
+      } finally {
+        this.#volumeResolves.delete(name);
+      }
+    })();
+    this.#volumeResolves.set(name, promise);
+    return promise;
+  }
+
   #startKeepalive(sdkSandbox: DaytonaSdkSandbox, expiresAt?: Date): void {
     if (this.#keepalives.has(sdkSandbox.id)) return;
     const expiresAtMs = expiresAt?.getTime();
