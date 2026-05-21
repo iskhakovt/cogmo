@@ -506,7 +506,7 @@ const REFUSAL_ERROR_CODES = new Set<string>([
  */
 function toRefusalErrorIfMatches(err: unknown): RefusalError | undefined {
   if (!(err instanceof Error)) return undefined;
-  if (!("status" in err) || err.status !== 400) return undefined;
+  if (!("status" in err) || typeof err.status !== "number" || err.status !== 400) return undefined;
   if (!("code" in err) || typeof err.code !== "string" || !REFUSAL_ERROR_CODES.has(err.code)) {
     return undefined;
   }
