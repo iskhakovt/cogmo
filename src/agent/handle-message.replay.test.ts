@@ -227,6 +227,54 @@ describe("handle-message — crash recovery / step replay", () => {
     expect(summaryMessage).toBeDefined();
   });
 
+  it("does not re-execute a durable tool step body when the iteration-keyed step is cached", async () => {
+    // Wire-level contract check for per-tool durability. The agent loop
+    // wraps `ToolSpec.durable = true` handlers in
+    // `step.run("tool-iter<N>-<P>", fn)` (see runOne in loop.ts). When
+    // Inngest replays this run, the step body must not re-execute and
+    // the cached value must flow back as the tool's result.
+    //
+    // We can't run the real loop in this test (the inner
+    // `runStreamingAgentLoop` is injected and itself mocked), so we
+    // mirror the production contract by calling the injected `stepRun`
+    // exactly the way the loop does. Priming `tool-iter1-0` in `steps:`
+    // simulates "this durable tool already ran on a prior attempt".
+    const handlerBody = vi.fn().mockResolvedValue("fresh-result");
+    const deps = mockDeps({
+      runStreamingAgentLoop: vi.fn().mockImplementation(async (params) => {
+        const cached = await params.stepRun("tool-iter1-0", handlerBody);
+        return {
+          text: cached,
+          messages: [],
+          newMessages: [{ role: "assistant", content: [{ type: "text", text: cached }] }],
+          usage: { inputTokens: 10, outputTokens: 5 },
+          model: "mock-model",
+          iterations: 1,
+        };
+      }),
+    });
+    const fn = createHandleMessage(deps);
+
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [event],
+      steps: [{ id: "tool-iter1-0", handler: () => "cached-tool-output" }],
+    });
+
+    await engine.execute();
+
+    // Cached step → body never runs.
+    expect(handlerBody).not.toHaveBeenCalled();
+    // The cached value flowed back through stepRun's return into the
+    // loop. Persisting confirms the loop actually consumed it
+    // — insertMessages call shape is (tx, { messages, ... }).
+    const insertArgs = (deps.agentStore.insertMessages as ReturnType<typeof vi.fn>).mock
+      .calls[0]?.[1] as { messages: Array<{ content: unknown }> } | undefined;
+    expect(insertArgs?.messages?.[0]?.content).toEqual([
+      { type: "text", text: "cached-tool-output" },
+    ]);
+  });
+
   it("re-invokes the streaming agent loop on resume even when all durable steps are cached", async () => {
     // This test documents the design tradeoff: the streaming section is
     // intentionally non-durable. Even if every durable boundary is cached,

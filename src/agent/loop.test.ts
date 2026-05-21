@@ -1242,6 +1242,66 @@ describe("tool durability (stepRun)", () => {
     expect(attempt0Ids).toEqual(attempt1Ids);
     expect(attempt0Ids).toEqual(["tool-iter1-0"]);
   });
+
+  it("returns a cached step result even when attempt 1 picks a different tool at the same position", async () => {
+    // The accepted trade-off of position-based step ids: if attempt 0
+    // cached `tool-iter1-0` for tool A and attempt 1's fresh LLM call
+    // emits tool B at the same position, Inngest replays the cached A
+    // result against B's `tool_use`. The Anthropic pairing invariant
+    // (every tool_use answered by a tool_result with matching id) still
+    // holds because `toolUseId` is rebuilt from the current attempt's
+    // block; the *content* is from the prior tool. This pins the
+    // behavior so a future change that silently restores LLM-driven
+    // step ids — and accidentally "fixes" this mismatch by deadlocking
+    // on retry — fails here. See design/crash-recovery.md.
+    const tools = new ToolRegistry();
+    tools.register({
+      name: "read_a",
+      description: "read A",
+      inputSchema: { type: "object" },
+      durable: true,
+      handler: async () => "contents-of-A",
+    });
+    tools.register({
+      name: "read_b",
+      description: "read B",
+      inputSchema: { type: "object" },
+      durable: true,
+      handler: async () => "contents-of-B",
+    });
+
+    // Simulate Inngest's cache: stepRun returns a prior attempt's value
+    // when the id matches, regardless of what the handler body would do.
+    const cache = new Map<string, string>([["tool-iter1-0", "contents-of-A"]]);
+    const stepRun: StepRunner = async (id, fn) => {
+      const cached = cache.get(id);
+      if (cached !== undefined) return cached;
+      const fresh = await fn();
+      cache.set(id, fresh);
+      return fresh;
+    };
+
+    const result = await testRunAgentLoop({
+      // Attempt 1: the model emits read_b at position 0 (different tool
+      // than attempt 0 would have cached). The id is fresh too.
+      provider: mockProvider([
+        toolUseResponse("read_b", "toolu_attempt1_B", {}),
+        textResponse("done"),
+      ]),
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      stepRun,
+    });
+
+    const toolResult = (result.messages[2]!.content as ContentBlock[])[0];
+    expect(toolResult).toEqual({
+      type: "tool_result",
+      // Current attempt's tool_use_id — pairing invariant preserved.
+      toolUseId: "toolu_attempt1_B",
+      // Cached content from attempt 0's read_a — the documented mismatch.
+      content: "contents-of-A",
+    });
+  });
 });
 
 describe("clearOldThinking", () => {

@@ -231,14 +231,25 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
   return buildResult(messages, initialLength, [], totalUsage, finalModel, iterations);
 }
 
+/**
+ * Stable identifier for a single `tool_use` invocation within an agent
+ * turn. Both fields are SDK-local — `iteration` is the loop counter,
+ * `position` is the index of this block in the iteration's `tool_use`
+ * content (pre-grouping). They are byte-identical across Inngest
+ * replays of the same run, which is what lets durable per-tool
+ * `step.run` ids match on retry even though the LLM-minted
+ * `tool_use_id` does not. Grouping the pair in one object eliminates
+ * adjacent-int parameter-swap bugs at the call site.
+ */
+interface ToolStepKey {
+  iteration: number;
+  position: number;
+}
+
 interface PlannedCall {
   block: ToolUseBlock;
   spec: ToolSpec | null;
-  // Position of this block within the iteration's `tool_use` content
-  // (pre-grouping). Feeds the durable step id so Inngest replays match
-  // across attempts — the LLM-minted `tool_use_id` is fresh every call
-  // and would diverge the step graph.
-  positionInIteration: number;
+  stepKey: ToolStepKey;
 }
 
 /**
@@ -368,10 +379,10 @@ async function executeToolCalls(
   const toolUseBlocks = content.filter((b): b is ToolUseBlock => b.type === "tool_use");
   if (toolUseBlocks.length === 0) return [];
 
-  const planned: PlannedCall[] = toolUseBlocks.map((block, positionInIteration) => ({
+  const planned: PlannedCall[] = toolUseBlocks.map((block, position) => ({
     block,
     spec: tools.get(block.name) ?? null,
-    positionInIteration,
+    stepKey: { iteration, position },
   }));
 
   // Coalesce consecutive safe entries; unsafe entries stay as singletons so
@@ -394,8 +405,8 @@ async function executeToolCalls(
   const results: ContentBlock[] = [];
   for (const group of groups) {
     const batch = await Promise.all(
-      group.map(({ block, spec, positionInIteration }) =>
-        runOne(block, spec, service, stepRun, iteration, positionInIteration, interceptions),
+      group.map(({ block, spec, stepKey }) =>
+        runOne(block, spec, service, stepRun, stepKey, interceptions),
       ),
     );
     results.push(...batch);
@@ -448,8 +459,7 @@ async function runOne(
   spec: ToolSpec | null,
   service: Service,
   stepRun: StepRunner | undefined,
-  iteration: number,
-  positionInIteration: number,
+  stepKey: ToolStepKey,
   interceptions?: ReadonlyMap<string, ContentBlock>,
 ): Promise<ContentBlock> {
   // Volume-cluster intercept short-circuits the handler — synthetic
@@ -476,18 +486,20 @@ async function runOne(
         // events (never during), so wrapping in `step.run` doesn't
         // reorder `onEvent` emissions. See design/crash-recovery.md.
         //
-        // Step id is `(iteration, positionInIteration)` — both stable
-        // across Inngest replays because the loop increments `iteration`
-        // deterministically and the LLM emits `tool_use` blocks in a
-        // consistent order within the response content. The
-        // LLM-minted `tool_use_id` is NOT stable across replays (each
-        // non-durable LLM call mints fresh ids), so keying off it would
-        // diverge the step graph and trip "Could not find step" on retry.
+        // The step id is derived purely from SDK-local state (loop
+        // counter + content array index) and is therefore identical on
+        // every attempt regardless of what the LLM emits. Inngest can
+        // match a cached step from attempt 0 even when attempt 1's
+        // fresh LLM call returns a different `tool_use_id` — or a
+        // different tool entirely at the same position. The trade-off:
+        // a cached result may semantically mismatch the current
+        // `tool_use`. See design/crash-recovery.md → Per-tool
+        // durability for the full semantics.
         const runHandler = (): Promise<string> =>
           spec.handler(block.input as Record<string, unknown>, service);
         const out =
           spec.durable === true && stepRun
-            ? await stepRun(`tool-iter${iteration}-${positionInIteration}`, runHandler)
+            ? await stepRun(`tool-iter${stepKey.iteration}-${stepKey.position}`, runHandler)
             : await runHandler();
         return { type: "tool_result" as const, toolUseId: block.id, content: out };
       } catch (err) {

@@ -22,5 +22,28 @@ the function completes.
 Replay-determinism regression test in `src/agent/loop.test.ts`
 simulates two attempts where the provider mints distinct
 `tool_use_id`s and asserts the durable step ids are identical across
-attempts. `design/crash-recovery.md` updated to drop the prior (false)
-"`tool_use_id` is stable across retries" invariant.
+attempts; a wire-level test in `src/agent/handle-message.replay.test.ts`
+exercises Inngest's `@inngest/test` step cache directly. A second
+unit test pins the documented "cache hit returns semantically-wrong
+content" trade-off so a future change that silently restores
+LLM-driven step ids surfaces as a test failure.
+`design/crash-recovery.md` updated to drop the prior (false)
+"`tool_use_id` is stable across retries" invariant and to explain why
+wrapping `provider.chat` in `step.run` is not the right alternative
+for the streaming path.
+
+**Observability note.** Inngest step logs previously surfaced the
+tool name in the step id (`tool-write_file-<id>`); `grep` over step
+ids by tool name no longer works. The tool name is still attached as
+`cogmo.tool.name` on the `tool.execute` OTEL span, so off-band
+debuggability is preserved through the trace backend.
+
+**Rollout note.** Any Inngest runs that are paused or mid-retry
+across the deploy carry old-format step ids in their state. Those
+ids will not match the new format on the next attempt, so the cached
+durable step is effectively dropped and the tool re-executes on
+resume. For `generate_image` this may bill twice for the affected
+turn; for `web_answer` the only cost is one extra Perplexity Sonar
+call. Single-user scale makes the window small and the impact
+benign — strictly better than the failure mode this fix removes.
+
