@@ -219,6 +219,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
       tools,
       service,
       stepRun,
+      iterations,
       interceptions,
     );
     messages.push({ role: "user", content: toolResults });
@@ -230,9 +231,19 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
   return buildResult(messages, initialLength, [], totalUsage, finalModel, iterations);
 }
 
+// Stable identifier for one `tool_use` invocation: `iteration` is the
+// agent-loop counter, `position` is the index in the iteration's
+// `tool_use` sub-list (after filtering text/thinking blocks). Grouped
+// in one object to make wrong-order swaps a type error at call sites.
+interface ToolStepKey {
+  iteration: number;
+  position: number;
+}
+
 interface PlannedCall {
   block: ToolUseBlock;
   spec: ToolSpec | null;
+  stepKey: ToolStepKey;
 }
 
 /**
@@ -356,14 +367,16 @@ async function executeToolCalls(
   tools: ToolRegistry,
   service: Service,
   stepRun: StepRunner | undefined,
+  iteration: number,
   interceptions?: ReadonlyMap<string, ContentBlock>,
 ): Promise<ContentBlock[]> {
   const toolUseBlocks = content.filter((b): b is ToolUseBlock => b.type === "tool_use");
   if (toolUseBlocks.length === 0) return [];
 
-  const planned: PlannedCall[] = toolUseBlocks.map((block) => ({
+  const planned: PlannedCall[] = toolUseBlocks.map((block, position) => ({
     block,
     spec: tools.get(block.name) ?? null,
+    stepKey: { iteration, position },
   }));
 
   // Coalesce consecutive safe entries; unsafe entries stay as singletons so
@@ -386,7 +399,9 @@ async function executeToolCalls(
   const results: ContentBlock[] = [];
   for (const group of groups) {
     const batch = await Promise.all(
-      group.map(({ block, spec }) => runOne(block, spec, service, stepRun, interceptions)),
+      group.map(({ block, spec, stepKey }) =>
+        runOne(block, spec, service, stepRun, stepKey, interceptions),
+      ),
     );
     results.push(...batch);
   }
@@ -438,6 +453,7 @@ async function runOne(
   spec: ToolSpec | null,
   service: Service,
   stepRun: StepRunner | undefined,
+  stepKey: ToolStepKey,
   interceptions?: ReadonlyMap<string, ContentBlock>,
 ): Promise<ContentBlock> {
   // Volume-cluster intercept short-circuits the handler — synthetic
@@ -459,18 +475,23 @@ async function runOne(
     { attributes: { "cogmo.tool.name": block.name } },
     async (span) => {
       try {
-        // Opt-in durability: wrap only when the tool is flagged AND a
-        // runner is provided. The handler body itself runs between stream
-        // events (never during), so wrapping in `step.run` doesn't
-        // reorder `onEvent` emissions. See design/crash-recovery.md.
+        // Step id is SDK-local (iteration + filtered-tool-use position)
+        // so the cache key is stable across Inngest replays even though
+        // the provider's `tool_use_id` is not. Cached content may
+        // semantically mismatch the current `tool_use` — see
+        // design/crash-recovery.md → Per-tool durability.
         const runHandler = (): Promise<string> =>
           spec.handler(block.input as Record<string, unknown>, service);
         const out =
           spec.durable === true && stepRun
-            ? await stepRun(`tool-${block.name}-${block.id}`, runHandler)
+            ? await stepRun(`tool-iter${stepKey.iteration}-${stepKey.position}`, runHandler)
             : await runHandler();
         return { type: "tool_result" as const, toolUseId: block.id, content: out };
       } catch (err) {
+        // Also catches cached rejections from a durable `stepRun` — Inngest
+        // replays a stored failure by re-throwing here. Converting to an
+        // `isError: true` tool_result keeps Class D's
+        // `iterationHadSideEffect` accurate across replays.
         const message = err instanceof Error ? err.message : String(err);
         span.recordException(err instanceof Error ? err : new Error(message));
         span.setStatus({ code: SpanStatusCode.ERROR, message });
@@ -821,6 +842,7 @@ export async function runStreamingAgentLoop(
       tools,
       service,
       stepRun,
+      iterations,
       interceptions,
     );
 
