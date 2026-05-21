@@ -10,6 +10,13 @@
 // Test files are exempt: stubbing partial interfaces is the dominant use and
 // `mock<T>()` / `mockDeep<T>()` from vitest-mock-extended is the preferred
 // replacement (see .claude/rules/testing.md).
+//
+// The exemption is a substring match on `.test.` and `/test/`, which tracks
+// the project's actual layout (`*.test.ts` suffix + `src/test/` helper
+// directory). Revisit if the test layout shifts to `__tests__/` or `tests/`
+// — both forms would slip through today. The smoke test in
+// `src/test/biome-plugin.test.ts` covers the positive, negative, and
+// suppression-comment paths.
 
 language js
 
