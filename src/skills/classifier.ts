@@ -1,6 +1,10 @@
 import { logger } from "../logger.js";
 import { AST_CLASSIFIER_VERSION, classifyWithAst } from "./ast-classifier.js";
-import { APPROVE_GATING_EFFECTS, APPROVE_SECRETS_THRESHOLD } from "./ast-rules.js";
+import {
+  APPROVE_GATING_EFFECTS,
+  APPROVE_SECRETS_THRESHOLD,
+  categoriseDependency,
+} from "./ast-rules.js";
 import type { ClassifierLog, SkillManifest } from "./types.js";
 
 /**
@@ -70,8 +74,13 @@ export function classifyManifestStub(manifest: SkillManifest): ClassifierLog {
   const hasApproveEffect = manifest.effects.some((e) => APPROVE_GATING_EFFECTS.has(e));
   const isContainerTier = manifest.tier === "container";
   const hasManySecrets = declaredSecrets.length >= APPROVE_SECRETS_THRESHOLD;
+  const hasApproveDep = manifest.dependencies.some((d) => categoriseDependency(d) === "approve");
 
-  const riskTier = hasApproveEffect || isContainerTier || hasManySecrets ? "approve" : "notify";
+  // Stub can't reach `auto` (only the AST path can prove a body is
+  // read-only), so the dep-allowlist case still lands at `notify` here —
+  // see classifier.ts header. Approve-tier deps still force `approve`.
+  const riskTier =
+    hasApproveEffect || isContainerTier || hasManySecrets || hasApproveDep ? "approve" : "notify";
 
   return {
     classifier_version: STUB_CLASSIFIER_VERSION,
@@ -79,6 +88,7 @@ export function classifyManifestStub(manifest: SkillManifest): ClassifierLog {
     declared_effects: manifest.effects,
     detected_effects: [],
     declared_secrets: declaredSecrets,
+    declared_dependencies: manifest.dependencies,
     validation_errors: [],
   };
 }

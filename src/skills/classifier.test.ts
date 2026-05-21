@@ -17,6 +17,7 @@ function makeManifest(overrides: Partial<SkillManifest> = {}): SkillManifest {
     inputs: { type: "object", properties: {} },
     effects: [],
     secrets: [],
+    dependencies: [],
     cost_per_call_usd: 0,
     ...overrides,
   } satisfies SkillManifest;
@@ -55,6 +56,52 @@ describe("classifyManifest (live AST path)", () => {
   it("container tier still forces approve regardless of body", async () => {
     const log = await classifyManifest(makeManifest({ tier: "container" }), NOOP_BODY);
     expect(log.risk_tier).toBe("approve");
+  });
+
+  describe("dependencies", () => {
+    it("allowlisted deps don't block auto", async () => {
+      const log = await classifyManifest(
+        makeManifest({ dependencies: ["httpx==0.27.0", "pydantic==2.5.3"] }),
+        NOOP_BODY,
+      );
+      expect(log.risk_tier).toBe("auto");
+      expect(log.declared_dependencies).toEqual(["httpx==0.27.0", "pydantic==2.5.3"]);
+    });
+
+    it("unknown deps bump to notify", async () => {
+      const log = await classifyManifest(
+        makeManifest({ dependencies: ["some-obscure-pkg==1.0.0"] }),
+        NOOP_BODY,
+      );
+      expect(log.risk_tier).toBe("notify");
+    });
+
+    it.each([
+      ["boto3==1.34.0", "cloud SDK"],
+      ["paramiko==3.4.0", "remote execution"],
+      ["stripe==9.0.0", "financial"],
+      ["sendgrid==6.11.0", "external mail"],
+    ])("approve-list dep %s forces approve", async (dep) => {
+      const log = await classifyManifest(makeManifest({ dependencies: [dep] }), NOOP_BODY);
+      expect(log.risk_tier).toBe("approve");
+    });
+
+    it("normalises PEP 503 names (case + underscore/dot variants)", async () => {
+      // Boto3, BOTO_3, etc. all canonicalise to "boto3" → approve.
+      const log = await classifyManifest(
+        makeManifest({ dependencies: ["Boto3==1.34.0"] }),
+        NOOP_BODY,
+      );
+      expect(log.risk_tier).toBe("approve");
+    });
+
+    it("worst category wins across deps (one approve-list dep dominates)", async () => {
+      const log = await classifyManifest(
+        makeManifest({ dependencies: ["httpx==0.27.0", "paramiko==3.4.0"] }),
+        NOOP_BODY,
+      );
+      expect(log.risk_tier).toBe("approve");
+    });
   });
 });
 

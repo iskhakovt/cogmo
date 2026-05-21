@@ -1,4 +1,5 @@
 import { Ajv, type ValidateFunction } from "ajv";
+import { err, ok, type Result } from "neverthrow";
 import { computeNextRun } from "../agent/scheduling/cron.js";
 import type { Service } from "../agent/service.js";
 import type { Transactor } from "../db/index.js";
@@ -11,6 +12,7 @@ import { DEFAULT_GITHUB_IDENTITY_NAME, resolveGitHubIdentity } from "../secrets/
 import type { SecretsStore } from "../secrets/store/index.js";
 import { classifyManifest, STUB_CLASSIFIER_VERSION } from "./classifier.js";
 import { type CtxUser, DefaultCtxHandler } from "./ctx-handler.js";
+import { readLockfileAtSha } from "./deps.js";
 import {
   deleteRef,
   GitOpsError,
@@ -390,6 +392,41 @@ export class SkillRunnerImpl implements SkillRunner {
     return computeNextRun(schedule, this.#user.timezone, this.#clock());
   }
 
+  /**
+   * Read the lockfile at a deploy sha and return its hash.
+   *
+   * Returns:
+   *   - `ok(null)` — manifest declares no deps; no lockfile is expected
+   *     and any committed `requirements.lock` is ignored.
+   *   - `ok(<hex>)` — manifest declares deps and a non-empty lockfile is
+   *     present. `<hex>` is `sha256(contents)`.
+   *   - `err(message)` — manifest declares deps but the lockfile is
+   *     missing or empty. The caller surfaces this verbatim as the
+   *     register `errors[]` payload.
+   *
+   * The lockfile contents themselves are deliberately discarded here —
+   * PR2 wires `uv pip compile`-based byte-comparison to detect staleness
+   * and `uv pip sync`-based populate at first invocation. PR1 only
+   * stamps the hash so the future populator + reachability sweep have a
+   * stable cache key.
+   */
+  async #readManifestLockfile(
+    repoPath: string,
+    gitSha: string,
+    manifest: SkillManifest,
+  ): Promise<Result<string | null, string>> {
+    if (manifest.dependencies.length === 0) {
+      return ok(null);
+    }
+    const snapshot = await readLockfileAtSha(repoPath, gitSha);
+    if (snapshot.isErr()) {
+      return err(
+        `requirements_lock_${snapshot.error.kind}: declared ${manifest.dependencies.length} dependencies but ${snapshot.error.message}. Run 'uv pip compile --generate-hashes' and commit the result.`,
+      );
+    }
+    return ok(snapshot.value.hash);
+  }
+
   static async create(opts: SkillRunnerOptions): Promise<SkillRunnerImpl> {
     // Pool init is deferred to first tier-2 invocation — cogmo serve
     // boots independently of sandbox availability. See `#ensurePool`.
@@ -546,6 +583,12 @@ export class SkillRunnerImpl implements SkillRunner {
       return rejectedResult(branchSha, classifierLog.validation_errors.join("; "));
     }
 
+    const lockfileResult = await this.#readManifestLockfile(repoPath, branchSha, manifest);
+    if (lockfileResult.isErr()) {
+      return rejectedResult(branchSha, lockfileResult.error);
+    }
+    const lockfileHash = lockfileResult.value;
+
     const schedule = manifest.schedule ?? null;
     const result = await this.#runInTx((tx) =>
       this.#store.executeRegister(tx, {
@@ -556,6 +599,7 @@ export class SkillRunnerImpl implements SkillRunner {
         schedule,
         scheduleNextRunAt: this.#computeScheduleNextRunAt(schedule),
         branchTipSha: branchSha,
+        lockfileHash,
         inputs: manifest.inputs,
         outputs: manifest.outputs ?? null,
         classifierLog,
@@ -654,6 +698,12 @@ export class SkillRunnerImpl implements SkillRunner {
       };
     }
 
+    const lockfileResult = await this.#readManifestLockfile(repoPath, deploy.gitSha, manifest);
+    if (lockfileResult.isErr()) {
+      return rejectedResult(deploy.gitSha, lockfileResult.error);
+    }
+    const lockfileHash = lockfileResult.value;
+
     const schedule = manifest.schedule ?? null;
     const result = await this.#runInTx((tx) =>
       this.#store.executeApprove(tx, {
@@ -667,6 +717,7 @@ export class SkillRunnerImpl implements SkillRunner {
         effects: manifest.effects,
         schedule,
         scheduleNextRunAt: this.#computeScheduleNextRunAt(schedule),
+        lockfileHash,
         inputs: manifest.inputs,
         outputs: manifest.outputs ?? null,
         applyFilesystem: async () => {
@@ -784,6 +835,12 @@ export class SkillRunnerImpl implements SkillRunner {
 
     const mainSha = await getMainSha(repoPath);
 
+    const lockfileResult = await this.#readManifestLockfile(repoPath, targetSha, manifest);
+    if (lockfileResult.isErr()) {
+      return rejectedResult(targetSha, lockfileResult.error);
+    }
+    const lockfileHash = lockfileResult.value;
+
     const schedule = manifest.schedule ?? null;
     const result = await this.#runInTx((tx) =>
       this.#store.executeRollback(tx, {
@@ -794,6 +851,7 @@ export class SkillRunnerImpl implements SkillRunner {
         effects: manifest.effects,
         schedule,
         scheduleNextRunAt: this.#computeScheduleNextRunAt(schedule),
+        lockfileHash,
         inputs: manifest.inputs,
         outputs: manifest.outputs ?? null,
         classifierLog,
@@ -1235,6 +1293,7 @@ export class SkillRunnerImpl implements SkillRunner {
       schedule,
       scheduleNextRunAt: this.#computeScheduleNextRunAt(schedule),
       gitSha,
+      lockfileHash: null,
       inputs: manifest.inputs,
       outputs: manifest.outputs ?? null,
     };
@@ -1248,6 +1307,7 @@ export class SkillRunnerImpl implements SkillRunner {
       declared_effects: [],
       detected_effects: [],
       declared_secrets: [],
+      declared_dependencies: [],
       validation_errors: [],
     };
     await this.#runInTx((tx) =>

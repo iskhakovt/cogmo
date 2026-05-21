@@ -39,6 +39,7 @@ const STUB_LOG: ClassifierLog = {
   declared_effects: [],
   detected_effects: [],
   declared_secrets: [],
+  declared_dependencies: [],
   validation_errors: [],
 };
 
@@ -51,6 +52,7 @@ function makeSkillParams(overrides: Partial<InsertSkillParams> = {}): InsertSkil
     schedule: null,
     scheduleNextRunAt: null,
     gitSha: SHA,
+    lockfileHash: null,
     inputs: INPUTS_SCHEMA,
     outputs: null,
     ...overrides,

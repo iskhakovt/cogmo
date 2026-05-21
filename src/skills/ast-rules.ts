@@ -195,3 +195,121 @@ export const APPROVE_GATING_EFFECTS: ReadonlySet<SkillEffect> = new Set<SkillEff
 
 /** A declared secret count at or above this threshold forces `approve`. */
 export const APPROVE_SECRETS_THRESHOLD = 3;
+
+/**
+ * Pythia dep allowlist — packages a skill can depend on without bumping
+ * out of `auto` tier. Curated to the slice of PyPI that does pure-HTTP,
+ * data shape, or template work and has no agency to mutate external
+ * state on its own. The classifier is a UX gate, not a security
+ * boundary (`design/skills.md` → Threat model); the goal is "skill
+ * declares httpx + pydantic, auto-deploys; skill declares paramiko,
+ * needs human approval."
+ *
+ * Names are PEP 503 normalised (lowercase, `_` → `-`); the classifier
+ * normalises declared deps before lookup.
+ */
+export const DEPENDENCY_ALLOWLIST: ReadonlySet<string> = new Set<string>([
+  "anyio",
+  "beautifulsoup4",
+  "certifi",
+  "charset-normalizer",
+  "dateparser",
+  "h11",
+  "httpcore",
+  "httpx",
+  "idna",
+  "jinja2",
+  "lxml",
+  "markdown-it-py",
+  "markupsafe",
+  "orjson",
+  "pendulum",
+  "pydantic",
+  "pydantic-core",
+  "python-dateutil",
+  "pytz",
+  "pyyaml",
+  "requests",
+  "rich",
+  "sniffio",
+  "soupsieve",
+  "tenacity",
+  "typing-extensions",
+  "urllib3",
+]);
+
+/**
+ * Packages whose presence in `dependencies` forces `approve` regardless of
+ * other signals. Either they touch destructive external surfaces (cloud
+ * SDKs, payment APIs, mail senders), grant arbitrary remote command
+ * execution (SSH/Paramiko), or sit close enough to credentials that a
+ * misuse needs a human in the loop.
+ *
+ * Anything not in {@link DEPENDENCY_ALLOWLIST} and not in this list bumps
+ * the skill to at least `notify` — the classifier treats unfamiliar deps
+ * as widening events worth surfacing without blocking.
+ */
+export const DEPENDENCY_APPROVE_LIST: ReadonlySet<string> = new Set<string>([
+  // Cloud SDKs — broad surface, IAM-shaped credentials
+  "boto3",
+  "botocore",
+  "google-cloud-storage",
+  "google-cloud-firestore",
+  "google-cloud-bigquery",
+  "azure-storage-blob",
+  // Payment / financial
+  "stripe",
+  "plaid-python",
+  "braintree",
+  // Mail
+  "sendgrid",
+  "mailgun",
+  // Messaging vendors with destructive surface
+  "twilio",
+  // Database drivers — surface area for arbitrary mutation
+  "psycopg",
+  "psycopg2",
+  "psycopg2-binary",
+  "pymongo",
+  "mysql-connector-python",
+  "redis",
+  // Remote execution / shell
+  "paramiko",
+  "fabric",
+  // OAuth-bearing wrappers
+  "requests-oauthlib",
+  "google-auth",
+  "google-auth-oauthlib",
+  // Telegram / Slack senders (mirrors the import rules)
+  "python-telegram-bot",
+  "slack-sdk",
+  "slackclient",
+  "discord-py",
+]);
+
+/**
+ * Normalise a PEP 503 distribution name for allowlist lookup. Strips
+ * the `==version` pin (kept by the manifest's strict regex) and
+ * lowercases / dash-canonicalises the name half. The manifest schema
+ * already guarantees `<name>==<version>` shape, so this is a tight
+ * split — anything that round-trips through here is well-formed.
+ */
+export function normaliseDepName(dep: string): string {
+  const idx = dep.indexOf("==");
+  const name = idx === -1 ? dep : dep.slice(0, idx);
+  return name.trim().toLowerCase().replace(/[_.]+/g, "-");
+}
+
+/**
+ * Categorise one declared dependency against the allow / approve lists.
+ * Returns the tier-impact category that the classifier folds into the
+ * overall risk tier.
+ */
+export type DependencyCategory = "allowlist" | "notify" | "approve";
+
+export function categoriseDependency(dep: string): DependencyCategory {
+  const name = normaliseDepName(dep);
+  if (DEPENDENCY_APPROVE_LIST.has(name)) return "approve";
+  if (DEPENDENCY_ALLOWLIST.has(name)) return "allowlist";
+  return "notify";
+}

@@ -118,9 +118,28 @@ const SkillBudgetSchema = z.object({
 });
 
 /**
+ * Direct Python dep declared in `SKILL.md`. Strict `name==version` only. The
+ * regex rejects ranges (`>=`, `<`), extras (`pkg[foo]`), URL/git specifiers,
+ * and bare names — see `design/skills.md` → Dependencies for the rationale.
+ * Transitive resolution lives in the generated `requirements.lock`.
+ *
+ * Name segment matches the PEP 508 distribution-name grammar (letter/digit at
+ * the boundary, `._-` interior). Version segment is permissive — uv enforces
+ * PEP 440 at resolve time, and overly-strict regex here would reject valid
+ * pre-releases and local-version segments.
+ */
+export const SkillDependencySchema = z
+  .string()
+  .regex(
+    /^[a-z0-9]([a-z0-9._-]*[a-z0-9])?==[a-zA-Z0-9.+-]+$/i,
+    "must be 'name==version' (no ranges, extras, URLs, or git refs)",
+  );
+
+/**
  * Canonical manifest schema for `SKILL.md` frontmatter. Source of truth for
- * the deploy contract; four consumers read it (register RPC, classifier,
- * dispatcher, tool registrar) — defining the shape once prevents drift.
+ * the deploy contract; five consumers read it (register RPC, classifier,
+ * dispatcher, tool registrar, dependency populator) — defining the shape once
+ * prevents drift.
  *
  * `isolation` only applies to `tier: container`; on `tier: wasm` the field is
  * silently coerced to `undefined` because Pyodide ships single-heap CPython
@@ -146,6 +165,8 @@ export const SkillManifestSchema = z
 
     effects: SkillEffectsSchema.default([]),
     secrets: z.array(SkillSecretSchema).default([]),
+
+    dependencies: z.array(SkillDependencySchema).default([]),
 
     resources: SkillResourcesSchema.optional(),
 
@@ -185,6 +206,7 @@ export const ClassifierLogSchema = z.object({
   declared_effects: SkillEffectsSchema,
   detected_effects: SkillEffectsSchema,
   declared_secrets: z.array(z.string().min(1)),
+  declared_dependencies: z.array(SkillDependencySchema).default([]),
   validation_errors: z.array(z.string()),
 });
 export type ClassifierLog = z.infer<typeof ClassifierLogSchema>;
