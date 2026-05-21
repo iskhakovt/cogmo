@@ -283,7 +283,7 @@ jobs:
           # hits anyway, so caching only buys log noise.
           cache: false
 
-      - uses: github/codeql-action/upload-sarif@458d36d7d4f47d0dd16ca424c1d3cda0060f1360 # v3.35.5
+      - uses: github/codeql-action/upload-sarif@f25eda876ebb741d872b63b9f2c6dfdd77f14b83 # v4.35.5
         # Run even if Trivy itself errored (e.g. DB download flake) so we
         # don't lose partial results. The upload action no-ops on a missing
         # file but logs a clear message.
