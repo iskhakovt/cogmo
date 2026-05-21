@@ -8,6 +8,12 @@ interface WorkerInit {
   port: MessagePort;
   body: string;
   packageCacheDir?: string;
+  /**
+   * Direct `pkg==version` specs to `micropip.install` before signalling
+   * ready. Sourced from the skill's `requirements.lock` parsed
+   * host-side; absent/empty means stdlib + Pyodide built-ins only.
+   */
+  packageSpecs?: string[];
   interruptBuffer?: SharedArrayBuffer;
 }
 
@@ -155,6 +161,29 @@ port.on("message", (raw: unknown) => {
   if (init.interruptBuffer) {
     pyodide.setInterruptBuffer(new Uint8Array(init.interruptBuffer));
   }
+
+  // Install the skill's declared dependencies via micropip before the
+  // skill body imports anything. Pyodide ships ~200 packages pre-built;
+  // micropip resolves the rest from PyPI's JSON API, transparently
+  // falling back to source for pure-Python wheels and failing with a
+  // typed exception for native packages that have no Pyodide build.
+  //
+  // The host has already byte-compared a fresh `uv pip compile`
+  // against the committed lockfile (PR2), so the specs we receive are
+  // resolver-validated for the sysbox tier. WASM-tier compatibility
+  // (Pyodide manifest membership + pure-Python fallback) is what
+  // surfaces here; a Pyodide-incompatible dep becomes a `fatal`
+  // worker init error, which the host turns into the task's `error`.
+  if (init.packageSpecs && init.packageSpecs.length > 0) {
+    await pyodide.loadPackage("micropip");
+    pyodide.globals.set("__cogmo_skill_deps", init.packageSpecs);
+    await pyodide.runPythonAsync(
+      "import micropip\n" +
+        "await micropip.install(list(__cogmo_skill_deps), keep_going=False)\n" +
+        "del __cogmo_skill_deps\n",
+    );
+  }
+
   // Tell the host the worker is ready to receive task_invoke.
   port.postMessage({ type: "ready" });
 })().catch((e) => {

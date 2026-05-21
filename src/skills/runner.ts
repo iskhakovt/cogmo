@@ -12,7 +12,12 @@ import { DEFAULT_GITHUB_IDENTITY_NAME, resolveGitHubIdentity } from "../secrets/
 import type { SecretsStore } from "../secrets/store/index.js";
 import { classifyManifest, STUB_CLASSIFIER_VERSION } from "./classifier.js";
 import { type CtxUser, DefaultCtxHandler } from "./ctx-handler.js";
-import { type LockfileCompiler, makeSandboxLockfileCompiler, readLockfileAtSha } from "./deps.js";
+import {
+  type LockfileCompiler,
+  makeSandboxLockfileCompiler,
+  parseLockfilePackageSpecs,
+  readLockfileAtSha,
+} from "./deps.js";
 import {
   deleteRef,
   GitOpsError,
@@ -1285,7 +1290,14 @@ export class SkillRunnerImpl implements SkillRunner {
     // the pgEnum) is a compile-time miss here rather than a silent route
     // through the sysbox path.
     switch (skill.tier) {
-      case "wasm":
+      case "wasm": {
+        // Parse the lockfile's direct deps for micropip. Hashes are
+        // discarded — Pyodide / micropip don't have a `--require-hashes`
+        // equivalent, and the lockfile staleness gate is already
+        // upstream at register (PR2's compile + byte-compare).
+        const packageSpecs = cached.lockfileContents
+          ? parseLockfilePackageSpecs(cached.lockfileContents)
+          : [];
         return runOnWorker({
           taskId,
           skillName: skill.name,
@@ -1295,8 +1307,10 @@ export class SkillRunnerImpl implements SkillRunner {
           ...(this.#pyodidePackageCacheDir && {
             packageCacheDir: this.#pyodidePackageCacheDir,
           }),
+          ...(packageSpecs.length > 0 && { packageSpecs }),
           ctxHandler,
         });
+      }
       case "container": {
         const sandbox = this.#sandbox;
         if (!sandbox) {

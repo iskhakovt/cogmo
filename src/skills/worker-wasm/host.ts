@@ -22,6 +22,20 @@ export interface RunOnWorkerParams {
   wallClockS?: number;
   /** Pyodide package cache directory for warm starts. */
   packageCacheDir?: string;
+  /**
+   * Direct `pkg==version` specs the worker should `micropip.install`
+   * before signalling `ready`. Sourced from the skill's
+   * `requirements.lock` via `parseLockfilePackageSpecs` — already
+   * narrowed to direct deps, hash-pinned via the lockfile contract.
+   * Absent / empty array → stdlib + Pyodide built-ins only.
+   *
+   * Install runs via Pyodide's `micropip` (Node fetch under the hood),
+   * with results cached in `packageCacheDir` when configured.
+   * Pyodide-incompatible wheels surface as a `fatal` worker init
+   * error — the runner re-raises as the task's `error` and the
+   * worker exits.
+   */
+  packageSpecs?: readonly string[];
   ctxHandler: CtxHandler;
 }
 
@@ -61,6 +75,10 @@ export async function runOnWorker(params: RunOnWorkerParams): Promise<RunOnWorke
       port: workerPort,
       body: params.body,
       ...(params.packageCacheDir && { packageCacheDir: params.packageCacheDir }),
+      ...(params.packageSpecs &&
+        params.packageSpecs.length > 0 && {
+          packageSpecs: [...params.packageSpecs],
+        }),
       interruptBuffer,
     },
     transferList: [workerPort],
