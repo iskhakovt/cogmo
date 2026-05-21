@@ -162,6 +162,29 @@ describe("SysboxWorkerPool", () => {
     );
   });
 
+  it("forwards depsCacheVolumeName to every createWorker call", async () => {
+    const seen: Array<string | undefined> = [];
+    const sandbox = mock<SandboxClient>();
+    const now = 1_000_000;
+    const pool = await SysboxWorkerPool.create({
+      sandbox,
+      image: "fake:test",
+      ...DEFAULT_POOL_OPTIONS,
+      min: 2,
+      max: 3,
+      depsCacheVolumeName: "cogmo-skills-deps-cache",
+      createWorker: async ({ workerId, depsCacheVolumeName }) => {
+        seen.push(depsCacheVolumeName);
+        return makeFakeWorker(workerId, {}, () => now);
+      },
+      setInterval: (): unknown => ({ __fake: true }),
+      clearInterval: () => {},
+      now: () => now,
+    });
+    expect(seen).toEqual(["cogmo-skills-deps-cache", "cogmo-skills-deps-cache"]);
+    await pool.dispose();
+  });
+
   it("acquires an idle worker on invoke and releases after success", async () => {
     const h = buildPoolHarness({ poolOptions: { min: 1, max: 3 } });
     const pool = await h.pool;

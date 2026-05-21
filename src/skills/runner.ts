@@ -279,6 +279,15 @@ export interface SkillRunnerOptions {
    */
   tier2Image?: string;
   /**
+   * Named Docker volume that holds per-lockfile-hash skill virtualenvs.
+   * Threaded into every tier-2 worker the pool spawns so populated
+   * venvs persist across worker recycle + are shared across the pool.
+   * Production wiring (`src/index.ts`) sets this from
+   * `env.COGMO_SKILLS_DEPS_VOLUME`. Omit for tests / tier-1-only paths
+   * that don't need the cache.
+   */
+  depsCacheVolumeName?: string;
+  /**
    * Pool sizing overrides. Defaults from `DEFAULT_POOL_OPTIONS` are tuned
    * for personal scale (min=1, max=3, recycle every 500 tasks or 24h).
    * Tests can shrink to `min: 0` to avoid eager-spawning a worker on
@@ -351,6 +360,7 @@ export class SkillRunnerImpl implements SkillRunner {
   #pyodidePackageCacheDir: string | undefined;
   #sandbox: SandboxClient | undefined;
   #tier2Image: string;
+  #depsCacheVolumeName: string | undefined;
   #clock: () => Date;
   #lockfileCompiler: LockfileCompiler | undefined;
   /**
@@ -396,6 +406,7 @@ export class SkillRunnerImpl implements SkillRunner {
     this.#pyodidePackageCacheDir = opts.pyodidePackageCacheDir;
     this.#sandbox = opts.sandbox;
     this.#tier2Image = opts.tier2Image ?? DEFAULT_TIER2_IMAGE;
+    this.#depsCacheVolumeName = opts.depsCacheVolumeName;
     this.#poolOptions = opts.poolOptions;
     this.#clock = opts.clock ?? (() => new Date());
     this.#ajv = new Ajv({ allErrors: true, strict: false });
@@ -514,6 +525,9 @@ export class SkillRunnerImpl implements SkillRunner {
           sandbox,
           image: this.#tier2Image,
           ...DEFAULT_POOL_OPTIONS,
+          ...(this.#depsCacheVolumeName !== undefined && {
+            depsCacheVolumeName: this.#depsCacheVolumeName,
+          }),
           ...this.#poolOptions,
         });
         this.#pool = pool;
@@ -1322,6 +1336,9 @@ export class SkillRunnerImpl implements SkillRunner {
             ...(wallClockS !== undefined && { wallClockS }),
             ...(isolation !== undefined && { isolation }),
             ...(deps !== undefined && { deps }),
+            ...(this.#depsCacheVolumeName !== undefined && {
+              depsCacheVolumeName: this.#depsCacheVolumeName,
+            }),
             resourceLimits: overrides,
             image: this.#tier2Image,
             sandbox,

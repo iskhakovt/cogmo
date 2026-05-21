@@ -251,6 +251,16 @@ const DEFAULT_POPULATE_TIMEOUT_MS = 180_000;
  * crash-and-retry on the same worker where the tmp dir from the
  * previous attempt is still present.
  *
+ * Cross-worker race safety: when `/skill-venvs` is a shared Docker
+ * volume mounted on every pool worker, two workers can populate the
+ * same hash in parallel. Both check `.ready` (missing), both `uv
+ * venv` into distinct `<HASH>.tmp.<workerId>` dirs, both run sync,
+ * both rename. POSIX `mv` of a directory onto an existing non-empty
+ * directory fails EEXIST — the first rename publishes the venv, the
+ * second sees the publication and treats it as success after
+ * confirming `.ready` is present on the winning copy. No advisory
+ * lock needed; the marker file is the synchronisation point.
+ *
  * Args are positional: $1 = lockfile hash, $2 = worker id (used for
  * the tmp-dir suffix; per-worker uniqueness is sufficient because
  * each container is single-flight on its supervisor).
@@ -260,15 +270,34 @@ HASH="$1"
 WORKERID="$2"
 VENV="${SKILL_VENVS_DIR}/$HASH"
 TMP="${SKILL_VENVS_DIR}/$HASH.tmp.$WORKERID"
+# UV_CACHE_DIR on the shared volume puts the content-addressed wheel
+# cache on the same filesystem as the venv targets, so uv's default
+# hardlink install mode actually hardlinks (cross-filesystem falls
+# back to copy and inflates disk by ~100×; see uv#15149). Same
+# rationale as the design's "uv-cache/ and venvs/ share a filesystem"
+# note. Exported once for both uv calls below.
+export UV_CACHE_DIR="${SKILL_VENVS_DIR}/.uv-cache"
 if [ -f "$VENV/.ready" ]; then
   exit 0
 fi
-mkdir -p "${SKILL_VENVS_DIR}"
+mkdir -p "${SKILL_VENVS_DIR}" "$UV_CACHE_DIR"
 rm -rf "$TMP"
 uv venv --quiet "$TMP"
 uv pip sync --quiet --python "$TMP/bin/python" --require-hashes --only-binary=:all: /dev/stdin
 touch "$TMP/.ready"
-mv "$TMP" "$VENV"
+# Atomic publish. Two workers populating the same hash can race here;
+# the loser's mv fails (target dir already exists and is non-empty).
+# Recover by confirming the winner published a complete venv via the
+# .ready marker, then drop our own tmp dir.
+if ! mv "$TMP" "$VENV" 2>/dev/null; then
+  if [ -f "$VENV/.ready" ]; then
+    rm -rf "$TMP"
+    exit 0
+  fi
+  echo "populate_failed: lost rename race but \\\`$VENV\\\` is not ready" >&2
+  rm -rf "$TMP"
+  exit 1
+fi
 `;
 
 /**

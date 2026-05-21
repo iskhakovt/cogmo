@@ -81,6 +81,14 @@ const CAPABILITIES: SandboxCapabilities = {
 const HOME_VOLUME_TARGET = "/home/vscode";
 
 /**
+ * Mount point for the skills-tier-2 deps cache volume — must match
+ * `SKILL_VENVS_DIR` in `src/skills/deps.ts`. The populator writes
+ * `<target>/<lockfile-hash>/` and the supervisor activates each task's
+ * venv from the same path.
+ */
+const DEPS_CACHE_VOLUME_TARGET = "/skill-venvs";
+
+/**
  * Local-Docker backend. Spawns task containers as siblings on the host
  * Docker daemon with `HostConfig.Runtime = "sysbox-runc"` by default.
  * Slice-3 features (proxy, cgroup parent, askpass) wired in optionally;
@@ -240,9 +248,24 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
     // mcr.microsoft.com/devcontainers/base:ubuntu-24.04). Skills tier-2
     // omits the home volume entirely. When custom devcontainer support
     // grows, the mount target needs to become image-declared.
-    const mounts: DockerodeMountSettings[] = spec.homeVolume
-      ? [{ Type: "volume", Source: spec.homeVolume.volumeName, Target: HOME_VOLUME_TARGET }]
-      : [];
+    const mounts: DockerodeMountSettings[] = [];
+    if (spec.homeVolume) {
+      mounts.push({
+        Type: "volume",
+        Source: spec.homeVolume.volumeName,
+        Target: HOME_VOLUME_TARGET,
+      });
+    }
+    if (spec.depsCacheVolume) {
+      // Skills-tier-2 deps cache. Same volume on every worker in the
+      // pool, so a venv populated by worker A is visible to worker B.
+      // Coding-delegation sessions never set this field.
+      mounts.push({
+        Type: "volume",
+        Source: spec.depsCacheVolume.volumeName,
+        Target: DEPS_CACHE_VOLUME_TARGET,
+      });
+    }
 
     // Process-level env (e.g. `CLAUDE_CODE_OAUTH_TOKEN` for the Claude Code
     // backend). Lives on the container's process env only — never written to

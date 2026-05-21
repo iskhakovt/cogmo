@@ -39,6 +39,14 @@ export interface SysboxSkillWorkerOptions {
    * (recycle ceiling + small buffer); workers don't need to know the policy.
    */
   expiresAt: Date;
+  /**
+   * Named Docker volume mounted at `/skill-venvs`. Threaded to the
+   * sandbox `SessionSpec.depsCacheVolume`. The pool passes the same
+   * value to every worker so a venv populated by one worker is reused
+   * by every other worker and survives recycle. Omit to run with a
+   * container-local cache (overlay FS, lost on recycle).
+   */
+  depsCacheVolumeName?: string;
 }
 
 /**
@@ -177,6 +185,9 @@ export class SysboxSkillWorker {
       image: opts.image,
       resourceLimits,
       expiresAt: opts.expiresAt,
+      ...(opts.depsCacheVolumeName !== undefined && {
+        depsCacheVolume: { volumeName: opts.depsCacheVolumeName },
+      }),
     });
 
     let exec: ExecStreamingHandle;

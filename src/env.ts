@@ -184,6 +184,16 @@ export const env = createEnv({
       .int()
       .positive()
       .default(30 * 60 * 1000),
+    /**
+     * Local-Docker named volume that holds per-lockfile-hash skill
+     * virtualenvs. The same volume is mounted at `/skill-venvs` on
+     * every tier-2 worker the pool spawns, so a venv populated by one
+     * worker is reused by every other worker (and survives worker
+     * recycle). Defaults to `cogmo-skills-deps-cache`; override per
+     * deployment for multi-tenant hosts where each Cogmo instance
+     * needs its own cache.
+     */
+    COGMO_SKILLS_DEPS_VOLUME: z.string().min(1).default("cogmo-skills-deps-cache"),
     /** Host root for git clones registered via `/repo add`. */
     COGMO_REPOS_DIR: z.string().default("/var/lib/cogmo/repos"),
     /** Host root for per-task git worktrees. */

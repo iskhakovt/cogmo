@@ -69,6 +69,14 @@ export interface RunOnSysboxContainerParams {
     lockfileHash: string;
     lockfileContents: string;
   };
+  /**
+   * Shared deps-cache volume name. When set, the one-shot container
+   * mounts the same Docker volume that pool workers use, so a venv
+   * populated on the pool is reused by this one-shot invocation
+   * (and vice versa). Omitted = container-local populate, lost on
+   * teardown.
+   */
+  depsCacheVolumeName?: string;
 }
 
 /**
@@ -103,6 +111,9 @@ export async function runOnSysboxContainer(
       image: params.image,
       ...(params.resourceLimits !== undefined && { resourceLimits: params.resourceLimits }),
       expiresAt,
+      ...(params.depsCacheVolumeName !== undefined && {
+        depsCacheVolumeName: params.depsCacheVolumeName,
+      }),
     });
     if (!worker.tryAcquire()) {
       // Brand-new worker should always be idle; this is a programmer error.
