@@ -4,15 +4,23 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
 import { conversations, messages, profiles, users } from "../agent/store/schema.js";
-import { channelSessions, channels, inboundMessages } from "../transport/store/schema.js";
+import * as schema from "../db/schemas.js";
+import { transactor } from "../db/transactor.js";
+import { DrizzleTransportStore } from "../transport/store/index.js";
+import {
+  boundaryPending,
+  channelSessions,
+  channels,
+  inboundMessages,
+} from "../transport/store/schema.js";
 
-let db: ReturnType<typeof drizzle>;
+let db: ReturnType<typeof drizzle<typeof schema>>;
 let inngestBaseUrl: string;
 
 beforeAll(() => {
   const databaseUrl = inject("databaseUrl");
   inngestBaseUrl = inject("inngestBaseUrl");
-  db = drizzle({ connection: databaseUrl });
+  db = drizzle({ connection: databaseUrl, schema });
 });
 
 afterAll(async () => {
@@ -121,5 +129,46 @@ describe("e2e smoke", () => {
     // `default` (or `cw=default,mo=default`) and miss this match.
     expect(stdout).toMatch(/litellm/);
     expect(stdout).not.toMatch(/\bdefault\b/);
+  });
+
+  it("boundary-janitor query roundtrips a Date param through postgres-js", async () => {
+    // Exercises `listExpiredBoundaryPending` on the real driver. Drizzle's
+    // PGLite tier accepts a JS `Date` in the parameter slot and silently
+    // coerces; postgres-js's prepared-statement bind rejects anything that
+    // isn't a string, throwing `ERR_INVALID_ARG_TYPE` from `Buffer.byteLength`
+    // before the query leaves the client. Typed operators (`lt`/`gt`/...)
+    // apply the column's `mapToDriverValue` (Date → ISO-8601 string) so the
+    // bind phase sees a string — this smoke pins that contract.
+    const defaultUserId = inject("defaultUserId");
+    const profileRows = await db.select({ id: profiles.id }).from(profiles).limit(1);
+    const channelRows = await db.select({ id: channels.id }).from(channels).limit(1);
+    const profileId = profileRows[0]!.id;
+    const channelId = channelRows[0]!.id;
+
+    const [conv] = await db
+      .insert(conversations)
+      .values({ userId: defaultUserId, profileId, isPrivate: true })
+      .returning({ id: conversations.id });
+
+    const platformAddress = `boundary-smoke-${Date.now()}`;
+    const [pending] = await db
+      .insert(boundaryPending)
+      .values({
+        channelId,
+        platformAddress,
+        platformUserHandle: "boundary-smoke",
+        priorConversationId: conv!.id,
+        promptMessageId: "tg:boundary-smoke",
+        bufferedInbounds: [],
+        expiresAt: new Date(Date.now() - 5 * 60 * 1000),
+      })
+      .returning({ id: boundaryPending.id });
+
+    const store = new DrizzleTransportStore();
+    const tx = transactor(db);
+    const expired = await tx((trx) =>
+      store.listExpiredBoundaryPending(trx, new Date(Date.now() - 60_000)),
+    );
+    expect(expired.some((r) => r.id === pending!.id)).toBe(true);
   });
 });

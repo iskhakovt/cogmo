@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, inArray, isNull, lte, ne, notExists, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, lt, lte, ne, notExists, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { JsonValue } from "type-fest";
 // Cross-module read: scheduled-task fire routing needs conversations.{user_id, profile_id}
@@ -1004,7 +1004,7 @@ export class DrizzleTransportStore implements TransportStore {
         platformAddress: boundaryPending.platformAddress,
       })
       .from(boundaryPending)
-      .where(sql`${boundaryPending.expiresAt} < ${cutoff}`);
+      .where(lt(boundaryPending.expiresAt, cutoff));
   }
 
   async findReachableChannelsForUserProfile(
