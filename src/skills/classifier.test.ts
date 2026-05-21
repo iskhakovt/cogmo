@@ -86,12 +86,28 @@ describe("classifyManifest (live AST path)", () => {
       expect(log.risk_tier).toBe("approve");
     });
 
-    it("normalises PEP 503 names (case + underscore/dot variants)", async () => {
-      // Boto3, BOTO_3, etc. all canonicalise to "boto3" → approve.
+    it("normalises PEP 503 names (case differences canonicalise)", async () => {
+      // `Boto3` → `boto3` (lowercase only; no `[-_.]` separators to collapse).
       const log = await classifyManifest(
         makeManifest({ dependencies: ["Boto3==1.34.0"] }),
         NOOP_BODY,
       );
+      expect(log.risk_tier).toBe("approve");
+    });
+
+    it.each([
+      // PEP 503 collapses every run of `[-_.]` to a single `-`. These
+      // adversarial separator-spam forms should ALL canonicalise back
+      // to the approve-list entry `python-telegram-bot`, regardless of
+      // which separator the manifest used.
+      ["python-telegram-bot==21.0.0", "canonical form"],
+      ["python_telegram_bot==21.0.0", "underscore separators"],
+      ["python.telegram.bot==21.0.0", "dot separators"],
+      ["python--telegram--bot==21.0.0", "double-dash runs"],
+      ["python-_-telegram-_-bot==21.0.0", "mixed run separators"],
+      ["Python_Telegram-Bot==21.0.0", "mixed case + separators"],
+    ])("collapses PEP 503 separator runs (%s)", async (dep) => {
+      const log = await classifyManifest(makeManifest({ dependencies: [dep] }), NOOP_BODY);
       expect(log.risk_tier).toBe("approve");
     });
 

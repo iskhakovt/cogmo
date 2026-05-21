@@ -254,5 +254,19 @@ dependencies:
       if (!result.isOk()) return;
       expect(result.value.manifest.dependencies).toHaveLength(3);
     });
+
+    it("accepts PEP 440 epoch versions (e.g. project version-scheme resets)", () => {
+      // Epoch syntax is `N!X.Y.Z` — used when a project changes its
+      // versioning scheme and needs the new versions to sort below the
+      // old ones (PyPy, pytest historical cases). Rare, but valid; the
+      // manifest layer doesn't second-guess what uv resolves.
+      const yaml = `${MIN_FIELDS}
+dependencies:
+  - reset-scheme==1!2.0.0`;
+      const result = parseManifest(frontmatter(yaml));
+      expect(result.isOk()).toBe(true);
+      if (!result.isOk()) return;
+      expect(result.value.manifest.dependencies).toEqual(["reset-scheme==1!2.0.0"]);
+    });
   });
 });

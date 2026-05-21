@@ -126,12 +126,13 @@ const SkillBudgetSchema = z.object({
  * Name segment matches the PEP 508 distribution-name grammar (letter/digit at
  * the boundary, `._-` interior). Version segment is permissive — uv enforces
  * PEP 440 at resolve time, and overly-strict regex here would reject valid
- * pre-releases and local-version segments.
+ * pre-releases (`1.0rc1`), local-version segments (`1.0+local`), and epoch
+ * forms (`1!2.0`, used when a project's versioning scheme resets).
  */
 export const SkillDependencySchema = z
   .string()
   .regex(
-    /^[a-z0-9]([a-z0-9._-]*[a-z0-9])?==[a-zA-Z0-9.+-]+$/i,
+    /^[a-z0-9]([a-z0-9._-]*[a-z0-9])?==[a-zA-Z0-9.+!-]+$/i,
     "must be 'name==version' (no ranges, extras, URLs, or git refs)",
   );
 

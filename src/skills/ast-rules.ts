@@ -290,14 +290,21 @@ export const DEPENDENCY_APPROVE_LIST: ReadonlySet<string> = new Set<string>([
 /**
  * Normalise a PEP 503 distribution name for allowlist lookup. Strips
  * the `==version` pin (kept by the manifest's strict regex) and
- * lowercases / dash-canonicalises the name half. The manifest schema
- * already guarantees `<name>==<version>` shape, so this is a tight
- * split — anything that round-trips through here is well-formed.
+ * lowercases / dash-canonicalises the name half. The character class
+ * includes `-` so consecutive runs of any of `-_.` collapse to a
+ * single `-` — matches [PEP 503](https://peps.python.org/pep-0503/)
+ * step-by-step: every `_` or `.`, and every run of mixed/consecutive
+ * separators (`foo._-bar`, `foo--bar`), reduces to one `-`. The manifest
+ * schema already guarantees `<name>==<version>` shape, so the split
+ * itself is unambiguous.
  */
 export function normaliseDepName(dep: string): string {
   const idx = dep.indexOf("==");
   const name = idx === -1 ? dep : dep.slice(0, idx);
-  return name.trim().toLowerCase().replace(/[_.]+/g, "-");
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[-_.]+/g, "-");
 }
 
 /**
