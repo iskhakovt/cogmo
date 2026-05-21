@@ -219,6 +219,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
       tools,
       service,
       stepRun,
+      iterations,
       interceptions,
     );
     messages.push({ role: "user", content: toolResults });
@@ -233,6 +234,11 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
 interface PlannedCall {
   block: ToolUseBlock;
   spec: ToolSpec | null;
+  // Position of this block within the iteration's `tool_use` content
+  // (pre-grouping). Feeds the durable step id so Inngest replays match
+  // across attempts — the LLM-minted `tool_use_id` is fresh every call
+  // and would diverge the step graph.
+  positionInIteration: number;
 }
 
 /**
@@ -356,14 +362,16 @@ async function executeToolCalls(
   tools: ToolRegistry,
   service: Service,
   stepRun: StepRunner | undefined,
+  iteration: number,
   interceptions?: ReadonlyMap<string, ContentBlock>,
 ): Promise<ContentBlock[]> {
   const toolUseBlocks = content.filter((b): b is ToolUseBlock => b.type === "tool_use");
   if (toolUseBlocks.length === 0) return [];
 
-  const planned: PlannedCall[] = toolUseBlocks.map((block) => ({
+  const planned: PlannedCall[] = toolUseBlocks.map((block, positionInIteration) => ({
     block,
     spec: tools.get(block.name) ?? null,
+    positionInIteration,
   }));
 
   // Coalesce consecutive safe entries; unsafe entries stay as singletons so
@@ -386,7 +394,9 @@ async function executeToolCalls(
   const results: ContentBlock[] = [];
   for (const group of groups) {
     const batch = await Promise.all(
-      group.map(({ block, spec }) => runOne(block, spec, service, stepRun, interceptions)),
+      group.map(({ block, spec, positionInIteration }) =>
+        runOne(block, spec, service, stepRun, iteration, positionInIteration, interceptions),
+      ),
     );
     results.push(...batch);
   }
@@ -438,6 +448,8 @@ async function runOne(
   spec: ToolSpec | null,
   service: Service,
   stepRun: StepRunner | undefined,
+  iteration: number,
+  positionInIteration: number,
   interceptions?: ReadonlyMap<string, ContentBlock>,
 ): Promise<ContentBlock> {
   // Volume-cluster intercept short-circuits the handler — synthetic
@@ -463,11 +475,19 @@ async function runOne(
         // runner is provided. The handler body itself runs between stream
         // events (never during), so wrapping in `step.run` doesn't
         // reorder `onEvent` emissions. See design/crash-recovery.md.
+        //
+        // Step id is `(iteration, positionInIteration)` — both stable
+        // across Inngest replays because the loop increments `iteration`
+        // deterministically and the LLM emits `tool_use` blocks in a
+        // consistent order within the response content. The
+        // LLM-minted `tool_use_id` is NOT stable across replays (each
+        // non-durable LLM call mints fresh ids), so keying off it would
+        // diverge the step graph and trip "Could not find step" on retry.
         const runHandler = (): Promise<string> =>
           spec.handler(block.input as Record<string, unknown>, service);
         const out =
           spec.durable === true && stepRun
-            ? await stepRun(`tool-${block.name}-${block.id}`, runHandler)
+            ? await stepRun(`tool-iter${iteration}-${positionInIteration}`, runHandler)
             : await runHandler();
         return { type: "tool_result" as const, toolUseId: block.id, content: out };
       } catch (err) {
@@ -821,6 +841,7 @@ export async function runStreamingAgentLoop(
       tools,
       service,
       stepRun,
+      iterations,
       interceptions,
     );
 

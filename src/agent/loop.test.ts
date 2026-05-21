@@ -1058,7 +1058,7 @@ describe("tool durability (stepRun)", () => {
       stepRun,
     });
 
-    expect(stepRunCalls).toEqual([{ id: "tool-paid-toolu_01ABC" }]);
+    expect(stepRunCalls).toEqual([{ id: "tool-iter1-0" }]);
     expect(handlerCalls).toBe(1);
     // Handler ran *inside* the wrapper — its output flows through as tool_result.
     expect(result.messages[2]!.content).toEqual([
@@ -1155,7 +1155,7 @@ describe("tool durability (stepRun)", () => {
       stepRun,
     });
 
-    expect(ids).toEqual(["tool-paid-toolu_A", "tool-paid-toolu_B"]);
+    expect(ids).toEqual(["tool-iter1-0", "tool-iter1-1"]);
     expect(new Set(ids).size).toBe(ids.length);
   });
 
@@ -1191,7 +1191,56 @@ describe("tool durability (stepRun)", () => {
       stepRun,
     });
 
-    expect(stepRunCalls).toEqual(["tool-paid-toolu_stream"]);
+    expect(stepRunCalls).toEqual(["tool-iter1-0"]);
+  });
+
+  it("emits identical step ids across attempts even when the LLM mints different tool_use ids", async () => {
+    // Inngest replays the function from the top on retry; the streaming
+    // LLM call is non-durable, so each replay calls the provider fresh and
+    // gets fresh `tool_use_id`s. The durable step id must therefore not
+    // depend on the LLM-minted id — otherwise the planner can't match the
+    // cached step on attempt N+1 and the run fails with
+    // "Could not find step <hash> to run; timed out".
+    function makeProvider(toolUseId: string) {
+      return mockProvider([toolUseResponse("paid", toolUseId, { q: "hi" }), textResponse("done")]);
+    }
+
+    function makeTools() {
+      const tools = new ToolRegistry();
+      tools.register({
+        name: "paid",
+        description: "expensive",
+        inputSchema: { type: "object" },
+        durable: true,
+        handler: async () => "paid-result",
+      });
+      return tools;
+    }
+
+    const attempt0Ids: string[] = [];
+    await testRunAgentLoop({
+      provider: makeProvider("toolu_attempt0"),
+      messages: [{ role: "user", content: "go" }],
+      tools: makeTools(),
+      stepRun: async (id, fn) => {
+        attempt0Ids.push(id);
+        return fn();
+      },
+    });
+
+    const attempt1Ids: string[] = [];
+    await testRunAgentLoop({
+      provider: makeProvider("toolu_attempt1_FRESH"),
+      messages: [{ role: "user", content: "go" }],
+      tools: makeTools(),
+      stepRun: async (id, fn) => {
+        attempt1Ids.push(id);
+        return fn();
+      },
+    });
+
+    expect(attempt0Ids).toEqual(attempt1Ids);
+    expect(attempt0Ids).toEqual(["tool-iter1-0"]);
   });
 });
 
