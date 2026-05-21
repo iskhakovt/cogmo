@@ -1834,8 +1834,7 @@ export async function handleMcp(transport: Transport, ctx: TelegramCommandContex
       }
       const res = await transport.mcp.addServer(handle, {
         name,
-        // Validation runs server-side via McpServerConfigSchema; pass through.
-        config: config as never,
+        config,
         enabled: true,
       });
       if (res.isErr()) {

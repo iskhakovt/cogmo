@@ -156,7 +156,6 @@ describe("Transport.mcp.addServer", () => {
     // Drive a real Zod failure — missing `command` on stdio.
     const result = await transport.mcp.addServer(KNOWN_HANDLE, {
       name: "broken",
-      // @ts-expect-error — deliberately malformed to drive Zod safeParse to fail.
       config: { transport: "stdio", args: [], env: {} },
       enabled: true,
     });

@@ -41,7 +41,7 @@ import { logger } from "../logger.js";
 import {
   type McpServer,
   McpServerConfigSchema,
-  type McpServerSpec,
+  type McpServerSpecInput,
   type McpServerStatus,
 } from "../mcp/config.js";
 import { McpInvalidServerNameError, McpServerNotFoundError } from "../mcp/errors.js";
@@ -774,7 +774,7 @@ export interface Transport {
     toolBudget(): number;
     addServer(
       platformUserHandle: string,
-      spec: McpServerSpec,
+      spec: McpServerSpecInput,
     ): Promise<Result<McpServer, TransportError>>;
     removeServer(
       platformUserHandle: string,

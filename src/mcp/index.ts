@@ -18,6 +18,7 @@ export {
   type McpServerApprovalStatus,
   McpServerConfigSchema,
   type McpServerSpec,
+  type McpServerSpecInput,
   type McpServerStatus,
   type McpToolApprovalStatus,
   type McpToolDescriptor,
