@@ -1,6 +1,10 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { err, ok, type Result } from "neverthrow";
+import { logger } from "../logger.js";
+import type { ResourceLimits, SandboxClient } from "../sandbox/index.js";
 import { GitOpsError, gitShow } from "./git-ops.js";
+
+const log = logger.child({ component: "skills.deps" });
 
 /**
  * Filename for the hash-pinned lockfile committed alongside `skill.py`.
@@ -12,7 +16,7 @@ export const REQUIREMENTS_LOCK_FILE = "requirements.lock";
 export interface LockfileSnapshot {
   /** sha256 over the lockfile contents (UTF-8 bytes). */
   hash: string;
-  /** Raw lockfile text. The dependency populator (PR2) feeds this to `uv pip sync`. */
+  /** Raw lockfile text. The dependency populator feeds this to `uv pip sync`. */
   contents: string;
 }
 
@@ -60,4 +64,168 @@ export async function readLockfileAtSha(
     hash: createHash("sha256").update(contents, "utf-8").digest("hex"),
     contents,
   });
+}
+
+/**
+ * Compute sha256 over UTF-8 bytes — exposed so callers comparing two
+ * lockfile shapes (committed vs. freshly compiled) can avoid re-reading
+ * the committed contents from git.
+ */
+export function hashLockfileContents(contents: string): string {
+  return createHash("sha256").update(contents, "utf-8").digest("hex");
+}
+
+/**
+ * `uv pip compile` failure modes the register flow surfaces verbatim
+ * to the author. `resolver_failed` carries the resolver's stderr (one
+ * yanked wheel, a name typo, a version that no longer exists upstream).
+ * `transport_failed` is everything else — the sandbox couldn't even
+ * launch, the exec broke, the output exceeded the buffer cap. The
+ * shapes share the same surface so caller error-handling stays flat.
+ */
+export type LockfileCompileError =
+  | { kind: "resolver_failed"; message: string }
+  | { kind: "transport_failed"; message: string };
+
+export interface LockfileCompiler {
+  /**
+   * Resolve `dependencies` via `uv pip compile --generate-hashes` and
+   * return the produced lockfile bytes. The caller byte-compares
+   * against the committed `requirements.lock`; a mismatch means the
+   * committed file is stale (a dep was added/bumped without re-running
+   * compile, or an upstream wheel was yanked since it was generated).
+   *
+   * `dependencies` is a flat list of `name==version` strings — the
+   * manifest schema's `SkillDependencySchema` shape. Empty input is
+   * undefined behaviour (callers gate on `manifest.dependencies.length
+   * > 0` before invoking).
+   */
+  compile(dependencies: ReadonlyArray<string>): Promise<Result<string, LockfileCompileError>>;
+}
+
+const DEFAULT_COMPILE_RESOURCE_LIMITS: Required<ResourceLimits> = {
+  cpus: 1,
+  memory_bytes: 512 * 1024 * 1024,
+  pids: 256,
+  disk_bytes: 512 * 1024 * 1024,
+};
+
+/** Wall-clock cap for the compile container. Resolver runs are typically <2s. */
+const DEFAULT_COMPILE_TIMEOUT_MS = 60_000;
+
+/** stdout cap from `SANDBOX_EXEC_BUFFER_LIMIT`. Lockfiles fit comfortably. */
+const MAX_LOCKFILE_BYTES = 1024 * 1024;
+
+export interface SandboxLockfileCompilerOptions {
+  sandbox: SandboxClient;
+  image: string;
+  /** Override per-test or per-resource-constrained host. */
+  resourceLimits?: Partial<ResourceLimits>;
+  /** Override the wall-clock cap. Defaults to 60s. */
+  timeoutMs?: number;
+}
+
+/**
+ * Build a `LockfileCompiler` that runs each compile inside a fresh
+ * short-lived sandbox session. The session is created, the exec
+ * streamed through stdin, and the session torn down — no warm-pool
+ * coupling, no shared state across compiles.
+ *
+ * Latency: ~1-2s per call dominated by container spawn + uv resolver
+ * walk. Register isn't latency-critical (once per skill version), so
+ * the cost is acceptable for the clean isolation it buys.
+ */
+export function makeSandboxLockfileCompiler(
+  opts: SandboxLockfileCompilerOptions,
+): LockfileCompiler {
+  const limits: ResourceLimits = {
+    cpus: opts.resourceLimits?.cpus ?? DEFAULT_COMPILE_RESOURCE_LIMITS.cpus,
+    memory_bytes: opts.resourceLimits?.memory_bytes ?? DEFAULT_COMPILE_RESOURCE_LIMITS.memory_bytes,
+    pids: opts.resourceLimits?.pids ?? DEFAULT_COMPILE_RESOURCE_LIMITS.pids,
+    disk_bytes: opts.resourceLimits?.disk_bytes ?? DEFAULT_COMPILE_RESOURCE_LIMITS.disk_bytes,
+  };
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_COMPILE_TIMEOUT_MS;
+
+  return {
+    async compile(
+      dependencies: ReadonlyArray<string>,
+    ): Promise<Result<string, LockfileCompileError>> {
+      const taskId = `lockfile-compile-${randomUUID()}`;
+      // Buffer for slightly longer than the exec budget so an exec
+      // timeout fires first and the reaper has a margin to clean up
+      // if the host crashes before delete().
+      const expiresAt = new Date(Date.now() + timeoutMs + 30_000);
+
+      await opts.sandbox.ensureImagePresent(opts.image, limits);
+      const session = await opts.sandbox.create({
+        taskId,
+        image: opts.image,
+        resourceLimits: limits,
+        expiresAt,
+      });
+
+      try {
+        // `--quiet` keeps progress lines off stdout; the resolver's
+        // structured output is the lockfile body. `-` reads
+        // requirements from stdin, one `name==version` per line.
+        const handle = await session.execStreaming(
+          ["uv", "pip", "compile", "--generate-hashes", "--quiet", "-"],
+          { attachStdin: true, timeoutMs },
+        );
+        if (!handle.stdin) {
+          await handle.dispose().catch(() => {});
+          return err({
+            kind: "transport_failed",
+            message: "execStreaming returned without stdin despite attachStdin=true",
+          });
+        }
+
+        const stdoutChunks: Buffer[] = [];
+        const stderrChunks: string[] = [];
+        let stdoutBytes = 0;
+        let truncated = false;
+        handle.stdout.on("data", (chunk: Buffer) => {
+          if (truncated) return;
+          if (stdoutBytes + chunk.length > MAX_LOCKFILE_BYTES) {
+            truncated = true;
+            return;
+          }
+          stdoutBytes += chunk.length;
+          stdoutChunks.push(chunk);
+        });
+        handle.stderr.setEncoding("utf-8");
+        handle.stderr.on("data", (chunk: string) => stderrChunks.push(chunk));
+
+        handle.stdin.write(`${dependencies.join("\n")}\n`);
+        handle.stdin.end();
+
+        const { exitCode } = await handle.wait();
+        if (truncated) {
+          return err({
+            kind: "transport_failed",
+            message: `uv pip compile output exceeded ${MAX_LOCKFILE_BYTES} bytes — declared deps produce an unexpectedly large lockfile`,
+          });
+        }
+        if (exitCode !== 0) {
+          return err({
+            kind: "resolver_failed",
+            message: stderrChunks.join("").trim() || `uv pip compile exited ${exitCode}`,
+          });
+        }
+        return ok(Buffer.concat(stdoutChunks).toString("utf-8"));
+      } catch (e) {
+        return err({
+          kind: "transport_failed",
+          message: e instanceof Error ? e.message : String(e),
+        });
+      } finally {
+        await opts.sandbox.delete(session).catch((e: unknown) => {
+          log.warn(
+            { taskId, err: e instanceof Error ? e.message : String(e) },
+            "lockfile compile: sandbox.delete failed",
+          );
+        });
+      }
+    },
+  };
 }

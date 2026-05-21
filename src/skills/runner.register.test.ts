@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { sql } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { err, ok } from "neverthrow";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../db/index.js";
 import type { MemoryProvider } from "../memory/provider.js";
@@ -162,7 +163,7 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
     await repo.cleanup();
   });
 
-  async function makeRunner() {
+  async function makeRunner(overrides: Partial<Parameters<typeof SkillRunnerImpl.create>[0]> = {}) {
     return SkillRunnerImpl.create({
       store,
       runInTx: tx,
@@ -172,6 +173,7 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
       user: { id: "user-1", timezone: "UTC" },
       memoryBankId: "bank-1",
       skillsRepoPath: repo.bare,
+      ...overrides,
     });
   }
 
@@ -417,6 +419,91 @@ dependencies:
       expect(result.status).toBe("live");
       const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
       expect(skill?.lockfileHash).toBeNull();
+    });
+
+    describe("compiler verification", () => {
+      async function commitWithLockfile(branch: string, lockfile: string): Promise<string> {
+        await writeFile(join(repo.work, "SKILL.md"), ECHO_WITH_DEPS);
+        await writeFile(join(repo.work, "skill.py"), ECHO_BODY);
+        await writeFile(join(repo.work, "requirements.lock"), lockfile);
+        await execFileP("git", ["-C", repo.work, "add", "."]);
+        await execFileP("git", [
+          "-C",
+          repo.work,
+          "commit",
+          "-m",
+          `update ${branch}`,
+          "--allow-empty",
+        ]);
+        await execFileP("git", [
+          "-C",
+          repo.work,
+          "push",
+          "-f",
+          "origin",
+          `HEAD:refs/heads/${branch}`,
+        ]);
+        const { stdout } = await execFileP("git", ["-C", repo.work, "rev-parse", "HEAD"]);
+        return stdout.trim();
+      }
+
+      it("accepts when fresh compile byte-matches the committed lockfile", async () => {
+        const lockfile = "httpx==0.27.0 --hash=sha256:0\n";
+        const compiler = { compile: vi.fn().mockResolvedValue(ok(lockfile)) };
+        const runner = await makeRunner({ lockfileCompiler: compiler });
+        await commitWithLockfile("skill/echo-verified", lockfile);
+
+        const result = await runner.register({ branch: "skill/echo-verified" });
+        expect(result.status).toBe("live");
+        expect(compiler.compile).toHaveBeenCalledWith(["httpx==0.27.0"]);
+      });
+
+      it("rejects with requirements_lock_stale when the compile output differs", async () => {
+        const committed = "httpx==0.27.0 --hash=sha256:OLD\n";
+        const fresh = "httpx==0.27.0 --hash=sha256:NEW\n";
+        const compiler = { compile: vi.fn().mockResolvedValue(ok(fresh)) };
+        const runner = await makeRunner({ lockfileCompiler: compiler });
+        await commitWithLockfile("skill/echo-stale", committed);
+
+        const result = await runner.register({ branch: "skill/echo-stale" });
+        expect(result.status).toBe("rejected");
+        expect(result.errors?.[0]).toMatch(/requirements_lock_stale/);
+        // main did NOT advance — the skill never went live.
+        const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
+        expect(skill).toBeUndefined();
+      });
+
+      it("rejects with resolver_failed when the compiler reports a resolver error", async () => {
+        const compiler = {
+          compile: vi.fn().mockResolvedValue(
+            err({
+              kind: "resolver_failed" as const,
+              message: "Distribution not found at: bogus==0",
+            }),
+          ),
+        };
+        const runner = await makeRunner({ lockfileCompiler: compiler });
+        await commitWithLockfile("skill/echo-bad", "anything\n");
+
+        const result = await runner.register({ branch: "skill/echo-bad" });
+        expect(result.status).toBe("rejected");
+        expect(result.errors?.[0]).toMatch(/requirements_lock_resolver_failed/);
+        expect(result.errors?.[0]).toMatch(/Distribution not found/);
+      });
+
+      it("skips compile when no compiler is configured (tier-1-only deployment)", async () => {
+        const lockfile = "httpx==0.27.0 --hash=sha256:0\n";
+        // No compiler — default constructor wires one only when `sandbox`
+        // is configured, and this test harness never sets `sandbox`, so
+        // `#lockfileCompiler` lands undefined.
+        const runner = await makeRunner();
+        await commitWithLockfile("skill/echo-no-compiler", lockfile);
+
+        const result = await runner.register({ branch: "skill/echo-no-compiler" });
+        expect(result.status).toBe("live");
+        const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
+        expect(skill?.lockfileHash).toMatch(/^[0-9a-f]{64}$/);
+      });
     });
   });
 

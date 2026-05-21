@@ -12,7 +12,7 @@ import { DEFAULT_GITHUB_IDENTITY_NAME, resolveGitHubIdentity } from "../secrets/
 import type { SecretsStore } from "../secrets/store/index.js";
 import { classifyManifest, STUB_CLASSIFIER_VERSION } from "./classifier.js";
 import { type CtxUser, DefaultCtxHandler } from "./ctx-handler.js";
-import { readLockfileAtSha } from "./deps.js";
+import { type LockfileCompiler, makeSandboxLockfileCompiler, readLockfileAtSha } from "./deps.js";
 import {
   deleteRef,
   GitOpsError,
@@ -303,6 +303,20 @@ export interface SkillRunnerOptions {
    * across the module.
    */
   clock?: () => Date;
+  /**
+   * Lockfile compiler used at register / approve / rollback to re-resolve
+   * the manifest's `dependencies` and byte-compare against the committed
+   * `requirements.lock`. Mismatch fails the deploy with a clear stale-
+   * lockfile error.
+   *
+   * Defaults to a {@link makeSandboxLockfileCompiler} backed by `sandbox`
+   * + `tier2Image` when both are configured. When the deployment has no
+   * tier-2 sandbox (tier-1-only deployments, or test paths that omit
+   * `sandbox`), the field is undefined and the runner downgrades to
+   * "presence + hash only" — lockfile must exist and parse, but the
+   * resolver isn't re-run. Set explicitly in tests to swap a stub.
+   */
+  lockfileCompiler?: LockfileCompiler;
 }
 
 interface SkillSourceCacheEntry {
@@ -331,6 +345,14 @@ export class SkillRunnerImpl implements SkillRunner {
   #sandbox: SandboxClient | undefined;
   #tier2Image: string;
   #clock: () => Date;
+  /**
+   * Lockfile compiler used at register / approve / rollback to re-resolve
+   * the manifest's `dependencies` and byte-compare the result against
+   * the committed `requirements.lock`. Undefined when no tier-2 sandbox
+   * is configured; verification then degrades to "presence + hash only."
+   * See `design/skills.md` → Dependencies.
+   */
+  #lockfileCompiler: LockfileCompiler | undefined;
   /**
    * Lazily-created warm pool over `#sandbox`. Created on first tier-2
    * invocation, not at boot — keeps cogmo serve startup independent of
@@ -377,6 +399,18 @@ export class SkillRunnerImpl implements SkillRunner {
     this.#poolOptions = opts.poolOptions;
     this.#clock = opts.clock ?? (() => new Date());
     this.#ajv = new Ajv({ allErrors: true, strict: false });
+    // Explicit override wins; otherwise default to a sandbox-backed
+    // compiler when the runtime has both a sandbox and a tier-2 image
+    // (the cogmo-skills image carries `uv`). Tier-1-only deployments
+    // fall through to undefined → presence + hash check only.
+    this.#lockfileCompiler =
+      opts.lockfileCompiler ??
+      (this.#sandbox
+        ? makeSandboxLockfileCompiler({
+            sandbox: this.#sandbox,
+            image: this.#tier2Image,
+          })
+        : undefined);
   }
 
   /**
@@ -393,22 +427,30 @@ export class SkillRunnerImpl implements SkillRunner {
   }
 
   /**
-   * Read the lockfile at a deploy sha and return its hash.
+   * Read the committed `requirements.lock` at a deploy sha and — when a
+   * compiler is configured — re-resolve the manifest's dependencies
+   * against `uv pip compile` to verify the committed lockfile is
+   * current. Returns the lockfile hash on success.
    *
    * Returns:
    *   - `ok(null)` — manifest declares no deps; no lockfile is expected
    *     and any committed `requirements.lock` is ignored.
    *   - `ok(<hex>)` — manifest declares deps and a non-empty lockfile is
-   *     present. `<hex>` is `sha256(contents)`.
-   *   - `err(message)` — manifest declares deps but the lockfile is
-   *     missing or empty. The caller surfaces this verbatim as the
-   *     register `errors[]` payload.
+   *     present. When a compiler is configured, fresh resolver output
+   *     byte-matches the committed file. `<hex>` is `sha256(contents)`.
+   *   - `err(message)` — manifest declares deps and one of: the
+   *     committed lockfile is missing/empty, the resolver couldn't run
+   *     ('transport_failed'), the resolver itself failed
+   *     ('resolver_failed'), or the committed file is stale relative
+   *     to a fresh resolve. The caller surfaces the message verbatim
+   *     as the register `errors[]` payload.
    *
-   * The lockfile contents themselves are deliberately discarded here —
-   * PR2 wires `uv pip compile`-based byte-comparison to detect staleness
-   * and `uv pip sync`-based populate at first invocation. PR1 only
-   * stamps the hash so the future populator + reachability sweep have a
-   * stable cache key.
+   * When `#lockfileCompiler` is undefined (tier-1-only deployments,
+   * test paths that omit the sandbox), verification degrades to
+   * presence + hash only — the committed file is trusted as long as
+   * it's well-formed. The author still hash-pinned each wheel via
+   * `--generate-hashes`, so even without re-resolution the install at
+   * populate time will refuse anything not in the lockfile.
    */
   async #readManifestLockfile(
     repoPath: string,
@@ -424,6 +466,19 @@ export class SkillRunnerImpl implements SkillRunner {
         `requirements_lock_${snapshot.error.kind}: declared ${manifest.dependencies.length} dependencies but ${snapshot.error.message}. Run 'uv pip compile --generate-hashes' and commit the result.`,
       );
     }
+
+    if (this.#lockfileCompiler) {
+      const compiled = await this.#lockfileCompiler.compile(manifest.dependencies);
+      if (compiled.isErr()) {
+        return err(`requirements_lock_${compiled.error.kind}: ${compiled.error.message}`);
+      }
+      if (compiled.value !== snapshot.value.contents) {
+        return err(
+          "requirements_lock_stale: committed requirements.lock differs from a fresh 'uv pip compile --generate-hashes'. Re-run the compile against your declared dependencies and recommit.",
+        );
+      }
+    }
+
     return ok(snapshot.value.hash);
   }
 

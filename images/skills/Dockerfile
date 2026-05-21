@@ -8,13 +8,15 @@
 # for the contract.
 #
 # Two-stage build with uv: builder syncs the locked deps + builds the
-# `cogmo_skills_runtime` package into a venv; runtime stage copies just
-# the venv. No build deps in the final image, no uv binary either —
-# the runtime only needs `python3` + the venv at /opt/cogmo-skills/.venv.
+# `cogmo_skills_runtime` package into a venv; runtime stage copies the
+# venv AND the uv binary itself — register-time lockfile compile and
+# first-invoke venv populate (see `design/skills.md` → Dependencies)
+# both shell out to `uv` inside this image, so the runtime resolver
+# matches the builder resolver byte-for-byte.
 #
-# Production has zero runtime python deps today (stdlib only). The uv
-# pipeline is wired so that adding a dep is `uv add` + `uv lock` + the
-# image picks it up — no Dockerfile changes per dep.
+# `cogmo_skills_runtime` itself has zero third-party python deps; only
+# the per-skill venvs populated by `uv pip sync --target …` against a
+# manifest's `requirements.lock` introduce wheels into the runtime.
 
 FROM mirror.gcr.io/library/python:3.14-slim@sha256:a7185a8e40af01bf891414a4df16ef10fc6000cee460a404a13da9029fe41604 AS builder
 
@@ -67,6 +69,14 @@ RUN useradd -m -u 1000 -s /bin/bash cogmo
 COPY --from=builder --chown=cogmo:cogmo /app/.venv /opt/cogmo-skills/.venv
 ENV PATH="/opt/cogmo-skills/.venv/bin:${PATH}"
 ENV VIRTUAL_ENV="/opt/cogmo-skills/.venv"
+
+# uv binary lives in the runtime image too — the host runs
+# `uv pip compile` here at register (to verify the committed
+# requirements.lock is current) and `uv venv` + `uv pip sync` at first
+# invocation (to populate the per-skill venv at /skill-venvs/<hash>/).
+# Pinned to the same astral release tag as the builder stage so the
+# resolver behaviour is identical end-to-end.
+COPY --from=ghcr.io/astral-sh/uv:0.11.12 /uv /uvx /usr/local/bin/
 
 # Cogmo's host (`src/skills/worker-sysbox/worker.ts`) overrides the
 # Entrypoint/Cmd at create-container time; the default below is for

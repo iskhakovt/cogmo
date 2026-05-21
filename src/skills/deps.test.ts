@@ -2,9 +2,12 @@ import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough, type Readable, type Writable } from "node:stream";
 import { promisify } from "node:util";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { REQUIREMENTS_LOCK_FILE, readLockfileAtSha } from "./deps.js";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { type MockProxy, mock } from "vitest-mock-extended";
+import type { ExecStreamingHandle, SandboxClient, SandboxSession } from "../sandbox/index.js";
+import { makeSandboxLockfileCompiler, REQUIREMENTS_LOCK_FILE, readLockfileAtSha } from "./deps.js";
 import { bootstrapSkillsRepo } from "./repo.js";
 
 const execFileP = promisify(execFile);
@@ -96,5 +99,199 @@ describe("readLockfileAtSha", () => {
     expect(result.isErr()).toBe(true);
     if (!result.isErr()) return;
     expect(result.error.kind).toBe("empty");
+  });
+});
+
+/**
+ * Stub a minimal `ExecStreamingHandle` that records what's written to
+ * stdin and emits scripted stdout/stderr + exit code. The compiler
+ * never reads from stdout/stderr async until the streams are
+ * connected, so we feed them after `execStreaming` resolves and
+ * before `wait()` settles.
+ */
+interface FakeExec {
+  stdinSink: PassThrough;
+  stdoutSource: PassThrough;
+  stderrSource: PassThrough;
+  handle: ExecStreamingHandle;
+  waitResolve(exitCode: number): void;
+  waitReject(err: Error): void;
+}
+
+function makeFakeExec(): FakeExec {
+  const stdinSink = new PassThrough();
+  const stdoutSource = new PassThrough();
+  const stderrSource = new PassThrough();
+  let resolveWait: (v: { exitCode: number }) => void = () => {};
+  let rejectWait: (e: Error) => void = () => {};
+  const waitPromise = new Promise<{ exitCode: number }>((res, rej) => {
+    resolveWait = res;
+    rejectWait = rej;
+  });
+  const handle: ExecStreamingHandle = {
+    stdin: stdinSink as unknown as Writable,
+    stdout: stdoutSource as unknown as Readable,
+    stderr: stderrSource as unknown as Readable,
+    wait: () => waitPromise,
+    dispose: async () => {
+      stdoutSource.end();
+      stderrSource.end();
+    },
+  };
+  return {
+    stdinSink,
+    stdoutSource,
+    stderrSource,
+    handle,
+    waitResolve(exitCode) {
+      stdoutSource.end();
+      stderrSource.end();
+      resolveWait({ exitCode });
+    },
+    waitReject(err) {
+      rejectWait(err);
+    },
+  };
+}
+
+interface CompilerHarness {
+  sandbox: MockProxy<SandboxClient>;
+  session: MockProxy<SandboxSession>;
+  ensureCalls: Array<[string, unknown]>;
+  createCalls: Array<unknown>;
+  deleteCalls: number;
+}
+
+function buildCompilerHarness(execFactory: () => FakeExec): CompilerHarness & { exec: FakeExec } {
+  const exec = execFactory();
+  const session = mock<SandboxSession>();
+  session.execStreaming.mockResolvedValue(exec.handle);
+
+  const sandbox = mock<SandboxClient>();
+  const ensureCalls: Array<[string, unknown]> = [];
+  const createCalls: Array<unknown> = [];
+  let deleteCalls = 0;
+  sandbox.ensureImagePresent.mockImplementation(async (image, limits) => {
+    ensureCalls.push([image, limits]);
+  });
+  sandbox.create.mockImplementation(async (spec) => {
+    createCalls.push(spec);
+    return session;
+  });
+  sandbox.delete.mockImplementation(async () => {
+    deleteCalls += 1;
+  });
+
+  return {
+    sandbox,
+    session,
+    ensureCalls,
+    createCalls,
+    get deleteCalls() {
+      return deleteCalls;
+    },
+    exec,
+  };
+}
+
+describe("makeSandboxLockfileCompiler", () => {
+  it("streams deps to stdin and returns stdout on a successful compile", async () => {
+    const h = buildCompilerHarness(makeFakeExec);
+    const compiler = makeSandboxLockfileCompiler({
+      sandbox: h.sandbox,
+      image: "cogmo-skills:test",
+    });
+
+    const promise = compiler.compile(["httpx==0.27.0", "pydantic==2.5.3"]);
+
+    // Let the compiler wire up listeners before we feed the streams.
+    await new Promise((r) => setImmediate(r));
+    h.exec.stdoutSource.write(
+      "httpx==0.27.0 --hash=sha256:abc\npydantic==2.5.3 --hash=sha256:def\n",
+    );
+    h.exec.waitResolve(0);
+
+    const result = await promise;
+    expect(result.isOk()).toBe(true);
+    if (!result.isOk()) return;
+    expect(result.value).toBe(
+      "httpx==0.27.0 --hash=sha256:abc\npydantic==2.5.3 --hash=sha256:def\n",
+    );
+
+    // The exec command shape is part of the contract.
+    expect(h.session.execStreaming).toHaveBeenCalledWith(
+      ["uv", "pip", "compile", "--generate-hashes", "--quiet", "-"],
+      expect.objectContaining({ attachStdin: true }),
+    );
+
+    // Deps were written to stdin in name==version-per-line form.
+    expect(h.exec.stdinSink.read()?.toString("utf-8")).toBe("httpx==0.27.0\npydantic==2.5.3\n");
+
+    // Session lifecycle — created with the requested image, deleted in finally.
+    expect(h.ensureCalls[0]?.[0]).toBe("cogmo-skills:test");
+    expect(h.createCalls[0]).toMatchObject({ image: "cogmo-skills:test" });
+    expect(h.deleteCalls).toBe(1);
+  });
+
+  it("returns resolver_failed when uv exits non-zero, carrying stderr", async () => {
+    const h = buildCompilerHarness(makeFakeExec);
+    const compiler = makeSandboxLockfileCompiler({
+      sandbox: h.sandbox,
+      image: "cogmo-skills:test",
+    });
+
+    const promise = compiler.compile(["nonexistent-pkg==999.0"]);
+    await new Promise((r) => setImmediate(r));
+    h.exec.stderrSource.write("error: Distribution not found at: nonexistent-pkg==999.0\n");
+    h.exec.waitResolve(2);
+
+    const result = await promise;
+    expect(result.isErr()).toBe(true);
+    if (!result.isErr()) return;
+    expect(result.error.kind).toBe("resolver_failed");
+    expect(result.error.message).toMatch(/Distribution not found/);
+    expect(h.deleteCalls).toBe(1);
+  });
+
+  it("returns transport_failed when wait() rejects (exec broken)", async () => {
+    const h = buildCompilerHarness(makeFakeExec);
+    const compiler = makeSandboxLockfileCompiler({
+      sandbox: h.sandbox,
+      image: "cogmo-skills:test",
+    });
+
+    const promise = compiler.compile(["httpx==0.27.0"]);
+    await new Promise((r) => setImmediate(r));
+    h.exec.waitReject(new Error("docker socket closed"));
+
+    const result = await promise;
+    expect(result.isErr()).toBe(true);
+    if (!result.isErr()) return;
+    expect(result.error.kind).toBe("transport_failed");
+    expect(result.error.message).toMatch(/docker socket/);
+    expect(h.deleteCalls).toBe(1);
+  });
+
+  it("returns transport_failed when execStreaming returns without stdin", async () => {
+    const h = buildCompilerHarness(makeFakeExec);
+    // Override execStreaming to return a handle with no stdin (e.g. backend
+    // misconfiguration that silently dropped attachStdin).
+    h.session.execStreaming.mockResolvedValueOnce({
+      stdout: new PassThrough() as unknown as Readable,
+      stderr: new PassThrough() as unknown as Readable,
+      wait: vi.fn(),
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+    const compiler = makeSandboxLockfileCompiler({
+      sandbox: h.sandbox,
+      image: "cogmo-skills:test",
+    });
+
+    const result = await compiler.compile(["httpx==0.27.0"]);
+    expect(result.isErr()).toBe(true);
+    if (!result.isErr()) return;
+    expect(result.error.kind).toBe("transport_failed");
+    expect(result.error.message).toMatch(/without stdin/);
+    expect(h.deleteCalls).toBe(1);
   });
 });
