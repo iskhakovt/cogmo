@@ -1,0 +1,20 @@
+// Bans the `as unknown as T` double-cast in production TypeScript.
+//
+// The double cast is TypeScript's "type system blind spot" — it silences the
+// compiler without runtime safety. Prefer a type guard (`"key" in obj`,
+// `typeof x === ...`), a Zod parse at the boundary, or narrowing at the
+// source. Library type gaps (dockerode hijacked streams, AI-SDK provider
+// extensions, etc.) keep the cast — add `// biome-ignore lint/plugin/no-unsafe-cast: <gap>`
+// on the line above and name the upstream type gap.
+//
+// Test files are exempt: stubbing partial interfaces is the dominant use and
+// `mock<T>()` / `mockDeep<T>()` from vitest-mock-extended is the preferred
+// replacement (see .claude/rules/testing.md).
+
+language js
+
+`$x as unknown as $y` as $node where {
+  $filename <: not includes ".test.",
+  $filename <: not includes "/test/",
+  register_diagnostic(span=$node, message="Avoid `as unknown as`. Use a type guard (`in`, `typeof`), Zod parse, or narrow at the source. For genuine upstream type gaps, add `// biome-ignore lint/plugin/no-unsafe-cast: <reason>` on the line above.")
+}

@@ -319,6 +319,7 @@ export function createObserver(deps: ObserverDeps) {
       // contract returning `Promise<T>`. The runtime values are identical for
       // the JSON-safe payloads `runObserver` produces; the cast bridges the
       // two type universes without infecting the test harness type.
+      // biome-ignore lint/plugin/no-unsafe-cast: Inngest Jsonify<T> vs harness T — identical at runtime for JSON-safe payloads.
       return runObserver(event, step as unknown as ObserverStepHarness, deps);
     },
   );

@@ -714,6 +714,7 @@ async function execStreaming(
   };
   // dockerode's hijacked exec stream is bidirectional and structurally a
   // Writable, but @types/dockerode types it as a generic Duplex.
+  // biome-ignore lint/plugin/no-unsafe-cast: @types/dockerode types hijacked stream as Duplex; runtime is Writable.
   if (opts.attachStdin === true) handle.stdin = stream as unknown as Writable;
   return handle;
 }
