@@ -7,7 +7,13 @@ import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { type MockProxy, mock } from "vitest-mock-extended";
 import type { ExecStreamingHandle, SandboxClient, SandboxSession } from "../sandbox/index.js";
-import { makeSandboxLockfileCompiler, REQUIREMENTS_LOCK_FILE, readLockfileAtSha } from "./deps.js";
+import {
+  ensureVenvPopulated,
+  makeSandboxLockfileCompiler,
+  REQUIREMENTS_LOCK_FILE,
+  readLockfileAtSha,
+  SKILL_VENVS_DIR,
+} from "./deps.js";
 import { bootstrapSkillsRepo } from "./repo.js";
 
 const execFileP = promisify(execFile);
@@ -369,5 +375,130 @@ describe("makeSandboxLockfileCompiler", () => {
     expect(result.error.kind).toBe("transport_failed");
     expect(result.error.message).toMatch(/exceeded/);
     expect(disposeSpy).toHaveBeenCalled();
+  });
+});
+
+describe("ensureVenvPopulated", () => {
+  it("returns the venv path when uv pip sync exits 0", async () => {
+    const exec = makeFakeExec();
+    const session = mock<SandboxSession>();
+    session.execStreaming.mockResolvedValue(exec.handle);
+
+    const promise = ensureVenvPopulated({
+      session,
+      lockfileHash: "abc123",
+      lockfileContents: "httpx==0.27.0 --hash=sha256:0\n",
+      workerId: "worker-1",
+    });
+
+    await new Promise((r) => setImmediate(r));
+    exec.waitResolve(0);
+    const result = await promise;
+
+    expect(result.isOk()).toBe(true);
+    if (!result.isOk()) return;
+    expect(result.value).toBe(`${SKILL_VENVS_DIR}/abc123`);
+
+    // Lockfile body was written to stdin.
+    expect(exec.stdinSink.read()?.toString("utf-8")).toBe("httpx==0.27.0 --hash=sha256:0\n");
+
+    // Argv shape: `sh -c <SCRIPT> populate <hash> <workerId>`. The
+    // script's POPULATE_SCRIPT body is the third argv; we don't pin
+    // its full contents here (lives in the module), but the
+    // positional args matter for the populate behaviour.
+    const call = session.execStreaming.mock.calls[0];
+    expect(call).toBeDefined();
+    if (!call) return;
+    const argv = call[0];
+    expect(argv[0]).toBe("sh");
+    expect(argv[1]).toBe("-c");
+    expect(argv[3]).toBe("populate");
+    expect(argv[4]).toBe("abc123");
+    expect(argv[5]).toBe("worker-1");
+    expect(call[1]?.attachStdin).toBe(true);
+  });
+
+  it("returns populate_failed with stderr on non-zero exit", async () => {
+    const exec = makeFakeExec();
+    const session = mock<SandboxSession>();
+    session.execStreaming.mockResolvedValue(exec.handle);
+
+    const promise = ensureVenvPopulated({
+      session,
+      lockfileHash: "abc123",
+      lockfileContents: "httpx==0.27.0\n",
+      workerId: "worker-1",
+    });
+
+    await new Promise((r) => setImmediate(r));
+    exec.stderrSource.write("error: hash mismatch on httpx-0.27.0-py3-none-any.whl\n");
+    exec.waitResolve(1);
+    const result = await promise;
+
+    expect(result.isErr()).toBe(true);
+    if (!result.isErr()) return;
+    expect(result.error.kind).toBe("populate_failed");
+    expect(result.error.message).toMatch(/hash mismatch/);
+  });
+
+  it("returns transport_failed when wait() rejects", async () => {
+    const exec = makeFakeExec();
+    const session = mock<SandboxSession>();
+    session.execStreaming.mockResolvedValue(exec.handle);
+
+    const promise = ensureVenvPopulated({
+      session,
+      lockfileHash: "abc123",
+      lockfileContents: "httpx==0.27.0\n",
+      workerId: "worker-1",
+    });
+
+    await new Promise((r) => setImmediate(r));
+    exec.waitReject(new Error("connection reset"));
+    const result = await promise;
+
+    expect(result.isErr()).toBe(true);
+    if (!result.isErr()) return;
+    expect(result.error.kind).toBe("transport_failed");
+    expect(result.error.message).toMatch(/connection reset/);
+  });
+
+  it("returns transport_failed when execStreaming itself throws", async () => {
+    const session = mock<SandboxSession>();
+    session.execStreaming.mockRejectedValue(new Error("docker daemon unreachable"));
+
+    const result = await ensureVenvPopulated({
+      session,
+      lockfileHash: "abc123",
+      lockfileContents: "httpx==0.27.0\n",
+      workerId: "worker-1",
+    });
+
+    expect(result.isErr()).toBe(true);
+    if (!result.isErr()) return;
+    expect(result.error.kind).toBe("transport_failed");
+    expect(result.error.message).toMatch(/docker daemon unreachable/);
+  });
+
+  it("returns transport_failed when execStreaming returns without stdin", async () => {
+    const session = mock<SandboxSession>();
+    session.execStreaming.mockResolvedValueOnce({
+      stdout: new PassThrough() as unknown as Readable,
+      stderr: new PassThrough() as unknown as Readable,
+      wait: vi.fn(),
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const result = await ensureVenvPopulated({
+      session,
+      lockfileHash: "abc123",
+      lockfileContents: "httpx==0.27.0\n",
+      workerId: "worker-1",
+    });
+
+    expect(result.isErr()).toBe(true);
+    if (!result.isErr()) return;
+    expect(result.error.kind).toBe("transport_failed");
+    expect(result.error.message).toMatch(/without stdin/);
   });
 });

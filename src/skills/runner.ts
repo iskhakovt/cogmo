@@ -330,6 +330,13 @@ interface SkillSourceCacheEntry {
    * use; remains `undefined` for skills without declared outputs.
    */
   outputsValidator?: ValidateFunction;
+  /**
+   * Raw `requirements.lock` bytes when the manifest declares dependencies.
+   * Cached alongside `body` so the populator on first invoke doesn't pay
+   * a second `git show` per task. `undefined` when the manifest declares
+   * no deps (no lockfile is committed).
+   */
+  lockfileContents?: string;
 }
 
 export class SkillRunnerImpl implements SkillRunner {
@@ -1285,6 +1292,18 @@ export class SkillRunnerImpl implements SkillRunner {
         // This is rare: most skills don't override and ride the warm path.
         const overrides = mapManifestResourceLimits(cached.manifest.resources);
         const isolation = cached.manifest.isolation;
+        // Per-skill venv handoff. Carrying both fields together keeps
+        // the populator from second-guessing the hash — the hash drives
+        // the cache key, the contents feed `uv pip sync`. The pair
+        // exists iff the manifest declared dependencies, captured in
+        // the `lockfileContents` cache field.
+        const deps =
+          skill.lockfileHash !== null && cached.lockfileContents !== undefined
+            ? {
+                lockfileHash: skill.lockfileHash,
+                lockfileContents: cached.lockfileContents,
+              }
+            : undefined;
         if (overrides.cpus !== undefined || overrides.memory_bytes !== undefined) {
           return runOnSysboxContainer({
             taskId,
@@ -1293,6 +1312,7 @@ export class SkillRunnerImpl implements SkillRunner {
             inputs,
             ...(wallClockS !== undefined && { wallClockS }),
             ...(isolation !== undefined && { isolation }),
+            ...(deps !== undefined && { deps }),
             resourceLimits: overrides,
             image: this.#tier2Image,
             sandbox,
@@ -1307,6 +1327,7 @@ export class SkillRunnerImpl implements SkillRunner {
           inputs,
           ...(wallClockS !== undefined && { wallClockS }),
           ...(isolation !== undefined && { isolation }),
+          ...(deps !== undefined && { deps }),
           ctxHandler,
         });
       }
@@ -1546,6 +1567,20 @@ export class SkillRunnerImpl implements SkillRunner {
     const manifest = parsed.value.manifest;
     const inputsValidator = this.#compileInputsValidator(manifest, "loadSource");
     const entry: SkillSourceCacheEntry = { manifest, body, inputsValidator };
+    if (row.lockfileHash !== null) {
+      // Lockfile presence is invariant with `row.lockfileHash != null` —
+      // register persists the hash atomically with the gitSha, so a row
+      // with a hash always has a committed lockfile. A missing/empty
+      // read here means the repo + DB drifted (manual git tampering,
+      // partial restore, ...) — surface it loudly.
+      const snapshot = await readLockfileAtSha(this.#skillsRepoPath, row.gitSha);
+      if (snapshot.isErr()) {
+        throw new Error(
+          `lockfile for skill '${row.name}' at ${row.gitSha} is ${snapshot.error.kind} — repo and DB are out of sync (skills.lockfile_hash=${row.lockfileHash})`,
+        );
+      }
+      entry.lockfileContents = snapshot.value.contents;
+    }
     this.#sourceCache.set(key, entry);
     return entry;
   }

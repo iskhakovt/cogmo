@@ -59,6 +59,16 @@ export interface RunOnSysboxContainerParams {
    * in practice.
    */
   isolation?: "subinterpreter" | "recycle";
+  /**
+   * Per-skill dependency artefacts. Same shape as the pooled path's
+   * `InvokeParams.deps` — the worker calls `ensureVenvPopulated` before
+   * invoking and threads the resulting venv path into the supervisor.
+   * Absent for skills with no declared dependencies.
+   */
+  deps?: {
+    lockfileHash: string;
+    lockfileContents: string;
+  };
 }
 
 /**
@@ -105,6 +115,7 @@ export async function runOnSysboxContainer(
       inputs: params.inputs,
       ...(wallClockS !== undefined && { wallClockS }),
       ...(params.isolation !== undefined && { isolation: params.isolation }),
+      ...(params.deps !== undefined && { deps: params.deps }),
       ctxHandler: params.ctxHandler,
     });
   } catch (e) {

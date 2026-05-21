@@ -32,6 +32,21 @@ export const TaskInvokeSchema = z.object({
   isolation: z.enum(["subinterpreter", "recycle"]).optional(),
   /** Wall-clock cap in seconds for the supervisor's per-task pebble timeout. */
   wallClockS: z.number().positive().optional(),
+  /**
+   * Absolute path inside the container to a per-skill virtualenv. When
+   * present, the tier-2 supervisor activates it before forking the task
+   * child — sets `VIRTUAL_ENV`, prepends `<venv>/bin` to PATH, prepends
+   * `<venv>/lib/pythonX.Y/site-packages` to `sys.path`. The supervisor's
+   * own runtime venv (where `cogmo_skills_runtime` lives) stays unchanged.
+   *
+   * Populated by the host via `ensureVenvPopulated` (see deps.ts) when the
+   * skill declares dependencies. Absent for skills with empty
+   * `dependencies` — the task runs against the stdlib only.
+   *
+   * Tier 1 (Pyodide) ignores this field — Pyodide manages its own
+   * import path via `micropip`.
+   */
+  skillVenv: z.string().min(1).optional(),
 });
 export type TaskInvoke = z.infer<typeof TaskInvokeSchema>;
 

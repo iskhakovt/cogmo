@@ -102,6 +102,36 @@ def _kill_and_reap(pid: int) -> None:
         pass
 
 
+def _activate_skill_venv(venv_path: str) -> None:
+    """Activate a per-skill venv in the current process.
+
+    Must run in the forked child *before* any skill code imports. We
+    prepend the venv's `site-packages` to `sys.path`, set
+    `VIRTUAL_ENV`, and prepend `<venv>/bin` to PATH. The supervisor's
+    own runtime venv (where `cogmo_skills_runtime` lives) stays on
+    `sys.path` after the prepended entry — `import cogmo_skills_runtime`
+    keeps resolving for the runner, while `import httpx` (or any other
+    skill-declared dep) now resolves against the skill venv.
+
+    Raises `RuntimeError` if the venv layout doesn't look right; the
+    runner's try/except catches it and surfaces a task_result so the
+    host doesn't hang.
+    """
+    site_packages = os.path.join(
+        venv_path,
+        "lib",
+        f"python{sys.version_info.major}.{sys.version_info.minor}",
+        "site-packages",
+    )
+    if not os.path.isdir(site_packages):
+        raise RuntimeError(f"skill_venv has no site-packages at {site_packages}")
+    sys.path.insert(0, site_packages)
+    os.environ["VIRTUAL_ENV"] = venv_path
+    bin_dir = os.path.join(venv_path, "bin")
+    existing_path = os.environ.get("PATH", "")
+    os.environ["PATH"] = f"{bin_dir}:{existing_path}" if existing_path else bin_dir
+
+
 def _run_one_task_in_child(task: Mapping[str, object]) -> None:
     """Runs in the forked child. Returns nothing; the runner writes its
     own task_result to stdout. Child exits with code 0 on normal
@@ -111,7 +141,10 @@ def _run_one_task_in_child(task: Mapping[str, object]) -> None:
     body = str(task.get("body", ""))
     inputs = task.get("inputs")
     task_id = str(task["id"])
+    skill_venv = task.get("skillVenv")
     try:
+        if isinstance(skill_venv, str) and skill_venv:
+            _activate_skill_venv(skill_venv)
         asyncio.run(_run_main(body, inputs, task_id))
     except BaseException as e:
         # The runner's own try/except covers normal Python exceptions;
