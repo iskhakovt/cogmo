@@ -65,10 +65,18 @@ export default defineConfig({
           // doesn't oversubscribe disk/CPU during WASM cold-start. `2`
           // matches CI's effective parallelism; bigger dev boxes can
           // override via `PYODIDE_MAX_WORKERS`.
+          //
+          // `sequence.groupOrder: 1` runs this project AFTER `unit` (default
+          // groupOrder 0) — Vitest 4 requires distinct groupOrders for
+          // projects with different `maxWorkers`. Sequential is acceptable
+          // because the pyodide tier is the wall-clock bottleneck anyway;
+          // running it alongside the fast `unit` tier (capped at the same
+          // 2 workers) would be a small net loss for the regular tier.
           name: "unit-pyodide",
           environment: "node",
           include: PYODIDE_HEAVY_UNIT_GLOBS,
           maxWorkers: PYODIDE_MAX_WORKERS,
+          sequence: { groupOrder: 1 },
           hookTimeout: 30_000,
           // 60s covers full Pyodide cold-start + a non-trivial WASM run.
           // Tighter per-test budgets (e.g. host.test.ts's 15s wall-clock
