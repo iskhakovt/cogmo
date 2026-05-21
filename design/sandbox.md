@@ -549,11 +549,19 @@ The 7-day retention applies only to the cron's stale criterion. The event-driven
 
 The slice-4 PR namespace `cogmo/<idShort>` (different namespace from `cogmo/run/*`) stays untouched until the user merges/closes — GitHub's repo-level `delete_branch_on_merge` setting handles those for free. The cron's prefix filter `heads/cogmo/run/` matches only the run-branch namespace, so PR branches are out of scope by construction.
 
-### Streaming exec `[proposed]`
+### Streaming exec `[confirmed]`
 
-The Daytona PTY path is wrong for `claude` — TTY mode triggers the CLI's interactive output (color codes, spinners) per claude-code's `isatty(stdout)` check, corrupting NDJSON parsing, and PTY collapses stdout/stderr into a single channel.
+Two backends share the `ExecStreamingHandle` contract, selected per call by `opts.attachStdin`. Output-only execs (`attachStdin: false` or omitted) take the **session-logs WebSocket** path; execs that need real stdin (`attachStdin: true`) take the **PTY** path. Downstream code stays backend-agnostic — both paths expose the same `Readable`-stream + `wait()` + `dispose()` shape.
 
-The fitting path is the non-PTY session-logs WebSocket: `executeSessionCommand({ runAsync: true })` returns a command id, then `getSessionCommandLogs(sessionId, commandId, onStdout, onStderr)` opens a WS with separated stdout/stderr callbacks. The streaming wrapper exposes the same `Readable`-stream shape the Local-Docker backend produces via dockerode demux — downstream code is backend-agnostic.
+**Output-only (session-logs WS, `exec-streaming.ts`).** `executeSessionCommand({ runAsync: true })` returns a command id, then `getSessionCommandLogs(sessionId, commandId, onStdout, onStderr)` opens a WS with separated stdout/stderr callbacks. This is the right path for pure-output commands because (a) the WS provides demuxed streams, matching the local-Docker dockerode shape downstream code depends on, and (b) session commands are cheaper than PTY sessions.
+
+**Stdin-attached (PTY, `exec-pty.ts`).** Daytona's session-command stdin (`sendSessionCommandInput` over HTTP) has no remote-EOF channel: for `runAsync: true` the daemon pins the FIFO open with a long-running `sleep`, so any caller that relies on stdin EOF as a shutdown signal (e.g. `claude --input-format stream-json`) wedges. `createPty()` exposes a real bidirectional WebSocket with `kill()` and `disconnect()` RPCs; the wrapper:
+
+- Buffers caller writes on the returned `Writable`; on `.end()`, uploads the payload to a tmpfile under `/tmp/cogmo-pty-stdin-<uuid>.bin` via `fs.uploadFile` and creates the PTY session.
+- Sends one shell line into the PTY: `exec <argv> < <stdinPath> 2> <stderrPath>`. The shell-level redirect gives the child a real pipe FD (not a TTY) on stdin, so EOF arrives naturally when the file is exhausted and the CLI's TTY-aware behaviour on stdin doesn't trigger. `exec` replaces the shell with the target binary so PTY exit = target binary exit, no marker parsing.
+- Sets `NO_COLOR=1` in the PTY's env block to suppress ANSI escapes on stdout (PTY's stdout is still a TTY for the child).
+- Redirects child stderr to `/tmp/cogmo-pty-stderr-<uuid>.log` so the PTY's combined onData channel carries clean stdout JSONL; the wrapper downloads + emits the stderr file via the stderr `Readable` after the PTY exits.
+- Cleans up both tmpfiles via `fs.deleteFile` on settle (best-effort; sandbox teardown sweeps `/tmp` anyway).
 
 WS reality the wrapper hides:
 

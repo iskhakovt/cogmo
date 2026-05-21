@@ -29,7 +29,6 @@ function fakeProcess(script: Script): Process {
     deletedSessions.add(sid);
     return undefined;
   });
-  const sendSessionCommandInput = vi.fn(async () => undefined);
   const executeSessionCommand = vi.fn(async () => ({
     cmdId: script.cmdId ?? "cmd-fake",
     output: "",
@@ -72,7 +71,6 @@ function fakeProcess(script: Script): Process {
   return {
     createSession,
     deleteSession,
-    sendSessionCommandInput,
     executeSessionCommand,
     getSessionCommand,
     getSessionCommandLogs,
@@ -367,24 +365,16 @@ describe("startExecStreaming", () => {
     expect(calls).toBeLessThanOrEqual(1);
   });
 
-  it("attachStdin: true exposes a Writable that calls sendSessionCommandInput", async () => {
+  it("rejects attachStdin (must be routed to the PTY backend)", async () => {
     const proc = fakeProcess({ wsResolve: {}, exitCode: 0 });
-    const handle = await startExecStreaming({
-      process: proc,
-      sessionIdPrefix: "p",
-      cmd: ["cat"],
-      opts: { attachStdin: true },
-    });
-    expect(handle.stdin).toBeDefined();
-    handle.stdin?.write("hello");
-    handle.stdin?.write("world");
-    // Synchronous after write — wait one tick so the underlying
-    // promise-based send flushes.
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    const sends = vi.mocked(proc.sendSessionCommandInput).mock.calls.map((c) => c[2]);
-    expect(sends).toContain("hello");
-    expect(sends).toContain("world");
-    await handle.wait();
+    await expect(
+      startExecStreaming({
+        process: proc,
+        sessionIdPrefix: "p",
+        cmd: ["cat"],
+        opts: { attachStdin: true },
+      }),
+    ).rejects.toThrow(/attachStdin must be routed to the PTY backend/);
   });
 
   it("throws + tears down the session if executeSessionCommand returns no cmdId", async () => {
