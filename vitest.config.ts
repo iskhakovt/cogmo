@@ -61,17 +61,22 @@ export default defineConfig({
       },
       {
         test: {
-          // Caps parallelism so Vitest's default `maxWorkers = os.cpus()`
-          // doesn't oversubscribe disk/CPU during WASM cold-start. `2`
-          // matches CI's effective parallelism; bigger dev boxes can
-          // override via `PYODIDE_MAX_WORKERS`.
+          // Caps parallelism so Vitest's default `maxWorkers`
+          // (`os.availableParallelism()`) doesn't oversubscribe disk/CPU
+          // during WASM cold-start. `2` matches CI's effective parallelism;
+          // bigger dev boxes can override via `PYODIDE_MAX_WORKERS`.
           //
-          // `sequence.groupOrder: 1` runs this project AFTER `unit` (default
-          // groupOrder 0) — Vitest 4 requires distinct groupOrders for
-          // projects with different `maxWorkers`. Sequential is acceptable
-          // because the pyodide tier is the wall-clock bottleneck anyway;
-          // running it alongside the fast `unit` tier (capped at the same
-          // 2 workers) would be a small net loss for the regular tier.
+          // `sequence.groupOrder` is what makes the per-project cap
+          // possible: projects sharing a `groupOrder` share one worker
+          // pool, so putting pyodide and unit in the same group would
+          // force a single `maxWorkers` value across both tiers (either
+          // pessimising `unit` by capping it at 2, or removing the
+          // pyodide cap by inheriting unit's default — both bad).
+          // Running pyodide in groupOrder 1 lets each tier keep its own
+          // worker config. Sequential isn't a regression: empirically
+          // CI's Unit Tests check is marginally faster than the
+          // previous interleaved layout (no cross-tier disk/CPU
+          // contention).
           name: "unit-pyodide",
           environment: "node",
           include: PYODIDE_HEAVY_UNIT_GLOBS,
