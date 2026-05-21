@@ -20,11 +20,12 @@
  *   per-turn structured-log context to thread through.
  */
 
-import { type ZodType, z } from "zod";
+import type { ZodType } from "zod";
 import { logger } from "../logger.js";
 import { ProviderProtocolError, parseProviderJson } from "./errors.js";
+import { toObjectJsonSchema } from "./json-schema.js";
 import type { LlmProvider } from "./provider.js";
-import type { JsonSchema, Message, Usage } from "./types.js";
+import type { Message, Usage } from "./types.js";
 
 /**
  * Repair behavior for typed LLM calls.
@@ -118,9 +119,7 @@ const DEFAULT_REPAIR: Required<ChatTypedRepair> = {
 export async function chatTyped<T>(params: TypedChatParams<T>): Promise<TypedChatResult<T>> {
   const { provider, model, system, schema, name } = params;
   const repair: Required<ChatTypedRepair> = { ...DEFAULT_REPAIR, ...params.repair };
-  // z.toJSONSchema returns Zod's JSONSchema7-flavoured shape; our internal
-  // JsonSchema type is a narrower subset that the LLM providers accept.
-  const jsonSchema = z.toJSONSchema(schema) as unknown as JsonSchema;
+  const jsonSchema = toObjectJsonSchema(schema);
   const messages: Message[] = [...params.messages];
   const totalUsage: Usage = { inputTokens: 0, outputTokens: 0 };
   let retries = 0;
