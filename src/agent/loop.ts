@@ -231,16 +231,10 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
   return buildResult(messages, initialLength, [], totalUsage, finalModel, iterations);
 }
 
-/**
- * Stable identifier for a single `tool_use` invocation within an agent
- * turn. Both fields are SDK-local — `iteration` is the loop counter,
- * `position` is the index of this block in the iteration's `tool_use`
- * content (pre-grouping). They are byte-identical across Inngest
- * replays of the same run, which is what lets durable per-tool
- * `step.run` ids match on retry even though the LLM-minted
- * `tool_use_id` does not. Grouping the pair in one object eliminates
- * adjacent-int parameter-swap bugs at the call site.
- */
+// Stable identifier for one `tool_use` invocation: `iteration` is the
+// agent-loop counter, `position` is the index in the iteration's
+// `tool_use` sub-list (after filtering text/thinking blocks). Grouped
+// in one object to make wrong-order swaps a type error at call sites.
 interface ToolStepKey {
   iteration: number;
   position: number;
@@ -481,20 +475,11 @@ async function runOne(
     { attributes: { "cogmo.tool.name": block.name } },
     async (span) => {
       try {
-        // Opt-in durability: wrap only when the tool is flagged AND a
-        // runner is provided. The handler body itself runs between stream
-        // events (never during), so wrapping in `step.run` doesn't
-        // reorder `onEvent` emissions. See design/crash-recovery.md.
-        //
-        // The step id is derived purely from SDK-local state (loop
-        // counter + content array index) and is therefore identical on
-        // every attempt regardless of what the LLM emits. Inngest can
-        // match a cached step from attempt 0 even when attempt 1's
-        // fresh LLM call returns a different `tool_use_id` — or a
-        // different tool entirely at the same position. The trade-off:
-        // a cached result may semantically mismatch the current
-        // `tool_use`. See design/crash-recovery.md → Per-tool
-        // durability for the full semantics.
+        // Step id is SDK-local (iteration + filtered-tool-use position)
+        // so the cache key is stable across Inngest replays even though
+        // the provider's `tool_use_id` is not. Cached content may
+        // semantically mismatch the current `tool_use` — see
+        // design/crash-recovery.md → Per-tool durability.
         const runHandler = (): Promise<string> =>
           spec.handler(block.input as Record<string, unknown>, service);
         const out =
@@ -503,6 +488,10 @@ async function runOne(
             : await runHandler();
         return { type: "tool_result" as const, toolUseId: block.id, content: out };
       } catch (err) {
+        // Also catches cached rejections from a durable `stepRun` — Inngest
+        // replays a stored failure by re-throwing here. Converting to an
+        // `isError: true` tool_result keeps Class D's
+        // `iterationHadSideEffect` accurate across replays.
         const message = err instanceof Error ? err.message : String(err);
         span.recordException(err instanceof Error ? err : new Error(message));
         span.setStatus({ code: SpanStatusCode.ERROR, message });

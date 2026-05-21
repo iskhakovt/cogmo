@@ -228,17 +228,10 @@ describe("handle-message — crash recovery / step replay", () => {
   });
 
   it("does not re-execute a durable tool step body when the iteration-keyed step is cached", async () => {
-    // Wire-level contract check for per-tool durability. The agent loop
-    // wraps `ToolSpec.durable = true` handlers in
-    // `step.run("tool-iter<N>-<P>", fn)` (see runOne in loop.ts). When
-    // Inngest replays this run, the step body must not re-execute and
-    // the cached value must flow back as the tool's result.
-    //
-    // We can't run the real loop in this test (the inner
-    // `runStreamingAgentLoop` is injected and itself mocked), so we
-    // mirror the production contract by calling the injected `stepRun`
-    // exactly the way the loop does. Priming `tool-iter1-0` in `steps:`
-    // simulates "this durable tool already ran on a prior attempt".
+    // Verifies that when the agent loop emits a `tool-iter<N>-<P>` step,
+    // Inngest's cache returns the stored value and skips the handler
+    // body. The id format itself is asserted in `loop.test.ts`; this
+    // test covers the handle-message ⇄ Inngest cache wire only.
     const handlerBody = vi.fn().mockResolvedValue("fresh-result");
     const deps = mockDeps({
       runStreamingAgentLoop: vi.fn().mockImplementation(async (params) => {
