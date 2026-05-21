@@ -1,4 +1,4 @@
-FROM mirror.gcr.io/library/node:24-slim@sha256:24dc26ef1e3c3690f27ebc4136c9c186c3133b25563ae4d7f0692e4d1fe5db0e AS base
+FROM mirror.gcr.io/library/node:24-slim@sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d AS base
 RUN corepack enable
 
 FROM base AS build
@@ -29,7 +29,15 @@ WORKDIR /app
 # failed. CAfile: none"); `openssh-client` is required for `git@host:` SSH
 # remotes in the same path. The `node` user (UID 1000) ships in `node:24-slim`;
 # bind-mounted state directories from the host must be chowned 1000:1000 to match.
+#
+# `apt-get upgrade` applies Debian security updates that landed after the
+# base-image rebuild. Hadolint's DL3005 advises against this on the
+# premise that base maintainers keep up — in practice node:24-slim trails
+# Debian security advisories by days to weeks, and the resulting CVE gap
+# in our published image is real. See trivy scan output on prior builds.
+# hadolint ignore=DL3005
 RUN apt-get update \
+ && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends \
     ca-certificates \
     git \

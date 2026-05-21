@@ -14,7 +14,7 @@
 # Codex CLI, Python 3.12 + uv, Go/Rust toolchains, and docker-outside-of-docker
 # are deferred to whenever real verify commands need them.
 
-FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
+FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04@sha256:d94c97dd9cacf183d0a6fd12a8e87b526e9e928307674ae9c94139139c0c6eae
 
 # Make `RUN ... | ...` fail when any element of the pipe fails. The
 # nodesource install (`curl ... | bash -`) below silently succeeds on a
@@ -23,7 +23,17 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # devcontainers/base already ships git, gh, curl, jq, ripgrep — but `fd-find`
 # is missing on Ubuntu and the binary is named `fdfind` rather than `fd`.
+#
+# `apt-get upgrade` applies Ubuntu security updates that landed after the
+# upstream rebuild — the devcontainers base image trails published USN
+# advisories by days to weeks and accumulates a large CVE surface on the
+# `ubuntu-24.04` tag. Hadolint's DL3005 disagrees with this on the premise
+# that maintainers keep base images patched; in practice they don't, and
+# this image runs inside sysbox sandboxes where every patch we can apply
+# at build time tightens the userland surface.
+# hadolint ignore=DL3005
 RUN apt-get update \
+ && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends fd-find \
  && rm -rf /var/lib/apt/lists/* \
  && ln -s /usr/bin/fdfind /usr/local/bin/fd
