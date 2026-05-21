@@ -2,30 +2,8 @@ import type { PtyHandle, PtyResult } from "@daytonaio/sdk";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { ExecTimeoutError } from "../index.js";
-import { startExecPty } from "./exec-pty.js";
+import { type PtyFileSystemClient, type PtyProcessClient, startExecPty } from "./exec-pty.js";
 import { DisposedError } from "./exec-streaming.js";
-
-/**
- * Mirror of the narrow interfaces in `exec-pty.ts`. Tests depend on the
- * module's actual contract, not on the SDK's wider class surface — so
- * `mock<T>()` produces a clean typed mock without overload conflicts.
- */
-interface PtyProcessClient {
-  createPty(options: {
-    id: string;
-    cwd?: string;
-    envs?: Record<string, string>;
-    cols?: number;
-    rows?: number;
-    onData: (data: Uint8Array) => void | Promise<void>;
-  }): Promise<PtyHandle>;
-}
-
-interface PtyFileSystemClient {
-  uploadFile(file: Buffer, remotePath: string): Promise<void>;
-  downloadFile(remotePath: string): Promise<Buffer>;
-  deleteFile(path: string): Promise<void>;
-}
 
 /**
  * PTY stub. Tests need to (a) trigger `onData` from outside (to drive
@@ -207,6 +185,65 @@ describe("startExecPty", () => {
     );
   });
 
+  it("truncates oversized stderr at the cap with a marker", async () => {
+    const ptyCtrl = fakePty();
+    const fsCtrl = fakeFs();
+    const procCtrl = fakeProcess(ptyCtrl);
+    // 2 MiB > 1 MiB cap; the wrapper must clip the payload and
+    // append a truncation marker so downstream consumers see the
+    // breach explicitly instead of silently losing bytes.
+    const oversized = Buffer.alloc(2 * 1024 * 1024, "x");
+    fsCtrl.stderrPayload = oversized;
+
+    const handle = await startExecPty({
+      process: procCtrl.process,
+      fs: fsCtrl.fs,
+      sessionIdPrefix: "p",
+      cmd: ["true"],
+      opts: { attachStdin: true },
+      random: deterministicRandom(),
+    });
+    handle.stdin?.end();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const stderrChunks: Buffer[] = [];
+    handle.stderr.on("data", (c: Buffer) => stderrChunks.push(c));
+
+    ptyCtrl.resolveWait({ exitCode: 0 });
+    await handle.wait();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const stderrText = Buffer.concat(stderrChunks).toString("utf8");
+    // Capped at 1 MiB of payload bytes plus the truncation marker.
+    expect(stderrText.length).toBeGreaterThan(1024 * 1024);
+    expect(stderrText.length).toBeLessThan(1024 * 1024 + 200);
+    expect(stderrText).toContain("[cogmo: stderr truncated]");
+  });
+
+  it("suppresses the bash prompt via PS1='' alongside NO_COLOR=1", async () => {
+    const ptyCtrl = fakePty();
+    const fsCtrl = fakeFs();
+    const procCtrl = fakeProcess(ptyCtrl);
+
+    const handle = await startExecPty({
+      process: procCtrl.process,
+      fs: fsCtrl.fs,
+      sessionIdPrefix: "p",
+      cmd: ["true"],
+      opts: { attachStdin: true },
+      random: deterministicRandom(),
+    });
+    handle.stdin?.end();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(procCtrl.createPtyOptions?.envs).toEqual({ PS1: "", NO_COLOR: "1" });
+
+    ptyCtrl.resolveWait({ exitCode: 0 });
+    await handle.wait();
+  });
+
   it("merges opts.env over a NO_COLOR default in PTY envs", async () => {
     const ptyCtrl = fakePty();
     const fsCtrl = fakeFs();
@@ -224,7 +261,7 @@ describe("startExecPty", () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
     await new Promise<void>((resolve) => setImmediate(resolve));
 
-    expect(procCtrl.createPtyOptions?.envs).toEqual({ NO_COLOR: "1", OTHER: "val" });
+    expect(procCtrl.createPtyOptions?.envs).toEqual({ PS1: "", NO_COLOR: "1", OTHER: "val" });
 
     ptyCtrl.resolveWait({ exitCode: 0 });
     await handle.wait();
@@ -247,7 +284,7 @@ describe("startExecPty", () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
     await new Promise<void>((resolve) => setImmediate(resolve));
 
-    expect(procCtrl.createPtyOptions?.envs).toEqual({ NO_COLOR: "0" });
+    expect(procCtrl.createPtyOptions?.envs).toEqual({ PS1: "", NO_COLOR: "0" });
 
     ptyCtrl.resolveWait({ exitCode: 0 });
     await handle.wait();
@@ -363,7 +400,7 @@ describe("startExecPty", () => {
     // Hold the upload open so we can call dispose() after stdin.end()
     // has triggered startPty but before createPty has been awaited.
     let releaseUpload!: () => void;
-    fsCtrl.fs.uploadFile.mockImplementationOnce(
+    vi.mocked(fsCtrl.fs.uploadFile).mockImplementationOnce(
       () =>
         new Promise<void>((resolve) => {
           releaseUpload = resolve;

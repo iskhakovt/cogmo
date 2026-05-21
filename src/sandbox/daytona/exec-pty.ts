@@ -14,7 +14,7 @@ const log = logger.child({ component: "sandbox.daytona.exec-pty" });
  * full class's overload soup, and documents the contract this module
  * depends on.
  */
-interface PtyProcessClient {
+export interface PtyProcessClient {
   createPty(options: {
     id: string;
     cwd?: string;
@@ -32,7 +32,7 @@ interface PtyProcessClient {
  * Buffer-out variants, so declaring a narrow contract sidesteps the
  * overload conflict in test mocks.
  */
-interface PtyFileSystemClient {
+export interface PtyFileSystemClient {
   uploadFile(file: Buffer, remotePath: string): Promise<void>;
   downloadFile(remotePath: string): Promise<Buffer>;
   deleteFile(path: string): Promise<void>;
@@ -58,6 +58,16 @@ interface PtyFileSystemClient {
 const PTY_COLS = 200;
 const PTY_ROWS = 50;
 const DISPOSE_GRACE_MS = 5_000;
+/**
+ * Cap on the stderr tmpfile we drain after the PTY exits. The Daytona
+ * `fs.downloadFile` returns the whole file as a `Buffer`, so an
+ * unbounded stderr would land in orchestrator memory. claude's
+ * stderr is small in practice (warn-level diagnostics only) — this
+ * is cheap insurance against a future verbose binary or stuck
+ * logging loop.
+ */
+const MAX_STDERR_BYTES = 1024 * 1024;
+const STDERR_TRUNCATED_SUFFIX = "\n[cogmo: stderr truncated]\n";
 
 export async function startExecPty(args: {
   process: PtyProcessClient;
@@ -175,8 +185,15 @@ export async function startExecPty(args: {
 
       pty = await daytonaProcess.createPty({
         id: sessionId,
+        // cwd applies to the PTY shell itself, which means the `exec
+        // <argv> < … 2> …` line below inherits it — no `cd` prefix
+        // needed inside the shell line.
         ...(opts.workingDir !== undefined && { cwd: opts.workingDir }),
-        envs: { NO_COLOR: "1", ...(opts.env ?? {}) },
+        // `PS1=""` suppresses the bash startup prompt so the only
+        // pre-claude bytes on onData are the terminal echo of the
+        // single exec line we send. `NO_COLOR=1` suppresses ANSI
+        // escapes on an isatty stdout. Caller env wins over both.
+        envs: { PS1: "", NO_COLOR: "1", ...(opts.env ?? {}) },
         cols: PTY_COLS,
         rows: PTY_ROWS,
         onData: handleOnData,
@@ -220,9 +237,16 @@ export async function startExecPty(args: {
       // Drain stderr tmpfile into the stderr stream — best-effort, so
       // a stuck download doesn't block exit reporting. The download
       // can 404 if the child never wrote to it; that's fine.
+      // Truncate at MAX_STDERR_BYTES so a runaway binary doesn't
+      // dump unbounded bytes into orchestrator memory.
       try {
         const errBuf = await fs.downloadFile(stderrPath);
-        if (errBuf.length > 0) stderr.write(errBuf);
+        if (errBuf.length > MAX_STDERR_BYTES) {
+          stderr.write(errBuf.subarray(0, MAX_STDERR_BYTES));
+          stderr.write(STDERR_TRUNCATED_SUFFIX);
+        } else if (errBuf.length > 0) {
+          stderr.write(errBuf);
+        }
       } catch (err) {
         log.debug(
           { err: (err as Error).message, path: stderrPath },

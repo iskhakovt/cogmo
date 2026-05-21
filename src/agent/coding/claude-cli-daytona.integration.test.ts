@@ -39,8 +39,16 @@ const DEVBASE_IMAGE = process.env.COGMO_DEVBASE_IMAGE ?? "ghcr.io/iskhakovt/cogm
 let client: DaytonaSandboxClient | undefined;
 
 beforeAll(async () => {
+  // Defensive: today `describe.skip` is what keeps the integration
+  // tier from firing this hook, and Vitest's documented behaviour is
+  // that root hooks don't run when no tests in the file are
+  // runnable. The skip-disables-beforeAll path is empirical, though
+  // — if a future Vitest release tightens that, we don't want a
+  // default integration run to error out trying to boot a real
+  // Daytona client. Bail silently when the env hasn't been set up
+  // for the manual-run workflow.
+  if (!process.env.DAYTONA_API_KEY) return;
   const apiKey = process.env.DAYTONA_API_KEY;
-  if (!apiKey) throw new Error("DAYTONA_API_KEY must be set to run this test");
   client = await DaytonaSandboxClient.create({
     apiKey,
     apiUrl: process.env.DAYTONA_API_URL ?? "https://app.daytona.io/api",
