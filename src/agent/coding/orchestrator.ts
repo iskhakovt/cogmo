@@ -497,7 +497,12 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
           // Idempotency id follows the same `<verb>-<taskId>` shape as
           // the catch-path `task-failed-<taskId>` emit; ensures bus-level
           // dedup on the off-chance the step fires more than once (e.g. a
-          // future retry change).
+          // future retry change). Safe across the task's lifetime because
+          // revise cancels the current task and a re-plan issues a fresh
+          // `taskId` (commands.ts handles the Revise tap via
+          // `cancelTask`); no path re-emits `plan-approved` for the same
+          // id. A future in-place re-plan flow would need to pick a new
+          // idempotency id.
           id: `plan-approved-${taskId}`,
         });
         taskLog.info("plan auto-approved via profile autoapprove=on");
