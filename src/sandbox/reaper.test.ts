@@ -59,7 +59,11 @@ interface DockerSideContainer {
  * resource so tests can assert order + count.
  */
 function fakeDocker(
-  opts: { containers?: DockerSideContainer[]; failKill?: Map<string, number> } = {},
+  opts: {
+    containers?: DockerSideContainer[];
+    failKill?: Map<string, number>;
+    failRemove?: Map<string, number>;
+  } = {},
 ): {
   docker: Docker;
   killCalls: string[];
@@ -83,6 +87,10 @@ function fakeDocker(
         killCalls.push(id);
       }),
       remove: vi.fn(async () => {
+        const code = opts.failRemove?.get(id);
+        if (code !== undefined) {
+          throw Object.assign(new Error("nope"), { statusCode: code });
+        }
         removeCalls.push(id);
       }),
     }),
@@ -177,6 +185,28 @@ describe("runReap — TTL pass", () => {
     const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
     expect(result.ttlReaped).toBe(1);
     expect(removeCalls).toEqual(["c-gone"]);
+    expect((await tx((trx) => store.getContainer(trx, cogmoId)))?.status).toBe("reaped");
+  });
+
+  it.each([
+    { code: 404, label: "404 ('no such container')" },
+    { code: 409, label: "409 ('removal already in progress')" },
+  ])("swallows remove rejection with statusCode $label", async ({ code }) => {
+    // 409 fires when the daemon (or a parallel actor) is already removing the
+    // same container — observed under parallel-fork integration runs where
+    // kill + remove race the daemon's own post-kill cleanup.
+    const { docker, killCalls } = fakeDocker({
+      containers: [{ Id: "c-rm-race", Labels: labels() }],
+      failRemove: new Map([["c-rm-race", code]]),
+    });
+    const cogmoId = await insertContainer({
+      dockerId: "c-rm-race",
+      ttlMs: -1000,
+      status: "running",
+    });
+    const result = await runReap({ docker, store, runInTx: tx, instanceId, now: NOW });
+    expect(result.ttlReaped).toBe(1);
+    expect(killCalls).toEqual(["c-rm-race"]);
     expect((await tx((trx) => store.getContainer(trx, cogmoId)))?.status).toBe("reaped");
   });
 

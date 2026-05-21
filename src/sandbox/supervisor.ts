@@ -146,6 +146,15 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
         `reconcileCrashedInstances called with mismatching instance id: ${currentInstanceId} vs ${this.#instanceId}`,
       );
     }
+    // Reap only containers whose stamped instance id is a known row in this
+    // store. `cogmo.managed=true` alone matches any concurrent deployment
+    // sharing the daemon; the store membership check scopes the reap to one
+    // deployment (a shared DB → all stale instances, an isolated DB → none).
+    const knownInstances = await this.#runInTx((tx) => this.#store.listLiveInstances(tx));
+    const reapTargets = new Set(
+      knownInstances.map((i) => i.id).filter((id) => id !== currentInstanceId),
+    );
+    if (reapTargets.size === 0) return { orphansReaped: 0 };
     const containers = await this.#docker.listContainers({
       all: true,
       filters: { label: [`${LABEL_MANAGED}=true`] },
@@ -153,7 +162,7 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
     let reaped = 0;
     for (const c of containers) {
       const stamped = c.Labels?.[LABEL_INSTANCE];
-      if (stamped && stamped === currentInstanceId) continue;
+      if (!stamped || !reapTargets.has(stamped)) continue;
       log.warn({ dockerId: c.Id, stampedInstance: stamped }, "reaping orphan container");
       await this.#killAndRemove(c.Id);
       const row = await this.#runInTx((tx) => this.#store.getContainerByDockerId(tx, c.Id));
@@ -466,14 +475,15 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
       await c.kill({ signal: "SIGTERM" });
     } catch (err) {
       const e = err as { statusCode?: number };
-      // 304 / 409 = already stopped (engine version varies), 404 = gone — all fine
+      // 304 / 409 = already stopped, 404 = gone.
       if (e.statusCode !== 304 && e.statusCode !== 409 && e.statusCode !== 404) throw err;
     }
     try {
       await c.remove({ force: true });
     } catch (err) {
       const e = err as { statusCode?: number };
-      if (e.statusCode !== 404) throw err;
+      // 404 = gone, 409 = remove already in flight.
+      if (e.statusCode !== 404 && e.statusCode !== 409) throw err;
     }
   }
 }

@@ -40,6 +40,7 @@ let docker: Docker;
 let workspaceTmp: string;
 const sandboxes: LocalDockerSandboxClient[] = [];
 const homeVolumes: string[] = [];
+const testFileInstanceIds: string[] = [];
 
 beforeAll(async () => {
   if (!SHOULD_RUN) return;
@@ -57,16 +58,19 @@ beforeAll(async () => {
 afterAll(async () => {
   if (!SHOULD_RUN) return;
   for (const s of sandboxes) await s.shutdown();
-  // Belt-and-suspenders cleanup.
-  const leftover = await docker.listContainers({
-    all: true,
-    filters: { label: [`${LABEL_MANAGED}=true`] },
-  });
-  for (const c of leftover) {
-    await docker
-      .getContainer(c.Id)
-      .remove({ force: true })
-      .catch(() => {});
+  // Scope by `LABEL_INSTANCE` — under parallel forks `LABEL_MANAGED=true`
+  // alone also reaches sibling test files' live containers.
+  for (const instanceId of testFileInstanceIds) {
+    const leftover = await docker.listContainers({
+      all: true,
+      filters: { label: [`${LABEL_MANAGED}=true`, `${LABEL_INSTANCE}=${instanceId}`] },
+    });
+    for (const c of leftover) {
+      await docker
+        .getContainer(c.Id)
+        .remove({ force: true })
+        .catch(() => {});
+    }
   }
   for (const v of homeVolumes) {
     await docker
@@ -87,6 +91,7 @@ describe.skipIf(!SHOULD_RUN)("LocalDockerSandboxClient (sysbox runtime, GHA only
     const inst = await tx((trx) =>
       store.insertInstance(trx, { host: "test-host", pid: process.pid }),
     );
+    testFileInstanceIds.push(inst.id);
     const sandbox = await LocalDockerSandboxClient.create({
       docker,
       store,
@@ -125,6 +130,7 @@ describe.skipIf(!SHOULD_RUN)("LocalDockerSandboxClient (sysbox runtime, GHA only
     const inst = await tx((trx) =>
       store.insertInstance(trx, { host: "test-host", pid: process.pid }),
     );
+    testFileInstanceIds.push(inst.id);
     const sandbox = await LocalDockerSandboxClient.create({
       docker,
       store,

@@ -16,6 +16,7 @@ import { LocalDockerSandboxClient } from "./index.js";
 import type { CogmoSocketProxy } from "./proxy/index.js";
 import type { TaskScope } from "./proxy/types.js";
 import { DrizzleSandboxStore } from "./store/index.js";
+import { LABEL_INSTANCE, LABEL_MANAGED } from "./supervisor.js";
 import type { ResourceLimits } from "./types.js";
 
 const RESOURCE_LIMITS: ResourceLimits = {
@@ -1161,6 +1162,79 @@ describe("LocalDockerSandboxClient — resume + tryResumeByTaskId (crash recover
 
     const session = await sandbox.tryResumeByTaskId(taskId);
     expect(session).toBeNull();
+  });
+});
+
+describe("LocalDockerSandboxClient — reconcileCrashedInstances", () => {
+  // Reap scope is "instance id present in this store", not "any
+  // `cogmo.managed=true` container on the daemon".
+  it("ignores containers labelled with an instance id not in this store", async () => {
+    const current = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker } = mockDockerFacade();
+    docker.listContainers.mockResolvedValue([
+      {
+        Id: "docker-foreign",
+        Labels: { [LABEL_MANAGED]: "true", [LABEL_INSTANCE]: "00000000-0000-7000-8000-deadbeef" },
+      } as unknown as import("dockerode").ContainerInfo,
+    ]);
+
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: current.id,
+    });
+
+    const result = await sandbox.reconcileCrashedInstances(current.id);
+    expect(result.orphansReaped).toBe(0);
+    expect(docker.getContainer).not.toHaveBeenCalled();
+  });
+
+  it("reaps containers stamped with a stale instance row from the same store", async () => {
+    const stale = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const current = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 2 }));
+    const { docker, container } = mockDockerFacade();
+    docker.listContainers.mockResolvedValue([
+      {
+        Id: "docker-stale",
+        Labels: { [LABEL_MANAGED]: "true", [LABEL_INSTANCE]: stale.id },
+      } as unknown as import("dockerode").ContainerInfo,
+    ]);
+    container.kill.mockResolvedValue(undefined);
+    container.remove.mockResolvedValue(undefined);
+
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: current.id,
+    });
+
+    const result = await sandbox.reconcileCrashedInstances(current.id);
+    expect(result.orphansReaped).toBe(1);
+    expect(container.kill).toHaveBeenCalledWith({ signal: "SIGTERM" });
+    expect(container.remove).toHaveBeenCalledWith({ force: true });
+  });
+
+  it("skips listContainers entirely when no peer instance rows exist", async () => {
+    // No peers → no daemon round-trip.
+    const current = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker } = mockDockerFacade();
+
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: current.id,
+    });
+
+    docker.listContainers.mockClear();
+    const result = await sandbox.reconcileCrashedInstances(current.id);
+    expect(result.orphansReaped).toBe(0);
+    expect(docker.listContainers).not.toHaveBeenCalled();
   });
 });
 
