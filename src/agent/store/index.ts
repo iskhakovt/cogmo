@@ -159,10 +159,11 @@ export interface Profile {
    */
   streamEdits: boolean;
   /**
-   * When `on`, the coding-delegation tool gate skips the Telegram permission
-   * round trip for prompt-worthy operations (`git push`, `gh pr/issue`
-   * mutations, publishes, external HTTP writes) and auto-allows. The
-   * `policy.deny` set still denies. Toggled via `/profile autoapprove`.
+   * When `on`, the plan orchestrator auto-stamps `plan_approved_at` and
+   * emits `coding/task/plan-approved` once the plan text is persisted,
+   * skipping the Telegram approve/revise/cancel round trip. The plan
+   * still streams to Telegram for visibility. Default `off`. Toggled via
+   * `/profile autoapprove`.
    */
   codingAutoapproveMode: CodingAutoapproveMode;
 }

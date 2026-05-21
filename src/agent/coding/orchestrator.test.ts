@@ -18,6 +18,7 @@ import type { SecretsStore } from "../../secrets/store/index.js";
 import { expectDefined } from "../../test/assertions.js";
 import { makeStepRun, makeStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
+import { DrizzleAgentStore } from "../store/index.js";
 import type { CodingBackend, CodingEvent } from "./backend.js";
 import {
   type CodingOrchestratorDeps,
@@ -36,6 +37,7 @@ let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleCodingStore;
 let sandboxStore: DrizzleSandboxStore;
+let agentStore: DrizzleAgentStore;
 let instanceId: string;
 let baseDir: string;
 let repoPath: string;
@@ -44,6 +46,7 @@ beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
   store = new DrizzleCodingStore();
   sandboxStore = new DrizzleSandboxStore();
+  agentStore = new DrizzleAgentStore();
 
   baseDir = mkdtempSync(join(tmpdir(), "cogmo-orch-test-"));
   repoPath = join(baseDir, "repo");
@@ -229,27 +232,16 @@ function backendYielding(events: CodingEvent[]): CodingBackend {
     plan: async function* () {
       for (const ev of events) yield ev;
     },
-    execute: async () => {
-      throw new Error("execute not exercised by this test — use executeBackendYielding");
-    },
+    execute: () => throwingPlan("execute not exercised by this test — use executeBackendYielding"),
   };
 }
 
-function executeBackendYielding(
-  events: CodingEvent[],
-  respondPermission: (
-    requestId: string,
-    response: { behavior: "allow" | "deny" },
-  ) => Promise<void> = async () => {},
-): CodingBackend {
+function executeBackendYielding(events: CodingEvent[]): CodingBackend {
   return {
     plan: () => throwingPlan("plan not exercised by this test — use backendYielding"),
-    execute: async () => ({
-      events: (async function* () {
-        for (const ev of events) yield ev;
-      })(),
-      respondPermission,
-    }),
+    execute: async function* () {
+      for (const ev of events) yield ev;
+    },
   };
 }
 
@@ -314,8 +306,9 @@ function makeDeps(
 }
 
 // `inngest` is required by both runCodingTask and runCodingExecute for
-// emit-task-failed / emit-cli-done / coding/task/permission-requested.
-// Defined here so both describe blocks can share it.
+// emit-task-failed, emit-cli-done, and the autoapprove path's
+// coding/task/plan-approved emit. Defined here so both describe blocks
+// can share it.
 const fakeInngestShared = { send: vi.fn().mockResolvedValue(undefined) };
 const stepSendEvent = makeStepSendEvent(fakeInngestShared);
 
@@ -430,6 +423,222 @@ describe("runCodingTask", () => {
       expect(result.failureReason).toMatch(/claude_code_oauth_token/);
     }
     expect(createCalls).toHaveLength(0);
+  });
+
+  async function seedUserTaskWithAutoapprove(
+    repo: CodingRepoRow,
+    mode: "off" | "on",
+    namePrefix: string,
+  ): Promise<CodingTaskRow> {
+    // Seed user + profile + conversation + task so the join in
+    // getCodingAutoapproveModeForTask resolves to the profile we toggle.
+    const user = await tx((trx) => agentStore.createUser(trx));
+    const profile = await tx((trx) =>
+      agentStore.createProfile(trx, {
+        userId: user.id,
+        name: `${namePrefix}-${Math.random().toString(36).slice(2)}`,
+        basePrompt: "x",
+        model: "claude-haiku-4-5-20251001",
+        toolSet: [],
+      }),
+    );
+    if (mode === "on") {
+      await tx((trx) => agentStore.updateProfile(trx, profile.id, { codingAutoapproveMode: "on" }));
+    }
+    const conv = await tx((trx) =>
+      agentStore.createConversation(trx, {
+        userId: user.id,
+        profileId: profile.id,
+        isPrivate: true,
+      }),
+    );
+    return tx((trx) =>
+      store.insertTask(trx, {
+        repoId: repo.id,
+        conversationId: conv.id,
+        goal: `${namePrefix} task`,
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      }),
+    );
+  }
+
+  it("profile coding_autoapprove_mode=on auto-approves the plan and emits coding/task/plan-approved", async () => {
+    const repo = await seedRepo();
+    const task = await seedUserTaskWithAutoapprove(repo, "on", "auto");
+
+    const { sandbox } = fakeSandbox();
+    const backend = backendYielding([
+      { kind: "session_started", sessionId: "sess-AUTO" },
+      { kind: "plan_ready", plan: "## Plan\n1. Do X\n" },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+
+    const sentEvents: { name: string; data: unknown }[] = [];
+    const recordingStepSendEvent = (async (_: string, payload: unknown) => {
+      sentEvents.push(payload as { name: string; data: unknown });
+      return { ids: [] };
+    }) as never;
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend }),
+      stepRun,
+      stepSendEvent: recordingStepSendEvent,
+    });
+    // Status stays at awaiting_approval (the execute orchestrator
+    // transitions it to executing on the event we just emitted).
+    expect(result.status).toBe("awaiting_approval");
+
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.planApprovedAt).toBeInstanceOf(Date);
+    // The auto-approve emit landed.
+    const approvedEvents = sentEvents.filter((e) => e.name === "coding/task/plan-approved");
+    expect(approvedEvents).toHaveLength(1);
+    expect(approvedEvents[0]?.data).toMatchObject({ taskId: task.id });
+  });
+
+  it("profile coding_autoapprove_mode=off keeps the Telegram round trip (no auto plan-approved emit)", async () => {
+    const repo = await seedRepo();
+    const task = await seedUserTaskWithAutoapprove(repo, "off", "manual");
+
+    const { sandbox } = fakeSandbox();
+    const backend = backendYielding([
+      { kind: "session_started", sessionId: "sess-MANUAL" },
+      { kind: "plan_ready", plan: "## Plan\n1. Do X\n" },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+
+    const sentEvents: { name: string }[] = [];
+    const recordingStepSendEvent = (async (_: string, payload: unknown) => {
+      sentEvents.push(payload as { name: string });
+      return { ids: [] };
+    }) as never;
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend }),
+      stepRun,
+      stepSendEvent: recordingStepSendEvent,
+    });
+    expect(result.status).toBe("awaiting_approval");
+
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.planApprovedAt).toBeNull();
+    expect(sentEvents.find((e) => e.name === "coding/task/plan-approved")).toBeUndefined();
+  });
+
+  it("autoapprove=on race: concurrent cancel between set-status-awaiting and auto-approve wins, no plan-approved emit", async () => {
+    // Pins the race-safe contract from the design doc: if the user taps
+    // Cancel after the plan finalizes but before the auto-approve step
+    // commits, `approvePlanIfPending` observes `status != awaiting_approval`
+    // and returns `not_pending`. The orchestrator logs and skips the
+    // emit; the cancellation stands.
+    const repo = await seedRepo();
+    const task = await seedUserTaskWithAutoapprove(repo, "on", "race");
+
+    const { sandbox } = fakeSandbox();
+    const backend = backendYielding([
+      { kind: "session_started", sessionId: "sess-RACE" },
+      { kind: "plan_ready", plan: "## Plan\n1. Do X\n" },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+
+    // Inject a cancel between set-status-awaiting and auto-approve-plan
+    // by wrapping stepRun. `cancelTaskIfActive` flips status to
+    // `cancelled` directly via the store (no Telegram round trip).
+    const interceptingStepRun = (async (id: string, fn: () => Promise<unknown>) => {
+      if (id === "auto-approve-plan") {
+        await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user cancelled"));
+      }
+      return fn();
+    }) as unknown as typeof stepRun;
+
+    const sentEvents: { name: string }[] = [];
+    const recordingStepSendEvent = (async (_: string, payload: unknown) => {
+      sentEvents.push(payload as { name: string });
+      return { ids: [] };
+    }) as never;
+
+    await runCodingTask({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend }),
+      stepRun: interceptingStepRun,
+      stepSendEvent: recordingStepSendEvent,
+    });
+
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.status).toBe("cancelled");
+    expect(reloaded?.planApprovedAt).toBeNull();
+    // No plan-approved event: the auto-approve step observed
+    // `not_pending` and skipped the emit.
+    expect(sentEvents.find((e) => e.name === "coding/task/plan-approved")).toBeUndefined();
+  });
+
+  it("autoapprove=on does NOT fire for evolution-triggered tasks even when the joined profile has it on", async () => {
+    // Defensive: today, evolution tasks have no conversation so the
+    // store join returns null, and the orchestrator's `triggerSource ===
+    // 'user'` guard means autoapprove never even gets resolved. This
+    // test pins both invariants by stitching together an unnatural
+    // combo (evolution trigger + conversation + autoapprove=on) and
+    // asserting the auto-approve emit doesn't fire.
+    const repo = await seedRepo();
+    const user = await tx((trx) => agentStore.createUser(trx));
+    const profile = await tx((trx) =>
+      agentStore.createProfile(trx, {
+        userId: user.id,
+        name: `evo-${Math.random().toString(36).slice(2)}`,
+        basePrompt: "x",
+        model: "claude-haiku-4-5-20251001",
+        toolSet: [],
+      }),
+    );
+    await tx((trx) => agentStore.updateProfile(trx, profile.id, { codingAutoapproveMode: "on" }));
+    const conv = await tx((trx) =>
+      agentStore.createConversation(trx, {
+        userId: user.id,
+        profileId: profile.id,
+        isPrivate: true,
+      }),
+    );
+    const task = await tx((trx) =>
+      store.insertTask(trx, {
+        repoId: repo.id,
+        conversationId: conv.id,
+        goal: "evolution-driven task",
+        triggerSource: "evolution",
+        triggerRef: "evo-1",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      }),
+    );
+
+    const { sandbox } = fakeSandbox();
+    const backend = backendYielding([
+      { kind: "session_started", sessionId: "sess-EVO" },
+      { kind: "plan_ready", plan: "auto-plan" },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+
+    const sentEvents: { name: string }[] = [];
+    const recordingStepSendEvent = (async (_: string, payload: unknown) => {
+      sentEvents.push(payload as { name: string });
+      return { ids: [] };
+    }) as never;
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend }),
+      stepRun,
+      stepSendEvent: recordingStepSendEvent,
+    });
+    // Evolution path lands at `executing` directly per the existing
+    // trigger-source branch — the autoapprove path is not consulted.
+    expect(result.status).toBe("executing");
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.planApprovedAt).toBeNull();
+    expect(sentEvents.find((e) => e.name === "coding/task/plan-approved")).toBeUndefined();
   });
 
   it("automated trigger (evolution) auto-advances to executing", async () => {
@@ -630,9 +839,7 @@ describe("runCodingTask", () => {
       plan: () => {
         throw new Error("backend exploded");
       },
-      execute: async () => {
-        throw new Error("not used");
-      },
+      execute: () => throwingPlan("execute not used in this test"),
     };
     const sendCalls: { eventName: string; whenStatus: string | null }[] = [];
     const stepSendEventThrowing = (async (_: string, payload: unknown) => {
@@ -672,9 +879,7 @@ describe("runCodingTask", () => {
       plan: () => {
         throw new Error("backend exploded");
       },
-      execute: async () => {
-        throw new Error("not used");
-      },
+      execute: () => throwingPlan("execute not used in this test"),
     };
     const payloads: unknown[] = [];
     const capturingStepSendEvent = (async (_: string, payload: unknown) => {
@@ -745,9 +950,7 @@ describe("runCodingTask", () => {
       plan: () => {
         throw new Error("backend exploded");
       },
-      execute: async () => {
-        throw new Error("not used");
-      },
+      execute: () => throwingPlan("execute not used in this test"),
     };
     // First UPDATE call (`set-status-planning` inside the try) succeeds;
     // the SECOND call (the catch path's status="failed" write) throws.
@@ -929,10 +1132,7 @@ async function seedExecutableTask(
 
 // Shared fakes for the runCodingExecute tests. The pending_verify path
 // emits `coding/task/cli-done` (slice 4.0h handoff) — a no-op send is
-// required to avoid the orchestrator throwing on the emit step. The
-// tool gate isn't exercised here (no permission_request events in these
-// backends), so `stepWaitForEvent` is a stub that never fires.
-const fakeStepWaitForEvent = (async () => null) as any;
+// required to avoid the orchestrator throwing on the emit step.
 const fakeInngest = fakeInngestShared;
 
 describe("runCodingExecute", () => {
@@ -969,7 +1169,6 @@ describe("runCodingExecute", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
       stepRun,
-      stepWaitForEvent: fakeStepWaitForEvent,
       stepSendEvent,
       inngest: fakeInngest,
     });
@@ -1014,7 +1213,6 @@ describe("runCodingExecute", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
       stepRun,
-      stepWaitForEvent: fakeStepWaitForEvent,
       stepSendEvent,
       inngest: fakeInngest,
     });
@@ -1059,7 +1257,6 @@ describe("runCodingExecute", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
       stepRun,
-      stepWaitForEvent: fakeStepWaitForEvent,
       stepSendEvent,
       inngest: fakeInngest,
     });
@@ -1095,7 +1292,6 @@ describe("runCodingExecute", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
       stepRun,
-      stepWaitForEvent: fakeStepWaitForEvent,
       stepSendEvent: capturingStepSendEvent,
       inngest: fakeInngest,
     });
@@ -1121,7 +1317,6 @@ describe("runCodingExecute", () => {
       taskId: task.id,
       deps: makeDeps({ sandbox, backend }),
       stepRun,
-      stepWaitForEvent: fakeStepWaitForEvent,
       stepSendEvent,
       inngest: fakeInngest,
     });
@@ -1153,7 +1348,6 @@ describe("runCodingExecute", () => {
           openExecuteStream: async () => NULL_EXECUTE_STREAM,
         }),
         stepRun,
-        stepWaitForEvent: fakeStepWaitForEvent,
         stepSendEvent,
         inngest: fakeInngest,
       }),
@@ -1178,7 +1372,6 @@ describe("runCodingExecute", () => {
         taskId: task.id,
         deps: makeDeps({ sandbox, backend: executeBackendYielding([]) }),
         stepRun,
-        stepWaitForEvent: fakeStepWaitForEvent,
         stepSendEvent,
         inngest: fakeInngest,
       }),
@@ -1192,7 +1385,6 @@ describe("runCodingExecute", () => {
         taskId: "019d0000-0000-7000-8000-000000000099",
         deps: makeDeps({ sandbox, backend: executeBackendYielding([]) }),
         stepRun,
-        stepWaitForEvent: fakeStepWaitForEvent,
         stepSendEvent,
         inngest: fakeInngest,
       }),
@@ -1233,7 +1425,6 @@ describe("runCodingExecute", () => {
         secretsStore: fakeSecrets,
       }),
       stepRun,
-      stepWaitForEvent: fakeStepWaitForEvent,
       stepSendEvent,
       inngest: fakeInngest,
     });
@@ -1270,7 +1461,6 @@ describe("runCodingExecute", () => {
         secretsStore: fakeSecrets,
       }),
       stepRun,
-      stepWaitForEvent: fakeStepWaitForEvent,
       stepSendEvent,
       inngest: fakeInngest,
     });
@@ -1299,9 +1489,7 @@ describe("runCodingExecute", () => {
     };
     const throwingBackend: CodingBackend = {
       plan: () => emptyPlan,
-      execute: async () => {
-        throw new Error("backend exploded");
-      },
+      execute: () => throwingPlan("backend exploded"),
     };
     const sendCalls: { eventName: string; whenStatus: string | null }[] = [];
     const stepSendEventThrowing = (async (_: string, payload: unknown) => {
@@ -1318,7 +1506,6 @@ describe("runCodingExecute", () => {
         taskId: task.id,
         deps: makeDeps({ sandbox, backend: throwingBackend }),
         stepRun,
-        stepWaitForEvent: fakeStepWaitForEvent,
         stepSendEvent: stepSendEventThrowing,
         inngest: fakeInngest,
       }),

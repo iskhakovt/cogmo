@@ -36,13 +36,16 @@ export const pendingMemorySource = pgEnum("pending_memory_source", ["live_retain
 export const voiceMode = pgEnum("voice_mode", ["auto", "always", "never"]);
 
 /**
- * Per-profile auto-approve mode for coding-delegation permission prompts.
- * `off` (default) preserves the policy gate's Telegram round trip for
- * prompt-worthy operations (`git push`, `gh pr/issue` mutations, publishes,
- * external HTTP writes). `on` short-circuits the prompt path to allow —
- * useful for trusted profiles where the user accepts the cost of unattended
- * mutations in exchange for not interrupting a delegated task. The static
- * `policy.deny` set still denies; only the `prompt` decision flips to allow.
+ * Per-profile auto-approve for the coding-delegation **plan gate**. `off`
+ * (default) preserves the Telegram approve/revise/cancel round trip after
+ * the plan streams; `on` stamps `plan_approved_at` and emits
+ * `coding/task/plan-approved` automatically once the plan text is
+ * persisted, so execute starts without waiting on a button tap. Toggled
+ * via `/profile autoapprove`. Visibility is preserved — the plan still
+ * streams to Telegram; only the approval round trip is skipped.
+ *
+ * Scope is limited to `triggerSource = 'user'` tasks: evolution /
+ * signal-pipeline triggers already bypass plan approval by design.
  */
 export const codingAutoapproveMode = pgEnum("coding_autoapprove_mode", ["off", "on"]);
 
@@ -509,10 +512,9 @@ export const profiles = pgTable(
     streamChunkChars: integer("stream_chunk_chars").notNull().default(4000),
     streamEdits: boolean("stream_edits").notNull().default(true),
     /**
-     * Bypass the Telegram permission round trip during coding-delegation
-     * tool gating. See `codingAutoapproveMode` enum docstring for the
-     * trade-off. Toggled via the `/profile autoapprove <name> on|off`
-     * Telegram subcommand.
+     * Auto-approve coding-delegation plans without waiting for the Telegram
+     * round trip. See `codingAutoapproveMode` enum docstring. Toggled via
+     * `/profile autoapprove <name> on|off`.
      */
     codingAutoapproveMode: codingAutoapproveMode("coding_autoapprove_mode")
       .notNull()

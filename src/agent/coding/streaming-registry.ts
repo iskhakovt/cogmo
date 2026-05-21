@@ -24,7 +24,19 @@ export type CodingStreamEvent =
   | { kind: "text"; delta: string }
   | { kind: "tool_call"; tool: string }
   | { kind: "tool_result"; tool: string; ok: boolean; summary?: string }
-  | { kind: "plan_finalized"; plan: string }
+  | {
+      kind: "plan_finalized";
+      plan: string;
+      /**
+       * `true` when the plan-orchestrator is about to auto-stamp
+       * `plan_approved_at` (profile `coding_autoapprove_mode = 'on'`,
+       * user trigger). Subscribers suppress the approve/revise/cancel
+       * keyboard in that case — the buttons would either be misleading
+       * (Approve is a no-op against an already-approved plan) or
+       * action-at-a-distance (a stray Cancel mid-execute).
+       */
+      autoApproved?: boolean;
+    }
   | { kind: "execute_started" }
   | { kind: "execute_complete"; ok: boolean; tokens?: { input: number; output: number } }
   | { kind: "failed"; reason: string };

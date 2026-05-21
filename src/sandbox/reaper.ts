@@ -214,18 +214,19 @@ export async function runReap(deps: ReaperDeps): Promise<ReapResult> {
 }
 
 async function killAndRemove(docker: Docker, dockerId: string): Promise<void> {
+  // Same idempotency contract as `LocalDockerSupervisor.#killAndRemove`.
   const c = docker.getContainer(dockerId);
   try {
     await c.kill({ signal: "SIGTERM" });
   } catch (err) {
     const e = err as { statusCode?: number };
-    if (e.statusCode !== 304 && e.statusCode !== 404) throw err;
+    if (e.statusCode !== 304 && e.statusCode !== 409 && e.statusCode !== 404) throw err;
   }
   try {
     await c.remove({ force: true });
   } catch (err) {
     const e = err as { statusCode?: number };
-    if (e.statusCode !== 404) throw err;
+    if (e.statusCode !== 404 && e.statusCode !== 409) throw err;
   }
 }
 

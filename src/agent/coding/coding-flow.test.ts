@@ -87,12 +87,9 @@ function flowBackend(args: {
     plan: async function* () {
       for (const ev of args.planEvents) yield ev;
     },
-    execute: async () => ({
-      events: (async function* () {
-        for (const ev of args.executeEvents) yield ev;
-      })(),
-      respondPermission: async () => {},
-    }),
+    execute: async function* () {
+      for (const ev of args.executeEvents) yield ev;
+    },
   };
 }
 
@@ -390,7 +387,6 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
       },
       stepRun,
       stepSendEvent,
-      stepWaitForEvent: (async () => null) as any,
       inngest: { send: vi.fn().mockResolvedValue(undefined) },
     });
 

@@ -725,8 +725,12 @@ export async function bootstrapRuntime(
         async appendText(delta) {
           codingStreamingRegistry.publish(taskId, { kind: "text", delta });
         },
-        async finalize(plan) {
-          codingStreamingRegistry.publish(taskId, { kind: "plan_finalized", plan });
+        async finalize(plan, opts) {
+          codingStreamingRegistry.publish(taskId, {
+            kind: "plan_finalized",
+            plan,
+            ...(opts?.autoApproved && { autoApproved: true }),
+          });
         },
         async fail(reason) {
           codingStreamingRegistry.publish(taskId, { kind: "failed", reason });

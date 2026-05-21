@@ -2486,7 +2486,7 @@ describe("/profile autoapprove subcommand", () => {
     expect(reply).toContain("off");
   });
 
-  it("set form: `on` calls update with codingAutoapproveMode and renders new state", async () => {
+  it("set form: `on` calls update with codingAutoapproveMode and renders the new state", async () => {
     const update = vi.fn().mockResolvedValue(ok(makeProfile({ codingAutoapproveMode: "on" })));
     const transport = transportWith({
       profiles: { list: vi.fn().mockResolvedValue(ok([makeProfile()])), update },
@@ -2512,7 +2512,23 @@ describe("/profile autoapprove subcommand", () => {
     expect(update).toHaveBeenCalledWith("1", "p1", { codingAutoapproveMode: "off" });
   });
 
+  it("unknown profile name replies friendly without writing", async () => {
+    const update = vi.fn();
+    const transport = transportWith({
+      profiles: { list: vi.fn().mockResolvedValue(ok([])), update },
+    });
+    const ctx = mkCtx("autoapprove ghost on");
+    await handleProfile(transport, ctx, mkDialogs());
+    expect(update).not.toHaveBeenCalled();
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain('No profile named "ghost"');
+  });
+
   it("trailing token that isn't on/off becomes part of the profile name (show form)", async () => {
+    // The `case "autoapprove":` parser treats the last token as the
+    // action only when it's literally `on` or `off`; anything else
+    // becomes part of the profile name, and the command falls into the
+    // show form (no `update` write). Pins the parse rule so a profile
+    // named "two words" doesn't get corrupted by a stray token.
     const update = vi.fn();
     const transport = transportWith({
       profiles: {
@@ -2527,23 +2543,11 @@ describe("/profile autoapprove subcommand", () => {
     expect(reply).toContain('Autoapprove for "two words"');
   });
 
-  it("unknown profile name replies friendly without writing", async () => {
-    const update = vi.fn();
-    const transport = transportWith({
-      profiles: { list: vi.fn().mockResolvedValue(ok([])), update },
-    });
-    const ctx = mkCtx("autoapprove ghost on");
-    await handleProfile(transport, ctx, mkDialogs());
-    expect(update).not.toHaveBeenCalled();
-    expect(ctx.reply.mock.calls[0]?.[0]).toContain('No profile named "ghost"');
-  });
-
   it("transport.profiles.update error surfaces to the user without crashing", async () => {
-    // The `res.isErr()` branch in replyProfileAutoapprove was previously
-    // untested. Most natural trigger today: trying to flip autoapprove
-    // on an org profile returns `access_denied` per Transport's
-    // org-profile-read-only invariant. We mock the error surface
-    // directly to keep the test focused on the command's reply path.
+    // Most natural trigger: trying to flip autoapprove on an org profile
+    // returns `access_denied` per Transport's org-profile-read-only
+    // invariant. Mock the error surface directly to keep the test
+    // focused on the command's reply path.
     const update = vi.fn().mockResolvedValue(
       err({
         code: "access_denied",
@@ -3610,7 +3614,6 @@ describe("handleStatus", () => {
           profileClass: null,
           streamChunkChars: 4000,
           streamEdits: true,
-          codingAutoapproveMode: "off",
           voiceMode: "auto",
         },
         voiceMode: null,

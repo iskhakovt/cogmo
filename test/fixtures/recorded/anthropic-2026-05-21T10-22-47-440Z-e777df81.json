@@ -1,0 +1,31 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "# Task\nRead /workspace/greet.ts. Plan a single change: add a JSDoc comment to the greet function describing what it returns. Keep the plan to one short paragraph.\n\n# Environment\n- Repo root is /workspace. Stay inside it.\n- Current branch: cogmo/cli-integration. Already created and checked out.\n- Git credentials are NOT available in plan mode — you cannot push or pull.\n- Do NOT make any edits. Plan only.\n\n# Verify command (for context — runs after execution, not during plan)\necho verify\n\n# Budget\nAim to keep the task within ~100000 tokens of execution. If the task is too large, narrow scope rather than promise the moon.\n\n# When finished\nProduce a \"## Plan\" section describing the steps you would take, the files you would touch, and how you would verify. Cogmo posts this plan to the human for approval before any execution. No edits, no commits, no pushes.",
+        "model": "claude-haiku-4-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\"title\": \"Add JSDoc return description to greet function\"}"
+      },
+      "recordedTimings": {
+        "ttftMs": 1,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          181,
+          27,
+          0,
+          0
+        ],
+        "totalDurationMs": 209
+      },
+      "metadata": {
+        "systemHash": "8a8348f4"
+      }
+    }
+  ]
+}

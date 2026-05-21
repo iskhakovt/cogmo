@@ -11,24 +11,9 @@ import type { CodingEvent } from "./backend.js";
 import { ClaudeCodeBackend } from "./claude.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
 
-// Frame shapes the runner writes to stdin. Schemas live in the test file
-// because they only describe the observable wire format we assert on, not
-// the runner's internal types.
 const StdinFrameSchema = z.object({
   type: z.literal("user"),
   message: z.object({ role: z.literal("user"), content: z.string() }),
-});
-
-const ControlResponseFrameSchema = z.object({
-  type: z.literal("control_response"),
-  response: z.object({
-    request_id: z.string(),
-    subtype: z.string(),
-    response: z.object({
-      behavior: z.enum(["allow", "deny"]),
-      message: z.string().optional(),
-    }),
-  }),
 });
 
 const TaggedFrameSchema = z.object({ type: z.string() }).passthrough();
@@ -198,7 +183,7 @@ describe("ClaudeCodeBackend.plan", () => {
     expect(parsed.message.content).toContain("Current branch: cogmo/abc");
   });
 
-  it("invokes claude with the slice-1 plan flag set", async () => {
+  it("invokes claude with the plan flag set", async () => {
     const { container, execStreaming } = fakeContainer(FIXTURE);
     const backend = new ClaudeCodeBackend();
     await collect(backend.plan({ task, repo, container }));
@@ -213,9 +198,12 @@ describe("ClaudeCodeBackend.plan", () => {
     expect(cmd).toContain("--input-format");
     expect(cmd).toContain("--permission-mode");
     expect(cmd).toContain("plan");
+    // Sandbox isolation is the security boundary — neither runner passes
+    // `--permission-prompt-tool stdio`, so the CLI never opens a
+    // bidirectional control channel.
+    expect(cmd).not.toContain("--permission-prompt-tool");
     // Per-callsite timeout pair pins the wedge-resilience contract —
     // see design/coding-delegation.md → Per-callsite exec timeouts.
-    // 30-minute total cap + 5-minute idle cap on claude streams.
     expect(opts).toEqual({
       attachStdin: true,
       timeoutMs: 30 * 60 * 1000,
@@ -269,51 +257,27 @@ describe("ClaudeCodeBackend.plan", () => {
     expect(text.text).toBe("hello");
   });
 
-  describe("ExitPlanMode permission round-trip", () => {
-    // Mirrors what Claude Code emits when plan mode completes:
-    // text_delta → tool_use(ExitPlanMode) → control_request → result.
-    // The runner must reply `behavior: "allow"` on stdin or the CLI
-    // blocks until its 5-min idle timeout.
-    const EXIT_PLAN_MODE_FIXTURE = [
-      '{"type":"system","subtype":"init","session_id":"sess-epm","model":"claude-sonnet-4"}',
-      '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"## Plan\\n"}}}',
-      '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"1. add foo\\n"}}}',
-      '{"type":"assistant","message":{"role":"assistant","content":[' +
-        '{"type":"tool_use","id":"toolu_epm","name":"ExitPlanMode","input":{"plan":"## Plan\\n1. add foo\\n"}}' +
-        "]}}",
-      '{"type":"control_request","request_id":"req_epm","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"## Plan\\n1. add foo\\n"}}}',
-      '{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.012,"usage":{"input_tokens":420,"output_tokens":86}}',
-      "",
-    ].join("\n");
+  describe("stdin lifecycle", () => {
+    // `--input-format stream-json` uses stdin EOF as the documented
+    // graceful-shutdown signal. The runner must close stdin immediately
+    // after the prompt frame so the CLI exits cleanly once it finishes
+    // streaming; holding stdin open wedges the subprocess after `result`
+    // because the remote-exec stdin proxy fails to deliver a post-`result`
+    // EOF in time.
+    it("closes stdin immediately after writing the prompt", async () => {
+      const { container, execStreaming } = fakeContainer(FIXTURE);
+      await collect(new ClaudeCodeBackend().plan({ task, repo, container }));
 
-    it("auto-allows ExitPlanMode and writes the control_response to stdin", async () => {
-      const { container, stdinChunks } = fakeContainer(EXIT_PLAN_MODE_FIXTURE);
-      const events = await collect(new ClaudeCodeBackend().plan({ task, repo, container }));
-
-      // permission_request must not escape the runner.
-      expect(events.find((e) => e.kind === "permission_request")).toBeUndefined();
-
-      const planReady = events.find((e) => e.kind === "plan_ready");
-      assertKind(planReady, "plan_ready");
-      expect(planReady.plan).toBe("## Plan\n1. add foo\n");
-
-      const lines = stdinChunks
-        .join("")
-        .split("\n")
-        .map((l) => l.trim())
-        .filter((l) => l.length > 0);
-      expect(lines.length).toBeGreaterThanOrEqual(2);
-      const responseFrame = ControlResponseFrameSchema.parse(JSON.parse(lines[1] ?? "{}"));
-      expect(responseFrame.type).toBe("control_response");
-      expect(responseFrame.response.request_id).toBe("req_epm");
-      expect(responseFrame.response.subtype).toBe("success");
-      expect(responseFrame.response.response).toEqual({ behavior: "allow" });
+      const handlePromise = execStreaming.mock.results[0];
+      if (!handlePromise || handlePromise.type !== "return") {
+        throw new Error("execStreaming did not return a handle");
+      }
+      const handle = await handlePromise.value;
+      expect(handle.stdin?.writableEnded).toBe(true);
     });
 
-    // A `control_response` must land on stdin AFTER the user prompt —
-    // proves stdin stayed writable through the permission round-trip.
-    it("keeps stdin open until the control_response is written", async () => {
-      const { container, stdinChunks } = fakeContainer(EXIT_PLAN_MODE_FIXTURE);
+    it("writes exactly one stdin frame — the user prompt", async () => {
+      const { container, stdinChunks } = fakeContainer(FIXTURE);
       await collect(new ClaudeCodeBackend().plan({ task, repo, container }));
 
       const frames = stdinChunks
@@ -322,57 +286,7 @@ describe("ClaudeCodeBackend.plan", () => {
         .map((l) => l.trim())
         .filter((l) => l.length > 0)
         .map((l) => TaggedFrameSchema.parse(JSON.parse(l)));
-      const types = frames.map((f) => f.type);
-      expect(types[0]).toBe("user");
-      expect(types).toContain("control_response");
-    });
-
-    it("auto-allows non-ExitPlanMode plan-mode tools (e.g. Write to the CLI's plan file)", async () => {
-      // CLI 2.1.x routes intermediate Read/Write/Bash through the same
-      // control channel — denying breaks the CLI's own plan-completion
-      // protocol (Write to ~/.claude/plans/<task>.md before ExitPlanMode).
-      const fixture = [
-        '{"type":"system","subtype":"init","session_id":"sess-write","model":"m"}',
-        '{"type":"control_request","request_id":"req_write","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"/home/vscode/.claude/plans/task.md","content":"## Plan"}}}',
-        '{"type":"result","subtype":"success","is_error":false}',
-        "",
-      ].join("\n");
-      const { container, stdinChunks } = fakeContainer(fixture);
-      const events = await collect(new ClaudeCodeBackend().plan({ task, repo, container }));
-
-      expect(events.find((e) => e.kind === "permission_request")).toBeUndefined();
-
-      const lines = stdinChunks
-        .join("")
-        .split("\n")
-        .map((l) => l.trim())
-        .filter((l) => l.length > 0);
-      const responseFrame = ControlResponseFrameSchema.parse(JSON.parse(lines[1] ?? "{}"));
-      expect(responseFrame.response.response).toEqual({ behavior: "allow" });
-    });
-
-    // Parser-level dedupe (`parseClaudeStream`'s `seenPermissionRequestIds`)
-    // collapses repeated control_request frames at the source — the runner
-    // sees only one permission_request, and writes one control_response.
-    it("collapses duplicate control_request frames at the parser layer", async () => {
-      const fixture = [
-        '{"type":"system","subtype":"init","session_id":"sess-dup","model":"m"}',
-        '{"type":"control_request","request_id":"req_dup","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{}}}',
-        '{"type":"control_request","request_id":"req_dup","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{}}}',
-        '{"type":"result","subtype":"success","is_error":false}',
-        "",
-      ].join("\n");
-      const { container, stdinChunks } = fakeContainer(fixture);
-      await collect(new ClaudeCodeBackend().plan({ task, repo, container }));
-
-      const controlResponses = stdinChunks
-        .join("")
-        .split("\n")
-        .map((l) => l.trim())
-        .filter((l) => l.length > 0)
-        .map((l) => TaggedFrameSchema.parse(JSON.parse(l)))
-        .filter((f) => f.type === "control_response");
-      expect(controlResponses.length).toBe(1);
+      expect(frames.map((f) => f.type)).toEqual(["user"]);
     });
   });
 });
@@ -420,8 +334,9 @@ describe("ClaudeCodeBackend.execute", () => {
   it("emits session, text, tool_call, tool_result, complete — no plan_ready", async () => {
     const { container } = fakeContainer(EXECUTE_FIXTURE);
     const backend = new ClaudeCodeBackend();
-    const handle = await backend.execute({ task: taskWithSession, repo, container }, sessionId);
-    const events = await collect(handle.events);
+    const events = await collect(
+      backend.execute({ task: taskWithSession, repo, container }, sessionId),
+    );
 
     const kinds = events.map((e) => e.kind);
     expect(kinds).toEqual([
@@ -459,21 +374,20 @@ describe("ClaudeCodeBackend.execute", () => {
     expect(complete.usage).toEqual({ inputTokens: 3120, outputTokens: 640, costUsd: 0.084 });
   });
 
-  it("invokes claude with --resume <sid> and NO --permission-mode flag (default mode gates every tool call)", async () => {
+  it("invokes claude with --resume <sid> and no permission flags", async () => {
     const { container, execStreaming } = fakeContainer(EXECUTE_FIXTURE);
     const backend = new ClaudeCodeBackend();
-    const handle = await backend.execute({ task: taskWithSession, repo, container }, sessionId);
-    await collect(handle.events);
+    await collect(backend.execute({ task: taskWithSession, repo, container }, sessionId));
 
     expect(execStreaming).toHaveBeenCalledTimes(1);
     const [cmd] = expectDefined(execStreaming.mock.calls[0], "execStreaming call");
     expect(cmd[0]).toBe("claude");
     expect(cmd).toContain("--resume");
     expect(cmd[cmd.indexOf("--resume") + 1]).toBe(sessionId);
-    // No --permission-mode in execute flags — stream-json control protocol
-    // surfaces every tool call as a permission_request the orchestrator
-    // resolves via handle.respondPermission.
+    // Sandbox isolation is the security boundary; no permission flags
+    // or control channel.
     expect(cmd).not.toContain("--permission-mode");
+    expect(cmd).not.toContain("--permission-prompt-tool");
     expect(cmd).not.toContain("acceptEdits");
     expect(cmd).not.toContain("plan");
   });
@@ -481,12 +395,9 @@ describe("ClaudeCodeBackend.execute", () => {
   it("sends the execute prompt (not the plan prompt) on stdin", async () => {
     const { container, stdinChunks } = fakeContainer(EXECUTE_FIXTURE);
     const backend = new ClaudeCodeBackend();
-    const handle = await backend.execute({ task: taskWithSession, repo, container }, sessionId);
-    await collect(handle.events);
+    await collect(backend.execute({ task: taskWithSession, repo, container }, sessionId));
 
     const written = stdinChunks.join("");
-    // First frame is the user prompt — find it among any subsequent
-    // control_response frames the orchestrator may have written.
     const firstFrame = written.split("\n").find((line) => line.trim().length > 0) ?? "";
     const parsed = StdinFrameSchema.parse(JSON.parse(firstFrame));
     expect(parsed.type).toBe("user");
@@ -496,16 +407,18 @@ describe("ClaudeCodeBackend.execute", () => {
     expect(parsed.message.content).not.toContain("# Task");
   });
 
-  it("does NOT close stdin after the prompt (must stay open for control_response)", async () => {
-    const { container, stdinChunks: _ } = fakeContainer(EXECUTE_FIXTURE);
-    void _;
-    const backend = new ClaudeCodeBackend();
-    const handle = await backend.execute({ task: taskWithSession, repo, container }, sessionId);
-    // Reach into the exec mock to inspect stdin.writableEnded after the
-    // prompt is written but before result. Iterate to drain.
-    await collect(handle.events);
-    // After completion the runner closes stdin itself; assertions on the
-    // open-stdin invariant happen mid-stream in the permission test below.
+  it("closes stdin immediately after writing the prompt", async () => {
+    const { container, execStreaming } = fakeContainer(EXECUTE_FIXTURE);
+    await collect(
+      new ClaudeCodeBackend().execute({ task: taskWithSession, repo, container }, sessionId),
+    );
+
+    const handlePromise = execStreaming.mock.results[0];
+    if (!handlePromise || handlePromise.type !== "return") {
+      throw new Error("execStreaming did not return a handle");
+    }
+    const handle = await handlePromise.value;
+    expect(handle.stdin?.writableEnded).toBe(true);
   });
 
   it("surfaces tool_result with ok=false when is_error is true", async () => {
@@ -522,8 +435,9 @@ describe("ClaudeCodeBackend.execute", () => {
     ].join("\n");
     const { container } = fakeContainer(fixture);
     const backend = new ClaudeCodeBackend();
-    const handle = await backend.execute({ task: taskWithSession, repo, container }, sessionId);
-    const events = await collect(handle.events);
+    const events = await collect(
+      backend.execute({ task: taskWithSession, repo, container }, sessionId),
+    );
     const result = events.find((e) => e.kind === "tool_result");
     assertKind(result, "tool_result");
     expect(result.ok).toBe(false);
@@ -533,161 +447,9 @@ describe("ClaudeCodeBackend.execute", () => {
   it("rejects empty sessionId", async () => {
     const { container } = fakeContainer(EXECUTE_FIXTURE);
     const backend = new ClaudeCodeBackend();
-    await expect(backend.execute({ task: taskWithSession, repo, container }, "")).rejects.toThrow(
+    expect(() => backend.execute({ task: taskWithSession, repo, container }, "")).toThrow(
       /without a session id/,
     );
-  });
-
-  describe("permission protocol", () => {
-    it("yields permission_request on control_request and serializes the response onto stdin", async () => {
-      // Fixture: one control_request mid-stream, then result. The test
-      // drives respondPermission and asserts the stdin frame format.
-      const fixture = [
-        '{"type":"system","subtype":"init","session_id":"sess-p","model":"m"}',
-        '{"type":"control_request","request_id":"req_42","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"git push"}}}',
-        '{"type":"result","subtype":"success","is_error":false}',
-        "",
-      ].join("\n");
-      const { container, stdinChunks } = fakeContainer(fixture);
-      const backend = new ClaudeCodeBackend();
-      const handle = await backend.execute({ task: taskWithSession, repo, container }, sessionId);
-
-      const events: CodingEvent[] = [];
-      for await (const ev of handle.events) {
-        events.push(ev);
-        if (ev.kind === "permission_request") {
-          await handle.respondPermission(ev.requestId, { behavior: "allow" });
-        }
-      }
-
-      const req = events.find((e) => e.kind === "permission_request");
-      assertKind(req, "permission_request");
-      expect(req.requestId).toBe("req_42");
-      expect(req.tool).toBe("Bash");
-      expect(req.input).toEqual({ command: "git push" });
-
-      // Stdin should now contain prompt + control_response frames.
-      const lines = stdinChunks
-        .join("")
-        .split("\n")
-        .map((l) => l.trim())
-        .filter((l) => l.length > 0);
-      // First line: user prompt; second: control_response.
-      const responseFrame = ControlResponseFrameSchema.parse(JSON.parse(lines[1] ?? "{}"));
-      expect(responseFrame.type).toBe("control_response");
-      expect(responseFrame.response.request_id).toBe("req_42");
-      expect(responseFrame.response.subtype).toBe("success");
-      expect(responseFrame.response.response).toEqual({ behavior: "allow" });
-    });
-
-    it("supports deny responses with a message", async () => {
-      const fixture = [
-        '{"type":"system","subtype":"init","session_id":"sess-p2","model":"m"}',
-        '{"type":"control_request","request_id":"req_99","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"rm -rf /"}}}',
-        '{"type":"result","subtype":"success","is_error":false}',
-        "",
-      ].join("\n");
-      const { container, stdinChunks } = fakeContainer(fixture);
-      const backend = new ClaudeCodeBackend();
-      const handle = await backend.execute({ task: taskWithSession, repo, container }, sessionId);
-
-      for await (const ev of handle.events) {
-        if (ev.kind === "permission_request") {
-          await handle.respondPermission(ev.requestId, {
-            behavior: "deny",
-            message: "user-rejected",
-          });
-        }
-      }
-
-      const lines = stdinChunks
-        .join("")
-        .split("\n")
-        .map((l) => l.trim())
-        .filter((l) => l.length > 0);
-      const responseFrame = ControlResponseFrameSchema.parse(JSON.parse(lines[1] ?? "{}"));
-      expect(responseFrame.response.response.behavior).toBe("deny");
-      expect(responseFrame.response.response.message).toBe("user-rejected");
-    });
-
-    it("dedupes a duplicate respondPermission call for the same request id", async () => {
-      const fixture = [
-        '{"type":"system","subtype":"init","session_id":"sess-p3","model":"m"}',
-        '{"type":"control_request","request_id":"req_dup","request":{"subtype":"can_use_tool","tool_name":"Edit","input":{}}}',
-        '{"type":"result","subtype":"success","is_error":false}',
-        "",
-      ].join("\n");
-      const { container, stdinChunks } = fakeContainer(fixture);
-      const backend = new ClaudeCodeBackend();
-      const handle = await backend.execute({ task: taskWithSession, repo, container }, sessionId);
-
-      for await (const ev of handle.events) {
-        if (ev.kind === "permission_request") {
-          await handle.respondPermission(ev.requestId, { behavior: "allow" });
-          // Second call for the same id is a no-op.
-          await handle.respondPermission(ev.requestId, { behavior: "deny" });
-        }
-      }
-
-      const responseFrames = stdinChunks
-        .join("")
-        .split("\n")
-        .map((l) => l.trim())
-        .filter((l) => l.length > 0)
-        .map((l) => TaggedFrameSchema.parse(JSON.parse(l)))
-        .filter((f) => f.type === "control_response")
-        .map((f) => ControlResponseFrameSchema.parse(f));
-      expect(responseFrames).toHaveLength(1);
-      expect(expectDefined(responseFrames[0]).response.response.behavior).toBe("allow");
-    });
-
-    it("ignores control_request with unknown subtype", async () => {
-      const fixture = [
-        '{"type":"system","subtype":"init","session_id":"sess-p4","model":"m"}',
-        '{"type":"control_request","request_id":"req_x","request":{"subtype":"interrupt"}}',
-        '{"type":"result","subtype":"success","is_error":false}',
-        "",
-      ].join("\n");
-      const { container } = fakeContainer(fixture);
-      const backend = new ClaudeCodeBackend();
-      const handle = await backend.execute({ task: taskWithSession, repo, container }, sessionId);
-      const events = await collect(handle.events);
-      expect(events.find((e) => e.kind === "permission_request")).toBeUndefined();
-    });
-
-    it("emits two interleaved permission_request events in stdin arrival order (FIFO)", async () => {
-      const fixture = [
-        '{"type":"system","subtype":"init","session_id":"sess-fifo","model":"m"}',
-        '{"type":"control_request","request_id":"req_first","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"git push"}}}',
-        '{"type":"control_request","request_id":"req_second","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"npm publish"}}}',
-        '{"type":"result","subtype":"success","is_error":false}',
-        "",
-      ].join("\n");
-      const { container, stdinChunks } = fakeContainer(fixture);
-      const backend = new ClaudeCodeBackend();
-      const handle = await backend.execute({ task: taskWithSession, repo, container }, sessionId);
-
-      const requestIds: string[] = [];
-      for await (const ev of handle.events) {
-        if (ev.kind === "permission_request") {
-          requestIds.push(ev.requestId);
-          await handle.respondPermission(ev.requestId, { behavior: "allow" });
-        }
-      }
-      // Events surface in stdout arrival order — the async generator
-      // doesn't reorder. Same order is preserved on the response stream.
-      expect(requestIds).toEqual(["req_first", "req_second"]);
-
-      const responseFrames = stdinChunks
-        .join("")
-        .split("\n")
-        .map((l) => l.trim())
-        .filter((l) => l.length > 0)
-        .map((l) => TaggedFrameSchema.parse(JSON.parse(l)))
-        .filter((f) => f.type === "control_response")
-        .map((f) => ControlResponseFrameSchema.parse(f).response.request_id);
-      expect(responseFrames).toEqual(["req_first", "req_second"]);
-    });
   });
 });
 
@@ -789,11 +551,12 @@ describe("ClaudeCodeBackend stream-json schema robustness", () => {
       "",
     ].join("\n");
     const { container } = fakeContainer(fixture);
-    const handle = await new ClaudeCodeBackend().execute(
-      { task: { ...task, sessionId: "sess-tu" }, repo, container },
-      "sess-tu",
+    const events = await collect(
+      new ClaudeCodeBackend().execute(
+        { task: { ...task, sessionId: "sess-tu" }, repo, container },
+        "sess-tu",
+      ),
     );
-    const events = await collect(handle.events);
     const calls = events.filter(
       (e): e is Extract<CodingEvent, { kind: "tool_call" }> => e.kind === "tool_call",
     );
@@ -818,32 +581,17 @@ describe("ClaudeCodeBackend stream-json schema robustness", () => {
       "",
     ].join("\n");
     const { container } = fakeContainer(fixture);
-    const handle = await new ClaudeCodeBackend().execute(
-      { task: { ...task, sessionId: "sess-tr" }, repo, container },
-      "sess-tr",
+    const events = await collect(
+      new ClaudeCodeBackend().execute(
+        { task: { ...task, sessionId: "sess-tr" }, repo, container },
+        "sess-tr",
+      ),
     );
-    const events = await collect(handle.events);
     const result = events.find((e) => e.kind === "tool_result");
     assertKind(result, "tool_result");
     expect(result.tool).toBe("Read");
     expect(result.ok).toBe(true);
     expect(result.summary).toBeUndefined();
-  });
-
-  it("ignores can_use_tool control_request missing tool_name", async () => {
-    const fixture = [
-      '{"type":"system","subtype":"init","session_id":"sess-cr","model":"m"}',
-      '{"type":"control_request","request_id":"req_no_name","request":{"subtype":"can_use_tool","input":{}}}',
-      '{"type":"result","subtype":"success","is_error":false}',
-      "",
-    ].join("\n");
-    const { container } = fakeContainer(fixture);
-    const handle = await new ClaudeCodeBackend().execute(
-      { task: { ...task, sessionId: "sess-cr" }, repo, container },
-      "sess-cr",
-    );
-    const events = await collect(handle.events);
-    expect(events.find((e) => e.kind === "permission_request")).toBeUndefined();
   });
 
   it("emits complete with no token counts when result has no usage block", async () => {
@@ -883,11 +631,12 @@ describe("ClaudeCodeBackend stream-json schema robustness", () => {
       "",
     ].join("\n");
     const { container } = fakeContainer(fixture);
-    const handle = await new ClaudeCodeBackend().execute(
-      { task: { ...task, sessionId: "sess-oo" }, repo, container },
-      "sess-oo",
+    const events = await collect(
+      new ClaudeCodeBackend().execute(
+        { task: { ...task, sessionId: "sess-oo" }, repo, container },
+        "sess-oo",
+      ),
     );
-    const events = await collect(handle.events);
     const result = events.find((e) => e.kind === "tool_result");
     assertKind(result, "tool_result");
     expect(result.tool).toBe("toolu_orphan");

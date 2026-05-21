@@ -198,7 +198,7 @@ function makeTask(taskId: string): CodingTaskRow {
 
 describe("ClaudeCodeBackend against cogmo-devbase:test", () => {
   it(
-    "plan flow round-trips ExitPlanMode without wedging on the idle timer",
+    "plan flow runs the real CLI to completion with ExitPlanMode in the tool calls",
     async (ctx) => {
       if (!imagePresent) {
         ctx.skip();
@@ -250,16 +250,18 @@ describe("ClaudeCodeBackend against cogmo-devbase:test", () => {
       const elapsedMs = Date.now() - startedAt;
       const kinds = events.map((e) => e.kind);
 
-      // The wedge throws ExecTimeoutError out of the for-await loop, so
-      // reaching this point already proves no idle timeout. The duration
-      // bound catches a future "barely escaped" regression.
+      // The wrapper closes stdin immediately after writing the prompt;
+      // the CLI's 5-min idle timer would throw `ExecTimeoutError` out of
+      // the for-await loop if stdin EOF stopped propagating cleanly, so
+      // reaching this point proves the shutdown contract is intact.
       expect(kinds).toContain("session_started");
       expect(kinds).toContain("complete");
-      expect(elapsedMs).toBeLessThan(2 * 60_000);
 
-      // permission_request must not escape runClaudePlan — its absence
-      // here is what proves the inline auto-allow actually ran.
-      expect(kinds).not.toContain("permission_request");
+      // Wedge-regression bound. Healthy replay finishes well under a
+      // minute; sitting on the CLI's 5-min idle backstop would report as
+      // a slow CI build under the outer `6 * 60_000` only. Pinning to
+      // 4 min keeps the failure mode "wedge detected", not "CI was slow".
+      expect(elapsedMs).toBeLessThan(4 * 60_000);
 
       // ExitPlanMode must actually have been called. Without this the
       // test would pass against any model that emits text and never
@@ -269,9 +271,106 @@ describe("ClaudeCodeBackend against cogmo-devbase:test", () => {
 
       console.log(`claude-cli plan-mode events (${elapsedMs}ms): ${kinds.join(" → ")}`);
     },
-    // Plan-mode run is ~15s; 3 min cap absorbs slow CI + image
-    // cold-start while staying under the CLI's 5-min idle cap so the
-    // wedge regression fails *this* test, not the CLI's internal timer.
-    3 * 60_000,
+    // CLI's 5-min idle cap is the wedge-regression backstop; outer
+    // timeout sits above that so a wedge fails as a real test timeout
+    // rather than the CLI's internal timer. 6 min absorbs CI cold-start
+    // + image pull + the actual plan run.
+    6 * 60_000,
+  );
+
+  // Execute-mode shutdown contract: `claude --resume <sid>` must honour
+  // the same stdin-EOF shutdown signal as plan mode and emit `complete`
+  // without sitting on the 5-min idle timer. Plan runs first to mint a
+  // real session id; execute resumes it. Both phases run against
+  // recorded llmock fixtures — re-record with `RECORD=1` if the CLI
+  // version bumps and the request bodies drift.
+  it(
+    "execute flow resumes a real session and completes without wedging on close-stdin",
+    async (ctx) => {
+      if (!imagePresent) {
+        ctx.skip();
+        return;
+      }
+      const { sandbox } = await bootSandbox();
+      const homeVolume = uniqueName("cogmo-task-home");
+      homeVolumes.push(homeVolume);
+      const taskId = "019e5000-0000-7000-8000-000000000002";
+
+      const baseUrl = llmockUrlForContainer();
+
+      if (!workspaceTmp) throw new Error("workspaceTmp not initialized — beforeAll skipped?");
+
+      const session = await sandbox.create({
+        taskId,
+        worktree: { type: "host-path", hostPath: workspaceTmp },
+        homeVolume: { volumeName: homeVolume },
+        image: DEVBASE_IMAGE,
+        resourceLimits: RESOURCE_LIMITS,
+        expiresAt: new Date(Date.now() + 5 * 60_000),
+        env: {
+          ANTHROPIC_BASE_URL: baseUrl,
+          ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? "sk-ant-fake",
+          ANTHROPIC_MODEL: "claude-haiku-4-5-20251001",
+          MAX_THINKING_TOKENS: "0",
+        },
+      });
+
+      // Plan phase first to mint a session id. The CLI persists the
+      // session under the home volume, which the execute leg resumes
+      // by pointing `--resume` at the captured id.
+      const backend = new ClaudeCodeBackend();
+      let sessionId: string | undefined;
+      const planEvents: CodingEvent[] = [];
+      try {
+        for await (const event of backend.plan({
+          task: makeTask(taskId),
+          repo,
+          container: session,
+        })) {
+          planEvents.push(event);
+          if (event.kind === "session_started") sessionId = event.sessionId;
+        }
+      } finally {
+        // Keep the sandbox alive for the execute leg — only sweep on test
+        // teardown via the `afterAll` instance-id cleanup.
+      }
+      if (!sessionId) throw new Error("plan phase did not emit session_started");
+
+      const executeTask = { ...makeTask(taskId), sessionId };
+      const startedAt = Date.now();
+      const executeEvents: CodingEvent[] = [];
+      try {
+        for await (const event of backend.execute(
+          { task: executeTask, repo, container: session },
+          sessionId,
+        )) {
+          executeEvents.push(event);
+        }
+      } finally {
+        await sandbox.deleteByTaskId(taskId);
+      }
+
+      const elapsedMs = Date.now() - startedAt;
+      const kinds = executeEvents.map((e) => e.kind);
+
+      // Same shutdown-contract pin as the plan test: reaching this point
+      // proves stdin EOF propagated and the CLI didn't sit on its idle
+      // timer. session_started fires from `--resume`'s init event.
+      expect(kinds).toContain("session_started");
+      expect(kinds).toContain("complete");
+
+      // Wedge-regression bound. See the plan test for the rationale —
+      // 4 min stays well under the CLI's 5-min idle backstop.
+      expect(elapsedMs).toBeLessThan(4 * 60_000);
+
+      // Execute mode should emit at least one tool_call against the
+      // planted greet.ts — even a trivial JSDoc addition routes
+      // through Read + Edit.
+      const toolCalls = executeEvents.flatMap((e) => (e.kind === "tool_call" ? [e.tool] : []));
+      expect(toolCalls.length).toBeGreaterThan(0);
+
+      console.log(`claude-cli execute-mode events (${elapsedMs}ms): ${kinds.join(" → ")}`);
+    },
+    6 * 60_000,
   );
 });

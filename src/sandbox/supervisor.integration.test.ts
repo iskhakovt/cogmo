@@ -254,9 +254,9 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
   });
 
   it("reconcileCrashedInstances reaps containers labelled with a stale instance id", async () => {
-    // Boot two sandboxes — one "stale" (creates a container, walks away),
-    // one "current" (reconciles and should reap the stale one's container).
-    const { sandbox: stale, instanceId: staleId } = await bootSandbox();
+    // Stale instance leaves `stopped_at` NULL (the crash signature). Current
+    // instance reaps it via `listLiveInstances`.
+    const { sandbox: stale } = await bootSandbox();
     const homeVolume = uniqueName("cogmo-task-home");
     homeVolumes.push(homeVolume);
     const taskId = "019d0000-0000-7000-8000-00000000ffff";
@@ -269,7 +269,6 @@ describe("LocalDockerSandboxClient (real Docker, runc runtime)", () => {
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
     });
-    await tx((trx) => store.closeInstance(trx, staleId));
 
     const { sandbox: current, instanceId: currentId } = await bootSandbox();
     const result = await current.reconcileCrashedInstances(currentId);

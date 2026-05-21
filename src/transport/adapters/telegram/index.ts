@@ -1,19 +1,10 @@
 import { Bot, InputFile } from "grammy";
 import type { JsonValue } from "type-fest";
-import {
-  buildPermissionKeyboard,
-  PERMISSION_CALLBACK_REGEX,
-  parsePermissionCallback,
-} from "../../../agent/coding/permission-keyboard.js";
 import { PLAN_CALLBACK_REGEX, parsePlanCallback } from "../../../agent/coding/plan-keyboard.js";
 import { startCodingProgressSubscriber } from "../../../agent/coding/progress-subscriber.js";
 import { parseGeneratedDocumentPayload } from "../../../agent/document-tools.js";
 import { parseGeneratedImagePayload } from "../../../agent/image-tools.js";
-import {
-  codingTaskPermissionRequested,
-  codingTaskStart,
-  skillsDeployApprovalRequested,
-} from "../../../inngest/events.js";
+import { codingTaskStart, skillsDeployApprovalRequested } from "../../../inngest/events.js";
 import type { StreamEvent } from "../../../llm/types.js";
 import { logger } from "../../../logger.js";
 import {
@@ -43,7 +34,6 @@ import {
   handleModel,
   handleName,
   handleNew,
-  handlePermissionCallback,
   handlePlanCallback,
   handleProfile,
   handleReflect,
@@ -812,29 +802,6 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     await ctx.answerCallbackQuery({ text: outcome.toast });
   });
 
-  // Permission keyboard: Once / Task / Deny — callback_data =
-  // "perm:<taskId>:<requestIdShort>:<o|t|d>"
-  bot.callbackQuery(PERMISSION_CALLBACK_REGEX, async (ctx) => {
-    const data = ctx.callbackQuery?.data;
-    const fromId = ctx.from?.id;
-    if (!data || fromId === undefined) return;
-    const parsed = parsePermissionCallback(data);
-    if (!parsed) return;
-
-    const outcome = await handlePermissionCallback(transport, parsed, String(fromId));
-    try {
-      await ctx.editMessageText(outcome.editText, {
-        reply_markup: { inline_keyboard: [] },
-      });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "";
-      if (!msg.includes("message is not modified")) {
-        logger.warn({ err }, "telegram: failed to edit permission message");
-      }
-    }
-    await ctx.answerCallbackQuery({ text: outcome.toast });
-  });
-
   // Skills approval keyboard: Approve / Deny — callback_data =
   // "skill:<pendingId>:<approve|deny>"
   bot.callbackQuery(SKILLS_APPROVAL_CALLBACK_REGEX, async (ctx) => {
@@ -1252,47 +1219,6 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
             registry: streamingRegistry,
           });
           return { subscribed: true };
-        },
-      ),
-    );
-
-    // Tool gate — listen for `coding/task/permission-requested`, render the
-    // inline keyboard message into the task's Telegram session. The
-    // orchestrator's `step.waitForEvent` is already armed and resumes when
-    // the user taps a button. requestId is already truncated by the
-    // orchestrator (matches the same `shortenRequestId` form the keyboard
-    // and the wait `if:` filter use).
-    functions.push(
-      inngest.createFunction(
-        {
-          id: `telegram-coding-permission-${channelId}`,
-          triggers: [codingTaskPermissionRequested],
-          retries: 0,
-        },
-        async ({ event }) => {
-          const { taskId, requestId, tool } = event.data;
-          const task = await runInTx((tx) => codingStore.getTask(tx, taskId));
-          const taskConversationId = task?.conversationId;
-          if (!taskConversationId) return { skipped: "no conversation" };
-
-          const sessions = await runInTx((tx) =>
-            transportStore.getActiveSessionsForConversation(tx, taskConversationId),
-          );
-          const tgSession = sessions.find((s) => s.channelId === channelId);
-          if (!tgSession) return { skipped: "no telegram session for this conversation" };
-
-          const keyboard = buildPermissionKeyboard(taskId, requestId);
-          // Tool names may contain `[`, `*`, `_`, etc. (notably MCP tools
-          // like `mcp__github__create_pr`). Posting them under
-          // `parse_mode: "Markdown"` would 400-fail the request when the
-          // markup turns out to be malformed. Plain text avoids the
-          // escape-or-break tradeoff entirely; the prompt is short and
-          // doesn't need formatting.
-          const text = `🔐 Permission requested: ${tool}\n\nAllow this tool call?`;
-          await bot.api.sendMessage(Number(tgSession.platformAddress), text, {
-            reply_markup: keyboard,
-          });
-          return { posted: true };
         },
       ),
     );

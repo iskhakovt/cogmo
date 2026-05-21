@@ -6,7 +6,6 @@
  * `index.ts` so the dispatcher logic is covered by unit tests.
  */
 
-import { actionToDecision } from "../../../agent/coding/permission-keyboard.js";
 import { MIN_MESSAGES_FOR_EXTRACTION } from "../../../agent/evolution/index.js";
 import {
   CORE_COMPARTMENTS,
@@ -82,9 +81,9 @@ const USAGE = {
     "  /profile stream <name> chunk=500 edits=off              → both at once\n" +
     "                                                          (use chunk=N edits=on|off — the = is required;\n" +
     "                                                          'chunk 500' without = becomes part of the name)\n" +
-    "  /profile autoapprove <name>                             → show current coding-delegation autoapprove mode\n" +
-    "  /profile autoapprove <name> on                          → skip Telegram prompts for prompt-worthy tool calls\n" +
-    "  /profile autoapprove <name> off                         → route prompt-worthy tool calls through Telegram (default)\n" +
+    "  /profile autoapprove <name>                             → show current coding-delegation plan autoapprove\n" +
+    "  /profile autoapprove <name> on                          → auto-approve plans (skip Telegram round trip)\n" +
+    "  /profile autoapprove <name> off                         → require Telegram approve tap before execute (default)\n" +
     `  Compartments: ${CORE_LIST}\n` +
     "  Trust:        first-party, any",
   classes:
@@ -526,59 +525,6 @@ export async function handlePlanCallback(
     };
   }
   return { editText: "❌ Plan cancelled.", toast: "Cancelled" };
-}
-
-export interface PermissionCallbackOutcome {
-  /** Replacement text for the original prompt message (keyboard cleared too). */
-  editText: string;
-  /** Short toast popup confirming the tap on the user's device. */
-  toast: string;
-}
-
-/**
- * Tool-gate callback handler — translates a parsed permission button tap
- * into a Transport call + an outcome the adapter renders. Identity check
- * happens inside `transport.coding.respondPermission`.
- */
-export async function handlePermissionCallback(
-  transport: Transport,
-  parsed: {
-    taskId: string;
-    requestIdShort: string;
-    action: "allow_once" | "allow_task" | "deny";
-  },
-  tapperPlatformHandle: string,
-): Promise<PermissionCallbackOutcome> {
-  // Single source of truth for the action → (decision, scope) mapping.
-  // Lives in `permission-keyboard.ts` alongside `PermissionAction`; the
-  // mapping must agree with what's encoded into callback_data, so any
-  // future addition (e.g. `deny_task`) only needs editing in one place.
-  const { decision, scope } = actionToDecision(parsed.action);
-
-  const res = await transport.coding.respondPermission(
-    {
-      taskId: parsed.taskId,
-      requestIdShort: parsed.requestIdShort,
-      decision,
-      scope,
-    },
-    tapperPlatformHandle,
-  );
-  if (res.isErr()) {
-    return { editText: errorMessage(res.error), toast: errorMessage(res.error) };
-  }
-
-  switch (parsed.action) {
-    case "allow_once":
-      return { editText: "✅ Allowed once.", toast: "Allowed" };
-    case "allow_task":
-      return {
-        editText: "✅ Allowed for this task — future matching requests auto-approve.",
-        toast: "Allowed for task",
-      };
-    case "deny":
-      return { editText: "❌ Denied.", toast: "Denied" };
-  }
 }
 
 export interface SkillsApprovalCallbackOutcome {
@@ -1455,9 +1401,10 @@ function formatStreamPrefs(name: string, chunk: number, edits: boolean): string 
 
 /**
  * `/profile autoapprove <name> [on|off]`. With no action, prints the
- * current mode. With `on`/`off`, flips the profile's coding-delegation
- * tool gate so prompt-worthy operations either skip the Telegram
- * round-trip (`on`) or route through it (`off`, the default).
+ * current mode. With `on`/`off`, flips the profile's plan-gate
+ * autoapprove: `on` skips the Telegram approve/revise/cancel round trip
+ * after the plan streams and auto-approves; `off` (default) keeps the
+ * round trip.
  */
 async function replyProfileAutoapprove(
   transport: Transport,
@@ -1501,8 +1448,8 @@ async function replyProfileAutoapprove(
 function formatAutoapprove(name: string, mode: "off" | "on"): string {
   const tail =
     mode === "on"
-      ? "on — git push / gh writes / publishes auto-approve (container + proxy still gate dangerous ops)"
-      : "off — coding-delegation prompts route through Telegram";
+      ? "on — plans auto-approve once persisted (no Telegram round trip)"
+      : "off — Telegram approve tap required before execute";
   return `Autoapprove for "${name}": ${tail}`;
 }
 

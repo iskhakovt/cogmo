@@ -100,6 +100,28 @@ describe("startCodingProgressSubscriber", () => {
     ).toEqual([`plan:${TASK_ID}:approve`, `plan:${TASK_ID}:revise`, `plan:${TASK_ID}:cancel`]);
   });
 
+  it("plan_finalized with autoApproved:true omits the inline keyboard", async () => {
+    // Suppression contract: when the plan orchestrator's autoapprove
+    // path is about to fire, the keyboard would either be misleading
+    // (Approve no-ops against an already-approved plan) or
+    // action-at-a-distance (a stray Cancel tap mid-execute). The
+    // subscriber renders the body text but no reply_markup, leaving
+    // execute_started to take over the message.
+    const { registry, bot } = start();
+
+    registry.publish(TASK_ID, {
+      kind: "plan_finalized",
+      plan: "## Plan\nbody",
+      autoApproved: true,
+    });
+    await new Promise((r) => setImmediate(r));
+
+    expect(bot.sent).toHaveLength(1);
+    const planSent = expectDefined(bot.sent[0], "plan sent");
+    expect(planSent.text).toContain("## Plan\nbody");
+    expect(planSent.replyMarkup).toBeUndefined();
+  });
+
   it("execute_started flips phase to executing and resets the body", async () => {
     const { registry, bot } = start();
     // Plan goes through first.

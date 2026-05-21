@@ -1,14 +1,8 @@
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Inngest } from "inngest";
 import type { Transactor } from "../../db/index.js";
-import {
-  codingTaskFailed,
-  codingTaskPermissionDecision,
-  codingTaskPermissionRequested,
-  codingTaskPlanApproved,
-  codingTaskStart,
-} from "../../inngest/events.js";
-import type { StepRun, StepSendEvent, StepWaitForEvent } from "../../inngest/index.js";
+import { codingTaskFailed, codingTaskPlanApproved, codingTaskStart } from "../../inngest/events.js";
+import type { StepRun, StepSendEvent } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
 import {
   isLocalDockerSessionState,
@@ -18,13 +12,10 @@ import {
 import type { ResourceLimits } from "../../sandbox/types.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { loadCodingSandboxEnv } from "./auth.js";
-import type { BackendUsage, CodingBackend, PermissionResponse } from "./backend.js";
+import type { BackendUsage, CodingBackend } from "./backend.js";
 import { loadIdentity, pushTaskBranchToRemote, runBranchFor } from "./git-as-transport.js";
-import { shortenRequestId } from "./permission-keyboard.js";
-import * as policy from "./policy.js";
-import type { CodingRepoRow, CodingStore, CodingTaskRow, ToolDecision } from "./store/index.js";
+import type { CodingRepoRow, CodingStore, CodingTaskRow } from "./store/index.js";
 import { safeTeardownWorktree } from "./teardown.js";
-import { canonicalPattern, replayDecisionLog } from "./tool-gate.js";
 import type { WorktreeAssignment } from "./types.js";
 import { allocateWorktree } from "./worktree.js";
 
@@ -39,7 +30,14 @@ export type { StepRun, StepSendEvent } from "../../inngest/index.js";
  */
 export interface PlanStreamHandle {
   appendText(delta: string): Promise<void>;
-  finalize(plan: string): Promise<void>;
+  /**
+   * Finalize the plan stream. `autoApproved` propagates the profile's
+   * `coding_autoapprove_mode = 'on'` decision to subscribers (the
+   * Telegram progress renderer skips the approve/revise/cancel keyboard
+   * when set, since the orchestrator will emit `coding/task/plan-approved`
+   * unattended in the next step).
+   */
+  finalize(plan: string, opts?: { autoApproved?: boolean }): Promise<void>;
   fail(reason: string): Promise<void>;
 }
 
@@ -149,7 +147,8 @@ interface RunParams {
    * Durable bus emit. Used in the in-worker catch path so a transient
    * send blip surfaces as a function failure (caught by the
    * `coding-task-reconcile` system-event subscriber) rather than a
-   * silently-swallowed `coding/task/failed` event.
+   * silently-swallowed `coding/task/failed` event. Also used by the
+   * auto-approve path to emit `coding/task/plan-approved`.
    */
   stepSendEvent: StepSendEvent;
 }
@@ -439,9 +438,22 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       runInTx((tx) => store.setTaskPlan(tx, taskId, result.plan ?? "")),
     );
 
-    // For automated triggers (evolution, signal_pipeline) we'd auto-advance
-    // straight to executing. Slice 1 only handles the user trigger path —
-    // park at awaiting_approval until the human approves via Telegram.
+    // Automated triggers (evolution, signal_pipeline) advance straight to
+    // executing. User-triggered tasks park at awaiting_approval until the
+    // human approves via Telegram — UNLESS the profile has
+    // `coding_autoapprove_mode='on'`, in which case we stamp
+    // `plan_approved_at` and emit `coding/task/plan-approved` directly
+    // (same code path the Telegram approve callback takes). Null mode
+    // (task without conversation — non-user triggers) reads as `off` and
+    // never reaches this branch anyway. Wrapped in `stepRun` so a future
+    // loosening of `retries: 0` on this function doesn't quietly turn a
+    // transient DB blip into a fresh CLI invocation on replay.
+    const autoapproveMode =
+      task.triggerSource === "user"
+        ? ((await stepRun("resolve-autoapprove-mode", () =>
+            runInTx((tx) => store.getCodingAutoapproveModeForTask(tx, taskId)),
+          )) ?? "off")
+        : "off";
     const nextStatus: CodingOrchestratorResult["status"] =
       task.triggerSource === "user" ? "awaiting_approval" : "executing";
     await stepRun("set-status-awaiting", () =>
@@ -449,12 +461,58 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     );
     // Same wrap as the failure-path notification above — once status is
     // committed, a subscriber error must not regress the task to failed.
-    await planStream.finalize(result.plan ?? "").catch((streamErr: unknown) => {
-      taskLog.warn(
-        { err: streamErr },
-        `plan stream finalize notification failed (task already ${nextStatus})`,
-      );
-    });
+    const willAutoApprove = task.triggerSource === "user" && autoapproveMode === "on";
+    await planStream
+      .finalize(result.plan ?? "", { autoApproved: willAutoApprove })
+      .catch((streamErr: unknown) => {
+        taskLog.warn(
+          { err: streamErr },
+          `plan stream finalize notification failed (task already ${nextStatus})`,
+        );
+      });
+    // Auto-approve: same effect as the Telegram approve callback. Uses
+    // `approvePlanIfPending` so the path is atomic with concurrent
+    // cancels/manual approvals — if the user managed to tap Cancel in the
+    // microseconds between `set-status-awaiting` and this step, the
+    // approve becomes a no-op and the task stays cancelled.
+    if (willAutoApprove) {
+      // Generate `approvedAt` INSIDE the step so the cached return on a
+      // future replay carries the original timestamp — otherwise a
+      // retry after the DB write but before the emit would persist
+      // an `approvedAt` from attempt 1 while emitting one from attempt 2,
+      // and downstream consumers see a row/event timestamp mismatch.
+      // `retries: 0` makes this defensive today; pinning it here closes
+      // the footgun if retries ever loosen.
+      const approveResult = await stepRun("auto-approve-plan", async () => {
+        const approvedAt = new Date();
+        const result = await runInTx((tx) => store.approvePlanIfPending(tx, taskId, approvedAt));
+        return { ...result, approvedAt: approvedAt.toISOString() };
+      });
+      if (approveResult.kind === "approved") {
+        await stepSendEvent("emit-plan-approved", {
+          ...codingTaskPlanApproved.create({
+            taskId,
+            approvedAt: approveResult.approvedAt,
+          }),
+          // Idempotency id follows the same `<verb>-<taskId>` shape as
+          // the catch-path `task-failed-<taskId>` emit; ensures bus-level
+          // dedup on the off-chance the step fires more than once (e.g. a
+          // future retry change). Safe across the task's lifetime because
+          // revise cancels the current task and a re-plan issues a fresh
+          // `taskId` (commands.ts handles the Revise tap via
+          // `cancelTask`); no path re-emits `plan-approved` for the same
+          // id. A future in-place re-plan flow would need to pick a new
+          // idempotency id.
+          id: `plan-approved-${taskId}`,
+        });
+        taskLog.info("plan auto-approved via profile autoapprove=on");
+      } else {
+        taskLog.info(
+          { kind: approveResult.kind },
+          "auto-approve skipped — task no longer awaiting approval",
+        );
+      }
+    }
     return { status: nextStatus, plan: result.plan ?? "" };
   } catch (err) {
     const reason = (err as Error).message;
@@ -547,7 +605,9 @@ async function runPlanStreaming(params: PlanStreamingParams): Promise<PlanStream
       // emits an `ExitPlanMode` tool_use as part of plan completion, but the
       // plan stream surfaces the same text via `text_delta` + `plan_ready`,
       // so the tool_call is redundant noise for the user. permission_request
-      // never escapes runClaudePlan — it auto-allows ExitPlanMode inline.
+      // doesn't reach plan mode: the CLI under `--permission-mode plan` (with
+      // no `--permission-prompt-tool stdio` flag) resolves every tool call
+      // locally and never asks back through the stream-json control channel.
     }
   }
 
@@ -569,8 +629,11 @@ export interface CodingExecuteResult {
 
 /**
  * Inngest function that consumes `coding/task/plan-approved` and runs
- * `claude --resume <sid> --permission-mode acceptEdits` in the same
- * task container (recreating it if the reaper got it first).
+ * `claude -p --resume <sid>` in the same task container (recreating it
+ * if the reaper got it first). No `--permission-mode` flag — the
+ * sandbox is the security boundary, the CLI runs to completion against
+ * its `--allowedTools` defaults inside the isolated container, and the
+ * stream-json output drives the user-visible progress feed.
  *
  * Same retries=0 reasoning as the plan function: file edits inside the
  * container are not idempotent under retry. A failed run leaves the
@@ -589,7 +652,6 @@ export function createCodingExecuteOrchestrator(deps: CodingOrchestratorDeps, in
         taskId: event.data.taskId,
         deps,
         stepRun: step.run,
-        stepWaitForEvent: step.waitForEvent,
         stepSendEvent: step.sendEvent,
         inngest,
       });
@@ -669,23 +731,13 @@ interface ExecuteRunParams {
   deps: CodingOrchestratorDeps;
   stepRun: StepRun;
   /**
-   * Inngest's `step.waitForEvent` — blocks the durable function until a
-   * matching event arrives. Used by the tool gate to wait for the user's
-   * Telegram tap on a permission prompt.
-   */
-  stepWaitForEvent: StepWaitForEvent;
-  /**
    * Durable bus emit. Used in the in-worker catch path so a transient
    * send blip surfaces as a function failure (caught by the reconcile
    * subscriber) rather than a silently-swallowed
    * `coding/task/failed` event.
    */
   stepSendEvent: StepSendEvent;
-  /**
-   * Inngest client — used to emit `coding/task/permission-requested` for
-   * observability + Telegram delivery, and any future events the gate
-   * fires.
-   */
+  /** Inngest client — used to emit `coding/task/cli-done` after teardown. */
   inngest: Pick<Inngest, "send">;
 }
 
@@ -702,7 +754,7 @@ interface ExecuteRunParams {
  * - `worktree_assignment` must be present (the plan phase allocated it).
  */
 export async function runCodingExecute(params: ExecuteRunParams): Promise<CodingExecuteResult> {
-  const { taskId, deps, stepRun, stepWaitForEvent, stepSendEvent, inngest } = params;
+  const { taskId, deps, stepRun, stepSendEvent, inngest } = params;
   const taskLog = log.child({ taskId });
   const { runInTx, store, sandbox, backend, devbaseImage, defaultResourceLimits, taskTtlMs } = deps;
   const openExecuteStream = deps.openExecuteStream ?? (async () => NULL_EXECUTE_STREAM);
@@ -881,10 +933,6 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       backend,
       executeStream,
       sessionId,
-      store,
-      runInTx,
-      stepWaitForEvent,
-      inngest,
     });
 
     if (result.isError) {
@@ -1015,10 +1063,6 @@ interface ExecuteStreamingParams {
   backend: CodingBackend;
   executeStream: ExecuteStreamHandle;
   sessionId: string;
-  store: CodingStore;
-  runInTx: Transactor;
-  stepWaitForEvent: StepWaitForEvent;
-  inngest: Pick<Inngest, "send">;
 }
 
 interface ExecuteStreamingResult {
@@ -1030,31 +1074,12 @@ interface ExecuteStreamingResult {
 async function runExecuteStreaming(
   params: ExecuteStreamingParams,
 ): Promise<ExecuteStreamingResult> {
-  const {
-    task,
-    repo,
-    container,
-    backend,
-    executeStream,
-    sessionId,
-    store,
-    runInTx,
-    stepWaitForEvent,
-    inngest,
-  } = params;
+  const { task, repo, container, backend, executeStream, sessionId } = params;
   let isError = false;
   let failureReason: string | undefined;
   let usage: BackendUsage | undefined;
 
-  // Resolved once per execute run. Profile-toggle changes mid-task don't
-  // take effect until the next task — acceptable since the user toggling
-  // mid-task is rare and the tool gate would otherwise need a DB round
-  // trip per permission_request.
-  const autoApproveMode =
-    (await runInTx((tx) => store.getCodingAutoapproveModeForTask(tx, task.id))) ?? "off";
-
-  const handle = await backend.execute({ task, repo, container }, sessionId);
-  for await (const event of handle.events) {
+  for await (const event of backend.execute({ task, repo, container }, sessionId)) {
     switch (event.kind) {
       case "session_started":
         // Resumed session — usually equals task.sessionId, but we don't
@@ -1069,21 +1094,6 @@ async function runExecuteStreaming(
       case "tool_result":
         await executeStream.toolResult(event.tool, event.ok, event.summary);
         break;
-      case "permission_request": {
-        const response = await handlePermissionRequest({
-          taskId: task.id,
-          requestId: event.requestId,
-          tool: event.tool,
-          input: (event.input ?? {}) as Record<string, unknown>,
-          autoApproveMode,
-          store,
-          runInTx,
-          stepWaitForEvent,
-          inngest,
-        });
-        await handle.respondPermission(event.requestId, response);
-        break;
-      }
       case "complete":
         if (event.usage) usage = event.usage;
         if (event.isError) {
@@ -1099,164 +1109,4 @@ async function runExecuteStreaming(
     ...(failureReason !== undefined && { failureReason }),
     ...(usage && { usage }),
   };
-}
-
-interface HandlePermissionRequestParams {
-  taskId: string;
-  requestId: string;
-  tool: string;
-  input: Record<string, unknown>;
-  /**
-   * Profile-level setting resolved once per execute run. `"on"` flips a
-   * `policy.evaluate → prompt` decision to allow, skipping the Telegram
-   * round trip. `"off"` keeps the current behavior.
-   */
-  autoApproveMode: "off" | "on";
-  store: CodingStore;
-  runInTx: Transactor;
-  stepWaitForEvent: StepWaitForEvent;
-  inngest: Pick<Inngest, "send">;
-}
-
-/**
- * The tool gate's decision pipeline for a single `permission_request`:
- *
- *   1. Build the canonical pattern (`Bash(git push *)` etc.).
- *   2. Replay the task's decision log — a prior task-scoped `allow` or
- *      `deny` on the matching pattern wins immediately.
- *   3. Run `policy.evaluate` — `allow` short-circuits and logs scope=once
- *      for audit; `prompt` triggers the Telegram round trip.
- *   4. On `prompt`: emit `coding/task/permission-requested` (the Telegram
- *      adapter listens on this and posts the inline keyboard), then
- *      block on `coding/task/permission-decision` until the user taps.
- *      Apply the user's `(decision, scope)` to the log and return.
- *
- * Block-indefinitely on Telegram outage is the design choice (slice3-plan
- * decision 4); the timeout below is a 7-day safety net for truly
- * abandoned tasks, not a deny-on-timeout.
- *
- * **Replay safety.** The decision-log lookup + policy evaluation +
- * persistDecision sequence runs OUTSIDE `step.run`. That's only safe
- * because `createCodingExecuteOrchestrator` pins `retries: 0` — if
- * retries are ever turned on, the task-scoped `insertToolDecision` here
- * would re-fire on replay and produce duplicate rows. Anyone enabling
- * retries needs to wrap this block in `stepRun("evaluate-tool-gate", …)`
- * first.
- */
-async function handlePermissionRequest(
-  params: HandlePermissionRequestParams,
-): Promise<PermissionResponse> {
-  const {
-    taskId,
-    requestId,
-    tool,
-    input,
-    autoApproveMode,
-    store,
-    runInTx,
-    stepWaitForEvent,
-    inngest,
-  } = params;
-  const taskLog = log.child({ taskId, requestId });
-  const call = { tool, input };
-  const pattern = canonicalPattern(call);
-
-  // 1. Decision log replay — task-scoped patterns the user already approved.
-  const logRows = await runInTx((tx) => store.listToolDecisionsForTask(tx, taskId));
-  const replayed = replayDecisionLog(call, logRows);
-  if (replayed) {
-    taskLog.info({ tool, pattern, decision: replayed.decision }, "tool gate: decision-log match");
-    return replayed.decision === "allow" ? { behavior: "allow" } : { behavior: "deny" };
-  }
-
-  // 2. Static policy.
-  const result = policy.evaluate(call);
-  if (result.decision === "allow") {
-    taskLog.info({ tool, pattern, reason: result.reason }, "tool gate: policy allow");
-    await persistDecision(store, runInTx, taskId, tool, pattern, "allow", "once");
-    return { behavior: "allow" };
-  }
-  if (result.decision === "deny") {
-    taskLog.info({ tool, pattern, reason: result.reason }, "tool gate: policy deny");
-    await persistDecision(store, runInTx, taskId, tool, pattern, "deny", "once");
-    return { behavior: "deny", message: result.reason };
-  }
-
-  // 3. Auto-approve — the policy would prompt, but this profile opted out
-  // of the Telegram round trip. `policy.deny` is unchanged (genuinely
-  // dangerous calls still deny); only the prompt set flips to allow.
-  // Audit lands in `coding_tool_decisions` as scope=once + decision=allow
-  // (same shape as a `policy.allow` row), so the audit log doesn't
-  // distinguish today — the profile setting is the audit at one level up.
-  if (autoApproveMode === "on") {
-    taskLog.info(
-      { tool, pattern, reason: result.reason },
-      "tool gate: profile autoapprove — skipping Telegram prompt",
-    );
-    await persistDecision(store, runInTx, taskId, tool, pattern, "allow", "once");
-    return { behavior: "allow" };
-  }
-
-  // 4. Prompt path — emit the request event, wait for the user's tap.
-  const requestIdShort = shortenRequestId(requestId);
-  await inngest.send({
-    name: codingTaskPermissionRequested.name,
-    data: { taskId, requestId: requestIdShort, tool },
-  });
-  taskLog.info({ requestIdShort, tool, pattern }, "tool gate: prompting user via Telegram");
-
-  // step.waitForEvent is durable. The `if:` filter pins the wait to this
-  // task + this request id, so a concurrent prompt for a different
-  // request can't satisfy our wait. 7d timeout is the abandoned-task
-  // safety net — design intent is block-indefinitely (slice3-plan #4).
-  const decisionEvent = await stepWaitForEvent(`tool-gate-${requestIdShort}`, {
-    event: codingTaskPermissionDecision.name,
-    if: `async.data.taskId == "${taskId}" && async.data.requestId == "${requestIdShort}"`,
-    timeout: "7d",
-  });
-  if (!decisionEvent) {
-    taskLog.warn({ tool }, "tool gate: prompt timed out (7d) — denying");
-    await persistDecision(store, runInTx, taskId, tool, pattern, "deny", "once");
-    return { behavior: "deny", message: "permission prompt timed out" };
-  }
-
-  const data = decisionEvent.data as { decision: ToolDecision; scope: "once" | "task" };
-  // Persist what the user chose. `task` scope means future matching
-  // requests in this task auto-apply; `once` is audit-only.
-  await persistDecision(store, runInTx, taskId, tool, pattern, data.decision, data.scope);
-
-  taskLog.info(
-    { tool, pattern, decision: data.decision, scope: data.scope },
-    "tool gate: user decision applied",
-  );
-  return data.decision === "allow"
-    ? { behavior: "allow" }
-    : { behavior: "deny", message: "user denied" };
-}
-
-async function persistDecision(
-  store: CodingStore,
-  runInTx: Transactor,
-  taskId: string,
-  tool: string,
-  pattern: string,
-  decision: ToolDecision,
-  scope: "once" | "task",
-): Promise<void> {
-  try {
-    await runInTx((tx) => store.insertToolDecision(tx, { taskId, tool, pattern, decision, scope }));
-  } catch (err) {
-    log.warn({ err, taskId, pattern, decision, scope }, "tool gate: insertToolDecision failed");
-    // `task` scope is behaviour-changing: future matching requests are
-    // supposed to auto-apply this decision via decision-log replay. A
-    // silently-lost `task`-scoped row would re-prompt every time, which
-    // is annoying but not unsafe — except the user already saw the
-    // outcome message ("Allowed for task"), so they expect it to stick.
-    // Re-throw so the orchestrator's outer catch marks the task failed
-    // and the user can re-delegate; loud beats quiet here. `once` is
-    // audit-only and safe to drop on the floor.
-    if (scope === "task") {
-      throw err;
-    }
-  }
 }

@@ -224,12 +224,9 @@ function backendYielding(events: CodingEvent[]): CodingBackend {
     plan: async function* () {
       for (const ev of events) yield ev;
     },
-    execute: async () => ({
-      events: (async function* () {
-        for (const ev of events) yield ev;
-      })(),
-      respondPermission: async () => {},
-    }),
+    execute: async function* () {
+      for (const ev of events) yield ev;
+    },
   };
 }
 
@@ -453,7 +450,6 @@ describe("runCodingExecute — git-remote transport", () => {
       }),
       stepRun,
       stepSendEvent,
-      stepWaitForEvent: (async () => null) as never,
       inngest: fakeInngest,
     });
 

@@ -1139,119 +1139,6 @@ describe("DrizzleCodingStore", () => {
     });
   });
 
-  describe("tool decisions", () => {
-    let taskCounter = 0;
-    async function seedTask(): Promise<string> {
-      taskCounter += 1;
-      const repoId = await seedRepo(`tool-decisions-${taskCounter}`);
-      const task = await tx((trx) =>
-        store.insertTask(trx, {
-          repoId,
-          goal: "g",
-          triggerSource: "user",
-          backend: "claude",
-          allowPrivilegedRunc: false,
-        }),
-      );
-      return task.id;
-    }
-
-    it("inserts a decision and reads it back", async () => {
-      const taskId = await seedTask();
-      const row = await tx((trx) =>
-        store.insertToolDecision(trx, {
-          taskId,
-          tool: "Bash",
-          pattern: "Bash(git push origin *)",
-          decision: "allow",
-          scope: "task",
-        }),
-      );
-      expect(row.taskId).toBe(taskId);
-      expect(row.tool).toBe("Bash");
-      expect(row.pattern).toBe("Bash(git push origin *)");
-      expect(row.decision).toBe("allow");
-      expect(row.scope).toBe("task");
-      expect(row.createdAt).toBeInstanceOf(Date);
-    });
-
-    it("rejects an unknown task_id (FK constraint)", async () => {
-      await expect(
-        tx((trx) =>
-          store.insertToolDecision(trx, {
-            taskId: "019d0000-0000-7000-8000-0000000000ff",
-            tool: "Bash",
-            pattern: "Bash(rm -rf *)",
-            decision: "deny",
-            scope: "task",
-          }),
-        ),
-      ).rejects.toThrow();
-    });
-
-    it("listToolDecisionsForTask returns rows oldest-first, scoped by task", async () => {
-      const taskA = await seedTask();
-      const taskB = await seedTask();
-      const first = await tx((trx) =>
-        store.insertToolDecision(trx, {
-          taskId: taskA,
-          tool: "Bash",
-          pattern: "Bash(git push *)",
-          decision: "allow",
-          scope: "task",
-        }),
-      );
-      const second = await tx((trx) =>
-        store.insertToolDecision(trx, {
-          taskId: taskA,
-          tool: "Bash",
-          pattern: "Bash(curl -X POST *)",
-          decision: "deny",
-          scope: "task",
-        }),
-      );
-      // Cross-task row to verify scoping.
-      await tx((trx) =>
-        store.insertToolDecision(trx, {
-          taskId: taskB,
-          tool: "Bash",
-          pattern: "Bash(rm -rf *)",
-          decision: "deny",
-          scope: "once",
-        }),
-      );
-
-      const rows = await tx((trx) => store.listToolDecisionsForTask(trx, taskA));
-      expect(rows.map((r) => r.id)).toEqual([first.id, second.id]);
-      expect(rows.map((r) => r.decision)).toEqual(["allow", "deny"]);
-    });
-
-    it("supports both scope and decision enums independently", async () => {
-      const taskId = await seedTask();
-      await tx((trx) =>
-        store.insertToolDecision(trx, {
-          taskId,
-          tool: "Edit",
-          pattern: "request-id-abc",
-          decision: "allow",
-          scope: "once",
-        }),
-      );
-      await tx((trx) =>
-        store.insertToolDecision(trx, {
-          taskId,
-          tool: "Bash",
-          pattern: "Bash(npm publish)",
-          decision: "deny",
-          scope: "task",
-        }),
-      );
-      const rows = await tx((trx) => store.listToolDecisionsForTask(trx, taskId));
-      expect(rows).toHaveLength(2);
-      expect(rows.map((r) => `${r.scope}/${r.decision}`)).toEqual(["once/allow", "task/deny"]);
-    });
-  });
-
   describe("getCodingAutoapproveModeForTask", () => {
     async function seedTaskWithProfile(autoapprove: "off" | "on"): Promise<string> {
       const repoId = await seedRepo(`repo-${Math.random().toString(36).slice(2)}`);
@@ -1318,9 +1205,6 @@ describe("DrizzleCodingStore", () => {
     });
 
     it("returns null for a task id that doesn't exist", async () => {
-      // The orchestrator's `??  'off'` fallback turns this into the safe
-      // default — pinning the null return so a future refactor that
-      // changes the join shape can't silently flip the fallback.
       const mode = await tx((trx) =>
         store.getCodingAutoapproveModeForTask(trx, "00000000-0000-7000-8000-deadbeef0000"),
       );
