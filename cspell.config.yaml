@@ -1,0 +1,64 @@
+version: "0.2"
+language: en
+
+dictionaries:
+  - typescript
+  - node
+  - npm
+  - software-terms
+  - fullstack
+  - filetypes
+  - docker
+  - k8s
+  - bash
+  - aws
+  - html
+  - python
+  - sql
+  - en_us
+  - en-gb
+  - project-words
+
+ignoreRegExpList:
+  # Hex strings (UUID chunks, MAC addresses, repeated nibbles like
+  # deadbeefdeadbeef…, OpenSSH base64 blobs we treat as opaque).
+  - "[a-fA-F0-9]{8,}"
+  # ULIDs and other long alphanumeric IDs (mixed digits + caps).
+  - "\\b[0-9A-Z]{16,}\\b"
+  # URL-encoded path segments: %2F, %20, etc. — the encoded byte plus
+  # the surrounding text gets split into nonsense like Ffoo / Finit.
+  - "%[0-9A-Fa-f]{2}[A-Za-z0-9]*"
+  # Non-ASCII strings (test fixtures with Cyrillic/diacritics).
+  - "[^\\x00-\\x7F]+"
+
+dictionaryDefinitions:
+  - name: project-words
+    path: ./project-words.txt
+    addWords: true
+
+ignorePaths:
+  - node_modules
+  - dist
+  - build
+  - coverage
+  - test-results
+  - pnpm-lock.yaml
+  - package-lock.json
+  - "**/*.min.js"
+  - "**/*.svg"
+  - "**/*.png"
+  - "**/*.jpg"
+  - "**/*.jpeg"
+  - "**/*.ico"
+  - "**/*.gif"
+  - "**/*.pdf"
+  - migrations/meta
+  - migrations/*.sql
+  - test/fixtures
+  - vendor
+  - data
+  - .git
+  - .dev
+  - .venv
+  - project-words.txt
+  - cspell.config.yaml

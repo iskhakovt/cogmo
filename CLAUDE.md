@@ -137,7 +137,9 @@ Principles, three-tier structure, PGlite store tests, record/replay mocks, integ
 
 ## Verification
 
-After making changes, run: `pnpm typecheck && pnpm lint && pnpm test`
+After making changes, run: `pnpm typecheck && pnpm lint && pnpm spellcheck && pnpm test`
+
+Unknown words flagged by `pnpm spellcheck` go in [`project-words.txt`](project-words.txt) (the project allowlist) — config in [`cspell.config.yaml`](cspell.config.yaml). For a comment that *intentionally* contains a misspelling (e.g. demonstrating what users mistype), use `// cspell:disable-next-line` so the typo stays excluded from the global dictionary.
 
 **Bug fixes: verify-then-act.** Prove the symptom (failing test or repro steps), identify root cause, propose fix, write a regression test. No shotgun debugging.
 

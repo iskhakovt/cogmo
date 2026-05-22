@@ -124,6 +124,7 @@ export class RepoDialogs {
       await ctx.reply("Remote URL can't be empty. Reply with the URL, or /cancel.");
       return;
     }
+    // cspell:disable-next-line
     // Catch typos ("htps://", missing host) before paying the network
     // round-trip on `git clone`. The verify orchestrator (slice 4.0h)
     // also requires the URL to parse as `owner/repo` for the PR step,
