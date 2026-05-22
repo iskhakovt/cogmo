@@ -292,6 +292,13 @@ export interface SkillStore {
    */
   listAllSkills(tx: Transaction): Promise<readonly SkillRow[]>;
   /**
+   * Distinct non-null `lockfile_hash` values across every skill row
+   * (enabled or disabled -- disabled skills can re-enable). Backs the
+   * `/skill-venvs/` cache reaper: every dir whose name isn't in this set
+   * AND is older than the grace window is unreachable and safe to remove.
+   */
+  listReachableLockfileHashes(tx: Transaction): Promise<ReadonlySet<string>>;
+  /**
    * True iff at least one `skill_deploys` row exists with the given
    * `(skill_id, git_sha)` and `status = 'live'`. Used by `enable` to gate
    * re-activation: a never-approved-then-denied first deploy leaves the
@@ -471,6 +478,14 @@ export class DrizzleSkillStore implements SkillStore {
 
   async listAllSkills(tx: Transaction): Promise<readonly SkillRow[]> {
     return tx.select().from(skills).orderBy(asc(skills.name));
+  }
+
+  async listReachableLockfileHashes(tx: Transaction): Promise<ReadonlySet<string>> {
+    const rows = await tx
+      .selectDistinct({ lockfileHash: skills.lockfileHash })
+      .from(skills)
+      .where(isNotNull(skills.lockfileHash));
+    return new Set(rows.map((r) => r.lockfileHash).filter((h): h is string => h !== null));
   }
 
   async hasLiveDeployForSkill(
