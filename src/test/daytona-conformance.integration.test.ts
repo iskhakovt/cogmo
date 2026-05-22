@@ -498,6 +498,16 @@ describe("Daytona conformance — wrapper-volume-mount", () => {
 
   // Stable volume name pinned to the scenario so URL paths (the
   // `(method, path)` match key) stay identical across record + replay.
+  //
+  // **Record-mode caveat: one record session at a time per Daytona org.**
+  // The volume is org-scoped, not per-record-run. Two simultaneous
+  // recordings (two devs, parallel CI lanes against the same org) both
+  // write + read the same sentinel and both pass even if one party's
+  // mount wiring regressed. The reader's `rm -f` below removes the
+  // sentinel after each successful read, which also defends against
+  // "yesterday's leftover masks today's broken-writer regression";
+  // a crashed prior run can still leave a stale sentinel for the next
+  // record (rare, acceptable for personal-scale + manual record cadence).
   const VOLUME_NAME = "cogmo-conformance-deps-cache";
 
   it.skipIf(!scenario.runnable)(
@@ -536,10 +546,14 @@ describe("Daytona conformance — wrapper-volume-mount", () => {
         ...wrapperSpec(),
         depsCacheVolume: { volumeName: VOLUME_NAME },
       });
+      // `cat` produces the sentinel for the assertion; `rm -f` removes
+      // it from the volume so the next record run starts clean. Single
+      // exec keeps the wire shape stable -- two execs would add a
+      // session to the fixture and force a re-record on every nit.
       const readResult = await reader.exec([
         "sh",
         "-c",
-        "cat /skill-venvs/.cogmo-cross-session-test",
+        "cat /skill-venvs/.cogmo-cross-session-test && rm -f /skill-venvs/.cogmo-cross-session-test",
       ]);
       expect(readResult.exitCode).toBe(0);
       expect(readResult.stdout.trim()).toBe(sentinel);

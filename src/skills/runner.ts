@@ -258,6 +258,12 @@ export interface RegisterForTestsParams {
    * `makeSandboxLockfileCompiler` unit tests); use this for e2e tests
    * that want to exercise the populator + activation path against a real
    * sandbox without bootstrapping a git repo.
+   *
+   * **Pass output from `uv pip compile --generate-hashes` only.** This
+   * bypass trusts the input is shape-valid: malformed lockfiles slip
+   * past the compile + byte-compare contract and either crash
+   * `uv pip sync` inside the sandbox or pin nonsense in the cache.
+   * Production paths can't reach this method.
    */
   lockfileContents?: string;
 }

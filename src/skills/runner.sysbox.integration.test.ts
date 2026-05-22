@@ -89,6 +89,24 @@ beforeAll(async () => {
     socketDir: "/tmp/cogmo-test-skills-proxy",
     hostDockerSocket: "/var/run/docker.sock",
   });
+
+  // Sweep any `cogmo-skills-test-deps-*` volumes left behind by prior
+  // runs that were SIGKILLed / OOMed / CI-timed-out before their
+  // `finally` could fire. CI runners are ephemeral so this matters
+  // on dev machines where the volume accumulation otherwise grows
+  // until disk pressure forces a manual `docker volume prune`.
+  const leftoverVolumes = await docker.listVolumes();
+  for (const v of leftoverVolumes.Volumes ?? []) {
+    if (v.Name.startsWith("cogmo-skills-test-deps-")) {
+      await docker
+        .getVolume(v.Name)
+        .remove()
+        .catch(() => {
+          // In-use or already gone; the next sweep catches whatever survives.
+        });
+    }
+  }
+
   sandbox = await LocalDockerSandboxClient.create({
     docker,
     store: agentStore,
@@ -285,6 +303,12 @@ resources:
     // populator's `uv pip sync --require-hashes` step exercises the
     // shared-volume mount + activation path with the smallest possible
     // wheel surface (~80 KB).
+    //
+    // **Refresh trigger: PyPI yanks idna==3.10.** If `uv pip sync` starts
+    // failing with a "hash mismatch" or "file not found" error here, the
+    // pinned version no longer exists upstream. Pick the current stable
+    // (`pip index versions idna`), re-run the compile command above,
+    // and replace the hashes + the assertion's expected version below.
     const idnaLockfile = `idna==3.10 \\
     --hash=sha256:12f65c9b470abda6dc35cf8e63cc574b1c52b11df2c86030af0ac09b01b13ea9 \\
     --hash=sha256:946d195a0d259cbba61165e88e65941f16e9b36ea6ddb97f00452bae8b1287d3
@@ -336,7 +360,10 @@ async def run(inputs, ctx):
 
       const result = await runner.invoke({ name: "tier2-with-deps", inputs: {} });
       expect(result.status, JSON.stringify(result)).toBe("success");
-      expect(result.output).toMatchObject({
+      // Pass `result` as the assertion-failure label so a mismatch
+      // surfaces the whole row (error string, runId, etc.) rather than
+      // just the matchObject diff.
+      expect(result.output, JSON.stringify(result)).toMatchObject({
         version: "3.10",
         // Bücher → xn--bcher-kva (IDN-encoded label). The encode call
         // proves the wheel actually loaded — a stub `idna` shim would
