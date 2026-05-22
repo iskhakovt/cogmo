@@ -478,6 +478,100 @@ describe("Daytona conformance — wrapper-success", () => {
   );
 });
 
+// ─── Scenario 3b: wrapper-level volume mount ────────────────────────
+
+/**
+ * The skills tier-2 deps cache (`SessionSpec.depsCacheVolume`) routes
+ * through `DaytonaSandboxClient.#resolveVolumeId` → `daytona.volume.get`
+ * → `daytona.create({ volumes: [...] })`. The unit tests in
+ * `client.test.ts` mock the SDK so the volumes-array shape passes through
+ * cleanly there, but the actual wire surface — `volume.get` HTTP, `volumes`
+ * field on `create` — is only exercised against a real provider in this
+ * scenario. Without it, a Daytona-side rename of the `volumes` field or
+ * a `volume.get` 4xx contract change would only surface in production.
+ */
+describe("Daytona conformance — wrapper-volume-mount", () => {
+  const scenario = setupScenario("wrapper-volume-mount");
+
+  beforeAll(scenario.init);
+  afterAll(scenario.shutdown);
+
+  // Stable volume name pinned to the scenario so URL paths (the
+  // `(method, path)` match key) stay identical across record + replay.
+  //
+  // **Record-mode caveat: one record session at a time per Daytona org.**
+  // The volume is org-scoped, not per-record-run. Two simultaneous
+  // recordings (two devs, parallel CI lanes against the same org) both
+  // write + read the same sentinel and both pass even if one party's
+  // mount wiring regressed. The reader's `rm -f` below removes the
+  // sentinel after each successful read, which also defends against
+  // "yesterday's leftover masks today's broken-writer regression";
+  // a crashed prior run can still leave a stale sentinel for the next
+  // record (rare, acceptable for personal-scale + manual record cadence).
+  const VOLUME_NAME = "cogmo-conformance-deps-cache";
+
+  it.skipIf(!scenario.runnable)(
+    "depsCacheVolume → volume.get + volumes round-trip; sentinel survives across sessions",
+    async () => {
+      const mock = scenario.getMock();
+      const client = await makeWrapperClient(mock, scenario.recordable, "wrapper-volume-mount");
+      await client.ensureImagePresent(WRAPPER_IMAGE, WRAPPER_RESOURCE_LIMITS);
+
+      // Cross-session contract test: a single-session `mkdir -p
+      // /skill-venvs && touch ...` proves nothing -- mkdir creates the
+      // dir in the container overlay even when `volumes:` was dropped
+      // from `daytona.create`. To verify the volume actually carries
+      // bytes across sandbox lifecycles we write in session A, delete
+      // A, and read from a fresh session B. If the wiring regresses
+      // (no volume mount on either side), session B's cat finds no
+      // file and the test fails loudly.
+      //
+      // Sentinel is a fixed string -- record/replay matches body
+      // content for the assertion, so a per-run random would diverge
+      // from the recorded fixture's stdout.
+      const sentinel = "cogmo-cross-session-sentinel-v1";
+      const writer = await client.create({
+        ...wrapperSpec(),
+        depsCacheVolume: { volumeName: VOLUME_NAME },
+      });
+      const writeResult = await writer.exec([
+        "sh",
+        "-c",
+        `printf '%s' "${sentinel}" > /skill-venvs/.cogmo-cross-session-test`,
+      ]);
+      expect(writeResult.exitCode).toBe(0);
+      await client.delete(writer);
+
+      const reader = await client.create({
+        ...wrapperSpec(),
+        depsCacheVolume: { volumeName: VOLUME_NAME },
+      });
+      // `cat` produces the sentinel for the assertion; `rm -f` removes
+      // it from the volume so the next record run starts clean. Single
+      // exec keeps the wire shape stable -- two execs would add a
+      // session to the fixture and force a re-record on every nit.
+      const readResult = await reader.exec([
+        "sh",
+        "-c",
+        "cat /skill-venvs/.cogmo-cross-session-test && rm -f /skill-venvs/.cogmo-cross-session-test",
+      ]);
+      expect(readResult.exitCode).toBe(0);
+      expect(readResult.stdout.trim()).toBe(sentinel);
+      await client.delete(reader);
+
+      if (scenario.recordable) {
+        await mock.endScenario();
+      }
+    },
+    600_000,
+  );
+
+  it.skipIf(scenario.runnable)(
+    "fixture missing — set RECORD=1 + DAYTONA_API_KEY and re-run to capture",
+    () => expectFixtureMissing(scenario),
+  );
+});
+
 // ─── Scenario 4: wrapper-level stderr demux + non-zero exit ─────────
 
 /**
