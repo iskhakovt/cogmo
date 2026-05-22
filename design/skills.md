@@ -1143,47 +1143,21 @@ UPDATE recovery_point='finished', status='success'|'error'  ← transitionToFini
 
 ## Module structure
 
-```text
-src/skills/
-  index.ts                — public SkillRunner interface, factory
-  runner.ts               — Dispatcher + Pool coordination, register/approve/rollback/invoke
-  manifest.ts             — SkillManifestSchema (Zod) + frontmatter parser
-  classifier.ts           — risk-tier classifier (manifest fields)
-  ast-classifier.ts       — tree-sitter static analysis over skill.py
-  ast-rules.ts            — effect / dependency category rules
-  dispatcher.ts           — ctx-call routing between worker + host
-  ctx-handler.ts          — host-side ctx.* method implementations
-  protocol.ts             — task_invoke / task_result / ctx_call / ctx_result Zod schemas
-  deps.ts                 — lockfile compile + verify (register), venv populate + activate (invoke)
-  deps-reaper.ts          — unreachable-venv sweep over /skill-venvs/
-  deps-reaper-function.ts — Inngest cron wrapper for the reaper
-  pyodide-compat.ts       — register-time tier-1 compat check (pyodide-lock.json + PyPI pure-wheel)
-  cron-ticker.ts          — Inngest cron tick → due-skill fan-out
-  cron-fire-handler.ts    — per-skill cron invocation handler
-  git-ops.ts              — git plumbing (revParse, gitShow, updateRef, etc.)
-  repo.ts                 — bare-repo bootstrap + remote configuration
-  types.ts                — shared SkillRow / classifier-log / resource-usage types
-  cli.ts                  — `cogmo skill ...` operator CLI
-  configure-remote.ts     — remote-setup CLI flow
-  skills-tool.ts          — agent-facing skill tool registration
-  skills-service.ts       — per-conversation skill service (orchestrator-scoped)
-  skill-tool-builder.ts   — Anthropic SDK tool descriptor builder per skill
-  skills-keyboard.ts      — Telegram approve/deny callback keyboard
-  worker-sysbox/
-    host.ts               — tier-2 host-side: spawn sandbox, drive dispatcher
-    worker.ts             — tier-2 in-container supervisor entrypoint glue
-    pool.ts               — warm-pool lifecycle, recycle, idle-shutdown
-    transport.ts          — NDJSON-over-stdio frame parsing
-  worker-wasm/
-    host.ts               — tier-1 host-side: spawn Node Worker, drive dispatcher
-    worker-entry.ts       — Worker-thread entry (loadPyodide + micropip install + run)
-    boot.mjs              — tsx-loader bootstrap for dev/test (Node 22.2+ workaround)
-    wasm-lint.ts          — pre-flight static check for WASM-incompatible imports
-    ctx.py.ts             — bundled Python ctx SDK injected into the Pyodide isolate
-  store/
-    schema.ts             — skills, skill_deploys, skill_runs, skill_context_calls tables
-    index.ts              — SkillStore interface + Drizzle impl
-```
+`src/skills/` is organised by concern. Use `ls src/skills/` for the live file list; the groupings below describe what lives where and why.
+
+| Group | Subdirectory / key entrypoints | Responsibility |
+|-|-|-|
+| Public interface | `index.ts`, `runner.ts` | `SkillRunner` contract + Dispatcher / Pool coordination across register, approve, rollback, invoke |
+| Manifest + classifier | `manifest.ts`, `classifier.ts`, `ast-classifier.ts`, `ast-rules.ts` | `SKILL.md` frontmatter parsing + risk-tier assignment (tree-sitter static analysis) |
+| Dependency stack | `deps.ts`, `deps-reaper*.ts`, `pyodide-compat.ts` | Lockfile compile + verify at register, venv populate + activate at invoke, unreachable-venv reaper, tier-1 Pyodide compat check |
+| Workers (tier 2) | `worker-sysbox/` | sysbox container host + in-container supervisor + warm pool |
+| Workers (tier 1) | `worker-wasm/` | Pyodide isolate host + Node Worker entry + WASM-import lint + bundled `ctx` Python SDK |
+| ctx RPC | `dispatcher.ts`, `ctx-handler.ts`, `protocol.ts` | Bi-directional NDJSON-over-stdio routing between worker + host, Zod-validated frames |
+| Cron scheduler | `cron-ticker.ts`, `cron-fire-handler.ts` | Per-minute Inngest tick + per-skill cron invocation |
+| Git plumbing | `git-ops.ts`, `repo.ts` | Bare-repo bootstrap, remote configuration, plumbing wrappers |
+| Operator CLI | `cli.ts`, `configure-remote*.ts` | `cogmo skill ...` subcommands |
+| Agent surface | `skills-tool.ts`, `skills-service.ts`, `skill-tool-builder.ts`, `skills-keyboard.ts` | Per-turn tool list registration, per-conversation service, Anthropic SDK descriptor build, Telegram approve/deny keyboard |
+| Store | `store/` | DB schema + `SkillStore` interface (`skills`, `skill_deploys`, `skill_runs`, `skill_context_calls` tables) |
 
 Public interface (canonical — see [Where the classifier runs](#where-the-classifier-runs) for the full RPC contract):
 
