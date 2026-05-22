@@ -197,6 +197,29 @@ describe("reapSkillVenvs", () => {
     expect(sandbox.delete).toHaveBeenCalledTimes(1);
   });
 
+  it("captures a stream `error` event and surfaces it as `transport_failed`", async () => {
+    // Stream-level errors (stdout/stderr/stdin emit 'error', e.g. a
+    // broken pipe under the wire) would crash the host without the
+    // listeners. Mirrors `makeSandboxLockfileCompiler`'s
+    // streamError-as-transport_failed contract so the reaper has the
+    // same posture.
+    const h = buildHarness();
+    const promise = reapSkillVenvs({
+      sandbox: h.sandbox,
+      image: "cogmo-skills:test",
+      depsCacheVolumeName: "deps-vol-x",
+      reachableHashes: new Set(),
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    h.exec.stdoutSource.emit("error", new Error("pipe shattered"));
+    h.exec.finish("", 0);
+    const result = await promise;
+    expect(result.isErr()).toBe(true);
+    if (!result.isErr()) return;
+    expect(result.error.kind).toBe("transport_failed");
+    expect(result.error.message).toContain("pipe shattered");
+  });
+
   it("always tears down the session, even on a script failure", async () => {
     const h = buildHarness();
     const promise = reapSkillVenvs({

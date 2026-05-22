@@ -149,6 +149,19 @@ describe("checkPyodideCompat", () => {
     expect(result.isOk()).toBe(true);
   });
 
+  it("fails open when the Pyodide lockfile itself is unreadable (e.g., pyodide not installed)", async () => {
+    // A future tier-2-only deployment could mark `pyodide` optional;
+    // `require.resolve` then throws synchronously and the unprotected
+    // call would surface as an unfriendly register error. Same
+    // fail-open posture as transient PyPI errors -- first-invoke will
+    // surface the real issue via micropip.
+    const result = await checkPyodideCompat(["any-pkg==1.0"], {
+      lockfilePath: "/nonexistent/pyodide-lock.json",
+      fetchImpl: fakeFetch({}),
+    });
+    expect(result.isOk()).toBe(true);
+  });
+
   it("fails open on non-404 PyPI HTTP errors (503/429/etc don't block register)", async () => {
     // Distinct from the 404 case above: a transient 5xx must NOT be
     // cached as "no pure wheel" -- the cache would then pin the wrong
@@ -190,7 +203,7 @@ describe("checkPyodideCompat", () => {
 });
 
 describe("pypiHasPureWheel", () => {
-  it("caches results across calls (same `name==version` -> one HTTP roundtrip)", async () => {
+  it("caches `true` results across calls (one HTTP roundtrip per pure-wheel hit)", async () => {
     const fetchMock = fakeFetch({
       "x==1.0": {
         ok: true,
@@ -202,6 +215,27 @@ describe("pypiHasPureWheel", () => {
     expect(a).toBe(true);
     expect(b).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT cache `false` results (republished pure-wheel becomes visible after first miss)", async () => {
+    // Yank-then-republish, namespace-squat takeover, and similar
+    // edge cases would otherwise pin the wrong answer for process
+    // lifetime. The cost is one extra round-trip per register-reject
+    // (a rare path).
+    let urls: Array<{ packagetype: string; filename: string }> = [];
+    const fetchMock = vi.fn(async () => {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ urls }),
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+    const first = await pypiHasPureWheel("rare", "1.0", { fetchImpl: fetchMock });
+    expect(first).toBe(false);
+    urls = [{ packagetype: "bdist_wheel", filename: "rare-1.0-py3-none-any.whl" }];
+    const second = await pypiHasPureWheel("rare", "1.0", { fetchImpl: fetchMock });
+    expect(second).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("accepts the universal py2.py3 wheel suffix", async () => {

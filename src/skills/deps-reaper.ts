@@ -44,6 +44,9 @@ cd "${DEPS_CACHE_VOLUME_TARGET}"
 # Regex restricts to lowercase-hex sha256 names so dot-prefixed sentinels
 # and .tmp dirs (which the populate script's own sweeper owns) are
 # protected.
+# GNU find / grep semantics expected (cogmo-skills image is Debian-
+# based via the runtime base image); -regex's Emacs syntax and
+# -vxFf's "no patterns -> pass everything" behaviour are GNU-specific.
 find . -maxdepth 1 -mindepth 1 -type d -regex '\\./[0-9a-f]\\{64\\}' -mtime "+\${GRACE_DAYS}" | sed 's|^\\./||' | grep -vxFf "$REACHABLE" | while read hash; do
   rm -rf "${DEPS_CACHE_VOLUME_TARGET}/$hash"
   echo "reaped:$hash"

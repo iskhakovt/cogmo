@@ -176,5 +176,17 @@ export async function teardown() {
   if (skillsPath) {
     await rm(skillsPath, { recursive: true, force: true });
   }
+  // Drop the per-run skill-deps cache volume so long-running dev
+  // machines don't accumulate one per integration-test invocation.
+  // Best-effort: in-use / already-gone is fine. CI runners are
+  // ephemeral so the cleanup only matters on the dev seat.
+  const depsVolume = process.env.COGMO_SKILLS_DEPS_VOLUME;
+  if (depsVolume?.startsWith("cogmo-skills-deps-test-")) {
+    const { default: Docker } = await import("dockerode");
+    await new Docker()
+      .getVolume(depsVolume)
+      .remove()
+      .catch(() => {});
+  }
   console.log("Test containers stopped.");
 }

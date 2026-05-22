@@ -38,8 +38,16 @@ export interface SkillDepsReaperDeps {
  * the grace window the venv gets reaped and a re-populate runs on
  * the next invoke.
  *
- * Singleton + 0 retries: another tick fires tomorrow regardless. A
- * transient sandbox failure today shouldn't keep retrying for hours.
+ * `concurrency: { limit: 1 }` is single-flight within THIS Cogmo
+ * instance's Inngest app -- not cross-instance. If two Cogmos with
+ * disjoint reachable sets share one Daytona/Docker volume (the
+ * documented multi-tenant footgun: see `design/skills.md` -> Security
+ * posture), their reapers could delete each other's reachable
+ * venvs. The correct mitigation is per-deployment
+ * `COGMO_SKILLS_DEPS_VOLUME`, not function-level concurrency.
+ *
+ * 0 retries: another tick fires tomorrow regardless. A transient
+ * sandbox failure today shouldn't keep retrying for hours.
  */
 export function createSkillDepsReaper(deps: SkillDepsReaperDeps, inngest: Inngest) {
   return inngest.createFunction(

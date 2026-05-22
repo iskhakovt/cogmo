@@ -12,8 +12,17 @@ interface PyodideLockfileShape {
 /** Bundled-package name -> version map, lazily loaded from pyodide's installed lockfile. */
 let cachedBundled: Map<string, string> | null = null;
 
-/** PyPI-pure-wheel cache keyed by `name==version`. */
-const pypiPureWheelCache = new Map<string, boolean>();
+/**
+ * PyPI-pure-wheel cache keyed by `name==version`. Stores only `true`
+ * answers: a wheel that exists today won't disappear (PyPI is
+ * append-only at the artifact level; yanks hide but don't delete
+ * bytes). Skipping `false` caching means a republished version
+ * (rare: yank-then-republish, namespace squat takeover) is re-checked
+ * on every register instead of pinning the wrong answer for the
+ * process lifetime. Cost is one extra PyPI round-trip per
+ * register-reject, which is itself rare.
+ */
+const pypiPureWheelCache = new Map<string, true>();
 
 async function loadBundled(lockfilePathOverride?: string): Promise<Map<string, string>> {
   if (cachedBundled && !lockfilePathOverride) return cachedBundled;
@@ -58,8 +67,7 @@ export async function pypiHasPureWheel(
   opts: { timeoutMs?: number; fetchImpl?: typeof fetch } = {},
 ): Promise<boolean> {
   const cacheKey = `${normalizeName(name)}==${version}`;
-  const cached = pypiPureWheelCache.get(cacheKey);
-  if (cached !== undefined) return cached;
+  if (pypiPureWheelCache.has(cacheKey)) return true;
   const timeoutMs = opts.timeoutMs ?? 5_000;
   const fetchImpl = opts.fetchImpl ?? fetch;
   const ctrl = new AbortController();
@@ -71,14 +79,13 @@ export async function pypiHasPureWheel(
     );
     if (resp.status === 404) {
       // Name/version doesn't exist upstream -- legitimate "no pure wheel".
-      pypiPureWheelCache.set(cacheKey, false);
+      // Not cached: see `pypiPureWheelCache` comment for why.
       return false;
     }
     if (!resp.ok) {
       // 5xx / 429 / etc. -- transient. Throw so checkPyodideCompat's
       // outer try/catch fails-open with a warn log; otherwise a brief
-      // PyPI hiccup would block every tier-1 register until restart
-      // (the cache pins the wrong answer).
+      // PyPI hiccup would block tier-1 registers for the spec.
       throw new Error(`pypi http ${resp.status} for ${name}==${version}`);
     }
     const parsed = (await resp.json()) as PypiJsonShape;
@@ -88,7 +95,7 @@ export async function pypiHasPureWheel(
         typeof u.filename === "string" &&
         PURE_WHEEL_SUFFIXES.some((suf) => u.filename?.endsWith(suf)),
     );
-    pypiPureWheelCache.set(cacheKey, hasPure);
+    if (hasPure) pypiPureWheelCache.set(cacheKey, true);
     return hasPure;
   } finally {
     clearTimeout(timer);
@@ -128,7 +135,21 @@ export async function checkPyodideCompat(
   opts: CheckPyodideCompatOptions = {},
 ): Promise<Result<void, ReadonlyArray<PyodideCompatIssue>>> {
   if (declaredSpecs.length === 0) return ok();
-  const bundled = await loadBundled(opts.lockfilePath);
+  let bundled: Map<string, string>;
+  try {
+    bundled = await loadBundled(opts.lockfilePath);
+  } catch (e) {
+    // pyodide-lock.json unreadable -- typically `pyodide` not installed
+    // (a future tier-2-only deployment marking it optional) or the file
+    // missing from a non-standard install. Same fail-open posture as
+    // PyPI network errors below: register stays unblocked, first
+    // WASM-tier invocation surfaces the real issue via micropip.
+    log.warn(
+      { err: (e as Error).message },
+      "pyodide-compat: lockfile load failed; allowing register (first-invoke surfaces the real issue)",
+    );
+    return ok();
+  }
   const issues: PyodideCompatIssue[] = [];
   for (const spec of declaredSpecs) {
     const m = /^([a-z0-9][a-z0-9._-]*?)==(.+)$/i.exec(spec);
