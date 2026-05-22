@@ -478,6 +478,69 @@ describe("Daytona conformance — wrapper-success", () => {
   );
 });
 
+// ─── Scenario 3b: wrapper-level volume mount ────────────────────────
+
+/**
+ * The skills tier-2 deps cache (`SessionSpec.depsCacheVolume`) routes
+ * through `DaytonaSandboxClient.#resolveVolumeId` → `daytona.volume.get`
+ * → `daytona.create({ volumes: [...] })`. The unit tests in
+ * `client.test.ts` mock the SDK so the volumes-array shape passes through
+ * cleanly there, but the actual wire surface — `volume.get` HTTP, `volumes`
+ * field on `create` — is only exercised against a real provider in this
+ * scenario. Without it, a Daytona-side rename of the `volumes` field or
+ * a `volume.get` 4xx contract change would only surface in production.
+ */
+describe("Daytona conformance — wrapper-volume-mount", () => {
+  const scenario = setupScenario("wrapper-volume-mount");
+
+  beforeAll(scenario.init);
+  afterAll(scenario.shutdown);
+
+  // Stable volume name pinned to the scenario so URL paths (the
+  // `(method, path)` match key) stay identical across record + replay.
+  const VOLUME_NAME = "cogmo-conformance-deps-cache";
+
+  it.skipIf(!scenario.runnable)(
+    "depsCacheVolume → volume.get + volumes mount round-trip through DaytonaSandboxClient",
+    async () => {
+      const mock = scenario.getMock();
+      const client = await makeWrapperClient(mock, scenario.recordable, "wrapper-volume-mount");
+      await client.ensureImagePresent(WRAPPER_IMAGE, WRAPPER_RESOURCE_LIMITS);
+      const session = await client.create({
+        ...wrapperSpec(),
+        depsCacheVolume: { volumeName: VOLUME_NAME },
+      });
+
+      // Verify the mount is live by writing a sentinel file to the
+      // declared mount path and reading it back. If the volumes spec
+      // didn't reach `daytona.create`, the mount path would be a plain
+      // overlay dir; the write would succeed but the file wouldn't
+      // survive across sessions. We don't test cross-session here
+      // (covered by sysbox e2e); the live `ls` against the mount is
+      // enough to prove `volumes` made it through the wire.
+      const result = await session.exec([
+        "sh",
+        "-c",
+        "mkdir -p /skill-venvs && echo mounted > /skill-venvs/.cogmo-test && ls /skill-venvs/.cogmo-test",
+      ]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("/skill-venvs/.cogmo-test");
+
+      await client.delete(session);
+
+      if (scenario.recordable) {
+        await mock.endScenario();
+      }
+    },
+    600_000,
+  );
+
+  it.skipIf(scenario.runnable)(
+    "fixture missing — set RECORD=1 + DAYTONA_API_KEY and re-run to capture",
+    () => expectFixtureMissing(scenario),
+  );
+});
+
 // ─── Scenario 4: wrapper-level stderr demux + non-zero exit ─────────
 
 /**

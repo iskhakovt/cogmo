@@ -13,6 +13,7 @@ import type { SecretsStore } from "../secrets/store/index.js";
 import { classifyManifest, STUB_CLASSIFIER_VERSION } from "./classifier.js";
 import { type CtxUser, DefaultCtxHandler } from "./ctx-handler.js";
 import {
+  hashLockfileContents,
   type LockfileCompiler,
   makeSandboxLockfileCompiler,
   parseLockfilePackageSpecs,
@@ -249,6 +250,16 @@ export interface RegisterForTestsParams {
   body: string;
   /** Optional fake commit sha — defaults to a deterministic hash of the body. */
   gitSha?: string;
+  /**
+   * Optional `requirements.lock` contents. When set, the skill row gets
+   * `lockfile_hash = sha256(contents)` and the cache entry is populated so
+   * `invoke` threads the lockfile through to the populator on first call.
+   * Bypasses the register-time compile-and-byte-compare (covered by
+   * `makeSandboxLockfileCompiler` unit tests); use this for e2e tests
+   * that want to exercise the populator + activation path against a real
+   * sandbox without bootstrapping a git repo.
+   */
+  lockfileContents?: string;
 }
 
 export interface SkillRunnerOptions {
@@ -1412,6 +1423,12 @@ export class SkillRunnerImpl implements SkillRunner {
 
     const gitSha = params.gitSha ?? hashStub(params.manifestSource + params.body);
     const schedule = manifest.schedule ?? null;
+    const lockfileSnapshot = params.lockfileContents
+      ? {
+          hash: hashLockfileContents(params.lockfileContents),
+          contents: params.lockfileContents,
+        }
+      : null;
     const insertParams: InsertSkillParams = {
       name: manifest.name,
       tier: manifest.tier,
@@ -1420,7 +1437,7 @@ export class SkillRunnerImpl implements SkillRunner {
       schedule,
       scheduleNextRunAt: this.#computeScheduleNextRunAt(schedule),
       gitSha,
-      lockfileHash: null,
+      lockfileHash: lockfileSnapshot?.hash ?? null,
       inputs: manifest.inputs,
       outputs: manifest.outputs ?? null,
     };
@@ -1453,6 +1470,7 @@ export class SkillRunnerImpl implements SkillRunner {
       manifest,
       body: params.body,
       inputsValidator,
+      ...(lockfileSnapshot && { lockfile: buildLockfileCacheValue(lockfileSnapshot) }),
     });
 
     return row;
