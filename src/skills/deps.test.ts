@@ -220,7 +220,7 @@ describe("makeSandboxLockfileCompiler", () => {
 
     // The exec command shape is part of the contract.
     expect(h.session.execStreaming).toHaveBeenCalledWith(
-      ["uv", "pip", "compile", "--generate-hashes", "--quiet", "-"],
+      ["uv", "pip", "compile", "--generate-hashes", "--no-header", "--quiet", "-"],
       expect.objectContaining({ attachStdin: true }),
     );
 
@@ -347,5 +347,27 @@ describe("makeSandboxLockfileCompiler", () => {
     if (!result.isErr()) return;
     expect(result.error.kind).toBe("transport_failed");
     expect(result.error.message).toMatch(/backend socket reset/);
+  });
+
+  it("returns transport_failed and aborts the exec on stdout > 1 MiB", async () => {
+    const h = buildCompilerHarness(makeFakeExec);
+    const disposeSpy = vi.fn().mockResolvedValue(undefined);
+    h.exec.handle.dispose = disposeSpy;
+    const compiler = makeSandboxLockfileCompiler({
+      sandbox: h.sandbox,
+      image: "cogmo-skills:test",
+    });
+    const promise = compiler.compile(["httpx==0.27.0"]);
+    await new Promise((r) => setImmediate(r));
+    // Single 2 MiB chunk trips the cap on the first write — the
+    // compiler must call dispose() so uv stops blocking on its pipe.
+    h.exec.stdoutSource.write(Buffer.alloc(2 * 1024 * 1024, "x"));
+    h.exec.waitResolve(0);
+    const result = await promise;
+    expect(result.isErr()).toBe(true);
+    if (!result.isErr()) return;
+    expect(result.error.kind).toBe("transport_failed");
+    expect(result.error.message).toMatch(/exceeded/);
+    expect(disposeSpy).toHaveBeenCalled();
   });
 });

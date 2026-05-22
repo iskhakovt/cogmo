@@ -345,13 +345,6 @@ export class SkillRunnerImpl implements SkillRunner {
   #sandbox: SandboxClient | undefined;
   #tier2Image: string;
   #clock: () => Date;
-  /**
-   * Lockfile compiler used at register / approve / rollback to re-resolve
-   * the manifest's `dependencies` and byte-compare the result against
-   * the committed `requirements.lock`. Undefined when no tier-2 sandbox
-   * is configured; verification then degrades to "presence + hash only."
-   * See `design/skills.md` → Dependencies.
-   */
   #lockfileCompiler: LockfileCompiler | undefined;
   /**
    * Lazily-created warm pool over `#sandbox`. Created on first tier-2
@@ -445,17 +438,18 @@ export class SkillRunnerImpl implements SkillRunner {
    *     to a fresh resolve. The caller surfaces the message verbatim
    *     as the register `errors[]` payload.
    *
-   * When `#lockfileCompiler` is undefined (tier-1-only deployments,
-   * test paths that omit the sandbox), verification degrades to
-   * presence + hash only — the committed file is trusted as long as
-   * it's well-formed. The author still hash-pinned each wheel via
-   * `--generate-hashes`, so even without re-resolution the install at
-   * populate time will refuse anything not in the lockfile.
+   * When `#lockfileCompiler` is undefined OR `verifyFresh` is false,
+   * verification degrades to presence + hash only — the committed
+   * file is trusted as-is. `verifyFresh: false` is the rollback
+   * mode: the target lockfile was valid at deploy time, hashes are
+   * still pinned, and a wheel yanked from PyPI since shouldn't block
+   * the operator from rewinding to a known-good revision.
    */
   async #readManifestLockfile(
     repoPath: string,
     gitSha: string,
     manifest: SkillManifest,
+    opts: { verifyFresh: boolean } = { verifyFresh: true },
   ): Promise<Result<string | null, string>> {
     if (manifest.dependencies.length === 0) {
       return ok(null);
@@ -463,18 +457,18 @@ export class SkillRunnerImpl implements SkillRunner {
     const snapshot = await readLockfileAtSha(repoPath, gitSha);
     if (snapshot.isErr()) {
       return err(
-        `requirements_lock_${snapshot.error.kind}: declared ${manifest.dependencies.length} dependencies but ${snapshot.error.message}. Run 'uv pip compile --generate-hashes' and commit the result.`,
+        `requirements_lock_${snapshot.error.kind}: declared ${manifest.dependencies.length} dependencies but ${snapshot.error.message}. Run 'uv pip compile --generate-hashes --no-header' and commit the result.`,
       );
     }
 
-    if (this.#lockfileCompiler) {
+    if (opts.verifyFresh && this.#lockfileCompiler) {
       const compiled = await this.#lockfileCompiler.compile(manifest.dependencies);
       if (compiled.isErr()) {
         return err(`requirements_lock_${compiled.error.kind}: ${compiled.error.message}`);
       }
       if (compiled.value !== snapshot.value.contents) {
         return err(
-          "requirements_lock_stale: committed requirements.lock differs from a fresh 'uv pip compile --generate-hashes'. Re-run the compile against your declared dependencies and recommit.",
+          "requirements_lock_stale: committed requirements.lock differs from a fresh 'uv pip compile --generate-hashes --no-header'. Re-run the compile against your declared dependencies and recommit.",
         );
       }
     }
@@ -890,7 +884,12 @@ export class SkillRunnerImpl implements SkillRunner {
 
     const mainSha = await getMainSha(repoPath);
 
-    const lockfileResult = await this.#readManifestLockfile(repoPath, targetSha, manifest);
+    // Trust the historical lockfile: it was valid at deploy time and
+    // its hashes are still pinned. A wheel yanked since shouldn't
+    // block rewinding to a known-good revision.
+    const lockfileResult = await this.#readManifestLockfile(repoPath, targetSha, manifest, {
+      verifyFresh: false,
+    });
     if (lockfileResult.isErr()) {
       return rejectedResult(targetSha, lockfileResult.error);
     }
