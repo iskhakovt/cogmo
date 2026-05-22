@@ -619,15 +619,15 @@ A persisted volume holds the wheel cache and per-lockfile-hash virtualenvs, moun
 
 ```text
 /skill-venvs/
-  .uv-cache/                                # UV_CACHE_DIR — content-addressed wheel cache.
-                                             # Dotted so it can't be mistaken for a lockfile-hash dir
-                                             # (sha256 hex never starts with a `.`); the reaper's
-                                             # regex excludes it from the sweep set.
-  <sha256(requirements.lock)>-py3.14/       # populated, ready (suffix = runtime's `py<major>.<minor>`)
+  .uv-cache/                       # UV_CACHE_DIR — content-addressed wheel cache.
+                                   # Dotted so it can't be mistaken for a lockfile-hash dir
+                                   # (sha256 hex never starts with a `.`); the reaper's
+                                   # regex excludes it from the sweep set.
+  <hash>-py3.14/                   # populated, ready (suffix = runtime's `py<major>.<minor>`)
     bin/
     lib/python3.14/site-packages/
-    .ready                                   # marker — readers gate on this
-  <other-hash>-py3.14.tmp.<workerId>/       # mid-populate; rename-target
+    .ready                         # marker — readers gate on this
+  <other-hash>-py3.14.tmp.<wid>/   # mid-populate; rename-target
 ```
 
 Local sysbox mounts a named Docker volume at `/skill-venvs`. Daytona mounts a Daytona Volume at the same path; the populator owns the `<lockfile-hash>-py<major>.<minor>/` subdirectory layout inside (single mount per sandbox, not K8s-style per-skill `subPath` isolation — workers are reused across skills with different lockfile hashes). `.uv-cache/` and the `<hash>-py<X.Y>/` venvs share the same filesystem so uv's hardlink mode works — cross-filesystem hardlinks silently fall back to copy and inflate disk by ~100× ([uv #15149](https://github.com/astral-sh/uv/issues/15149)). Wheels are downloaded once across the entire cache; every venv hardlinks from `.uv-cache/` for free dedup.
