@@ -191,17 +191,15 @@ export const env = createEnv({
      * populated by one worker is reused by every other worker and
      * survives recycle.
      *
-     * **Required, no default**, deliberately. A shared default name
-     * would cross-mount every Cogmo instance on the same host (or
-     * same Daytona org) into one cache — a compromised skill on
-     * either side could pre-stage malicious `<hash>/.ready` entries
-     * the other consumes. Set explicitly per deployment, e.g.
-     * `cogmo-skills-deps-cache` for a single-tenant install or
-     * `cogmo-skills-deps-cache-<deployment-id>` when running multiple
-     * Cogmos on one host or Daytona org. See `design/skills.md` ->
-     * Security posture.
+     * Default suits single-tenant single-host deployments. Multi-
+     * instance deployments (staging + prod on one host, multiple
+     * Cogmos on the same Daytona org) should override per-deployment
+     * (`...-staging`, `...-prod`) — otherwise the cache cross-mounts
+     * and a compromised skill on either side could pre-stage malicious
+     * `<hash>/.ready` entries the other consumes. See
+     * `design/skills.md` -> Security posture.
      */
-    COGMO_SKILLS_DEPS_VOLUME: z.string().min(1),
+    COGMO_SKILLS_DEPS_VOLUME: z.string().min(1).default("cogmo-skills-deps-cache"),
     /** Host root for git clones registered via `/repo add`. */
     COGMO_REPOS_DIR: z.string().default("/var/lib/cogmo/repos"),
     /** Host root for per-task git worktrees. */

@@ -29,9 +29,6 @@ const UNIT_ENV = {
   NODE_ENV: "test",
   HINDSIGHT_URL: "http://localhost:8080",
   INNGEST_BASE_URL: "http://localhost:8288",
-  // Required, no default in production. Unit tests don't actually mount
-  // anything; the value just satisfies the env schema.
-  COGMO_SKILLS_DEPS_VOLUME: "cogmo-skills-deps-test",
 } as const;
 
 export default defineConfig({
