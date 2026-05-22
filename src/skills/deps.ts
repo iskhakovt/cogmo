@@ -302,6 +302,19 @@ WORKERID="$2"
 # fresh populate; the stale 3.14 dir orphans and the reaper cleans
 # it up on its next tick. The supervisor reads its own
 # sys.version_info to construct the same path on activation.
+#
+# Assumes the runtime image exposes a \`python3\` binary on PATH.
+# True today (python:3.14-slim base); a hypothetical Python 4 image
+# that renamed the binary to \`python4\` would need this line
+# updated. Major-in-suffix already protects the cache key, so the
+# only impact would be the script failing at this line vs at first
+# import.
+#
+# Command substitution runs synchronously and produces no side
+# effects on stdin, so PY_ABI completes before \`uv pip sync\` reads
+# the lockfile body. If a future change adds an earlier
+# stdin-consuming step, move this line above it to preserve that
+# ordering.
 PY_ABI=$(python3 -c "import sys; print(f'py{sys.version_info.major}.{sys.version_info.minor}')")
 VENV="${DEPS_CACHE_VOLUME_TARGET}/$HASH-$PY_ABI"
 TMP="${DEPS_CACHE_VOLUME_TARGET}/$HASH-$PY_ABI.tmp.$WORKERID"

@@ -103,6 +103,11 @@ def _kill_and_reap(pid: int) -> None:
         pass
 
 
+# In-container root for the deps-cache volume mount. Mirrors
+# `DEPS_CACHE_VOLUME_TARGET` on the TS side (`src/sandbox/index.ts`);
+# the populator and supervisor must agree on this path. Module-level
+# so tests can `monkeypatch.setattr(supervisor, "SKILL_VENVS_ROOT", ...)`
+# to redirect venv resolution into a fixture dir.
 SKILL_VENVS_ROOT = "/skill-venvs"
 
 # Defense-in-depth: refuse non-sha256-hex values so a malformed

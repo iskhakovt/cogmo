@@ -55,9 +55,12 @@ export const TaskInvokeSchema = z.object({
    * Tier 1 (Pyodide) ignores this field — Pyodide manages its own
    * import path via `micropip`.
    */
+  // Zod surfaces the failing value via `error.issues[i].input` on
+  // parse failure — the message stays terse; debug consumers reach
+  // for the value through the issue envelope.
   lockfileHash: z
     .string()
-    .regex(/^[0-9a-f]{64}$/, "must be a sha256 hex")
+    .regex(/^[0-9a-f]{64}$/, "lockfileHash must be sha256 hex")
     .optional(),
 });
 export type TaskInvoke = z.infer<typeof TaskInvokeSchema>;
