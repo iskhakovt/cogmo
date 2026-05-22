@@ -15,7 +15,11 @@ import type {
   SandboxSession,
   SessionSpec,
 } from "./index.js";
-import { ExecTimeoutError, LocalDockerSessionStateSchema } from "./index.js";
+import {
+  DEPS_CACHE_VOLUME_TARGET,
+  ExecTimeoutError,
+  LocalDockerSessionStateSchema,
+} from "./index.js";
 import type { CogmoSocketProxy } from "./proxy/index.js";
 import { assertRuntimeAvailable, dockerRuntimeName, type SandboxRuntime } from "./runtime.js";
 import type { SandboxStore } from "./store/index.js";
@@ -79,14 +83,6 @@ const CAPABILITIES: SandboxCapabilities = {
 };
 
 const HOME_VOLUME_TARGET = "/home/vscode";
-
-/**
- * Mount point for the skills-tier-2 deps cache volume — must match
- * `SKILL_VENVS_DIR` in `src/skills/deps.ts`. The populator writes
- * `<target>/<lockfile-hash>/` and the supervisor activates each task's
- * venv from the same path.
- */
-const DEPS_CACHE_VOLUME_TARGET = "/skill-venvs";
 
 /**
  * Local-Docker backend. Spawns task containers as siblings on the host

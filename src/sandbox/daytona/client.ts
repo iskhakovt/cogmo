@@ -429,6 +429,15 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
         "DaytonaSandboxClient.create: SessionSpec.allowPrivilegedRunc is Local-Docker-specific — Daytona uses the provider's runtime",
       );
     }
+    // TODO: depsCacheVolume — Daytona volume integration is a follow-up.
+    // The field is silently ignored here; tier-2 skills with declared
+    // deps fall back to per-container populate (no cross-worker reuse).
+    if (spec.depsCacheVolume) {
+      log.warn(
+        { taskId: spec.taskId, volumeName: spec.depsCacheVolume.volumeName },
+        "depsCacheVolume passed to Daytona backend but ignored (volume integration deferred)",
+      );
+    }
 
     const autoStopInterval = computeAutoStopInterval(spec.expiresAt);
     const warmedSnapshot = this.#snapshotByImage.get(spec.image);

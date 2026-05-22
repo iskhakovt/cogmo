@@ -41,12 +41,20 @@ export interface HomeVolumeSpec {
 }
 
 /**
+ * In-container mount point for the skills-tier-2 deps cache. Sandbox
+ * backends mount {@link DepsCacheVolumeSpec} here; the skills
+ * populator + supervisor read/write here. Single source of truth so
+ * the two modules don't drift.
+ */
+export const DEPS_CACHE_VOLUME_TARGET = "/skill-venvs";
+
+/**
  * Process-wide shared cache volume for skills-tier-2 per-lockfile-hash
- * virtualenvs. Mounted read-write at `/skill-venvs` inside the
- * container. Lives across worker recycles + shared across the pool's
- * workers — first task populates a given `<hash>/`; every subsequent
- * task on any worker reads the same `<hash>/.ready` and skips the
- * populate.
+ * virtualenvs. Mounted read-write at {@link DEPS_CACHE_VOLUME_TARGET}
+ * inside the container. Lives across worker recycles + shared across
+ * the pool's workers — first task populates a given `<hash>/`; every
+ * subsequent task on any worker reads the same `<hash>/.ready` and
+ * skips the populate.
  *
  * Local-Docker: one named Docker volume per host. The same name is
  * passed to every worker the pool spawns, so all containers see the
