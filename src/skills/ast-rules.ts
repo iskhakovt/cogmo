@@ -195,3 +195,99 @@ export const APPROVE_GATING_EFFECTS: ReadonlySet<SkillEffect> = new Set<SkillEff
 
 /** A declared secret count at or above this threshold forces `approve`. */
 export const APPROVE_SECRETS_THRESHOLD = 3;
+
+/** Deps that don't bump risk tier — pure HTTP / data / template libs. See `design/skills.md`. */
+export const DEPENDENCY_ALLOWLIST: ReadonlySet<string> = new Set<string>([
+  "anyio",
+  "beautifulsoup4",
+  "certifi",
+  "charset-normalizer",
+  "dateparser",
+  "h11",
+  "httpcore",
+  "httpx",
+  "idna",
+  "jinja2",
+  "lxml",
+  "markdown-it-py",
+  "markupsafe",
+  "orjson",
+  "pendulum",
+  "pydantic",
+  "pydantic-core",
+  "python-dateutil",
+  "pytz",
+  "pyyaml",
+  "requests",
+  "rich",
+  "sniffio",
+  "soupsieve",
+  "tenacity",
+  "typing-extensions",
+  "urllib3",
+]);
+
+/** Deps that force `approve` — destructive surfaces, RCE, credentials. See `design/skills.md`. */
+export const DEPENDENCY_APPROVE_LIST: ReadonlySet<string> = new Set<string>([
+  // Cloud SDKs — broad surface, IAM-shaped credentials
+  "boto3",
+  "botocore",
+  "google-cloud-storage",
+  "google-cloud-firestore",
+  "google-cloud-bigquery",
+  "azure-storage-blob",
+  // Payment / financial
+  "stripe",
+  "plaid-python",
+  "braintree",
+  // Mail
+  "sendgrid",
+  "mailgun",
+  // Messaging vendors with destructive surface
+  "twilio",
+  // Database drivers — surface area for arbitrary mutation
+  "psycopg",
+  "psycopg2",
+  "psycopg2-binary",
+  "pymongo",
+  "mysql-connector-python",
+  "redis",
+  // Remote execution / shell
+  "paramiko",
+  "fabric",
+  // OAuth-bearing wrappers
+  "requests-oauthlib",
+  "google-auth",
+  "google-auth-oauthlib",
+  // Google APIs SDK — the import skills use to issue Drive/Calendar/etc.
+  // writes; design doc's canonical OAuth example.
+  "google-api-python-client",
+  "googleapis-common-protos",
+  // Cluster / container control — arbitrary external mutation.
+  "kubernetes",
+  "docker",
+  // Telegram / Slack senders (mirrors the import rules)
+  "python-telegram-bot",
+  "slack-sdk",
+  "slackclient",
+  "discord-py",
+]);
+
+/** [PEP 503](https://peps.python.org/pep-0503/) name canonicalisation: lowercase + collapse `[-_.]` runs. */
+export function normaliseDepName(dep: string): string {
+  const idx = dep.indexOf("==");
+  const name = idx === -1 ? dep : dep.slice(0, idx);
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[-_.]+/g, "-");
+}
+
+export type DependencyCategory = "allowlist" | "notify" | "approve";
+
+export function categoriseDependency(dep: string): DependencyCategory {
+  const name = normaliseDepName(dep);
+  if (DEPENDENCY_APPROVE_LIST.has(name)) return "approve";
+  if (DEPENDENCY_ALLOWLIST.has(name)) return "allowlist";
+  return "notify";
+}

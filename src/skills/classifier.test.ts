@@ -17,6 +17,7 @@ function makeManifest(overrides: Partial<SkillManifest> = {}): SkillManifest {
     inputs: { type: "object", properties: {} },
     effects: [],
     secrets: [],
+    dependencies: [],
     cost_per_call_usd: 0,
     ...overrides,
   } satisfies SkillManifest;
@@ -54,6 +55,72 @@ describe("classifyManifest (live AST path)", () => {
 
   it("container tier still forces approve regardless of body", async () => {
     const log = await classifyManifest(makeManifest({ tier: "container" }), NOOP_BODY);
+    expect(log.risk_tier).toBe("approve");
+  });
+});
+
+// Dependency-tier gating runs through both classifier paths: the AST
+// path consumes `manifest.dependencies` via highestDepCategory; the
+// stub path consumes it via hasApproveDep. One block ensures both
+// paths agree on the approve-list / unknown-dep / PEP 503
+// normalisation contract. AST reaches `auto` for harmless inputs;
+// stub cannot (no AST means no read-only proof) and lands at `notify`.
+describe.each([
+  {
+    label: "AST path",
+    classify: (m: SkillManifest) => classifyManifest(m, NOOP_BODY),
+    nonApproveTier: "auto" as const,
+  },
+  {
+    label: "stub fallback",
+    classify: (m: SkillManifest) => Promise.resolve(classifyManifestStub(m)),
+    nonApproveTier: "notify" as const,
+  },
+])("dependencies — $label", ({ classify, nonApproveTier }) => {
+  it("allowlisted deps land at the path's lowest non-approve tier", async () => {
+    const log = await classify(
+      makeManifest({ dependencies: ["httpx==0.27.0", "pydantic==2.5.3"] }),
+    );
+    expect(log.risk_tier).toBe(nonApproveTier);
+    expect(log.declared_dependencies).toEqual(["httpx==0.27.0", "pydantic==2.5.3"]);
+  });
+
+  it("unknown deps bump to notify", async () => {
+    const log = await classify(makeManifest({ dependencies: ["some-obscure-pkg==1.0.0"] }));
+    expect(log.risk_tier).toBe("notify");
+  });
+
+  it.each([
+    ["boto3==1.34.0", "cloud SDK"],
+    ["paramiko==3.4.0", "remote execution"],
+    ["stripe==9.0.0", "financial"],
+    ["sendgrid==6.11.0", "external mail"],
+  ])("approve-list dep %s forces approve", async (dep) => {
+    const log = await classify(makeManifest({ dependencies: [dep] }));
+    expect(log.risk_tier).toBe("approve");
+  });
+
+  it("normalises PEP 503 names (case differences canonicalise)", async () => {
+    const log = await classify(makeManifest({ dependencies: ["Boto3==1.34.0"] }));
+    expect(log.risk_tier).toBe("approve");
+  });
+
+  it.each([
+    ["python-telegram-bot==21.0.0", "canonical form"],
+    ["python_telegram_bot==21.0.0", "underscore separators"],
+    ["python.telegram.bot==21.0.0", "dot separators"],
+    ["python--telegram--bot==21.0.0", "double-dash runs"],
+    ["python-_-telegram-_-bot==21.0.0", "mixed run separators"],
+    ["Python_Telegram-Bot==21.0.0", "mixed case + separators"],
+  ])("collapses PEP 503 separator runs (%s)", async (dep) => {
+    const log = await classify(makeManifest({ dependencies: [dep] }));
+    expect(log.risk_tier).toBe("approve");
+  });
+
+  it("worst category wins across deps (one approve-list dep dominates)", async () => {
+    const log = await classify(
+      makeManifest({ dependencies: ["httpx==0.27.0", "paramiko==3.4.0"] }),
+    );
     expect(log.risk_tier).toBe("approve");
   });
 });

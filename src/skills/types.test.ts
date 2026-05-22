@@ -75,6 +75,7 @@ describe("ClassifierLogSchema", () => {
     declared_effects: [],
     detected_effects: [],
     declared_secrets: [],
+    declared_dependencies: [],
     validation_errors: [],
   };
 

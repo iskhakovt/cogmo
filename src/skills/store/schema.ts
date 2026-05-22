@@ -96,6 +96,15 @@ export const skills = pgTable(
     /** Last fire timestamp. Null = never fired. */
     lastFiredAt: timestamp("last_fired_at", { withTimezone: true }),
     gitSha: text("git_sha").notNull(),
+    /**
+     * sha256 of `requirements.lock` at `git_sha`. Null when the skill's
+     * manifest declares no dependencies. Drives the per-lockfile-hash venv
+     * cache key and the reachability sweep: a `<hash>/` cache dir is GC-able
+     * iff no enabled-or-disabled skill row carries it. Updated atomically
+     * with `git_sha` in the same register/approve/rollback transaction.
+     * See `design/skills.md` → Dependencies.
+     */
+    lockfileHash: text("lockfile_hash"),
     inputs: jsonbZod("inputs", SkillInputsSchema).notNull(),
     outputs: jsonbZod("outputs", SkillIoSchema), // null for side-effect-only skills
     disabled: boolean("disabled").notNull().default(false),

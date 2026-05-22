@@ -63,12 +63,13 @@ Skills execute in one of two sandboxes, chosen by skill metadata. No middle grou
 
 **Used for:** skills that need `subprocess`, native binaries, arbitrary pip wheels with C extensions, or full-OS isolation.
 
-**Why:** full Python + OS ecosystem, hardened namespaces (user namespaces = root-in-container ≠ root-on-host), consistent with the runtime already chosen for coding delegation. Full [sandbox.md](sandbox.md) infrastructure reused.
+**Why:** full Python + OS ecosystem, hardened namespaces (user namespaces = root-in-container ≠ root-on-host), consistent with the runtime already chosen for coding delegation. Full [sandbox.md](sandbox.md) infrastructure reused. The `cogmo-skills:<version>` runtime image carries `uv` so register-time compile and first-invoke populate run the same resolver inside the sandbox — see [[Dependencies]].
 
 **Constraints:**
 
 - Higher resource overhead (~100–300 MB per worker for Python + imports)
 - 1–2s cold start if not warm — addressed by the warm pool
+- First task using a new lockfile hash pays a one-time populate cost (single-digit seconds for typical dep sets); shared across all subsequent tasks and skills with the same lockfile
 
 ### Why unify on sysbox (not plain runc) for tier 2
 
@@ -268,10 +269,10 @@ Follows the Anthropic SKILL.md standard for progressive disclosure (see [integra
 ```text
 skills/
   summarize-email/
-    SKILL.md           — name, description, when-to-use (retrieval key)
-    skill.py           — entrypoint
-    requirements.txt   — explicit deps (tier 2)
-    test.py            — optional smoke test
+    SKILL.md             — name, description, when-to-use (retrieval key)
+    skill.py             — entrypoint
+    requirements.lock    — `uv pip compile`-generated, hash-pinned; see [[Dependencies]]
+    test.py              — optional smoke test
   check-spending/
     SKILL.md
     skill.py
@@ -321,6 +322,12 @@ outputs:
   properties:
     summary: { type: string }
     count: { type: integer }
+
+# Dependencies — optional; absent = stdlib only. See [[Dependencies]].
+# Strict name==version form. No ranges, no extras, no URLs, no path specifiers.
+dependencies:
+  - httpx==0.27.0
+  - google-api-python-client==2.108.0
 
 # Permissions & effects — optional but drive risk classification
 effects:
@@ -401,6 +408,16 @@ export const SkillManifestSchema = z.object({
   inputs: z.record(z.unknown()),
   outputs: z.record(z.unknown()).optional(),
 
+  // Dependencies — direct Python deps. Strict `name==version` only; see [[Dependencies]].
+  // The regex rejects ranges, extras, URLs, git refs, and path specifiers at the
+  // manifest layer. Transitive resolution lives in the generated requirements.lock.
+  dependencies: z.array(
+    z.string().regex(
+      /^[a-z0-9]([a-z0-9._-]*[a-z0-9])?==[a-zA-Z0-9.+!-]+$/i,
+      "must be 'name==version' (no ranges, extras, URLs, or git refs)",
+    ),
+  ).default([]),
+
   // Permissions & effects
   effects: z.array(z.enum(SKILL_EFFECTS)).default([]),
   secrets: z.array(z.union([
@@ -441,14 +458,15 @@ export const SkillManifestSchema = z.object({
 
 **Compatibility with Anthropic's SKILL.md:** a minimal Anthropic SKILL.md with just `name` + `description` parses as an invalid Cogmo manifest (missing `tier` and `inputs`), but the *fields present* are interpreted the same. When mirroring to Anthropic's ecosystem (e.g., loading a Cogmo skill into Claude), the superset fields are ignored.
 
-**Validation happens in four places — all reading the same schema:**
+**Validation happens in five places — all reading the same schema:**
 
 1. **`register` RPC** — parses manifest, rejects with `errors[]` on schema failure.
-2. **Classifier** — reads validated manifest fields (`effects`, `secrets`, `tier`) to assign risk tier.
+2. **Classifier** — reads validated manifest fields (`effects`, `secrets`, `tier`, `dependencies`) to assign risk tier.
 3. **Dispatcher** — reads `inputs` schema to validate invocation arguments; reads `resources` to set cgroup/isolate caps; reads `budget` to check cost.
 4. **Tool registrar** — reads `description` + `inputs` to build the LLM's per-skill tool entry.
+5. **Dependency populator** — reads `dependencies` to verify the committed `requirements.lock` is current; reads it again at first-invoke to populate the venv. See [[Dependencies]].
 
-Single schema, four consumers, zero drift.
+Single schema, five consumers, zero drift.
 
 ## Risk tiering & auto-apply `[confirmed]`
 
@@ -503,11 +521,12 @@ The `register` RPC:
 3. **No-op check.** If `current skills.git_sha == branch tip sha` → return `{ status: "live", … }` with no side effects (idempotent).
 4. **Pending-approval check.** If any `skill_deploys` row for this skill has `status = 'pending_approval'` → return `{ status: "rejected", errors: ["pending deploy exists; approve or deny first"] }`.
 5. **Read + classify.** `git show <branch-tip>:SKILL.md` / `:skill.py`. Run classifier + static analysis. Validate manifest against `SkillManifestSchema`.
-6. **Branch by tier:**
-   - `auto` / `notify` → `git update-ref refs/heads/main <branch-tip>` (advances main), delete the feature branch, `UPSERT skills`, insert `skill_deploys` with `status = 'live'`. The audit trail lives in `skill_deploys.git_sha` — the branch pointer itself is not the record, so cleanup is unambiguous.
+6. **Verify lockfile.** If `manifest.dependencies` is non-empty, `git show <branch-tip>:requirements.lock` must exist. Spawn a short-lived sandbox session, run `uv pip compile --generate-hashes` against `manifest.dependencies`, and byte-compare against the committed lockfile. Mismatch → `errors: ["requirements.lock is stale; re-run 'uv pip compile' and recommit"]`. Resolver failure → `errors: ["dependency resolution failed: <stderr>"]`. The session is destroyed regardless of outcome. See [[Dependencies]].
+7. **Branch by tier:**
+   - `auto` / `notify` → `git update-ref refs/heads/main <branch-tip>` (advances main), delete the feature branch, `UPSERT skills` (including `lockfile_hash = sha256(requirements.lock)` or `NULL` if no deps), insert `skill_deploys` with `status = 'live'`. The audit trail lives in `skill_deploys.git_sha` — the branch pointer itself is not the record, so cleanup is unambiguous.
    - `approve` → insert `skill_deploys` with `status = 'pending_approval'`. Branch **stays** until `approveDeploy` / `denyDeploy` resolves the deploy. `main` does not move. Fire Telegram prompt.
    - Validation errors → return `errors[]`, nothing persisted.
-7. **Commit** (releases lock). Return result synchronously.
+8. **Commit** (releases lock). Return result synchronously.
 
 RPC signature:
 
@@ -554,6 +573,131 @@ type EnableResult =
 - **No race via direct push.** Pre-receive hook rejects non-Cogmo writes to `main`; advisory lock serializes Cogmo's own writes.
 - **Idempotent.** Registering a branch whose tip is already `main` is a no-op. Safe to retry on network timeouts.
 - **Git push is orthogonal.** Pushing branches to a user-configured remote (backup, multi-machine) neither triggers nor depends on registration.
+
+## Dependencies `[proposed]`
+
+Skills declare direct Python dependencies in `SKILL.md`. Register produces a hash-pinned lockfile committed alongside `skill.py`. At first invocation of a given lockfile hash, the worker materialises a private virtualenv on a persisted volume; subsequent tasks activate the existing venv. One venv per lockfile hash, shared across workers and across skills with identical lockfiles.
+
+### Declaration
+
+`dependencies:` in the manifest frontmatter — a flat list of strict pins:
+
+```yaml
+dependencies:
+  - httpx==0.27.0
+  - pydantic==2.5.3
+  - google-api-python-client==2.108.0
+```
+
+Strict `name==version` only. The Zod regex in `SkillManifestSchema` rejects every other form at the manifest layer:
+
+| Excluded form | Why |
+|-|-|
+| Ranges (`pkg>=1.2,<2`) | Resolution drifts between register and re-resolve — same skill resolves to different transitives over time. |
+| Extras (`pkg[foo]`) | Add transitive surface invisible in the manifest line — bypasses the classifier's per-package read. |
+| URL / git refs (`pkg @ git+https://…`) | Supply-chain surface — bypasses PyPI + hash pinning. |
+| Path / file specifiers (`./local-pkg`) | Non-portable, no meaningful audit, breaks the sandbox model. |
+| Bare names (`pkg`) | Implicit "latest" — same drift class as ranges. |
+
+Skills needing an extra declare the underlying package directly. URL/path forms are a future escape hatch when a real driver appears.
+
+Empty `dependencies` is the common case — HTTP-only skills using `urllib` from the stdlib pay no populate cost and skip the venv-overlay activation entirely.
+
+### Lockfile
+
+`requirements.lock` lives next to `skill.py` in the skill's directory — hash-pinned via `uv pip compile --generate-hashes`, transitive graph fully expanded, committed by the skill author in the same git commit as `SKILL.md`. Atomic from the operator's perspective.
+
+`SKILL.md`'s `dependencies` is the source of truth for the classifier and for what authors edit. `requirements.lock` is the source of truth for `uv pip sync` at populate time. Register verifies they agree by re-running the compile inside a short-lived sandbox session (`SandboxClient.create()` → `execStreaming(["uv", "pip", "compile", "--generate-hashes", "-"])` → destroy) and byte-comparing against the committed file — stale lockfile fails register with a clear error. The compile runs against the `uv` binary baked into `ghcr.io/iskhakovt/cogmo-skills:<version>`, so the resolver at register matches the resolver at populate, byte-for-byte.
+
+No host-side `uv` dependency. The Cogmo TS host shells out to the sandbox for compile + populate; the `uv` binary is part of the runtime image, not the deployment surface.
+
+### Cache layout
+
+A persisted volume holds the wheel cache and per-lockfile-hash virtualenvs:
+
+```text
+/var/cache/cogmo-skills/
+  uv-cache/                          # UV_CACHE_DIR — content-addressed wheel cache
+  venvs/
+    <sha256(requirements.lock)>/     # populated, ready
+      bin/
+      lib/pythonX.Y/site-packages/
+      .ready                          # marker — readers gate on this
+    <other-hash>.tmp.<workerId>/     # mid-populate; rename-target
+```
+
+Local sysbox bind-mounts this directory from the host at `/var/cache/cogmo-skills`. Daytona mounts a Daytona Volume at the same path, subpath per lockfile-hash. `uv-cache/` and `venvs/` share the same filesystem so uv's hardlink mode works — cross-filesystem hardlinks silently fall back to copy and inflate disk by ~100× ([uv #15149](https://github.com/astral-sh/uv/issues/15149)). Wheels are downloaded once across the entire cache; every venv hardlinks from `uv-cache/` for free dedup.
+
+### Populate
+
+First task using a given lockfile hash populates the venv. Concurrent populators are serialised by a Postgres advisory lock; idempotent against rerun:
+
+```text
+1. pg_advisory_xact_lock(hashtext("skill-venv:" + lockfileHash))
+2. if /var/cache/cogmo-skills/venvs/<hash>/.ready exists → done, release lock
+3. uv venv /var/cache/cogmo-skills/venvs/<hash>.tmp.<workerId>
+4. uv pip sync --require-hashes --only-binary=:all: -r requirements.lock
+                                  (into the tmp venv, hardlinking from uv-cache/)
+5. touch /var/cache/cogmo-skills/venvs/<hash>.tmp.<workerId>/.ready
+6. rename /var/cache/cogmo-skills/venvs/<hash>.tmp.<workerId>
+       → /var/cache/cogmo-skills/venvs/<hash>
+                                  (atomic; readers see the populated venv or nothing)
+7. release lock
+```
+
+`.ready` is the marker readers gate on — `uv` itself does not provide directory-level atomicity guarantees for parallel `--target` or `venv` population ([uv #15335](https://github.com/astral-sh/uv/issues/15335), [#13883](https://github.com/astral-sh/uv/issues/13883)). The marker file pattern is the portable answer; the advisory lock keeps N workers from redundantly resolving the same lockfile.
+
+Failure during steps 3-5 leaves an orphaned `<hash>.tmp.<workerId>/` directory; the cache reaper sweeps `.tmp.*` entries older than 10 minutes regardless of source skill.
+
+`--only-binary=:all:` forbids source distributions by default — sdists require a build toolchain in the sandbox and run arbitrary `setup.py` code at install. A skill declaring a package available only as sdist fails at register. Sdist support is a future opt-in (`allow_sdist: true` in the manifest, automatic `approve` tier) when a real driver appears.
+
+### Activation
+
+Before forking the task child, the supervisor activates the skill venv:
+
+```python
+venv = f"/var/cache/cogmo-skills/venvs/{lockfile_hash}"
+os.environ["VIRTUAL_ENV"] = venv
+os.environ["PATH"] = f"{venv}/bin:{os.environ['PATH']}"
+sys.path[:0] = [f"{venv}/lib/python{sys.version_info[0]}.{sys.version_info[1]}/site-packages"]
+```
+
+The supervisor's own venv (`/opt/cogmo-skills/.venv`, where `cogmo_skills_runtime` lives) stays unchanged — the supervisor needs it to keep serving the dispatcher protocol. The skill venv is prepended to `sys.path`; the runtime venv is NOT on `sys.path` at all inside the child. Skill code can `import httpx` but cannot `import cogmo_skills_runtime` — the abstraction stays sealed.
+
+A skill with `lockfile_hash IS NULL` (empty `dependencies`) skips activation entirely — the task runs in a child with stdlib visible and nothing else.
+
+### Tier 1 (WASM)
+
+Pyodide consumes the same `requirements.lock` via `micropip.install(packages, index_urls=[mirror])` at worker init. Wheels cached on the host disk in `pyodide-cache/<lockfile_hash>/`, keyed identically to the sysbox case for symmetric audit.
+
+Pyodide-incompatible wheels (native extensions outside the [pre-built Pyodide list](https://pyodide.org/en/stable/usage/packages-in-pyodide.html) and not available as pure-Python wheels via `micropip`) fail at register — the WASM tier validates package compatibility against Pyodide's manifest before the skill goes live, not at first invocation. Skills with such deps must declare `tier: container`.
+
+### Cache reachability
+
+`/var/cache/cogmo-skills/venvs/<hash>/` is reachable iff some `skills` row (enabled or disabled, since disabled skills can re-enable) has `lockfile_hash = <hash>`. The reaper sweeps unreachable entries older than a 7-day grace period — catches the rollback-then-roll-forward case without forcing re-populate.
+
+`skills.lockfile_hash` is denormalised from git for cheap reachability queries — updated atomically in the same transaction that advances `git_sha`. LRU is the wrong policy on this volume: a rarely-used but live skill would lose its venv and pay a multi-second cold start on the next invocation. Reachability with a grace period is correct.
+
+`uv-cache/` (the wheel cache, not the venvs) is swept by `uv cache prune` on a separate cadence. Wheels are shared across many venvs and reachability is harder to compute (track which wheels each `requirements.lock` references); growth is bounded by `(name, version, platform tag)` distinct combinations and stays manageable at personal scale without aggressive eviction.
+
+### Classifier inputs
+
+The classifier reads `dependencies` directly from the manifest — not the lockfile. Transitive graphs are too noisy for the risk decision; the direct deps are what authors saw and what humans audit. Three categories live in `src/skills/ast-rules.ts` next to the existing effect rules:
+
+| Category | Examples | Tier impact |
+|-|-|-|
+| **Allowlist** | `httpx`, `requests`, `pydantic`, `pyyaml`, `python-dateutil`, `markdown-it-py`, `beautifulsoup4` | All deps allowlisted → does not block `auto`. |
+| **Notify** | Anything not on either explicit list — unknown but no known-bad pattern | Bumps to at least `notify`. |
+| **Approve** | `boto3`, `paramiko`, `psycopg`, `stripe`, `requests-oauthlib`, anything matching `*-credentials` / `*-aws-*` / `crypto*` patterns | Bumps to `approve` regardless of other signals. |
+
+Dep additions to a previously-deployed skill are widening events — re-classified, may bump tier, may require approval. Same flow as effect widening per "Edit vs create".
+
+### Security posture
+
+- **Hash pinning via `--require-hashes`** is non-optional. The lockfile carries SHA-256 per wheel; `uv pip sync` refuses to install anything unhashed.
+- **`--only-binary=:all:`** forbids sdists by default. Sdists run arbitrary install-time code and need a build toolchain — both are surface the auto tier should not provide.
+- **Public PyPI for v1.** Hash pinning makes the index untrusted-but-verified. A private pull-through mirror (Devpi / Bandersnatch) is the obvious next step when (a) the user base widens beyond single-operator or (b) we want quarantine windows on new package versions to catch flash-malicious publishes. `[research]`.
+- **PEP 740 / Sigstore attestation verification.** 132k+ packages had attestations by Mar 2026 via PyPI Trusted Publishing. Verification via `pypi-attestations` is "free defense in depth" once the mirror is in place. `[research]`.
 
 ## Cost tracking `[proposed]`
 
@@ -883,17 +1027,21 @@ CREATE TYPE skill_run_trigger AS ENUM ('manual', 'cron', 'event');
 CREATE TYPE skill_deploy_status AS ENUM ('pending_approval', 'approved', 'denied', 'live', 'rolled_back');
 
 skills (
-  id          UUID v7 PK,
-  name        TEXT NOT NULL UNIQUE,        -- matches dir name
-  tier        skill_tier NOT NULL,
-  risk_tier   skill_risk_tier NOT NULL,    -- computed by classifier at deploy
-  effects     JSONB NOT NULL,              -- SkillEffectsSchema (declared effects list)
-  schedule    TEXT,                        -- nullable: cron expression; null = not scheduled
-  git_sha     TEXT NOT NULL,               -- commit hash of current live version
-  inputs      JSONB NOT NULL,              -- SkillIoSchema (opaque JSON Schema — see Manifest)
-  outputs     JSONB,                       -- nullable: side-effect-only skills have no structured output. SkillIoSchema when present.
-  disabled    BOOLEAN NOT NULL DEFAULT false,
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+  id            UUID v7 PK,
+  name          TEXT NOT NULL UNIQUE,        -- matches dir name
+  tier          skill_tier NOT NULL,
+  risk_tier     skill_risk_tier NOT NULL,    -- computed by classifier at deploy
+  effects       JSONB NOT NULL,              -- SkillEffectsSchema (declared effects list)
+  schedule      TEXT,                        -- nullable: cron expression; null = not scheduled
+  git_sha       TEXT NOT NULL,               -- commit hash of current live version
+  lockfile_hash TEXT,                        -- nullable: null when manifest.dependencies is empty.
+                                             -- sha256(requirements.lock @ git_sha). Drives venv cache
+                                             -- key + reachability GC; updated atomically with git_sha.
+                                             -- See Dependencies.
+  inputs        JSONB NOT NULL,              -- SkillIoSchema (opaque JSON Schema — see Manifest)
+  outputs       JSONB,                       -- nullable: side-effect-only skills have no structured output. SkillIoSchema when present.
+  disabled      BOOLEAN NOT NULL DEFAULT false,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 
 skill_deploys (
@@ -991,6 +1139,7 @@ src/skills/
   worker-container.ts — sysbox container spawn (via Sandbox interface)
   protocol.ts         — JSON-RPC framing
   sync.ts             — git → DB sync on deploy
+  deps.ts             — lockfile compile + verify (register), venv populate + activate (invoke). See Dependencies.
   store/
     schema.ts         — skills, skill_runs tables
     index.ts          — SkillStore interface + Drizzle impl
@@ -1054,6 +1203,18 @@ interface SkillRunner {
 | Secrets access | Pull model — `ctx.secrets.get(name)` gated by manifest allowlist | Materializes secrets only at point of use; per-access audit; zero-touch rotation. Reads naturally in Python. |
 | Secrets storage | Existing encrypted `secrets` table (per [infrastructure.md](infrastructure.md)) | Cogmo already has a minimal self-hosted vault. No external service at personal scale. |
 | Egress-proxy substitution | Deferred (`[research]`) | Adds sandbox-invisible secrets via placeholder + egress proxy that validates destination and substitutes. Earns complexity only when trust boundary widens. |
+| Dep declaration | `dependencies: ["pkg==version", ...]` in `SKILL.md`; Zod regex rejects ranges/extras/URLs/paths | One Zod schema, five consumers — same drift-prevention as the rest of the manifest. Strict pinning prevents resolution drift between register and re-resolve. |
+| Lockfile | `requirements.lock` next to `skill.py`, hash-pinned via `uv pip compile --generate-hashes`, author-committed | Transitive graph pinned; register byte-compares to catch staleness. Atomic with the rest of the skill from the operator's POV. |
+| Resolver | `uv` (compile + sync) baked into `cogmo-skills:<version>` runtime image | Sub-100ms venv creation; hash pinning is first-class; resolver at register matches resolver at populate byte-for-byte. Already standardised across the codebase. |
+| Where compile runs at register | Short-lived sandbox session via `SandboxClient` | No host-side `uv` dependency; same `uv` binary as runtime; ~1-2s register latency is acceptable for a once-per-skill-version op. |
+| Dep cache shape | Per-lockfile-hash venv on a persisted volume, shared `UV_CACHE_DIR` for wheels | Avoids per-skill image rebuild (kills warm-pool economics); uv hardlinks share wheels across venvs for free dedup. |
+| Cache atomicity | Populate to `<hash>.tmp.<workerId>/`, `.ready` marker, atomic rename; `pg_advisory_xact_lock` serializes populators | uv has no directory-level atomicity guarantees under concurrent writers ([uv #15335](https://github.com/astral-sh/uv/issues/15335)). Marker file + rename + advisory lock is the portable answer. |
+| Cache reachability | `skills.lockfile_hash` denormalised from git; reaper sweeps `<hash>/` with no live reference + 7-day grace | LRU evicts cold-but-live skills and pays multi-second cold start on next invoke. Reachability + grace period is correct. |
+| Source distributions | Forbidden (`--only-binary=:all:`) | Sdists run arbitrary install-time code + need a build toolchain. Auto-tier never includes sdists. Opt-in escape hatch deferred to a real driver. |
+| Venv overlay vs `--target` | Per-skill venv, not `--target` + PYTHONPATH | `--target` has well-known namespace-package collisions ([pip #10629](https://github.com/pypa/pip/issues/10629)), inert `.pth` files, missing console scripts; PYTHONPATH overlay shadows base-wins which is surprising. Venv creation is cheap enough that "always a venv" is defensible. |
+| Tier 1 deps | `micropip.install(packages, index_urls=[mirror])` at WASM worker init; wheels cached per lockfile-hash | Symmetric audit with sysbox cache key. Pyodide-incompatible wheels fail at register, not at first invocation. |
+| Private mirror | Deferred (`[research]`) | Public PyPI + hash pinning is fine at single-operator scale. Devpi/Bandersnatch becomes table stakes when scale widens or quarantine windows on new releases are wanted. |
+| Attestation verification | Deferred (`[research]`) | PEP 740 attestations are emerging (132k+ packages by Mar 2026). Verification via `pypi-attestations` belongs alongside the mirror when that lands. |
 
 ## Open questions
 

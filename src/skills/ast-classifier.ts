@@ -41,6 +41,7 @@ import {
   APPROVE_GATING_EFFECTS,
   APPROVE_SECRETS_THRESHOLD,
   CALL_RULES,
+  categoriseDependency,
   IMPORT_RULES,
   REJECT_ON_UNDECLARED,
 } from "./ast-rules.js";
@@ -349,8 +350,16 @@ function computeRiskTier(opts: {
   validationErrors: ReadonlyArray<string>;
   tier: SkillManifest["tier"];
   secretsCount: number;
+  /**
+   * Highest-severity dep category across `manifest.dependencies`. A
+   * single `approve`-listed dep forces `approve`; otherwise any dep
+   * outside the allowlist bumps to at least `notify`. `none` means
+   * either no deps or every dep is allowlisted.
+   */
+  depCategory: "none" | "notify" | "approve";
 }): ClassifierLog["risk_tier"] {
   if (opts.validationErrors.length > 0) return "approve";
+  if (opts.depCategory === "approve") return "approve";
 
   const all = new Set<SkillEffect>([...opts.declared, ...opts.detected]);
   for (const e of all) {
@@ -358,8 +367,24 @@ function computeRiskTier(opts: {
   }
   if (opts.tier === "container") return "approve";
   if (opts.secretsCount >= APPROVE_SECRETS_THRESHOLD) return "approve";
+  if (opts.depCategory === "notify") return "notify";
   if (all.size > 0) return "notify";
   return "auto";
+}
+
+/**
+ * Fold the per-dep categories into a single tier-impact label. The
+ * classifier never needs the full per-dep breakdown for the tier
+ * decision — only the worst category drives it.
+ */
+function highestDepCategory(deps: ReadonlyArray<string>): "none" | "notify" | "approve" {
+  let worst: "none" | "notify" | "approve" = "none";
+  for (const dep of deps) {
+    const cat = categoriseDependency(dep);
+    if (cat === "approve") return "approve";
+    if (cat === "notify") worst = "notify";
+  }
+  return worst;
 }
 
 /**
@@ -420,6 +445,7 @@ export async function classifyWithAst(
     validationErrors: validation_errors,
     tier: manifest.tier,
     secretsCount: declaredSecrets.length,
+    depCategory: highestDepCategory(manifest.dependencies),
   });
 
   return {
@@ -428,6 +454,7 @@ export async function classifyWithAst(
     declared_effects: manifest.effects,
     detected_effects: [...detectedSet].sort(),
     declared_secrets: declaredSecrets,
+    declared_dependencies: manifest.dependencies,
     validation_errors,
   };
 }
@@ -446,6 +473,7 @@ function classifyFromDeclarationsOnly(manifest: SkillManifest): ClassifierLog {
     validationErrors: [],
     tier: manifest.tier,
     secretsCount: declaredSecrets.length,
+    depCategory: highestDepCategory(manifest.dependencies),
   });
   return {
     classifier_version: AST_CLASSIFIER_VERSION,
@@ -453,6 +481,7 @@ function classifyFromDeclarationsOnly(manifest: SkillManifest): ClassifierLog {
     declared_effects: manifest.effects,
     detected_effects: [],
     declared_secrets: declaredSecrets,
+    declared_dependencies: manifest.dependencies,
     validation_errors: [],
   };
 }
