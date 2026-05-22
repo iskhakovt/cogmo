@@ -204,6 +204,7 @@ async function generateViaAiSdk(args: {
       // public `generateImage` signature only declares `string`
       // (provider-specific extension surfaced via fal's `prompt.images`
       // — see vercel/ai #11573 thread on ai-sdk-providers/fal docs).
+      // biome-ignore lint/plugin/no-unsafe-cast: AI SDK declares prompt: string; fal accepts { text, images } at runtime per vercel/ai#11573.
       prompt: promptArg as unknown as string,
       ...(args.aspectRatio !== undefined && {
         // AI SDK types aspectRatio as `${number}:${number}`. Our Zod

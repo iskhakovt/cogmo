@@ -82,7 +82,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
       if (typeof msg.content === "string") {
         tokens += enc.encode(msg.content).length;
       } else if (Array.isArray(msg.content)) {
-        for (const part of msg.content as Array<{ type: string; text?: string }>) {
+        for (const part of msg.content) {
           if (part.type === "text" && part.text) {
             tokens += enc.encode(part.text).length;
           }
@@ -92,22 +92,16 @@ export class OpenAICompatibleProvider implements LlmProvider {
         }
       }
 
-      // OpenAI SDK's ChatCompletionMessage union doesn't surface tool_calls
-      // on every variant we hit at runtime; narrow via runtime check below.
-      const toolCalls = (msg as unknown as Record<string, unknown>).tool_calls as
-        | Array<{ function: { name: string; arguments: string } }>
-        | undefined;
-      if (toolCalls) {
-        for (const tc of toolCalls) {
+      if (msg.role === "assistant" && msg.tool_calls) {
+        for (const tc of msg.tool_calls) {
+          if (tc.type !== "function") continue;
           tokens += enc.encode(tc.function.name).length;
           tokens += enc.encode(tc.function.arguments).length;
         }
       }
 
-      // Tool role messages (tool results)
-      if ((msg as { role: string }).role === "tool") {
-        const toolContent = (msg as { content?: string }).content;
-        if (toolContent) tokens += enc.encode(toolContent).length;
+      if (msg.role === "tool" && typeof msg.content === "string") {
+        tokens += enc.encode(msg.content).length;
       }
     }
 
@@ -512,10 +506,10 @@ const REFUSAL_ERROR_CODES = new Set<string>([
  */
 function toRefusalErrorIfMatches(err: unknown): RefusalError | undefined {
   if (!(err instanceof Error)) return undefined;
-  const status = (err as unknown as { status?: unknown }).status;
-  if (status !== 400) return undefined;
-  const code = (err as unknown as { code?: unknown }).code;
-  if (typeof code !== "string" || !REFUSAL_ERROR_CODES.has(code)) return undefined;
+  if (!("status" in err) || typeof err.status !== "number" || err.status !== 400) return undefined;
+  if (!("code" in err) || typeof err.code !== "string" || !REFUSAL_ERROR_CODES.has(err.code)) {
+    return undefined;
+  }
   return new RefusalError(err.message, err);
 }
 

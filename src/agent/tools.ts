@@ -1,4 +1,5 @@
 import { type ZodType, z } from "zod";
+import { toObjectJsonSchema } from "../llm/json-schema.js";
 import type { JsonSchema, ToolDefinition } from "../llm/types.js";
 import { logger } from "../logger.js";
 import type { Service } from "./service.js";
@@ -115,9 +116,7 @@ export function defineTool<T>(opts: {
       `defineTool(${opts.name}): invocationBudget must be a positive integer (>= 1); got ${opts.invocationBudget}`,
     );
   }
-  // z.toJSONSchema returns Zod's JSONSchema7-flavoured shape; our internal
-  // JsonSchema type is a narrower subset that the LLM providers accept.
-  const inputSchema = z.toJSONSchema(opts.schema) as unknown as JsonSchema;
+  const inputSchema = toObjectJsonSchema(opts.schema);
   return {
     name: opts.name,
     description: opts.description,

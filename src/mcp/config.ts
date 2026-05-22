@@ -82,6 +82,19 @@ export interface McpServerSpec {
   enabled: boolean;
 }
 
+/**
+ * Boundary-input shape for `transport.mcp.addServer` — `config` is `unknown`
+ * because the caller (Telegram /mcp add, future channels) hands us raw
+ * `JSON.parse` output. The transport layer validates with
+ * `McpServerConfigSchema` before constructing an `McpServerSpec` for the
+ * registry / store layers.
+ */
+export interface McpServerSpecInput {
+  name: string;
+  config: unknown;
+  enabled: boolean;
+}
+
 export interface McpServer {
   id: string;
   name: string;

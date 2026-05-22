@@ -125,10 +125,9 @@ export function isRetriableProviderError(err: unknown): boolean {
 
 function extractStatus(err: Error): number | undefined {
   // SDK error subclasses (Anthropic, OpenAI) carry a `status` field that
-  // Error's type doesn't promise; runtime narrowing via the typeof check
-  // below guards the read.
-  const status = (err as unknown as { status?: unknown }).status;
-  return typeof status === "number" ? status : undefined;
+  // Error's type doesn't promise; `in` narrows + typeof guards the read.
+  if (!("status" in err)) return undefined;
+  return typeof err.status === "number" ? err.status : undefined;
 }
 
 function noop(): void {}
