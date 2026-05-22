@@ -413,7 +413,7 @@ export const SkillManifestSchema = z.object({
   // manifest layer. Transitive resolution lives in the generated requirements.lock.
   dependencies: z.array(
     z.string().regex(
-      /^[a-z0-9]([a-z0-9._-]*[a-z0-9])?==[a-zA-Z0-9.+\-]+$/i,
+      /^[a-z0-9]([a-z0-9._-]*[a-z0-9])?==[a-zA-Z0-9.+!-]+$/i,
       "must be 'name==version' (no ranges, extras, URLs, or git refs)",
     ),
   ).default([]),

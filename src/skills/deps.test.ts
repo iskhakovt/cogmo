@@ -69,21 +69,25 @@ describe("readLockfileAtSha", () => {
   });
 
   it("returns 'missing' when the lockfile is not committed at this sha", async () => {
-    const sha = await commit({ "other.txt": "x" });
-    // The previous test left a lockfile in the working tree; remove it so this
-    // commit really lacks one. (Using `git rm` to drop tracking.)
-    await execFileP("git", ["-C", setup.work, "rm", "-f", REQUIREMENTS_LOCK_FILE]).catch(() => {});
-    const noLockSha = (
-      await execFileP("git", ["-C", setup.work, "commit", "-m", "drop lockfile", "--allow-empty"])
-    ).stdout;
-    void noLockSha;
-    const { stdout } = await execFileP("git", ["-C", setup.work, "rev-parse", "HEAD"]);
-    const result = await readLockfileAtSha(setup.work, stdout.trim());
-    expect(result.isErr()).toBe(true);
-    if (!result.isErr()) return;
-    expect(result.error.kind).toBe("missing");
-    // Reference the earlier commit for clarity (older history still has the lockfile).
-    void sha;
+    // Fresh repo with zero lockfile history — avoids dependency on
+    // commits left by earlier tests in the shared fixture.
+    const dir = await mkdtemp(join(tmpdir(), "skills-deps-missing-"));
+    try {
+      await execFileP("git", ["init", "-b", "main", dir]);
+      await execFileP("git", ["-C", dir, "config", "user.email", "test@cogmo.dev"]);
+      await execFileP("git", ["-C", dir, "config", "user.name", "test"]);
+      await execFileP("git", ["-C", dir, "config", "commit.gpgsign", "false"]);
+      await writeFile(join(dir, "other.txt"), "x");
+      await execFileP("git", ["-C", dir, "add", "."]);
+      await execFileP("git", ["-C", dir, "commit", "-m", "no lockfile"]);
+      const { stdout } = await execFileP("git", ["-C", dir, "rev-parse", "HEAD"]);
+      const result = await readLockfileAtSha(dir, stdout.trim());
+      expect(result.isErr()).toBe(true);
+      if (!result.isErr()) return;
+      expect(result.error.kind).toBe("missing");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("returns 'empty' when the lockfile is committed but blank", async () => {
