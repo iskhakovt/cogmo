@@ -1,7 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { err, ok, type Result } from "neverthrow";
 import { logger } from "../logger.js";
-import type { ResourceLimits, SandboxClient, SandboxSession } from "../sandbox/index.js";
+import {
+  DEPS_CACHE_VOLUME_TARGET,
+  type ResourceLimits,
+  type SandboxClient,
+  type SandboxSession,
+} from "../sandbox/index.js";
 import { GitOpsError, gitShow } from "./git-ops.js";
 
 const log = logger.child({ component: "skills.deps" });
@@ -223,12 +228,8 @@ export function makeSandboxLockfileCompiler(
   };
 }
 
-/**
- * Filesystem layout the populator owns inside the container. Keep in
- * sync with the supervisor's activation expectations (the supervisor
- * reads the activation path verbatim from `task_invoke.skillVenv`).
- */
-export const SKILL_VENVS_DIR = "/skill-venvs";
+/** Re-export so existing callers (`SKILL_VENVS_DIR`) keep working. */
+export const SKILL_VENVS_DIR = DEPS_CACHE_VOLUME_TARGET;
 
 /**
  * Per-task wall-clock cap for the populate exec. Default uv pip sync
@@ -251,6 +252,16 @@ const DEFAULT_POPULATE_TIMEOUT_MS = 180_000;
  * crash-and-retry on the same worker where the tmp dir from the
  * previous attempt is still present.
  *
+ * Cross-worker race safety: when `/skill-venvs` is a shared Docker
+ * volume mounted on every pool worker, two workers can populate the
+ * same hash in parallel. Both check `.ready` (missing), both `uv
+ * venv` into distinct `<HASH>.tmp.<workerId>` dirs, both run sync,
+ * both rename. POSIX `mv` of a directory onto an existing non-empty
+ * directory fails EEXIST — the first rename publishes the venv, the
+ * second sees the publication and treats it as success after
+ * confirming `.ready` is present on the winning copy. No advisory
+ * lock needed; the marker file is the synchronisation point.
+ *
  * Args are positional: $1 = lockfile hash, $2 = worker id (used for
  * the tmp-dir suffix; per-worker uniqueness is sufficient because
  * each container is single-flight on its supervisor).
@@ -260,15 +271,35 @@ HASH="$1"
 WORKERID="$2"
 VENV="${SKILL_VENVS_DIR}/$HASH"
 TMP="${SKILL_VENVS_DIR}/$HASH.tmp.$WORKERID"
+# Dotted so it can't be mistaken for a lockfile-hash dir (sha256 hex
+# never starts with .). Shared filesystem with venvs lets uv hardlink.
+export UV_CACHE_DIR="${SKILL_VENVS_DIR}/.uv-cache"
 if [ -f "$VENV/.ready" ]; then
   exit 0
 fi
-mkdir -p "${SKILL_VENVS_DIR}"
+mkdir -p "${SKILL_VENVS_DIR}" "$UV_CACHE_DIR"
+# Opportunistic reaper of orphaned tmp dirs from earlier crashed
+# populates on other workers. Same-worker crash is already covered by
+# the rm -rf "$TMP" below; this one catches the cross-worker case on
+# the shared volume.
+find "${SKILL_VENVS_DIR}" -maxdepth 1 -name '*.tmp.*' -mmin +10 -exec rm -rf {} + 2>/dev/null || true
 rm -rf "$TMP"
 uv venv --quiet "$TMP"
 uv pip sync --quiet --python "$TMP/bin/python" --require-hashes --only-binary=:all: /dev/stdin
 touch "$TMP/.ready"
-mv "$TMP" "$VENV"
+# -T (no-target-directory) makes mv fail rather than nest TMP inside
+# an existing VENV. Capture stderr so disk-full / permission failures
+# surface as themselves, not as the recovery branch's misleading
+# "lost rename race".
+if ! MV_ERR=$(mv -T "$TMP" "$VENV" 2>&1); then
+  if [ -f "$VENV/.ready" ]; then
+    rm -rf "$TMP"
+    exit 0
+  fi
+  echo "populate_failed: rename $TMP → $VENV failed and $VENV is not ready: $MV_ERR" >&2
+  rm -rf "$TMP"
+  exit 1
+fi
 `;
 
 /**

@@ -162,6 +162,56 @@ describe("SysboxWorkerPool", () => {
     );
   });
 
+  it("forwards depsCacheVolumeName to every createWorker call", async () => {
+    const seen: Array<string | undefined> = [];
+    const sandbox = mock<SandboxClient>();
+    const now = 1_000_000;
+    const pool = await SysboxWorkerPool.create({
+      sandbox,
+      image: "fake:test",
+      ...DEFAULT_POOL_OPTIONS,
+      min: 2,
+      max: 3,
+      depsCacheVolumeName: "cogmo-skills-deps-cache",
+      createWorker: async ({ workerId, depsCacheVolumeName }) => {
+        seen.push(depsCacheVolumeName);
+        return makeFakeWorker(workerId, {}, () => now);
+      },
+      setInterval: (): unknown => ({ __fake: true }),
+      clearInterval: () => {},
+      now: () => now,
+    });
+    expect(seen).toEqual(["cogmo-skills-deps-cache", "cogmo-skills-deps-cache"]);
+    await pool.dispose();
+  });
+
+  it("forwards depsCacheVolumeName to grow-time spawns (min=0, demand-driven)", async () => {
+    // Pin the volume threading on the lazy-spawn path too: min=0 means
+    // no workers exist at boot; the first invoke triggers a grow.
+    const seen: Array<string | undefined> = [];
+    const sandbox = mock<SandboxClient>();
+    const now = 1_000_000;
+    const pool = await SysboxWorkerPool.create({
+      sandbox,
+      image: "fake:test",
+      ...DEFAULT_POOL_OPTIONS,
+      min: 0,
+      max: 3,
+      depsCacheVolumeName: "cogmo-skills-deps-cache",
+      createWorker: async ({ workerId, depsCacheVolumeName }) => {
+        seen.push(depsCacheVolumeName);
+        return makeFakeWorker(workerId, {}, () => now);
+      },
+      setInterval: (): unknown => ({ __fake: true }),
+      clearInterval: () => {},
+      now: () => now,
+    });
+    expect(seen).toEqual([]); // no workers yet
+    await pool.invoke(invokeParams("t-grow"));
+    expect(seen).toEqual(["cogmo-skills-deps-cache"]);
+    await pool.dispose();
+  });
+
   it("acquires an idle worker on invoke and releases after success", async () => {
     const h = buildPoolHarness({ poolOptions: { min: 1, max: 3 } });
     const pool = await h.pool;

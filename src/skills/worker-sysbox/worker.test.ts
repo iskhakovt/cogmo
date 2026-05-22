@@ -172,6 +172,36 @@ describe("SysboxSkillWorker", () => {
     );
   });
 
+  it("passes depsCacheVolumeName through to sandbox.create as depsCacheVolume", async () => {
+    const { sandbox } = buildFakeSandbox();
+    await SysboxSkillWorker.create({
+      workerId: "w-vol",
+      sandbox,
+      image: "cogmo-skills:test",
+      expiresAt: new Date(Date.now() + 60_000),
+      depsCacheVolumeName: "cogmo-skills-deps-cache",
+    });
+    expect(sandbox.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        depsCacheVolume: { volumeName: "cogmo-skills-deps-cache" },
+      }),
+    );
+  });
+
+  it("omits depsCacheVolume from sandbox.create when volume name absent", async () => {
+    const { sandbox } = buildFakeSandbox();
+    await SysboxSkillWorker.create({
+      workerId: "w-novol",
+      sandbox,
+      image: "cogmo-skills:test",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    const spec = vi.mocked(sandbox.create).mock.calls[0]?.[0];
+    expect(spec).toBeDefined();
+    if (!spec) return;
+    expect("depsCacheVolume" in spec).toBe(false);
+  });
+
   it("disposes session if execStreaming throws after create", async () => {
     const bundle = buildFakeSandbox();
     vi.mocked(bundle.session.execStreaming).mockRejectedValueOnce(new Error("exec failed"));

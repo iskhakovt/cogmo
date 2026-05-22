@@ -78,6 +78,11 @@ ENV VIRTUAL_ENV="/opt/cogmo-skills/.venv"
 # resolver behaviour is identical end-to-end.
 COPY --from=ghcr.io/astral-sh/uv:0.11.12 /uv /uvx /usr/local/bin/
 
+# Pre-create /skill-venvs owned by `cogmo`. A fresh Docker named volume
+# inherits this ownership on first mount, so the non-root supervisor
+# can write into it without a CAP_CHOWN dance at runtime.
+RUN mkdir -p /skill-venvs && chown cogmo:cogmo /skill-venvs
+
 # Cogmo's host (`src/skills/worker-sysbox/worker.ts`) overrides the
 # Entrypoint/Cmd at create-container time; the default below is for
 # `docker run` smoke tests. WORKDIR is the user's home so any temp

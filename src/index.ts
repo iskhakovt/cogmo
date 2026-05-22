@@ -658,6 +658,7 @@ export async function bootstrapSkillRunner(
     files: core.fileService,
     ...(sandbox.sandbox && { sandbox: sandbox.sandbox }),
     tier2Image: env.COGMO_SKILLS_IMAGE,
+    depsCacheVolumeName: env.COGMO_SKILLS_DEPS_VOLUME,
     user: { id: core.user.id, timezone: env.USER_TIMEZONE },
     memoryBankId: core.user.id,
     skillsRepoPath: env.COGMO_SKILLS_PATH,

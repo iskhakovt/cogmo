@@ -57,10 +57,17 @@ afterAll(async () => {
   await close();
 });
 
+interface DockerMount {
+  Type: "volume" | "bind";
+  Source: string;
+  Target: string;
+}
+
 interface DockerCreateCallArgs {
   Image: string;
   HostConfig?: {
     Binds?: string[];
+    Mounts?: DockerMount[];
     Runtime?: string;
     CgroupParent?: string;
     NanoCpus?: number;
@@ -255,6 +262,56 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     expect(create0.HostConfig?.PidsLimit).toBe(64);
     // …but no disk-quota field landed in HostConfig.
     expect(create0.HostConfig?.StorageOpt).toBeUndefined();
+  });
+
+  it("mounts depsCacheVolume at /skill-venvs when set", async () => {
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker, calls } = fakeDocker({ dockerId: "docker-vol" });
+    const { proxy } = fakeProxy();
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+      proxy,
+    });
+    await sandbox.create({
+      taskId: "019d0000-0000-7000-8000-0000000000d2",
+      image: "alpine",
+      resourceLimits: RESOURCE_LIMITS,
+      expiresAt: new Date(Date.now() + 60_000),
+      depsCacheVolume: { volumeName: "cogmo-skills-deps-cache" },
+    });
+    const withVolume = expectDefined(calls.create[0], "first create call");
+    expect(withVolume.HostConfig?.Mounts).toEqual(
+      expect.arrayContaining([
+        { Type: "volume", Source: "cogmo-skills-deps-cache", Target: "/skill-venvs" },
+      ]),
+    );
+  });
+
+  it("omits the /skill-venvs mount when depsCacheVolume is absent", async () => {
+    const inst = await tx((trx) => store.insertInstance(trx, { host: "h", pid: 1 }));
+    const { docker, calls } = fakeDocker({ dockerId: "docker-novol" });
+    const { proxy } = fakeProxy();
+    const sandbox = await LocalDockerSandboxClient.create({
+      docker,
+      store,
+      runInTx: tx,
+      runtime: "runc",
+      instanceId: inst.id,
+      proxy,
+    });
+    await sandbox.create({
+      taskId: "019d0000-0000-7000-8000-0000000000d3",
+      image: "alpine",
+      resourceLimits: RESOURCE_LIMITS,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    const without = expectDefined(calls.create[0], "first create call");
+    const targets = (without.HostConfig?.Mounts ?? []).map((m) => m.Target);
+    expect(targets).not.toContain("/skill-venvs");
   });
 
   it("unregisters the proxy on stopTask", async () => {

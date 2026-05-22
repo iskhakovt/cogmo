@@ -10,6 +10,14 @@ export interface SysboxWorkerPoolOptions {
   image: string;
   /** Optional per-skill overrides applied to every worker in the pool. */
   resourceLimits?: Partial<ResourceLimits>;
+  /**
+   * Named Docker volume mounted at `/skill-venvs` on every worker. Same
+   * value passed to all workers in the pool so a venv populated by
+   * worker A is reused by worker B and survives recycle. Omit to run
+   * without a persisted cache — each worker then populates its venvs
+   * into its container overlay FS (and loses them on recycle).
+   */
+  depsCacheVolumeName?: string;
 
   /**
    * Always-warm worker count. ≥ 1 keeps interactive latency at the steady-
@@ -54,6 +62,7 @@ export interface SysboxWorkerPoolOptions {
     image: string;
     resourceLimits?: Partial<ResourceLimits>;
     expiresAt: Date;
+    depsCacheVolumeName?: string;
   }) => Promise<WorkerHandle>;
 
   /** Test seam — replace the timer source. Defaults to `setInterval` / `clearInterval`. */
@@ -145,6 +154,7 @@ export class SysboxWorkerPool {
   #sandbox: SandboxClient;
   #image: string;
   #resourceLimits: Partial<ResourceLimits> | undefined;
+  #depsCacheVolumeName: string | undefined;
   #opts: Required<
     Pick<
       SysboxWorkerPoolOptions,
@@ -181,6 +191,7 @@ export class SysboxWorkerPool {
     this.#sandbox = opts.sandbox;
     this.#image = opts.image;
     this.#resourceLimits = opts.resourceLimits;
+    this.#depsCacheVolumeName = opts.depsCacheVolumeName;
     this.#opts = {
       min: opts.min,
       max: opts.max,
@@ -198,6 +209,9 @@ export class SysboxWorkerPool {
           image: o.image,
           ...(o.resourceLimits !== undefined && { resourceLimits: o.resourceLimits }),
           expiresAt: o.expiresAt,
+          ...(o.depsCacheVolumeName !== undefined && {
+            depsCacheVolumeName: o.depsCacheVolumeName,
+          }),
         }));
     this.#setInterval =
       opts.setInterval ??
@@ -369,6 +383,9 @@ export class SysboxWorkerPool {
         image: this.#image,
         ...(this.#resourceLimits !== undefined && { resourceLimits: this.#resourceLimits }),
         expiresAt,
+        ...(this.#depsCacheVolumeName !== undefined && {
+          depsCacheVolumeName: this.#depsCacheVolumeName,
+        }),
       });
       // `createWorker` is async; `dispose()` may have run while we were
       // awaiting it. Pushing the new worker into `#workers` now would leak
