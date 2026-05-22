@@ -632,24 +632,24 @@ Local sysbox bind-mounts this directory from the host at `/var/cache/cogmo-skill
 
 ### Populate
 
-First task using a given lockfile hash populates the venv. Concurrent populators are serialised by a Postgres advisory lock; idempotent against rerun:
+First task using a given lockfile hash populates the venv. Concurrent populators on the same lockfile hash are serialised by `.ready` + `mv -T` rename failure — the marker file plus atomic rename is the synchronisation point; the loser of the race detects `.ready` on the target after its own rename fails and exits success without redundant work. No Postgres advisory lock is used.
 
 ```text
-1. pg_advisory_xact_lock(hashtext("skill-venv:" + lockfileHash))
-2. if /var/cache/cogmo-skills/venvs/<hash>/.ready exists → done, release lock
-3. uv venv /var/cache/cogmo-skills/venvs/<hash>.tmp.<workerId>
-4. uv pip sync --require-hashes --only-binary=:all: -r requirements.lock
+1. if /var/cache/cogmo-skills/venvs/<hash>/.ready exists → done
+2. uv venv /var/cache/cogmo-skills/venvs/<hash>.tmp.<workerId>
+3. uv pip sync --require-hashes --only-binary=:all: -r requirements.lock
                                   (into the tmp venv, hardlinking from uv-cache/)
-5. touch /var/cache/cogmo-skills/venvs/<hash>.tmp.<workerId>/.ready
-6. rename /var/cache/cogmo-skills/venvs/<hash>.tmp.<workerId>
+4. touch /var/cache/cogmo-skills/venvs/<hash>.tmp.<workerId>/.ready
+5. mv -T /var/cache/cogmo-skills/venvs/<hash>.tmp.<workerId>
        → /var/cache/cogmo-skills/venvs/<hash>
-                                  (atomic; readers see the populated venv or nothing)
-7. release lock
+                                  (atomic; readers see the populated venv or nothing.
+                                   `mv -T` refuses to nest on collision, so the loser's
+                                   rename fails and it exits success after seeing .ready.)
 ```
 
-`.ready` is the marker readers gate on — `uv` itself does not provide directory-level atomicity guarantees for parallel `--target` or `venv` population ([uv #15335](https://github.com/astral-sh/uv/issues/15335), [#13883](https://github.com/astral-sh/uv/issues/13883)). The marker file pattern is the portable answer; the advisory lock keeps N workers from redundantly resolving the same lockfile.
+`.ready` is the marker readers gate on — `uv` itself does not provide directory-level atomicity guarantees for parallel `--target` or `venv` population ([uv #15335](https://github.com/astral-sh/uv/issues/15335), [#13883](https://github.com/astral-sh/uv/issues/13883)). The marker file plus `mv -T` rename is the portable answer.
 
-Failure during steps 3-5 leaves an orphaned `<hash>.tmp.<workerId>/` directory; the cache reaper sweeps `.tmp.*` entries older than 10 minutes regardless of source skill.
+Failure during steps 2-4 leaves an orphaned `<hash>.tmp.<workerId>/` directory. The populate script itself opportunistically sweeps `.tmp.*` entries older than 10 minutes at the top of every populate run — the per-hash reaper (`skill-venvs-reaper` Inngest cron) targets only published `<hash>/` directories (sha256 hex), never in-flight tmp dirs.
 
 `--only-binary=:all:` forbids source distributions by default — sdists require a build toolchain in the sandbox and run arbitrary `setup.py` code at install. A skill declaring a package available only as sdist fails at register. Sdist support is a future opt-in (`allow_sdist: true` in the manifest, automatic `approve` tier) when a real driver appears.
 
@@ -672,7 +672,7 @@ A skill with `lockfile_hash IS NULL` (empty `dependencies`) skips activation ent
 
 Pyodide consumes the parsed package specs from `requirements.lock` via `micropip.install(specs, keep_going=False)` at worker init. Hashes are dropped — micropip has no `--require-hashes` equivalent; see *Security posture* below for the asymmetry vs the sysbox tier. After install, `importlib.metadata.version(name)` is checked per declared dep and any mismatch (silent skip, bundled-vs-pin drift) raises a fatal init error surfaced as the task's `error`.
 
-Pyodide-incompatible wheels (native extensions outside the [pre-built Pyodide list](https://pyodide.org/en/stable/usage/packages-in-pyodide.html) and not available as pure-Python wheels via `micropip`) fail at first invocation — `micropip.install` raises and the host turns it into the task's `error`. Register-time pre-validation against Pyodide's `pyodide-lock.json` is a deferred follow-up (todo.md → Skills, voice & transport); skills depending on native-only wheels should declare `tier: container` until that lands.
+Pyodide-incompatible wheels (native extensions outside the [pre-built Pyodide list](https://pyodide.org/en/stable/usage/packages-in-pyodide.html) and not available as pure-Python wheels via `micropip`) fail at register. `src/skills/pyodide-compat.ts` reads `pyodide-lock.json` from the installed pyodide package and verifies each declared `name==version` is either bundled exactly or has a pure-Python wheel on PyPI; mismatches reject the register with `tier1_incompatible_dependency`. Skills depending on native-only wheels must declare `tier: container`.
 
 Worker init (Pyodide load + micropip install + version verify) is capped at 60s by default — a hung micropip resolve against a slow PyPI surfaces as `worker_init_timeout` instead of wedging the worker. A per-lockfile-hash wheel cache for micropip-fetched wheels is deferred — Pyodide's built-in `packageCacheDir` covers the runtime's bundled packages only, so a moderately-deps'd skill re-downloads from PyPI on every worker boot today (todo.md).
 
@@ -697,6 +697,8 @@ The classifier reads `dependencies` directly from the manifest — not the lockf
 Dep additions to a previously-deployed skill are widening events — re-classified, may bump tier, may require approval. Same flow as effect widening per "Edit vs create".
 
 ### Security posture
+
+> **Precondition: tier-2 skills are mutually trusted code by the operator.** The shared `/skill-venvs` volume is mounted RW on every tier-2 worker under the same UID; any skill can write under `/skill-venvs/<other-hash>/` and pre-stage entries the next populator activates. Hash pinning at install time doesn't protect against this because the trivial bypass is `.ready`-pre-staging (creating the marker file + a stub Python layout) which skips `uv pip sync` entirely. Cogmo's v1 deployment model is single-operator with operator-authored / operator-audited skills; this section enumerates the threats accepted under that precondition. **Multi-author skill libraries require per-skill UID isolation (or per-hash bind-mount made read-only after publish) before the precondition holds.** See the `[research]` items below for the upgrade path.
 
 - **Hash pinning via `--require-hashes`** is non-optional **on the sysbox tier**. The lockfile carries SHA-256 per wheel; `uv pip sync` refuses to install anything unhashed.
 - **WASM-tier dependency install trusts public PyPI without wire integrity verification.** `micropip.install` has no `--require-hashes` equivalent and fetches wheels from PyPI's JSON API over TLS with no per-wheel hash check. A flash-malicious release between register (when uv pinned the resolution) and the first WASM-tier invocation gets installed silently — the lockfile-hash byte-compare at register catches *staleness*, not *integrity at fetch time*. Mitigation today: post-install version verification (catches silent skips and bundled-vs-pin drift) plus narrow classifier tier-bumps for security-relevant deps so anything sensitive lands on `tier: container`. Real closure requires either upstream `micropip --require-hashes` support or a sidecar pre-fetch that hash-verifies wheels and primes the cache before Pyodide opens. `[research]`.

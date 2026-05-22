@@ -346,11 +346,11 @@ export interface EnsureVenvPopulatedOptions {
   lockfileContents: string;
   /**
    * Stable identifier for the calling worker. Used to suffix the tmp
-   * populate directory (`<hash>.tmp.<workerId>`) so a crash-and-retry
-   * on the same worker doesn't fight a prior in-flight populate.
-   * Cross-worker collisions don't apply at this PR — each container's
-   * `/skill-venvs/` lives in its own overlay FS. The volume-mounted
-   * variant in a follow-up PR will need a stronger guard.
+   * populate directory (`<hash>.tmp.<workerId>`) so concurrent populators
+   * on the shared `/skill-venvs` volume target distinct tmp dirs.
+   * Cross-worker concurrency is resolved at the rename step (`mv -T`
+   * fails on a non-empty target; the loser sees `.ready` on the
+   * winner's published dir and exits success).
    */
   workerId: string;
   timeoutMs?: number;
@@ -358,15 +358,16 @@ export interface EnsureVenvPopulatedOptions {
 
 /**
  * Ensure a per-lockfile-hash virtualenv exists at
- * `/skill-venvs/<hash>/` inside the worker's container. Idempotent —
+ * `/skill-venvs/<hash>/` on the shared deps-cache volume. Idempotent —
  * the second call (or any concurrent call ordered after a successful
  * one) returns the path without touching the FS. Returns the absolute
  * venv path that the supervisor activates via `task_invoke.skillVenv`.
  *
- * Today the venv lives in the container's overlay FS — survives
- * across tasks on the same worker, vanishes on worker recycle. A
- * follow-up adds a persisted volume mount so cross-worker reuse +
- * cross-recycle persistence work without re-paying the populate cost.
+ * The venv lives on the `/skill-venvs` Docker / Daytona volume shared
+ * across every tier-2 worker the pool spawns: a venv populated by one
+ * worker is reused by every subsequent worker and survives recycle.
+ * Cross-worker concurrency on the same hash is serialised by `.ready`
+ * + `mv -T` rename failure; see `POPULATE_SCRIPT` below.
  */
 export async function ensureVenvPopulated(
   opts: EnsureVenvPopulatedOptions,
