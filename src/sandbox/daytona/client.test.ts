@@ -46,6 +46,9 @@ type DaytonaSnapshot = { name: string; state: string };
 // The Daytona class's internal behaviour isn't under test here — what matters
 // is the shape of calls Cogmo's client makes against it (labels, resources,
 // auto-stop math, lifecycle order).
+//
+// Deliberately narrower than the SDK's `Volume` model — client.ts only
+// reads `.id` from the resolved volume, so the structural subset suffices.
 type FakeDaytonaVolume = { id: string; name: string };
 
 const daytonaCalls = {

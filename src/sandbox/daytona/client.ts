@@ -12,6 +12,7 @@ import { withRetry } from "../../util/with-retry.js";
 import {
   type DaytonaSessionState,
   DaytonaSessionStateSchema,
+  DEPS_CACHE_VOLUME_TARGET,
   type ResourceLimits,
   type SandboxCapabilities,
   type SandboxClient,
@@ -54,14 +55,6 @@ const log = logger.child({ component: "sandbox.daytona.client" });
 /** Cogmo label keys on Daytona sandboxes — used for `tryResumeByTaskId` lookup. */
 const LABEL_TASK = "cogmo.task";
 const LABEL_ROLE = "cogmo.role";
-
-/**
- * In-container mount point for the skills-tier-2 deps cache. Must match
- * the LocalDocker supervisor's `DEPS_CACHE_VOLUME_TARGET` and
- * `SKILL_VENVS_DIR` in `src/skills/deps.ts` — the populator writes
- * `<target>/<lockfile-hash>/` and the supervisor reads the same path.
- */
-const DEPS_CACHE_VOLUME_TARGET = "/skill-venvs";
 
 /** Refresh the sandbox's auto-stop activity timer this often, while a session is live. */
 const KEEPALIVE_INTERVAL_MS = 5 * 60 * 1000;
@@ -195,10 +188,16 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
   #resourcesByImage = new Map<string, ResourceLimits>();
   /**
    * Daytona volume id cache keyed by volume name. `daytona.volume.get`
-   * is a network call against the provider's volumes API; the volume
-   * id is stable across calls, so we resolve once and reuse for every
-   * subsequent session create. In-flight lookups are deduplicated so
-   * concurrent first-callers share one resolve.
+   * is a network call; the id is stable, so we resolve once and reuse.
+   * In-flight lookups dedupe via `#volumeResolves`. Bounded by the
+   * number of distinct deps-cache volume names this client touches —
+   * in practice 1 per Cogmo instance, so no eviction policy.
+   *
+   * Stale-id failure mode: if the operator deletes the volume
+   * out-of-band, every subsequent `daytona.create` 4xx's with the
+   * cached id until restart. Recovery today: restart Cogmo. A
+   * narrower auto-invalidate on volume-related `create` rejections is
+   * tracked in todo.md.
    */
   #volumeIdByName = new Map<string, string>();
   #volumeResolves = new Map<string, Promise<string>>();
@@ -457,15 +456,6 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
     if (spec.allowPrivilegedRunc) {
       throw new Error(
         "DaytonaSandboxClient.create: SessionSpec.allowPrivilegedRunc is Local-Docker-specific — Daytona uses the provider's runtime",
-      );
-    }
-    // TODO: depsCacheVolume — Daytona volume integration is a follow-up.
-    // The field is silently ignored here; tier-2 skills with declared
-    // deps fall back to per-container populate (no cross-worker reuse).
-    if (spec.depsCacheVolume) {
-      log.warn(
-        { taskId: spec.taskId, volumeName: spec.depsCacheVolume.volumeName },
-        "depsCacheVolume passed to Daytona backend but ignored (volume integration deferred)",
       );
     }
 
@@ -744,6 +734,7 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
       try {
         const volume = await this.#daytona.volume.get(name, true);
         this.#volumeIdByName.set(name, volume.id);
+        log.debug({ volumeName: name, volumeId: volume.id }, "resolved Daytona deps-cache volume");
         return volume.id;
       } finally {
         // Clear the in-flight slot so a failed resolve retries.
