@@ -69,10 +69,17 @@ export async function pypiHasPureWheel(
       `https://pypi.org/pypi/${encodeURIComponent(name)}/${encodeURIComponent(version)}/json`,
       { signal: ctrl.signal, headers: { Accept: "application/json" } },
     );
-    if (!resp.ok) {
-      // 404 -> name/version doesn't exist upstream; treat as "no pure wheel".
+    if (resp.status === 404) {
+      // Name/version doesn't exist upstream -- legitimate "no pure wheel".
       pypiPureWheelCache.set(cacheKey, false);
       return false;
+    }
+    if (!resp.ok) {
+      // 5xx / 429 / etc. -- transient. Throw so checkPyodideCompat's
+      // outer try/catch fails-open with a warn log; otherwise a brief
+      // PyPI hiccup would block every tier-1 register until restart
+      // (the cache pins the wrong answer).
+      throw new Error(`pypi http ${resp.status} for ${name}==${version}`);
     }
     const parsed = (await resp.json()) as PypiJsonShape;
     const hasPure = (parsed.urls ?? []).some(

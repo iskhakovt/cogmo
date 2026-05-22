@@ -149,6 +149,21 @@ describe("checkPyodideCompat", () => {
     expect(result.isOk()).toBe(true);
   });
 
+  it("fails open on non-404 PyPI HTTP errors (503/429/etc don't block register)", async () => {
+    // Distinct from the 404 case above: a transient 5xx must NOT be
+    // cached as "no pure wheel" -- the cache would then pin the wrong
+    // answer for the process lifetime and every tier-1 register
+    // referencing this package would fail until restart.
+    const fetchMock = fakeFetch({
+      "blip==1.0": { ok: false, status: 503 },
+    });
+    const result = await checkPyodideCompat(["blip==1.0"], {
+      lockfilePath,
+      fetchImpl: fetchMock,
+    });
+    expect(result.isOk()).toBe(true);
+  });
+
   it("normalises PEP 503 distribution names when checking bundled state", async () => {
     // Lockfile stores under canonical `python-dateutil`; spec uses
     // `Python_Dateutil`. PEP 503 says these are the same project.

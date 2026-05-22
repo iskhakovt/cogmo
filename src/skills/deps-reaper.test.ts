@@ -141,6 +141,62 @@ describe("reapSkillVenvs", () => {
     expect(result.error.message).toContain("Daytona quota exceeded");
   });
 
+  it("returns `transport_failed` when execStreaming itself rejects", async () => {
+    // Distinct from the create-rejects path above: covers the
+    // execStreaming throw (image build hiccup, transport error mid-attach).
+    // Without the inner try/catch this would escape the function as an
+    // unhandled rejection.
+    const exec = makeFakeExec();
+    const session = mock<SandboxSession>();
+    session.execStreaming.mockRejectedValue(new Error("exec attach failed"));
+    const sandbox = mock<SandboxClient>();
+    sandbox.ensureImagePresent.mockResolvedValue();
+    sandbox.create.mockResolvedValue(session);
+    sandbox.delete.mockResolvedValue();
+    const result = await reapSkillVenvs({
+      sandbox,
+      image: "cogmo-skills:test",
+      depsCacheVolumeName: "deps-vol-x",
+      reachableHashes: new Set(),
+    });
+    expect(result.isErr()).toBe(true);
+    if (!result.isErr()) return;
+    expect(result.error.kind).toBe("transport_failed");
+    expect(result.error.message).toContain("exec attach failed");
+    // Session teardown still fires even though we never wrote to its
+    // exec handle.
+    expect(sandbox.delete).toHaveBeenCalledTimes(1);
+    // Suppress unused-variable warning from the local exec fixture --
+    // we don't drive it here because execStreaming itself rejected.
+    expect(exec.stdinSink).toBeDefined();
+  });
+
+  it("returns `transport_failed` when handle.wait() rejects (timeout / transport drop)", async () => {
+    const exec = makeFakeExec();
+    const session = mock<SandboxSession>();
+    // Replace wait with a rejecting version. The fake's default returns
+    // a Promise tied to `resolveWait`/`rejectWait`; here we short-circuit.
+    exec.handle.wait = async () => {
+      throw new Error("exec_timeout after 60000ms");
+    };
+    session.execStreaming.mockResolvedValue(exec.handle);
+    const sandbox = mock<SandboxClient>();
+    sandbox.ensureImagePresent.mockResolvedValue();
+    sandbox.create.mockResolvedValue(session);
+    sandbox.delete.mockResolvedValue();
+    const result = await reapSkillVenvs({
+      sandbox,
+      image: "cogmo-skills:test",
+      depsCacheVolumeName: "deps-vol-x",
+      reachableHashes: new Set(["x"]),
+    });
+    expect(result.isErr()).toBe(true);
+    if (!result.isErr()) return;
+    expect(result.error.kind).toBe("transport_failed");
+    expect(result.error.message).toContain("exec_timeout");
+    expect(sandbox.delete).toHaveBeenCalledTimes(1);
+  });
+
   it("always tears down the session, even on a script failure", async () => {
     const h = buildHarness();
     const promise = reapSkillVenvs({

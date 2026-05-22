@@ -33,8 +33,8 @@ const REAP_TIMEOUT_MS = 60_000;
  */
 const REAP_SCRIPT = `set -eu
 GRACE_DAYS="$1"
-# Capture reachable hashes once; later \`grep -qxFf\` against a temp file
-# is cheaper than re-reading stdin in a loop.
+# Capture reachable hashes once; \`grep -vxFf\` against the temp file
+# is a single-pass O(N) filter rather than N greps over the find output.
 REACHABLE=$(mktemp)
 trap 'rm -f "$REACHABLE"' EXIT
 cat > "$REACHABLE"
@@ -44,11 +44,9 @@ cd "${DEPS_CACHE_VOLUME_TARGET}"
 # Regex restricts to lowercase-hex sha256 names so dot-prefixed sentinels
 # and .tmp dirs (which the populate script's own sweeper owns) are
 # protected.
-find . -maxdepth 1 -mindepth 1 -type d -regex '\\./[0-9a-f]\\{64\\}' -mtime "+\${GRACE_DAYS}" | sed 's|^\\./||' | while read hash; do
-  if ! grep -qxF "$hash" "$REACHABLE"; then
-    rm -rf "${DEPS_CACHE_VOLUME_TARGET}/$hash"
-    echo "reaped:$hash"
-  fi
+find . -maxdepth 1 -mindepth 1 -type d -regex '\\./[0-9a-f]\\{64\\}' -mtime "+\${GRACE_DAYS}" | sed 's|^\\./||' | grep -vxFf "$REACHABLE" | while read hash; do
+  rm -rf "${DEPS_CACHE_VOLUME_TARGET}/$hash"
+  echo "reaped:$hash"
 done
 `;
 
@@ -113,57 +111,71 @@ export async function reapSkillVenvs(
   }
 
   try {
-    const handle = await session.execStreaming(
-      ["sh", "-c", REAP_SCRIPT, "reap", String(graceDays)],
-      { attachStdin: true, timeoutMs: REAP_TIMEOUT_MS },
-    );
-    if (!handle.stdin) {
-      await handle.dispose().catch(() => {});
+    // execStreaming setup + handle.wait() can throw (timeout, transport
+    // reject, stream construction failure). Without this catch the
+    // rejection escapes the `Result` API contract.
+    try {
+      const handle = await session.execStreaming(
+        ["sh", "-c", REAP_SCRIPT, "reap", String(graceDays)],
+        { attachStdin: true, timeoutMs: REAP_TIMEOUT_MS },
+      );
+      if (!handle.stdin) {
+        await handle.dispose().catch(() => {});
+        return err({
+          kind: "transport_failed",
+          message: "execStreaming returned without stdin despite attachStdin=true",
+        });
+      }
+
+      const stdoutChunks: string[] = [];
+      const stderrChunks: string[] = [];
+      let streamError: Error | undefined;
+      const captureError = (e: Error): void => {
+        if (!streamError) streamError = e;
+      };
+      handle.stdout.on("error", captureError);
+      handle.stderr.on("error", captureError);
+      handle.stdin.on("error", captureError);
+      handle.stdout.setEncoding("utf-8");
+      handle.stdout.on("data", (chunk: string) => stdoutChunks.push(chunk));
+      handle.stderr.setEncoding("utf-8");
+      handle.stderr.on("data", (chunk: string) => stderrChunks.push(chunk));
+
+      // Trailing newline only when there's content; empty input writes
+      // an empty file, which `grep -vxFf` reads as "no patterns -- pass
+      // everything through" (the desired all-unreachable case).
+      const reachableList = [...opts.reachableHashes];
+      handle.stdin.end(reachableList.length > 0 ? `${reachableList.join("\n")}\n` : "");
+
+      const { exitCode } = await handle.wait();
+      if (streamError) {
+        return err({ kind: "transport_failed", message: `stream error: ${streamError.message}` });
+      }
+      if (exitCode !== 0) {
+        return err({
+          kind: "reap_failed",
+          message: `reap script exit ${exitCode}; stderr: ${stderrChunks.join("").trim()}`,
+        });
+      }
+
+      const reapedHashes = stdoutChunks
+        .join("")
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l.startsWith("reaped:"))
+        .map((l) => l.slice("reaped:".length));
+
+      log.info(
+        { reapedCount: reapedHashes.length, reachableCount: opts.reachableHashes.size, graceDays },
+        "skill-venvs reap completed",
+      );
+      return ok({ reapedHashes });
+    } catch (e) {
       return err({
         kind: "transport_failed",
-        message: "execStreaming returned without stdin despite attachStdin=true",
+        message: e instanceof Error ? e.message : String(e),
       });
     }
-
-    const stdoutChunks: string[] = [];
-    const stderrChunks: string[] = [];
-    let streamError: Error | undefined;
-    const captureError = (e: Error): void => {
-      if (!streamError) streamError = e;
-    };
-    handle.stdout.on("error", captureError);
-    handle.stderr.on("error", captureError);
-    handle.stdin.on("error", captureError);
-    handle.stdout.setEncoding("utf-8");
-    handle.stdout.on("data", (chunk: string) => stdoutChunks.push(chunk));
-    handle.stderr.setEncoding("utf-8");
-    handle.stderr.on("data", (chunk: string) => stderrChunks.push(chunk));
-
-    handle.stdin.end(`${[...opts.reachableHashes].join("\n")}\n`);
-
-    const { exitCode } = await handle.wait();
-    if (streamError) {
-      return err({ kind: "transport_failed", message: `stream error: ${streamError.message}` });
-    }
-    if (exitCode !== 0) {
-      return err({
-        kind: "reap_failed",
-        message: `reap script exit ${exitCode}; stderr: ${stderrChunks.join("").trim()}`,
-      });
-    }
-
-    const reapedHashes = stdoutChunks
-      .join("")
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l.startsWith("reaped:"))
-      .map((l) => l.slice("reaped:".length));
-
-    log.info(
-      { reapedCount: reapedHashes.length, reachableCount: opts.reachableHashes.size, graceDays },
-      "skill-venvs reap completed",
-    );
-    return ok({ reapedHashes });
   } finally {
     await opts.sandbox.delete(session).catch((e: unknown) => {
       log.warn({ err: e, taskId }, "reap session delete failed; reaper will retry on next tick");
