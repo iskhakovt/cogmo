@@ -54,18 +54,25 @@ export interface PtyFileSystemClient {
  * does not accept. Uploading to a tmpfile and exec'ing
  * `claude < /tmp/...` gives the child a real pipe FD that closes when
  * the file is exhausted.
+ *
+ * Consumer contract:
+ *
+ * - Stdin is buffered in process memory until `.end()`, then uploaded
+ *   in one shot. Single-message protocols only.
+ * - Stdout carries the PTY's echo of the typed `exec …` line ahead of
+ *   the child's output. Today's only consumer (`parseClaudeStream`)
+ *   drops non-JSONL lines via `safeParse`; non-JSONL consumers must
+ *   tolerate or filter the preamble themselves.
+ * - Stderr is drained from a tmpfile after exit, capped at
+ *   `MAX_STDERR_BYTES` with a truncation marker.
+ * - `opts.timeoutMs` bounds the whole lifetime (pre-end wait, upload,
+ *   createPty handshake, sendInput, running exec). `opts.idleTimeoutMs`
+ *   only arms once `sendInput` has dispatched.
  */
 const PTY_COLS = 200;
 const PTY_ROWS = 50;
 const DISPOSE_GRACE_MS = 5_000;
-/**
- * Cap on the stderr tmpfile we drain after the PTY exits. The Daytona
- * `fs.downloadFile` returns the whole file as a `Buffer`, so an
- * unbounded stderr would land in orchestrator memory. claude's
- * stderr is small in practice (warn-level diagnostics only) — this
- * is cheap insurance against a future verbose binary or stuck
- * logging loop.
- */
+/** Cap on the stderr tmpfile drained after exit — `downloadFile` is unbounded. */
 const MAX_STDERR_BYTES = 1024 * 1024;
 const STDERR_TRUNCATED_SUFFIX = "\n[cogmo: stderr truncated]\n";
 
@@ -110,9 +117,7 @@ export async function startExecPty(args: {
     }
   };
 
-  // Tmpfile cleanup is best-effort — the sandbox tmpfs goes away with
-  // the sandbox, so a stuck `deleteFile` doesn't leak across runs. Log
-  // and move on.
+  // Tmpfile cleanup is best-effort; sandbox tmpfs vanishes on teardown.
   let cleanedUp = false;
   const cleanupRemoteFiles = async (): Promise<void> => {
     if (cleanedUp) return;
@@ -127,38 +132,29 @@ export async function startExecPty(args: {
     ]);
   };
 
-  // PTY merges stdout and stderr; we redirect stderr to a tmpfile in
-  // the shell line so onData is clean stdout. Bash prompt + echoed
-  // command preamble flows through onData too; the consumer (the
-  // claude JSONL parser) drops non-JSON lines via safeParse so the
-  // preamble is silently filtered without any sentinel-marker dance.
   let pty: PtyHandle | undefined;
   const handleOnData = (data: Uint8Array): void => {
     resetIdle();
     stdout.write(Buffer.from(data));
   };
 
-  // Idle reset is hoisted so onData can call it before pty/timer
-  // state is fully assigned; the closures below see the same `pty`
-  // variable.
+  /** Idempotent kill — silent if `pty` is undefined or the RPC races natural exit. */
+  const killPty = (): Promise<void> => pty?.kill().catch(() => undefined) ?? Promise.resolve();
+
+  // Hoisted so `handleOnData` above can reference it.
   function resetIdle(): void {
     if (idleTimer) clearTimeout(idleTimer);
     if (opts.idleTimeoutMs !== undefined && !timedOut && !disposed) {
+      const idleMs = opts.idleTimeoutMs;
       idleTimer = setTimeout(() => {
         idleTimer = null;
         if (timedOut || disposed) return;
-        timedOut = new ExecTimeoutError("idle", opts.idleTimeoutMs ?? 0);
-        // Force-kill the PTY; `wait()` resolves and the settle path
-        // below maps it to the timeout rejection.
-        pty?.kill().catch(() => {});
-      }, opts.idleTimeoutMs);
+        timedOut = new ExecTimeoutError("idle", idleMs);
+        void killPty();
+      }, idleMs);
     }
   }
 
-  // Stdin: buffer caller writes until they call `.end()`, then upload
-  // and kick off the exec. Callers in cogmo today (runClaudeSession)
-  // write one frame then end immediately, so a buffered uploader is
-  // sufficient.
   const stdinBuffers: Buffer[] = [];
   const stdin = new Writable({
     write(chunk, _encoding, callback): void {
@@ -167,65 +163,69 @@ export async function startExecPty(args: {
     },
   });
 
-  // Promise resolves when the PTY process exits naturally; rejects on
-  // timeout, dispose, or transport error. Order matters: stdin.end()
-  // triggers the uploader, which awaits createPty + sendInput; the
-  // overall lifetime is bounded by the PTY's wait().
+  // Total timer covers the whole lifetime — including upload,
+  // createPty, and a caller that never `.end()`s stdin.
+  if (opts.timeoutMs !== undefined) {
+    const totalMs = opts.timeoutMs;
+    totalTimer = setTimeout(() => {
+      totalTimer = null;
+      if (timedOut || disposed) return;
+      timedOut = new ExecTimeoutError("total", totalMs);
+      void killPty();
+      if (!stdin.writableEnded) stdin.destroy(timedOut);
+    }, totalMs);
+  }
+
   const exitPromise = new Promise<{ exitCode: number }>((resolve, reject) => {
+    // Throw the right sentinel so the catch below rejects with
+    // `DisposedError` / `ExecTimeoutError` instead of whatever
+    // downstream error a half-built exec would surface.
+    const checkAborted = (): void => {
+      if (disposed) throw new DisposedError();
+      if (timedOut) throw timedOut;
+    };
+
     const startPty = async (): Promise<void> => {
       const stdinPayload = Buffer.concat(stdinBuffers);
-      // Check `disposed` after every await so a caller that calls
-      // `dispose()` while the IIFE is mid-flight (between stdin.end()
-      // and pty.sendInput) doesn't end up running the exec to
-      // completion in the background — the PTY would otherwise be
-      // born after dispose's `if (pty)` check ran and saw undefined.
-      if (disposed) throw new DisposedError();
+      // Re-checked after every await so a `dispose()` or total-timer
+      // fire mid-flight doesn't end up running the exec anyway.
+      checkAborted();
       await fs.uploadFile(stdinPayload, stdinPath);
-      if (disposed) throw new DisposedError();
+      checkAborted();
 
       pty = await daytonaProcess.createPty({
         id: sessionId,
-        // cwd applies to the PTY shell itself, which means the `exec
-        // <argv> < … 2> …` line below inherits it — no `cd` prefix
-        // needed inside the shell line.
+        // The PTY shell starts in `cwd`, so the `exec …` line below
+        // inherits it.
         ...(opts.workingDir !== undefined && { cwd: opts.workingDir }),
-        // `PS1=""` suppresses the bash startup prompt so the only
-        // pre-claude bytes on onData are the terminal echo of the
-        // single exec line we send. `NO_COLOR=1` suppresses ANSI
-        // escapes on an isatty stdout. Caller env wins over both.
+        // `PS1=""` mutes the shell prompt; `NO_COLOR=1` mutes ANSI on
+        // isatty stdout. Caller env overrides both. (Custom images
+        // that source `/etc/bash.bashrc` may still leak rc-file
+        // output here — cogmo-devbase doesn't.)
         envs: { PS1: "", NO_COLOR: "1", ...(opts.env ?? {}) },
+        // 200x50 is generous; sized for claude's wide tool output.
+        // Lift to `ExecOptions` when a binary needs explicit COLUMNS.
         cols: PTY_COLS,
         rows: PTY_ROWS,
         onData: handleOnData,
       });
-      if (disposed) {
-        await pty.kill().catch(() => undefined);
-        throw new DisposedError();
+      if (disposed || timedOut) {
+        await killPty();
+        checkAborted();
       }
       await pty.waitForConnection();
-      if (disposed) {
-        await pty.kill().catch(() => undefined);
-        throw new DisposedError();
+      if (disposed || timedOut) {
+        await killPty();
+        checkAborted();
       }
 
-      // Arm timers after the WS is up — they bound the running exec,
-      // not the createPty handshake.
-      if (opts.timeoutMs !== undefined) {
-        totalTimer = setTimeout(() => {
-          totalTimer = null;
-          if (timedOut || disposed) return;
-          timedOut = new ExecTimeoutError("total", opts.timeoutMs ?? 0);
-          pty?.kill().catch(() => {});
-        }, opts.timeoutMs);
-      }
+      // Idle watchdog arms now that bytes can flow; total timer
+      // already armed at function entry.
       resetIdle();
 
-      // Send the exec line. `exec` replaces the shell so the PTY's
-      // underlying pid becomes claude (or whatever cmd); when it exits
-      // the PTY tears down and `pty.wait()` resolves with its exit
-      // code, no marker parsing needed. Stdin redirected from the
-      // uploaded tmpfile (real pipe FD → kernel-level EOF when
-      // exhausted). Stderr to a tmpfile so onData is clean stdout.
+      // `exec` replaces the shell, so PTY exit = target exit. Stdin
+      // comes from the uploaded tmpfile (real pipe FD = real EOF);
+      // stderr is redirected so onData carries only stdout.
       const shellLine = `exec ${shellEscapeArgv(cmd)} < ${shellEscape(stdinPath)} 2> ${shellEscape(stderrPath)}\n`;
       await pty.sendInput(shellLine);
     };
@@ -254,6 +254,10 @@ export async function startExecPty(args: {
         );
       }
       stderr.end();
+
+      // `disconnect()` is idempotent and frees the local WS even when
+      // natural exit already closed it server-side.
+      if (pty) await pty.disconnect().catch(() => undefined);
 
       await cleanupRemoteFiles();
     };
@@ -322,12 +326,9 @@ export async function startExecPty(args: {
     disposed = true;
     clearTimers();
     if (pty) {
-      await pty.kill().catch(() => undefined);
+      await killPty();
     } else if (!stdin.writableEnded) {
-      // Caller called dispose() before `stdin.end()` — the IIFE is
-      // still parked on the finish event. Destroy the writable so the
-      // rejectEnd branch fires and the IIFE settles into the disposed
-      // rejection path.
+      // Unblock the IIFE parked on `stdin.once("finish")`.
       stdin.destroy(new DisposedError());
     }
     await Promise.race([

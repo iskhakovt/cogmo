@@ -290,6 +290,98 @@ describe("startExecPty", () => {
     await handle.wait();
   });
 
+  it("total timer fires while parked on stdin.end() (caller never ends)", async () => {
+    vi.useFakeTimers();
+    try {
+      const ptyCtrl = fakePty();
+      const fsCtrl = fakeFs();
+      const procCtrl = fakeProcess(ptyCtrl);
+
+      const handle = await startExecPty({
+        process: procCtrl.process,
+        fs: fsCtrl.fs,
+        sessionIdPrefix: "p",
+        cmd: ["true"],
+        opts: { attachStdin: true, timeoutMs: 1_000 },
+        random: deterministicRandom(),
+      });
+      // No `handle.stdin.end()` — the IIFE is parked on the finish event.
+      const failure = handle.wait().catch((err: Error) => err);
+
+      await vi.advanceTimersByTimeAsync(1_001);
+
+      const err = await failure;
+      if (!(err instanceof ExecTimeoutError)) {
+        throw new Error(`expected ExecTimeoutError, got ${String(err)}`);
+      }
+      expect(err.kind).toBe("total");
+      // The pre-end wait gets unblocked before createPty is ever called.
+      expect(procCtrl.process.createPty).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("total timer fires during fs.uploadFile (before createPty)", async () => {
+    vi.useFakeTimers();
+    try {
+      const ptyCtrl = fakePty();
+      const fsCtrl = fakeFs();
+      const procCtrl = fakeProcess(ptyCtrl);
+      // Make upload take longer than the total timeout.
+      vi.mocked(fsCtrl.fs.uploadFile).mockImplementationOnce(
+        () => new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
+      );
+
+      const handle = await startExecPty({
+        process: procCtrl.process,
+        fs: fsCtrl.fs,
+        sessionIdPrefix: "p",
+        cmd: ["true"],
+        opts: { attachStdin: true, timeoutMs: 1_000 },
+        random: deterministicRandom(),
+      });
+      handle.stdin?.end();
+      const failure = handle.wait().catch((err: Error) => err);
+
+      await vi.advanceTimersByTimeAsync(5_001);
+
+      const err = await failure;
+      if (!(err instanceof ExecTimeoutError)) {
+        throw new Error(`expected ExecTimeoutError, got ${String(err)}`);
+      }
+      expect(err.kind).toBe("total");
+      // checkAborted() runs after the slow upload completes — createPty
+      // never runs.
+      expect(procCtrl.process.createPty).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("calls pty.disconnect() on natural exit", async () => {
+    const ptyCtrl = fakePty();
+    const fsCtrl = fakeFs();
+    const procCtrl = fakeProcess(ptyCtrl);
+
+    const handle = await startExecPty({
+      process: procCtrl.process,
+      fs: fsCtrl.fs,
+      sessionIdPrefix: "p",
+      cmd: ["true"],
+      opts: { attachStdin: true },
+      random: deterministicRandom(),
+    });
+    handle.stdin?.end();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    ptyCtrl.resolveWait({ exitCode: 0 });
+    await handle.wait();
+
+    expect(ptyCtrl.pty.disconnect).toHaveBeenCalledTimes(1);
+  });
+
   it("fires the idle timer when no onData arrives within the bound", async () => {
     vi.useFakeTimers();
     try {
