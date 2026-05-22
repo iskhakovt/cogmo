@@ -69,6 +69,51 @@ describe("TaskInvokeSchema", () => {
   it("rejects missing skill", () => {
     expect(() => TaskInvokeSchema.parse({ type: "task_invoke", id: "t", inputs: {} })).toThrow();
   });
+
+  it("accepts an absent skillVenv (skill has no declared dependencies)", () => {
+    const r = TaskInvokeSchema.parse({
+      type: "task_invoke",
+      id: "t",
+      skill: "s",
+      inputs: {},
+    });
+    expect(r.skillVenv).toBeUndefined();
+  });
+
+  it("accepts a populated skillVenv path", () => {
+    const r = TaskInvokeSchema.parse({
+      type: "task_invoke",
+      id: "t",
+      skill: "s",
+      inputs: {},
+      skillVenv: "/skill-venvs/abc123/",
+    });
+    expect(r.skillVenv).toBe("/skill-venvs/abc123/");
+  });
+
+  it("rejects an empty skillVenv string", () => {
+    expect(() =>
+      TaskInvokeSchema.parse({
+        type: "task_invoke",
+        id: "t",
+        skill: "s",
+        inputs: {},
+        skillVenv: "",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects a relative skillVenv path", () => {
+    expect(() =>
+      TaskInvokeSchema.parse({
+        type: "task_invoke",
+        id: "t",
+        skill: "s",
+        inputs: {},
+        skillVenv: "skill-venvs/abc",
+      }),
+    ).toThrow(/absolute path/);
+  });
 });
 
 describe("TaskResultSchema (discriminated)", () => {

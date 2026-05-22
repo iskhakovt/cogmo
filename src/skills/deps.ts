@@ -222,3 +222,153 @@ export function makeSandboxLockfileCompiler(
     },
   };
 }
+
+/**
+ * Filesystem layout the populator owns inside the container. Keep in
+ * sync with the supervisor's activation expectations (the supervisor
+ * reads the activation path verbatim from `task_invoke.skillVenv`).
+ */
+export const SKILL_VENVS_DIR = "/skill-venvs";
+
+/**
+ * Per-task wall-clock cap for the populate exec. Default uv pip sync
+ * over a typical skill's lockfile (HTTP-only deps) finishes in
+ * single-digit seconds; bigger trees (anything pulling cryptography,
+ * pandas, etc.) need more. Tuned conservatively so the first invoke
+ * doesn't time out on a cold populate path.
+ */
+const DEFAULT_POPULATE_TIMEOUT_MS = 180_000;
+
+/**
+ * Shell program that the populator invokes inside the worker
+ * container. Idempotent: if `$VENV/.ready` exists, exits 0 immediately.
+ * Otherwise creates a tmp venv adjacent to the target, syncs the
+ * lockfile via stdin, plants the marker, and renames into place.
+ *
+ * The rename is the atomic-publish point — readers gate on `.ready`,
+ * so partial populates (process killed mid-sync, tmp dir left behind)
+ * never get observed as live. The rm -rf at the top covers a
+ * crash-and-retry on the same worker where the tmp dir from the
+ * previous attempt is still present.
+ *
+ * Args are positional: $1 = lockfile hash, $2 = worker id (used for
+ * the tmp-dir suffix; per-worker uniqueness is sufficient because
+ * each container is single-flight on its supervisor).
+ */
+const POPULATE_SCRIPT = `set -eu
+HASH="$1"
+WORKERID="$2"
+VENV="${SKILL_VENVS_DIR}/$HASH"
+TMP="${SKILL_VENVS_DIR}/$HASH.tmp.$WORKERID"
+if [ -f "$VENV/.ready" ]; then
+  exit 0
+fi
+mkdir -p "${SKILL_VENVS_DIR}"
+rm -rf "$TMP"
+uv venv --quiet "$TMP"
+uv pip sync --quiet --python "$TMP/bin/python" --require-hashes --only-binary=:all: /dev/stdin
+touch "$TMP/.ready"
+mv "$TMP" "$VENV"
+`;
+
+/**
+ * Outcome of `ensureVenvPopulated`. `populate_failed` carries the
+ * sync's stderr — usually a hash-mismatch (someone tampered with the
+ * lockfile), a yanked wheel, or a Pyodide-incompatible package the
+ * register-time compile somehow let through. `transport_failed` is
+ * everything else: exec couldn't launch, timed out, etc.
+ */
+export type VenvPopulateError =
+  | { kind: "populate_failed"; message: string }
+  | { kind: "transport_failed"; message: string };
+
+export interface EnsureVenvPopulatedOptions {
+  session: SandboxSession;
+  lockfileHash: string;
+  lockfileContents: string;
+  /**
+   * Stable identifier for the calling worker. Used to suffix the tmp
+   * populate directory (`<hash>.tmp.<workerId>`) so a crash-and-retry
+   * on the same worker doesn't fight a prior in-flight populate.
+   * Cross-worker collisions don't apply at this PR — each container's
+   * `/skill-venvs/` lives in its own overlay FS. The volume-mounted
+   * variant in a follow-up PR will need a stronger guard.
+   */
+  workerId: string;
+  timeoutMs?: number;
+}
+
+/**
+ * Ensure a per-lockfile-hash virtualenv exists at
+ * `/skill-venvs/<hash>/` inside the worker's container. Idempotent —
+ * the second call (or any concurrent call ordered after a successful
+ * one) returns the path without touching the FS. Returns the absolute
+ * venv path that the supervisor activates via `task_invoke.skillVenv`.
+ *
+ * Today the venv lives in the container's overlay FS — survives
+ * across tasks on the same worker, vanishes on worker recycle. A
+ * follow-up adds a persisted volume mount so cross-worker reuse +
+ * cross-recycle persistence work without re-paying the populate cost.
+ */
+export async function ensureVenvPopulated(
+  opts: EnsureVenvPopulatedOptions,
+): Promise<Result<string, VenvPopulateError>> {
+  const venvPath = `${SKILL_VENVS_DIR}/${opts.lockfileHash}`;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_POPULATE_TIMEOUT_MS;
+
+  // `sh -c <script> <argv0> <args...>` runs the script with the
+  // trailing values bound to $0/$1/$2. Lockfile body goes through
+  // stdin (uv pip sync reads /dev/stdin). Buffered exec doesn't
+  // expose stdin, so this has to be streaming.
+  let handle: Awaited<ReturnType<SandboxSession["execStreaming"]>>;
+  try {
+    handle = await opts.session.execStreaming(
+      ["sh", "-c", POPULATE_SCRIPT, "populate", opts.lockfileHash, opts.workerId],
+      { attachStdin: true, timeoutMs },
+    );
+  } catch (e) {
+    return err({
+      kind: "transport_failed",
+      message: e instanceof Error ? e.message : String(e),
+    });
+  }
+  if (!handle.stdin) {
+    await handle.dispose().catch(() => {});
+    return err({
+      kind: "transport_failed",
+      message: "execStreaming returned without stdin despite attachStdin=true",
+    });
+  }
+
+  // Script runs with `--quiet` flags everywhere; uv stays silent
+  // on stdout under normal operation. Stderr captures the diagnostic
+  // surface (hash mismatch, yanked wheel, etc.) we surface back to
+  // the host.
+  const stderrChunks: string[] = [];
+  handle.stdout.on("data", () => {
+    // Drain — script is `--quiet`. Any bytes here are uv-version
+    // diagnostic noise we don't bubble up.
+  });
+  handle.stderr.setEncoding("utf-8");
+  handle.stderr.on("data", (c: string) => stderrChunks.push(c));
+
+  handle.stdin.write(opts.lockfileContents);
+  handle.stdin.end();
+
+  let exitCode: number;
+  try {
+    ({ exitCode } = await handle.wait());
+  } catch (e) {
+    return err({
+      kind: "transport_failed",
+      message: e instanceof Error ? e.message : String(e),
+    });
+  }
+  if (exitCode !== 0) {
+    return err({
+      kind: "populate_failed",
+      message: stderrChunks.join("").trim() || `uv pip sync exited ${exitCode}`,
+    });
+  }
+  return ok(venvPath);
+}

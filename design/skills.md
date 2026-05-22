@@ -664,7 +664,7 @@ os.environ["PATH"] = f"{venv}/bin:{os.environ['PATH']}"
 sys.path[:0] = [f"{venv}/lib/python{sys.version_info[0]}.{sys.version_info[1]}/site-packages"]
 ```
 
-The supervisor's own venv (`/opt/cogmo-skills/.venv`, where `cogmo_skills_runtime` lives) stays unchanged — the supervisor needs it to keep serving the dispatcher protocol. The skill venv is prepended to `sys.path`; the runtime venv is NOT on `sys.path` at all inside the child. Skill code can `import httpx` but cannot `import cogmo_skills_runtime` — the abstraction stays sealed.
+The supervisor's own venv (`/opt/cogmo-skills/.venv`, where `cogmo_skills_runtime` lives) stays on `sys.path` — the runner needs it to keep serving the dispatcher protocol. The skill venv is *prepended*, so any name collision resolves to the skill's pinned version (`import httpx` → skill's `httpx==0.27.0`, not whatever the runtime happens to bundle). Skill code can technically reach `cogmo_skills_runtime` symbols; that's UX confusion at worst — the real isolation boundary is the sysbox container, not Python module visibility.
 
 A skill with `lockfile_hash IS NULL` (empty `dependencies`) skips activation entirely — the task runs in a child with stdlib visible and nothing else.
 

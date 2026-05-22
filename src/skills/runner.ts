@@ -330,6 +330,13 @@ interface SkillSourceCacheEntry {
    * use; remains `undefined` for skills without declared outputs.
    */
   outputsValidator?: ValidateFunction;
+  /**
+   * Raw `requirements.lock` bytes when the manifest declares dependencies.
+   * Cached alongside `body` so the populator on first invoke doesn't pay
+   * a second `git show` per task. `undefined` when the manifest declares
+   * no deps (no lockfile is committed).
+   */
+  lockfileContents?: string;
 }
 
 export class SkillRunnerImpl implements SkillRunner {
@@ -450,7 +457,7 @@ export class SkillRunnerImpl implements SkillRunner {
     gitSha: string,
     manifest: SkillManifest,
     opts: { verifyFresh: boolean } = { verifyFresh: true },
-  ): Promise<Result<string | null, string>> {
+  ): Promise<Result<{ hash: string; contents: string } | null, string>> {
     if (manifest.dependencies.length === 0) {
       return ok(null);
     }
@@ -473,7 +480,7 @@ export class SkillRunnerImpl implements SkillRunner {
       }
     }
 
-    return ok(snapshot.value.hash);
+    return ok({ hash: snapshot.value.hash, contents: snapshot.value.contents });
   }
 
   static async create(opts: SkillRunnerOptions): Promise<SkillRunnerImpl> {
@@ -636,7 +643,7 @@ export class SkillRunnerImpl implements SkillRunner {
     if (lockfileResult.isErr()) {
       return rejectedResult(branchSha, lockfileResult.error);
     }
-    const lockfileHash = lockfileResult.value;
+    const lockfile = lockfileResult.value;
 
     const schedule = manifest.schedule ?? null;
     const result = await this.#runInTx((tx) =>
@@ -648,7 +655,7 @@ export class SkillRunnerImpl implements SkillRunner {
         schedule,
         scheduleNextRunAt: this.#computeScheduleNextRunAt(schedule),
         branchTipSha: branchSha,
-        lockfileHash,
+        lockfileHash: lockfile?.hash ?? null,
         inputs: manifest.inputs,
         outputs: manifest.outputs ?? null,
         classifierLog,
@@ -673,6 +680,7 @@ export class SkillRunnerImpl implements SkillRunner {
       result,
       manifest,
       body,
+      lockfile,
     });
   }
 
@@ -751,7 +759,7 @@ export class SkillRunnerImpl implements SkillRunner {
     if (lockfileResult.isErr()) {
       return rejectedResult(deploy.gitSha, lockfileResult.error);
     }
-    const lockfileHash = lockfileResult.value;
+    const lockfile = lockfileResult.value;
 
     const schedule = manifest.schedule ?? null;
     const result = await this.#runInTx((tx) =>
@@ -766,7 +774,7 @@ export class SkillRunnerImpl implements SkillRunner {
         effects: manifest.effects,
         schedule,
         scheduleNextRunAt: this.#computeScheduleNextRunAt(schedule),
-        lockfileHash,
+        lockfileHash: lockfile?.hash ?? null,
         inputs: manifest.inputs,
         outputs: manifest.outputs ?? null,
         applyFilesystem: async () => {
@@ -783,6 +791,9 @@ export class SkillRunnerImpl implements SkillRunner {
         manifest,
         body,
         inputsValidator,
+        // Mirror `#loadSourceForRow`: lockfileContents lives on the
+        // cache entry whenever the manifest declares deps.
+        ...(lockfile && { lockfileContents: lockfile.contents }),
       });
       // Mirror the new main SHA to the configured remote — same rationale as
       // register's mirror call.
@@ -893,7 +904,7 @@ export class SkillRunnerImpl implements SkillRunner {
     if (lockfileResult.isErr()) {
       return rejectedResult(targetSha, lockfileResult.error);
     }
-    const lockfileHash = lockfileResult.value;
+    const lockfile = lockfileResult.value;
 
     const schedule = manifest.schedule ?? null;
     const result = await this.#runInTx((tx) =>
@@ -905,7 +916,7 @@ export class SkillRunnerImpl implements SkillRunner {
         effects: manifest.effects,
         schedule,
         scheduleNextRunAt: this.#computeScheduleNextRunAt(schedule),
-        lockfileHash,
+        lockfileHash: lockfile?.hash ?? null,
         inputs: manifest.inputs,
         outputs: manifest.outputs ?? null,
         classifierLog,
@@ -926,6 +937,8 @@ export class SkillRunnerImpl implements SkillRunner {
         manifest,
         body,
         inputsValidator,
+        // Same invariant as approve-warm above.
+        ...(lockfile && { lockfileContents: lockfile.contents }),
       });
       // Rollback rewinds main backwards, so the remote push needs `force`. We
       // gate with `--force-with-lease=refs/heads/main:<mainSha>` — if anything
@@ -1285,6 +1298,21 @@ export class SkillRunnerImpl implements SkillRunner {
         // This is rare: most skills don't override and ride the warm path.
         const overrides = mapManifestResourceLimits(cached.manifest.resources);
         const isolation = cached.manifest.isolation;
+        // Invariant: lockfile_hash != null ⇒ cached.lockfileContents
+        // must be present. Loud throw if not — silently dropping deps
+        // would run a dep-locked skill without its venv.
+        let deps: { lockfileHash: string; lockfileContents: string } | undefined;
+        if (skill.lockfileHash !== null) {
+          if (cached.lockfileContents === undefined) {
+            throw new Error(
+              `invariant: skill '${skill.name}' has lockfile_hash but cache missing lockfileContents`,
+            );
+          }
+          deps = {
+            lockfileHash: skill.lockfileHash,
+            lockfileContents: cached.lockfileContents,
+          };
+        }
         if (overrides.cpus !== undefined || overrides.memory_bytes !== undefined) {
           return runOnSysboxContainer({
             taskId,
@@ -1293,6 +1321,7 @@ export class SkillRunnerImpl implements SkillRunner {
             inputs,
             ...(wallClockS !== undefined && { wallClockS }),
             ...(isolation !== undefined && { isolation }),
+            ...(deps !== undefined && { deps }),
             resourceLimits: overrides,
             image: this.#tier2Image,
             sandbox,
@@ -1307,6 +1336,7 @@ export class SkillRunnerImpl implements SkillRunner {
           inputs,
           ...(wallClockS !== undefined && { wallClockS }),
           ...(isolation !== undefined && { isolation }),
+          ...(deps !== undefined && { deps }),
           ctxHandler,
         });
       }
@@ -1546,6 +1576,20 @@ export class SkillRunnerImpl implements SkillRunner {
     const manifest = parsed.value.manifest;
     const inputsValidator = this.#compileInputsValidator(manifest, "loadSource");
     const entry: SkillSourceCacheEntry = { manifest, body, inputsValidator };
+    if (row.lockfileHash !== null) {
+      // Lockfile presence is invariant with `row.lockfileHash != null` —
+      // register persists the hash atomically with the gitSha, so a row
+      // with a hash always has a committed lockfile. A missing/empty
+      // read here means the repo + DB drifted (manual git tampering,
+      // partial restore, ...) — surface it loudly.
+      const snapshot = await readLockfileAtSha(this.#skillsRepoPath, row.gitSha);
+      if (snapshot.isErr()) {
+        throw new Error(
+          `lockfile for skill '${row.name}' at ${row.gitSha} is ${snapshot.error.kind} — repo and DB are out of sync (skills.lockfile_hash=${row.lockfileHash})`,
+        );
+      }
+      entry.lockfileContents = snapshot.value.contents;
+    }
     this.#sourceCache.set(key, entry);
     return entry;
   }
@@ -1584,8 +1628,9 @@ export class SkillRunnerImpl implements SkillRunner {
     result: ExecuteRegisterResult;
     manifest: SkillManifest;
     body: string;
+    lockfile: { hash: string; contents: string } | null;
   }): RegisterResult {
-    const { name, branchSha, classifierLog, result, manifest, body } = args;
+    const { name, branchSha, classifierLog, result, manifest, body, lockfile } = args;
     if (result.kind === "rejected") {
       return rejectedResult(branchSha, result.reason);
     }
@@ -1605,6 +1650,7 @@ export class SkillRunnerImpl implements SkillRunner {
         manifest,
         body,
         inputsValidator,
+        ...(lockfile && { lockfileContents: lockfile.contents }),
       });
       return {
         name,
@@ -1619,6 +1665,7 @@ export class SkillRunnerImpl implements SkillRunner {
       manifest,
       body,
       inputsValidator,
+      ...(lockfile && { lockfileContents: lockfile.contents }),
     });
     return {
       name,
