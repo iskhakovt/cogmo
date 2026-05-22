@@ -615,33 +615,37 @@ No host-side `uv` dependency. The Cogmo TS host shells out to the sandbox for co
 
 ### Cache layout
 
-A persisted volume holds the wheel cache and per-lockfile-hash virtualenvs:
+A persisted volume holds the wheel cache and per-lockfile-hash virtualenvs, mounted flat at `/skill-venvs/`:
 
 ```text
-/var/cache/cogmo-skills/
-  uv-cache/                          # UV_CACHE_DIR — content-addressed wheel cache
-  venvs/
-    <sha256(requirements.lock)>/     # populated, ready
-      bin/
-      lib/pythonX.Y/site-packages/
-      .ready                          # marker — readers gate on this
-    <other-hash>.tmp.<workerId>/     # mid-populate; rename-target
+/skill-venvs/
+  .uv-cache/                          # UV_CACHE_DIR — content-addressed wheel cache.
+                                       # Dotted so it can't be mistaken for a lockfile-hash dir
+                                       # (sha256 hex never starts with a `.`); the reaper's
+                                       # `^[0-9a-f]{64}$` filter excludes it from the sweep set.
+  <sha256(requirements.lock)>/        # populated, ready
+    bin/
+    lib/pythonX.Y/site-packages/
+    .ready                             # marker — readers gate on this
+  <other-hash>.tmp.<workerId>/        # mid-populate; rename-target
 ```
 
-Local sysbox bind-mounts this directory from the host at `/var/cache/cogmo-skills`. Daytona mounts a Daytona Volume at the same path; the populator owns the `<lockfile-hash>/` subdirectory layout inside (single mount per sandbox, not K8s-style per-skill `subPath` isolation — workers are reused across skills with different lockfile hashes). `uv-cache/` and `venvs/` share the same filesystem so uv's hardlink mode works — cross-filesystem hardlinks silently fall back to copy and inflate disk by ~100× ([uv #15149](https://github.com/astral-sh/uv/issues/15149)). Wheels are downloaded once across the entire cache; every venv hardlinks from `uv-cache/` for free dedup.
+Local sysbox mounts a named Docker volume at `/skill-venvs`. Daytona mounts a Daytona Volume at the same path; the populator owns the `<lockfile-hash>/` subdirectory layout inside (single mount per sandbox, not K8s-style per-skill `subPath` isolation — workers are reused across skills with different lockfile hashes). `.uv-cache/` and the `<hash>/` venvs share the same filesystem so uv's hardlink mode works — cross-filesystem hardlinks silently fall back to copy and inflate disk by ~100× ([uv #15149](https://github.com/astral-sh/uv/issues/15149)). Wheels are downloaded once across the entire cache; every venv hardlinks from `.uv-cache/` for free dedup.
 
 ### Populate
 
 First task using a given lockfile hash populates the venv. Concurrent populators on the same lockfile hash are serialised by `.ready` + `mv -T` rename failure — the marker file plus atomic rename is the synchronisation point; the loser of the race detects `.ready` on the target after its own rename fails and exits success without redundant work. No Postgres advisory lock is used.
 
 ```text
-1. if /var/cache/cogmo-skills/venvs/<hash>/.ready exists → done
-2. uv venv /var/cache/cogmo-skills/venvs/<hash>.tmp.<workerId>
-3. uv pip sync --require-hashes --only-binary=:all: -r requirements.lock
-                                  (into the tmp venv, hardlinking from uv-cache/)
-4. touch /var/cache/cogmo-skills/venvs/<hash>.tmp.<workerId>/.ready
-5. mv -T /var/cache/cogmo-skills/venvs/<hash>.tmp.<workerId>
-       → /var/cache/cogmo-skills/venvs/<hash>
+1. if /skill-venvs/<hash>/.ready exists → done
+2. uv venv /skill-venvs/<hash>.tmp.<workerId>
+3. uv pip sync --require-hashes --only-binary=:all: \
+       --python /skill-venvs/<hash>.tmp.<workerId>/bin/python /dev/stdin
+                                  (lockfile contents streamed in on stdin from the host;
+                                   hardlinks from .uv-cache/)
+4. touch /skill-venvs/<hash>.tmp.<workerId>/.ready
+5. mv -T /skill-venvs/<hash>.tmp.<workerId>
+       → /skill-venvs/<hash>
                                   (atomic; readers see the populated venv or nothing.
                                    `mv -T` refuses to nest on collision, so the loser's
                                    rename fails and it exits success after seeing .ready.)
@@ -658,7 +662,7 @@ Failure during steps 2-4 leaves an orphaned `<hash>.tmp.<workerId>/` directory. 
 Before forking the task child, the supervisor activates the skill venv:
 
 ```python
-venv = f"/var/cache/cogmo-skills/venvs/{lockfile_hash}"
+venv = f"/skill-venvs/{lockfile_hash}"
 os.environ["VIRTUAL_ENV"] = venv
 os.environ["PATH"] = f"{venv}/bin:{os.environ['PATH']}"
 sys.path[:0] = [f"{venv}/lib/python{sys.version_info[0]}.{sys.version_info[1]}/site-packages"]
@@ -678,11 +682,11 @@ Worker init (Pyodide load + micropip install + version verify) is capped at 60s 
 
 ### Cache reachability
 
-`/var/cache/cogmo-skills/venvs/<hash>/` is reachable iff some `skills` row (enabled or disabled, since disabled skills can re-enable) has `lockfile_hash = <hash>`. The reaper sweeps unreachable entries older than a 7-day grace period — catches the rollback-then-roll-forward case without forcing re-populate.
+`/skill-venvs/<hash>/` is reachable iff some `skills` row (enabled or disabled, since disabled skills can re-enable) has `lockfile_hash = <hash>`. The reaper sweeps unreachable entries older than a 7-day grace period — catches the rollback-then-roll-forward case without forcing re-populate.
 
 `skills.lockfile_hash` is denormalised from git for cheap reachability queries — updated atomically in the same transaction that advances `git_sha`. LRU is the wrong policy on this volume: a rarely-used but live skill would lose its venv and pay a multi-second cold start on the next invocation. Reachability with a grace period is correct.
 
-`uv-cache/` (the wheel cache, not the venvs) is swept by `uv cache prune` on a separate cadence. Wheels are shared across many venvs and reachability is harder to compute (track which wheels each `requirements.lock` references); growth is bounded by `(name, version, platform tag)` distinct combinations and stays manageable at personal scale without aggressive eviction.
+`.uv-cache/` (the wheel cache, not the venvs) is swept by `uv cache prune` on a separate cadence. Wheels are shared across many venvs and reachability is harder to compute (track which wheels each `requirements.lock` references); growth is bounded by `(name, version, platform tag)` distinct combinations and stays manageable at personal scale without aggressive eviction.
 
 ### Classifier inputs
 
@@ -1137,21 +1141,48 @@ UPDATE recovery_point='finished', status='success'|'error'  ← transitionToFini
 
 **Why DB-level over framework-level (Inngest step.run boundaries).** Framework-agnostic — survives engine swaps, works under Inngest today and bare `setTimeout` for CLI runs. Avoids Inngest's `Jsonify<Awaited<T>>` return-type friction. One code path for all callers. Survives crashes the framework can't see (LangGraph's specific critique). See PR #303 review thread and the [decision summary in todo](todo.md).
 
-## Module structure `[proposed]`
+## Module structure
 
 ```text
 src/skills/
-  index.ts            — public SkillRunner interface, factory
-  runner.ts           — Dispatcher + Pool coordination
-  pool.ts             — worker lifecycle, state tracking
-  worker-wasm.ts      — Pyodide isolate management
-  worker-container.ts — sysbox container spawn (via Sandbox interface)
-  protocol.ts         — JSON-RPC framing
-  sync.ts             — git → DB sync on deploy
-  deps.ts             — lockfile compile + verify (register), venv populate + activate (invoke). See Dependencies.
+  index.ts                — public SkillRunner interface, factory
+  runner.ts               — Dispatcher + Pool coordination, register/approve/rollback/invoke
+  manifest.ts             — SkillManifestSchema (Zod) + frontmatter parser
+  classifier.ts           — risk-tier classifier (manifest fields)
+  ast-classifier.ts       — tree-sitter static analysis over skill.py
+  ast-rules.ts            — effect / dependency category rules
+  dispatcher.ts           — ctx-call routing between worker + host
+  ctx-handler.ts          — host-side ctx.* method implementations
+  protocol.ts             — task_invoke / task_result / ctx_call / ctx_result Zod schemas
+  deps.ts                 — lockfile compile + verify (register), venv populate + activate (invoke)
+  deps-reaper.ts          — unreachable-venv sweep over /skill-venvs/
+  deps-reaper-function.ts — Inngest cron wrapper for the reaper
+  pyodide-compat.ts       — register-time tier-1 compat check (pyodide-lock.json + PyPI pure-wheel)
+  cron-ticker.ts          — Inngest cron tick → due-skill fan-out
+  cron-fire-handler.ts    — per-skill cron invocation handler
+  git-ops.ts              — git plumbing (revParse, gitShow, updateRef, etc.)
+  repo.ts                 — bare-repo bootstrap + remote configuration
+  types.ts                — shared SkillRow / classifier-log / resource-usage types
+  cli.ts                  — `cogmo skill ...` operator CLI
+  configure-remote.ts     — remote-setup CLI flow
+  skills-tool.ts          — agent-facing skill tool registration
+  skills-service.ts       — per-conversation skill service (orchestrator-scoped)
+  skill-tool-builder.ts   — Anthropic SDK tool descriptor builder per skill
+  skills-keyboard.ts      — Telegram approve/deny callback keyboard
+  worker-sysbox/
+    host.ts               — tier-2 host-side: spawn sandbox, drive dispatcher
+    worker.ts             — tier-2 in-container supervisor entrypoint glue
+    pool.ts               — warm-pool lifecycle, recycle, idle-shutdown
+    transport.ts          — NDJSON-over-stdio frame parsing
+  worker-wasm/
+    host.ts               — tier-1 host-side: spawn Node Worker, drive dispatcher
+    worker-entry.ts       — Worker-thread entry (loadPyodide + micropip install + run)
+    boot.mjs              — tsx-loader bootstrap for dev/test (Node 22.2+ workaround)
+    wasm-lint.ts          — pre-flight static check for WASM-incompatible imports
+    ctx.py.ts             — bundled Python ctx SDK injected into the Pyodide isolate
   store/
-    schema.ts         — skills, skill_runs tables
-    index.ts          — SkillStore interface + Drizzle impl
+    schema.ts             — skills, skill_deploys, skill_runs, skill_context_calls tables
+    index.ts              — SkillStore interface + Drizzle impl
 ```
 
 Public interface (canonical — see [Where the classifier runs](#where-the-classifier-runs) for the full RPC contract):
@@ -1197,7 +1228,7 @@ interface SkillRunner {
 | Who advances `main` | Only Cogmo's `register` RPC | Pre-receive hook rejects direct pushes to `main`. Makes "live on main" atomic with "classified and approved"; collapses transient "committed-but-rejected" states; structurally prevents force push. |
 | Concurrency on register | Advisory lock + pending-deploy check | `pg_advisory_xact_lock` per skill name serializes concurrent registers. Refuse if a pending-approval deploy exists. Idempotent for no-op SHAs. Standard DB-backed state-machine pattern. |
 | LLM tool surface | One tool per skill (dynamic per-turn tool list) | Matches progressive disclosure — skills appear in the tool list with their own name + description. No `invoke_skill` wrapper (would break discovery). Orchestrator rebuilds tool list each turn from `SkillRunner.list()`. |
-| Manifest | Single `SkillManifestSchema` (Zod) parsed from `SKILL.md` frontmatter | Four consumers read it: register RPC, classifier, dispatcher, tool registrar. One schema prevents field drift. Superset of Anthropic SKILL.md. |
+| Manifest | Single `SkillManifestSchema` (Zod) parsed from `SKILL.md` frontmatter | Five consumers read it: register RPC, classifier, dependency populator, dispatcher, tool registrar. One schema prevents field drift. Superset of Anthropic SKILL.md. |
 | State reset | Subinterpreter per task (3.13+), per-skill `recycle` opt-out | Fresh interpreter ≈ no state leakage, ~50ms. Opt-out handles C-extension hostile libraries. Flip default to `recycle` system-wide if widespread breakage. |
 | Skill discovery | Progressive disclosure (SKILL.md) | Matches Anthropic standard. At <50 skills, tool list stays manageable. Retrieval (`search_skills`) added later when tool-list tokens or selection accuracy forces it. |
 | Resource budgets | Declared in SKILL.md; cgroup slice (container) / V8 isolate limits (WASM) | Container tier reuses sandbox.md cgroup parent. WASM uses host-side timer + isolate memory cap. Per-skill override within tier hard ceilings. |
@@ -1217,11 +1248,11 @@ interface SkillRunner {
 | Resolver | `uv` (compile + sync) baked into `cogmo-skills:<version>` runtime image | Sub-100ms venv creation; hash pinning is first-class; resolver at register matches resolver at populate byte-for-byte. Already standardised across the codebase. |
 | Where compile runs at register | Short-lived sandbox session via `SandboxClient` | No host-side `uv` dependency; same `uv` binary as runtime; ~1-2s register latency is acceptable for a once-per-skill-version op. |
 | Dep cache shape | Per-lockfile-hash venv on a persisted volume, shared `UV_CACHE_DIR` for wheels | Avoids per-skill image rebuild (kills warm-pool economics); uv hardlinks share wheels across venvs for free dedup. |
-| Cache atomicity | Populate to `<hash>.tmp.<workerId>/`, `.ready` marker, atomic rename; `pg_advisory_xact_lock` serializes populators | uv has no directory-level atomicity guarantees under concurrent writers ([uv #15335](https://github.com/astral-sh/uv/issues/15335)). Marker file + rename + advisory lock is the portable answer. |
+| Cache atomicity | Populate to `<hash>.tmp.<workerId>/`, `.ready` marker, `mv -T` rename | uv has no directory-level atomicity guarantees under concurrent writers ([uv #15335](https://github.com/astral-sh/uv/issues/15335)). Marker file + `mv -T` rename is the portable answer; the loser of a concurrent populate sees `.ready` on the target after its rename fails and exits success. No Postgres advisory lock needed at this layer (advisory lock IS used for register concurrency, a separate concern). |
 | Cache reachability | `skills.lockfile_hash` denormalised from git; reaper sweeps `<hash>/` with no live reference + 7-day grace | LRU evicts cold-but-live skills and pays multi-second cold start on next invoke. Reachability + grace period is correct. |
 | Source distributions | Forbidden (`--only-binary=:all:`) | Sdists run arbitrary install-time code + need a build toolchain. Auto-tier never includes sdists. Opt-in escape hatch deferred to a real driver. |
 | Venv overlay vs `--target` | Per-skill venv, not `--target` + PYTHONPATH | `--target` has well-known namespace-package collisions ([pip #10629](https://github.com/pypa/pip/issues/10629)), inert `.pth` files, missing console scripts; PYTHONPATH overlay shadows base-wins which is surprising. Venv creation is cheap enough that "always a venv" is defensible. |
-| Tier 1 deps | `micropip.install(packages, index_urls=[mirror])` at WASM worker init; wheels cached per lockfile-hash | Symmetric audit with sysbox cache key. Pyodide-incompatible wheels fail at register, not at first invocation. |
+| Tier 1 deps | `micropip.install(specs, keep_going=False)` at WASM worker init, post-install `importlib.metadata.version()` verify per declared dep | Pyodide-incompatible wheels fail at register (`src/skills/pyodide-compat.ts` reads `pyodide-lock.json` + checks PyPI for a pure-Python wheel). Hash pinning isn't possible (no `micropip --require-hashes`); a per-lockfile-hash micropip wheel cache + private mirror are deferred (`[research]`). |
 | Private mirror | Deferred (`[research]`) | Public PyPI + hash pinning is fine at single-operator scale. Devpi/Bandersnatch becomes table stakes when scale widens or quarantine windows on new releases are wanted. |
 | Attestation verification | Deferred (`[research]`) | PEP 740 attestations are emerging (132k+ packages by Mar 2026). Verification via `pypi-attestations` belongs alongside the mirror when that lands. |
 
