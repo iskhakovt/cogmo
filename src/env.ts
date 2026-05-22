@@ -185,20 +185,19 @@ export const env = createEnv({
       .positive()
       .default(30 * 60 * 1000),
     /**
-     * Local-Docker named volume that holds per-lockfile-hash skill
-     * virtualenvs. The same volume is mounted at `/skill-venvs` on
-     * every tier-2 worker the pool spawns, so a venv populated by one
-     * worker is reused by every other worker (and survives worker
-     * recycle).
+     * Docker named volume (LocalDocker backend) / Daytona Volume
+     * (Daytona backend) that holds per-lockfile-hash skill virtualenvs.
+     * Mounted at `/skill-venvs` on every tier-2 worker — a venv
+     * populated by one worker is reused by every other worker and
+     * survives recycle.
      *
-     * **Multi-tenant warning.** The default name is shared across any
-     * Cogmo instances on the same Docker host — fine for the personal-
-     * scale single-tenant case, a footgun otherwise. Two instances
-     * (dev + prod, two users' instances, etc.) would share a venv
-     * cache and a compromised skill on either side could pre-stage
-     * malicious entries the other consumes. Set per-instance when
-     * running multiple Cogmos on one host. See
-     * `design/skills.md` → Security.
+     * Default suits single-tenant single-host deployments. Multi-
+     * instance deployments (staging + prod on one host, multiple
+     * Cogmos on the same Daytona org) should override per-deployment
+     * (`...-staging`, `...-prod`) — otherwise the cache cross-mounts
+     * and a compromised skill on either side could pre-stage malicious
+     * `<hash>/.ready` entries the other consumes. See
+     * `design/skills.md` -> Security posture.
      */
     COGMO_SKILLS_DEPS_VOLUME: z.string().min(1).default("cogmo-skills-deps-cache"),
     /** Host root for git clones registered via `/repo add`. */

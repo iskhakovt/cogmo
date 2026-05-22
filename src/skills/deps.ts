@@ -118,6 +118,15 @@ export interface SandboxLockfileCompilerOptions {
   resourceLimits?: Partial<ResourceLimits>;
   /** Override the wall-clock cap. Defaults to 60s. */
   timeoutMs?: number;
+  /**
+   * Optional shared deps-cache volume. When set, the compile sandbox
+   * mounts it at `/skill-venvs` and points `UV_CACHE_DIR` at the
+   * `.uv-cache` subdir so wheel metadata fetched during compile lives
+   * on the same volume the populator later uses. Without this, every
+   * register re-fetches PyPI metadata from scratch (~5-30s per register
+   * for non-trivial dep sets).
+   */
+  depsCacheVolumeName?: string;
 }
 
 /** Sandbox-backed LockfileCompiler. Fresh session per compile; ~1-2s spawn-dominated. */
@@ -151,6 +160,10 @@ export function makeSandboxLockfileCompiler(
           image: opts.image,
           resourceLimits: limits,
           expiresAt,
+          ...(opts.depsCacheVolumeName && {
+            depsCacheVolume: { volumeName: opts.depsCacheVolumeName },
+            env: { UV_CACHE_DIR: `${DEPS_CACHE_VOLUME_TARGET}/.uv-cache` },
+          }),
         });
       } catch (e) {
         return err({
@@ -245,9 +258,6 @@ export function makeSandboxLockfileCompiler(
   };
 }
 
-/** Re-export so existing callers (`SKILL_VENVS_DIR`) keep working. */
-export const SKILL_VENVS_DIR = DEPS_CACHE_VOLUME_TARGET;
-
 /**
  * Per-task wall-clock cap for the populate exec. Default uv pip sync
  * over a typical skill's lockfile (HTTP-only deps) finishes in
@@ -286,20 +296,20 @@ const DEFAULT_POPULATE_TIMEOUT_MS = 180_000;
 const POPULATE_SCRIPT = `set -eu
 HASH="$1"
 WORKERID="$2"
-VENV="${SKILL_VENVS_DIR}/$HASH"
-TMP="${SKILL_VENVS_DIR}/$HASH.tmp.$WORKERID"
+VENV="${DEPS_CACHE_VOLUME_TARGET}/$HASH"
+TMP="${DEPS_CACHE_VOLUME_TARGET}/$HASH.tmp.$WORKERID"
 # Dotted so it can't be mistaken for a lockfile-hash dir (sha256 hex
 # never starts with .). Shared filesystem with venvs lets uv hardlink.
-export UV_CACHE_DIR="${SKILL_VENVS_DIR}/.uv-cache"
+export UV_CACHE_DIR="${DEPS_CACHE_VOLUME_TARGET}/.uv-cache"
 if [ -f "$VENV/.ready" ]; then
   exit 0
 fi
-mkdir -p "${SKILL_VENVS_DIR}" "$UV_CACHE_DIR"
+mkdir -p "${DEPS_CACHE_VOLUME_TARGET}" "$UV_CACHE_DIR"
 # Opportunistic reaper of orphaned tmp dirs from earlier crashed
 # populates on other workers. Same-worker crash is already covered by
 # the rm -rf "$TMP" below; this one catches the cross-worker case on
 # the shared volume.
-find "${SKILL_VENVS_DIR}" -maxdepth 1 -name '*.tmp.*' -mmin +10 -exec rm -rf {} + 2>/dev/null || true
+find "${DEPS_CACHE_VOLUME_TARGET}" -maxdepth 1 -name '*.tmp.*' -mmin +10 -exec rm -rf {} + 2>/dev/null || true
 rm -rf "$TMP"
 uv venv --quiet "$TMP"
 uv pip sync --quiet --python "$TMP/bin/python" --require-hashes --only-binary=:all: /dev/stdin
@@ -361,7 +371,7 @@ export interface EnsureVenvPopulatedOptions {
 export async function ensureVenvPopulated(
   opts: EnsureVenvPopulatedOptions,
 ): Promise<Result<string, VenvPopulateError>> {
-  const venvPath = `${SKILL_VENVS_DIR}/${opts.lockfileHash}`;
+  const venvPath = `${DEPS_CACHE_VOLUME_TARGET}/${opts.lockfileHash}`;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_POPULATE_TIMEOUT_MS;
 
   // `sh -c <script> <argv0> <args...>` runs the script with the

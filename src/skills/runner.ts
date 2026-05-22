@@ -29,6 +29,7 @@ import {
   updateRef,
 } from "./git-ops.js";
 import { parseManifest } from "./manifest.js";
+import { checkPyodideCompat, formatPyodideCompatIssues } from "./pyodide-compat.js";
 import { readOriginUrl } from "./repo.js";
 import type {
   ExecuteRegisterResult,
@@ -462,6 +463,9 @@ export class SkillRunnerImpl implements SkillRunner {
         ? makeSandboxLockfileCompiler({
             sandbox: this.#sandbox,
             image: this.#tier2Image,
+            ...(this.#depsCacheVolumeName !== undefined && {
+              depsCacheVolumeName: this.#depsCacheVolumeName,
+            }),
           })
         : undefined);
   }
@@ -700,6 +704,13 @@ export class SkillRunnerImpl implements SkillRunner {
       return rejectedResult(branchSha, lockfileResult.error);
     }
     const lockfile = lockfileResult.value;
+
+    if (manifest.tier === "wasm" && lockfile !== null) {
+      const compat = await checkPyodideCompat(parseLockfilePackageSpecs(lockfile.contents));
+      if (compat.isErr()) {
+        return rejectedResult(branchSha, formatPyodideCompatIssues(compat.error));
+      }
+    }
 
     const schedule = manifest.schedule ?? null;
     const result = await this.#runInTx((tx) =>

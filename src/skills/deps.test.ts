@@ -6,14 +6,18 @@ import { PassThrough, type Readable, type Writable } from "node:stream";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { type MockProxy, mock } from "vitest-mock-extended";
-import type { ExecStreamingHandle, SandboxClient, SandboxSession } from "../sandbox/index.js";
+import {
+  DEPS_CACHE_VOLUME_TARGET,
+  type ExecStreamingHandle,
+  type SandboxClient,
+  type SandboxSession,
+} from "../sandbox/index.js";
 import {
   ensureVenvPopulated,
   makeSandboxLockfileCompiler,
   parseLockfilePackageSpecs,
   REQUIREMENTS_LOCK_FILE,
   readLockfileAtSha,
-  SKILL_VENVS_DIR,
 } from "./deps.js";
 import { bootstrapSkillsRepo } from "./repo.js";
 
@@ -448,7 +452,7 @@ describe("ensureVenvPopulated", () => {
 
     expect(result.isOk()).toBe(true);
     if (!result.isOk()) return;
-    expect(result.value).toBe(`${SKILL_VENVS_DIR}/abc123`);
+    expect(result.value).toBe(`${DEPS_CACHE_VOLUME_TARGET}/abc123`);
 
     // Lockfile body was written to stdin.
     expect(exec.stdinSink.read()?.toString("utf-8")).toBe("httpx==0.27.0 --hash=sha256:0\n");
