@@ -501,32 +501,49 @@ describe("Daytona conformance — wrapper-volume-mount", () => {
   const VOLUME_NAME = "cogmo-conformance-deps-cache";
 
   it.skipIf(!scenario.runnable)(
-    "depsCacheVolume → volume.get + volumes mount round-trip through DaytonaSandboxClient",
+    "depsCacheVolume → volume.get + volumes round-trip; sentinel survives across sessions",
     async () => {
       const mock = scenario.getMock();
       const client = await makeWrapperClient(mock, scenario.recordable, "wrapper-volume-mount");
       await client.ensureImagePresent(WRAPPER_IMAGE, WRAPPER_RESOURCE_LIMITS);
-      const session = await client.create({
+
+      // Cross-session contract test: a single-session `mkdir -p
+      // /skill-venvs && touch ...` proves nothing -- mkdir creates the
+      // dir in the container overlay even when `volumes:` was dropped
+      // from `daytona.create`. To verify the volume actually carries
+      // bytes across sandbox lifecycles we write in session A, delete
+      // A, and read from a fresh session B. If the wiring regresses
+      // (no volume mount on either side), session B's cat finds no
+      // file and the test fails loudly.
+      //
+      // Sentinel is a fixed string -- record/replay matches body
+      // content for the assertion, so a per-run random would diverge
+      // from the recorded fixture's stdout.
+      const sentinel = "cogmo-cross-session-sentinel-v1";
+      const writer = await client.create({
         ...wrapperSpec(),
         depsCacheVolume: { volumeName: VOLUME_NAME },
       });
-
-      // Verify the mount is live by writing a sentinel file to the
-      // declared mount path and reading it back. If the volumes spec
-      // didn't reach `daytona.create`, the mount path would be a plain
-      // overlay dir; the write would succeed but the file wouldn't
-      // survive across sessions. We don't test cross-session here
-      // (covered by sysbox e2e); the live `ls` against the mount is
-      // enough to prove `volumes` made it through the wire.
-      const result = await session.exec([
+      const writeResult = await writer.exec([
         "sh",
         "-c",
-        "mkdir -p /skill-venvs && echo mounted > /skill-venvs/.cogmo-test && ls /skill-venvs/.cogmo-test",
+        `printf '%s' "${sentinel}" > /skill-venvs/.cogmo-cross-session-test`,
       ]);
-      expect(result.exitCode).toBe(0);
-      expect(result.stdout).toContain("/skill-venvs/.cogmo-test");
+      expect(writeResult.exitCode).toBe(0);
+      await client.delete(writer);
 
-      await client.delete(session);
+      const reader = await client.create({
+        ...wrapperSpec(),
+        depsCacheVolume: { volumeName: VOLUME_NAME },
+      });
+      const readResult = await reader.exec([
+        "sh",
+        "-c",
+        "cat /skill-venvs/.cogmo-cross-session-test",
+      ]);
+      expect(readResult.exitCode).toBe(0);
+      expect(readResult.stdout.trim()).toBe(sentinel);
+      await client.delete(reader);
 
       if (scenario.recordable) {
         await mock.endScenario();

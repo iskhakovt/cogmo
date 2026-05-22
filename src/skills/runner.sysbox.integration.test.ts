@@ -1,5 +1,6 @@
 /// <reference path="../../test/vitest.d.ts" />
 
+import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import Docker from "dockerode";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -312,7 +313,7 @@ async def run(inputs, ctx):
     // the populator targets the same `/skill-venvs` mount the supervisor
     // activates. Volume name unique to this test so concurrent test
     // files don't collide on a shared host docker daemon.
-    const depsCacheVolumeName = `cogmo-skills-test-deps-${Date.now()}`;
+    const depsCacheVolumeName = `cogmo-skills-test-deps-${randomUUID()}`;
     const runner = await SkillRunnerImpl.create({
       runInTx: tx,
       store: skillStore,
