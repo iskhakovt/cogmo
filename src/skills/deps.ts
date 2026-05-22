@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { err, ok, type Result } from "neverthrow";
 import { logger } from "../logger.js";
-import type { ResourceLimits, SandboxClient } from "../sandbox/index.js";
+import type { ResourceLimits, SandboxClient, SandboxSession } from "../sandbox/index.js";
 import { GitOpsError, gitShow } from "./git-ops.js";
 
 const log = logger.child({ component: "skills.deps" });
@@ -156,13 +156,22 @@ export function makeSandboxLockfileCompiler(
       // if the host crashes before delete().
       const expiresAt = new Date(Date.now() + timeoutMs + 30_000);
 
-      await opts.sandbox.ensureImagePresent(opts.image, limits);
-      const session = await opts.sandbox.create({
-        taskId,
-        image: opts.image,
-        resourceLimits: limits,
-        expiresAt,
-      });
+      // Backend startup folds into the same error envelope as the exec.
+      let session: SandboxSession;
+      try {
+        await opts.sandbox.ensureImagePresent(opts.image, limits);
+        session = await opts.sandbox.create({
+          taskId,
+          image: opts.image,
+          resourceLimits: limits,
+          expiresAt,
+        });
+      } catch (e) {
+        return err({
+          kind: "transport_failed",
+          message: e instanceof Error ? e.message : String(e),
+        });
+      }
 
       try {
         // `--quiet` keeps progress lines off stdout; the resolver's
@@ -184,6 +193,14 @@ export function makeSandboxLockfileCompiler(
         const stderrChunks: string[] = [];
         let stdoutBytes = 0;
         let truncated = false;
+        // Unhandled stream `'error'` events crash the host process.
+        let streamError: Error | undefined;
+        const captureError = (e: Error): void => {
+          if (!streamError) streamError = e;
+        };
+        handle.stdout.on("error", captureError);
+        handle.stderr.on("error", captureError);
+        handle.stdin.on("error", captureError);
         handle.stdout.on("data", (chunk: Buffer) => {
           if (truncated) return;
           if (stdoutBytes + chunk.length > MAX_LOCKFILE_BYTES) {
@@ -200,6 +217,12 @@ export function makeSandboxLockfileCompiler(
         handle.stdin.end();
 
         const { exitCode } = await handle.wait();
+        if (streamError) {
+          return err({
+            kind: "transport_failed",
+            message: `stream error: ${streamError.message}`,
+          });
+        }
         if (truncated) {
           return err({
             kind: "transport_failed",

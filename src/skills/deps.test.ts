@@ -294,4 +294,58 @@ describe("makeSandboxLockfileCompiler", () => {
     expect(result.error.message).toMatch(/without stdin/);
     expect(h.deleteCalls).toBe(1);
   });
+
+  it("returns transport_failed when ensureImagePresent throws (sandbox startup)", async () => {
+    const sandbox = mock<SandboxClient>();
+    sandbox.ensureImagePresent.mockRejectedValue(new Error("docker daemon offline"));
+    const compiler = makeSandboxLockfileCompiler({
+      sandbox,
+      image: "cogmo-skills:test",
+    });
+    const result = await compiler.compile(["httpx==0.27.0"]);
+    expect(result.isErr()).toBe(true);
+    if (!result.isErr()) return;
+    expect(result.error.kind).toBe("transport_failed");
+    expect(result.error.message).toMatch(/docker daemon offline/);
+    // No session was created → no delete to make.
+    expect(sandbox.create).not.toHaveBeenCalled();
+    expect(sandbox.delete).not.toHaveBeenCalled();
+  });
+
+  it("returns transport_failed when sandbox.create throws (post-image)", async () => {
+    const sandbox = mock<SandboxClient>();
+    sandbox.ensureImagePresent.mockResolvedValue(undefined);
+    sandbox.create.mockRejectedValue(new Error("quota exceeded"));
+    const compiler = makeSandboxLockfileCompiler({
+      sandbox,
+      image: "cogmo-skills:test",
+    });
+    const result = await compiler.compile(["httpx==0.27.0"]);
+    expect(result.isErr()).toBe(true);
+    if (!result.isErr()) return;
+    expect(result.error.kind).toBe("transport_failed");
+    expect(result.error.message).toMatch(/quota exceeded/);
+    // create() rejected before returning a session → nothing to delete.
+    expect(sandbox.delete).not.toHaveBeenCalled();
+  });
+
+  it("captures a stream 'error' event as transport_failed (no unhandled exception)", async () => {
+    const h = buildCompilerHarness(makeFakeExec);
+    const compiler = makeSandboxLockfileCompiler({
+      sandbox: h.sandbox,
+      image: "cogmo-skills:test",
+    });
+    const promise = compiler.compile(["httpx==0.27.0"]);
+    await new Promise((r) => setImmediate(r));
+    // Emit `error` on stdout — without an `'error'` listener Node would
+    // crash the process. The compiler attaches one and folds the error
+    // into the Result.
+    h.exec.stdoutSource.emit("error", new Error("backend socket reset"));
+    h.exec.waitResolve(0);
+    const result = await promise;
+    expect(result.isErr()).toBe(true);
+    if (!result.isErr()) return;
+    expect(result.error.kind).toBe("transport_failed");
+    expect(result.error.message).toMatch(/backend socket reset/);
+  });
 });
