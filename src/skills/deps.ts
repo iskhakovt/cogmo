@@ -118,6 +118,15 @@ export interface SandboxLockfileCompilerOptions {
   resourceLimits?: Partial<ResourceLimits>;
   /** Override the wall-clock cap. Defaults to 60s. */
   timeoutMs?: number;
+  /**
+   * Optional shared deps-cache volume. When set, the compile sandbox
+   * mounts it at `/skill-venvs` and points `UV_CACHE_DIR` at the
+   * `.uv-cache` subdir so wheel metadata fetched during compile lives
+   * on the same volume the populator later uses. Without this, every
+   * register re-fetches PyPI metadata from scratch (~5-30s per register
+   * for non-trivial dep sets).
+   */
+  depsCacheVolumeName?: string;
 }
 
 /** Sandbox-backed LockfileCompiler. Fresh session per compile; ~1-2s spawn-dominated. */
@@ -151,6 +160,10 @@ export function makeSandboxLockfileCompiler(
           image: opts.image,
           resourceLimits: limits,
           expiresAt,
+          ...(opts.depsCacheVolumeName && {
+            depsCacheVolume: { volumeName: opts.depsCacheVolumeName },
+            env: { UV_CACHE_DIR: `${SKILL_VENVS_DIR}/.uv-cache` },
+          }),
         });
       } catch (e) {
         return err({

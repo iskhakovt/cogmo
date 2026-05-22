@@ -1,4 +1,5 @@
 import { execSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -102,6 +103,10 @@ export async function setup({ provide }: GlobalSetupContext) {
   // is never validated. Real key passes through in record mode when the
   // operator sets it locally: RECORD=1 FAL_API_KEY=... pnpm test:integration.
   process.env.FAL_API_KEY = process.env.FAL_API_KEY ?? "test-fal-key";
+  // Required env var (no default after the multi-tenant-footgun fix).
+  // Per-test-run volume name so parallel integration files don't share
+  // a populated venv cache.
+  process.env.COGMO_SKILLS_DEPS_VOLUME = `cogmo-skills-deps-test-${randomUUID()}`;
 
   // Skills bare repo lives on the host (not in a container) — bootstrap
   // initializes it on every boot. Use a tempdir so tests don't try to write

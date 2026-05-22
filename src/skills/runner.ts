@@ -462,6 +462,9 @@ export class SkillRunnerImpl implements SkillRunner {
         ? makeSandboxLockfileCompiler({
             sandbox: this.#sandbox,
             image: this.#tier2Image,
+            ...(this.#depsCacheVolumeName !== undefined && {
+              depsCacheVolumeName: this.#depsCacheVolumeName,
+            }),
           })
         : undefined);
   }
