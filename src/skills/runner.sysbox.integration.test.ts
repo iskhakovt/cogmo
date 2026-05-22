@@ -1,5 +1,6 @@
 /// <reference path="../../test/vitest.d.ts" />
 
+import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import Docker from "dockerode";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -88,6 +89,24 @@ beforeAll(async () => {
     socketDir: "/tmp/cogmo-test-skills-proxy",
     hostDockerSocket: "/var/run/docker.sock",
   });
+
+  // Sweep any `cogmo-skills-test-deps-*` volumes left behind by prior
+  // runs that were SIGKILLed / OOMed / CI-timed-out before their
+  // `finally` could fire. CI runners are ephemeral so this matters
+  // on dev machines where the volume accumulation otherwise grows
+  // until disk pressure forces a manual `docker volume prune`.
+  const leftoverVolumes = await docker.listVolumes();
+  for (const v of leftoverVolumes.Volumes ?? []) {
+    if (v.Name.startsWith("cogmo-skills-test-deps-")) {
+      await docker
+        .getVolume(v.Name)
+        .remove()
+        .catch(() => {
+          // In-use or already gone; the next sweep catches whatever survives.
+        });
+    }
+  }
+
   sandbox = await LocalDockerSandboxClient.create({
     docker,
     store: agentStore,
@@ -274,6 +293,94 @@ resources:
     expect(o1.ppid).toBe(o2.ppid);
 
     await runner.shutdown();
+  }, 180_000);
+
+  it("invokes a tier-2 skill with declared deps — populator + venv activation end-to-end", async () => {
+    // Lockfile recorded by running `echo "idna==3.10" | uv pip compile
+    // --generate-hashes --no-header --quiet --only-binary=:all: -` against
+    // the same `cogmo-skills:test` image the sandbox uses. Idna is a
+    // pure-Python single-package dep (no transitive graph), so the
+    // populator's `uv pip sync --require-hashes` step exercises the
+    // shared-volume mount + activation path with the smallest possible
+    // wheel surface (~80 KB).
+    //
+    // **Refresh trigger: PyPI yanks idna==3.10.** If `uv pip sync` starts
+    // failing with a "hash mismatch" or "file not found" error here, the
+    // pinned version no longer exists upstream. Pick the current stable
+    // (`pip index versions idna`), re-run the compile command above,
+    // and replace the hashes + the assertion's expected version below.
+    const idnaLockfile = `idna==3.10 \\
+    --hash=sha256:12f65c9b470abda6dc35cf8e63cc574b1c52b11df2c86030af0ac09b01b13ea9 \\
+    --hash=sha256:946d195a0d259cbba61165e88e65941f16e9b36ea6ddb97f00452bae8b1287d3
+`;
+    const depsManifest = `---
+name: tier2-with-deps
+description: a tier-2 skill that imports a declared dependency
+tier: container
+dependencies:
+  - "idna==3.10"
+inputs:
+  type: object
+  properties: {}
+---
+`;
+    const depsBody = `
+import importlib.metadata as md
+import idna
+async def run(inputs, ctx):
+    return {
+        "version": md.version("idna"),
+        "encoded": idna.encode("bücher.example").decode("ascii"),
+    }
+`;
+    // Use the host-side dep volume name plumbed through SkillRunner so
+    // the populator targets the same `/skill-venvs` mount the supervisor
+    // activates. Volume name unique to this test so concurrent test
+    // files don't collide on a shared host docker daemon.
+    const depsCacheVolumeName = `cogmo-skills-test-deps-${randomUUID()}`;
+    const runner = await SkillRunnerImpl.create({
+      runInTx: tx,
+      store: skillStore,
+      memory: stubMemory(),
+      secretsStore: stubSecrets(),
+      files: noopFiles,
+      sandbox,
+      tier2Image: SKILLS_IMAGE,
+      user: { id: "u-1", timezone: "UTC" },
+      memoryBankId: "bank-1",
+      depsCacheVolumeName,
+    });
+    try {
+      await runner.__registerForTests({
+        name: "tier2-with-deps",
+        manifestSource: depsManifest,
+        body: depsBody,
+        lockfileContents: idnaLockfile,
+      });
+
+      const result = await runner.invoke({ name: "tier2-with-deps", inputs: {} });
+      expect(result.status, JSON.stringify(result)).toBe("success");
+      // Pass `result` as the assertion-failure label so a mismatch
+      // surfaces the whole row (error string, runId, etc.) rather than
+      // just the matchObject diff.
+      expect(result.output, JSON.stringify(result)).toMatchObject({
+        version: "3.10",
+        // Bücher → xn--bcher-kva (IDN-encoded label). The encode call
+        // proves the wheel actually loaded — a stub `idna` shim would
+        // crash instead.
+        encoded: "xn--bcher-kva.example",
+      });
+    } finally {
+      await runner.shutdown();
+      // Tear down the test-scoped volume so the host docker daemon
+      // doesn't accumulate one per test run. Failure is benign — the
+      // volume may already be gone, or another test in the same suite
+      // might be using it (volume name is unique by Date.now()).
+      await docker
+        .getVolume(depsCacheVolumeName)
+        .remove()
+        .catch(() => {});
+    }
   }, 180_000);
 
   it("isolates module-level state between sequential tasks (fresh fork per task)", async () => {

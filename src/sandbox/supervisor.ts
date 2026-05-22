@@ -15,7 +15,11 @@ import type {
   SandboxSession,
   SessionSpec,
 } from "./index.js";
-import { ExecTimeoutError, LocalDockerSessionStateSchema } from "./index.js";
+import {
+  DEPS_CACHE_VOLUME_TARGET,
+  ExecTimeoutError,
+  LocalDockerSessionStateSchema,
+} from "./index.js";
 import type { CogmoSocketProxy } from "./proxy/index.js";
 import { assertRuntimeAvailable, dockerRuntimeName, type SandboxRuntime } from "./runtime.js";
 import type { SandboxStore } from "./store/index.js";
@@ -240,9 +244,24 @@ export class LocalDockerSandboxClient implements SandboxClient<LocalDockerSessio
     // mcr.microsoft.com/devcontainers/base:ubuntu-24.04). Skills tier-2
     // omits the home volume entirely. When custom devcontainer support
     // grows, the mount target needs to become image-declared.
-    const mounts: DockerodeMountSettings[] = spec.homeVolume
-      ? [{ Type: "volume", Source: spec.homeVolume.volumeName, Target: HOME_VOLUME_TARGET }]
-      : [];
+    const mounts: DockerodeMountSettings[] = [];
+    if (spec.homeVolume) {
+      mounts.push({
+        Type: "volume",
+        Source: spec.homeVolume.volumeName,
+        Target: HOME_VOLUME_TARGET,
+      });
+    }
+    if (spec.depsCacheVolume) {
+      // Skills-tier-2 deps cache. Same volume on every worker in the
+      // pool, so a venv populated by worker A is visible to worker B.
+      // Coding-delegation sessions never set this field.
+      mounts.push({
+        Type: "volume",
+        Source: spec.depsCacheVolume.volumeName,
+        Target: DEPS_CACHE_VOLUME_TARGET,
+      });
+    }
 
     // Process-level env (e.g. `CLAUDE_CODE_OAUTH_TOKEN` for the Claude Code
     // backend). Lives on the container's process env only — never written to

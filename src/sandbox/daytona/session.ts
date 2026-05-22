@@ -6,6 +6,7 @@ import type {
   ExecStreamingHandle,
   SandboxSession,
 } from "../index.js";
+import { startExecPty } from "./exec-pty.js";
 import { startExecStreaming } from "./exec-streaming.js";
 
 /** Buffered-exec output cap per stream — same as local-docker. */
@@ -70,9 +71,25 @@ export class DaytonaSandboxSession implements SandboxSession<DaytonaSessionState
     cmd: readonly string[],
     opts: ExecOptions = {},
   ): Promise<ExecStreamingHandle> {
+    const sessionIdPrefix = `cogmo-${this.state.taskId.slice(0, 12)}`;
+    // PTY backend for stdin-attached execs — the session-command HTTP
+    // transport has no remote stdin EOF (daemon pins the FIFO open
+    // for `runAsync: true`), so anything that relies on stdin EOF as
+    // a shutdown signal wedges there. PTY's WS-backed stdin closes
+    // naturally when its underlying file descriptor is exhausted.
+    if (opts.attachStdin === true) {
+      return startExecPty({
+        process: this.#sdkSandbox.process,
+        fs: this.#sdkSandbox.fs,
+        sessionIdPrefix,
+        cmd,
+        opts,
+        ...(this.#random && { random: this.#random }),
+      });
+    }
     return startExecStreaming({
       process: this.#sdkSandbox.process,
-      sessionIdPrefix: `cogmo-${this.state.taskId.slice(0, 12)}`,
+      sessionIdPrefix,
       cmd,
       opts,
       ...(this.#random && { random: this.#random }),

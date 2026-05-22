@@ -1,4 +1,5 @@
 import { Ajv, type ValidateFunction } from "ajv";
+import { err, ok, type Result } from "neverthrow";
 import { computeNextRun } from "../agent/scheduling/cron.js";
 import type { Service } from "../agent/service.js";
 import type { Transactor } from "../db/index.js";
@@ -12,6 +13,13 @@ import type { SecretsStore } from "../secrets/store/index.js";
 import { classifyManifest, STUB_CLASSIFIER_VERSION } from "./classifier.js";
 import { type CtxUser, DefaultCtxHandler } from "./ctx-handler.js";
 import {
+  hashLockfileContents,
+  type LockfileCompiler,
+  makeSandboxLockfileCompiler,
+  parseLockfilePackageSpecs,
+  readLockfileAtSha,
+} from "./deps.js";
+import {
   deleteRef,
   GitOpsError,
   getMainSha,
@@ -21,6 +29,7 @@ import {
   updateRef,
 } from "./git-ops.js";
 import { parseManifest } from "./manifest.js";
+import { checkPyodideCompat, formatPyodideCompatIssues } from "./pyodide-compat.js";
 import { readOriginUrl } from "./repo.js";
 import type {
   ExecuteRegisterResult,
@@ -242,6 +251,22 @@ export interface RegisterForTestsParams {
   body: string;
   /** Optional fake commit sha — defaults to a deterministic hash of the body. */
   gitSha?: string;
+  /**
+   * Optional `requirements.lock` contents. When set, the skill row gets
+   * `lockfile_hash = sha256(contents)` and the cache entry is populated so
+   * `invoke` threads the lockfile through to the populator on first call.
+   * Bypasses the register-time compile-and-byte-compare (covered by
+   * `makeSandboxLockfileCompiler` unit tests); use this for e2e tests
+   * that want to exercise the populator + activation path against a real
+   * sandbox without bootstrapping a git repo.
+   *
+   * **Pass output from `uv pip compile --generate-hashes` only.** This
+   * bypass trusts the input is shape-valid: malformed lockfiles slip
+   * past the compile + byte-compare contract and either crash
+   * `uv pip sync` inside the sandbox or pin nonsense in the cache.
+   * Production paths can't reach this method.
+   */
+  lockfileContents?: string;
 }
 
 export interface SkillRunnerOptions {
@@ -277,6 +302,15 @@ export interface SkillRunnerOptions {
    */
   tier2Image?: string;
   /**
+   * Named Docker volume that holds per-lockfile-hash skill virtualenvs.
+   * Threaded into every tier-2 worker the pool spawns so populated
+   * venvs persist across worker recycle + are shared across the pool.
+   * Production wiring (`src/index.ts`) sets this from
+   * `env.COGMO_SKILLS_DEPS_VOLUME`. Omit for tests / tier-1-only paths
+   * that don't need the cache.
+   */
+  depsCacheVolumeName?: string;
+  /**
    * Pool sizing overrides. Defaults from `DEFAULT_POOL_OPTIONS` are tuned
    * for personal scale (min=1, max=3, recycle every 500 tasks or 24h).
    * Tests can shrink to `min: 0` to avoid eager-spawning a worker on
@@ -301,6 +335,29 @@ export interface SkillRunnerOptions {
    * across the module.
    */
   clock?: () => Date;
+  /**
+   * Lockfile compiler used at register / approve / rollback to re-resolve
+   * the manifest's `dependencies` and byte-compare against the committed
+   * `requirements.lock`. Mismatch fails the deploy with a clear stale-
+   * lockfile error.
+   *
+   * Defaults to a {@link makeSandboxLockfileCompiler} backed by `sandbox`
+   * + `tier2Image` when both are configured. When the deployment has no
+   * tier-2 sandbox (tier-1-only deployments, or test paths that omit
+   * `sandbox`), the field is undefined and the runner downgrades to
+   * "presence + hash only" — lockfile must exist and parse, but the
+   * resolver isn't re-run. Set explicitly in tests to swap a stub.
+   */
+  lockfileCompiler?: LockfileCompiler;
+}
+
+interface SkillLockfileCacheValue {
+  /** sha256, matches `skills.lockfile_hash`. */
+  hash: string;
+  /** Raw bytes — sysbox populator feeds to `uv pip sync` via stdin. */
+  contents: string;
+  /** Parsed `name==version` specs — WASM tier feeds to `micropip.install`. */
+  specs: readonly string[];
 }
 
 interface SkillSourceCacheEntry {
@@ -314,6 +371,24 @@ interface SkillSourceCacheEntry {
    * use; remains `undefined` for skills without declared outputs.
    */
   outputsValidator?: ValidateFunction;
+  /**
+   * Lockfile-derived data, populated atomically when the manifest declares
+   * dependencies. All three fields go together; half-populated states are
+   * unrepresentable. Absent when the manifest has no deps.
+   */
+  lockfile?: SkillLockfileCacheValue;
+}
+
+/** Build the cohesive cache value from a lockfile snapshot. */
+function buildLockfileCacheValue(snapshot: {
+  hash: string;
+  contents: string;
+}): SkillLockfileCacheValue {
+  return {
+    hash: snapshot.hash,
+    contents: snapshot.contents,
+    specs: parseLockfilePackageSpecs(snapshot.contents),
+  };
 }
 
 export class SkillRunnerImpl implements SkillRunner {
@@ -328,7 +403,9 @@ export class SkillRunnerImpl implements SkillRunner {
   #pyodidePackageCacheDir: string | undefined;
   #sandbox: SandboxClient | undefined;
   #tier2Image: string;
+  #depsCacheVolumeName: string | undefined;
   #clock: () => Date;
+  #lockfileCompiler: LockfileCompiler | undefined;
   /**
    * Lazily-created warm pool over `#sandbox`. Created on first tier-2
    * invocation, not at boot — keeps cogmo serve startup independent of
@@ -372,9 +449,25 @@ export class SkillRunnerImpl implements SkillRunner {
     this.#pyodidePackageCacheDir = opts.pyodidePackageCacheDir;
     this.#sandbox = opts.sandbox;
     this.#tier2Image = opts.tier2Image ?? DEFAULT_TIER2_IMAGE;
+    this.#depsCacheVolumeName = opts.depsCacheVolumeName;
     this.#poolOptions = opts.poolOptions;
     this.#clock = opts.clock ?? (() => new Date());
     this.#ajv = new Ajv({ allErrors: true, strict: false });
+    // Explicit override wins; otherwise default to a sandbox-backed
+    // compiler when the runtime has both a sandbox and a tier-2 image
+    // (the cogmo-skills image carries `uv`). Tier-1-only deployments
+    // fall through to undefined → presence + hash check only.
+    this.#lockfileCompiler =
+      opts.lockfileCompiler ??
+      (this.#sandbox
+        ? makeSandboxLockfileCompiler({
+            sandbox: this.#sandbox,
+            image: this.#tier2Image,
+            ...(this.#depsCacheVolumeName !== undefined && {
+              depsCacheVolumeName: this.#depsCacheVolumeName,
+            }),
+          })
+        : undefined);
   }
 
   /**
@@ -388,6 +481,63 @@ export class SkillRunnerImpl implements SkillRunner {
   #computeScheduleNextRunAt(schedule: string | null): Date | null {
     if (schedule === null) return null;
     return computeNextRun(schedule, this.#user.timezone, this.#clock());
+  }
+
+  /**
+   * Read the committed `requirements.lock` at a deploy sha and — when a
+   * compiler is configured — re-resolve the manifest's dependencies
+   * against `uv pip compile` to verify the committed lockfile is
+   * current. Returns the lockfile hash on success.
+   *
+   * Returns:
+   *   - `ok(null)` — manifest declares no deps; no lockfile is expected
+   *     and any committed `requirements.lock` is ignored.
+   *   - `ok(<hex>)` — manifest declares deps and a non-empty lockfile is
+   *     present. When a compiler is configured, fresh resolver output
+   *     byte-matches the committed file. `<hex>` is `sha256(contents)`.
+   *   - `err(message)` — manifest declares deps and one of: the
+   *     committed lockfile is missing/empty, the resolver couldn't run
+   *     ('transport_failed'), the resolver itself failed
+   *     ('resolver_failed'), or the committed file is stale relative
+   *     to a fresh resolve. The caller surfaces the message verbatim
+   *     as the register `errors[]` payload.
+   *
+   * When `#lockfileCompiler` is undefined OR `verifyFresh` is false,
+   * verification degrades to presence + hash only — the committed
+   * file is trusted as-is. `verifyFresh: false` is the rollback
+   * mode: the target lockfile was valid at deploy time, hashes are
+   * still pinned, and a wheel yanked from PyPI since shouldn't block
+   * the operator from rewinding to a known-good revision.
+   */
+  async #readManifestLockfile(
+    repoPath: string,
+    gitSha: string,
+    manifest: SkillManifest,
+    opts: { verifyFresh: boolean } = { verifyFresh: true },
+  ): Promise<Result<{ hash: string; contents: string } | null, string>> {
+    if (manifest.dependencies.length === 0) {
+      return ok(null);
+    }
+    const snapshot = await readLockfileAtSha(repoPath, gitSha);
+    if (snapshot.isErr()) {
+      return err(
+        `requirements_lock_${snapshot.error.kind}: declared ${manifest.dependencies.length} dependencies but ${snapshot.error.message}. Run 'uv pip compile --generate-hashes --no-header' and commit the result.`,
+      );
+    }
+
+    if (opts.verifyFresh && this.#lockfileCompiler) {
+      const compiled = await this.#lockfileCompiler.compile(manifest.dependencies);
+      if (compiled.isErr()) {
+        return err(`requirements_lock_${compiled.error.kind}: ${compiled.error.message}`);
+      }
+      if (compiled.value !== snapshot.value.contents) {
+        return err(
+          "requirements_lock_stale: committed requirements.lock differs from a fresh 'uv pip compile --generate-hashes --no-header'. Re-run the compile against your declared dependencies and recommit.",
+        );
+      }
+    }
+
+    return ok({ hash: snapshot.value.hash, contents: snapshot.value.contents });
   }
 
   static async create(opts: SkillRunnerOptions): Promise<SkillRunnerImpl> {
@@ -421,6 +571,9 @@ export class SkillRunnerImpl implements SkillRunner {
           sandbox,
           image: this.#tier2Image,
           ...DEFAULT_POOL_OPTIONS,
+          ...(this.#depsCacheVolumeName !== undefined && {
+            depsCacheVolumeName: this.#depsCacheVolumeName,
+          }),
           ...this.#poolOptions,
         });
         this.#pool = pool;
@@ -546,6 +699,19 @@ export class SkillRunnerImpl implements SkillRunner {
       return rejectedResult(branchSha, classifierLog.validation_errors.join("; "));
     }
 
+    const lockfileResult = await this.#readManifestLockfile(repoPath, branchSha, manifest);
+    if (lockfileResult.isErr()) {
+      return rejectedResult(branchSha, lockfileResult.error);
+    }
+    const lockfile = lockfileResult.value;
+
+    if (manifest.tier === "wasm" && lockfile !== null) {
+      const compat = await checkPyodideCompat(parseLockfilePackageSpecs(lockfile.contents));
+      if (compat.isErr()) {
+        return rejectedResult(branchSha, formatPyodideCompatIssues(compat.error));
+      }
+    }
+
     const schedule = manifest.schedule ?? null;
     const result = await this.#runInTx((tx) =>
       this.#store.executeRegister(tx, {
@@ -556,6 +722,7 @@ export class SkillRunnerImpl implements SkillRunner {
         schedule,
         scheduleNextRunAt: this.#computeScheduleNextRunAt(schedule),
         branchTipSha: branchSha,
+        lockfileHash: lockfile?.hash ?? null,
         inputs: manifest.inputs,
         outputs: manifest.outputs ?? null,
         classifierLog,
@@ -580,6 +747,7 @@ export class SkillRunnerImpl implements SkillRunner {
       result,
       manifest,
       body,
+      lockfile,
     });
   }
 
@@ -654,6 +822,12 @@ export class SkillRunnerImpl implements SkillRunner {
       };
     }
 
+    const lockfileResult = await this.#readManifestLockfile(repoPath, deploy.gitSha, manifest);
+    if (lockfileResult.isErr()) {
+      return rejectedResult(deploy.gitSha, lockfileResult.error);
+    }
+    const lockfile = lockfileResult.value;
+
     const schedule = manifest.schedule ?? null;
     const result = await this.#runInTx((tx) =>
       this.#store.executeApprove(tx, {
@@ -667,6 +841,7 @@ export class SkillRunnerImpl implements SkillRunner {
         effects: manifest.effects,
         schedule,
         scheduleNextRunAt: this.#computeScheduleNextRunAt(schedule),
+        lockfileHash: lockfile?.hash ?? null,
         inputs: manifest.inputs,
         outputs: manifest.outputs ?? null,
         applyFilesystem: async () => {
@@ -683,6 +858,7 @@ export class SkillRunnerImpl implements SkillRunner {
         manifest,
         body,
         inputsValidator,
+        ...(lockfile && { lockfile: buildLockfileCacheValue(lockfile) }),
       });
       // Mirror the new main SHA to the configured remote — same rationale as
       // register's mirror call.
@@ -784,6 +960,17 @@ export class SkillRunnerImpl implements SkillRunner {
 
     const mainSha = await getMainSha(repoPath);
 
+    // Trust the historical lockfile: it was valid at deploy time and
+    // its hashes are still pinned. A wheel yanked since shouldn't
+    // block rewinding to a known-good revision.
+    const lockfileResult = await this.#readManifestLockfile(repoPath, targetSha, manifest, {
+      verifyFresh: false,
+    });
+    if (lockfileResult.isErr()) {
+      return rejectedResult(targetSha, lockfileResult.error);
+    }
+    const lockfile = lockfileResult.value;
+
     const schedule = manifest.schedule ?? null;
     const result = await this.#runInTx((tx) =>
       this.#store.executeRollback(tx, {
@@ -794,6 +981,7 @@ export class SkillRunnerImpl implements SkillRunner {
         effects: manifest.effects,
         schedule,
         scheduleNextRunAt: this.#computeScheduleNextRunAt(schedule),
+        lockfileHash: lockfile?.hash ?? null,
         inputs: manifest.inputs,
         outputs: manifest.outputs ?? null,
         classifierLog,
@@ -814,6 +1002,8 @@ export class SkillRunnerImpl implements SkillRunner {
         manifest,
         body,
         inputsValidator,
+        // Same invariant as approve-warm above.
+        ...(lockfile && { lockfile: buildLockfileCacheValue(lockfile) }),
       });
       // Rollback rewinds main backwards, so the remote push needs `force`. We
       // gate with `--force-with-lease=refs/heads/main:<mainSha>` — if anything
@@ -1146,7 +1336,10 @@ export class SkillRunnerImpl implements SkillRunner {
     // the pgEnum) is a compile-time miss here rather than a silent route
     // through the sysbox path.
     switch (skill.tier) {
-      case "wasm":
+      case "wasm": {
+        // Specs only (not hashes) — see `design/skills.md` → Security posture
+        // for the WASM-vs-sysbox integrity asymmetry rationale.
+        const packageSpecs = cached.lockfile?.specs ?? [];
         return runOnWorker({
           taskId,
           skillName: skill.name,
@@ -1156,8 +1349,10 @@ export class SkillRunnerImpl implements SkillRunner {
           ...(this.#pyodidePackageCacheDir && {
             packageCacheDir: this.#pyodidePackageCacheDir,
           }),
+          ...(packageSpecs.length > 0 && { packageSpecs }),
           ctxHandler,
         });
+      }
       case "container": {
         const sandbox = this.#sandbox;
         if (!sandbox) {
@@ -1173,6 +1368,19 @@ export class SkillRunnerImpl implements SkillRunner {
         // This is rare: most skills don't override and ride the warm path.
         const overrides = mapManifestResourceLimits(cached.manifest.resources);
         const isolation = cached.manifest.isolation;
+        // Invariant: skill.lockfileHash != null ⇒ cached.lockfile set.
+        let deps: { lockfileHash: string; lockfileContents: string } | undefined;
+        if (skill.lockfileHash !== null) {
+          if (cached.lockfile === undefined) {
+            throw new Error(
+              `invariant: skill '${skill.name}' has lockfile_hash but cache missing lockfile`,
+            );
+          }
+          deps = {
+            lockfileHash: cached.lockfile.hash,
+            lockfileContents: cached.lockfile.contents,
+          };
+        }
         if (overrides.cpus !== undefined || overrides.memory_bytes !== undefined) {
           return runOnSysboxContainer({
             taskId,
@@ -1181,6 +1389,10 @@ export class SkillRunnerImpl implements SkillRunner {
             inputs,
             ...(wallClockS !== undefined && { wallClockS }),
             ...(isolation !== undefined && { isolation }),
+            ...(deps !== undefined && { deps }),
+            ...(this.#depsCacheVolumeName !== undefined && {
+              depsCacheVolumeName: this.#depsCacheVolumeName,
+            }),
             resourceLimits: overrides,
             image: this.#tier2Image,
             sandbox,
@@ -1195,6 +1407,7 @@ export class SkillRunnerImpl implements SkillRunner {
           inputs,
           ...(wallClockS !== undefined && { wallClockS }),
           ...(isolation !== undefined && { isolation }),
+          ...(deps !== undefined && { deps }),
           ctxHandler,
         });
       }
@@ -1227,6 +1440,12 @@ export class SkillRunnerImpl implements SkillRunner {
 
     const gitSha = params.gitSha ?? hashStub(params.manifestSource + params.body);
     const schedule = manifest.schedule ?? null;
+    const lockfileSnapshot = params.lockfileContents
+      ? {
+          hash: hashLockfileContents(params.lockfileContents),
+          contents: params.lockfileContents,
+        }
+      : null;
     const insertParams: InsertSkillParams = {
       name: manifest.name,
       tier: manifest.tier,
@@ -1235,6 +1454,7 @@ export class SkillRunnerImpl implements SkillRunner {
       schedule,
       scheduleNextRunAt: this.#computeScheduleNextRunAt(schedule),
       gitSha,
+      lockfileHash: lockfileSnapshot?.hash ?? null,
       inputs: manifest.inputs,
       outputs: manifest.outputs ?? null,
     };
@@ -1248,6 +1468,7 @@ export class SkillRunnerImpl implements SkillRunner {
       declared_effects: [],
       detected_effects: [],
       declared_secrets: [],
+      declared_dependencies: [],
       validation_errors: [],
     };
     await this.#runInTx((tx) =>
@@ -1266,6 +1487,7 @@ export class SkillRunnerImpl implements SkillRunner {
       manifest,
       body: params.body,
       inputsValidator,
+      ...(lockfileSnapshot && { lockfile: buildLockfileCacheValue(lockfileSnapshot) }),
     });
 
     return row;
@@ -1432,6 +1654,20 @@ export class SkillRunnerImpl implements SkillRunner {
     const manifest = parsed.value.manifest;
     const inputsValidator = this.#compileInputsValidator(manifest, "loadSource");
     const entry: SkillSourceCacheEntry = { manifest, body, inputsValidator };
+    if (row.lockfileHash !== null) {
+      // Lockfile presence is invariant with `row.lockfileHash != null` —
+      // register persists the hash atomically with the gitSha, so a row
+      // with a hash always has a committed lockfile. A missing/empty
+      // read here means the repo + DB drifted (manual git tampering,
+      // partial restore, ...) — surface it loudly.
+      const snapshot = await readLockfileAtSha(this.#skillsRepoPath, row.gitSha);
+      if (snapshot.isErr()) {
+        throw new Error(
+          `lockfile for skill '${row.name}' at ${row.gitSha} is ${snapshot.error.kind} — repo and DB are out of sync (skills.lockfile_hash=${row.lockfileHash})`,
+        );
+      }
+      entry.lockfile = buildLockfileCacheValue(snapshot.value);
+    }
     this.#sourceCache.set(key, entry);
     return entry;
   }
@@ -1470,8 +1706,9 @@ export class SkillRunnerImpl implements SkillRunner {
     result: ExecuteRegisterResult;
     manifest: SkillManifest;
     body: string;
+    lockfile: { hash: string; contents: string } | null;
   }): RegisterResult {
-    const { name, branchSha, classifierLog, result, manifest, body } = args;
+    const { name, branchSha, classifierLog, result, manifest, body, lockfile } = args;
     if (result.kind === "rejected") {
       return rejectedResult(branchSha, result.reason);
     }
@@ -1491,6 +1728,7 @@ export class SkillRunnerImpl implements SkillRunner {
         manifest,
         body,
         inputsValidator,
+        ...(lockfile && { lockfile: buildLockfileCacheValue(lockfile) }),
       });
       return {
         name,
@@ -1505,6 +1743,7 @@ export class SkillRunnerImpl implements SkillRunner {
       manifest,
       body,
       inputsValidator,
+      ...(lockfile && { lockfile: buildLockfileCacheValue(lockfile) }),
     });
     return {
       name,

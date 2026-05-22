@@ -70,6 +70,7 @@ import { DrizzleSecretsStore } from "./secrets/store/index.js";
 import { ensureFalImageDefaults } from "./setup/seed.js";
 import { createSkillCronFireHandler } from "./skills/cron-fire-handler.js";
 import { createSkillCronTicker } from "./skills/cron-ticker.js";
+import { createSkillDepsReaper } from "./skills/deps-reaper-function.js";
 import { bootstrapSkillsRepo, ensureSkillsCodingRepo } from "./skills/repo.js";
 import { SkillRunnerImpl } from "./skills/runner.js";
 import { registerSkillTool, SKILLS_PROMPT_GUIDANCE } from "./skills/skills-tool.js";
@@ -658,6 +659,7 @@ export async function bootstrapSkillRunner(
     files: core.fileService,
     ...(sandbox.sandbox && { sandbox: sandbox.sandbox }),
     tier2Image: env.COGMO_SKILLS_IMAGE,
+    depsCacheVolumeName: env.COGMO_SKILLS_DEPS_VOLUME,
     user: { id: core.user.id, timezone: env.USER_TIMEZONE },
     memoryBankId: core.user.id,
     skillsRepoPath: env.COGMO_SKILLS_PATH,
@@ -1085,6 +1087,19 @@ export async function bootstrapRuntime(
   // the skill with empty inputs. See `src/skills/cron-fire-handler.ts`.
   const skillCronFire = createSkillCronFireHandler({ runner: skillRunner }, inngest);
 
+  // Daily reaper that sweeps unreachable `/skill-venvs/<hash>/` dirs after
+  // the grace window. See `src/skills/deps-reaper-function.ts`.
+  const skillDepsReaper = createSkillDepsReaper(
+    {
+      runInTx: core.runInTx,
+      store: core.skillStore,
+      sandbox: sandbox.sandbox ?? undefined,
+      image: env.COGMO_SKILLS_IMAGE,
+      depsCacheVolumeName: env.COGMO_SKILLS_DEPS_VOLUME,
+    },
+    inngest,
+  );
+
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const functions: any[] = [
     handleMessage,
@@ -1096,6 +1111,7 @@ export async function bootstrapRuntime(
     scheduledTaskFire,
     skillCronTicker,
     skillCronFire,
+    skillDepsReaper,
     boundaryWaiter,
     boundaryJanitor,
     ...debounceFunctions,

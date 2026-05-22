@@ -172,6 +172,36 @@ describe("SysboxSkillWorker", () => {
     );
   });
 
+  it("passes depsCacheVolumeName through to sandbox.create as depsCacheVolume", async () => {
+    const { sandbox } = buildFakeSandbox();
+    await SysboxSkillWorker.create({
+      workerId: "w-vol",
+      sandbox,
+      image: "cogmo-skills:test",
+      expiresAt: new Date(Date.now() + 60_000),
+      depsCacheVolumeName: "cogmo-skills-deps-cache",
+    });
+    expect(sandbox.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        depsCacheVolume: { volumeName: "cogmo-skills-deps-cache" },
+      }),
+    );
+  });
+
+  it("omits depsCacheVolume from sandbox.create when volume name absent", async () => {
+    const { sandbox } = buildFakeSandbox();
+    await SysboxSkillWorker.create({
+      workerId: "w-novol",
+      sandbox,
+      image: "cogmo-skills:test",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    const spec = vi.mocked(sandbox.create).mock.calls[0]?.[0];
+    expect(spec).toBeDefined();
+    if (!spec) return;
+    expect("depsCacheVolume" in spec).toBe(false);
+  });
+
   it("disposes session if execStreaming throws after create", async () => {
     const bundle = buildFakeSandbox();
     vi.mocked(bundle.session.execStreaming).mockRejectedValueOnce(new Error("exec failed"));
@@ -307,6 +337,153 @@ describe("SysboxSkillWorker", () => {
       expect(r.ok).toBe(true);
       expect(r.workerReusable).toBe(false);
       expect(w.state).toBe("draining");
+    });
+
+    it("with deps: populates venv and threads skill_venv into task_invoke", async () => {
+      // Two distinct execs in this scenario: the supervisor (long-lived,
+      // started at create) and the per-task populate (short-lived `sh -c`).
+      // Discriminate via the literal "populate" argv0 sentinel set at
+      // argv[3] — the call site put it there for exactly this purpose.
+      const bundle = buildFakeSandbox();
+      const populateStderr = new PassThrough();
+      vi.mocked(bundle.session.execStreaming).mockImplementation(async (cmd) => {
+        bundle.calls.push(`exec:${cmd[0]}`);
+        if (cmd[3] === "populate") {
+          // Populate exec — wait resolves immediately to exit 0.
+          return {
+            stdin: new PassThrough() as unknown as Writable,
+            stdout: new PassThrough() as unknown as Readable,
+            stderr: populateStderr as unknown as Readable,
+            wait: async () => ({ exitCode: 0 }),
+            dispose: async () => {},
+          };
+        }
+        // Supervisor exec — same shape as buildFakeSandbox's default.
+        return {
+          stdin: bundle.stdin as unknown as Writable,
+          stdout: bundle.stdout as unknown as Readable,
+          stderr: new PassThrough() as unknown as Readable,
+          wait: async () => ({ exitCode: 0 }),
+          dispose: async () => {
+            bundle.execDisposeCalls.count += 1;
+          },
+        };
+      });
+
+      // Capture the task_invoke line so we can assert on `skillVenv`.
+      const taskInvokes: Array<Record<string, unknown>> = [];
+      bundle.stdin.on("data", (chunk: Buffer) => {
+        const lines = chunk
+          .toString("utf-8")
+          .split("\n")
+          .filter((l) => l.length > 0);
+        for (const line of lines) {
+          try {
+            const msg = JSON.parse(line) as { type?: unknown; id?: unknown };
+            if (msg.type === "task_invoke" && typeof msg.id === "string") {
+              taskInvokes.push(msg as Record<string, unknown>);
+              bundle.stdout.write(
+                `${JSON.stringify({ type: "task_result", id: msg.id, ok: true, output: { ok: 1 } })}\n`,
+              );
+            }
+          } catch {}
+        }
+      });
+
+      const w = await SysboxSkillWorker.create({
+        workerId: "w-deps",
+        sandbox: bundle.sandbox,
+        image: "cogmo-skills:test",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      w.tryAcquire();
+      const r = await w.invoke({
+        ...invokeParams("t-deps"),
+        deps: {
+          lockfileHash: "abc123",
+          lockfileContents: "httpx==0.27.0 --hash=sha256:0\n",
+        },
+      });
+
+      expect(r.ok).toBe(true);
+      expect(r.workerReusable).toBe(true);
+      // Populate exec ran (sh + supervisor python3, in some order).
+      expect(bundle.calls).toContain("exec:sh");
+      // Task invoke carried the venv path.
+      expect(taskInvokes[0]?.skillVenv).toBe("/skill-venvs/abc123");
+    });
+
+    it("with deps: populate_failed poisons the worker, no task is invoked", async () => {
+      const bundle = buildFakeSandbox();
+      vi.mocked(bundle.session.execStreaming).mockImplementation(async (cmd) => {
+        if (cmd[3] === "populate") {
+          // Populate exec — emit a hash-mismatch stderr and exit 1.
+          // The stderr listener attaches synchronously after the handle
+          // is returned; we hold `wait()` until the next microtask so
+          // the listener observes the bytes before the result settles.
+          const populateStderr = new PassThrough();
+          populateStderr.write("error: hash mismatch on httpx-0.27.0\n");
+          populateStderr.end();
+          return {
+            stdin: new PassThrough() as unknown as Writable,
+            stdout: new PassThrough() as unknown as Readable,
+            stderr: populateStderr as unknown as Readable,
+            wait: async () => {
+              // Drain the stderr stream's queued chunks into the
+              // listener before resolving. One macrotask is enough.
+              await new Promise<void>((r) => setImmediate(r));
+              return { exitCode: 1 };
+            },
+            dispose: async () => {},
+          };
+        }
+        return {
+          stdin: bundle.stdin as unknown as Writable,
+          stdout: bundle.stdout as unknown as Readable,
+          stderr: new PassThrough() as unknown as Readable,
+          wait: async () => ({ exitCode: 0 }),
+          dispose: async () => {
+            bundle.execDisposeCalls.count += 1;
+          },
+        };
+      });
+
+      // Track any task_invoke — should NOT see one when populate fails.
+      const taskInvokes: unknown[] = [];
+      bundle.stdin.on("data", (chunk: Buffer) => {
+        const lines = chunk
+          .toString("utf-8")
+          .split("\n")
+          .filter((l) => l.length > 0);
+        for (const line of lines) {
+          try {
+            const msg = JSON.parse(line) as { type?: unknown };
+            if (msg.type === "task_invoke") taskInvokes.push(msg);
+          } catch {}
+        }
+      });
+
+      const w = await SysboxSkillWorker.create({
+        workerId: "w-deps-fail",
+        sandbox: bundle.sandbox,
+        image: "cogmo-skills:test",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      w.tryAcquire();
+      const r = await w.invoke({
+        ...invokeParams("t-fail"),
+        deps: {
+          lockfileHash: "abc123",
+          lockfileContents: "httpx==0.27.0\n",
+        },
+      });
+
+      expect(r.ok).toBe(false);
+      expect(r.error).toMatch(/skill_venv_populate_failed/);
+      expect(r.error).toMatch(/hash mismatch/);
+      expect(r.workerReusable).toBe(false);
+      expect(w.state).toBe("draining");
+      expect(taskInvokes).toHaveLength(0);
     });
 
     it("host watchdog fires when supervisor never replies (poisons worker)", async () => {

@@ -59,6 +59,24 @@ export interface RunOnSysboxContainerParams {
    * in practice.
    */
   isolation?: "subinterpreter" | "recycle";
+  /**
+   * Per-skill dependency artefacts. Same shape as the pooled path's
+   * `InvokeParams.deps` — the worker calls `ensureVenvPopulated` before
+   * invoking and threads the resulting venv path into the supervisor.
+   * Absent for skills with no declared dependencies.
+   */
+  deps?: {
+    lockfileHash: string;
+    lockfileContents: string;
+  };
+  /**
+   * Shared deps-cache volume name. When set, the one-shot container
+   * mounts the same Docker volume that pool workers use, so a venv
+   * populated on the pool is reused by this one-shot invocation
+   * (and vice versa). Omitted = container-local populate, lost on
+   * teardown.
+   */
+  depsCacheVolumeName?: string;
 }
 
 /**
@@ -93,6 +111,9 @@ export async function runOnSysboxContainer(
       image: params.image,
       ...(params.resourceLimits !== undefined && { resourceLimits: params.resourceLimits }),
       expiresAt,
+      ...(params.depsCacheVolumeName !== undefined && {
+        depsCacheVolumeName: params.depsCacheVolumeName,
+      }),
     });
     if (!worker.tryAcquire()) {
       // Brand-new worker should always be idle; this is a programmer error.
@@ -105,6 +126,7 @@ export async function runOnSysboxContainer(
       inputs: params.inputs,
       ...(wallClockS !== undefined && { wallClockS }),
       ...(params.isolation !== undefined && { isolation: params.isolation }),
+      ...(params.deps !== undefined && { deps: params.deps }),
       ctxHandler: params.ctxHandler,
     });
   } catch (e) {

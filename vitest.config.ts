@@ -1,10 +1,10 @@
 import { defineConfig } from "vitest/config";
 
 /** Defaults to 2 — matches the parallelism of CI's 2-core runners.
- * Override with `PYODIDE_MAX_FORKS=N` on bigger dev boxes if 2 leaves
+ * Override with `PYODIDE_MAX_WORKERS=N` on bigger dev boxes if 2 leaves
  * perf on the table. */
-const PYODIDE_MAX_FORKS = (() => {
-  const v = Number(process.env.PYODIDE_MAX_FORKS);
+const PYODIDE_MAX_WORKERS = (() => {
+  const v = Number(process.env.PYODIDE_MAX_WORKERS);
   return Number.isFinite(v) && v >= 1 ? v : 2;
 })();
 
@@ -61,14 +61,27 @@ export default defineConfig({
       },
       {
         test: {
-          // Caps parallelism so Vitest's default `maxForks = os.cpus()`
-          // doesn't oversubscribe disk/CPU during WASM cold-start. `2`
-          // matches CI's effective parallelism; bigger dev boxes can
-          // override via `PYODIDE_MAX_FORKS`.
+          // Caps parallelism so Vitest's default `maxWorkers`
+          // (`os.availableParallelism()`) doesn't oversubscribe disk/CPU
+          // during WASM cold-start. `2` matches CI's effective parallelism;
+          // bigger dev boxes can override via `PYODIDE_MAX_WORKERS`.
+          //
+          // `sequence.groupOrder` is what makes the per-project cap
+          // possible: projects sharing a `groupOrder` share one worker
+          // pool, so putting pyodide and unit in the same group would
+          // force a single `maxWorkers` value across both tiers (either
+          // pessimising `unit` by capping it at 2, or removing the
+          // pyodide cap by inheriting unit's default — both bad).
+          // Running pyodide in groupOrder 1 lets each tier keep its own
+          // worker config. Sequential isn't a regression: empirically
+          // CI's Unit Tests check is marginally faster than the
+          // previous interleaved layout (no cross-tier disk/CPU
+          // contention).
           name: "unit-pyodide",
           environment: "node",
           include: PYODIDE_HEAVY_UNIT_GLOBS,
-          poolOptions: { forks: { maxForks: PYODIDE_MAX_FORKS } },
+          maxWorkers: PYODIDE_MAX_WORKERS,
+          sequence: { groupOrder: 1 },
           hookTimeout: 30_000,
           // 60s covers full Pyodide cold-start + a non-trivial WASM run.
           // Tighter per-test budgets (e.g. host.test.ts's 15s wall-clock

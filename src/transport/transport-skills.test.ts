@@ -262,6 +262,7 @@ function makeDeployRow(overrides: Partial<SkillDeployRow> = {}): SkillDeployRow 
       declared_effects: [],
       detected_effects: [],
       declared_secrets: [],
+      declared_dependencies: [],
       validation_errors: [],
     },
     createdAt: new Date("2026-05-01T00:00:00Z"),

@@ -40,6 +40,31 @@ export interface HomeVolumeSpec {
   volumeName: string;
 }
 
+/**
+ * In-container mount point for the skills-tier-2 deps cache. Sandbox
+ * backends mount {@link DepsCacheVolumeSpec} here; the skills
+ * populator + supervisor read/write here. Single source of truth so
+ * the two modules don't drift.
+ */
+export const DEPS_CACHE_VOLUME_TARGET = "/skill-venvs";
+
+/**
+ * Process-wide shared cache volume for skills-tier-2 per-lockfile-hash
+ * virtualenvs. Mounted read-write at {@link DEPS_CACHE_VOLUME_TARGET}
+ * inside the container. Lives across worker recycles + shared across
+ * the pool's workers — first task populates a given `<hash>/`; every
+ * subsequent task on any worker reads the same `<hash>/.ready` and
+ * skips the populate.
+ *
+ * Local-Docker: one named Docker volume per host. The same name is
+ * passed to every worker the pool spawns, so all containers see the
+ * same `<hash>/` entries.
+ */
+export interface DepsCacheVolumeSpec {
+  /** Local-Docker: named Docker volume; created on demand. */
+  volumeName: string;
+}
+
 /** Per-task askpass secrets directory. Backend bind-mounts read-only. */
 export interface AskpassSpec {
   hostDir: string;
@@ -67,6 +92,14 @@ export interface SessionSpec {
    * surviving the task.
    */
   homeVolume?: HomeVolumeSpec;
+  /**
+   * Shared persistent venv cache for skills tier-2. Mounted at
+   * `/skill-venvs` inside the container. Same volume passed to every
+   * worker in the pool, so cross-worker venv reuse works automatically
+   * without coordination beyond the populator's `.ready` marker and
+   * rename atomicity. Omit on non-skills sandbox sessions.
+   */
+  depsCacheVolume?: DepsCacheVolumeSpec;
   askpass?: AskpassSpec;
   /**
    * Per-task escape hatch: drop sysbox isolation and run under plain `runc`.

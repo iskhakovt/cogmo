@@ -5,6 +5,7 @@ import type {
   SandboxClient,
   SandboxSession,
 } from "../../sandbox/index.js";
+import { ensureVenvPopulated } from "../deps.js";
 import { type CtxHandler, Dispatcher } from "../dispatcher.js";
 import type { RuntimeRusage, TaskInvoke, TaskResult } from "../protocol.js";
 import { DEFAULT_RESOURCE_LIMITS } from "./host.js";
@@ -38,6 +39,14 @@ export interface SysboxSkillWorkerOptions {
    * (recycle ceiling + small buffer); workers don't need to know the policy.
    */
   expiresAt: Date;
+  /**
+   * Named Docker volume mounted at `/skill-venvs`. Threaded to the
+   * sandbox `SessionSpec.depsCacheVolume`. The pool passes the same
+   * value to every worker so a venv populated by one worker is reused
+   * by every other worker and survives recycle. Omit to run with a
+   * container-local cache (overlay FS, lost on recycle).
+   */
+  depsCacheVolumeName?: string;
 }
 
 /**
@@ -68,6 +77,19 @@ export interface InvokeParams {
    * task's success — pool replaces it on next acquire.
    */
   isolation?: "subinterpreter" | "recycle";
+  /**
+   * Per-skill dependency artefacts. Both fields must be set together —
+   * the worker calls `ensureVenvPopulated` before invoking and threads
+   * the resulting venv path into `task_invoke.skillVenv`. Absent (or
+   * `null` lockfile hash) means the skill declared no dependencies and
+   * runs against stdlib only.
+   */
+  deps?: {
+    /** sha256 of `requirements.lock` at the skill's `git_sha`. */
+    lockfileHash: string;
+    /** Raw lockfile contents — fed to `uv pip sync` via stdin. */
+    lockfileContents: string;
+  };
   ctxHandler: CtxHandler;
 }
 
@@ -163,6 +185,9 @@ export class SysboxSkillWorker {
       image: opts.image,
       resourceLimits,
       expiresAt: opts.expiresAt,
+      ...(opts.depsCacheVolumeName !== undefined && {
+        depsCacheVolume: { volumeName: opts.depsCacheVolumeName },
+      }),
     });
 
     let exec: ExecStreamingHandle;
@@ -242,6 +267,34 @@ export class SysboxSkillWorker {
       );
     }
     const wallClockS = params.wallClockS ?? DEFAULT_WALL_CLOCK_S;
+
+    // Ensure the skill's venv is populated before sending the task. The
+    // populator is idempotent — second-and-later calls with the same
+    // lockfile hash on the same worker no-op via the `.ready` marker.
+    // Failure poisons the worker because uv pip sync writes into the
+    // container's overlay FS; a partial populate could leave the venv
+    // in an unreusable state for any future task with the same hash.
+    let skillVenv: string | undefined;
+    if (params.deps) {
+      const populate = await ensureVenvPopulated({
+        session: this.#session,
+        lockfileHash: params.deps.lockfileHash,
+        lockfileContents: params.deps.lockfileContents,
+        workerId: this.workerId,
+      });
+      if (populate.isErr()) {
+        this.#taskCount += 1;
+        this.#lastUsedAtMs = Date.now();
+        this.markPoisoned();
+        return {
+          ok: false,
+          error: `skill_venv_${populate.error.kind}: ${populate.error.message}`,
+          workerReusable: false,
+        };
+      }
+      skillVenv = populate.value;
+    }
+
     const invoke: TaskInvoke = {
       type: "task_invoke",
       id: params.taskId,
@@ -249,6 +302,7 @@ export class SysboxSkillWorker {
       inputs: params.inputs,
       body: params.body,
       ...(params.isolation !== undefined && { isolation: params.isolation }),
+      ...(skillVenv !== undefined && { skillVenv }),
       wallClockS,
     };
 

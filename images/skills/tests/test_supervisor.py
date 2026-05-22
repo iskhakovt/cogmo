@@ -9,11 +9,12 @@ and child entry point.
 import json
 import os
 import time
-from collections.abc import Mapping
+from collections.abc import Generator, Mapping
 
 import pytest
 
 from cogmo_skills_runtime.supervisor import (
+    _activate_skill_venv,
     _dispatch_one_task,
     _kill_and_reap,
     _run_one_task_in_child,
@@ -149,6 +150,101 @@ class TestRunOneTaskInChild:
         result = json.loads(captured.out.strip())
         assert result["ok"] is False
         assert "async def run" in result["error"]
+
+
+class TestActivateSkillVenv:
+    """Pin the activation contract: site-packages prepended to
+    sys.path, VIRTUAL_ENV + PATH set. Tests run in the test process
+    itself (not in a forked child), so we snapshot + restore env state
+    around each case.
+    """
+
+    @pytest.fixture(autouse=True)
+    def restore_env(self) -> Generator[None]:
+        import sys
+
+        saved_path = list(sys.path)
+        saved_env = dict(os.environ)
+        yield
+        sys.path[:] = saved_path
+        os.environ.clear()
+        os.environ.update(saved_env)
+
+    def _build_fake_venv(self, tmp_path: object) -> str:
+        import sys
+
+        venv = os.fspath(tmp_path / "venv")  # type: ignore[operator]
+        site_packages = os.path.join(
+            venv, "lib", f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages"
+        )
+        os.makedirs(site_packages)
+        os.makedirs(os.path.join(venv, "bin"))
+        return venv
+
+    def test_prepends_site_packages_to_sys_path(self, tmp_path: object) -> None:
+        import sys
+
+        venv = self._build_fake_venv(tmp_path)
+        _activate_skill_venv(venv)
+        expected = os.path.join(
+            venv, "lib", f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages"
+        )
+        assert sys.path[0] == expected
+
+    def test_sets_virtual_env_and_prepends_bin_to_path(self, tmp_path: object) -> None:
+        venv = self._build_fake_venv(tmp_path)
+        os.environ["PATH"] = "/usr/bin:/bin"
+        _activate_skill_venv(venv)
+        assert os.environ["VIRTUAL_ENV"] == venv
+        assert os.environ["PATH"].startswith(f"{venv}/bin:")
+        assert "/usr/bin:/bin" in os.environ["PATH"]
+
+    def test_handles_empty_existing_path(self, tmp_path: object) -> None:
+        venv = self._build_fake_venv(tmp_path)
+        os.environ.pop("PATH", None)
+        _activate_skill_venv(venv)
+        assert os.environ["PATH"] == os.path.join(venv, "bin")
+
+    def test_raises_when_site_packages_is_missing(self, tmp_path: object) -> None:
+        empty = os.fspath(tmp_path / "empty-venv")  # type: ignore[operator]
+        os.makedirs(empty)
+        with pytest.raises(RuntimeError, match="has no site-packages"):
+            _activate_skill_venv(empty)
+
+    def test_run_one_task_in_child_activates_when_skill_venv_present(
+        self, tmp_path: object, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Drop a stub module into the fake venv's site-packages, then
+        run a skill body that imports it. Without activation, the
+        import would fail; with activation, the task_result is
+        ok=true.
+        """
+        import sys
+
+        venv = self._build_fake_venv(tmp_path)
+        site_packages = os.path.join(
+            venv, "lib", f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages"
+        )
+        with open(os.path.join(site_packages, "skillvenv_marker.py"), "w") as f:
+            f.write("ANSWER = 42\n")
+        body = (
+            "async def run(inputs, ctx):\n"
+            "    import skillvenv_marker\n"
+            "    return {'answer': skillvenv_marker.ANSWER}\n"
+        )
+        task = {
+            "type": "task_invoke",
+            "id": "t-venv",
+            "skill": "venv-import",
+            "inputs": {},
+            "body": body,
+            "skillVenv": venv,
+        }
+        _run_one_task_in_child(task)
+        captured = capsys.readouterr()
+        result = json.loads(captured.out.strip())
+        assert result["ok"] is True, result
+        assert result["output"] == {"answer": 42}
 
 
 class TestSupervisorImportSafety:

@@ -25,6 +25,7 @@ function manifestWith(overrides: Partial<SkillManifest> = {}): SkillManifest {
     inputs: { type: "object", properties: {} },
     effects: [],
     secrets: [],
+    dependencies: [],
     cost_per_call_usd: 0,
     ...overrides,
   } satisfies SkillManifest;

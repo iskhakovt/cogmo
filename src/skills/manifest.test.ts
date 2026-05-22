@@ -200,4 +200,73 @@ secrets:
     if (!result.isOk()) return;
     expect(result.value.body).toBe("");
   });
+
+  describe("dependencies", () => {
+    it("defaults to an empty list", () => {
+      const result = parseManifest(frontmatter(MIN_FIELDS));
+      expect(result.isOk()).toBe(true);
+      if (!result.isOk()) return;
+      expect(result.value.manifest.dependencies).toEqual([]);
+    });
+
+    it("accepts strict name==version pins", () => {
+      const yaml = `${MIN_FIELDS}
+dependencies:
+  - httpx==0.27.0
+  - pydantic==2.5.3
+  - google-api-python-client==2.108.0`;
+      const result = parseManifest(frontmatter(yaml));
+      expect(result.isOk()).toBe(true);
+      if (!result.isOk()) return;
+      expect(result.value.manifest.dependencies).toEqual([
+        "httpx==0.27.0",
+        "pydantic==2.5.3",
+        "google-api-python-client==2.108.0",
+      ]);
+    });
+
+    it.each([
+      ["range: >=", "httpx>=0.27.0"],
+      ["range: <", "httpx<1.0"],
+      ["range: ~=", "httpx~=0.27"],
+      ["compound range", "httpx>=0.27,<0.30"],
+      ["extra", "httpx[http2]==0.27.0"],
+      ["url ref", "pkg @ git+https://github.com/x/y"],
+      ["path ref", "./local-pkg"],
+      ["bare name", "httpx"],
+      ["whitespace", " httpx==0.27.0"],
+    ])("rejects %s", (_label, dep) => {
+      const yaml = `${MIN_FIELDS}\ndependencies:\n  - "${dep.replace(/"/g, '\\"')}"`;
+      const result = parseManifest(frontmatter(yaml));
+      expect(result.isErr()).toBe(true);
+      if (!result.isErr()) return;
+      expect(result.error.kind).toBe("invalid_manifest");
+    });
+
+    it("accepts version forms with pre-releases and local segments", () => {
+      const yaml = `${MIN_FIELDS}
+dependencies:
+  - alpha==1.0.0rc1
+  - beta==2.0.0.post1
+  - gamma==3.0+local`;
+      const result = parseManifest(frontmatter(yaml));
+      expect(result.isOk()).toBe(true);
+      if (!result.isOk()) return;
+      expect(result.value.manifest.dependencies).toHaveLength(3);
+    });
+
+    it("accepts PEP 440 epoch versions (e.g. project version-scheme resets)", () => {
+      // Epoch syntax is `N!X.Y.Z` — used when a project changes its
+      // versioning scheme and needs the new versions to sort below the
+      // old ones (PyPy, pytest historical cases). Rare, but valid; the
+      // manifest layer doesn't second-guess what uv resolves.
+      const yaml = `${MIN_FIELDS}
+dependencies:
+  - reset-scheme==1!2.0.0`;
+      const result = parseManifest(frontmatter(yaml));
+      expect(result.isOk()).toBe(true);
+      if (!result.isOk()) return;
+      expect(result.value.manifest.dependencies).toEqual(["reset-scheme==1!2.0.0"]);
+    });
+  });
 });

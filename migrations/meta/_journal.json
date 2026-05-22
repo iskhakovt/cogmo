@@ -330,6 +330,13 @@
       "when": 1779297643394,
       "tag": "0046_drop_tool_gate",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1779389238019,
+      "tag": "0047_skills_lockfile_hash",
+      "breakpoints": true
     }
   ]
 }

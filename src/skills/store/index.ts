@@ -48,6 +48,13 @@ export interface SkillRow {
   /** Last fire timestamp. Null = never fired. */
   lastFiredAt: Date | null;
   gitSha: string;
+  /**
+   * sha256 of `requirements.lock` at `git_sha`. Null when the manifest
+   * declares no dependencies. Drives the dependency-populator's cache key
+   * and the reachability sweep. Written atomically with `gitSha` in
+   * register/approve/rollback.
+   */
+  lockfileHash: string | null;
   inputs: SkillInputs;
   outputs: SkillIo | null;
   disabled: boolean;
@@ -125,6 +132,8 @@ export interface InsertSkillParams {
    */
   scheduleNextRunAt: Date | null;
   gitSha: string;
+  /** sha256 of `requirements.lock` at `gitSha`, or null when no deps. */
+  lockfileHash: string | null;
   inputs: SkillInputs;
   outputs: SkillIo | null;
 }
@@ -184,6 +193,8 @@ export interface ExecuteRegisterParams {
   /** Non-null iff `schedule` is non-null. See {@link InsertSkillParams}. */
   scheduleNextRunAt: Date | null;
   branchTipSha: string;
+  /** sha256 of `requirements.lock` at `branchTipSha`, or null when no deps. */
+  lockfileHash: string | null;
   inputs: SkillInputs;
   outputs: SkillIo | null;
   classifierLog: ClassifierLog;
@@ -236,6 +247,8 @@ export interface ExecuteApproveParams {
   schedule: string | null;
   /** Non-null iff `schedule` is non-null. See {@link InsertSkillParams}. */
   scheduleNextRunAt: Date | null;
+  /** sha256 of `requirements.lock` at the approved sha, or null when no deps. */
+  lockfileHash: string | null;
   inputs: SkillInputs;
   outputs: SkillIo | null;
   applyFilesystem(): Promise<void>;
@@ -256,6 +269,8 @@ export interface ExecuteRollbackParams {
   schedule: string | null;
   /** Non-null iff `schedule` is non-null. See {@link InsertSkillParams}. */
   scheduleNextRunAt: Date | null;
+  /** sha256 of `requirements.lock` at `toGitSha`, or null when no deps. */
+  lockfileHash: string | null;
   inputs: SkillInputs;
   outputs: SkillIo | null;
   classifierLog: ClassifierLog;
@@ -276,6 +291,13 @@ export interface SkillStore {
    * paths still use {@link listEnabledSkills}.
    */
   listAllSkills(tx: Transaction): Promise<readonly SkillRow[]>;
+  /**
+   * Distinct non-null `lockfile_hash` values across every skill row
+   * (enabled or disabled -- disabled skills can re-enable). Backs the
+   * `/skill-venvs/` cache reaper: every dir whose name isn't in this set
+   * AND is older than the grace window is unreachable and safe to remove.
+   */
+  listReachableLockfileHashes(tx: Transaction): Promise<ReadonlySet<string>>;
   /**
    * True iff at least one `skill_deploys` row exists with the given
    * `(skill_id, git_sha)` and `status = 'live'`. Used by `enable` to gate
@@ -432,6 +454,7 @@ export class DrizzleSkillStore implements SkillStore {
           schedule: params.schedule,
           nextRunAt: params.scheduleNextRunAt,
           gitSha: params.gitSha,
+          lockfileHash: params.lockfileHash,
           inputs: params.inputs,
           outputs: params.outputs,
         })
@@ -455,6 +478,14 @@ export class DrizzleSkillStore implements SkillStore {
 
   async listAllSkills(tx: Transaction): Promise<readonly SkillRow[]> {
     return tx.select().from(skills).orderBy(asc(skills.name));
+  }
+
+  async listReachableLockfileHashes(tx: Transaction): Promise<ReadonlySet<string>> {
+    const rows = await tx
+      .selectDistinct({ lockfileHash: skills.lockfileHash })
+      .from(skills)
+      .where(isNotNull(skills.lockfileHash));
+    return new Set(rows.map((r) => r.lockfileHash).filter((h): h is string => h !== null));
   }
 
   async hasLiveDeployForSkill(
@@ -596,6 +627,7 @@ export class DrizzleSkillStore implements SkillStore {
             schedule: params.schedule,
             nextRunAt: params.scheduleNextRunAt,
             gitSha: params.branchTipSha,
+            lockfileHash: params.lockfileHash,
             inputs: params.inputs,
             outputs: params.outputs,
             disabled: false,
@@ -623,6 +655,7 @@ export class DrizzleSkillStore implements SkillStore {
           schedule: params.schedule,
           nextRunAt: params.scheduleNextRunAt,
           gitSha: params.branchTipSha,
+          lockfileHash: params.lockfileHash,
           inputs: params.inputs,
           outputs: params.outputs,
           disabled: !goesLive,
@@ -699,6 +732,7 @@ export class DrizzleSkillStore implements SkillStore {
       .update(skills)
       .set({
         gitSha: deploy.gitSha,
+        lockfileHash: params.lockfileHash,
         disabled: false,
         tier: params.tier,
         riskTier: params.riskTier,
@@ -791,6 +825,7 @@ export class DrizzleSkillStore implements SkillStore {
       .update(skills)
       .set({
         gitSha: params.toGitSha,
+        lockfileHash: params.lockfileHash,
         disabled: false,
         tier: params.tier,
         riskTier: params.riskTier,
