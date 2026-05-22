@@ -1309,9 +1309,8 @@ export class SkillRunnerImpl implements SkillRunner {
     // through the sysbox path.
     switch (skill.tier) {
       case "wasm": {
-        // Hashes are discarded — Pyodide / micropip don't have a
-        // `--require-hashes` equivalent; staleness gate is upstream
-        // at register (PR #322's compile + byte-compare).
+        // Specs only (not hashes) — see `design/skills.md` → Security posture
+        // for the WASM-vs-sysbox integrity asymmetry rationale.
         const packageSpecs = cached.lockfile?.specs ?? [];
         return runOnWorker({
           taskId,

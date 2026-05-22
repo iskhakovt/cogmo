@@ -670,9 +670,11 @@ A skill with `lockfile_hash IS NULL` (empty `dependencies`) skips activation ent
 
 ### Tier 1 (WASM)
 
-Pyodide consumes the same `requirements.lock` via `micropip.install(packages, index_urls=[mirror])` at worker init. Wheels cached on the host disk in `pyodide-cache/<lockfile_hash>/`, keyed identically to the sysbox case for symmetric audit.
+Pyodide consumes the parsed package specs from `requirements.lock` via `micropip.install(specs, keep_going=False)` at worker init. Hashes are dropped — micropip has no `--require-hashes` equivalent; see *Security posture* below for the asymmetry vs the sysbox tier. After install, `importlib.metadata.version(name)` is checked per declared dep and any mismatch (silent skip, bundled-vs-pin drift) raises a fatal init error surfaced as the task's `error`.
 
-Pyodide-incompatible wheels (native extensions outside the [pre-built Pyodide list](https://pyodide.org/en/stable/usage/packages-in-pyodide.html) and not available as pure-Python wheels via `micropip`) fail at register — the WASM tier validates package compatibility against Pyodide's manifest before the skill goes live, not at first invocation. Skills with such deps must declare `tier: container`.
+Pyodide-incompatible wheels (native extensions outside the [pre-built Pyodide list](https://pyodide.org/en/stable/usage/packages-in-pyodide.html) and not available as pure-Python wheels via `micropip`) fail at first invocation — `micropip.install` raises and the host turns it into the task's `error`. Register-time pre-validation against Pyodide's `pyodide-lock.json` is a deferred follow-up (todo.md → Skills, voice & transport); skills depending on native-only wheels should declare `tier: container` until that lands.
+
+Worker init (Pyodide load + micropip install + version verify) is capped at 60s by default — a hung micropip resolve against a slow PyPI surfaces as `worker_init_timeout` instead of wedging the worker. A per-lockfile-hash wheel cache for micropip-fetched wheels is deferred — Pyodide's built-in `packageCacheDir` covers the runtime's bundled packages only, so a moderately-deps'd skill re-downloads from PyPI on every worker boot today (todo.md).
 
 ### Cache reachability
 
@@ -696,7 +698,8 @@ Dep additions to a previously-deployed skill are widening events — re-classifi
 
 ### Security posture
 
-- **Hash pinning via `--require-hashes`** is non-optional. The lockfile carries SHA-256 per wheel; `uv pip sync` refuses to install anything unhashed.
+- **Hash pinning via `--require-hashes`** is non-optional **on the sysbox tier**. The lockfile carries SHA-256 per wheel; `uv pip sync` refuses to install anything unhashed.
+- **WASM-tier dependency install trusts public PyPI without wire integrity verification.** `micropip.install` has no `--require-hashes` equivalent and fetches wheels from PyPI's JSON API over TLS with no per-wheel hash check. A flash-malicious release between register (when uv pinned the resolution) and the first WASM-tier invocation gets installed silently — the lockfile-hash byte-compare at register catches *staleness*, not *integrity at fetch time*. Mitigation today: post-install version verification (catches silent skips and bundled-vs-pin drift) plus narrow classifier tier-bumps for security-relevant deps so anything sensitive lands on `tier: container`. Real closure requires either upstream `micropip --require-hashes` support or a sidecar pre-fetch that hash-verifies wheels and primes the cache before Pyodide opens. `[research]`.
 - **`--only-binary=:all:`** forbids sdists by default. Sdists run arbitrary install-time code and need a build toolchain — both are surface the auto tier should not provide.
 - **Public PyPI for v1.** Hash pinning makes the index untrusted-but-verified. A private pull-through mirror (Devpi / Bandersnatch) is the obvious next step when (a) the user base widens beyond single-operator or (b) we want quarantine windows on new package versions to catch flash-malicious publishes. `[research]`.
 - **PEP 740 / Sigstore attestation verification.** 132k+ packages had attestations by Mar 2026 via PyPI Trusted Publishing. Verification via `pypi-attestations` is "free defense in depth" once the mirror is in place. `[research]`.

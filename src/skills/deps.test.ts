@@ -420,6 +420,13 @@ pydantic==2.5.3 \\
       parseLockfilePackageSpecs("reset-scheme==1!2.0.0\nalpha==1.0.0rc1\ngamma==3.0+local\n"),
     ).toEqual(["reset-scheme==1!2.0.0", "alpha==1.0.0rc1", "gamma==3.0+local"]);
   });
+
+  it("ignores trailing inline comments and via-annotations on the spec line", () => {
+    expect(parseLockfilePackageSpecs("httpx==0.27.0 # via something\nrequests==2.31.0\n")).toEqual([
+      "httpx==0.27.0",
+      "requests==2.31.0",
+    ]);
+  });
 });
 
 describe("ensureVenvPopulated", () => {

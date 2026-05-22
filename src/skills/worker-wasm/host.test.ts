@@ -278,6 +278,22 @@ async def run(inputs, ctx):
     expect(handler2.handle).toHaveBeenCalledTimes(1);
   });
 
+  it("surfaces worker_init_timeout when the worker doesn't signal ready in time", async () => {
+    // Pyodide load alone is ~5s, so a 50ms readyTimeoutMs is guaranteed
+    // to trip — the worker is terminated mid-init and the host returns
+    // a typed error instead of wedging on the un-bounded ready await.
+    const result = await runOnWorker({
+      taskId: "init-timeout",
+      skillName: "init-timeout",
+      body: "async def run(inputs, ctx):\n    return None\n",
+      inputs: {},
+      readyTimeoutMs: 50,
+      ctxHandler: noopHandler(),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/worker_init_timeout/);
+  });
+
   it("nested types in inputs round-trip correctly", async () => {
     const result = await runOnWorker({
       taskId: "nested",

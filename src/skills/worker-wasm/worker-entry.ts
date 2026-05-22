@@ -162,26 +162,39 @@ port.on("message", (raw: unknown) => {
     pyodide.setInterruptBuffer(new Uint8Array(init.interruptBuffer));
   }
 
-  // Install the skill's declared dependencies via micropip before the
-  // skill body imports anything. Pyodide ships ~200 packages pre-built;
-  // micropip resolves the rest from PyPI's JSON API, transparently
-  // falling back to source for pure-Python wheels and failing with a
-  // typed exception for native packages that have no Pyodide build.
-  //
-  // The host has already byte-compared a fresh `uv pip compile`
-  // against the committed lockfile (PR2), so the specs we receive are
-  // resolver-validated for the sysbox tier. WASM-tier compatibility
-  // (Pyodide manifest membership + pure-Python fallback) is what
-  // surfaces here; a Pyodide-incompatible dep becomes a `fatal`
-  // worker init error, which the host turns into the task's `error`.
+  // No `--require-hashes` equivalent in micropip; WASM-tier trusts
+  // PyPI wire integrity. See `design/skills.md` → Security posture.
+  // Pyodide-incompatible deps surface as a `fatal` init error here
+  // because register-time pre-check against `pyodide-lock.json` is
+  // deferred (todo.md). Post-install version verification catches
+  // silent resolver skips and any bundled-vs-pin drift.
   if (init.packageSpecs && init.packageSpecs.length > 0) {
     await pyodide.loadPackage("micropip");
     pyodide.globals.set("__cogmo_skill_deps", init.packageSpecs);
-    await pyodide.runPythonAsync(
-      "import micropip\n" +
-        "await micropip.install(list(__cogmo_skill_deps), keep_going=False)\n" +
-        "del __cogmo_skill_deps\n",
-    );
+    await pyodide.runPythonAsync(`
+import micropip
+import importlib.metadata as _md
+
+async def _install_and_verify(specs):
+    await micropip.install(specs, keep_going=False)
+    mismatches = []
+    for spec in specs:
+        name, _, version = spec.partition("==")
+        if not version:
+            continue
+        try:
+            installed = _md.version(name)
+        except _md.PackageNotFoundError:
+            mismatches.append(f"{name}: not installed")
+            continue
+        if installed != version:
+            mismatches.append(f"{name}: requested {version}, installed {installed}")
+    if mismatches:
+        raise RuntimeError("dep version verification failed: " + "; ".join(mismatches))
+
+await _install_and_verify(list(__cogmo_skill_deps))
+del __cogmo_skill_deps
+`);
   }
 
   // Tell the host the worker is ready to receive task_invoke.
