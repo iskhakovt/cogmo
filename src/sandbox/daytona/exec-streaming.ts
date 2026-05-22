@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { PassThrough, Writable } from "node:stream";
+import { PassThrough } from "node:stream";
 import type { Process } from "@daytonaio/sdk";
 import { logger } from "../../logger.js";
 import { type ExecOptions, type ExecStreamingHandle, ExecTimeoutError } from "../index.js";
+import { shellEscape } from "./shell-quote.js";
 
 const log = logger.child({ component: "sandbox.daytona.exec-streaming" });
 
@@ -66,6 +67,18 @@ export async function startExecStreaming(args: {
   if (opts.user !== undefined) {
     throw new Error(
       "DaytonaSandboxSession.execStreaming: opts.user is not supported in Phase 3a (use `runuser` / `sudo` inside the cmd argv until upstream support lands)",
+    );
+  }
+
+  // Session-command stdin (`sendSessionCommandInput` HTTP POST) has no
+  // remote EOF channel — the daemon pins the FIFO with a long-running
+  // sleep for `runAsync: true` commands, so any caller that relies on
+  // stdin EOF wedges. `attachStdin: true` is routed to the PTY
+  // backend (`startExecPty`) before this point; reject if it somehow
+  // reaches here.
+  if (opts.attachStdin === true) {
+    throw new Error(
+      "DaytonaSandboxSession.execStreaming: attachStdin must be routed to the PTY backend (startExecPty); session-command stdin has no remote EOF channel",
     );
   }
 
@@ -333,14 +346,6 @@ export async function startExecStreaming(args: {
     ]);
   };
 
-  // stdin: Daytona accepts session input via `sendSessionCommandInput`.
-  // Wrap in a Writable that flushes per write. Coalescing happens at the
-  // caller's stream layer if they want it.
-  const stdin =
-    opts.attachStdin === true
-      ? new SessionCommandInputWritable(daytonaProcess, sessionId, commandId)
-      : undefined;
-
   const handle: ExecStreamingHandle = {
     // PassThrough is a Duplex which is itself a Readable — direct
     // assignment without a cast is structurally type-safe.
@@ -349,39 +354,7 @@ export async function startExecStreaming(args: {
     wait: () => exitPromise,
     dispose,
   };
-  if (stdin) handle.stdin = stdin;
   return handle;
-}
-
-/**
- * Writable adapter over `process.sendSessionCommandInput`. Each `write()`
- * sends a chunk; `end()` is a no-op on Daytona (no explicit EOF — caller
- * must structure its protocol so the remote process knows when input is
- * done, e.g. emit a sentinel line for stream-json).
- */
-class SessionCommandInputWritable extends Writable {
-  #process: Process;
-  #sessionId: string;
-  #commandId: string;
-
-  constructor(process: Process, sessionId: string, commandId: string) {
-    super();
-    this.#process = process;
-    this.#sessionId = sessionId;
-    this.#commandId = commandId;
-  }
-
-  override _write(
-    chunk: Buffer | string,
-    _encoding: BufferEncoding,
-    callback: (err?: Error | null) => void,
-  ): void {
-    const data = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-    this.#process
-      .sendSessionCommandInput(this.#sessionId, this.#commandId, data)
-      .then(() => callback())
-      .catch((err: Error) => callback(err));
-  }
 }
 
 function buildShellCommand(cmd: readonly string[], opts: ExecOptions): string {
@@ -400,13 +373,4 @@ function buildShellCommand(cmd: readonly string[], opts: ExecOptions): string {
   const cdPrefix = opts.workingDir ? `cd ${shellEscape(opts.workingDir)} && ` : "";
   const argv = cmd.map(shellEscape).join(" ");
   return `${cdPrefix}${envPrefix}${argv}`;
-}
-
-/**
- * Single-quote-escape for safe bash interpolation. POSIX rule: `'foo'` is
- * literal; embedded `'` becomes `'"'"'`. Cheaper than reaching for shellac
- * for one helper.
- */
-function shellEscape(s: string): string {
-  return `'${s.replaceAll("'", "'\"'\"'")}'`;
 }
