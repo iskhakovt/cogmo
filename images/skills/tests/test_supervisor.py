@@ -212,6 +212,26 @@ class TestActivateSkillVenv:
         expected_suffix = f"-py{sys.version_info.major}.{sys.version_info.minor}"
         assert venv.endswith(self._HASH + expected_suffix)
 
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "..",
+            "../etc/passwd",
+            "/absolute/path",
+            "a" * 63,
+            "A" * 64,
+            "g" * 64,
+            "",
+        ],
+    )
+    def test_skill_venv_path_rejects_non_sha256(self, bad: str) -> None:
+        """`os.path.join` doesn't normalise `..`, so a malformed
+        lockfile_hash on the wire could otherwise escape
+        `SKILL_VENVS_ROOT`. The supervisor refuses anything that isn't
+        a sha256-hex string."""
+        with pytest.raises(RuntimeError, match="lockfile_hash must be sha256 hex"):
+            _skill_venv_path(bad)
+
     def test_prepends_site_packages_to_sys_path(self, tmp_path: object) -> None:
         import sys
 

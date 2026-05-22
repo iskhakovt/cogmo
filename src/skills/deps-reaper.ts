@@ -33,11 +33,30 @@ const REAP_TIMEOUT_MS = 60_000;
  */
 const REAP_SCRIPT = `set -eu
 GRACE_DAYS="$1"
-# Capture reachable hashes once; \`grep -vxFf\` against the temp file
-# is a single-pass O(N) filter rather than N greps over the find output.
+# Reachability under the current runtime: a dir \`<hash>-py<X.Y>/\` is
+# reachable iff \`<hash>\` is in the skills table AND \`<X.Y>\` matches
+# THIS image's Python ABI. Stale ABI variants of a reachable hash
+# (e.g. \`<hash>-py3.14/\` left behind after an image bump to py3.15)
+# are unreachable from the current runtime and should sweep on the
+# next tick once they age past the grace window. Same for legacy
+# bare \`<hash>/\` dirs (from before the ABI suffix shipped) -- they
+# look "reachable" by the bare hash but the supervisor will populate
+# \`<hash>-py<X.Y>/\` on the next invoke, so the bare dir is dead
+# weight. Solution: build the EXPECTED reachable dir-name set
+# (\`<hash>-py<CURRENT_ABI>\` for every hash in REACHABLE) and compare
+# candidate dirs against that set, not against the bare-hash set.
+PY_ABI=$(python3 -c "import sys; print(f'py{sys.version_info.major}.{sys.version_info.minor}')")
 REACHABLE=$(mktemp)
-trap 'rm -f "$REACHABLE"' EXIT
+EXPECTED=$(mktemp)
+trap 'rm -f "$REACHABLE" "$EXPECTED"' EXIT
 cat > "$REACHABLE"
+# Build the expected set: each reachable hash becomes <hash>-$PY_ABI.
+# Empty REACHABLE -> empty EXPECTED -> grep -vxFf treats every
+# candidate as unreachable (the desired all-stale-sweep behaviour).
+while IFS= read -r h; do
+  [ -n "$h" ] || continue
+  echo "$h-$PY_ABI" >> "$EXPECTED"
+done < "$REACHABLE"
 cd "${DEPS_CACHE_VOLUME_TARGET}"
 # -maxdepth/mindepth 1 -type d catches direct subdirs only -- the
 # top-level mount point itself is excluded by mindepth.
@@ -47,16 +66,9 @@ cd "${DEPS_CACHE_VOLUME_TARGET}"
 # GNU find / grep semantics expected (cogmo-skills image is Debian-based);
 # posix-extended regex + grep's empty-pattern-passes-everything behaviour
 # are GNU-specific.
-find . -maxdepth 1 -mindepth 1 -type d -regextype posix-extended -regex '\\./[0-9a-f]{64}(-py[0-9]+\\.[0-9]+)?' -mtime "+\${GRACE_DAYS}" | sed 's|^\\./||' | while read dir; do
-  # Strip the optional -py<X.Y> suffix before comparing against the
-  # reachable hash set (set carries bare sha256s; the directory name
-  # embeds the runtime's Python ABI). \`\${dir%-py*}\` is a no-op on
-  # legacy bare-hash names and strips the ABI on current ones.
-  hash="\${dir%-py*}"
-  if ! grep -qxF "$hash" "$REACHABLE"; then
-    rm -rf "${DEPS_CACHE_VOLUME_TARGET}/$dir"
-    echo "reaped:$dir"
-  fi
+find . -maxdepth 1 -mindepth 1 -type d -regextype posix-extended -regex '\\./[0-9a-f]{64}(-py[0-9]+\\.[0-9]+)?' -mtime "+\${GRACE_DAYS}" | sed 's|^\\./||' | grep -vxFf "$EXPECTED" | while read dir; do
+  rm -rf "${DEPS_CACHE_VOLUME_TARGET}/$dir"
+  echo "reaped:$dir"
 done
 `;
 

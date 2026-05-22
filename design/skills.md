@@ -656,7 +656,7 @@ First task using a given lockfile hash populates the venv. Concurrent populators
 
 `.ready` is the marker readers gate on — `uv` itself does not provide directory-level atomicity guarantees for parallel `--target` or `venv` population ([uv #15335](https://github.com/astral-sh/uv/issues/15335), [#13883](https://github.com/astral-sh/uv/issues/13883)). The marker file plus `mv -T` rename is the portable answer.
 
-Failure during steps 2-4 leaves an orphaned `<hash>.tmp.<workerId>/` directory. The populate script itself opportunistically sweeps `.tmp.*` entries older than 10 minutes at the top of every populate run — the per-hash reaper (`skill-venvs-reaper` Inngest cron) targets only published `<hash>/` directories (sha256 hex), never in-flight tmp dirs.
+Failure during steps 2-4 leaves an orphaned `<hash>-py<X.Y>.tmp.<workerId>/` directory. The populate script itself opportunistically sweeps `.tmp.*` entries older than 10 minutes at the top of every populate run — the per-hash reaper (`skill-venvs-reaper` Inngest cron) targets only published `<hash>-py<X.Y>/` directories (sha256 hex + ABI suffix), never in-flight tmp dirs.
 
 `--only-binary=:all:` forbids source distributions by default — sdists require a build toolchain in the sandbox and run arbitrary `setup.py` code at install. A skill declaring a package available only as sdist fails at register. Sdist support is a future opt-in (`allow_sdist: true` in the manifest, automatic `approve` tier) when a real driver appears.
 
@@ -686,7 +686,7 @@ Worker init (Pyodide load + micropip install + version verify) is capped at 60s 
 
 ### Cache reachability
 
-A `<hash>-py<X.Y>/` directory is reachable iff some `skills` row (enabled or disabled, since disabled skills can re-enable) has `lockfile_hash = <hash>` — the ABI suffix is ignored by the reachability check (`${dir%-py*}` shell-strips it before lookup). Stale ABI variants of a reachable hash (e.g. `<hash>-py3.14/` left behind after an image bump to py3.15) are unreachable from the current runtime and sweep on the next reaper tick once they age past the 7-day grace window.
+A `<hash>-py<X.Y>/` directory is reachable iff some `skills` row (enabled or disabled, since disabled skills can re-enable) has `lockfile_hash = <hash>` AND `<X.Y>` matches the reaper sandbox's own Python ABI. The reaper computes `PY_ABI` from its own `sys.version_info` and builds the expected reachable set as `<hash>-$PY_ABI` per row; candidate dirs are compared against that full-name set. Stale ABI variants (e.g. `<hash>-py3.14/` left behind after an image bump to py3.15) don't match the current expected set, so they're unreachable from the current runtime and sweep on the next reaper tick once they age past the 7-day grace window. Same logic reaps legacy bare `<hash>/` dirs left over from before the ABI suffix shipped.
 
 `skills.lockfile_hash` is denormalised from git for cheap reachability queries — updated atomically in the same transaction that advances `git_sha`. LRU is the wrong policy on this volume: a rarely-used but live skill would lose its venv and pay a multi-second cold start on the next invocation. Reachability with a grace period is correct.
 
