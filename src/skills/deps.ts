@@ -296,8 +296,15 @@ const DEFAULT_POPULATE_TIMEOUT_MS = 180_000;
 const POPULATE_SCRIPT = `set -eu
 HASH="$1"
 WORKERID="$2"
-VENV="${DEPS_CACHE_VOLUME_TARGET}/$HASH"
-TMP="${DEPS_CACHE_VOLUME_TARGET}/$HASH.tmp.$WORKERID"
+# Compute the runtime's Python ABI inline so the venv path varies
+# with the image's Python version. An image bump from python:3.14 to
+# python:3.15 produces a different PY_ABI -> different VENV path ->
+# fresh populate; the stale 3.14 dir orphans and the reaper cleans
+# it up on its next tick. The supervisor reads its own
+# sys.version_info to construct the same path on activation.
+PY_ABI=$(python3 -c "import sys; print(f'py{sys.version_info.major}.{sys.version_info.minor}')")
+VENV="${DEPS_CACHE_VOLUME_TARGET}/$HASH-$PY_ABI"
+TMP="${DEPS_CACHE_VOLUME_TARGET}/$HASH-$PY_ABI.tmp.$WORKERID"
 # Dotted so it can't be mistaken for a lockfile-hash dir (sha256 hex
 # never starts with .). Shared filesystem with venvs lets uv hardlink.
 export UV_CACHE_DIR="${DEPS_CACHE_VOLUME_TARGET}/.uv-cache"
@@ -358,21 +365,28 @@ export interface EnsureVenvPopulatedOptions {
 
 /**
  * Ensure a per-lockfile-hash virtualenv exists at
- * `/skill-venvs/<hash>/` on the shared deps-cache volume. Idempotent —
- * the second call (or any concurrent call ordered after a successful
- * one) returns the path without touching the FS. Returns the absolute
- * venv path that the supervisor activates via `task_invoke.skillVenv`.
+ * `/skill-venvs/<hash>-py<major>.<minor>/` on the shared deps-cache
+ * volume. Idempotent -- the second call (or any concurrent call
+ * ordered after a successful one) no-ops via the `.ready` marker.
+ *
+ * The path includes the runtime's Python ABI so an image bump that
+ * changes Python minor populates a fresh venv (and orphans the old
+ * one for the reaper). The host doesn't need to know the image's
+ * ABI: the populate script computes it inline from
+ * `python3 -c "...sys.version_info..."`, and the supervisor reads its
+ * own `sys.version_info` to construct the same path on activation.
+ * Same image, same Python -> same path, by construction.
  *
  * The venv lives on the `/skill-venvs` Docker / Daytona volume shared
  * across every tier-2 worker the pool spawns: a venv populated by one
  * worker is reused by every subsequent worker and survives recycle.
- * Cross-worker concurrency on the same hash is serialised by `.ready`
- * + `mv -T` rename failure; see `POPULATE_SCRIPT` below.
+ * Cross-worker concurrency on the same `(hash, ABI)` pair is
+ * serialised by `.ready` + `mv -T` rename failure; see
+ * `POPULATE_SCRIPT` below.
  */
 export async function ensureVenvPopulated(
   opts: EnsureVenvPopulatedOptions,
-): Promise<Result<string, VenvPopulateError>> {
-  const venvPath = `${DEPS_CACHE_VOLUME_TARGET}/${opts.lockfileHash}`;
+): Promise<Result<void, VenvPopulateError>> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_POPULATE_TIMEOUT_MS;
 
   // `sh -c <script> <argv0> <args...>` runs the script with the
@@ -429,5 +443,5 @@ export async function ensureVenvPopulated(
       message: stderrChunks.join("").trim() || `uv pip sync exited ${exitCode}`,
     });
   }
-  return ok(venvPath);
+  return ok(undefined);
 }

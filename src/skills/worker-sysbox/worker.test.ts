@@ -370,7 +370,7 @@ describe("SysboxSkillWorker", () => {
         };
       });
 
-      // Capture the task_invoke line so we can assert on `skillVenv`.
+      // Capture the task_invoke line so we can assert on `lockfileHash`.
       const taskInvokes: Array<Record<string, unknown>> = [];
       bundle.stdin.on("data", (chunk: Buffer) => {
         const lines = chunk
@@ -410,7 +410,7 @@ describe("SysboxSkillWorker", () => {
       // Populate exec ran (sh + supervisor python3, in some order).
       expect(bundle.calls).toContain("exec:sh");
       // Task invoke carried the venv path.
-      expect(taskInvokes[0]?.skillVenv).toBe("/skill-venvs/abc123");
+      expect(taskInvokes[0]?.lockfileHash).toBe("abc123");
     });
 
     it("with deps: populate_failed poisons the worker, no task is invoked", async () => {

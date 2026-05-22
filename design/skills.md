@@ -619,33 +619,36 @@ A persisted volume holds the wheel cache and per-lockfile-hash virtualenvs, moun
 
 ```text
 /skill-venvs/
-  .uv-cache/                          # UV_CACHE_DIR — content-addressed wheel cache.
-                                       # Dotted so it can't be mistaken for a lockfile-hash dir
-                                       # (sha256 hex never starts with a `.`); the reaper's
-                                       # `^[0-9a-f]{64}$` filter excludes it from the sweep set.
-  <sha256(requirements.lock)>/        # populated, ready
+  .uv-cache/                                # UV_CACHE_DIR — content-addressed wheel cache.
+                                             # Dotted so it can't be mistaken for a lockfile-hash dir
+                                             # (sha256 hex never starts with a `.`); the reaper's
+                                             # regex excludes it from the sweep set.
+  <sha256(requirements.lock)>-py3.14/       # populated, ready (suffix = runtime's `py<major>.<minor>`)
     bin/
-    lib/pythonX.Y/site-packages/
-    .ready                             # marker — readers gate on this
-  <other-hash>.tmp.<workerId>/        # mid-populate; rename-target
+    lib/python3.14/site-packages/
+    .ready                                   # marker — readers gate on this
+  <other-hash>-py3.14.tmp.<workerId>/       # mid-populate; rename-target
 ```
 
-Local sysbox mounts a named Docker volume at `/skill-venvs`. Daytona mounts a Daytona Volume at the same path; the populator owns the `<lockfile-hash>/` subdirectory layout inside (single mount per sandbox, not K8s-style per-skill `subPath` isolation — workers are reused across skills with different lockfile hashes). `.uv-cache/` and the `<hash>/` venvs share the same filesystem so uv's hardlink mode works — cross-filesystem hardlinks silently fall back to copy and inflate disk by ~100× ([uv #15149](https://github.com/astral-sh/uv/issues/15149)). Wheels are downloaded once across the entire cache; every venv hardlinks from `.uv-cache/` for free dedup.
+Local sysbox mounts a named Docker volume at `/skill-venvs`. Daytona mounts a Daytona Volume at the same path; the populator owns the `<lockfile-hash>-py<major>.<minor>/` subdirectory layout inside (single mount per sandbox, not K8s-style per-skill `subPath` isolation — workers are reused across skills with different lockfile hashes). `.uv-cache/` and the `<hash>-py<X.Y>/` venvs share the same filesystem so uv's hardlink mode works — cross-filesystem hardlinks silently fall back to copy and inflate disk by ~100× ([uv #15149](https://github.com/astral-sh/uv/issues/15149)). Wheels are downloaded once across the entire cache; every venv hardlinks from `.uv-cache/` for free dedup.
+
+The `-py<major>.<minor>` suffix encodes the runtime's Python ABI so an image bump that changes Python minor (e.g. `python:3.14-slim` -> `python:3.15-slim`) routes to a fresh venv: populate writes `<hash>-py3.15/`, supervisor activates the same. The stale `<hash>-py3.14/` orphans cleanly and the reaper sweeps it on the next tick. Host doesn't need to know the image's ABI — populator (`python3 -c "..."`) + supervisor (`sys.version_info`) compute it from the runtime they share.
 
 ### Populate
 
 First task using a given lockfile hash populates the venv. Concurrent populators on the same lockfile hash are serialised by `.ready` + `mv -T` rename failure — the marker file plus atomic rename is the synchronisation point; the loser of the race detects `.ready` on the target after its own rename fails and exits success without redundant work. No Postgres advisory lock is used.
 
 ```text
-1. if /skill-venvs/<hash>/.ready exists → done
-2. uv venv /skill-venvs/<hash>.tmp.<workerId>
+0. PY_ABI=$(python3 -c "import sys; print(f'py{sys.version_info.major}.{sys.version_info.minor}')")
+1. if /skill-venvs/<hash>-$PY_ABI/.ready exists → done
+2. uv venv /skill-venvs/<hash>-$PY_ABI.tmp.<workerId>
 3. uv pip sync --require-hashes --only-binary=:all: \
-       --python /skill-venvs/<hash>.tmp.<workerId>/bin/python /dev/stdin
+       --python /skill-venvs/<hash>-$PY_ABI.tmp.<workerId>/bin/python /dev/stdin
                                   (lockfile contents streamed in on stdin from the host;
                                    hardlinks from .uv-cache/)
-4. touch /skill-venvs/<hash>.tmp.<workerId>/.ready
-5. mv -T /skill-venvs/<hash>.tmp.<workerId>
-       → /skill-venvs/<hash>
+4. touch /skill-venvs/<hash>-$PY_ABI.tmp.<workerId>/.ready
+5. mv -T /skill-venvs/<hash>-$PY_ABI.tmp.<workerId>
+       → /skill-venvs/<hash>-$PY_ABI
                                   (atomic; readers see the populated venv or nothing.
                                    `mv -T` refuses to nest on collision, so the loser's
                                    rename fails and it exits success after seeing .ready.)
@@ -659,10 +662,11 @@ Failure during steps 2-4 leaves an orphaned `<hash>.tmp.<workerId>/` directory. 
 
 ### Activation
 
-Before forking the task child, the supervisor activates the skill venv:
+Before forking the task child, the supervisor activates the skill venv. The path is constructed from the lockfile hash + the runtime's Python ABI — the populator (running in the same image) produces the same path, so the two agree without coordinating through the host:
 
 ```python
-venv = f"/skill-venvs/{lockfile_hash}"
+py_abi = f"py{sys.version_info.major}.{sys.version_info.minor}"
+venv = f"/skill-venvs/{lockfile_hash}-{py_abi}"
 os.environ["VIRTUAL_ENV"] = venv
 os.environ["PATH"] = f"{venv}/bin:{os.environ['PATH']}"
 sys.path[:0] = [f"{venv}/lib/python{sys.version_info[0]}.{sys.version_info[1]}/site-packages"]
@@ -682,7 +686,7 @@ Worker init (Pyodide load + micropip install + version verify) is capped at 60s 
 
 ### Cache reachability
 
-`/skill-venvs/<hash>/` is reachable iff some `skills` row (enabled or disabled, since disabled skills can re-enable) has `lockfile_hash = <hash>`. The reaper sweeps unreachable entries older than a 7-day grace period — catches the rollback-then-roll-forward case without forcing re-populate.
+A `<hash>-py<X.Y>/` directory is reachable iff some `skills` row (enabled or disabled, since disabled skills can re-enable) has `lockfile_hash = <hash>` — the ABI suffix is ignored by the reachability check (`${dir%-py*}` shell-strips it before lookup). Stale ABI variants of a reachable hash (e.g. `<hash>-py3.14/` left behind after an image bump to py3.15) are unreachable from the current runtime and sweep on the next reaper tick once they age past the 7-day grace window.
 
 `skills.lockfile_hash` is denormalised from git for cheap reachability queries — updated atomically in the same transaction that advances `git_sha`. LRU is the wrong policy on this volume: a rarely-used but live skill would lose its venv and pay a multi-second cold start on the next invocation. Reachability with a grace period is correct.
 
@@ -702,7 +706,7 @@ Dep additions to a previously-deployed skill are widening events — re-classifi
 
 ### Security posture
 
-> **Precondition: tier-2 skills are mutually trusted code by the operator.** The shared `/skill-venvs` volume is mounted RW on every tier-2 worker under the same UID; any skill can write under `/skill-venvs/<other-hash>/` and pre-stage entries the next populator activates. Hash pinning at install time doesn't protect against this because the trivial bypass is `.ready`-pre-staging (creating the marker file + a stub Python layout) which skips `uv pip sync` entirely. Cogmo's v1 deployment model is single-operator with operator-authored / operator-audited skills; this section enumerates the threats accepted under that precondition. **Multi-author skill libraries require per-skill UID isolation (or per-hash bind-mount made read-only after publish) before the precondition holds.** See the `[research]` items below for the upgrade path.
+> **Precondition: tier-2 skills are mutually trusted code by the operator.** The shared `/skill-venvs` volume is mounted RW on every tier-2 worker under the same UID; any skill can write under `/skill-venvs/<other-hash>-py<X.Y>/` and pre-stage entries the next populator activates. Hash pinning at install time doesn't protect against this because the trivial bypass is `.ready`-pre-staging (creating the marker file + a stub Python layout at the path the populator will check) which skips `uv pip sync` entirely. Cogmo's v1 deployment model is single-operator with operator-authored / operator-audited skills; this section enumerates the threats accepted under that precondition. **Multi-author skill libraries require per-skill UID isolation (or per-hash bind-mount made read-only after publish) before the precondition holds.** See the `[research]` items below for the upgrade path.
 
 - **Hash pinning via `--require-hashes`** is non-optional **on the sysbox tier**. The lockfile carries SHA-256 per wheel; `uv pip sync` refuses to install anything unhashed.
 - **WASM-tier dependency install trusts public PyPI without wire integrity verification.** `micropip.install` has no `--require-hashes` equivalent and fetches wheels from PyPI's JSON API over TLS with no per-wheel hash check. A flash-malicious release between register (when uv pinned the resolution) and the first WASM-tier invocation gets installed silently — the lockfile-hash byte-compare at register catches *staleness*, not *integrity at fetch time*. Mitigation today: post-install version verification (catches silent skips and bundled-vs-pin drift) plus narrow classifier tier-bumps for security-relevant deps so anything sensitive lands on `tier: container`. Real closure requires either upstream `micropip --require-hashes` support or a sidecar pre-fetch that hash-verifies wheels and primes the cache before Pyodide opens. `[research]`.

@@ -41,15 +41,22 @@ cat > "$REACHABLE"
 cd "${DEPS_CACHE_VOLUME_TARGET}"
 # -maxdepth/mindepth 1 -type d catches direct subdirs only -- the
 # top-level mount point itself is excluded by mindepth.
-# Regex restricts to lowercase-hex sha256 names so dot-prefixed sentinels
-# and .tmp dirs (which the populate script's own sweeper owns) are
-# protected.
-# GNU find / grep semantics expected (cogmo-skills image is Debian-
-# based via the runtime base image); -regex's Emacs syntax and
-# -vxFf's "no patterns -> pass everything" behaviour are GNU-specific.
-find . -maxdepth 1 -mindepth 1 -type d -regex '\\./[0-9a-f]\\{64\\}' -mtime "+\${GRACE_DAYS}" | sed 's|^\\./||' | grep -vxFf "$REACHABLE" | while read hash; do
-  rm -rf "${DEPS_CACHE_VOLUME_TARGET}/$hash"
-  echo "reaped:$hash"
+# Regex matches lockfile-hash dirs in two shapes: bare \`<hash>/\` (legacy,
+# pre-ABI-suffix) and \`<hash>-py<major>.<minor>/\` (current). Dot-prefixed
+# sentinels (.uv-cache, .tmp.*) are excluded by the leading hex class.
+# GNU find / grep semantics expected (cogmo-skills image is Debian-based);
+# posix-extended regex + grep's empty-pattern-passes-everything behaviour
+# are GNU-specific.
+find . -maxdepth 1 -mindepth 1 -type d -regextype posix-extended -regex '\\./[0-9a-f]{64}(-py[0-9]+\\.[0-9]+)?' -mtime "+\${GRACE_DAYS}" | sed 's|^\\./||' | while read dir; do
+  # Strip the optional -py<X.Y> suffix before comparing against the
+  # reachable hash set (set carries bare sha256s; the directory name
+  # embeds the runtime's Python ABI). \`\${dir%-py*}\` is a no-op on
+  # legacy bare-hash names and strips the ABI on current ones.
+  hash="\${dir%-py*}"
+  if ! grep -qxF "$hash" "$REACHABLE"; then
+    rm -rf "${DEPS_CACHE_VOLUME_TARGET}/$dir"
+    echo "reaped:$dir"
+  fi
 done
 `;
 

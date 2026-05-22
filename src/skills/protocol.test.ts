@@ -70,49 +70,40 @@ describe("TaskInvokeSchema", () => {
     expect(() => TaskInvokeSchema.parse({ type: "task_invoke", id: "t", inputs: {} })).toThrow();
   });
 
-  it("accepts an absent skillVenv (skill has no declared dependencies)", () => {
+  it("accepts an absent lockfileHash (skill has no declared dependencies)", () => {
     const r = TaskInvokeSchema.parse({
       type: "task_invoke",
       id: "t",
       skill: "s",
       inputs: {},
     });
-    expect(r.skillVenv).toBeUndefined();
+    expect(r.lockfileHash).toBeUndefined();
   });
 
-  it("accepts a populated skillVenv path", () => {
+  it("accepts a sha256-hex lockfileHash", () => {
+    const sha256 = "a".repeat(64);
     const r = TaskInvokeSchema.parse({
       type: "task_invoke",
       id: "t",
       skill: "s",
       inputs: {},
-      skillVenv: "/skill-venvs/abc123/",
+      lockfileHash: sha256,
     });
-    expect(r.skillVenv).toBe("/skill-venvs/abc123/");
+    expect(r.lockfileHash).toBe(sha256);
   });
 
-  it("rejects an empty skillVenv string", () => {
-    expect(() =>
-      TaskInvokeSchema.parse({
-        type: "task_invoke",
-        id: "t",
-        skill: "s",
-        inputs: {},
-        skillVenv: "",
-      }),
-    ).toThrow();
-  });
-
-  it("rejects a relative skillVenv path", () => {
-    expect(() =>
-      TaskInvokeSchema.parse({
-        type: "task_invoke",
-        id: "t",
-        skill: "s",
-        inputs: {},
-        skillVenv: "skill-venvs/abc",
-      }),
-    ).toThrow(/absolute path/);
+  it("rejects a non-sha256 lockfileHash (wrong length / case / non-hex)", () => {
+    for (const bad of ["abc123", "A".repeat(64), "g".repeat(64), "a".repeat(63)]) {
+      expect(() =>
+        TaskInvokeSchema.parse({
+          type: "task_invoke",
+          id: "t",
+          skill: "s",
+          inputs: {},
+          lockfileHash: bad,
+        }),
+      ).toThrow(/sha256/);
+    }
   });
 });
 

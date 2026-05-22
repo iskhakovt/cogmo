@@ -13,11 +13,13 @@ from collections.abc import Generator, Mapping
 
 import pytest
 
+from cogmo_skills_runtime import supervisor
 from cogmo_skills_runtime.supervisor import (
     _activate_skill_venv,
     _dispatch_one_task,
     _kill_and_reap,
     _run_one_task_in_child,
+    _skill_venv_path,
     _wait_with_timeout,
 )
 
@@ -170,10 +172,28 @@ class TestActivateSkillVenv:
         os.environ.clear()
         os.environ.update(saved_env)
 
+    # Fixed sha256-hex used across the activation tests; matches the
+    # protocol's `lockfileHash` shape so the supervisor's path
+    # computation runs against a real-looking input.
+    _HASH = "a" * 64
+
+    @pytest.fixture(autouse=True)
+    def _redirect_skill_venvs_root(
+        self, tmp_path: object, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Point `SKILL_VENVS_ROOT` at the per-test tmpdir so the
+        supervisor's `_skill_venv_path` computes a path under our
+        control. Production wiring uses `/skill-venvs/`, which tests
+        can't write to."""
+        monkeypatch.setattr(supervisor, "SKILL_VENVS_ROOT", os.fspath(tmp_path))  # type: ignore[arg-type]
+
     def _build_fake_venv(self, tmp_path: object) -> str:
+        """Build a fake venv at the path `_skill_venv_path(_HASH)` resolves
+        to under the redirected root. Mirrors the populate script's
+        layout so `_activate_skill_venv(_HASH)` finds it."""
         import sys
 
-        venv = os.fspath(tmp_path / "venv")  # type: ignore[operator]
+        venv = _skill_venv_path(self._HASH)
         site_packages = os.path.join(
             venv, "lib", f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages"
         )
@@ -181,11 +201,22 @@ class TestActivateSkillVenv:
         os.makedirs(os.path.join(venv, "bin"))
         return venv
 
+    def test_skill_venv_path_includes_python_abi(self) -> None:
+        """Image bumps that change Python minor must route to a fresh
+        venv. The path embeds `py<major>.<minor>` so the populate
+        script and supervisor (same image, same `sys.version_info`)
+        construct the same path."""
+        import sys
+
+        venv = _skill_venv_path(self._HASH)
+        expected_suffix = f"-py{sys.version_info.major}.{sys.version_info.minor}"
+        assert venv.endswith(self._HASH + expected_suffix)
+
     def test_prepends_site_packages_to_sys_path(self, tmp_path: object) -> None:
         import sys
 
         venv = self._build_fake_venv(tmp_path)
-        _activate_skill_venv(venv)
+        _activate_skill_venv(self._HASH)
         expected = os.path.join(
             venv, "lib", f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages"
         )
@@ -194,7 +225,7 @@ class TestActivateSkillVenv:
     def test_sets_virtual_env_and_prepends_bin_to_path(self, tmp_path: object) -> None:
         venv = self._build_fake_venv(tmp_path)
         os.environ["PATH"] = "/usr/bin:/bin"
-        _activate_skill_venv(venv)
+        _activate_skill_venv(self._HASH)
         assert os.environ["VIRTUAL_ENV"] == venv
         assert os.environ["PATH"].startswith(f"{venv}/bin:")
         assert "/usr/bin:/bin" in os.environ["PATH"]
@@ -202,16 +233,21 @@ class TestActivateSkillVenv:
     def test_handles_empty_existing_path(self, tmp_path: object) -> None:
         venv = self._build_fake_venv(tmp_path)
         os.environ.pop("PATH", None)
-        _activate_skill_venv(venv)
+        _activate_skill_venv(self._HASH)
         assert os.environ["PATH"] == os.path.join(venv, "bin")
 
-    def test_raises_when_site_packages_is_missing(self, tmp_path: object) -> None:
-        empty = os.fspath(tmp_path / "empty-venv")  # type: ignore[operator]
-        os.makedirs(empty)
+    def test_raises_when_site_packages_is_missing(self) -> None:
+        """Regression for the ABI-mismatch wedge: when an image upgrade
+        changes Python minor, the old `<hash>-py3.14/` dir stays but
+        the new supervisor's `_skill_venv_path(<hash>)` resolves to
+        `<hash>-py3.15/` which doesn't exist. Activate should raise a
+        meaningful error instead of silently working with the wrong
+        layout."""
+        # No `_build_fake_venv` -> the resolved path doesn't exist.
         with pytest.raises(RuntimeError, match="has no site-packages"):
-            _activate_skill_venv(empty)
+            _activate_skill_venv(self._HASH)
 
-    def test_run_one_task_in_child_activates_when_skill_venv_present(
+    def test_run_one_task_in_child_activates_when_lockfile_hash_present(
         self, tmp_path: object, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """Drop a stub module into the fake venv's site-packages, then
@@ -238,7 +274,7 @@ class TestActivateSkillVenv:
             "skill": "venv-import",
             "inputs": {},
             "body": body,
-            "skillVenv": venv,
+            "lockfileHash": self._HASH,
         }
         _run_one_task_in_child(task)
         captured = capsys.readouterr()

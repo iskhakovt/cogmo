@@ -102,8 +102,23 @@ def _kill_and_reap(pid: int) -> None:
         pass
 
 
-def _activate_skill_venv(venv_path: str) -> None:
-    """Activate a per-skill venv in the current process.
+SKILL_VENVS_ROOT = "/skill-venvs"
+
+
+def _skill_venv_path(lockfile_hash: str) -> str:
+    """Compute the venv path for a given lockfile hash on this image.
+
+    The path includes the runtime's Python ABI so an image bump that
+    changes Python minor (or major) routes to a fresh venv. The
+    populate script computes the same suffix from its own
+    `sys.version_info`; same image -> same Python -> same path.
+    """
+    py_abi = f"py{sys.version_info.major}.{sys.version_info.minor}"
+    return os.path.join(SKILL_VENVS_ROOT, f"{lockfile_hash}-{py_abi}")
+
+
+def _activate_skill_venv(lockfile_hash: str) -> None:
+    """Activate the skill venv for `lockfile_hash` in the current process.
 
     Must run in the forked child *before* any skill code imports. We
     prepend the venv's `site-packages` to `sys.path`, set
@@ -117,6 +132,7 @@ def _activate_skill_venv(venv_path: str) -> None:
     runner's try/except catches it and surfaces a task_result so the
     host doesn't hang.
     """
+    venv_path = _skill_venv_path(lockfile_hash)
     site_packages = os.path.join(
         venv_path,
         "lib",
@@ -141,10 +157,10 @@ def _run_one_task_in_child(task: Mapping[str, object]) -> None:
     body = str(task.get("body", ""))
     inputs = task.get("inputs")
     task_id = str(task["id"])
-    skill_venv = task.get("skillVenv")
+    lockfile_hash = task.get("lockfileHash")
     try:
-        if isinstance(skill_venv, str) and skill_venv:
-            _activate_skill_venv(skill_venv)
+        if isinstance(lockfile_hash, str) and lockfile_hash:
+            _activate_skill_venv(lockfile_hash)
         asyncio.run(_run_main(body, inputs, task_id))
     except BaseException as e:
         # The runner's own try/except covers normal Python exceptions;
