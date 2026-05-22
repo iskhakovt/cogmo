@@ -312,12 +312,13 @@ describe("SysboxSkillWorker", () => {
     it("with deps: populates venv and threads skill_venv into task_invoke", async () => {
       // Two distinct execs in this scenario: the supervisor (long-lived,
       // started at create) and the per-task populate (short-lived `sh -c`).
-      // Route by argv[0] so each gets the right stream shape.
+      // Discriminate via the literal "populate" argv0 sentinel set at
+      // argv[3] — the call site put it there for exactly this purpose.
       const bundle = buildFakeSandbox();
       const populateStderr = new PassThrough();
       vi.mocked(bundle.session.execStreaming).mockImplementation(async (cmd) => {
         bundle.calls.push(`exec:${cmd[0]}`);
-        if (cmd[0] === "sh") {
+        if (cmd[3] === "populate") {
           // Populate exec — wait resolves immediately to exit 0.
           return {
             stdin: new PassThrough() as unknown as Writable,
@@ -385,7 +386,7 @@ describe("SysboxSkillWorker", () => {
     it("with deps: populate_failed poisons the worker, no task is invoked", async () => {
       const bundle = buildFakeSandbox();
       vi.mocked(bundle.session.execStreaming).mockImplementation(async (cmd) => {
-        if (cmd[0] === "sh") {
+        if (cmd[3] === "populate") {
           // Populate exec — emit a hash-mismatch stderr and exit 1.
           // The stderr listener attaches synchronously after the handle
           // is returned; we hold `wait()` until the next microtask so

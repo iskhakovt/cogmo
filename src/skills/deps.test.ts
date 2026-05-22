@@ -501,4 +501,29 @@ describe("ensureVenvPopulated", () => {
     expect(result.error.kind).toBe("transport_failed");
     expect(result.error.message).toMatch(/without stdin/);
   });
+
+  it("is idempotent — repeat calls with same hash re-invoke the script (which short-circuits on .ready)", async () => {
+    // Host never caches; it dispatches the populate every time and
+    // trusts the script's `.ready` check to no-op. This pins that
+    // contract — execStreaming fires on the second call too.
+    const session = mock<SandboxSession>();
+    session.execStreaming.mockImplementation(async () => {
+      const exec = makeFakeExec();
+      setImmediate(() => exec.waitResolve(0));
+      return exec.handle;
+    });
+
+    const opts = {
+      session,
+      lockfileHash: "abc123",
+      lockfileContents: "httpx==0.27.0\n",
+      workerId: "worker-1",
+    };
+    const r1 = await ensureVenvPopulated(opts);
+    const r2 = await ensureVenvPopulated(opts);
+
+    expect(r1.isOk()).toBe(true);
+    expect(r2.isOk()).toBe(true);
+    expect(session.execStreaming).toHaveBeenCalledTimes(2);
+  });
 });

@@ -791,9 +791,8 @@ export class SkillRunnerImpl implements SkillRunner {
         manifest,
         body,
         inputsValidator,
-        // Must mirror `#loadSourceForRow` — skills with deps require
-        // lockfileContents at invoke time. Skipping it here meant the
-        // first invoke after approve ran without the venv activated.
+        // Mirror `#loadSourceForRow`: lockfileContents lives on the
+        // cache entry whenever the manifest declares deps.
         ...(lockfile && { lockfileContents: lockfile.contents }),
       });
       // Mirror the new main SHA to the configured remote — same rationale as
