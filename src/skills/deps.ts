@@ -270,12 +270,7 @@ HASH="$1"
 WORKERID="$2"
 VENV="${SKILL_VENVS_DIR}/$HASH"
 TMP="${SKILL_VENVS_DIR}/$HASH.tmp.$WORKERID"
-# UV_CACHE_DIR on the shared volume puts the content-addressed wheel
-# cache on the same filesystem as the venv targets, so uv's default
-# hardlink install mode actually hardlinks (cross-filesystem falls
-# back to copy and inflates disk by ~100×; see uv#15149). Same
-# rationale as the design's "uv-cache/ and venvs/ share a filesystem"
-# note. Exported once for both uv calls below.
+# Share UV_CACHE_DIR with the venv volume so hardlink install works.
 export UV_CACHE_DIR="${SKILL_VENVS_DIR}/.uv-cache"
 if [ -f "$VENV/.ready" ]; then
   exit 0
@@ -285,16 +280,15 @@ rm -rf "$TMP"
 uv venv --quiet "$TMP"
 uv pip sync --quiet --python "$TMP/bin/python" --require-hashes --only-binary=:all: /dev/stdin
 touch "$TMP/.ready"
-# Atomic publish. Two workers populating the same hash can race here;
-# the loser's mv fails (target dir already exists and is non-empty).
-# Recover by confirming the winner published a complete venv via the
-# .ready marker, then drop our own tmp dir.
-if ! mv "$TMP" "$VENV" 2>/dev/null; then
+# -T (no-target-directory) makes mv fail EEXIST instead of nesting TMP
+# inside an existing VENV — the race-recovery branch can only fire if
+# this stays a rename, never a nest.
+if ! mv -T "$TMP" "$VENV" 2>/dev/null; then
   if [ -f "$VENV/.ready" ]; then
     rm -rf "$TMP"
     exit 0
   fi
-  echo "populate_failed: lost rename race but \\\`$VENV\\\` is not ready" >&2
+  echo "populate_failed: lost rename race but $VENV is not ready" >&2
   rm -rf "$TMP"
   exit 1
 fi
