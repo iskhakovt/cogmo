@@ -35,7 +35,7 @@ Docker services + app wired in-process. Tests the orchestration pipeline — deb
 **Infrastructure:**
 - Testcontainers (PostgreSQL, Redis, Inngest, Hindsight) — started in vitest `globalSetup`, random ports
 - Container definitions in `dev/containers.ts` (shared with `scripts/dev-infra.ts` for local dev)
-- llmock (`@copilotkit/llmock`) runs in-process — serves both Anthropic API (for app) and OpenAI-compatible API (for Hindsight, replacing Ollama)
+- llmock (`@copilotkit/aimock`) runs in-process — serves both Anthropic API (for app) and OpenAI-compatible API (for Hindsight)
 - Hindsight reaches llmock via `host.docker.internal`
 - App modules imported directly — `bootstrap()` from `src/index.ts` wires everything
 

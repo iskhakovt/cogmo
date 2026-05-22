@@ -4,7 +4,6 @@ packages:
 injectWorkspacePackages: true
 
 allowBuilds:
-  "@copilotkit/llmock": true
   cpu-features: false
   esbuild: false
   protobufjs: false
