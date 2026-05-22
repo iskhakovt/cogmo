@@ -82,13 +82,8 @@ const LOCKFILE_SPEC_RE = /^([a-z0-9][a-z0-9._-]*?)==([a-zA-Z0-9.+!-]+)/i;
 export function parseLockfilePackageSpecs(contents: string): readonly string[] {
   const specs: string[] = [];
   for (const rawLine of contents.split("\n")) {
-    const line = rawLine.replace(/\s+\\$/, "").trim();
-    if (line.length === 0) continue;
-    if (line.startsWith("#")) continue;
-    if (line.startsWith("--hash=") || line.startsWith("--")) continue;
-    const match = LOCKFILE_SPEC_RE.exec(line);
-    if (!match) continue;
-    specs.push(`${match[1]}==${match[2]}`);
+    const match = LOCKFILE_SPEC_RE.exec(rawLine.trim());
+    if (match) specs.push(`${match[1]}==${match[2]}`);
   }
   return specs;
 }

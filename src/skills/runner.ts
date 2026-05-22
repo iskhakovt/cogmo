@@ -333,6 +333,15 @@ export interface SkillRunnerOptions {
   lockfileCompiler?: LockfileCompiler;
 }
 
+interface SkillLockfileCacheValue {
+  /** sha256, matches `skills.lockfile_hash`. */
+  hash: string;
+  /** Raw bytes — sysbox populator feeds to `uv pip sync` via stdin. */
+  contents: string;
+  /** Parsed `name==version` specs — WASM tier feeds to `micropip.install`. */
+  specs: readonly string[];
+}
+
 interface SkillSourceCacheEntry {
   manifest: SkillManifest;
   body: string;
@@ -345,12 +354,23 @@ interface SkillSourceCacheEntry {
    */
   outputsValidator?: ValidateFunction;
   /**
-   * Raw `requirements.lock` bytes when the manifest declares dependencies.
-   * Cached alongside `body` so the populator on first invoke doesn't pay
-   * a second `git show` per task. `undefined` when the manifest declares
-   * no deps (no lockfile is committed).
+   * Lockfile-derived data, populated atomically when the manifest declares
+   * dependencies. All three fields go together; half-populated states are
+   * unrepresentable. Absent when the manifest has no deps.
    */
-  lockfileContents?: string;
+  lockfile?: SkillLockfileCacheValue;
+}
+
+/** Build the cohesive cache value from a lockfile snapshot. */
+function buildLockfileCacheValue(snapshot: {
+  hash: string;
+  contents: string;
+}): SkillLockfileCacheValue {
+  return {
+    hash: snapshot.hash,
+    contents: snapshot.contents,
+    specs: parseLockfilePackageSpecs(snapshot.contents),
+  };
 }
 
 export class SkillRunnerImpl implements SkillRunner {
@@ -810,9 +830,7 @@ export class SkillRunnerImpl implements SkillRunner {
         manifest,
         body,
         inputsValidator,
-        // Mirror `#loadSourceForRow`: lockfileContents lives on the
-        // cache entry whenever the manifest declares deps.
-        ...(lockfile && { lockfileContents: lockfile.contents }),
+        ...(lockfile && { lockfile: buildLockfileCacheValue(lockfile) }),
       });
       // Mirror the new main SHA to the configured remote — same rationale as
       // register's mirror call.
@@ -957,7 +975,7 @@ export class SkillRunnerImpl implements SkillRunner {
         body,
         inputsValidator,
         // Same invariant as approve-warm above.
-        ...(lockfile && { lockfileContents: lockfile.contents }),
+        ...(lockfile && { lockfile: buildLockfileCacheValue(lockfile) }),
       });
       // Rollback rewinds main backwards, so the remote push needs `force`. We
       // gate with `--force-with-lease=refs/heads/main:<mainSha>` — if anything
@@ -1291,13 +1309,10 @@ export class SkillRunnerImpl implements SkillRunner {
     // through the sysbox path.
     switch (skill.tier) {
       case "wasm": {
-        // Parse the lockfile's direct deps for micropip. Hashes are
-        // discarded — Pyodide / micropip don't have a `--require-hashes`
-        // equivalent, and the lockfile staleness gate is already
-        // upstream at register (PR2's compile + byte-compare).
-        const packageSpecs = cached.lockfileContents
-          ? parseLockfilePackageSpecs(cached.lockfileContents)
-          : [];
+        // Hashes are discarded — Pyodide / micropip don't have a
+        // `--require-hashes` equivalent; staleness gate is upstream
+        // at register (PR #322's compile + byte-compare).
+        const packageSpecs = cached.lockfile?.specs ?? [];
         return runOnWorker({
           taskId,
           skillName: skill.name,
@@ -1326,19 +1341,17 @@ export class SkillRunnerImpl implements SkillRunner {
         // This is rare: most skills don't override and ride the warm path.
         const overrides = mapManifestResourceLimits(cached.manifest.resources);
         const isolation = cached.manifest.isolation;
-        // Invariant: lockfile_hash != null ⇒ cached.lockfileContents
-        // must be present. Loud throw if not — silently dropping deps
-        // would run a dep-locked skill without its venv.
+        // Invariant: skill.lockfileHash != null ⇒ cached.lockfile set.
         let deps: { lockfileHash: string; lockfileContents: string } | undefined;
         if (skill.lockfileHash !== null) {
-          if (cached.lockfileContents === undefined) {
+          if (cached.lockfile === undefined) {
             throw new Error(
-              `invariant: skill '${skill.name}' has lockfile_hash but cache missing lockfileContents`,
+              `invariant: skill '${skill.name}' has lockfile_hash but cache missing lockfile`,
             );
           }
           deps = {
-            lockfileHash: skill.lockfileHash,
-            lockfileContents: cached.lockfileContents,
+            lockfileHash: cached.lockfile.hash,
+            lockfileContents: cached.lockfile.contents,
           };
         }
         if (overrides.cpus !== undefined || overrides.memory_bytes !== undefined) {
@@ -1619,7 +1632,7 @@ export class SkillRunnerImpl implements SkillRunner {
           `lockfile for skill '${row.name}' at ${row.gitSha} is ${snapshot.error.kind} — repo and DB are out of sync (skills.lockfile_hash=${row.lockfileHash})`,
         );
       }
-      entry.lockfileContents = snapshot.value.contents;
+      entry.lockfile = buildLockfileCacheValue(snapshot.value);
     }
     this.#sourceCache.set(key, entry);
     return entry;
@@ -1681,7 +1694,7 @@ export class SkillRunnerImpl implements SkillRunner {
         manifest,
         body,
         inputsValidator,
-        ...(lockfile && { lockfileContents: lockfile.contents }),
+        ...(lockfile && { lockfile: buildLockfileCacheValue(lockfile) }),
       });
       return {
         name,
@@ -1696,7 +1709,7 @@ export class SkillRunnerImpl implements SkillRunner {
       manifest,
       body,
       inputsValidator,
-      ...(lockfile && { lockfileContents: lockfile.contents }),
+      ...(lockfile && { lockfile: buildLockfileCacheValue(lockfile) }),
     });
     return {
       name,
