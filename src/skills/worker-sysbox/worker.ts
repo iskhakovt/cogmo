@@ -80,9 +80,10 @@ export interface InvokeParams {
   /**
    * Per-skill dependency artefacts. Both fields must be set together —
    * the worker calls `ensureVenvPopulated` before invoking and threads
-   * the resulting venv path into `task_invoke.skillVenv`. Absent (or
-   * `null` lockfile hash) means the skill declared no dependencies and
-   * runs against stdlib only.
+   * the lockfile hash into `task_invoke.lockfileHash` so the
+   * supervisor can construct the ABI-qualified venv path on its side.
+   * Absent (or `null` lockfile hash) means the skill declared no
+   * dependencies and runs against stdlib only.
    */
   deps?: {
     /** sha256 of `requirements.lock` at the skill's `git_sha`. */
@@ -274,7 +275,7 @@ export class SysboxSkillWorker {
     // Failure poisons the worker because uv pip sync writes into the
     // container's overlay FS; a partial populate could leave the venv
     // in an unreusable state for any future task with the same hash.
-    let skillVenv: string | undefined;
+    let lockfileHash: string | undefined;
     if (params.deps) {
       const populate = await ensureVenvPopulated({
         session: this.#session,
@@ -292,7 +293,7 @@ export class SysboxSkillWorker {
           workerReusable: false,
         };
       }
-      skillVenv = populate.value;
+      lockfileHash = params.deps.lockfileHash;
     }
 
     const invoke: TaskInvoke = {
@@ -302,7 +303,7 @@ export class SysboxSkillWorker {
       inputs: params.inputs,
       body: params.body,
       ...(params.isolation !== undefined && { isolation: params.isolation }),
-      ...(skillVenv !== undefined && { skillVenv }),
+      ...(lockfileHash !== undefined && { lockfileHash }),
       wallClockS,
     };
 

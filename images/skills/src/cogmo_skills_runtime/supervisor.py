@@ -33,6 +33,7 @@ import asyncio
 import errno
 import json
 import os
+import re
 import selectors
 import signal
 import sys
@@ -102,8 +103,43 @@ def _kill_and_reap(pid: int) -> None:
         pass
 
 
-def _activate_skill_venv(venv_path: str) -> None:
-    """Activate a per-skill venv in the current process.
+# In-container root for the deps-cache volume mount. Mirrors
+# `DEPS_CACHE_VOLUME_TARGET` on the TS side (`src/sandbox/index.ts`);
+# the populator and supervisor must agree on this path. Module-level
+# so tests can `monkeypatch.setattr(supervisor, "SKILL_VENVS_ROOT", ...)`
+# to redirect venv resolution into a fixture dir.
+SKILL_VENVS_ROOT = "/skill-venvs"
+
+# Defense-in-depth: refuse non-sha256-hex values so a malformed
+# lockfile_hash on the wire (e.g. `..` or an absolute path) can't
+# escape `SKILL_VENVS_ROOT` via `os.path.join`. The TS-side protocol
+# schema already validates the shape host-side; this is the supervisor's
+# independent guard.
+_LOCKFILE_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _skill_venv_path(lockfile_hash: str) -> str:
+    """Compute the venv path for a given lockfile hash on this image.
+
+    The path includes the runtime's Python ABI so an image bump that
+    changes Python minor (or major) routes to a fresh venv. The
+    populate script computes the same suffix from its own
+    `sys.version_info`; same image -> same Python -> same path.
+
+    Raises RuntimeError if `lockfile_hash` isn't a sha256-hex string;
+    `os.path.join` doesn't normalise `..` and would otherwise compose
+    a path outside `SKILL_VENVS_ROOT` for hostile input.
+    """
+    if not _LOCKFILE_HASH_RE.match(lockfile_hash):
+        raise RuntimeError(
+            f"skill_venv: lockfile_hash must be sha256 hex (got {lockfile_hash!r})"
+        )
+    py_abi = f"py{sys.version_info.major}.{sys.version_info.minor}"
+    return os.path.join(SKILL_VENVS_ROOT, f"{lockfile_hash}-{py_abi}")
+
+
+def _activate_skill_venv(lockfile_hash: str) -> None:
+    """Activate the skill venv for `lockfile_hash` in the current process.
 
     Must run in the forked child *before* any skill code imports. We
     prepend the venv's `site-packages` to `sys.path`, set
@@ -117,6 +153,7 @@ def _activate_skill_venv(venv_path: str) -> None:
     runner's try/except catches it and surfaces a task_result so the
     host doesn't hang.
     """
+    venv_path = _skill_venv_path(lockfile_hash)
     site_packages = os.path.join(
         venv_path,
         "lib",
@@ -141,10 +178,10 @@ def _run_one_task_in_child(task: Mapping[str, object]) -> None:
     body = str(task.get("body", ""))
     inputs = task.get("inputs")
     task_id = str(task["id"])
-    skill_venv = task.get("skillVenv")
+    lockfile_hash = task.get("lockfileHash")
     try:
-        if isinstance(skill_venv, str) and skill_venv:
-            _activate_skill_venv(skill_venv)
+        if isinstance(lockfile_hash, str) and lockfile_hash:
+            _activate_skill_venv(lockfile_hash)
         asyncio.run(_run_main(body, inputs, task_id))
     except BaseException as e:
         # The runner's own try/except covers normal Python exceptions;

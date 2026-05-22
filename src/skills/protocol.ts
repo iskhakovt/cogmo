@@ -33,11 +33,20 @@ export const TaskInvokeSchema = z.object({
   /** Wall-clock cap in seconds for the supervisor's per-task pebble timeout. */
   wallClockS: z.number().positive().optional(),
   /**
-   * Absolute path inside the container to a per-skill virtualenv. When
-   * present, the tier-2 supervisor activates it before forking the task
-   * child — sets `VIRTUAL_ENV`, prepends `<venv>/bin` to PATH, prepends
-   * `<venv>/lib/pythonX.Y/site-packages` to `sys.path`. The supervisor's
-   * own runtime venv (where `cogmo_skills_runtime` lives) stays unchanged.
+   * sha256 of `requirements.lock`. When present, the tier-2 supervisor
+   * activates `/skill-venvs/<lockfileHash>-py<major>.<minor>/` before
+   * forking the task child — sets `VIRTUAL_ENV`, prepends `<venv>/bin`
+   * to PATH, prepends `<venv>/lib/pythonX.Y/site-packages` to `sys.path`.
+   * The supervisor's own runtime venv (where `cogmo_skills_runtime` lives)
+   * stays unchanged.
+   *
+   * The supervisor constructs the path from the hash + its own
+   * `sys.version_info` so an image upgrade that changes Python minor
+   * (e.g. `python:3.14-slim` -> `python:3.15-slim`) automatically
+   * routes to a fresh `<hash>-py3.15/` venv; the stale `<hash>-py3.14/`
+   * dir is reaped by the per-hash sweep on its next cron tick. Host
+   * doesn't need to know the image's Python ABI -- the supervisor +
+   * populate script (same image, same runtime) agree by construction.
    *
    * Populated by the host via `ensureVenvPopulated` (see deps.ts) when the
    * skill declares dependencies. Absent for skills with empty
@@ -46,7 +55,13 @@ export const TaskInvokeSchema = z.object({
    * Tier 1 (Pyodide) ignores this field — Pyodide manages its own
    * import path via `micropip`.
    */
-  skillVenv: z.string().regex(/^\//, "must be an absolute path").optional(),
+  // Zod surfaces the failing value via `error.issues[i].input` on
+  // parse failure — the message stays terse; debug consumers reach
+  // for the value through the issue envelope.
+  lockfileHash: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/, "lockfileHash must be sha256 hex")
+    .optional(),
 });
 export type TaskInvoke = z.infer<typeof TaskInvokeSchema>;
 

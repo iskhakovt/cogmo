@@ -6,12 +6,7 @@ import { PassThrough, type Readable, type Writable } from "node:stream";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { type MockProxy, mock } from "vitest-mock-extended";
-import {
-  DEPS_CACHE_VOLUME_TARGET,
-  type ExecStreamingHandle,
-  type SandboxClient,
-  type SandboxSession,
-} from "../sandbox/index.js";
+import type { ExecStreamingHandle, SandboxClient, SandboxSession } from "../sandbox/index.js";
 import {
   ensureVenvPopulated,
   makeSandboxLockfileCompiler,
@@ -434,7 +429,7 @@ pydantic==2.5.3 \\
 });
 
 describe("ensureVenvPopulated", () => {
-  it("returns the venv path when uv pip sync exits 0", async () => {
+  it("succeeds when uv pip sync exits 0 (path computed by supervisor; host returns void)", async () => {
     const exec = makeFakeExec();
     const session = mock<SandboxSession>();
     session.execStreaming.mockResolvedValue(exec.handle);
@@ -451,8 +446,6 @@ describe("ensureVenvPopulated", () => {
     const result = await promise;
 
     expect(result.isOk()).toBe(true);
-    if (!result.isOk()) return;
-    expect(result.value).toBe(`${DEPS_CACHE_VOLUME_TARGET}/abc123`);
 
     // Lockfile body was written to stdin.
     expect(exec.stdinSink.read()?.toString("utf-8")).toBe("httpx==0.27.0 --hash=sha256:0\n");
