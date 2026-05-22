@@ -102,6 +102,18 @@ describe("TaskInvokeSchema", () => {
       }),
     ).toThrow();
   });
+
+  it("rejects a relative skillVenv path", () => {
+    expect(() =>
+      TaskInvokeSchema.parse({
+        type: "task_invoke",
+        id: "t",
+        skill: "s",
+        inputs: {},
+        skillVenv: "skill-venvs/abc",
+      }),
+    ).toThrow(/absolute path/);
+  });
 });
 
 describe("TaskResultSchema (discriminated)", () => {

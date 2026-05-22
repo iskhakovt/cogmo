@@ -46,7 +46,7 @@ export const TaskInvokeSchema = z.object({
    * Tier 1 (Pyodide) ignores this field — Pyodide manages its own
    * import path via `micropip`.
    */
-  skillVenv: z.string().min(1).optional(),
+  skillVenv: z.string().regex(/^\//, "must be an absolute path").optional(),
 });
 export type TaskInvoke = z.infer<typeof TaskInvokeSchema>;
 
