@@ -711,34 +711,6 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
    * sandbox back, intent is unclear), the ticker fires unconditionally
    * and only stops on `delete` / `shutdown`.
    */
-  /**
-   * Get-or-create the deps-cache volume by name, returning its id.
-   * `daytona.volume.get(name, true)` is the SDK's idempotent
-   * get-or-create — exists → return; missing → create-then-return.
-   * Cached by name in `#volumeIdByName`; concurrent first-callers
-   * dedupe on the in-flight promise stored in `#volumeResolves`. A
-   * failed resolve clears the in-flight slot so the next caller
-   * retries — a transient Daytona blip during the first session
-   * shouldn't poison every subsequent session.
-   */
-  async #resolveVolumeId(name: string): Promise<string> {
-    const cached = this.#volumeIdByName.get(name);
-    if (cached !== undefined) return cached;
-    const inFlight = this.#volumeResolves.get(name);
-    if (inFlight) return inFlight;
-    const promise = (async () => {
-      try {
-        const volume = await this.#daytona.volume.get(name, true);
-        this.#volumeIdByName.set(name, volume.id);
-        return volume.id;
-      } finally {
-        this.#volumeResolves.delete(name);
-      }
-    })();
-    this.#volumeResolves.set(name, promise);
-    return promise;
-  }
-
   #startKeepalive(sdkSandbox: DaytonaSdkSandbox, expiresAt?: Date): void {
     if (this.#keepalives.has(sdkSandbox.id)) return;
     const expiresAtMs = expiresAt?.getTime();
@@ -760,6 +732,26 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
     // exit cleanly when the keepalive is the only remaining handle.
     handle.unref();
     this.#keepalives.set(sandboxId, handle);
+  }
+
+  /** Get-or-create the deps-cache volume by name. Caches the id. */
+  async #resolveVolumeId(name: string): Promise<string> {
+    const cached = this.#volumeIdByName.get(name);
+    if (cached !== undefined) return cached;
+    const inFlight = this.#volumeResolves.get(name);
+    if (inFlight) return inFlight;
+    const promise = (async () => {
+      try {
+        const volume = await this.#daytona.volume.get(name, true);
+        this.#volumeIdByName.set(name, volume.id);
+        return volume.id;
+      } finally {
+        // Clear the in-flight slot so a failed resolve retries.
+        this.#volumeResolves.delete(name);
+      }
+    })();
+    this.#volumeResolves.set(name, promise);
+    return promise;
   }
 
   #stopKeepalive(sandboxId: string): void {
