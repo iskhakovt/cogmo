@@ -1,0 +1,604 @@
+{
+  "scenario": "wrapper-volume-mount",
+  "recordedAt": "2026-05-22T16:59:53.549Z",
+  "calls": [
+    {
+      "kind": "http",
+      "method": "GET",
+      "path": "/snapshots/cogmo-python-3.14-slim-79eab4bf",
+      "request": {
+        "headers": {
+          "accept": "application/json",
+          "user-agent": "sdk-typescript-legacy/0.175.0",
+          "x-daytona-source": "sdk-typescript-legacy",
+          "x-daytona-sdk-version": "0.175.0"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "access-control-allow-credentials": "true",
+          "connection": "keep-alive",
+          "content-length": "654",
+          "content-security-policy": "frame-ancestors 'none'",
+          "content-type": "application/json; charset=utf-8",
+          "date": "Fri, 22 May 2026 16:59:41 GMT",
+          "etag": "W/\"28e-kl/oti0L53p3uk5H0rmsHZcAScM\"",
+          "referrer-policy": "strict-origin-when-cross-origin",
+          "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+          "vary": "Origin",
+          "via": "1.1 32454b720dce934befa2d50bacc6d890.cloudfront.net (CloudFront)",
+          "x-amz-cf-id": "9yvtcye21Ai2Kh770g5RguW26jZ1eX-YbX6FAPlZSoDCu8XxKpZgLw==",
+          "x-amz-cf-pop": "LHR50-P5",
+          "x-cache": "Miss from cloudfront",
+          "x-content-type-options": "nosniff",
+          "x-daytona-api-version": "v0.179.0",
+          "x-frame-options": "DENY",
+          "x-powered-by": "Express",
+          "x-ratelimit-limit-authenticated": "50000",
+          "x-ratelimit-remaining-authenticated": "49997",
+          "x-ratelimit-reset-authenticated": "13"
+        },
+        "bodyJson": {
+          "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
+          "general": false,
+          "name": "cogmo-python-3.14-slim-79eab4bf",
+          "imageName": "python:3.14-slim",
+          "state": "active",
+          "size": 0.04042619187384844,
+          "entrypoint": null,
+          "cpu": 1,
+          "gpu": 0,
+          "mem": 1,
+          "disk": 1,
+          "errorReason": null,
+          "createdAt": "2026-05-19T15:28:20.196Z",
+          "updatedAt": "2026-05-22T16:58:48.192Z",
+          "lastUsedAt": "2026-05-22T16:58:48.183Z",
+          "skipValidation": false,
+          "regionIds": [
+            "eu"
+          ],
+          "initialRunnerId": "2bd30165-78ca-47b0-87b7-4bd961313726",
+          "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
+          "androidDevice": false
+        }
+      }
+    },
+    {
+      "kind": "http",
+      "method": "GET",
+      "path": "/volumes/by-name/cogmo-conformance-deps-cache",
+      "request": {
+        "headers": {
+          "accept": "application/json",
+          "user-agent": "sdk-typescript-legacy/0.175.0",
+          "x-daytona-source": "sdk-typescript-legacy",
+          "x-daytona-sdk-version": "0.175.0"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "access-control-allow-credentials": "true",
+          "connection": "keep-alive",
+          "content-length": "292",
+          "content-security-policy": "frame-ancestors 'none'",
+          "content-type": "application/json; charset=utf-8",
+          "date": "Fri, 22 May 2026 16:59:41 GMT",
+          "etag": "W/\"124-gkiVhK3q/N9hBAXhz2y3Lgub3zw\"",
+          "referrer-policy": "strict-origin-when-cross-origin",
+          "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+          "vary": "Origin",
+          "via": "1.1 32454b720dce934befa2d50bacc6d890.cloudfront.net (CloudFront)",
+          "x-amz-cf-id": "fXT6FKmQ05oCJrMQT5--d-XJoFYitIzcO2gXdWykgmMh96BaTH81Wg==",
+          "x-amz-cf-pop": "LHR50-P5",
+          "x-cache": "Miss from cloudfront",
+          "x-content-type-options": "nosniff",
+          "x-daytona-api-version": "v0.179.0",
+          "x-frame-options": "DENY",
+          "x-powered-by": "Express",
+          "x-ratelimit-limit-authenticated": "50000",
+          "x-ratelimit-remaining-authenticated": "49996",
+          "x-ratelimit-reset-authenticated": "13"
+        },
+        "bodyJson": {
+          "id": "5c5c00ed-fe24-4596-a988-9cf1b5da02d2",
+          "name": "cogmo-conformance-deps-cache",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
+          "state": "ready",
+          "createdAt": "2026-05-22T16:57:52.529Z",
+          "updatedAt": "2026-05-22T16:58:48.191Z",
+          "lastUsedAt": "2026-05-22T16:58:48.183Z",
+          "errorReason": null
+        }
+      }
+    },
+    {
+      "kind": "http",
+      "method": "POST",
+      "path": "/sandbox",
+      "request": {
+        "headers": {
+          "accept": "application/json",
+          "content-type": "application/json",
+          "user-agent": "sdk-typescript-legacy/0.175.0",
+          "x-daytona-source": "sdk-typescript-legacy",
+          "x-daytona-sdk-version": "0.175.0"
+        },
+        "bodyJson": {
+          "snapshot": "cogmo-python-3.14-slim-79eab4bf",
+          "env": {},
+          "labels": {
+            "cogmo.task": "wrapper-conf",
+            "cogmo.role": "root",
+            "cogmo.instance": "conformance",
+            "code-toolbox-language": "python"
+          },
+          "autoStopInterval": 5,
+          "volumes": [
+            {
+              "volumeId": "5c5c00ed-fe24-4596-a988-9cf1b5da02d2",
+              "mountPath": "/skill-venvs"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "access-control-allow-credentials": "true",
+          "connection": "keep-alive",
+          "content-length": "951",
+          "content-security-policy": "frame-ancestors 'none'",
+          "content-type": "application/json; charset=utf-8",
+          "date": "Fri, 22 May 2026 16:59:49 GMT",
+          "etag": "W/\"3c0-8gypI0n29L+beVfx5vNVP8eKifQ\"",
+          "referrer-policy": "strict-origin-when-cross-origin",
+          "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+          "vary": "Origin",
+          "via": "1.1 32454b720dce934befa2d50bacc6d890.cloudfront.net (CloudFront)",
+          "x-amz-cf-id": "V8oz0mzx8uglr0N-BCiysFOuUWr2mEcMx2aSJXQ-Ht-V1GiEGLsSag==",
+          "x-amz-cf-pop": "LHR50-P5",
+          "x-cache": "Miss from cloudfront",
+          "x-content-type-options": "nosniff",
+          "x-daytona-api-version": "v0.179.0",
+          "x-frame-options": "DENY",
+          "x-powered-by": "Express",
+          "x-ratelimit-limit-sandbox-create": "600",
+          "x-ratelimit-remaining-sandbox-create": "599",
+          "x-ratelimit-reset-sandbox-create": "60"
+        },
+        "bodyJson": {
+          "id": "fe803160-f1b8-4362-8483-9a660427f63c",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
+          "name": "fe803160-f1b8-4362-8483-9a660427f63c",
+          "target": "eu",
+          "snapshot": "cogmo-python-3.14-slim-79eab4bf",
+          "user": "daytona",
+          "env": {},
+          "cpu": 1,
+          "gpu": 0,
+          "memory": 1,
+          "disk": 1,
+          "public": false,
+          "networkBlockAll": false,
+          "labels": {
+            "cogmo.task": "wrapper-conf",
+            "cogmo.role": "root",
+            "cogmo.instance": "conformance",
+            "code-toolbox-language": "python"
+          },
+          "volumes": [
+            {
+              "volumeId": "5c5c00ed-fe24-4596-a988-9cf1b5da02d2",
+              "mountPath": "/skill-venvs"
+            }
+          ],
+          "state": "creating",
+          "desiredState": "started",
+          "recoverable": false,
+          "backupState": "None",
+          "autoStopInterval": 5,
+          "autoArchiveInterval": 10080,
+          "autoDeleteInterval": -1,
+          "sandboxClass": "container",
+          "androidDevice": false,
+          "createdAt": "2026-05-22T16:59:41.513Z",
+          "updatedAt": "2026-05-22T16:59:41.513Z",
+          "lastActivityAt": "2026-05-22T16:59:41.513Z",
+          "runnerId": "11111111-1111-1111-1111-111111111111",
+          "toolboxProxyUrl": "http://__daytona_mock__/toolbox"
+        }
+      }
+    },
+    {
+      "kind": "http",
+      "method": "GET",
+      "path": "/sandbox/fe803160-f1b8-4362-8483-9a660427f63c",
+      "request": {
+        "headers": {
+          "accept": "application/json",
+          "user-agent": "sdk-typescript-legacy/0.175.0",
+          "x-daytona-source": "sdk-typescript-legacy",
+          "x-daytona-sdk-version": "0.175.0"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "access-control-allow-credentials": "true",
+          "connection": "keep-alive",
+          "content-length": "1047",
+          "content-security-policy": "frame-ancestors 'none'",
+          "content-type": "application/json; charset=utf-8",
+          "date": "Fri, 22 May 2026 16:59:50 GMT",
+          "etag": "W/\"417-r1K27n/96t7GO5xwSEwFDPYx3eU\"",
+          "referrer-policy": "strict-origin-when-cross-origin",
+          "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+          "vary": "Origin",
+          "via": "1.1 32454b720dce934befa2d50bacc6d890.cloudfront.net (CloudFront)",
+          "x-amz-cf-id": "3TPX_tIg9BVJCfu4X1_xhQtCvs14LqimAP19kMuAy9Yjp-YeoLIAQg==",
+          "x-amz-cf-pop": "LHR50-P5",
+          "x-cache": "Miss from cloudfront",
+          "x-content-type-options": "nosniff",
+          "x-daytona-api-version": "v0.179.0",
+          "x-frame-options": "DENY",
+          "x-powered-by": "Express",
+          "x-ratelimit-limit-authenticated": "50000",
+          "x-ratelimit-remaining-authenticated": "49995",
+          "x-ratelimit-reset-authenticated": "5"
+        },
+        "bodyJson": {
+          "id": "fe803160-f1b8-4362-8483-9a660427f63c",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
+          "name": "fe803160-f1b8-4362-8483-9a660427f63c",
+          "target": "eu",
+          "snapshot": "cogmo-python-3.14-slim-79eab4bf",
+          "user": "daytona",
+          "env": {},
+          "cpu": 1,
+          "gpu": 0,
+          "memory": 1,
+          "disk": 1,
+          "public": false,
+          "networkBlockAll": false,
+          "networkAllowList": null,
+          "labels": {
+            "cogmo.role": "root",
+            "cogmo.task": "wrapper-conf",
+            "cogmo.instance": "conformance",
+            "code-toolbox-language": "python"
+          },
+          "volumes": [
+            {
+              "volumeId": "5c5c00ed-fe24-4596-a988-9cf1b5da02d2",
+              "mountPath": "/skill-venvs"
+            }
+          ],
+          "state": "started",
+          "desiredState": "started",
+          "errorReason": null,
+          "recoverable": false,
+          "backupState": "None",
+          "autoStopInterval": 5,
+          "autoArchiveInterval": 10080,
+          "autoDeleteInterval": -1,
+          "sandboxClass": "container",
+          "androidDevice": false,
+          "createdAt": "2026-05-22T16:59:41.513Z",
+          "updatedAt": "2026-05-22T16:59:49.917Z",
+          "lastActivityAt": "2026-05-22T16:59:49.919Z",
+          "daemonVersion": "v0.177.0-prod-reaper-patch",
+          "runnerId": "11111111-1111-1111-1111-111111111111",
+          "toolboxProxyUrl": "https://proxy.app-eu.daytona.io/toolbox"
+        }
+      }
+    },
+    {
+      "kind": "http",
+      "method": "POST",
+      "path": "/toolbox/fe803160-f1b8-4362-8483-9a660427f63c/process/session",
+      "request": {
+        "headers": {
+          "accept": "application/json, text/plain, */*",
+          "content-type": "application/json",
+          "user-agent": "sdk-typescript-legacy/0.175.0",
+          "x-daytona-source": "sdk-typescript-legacy",
+          "x-daytona-sdk-version": "0.175.0"
+        },
+        "bodyJson": {
+          "sessionId": "cogmo-wrapper-conf-wrapper-volume-mount-1"
+        }
+      },
+      "response": {
+        "status": 201,
+        "headers": {
+          "connection": "keep-alive",
+          "content-length": "0",
+          "date": "Fri, 22 May 2026 16:59:50 GMT",
+          "strict-transport-security": "max-age=31536000;includeSubDomains;preload",
+          "x-request-id": "4882be05-2fa8-4de0-b5e1-a55c12b7bb36"
+        }
+      }
+    },
+    {
+      "kind": "http",
+      "method": "POST",
+      "path": "/toolbox/fe803160-f1b8-4362-8483-9a660427f63c/process/session/cogmo-wrapper-conf-wrapper-volume-mount-1/exec",
+      "request": {
+        "headers": {
+          "accept": "application/json",
+          "content-type": "application/json",
+          "user-agent": "sdk-typescript-legacy/0.175.0",
+          "x-daytona-source": "sdk-typescript-legacy",
+          "x-daytona-sdk-version": "0.175.0"
+        },
+        "bodyJson": {
+          "command": "'sh' '-c' 'mkdir -p /skill-venvs && echo mounted > /skill-venvs/.cogmo-test && ls /skill-venvs/.cogmo-test'",
+          "runAsync": true
+        }
+      },
+      "response": {
+        "status": 202,
+        "headers": {
+          "connection": "keep-alive",
+          "content-length": "106",
+          "content-type": "application/json; charset=utf-8",
+          "date": "Fri, 22 May 2026 16:59:51 GMT",
+          "strict-transport-security": "max-age=31536000;includeSubDomains;preload",
+          "x-request-id": "94f2d7af-fef9-484e-97f7-7c24a66be14d"
+        },
+        "bodyJson": {
+          "cmdId": "44a23003-4ded-4c31-8caa-c1c64273f9d1",
+          "output": null,
+          "stdout": null,
+          "stderr": null,
+          "exitCode": null
+        }
+      }
+    },
+    {
+      "kind": "ws",
+      "path": "/toolbox/fe803160-f1b8-4362-8483-9a660427f63c/process/session/cogmo-wrapper-conf-wrapper-volume-mount-1/command/44a23003-4ded-4c31-8caa-c1c64273f9d1/logs?follow=true",
+      "frames": [
+        {
+          "direction": "down",
+          "text": "\u0001\u0001\u0001/skill-venvs/.cogmo-test\n"
+        },
+        {
+          "direction": "close",
+          "code": 1000,
+          "reason": ""
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "method": "GET",
+      "path": "/toolbox/fe803160-f1b8-4362-8483-9a660427f63c/process/session/cogmo-wrapper-conf-wrapper-volume-mount-1/command/44a23003-4ded-4c31-8caa-c1c64273f9d1",
+      "request": {
+        "headers": {
+          "accept": "application/json",
+          "user-agent": "sdk-typescript-legacy/0.175.0",
+          "x-daytona-source": "sdk-typescript-legacy",
+          "x-daytona-sdk-version": "0.175.0"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "connection": "keep-alive",
+          "content-length": "178",
+          "content-type": "application/json; charset=utf-8",
+          "date": "Fri, 22 May 2026 16:59:53 GMT",
+          "strict-transport-security": "max-age=31536000;includeSubDomains;preload",
+          "x-request-id": "26cc8ea7-c093-4f04-9463-223ce20ee13c"
+        },
+        "bodyJson": {
+          "id": "44a23003-4ded-4c31-8caa-c1c64273f9d1",
+          "command": "'sh' '-c' 'mkdir -p /skill-venvs && echo mounted > /skill-venvs/.cogmo-test && ls /skill-venvs/.cogmo-test'",
+          "exitCode": 0
+        }
+      }
+    },
+    {
+      "kind": "http",
+      "method": "DELETE",
+      "path": "/toolbox/fe803160-f1b8-4362-8483-9a660427f63c/process/session/cogmo-wrapper-conf-wrapper-volume-mount-1",
+      "request": {
+        "headers": {
+          "accept": "application/json, text/plain, */*",
+          "user-agent": "sdk-typescript-legacy/0.175.0",
+          "x-daytona-source": "sdk-typescript-legacy",
+          "x-daytona-sdk-version": "0.175.0"
+        }
+      },
+      "response": {
+        "status": 204,
+        "headers": {
+          "connection": "keep-alive",
+          "date": "Fri, 22 May 2026 16:59:53 GMT",
+          "strict-transport-security": "max-age=31536000;includeSubDomains;preload",
+          "x-request-id": "135cce7d-848c-40f7-a92e-9e67740fcd7a"
+        }
+      }
+    },
+    {
+      "kind": "http",
+      "method": "GET",
+      "path": "/sandbox/paginated?labels=%7B%22cogmo.task%22%3A%22wrapper-conf%22%7D",
+      "request": {
+        "headers": {
+          "accept": "application/json",
+          "user-agent": "sdk-typescript-legacy/0.175.0",
+          "x-daytona-source": "sdk-typescript-legacy",
+          "x-daytona-sdk-version": "0.175.0"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "access-control-allow-credentials": "true",
+          "connection": "keep-alive",
+          "content-length": "1093",
+          "content-security-policy": "frame-ancestors 'none'",
+          "content-type": "application/json; charset=utf-8",
+          "date": "Fri, 22 May 2026 16:59:53 GMT",
+          "etag": "W/\"445-1WLrUNpZTk6faLyGKTIGNgcsORU\"",
+          "referrer-policy": "strict-origin-when-cross-origin",
+          "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+          "vary": "Origin",
+          "via": "1.1 32454b720dce934befa2d50bacc6d890.cloudfront.net (CloudFront)",
+          "x-amz-cf-id": "7j5RW3jtvfFfMSSfOAcmpSpMQ1A9RaqnRykCdrU4bblsduQnkaSDfg==",
+          "x-amz-cf-pop": "LHR50-P5",
+          "x-cache": "Miss from cloudfront",
+          "x-content-type-options": "nosniff",
+          "x-daytona-api-version": "v0.179.0",
+          "x-frame-options": "DENY",
+          "x-powered-by": "Express",
+          "x-ratelimit-limit-authenticated": "50000",
+          "x-ratelimit-limit-sandbox-list": "500",
+          "x-ratelimit-remaining-authenticated": "49993",
+          "x-ratelimit-remaining-sandbox-list": "499",
+          "x-ratelimit-reset-authenticated": "1",
+          "x-ratelimit-reset-sandbox-list": "30"
+        },
+        "bodyJson": {
+          "items": [
+            {
+              "id": "fe803160-f1b8-4362-8483-9a660427f63c",
+              "organizationId": "00000000-0000-0000-0000-000000000000",
+              "name": "fe803160-f1b8-4362-8483-9a660427f63c",
+              "target": "eu",
+              "snapshot": "cogmo-python-3.14-slim-79eab4bf",
+              "user": "daytona",
+              "env": {},
+              "cpu": 1,
+              "gpu": 0,
+              "memory": 1,
+              "disk": 1,
+              "public": false,
+              "networkBlockAll": false,
+              "networkAllowList": null,
+              "labels": {
+                "cogmo.role": "root",
+                "cogmo.task": "wrapper-conf",
+                "cogmo.instance": "conformance",
+                "code-toolbox-language": "python"
+              },
+              "volumes": [
+                {
+                  "volumeId": "5c5c00ed-fe24-4596-a988-9cf1b5da02d2",
+                  "mountPath": "/skill-venvs"
+                }
+              ],
+              "state": "started",
+              "desiredState": "started",
+              "errorReason": null,
+              "recoverable": false,
+              "backupState": "None",
+              "autoStopInterval": 5,
+              "autoArchiveInterval": 10080,
+              "autoDeleteInterval": -1,
+              "sandboxClass": "container",
+              "androidDevice": false,
+              "createdAt": "2026-05-22T16:59:41.513Z",
+              "updatedAt": "2026-05-22T16:59:49.917Z",
+              "lastActivityAt": "2026-05-22T16:59:49.919Z",
+              "daemonVersion": "v0.177.0-prod-reaper-patch",
+              "runnerId": "11111111-1111-1111-1111-111111111111",
+              "toolboxProxyUrl": "https://proxy.app-eu.daytona.io/toolbox"
+            }
+          ],
+          "total": 1,
+          "page": 1,
+          "totalPages": 1
+        }
+      }
+    },
+    {
+      "kind": "http",
+      "method": "DELETE",
+      "path": "/sandbox/fe803160-f1b8-4362-8483-9a660427f63c",
+      "request": {
+        "headers": {
+          "accept": "application/json",
+          "user-agent": "sdk-typescript-legacy/0.175.0",
+          "x-daytona-source": "sdk-typescript-legacy",
+          "x-daytona-sdk-version": "0.175.0"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "access-control-allow-credentials": "true",
+          "connection": "keep-alive",
+          "content-length": "1032",
+          "content-security-policy": "frame-ancestors 'none'",
+          "content-type": "application/json; charset=utf-8",
+          "date": "Fri, 22 May 2026 16:59:53 GMT",
+          "etag": "W/\"408-HVyOBpJAnjiyrUNrDVTKPk6u/Vs\"",
+          "referrer-policy": "strict-origin-when-cross-origin",
+          "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+          "vary": "Origin",
+          "via": "1.1 32454b720dce934befa2d50bacc6d890.cloudfront.net (CloudFront)",
+          "x-amz-cf-id": "1Bb0qUpDaukxc_QnyJDUqC0aZO-yx3XwsIBEaTfp1GFV39zrZkpWTQ==",
+          "x-amz-cf-pop": "LHR50-P5",
+          "x-cache": "Miss from cloudfront",
+          "x-content-type-options": "nosniff",
+          "x-daytona-api-version": "v0.179.0",
+          "x-frame-options": "DENY",
+          "x-powered-by": "Express",
+          "x-ratelimit-limit-sandbox-lifecycle": "50000",
+          "x-ratelimit-remaining-sandbox-lifecycle": "49998",
+          "x-ratelimit-reset-sandbox-lifecycle": "1"
+        },
+        "bodyJson": {
+          "id": "fe803160-f1b8-4362-8483-9a660427f63c",
+          "organizationId": "00000000-0000-0000-0000-000000000000",
+          "name": "DESTROYED_fe803160-f1b8-4362-8483-9a660427f63c_1779469193491",
+          "target": "eu",
+          "snapshot": "cogmo-python-3.14-slim-79eab4bf",
+          "user": "daytona",
+          "env": {},
+          "cpu": 1,
+          "gpu": 0,
+          "memory": 1,
+          "disk": 1,
+          "public": false,
+          "networkBlockAll": false,
+          "networkAllowList": null,
+          "labels": {
+            "cogmo.role": "root",
+            "cogmo.task": "wrapper-conf",
+            "cogmo.instance": "conformance",
+            "code-toolbox-language": "python"
+          },
+          "volumes": [
+            {
+              "volumeId": "5c5c00ed-fe24-4596-a988-9cf1b5da02d2",
+              "mountPath": "/skill-venvs"
+            }
+          ],
+          "state": "destroying",
+          "desiredState": "destroyed",
+          "errorReason": null,
+          "recoverable": false,
+          "backupState": "None",
+          "autoStopInterval": 5,
+          "autoArchiveInterval": 10080,
+          "autoDeleteInterval": -1,
+          "sandboxClass": "container",
+          "androidDevice": false,
+          "createdAt": "2026-05-22T16:59:41.513Z",
+          "updatedAt": "2026-05-22T16:59:53.493Z",
+          "daemonVersion": "v0.177.0-prod-reaper-patch",
+          "runnerId": "11111111-1111-1111-1111-111111111111",
+          "toolboxProxyUrl": "https://proxy.app-eu.daytona.io/toolbox"
+        }
+      }
+    }
+  ]
+}
