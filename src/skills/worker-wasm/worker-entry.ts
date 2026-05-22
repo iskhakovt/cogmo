@@ -8,6 +8,12 @@ interface WorkerInit {
   port: MessagePort;
   body: string;
   packageCacheDir?: string;
+  /**
+   * Direct `pkg==version` specs to `micropip.install` before signalling
+   * ready. Sourced from the skill's `requirements.lock` parsed
+   * host-side; absent/empty means stdlib + Pyodide built-ins only.
+   */
+  packageSpecs?: string[];
   interruptBuffer?: SharedArrayBuffer;
 }
 
@@ -155,6 +161,42 @@ port.on("message", (raw: unknown) => {
   if (init.interruptBuffer) {
     pyodide.setInterruptBuffer(new Uint8Array(init.interruptBuffer));
   }
+
+  // No `--require-hashes` equivalent in micropip; WASM-tier trusts
+  // PyPI wire integrity. See `design/skills.md` → Security posture.
+  // Pyodide-incompatible deps surface as a `fatal` init error here
+  // because register-time pre-check against `pyodide-lock.json` is
+  // deferred (todo.md). Post-install version verification catches
+  // silent resolver skips and any bundled-vs-pin drift.
+  if (init.packageSpecs && init.packageSpecs.length > 0) {
+    await pyodide.loadPackage("micropip");
+    pyodide.globals.set("__cogmo_skill_deps", init.packageSpecs);
+    await pyodide.runPythonAsync(`
+import micropip
+import importlib.metadata as _md
+
+async def _install_and_verify(specs):
+    await micropip.install(specs, keep_going=False)
+    mismatches = []
+    for spec in specs:
+        name, _, version = spec.partition("==")
+        if not version:
+            continue
+        try:
+            installed = _md.version(name)
+        except _md.PackageNotFoundError:
+            mismatches.append(f"{name}: not installed")
+            continue
+        if installed != version:
+            mismatches.append(f"{name}: requested {version}, installed {installed}")
+    if mismatches:
+        raise RuntimeError("dep version verification failed: " + "; ".join(mismatches))
+
+await _install_and_verify(list(__cogmo_skill_deps))
+del __cogmo_skill_deps
+`);
+  }
+
   // Tell the host the worker is ready to receive task_invoke.
   port.postMessage({ type: "ready" });
 })().catch((e) => {

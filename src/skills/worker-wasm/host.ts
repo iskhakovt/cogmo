@@ -11,6 +11,9 @@ const DEFAULT_WALL_CLOCK_S = 30;
 /** Grace window after firing the SAB interrupt before hard-terminating the worker. */
 const TERMINATE_GRACE_MS = 1000;
 
+/** Pyodide cold start (~5s) + micropip resolve from PyPI for a moderately-deps'd skill. */
+const DEFAULT_READY_TIMEOUT_MS = 60_000;
+
 export interface RunOnWorkerParams {
   taskId: string;
   /** Skill name — informational only; surfaced in logs. */
@@ -20,8 +23,28 @@ export interface RunOnWorkerParams {
   inputs: unknown;
   /** Wall-clock cap in seconds. Defaults to 30 s. */
   wallClockS?: number;
-  /** Pyodide package cache directory for warm starts. */
+  /** Worker init cap (Pyodide load + micropip install). Defaults to 60s. */
+  readyTimeoutMs?: number;
+  /**
+   * Pyodide package cache for the runtime's built-in package downloads.
+   * Does NOT cover micropip-fetched wheels — those re-download from
+   * PyPI on every worker init today. Tracked in todo.md.
+   */
   packageCacheDir?: string;
+  /**
+   * Direct `pkg==version` specs the worker should `micropip.install`
+   * before signalling `ready`. Sourced from the skill's
+   * `requirements.lock` via `parseLockfilePackageSpecs` — already
+   * narrowed to direct deps, hash-pinned via the lockfile contract.
+   * Absent / empty array → stdlib + Pyodide built-ins only.
+   *
+   * Install runs via Pyodide's `micropip` (Node fetch under the hood),
+   * with results cached in `packageCacheDir` when configured.
+   * Pyodide-incompatible wheels surface as a `fatal` worker init
+   * error — the runner re-raises as the task's `error` and the
+   * worker exits.
+   */
+  packageSpecs?: readonly string[];
   ctxHandler: CtxHandler;
 }
 
@@ -50,6 +73,7 @@ export interface RunOnWorkerResult {
  */
 export async function runOnWorker(params: RunOnWorkerParams): Promise<RunOnWorkerResult> {
   const wallClockS = params.wallClockS ?? DEFAULT_WALL_CLOCK_S;
+  const readyTimeoutMs = params.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
   const interruptBuffer = new SharedArrayBuffer(1);
 
   const channel = new MessageChannel();
@@ -61,6 +85,10 @@ export async function runOnWorker(params: RunOnWorkerParams): Promise<RunOnWorke
       port: workerPort,
       body: params.body,
       ...(params.packageCacheDir && { packageCacheDir: params.packageCacheDir }),
+      ...(params.packageSpecs &&
+        params.packageSpecs.length > 0 && {
+          packageSpecs: [...params.packageSpecs],
+        }),
       interruptBuffer,
     },
     transferList: [workerPort],
@@ -74,10 +102,15 @@ export async function runOnWorker(params: RunOnWorkerParams): Promise<RunOnWorke
   });
 
   // Wait for the worker's `ready` message before sending task_invoke.
-  // Also reject on `worker.error` / `worker.exit` so a synchronous Pyodide
-  // load failure (missing WASM, libc mismatch, etc) surfaces immediately
-  // instead of waiting for the wall-clock timeout.
+  // Reject on `worker.error` / `worker.exit` so a synchronous Pyodide
+  // load failure surfaces immediately. Reject on `readyTimeoutMs` so a
+  // hung micropip install (slow PyPI, resolver dead-end) doesn't wedge
+  // the worker indefinitely — the task watchdog only starts after ready.
   const ready = new Promise<void>((resolve, reject) => {
+    const readyTimer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`worker_init_timeout after ${readyTimeoutMs}ms`));
+    }, readyTimeoutMs);
     const onMessage = (raw: unknown): void => {
       const msg = raw as { type?: string; error?: string };
       if (msg?.type === "ready") {
@@ -97,6 +130,7 @@ export async function runOnWorker(params: RunOnWorkerParams): Promise<RunOnWorke
       reject(new Error(`worker exited before ready (code ${code})`));
     };
     function cleanup(): void {
+      clearTimeout(readyTimer);
       hostPort.off("message", onMessage);
       worker.off("error", onError);
       worker.off("exit", onExit);
