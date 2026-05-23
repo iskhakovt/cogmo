@@ -59,10 +59,10 @@ beforeEach(async () => {
   });
   // Provision a synthetic askpass dir like `provisionAskpass` would on
   // the host. Helper script body embeds the canonical container path
-  // `/.cogmo-askpass/pat` so the fake's rewrite-on-mirror logic gets
+  // `/tmp/cogmo-askpass/pat` so the fake's rewrite-on-mirror logic gets
   // exercised.
   askpassDir = mkdtempSync(join(tmpdir(), "cogmo-fake-askpass-"));
-  writeFileSync(join(askpassDir, "helper"), "#!/bin/sh\nexec /bin/cat '/.cogmo-askpass/pat'\n", {
+  writeFileSync(join(askpassDir, "helper"), "#!/bin/sh\nexec /bin/cat '/tmp/cogmo-askpass/pat'\n", {
     mode: 0o755,
   });
   writeFileSync(join(askpassDir, "pat"), "ghp_fake_pat_value", { mode: 0o600 });
@@ -190,13 +190,13 @@ describe("FakeDaytonaSandboxClient.create — askpass mirror", () => {
   it("mirrors the askpass dir into the sandbox root", async () => {
     const session = await client.create(
       makeSpec({
-        askpass: { hostDir: askpassDir, containerDir: "/.cogmo-askpass" },
+        askpass: { hostDir: askpassDir, containerDir: "/tmp/cogmo-askpass" },
       }),
     );
 
     // Inspect the host filesystem directly — using `exec` would route
     // the cmd args through the path-rewriter, which (correctly) treats
-    // any `/.cogmo-askpass` substring as a fixup target.
+    // any `/tmp/cogmo-askpass` substring as a fixup target.
     const sandboxRoot = join(baseDir, session.state.sandboxId);
     expect(existsSync(join(sandboxRoot, ".cogmo-askpass", "helper"))).toBe(true);
     expect(existsSync(join(sandboxRoot, ".cogmo-askpass", "pat"))).toBe(true);
@@ -207,7 +207,7 @@ describe("FakeDaytonaSandboxClient.create — askpass mirror", () => {
   it("rewrites the helper script's PAT path to the host-mirrored location", async () => {
     const session = await client.create(
       makeSpec({
-        askpass: { hostDir: askpassDir, containerDir: "/.cogmo-askpass" },
+        askpass: { hostDir: askpassDir, containerDir: "/tmp/cogmo-askpass" },
       }),
     );
 
@@ -216,7 +216,7 @@ describe("FakeDaytonaSandboxClient.create — askpass mirror", () => {
     const expectedHostPath = join(baseDir, session.state.sandboxId, ".cogmo-askpass", "pat");
 
     // Body must reference the rewritten host path. (We can't simply check
-    // `not.toContain("/.cogmo-askpass/pat")` because the rewritten host
+    // `not.toContain("/tmp/cogmo-askpass/pat")` because the rewritten host
     // path itself ends in `.cogmo-askpass/pat`.)
     expect(helperBody).toContain(expectedHostPath);
     // The bare canonical path (without the host prefix) must NOT appear

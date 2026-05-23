@@ -34,6 +34,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { logger } from "../logger.js";
+import { CONTAINER_ASKPASS_DIR as ASKPASS_CONTAINER_DIR } from "../sandbox/askpass.js";
 import { DisposedError } from "../sandbox/daytona/exec-streaming.js";
 import {
   type DaytonaSessionState,
@@ -62,9 +63,6 @@ const CAPABILITIES: SandboxCapabilities = {
 
 /** Path the orchestrator + git-as-transport helpers expect inside the sandbox. */
 const WORKTREE_PATH_IN_SANDBOX = "/workspace";
-
-/** Container path the askpass helper resolves to. Mirrors `provisionAskpass`'s host layout. */
-const ASKPASS_CONTAINER_DIR = "/.cogmo-askpass";
 
 interface FakeSandboxRecord {
   sandboxId: string;

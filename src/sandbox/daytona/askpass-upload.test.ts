@@ -44,7 +44,7 @@ describe("uploadAskpassToSandbox", () => {
     await uploadAskpassToSandbox({
       sandbox: fakeSandbox(),
       hostDir,
-      containerDir: "/.cogmo-askpass",
+      containerDir: "/tmp/cogmo-askpass",
     });
 
     expect(fsCalls.uploadFiles).toHaveBeenCalledTimes(1);
@@ -54,10 +54,10 @@ describe("uploadAskpassToSandbox", () => {
     }>;
     const destinations = uploads.map((u) => u.destination).sort();
     expect(destinations).toEqual([
-      "/.cogmo-askpass/helper",
-      "/.cogmo-askpass/pat",
-      "/.cogmo-askpass/signing-key",
-      "/.cogmo-askpass/signing-key.pub",
+      "/tmp/cogmo-askpass/helper",
+      "/tmp/cogmo-askpass/pat",
+      "/tmp/cogmo-askpass/signing-key",
+      "/tmp/cogmo-askpass/signing-key.pub",
     ]);
     // Source bytes match disk content — ssh-keygen and the helper both
     // care about exact contents (newlines, etc.).
@@ -73,7 +73,7 @@ describe("uploadAskpassToSandbox", () => {
     await uploadAskpassToSandbox({
       sandbox: fakeSandbox(),
       hostDir,
-      containerDir: "/.cogmo-askpass",
+      containerDir: "/tmp/cogmo-askpass",
     });
 
     const modes = fsCalls.setFilePermissions.mock.calls.map((args) => ({
@@ -84,12 +84,12 @@ describe("uploadAskpassToSandbox", () => {
     expect(modes).toHaveLength(4);
     expect(modes).toEqual(
       expect.arrayContaining([
-        { path: "/.cogmo-askpass/helper", mode: "755" },
-        { path: "/.cogmo-askpass/pat", mode: "644" },
+        { path: "/tmp/cogmo-askpass/helper", mode: "755" },
+        { path: "/tmp/cogmo-askpass/pat", mode: "644" },
         // 600 is non-negotiable — ssh-keygen -Y sign refuses to load a
         // private key with broader permissions.
-        { path: "/.cogmo-askpass/signing-key", mode: "600" },
-        { path: "/.cogmo-askpass/signing-key.pub", mode: "644" },
+        { path: "/tmp/cogmo-askpass/signing-key", mode: "600" },
+        { path: "/tmp/cogmo-askpass/signing-key.pub", mode: "644" },
       ]),
     );
   });
@@ -100,7 +100,7 @@ describe("uploadAskpassToSandbox", () => {
       uploadAskpassToSandbox({
         sandbox: fakeSandbox(),
         hostDir,
-        containerDir: "/.cogmo-askpass",
+        containerDir: "/tmp/cogmo-askpass",
       }),
     ).rejects.toThrow(/network blip/);
     // No permissions calls when the upload itself failed — nothing to chmod.
