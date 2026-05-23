@@ -16,6 +16,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough, type Readable } from "node:stream";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
@@ -164,10 +165,16 @@ interface FakeGitRemoteSandboxResult {
   execCalls: Array<{ cmd: ReadonlyArray<string>; workingDir: string | undefined }>;
 }
 
-function noopExec(): ExecStreamingHandle {
+function noopExec(stdout = "", stderr = ""): ExecStreamingHandle {
+  const out = new PassThrough();
+  const err = new PassThrough();
+  if (stdout) out.write(stdout);
+  if (stderr) err.write(stderr);
+  out.end();
+  err.end();
   return {
-    stdout: process.stdin,
-    stderr: process.stdin,
+    stdout: out as Readable,
+    stderr: err as Readable,
     wait: async () => ({ exitCode: 0 }),
     dispose: async () => {},
   };
@@ -244,6 +251,7 @@ function makeDeps(
     defaultResourceLimits: RESOURCE_LIMITS,
     taskTtlMs: 60_000,
     worktreesDir: join(baseDir, "worktrees"),
+    askpassBaseDir: join(baseDir, "askpass"),
     openPlanStream: async () => NULL_PLAN_STREAM,
     openExecuteStream: async () => NULL_EXECUTE_STREAM,
     ...overrides,

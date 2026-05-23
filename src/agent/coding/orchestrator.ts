@@ -4,6 +4,7 @@ import type { Transactor } from "../../db/index.js";
 import { codingTaskFailed, codingTaskPlanApproved, codingTaskStart } from "../../inngest/events.js";
 import type { StepRun, StepSendEvent } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
+import { cleanupAskpass, provisionAskpass } from "../../sandbox/askpass.js";
 import {
   isLocalDockerSessionState,
   type SandboxClient,
@@ -13,6 +14,7 @@ import type { ResourceLimits } from "../../sandbox/types.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { loadCodingSandboxEnv } from "./auth.js";
 import type { BackendUsage, CodingBackend } from "./backend.js";
+import { commitAuthorFor, runCommitAndPush } from "./commit-push.js";
 import { loadIdentity, pushTaskBranchToRemote, runBranchFor } from "./git-as-transport.js";
 import type { CodingRepoRow, CodingStore, CodingTaskRow } from "./store/index.js";
 import { safeTeardownWorktree } from "./teardown.js";
@@ -91,6 +93,16 @@ export interface CodingOrchestratorDeps {
   taskTtlMs: number;
   /** Host root for per-task git worktrees — `${worktreesDir}/<repo>/<id-short>`. */
   worktreesDir: string;
+  /**
+   * Host root for per-task askpass material. The execute orchestrator
+   * provisions an askpass dir before `create-container` when the
+   * transport is `git-remote` and runs `runCommitAndPush` from inside
+   * the execute sandbox after the streaming phase completes — claude's
+   * edits ride to the verify sandbox via the remote, not the orchestrator.
+   * Bind-mount transports share the worktree on the host and don't need
+   * the execute-side push.
+   */
+  askpassBaseDir: string;
   /** Open a delivery channel for streaming plan text. Slice 1 default = NULL_PLAN_STREAM. */
   openPlanStream?: (taskId: string) => Promise<PlanStreamHandle>;
   /**
@@ -791,6 +803,26 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   const sessionId = task.sessionId;
   const worktreeAssignment = task.worktreeAssignment;
   let executeStream: ExecuteStreamHandle | null = null;
+  let askpassProvisioned = false;
+  const needsExecutePush = sandbox.capabilities.workingTreeTransport === "git-remote";
+
+  // git-remote transports tunnel claude's edits via origin to the verify
+  // sandbox: execute resolves the bot identity up front and provisions
+  // an askpass dir so the post-streaming commit-and-push step can push
+  // `cogmo/<idShort>` to the remote. Resolved outside any step so the
+  // PAT lives in closure scope only and never reaches Inngest's state
+  // store as a step return value.
+  let identity: import("../../secrets/github.js").GitHubIdentity | undefined;
+  if (needsExecutePush) {
+    if (!deps.secretsStore) {
+      throw new Error("git-remote sandbox requires a secretsStore for clone + push auth");
+    }
+    identity = await loadIdentity({
+      runInTx,
+      secretsStore: deps.secretsStore,
+      identityName: repo.identityName,
+    });
+  }
 
   try {
     // Conditional UPDATE: the transition only fires when the row is
@@ -832,6 +864,37 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       return existing?.state ?? null;
     });
 
+    // git-remote transports need the askpass dir mounted into the
+    // execute sandbox so the post-streaming push step has bot creds to
+    // reach origin. Provision unconditionally (resume or fresh-create)
+    // so a resumed sandbox that's about to push has fresh material on
+    // the host. Mark before the step body so a partial provision still
+    // triggers cleanup in the finally block; the cleanup is a recursive
+    // `rm -rf` and absent/partial dirs are no-ops.
+    let askpassMaterials:
+      | { hostDir: string; containerDir: string; signingKeyPath: string; helperPath: string }
+      | undefined;
+    if (needsExecutePush) {
+      askpassProvisioned = true;
+      const identityForAskpass = identity;
+      if (!identityForAskpass) {
+        throw new Error("identity not resolved despite git-remote transport");
+      }
+      const provisioned = await stepRun("provision-askpass", async () =>
+        provisionAskpass({
+          baseDir: deps.askpassBaseDir,
+          rootTaskId: taskId,
+          identity: identityForAskpass,
+        }),
+      );
+      askpassMaterials = {
+        hostDir: provisioned.hostDir,
+        containerDir: provisioned.containerDir,
+        signingKeyPath: provisioned.signingKeyPath,
+        helperPath: provisioned.helperPath,
+      };
+    }
+
     let sessionState: typeof resumedState;
     let isFreshCreate: boolean;
     if (resumedState !== null) {
@@ -845,6 +908,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       await stepRun("ensure-image-present", async () => {
         await sandbox.ensureImagePresent(containerImage, defaultResourceLimits);
       });
+
       sessionState = await stepRun("create-container", async () => {
         const loadAuth = deps.loadCodingSandboxEnv ?? loadCodingSandboxEnv;
         let sandboxEnv: Record<string, string> | undefined;
@@ -856,19 +920,6 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
           sandboxEnv = authResult.value;
         }
 
-        let gitRemoteIdentityPat: string | undefined;
-        if (sandbox.capabilities.workingTreeTransport === "git-remote") {
-          if (!secretsStore) {
-            throw new Error("git-remote sandbox requires a secretsStore for clone auth");
-          }
-          const identity = await loadIdentity({
-            runInTx,
-            secretsStore,
-            identityName: repo.identityName,
-          });
-          gitRemoteIdentityPat = identity.pat;
-        }
-
         const session = await sandbox.create({
           taskId,
           worktree: buildWorktreeSpec({
@@ -876,10 +927,16 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
             capability: sandbox.capabilities.workingTreeTransport,
             assignment: worktreeAssignment,
             remoteUrl: repo.remoteUrl,
-            identityPat: gitRemoteIdentityPat,
+            identityPat: identity?.pat,
           }),
           ...(sandbox.capabilities.workingTreeTransport === "bind-mount" && {
             homeVolume: { volumeName: `${HOME_VOLUME_PREFIX}-${taskId}` },
+          }),
+          ...(askpassMaterials && {
+            askpass: {
+              hostDir: askpassMaterials.hostDir,
+              containerDir: askpassMaterials.containerDir,
+            },
           }),
           image: containerImage,
           resourceLimits: defaultResourceLimits,
@@ -993,6 +1050,68 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       }
     }
 
+    // git-remote transport: push claude's commits to origin from inside
+    // the execute sandbox so the verify sandbox (which clones from
+    // origin into a fresh tree) sees the same state. Pushed to the
+    // run-branch (`cogmo/run/<task-id>`) — the same ref the orchestrator
+    // initialized at plan-start and the same ref `buildWorktreeSpec`
+    // points the verify sandbox's clone at. Verify then locally creates
+    // `cogmo/<idShort>` from the run-branch tip and pushes it to origin
+    // as the PR head. Bind-mount transports share the worktree on the
+    // host, so the verify-side `runCommitAndPush` covers the same job.
+    if (needsExecutePush) {
+      if (!askpassMaterials || !identity) {
+        throw new Error("git-remote push attempted without askpass/identity provisioned");
+      }
+      const commitMaterials = askpassMaterials;
+      const commitIdentity = identity;
+      const runBranch = runBranchFor(taskId);
+      const pushResult = await stepRun("commit-and-push-execute-changes", async () => {
+        const session = await sandbox.resume(sessionState);
+        return runCommitAndPush({
+          container: session,
+          worktreeDir: WORKTREE_DIR_IN_CONTAINER,
+          branch: worktreeAssignment.branch,
+          remoteBranch: runBranch,
+          commitMessage: task.goal,
+          signingKeyPath: commitMaterials.signingKeyPath,
+          askpassEnv: {
+            GIT_ASKPASS: commitMaterials.helperPath,
+            GIT_TERMINAL_PROMPT: "0",
+          },
+          author: commitAuthorFor(commitIdentity),
+        });
+      });
+      if (pushResult.kind !== "pushed" && pushResult.kind !== "nothing_to_commit") {
+        const reason = `execute push failed (${pushResult.kind}):\n\n${pushResult.output}`;
+        await stepRun("set-status-failed-after-push", () =>
+          runInTx((tx) =>
+            store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
+          ),
+        );
+        await stepSendEvent("emit-task-failed", {
+          ...codingTaskFailed.create({ taskId, reason }),
+          id: `task-failed-${taskId}`,
+        });
+        await stepRun("teardown-after-push-failure", () =>
+          sandbox.deleteByTaskId(taskId).catch(() => {}),
+        );
+        await stepRun("persist-sandbox-deleted-after-push-failure", () =>
+          runInTx((tx) => store.setTaskSandboxDeletedAt(tx, taskId, new Date().toISOString())),
+        );
+        await executeStream.complete(false).catch((streamErr: unknown) => {
+          taskLog.warn(
+            { err: streamErr },
+            "execute stream complete(false) notification failed (push failure)",
+          );
+        });
+        await executeStream.fail(reason).catch((streamErr: unknown) => {
+          taskLog.warn({ err: streamErr }, "execute stream fail notification failed");
+        });
+        return { status: "failed", failureReason: reason };
+      }
+    }
+
     await stepRun("set-status-pending-verify", () =>
       runInTx((tx) => store.updateTaskStatus(tx, { id: taskId, status: "pending_verify" })),
     );
@@ -1061,6 +1180,10 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     ).catch(() => {});
     await executeStream?.fail(reason).catch(() => {});
     return { status: "failed", failureReason: reason };
+  } finally {
+    if (askpassProvisioned) {
+      cleanupAskpass({ baseDir: deps.askpassBaseDir, rootTaskId: taskId });
+    }
   }
 }
 
