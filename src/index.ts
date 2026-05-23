@@ -732,6 +732,7 @@ export async function bootstrapRuntime(
       defaultResourceLimits: DEFAULT_CODING_RESOURCE_LIMITS,
       taskTtlMs: env.CODING_TASK_IDLE_TTL_MINUTES * 60 * 1000,
       worktreesDir: env.COGMO_WORKTREES_DIR,
+      askpassBaseDir: env.SANDBOX_ASKPASS_DIR,
       ...(opts.codingAuthOverride && { loadCodingSandboxEnv: opts.codingAuthOverride }),
       openPlanStream: async (taskId: string): Promise<PlanStreamHandle> => ({
         async appendText(delta) {

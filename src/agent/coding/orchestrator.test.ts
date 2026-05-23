@@ -300,6 +300,7 @@ function makeDeps(
     defaultResourceLimits: RESOURCE_LIMITS,
     taskTtlMs: 60_000,
     worktreesDir: join(baseDir, "worktrees"),
+    askpassBaseDir: join(baseDir, "askpass"),
     openPlanStream: async () => NULL_PLAN_STREAM,
     ...overrides,
   };
