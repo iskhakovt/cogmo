@@ -35,7 +35,7 @@ import {
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { loadCodingSandboxEnv } from "./auth.js";
-import { runCommitAndPush } from "./commit-push.js";
+import { commitAuthorFor, runCommitAndPush } from "./commit-push.js";
 import { parseRemoteUrl, runOpenDraftPr } from "./draft-pr.js";
 import { fetchFeatureBranch } from "./git-as-transport.js";
 import {
@@ -62,12 +62,6 @@ const WORKTREE_DIR_IN_CONTAINER = "/workspace";
  * email never delivers anywhere because GitHub blocks delivery to that
  * suffix. The author *name* is a freeform display label.
  */
-function commitAuthorFor(identity: GitHubIdentity): { name: string; email: string } {
-  return {
-    name: identity.login,
-    email: `${identity.id}+${identity.login}@users.noreply.github.com`,
-  };
-}
 
 export interface VerifyOrchestratorDeps {
   runInTx: Transactor;
