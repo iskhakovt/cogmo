@@ -149,18 +149,24 @@ describe("startExecPty", () => {
     // The exec line wraps the cmd inside `bash --norc --noprofile -c`
     // so the default interactive PTY shell gets replaced atomically by
     // a non-interactive bash that doesn't run readline or fire
-    // PROMPT_COMMAND. The inner `exec <cmd> < stdin 2> stderr`
-    // (single-quoted as the -c script body) is what actually swaps
-    // bash for the target argv. See the docstring in exec-pty.ts.
+    // PROMPT_COMMAND. The inner script pipes stdin via `cat` (a real
+    // pipe FD — claude 2.1.138 silently exits on file-FD stdin) and
+    // redirects stderr to a tmpfile so onData carries only stdout.
+    // Assert the full structure (envelope + inner script shape) so a
+    // quoting/redirection regression in the wrapper is caught here
+    // instead of leaking out as a downstream shell-parse error.
     expect(ptyCtrl.sendInputs).toHaveLength(1);
     const sent = ptyCtrl.sendInputs[0] ?? "";
-    expect(sent).toMatch(/^exec bash --norc --noprofile -c '/);
-    expect(sent).toContain("claude");
-    expect(sent).toContain("--output-format");
-    expect(sent).toContain("stream-json");
-    expect(sent).toMatch(/\/tmp\/cogmo-pty-stdin-fixed-\d+\.bin/);
-    expect(sent).toMatch(/\/tmp\/cogmo-pty-stderr-fixed-\d+\.log/);
-    expect(sent).toMatch(/'\n$/);
+    const envelopeMatch = sent.match(/^exec bash --norc --noprofile -c '(.*)'\n$/s);
+    expect(envelopeMatch).not.toBeNull();
+    // Bash single-quote escape: every inner `'` becomes `'"'"'` (close
+    // single-quote, double-quote a literal single, reopen single-quote).
+    // Reverse the escape to recover the literal script body the inner
+    // bash will execute, then assert its shape.
+    const innerScript = (envelopeMatch?.[1] ?? "").replaceAll(`'"'"'`, "'");
+    expect(innerScript).toMatch(
+      /^cat '\/tmp\/cogmo-pty-stdin-fixed-\d+\.bin' \| exec 'claude' '-p' '--output-format' 'stream-json' 2> '\/tmp\/cogmo-pty-stderr-fixed-\d+\.log'$/,
+    );
 
     // onData → stdout pass-through.
     const stdoutChunks: Buffer[] = [];

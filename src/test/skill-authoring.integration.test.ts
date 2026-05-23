@@ -91,11 +91,14 @@ interface CapturedOutbound {
 const capturedOutbound: CapturedOutbound[] = [];
 
 /**
- * Test-run UUID — namespaces all branches/PRs created during this run
- * so cleanup is unambiguous and concurrent runs (unlikely but possible)
- * can't collide.
+ * Test-run id — namespaces all branches/PRs created during this run.
+ * In record mode it carries a UUID slice so concurrent runs against the
+ * real GitHub remote don't collide on `cogmo/run/<id>`. In replay mode
+ * a fixed string keeps `DaytonaMock`'s exact-path matching stable: the
+ * id ends up encoded in sandbox/session URLs that the fixture pinned
+ * during recording, and a fresh UUID per replay would fail every lookup.
  */
-const TEST_RUN_ID = `skill-author-${randomUUID().slice(0, 8)}`;
+const TEST_RUN_ID = RECORDABLE ? `skill-author-${randomUUID().slice(0, 8)}` : "skill-author-replay";
 const TASK_BRANCH_GLOB = `cogmo/run/${TEST_RUN_ID}`;
 
 describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () => {
@@ -150,8 +153,14 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     });
 
     // RECORD: real PAT/login/id from `gh auth`. Replay: any non-empty
-    // values — the identity-loader runs before DaytonaMock takes over routing.
-    remoteUrl = expectDefined(process.env.COGMO_TEST_SKILLS_REMOTE);
+    // values — the identity-loader runs before DaytonaMock takes over
+    // routing, and the placeholder remote URL is never actually contacted
+    // because DaytonaMock intercepts every git/sandbox call. Strictly
+    // requiring COGMO_TEST_SKILLS_REMOTE in replay would gate the test
+    // on an env var that's only meaningful during recording.
+    remoteUrl = RECORDABLE
+      ? expectDefined(process.env.COGMO_TEST_SKILLS_REMOTE)
+      : "https://github.com/cogmo-test/replay-placeholder.git";
     remoteSlug = parseGitHubSlug(remoteUrl);
 
     const ghAuth = RECORDABLE
@@ -542,7 +551,11 @@ async function seedConversation(
     .insert(channelSessions)
     .values({
       channelId,
-      platformAddress: `skill-${Date.now()}`,
+      // Encodes TEST_RUN_ID (fixed in replay mode) rather than Date.now()
+      // so the platform address is stable across runs and DaytonaMock /
+      // any downstream fixture matching that captures it doesn't have to
+      // mask the timestamp out.
+      platformAddress: `skill-${TEST_RUN_ID}`,
       conversationId,
       status: "active",
       receive: "routed",

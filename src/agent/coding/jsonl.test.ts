@@ -85,4 +85,24 @@ describe("readJsonl", () => {
   it("handles an empty stream", async () => {
     expect(await collect(streamOf())).toEqual([]);
   });
+
+  it("extracts the JSON object when trailing noise follows the closing brace", async () => {
+    // The PTY can leak terminal control bytes (cursor reset, OSC echo)
+    // immediately after the closing brace on the same line. The
+    // balanced-brace scan picks the inner object and ignores the tail.
+    const s = streamOf('{"type":"assistant","content":"hi"}\x1b[0m\x1b]0;\x07\n');
+    expect(await collect(s)).toEqual([{ type: "assistant", content: "hi" }]);
+  });
+
+  it("respects braces inside JSON string values", async () => {
+    // The brace scan must track string state — a `}` inside a string
+    // shouldn't close the outer object early.
+    const s = streamOf('{"k":"a}b{c"}\n');
+    expect(await collect(s)).toEqual([{ k: "a}b{c" }]);
+  });
+
+  it("parses nested objects without truncating at an inner closing brace", async () => {
+    const s = streamOf('{"outer":{"inner":1}}\n');
+    expect(await collect(s)).toEqual([{ outer: { inner: 1 } }]);
+  });
 });
