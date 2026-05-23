@@ -165,22 +165,37 @@ interface FakeGitRemoteSandboxResult {
   execCalls: Array<{ cmd: ReadonlyArray<string>; workingDir: string | undefined }>;
 }
 
-function noopExec(stdout = "", stderr = ""): ExecStreamingHandle {
+interface FakeExecResult {
+  exitCode?: number;
+  stdout?: string;
+  stderr?: string;
+}
+
+function noopExec(result: FakeExecResult = {}): ExecStreamingHandle {
   const out = new PassThrough();
   const err = new PassThrough();
-  if (stdout) out.write(stdout);
-  if (stderr) err.write(stderr);
+  if (result.stdout) out.write(result.stdout);
+  if (result.stderr) err.write(result.stderr);
   out.end();
   err.end();
   return {
     stdout: out as Readable,
     stderr: err as Readable,
-    wait: async () => ({ exitCode: 0 }),
+    wait: async () => ({ exitCode: result.exitCode ?? 0 }),
     dispose: async () => {},
   };
 }
 
-function fakeGitRemoteSandbox(): FakeGitRemoteSandboxResult {
+/**
+ * Script the fake sandbox's `execStreaming` per-command. The matcher
+ * takes the argv (e.g. `["git", "push", "origin", "..."]`) and returns
+ * a fake result or `undefined` to fall through to the default
+ * `exitCode: 0, no output`. Tests pass a script to drive specific
+ * outcomes (e.g. push auth failure) without rebuilding the whole fake.
+ */
+type ExecScript = (cmd: ReadonlyArray<string>) => FakeExecResult | undefined;
+
+function fakeGitRemoteSandbox(execScript?: ExecScript): FakeGitRemoteSandboxResult {
   const createSpecs: SessionSpec[] = [];
   const execCalls: FakeGitRemoteSandboxResult["execCalls"] = [];
 
@@ -188,7 +203,7 @@ function fakeGitRemoteSandbox(): FakeGitRemoteSandboxResult {
     state: { type: "daytona", taskId: "t", sandboxId: "sb-fake" },
     execStreaming: vi.fn(async (cmd, opts) => {
       execCalls.push({ cmd, workingDir: opts?.workingDir });
-      return noopExec();
+      return noopExec(execScript?.(cmd));
     }),
     exec: vi.fn(async () => ({
       stdout: "",
@@ -468,5 +483,162 @@ describe("runCodingExecute — git-remote transport", () => {
     // is already on the feature branch from the prior attempt.
     const checkoutCalls = execCalls.filter((c) => c.cmd[0] === "git" && c.cmd[1] === "checkout");
     expect(checkoutCalls).toHaveLength(0);
+  });
+
+  it("fresh-create: provisions askpass, mounts it on the sandbox, and pushes the run-branch", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const idShort = task.id.replaceAll("-", "").slice(0, 12);
+    await tx((trx) =>
+      store.setTaskWorktreeAssignment(trx, task.id, {
+        type: "git-remote",
+        branch: `cogmo/${idShort}`,
+      }),
+    );
+    await tx((trx) => store.setTaskSessionId(trx, task.id, "sess-from-plan"));
+    await tx((trx) =>
+      store.updateTaskStatus(trx, {
+        id: task.id,
+        status: "awaiting_approval",
+        planApprovedAt: new Date(),
+      }),
+    );
+
+    // Default fake — no resume hit, falls through to create-container.
+    // Simulate one tracked-but-unstaged edit so runCommitAndPush hits
+    // the commit + push branch (not nothing_to_commit).
+    const { sandbox, createSpecs, execCalls } = fakeGitRemoteSandbox((cmd) => {
+      if (cmd[0] === "git" && cmd[1] === "status" && cmd[2] === "--porcelain") {
+        return { exitCode: 0, stdout: "M src/foo.ts\n" };
+      }
+      return undefined;
+    });
+
+    const secretsStore = mock<SecretsStore>();
+    secretsStore.getSecret.mockImplementation(async (_tx, name) =>
+      name === CLAUDE_CODE_OAUTH_TOKEN_SECRET ? "test-oauth-token" : undefined,
+    );
+
+    const result = await runCodingExecute({
+      taskId: task.id,
+      deps: makeDeps({
+        sandbox,
+        backend: backendYielding([
+          { kind: "session_started", sessionId: "sess-from-plan" },
+          { kind: "complete", exitCode: 0, isError: false },
+        ]),
+        secretsStore,
+      }),
+      stepRun,
+      stepSendEvent,
+      inngest: fakeInngest,
+    });
+
+    expect(result.status).toBe("pending_verify");
+
+    // Identity loaded for askpass + clone auth.
+    expect(transportMocks.loadIdentity).toHaveBeenCalledTimes(1);
+
+    // Fresh-create branch: sandbox.create called with askpass mount.
+    expect(createSpecs).toHaveLength(1);
+    const spec = createSpecs[0];
+    if (!spec) throw new Error("expected one create call");
+    expect(spec.askpass?.containerDir).toBe("/tmp/cogmo-askpass");
+    expect(spec.askpass?.hostDir).toMatch(new RegExp(`/askpass/${task.id}$`));
+
+    // The execute-side push step ran with `HEAD:refs/heads/<runBranch>`
+    // as the push refspec.
+    const pushCall = execCalls.find((c) => c.cmd[0] === "git" && c.cmd[1] === "push");
+    expect(pushCall).toBeDefined();
+    expect(pushCall?.cmd).toContain(`HEAD:refs/heads/cogmo/run/${task.id}`);
+    expect(pushCall?.workingDir).toBe("/workspace");
+
+    // Commit invocation present + signed with the per-task signing key.
+    const commitCall = execCalls.find((c) => c.cmd[0] === "git" && c.cmd.includes("commit"));
+    expect(commitCall?.cmd).toContain("-S");
+    expect(commitCall?.cmd.some((a) => a.startsWith("user.signingkey="))).toBe(true);
+  });
+
+  it("push failure: transitions to failed, emits task-failed, skips pending-verify", async () => {
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const idShort = task.id.replaceAll("-", "").slice(0, 12);
+    await tx((trx) =>
+      store.setTaskWorktreeAssignment(trx, task.id, {
+        type: "git-remote",
+        branch: `cogmo/${idShort}`,
+      }),
+    );
+    await tx((trx) => store.setTaskSessionId(trx, task.id, "sess-from-plan"));
+    await tx((trx) =>
+      store.updateTaskStatus(trx, {
+        id: task.id,
+        status: "awaiting_approval",
+        planApprovedAt: new Date(),
+      }),
+    );
+
+    // status shows a tracked edit (so we commit), then push returns a
+    // non-zero exit with stderr that runCommitAndPush classifies as
+    // auth_failed via its `looksLikeAuthFailure` pattern.
+    const { sandbox, execCalls } = fakeGitRemoteSandbox((cmd) => {
+      if (cmd[0] === "git" && cmd[1] === "status" && cmd[2] === "--porcelain") {
+        return { exitCode: 0, stdout: "M src/foo.ts\n" };
+      }
+      if (cmd[0] === "git" && cmd[1] === "push") {
+        return {
+          exitCode: 128,
+          stderr:
+            "remote: Invalid username or password.\nfatal: Authentication failed for 'https://github.com/...'\n",
+        };
+      }
+      return undefined;
+    });
+
+    const secretsStore = mock<SecretsStore>();
+    secretsStore.getSecret.mockImplementation(async (_tx, name) =>
+      name === CLAUDE_CODE_OAUTH_TOKEN_SECRET ? "test-oauth-token" : undefined,
+    );
+
+    const sendSpy = vi.fn().mockResolvedValue(undefined);
+    const inngest = { send: sendSpy };
+
+    const result = await runCodingExecute({
+      taskId: task.id,
+      deps: makeDeps({
+        sandbox,
+        backend: backendYielding([
+          { kind: "session_started", sessionId: "sess-from-plan" },
+          { kind: "complete", exitCode: 0, isError: false },
+        ]),
+        secretsStore,
+      }),
+      stepRun,
+      stepSendEvent,
+      inngest,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.failureReason).toContain("execute push failed (auth_failed)");
+
+    // Push was attempted before the failure handler kicked in.
+    const pushCall = execCalls.find((c) => c.cmd[0] === "git" && c.cmd[1] === "push");
+    expect(pushCall).toBeDefined();
+
+    // Task row is `failed` with the auth-failure reason, never reached
+    // `pending_verify`.
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.status).toBe("failed");
+    expect(reloaded?.failureReason).toContain("auth_failed");
+
+    // Sandbox cleanup was invoked through the push-failure path.
+    expect(sandbox.deleteByTaskId).toHaveBeenCalledWith(task.id);
+
+    // No cli-done event — pending-verify was skipped, verify orchestrator
+    // never gets the handoff.
+    const cliDoneSends = sendSpy.mock.calls.filter(
+      (c) => (c[0] as { name?: string })?.name === "coding/task/cli-done",
+    );
+    expect(cliDoneSends).toHaveLength(0);
   });
 });

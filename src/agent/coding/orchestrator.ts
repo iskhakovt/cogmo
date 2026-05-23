@@ -11,6 +11,7 @@ import {
   type SandboxSession,
 } from "../../sandbox/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
+import type { GitHubIdentity } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { loadCodingSandboxEnv } from "./auth.js";
 import type { BackendUsage, CodingBackend } from "./backend.js";
@@ -804,25 +805,8 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   const worktreeAssignment = task.worktreeAssignment;
   let executeStream: ExecuteStreamHandle | null = null;
   let askpassProvisioned = false;
+  let identity: GitHubIdentity | undefined;
   const needsExecutePush = sandbox.capabilities.workingTreeTransport === "git-remote";
-
-  // git-remote transports tunnel claude's edits via origin to the verify
-  // sandbox: execute resolves the bot identity up front and provisions
-  // an askpass dir so the post-streaming commit-and-push step can push
-  // `cogmo/<idShort>` to the remote. Resolved outside any step so the
-  // PAT lives in closure scope only and never reaches Inngest's state
-  // store as a step return value.
-  let identity: import("../../secrets/github.js").GitHubIdentity | undefined;
-  if (needsExecutePush) {
-    if (!deps.secretsStore) {
-      throw new Error("git-remote sandbox requires a secretsStore for clone + push auth");
-    }
-    identity = await loadIdentity({
-      runInTx,
-      secretsStore: deps.secretsStore,
-      identityName: repo.identityName,
-    });
-  }
 
   try {
     // Conditional UPDATE: the transition only fires when the row is
@@ -840,6 +824,25 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
         "execute: status transition lost the race (already cancelled or transitioned)",
       );
       return { status: "skipped" };
+    }
+
+    // git-remote transports tunnel claude's edits via origin to the
+    // verify sandbox: execute resolves the bot identity up front and
+    // provisions an askpass dir so the post-streaming commit-and-push
+    // step can push to the remote. Resolved inside the try block (not
+    // inside any `step.run`) so the PAT lives in closure scope only —
+    // never returned to Inngest's state store — and so a DB/decrypt
+    // failure here surfaces through the catch (task -> failed +
+    // emit-task-failed + teardown) rather than throwing past it.
+    if (needsExecutePush) {
+      if (!deps.secretsStore) {
+        throw new Error("git-remote sandbox requires a secretsStore for clone + push auth");
+      }
+      identity = await loadIdentity({
+        runInTx,
+        secretsStore: deps.secretsStore,
+        identityName: repo.identityName,
+      });
     }
 
     const secretsStore = deps.secretsStore;
@@ -1063,15 +1066,29 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       if (!askpassMaterials || !identity) {
         throw new Error("git-remote push attempted without askpass/identity provisioned");
       }
+      // The `needsExecutePush` flag is set from the sandbox capability;
+      // the worktree assignment is set by the plan orchestrator and
+      // should match. Narrow the discriminated union so reading
+      // `.branch` is type-safe and a future variant without `branch`
+      // would fail here rather than silently typecheck.
+      if (worktreeAssignment.type !== "git-remote") {
+        throw new Error(
+          `git-remote push step requires a git-remote worktree assignment, got ${worktreeAssignment.type}`,
+        );
+      }
       const commitMaterials = askpassMaterials;
       const commitIdentity = identity;
       const runBranch = runBranchFor(taskId);
-      const pushResult = await stepRun("commit-and-push-execute-changes", async () => {
-        const session = await sandbox.resume(sessionState);
-        return runCommitAndPush({
-          container: session,
+      const featureBranch = worktreeAssignment.branch;
+      const pushResult = await stepRun("commit-and-push-execute-changes", () =>
+        // Reuse the already-resumed `container` rather than a fresh
+        // `sandbox.resume(sessionState)` — on Daytona that's an API
+        // round-trip; `step.run` only requires the result be replay-safe,
+        // not the session handle.
+        runCommitAndPush({
+          container,
           worktreeDir: WORKTREE_DIR_IN_CONTAINER,
-          branch: worktreeAssignment.branch,
+          branch: featureBranch,
           remoteBranch: runBranch,
           commitMessage: task.goal,
           signingKeyPath: commitMaterials.signingKeyPath,
@@ -1080,8 +1097,8 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
             GIT_TERMINAL_PROMPT: "0",
           },
           author: commitAuthorFor(commitIdentity),
-        });
-      });
+        }),
+      );
       if (pushResult.kind !== "pushed" && pushResult.kind !== "nothing_to_commit") {
         const reason = `execute push failed (${pushResult.kind}):\n\n${pushResult.output}`;
         await stepRun("set-status-failed-after-push", () =>
@@ -1093,6 +1110,10 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
           ...codingTaskFailed.create({ taskId, reason }),
           id: `task-failed-${taskId}`,
         });
+        // No `teardown-worktree` step here — `safeTeardownWorktree`
+        // early-returns for git-remote assignments (no host worktree
+        // exists), and `needsExecutePush` only fires for git-remote.
+        // Mirrors the verify orchestrator's push-failure path.
         await stepRun("teardown-after-push-failure", () =>
           sandbox.deleteByTaskId(taskId).catch(() => {}),
         );
