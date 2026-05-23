@@ -223,10 +223,13 @@ export async function startExecPty(args: {
       // already armed at function entry.
       resetIdle();
 
-      // `exec` replaces the shell, so PTY exit = target exit. Stdin
-      // comes from the uploaded tmpfile (real pipe FD = real EOF);
-      // stderr is redirected so onData carries only stdout.
-      const shellLine = `exec ${shellEscapeArgv(cmd)} < ${shellEscape(stdinPath)} 2> ${shellEscape(stderrPath)}\n`;
+      // `cat file | cmd` (not `cmd < file`): claude 2.1.138 silently
+      // exits 0 with no output when stream-json input arrives via a
+      // regular file FD. Outer `exec bash --norc --noprofile -c` swaps
+      // the default interactive bash for a non-interactive one — no
+      // readline echo, no `PROMPT_COMMAND` OSCs after the swap.
+      const innerScript = `cat ${shellEscape(stdinPath)} | exec ${shellEscapeArgv(cmd)} 2> ${shellEscape(stderrPath)}`;
+      const shellLine = `exec bash --norc --noprofile -c ${shellEscape(innerScript)}\n`;
       await pty.sendInput(shellLine);
     };
 
@@ -248,7 +251,14 @@ export async function startExecPty(args: {
           stderr.write(errBuf);
         }
       } catch (err) {
-        log.debug(
+        // `warn` not `debug`: when claude exits silently with no
+        // stream-json output, the stderr tmpfile is the only diagnostic
+        // for *why* — surfacing the download failure at `info` level
+        // means operators see the breadcrumb without dropping LOG_LEVEL.
+        // A child that simply never wrote to stderr is the common case;
+        // the warn is acceptable noise to keep the rare-but-critical
+        // case visible.
+        log.warn(
           { err: (err as Error).message, path: stderrPath },
           "stderr tmpfile download failed (often expected — child may not have written)",
         );

@@ -146,14 +146,21 @@ describe("startExecPty", () => {
     );
     expect(upload?.remotePath).toMatch(/^\/tmp\/cogmo-pty-stdin-fixed-\d+\.bin$/);
 
-    // The exec line `exec`s the cmd with stdin redirected from the
-    // uploaded file and stderr to a separate tmpfile.
+    // The exec line wraps the cmd inside `bash --norc --noprofile -c`
+    // so the default interactive PTY shell gets replaced atomically by
+    // a non-interactive bash that doesn't run readline or fire
+    // PROMPT_COMMAND. The inner `exec <cmd> < stdin 2> stderr`
+    // (single-quoted as the -c script body) is what actually swaps
+    // bash for the target argv. See the docstring in exec-pty.ts.
     expect(ptyCtrl.sendInputs).toHaveLength(1);
     const sent = ptyCtrl.sendInputs[0] ?? "";
-    expect(sent).toMatch(/^exec 'claude' '-p' '--output-format' 'stream-json' </);
-    expect(sent).toMatch(
-      /< '\/tmp\/cogmo-pty-stdin-fixed-\d+\.bin' 2> '\/tmp\/cogmo-pty-stderr-fixed-\d+\.log'\n$/,
-    );
+    expect(sent).toMatch(/^exec bash --norc --noprofile -c '/);
+    expect(sent).toContain("claude");
+    expect(sent).toContain("--output-format");
+    expect(sent).toContain("stream-json");
+    expect(sent).toMatch(/\/tmp\/cogmo-pty-stdin-fixed-\d+\.bin/);
+    expect(sent).toMatch(/\/tmp\/cogmo-pty-stderr-fixed-\d+\.log/);
+    expect(sent).toMatch(/'\n$/);
 
     // onData → stdout pass-through.
     const stdoutChunks: Buffer[] = [];
