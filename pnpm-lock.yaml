@@ -9,6 +9,9 @@ overrides:
   ip-address@<10.1.1: '>=10.1.1'
   '@opentelemetry/otlp-transformer@0.217.0': ^0.218.0
 
+patchedDependencies:
+  '@daytonaio/sdk@0.175.0': bdd568b22d83ff0d7b88852b24292a91028ceb01ae9a62f6ab0ef93bf389a599
+
 importers:
 
   .:
@@ -30,7 +33,7 @@ importers:
         version: 1.4.0
       '@daytonaio/sdk':
         specifier: ^0.175.0
-        version: 0.175.0(ws@8.20.1)
+        version: 0.175.0(patch_hash=bdd568b22d83ff0d7b88852b24292a91028ceb01ae9a62f6ab0ef93bf389a599)(ws@8.20.1)
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@4.4.3)
@@ -5111,7 +5114,7 @@ snapshots:
     transitivePeerDependencies:
       - debug
 
-  '@daytonaio/sdk@0.175.0(ws@8.20.1)':
+  '@daytonaio/sdk@0.175.0(patch_hash=bdd568b22d83ff0d7b88852b24292a91028ceb01ae9a62f6ab0ef93bf389a599)(ws@8.20.1)':
     dependencies:
       '@aws-sdk/client-s3': 3.1049.0
       '@aws-sdk/lib-storage': 3.1045.0(@aws-sdk/client-s3@3.1049.0)
