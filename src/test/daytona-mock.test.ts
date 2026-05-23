@@ -255,6 +255,66 @@ describe("DaytonaMock", () => {
       }
     });
 
+    it("emits recorded binary frames as binary (isBinary === true) — PTY round-trip", async () => {
+      // PTY terminal output arrives as binary frames; `data.toString()`
+      // would UTF-8-decode it and mangle any non-UTF-8 byte sequence.
+      // The `bytes` (base64) path preserves binary semantics end to end.
+      const fixturePath = join(fixtureDir, "ws-binary.json");
+      const ptyBytes = Buffer.from([0x1b, 0x5d, 0x30, 0x3b, 0x07, 0xc3, 0x28]); // ESC ] 0 ; BEL + invalid UTF-8
+      await writeFixture(fixturePath, {
+        scenario: "ws-binary",
+        recordedAt: "2026-05-23T00:00:00.000Z",
+        calls: [
+          {
+            kind: "ws",
+            path: "/toolbox/sb-1/process/pty/sess-x/connect",
+            frames: [
+              { direction: "down", bytes: ptyBytes.toString("base64") },
+              { direction: "close", code: 1000, reason: "" },
+            ],
+          },
+        ],
+      });
+
+      const mock = await DaytonaMock.create({ mode: "replay", fixturePath });
+      try {
+        const ws = new WebSocket(
+          `${mock.url.replace(/^http/, "ws")}/toolbox/sb-1/process/pty/sess-x/connect`,
+        );
+        const received: Array<{ bytes: Buffer; isBinary: boolean }> = [];
+        const closed = new Promise<void>((resolve, reject) => {
+          ws.on("message", (data: WebSocket.RawData, isBinary: boolean) => {
+            const buf = rawDataToBuffer(data);
+            received.push({ bytes: buf, isBinary });
+          });
+          ws.on("close", () => resolve());
+          ws.on("error", reject);
+        });
+        await closed;
+        expect(received).toHaveLength(1);
+        expect(received[0]?.isBinary).toBe(true);
+        expect(received[0]?.bytes.equals(ptyBytes)).toBe(true);
+      } finally {
+        await mock.stop();
+      }
+    });
+
+    it("rejects fixtures with both text and bytes set on one frame", async () => {
+      const fixturePath = join(fixtureDir, "ws-both.json");
+      await writeFixture(fixturePath, {
+        scenario: "ws-both",
+        recordedAt: "2026-05-23T00:00:00.000Z",
+        calls: [
+          {
+            kind: "ws",
+            path: "/toolbox/sb-1/anywhere",
+            frames: [{ direction: "down", text: "hi", bytes: "aGk=" }],
+          },
+        ],
+      });
+      await expect(DaytonaMock.create({ mode: "replay", fixturePath })).rejects.toThrow();
+    });
+
     it("returns 1011 when no WS fixture matches", async () => {
       const fixturePath = join(fixtureDir, "ws-empty.json");
       await writeFixture(fixturePath, {
@@ -337,6 +397,74 @@ describe("DaytonaMock", () => {
       expect(recorded?.response.bodyJson?.toolboxProxyUrl).toBe("http://__daytona_mock__/toolbox");
     });
 
+    it("journals binary WS frames as base64 bytes — PTY round-trip recording", async () => {
+      // Stub upstream that speaks both HTTP and WS. POST /sandbox
+      // returns a `toolboxProxyUrl` pointing at the stub itself so the
+      // mock's toolbox map gets populated and routes the subsequent WS
+      // upgrade back through us. Uses an OSC + invalid-UTF-8 byte
+      // sequence as the PTY payload — `data.toString()` would mangle
+      // these, so the assertion proves the new `bytes` path survives.
+      const ptyBytes = Buffer.from([0x1b, 0x5d, 0x30, 0x07, 0xff, 0xfe]);
+      const stub = await startStubUpstreamWithWs(ptyBytes);
+      const fixturePath = join(fixtureDir, "record-pty-binary.json");
+      const mock = await DaytonaMock.create({
+        mode: "record",
+        fixturePath,
+        upstreamUrl: stub.url,
+        upstreamApiKey: "real-key-redacted",
+      });
+      try {
+        mock.beginScenario("pty-binary");
+        // POST /sandbox populates the toolbox map with the stub's URL.
+        const createResp = await fetch(`${mock.url}/sandbox`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ image: "anything" }),
+        });
+        expect(createResp.status).toBe(200);
+
+        // Open a WS to the PTY connect path; the upstream sends one
+        // binary frame and closes. The mock journals the frame as
+        // `bytes` (base64) and forwards as binary to the client.
+        const ws = new WebSocket(
+          `${mock.url.replace(/^http/, "ws")}/toolbox/sb-pty-1/process/pty/sess-x/connect`,
+        );
+        const received: Array<{ buf: Buffer; isBinary: boolean }> = [];
+        await new Promise<void>((resolve, reject) => {
+          ws.on("message", (data: WebSocket.RawData, isBinary: boolean) => {
+            const buf = rawDataToBuffer(data);
+            received.push({ buf, isBinary });
+          });
+          ws.on("close", () => resolve());
+          ws.on("error", reject);
+        });
+        expect(received).toHaveLength(1);
+        expect(received[0]?.isBinary).toBe(true);
+        expect(received[0]?.buf.equals(ptyBytes)).toBe(true);
+        await mock.endScenario();
+      } finally {
+        await mock.stop();
+        await stub.stop();
+      }
+
+      // Fixture journaled the frame as base64 bytes — not as `text` —
+      // and the base64 decodes back to the original byte sequence.
+      const persisted = JSON.parse(readFileSync(fixturePath, "utf8")) as {
+        calls: Array<{
+          kind: string;
+          path: string;
+          frames?: Array<{ direction: string; text?: string; bytes?: string }>;
+        }>;
+      };
+      const wsCall = persisted.calls.find((c) => c.kind === "ws");
+      expect(wsCall?.path).toBe("/toolbox/sb-pty-1/process/pty/sess-x/connect");
+      const downFrames = wsCall?.frames?.filter((f) => f.direction === "down") ?? [];
+      expect(downFrames).toHaveLength(1);
+      expect(downFrames[0]?.text).toBeUndefined();
+      expect(downFrames[0]?.bytes).toBeDefined();
+      expect(Buffer.from(downFrames[0]?.bytes ?? "", "base64").equals(ptyBytes)).toBe(true);
+    });
+
     it("strips Authorization header from recorded request — no real keys on disk", async () => {
       const upstream = await startStubUpstream(() => ({
         status: 200,
@@ -365,12 +493,105 @@ describe("DaytonaMock", () => {
       expect(text).not.toContain("client-token");
       expect(text).toContain("x-trace-id");
     });
+
+    it("scrubs Anthropic + GitHub credentials from recorded request bodies", async () => {
+      const anthropicKey =
+        "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+      const githubToken = "gho_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+      const upstream = await startStubUpstream(() => ({
+        status: 200,
+        bodyJson: { ok: true },
+      }));
+      const fixturePath = join(fixtureDir, "record-redacts-body-secrets.json");
+      const mock = await DaytonaMock.create({
+        mode: "record",
+        fixturePath,
+        upstreamUrl: upstream.url,
+        upstreamApiKey: "sk-real-secret",
+      });
+      try {
+        mock.beginScenario("redacts-body-secrets");
+        await fetch(`${mock.url}/sandbox/x`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            env: { ANTHROPIC_API_KEY: anthropicKey },
+            git: { password: githubToken },
+          }),
+        });
+        await mock.endScenario();
+      } finally {
+        await mock.stop();
+        await upstream.stop();
+      }
+
+      const text = readFileSync(fixturePath, "utf8");
+      expect(text).not.toContain(anthropicKey);
+      expect(text).not.toContain(githubToken);
+      expect(text).toContain("sk-ant-api03-REDACTED");
+      expect(text).toContain("gho_REDACTED");
+    });
   });
 });
+
+function rawDataToBuffer(data: WebSocket.RawData): Buffer {
+  if (Buffer.isBuffer(data)) return data;
+  if (data instanceof ArrayBuffer) return Buffer.from(data);
+  return Buffer.concat(data);
+}
 
 async function writeFixture(path: string, content: unknown): Promise<void> {
   const { writeFile, mkdir } = await import("node:fs/promises");
   const { dirname } = await import("node:path");
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, JSON.stringify(content));
+}
+
+/**
+ * Stub upstream that speaks HTTP and WS on the same port. POST
+ * `/sandbox` returns a `toolboxProxyUrl` pointing back at the stub so
+ * the mock's toolbox map gets populated with a routable address; any
+ * incoming WS upgrade emits one binary frame and closes.
+ */
+async function startStubUpstreamWithWs(
+  binaryPayload: Buffer,
+): Promise<{ url: string; stop: () => Promise<void> }> {
+  const { WebSocketServer } = await import("ws");
+  const server: Server = createServer(async (req, res) => {
+    // The toolboxProxyUrl reflects the stub's own URL so the mock's
+    // forwarder can reach this same server for the WS upgrade.
+    const ownUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    if (req.method === "POST" && req.url === "/sandbox") {
+      res.statusCode = 200;
+      res.setHeader("content-type", "application/json");
+      res.end(
+        JSON.stringify({
+          id: "sb-pty-1",
+          state: "started",
+          toolboxProxyUrl: ownUrl,
+        }),
+      );
+      return;
+    }
+    res.statusCode = 404;
+    res.end();
+  });
+  const wss = new WebSocketServer({ noServer: true });
+  server.on("upgrade", (req, socket, head) => {
+    wss.handleUpgrade(req, socket as import("node:net").Socket, head, (ws) => {
+      ws.send(binaryPayload, { binary: true });
+      ws.close(1000, "");
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("stub address invalid");
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    stop: () =>
+      new Promise<void>((resolve, reject) => {
+        wss.close();
+        server.close((err) => (err ? reject(err) : resolve()));
+      }),
+  };
 }

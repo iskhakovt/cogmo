@@ -82,13 +82,32 @@ const WsFrameSchema = z
   .object({
     /** `down` = server→client, `up` = client→server, `close` = WS close. */
     direction: z.enum(["down", "up", "close"]),
-    /** Frame payload. Empty for `close`. Daytona log frames are text. */
+    /**
+     * Text-frame payload. Mutually exclusive with `bytes`; exactly one
+     * of them is set for non-`close` directions. Daytona's
+     * `getSessionCommandLogs` and PTY control messages arrive as text;
+     * PTY terminal output arrives as binary (see `bytes`).
+     */
     text: z.string().optional(),
+    /**
+     * Binary-frame payload, base64-encoded. Mutually exclusive with
+     * `text`. Used for PTY terminal output and for client-side
+     * `PtyHandle.sendInput` (the SDK always sends binary, even for
+     * string inputs — see `@daytonaio/sdk/esm/PtyHandle.js`).
+     */
+    bytes: z
+      .string()
+      .regex(/^[A-Za-z0-9+/]*={0,2}$/, "bytes must be base64")
+      .optional(),
     /** WS close code; only present on `close` frames. */
     code: z.number().int().optional(),
     reason: z.string().optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (f) => !(f.text !== undefined && f.bytes !== undefined),
+    "frame must not set both text and bytes",
+  );
 type WsFrame = z.infer<typeof WsFrameSchema>;
 
 /** One recorded WS connection. Replay emits `down`/`close` frames in order. */
@@ -168,6 +187,63 @@ function redactBodyFields(value: unknown, rules: ReadonlyArray<BodyRedaction>): 
       return rule && typeof val === "string" ? rule.replacement : val;
     }),
   );
+}
+
+/**
+ * Last-line-of-defense secret redaction applied to the serialized
+ * fixture string. The HTTP recorder strips `Authorization` headers and
+ * the body recorder masks specific JSON fields, but env vars passed via
+ * `exec` payloads (the toolbox proxy mounts them on every session call)
+ * and credential-bearing URLs (`https://user:tok@github.com/...`) leak
+ * through both paths. We scan the final fixture text and replace any
+ * recognizable secret with a stable placeholder so a stray env-injection
+ * point or new SDK path can't produce a fixture containing real keys.
+ */
+const SECRET_PATTERNS: ReadonlyArray<{ pattern: RegExp; replacement: string }> = [
+  { pattern: /sk-ant-api03-[A-Za-z0-9_-]{60,}/g, replacement: "sk-ant-api03-REDACTED" },
+  { pattern: /\b(gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}\b/g, replacement: "$1_REDACTED" },
+];
+
+function redactSecrets(input: string): string {
+  let out = input;
+  for (const { pattern, replacement } of SECRET_PATTERNS) {
+    out = out.replace(pattern, replacement);
+  }
+  return out;
+}
+
+/**
+ * Normalize a WS message payload to a Buffer. `ws` delivers messages
+ * as `Buffer`, `ArrayBuffer`, or `Buffer[]` (when `binaryType` is
+ * `nodebuffer` / `arraybuffer` / `fragments`); journaling needs one
+ * concrete shape so the base64 encoding is stable across deliveries.
+ */
+function toBuffer(data: WebSocket.RawData): Buffer {
+  if (Buffer.isBuffer(data)) return data;
+  if (data instanceof ArrayBuffer) return Buffer.from(data);
+  return Buffer.concat(data);
+}
+
+/**
+ * Walk a JSON body and replace every `toolboxProxyUrl` (alongside an
+ * `id`) with the placeholder, populating `toolboxUpstreams` so the
+ * record-mode forwarder can resolve subsequent toolbox calls.
+ */
+function rewriteToolboxProxyUrls(body: unknown, toolboxUpstreams: Map<string, string>): unknown {
+  if (Array.isArray(body)) {
+    for (const item of body) rewriteToolboxProxyUrls(item, toolboxUpstreams);
+    return body;
+  }
+  if (typeof body !== "object" || body === null) return body;
+  const obj = body as Record<string, unknown>;
+  const id = obj.id;
+  const originalToolbox = obj.toolboxProxyUrl;
+  if (typeof id === "string" && typeof originalToolbox === "string") {
+    toolboxUpstreams.set(id, originalToolbox);
+    obj.toolboxProxyUrl = `${MOCK_URL_PLACEHOLDER}/toolbox`;
+  }
+  for (const value of Object.values(obj)) rewriteToolboxProxyUrls(value, toolboxUpstreams);
+  return obj;
 }
 
 export interface DaytonaMockReplayOptions {
@@ -362,7 +438,8 @@ export class DaytonaMock {
     };
     const dir = dirname(this.#opts.fixturePath);
     if (!existsSync(dir)) await mkdir(dir, { recursive: true });
-    await writeFile(this.#opts.fixturePath, `${JSON.stringify(fixture, null, 2)}\n`, "utf8");
+    const serialized = redactSecrets(`${JSON.stringify(fixture, null, 2)}\n`);
+    await writeFile(this.#opts.fixturePath, serialized, "utf8");
     log.info({ path: this.#opts.fixturePath, callCount: fixture.calls.length }, "fixture written");
     this.#scenario = null;
   }
@@ -452,10 +529,17 @@ export class DaytonaMock {
     this.#pendingWsJournals.add(journaled);
     journaled.finally(() => this.#pendingWsJournals.delete(journaled));
 
-    // Server→client direction. Forward + journal.
+    // Server→client direction. Forward + journal. Binary frames go
+    // through `bytes` (base64) so a PTY's raw terminal output survives
+    // the round-trip — `data.toString()` would UTF-8-decode it and
+    // mangle any byte sequence that isn't valid UTF-8.
     upstream.on("message", (data: WebSocket.RawData, isBinary: boolean) => {
-      const text = data.toString();
-      frames.push({ direction: "down", text });
+      const buf = toBuffer(data);
+      frames.push(
+        isBinary
+          ? { direction: "down", bytes: buf.toString("base64") }
+          : { direction: "down", text: buf.toString("utf8") },
+      );
       ws.send(data, { binary: isBinary });
     });
     upstream.on("close", (code, reason) => {
@@ -479,10 +563,17 @@ export class DaytonaMock {
       }
     });
 
-    // Client→server direction. Forward + journal.
+    // Client→server direction. Forward + journal. Binary frames go
+    // through `bytes` — `PtyHandle.sendInput` always sends binary, even
+    // for string inputs (the SDK runs `TextEncoder().encode(data)`
+    // before `ws.send`).
     ws.on("message", (data: WebSocket.RawData, isBinary: boolean) => {
-      const text = data.toString();
-      frames.push({ direction: "up", text });
+      const buf = toBuffer(data);
+      frames.push(
+        isBinary
+          ? { direction: "up", bytes: buf.toString("base64") }
+          : { direction: "up", text: buf.toString("utf8") },
+      );
       if (upstream.readyState === WebSocket.OPEN) {
         upstream.send(data, { binary: isBinary });
       }
@@ -518,7 +609,9 @@ export class DaytonaMock {
    * `queueMicrotask` so each frame surfaces as its own `message` event
    * on the client side, matching the per-chunk delivery the SDK sees
    * over a real Daytona toolbox WS. `close` frames terminate the
-   * connection with the recorded code/reason.
+   * connection with the recorded code/reason. Binary frames (`bytes`)
+   * are emitted as binary so consumers seeing `isBinary === true` on
+   * replay match the live-record signal.
    */
   #emitFrames(ws: WebSocket, frames: ReadonlyArray<WsFrame>): void {
     let i = 0;
@@ -527,11 +620,20 @@ export class DaytonaMock {
         const frame = frames[i++];
         if (!frame) continue;
         if (frame.direction === "up") continue; // client→server frames are not replayed
-        if (frame.direction === "down" && frame.text !== undefined) {
+        if (frame.direction === "down") {
           if (ws.readyState !== WebSocket.OPEN) return;
-          ws.send(frame.text);
-          queueMicrotask(next);
-          return;
+          if (frame.bytes !== undefined) {
+            ws.send(Buffer.from(frame.bytes, "base64"), { binary: true });
+            queueMicrotask(next);
+            return;
+          }
+          if (frame.text !== undefined) {
+            ws.send(frame.text);
+            queueMicrotask(next);
+            return;
+          }
+          // `down` with neither text nor bytes is a noise frame; skip.
+          continue;
         }
         if (frame.direction === "close") {
           try {
@@ -830,31 +932,16 @@ export class DaytonaMock {
   }
 
   /**
-   * If this is a `POST /sandbox` response carrying `toolboxProxyUrl`,
-   * remember the real URL and rewrite the response to point at our
-   * mock so the SDK's subsequent toolbox calls hit us. The placeholder
-   * `__daytona_mock__` host is written to the fixture and substituted
-   * for the current mock URL at replay time — keeps fixtures portable
-   * across processes (mock port is random).
-   *
-   * Daytona's real `toolboxProxyUrl` does NOT contain the sandbox-id;
-   * the SDK appends `<sandbox-id>` itself to build per-sandbox URLs
-   * (see Sandbox.js → `axiosInstance.defaults.baseURL = baseUrl + id`).
-   * Our rewrite mirrors that — bare `/toolbox` — so the SDK's
-   * appending math produces `/toolbox/<id>/…` paths the mock can
-   * route by extracting the id.
+   * Rewrite every `toolboxProxyUrl` in the response body to the mock's
+   * placeholder so the SDK's subsequent toolbox calls hit us. Must run
+   * on ALL responses (not just `POST /sandbox`) — `sandbox.resume()`
+   * goes through `daytona.get(sandboxId)`, and the SDK rebinds its
+   * axios baseURL from the GET response's `toolboxProxyUrl` too. List
+   * endpoints (`/sandbox/paginated`) return arrays; the walk handles
+   * them in one pass. Placeholder stays portable across mock-port spawns.
    */
-  #rewriteCreateResponse(method: string, path: string, body: unknown): unknown {
-    if (method !== "POST") return body;
-    if (path !== "/sandbox") return body;
-    if (typeof body !== "object" || body === null) return body;
-    const obj = body as Record<string, unknown>;
-    const id = obj.id;
-    const originalToolbox = obj.toolboxProxyUrl;
-    if (typeof id !== "string" || typeof originalToolbox !== "string") return body;
-    this.#toolboxUpstreams.set(id, originalToolbox);
-    obj.toolboxProxyUrl = `${MOCK_URL_PLACEHOLDER}/toolbox`;
-    return obj;
+  #rewriteCreateResponse(_method: string, _path: string, body: unknown): unknown {
+    return rewriteToolboxProxyUrls(body, this.#toolboxUpstreams);
   }
 
   /**
