@@ -35,7 +35,7 @@ import {
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { loadCodingSandboxEnv } from "./auth.js";
-import { runCommitAndPush } from "./commit-push.js";
+import { commitAuthorFor, runCommitAndPush } from "./commit-push.js";
 import { parseRemoteUrl, runOpenDraftPr } from "./draft-pr.js";
 import { fetchFeatureBranch } from "./git-as-transport.js";
 import {
@@ -53,21 +53,6 @@ const log = logger.child({ component: "coding.verify-orchestrator" });
 
 const HOME_VOLUME_PREFIX = "cogmo-task-home";
 const WORKTREE_DIR_IN_CONTAINER = "/workspace";
-
-/**
- * Build the commit author for a given identity. GitHub's canonical
- * non-routable suffix is `<id>+<login>@users.noreply.github.com` —
- * commits authored under this email reverse-resolve to the bot account
- * on github.com (right avatar, right "authored by" link), and the
- * email never delivers anywhere because GitHub blocks delivery to that
- * suffix. The author *name* is a freeform display label.
- */
-function commitAuthorFor(identity: GitHubIdentity): { name: string; email: string } {
-  return {
-    name: identity.login,
-    email: `${identity.id}+${identity.login}@users.noreply.github.com`,
-  };
-}
 
 export interface VerifyOrchestratorDeps {
   runInTx: Transactor;
@@ -89,6 +74,8 @@ export interface VerifyOrchestratorDeps {
    * PAT isn't known until the identity bundle is decrypted per-task.
    */
   octokitFactory?: (pat: string) => Octokit;
+  /** Test-only — same role as `CodingOrchestratorDeps.loadCodingSandboxEnv`. */
+  loadCodingSandboxEnv?: typeof loadCodingSandboxEnv;
 }
 
 export interface VerifyOrchestratorResult {
@@ -208,7 +195,8 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   // Same fail-fast contract for the Claude Code subscription token —
   // resolved here (not inside the create-container step) so a missing
   // secret doesn't waste an askpass provision on disk before surfacing.
-  const authResult = await runInTx((tx) => loadCodingSandboxEnv(tx, secretsStore));
+  const loadAuth = deps.loadCodingSandboxEnv ?? loadCodingSandboxEnv;
+  const authResult = await runInTx((tx) => loadAuth(tx, secretsStore));
   if (authResult.isErr()) {
     return await failAndTeardown(authResult.error.message);
   }

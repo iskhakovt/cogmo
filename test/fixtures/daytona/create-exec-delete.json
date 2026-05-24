@@ -1,6 +1,5 @@
 {
   "scenario": "create-exec-delete",
-  "recordedAt": "2026-05-19T15:25:57.916Z",
   "calls": [
     {
       "kind": "http",

@@ -25,6 +25,7 @@ let mock: LLMock | null = null;
 let telegramMock: TelegramMockServer | null = null;
 let mcpEchoServer: Awaited<ReturnType<typeof startMcpEchoHttpServer>> | null = null;
 let skillsPath: string | null = null;
+let askpassPath: string | null = null;
 
 /**
  * Bot token for the seeded integration-test Telegram channel. Format matches
@@ -98,7 +99,10 @@ export async function setup({ provide }: GlobalSetupContext) {
   process.env.S3_ACCESS_KEY = "minioadmin";
   process.env.S3_SECRET_KEY = "minioadmin";
   process.env.S3_BUCKET = "cogmo-files";
-  process.env.LOG_LEVEL = "warn";
+  // Default to `warn` so noisy info-level logs don't drown the test
+  // output, but let the operator opt-in to `info` / `debug` for a
+  // recording or debugging session via `LOG_LEVEL=... pnpm test:integration ...`.
+  process.env.LOG_LEVEL = process.env.LOG_LEVEL ?? "warn";
   // fal-mock intercepts all real network traffic in tests, so the dummy key
   // is never validated. Real key passes through in record mode when the
   // operator sets it locally: RECORD=1 FAL_API_KEY=... pnpm test:integration.
@@ -107,6 +111,11 @@ export async function setup({ provide }: GlobalSetupContext) {
   // Per-test-run volume name so parallel integration files don't share
   // a populated venv cache.
   process.env.COGMO_SKILLS_DEPS_VOLUME = `cogmo-skills-deps-test-${randomUUID()}`;
+  // `SANDBOX_ASKPASS_DIR` defaults to `/run/cogmo/askpass` for production
+  // (root-owned tmpfs, written by the cogmo service user). Tests run as
+  // the developer's user; redirect to a tmpdir we can mkdir into.
+  askpassPath = await mkdtemp(join(tmpdir(), "cogmo-askpass-it-"));
+  process.env.SANDBOX_ASKPASS_DIR = askpassPath;
 
   // Skills bare repo lives on the host (not in a container) — bootstrap
   // initializes it on every boot. Use a tempdir so tests don't try to write
@@ -136,21 +145,41 @@ export async function setup({ provide }: GlobalSetupContext) {
   execSync("tsx src/main.ts seed", { stdio: "inherit" });
   console.log("Seed complete.");
 
+  // Drizzle handle so the channels insert below uses typed inserts +
+  // JSONB schema validation, not raw `${sql.json(...)}` interpolation.
+  // Same project-wide rule as the e2e setup's seed step.
+  const { drizzle } = await import("drizzle-orm/postgres-js");
+  const { eq } = await import("drizzle-orm");
+  const dbSchema = await import("../src/db/schemas.js");
+  const { users } = dbSchema;
+  const { channels } = await import("../src/transport/store/schema.js");
   const postgres = (await import("postgres")).default;
   const sql = postgres(urls.databaseUrl);
-  const rows = await sql<{ id: string }[]>`SELECT id FROM users LIMIT 1`;
+  const db = drizzle({ client: sql, schema: dbSchema });
+
+  const userRows = await db.select({ id: users.id }).from(users).limit(1);
+  const defaultUserId = userRows[0]?.id;
+  if (!defaultUserId) throw new Error("Default user not found after seed");
+
   // Telegram channel fixture — `bootstrap()` iterates every channel row
   // through `startChannels`, which constructs a grammY `Bot` with these
   // credentials. The `apiRoot` field is consumed by the Telegram adapter's
-  // `setup()` and routes all bot API calls to the mock above.
-  await sql`
-    INSERT INTO channels (type, credentials, identity_mode)
-    SELECT 'telegram', ${sql.json({ token: TELEGRAM_TEST_BOT_TOKEN, apiRoot: telegramMock.url })}, 'create'
-    WHERE NOT EXISTS (SELECT 1 FROM channels WHERE type = 'telegram')
-  `;
+  // `setup()` and routes all bot API calls to the mock above. Insert is
+  // gated on "telegram channel not already present" so re-runs of the
+  // integration setup don't duplicate the row.
+  const existing = await db
+    .select({ id: channels.id })
+    .from(channels)
+    .where(eq(channels.type, "telegram"))
+    .limit(1);
+  if (!existing[0]) {
+    await db.insert(channels).values({
+      type: "telegram",
+      credentials: { token: TELEGRAM_TEST_BOT_TOKEN, apiRoot: telegramMock.url },
+      identityMode: "create",
+    });
+  }
   await sql.end();
-  const defaultUserId = rows[0]?.id;
-  if (!defaultUserId) throw new Error("Default user not found after seed");
 
   provide("databaseUrl", urls.databaseUrl);
   provide("inngestBaseUrl", urls.inngestBaseUrl);
@@ -175,6 +204,9 @@ export async function teardown() {
   if (network) await network.stop();
   if (skillsPath) {
     await rm(skillsPath, { recursive: true, force: true });
+  }
+  if (askpassPath) {
+    await rm(askpassPath, { recursive: true, force: true });
   }
   // Drop the per-run skill-deps cache volume so long-running dev
   // machines don't accumulate one per integration-test invocation.

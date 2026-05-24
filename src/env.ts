@@ -224,7 +224,7 @@ export const env = createEnv({
      * Host root for per-task git-askpass material. Each task gets
      * `${SANDBOX_ASKPASS_DIR}/<task-id>/` provisioned with a helper script,
      * the bot account's PAT, and the SSH signing key — bind-mounted into
-     * the task container at `/.cogmo-askpass/`. Wiped on `stopTask`.
+     * the task container at `/tmp/cogmo-askpass/`. Wiped on `stopTask`.
      */
     SANDBOX_ASKPASS_DIR: z.string().default("/run/cogmo/askpass"),
     /**

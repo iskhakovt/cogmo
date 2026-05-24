@@ -47,6 +47,36 @@ describe("readJsonl", () => {
     expect(await collect(s)).toEqual([{ a: 1 }, { b: 2 }]);
   });
 
+  it("silently drops PTY shell preamble (echoed exec, OSC title, mode-reset)", async () => {
+    // Real-world preamble captured from a Daytona PTY shell — bash echoes
+    // the typed `exec …` line in cooked mode and emits OSC title sequences
+    // via PROMPT_COMMAND even with PS1 empty. Lines without a `{` are
+    // non-records and must drop without raising the warn-log floor.
+    const s = streamOf(
+      "exec 'claude' '-p' '--output-format' 'stream-json' < '/tmp/...'\n",
+      "\x1b]2;exec 'claude'…\x07\x1b[?2004l\n",
+      '{"type":"system","subtype":"init"}\n',
+      "\x1b]0;\x07\n",
+      '{"type":"assistant","content":"hi"}\n',
+    );
+    expect(await collect(s)).toEqual([
+      { type: "system", subtype: "init" },
+      { type: "assistant", content: "hi" },
+    ]);
+  });
+
+  it("extracts JSON from a line with leading OSC/ANSI prefix", async () => {
+    // Real-world capture: bash emits a final OSC icon-name sequence as
+    // it transitions out of interactive mode, and claude's first
+    // stream-json event arrives on the SAME PTY line (no newline
+    // between bash's `\e]1;exec\a` and claude's `{...}` write). A strict
+    // first-char-must-be-`{` filter drops this line and the orchestrator
+    // never sees the `system init` event → no session_id captured →
+    // execute orchestrator fails with "no session_id".
+    const s = streamOf('\x1b]1;exec\x07{"type":"system","subtype":"init","session_id":"abc"}\n');
+    expect(await collect(s)).toEqual([{ type: "system", subtype: "init", session_id: "abc" }]);
+  });
+
   it("handles CRLF line endings", async () => {
     const s = streamOf('{"a":1}\r\n{"b":2}\r\n');
     expect(await collect(s)).toEqual([{ a: 1 }, { b: 2 }]);
@@ -54,5 +84,25 @@ describe("readJsonl", () => {
 
   it("handles an empty stream", async () => {
     expect(await collect(streamOf())).toEqual([]);
+  });
+
+  it("extracts the JSON object when trailing noise follows the closing brace", async () => {
+    // The PTY can leak terminal control bytes (cursor reset, OSC echo)
+    // immediately after the closing brace on the same line. The
+    // balanced-brace scan picks the inner object and ignores the tail.
+    const s = streamOf('{"type":"assistant","content":"hi"}\x1b[0m\x1b]0;\x07\n');
+    expect(await collect(s)).toEqual([{ type: "assistant", content: "hi" }]);
+  });
+
+  it("respects braces inside JSON string values", async () => {
+    // The brace scan must track string state — a `}` inside a string
+    // shouldn't close the outer object early.
+    const s = streamOf('{"k":"a}b{c"}\n');
+    expect(await collect(s)).toEqual([{ k: "a}b{c" }]);
+  });
+
+  it("parses nested objects without truncating at an inner closing brace", async () => {
+    const s = streamOf('{"outer":{"inner":1}}\n');
+    expect(await collect(s)).toEqual([{ outer: { inner: 1 } }]);
   });
 });

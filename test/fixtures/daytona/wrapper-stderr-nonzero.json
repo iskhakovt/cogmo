@@ -1,6 +1,5 @@
 {
   "scenario": "wrapper-stderr-nonzero",
-  "recordedAt": "2026-05-19T15:28:39.751Z",
   "calls": [
     {
       "kind": "http",

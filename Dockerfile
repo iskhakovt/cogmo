@@ -3,6 +3,7 @@ FROM mirror.gcr.io/library/node:24-slim@sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cc
 FROM base AS build
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY patches/ patches/
 # Install pnpm via npm in the build stage; version is parsed from the
 # `packageManager` field so package.json stays the single source of truth.
 # Avoids corepack, which seeds an older LKG pnpm in ~/.cache/node/corepack

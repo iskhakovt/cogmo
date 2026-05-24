@@ -48,6 +48,9 @@ function normalizeContent(text: string): string {
         /\b(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+\w+\s+\d{1,2},\s+\d{4}\b/g,
         "[DATE]",
       )
+      // Claude Code's harness emits "Today's date is YYYY-MM-DD." as a
+      // system-reminder. Strip the date so fixtures don't drift by day.
+      .replace(/Today's date is \d{4}-\d{2}-\d{2}/g, "Today's date is [DATE]")
       // Test bank IDs (`test-1775815196908`, `test-compartments-1775...`) —
       // Hindsight bakes the bank ID into extraction prompts as the narrator
       // name. Optional `-<word>` segment lets per-suite banks include a
