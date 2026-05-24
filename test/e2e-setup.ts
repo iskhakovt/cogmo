@@ -95,10 +95,18 @@ export async function setup({ provide }: GlobalSetupContext) {
   console.log("Seed complete.");
 
   // Seed an LLM provider into the DB so bootstrap() can resolve it.
-  // Uses raw SQL to avoid importing the store layer into the e2e setup.
+  // Uses the same Drizzle handle the app does — schema-typed inserts
+  // keep this aligned with column renames + JSONB schema validation,
+  // and remove a class of foot-guns (postgres-js raw `${jsValue}`
+  // against typed columns) flagged by the project's code-style rules.
   const { generateMasterKey, parseMasterKey, deriveMasterKey, encrypt, toBase64 } = await import(
     "../src/secrets/encryption.js"
   );
+  const { drizzle } = await import("drizzle-orm/postgres-js");
+  const dbSchema = await import("../src/db/schemas.js");
+  const { users, profiles, llmProviders, modelProviders } = dbSchema;
+  const { secrets } = await import("../src/secrets/store/schema.js");
+
   const masterKey = generateMasterKey();
   const encKey = deriveMasterKey(parseMasterKey(masterKey), "cogmo/secrets-at-rest/v1");
   const apiKey = process.env.ANTHROPIC_API_KEY ?? "test-key";
@@ -106,31 +114,47 @@ export async function setup({ provide }: GlobalSetupContext) {
 
   const postgres = (await import("postgres")).default;
   const sql = postgres(urls.databaseUrl);
-  const rows = await sql<{ id: string }[]>`SELECT id FROM users LIMIT 1`;
-  const defaultUserId = rows[0]?.id;
+  const db = drizzle({ client: sql, schema: dbSchema });
+
+  const userRows = await db.select({ id: users.id }).from(users).limit(1);
+  const defaultUserId = userRows[0]?.id;
   if (!defaultUserId) throw new Error("Default user not found after seed");
 
   // Insert encrypted secret + provider + model routing inside one transaction so a
   // partial e2e seed can't leave orphaned rows (project rule: all DB ops transactional).
-  await sql.begin(async (tx) => {
-    const [secret] = await tx<{ id: string }[]>`
-      INSERT INTO secrets (id, name, ciphertext, nonce, description)
-      VALUES (uuidv7(), 'anthropic_api_key', ${toBase64(ciphertext)}, ${toBase64(nonce)}, 'E2e test key')
-      RETURNING id
-    `;
+  await db.transaction(async (tx) => {
+    const [secret] = await tx
+      .insert(secrets)
+      .values({
+        name: "anthropic_api_key",
+        ciphertext: toBase64(ciphertext),
+        nonce: toBase64(nonce),
+        description: "E2e test key",
+      })
+      .returning({ id: secrets.id });
     if (!secret) throw new Error("Secret insert returned no row");
-    const [provider] = await tx<{ id: string }[]>`
-      INSERT INTO llm_providers (id, name, type, base_url, secret_id, attrs)
-      VALUES (uuidv7(), 'anthropic', 'anthropic', ${`http://host.docker.internal:${mock.port}`}, ${secret.id}, '{}')
-      RETURNING id
-    `;
+
+    const [provider] = await tx
+      .insert(llmProviders)
+      .values({
+        name: "anthropic",
+        type: "anthropic",
+        baseUrl: `http://host.docker.internal:${mock.port}`,
+        secretId: secret.id,
+        attrs: {},
+      })
+      .returning({ id: llmProviders.id });
     if (!provider) throw new Error("Provider insert returned no row");
-    const [profileRow] = await tx<{ model: string }[]>`SELECT model FROM profiles LIMIT 1`;
-    if (!profileRow) throw new Error("Default profile not found after seed");
-    await tx`
-      INSERT INTO model_providers (id, model, provider_id, position, user_selectable)
-      VALUES (uuidv7(), ${profileRow.model}, ${provider.id}, 0, true)
-    `;
+
+    const profileRows = await tx.select({ model: profiles.model }).from(profiles).limit(1);
+    if (!profileRows[0]) throw new Error("Default profile not found after seed");
+
+    await tx.insert(modelProviders).values({
+      model: profileRows[0].model,
+      providerId: provider.id,
+      position: 0,
+      userSelectable: true,
+    });
   });
   await sql.end();
 

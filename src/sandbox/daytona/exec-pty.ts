@@ -223,14 +223,17 @@ export async function startExecPty(args: {
       // already armed at function entry.
       resetIdle();
 
-      // `exec` replaces the shell, so PTY exit = target exit. Stdin
-      // comes from the uploaded tmpfile (real pipe FD = real EOF);
-      // stderr is redirected so onData carries only stdout.
-      const shellLine = `exec ${shellEscapeArgv(cmd)} < ${shellEscape(stdinPath)} 2> ${shellEscape(stderrPath)}\n`;
+      // `cat file | cmd` (not `cmd < file`): claude 2.1.138 silently
+      // exits 0 with no output when stream-json input arrives via a
+      // regular file FD. Outer `exec bash --norc --noprofile -c` swaps
+      // the default interactive bash for a non-interactive one — no
+      // readline echo, no `PROMPT_COMMAND` OSCs after the swap.
+      const innerScript = `cat ${shellEscape(stdinPath)} | exec ${shellEscapeArgv(cmd)} 2> ${shellEscape(stderrPath)}`;
+      const shellLine = `exec bash --norc --noprofile -c ${shellEscape(innerScript)}\n`;
       await pty.sendInput(shellLine);
     };
 
-    const settle = async (): Promise<void> => {
+    const settle = async (opts: { exitCode?: number } = {}): Promise<void> => {
       clearTimers();
       stdout.end();
 
@@ -248,9 +251,17 @@ export async function startExecPty(args: {
           stderr.write(errBuf);
         }
       } catch (err) {
-        log.debug(
-          { err: (err as Error).message, path: stderrPath },
-          "stderr tmpfile download failed (often expected — child may not have written)",
+        // Clean-exit (or unknown-exit) downloads default to `debug` —
+        // the common shape is a child that simply never wrote to
+        // stderr, and `warn` floods at LOG_LEVEL=info. A non-zero
+        // exit IS the rare-but-critical case where the stderr tmpfile
+        // is the only diagnostic for *why*, so promote to `warn`.
+        const failedDownloadLog =
+          opts.exitCode !== undefined && opts.exitCode !== 0 ? log.warn : log.debug;
+        failedDownloadLog.call(
+          log,
+          { err: (err as Error).message, path: stderrPath, exitCode: opts.exitCode },
+          "stderr tmpfile download failed",
         );
       }
       stderr.end();
@@ -285,7 +296,7 @@ export async function startExecPty(args: {
 
       try {
         const result = await handle.wait();
-        await settle();
+        await settle(result.exitCode !== undefined ? { exitCode: result.exitCode } : {});
         if (timedOut) {
           reject(timedOut);
           return;

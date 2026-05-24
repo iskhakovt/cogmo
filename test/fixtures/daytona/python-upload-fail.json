@@ -1,6 +1,5 @@
 {
   "scenario": "python-upload-fail",
-  "recordedAt": "2026-05-19T15:26:07.076Z",
   "calls": [
     {
       "kind": "http",

@@ -1274,6 +1274,38 @@ describe("DaytonaSandboxClient", () => {
       }
     });
 
+    it("recovers from snapshot.create 409 (stale-stub conflict) by rebuilding under a fresh name", async () => {
+      // Daytona's snapshot builder occasionally leaks a stub when
+      // `withRetry` re-attempts `snapshot.create` after the "repository
+      // … not found" transient — attempt 0 leaves a stub server-side,
+      // attempt 1 then hits 409 on the same name. The 409 propagates
+      // out of `withRetry` (pRetry classifies it as non-retryable),
+      // which was the v2.1.0 first-task-after-deploy failure mode. The
+      // `#buildWithConflictRecovery` wrapper catches it and rebuilds
+      // once under `<name>-r-<hex>`. Two `snapshot.create` calls total:
+      // the original-name attempt that 409s, and the rebuild-name
+      // attempt that lands ACTIVE.
+      daytonaCalls.snapshotGet.mockRejectedValue(new DaytonaNotFoundError("not found"));
+      const conflict = new DaytonaConflictError(
+        `Snapshot with name "${DEVBASE_SNAPSHOT}" already exists for this organization`,
+      );
+      daytonaCalls.snapshotCreate
+        .mockRejectedValueOnce(conflict)
+        .mockImplementation(async (arg: unknown) => {
+          const { name } = arg as { name: string };
+          return fakeSnapshot({ name, state: SnapshotState.ACTIVE });
+        });
+
+      const client = await makeClient();
+      await client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
+
+      expect(daytonaCalls.snapshotCreate).toHaveBeenCalledTimes(2);
+      const firstArg = daytonaCalls.snapshotCreate.mock.calls[0]?.[0] as { name: string };
+      const secondArg = daytonaCalls.snapshotCreate.mock.calls[1]?.[0] as { name: string };
+      expect(firstArg.name).toBe(DEVBASE_SNAPSHOT);
+      expect(secondArg.name).toMatch(new RegExp(`^${DEVBASE_SNAPSHOT}-r-[0-9a-f]{8}$`));
+    });
+
     it("does NOT retry snapshot.create on persistent (non-matching) errors", async () => {
       // A real image-build failure (broken Dockerfile, missing upstream
       // image, auth) doesn't match the transient signature and must

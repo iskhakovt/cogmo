@@ -1,0 +1,55 @@
+diff --git a/esm/FileSystem.js b/esm/FileSystem.js
+index 3ca03ff8d8f29e75feeaf277b57bf0e431d2e311..805f764b2392d81bfb95bac445bd7ccfcaae5afb 100644
+--- a/esm/FileSystem.js
++++ b/esm/FileSystem.js
+@@ -2,6 +2,11 @@
+  * Copyright 2025 Daytona Platforms Inc.
+  * SPDX-License-Identifier: Apache-2.0
+  */
++// Cogmo local patch: top-level ESM import for `Transform`. Same reasoning
++// as the patch in `utils/FileTransfer.js` — the bare `require('stream')`
++// inside `downloadFileStream`'s onProgress branch throws under vite-node.
++// Remove this comment + the import when upstream lands the fix.
++import { Transform } from 'node:stream';
+ import { __decorate, __metadata } from "tslib";
+ import * as pathe from 'pathe';
+ import axios from 'axios';
+@@ -111,7 +116,7 @@ export class FileSystem {
+             let resolvedStream = null;
+             processDownloadFilesResponseWithBusboy(responseStream, response.headers, metadataMap, (_source, fileStream, totalBytes) => {
+                 if (options.onProgress) {
+-                    const { Transform } = require('stream');
++                    // Cogmo local patch: `Transform` imported at top of file.
+                     let bytesReceived = 0;
+                     const progress = new Transform({
+                         transform(chunk, _encoding, callback) {
+diff --git a/esm/utils/FileTransfer.js b/esm/utils/FileTransfer.js
+index 08e97e614f73cc6c309051b0615fd8d6588ca57e..d1f82073ef39d0cfad95ca73fd9fdf387f50a84a 100644
+--- a/esm/utils/FileTransfer.js
++++ b/esm/utils/FileTransfer.js
+@@ -2,6 +2,14 @@
+  * Copyright 2025 Daytona Platforms Inc.
+  * SPDX-License-Identifier: Apache-2.0
+  */
++// Cogmo local patch: top-level ESM import for `Transform` so the ESM build
++// works under vite-node / Vitest (and any other strict-ESM consumer) where
++// the bare `require('stream')` at line ~320 below would throw
++// `ReferenceError: require is not defined`. Upstream issue: the SDK's
++// `scripts/post-build.js` prepends a `createRequire` shim to Import.js but
++// missed this file. Patched via `pnpm patch @daytonaio/sdk@0.175.0`;
++// remove this comment + the import when upstream lands the fix.
++import { Transform } from 'node:stream';
+ import { DaytonaError } from '../errors/DaytonaError.js';
+ import { dynamicImport, dynamicRequire } from './Import.js';
+ import { collectStreamBytes, toBuffer, toUint8Array } from './Binary.js';
+@@ -317,7 +325,9 @@ async function feedStreamToBusboy(stream, bb, observer) {
+     // always emits DaytonaError, not a raw library error.
+     if (typeof stream?.pipe === 'function') {
+         if (observer) {
+-            const { Transform } = require('stream');
++            // Cogmo local patch: `Transform` imported at top of file from
++            // `node:stream`. Original `const { Transform } = require('stream');`
++            // throws under vite-node — see top-of-file comment.
+             const tapStream = new Transform({
+                 transform(chunk, _encoding, callback) {
+                     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);

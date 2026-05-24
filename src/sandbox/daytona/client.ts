@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
   Daytona,
+  DaytonaConflictError,
   DaytonaConnectionError,
   DaytonaNotFoundError,
   DaytonaRateLimitError,
@@ -325,11 +326,42 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
         );
         this.#fireAndForgetDelete(existing, image);
       }
-      return await this.#buildSnapshot(image, rebuildSnapshotName(name), resourceLimits);
+      return await this.#buildWithConflictRecovery(
+        image,
+        rebuildSnapshotName(name),
+        resourceLimits,
+      );
     } catch (err) {
       if (!(err instanceof DaytonaNotFoundError)) throw err;
       log.info({ image, snapshot: name }, "snapshot not found — building");
+      return await this.#buildWithConflictRecovery(image, name, resourceLimits);
+    }
+  }
+
+  /**
+   * `#buildSnapshot` wrapped with one-shot 409-conflict recovery.
+   * Daytona occasionally leaks a stub row when `snapshot.create`
+   * retries internally — attempt 0 fails transient, attempt 1 409s on
+   * the same name. The wrapper rebuilds once under `<name>-r-<hex>`.
+   * Concurrent-warmer race (two callers both pass initial `get`
+   * NotFound) lands here too — the loser pays a duplicate build;
+   * benign at single-user scale.
+   */
+  async #buildWithConflictRecovery(
+    image: string,
+    name: string,
+    resourceLimits: ResourceLimits | undefined,
+  ): Promise<string> {
+    try {
       return await this.#buildSnapshot(image, name, resourceLimits);
+    } catch (err) {
+      if (!(err instanceof DaytonaConflictError)) throw err;
+      const rebuildName = rebuildSnapshotName(name);
+      log.info(
+        { image, originalName: name, rebuildName },
+        "snapshot.create returned 409 — name taken (stale stub from a retried-create cycle); rebuilding under fresh name",
+      );
+      return await this.#buildSnapshot(image, rebuildName, resourceLimits);
     }
   }
 

@@ -6,6 +6,7 @@ import { ClaudeCodeBackend } from "./agent/coding/claude.js";
 import { createOrphanRunBranchSweepFunctions } from "./agent/coding/cleanup-orphan-run-branches.js";
 import { createRunBranchCleanupSubscriber } from "./agent/coding/cleanup-run-branch.js";
 import {
+  type CodingOrchestratorDeps,
   createCodingExecuteOrchestrator,
   createCodingOrchestrator,
   type ExecuteStreamHandle,
@@ -143,6 +144,14 @@ export interface BootstrapOptions {
    * backend identity).
    */
   sandboxClientOverride?: SandboxClient;
+  /**
+   * Test-only override for the in-sandbox coding-auth resolver. When
+   * omitted, the orchestrators use the real `loadCodingSandboxEnv` —
+   * missing `claude_code_oauth_token` then fails fast (no silent
+   * fallback to metered API-key billing for users who forgot to run
+   * `claude setup-token`).
+   */
+  codingAuthOverride?: CodingOrchestratorDeps["loadCodingSandboxEnv"];
 }
 
 /**
@@ -723,6 +732,7 @@ export async function bootstrapRuntime(
       defaultResourceLimits: DEFAULT_CODING_RESOURCE_LIMITS,
       taskTtlMs: env.CODING_TASK_IDLE_TTL_MINUTES * 60 * 1000,
       worktreesDir: env.COGMO_WORKTREES_DIR,
+      ...(opts.codingAuthOverride && { loadCodingSandboxEnv: opts.codingAuthOverride }),
       openPlanStream: async (taskId: string): Promise<PlanStreamHandle> => ({
         async appendText(delta) {
           codingStreamingRegistry.publish(taskId, { kind: "text", delta });
@@ -782,6 +792,7 @@ export async function bootstrapRuntime(
           defaultResourceLimits: orchestratorDeps.defaultResourceLimits,
           taskTtlMs: orchestratorDeps.taskTtlMs,
           openExecuteStream: orchestratorDeps.openExecuteStream,
+          ...(opts.codingAuthOverride && { loadCodingSandboxEnv: opts.codingAuthOverride }),
         },
         inngest,
       ),

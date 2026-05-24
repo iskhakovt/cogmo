@@ -99,6 +99,12 @@ export interface CodingOrchestratorDeps {
    * bootstrap (slice 2.0f), consumed by Telegram delivery in 2.0g.
    */
   openExecuteStream?: (taskId: string) => Promise<ExecuteStreamHandle>;
+  /**
+   * Test-only override for the in-sandbox coding-auth resolver. Threaded
+   * from `BootstrapOptions.codingAuthOverride`; production leaves it
+   * undefined so missing `claude_code_oauth_token` still fails fast.
+   */
+  loadCodingSandboxEnv?: typeof loadCodingSandboxEnv;
 }
 
 export interface CodingOrchestratorResult {
@@ -289,9 +295,10 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     // the orchestrator is wired without a secrets store (unit tests).
     // Local-capture narrows the type and avoids `secretsStore!`.
     const secretsStore = deps.secretsStore;
+    const loadAuth = deps.loadCodingSandboxEnv ?? loadCodingSandboxEnv;
     let sandboxEnv: Record<string, string> | undefined;
     if (secretsStore) {
-      const authResult = await runInTx((tx) => loadCodingSandboxEnv(tx, secretsStore));
+      const authResult = await runInTx((tx) => loadAuth(tx, secretsStore));
       if (authResult.isErr()) {
         throw new Error(authResult.error.message);
       }
@@ -839,9 +846,10 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
         await sandbox.ensureImagePresent(containerImage, defaultResourceLimits);
       });
       sessionState = await stepRun("create-container", async () => {
+        const loadAuth = deps.loadCodingSandboxEnv ?? loadCodingSandboxEnv;
         let sandboxEnv: Record<string, string> | undefined;
         if (secretsStore) {
-          const authResult = await runInTx((tx) => loadCodingSandboxEnv(tx, secretsStore));
+          const authResult = await runInTx((tx) => loadAuth(tx, secretsStore));
           if (authResult.isErr()) {
             throw new Error(authResult.error.message);
           }

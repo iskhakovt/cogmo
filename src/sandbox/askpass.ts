@@ -36,14 +36,14 @@ import type { GitHubIdentity } from "../secrets/github.js";
 
 const log = logger.child({ component: "sandbox.askpass" });
 
-/** Mount target inside the container. Constant so the helper, PAT, and
- * signing-key paths are predictable from the in-container env. */
-export const CONTAINER_ASKPASS_DIR = "/.cogmo-askpass";
+/** Mount target inside the container. `/tmp` because the Daytona toolbox
+ * uploads as the sandbox's non-root user and can't `mkdir /<anything>`. */
+export const CONTAINER_ASKPASS_DIR = "/tmp/cogmo-askpass";
 
 export interface AskpassMaterials {
   /** Host directory holding the helper + secret files. Bind-mount source. */
   hostDir: string;
-  /** Mount target inside the container — always `/.cogmo-askpass`. */
+  /** Mount target inside the container — always `/tmp/cogmo-askpass`. */
   containerDir: string;
   /** Env vars to pass via `exec`'s `opts.env` when running git. */
   env: Readonly<Record<string, string>>;

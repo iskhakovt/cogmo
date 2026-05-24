@@ -310,7 +310,7 @@ function fakeSandbox(opts: { worktreePath: string }): {
         createCalls.push(spec);
         lastSpec = spec;
         // The askpass helper script's body embeds the *container* path
-        // (`/.cogmo-askpass/pat`). Host execution needs that to resolve to
+        // (`/tmp/cogmo-askpass/pat`). Host execution needs that to resolve to
         // the host path. Rewrite the helper file on disk so `cat` reads
         // the actual file. Same-shell-quoting kept by the rewrite — the
         // helper just contains the literal path under single quotes.

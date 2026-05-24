@@ -1,6 +1,5 @@
 {
   "scenario": "wrapper-success",
-  "recordedAt": "2026-05-19T15:28:14.901Z",
   "calls": [
     {
       "kind": "http",

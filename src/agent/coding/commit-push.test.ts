@@ -86,7 +86,7 @@ function isFlagValue(s: string): boolean {
 }
 
 const askpassEnv = Object.freeze({
-  GIT_ASKPASS: "/.cogmo-askpass/helper",
+  GIT_ASKPASS: "/tmp/cogmo-askpass/helper",
   GIT_TERMINAL_PROMPT: "0",
 });
 
@@ -107,7 +107,7 @@ describe("runCommitAndPush", () => {
       worktreeDir: "/workspace",
       branch: "cogmo/abc12345",
       commitMessage: "test goal",
-      signingKeyPath: "/.cogmo-askpass/signing-key",
+      signingKeyPath: "/tmp/cogmo-askpass/signing-key",
       askpassEnv,
       author,
     });
@@ -120,7 +120,7 @@ describe("runCommitAndPush", () => {
     // Verify the commit invocation used the per-invocation signing config.
     const commitCall = calls.find((c) => c.args.includes("commit"));
     expect(commitCall).toBeDefined();
-    expect(commitCall?.args).toContain("user.signingkey=/.cogmo-askpass/signing-key");
+    expect(commitCall?.args).toContain("user.signingkey=/tmp/cogmo-askpass/signing-key");
     expect(commitCall?.args).toContain("gpg.format=ssh");
     expect(commitCall?.args).toContain("user.email=cogmo-bot@noreply");
     expect(commitCall?.args).toContain("user.name=Cogmo Bot".replace('"', ""));
@@ -145,7 +145,7 @@ describe("runCommitAndPush", () => {
       worktreeDir: "/workspace",
       branch: "cogmo/abc",
       commitMessage: "no-op",
-      signingKeyPath: "/.cogmo-askpass/signing-key",
+      signingKeyPath: "/tmp/cogmo-askpass/signing-key",
       askpassEnv,
       author,
     });
@@ -170,7 +170,7 @@ describe("runCommitAndPush", () => {
       worktreeDir: "/workspace",
       branch: "cogmo/abc",
       commitMessage: "x",
-      signingKeyPath: "/.cogmo-askpass/signing-key",
+      signingKeyPath: "/tmp/cogmo-askpass/signing-key",
       askpassEnv,
       author,
     });
@@ -197,7 +197,7 @@ describe("runCommitAndPush", () => {
       worktreeDir: "/workspace",
       branch: "cogmo/abc",
       commitMessage: "x",
-      signingKeyPath: "/.cogmo-askpass/signing-key",
+      signingKeyPath: "/tmp/cogmo-askpass/signing-key",
       askpassEnv,
       author,
     });
@@ -217,7 +217,7 @@ describe("runCommitAndPush", () => {
       worktreeDir: "/workspace",
       branch: "cogmo/abc",
       commitMessage: "x",
-      signingKeyPath: "/.cogmo-askpass/signing-key",
+      signingKeyPath: "/tmp/cogmo-askpass/signing-key",
       askpassEnv,
       author,
     });
@@ -239,7 +239,7 @@ describe("runCommitAndPush", () => {
       worktreeDir: "/workspace",
       branch: "cogmo/abc",
       commitMessage: "x",
-      signingKeyPath: "/.cogmo-askpass/signing-key",
+      signingKeyPath: "/tmp/cogmo-askpass/signing-key",
       askpassEnv,
       author,
     });
@@ -263,7 +263,7 @@ describe("runCommitAndPush", () => {
       worktreeDir: "/workspace",
       branch: "cogmo/abc",
       commitMessage: "x",
-      signingKeyPath: "/.cogmo-askpass/signing-key",
+      signingKeyPath: "/tmp/cogmo-askpass/signing-key",
       askpassEnv,
       author,
     });
@@ -291,7 +291,7 @@ describe("runCommitAndPush", () => {
       worktreeDir: "/workspace",
       branch: "cogmo/abc",
       commitMessage: "x",
-      signingKeyPath: "/.cogmo-askpass/signing-key",
+      signingKeyPath: "/tmp/cogmo-askpass/signing-key",
       askpassEnv,
       author,
     });

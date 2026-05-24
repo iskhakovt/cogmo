@@ -89,6 +89,8 @@ export interface VerifyOrchestratorDeps {
    * PAT isn't known until the identity bundle is decrypted per-task.
    */
   octokitFactory?: (pat: string) => Octokit;
+  /** Test-only — same role as `CodingOrchestratorDeps.loadCodingSandboxEnv`. */
+  loadCodingSandboxEnv?: typeof loadCodingSandboxEnv;
 }
 
 export interface VerifyOrchestratorResult {
@@ -208,7 +210,8 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   // Same fail-fast contract for the Claude Code subscription token —
   // resolved here (not inside the create-container step) so a missing
   // secret doesn't waste an askpass provision on disk before surfacing.
-  const authResult = await runInTx((tx) => loadCodingSandboxEnv(tx, secretsStore));
+  const loadAuth = deps.loadCodingSandboxEnv ?? loadCodingSandboxEnv;
+  const authResult = await runInTx((tx) => loadAuth(tx, secretsStore));
   if (authResult.isErr()) {
     return await failAndTeardown(authResult.error.message);
   }
