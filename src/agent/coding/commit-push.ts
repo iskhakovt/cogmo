@@ -23,15 +23,39 @@
  */
 
 import type { SandboxSession } from "../../sandbox/index.js";
+import type { GitHubIdentity } from "../../secrets/github.js";
 
 const REMOTE = "origin";
+
+/**
+ * Compose a `git commit` author from a `GitHubIdentity`. The email maps
+ * to GitHub's noreply alias so commits authored under it reverse-resolve
+ * to the bot account on github.com (avatar + "authored by" link), and
+ * delivery to the address is blocked by GitHub. Author name is the
+ * freeform display label, which we set to the login.
+ */
+export function commitAuthorFor(identity: GitHubIdentity): { name: string; email: string } {
+  return {
+    name: identity.login,
+    email: `${identity.id}+${identity.login}@users.noreply.github.com`,
+  };
+}
 
 export interface CommitAndPushParams {
   container: Pick<SandboxSession, "execStreaming">;
   /** Working directory inside the container — typically `/workspace`. */
   worktreeDir: string;
-  /** Branch to push, e.g. `cogmo/<idShort>`. */
+  /** Local branch the commit lands on, e.g. `cogmo/<idShort>`. */
   branch: string;
+  /**
+   * Remote ref to push to. Omit to push `<branch>` to the same name on
+   * origin (the verify-side push: feature branch -> feature branch).
+   * Set to a different value when the local branch and the remote ref
+   * intentionally diverge — the execute-side push commits on the local
+   * feature branch but writes to the run-branch on origin, because the
+   * verify sandbox clones the run-branch into a fresh tree.
+   */
+  remoteBranch?: string;
   /** Commit message — typically `task.goal` truncated. */
   commitMessage: string;
   /** In-container path to the SSH signing key (slice 4.0d askpass output). */
@@ -50,8 +74,20 @@ export type CommitAndPushResult =
   | { kind: "failed"; output: string };
 
 export async function runCommitAndPush(params: CommitAndPushParams): Promise<CommitAndPushResult> {
-  const { container, worktreeDir, branch, commitMessage, signingKeyPath, askpassEnv, author } =
-    params;
+  const {
+    container,
+    worktreeDir,
+    branch,
+    remoteBranch,
+    commitMessage,
+    signingKeyPath,
+    askpassEnv,
+    author,
+  } = params;
+  // Push HEAD to <remoteBranch> when the caller asked for a different
+  // remote ref; default sends the local <branch> under the same name
+  // on origin.
+  const pushRefspec = remoteBranch === undefined ? branch : `HEAD:refs/heads/${remoteBranch}`;
 
   // 1. Working-tree status. Empty stdout = clean tree.
   const status = await runGit(container, ["status", "--porcelain"], {
@@ -116,7 +152,7 @@ export async function runCommitAndPush(params: CommitAndPushParams): Promise<Com
   // 3. Push. Even when nothing was committed locally, push is still safe
   // (a prior run might have committed but failed to push; idempotent
   // retry should converge).
-  const pushResult = await runGit(container, ["push", REMOTE, branch], {
+  const pushResult = await runGit(container, ["push", REMOTE, pushRefspec], {
     workingDir: worktreeDir,
     env: askpassEnv,
     timeoutMs: GIT_PUSH_TOTAL_MS,
@@ -205,9 +241,16 @@ async function runGit(
   };
 }
 
+// `output` ends up in `failure_reason` + the Inngest event payload —
+// cap from the tail so the actionable stderr survives.
+const MAX_OUTPUT_BYTES = 8 * 1024;
+const OUTPUT_TRUNCATED_PREFIX = "[cogmo: output truncated to last 8 KiB]\n";
+
 function combine(c: ExecCapture): string {
-  if (c.stdout && c.stderr) return `${c.stdout.trimEnd()}\n${c.stderr.trimEnd()}`;
-  return c.stdout || c.stderr;
+  const raw =
+    c.stdout && c.stderr ? `${c.stdout.trimEnd()}\n${c.stderr.trimEnd()}` : c.stdout || c.stderr;
+  if (raw.length <= MAX_OUTPUT_BYTES) return raw;
+  return `${OUTPUT_TRUNCATED_PREFIX}${raw.slice(-MAX_OUTPUT_BYTES)}`;
 }
 
 function looksLikeAuthFailure(output: string): boolean {

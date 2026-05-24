@@ -4,15 +4,18 @@ import type { Transactor } from "../../db/index.js";
 import { codingTaskFailed, codingTaskPlanApproved, codingTaskStart } from "../../inngest/events.js";
 import type { StepRun, StepSendEvent } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
+import { type AskpassMaterials, cleanupAskpass, provisionAskpass } from "../../sandbox/askpass.js";
 import {
   isLocalDockerSessionState,
   type SandboxClient,
   type SandboxSession,
 } from "../../sandbox/index.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
+import type { GitHubIdentity } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { loadCodingSandboxEnv } from "./auth.js";
 import type { BackendUsage, CodingBackend } from "./backend.js";
+import { commitAuthorFor, runCommitAndPush } from "./commit-push.js";
 import { loadIdentity, pushTaskBranchToRemote, runBranchFor } from "./git-as-transport.js";
 import type { CodingRepoRow, CodingStore, CodingTaskRow } from "./store/index.js";
 import { safeTeardownWorktree } from "./teardown.js";
@@ -91,6 +94,16 @@ export interface CodingOrchestratorDeps {
   taskTtlMs: number;
   /** Host root for per-task git worktrees — `${worktreesDir}/<repo>/<id-short>`. */
   worktreesDir: string;
+  /**
+   * Host root for per-task askpass material. The execute orchestrator
+   * provisions an askpass dir before `create-container` when the
+   * transport is `git-remote` and runs `runCommitAndPush` from inside
+   * the execute sandbox after the streaming phase completes — claude's
+   * edits ride to the verify sandbox via the remote, not the orchestrator.
+   * Bind-mount transports share the worktree on the host and don't need
+   * the execute-side push.
+   */
+  askpassBaseDir: string;
   /** Open a delivery channel for streaming plan text. Slice 1 default = NULL_PLAN_STREAM. */
   openPlanStream?: (taskId: string) => Promise<PlanStreamHandle>;
   /**
@@ -198,6 +211,10 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
   // Hoisted out of the try block so the catch can call planStream.fail().
   // Stays null until openPlanStream has actually returned a handle.
   let planStream: PlanStreamHandle | null = null;
+  // Hoisted so the catch can call cleanupAskpass on plan-phase failure
+  // (success leaves the dir alive — execute's finally owns it once the
+  // task transitions to executing).
+  let askpassProvisioned = false;
   try {
     await stepRun("set-status-planning", () =>
       runInTx((tx) => store.updateTaskStatus(tx, { id: taskId, status: "planning" })),
@@ -305,9 +322,12 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       sandboxEnv = authResult.value;
     }
 
-    // Resolve the GitHub identity once — git-remote backends need it for
-    // the sandbox's clone auth. Bind-mount paths skip this entirely.
+    // Resolve the GitHub identity once — git-remote backends need it
+    // for the sandbox's clone auth AND for the execute-side push step
+    // that runs against the same sandbox. Bind-mount paths skip this
+    // entirely.
     let gitRemoteIdentityPat: string | undefined;
+    let askpassMaterials: AskpassMaterials | undefined;
     if (sandbox.capabilities.workingTreeTransport === "git-remote") {
       if (!deps.secretsStore) {
         throw new Error("git-remote sandbox requires a secretsStore for clone auth");
@@ -318,6 +338,15 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
         identityName: repo.identityName,
       });
       gitRemoteIdentityPat = identity.pat;
+
+      // Mount askpass on the plan-phase sandbox so an execute resume
+      // (no `sandbox.create()` call on that path) still has the push
+      // creds. Cleanup: plan's catch on failure; execute's `finally`
+      // on success.
+      askpassProvisioned = true;
+      askpassMaterials = await stepRun("provision-askpass", () =>
+        provisionAskpass({ baseDir: deps.askpassBaseDir, rootTaskId: taskId, identity }),
+      );
     }
 
     // Cleanup on failure goes through `sandbox.deleteByTaskId(taskId)`
@@ -356,6 +385,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
         ...(sandbox.capabilities.workingTreeTransport === "bind-mount" && {
           homeVolume: { volumeName: `${HOME_VOLUME_PREFIX}-${taskId}` },
         }),
+        ...(askpassMaterials && { askpass: askpassMaterials }),
         image: containerImage,
         resourceLimits: defaultResourceLimits,
         expiresAt: new Date(Date.now() + taskTtlMs),
@@ -557,6 +587,9 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     // `create-container` step. Idempotent at the label-index layer:
     // a sandbox that never made it server-side is a no-op sweep.
     await sandbox.deleteByTaskId(taskId).catch(() => {});
+    if (askpassProvisioned) {
+      cleanupAskpass({ baseDir: deps.askpassBaseDir, rootTaskId: taskId });
+    }
     // Notify the plan stream if it was opened. Best-effort — we're already
     // in the catch path, don't let a delivery failure mask the original error.
     await planStream?.fail(reason).catch(() => {});
@@ -791,6 +824,11 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   const sessionId = task.sessionId;
   const worktreeAssignment = task.worktreeAssignment;
   let executeStream: ExecuteStreamHandle | null = null;
+  let askpassProvisioned = false;
+  // Identity + askpass live together — bundling encodes "both or
+  // neither" in the type. Set only when `needsExecutePush`.
+  let executePushCtx: { identity: GitHubIdentity; askpass: AskpassMaterials } | undefined;
+  const needsExecutePush = sandbox.capabilities.workingTreeTransport === "git-remote";
 
   try {
     // Conditional UPDATE: the transition only fires when the row is
@@ -810,6 +848,10 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       return { status: "skipped" };
     }
 
+    // PAT-bearing identity stays out of `step.run` so it never reaches
+    // Inngest's state store. Safe to skip the step boundary only
+    // because this function is `retries: 0` — loosen retries and the
+    // DB+decrypt would replay; cache through a step then.
     const secretsStore = deps.secretsStore;
 
     // Get-or-create the task container in two checkpoints:
@@ -832,6 +874,30 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       return existing?.state ?? null;
     });
 
+    // Provision askpass for git-remote unconditionally (resume reuses
+    // the plan-phase mount; fresh-create needs it on `sandbox.create`).
+    // `askpassProvisioned` flips before the step body so a partial
+    // provision still triggers cleanup in `finally`.
+    if (needsExecutePush) {
+      if (!deps.secretsStore) {
+        throw new Error("git-remote sandbox requires a secretsStore for clone + push auth");
+      }
+      const pushIdentity = await loadIdentity({
+        runInTx,
+        secretsStore: deps.secretsStore,
+        identityName: repo.identityName,
+      });
+      askpassProvisioned = true;
+      const askpass = await stepRun("provision-askpass", async () =>
+        provisionAskpass({
+          baseDir: deps.askpassBaseDir,
+          rootTaskId: taskId,
+          identity: pushIdentity,
+        }),
+      );
+      executePushCtx = { identity: pushIdentity, askpass };
+    }
+
     let sessionState: typeof resumedState;
     let isFreshCreate: boolean;
     if (resumedState !== null) {
@@ -845,6 +911,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       await stepRun("ensure-image-present", async () => {
         await sandbox.ensureImagePresent(containerImage, defaultResourceLimits);
       });
+
       sessionState = await stepRun("create-container", async () => {
         const loadAuth = deps.loadCodingSandboxEnv ?? loadCodingSandboxEnv;
         let sandboxEnv: Record<string, string> | undefined;
@@ -856,19 +923,6 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
           sandboxEnv = authResult.value;
         }
 
-        let gitRemoteIdentityPat: string | undefined;
-        if (sandbox.capabilities.workingTreeTransport === "git-remote") {
-          if (!secretsStore) {
-            throw new Error("git-remote sandbox requires a secretsStore for clone auth");
-          }
-          const identity = await loadIdentity({
-            runInTx,
-            secretsStore,
-            identityName: repo.identityName,
-          });
-          gitRemoteIdentityPat = identity.pat;
-        }
-
         const session = await sandbox.create({
           taskId,
           worktree: buildWorktreeSpec({
@@ -876,10 +930,16 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
             capability: sandbox.capabilities.workingTreeTransport,
             assignment: worktreeAssignment,
             remoteUrl: repo.remoteUrl,
-            identityPat: gitRemoteIdentityPat,
+            identityPat: executePushCtx?.identity.pat,
           }),
           ...(sandbox.capabilities.workingTreeTransport === "bind-mount" && {
             homeVolume: { volumeName: `${HOME_VOLUME_PREFIX}-${taskId}` },
+          }),
+          ...(executePushCtx && {
+            askpass: {
+              hostDir: executePushCtx.askpass.hostDir,
+              containerDir: executePushCtx.askpass.containerDir,
+            },
           }),
           image: containerImage,
           resourceLimits: defaultResourceLimits,
@@ -993,6 +1053,82 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       }
     }
 
+    // git-remote transport: push claude's commits to origin from inside
+    // the execute sandbox so the verify sandbox (which clones from
+    // origin into a fresh tree) sees the same state. Pushed to the
+    // run-branch (`cogmo/run/<task-id>`) — the same ref the orchestrator
+    // initialized at plan-start and the same ref `buildWorktreeSpec`
+    // points the verify sandbox's clone at. Verify then locally creates
+    // `cogmo/<idShort>` from the run-branch tip and pushes it to origin
+    // as the PR head. Bind-mount transports share the worktree on the
+    // host, so the verify-side `runCommitAndPush` covers the same job.
+    if (executePushCtx) {
+      // The `needsExecutePush` flag is set from the sandbox capability;
+      // the worktree assignment is set by the plan orchestrator and
+      // should match. Narrow the discriminated union so reading
+      // `.branch` is type-safe and a future variant without `branch`
+      // would fail here rather than silently typecheck.
+      if (worktreeAssignment.type !== "git-remote") {
+        throw new Error(
+          `git-remote push step requires a git-remote worktree assignment, got ${worktreeAssignment.type}`,
+        );
+      }
+      const pushCtx = executePushCtx;
+      const runBranch = runBranchFor(taskId);
+      const featureBranch = worktreeAssignment.branch;
+      const pushResult = await stepRun("commit-and-push-execute-changes", () =>
+        // Reuse the already-resumed `container` rather than a fresh
+        // `sandbox.resume(sessionState)` — on Daytona that's an API
+        // round-trip; `step.run` only requires the result be replay-safe,
+        // not the session handle.
+        runCommitAndPush({
+          container,
+          worktreeDir: WORKTREE_DIR_IN_CONTAINER,
+          branch: featureBranch,
+          remoteBranch: runBranch,
+          commitMessage: task.goal,
+          signingKeyPath: pushCtx.askpass.signingKeyPath,
+          askpassEnv: {
+            GIT_ASKPASS: pushCtx.askpass.helperPath,
+            GIT_TERMINAL_PROMPT: "0",
+          },
+          author: commitAuthorFor(pushCtx.identity),
+        }),
+      );
+      if (pushResult.kind !== "pushed" && pushResult.kind !== "nothing_to_commit") {
+        const reason = `execute push failed (${pushResult.kind}):\n\n${pushResult.output}`;
+        await stepRun("set-status-failed-after-push", () =>
+          runInTx((tx) =>
+            store.updateTaskStatus(tx, { id: taskId, status: "failed", failureReason: reason }),
+          ),
+        );
+        await stepSendEvent("emit-task-failed", {
+          ...codingTaskFailed.create({ taskId, reason }),
+          id: `task-failed-${taskId}`,
+        });
+        // No `teardown-worktree` step here — `safeTeardownWorktree`
+        // early-returns for git-remote assignments (no host worktree
+        // exists), and `needsExecutePush` only fires for git-remote.
+        // Mirrors the verify orchestrator's push-failure path.
+        await stepRun("teardown-after-push-failure", () =>
+          sandbox.deleteByTaskId(taskId).catch(() => {}),
+        );
+        await stepRun("persist-sandbox-deleted-after-push-failure", () =>
+          runInTx((tx) => store.setTaskSandboxDeletedAt(tx, taskId, new Date().toISOString())),
+        );
+        await executeStream.complete(false).catch((streamErr: unknown) => {
+          taskLog.warn(
+            { err: streamErr },
+            "execute stream complete(false) notification failed (push failure)",
+          );
+        });
+        await executeStream.fail(reason).catch((streamErr: unknown) => {
+          taskLog.warn({ err: streamErr }, "execute stream fail notification failed");
+        });
+        return { status: "failed", failureReason: reason };
+      }
+    }
+
     await stepRun("set-status-pending-verify", () =>
       runInTx((tx) => store.updateTaskStatus(tx, { id: taskId, status: "pending_verify" })),
     );
@@ -1061,6 +1197,10 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     ).catch(() => {});
     await executeStream?.fail(reason).catch(() => {});
     return { status: "failed", failureReason: reason };
+  } finally {
+    if (askpassProvisioned) {
+      cleanupAskpass({ baseDir: deps.askpassBaseDir, rootTaskId: taskId });
+    }
   }
 }
 

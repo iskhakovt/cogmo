@@ -35,7 +35,7 @@ import {
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { loadCodingSandboxEnv } from "./auth.js";
-import { runCommitAndPush } from "./commit-push.js";
+import { commitAuthorFor, runCommitAndPush } from "./commit-push.js";
 import { parseRemoteUrl, runOpenDraftPr } from "./draft-pr.js";
 import { fetchFeatureBranch } from "./git-as-transport.js";
 import {
@@ -53,21 +53,6 @@ const log = logger.child({ component: "coding.verify-orchestrator" });
 
 const HOME_VOLUME_PREFIX = "cogmo-task-home";
 const WORKTREE_DIR_IN_CONTAINER = "/workspace";
-
-/**
- * Build the commit author for a given identity. GitHub's canonical
- * non-routable suffix is `<id>+<login>@users.noreply.github.com` —
- * commits authored under this email reverse-resolve to the bot account
- * on github.com (right avatar, right "authored by" link), and the
- * email never delivers anywhere because GitHub blocks delivery to that
- * suffix. The author *name* is a freeform display label.
- */
-function commitAuthorFor(identity: GitHubIdentity): { name: string; email: string } {
-  return {
-    name: identity.login,
-    email: `${identity.id}+${identity.login}@users.noreply.github.com`,
-  };
-}
 
 export interface VerifyOrchestratorDeps {
   runInTx: Transactor;
