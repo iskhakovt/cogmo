@@ -342,7 +342,8 @@ export async function startExecPty(args: {
       } catch (err) {
         await settle();
         if (timedOut) {
-          timedOut.cause = err as Error;
+          // Avoid `timedOut.cause = timedOut` when abortSignal rejected with timedOut itself.
+          if (err !== timedOut) timedOut.cause = err as Error;
           reject(timedOut);
         } else if (disposed) {
           reject(new DisposedError());
