@@ -19,8 +19,8 @@ in the corepack cache (no LKG default), and the build stage's
 filesystem is never copied into the runtime stage.
 
 A `qs >= 6.15.2` pin via `pnpm-workspace.yaml`'s `overrides` covers
-CVE-2026-8723 (DoS in `qs.stringify`, transitive via `express →
-body-parser`) — the only remaining Node-side alert.
+CVE-2026-8723 (DoS in `qs.stringify`, transitive via
+`express -> body-parser`) — the only remaining Node-side alert.
 
 Net effect: 29 image-scan findings on the published image collapse to
 the 8 unfixable debian:12 base-OS findings (libuuid1, ncurses,
