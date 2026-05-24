@@ -1,0 +1,5 @@
+`startExecPty` no longer hangs on `handle.wait()` when the underlying SDK fails to surface an exit code. The Daytona SDK's `PtyHandle.wait()` polls `_exitCode` every 100ms and only populates it from a clean WS close (code 1000 or a parseable `{exitCode}` in `event.reason`); on code 1006 (abnormal closure with empty reason) it polls forever, and `kill()` doesn't help because the SDK's kill only invokes an HTTP RPC. Cogmo's existing `timeoutMs` / `idleTimeoutMs` / `dispose()` paths already set `timedOut`, called `kill()`, and destroyed stdin — but `await handle.wait()` was unguarded, so the function leaked indefinitely.
+
+The fix wraps `handle.wait()` in `Promise.race` against an abort signal. The signal rejects when total / idle timers fire or when `dispose()` is called, ensuring the exitPromise settles within bounded time regardless of the SDK's polling state.
+
+Surfaced while recording the skill-authoring cassette: `register`'s lockfile-compile sandbox would hang after `uv pip compile` finished. The full register call leaked past auto-register's 180s outer wall-clock cap and blocked `skillRunner.shutdown()` during test teardown.

@@ -117,6 +117,25 @@ export async function startExecPty(args: {
     }
   };
 
+  // The SDK's PtyHandle.wait() polls `_exitCode` every 100ms and only
+  // sets it from a clean WS close (code 1000 or a parseable `{exitCode}`
+  // in event.reason). On code 1006 (abnormal) with empty reason, wait()
+  // loops forever — kill() doesn't set the exit code either. We race
+  // wait() against this signal so timer / dispose paths exit deterministically.
+  let aborted = false;
+  let rejectAbort: ((reason: Error) => void) | undefined;
+  const abortSignal = new Promise<never>((_, reject) => {
+    rejectAbort = reject;
+  });
+  // Silence the rejection when no race consumer is listening (e.g. natural
+  // exit already settled exitPromise before a timer/dispose fired).
+  abortSignal.catch(() => undefined);
+  const signalAbort = (): void => {
+    if (aborted) return;
+    aborted = true;
+    rejectAbort?.(timedOut ?? new DisposedError());
+  };
+
   // Tmpfile cleanup is best-effort; sandbox tmpfs vanishes on teardown.
   let cleanedUp = false;
   const cleanupRemoteFiles = async (): Promise<void> => {
@@ -151,6 +170,7 @@ export async function startExecPty(args: {
         if (timedOut || disposed) return;
         timedOut = new ExecTimeoutError("idle", idleMs);
         void killPty();
+        signalAbort();
       }, idleMs);
     }
   }
@@ -173,6 +193,7 @@ export async function startExecPty(args: {
       timedOut = new ExecTimeoutError("total", totalMs);
       void killPty();
       if (!stdin.writableEnded) stdin.destroy(timedOut);
+      signalAbort();
     }, totalMs);
   }
 
@@ -295,7 +316,7 @@ export async function startExecPty(args: {
       }
 
       try {
-        const result = await handle.wait();
+        const result = await Promise.race([handle.wait(), abortSignal]);
         await settle(result.exitCode !== undefined ? { exitCode: result.exitCode } : {});
         if (timedOut) {
           reject(timedOut);
@@ -342,6 +363,7 @@ export async function startExecPty(args: {
       // Unblock the IIFE parked on `stdin.once("finish")`.
       stdin.destroy(new DisposedError());
     }
+    signalAbort();
     await Promise.race([
       exitPromise.catch(() => undefined),
       new Promise<void>((resolve) => setTimeout(resolve, DISPOSE_GRACE_MS)),
