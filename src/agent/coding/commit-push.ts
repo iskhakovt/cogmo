@@ -241,9 +241,20 @@ async function runGit(
   };
 }
 
+// `output` field of every CommitAndPushResult flows into `failure_reason`
+// (persisted) and the `coding/task/failed` Inngest event payload (stored
+// in Inngest's state). A long-tail conflict / verbose-error output could
+// bloat both. Cap at 8 KiB — enough to keep the actionable stderr lines
+// (which sit at the END of git's output), short enough to bound the worst
+// case. Truncation marker mirrors `exec-pty.ts`'s STDERR_TRUNCATED_SUFFIX.
+const MAX_OUTPUT_BYTES = 8 * 1024;
+const OUTPUT_TRUNCATED_PREFIX = "[cogmo: output truncated to last 8 KiB]\n";
+
 function combine(c: ExecCapture): string {
-  if (c.stdout && c.stderr) return `${c.stdout.trimEnd()}\n${c.stderr.trimEnd()}`;
-  return c.stdout || c.stderr;
+  const raw =
+    c.stdout && c.stderr ? `${c.stdout.trimEnd()}\n${c.stderr.trimEnd()}` : c.stdout || c.stderr;
+  if (raw.length <= MAX_OUTPUT_BYTES) return raw;
+  return `${OUTPUT_TRUNCATED_PREFIX}${raw.slice(-MAX_OUTPUT_BYTES)}`;
 }
 
 function looksLikeAuthFailure(output: string): boolean {

@@ -483,6 +483,14 @@ describe("runCodingExecute — git-remote transport", () => {
     // is already on the feature branch from the prior attempt.
     const checkoutCalls = execCalls.filter((c) => c.cmd[0] === "git" && c.cmd[1] === "checkout");
     expect(checkoutCalls).toHaveLength(0);
+    // The commit-and-push step MUST still run on the resume path — the
+    // askpass mount on the resumed sandbox came from plan-phase
+    // provisioning, and execute pushes the run-branch refspec for
+    // verify's clone. Default fake exec returns clean status → push
+    // takes the no-commit path, but the push call itself is the
+    // load-bearing assertion against a regression that skips this step.
+    const pushCall = execCalls.find((c) => c.cmd[0] === "git" && c.cmd[1] === "push");
+    expect(pushCall?.cmd).toContain(`HEAD:refs/heads/cogmo/run/${task.id}`);
   });
 
   it("fresh-create: provisions askpass, mounts it on the sandbox, and pushes the run-branch", async () => {

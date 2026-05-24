@@ -303,4 +303,34 @@ describe("runCommitAndPush", () => {
     expect(calls.find((c) => c.args.includes("commit"))).toBeUndefined();
     expect(calls.find((c) => c.args.includes("push"))).toBeUndefined();
   });
+
+  it("truncates oversized git output to the last 8 KiB with a marker", async () => {
+    // 12 KiB stderr — exceeds the 8 KiB cap. Push exits non-zero so
+    // the failure path returns `output`, which is what the orchestrator
+    // persists into `failure_reason` and the Inngest event payload.
+    const longTail = "trailing diagnostic line\n".repeat(700);
+    const { container } = fakeContainer({
+      status: { stdout: "" },
+      push: {
+        stderr: `${"x".repeat(4 * 1024)}\nfatal: a real error message\n${longTail}`,
+        exitCode: 1,
+      },
+    });
+
+    const result = await runCommitAndPush({
+      container,
+      worktreeDir: "/workspace",
+      branch: "cogmo/abc",
+      commitMessage: "x",
+      signingKeyPath: "/tmp/cogmo-askpass/signing-key",
+      askpassEnv,
+      author,
+    });
+
+    expect(result.kind).toBe("failed");
+    expect(result.output.length).toBeLessThanOrEqual(8 * 1024 + 64);
+    expect(result.output).toContain("[cogmo: output truncated to last 8 KiB]");
+    // The cap-from-the-end preserves the most-recent trailing lines.
+    expect(result.output).toContain("trailing diagnostic line");
+  });
 });
