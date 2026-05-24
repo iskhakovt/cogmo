@@ -46,10 +46,13 @@
  */
 
 import { execFile as execFileCb } from "node:child_process";
-import { generateKeyPairSync, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
-import { and, eq, ne } from "drizzle-orm";
+import { and, desc, eq, ne } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { connect } from "inngest/connect";
 import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
@@ -166,7 +169,7 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     const ghAuth = RECORDABLE
       ? await readGhAuth()
       : { pat: "test-pat", login: "test-user", id: "0" };
-    const signingKeypair = generateSigningKeypair();
+    const signingKeypair = await generateSigningKeypair();
 
     // Init the bare skills repo + wire origin BEFORE `bootstrap()` so
     // `ensureSkillsCodingRepo` reads the right `origin` for the row.
@@ -246,11 +249,12 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
       if (bootstrapResult.sandbox) await bootstrapResult.sandbox.shutdown();
     }
     if (mock) await mock.stop();
-    if (db) await db.$client.end();
-    // Branch + PR cleanup runs LAST so it has a chance even if other
-    // teardown throws. Each step is tolerant of "not found" / "already
-    // closed" — the test may have failed before creating any of these.
+    // gh CLI cleanup runs BEFORE closing the DB pool so a future
+    // cleanup step that needs DB access doesn't hit a closed pool.
+    // Each step is tolerant of "not found" / "already closed" — the
+    // test may have failed before creating any of these.
     if (RECORDABLE) await cleanupGitHub();
+    if (db) await db.$client.end();
   });
 
   it("creates a skill via chat and invokes it on the next turn", async () => {
@@ -260,6 +264,12 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     // codingAutoapproveMode, so the earlier beforeAll update isn't load-
     // bearing. The orchestrator's resolver reads the conversation's
     // profile via JOIN, so the value at task-run time is what counts.
+    //
+    // TODO: drop this blanket UPDATE once bootstrap's profile-management
+    // is made idempotent on `codingAutoapproveMode` (currently it may
+    // overwrite the value on every boot). At single-row scale here the
+    // unscoped update is harmless, but it's a smell worth fixing at the
+    // source.
     await db.update(profiles).set({ codingAutoapproveMode: "on" });
     const { conversationId, sessionId } = await seedConversation(db, defaultUserId);
     await sendInbound(
@@ -402,22 +412,35 @@ async function readGhAuth(): Promise<{ pat: string; login: string; id: string }>
 }
 
 /**
- * Generate an Ed25519 keypair in OpenSSH format. Used as the ephemeral
- * commit-signing key for this test run. The public key is NOT
- * registered on GitHub — commits will show "Unverified" badges, which
- * is acceptable for test runs. Push/PR-open operations don't gate on
- * signature verification.
+ * Generate an Ed25519 keypair in OpenSSH format via `ssh-keygen`.
+ * Node's `generateKeyPairSync` only emits PKCS#8 PEM, which the
+ * `ssh-keygen -Y sign` signer git invokes under `gpg.format=ssh`
+ * rejects. Commits go out "Unverified" — fine for test runs because
+ * push / PR-open don't gate on signature verification.
  */
-function generateSigningKeypair(): { privateKey: string; publicKey: string } {
-  const { publicKey, privateKey } = generateKeyPairSync("ed25519", {
-    publicKeyEncoding: { format: "pem", type: "spki" },
-    privateKeyEncoding: { format: "pem", type: "pkcs8" },
-  });
-  // PEM is acceptable input to `ssh-keygen -y` and to git's
-  // gpg.format=ssh signer — both accept PEM-encoded Ed25519 keys.
-  // OpenSSH-native format would be preferred but requires extra
-  // tooling to derive; PEM works for git signing.
-  return { privateKey, publicKey };
+async function generateSigningKeypair(): Promise<{ privateKey: string; publicKey: string }> {
+  const dir = await mkdtemp(join(tmpdir(), "cogmo-signing-key-"));
+  try {
+    const keyPath = join(dir, "key");
+    await execFileP("ssh-keygen", [
+      "-t",
+      "ed25519",
+      "-f",
+      keyPath,
+      "-N",
+      "",
+      "-C",
+      "cogmo-test-signing",
+      "-q",
+    ]);
+    const [privateKey, publicKey] = await Promise.all([
+      readFile(keyPath, "utf8"),
+      readFile(`${keyPath}.pub`, "utf8"),
+    ]);
+    return { privateKey, publicKey };
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 }
 
 async function setOriginAndFetch(
@@ -622,7 +645,8 @@ async function waitForCodingTask(
     const rows = await db
       .select()
       .from(codingTasks)
-      .where(and(eq(codingTasks.conversationId, conversationId), ne(codingTasks.status, "queued")));
+      .where(and(eq(codingTasks.conversationId, conversationId), ne(codingTasks.status, "queued")))
+      .orderBy(desc(codingTasks.createdAt));
     const latest = rows[0];
     if (latest && latest.status !== lastSeenStatus) {
       lastSeenStatus = latest.status;

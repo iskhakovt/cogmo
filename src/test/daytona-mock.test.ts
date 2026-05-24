@@ -494,10 +494,11 @@ describe("DaytonaMock", () => {
       expect(text).toContain("x-trace-id");
     });
 
-    it("scrubs Anthropic + GitHub credentials from recorded request bodies", async () => {
+    it("scrubs known API keys (Anthropic, GitHub, OpenAI) from recorded request bodies", async () => {
       const anthropicKey =
         "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
       const githubToken = "gho_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+      const openaiKey = "sk-proj-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
       const upstream = await startStubUpstream(() => ({
         status: 200,
         bodyJson: { ok: true },
@@ -515,7 +516,7 @@ describe("DaytonaMock", () => {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            env: { ANTHROPIC_API_KEY: anthropicKey },
+            env: { ANTHROPIC_API_KEY: anthropicKey, OPENAI_API_KEY: openaiKey },
             git: { password: githubToken },
           }),
         });
@@ -528,8 +529,10 @@ describe("DaytonaMock", () => {
       const text = readFileSync(fixturePath, "utf8");
       expect(text).not.toContain(anthropicKey);
       expect(text).not.toContain(githubToken);
+      expect(text).not.toContain(openaiKey);
       expect(text).toContain("sk-ant-api03-REDACTED");
       expect(text).toContain("gho_REDACTED");
+      expect(text).toContain("sk-REDACTED");
     });
   });
 });

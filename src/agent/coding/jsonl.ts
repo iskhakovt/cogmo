@@ -6,14 +6,11 @@ const log = logger.child({ component: "coding.jsonl" });
 
 /**
  * Iterate a Readable stream as parsed JSONL records. Extracts the
- * outermost balanced `{...}` on each line: bash's transition-out-of-
- * interactive OSC title (`\x1b]1;exec\x07`) can sit adjacent to the
- * first `{"type":"system",...}` event with no newline separator, and
- * later lines occasionally carry trailing terminal control bytes after
- * a closing brace. Lines without a balanced object are dropped
- * silently (echoed input, bash prompt, OSC titles). String values
- * containing `{` / `}` are respected — the scan tracks string state
- * and escape sequences so `{"k":"}"}` parses correctly.
+ * outermost balanced `{...}` on each line so terminal control bytes
+ * adjacent to claude's JSON events (bash's `\x1b]1;exec\x07` OSC
+ * title, trailing cursor-reset on the same line) don't trip the parser.
+ * Best-effort extract: lines with no balanced object drop at `debug`;
+ * concatenated objects (`{...}{...}`) yield only the first.
  */
 export async function* readJsonl(stream: Readable): AsyncIterable<unknown> {
   const splitter = stream.pipe(split2());
@@ -21,7 +18,10 @@ export async function* readJsonl(stream: Readable): AsyncIterable<unknown> {
     const trimmed = line.trim();
     if (!trimmed) continue;
     const candidate = extractBalancedObject(trimmed);
-    if (candidate === null) continue;
+    if (candidate === null) {
+      log.debug({ line: trimmed.slice(0, 200) }, "no balanced JSON object on line — dropping");
+      continue;
+    }
     try {
       yield JSON.parse(candidate);
     } catch (err) {
@@ -35,8 +35,9 @@ export async function* readJsonl(stream: Readable): AsyncIterable<unknown> {
 
 /**
  * Scan `s` for the first balanced `{...}` and return that slice, or
- * `null` if no balanced object is found. Tracks JSON string state so
- * `{` and `}` inside strings don't shift the depth counter.
+ * `null` if no balanced object is found. Tracks JSON string state.
+ * Bytes before the first `{` are assumed to be an ANSI/OSC prefix —
+ * a CSI sequence containing a literal `{` (rare) would shift the start.
  */
 function extractBalancedObject(s: string): string | null {
   const start = s.indexOf("{");

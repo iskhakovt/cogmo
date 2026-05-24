@@ -190,23 +190,24 @@ function redactBodyFields(value: unknown, rules: ReadonlyArray<BodyRedaction>): 
 }
 
 /**
- * Last-line-of-defense secret redaction applied to the serialized
- * fixture string. The HTTP recorder strips `Authorization` headers and
- * the body recorder masks specific JSON fields, but env vars passed via
- * `exec` payloads (the toolbox proxy mounts them on every session call)
- * and credential-bearing URLs (`https://user:tok@github.com/...`) leak
- * through both paths. We scan the final fixture text and replace any
- * recognizable secret with a stable placeholder so a stray env-injection
- * point or new SDK path can't produce a fixture containing real keys.
+ * Last-line-of-defense API-key scrub on the serialized fixture string.
+ * The HTTP `Authorization` strip and field-name `BodyRedaction` cover
+ * the common shapes; this catches keys nested at arbitrary depth
+ * (`exec` env, `git.password`, etc.). Coverage is explicit — extend
+ * when a new provider lands; tokens without a recognizable prefix
+ * need field-name masking instead.
  */
-const SECRET_PATTERNS: ReadonlyArray<{ pattern: RegExp; replacement: string }> = [
+const KNOWN_API_KEY_PATTERNS: ReadonlyArray<{ pattern: RegExp; replacement: string }> = [
   { pattern: /sk-ant-api03-[A-Za-z0-9_-]{60,}/g, replacement: "sk-ant-api03-REDACTED" },
   { pattern: /\b(gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}\b/g, replacement: "$1_REDACTED" },
+  // Order matters: the Anthropic `sk-ant-api03-` form is more specific
+  // and runs first so it doesn't get caught by this generic `sk-` rule.
+  { pattern: /\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{32,}\b/g, replacement: "sk-REDACTED" },
 ];
 
 function redactSecrets(input: string): string {
   let out = input;
-  for (const { pattern, replacement } of SECRET_PATTERNS) {
+  for (const { pattern, replacement } of KNOWN_API_KEY_PATTERNS) {
     out = out.replace(pattern, replacement);
   }
   return out;
@@ -748,8 +749,11 @@ export class DaytonaMock {
         // Rewrite first so the {sandbox-id → real toolbox} map gets
         // populated for downstream toolbox-routing in the same record
         // session. The rewrite uses the placeholder host so the
-        // fixture stays portable across mock-port spawns.
-        const rewrittenForFixture = this.#rewriteCreateResponse(method, path, parsed);
+        // fixture stays portable across mock-port spawns. Runs on
+        // every response (not just POST /sandbox) — `sandbox.resume`
+        // goes through `daytona.get(sandboxId)` and the SDK rebinds
+        // its axios baseURL from the GET response too.
+        const rewrittenForFixture = rewriteToolboxProxyUrls(parsed, this.#toolboxUpstreams);
         // For the SDK in this record session, substitute the
         // placeholder with the live mock URL so subsequent toolbox
         // calls actually resolve to us.
@@ -929,19 +933,6 @@ export class DaytonaMock {
       out[k] = v;
     }
     return out;
-  }
-
-  /**
-   * Rewrite every `toolboxProxyUrl` in the response body to the mock's
-   * placeholder so the SDK's subsequent toolbox calls hit us. Must run
-   * on ALL responses (not just `POST /sandbox`) — `sandbox.resume()`
-   * goes through `daytona.get(sandboxId)`, and the SDK rebinds its
-   * axios baseURL from the GET response's `toolboxProxyUrl` too. List
-   * endpoints (`/sandbox/paginated`) return arrays; the walk handles
-   * them in one pass. Placeholder stays portable across mock-port spawns.
-   */
-  #rewriteCreateResponse(_method: string, _path: string, body: unknown): unknown {
-    return rewriteToolboxProxyUrls(body, this.#toolboxUpstreams);
   }
 
   /**

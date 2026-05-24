@@ -233,7 +233,7 @@ export async function startExecPty(args: {
       await pty.sendInput(shellLine);
     };
 
-    const settle = async (): Promise<void> => {
+    const settle = async (opts: { exitCode?: number } = {}): Promise<void> => {
       clearTimers();
       stdout.end();
 
@@ -251,16 +251,17 @@ export async function startExecPty(args: {
           stderr.write(errBuf);
         }
       } catch (err) {
-        // `warn` not `debug`: when claude exits silently with no
-        // stream-json output, the stderr tmpfile is the only diagnostic
-        // for *why* — surfacing the download failure at `info` level
-        // means operators see the breadcrumb without dropping LOG_LEVEL.
-        // A child that simply never wrote to stderr is the common case;
-        // the warn is acceptable noise to keep the rare-but-critical
-        // case visible.
-        log.warn(
-          { err: (err as Error).message, path: stderrPath },
-          "stderr tmpfile download failed (often expected — child may not have written)",
+        // Clean-exit (or unknown-exit) downloads default to `debug` —
+        // the common shape is a child that simply never wrote to
+        // stderr, and `warn` floods at LOG_LEVEL=info. A non-zero
+        // exit IS the rare-but-critical case where the stderr tmpfile
+        // is the only diagnostic for *why*, so promote to `warn`.
+        const failedDownloadLog =
+          opts.exitCode !== undefined && opts.exitCode !== 0 ? log.warn : log.debug;
+        failedDownloadLog.call(
+          log,
+          { err: (err as Error).message, path: stderrPath, exitCode: opts.exitCode },
+          "stderr tmpfile download failed",
         );
       }
       stderr.end();
@@ -295,7 +296,7 @@ export async function startExecPty(args: {
 
       try {
         const result = await handle.wait();
-        await settle();
+        await settle(result.exitCode !== undefined ? { exitCode: result.exitCode } : {});
         if (timedOut) {
           reject(timedOut);
           return;
