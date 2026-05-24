@@ -61,7 +61,7 @@ import { conversations, llmProviders, modelProviders, profiles } from "../agent/
 import * as schema from "../db/schemas.js";
 import { bootstrap } from "../index.js";
 import { directOutbound } from "../inngest/events.js";
-import { DaytonaSandboxClient } from "../sandbox/daytona/client.js";
+import { DaytonaSandboxClient, snapshotNameFor } from "../sandbox/daytona/client.js";
 import { deriveMasterKey, encrypt, parseMasterKey, toBase64 } from "../secrets/encryption.js";
 import { secrets } from "../secrets/store/schema.js";
 import { skills } from "../skills/store/schema.js";
@@ -133,6 +133,22 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     db = drizzle({ connection: databaseUrl, schema });
 
     console.log(`[skill-authoring e2e] TEST_RUN_ID=${TEST_RUN_ID}`);
+
+    if (RECORDABLE) {
+      // Pre-build the devbase snapshot from the local Dockerfile so the
+      // test stays self-contained — no ghcr push required. Cogmo's
+      // `ensureImagePresent` later derives the same name via
+      // `snapshotNameFor()` and short-circuits on the pre-built snapshot.
+      // Also pre-create + wait for the deps-cache volume so register's
+      // lockfile-compile sandbox doesn't race a `pending_create` volume.
+      await prebuildDaytonaPrereqs();
+
+      // Reset origin/main on the throwaway skills repo so claude doesn't
+      // pull leftover SKILL.md + skill.py from a previous successful run.
+      const remote = expectDefined(process.env.COGMO_TEST_SKILLS_REMOTE);
+      const { pat } = await readGhAuth();
+      await resetRemoteMain(remote, pat);
+    }
 
     const mockOpts: DaytonaMockOptions = RECORDABLE
       ? {
@@ -404,6 +420,128 @@ function parseGitHubSlug(url: string): string {
     throw new Error(`Cannot extract owner/repo from URL: ${url}`);
   }
   return match[1];
+}
+
+interface SnapshotApi {
+  get(name: string): Promise<{ state: string }>;
+  delete(snapshot: unknown): Promise<unknown>;
+  create(params: { name: string; image: unknown }): Promise<unknown>;
+}
+async function ensureSnapshot(
+  realSdk: { snapshot: SnapshotApi },
+  label: string,
+  name: string,
+  imageProvider: () => unknown,
+): Promise<void> {
+  try {
+    const existing = await realSdk.snapshot.get(name);
+    if (existing.state === "active") {
+      console.log(`[skill-authoring e2e] ${label} snapshot ${name} already active — reusing`);
+      return;
+    }
+    console.log(
+      `[skill-authoring e2e] ${label} snapshot ${name} in state ${existing.state} — deleting + rebuilding`,
+    );
+    await realSdk.snapshot.delete(existing);
+  } catch (err) {
+    if (!/not.found|404/i.test((err as Error).message)) throw err;
+  }
+  console.log(`[skill-authoring e2e] building ${label} snapshot ${name}...`);
+  await realSdk.snapshot.create({ name, image: imageProvider() });
+  console.log(`[skill-authoring e2e] ${label} snapshot ${name} ready`);
+}
+
+/**
+ * Reset origin/main on the test skills repo to a single empty commit so
+ * every record run starts from a clean state. Previous run's auto-register
+ * mirror-pushed SKILL.md + skill.py to main, and the next run's claude
+ * would clone that, see the files already present, and do nothing.
+ */
+async function resetRemoteMain(remoteUrl: string, pat: string): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), "cogmo-skills-reset-"));
+  try {
+    const { withGitAskpass } = await import("../secrets/git-askpass.js");
+    await execFileP("git", ["init", "--initial-branch=main", dir]);
+    await execFileP("git", ["-C", dir, "config", "user.email", "skill-author-test@cogmo"]);
+    await execFileP("git", ["-C", dir, "config", "user.name", "skill-author-test"]);
+    await execFileP("git", [
+      "-C",
+      dir,
+      "commit",
+      "--allow-empty",
+      "-m",
+      "skill-authoring e2e: reset main to empty",
+    ]);
+    await withGitAskpass(pat, async (env) =>
+      execFileP("git", ["-C", dir, "push", "--force", remoteUrl, "HEAD:refs/heads/main"], {
+        env: { ...process.env, ...env },
+      }),
+    );
+    console.log(`[skill-authoring e2e] reset ${remoteUrl} main to empty commit`);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+async function prebuildDaytonaPrereqs(): Promise<void> {
+  const imageRef = expectDefined(
+    process.env.COGMO_DEVBASE_IMAGE,
+    "COGMO_DEVBASE_IMAGE must be set in record mode (snapshot name + cogmo override key — registry doesn't need to exist)",
+  );
+  const snapshotName = expectDefined(
+    snapshotNameFor(imageRef),
+    `snapshotNameFor(${imageRef}) returned null — COGMO_DEVBASE_IMAGE must include a non-latest tag`,
+  );
+  const depsVolumeName = expectDefined(process.env.COGMO_SKILLS_DEPS_VOLUME);
+  const { Daytona, Image } = await import("@daytonaio/sdk");
+  const apiKey = expectDefined(process.env.DAYTONA_API_KEY);
+  const realSdk = new Daytona({
+    apiKey,
+    apiUrl: process.env.DAYTONA_API_URL ?? "https://app.daytona.io/api",
+    ...(process.env.DAYTONA_ORGANIZATION_ID && {
+      organizationId: process.env.DAYTONA_ORGANIZATION_ID,
+    }),
+  });
+
+  // 1a. Devbase snapshot
+  await ensureSnapshot(realSdk, "devbase", snapshotName, () =>
+    Image.fromDockerfile("images/devbase/Dockerfile"),
+  );
+
+  // 1b. cogmo-skills snapshot — register's lockfile-compile sandbox uses
+  // this image. The default `:latest` tag is a ghcr.io pull, not a local
+  // build; Daytona stages it on first use.
+  const skillsImageRef = expectDefined(
+    process.env.COGMO_SKILLS_IMAGE ?? "ghcr.io/iskhakovt/cogmo-skills:latest",
+  );
+  // The default tag is `latest` which `snapshotNameFor` refuses. Fall back
+  // to passing the image directly to Daytona so it stages under its own
+  // generated name; cogmo's `ensureImagePresent` no-ops on `:latest`.
+  const skillsSnapshotName = snapshotNameFor(skillsImageRef);
+  if (skillsSnapshotName) {
+    await ensureSnapshot(realSdk, "cogmo-skills", skillsSnapshotName, () => skillsImageRef);
+  } else {
+    console.log(
+      `[skill-authoring e2e] cogmo-skills image ${skillsImageRef} is :latest — lazy-pull on first use`,
+    );
+  }
+
+  // 2. Deps-cache volume — get-or-create then poll until ready. Register's
+  // lockfile-compile sandbox attaches this volume; if it's still in
+  // `pending_create` when the sandbox boots, register fails with
+  // `requirements_lock_transport_failed`.
+  console.log(`[skill-authoring e2e] ensuring deps-cache volume ${depsVolumeName} is ready...`);
+  await realSdk.volume.get(depsVolumeName, true);
+  const start = Date.now();
+  while (Date.now() - start < 120_000) {
+    const v = await realSdk.volume.get(depsVolumeName);
+    if (v.state === "ready") {
+      console.log(`[skill-authoring e2e] deps-cache volume ${depsVolumeName} ready`);
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  throw new Error(`deps-cache volume ${depsVolumeName} did not become ready within 120s`);
 }
 
 async function readGhAuth(): Promise<{ pat: string; login: string; id: string }> {

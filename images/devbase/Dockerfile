@@ -6,13 +6,17 @@
 # `cogmo-devbase:1.46.0`. See design/coding-delegation.md → "Base Image"
 # for the full contract.
 #
-# Today's image ships what plan-only Claude Code flows need:
+# Today's image ships what plan-only Claude Code flows need plus the uv
+# toolchain skill-authoring tasks rely on (`uv pip compile` to produce a
+# `requirements.lock` byte-identical to what `cogmo-skills` resolves at
+# register time):
 #   - Node 24 + pnpm + git + gh + ripgrep + fd + jq + curl
 #   - @anthropic-ai/claude-code (pinned)
+#   - Python 3 (from devcontainers/base) + uv (pinned to match cogmo-skills)
 #   - Non-root user `vscode` (UID 1000) inherited from the devcontainers base.
 #
-# Codex CLI, Python 3.12 + uv, Go/Rust toolchains, and docker-outside-of-docker
-# are deferred to whenever real verify commands need them.
+# Codex CLI and Go/Rust toolchains are deferred to whenever real verify
+# commands need them.
 
 FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04@sha256:d94c97dd9cacf183d0a6fd12a8e87b526e9e928307674ae9c94139139c0c6eae
 
@@ -54,6 +58,12 @@ RUN corepack enable \
 ARG CLAUDE_CODE_VERSION=2.1.138
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
  && claude --version
+
+# uv — copied from astral's distroless image, pinned to the same version
+# (+ digest) `images/skills/Dockerfile` uses so author-side `uv pip compile`
+# produces lockfiles byte-identical to what `cogmo-skills` re-resolves at
+# register time. Bump both Dockerfiles together.
+COPY --from=ghcr.io/astral-sh/uv:0.11.12@sha256:3a59a3cdd5f7c217faa36e32dbc7fddbb0412889c2a0a5229f6d790e5a019dd7 /uv /uvx /usr/local/bin/
 
 # Drop privileges. Cogmo's supervisor mounts the worktree at /workspace and
 # always overrides Entrypoint/Cmd at create-container time, so we leave the

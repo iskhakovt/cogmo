@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { S3Client } from "@aws-sdk/client-s3";
 import Docker from "dockerode";
+import { createAutoRegisterSkillSubscriber } from "./agent/coding/auto-register-skill.js";
 import { ClaudeCodeBackend } from "./agent/coding/claude.js";
 import { createOrphanRunBranchSweepFunctions } from "./agent/coding/cleanup-orphan-run-branches.js";
 import { createRunBranchCleanupSubscriber } from "./agent/coding/cleanup-run-branch.js";
@@ -809,6 +810,21 @@ export async function bootstrapRuntime(
           runInTx: core.runInTx,
           store: core.codingStore,
           secretsStore: core.secretsStore,
+        },
+        inngest,
+      ),
+    );
+
+    // Closes the chat -> register -> invoke loop for skills the agent
+    // authors via the coding pipeline. No-op for human-mediated repos.
+    codingFunctions.push(
+      createAutoRegisterSkillSubscriber(
+        {
+          runInTx: core.runInTx,
+          store: core.codingStore,
+          secretsStore: core.secretsStore,
+          skillRunner,
+          skillsRepoPath: env.COGMO_SKILLS_PATH,
         },
         inngest,
       ),

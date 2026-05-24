@@ -21,8 +21,9 @@
 FROM mirror.gcr.io/library/python:3.14-slim@sha256:a7185a8e40af01bf891414a4df16ef10fc6000cee460a404a13da9029fe41604 AS builder
 
 # uv binary copied from astral's distroless image — no apt install,
-# pinned to a specific astral release tag so a `uv sync` is deterministic.
-COPY --from=ghcr.io/astral-sh/uv:0.11.12 /uv /uvx /bin/
+# pinned to a specific astral release tag + digest so a `uv sync` is
+# deterministic across rebuilds. Bump in lockstep with `images/devbase/Dockerfile`.
+COPY --from=ghcr.io/astral-sh/uv:0.11.12@sha256:3a59a3cdd5f7c217faa36e32dbc7fddbb0412889c2a0a5229f6d790e5a019dd7 /uv /uvx /bin/
 
 ENV UV_COMPILE_BYTECODE=1
 ENV UV_LINK_MODE=copy
