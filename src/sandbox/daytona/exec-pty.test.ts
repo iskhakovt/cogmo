@@ -472,6 +472,79 @@ describe("startExecPty", () => {
     }
   });
 
+  it("timeout exits even when the SDK's wait() never resolves after kill", async () => {
+    // Real-world failure mode: SDK's PtyHandle.wait() polls _exitCode
+    // every 100ms; kill() only invokes an HTTP RPC, doesn't set the
+    // exit code. On WS close code 1006 (abnormal) with empty reason,
+    // wait() loops forever even after kill returns. Cogmo's abort signal
+    // must let the timer path exit deterministically without waiting for
+    // the SDK to settle. Mirror that here: override kill so it does NOT
+    // resolve wait.
+    vi.useFakeTimers();
+    try {
+      const ptyCtrl = fakePty();
+      vi.mocked(ptyCtrl.pty.kill).mockImplementation(async () => {
+        ptyCtrl.killed = true;
+        // No resolveWait() — mimic the SDK bug.
+      });
+      const fsCtrl = fakeFs();
+      const procCtrl = fakeProcess(ptyCtrl);
+
+      const handle = await startExecPty({
+        process: procCtrl.process,
+        fs: fsCtrl.fs,
+        sessionIdPrefix: "p",
+        cmd: ["sleep", "999"],
+        opts: { attachStdin: true, timeoutMs: 1_000 },
+        random: deterministicRandom(),
+      });
+      handle.stdin?.end();
+      const failure = handle.wait().catch((err: Error) => err);
+      // Flush microtasks so startPty progresses to `pty.sendInput`.
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+      // Fire the total timer; wait() never resolves, abort signal does.
+      await vi.advanceTimersByTimeAsync(1_001);
+      const err = await failure;
+      if (!(err instanceof ExecTimeoutError)) {
+        throw new Error(`expected ExecTimeoutError, got ${String(err)}`);
+      }
+      expect(err.kind).toBe("total");
+      expect(ptyCtrl.killed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("dispose() exits even when the SDK's wait() never resolves after kill", async () => {
+    // Mirror of the timeout test, driving dispose() instead of the timer.
+    const ptyCtrl = fakePty();
+    vi.mocked(ptyCtrl.pty.kill).mockImplementation(async () => {
+      ptyCtrl.killed = true;
+    });
+    const fsCtrl = fakeFs();
+    const procCtrl = fakeProcess(ptyCtrl);
+
+    const handle = await startExecPty({
+      process: procCtrl.process,
+      fs: fsCtrl.fs,
+      sessionIdPrefix: "p",
+      cmd: ["sleep", "999"],
+      opts: { attachStdin: true },
+      random: deterministicRandom(),
+    });
+    handle.stdin?.end();
+    // Let startPty get past sendInput so dispose hits the post-kill path.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const failure = handle.wait().catch((err: Error) => err);
+    await handle.dispose();
+    expect(ptyCtrl.killed).toBe(true);
+    const err = await failure;
+    expect(err).toBeInstanceOf(DisposedError);
+  });
+
   it("dispose() before exit rejects wait() with DisposedError and kills the PTY", async () => {
     const ptyCtrl = fakePty();
     const fsCtrl = fakeFs();

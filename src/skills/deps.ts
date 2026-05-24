@@ -105,8 +105,8 @@ const DEFAULT_COMPILE_RESOURCE_LIMITS: Required<ResourceLimits> = {
   disk_bytes: 512 * 1024 * 1024,
 };
 
-/** Wall-clock cap for the compile container. Resolver runs are typically <2s. */
-const DEFAULT_COMPILE_TIMEOUT_MS = 60_000;
+// Covers the cold-cache path (sandbox boot + PyPI metadata + hash downloads).
+const DEFAULT_COMPILE_TIMEOUT_MS = 180_000;
 
 /** stdout cap from `SANDBOX_EXEC_BUFFER_LIMIT`. Lockfiles fit comfortably. */
 const MAX_LOCKFILE_BYTES = 1024 * 1024;
