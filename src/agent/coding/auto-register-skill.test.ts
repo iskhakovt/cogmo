@@ -271,7 +271,7 @@ describe("autoRegisterSkill", () => {
         }),
     );
 
-    // Stub global setTimeout for the test so the 180_000ms cap fires in ~10ms.
+    // Stub global setTimeout for the test so the 300_000ms cap fires in ~10ms.
     const realSetTimeout = global.setTimeout;
     const stubbed = vi
       .spyOn(global, "setTimeout")
@@ -289,7 +289,7 @@ describe("autoRegisterSkill", () => {
           },
           { taskId },
         ),
-      ).rejects.toThrow(/register exceeded 180000ms/);
+      ).rejects.toThrow(/register exceeded 300000ms/);
     } finally {
       stubbed.mockRestore();
       resolveHang?.();

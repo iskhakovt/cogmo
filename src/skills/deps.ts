@@ -105,8 +105,13 @@ const DEFAULT_COMPILE_RESOURCE_LIMITS: Required<ResourceLimits> = {
   disk_bytes: 512 * 1024 * 1024,
 };
 
-/** Wall-clock cap for the compile container. Resolver runs are typically <2s. */
-const DEFAULT_COMPILE_TIMEOUT_MS = 60_000;
+/**
+ * Wall-clock cap for the compile container. Steady-state uv resolves are
+ * <2s, but the first compile pays for sandbox boot (~30s on Daytona) +
+ * cold PyPI metadata + per-wheel hash downloads. 240s leaves room for a
+ * mid-size manifest on a fresh deps-cache volume.
+ */
+const DEFAULT_COMPILE_TIMEOUT_MS = 240_000;
 
 /** stdout cap from `SANDBOX_EXEC_BUFFER_LIMIT`. Lockfiles fit comfortably. */
 const MAX_LOCKFILE_BYTES = 1024 * 1024;
