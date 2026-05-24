@@ -183,16 +183,9 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     remoteUrl = expectDefined(process.env.COGMO_TEST_SKILLS_REMOTE);
     remoteSlug = parseGitHubSlug(remoteUrl);
 
-    // Replay still talks to real github host-side (setOriginAndFetch +
-    // auto-register's fetch). Try the operator's gh token; fall back to a
-    // fake only when gh is genuinely missing (ENOENT / "not found"
-    // shaped errors). Any other failure (broken gh install, expired
-    // token, network) surfaces clearly instead of silently degrading.
+    // Fall back to a fake PAT only when gh is missing; other failures surface.
     const ghAuth = await readGhAuth().catch((err: Error) => {
-      const msg = err.message.toLowerCase();
-      const ghMissing =
-        msg.includes("enoent") || msg.includes("not found") || msg.includes("command not found");
-      if (!ghMissing) throw err;
+      if (!/enoent|not found|command not found/i.test(err.message)) throw err;
       return { pat: "test-pat", login: "test-user", id: "0" };
     });
     const signingKeypair = await generateSigningKeypair();
@@ -339,10 +332,7 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
       inboundMessageId: await latestInboundId(db, conversationId),
     });
 
-    // Structural assertion only — exact phrasing varies. Anchor on a
-    // tens-of-thousands-shape number so error replies / years / HTTP
-    // codes don't false-positive. Matches "$95,000", "95000 USD",
-    // "around 95k", "$95k", etc.
+    // Anchor on tens-of-thousands shape so years / HTTP codes don't false-positive.
     const replyRe = /\$?\s?\d{2,3}[,.]?\d{3}|\$?\d+k/i;
     const reply = await waitForOutbound(
       (e) => replyRe.test(e.content) && e.platformAddress === sessionId,

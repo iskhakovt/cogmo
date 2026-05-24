@@ -517,13 +517,10 @@ describe("startExecPty", () => {
   });
 
   it("dispose() exits even when the SDK's wait() never resolves after kill", async () => {
-    // Same SDK-bug shape as the timeout regression, driven through
-    // dispose() instead of the total timer. Locks in the abort signal's
-    // dispose path against future refactors.
+    // Mirror of the timeout test, driving dispose() instead of the timer.
     const ptyCtrl = fakePty();
     vi.mocked(ptyCtrl.pty.kill).mockImplementation(async () => {
       ptyCtrl.killed = true;
-      // No resolveWait() — mimic the SDK bug.
     });
     const fsCtrl = fakeFs();
     const procCtrl = fakeProcess(ptyCtrl);

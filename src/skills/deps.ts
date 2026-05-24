@@ -105,12 +105,7 @@ const DEFAULT_COMPILE_RESOURCE_LIMITS: Required<ResourceLimits> = {
   disk_bytes: 512 * 1024 * 1024,
 };
 
-/**
- * Wall-clock cap for the compile container. Steady-state uv resolves are
- * <2s; cold cache pays for sandbox boot (~30s) + PyPI metadata (~60s) +
- * per-wheel hash downloads (~30s). 180s covers the cold path with
- * headroom; surfaces a wedged uv faster than a more generous budget.
- */
+// Covers the cold-cache path (sandbox boot + PyPI metadata + hash downloads).
 const DEFAULT_COMPILE_TIMEOUT_MS = 180_000;
 
 /** stdout cap from `SANDBOX_EXEC_BUFFER_LIMIT`. Lockfiles fit comfortably. */
