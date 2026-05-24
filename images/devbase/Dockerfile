@@ -60,10 +60,10 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
  && claude --version
 
 # uv — copied from astral's distroless image, pinned to the same version
-# `images/skills/Dockerfile` uses so author-side `uv pip compile` produces
-# lockfiles byte-identical to what `cogmo-skills` re-resolves at register
-# time. Bump both Dockerfiles together.
-COPY --from=ghcr.io/astral-sh/uv:0.11.12 /uv /uvx /usr/local/bin/
+# (+ digest) `images/skills/Dockerfile` uses so author-side `uv pip compile`
+# produces lockfiles byte-identical to what `cogmo-skills` re-resolves at
+# register time. Bump both Dockerfiles together.
+COPY --from=ghcr.io/astral-sh/uv:0.11.12@sha256:3a59a3cdd5f7c217faa36e32dbc7fddbb0412889c2a0a5229f6d790e5a019dd7 /uv /uvx /usr/local/bin/
 
 # Drop privileges. Cogmo's supervisor mounts the worktree at /workspace and
 # always overrides Entrypoint/Cmd at create-container time, so we leave the

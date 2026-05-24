@@ -51,31 +51,38 @@ export async function autoRegisterSkill(
   deps: AutoRegisterSkillDeps,
   args: { taskId: string },
 ): Promise<AutoRegisterResult> {
-  const task = await deps.runInTx((tx) => deps.store.getTask(tx, args.taskId));
-  if (!task) return { kind: "skipped", reason: "task row not found" };
-
-  const repo = await deps.runInTx((tx) => deps.store.getRepoById(tx, task.repoId));
-  if (!repo) return { kind: "skipped", reason: "repo row not found" };
-
-  if (repo.name !== SKILLS_CODING_REPO_NAME) {
-    return { kind: "skipped", reason: `not the skills repo (name=${repo.name})` };
-  }
-
-  const identityResult = await deps.runInTx((tx) =>
-    resolveGitHubIdentity(tx, deps.secretsStore, repo.identityName),
-  );
-  if (identityResult.isErr()) {
-    return { kind: "skipped", reason: describeResolveIdentityError(identityResult.error) };
-  }
-  const identity = identityResult.value;
-
-  if (!task.worktreeAssignment) {
-    return { kind: "skipped", reason: "worktree_assignment is null (task never started)" };
-  }
-  const branch = task.worktreeAssignment.branch;
-  // Address the remote by URL not by name — symmetric with
-  // `pushTaskBranchToRemote` in git-as-transport.ts, and decoupled from
-  // whatever local remote name the bare repo happens to use.
+  // One tx for (task, repo, identity) — atomic snapshot, one round-trip.
+  const snapshot = await deps.runInTx(async (tx) => {
+    const task = await deps.store.getTask(tx, args.taskId);
+    if (!task) return { kind: "skipped" as const, reason: "task row not found" };
+    const repo = await deps.store.getRepoById(tx, task.repoId);
+    if (!repo) return { kind: "skipped" as const, reason: "repo row not found" };
+    if (repo.name !== SKILLS_CODING_REPO_NAME) {
+      return { kind: "skipped" as const, reason: `not the skills repo (name=${repo.name})` };
+    }
+    if (!task.worktreeAssignment) {
+      return {
+        kind: "skipped" as const,
+        reason: "worktree_assignment is null (task never started)",
+      };
+    }
+    const identityResult = await resolveGitHubIdentity(tx, deps.secretsStore, repo.identityName);
+    if (identityResult.isErr()) {
+      return {
+        kind: "skipped" as const,
+        reason: describeResolveIdentityError(identityResult.error),
+      };
+    }
+    return {
+      kind: "ok" as const,
+      repo,
+      identity: identityResult.value,
+      branch: task.worktreeAssignment.branch,
+    };
+  });
+  if (snapshot.kind === "skipped") return snapshot;
+  const { repo, identity, branch } = snapshot;
+  // Address remote by URL, not name — see pushTaskBranchToRemote.
   await withGitAskpass(identity.pat, async (env) => {
     await execFileP(
       "git",
@@ -84,11 +91,7 @@ export async function autoRegisterSkill(
     );
   });
 
-  // Wall-clock cap on the register call. The lockfile-compile sandbox
-  // has its own 60s + 30s expiresAt cap inside `makeSandboxLockfileCompiler`,
-  // but the PTY-based wait() doesn't always detect sandbox death
-  // cleanly — without this wrapper, a hung compile leaves the Inngest
-  // function in-flight indefinitely and blocks graceful shutdown.
+  // Bandage: register() has no AbortSignal so the underlying call leaks past this timeout — see todo.md PTY-hang p1.
   const REGISTER_TIMEOUT_MS = 180_000;
   let timeoutHandle: NodeJS.Timeout | undefined;
   try {
@@ -122,10 +125,7 @@ export function createAutoRegisterSkillSubscriber(deps: AutoRegisterSkillDeps, i
     {
       id: "coding-auto-register-skill",
       idempotency: "event.data.taskId",
-      // Same retries:0 reasoning as the orchestrators: register's lockfile-
-      // compile sandbox isn't idempotent under retry, and a transient
-      // failure should surface as a failed registration the operator sees,
-      // not a multi-minute retry storm. Re-author via chat to retry.
+      // register isn't idempotent under retry — re-author via chat instead.
       retries: 0,
       triggers: [codingTaskPrOpened],
     },
