@@ -120,7 +120,11 @@ const PLAN_FLAGS: readonly string[] = [...COMMON_FLAGS, "--permission-mode", "pl
 // still prompt on `Bash`, which claude routinely uses for `cat > file
 // << EOF` writes and would silently deny in the absence of a stdio
 // `--permission-prompt-tool`.
-const EXECUTE_PERMISSION_FLAGS: readonly string[] = ["--permission-mode", "bypassPermissions"];
+const EXECUTE_FLAGS: readonly string[] = [
+  ...COMMON_FLAGS,
+  "--permission-mode",
+  "bypassPermissions",
+];
 
 /**
  * Per-call exec timeouts for `claude -p`. See design/coding-delegation.md →
@@ -156,7 +160,7 @@ export class ClaudeCodeBackend implements CodingBackend {
       );
     }
     const prompt = buildExecutePrompt(ctx.repo);
-    const flags = [...COMMON_FLAGS, ...EXECUTE_PERMISSION_FLAGS, "--resume", sessionId];
+    const flags = [...EXECUTE_FLAGS, "--resume", sessionId];
     return runClaudeSession(this.#binary, ctx.container, flags, prompt, "execute");
   }
 }
