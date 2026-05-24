@@ -55,6 +55,7 @@ RUN apt-get update \
            /usr/local/bin/npm /usr/local/bin/npx \
            /usr/local/bin/corepack \
            /usr/local/bin/yarn /usr/local/bin/yarnpkg \
+           /opt/yarn-v* \
  && mkdir -p /var/lib/cogmo/skills /var/lib/cogmo/repos /var/lib/cogmo/worktrees /var/lib/cogmo/askpass \
  && git init --bare /var/lib/cogmo/skills \
  && chown -R node:node /var/lib/cogmo
