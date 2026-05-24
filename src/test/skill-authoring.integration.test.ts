@@ -83,7 +83,13 @@ const HAS_RECORDING_INPUTS =
   !!process.env.COGMO_TEST_SKILLS_REMOTE;
 const RECORDABLE = IS_RECORD && HAS_RECORDING_INPUTS;
 const FIXTURE_EXISTS = existsSync(FIXTURE_PATH);
-const RUNNABLE = RECORDABLE || FIXTURE_EXISTS;
+// Replay mode also requires `COGMO_TEST_SKILLS_REMOTE` because the
+// host-side `setOriginAndFetch` step runs unconditionally — the
+// Daytona mock doesn't intercept host-side git. CI without the env
+// var set skips cleanly; an operator running locally with both the
+// fixture and the env present runs the full replay.
+const HAS_REPLAY_INPUTS = !!process.env.COGMO_TEST_SKILLS_REMOTE;
+const RUNNABLE = RECORDABLE || (FIXTURE_EXISTS && HAS_REPLAY_INPUTS);
 
 // --- Outbound capture (mirrors pipeline.integration.test.ts) ─────────
 
@@ -155,15 +161,13 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
         }),
     });
 
-    // RECORD: real PAT/login/id from `gh auth`. Replay: any non-empty
-    // values — the identity-loader runs before DaytonaMock takes over
-    // routing, and the placeholder remote URL is never actually contacted
-    // because DaytonaMock intercepts every git/sandbox call. Strictly
-    // requiring COGMO_TEST_SKILLS_REMOTE in replay would gate the test
-    // on an env var that's only meaningful during recording.
-    remoteUrl = RECORDABLE
-      ? expectDefined(process.env.COGMO_TEST_SKILLS_REMOTE)
-      : "https://github.com/cogmo-test/replay-placeholder.git";
+    // `COGMO_TEST_SKILLS_REMOTE` is required in BOTH record and replay
+    // modes. `setOriginAndFetch` below runs a host-side `git fetch
+    // origin +refs/heads/main:refs/heads/main` against this URL — the
+    // Daytona mock only proxies traffic between Cogmo and Daytona, not
+    // host-side git. A placeholder URL fails with "Could not read from
+    // remote repository" before the test reaches the mock at all.
+    remoteUrl = expectDefined(process.env.COGMO_TEST_SKILLS_REMOTE);
     remoteSlug = parseGitHubSlug(remoteUrl);
 
     const ghAuth = RECORDABLE

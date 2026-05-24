@@ -571,12 +571,14 @@ Two viable patterns, each with real costs:
 **Slice 4.0d wiring (concrete shape).** The orchestrator provisions a per-task askpass directory before `sandbox.create`:
 
 ```
-${SANDBOX_ASKPASS_DIR}/<rootTaskId>/
-  helper           0700  — `#!/bin/sh; exec /bin/cat /tmp/cogmo-askpass/pat`
-  pat              0600  — bot account's fine-grained PAT
-  signing-key      0600  — OpenSSH-armored Ed25519 private key
+${SANDBOX_ASKPASS_DIR}/<rootTaskId>/       (parent dir is 0700)
+  helper           0755  — `#!/bin/sh; exec /bin/cat /tmp/cogmo-askpass/pat`
+  pat              0644  — bot account's fine-grained PAT
+  signing-key      0600  — OpenSSH-armored Ed25519 private key (ssh-keygen -Y sign refuses anything broader)
   signing-key.pub  0644  — corresponding `ssh-ed25519 ...` line
 ```
+
+Helper script + PAT + public key are world-readable so the container's non-root CLI user can read them through the bind mount under runtimes that map container-uid to a host subordinate-uid (plain runc with userns, idmapped mounts without shift). Confidentiality stays with the parent dir's `0700`. The signing key is `0600` by necessity — `ssh-keygen -Y sign` refuses to load a key with broader permissions and aborts.
 
 The directory is bind-mounted **read-only** at `/tmp/cogmo-askpass/` inside the container (Local-Docker) or uploaded via `fs.uploadFiles` then mode-set with `fs.setFilePermissions` (Daytona — same path layout, same modes). `/tmp` because Daytona's toolbox uploads as the sandbox image's non-root user (`vscode` in cogmo-devbase), which can't `mkdir /<anything>` at the container root. `provisionAskpass` returns env vars to thread into `exec` — `GIT_ASKPASS=/tmp/cogmo-askpass/helper` and `GIT_TERMINAL_PROMPT=0`; commit signing happens via `git -c gpg.format=ssh -c user.signingkey=/tmp/cogmo-askpass/signing-key` (env vars don't drive the signing path). The sandbox client's `deleteByTaskId` calls `cleanupAskpass` in its `try/finally`, idempotent under retries and a no-op when the directory was never provisioned. See `src/sandbox/askpass.ts` and `src/sandbox/daytona/askpass-upload.ts`.
 
