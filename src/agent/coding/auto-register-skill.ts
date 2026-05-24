@@ -82,6 +82,11 @@ export async function autoRegisterSkill(
   });
   if (snapshot.kind === "skipped") return snapshot;
   const { repo, identity, branch } = snapshot;
+  // Refuse anything outside the orchestrator's per-task namespace —
+  // `git fetch +<branch>:<branch>` against `main` would clobber the bare repo's main.
+  if (!branch.startsWith("cogmo/") || branch === "cogmo/" || branch.includes("..")) {
+    return { kind: "skipped", reason: `unsafe branch name: ${branch}` };
+  }
   // Address remote by URL, not name — see pushTaskBranchToRemote.
   await withGitAskpass(identity.pat, async (env) => {
     await execFileP(
@@ -91,7 +96,7 @@ export async function autoRegisterSkill(
     );
   });
 
-  // Bandage: register() has no AbortSignal so the underlying call leaks past this timeout — see todo.md PTY-hang p1.
+  // KNOWN LEAK: register() has no AbortSignal — underlying call keeps running past this cap. See PTY-hang p1 in todo.md.
   const REGISTER_TIMEOUT_MS = 180_000;
   let timeoutHandle: NodeJS.Timeout | undefined;
   try {
@@ -104,13 +109,15 @@ export async function autoRegisterSkill(
         );
       }),
     ]);
-    log.warn(
+    const hasErrors = result.errors && result.errors.length > 0;
+    const logLevel = result.status === "live" && !hasErrors ? "info" : "warn";
+    log[logLevel](
       {
         taskId: args.taskId,
         branch,
         status: result.status,
         name: result.name,
-        ...(result.errors && result.errors.length > 0 && { errors: result.errors }),
+        ...(hasErrors && { errors: result.errors }),
       },
       "auto-register fired",
     );

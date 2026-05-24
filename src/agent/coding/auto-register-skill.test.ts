@@ -3,9 +3,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
+import { GitHubIdentitySchema } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { bootstrapSkillsRepo, SKILLS_CODING_REPO_NAME } from "../../skills/repo.js";
 import type { RegisterResult, SkillRunner } from "../../skills/runner.js";
@@ -54,13 +55,16 @@ afterAll(async () => {
   await close();
 });
 
-const validIdentity = JSON.stringify({
-  pat: "ghp_test",
-  sshPrivateKey: "-----BEGIN OPENSSH PRIVATE KEY-----",
-  sshPublicKey: "ssh-ed25519 AAAA",
-  login: "cogmo-bot",
-  id: "12345",
-});
+// Parse through the schema so a future required-field addition fails here, not silently in resolveGitHubIdentity.
+const validIdentity = JSON.stringify(
+  GitHubIdentitySchema.parse({
+    pat: "ghp_test",
+    sshPrivateKey: "-----BEGIN OPENSSH PRIVATE KEY-----",
+    sshPublicKey: "ssh-ed25519 AAAA",
+    login: "cogmo-bot",
+    id: "12345",
+  }),
+);
 
 function fakeSecretsStore(secret: string | undefined): SecretsStore {
   const m = mock<SecretsStore>();
@@ -188,6 +192,8 @@ describe("autoRegisterSkill", () => {
     const { taskId, branch } = await seedRepoAndTask(SKILLS_CODING_REPO_NAME);
     await pushBranchToUpstream(branch);
 
+    // `riskTier` on RegisterResult is auto-derived from declared effects,
+    // distinct from the manifest's `tier` (wasm | container).
     const registerResult: RegisterResult = {
       name: "btc-spot",
       riskTier: "notify",
@@ -223,5 +229,70 @@ describe("autoRegisterSkill", () => {
       `refs/heads/${branch}`,
     ]);
     expect(stdout.trim()).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it("skips on unsafe branch names that would clobber main on fetch", async () => {
+    const { taskId } = await seedRepoAndTask(SKILLS_CODING_REPO_NAME);
+    // Replace the assigned branch with an unsafe value the orchestrator
+    // would never produce — defends the boundary against a future bug.
+    await tx((trx) =>
+      store.setTaskWorktreeAssignment(trx, taskId, { type: "git-remote", branch: "main" }),
+    );
+    const skillRunner = mock<SkillRunner>();
+    const result = await autoRegisterSkill(
+      {
+        runInTx: tx,
+        store,
+        secretsStore: fakeSecretsStore(validIdentity),
+        skillRunner,
+        skillsRepoPath: bareRepoPath,
+      },
+      { taskId },
+    );
+    expect(result.kind).toBe("skipped");
+    if (result.kind === "skipped") expect(result.reason).toMatch(/unsafe branch/);
+    expect(skillRunner.register).not.toHaveBeenCalled();
+  });
+
+  it("rejects when register exceeds the wall-clock cap", async () => {
+    // Simulate a hung register with a short real timer; reaches the same
+    // Promise.race path that fires at 180s in production. Fake timers
+    // collide with PGlite/git so we use a real-but-tiny timeout instead.
+    const { taskId, branch } = await seedRepoAndTask(SKILLS_CODING_REPO_NAME);
+    await pushBranchToUpstream(branch);
+    const skillRunner = mock<SkillRunner>();
+    let resolveHang: (() => void) | undefined;
+    skillRunner.register.mockImplementation(
+      () =>
+        new Promise<never>((_, reject) => {
+          // Keep a reference so we can settle the hung promise in the finally
+          // block — otherwise vitest reports an unhandled rejection.
+          resolveHang = () => reject(new Error("test cleanup"));
+        }),
+    );
+
+    // Stub global setTimeout for the test so the 180_000ms cap fires in ~10ms.
+    const realSetTimeout = global.setTimeout;
+    const stubbed = vi
+      .spyOn(global, "setTimeout")
+      .mockImplementation(((cb: () => void) => realSetTimeout(cb, 10)) as typeof setTimeout);
+
+    try {
+      await expect(
+        autoRegisterSkill(
+          {
+            runInTx: tx,
+            store,
+            secretsStore: fakeSecretsStore(validIdentity),
+            skillRunner,
+            skillsRepoPath: bareRepoPath,
+          },
+          { taskId },
+        ),
+      ).rejects.toThrow(/register exceeded 180000ms/);
+    } finally {
+      stubbed.mockRestore();
+      resolveHang?.();
+    }
   });
 });
