@@ -516,6 +516,38 @@ describe("startExecPty", () => {
     }
   });
 
+  it("dispose() exits even when the SDK's wait() never resolves after kill", async () => {
+    // Same SDK-bug shape as the timeout regression, driven through
+    // dispose() instead of the total timer. Locks in the abort signal's
+    // dispose path against future refactors.
+    const ptyCtrl = fakePty();
+    vi.mocked(ptyCtrl.pty.kill).mockImplementation(async () => {
+      ptyCtrl.killed = true;
+      // No resolveWait() — mimic the SDK bug.
+    });
+    const fsCtrl = fakeFs();
+    const procCtrl = fakeProcess(ptyCtrl);
+
+    const handle = await startExecPty({
+      process: procCtrl.process,
+      fs: fsCtrl.fs,
+      sessionIdPrefix: "p",
+      cmd: ["sleep", "999"],
+      opts: { attachStdin: true },
+      random: deterministicRandom(),
+    });
+    handle.stdin?.end();
+    // Let startPty get past sendInput so dispose hits the post-kill path.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const failure = handle.wait().catch((err: Error) => err);
+    await handle.dispose();
+    expect(ptyCtrl.killed).toBe(true);
+    const err = await failure;
+    expect(err).toBeInstanceOf(DisposedError);
+  });
+
   it("dispose() before exit rejects wait() with DisposedError and kills the PTY", async () => {
     const ptyCtrl = fakePty();
     const fsCtrl = fakeFs();

@@ -185,13 +185,16 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
 
     // Replay still talks to real github host-side (setOriginAndFetch +
     // auto-register's fetch). Try the operator's gh token; fall back to a
-    // fake when not available (CI without gh — that environment can't
-    // exercise the host-side fetch and should skip the test entirely).
-    const ghAuth = await readGhAuth().catch(() => ({
-      pat: "test-pat",
-      login: "test-user",
-      id: "0",
-    }));
+    // fake only when gh is genuinely missing (ENOENT / "not found"
+    // shaped errors). Any other failure (broken gh install, expired
+    // token, network) surfaces clearly instead of silently degrading.
+    const ghAuth = await readGhAuth().catch((err: Error) => {
+      const msg = err.message.toLowerCase();
+      const ghMissing =
+        msg.includes("enoent") || msg.includes("not found") || msg.includes("command not found");
+      if (!ghMissing) throw err;
+      return { pat: "test-pat", login: "test-user", id: "0" };
+    });
     const signingKeypair = await generateSigningKeypair();
 
     // Init the bare skills repo + wire origin BEFORE `bootstrap()` so
@@ -336,14 +339,16 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
       inboundMessageId: await latestInboundId(db, conversationId),
     });
 
-    // Structural assertion only — exact phrasing varies. Match any 4+
-    // digit number (BTC is in the tens of thousands); models phrase the
-    // reply as "$95,000", "95000 USD", "around 95k", etc.
+    // Structural assertion only — exact phrasing varies. Anchor on a
+    // tens-of-thousands-shape number so error replies / years / HTTP
+    // codes don't false-positive. Matches "$95,000", "95000 USD",
+    // "around 95k", "$95k", etc.
+    const replyRe = /\$?\s?\d{2,3}[,.]?\d{3}|\$?\d+k/i;
     const reply = await waitForOutbound(
-      (e) => /\d{4,}|\d+k/i.test(e.content) && e.platformAddress === sessionId,
+      (e) => replyRe.test(e.content) && e.platformAddress === sessionId,
       60_000,
     );
-    expect(reply.content).toMatch(/\d{4,}|\d+k/i);
+    expect(reply.content).toMatch(replyRe);
   });
 
   // --- Cleanup helper bound to the describe scope ------------------

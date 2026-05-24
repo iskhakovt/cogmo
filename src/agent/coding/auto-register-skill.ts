@@ -96,7 +96,7 @@ export async function autoRegisterSkill(
     );
   });
 
-  // KNOWN LEAK: register() has no AbortSignal — underlying call keeps running past this cap. See PTY-hang p1 in todo.md.
+  // KNOWN LEAK: register() has no AbortSignal — underlying call keeps running past this cap. See AbortSignal-threading p3 in todo.md.
   // Budget covers the compile sandbox's `DEFAULT_COMPILE_TIMEOUT_MS` (240s) plus boot + classifier overhead.
   const REGISTER_TIMEOUT_MS = 300_000;
   let timeoutHandle: NodeJS.Timeout | undefined;
