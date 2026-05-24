@@ -418,7 +418,7 @@ export const codingTaskStart = eventType("coding/task/start", {
 /**
  * Coding delegation — user approved the plan via the Telegram inline
  * keyboard (slice 2.0e). The execute orchestrator (slice 2.0f) consumes
- * this event and runs `claude --resume <sid> --permission-mode acceptEdits`
+ * this event and runs `claude --resume <sid> --permission-mode bypassPermissions`
  * against the same task container.
  */
 export const codingTaskPlanApproved = eventType("coding/task/plan-approved", {

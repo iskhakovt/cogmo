@@ -115,6 +115,12 @@ const COMMON_FLAGS: readonly string[] = [
 ];
 
 const PLAN_FLAGS: readonly string[] = [...COMMON_FLAGS, "--permission-mode", "plan"];
+// Not `acceptEdits` — it still prompts on `Bash`. See design/coding-delegation.md.
+const EXECUTE_FLAGS: readonly string[] = [
+  ...COMMON_FLAGS,
+  "--permission-mode",
+  "bypassPermissions",
+];
 
 /**
  * Per-call exec timeouts for `claude -p`. See design/coding-delegation.md →
@@ -150,7 +156,7 @@ export class ClaudeCodeBackend implements CodingBackend {
       );
     }
     const prompt = buildExecutePrompt(ctx.repo);
-    const flags = [...COMMON_FLAGS, "--resume", sessionId];
+    const flags = [...EXECUTE_FLAGS, "--resume", sessionId];
     return runClaudeSession(this.#binary, ctx.container, flags, prompt, "execute");
   }
 }
