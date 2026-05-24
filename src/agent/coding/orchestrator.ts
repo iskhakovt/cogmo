@@ -339,14 +339,10 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       });
       gitRemoteIdentityPat = identity.pat;
 
-      // Provision askpass material here (plan phase) so the sandbox is
-      // created WITH askpass mounted from the start. Execute then
-      // resumes the same sandbox — without this, the resume path would
-      // have nowhere to mount the askpass (no `sandbox.create()` call
-      // on resume) and the push step would fail with "could not read
-      // askpass helper". Cleanup runs in the catch below on plan
-      // failure; on success, the execute orchestrator's finally takes
-      // ownership of teardown.
+      // Mount askpass on the plan-phase sandbox so an execute resume
+      // (no `sandbox.create()` call on that path) still has the push
+      // creds. Cleanup: plan's catch on failure; execute's `finally`
+      // on success.
       askpassProvisioned = true;
       askpassMaterials = await stepRun("provision-askpass", () =>
         provisionAskpass({ baseDir: deps.askpassBaseDir, rootTaskId: taskId, identity }),
@@ -829,11 +825,8 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   const worktreeAssignment = task.worktreeAssignment;
   let executeStream: ExecuteStreamHandle | null = null;
   let askpassProvisioned = false;
-  // Bundles the two prerequisites for the execute-side push step (bot
-  // identity + provisioned askpass material) so the invariant "both set
-  // together or neither set" lives in the type, not in adjacent
-  // `if (!a || !b)` runtime checks. Populated only when
-  // `needsExecutePush`.
+  // Identity + askpass live together — bundling encodes "both or
+  // neither" in the type. Set only when `needsExecutePush`.
   let executePushCtx: { identity: GitHubIdentity; askpass: AskpassMaterials } | undefined;
   const needsExecutePush = sandbox.capabilities.workingTreeTransport === "git-remote";
 
@@ -855,19 +848,10 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       return { status: "skipped" };
     }
 
-    // git-remote transports tunnel claude's edits via origin to the
-    // verify sandbox: execute resolves the bot identity up front and
-    // provisions an askpass dir so the post-streaming commit-and-push
-    // step can push to the remote. Resolved inside the try block (not
-    // inside any `step.run`) so the PAT lives in closure scope only —
-    // never returned to Inngest's state store — and so a DB/decrypt
-    // failure here surfaces through the catch (task -> failed +
-    // emit-task-failed + teardown) rather than throwing past it. Safe
-    // to skip the step-boundary cache only because the orchestrator
-    // function is pinned to `retries: 0` — a replay would otherwise
-    // redo the DB+decrypt on every retry. Loosen retries → cache
-    // identity through a step (or split: cache id/login as step return,
-    // re-fetch PAT outside).
+    // PAT-bearing identity stays out of `step.run` so it never reaches
+    // Inngest's state store. Safe to skip the step boundary only
+    // because this function is `retries: 0` — loosen retries and the
+    // DB+decrypt would replay; cache through a step then.
     const secretsStore = deps.secretsStore;
 
     // Get-or-create the task container in two checkpoints:
@@ -890,17 +874,10 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       return existing?.state ?? null;
     });
 
-    // git-remote transports need the askpass dir mounted into the
-    // execute sandbox so the post-streaming push step has bot creds to
-    // reach origin. Resolve identity + provision askpass in one
-    // transaction here so `executePushCtx` is set atomically — the
-    // type guarantees "both or neither", removing the runtime `!a || !b`
-    // guards at the push site. Provision runs unconditionally (resume
-    // or fresh-create) so a resumed sandbox that's about to push has
-    // fresh material on the host. Mark before the step body so a
-    // partial provision still triggers cleanup in the finally block;
-    // the cleanup is a recursive `rm -rf` and absent/partial dirs are
-    // no-ops.
+    // Provision askpass for git-remote unconditionally (resume reuses
+    // the plan-phase mount; fresh-create needs it on `sandbox.create`).
+    // `askpassProvisioned` flips before the step body so a partial
+    // provision still triggers cleanup in `finally`.
     if (needsExecutePush) {
       if (!deps.secretsStore) {
         throw new Error("git-remote sandbox requires a secretsStore for clone + push auth");

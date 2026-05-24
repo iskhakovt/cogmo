@@ -241,12 +241,8 @@ async function runGit(
   };
 }
 
-// `output` field of every CommitAndPushResult flows into `failure_reason`
-// (persisted) and the `coding/task/failed` Inngest event payload (stored
-// in Inngest's state). A long-tail conflict / verbose-error output could
-// bloat both. Cap at 8 KiB — enough to keep the actionable stderr lines
-// (which sit at the END of git's output), short enough to bound the worst
-// case. Truncation marker mirrors `exec-pty.ts`'s STDERR_TRUNCATED_SUFFIX.
+// `output` ends up in `failure_reason` + the Inngest event payload —
+// cap from the tail so the actionable stderr survives.
 const MAX_OUTPUT_BYTES = 8 * 1024;
 const OUTPUT_TRUNCATED_PREFIX = "[cogmo: output truncated to last 8 KiB]\n";
 
