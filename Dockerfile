@@ -4,10 +4,9 @@ FROM base AS build
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY patches/ patches/
-# Avoids corepack — its LKG default seeds an older pnpm whose bundled deps trivy flags.
-RUN PNPM_VERSION="$(node -p "require('./package.json').packageManager.match(/^pnpm@([^+]+)/)[1]")" \
- && npm install -g "pnpm@${PNPM_VERSION}" \
- && pnpm --version
+# Corepack runs only in this stage; `prepare --activate` verifies the +sha512 hash from packageManager.
+RUN corepack enable \
+ && corepack prepare --activate "$(node -p "require('./package.json').packageManager")"
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 COPY tsconfig.json tsup.config.ts ./
