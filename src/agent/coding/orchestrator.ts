@@ -669,11 +669,11 @@ export interface CodingExecuteResult {
 
 /**
  * Inngest function that consumes `coding/task/plan-approved` and runs
- * `claude -p --resume <sid>` in the same task container (recreating it
- * if the reaper got it first). No `--permission-mode` flag — the
- * sandbox is the security boundary, the CLI runs to completion against
- * its `--allowedTools` defaults inside the isolated container, and the
- * stream-json output drives the user-visible progress feed.
+ * `claude -p --resume <sid> --permission-mode bypassPermissions` in the
+ * same task container (recreating it if the reaper got it first).
+ * Sandbox isolation is the security boundary; the CLI resolves every
+ * tool call locally with no stdio control channel, and the stream-json
+ * output drives the user-visible progress feed.
  *
  * Same retries=0 reasoning as the plan function: file edits inside the
  * container are not idempotent under retry. A failed run leaves the

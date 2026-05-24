@@ -374,7 +374,7 @@ describe("ClaudeCodeBackend.execute", () => {
     expect(complete.usage).toEqual({ inputTokens: 3120, outputTokens: 640, costUsd: 0.084 });
   });
 
-  it("invokes claude with --resume <sid> and no permission flags", async () => {
+  it("invokes claude with --resume <sid> and bypassPermissions", async () => {
     const { container, execStreaming } = fakeContainer(EXECUTE_FIXTURE);
     const backend = new ClaudeCodeBackend();
     await collect(backend.execute({ task: taskWithSession, repo, container }, sessionId));
@@ -384,9 +384,10 @@ describe("ClaudeCodeBackend.execute", () => {
     expect(cmd[0]).toBe("claude");
     expect(cmd).toContain("--resume");
     expect(cmd[cmd.indexOf("--resume") + 1]).toBe(sessionId);
-    // Sandbox isolation is the security boundary; no permission flags
-    // or control channel.
-    expect(cmd).not.toContain("--permission-mode");
+    // Sandbox is the security boundary; CLI resolves tool calls
+    // locally with no stdio control channel.
+    expect(cmd).toContain("--permission-mode");
+    expect(cmd[cmd.indexOf("--permission-mode") + 1]).toBe("bypassPermissions");
     expect(cmd).not.toContain("--permission-prompt-tool");
     expect(cmd).not.toContain("acceptEdits");
     expect(cmd).not.toContain("plan");

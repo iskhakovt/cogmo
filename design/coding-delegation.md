@@ -24,7 +24,7 @@ Scope explicitly *not* in this doc: writing code inline in the agent's own respo
 
 | Backend | Invocation (shape) | Auth |
 |-|-|-|
-| Claude Code | `claude -p --output-format stream-json --include-partial-messages --input-format stream-json --permission-mode {plan,acceptEdits} [--resume <sid>] [--session-id <uuid>]` | User's Max/Pro subscription via long-lived OAuth token, see [Subscription Auth](#subscription-auth-proposed) |
+| Claude Code | `claude -p --output-format stream-json --include-partial-messages --input-format stream-json --permission-mode {plan,bypassPermissions} [--resume <sid>] [--session-id <uuid>]` | User's Max/Pro subscription via long-lived OAuth token, see [Subscription Auth](#subscription-auth-proposed) |
 | Codex CLI | `codex exec resume <sid> --json` (or `codex exec resume --last --json`) — `resume` is a subcommand and must precede `--json` | User's ChatGPT Plus/Pro login (file-mount path TBD, see [Subscription Auth → Codex parallel](#subscription-auth-proposed)) |
 
 Flag set is illustrative — pin and verify against the exact `claude` / `codex` versions baked into `cogmo/devbase`. Both CLIs evolve their flags quickly; the `CodingBackend` impl treats the argv vector as a versioned contract keyed on the image tag.
@@ -315,7 +315,7 @@ Identity bundles (PAT + SSH private key) follow [scheduling.md → Don't return 
 2. Reuse-or-create check: `sandbox.tryResumeByTaskId(taskId)` returns the live root session for the task or null. The local-Docker backend implements this by querying its `containers` table for `depth=0` rows and inspecting Docker; managed backends query their provider-side API. A non-null return means the prior session is still alive and the orchestrator skips step 3.
 3. `sandbox.create(spec)` with the worktree spec the orchestrator's `allocate-worktree` step persisted (host-path or git-remote — see below). Fresh sandbox, same per-task lineage label. Local-Docker inserts a new `containers` row and stamps `coding_tasks.container_id`; managed backends leave the column null and rely on the sandbox's task-id label.
 4. Re-attach a session handle on the orchestrator side via `sandbox.resume(sessionState)` — handles aren't JSON-serializable so they can't cross step boundaries; the state is.
-5. `backend.execute(ctx, sessionId)` → `claude -p --resume <session_id> --permission-mode acceptEdits` (or Codex equivalent). CLI rehydrates its conversation from its session file in the per-task home volume (Local-Docker named volume; Daytona auto-persists FS across stop/start).
+5. `backend.execute(ctx, sessionId)` → `claude -p --resume <session_id> --permission-mode bypassPermissions` (or Codex equivalent). CLI rehydrates its conversation from its session file in the per-task home volume (Local-Docker named volume; Daytona auto-persists FS across stop/start). `bypassPermissions` matches the sandbox-is-the-boundary stance from the [Sandbox isolation](#sandbox-isolation-confirmed) section: every tool call resolves locally with no prompt. `acceptEdits` would still prompt on `Bash`, which the CLI routinely uses for `cat > file << EOF` writes and would silently deny in the absence of a stdio `--permission-prompt-tool`.
 
 Cost: ~1–3s container start under sysbox plus cache-volume mount when the recreate path is taken. Acceptable because reuse is the common case (default 20-minute idle TTL covers most approve-tap intervals).
 
@@ -418,8 +418,8 @@ plan_ready event
         │
         ▼ (on Approve or auto-proceed)
 ClaudeCodeBackend.execute()
-  claude -p --resume <sid> --permission-mode acceptEdits --input-format stream-json
-  Dangerous tool calls surface as stream-json permission requests → Telegram approve/deny
+  claude -p --resume <sid> --permission-mode bypassPermissions --input-format stream-json
+  Sandbox is the boundary; tool calls resolve inside the container with no per-call gate
   Text + tool-use events stream to Telegram progress message (edited in place)
         │
         ▼
@@ -518,6 +518,7 @@ During execute phase. **The sandbox container is the security boundary.** There 
 | `--include-partial-messages` | ✅ | ✅ | Streams `text_delta`s so the user sees progress. |
 | `--verbose` | ✅ | ✅ | Required by `--output-format stream-json`. |
 | `--permission-mode plan` | ✅ | ❌ | Plan mode is read-only by CLI contract. |
+| `--permission-mode bypassPermissions` | ❌ | ✅ | Default mode prompts on every tool call; with no stdio `--permission-prompt-tool` the CLI denies its own prompts and gives up after a few turns. Sandbox isolation is the boundary, not a per-tool gate. |
 | `--resume <sessionId>` | ❌ | ✅ | Execute resumes the plan-phase session. |
 | `--permission-prompt-tool stdio` | ❌ | ❌ | Would open the bidirectional control channel. We don't want it — sandbox is the boundary. |
 | `--bare` | ❌ | ❌ | Skips CLAUDE.md / hooks / MCP / skills / plugins auto-discovery. Skipped because we *do* want the repo's CLAUDE.md to influence Claude (if the repo ships one). Reconsider per-repo if the auto-discovery cost matters. |
