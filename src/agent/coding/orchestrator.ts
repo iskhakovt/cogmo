@@ -211,6 +211,10 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
   // Hoisted out of the try block so the catch can call planStream.fail().
   // Stays null until openPlanStream has actually returned a handle.
   let planStream: PlanStreamHandle | null = null;
+  // Hoisted so the catch can call cleanupAskpass on plan-phase failure
+  // (success leaves the dir alive — execute's finally owns it once the
+  // task transitions to executing).
+  let askpassProvisioned = false;
   try {
     await stepRun("set-status-planning", () =>
       runInTx((tx) => store.updateTaskStatus(tx, { id: taskId, status: "planning" })),
@@ -318,9 +322,12 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       sandboxEnv = authResult.value;
     }
 
-    // Resolve the GitHub identity once — git-remote backends need it for
-    // the sandbox's clone auth. Bind-mount paths skip this entirely.
+    // Resolve the GitHub identity once — git-remote backends need it
+    // for the sandbox's clone auth AND for the execute-side push step
+    // that runs against the same sandbox. Bind-mount paths skip this
+    // entirely.
     let gitRemoteIdentityPat: string | undefined;
+    let askpassMaterials: { hostDir: string; containerDir: string } | undefined;
     if (sandbox.capabilities.workingTreeTransport === "git-remote") {
       if (!deps.secretsStore) {
         throw new Error("git-remote sandbox requires a secretsStore for clone auth");
@@ -331,6 +338,20 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
         identityName: repo.identityName,
       });
       gitRemoteIdentityPat = identity.pat;
+
+      // Provision askpass material here (plan phase) so the sandbox is
+      // created WITH askpass mounted from the start. Execute then
+      // resumes the same sandbox — without this, the resume path would
+      // have nowhere to mount the askpass (no `sandbox.create()` call
+      // on resume) and the push step would fail with "could not read
+      // askpass helper". Cleanup runs in the catch below on plan
+      // failure; on success, the execute orchestrator's finally takes
+      // ownership of teardown.
+      askpassProvisioned = true;
+      const provisioned = await stepRun("provision-askpass", () =>
+        provisionAskpass({ baseDir: deps.askpassBaseDir, rootTaskId: taskId, identity }),
+      );
+      askpassMaterials = { hostDir: provisioned.hostDir, containerDir: provisioned.containerDir };
     }
 
     // Cleanup on failure goes through `sandbox.deleteByTaskId(taskId)`
@@ -369,6 +390,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
         ...(sandbox.capabilities.workingTreeTransport === "bind-mount" && {
           homeVolume: { volumeName: `${HOME_VOLUME_PREFIX}-${taskId}` },
         }),
+        ...(askpassMaterials && { askpass: askpassMaterials }),
         image: containerImage,
         resourceLimits: defaultResourceLimits,
         expiresAt: new Date(Date.now() + taskTtlMs),
@@ -570,6 +592,9 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     // `create-container` step. Idempotent at the label-index layer:
     // a sandbox that never made it server-side is a no-op sweep.
     await sandbox.deleteByTaskId(taskId).catch(() => {});
+    if (askpassProvisioned) {
+      cleanupAskpass({ baseDir: deps.askpassBaseDir, rootTaskId: taskId });
+    }
     // Notify the plan stream if it was opened. Best-effort — we're already
     // in the catch path, don't let a delivery failure mask the original error.
     await planStream?.fail(reason).catch(() => {});
