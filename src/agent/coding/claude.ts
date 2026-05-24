@@ -115,11 +115,7 @@ const COMMON_FLAGS: readonly string[] = [
 ];
 
 const PLAN_FLAGS: readonly string[] = [...COMMON_FLAGS, "--permission-mode", "plan"];
-// `bypassPermissions` matches the sandbox-is-the-boundary stance: the CLI
-// resolves every tool call locally with no prompt. `acceptEdits` would
-// still prompt on `Bash`, which claude routinely uses for `cat > file
-// << EOF` writes and would silently deny in the absence of a stdio
-// `--permission-prompt-tool`.
+// Not `acceptEdits` — it still prompts on `Bash`. See design/coding-delegation.md.
 const EXECUTE_FLAGS: readonly string[] = [
   ...COMMON_FLAGS,
   "--permission-mode",
