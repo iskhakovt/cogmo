@@ -11,4 +11,5 @@ allowBuilds:
 
 overrides:
   "ip-address@<10.1.1": ">=10.1.1"
+  "qs@<6.15.2": ">=6.15.2"
   "@opentelemetry/otlp-transformer@0.217.0": "^0.218.0"

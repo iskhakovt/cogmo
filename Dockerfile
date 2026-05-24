@@ -1,9 +1,15 @@
 FROM mirror.gcr.io/library/node:24-slim@sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d AS base
-RUN corepack enable
 
 FROM base AS build
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+# Install pnpm via npm in the build stage; version is parsed from the
+# `packageManager` field so package.json stays the single source of truth.
+# Avoids corepack, which seeds an older LKG pnpm in ~/.cache/node/corepack
+# and shows up in trivy as bundled tar/picomatch/etc. CVEs.
+RUN PNPM_VERSION="$(node -p "require('./package.json').packageManager.match(/^pnpm@([^+]+)/)[1]")" \
+ && npm install -g "pnpm@${PNPM_VERSION}" \
+ && pnpm --version
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 COPY tsconfig.json tsup.config.ts ./
@@ -43,6 +49,11 @@ RUN apt-get update \
     git \
     openssh-client \
  && rm -rf /var/lib/apt/lists/* \
+           /usr/local/lib/node_modules/npm \
+           /usr/local/lib/node_modules/corepack \
+           /usr/local/bin/npm /usr/local/bin/npx \
+           /usr/local/bin/corepack \
+           /usr/local/bin/yarn /usr/local/bin/yarnpkg \
  && mkdir -p /var/lib/cogmo/skills /var/lib/cogmo/repos /var/lib/cogmo/worktrees /var/lib/cogmo/askpass \
  && git init --bare /var/lib/cogmo/skills \
  && chown -R node:node /var/lib/cogmo
