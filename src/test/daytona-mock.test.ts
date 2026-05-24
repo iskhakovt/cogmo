@@ -61,7 +61,6 @@ describe("DaytonaMock", () => {
       const fixturePath = join(fixtureDir, "single-call.json");
       const fixture = {
         scenario: "single-call",
-        recordedAt: "2026-05-11T00:00:00.000Z",
         calls: [
           {
             kind: "http",
@@ -93,7 +92,6 @@ describe("DaytonaMock", () => {
       const fixturePath = join(fixtureDir, "fifo.json");
       const fixture = {
         scenario: "fifo",
-        recordedAt: "2026-05-11T00:00:00.000Z",
         calls: [
           {
             kind: "http",
@@ -128,7 +126,6 @@ describe("DaytonaMock", () => {
       const fixturePath = join(fixtureDir, "empty.json");
       await writeFixture(fixturePath, {
         scenario: "empty",
-        recordedAt: "2026-05-11T00:00:00.000Z",
         calls: [],
       });
       const mock = await DaytonaMock.create({ mode: "replay", fixturePath });
@@ -148,7 +145,6 @@ describe("DaytonaMock", () => {
       const fixturePath = join(fixtureDir, "ws-stream.json");
       await writeFixture(fixturePath, {
         scenario: "ws-stream",
-        recordedAt: "2026-05-11T00:00:00.000Z",
         calls: [
           {
             kind: "ws",
@@ -197,7 +193,6 @@ describe("DaytonaMock", () => {
       // would find nothing at the cursor and 503.
       await writeFixture(fixturePath, {
         scenario: "ws-wedge",
-        recordedAt: "2026-05-11T00:00:00.000Z",
         calls: [
           {
             kind: "http",
@@ -263,7 +258,6 @@ describe("DaytonaMock", () => {
       const ptyBytes = Buffer.from([0x1b, 0x5d, 0x30, 0x3b, 0x07, 0xc3, 0x28]); // ESC ] 0 ; BEL + invalid UTF-8
       await writeFixture(fixturePath, {
         scenario: "ws-binary",
-        recordedAt: "2026-05-23T00:00:00.000Z",
         calls: [
           {
             kind: "ws",
@@ -303,7 +297,6 @@ describe("DaytonaMock", () => {
       const fixturePath = join(fixtureDir, "ws-both.json");
       await writeFixture(fixturePath, {
         scenario: "ws-both",
-        recordedAt: "2026-05-23T00:00:00.000Z",
         calls: [
           {
             kind: "ws",
@@ -319,7 +312,6 @@ describe("DaytonaMock", () => {
       const fixturePath = join(fixtureDir, "ws-empty.json");
       await writeFixture(fixturePath, {
         scenario: "ws-empty",
-        recordedAt: "2026-05-11T00:00:00.000Z",
         calls: [],
       });
       const mock = await DaytonaMock.create({ mode: "replay", fixturePath });

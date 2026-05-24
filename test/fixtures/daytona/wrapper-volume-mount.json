@@ -1,6 +1,5 @@
 {
   "scenario": "wrapper-volume-mount",
-  "recordedAt": "2026-05-22T19:14:32.556Z",
   "calls": [
     {
       "kind": "http",

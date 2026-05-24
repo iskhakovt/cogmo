@@ -30,7 +30,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { dirname } from "node:path";
@@ -122,14 +122,23 @@ const WsCallSchema = z
 const CallSchema = z.discriminatedUnion("kind", [HttpCallSchema, WsCallSchema]);
 type Call = z.infer<typeof CallSchema>;
 
+/**
+ * On-disk fixture shape. `recordedAt` is intentionally absent: every
+ * re-record would otherwise produce a different timestamp and churn the
+ * diff. Load-time consumers derive the recorded-at time from the file's
+ * mtime (see `loadFixture`) — same diagnostic value, byte-stable file.
+ */
 const FixtureSchema = z
   .object({
     scenario: z.string().min(1),
-    recordedAt: z.string().datetime(),
     calls: z.array(CallSchema),
   })
   .strict();
 type Fixture = z.infer<typeof FixtureSchema>;
+
+interface LoadedFixture extends Fixture {
+  recordedAt: Date;
+}
 
 // --- Options ────────────────────────────────────────────────────────
 
@@ -311,7 +320,7 @@ interface InFlightScenario {
 }
 
 interface ReplayState {
-  fixture: Fixture;
+  fixture: LoadedFixture;
   /**
    * Index of the next call to match. Advances on each successful
    * HTTP or WS match — they share one cursor. Order-fragile: replay
@@ -385,8 +394,12 @@ export class DaytonaMock {
     }
     const mock = new DaytonaMock(opts, server, wss, address.port);
     if (opts.mode === "replay") {
-      const raw = await readFile(opts.fixturePath, "utf8");
-      const fixture = FixtureSchema.parse(JSON.parse(raw));
+      const [raw, statRes] = await Promise.all([
+        readFile(opts.fixturePath, "utf8"),
+        stat(opts.fixturePath),
+      ]);
+      const parsed = FixtureSchema.parse(JSON.parse(raw));
+      const fixture: LoadedFixture = { ...parsed, recordedAt: statRes.mtime };
       mock.#replay = { fixture, cursor: 0 };
     }
     server.on("request", (req, res) => {
@@ -434,7 +447,6 @@ export class DaytonaMock {
     }
     const fixture: Fixture = {
       scenario: this.#scenario.name,
-      recordedAt: new Date().toISOString(),
       calls: this.#scenario.calls,
     };
     const dir = dirname(this.#opts.fixturePath);
