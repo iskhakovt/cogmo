@@ -1,4 +1,80 @@
+import { SKILLS_CODING_REPO_NAME } from "../../skills/repo.js";
 import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
+
+/**
+ * Repo-specific guidance for the skills library. `register` reads
+ * `SKILL.md` + `skill.py` from the repo root at the branch tip, so claude
+ * must place both files at `/workspace` — not in a `skills/<name>/`
+ * subdirectory. One feature branch = one skill.
+ */
+const SKILLS_REPO_CONVENTION = [
+  "# Skills repo convention",
+  "- This is the skills library. One feature branch = exactly one skill.",
+  "- Place SKILL.md (the manifest), skill.py (the implementation), and (if",
+  "  the skill imports any third-party package) requirements.lock at /workspace root.",
+  "  Do NOT put them in a `skills/<name>/` subdirectory — registration reads them from the",
+  "  repo root and rejects layouts that hide them inside subdirs.",
+  "- skill.py must export `async def run(inputs, ctx) -> dict`.",
+  "",
+  "SKILL.md frontmatter contract — these are validated structurally, not free-form:",
+  "  - name: lowercase, starts with letter, [a-z0-9_-] only",
+  "  - description: 10-500 chars",
+  '  - tier: one of "wasm" | "container" (NOT "notify"/"approve" — those are risk tiers',
+  "    auto-derived from effects, not authored)",
+  "  - inputs: a JSON Schema object — must include `type: object` and (usually)",
+  "    `properties` + `required` arrays. Use `{type: object, properties: {}}` for",
+  "    no-arg skills. Never `inputs: none` or `inputs: <string>`.",
+  "  - effects: an array of strings, picked from this closed set: reads_memory,",
+  "    writes_memory, reads_user_data, writes_user_data, sends_email, sends_message,",
+  "    posts_public, deletes_external, financial, reads_filesystem, writes_filesystem,",
+  "    spawns_subprocess. Use `[]` if none apply. Never a free-form string or a value",
+  "    outside this set. A read-only HTTP call to a public API needs no effects.",
+  "  - dependencies: an array of strict `name==version` strings. Required for any",
+  "    third-party import in skill.py. Use `[]` (or omit) when skill.py is stdlib-only.",
+  "",
+  "Lockfile contract — if dependencies is non-empty:",
+  "- Generate requirements.lock with `uv pip compile --no-header --generate-hashes",
+  "  -o requirements.lock -` reading specs from stdin, e.g.:",
+  "    `printf 'httpx==0.27.2\\n' | uv pip compile --no-header --generate-hashes",
+  "    -o requirements.lock -`",
+  "  uv is on PATH in the sandbox. The lockfile resolves transitive deps with",
+  "  hashes — register byte-compares against a fresh re-resolve, so `--no-header`",
+  "  is required (the header is non-deterministic).",
+  "",
+  "Minimal valid SKILL.md (no deps):",
+  "```",
+  "---",
+  "name: example-skill",
+  "description: One-line summary of what the skill does (at least 10 chars).",
+  "tier: wasm",
+  "inputs:",
+  "  type: object",
+  "  properties: {}",
+  "effects: []",
+  "---",
+  "Free-form markdown body describing the skill in more detail.",
+  "```",
+  "",
+  "Same shape with dependencies:",
+  "```",
+  "---",
+  "name: example-skill",
+  "description: Fetches data over HTTP.",
+  "tier: wasm",
+  "inputs:",
+  "  type: object",
+  "  properties: {}",
+  "effects: []",
+  "dependencies:",
+  '  - "httpx==0.27.2"',
+  "---",
+  "```",
+].join("\n");
+
+function repoConvention(repo: CodingRepoRow): string {
+  if (repo.name === SKILLS_CODING_REPO_NAME) return `\n${SKILLS_REPO_CONVENTION}\n`;
+  return "";
+}
 
 /**
  * Slice-1 plan-phase prompt. Hardcoded template; slice 4+ wires this through
@@ -7,6 +83,9 @@ import type { CodingRepoRow, CodingTaskRow } from "./store/index.js";
  * Repo conventions are NOT inlined — Claude Code loads `/workspace/CLAUDE.md`,
  * `~/.claude/CLAUDE.md`, and `/etc/claude-code/CLAUDE.md` natively from its
  * memory tiers. See design/coding-delegation.md → "Injected context".
+ * Exception: the skills library has a layout convention that's load-bearing
+ * for register (root-only files), surfaced via {@link repoConvention} until
+ * a CLAUDE.md ships in the bare repo.
  */
 export function buildPlanPrompt(task: CodingTaskRow, repo: CodingRepoRow): string {
   if (!task.worktreeAssignment) {
@@ -21,7 +100,7 @@ export function buildPlanPrompt(task: CodingTaskRow, repo: CodingRepoRow): strin
     `- Current branch: ${task.worktreeAssignment.branch}. Already created and checked out.`,
     "- Git credentials are NOT available in plan mode — you cannot push or pull.",
     "- Do NOT make any edits. Plan only.",
-    "",
+    repoConvention(repo),
     "# Verify command (for context — runs after execution, not during plan)",
     repo.verifyCommand,
     "",
@@ -53,7 +132,7 @@ export function buildExecutePrompt(repo: CodingRepoRow): string {
     "  Cogmo handles push and PR opening after verifying your work.",
     "- When you believe the task is done, run the verify command and report",
     "  the result. If it fails, iterate.",
-    "",
+    repoConvention(repo),
     "# Verify command",
     repo.verifyCommand,
   ].join("\n");
