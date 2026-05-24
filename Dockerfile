@@ -1,4 +1,4 @@
-FROM mirror.gcr.io/library/node:24-slim@sha256:4e6b70dd6cbfc88c8157ba19aa3d9f9cce6ba4703576d55459e45efcbc9c5f5d AS base
+FROM mirror.gcr.io/library/node:24-trixie-slim@sha256:05c08ce4291e9a58f59456a7985176defb12cdd42271f35ff81a3e167ea61d4c AS base
 
 FROM base AS build
 WORKDIR /app
@@ -30,12 +30,12 @@ WORKDIR /app
 # merge-base). `ca-certificates` is required for `git clone` over HTTPS in
 # `transport.repos.cloneAndAdd` (otherwise: "server certificate verification
 # failed. CAfile: none"); `openssh-client` is required for `git@host:` SSH
-# remotes in the same path. The `node` user (UID 1000) ships in `node:24-slim`;
+# remotes in the same path. The `node` user (UID 1000) ships in `node:24-trixie-slim`;
 # bind-mounted state directories from the host must be chowned 1000:1000 to match.
 #
 # `apt-get upgrade` applies Debian security updates that landed after the
 # base-image rebuild. Hadolint's DL3005 advises against this on the
-# premise that base maintainers keep up — in practice node:24-slim trails
+# premise that base maintainers keep up — in practice node:24-trixie-slim trails
 # Debian security advisories by days to weeks, and the resulting CVE gap
 # in our published image is real. See trivy scan output on prior builds.
 # hadolint ignore=DL3005
