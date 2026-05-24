@@ -42,7 +42,7 @@ docker build -t cogmo .                              # version = "dev" (Dockerfi
 docker build --build-arg VERSION=0.0.0-dev -t cogmo . # override the embedded version string
 ```
 
-The image is based on `node:24-slim`, runs as the `node` user (UID 1000), and exposes port 9090 (health). Default entrypoint: `node --import ./dist/otel.js dist/main.js serve`. The `--import` hook initializes OpenTelemetry if configured (see [Observability](#observability)) and is a no-op otherwise.
+The image is based on `node:24-trixie-slim` (Debian 13), runs as the `node` user (UID 1000), and exposes port 9090 (health). Default entrypoint: `node --import ./dist/otel.js dist/main.js serve`. The `--import` hook initializes OpenTelemetry if configured (see [Observability](#observability)) and is a no-op otherwise.
 
 ## Persistent state
 
