@@ -4,10 +4,7 @@ FROM base AS build
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY patches/ patches/
-# Install pnpm via npm in the build stage; version is parsed from the
-# `packageManager` field so package.json stays the single source of truth.
-# Avoids corepack, which seeds an older LKG pnpm in ~/.cache/node/corepack
-# and shows up in trivy as bundled tar/picomatch/etc. CVEs.
+# Avoids corepack — its LKG default seeds an older pnpm whose bundled deps trivy flags.
 RUN PNPM_VERSION="$(node -p "require('./package.json').packageManager.match(/^pnpm@([^+]+)/)[1]")" \
  && npm install -g "pnpm@${PNPM_VERSION}" \
  && pnpm --version
