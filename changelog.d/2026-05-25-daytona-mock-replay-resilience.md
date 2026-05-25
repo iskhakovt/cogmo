@@ -1,0 +1,9 @@
+`DaytonaMock` replay-mode matching is now tolerant of three classes of record/replay drift surfaced when wiring up the skill-authoring cassette:
+
+- **UUIDs in paths**: full UUIDv4/UUIDv7 + cogmo's `cogmo-<8hex>-<3hex>-<random>` session-ID prefix are stripped to placeholders before matching. Path-segment UUIDs (sandbox / command / file IDs from Daytona responses) and session IDs (built from the runtime-generated task UUID) match across runs without re-recording.
+- **Body-bound headers**: `content-length`, `transfer-encoding`, `content-encoding`, `etag`, `date`, `connection`, `keep-alive` are stripped from replayed response headers. The recorded values are bound to the original body bytes; replay re-serializes the JSON to potentially different bytes, and axios sees `content-length` mismatch as "stream has been aborted".
+- **Order drift**: the cursor-first FIFO scan now falls back to a full-fixture wrap-around scan on miss, matching Polly.js's `order: false` fallback. Recorded polling loops (Daytona's `snapshot.create` polls until ACTIVE) fire many times in record and once in replay; without the fallback, every subsequent unique call after the diverged poll counts is stranded with "no fixture match".
+
+Per-test path normalization hook (`pathNormalizations`) lets tests strip their own random tokens (the skill-authoring test injects `skill-author-<seq>` into session IDs and tmpfile paths; replay's seq counter drifts from record's because the call sequence isn't byte-identical).
+
+Inspired by [VCR.py's `before_record_request` hook](https://vcrpy.readthedocs.io/en/latest/advanced.html), Polly.js's [`matchRequestsBy` + `order: false`](https://github.com/Netflix/pollyjs/blob/master/docs/configuration.md), and [nock issue #1094](https://github.com/nock/nock/issues/1094) on the stale `content-length` failure mode.

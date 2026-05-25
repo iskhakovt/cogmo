@@ -140,6 +140,245 @@ describe("DaytonaMock", () => {
     });
   });
 
+  describe("replay mode — path normalization", () => {
+    it("matches when the request UUID differs from the recorded UUID", async () => {
+      // Daytona echoes server-generated UUIDs back into subsequent
+      // request paths (sandbox id, command id, etc.) — those UUIDs are
+      // fresh every record run, so literal-path matching would never
+      // hit. The mock normalizes both sides to `<UUID>` before compare.
+      const fixturePath = join(fixtureDir, "replay-uuid-normalize.json");
+      await writeFixture(fixturePath, {
+        scenario: "uuid",
+        calls: [
+          {
+            kind: "http",
+            method: "GET",
+            path: "/sandbox/abc12345-1111-2222-3333-444444444444/state",
+            request: {},
+            response: { status: 200, bodyJson: { state: "started" } },
+          },
+        ],
+      });
+      const mock = await DaytonaMock.create({ mode: "replay", fixturePath });
+      try {
+        const resp = await fetch(`${mock.url}/sandbox/deadbeef-9999-8888-7777-666666666666/state`);
+        expect(resp.status).toBe(200);
+        expect(await resp.json()).toEqual({ state: "started" });
+      } finally {
+        await mock.stop();
+      }
+    });
+
+    it("matches when cogmo session-IDs differ between record and replay", async () => {
+      // Session IDs are `cogmo-<12hex-task-prefix>-<suffix>`. The
+      // task-UUID prefix and suffix both drift between runs; the regex
+      // normalizes the whole session ID to `cogmo-<SESSION>`.
+      const fixturePath = join(fixtureDir, "replay-session-normalize.json");
+      await writeFixture(fixturePath, {
+        scenario: "session",
+        calls: [
+          {
+            kind: "http",
+            method: "POST",
+            path: "/toolbox/sb-1/process/session/cogmo-aaaaaaaa-bbb-record-run-1/commands",
+            request: {},
+            response: { status: 200, bodyJson: { cmdId: "x" } },
+          },
+        ],
+      });
+      const mock = await DaytonaMock.create({ mode: "replay", fixturePath });
+      try {
+        const resp = await fetch(
+          `${mock.url}/toolbox/sb-1/process/session/cogmo-deadbeef-c0d-replay-run-99/commands`,
+          { method: "POST" },
+        );
+        expect(resp.status).toBe(200);
+      } finally {
+        await mock.stop();
+      }
+    });
+
+    it("session-ID normalization stops at path/query boundary", async () => {
+      // The session-ID suffix matcher is `[^/?]+` — must stop at the
+      // next path segment or the query string so adjacent path
+      // segments don't get absorbed.
+      const fixturePath = join(fixtureDir, "replay-session-boundary.json");
+      await writeFixture(fixturePath, {
+        scenario: "session-boundary",
+        calls: [
+          {
+            kind: "http",
+            method: "GET",
+            path: "/session/cogmo-aaaaaaaa-bbb-recorded/logs?follow=true",
+            request: {},
+            response: { status: 200, bodyJson: { ok: 1 } },
+          },
+        ],
+      });
+      const mock = await DaytonaMock.create({ mode: "replay", fixturePath });
+      try {
+        // Different session ID, but `/logs?follow=true` must still
+        // line up — if the regex consumed across `/` or `?` the
+        // suffix on either side would diverge and the match would
+        // miss.
+        const resp = await fetch(
+          `${mock.url}/session/cogmo-deadbeef-fed-replayed/logs?follow=true`,
+        );
+        expect(resp.status).toBe(200);
+      } finally {
+        await mock.stop();
+      }
+    });
+
+    it("applies pathNormalizations to both recorded and incoming paths", async () => {
+      const fixturePath = join(fixtureDir, "replay-extra-normalize.json");
+      await writeFixture(fixturePath, {
+        scenario: "extra",
+        calls: [
+          {
+            kind: "http",
+            method: "GET",
+            path: "/skill-author-3/manifest",
+            request: {},
+            response: { status: 200, bodyJson: { name: "x" } },
+          },
+        ],
+      });
+      const mock = await DaytonaMock.create({
+        mode: "replay",
+        fixturePath,
+        pathNormalizations: [{ pattern: /skill-author-\d+/g, replacement: "skill-author-<N>" }],
+      });
+      try {
+        const resp = await fetch(`${mock.url}/skill-author-7/manifest`);
+        expect(resp.status).toBe(200);
+      } finally {
+        await mock.stop();
+      }
+    });
+  });
+
+  describe("replay mode — body-bound headers", () => {
+    it("strips recorded content-length so re-serialized body bytes don't trigger axios abort", async () => {
+      // The recorded content-length is bound to the recorded byte
+      // sequence; re-serializing the JSON produces a different byte
+      // count (key ordering, whitespace), and a client that honors
+      // the wrong content-length sees premature stream close. Pin
+      // that the response Node actually sends does NOT carry the
+      // recorded length.
+      const fixturePath = join(fixtureDir, "replay-content-length.json");
+      const huge = "x".repeat(9999);
+      await writeFixture(fixturePath, {
+        scenario: "content-length-strip",
+        calls: [
+          {
+            kind: "http",
+            method: "GET",
+            path: "/payload",
+            request: {},
+            response: {
+              status: 200,
+              headers: {
+                "content-type": "application/json",
+                "content-length": "99999",
+                "transfer-encoding": "chunked",
+                etag: 'W/"stale"',
+                date: "Mon, 01 Jan 1970 00:00:00 GMT",
+              },
+              bodyJson: { payload: huge },
+            },
+          },
+        ],
+      });
+      const mock = await DaytonaMock.create({ mode: "replay", fixturePath });
+      try {
+        const resp = await fetch(`${mock.url}/payload`);
+        expect(resp.status).toBe(200);
+        // No stalled stream — fetch resolved a full body.
+        const body = (await resp.json()) as { payload: string };
+        expect(body.payload).toBe(huge);
+        // Verify Node's recomputed content-length is consistent with the
+        // bytes we actually sent (i.e. the recorded 99999 was discarded).
+        const sentLen = resp.headers.get("content-length");
+        if (sentLen !== null) {
+          expect(Number(sentLen)).not.toBe(99999);
+        }
+        // ETag/date from the fixture must not survive the strip.
+        expect(resp.headers.get("etag")).toBeNull();
+        expect(resp.headers.get("date")).not.toBe("Mon, 01 Jan 1970 00:00:00 GMT");
+      } finally {
+        await mock.stop();
+      }
+    });
+  });
+
+  describe("replay mode — wrap-around", () => {
+    it("wraps to find a match before the cursor when the cursor-side has no match", async () => {
+      // Fixture order is [B, A]; replay calls A first. Cursor-first
+      // scan from 0 finds A at i=1 (cursor advances past B). Then
+      // calling B requires wrapping back to i=0.
+      const fixturePath = join(fixtureDir, "replay-wrap-around.json");
+      await writeFixture(fixturePath, {
+        scenario: "wrap",
+        calls: [
+          {
+            kind: "http",
+            method: "POST",
+            path: "/b",
+            request: {},
+            response: { status: 200, bodyJson: { which: "B" } },
+          },
+          {
+            kind: "http",
+            method: "POST",
+            path: "/a",
+            request: {},
+            response: { status: 200, bodyJson: { which: "A" } },
+          },
+        ],
+      });
+      const mock = await DaytonaMock.create({ mode: "replay", fixturePath });
+      try {
+        const a = await (await fetch(`${mock.url}/a`, { method: "POST" })).json();
+        expect(a).toEqual({ which: "A" });
+        const b = await (await fetch(`${mock.url}/b`, { method: "POST" })).json();
+        expect(b).toEqual({ which: "B" });
+      } finally {
+        await mock.stop();
+      }
+    });
+
+    it("re-matches an already-played entry after wrap (trade-off vs strict FIFO)", async () => {
+      // Pinning the documented trade-off in findWrappedCall: there's
+      // no consumed-set, so a fixture with a single call can satisfy
+      // multiple identical requests via wrap. Strict FIFO would 503
+      // here. If a future change tightens this, the test will fail
+      // and force an explicit decision.
+      const fixturePath = join(fixtureDir, "replay-wrap-duplicate.json");
+      await writeFixture(fixturePath, {
+        scenario: "wrap-dup",
+        calls: [
+          {
+            kind: "http",
+            method: "GET",
+            path: "/poll",
+            request: {},
+            response: { status: 200, bodyJson: { state: "ready" } },
+          },
+        ],
+      });
+      const mock = await DaytonaMock.create({ mode: "replay", fixturePath });
+      try {
+        const first = await (await fetch(`${mock.url}/poll`)).json();
+        const second = await (await fetch(`${mock.url}/poll`)).json();
+        expect(first).toEqual({ state: "ready" });
+        expect(second).toEqual({ state: "ready" });
+      } finally {
+        await mock.stop();
+      }
+    });
+  });
+
   describe("replay mode — WS", () => {
     it("emits recorded server→client frames in order, then closes", async () => {
       const fixturePath = join(fixtureDir, "ws-stream.json");
