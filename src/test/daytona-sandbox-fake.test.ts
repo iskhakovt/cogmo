@@ -103,6 +103,7 @@ describe("FakeDaytonaSandboxClient — capabilities + handshake", () => {
       customImage: true,
       volumes: "managed",
       workingTreeTransport: "git-remote",
+      depsCacheSharing: "per-sandbox",
     });
   });
 

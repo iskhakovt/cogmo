@@ -67,6 +67,7 @@ function buildFakeSandbox(): FakeSandboxBundle {
       customImage: true,
       volumes: "docker",
       workingTreeTransport: "bind-mount",
+      depsCacheSharing: "shared-volume",
     },
     healthCheck: vi.fn(),
     reconcileCrashedInstances: vi.fn(),

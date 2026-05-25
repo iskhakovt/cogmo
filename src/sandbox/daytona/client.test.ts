@@ -189,61 +189,22 @@ describe("DaytonaSandboxClient", () => {
       });
     });
 
-    it("resolves depsCacheVolume name → id via volume.get(name, true) and mounts at /skill-venvs", async () => {
+    it("rejects depsCacheVolume because Daytona Volumes can't honour uv's POSIX assumptions", async () => {
       daytonaCalls.create.mockResolvedValue(
         fakeSandbox({ id: "sb-vol", state: SandboxState.STARTED }),
       );
-      daytonaCalls.volumeGet.mockResolvedValue({
-        id: "vol-id-abc",
-        name: "cogmo-skills-deps-cache",
-      });
 
       const client = await makeClient();
-      await client.create({
-        ...BASE_SPEC,
-        depsCacheVolume: { volumeName: "cogmo-skills-deps-cache" },
-      });
-
-      expect(daytonaCalls.volumeGet).toHaveBeenCalledWith("cogmo-skills-deps-cache", true);
-      const call = daytonaCalls.create.mock.calls[0]?.[0] as {
-        volumes?: Array<{ volumeId: string; mountPath: string }>;
-      };
-      expect(call.volumes).toEqual([{ volumeId: "vol-id-abc", mountPath: "/skill-venvs" }]);
-    });
-
-    it("caches the resolved volume id across concurrent + sequential create calls", async () => {
-      daytonaCalls.create.mockImplementation(async () =>
-        fakeSandbox({ id: `sb-${Math.random()}`, state: SandboxState.STARTED }),
-      );
-      daytonaCalls.volumeGet.mockImplementation(async (name) => ({
-        id: `id-${String(name)}`,
-        name: String(name),
-      }));
-
-      const client = await makeClient();
-      const depsCacheVolume = { volumeName: "cogmo-skills-deps-cache" } as const;
-      // Concurrent first-callers — should dedupe on the in-flight resolve.
-      await Promise.all([
+      await expect(
         client.create({
           ...BASE_SPEC,
-          taskId: "019d0000-0000-7000-8000-000000000001",
-          depsCacheVolume,
+          depsCacheVolume: { volumeName: "cogmo-skills-deps-cache" },
         }),
-        client.create({
-          ...BASE_SPEC,
-          taskId: "019d0000-0000-7000-8000-000000000002",
-          depsCacheVolume,
-        }),
-      ]);
-      // Sequential third call — should hit the cache, no extra volume.get.
-      await client.create({
-        ...BASE_SPEC,
-        taskId: "019d0000-0000-7000-8000-000000000003",
-        depsCacheVolume,
-      });
+      ).rejects.toThrow(/depsCacheSharing: 'per-sandbox'/);
 
-      expect(daytonaCalls.volumeGet).toHaveBeenCalledTimes(1);
-      expect(daytonaCalls.create).toHaveBeenCalledTimes(3);
+      // No Daytona SDK calls made — the spec is rejected before we touch the wire.
+      expect(daytonaCalls.create).not.toHaveBeenCalled();
+      expect(daytonaCalls.volumeGet).not.toHaveBeenCalled();
     });
 
     it("omits volumes from create when depsCacheVolume is absent", async () => {
@@ -255,32 +216,6 @@ describe("DaytonaSandboxClient", () => {
       const call = daytonaCalls.create.mock.calls[0]?.[0] as { volumes?: unknown };
       expect("volumes" in call).toBe(false);
       expect(daytonaCalls.volumeGet).not.toHaveBeenCalled();
-    });
-
-    it("retries the volume resolve after a failure (transient blip doesn't poison)", async () => {
-      daytonaCalls.create.mockResolvedValue(
-        fakeSandbox({ id: "sb-retry", state: SandboxState.STARTED }),
-      );
-      daytonaCalls.volumeGet
-        .mockRejectedValueOnce(new Error("transient blip"))
-        .mockResolvedValueOnce({ id: "vol-id-retry", name: "cogmo-skills-deps-cache" });
-
-      const client = await makeClient();
-      const depsCacheVolume = { volumeName: "cogmo-skills-deps-cache" } as const;
-
-      // First call fails — the in-flight slot must clear so the next
-      // attempt isn't stuck on the rejected promise.
-      await expect(client.create({ ...BASE_SPEC, depsCacheVolume })).rejects.toThrow(
-        /transient blip/,
-      );
-
-      // Second call succeeds and resolves cleanly.
-      await client.create({
-        ...BASE_SPEC,
-        taskId: "019d0000-0000-7000-8000-000000000004",
-        depsCacheVolume,
-      });
-      expect(daytonaCalls.volumeGet).toHaveBeenCalledTimes(2);
     });
 
     it("rounds memory_bytes up to GiB (Daytona's unit) and cpus up to integer", async () => {
@@ -1027,6 +962,7 @@ describe("DaytonaSandboxClient", () => {
         customImage: true,
         volumes: "managed",
         workingTreeTransport: "git-remote",
+        depsCacheSharing: "per-sandbox",
       });
     });
   });

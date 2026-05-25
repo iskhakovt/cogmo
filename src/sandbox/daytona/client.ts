@@ -13,7 +13,6 @@ import { withRetry } from "../../util/with-retry.js";
 import {
   type DaytonaSessionState,
   DaytonaSessionStateSchema,
-  DEPS_CACHE_VOLUME_TARGET,
   type ResourceLimits,
   type SandboxCapabilities,
   type SandboxClient,
@@ -94,6 +93,14 @@ const CAPABILITIES: SandboxCapabilities = {
   customImage: true,
   volumes: "managed",
   workingTreeTransport: "git-remote",
+  // Daytona Volumes are mountpoint-s3 FUSE: no hardlinks, no general
+  // rename(2), no O_RDWR on existing files. uv's content-addressed
+  // cache and the populate script's `mv -T` atomic publish both
+  // require those ops. Skills tier-2 falls back to container-local
+  // ephemeral `/skill-venvs` instead — the wiring layer (see
+  // SkillRunnerImpl + createSkillDepsReaper) gates on this flag and
+  // omits SessionSpec.depsCacheVolume.
+  depsCacheSharing: "per-sandbox",
 };
 
 export interface DaytonaSandboxClientOptions {
@@ -187,21 +194,6 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
    * Logged at warn-level so configuration drift surfaces operationally.
    */
   #resourcesByImage = new Map<string, ResourceLimits>();
-  /**
-   * Daytona volume id cache keyed by volume name. `daytona.volume.get`
-   * is a network call; the id is stable, so we resolve once and reuse.
-   * In-flight lookups dedupe via `#volumeResolves`. Bounded by the
-   * number of distinct deps-cache volume names this client touches —
-   * in practice 1 per Cogmo instance, so no eviction policy.
-   *
-   * Stale-id failure mode: if the operator deletes the volume
-   * out-of-band, every subsequent `daytona.create` 4xx's with the
-   * cached id until restart. Recovery today: restart Cogmo. A
-   * narrower auto-invalidate on volume-related `create` rejections is
-   * tracked in todo.md.
-   */
-  #volumeIdByName = new Map<string, string>();
-  #volumeResolves = new Map<string, Promise<string>>();
   #random: (() => string) | undefined;
 
   private constructor(opts: CreateOptions) {
@@ -472,18 +464,16 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
         "DaytonaSandboxClient.create: SessionSpec.homeVolume is unused — Daytona auto-persists sandbox FS across stop/start cycles. Drop the field.",
       );
     }
-
-    // Resolve the deps-cache volume up front. `daytona.volume.get(name,
-    // true)` is get-or-create — the first session for a given name
-    // pays the create round-trip; subsequent calls hit our local
-    // `#volumeIdByName` cache. Concurrent first-callers dedupe on
-    // `#volumeResolves`. Resolves go BEFORE `daytona.create` so a
-    // create-failure path doesn't leak a billable sandbox alongside an
-    // unmounted volume.
-    let volumes: Array<{ volumeId: string; mountPath: string }> | undefined;
     if (spec.depsCacheVolume) {
-      const volumeId = await this.#resolveVolumeId(spec.depsCacheVolume.volumeName);
-      volumes = [{ volumeId, mountPath: DEPS_CACHE_VOLUME_TARGET }];
+      // Daytona Volumes are mountpoint-s3 FUSE — no hardlinks, no
+      // general rename(2), no O_RDWR on existing files. uv's cache
+      // and the populate script's atomic publish require those ops,
+      // so mounting the volume would wedge skill registration with
+      // EPERM. `capabilities.depsCacheSharing === "per-sandbox"`
+      // advertises this; the skill runner / reaper omit the field.
+      throw new Error(
+        "DaytonaSandboxClient.create: SessionSpec.depsCacheVolume is unsupported — capability advertises depsCacheSharing: 'per-sandbox'. Each sandbox uses container-local /skill-venvs instead.",
+      );
     }
     if (spec.allowPrivilegedRunc) {
       throw new Error(
@@ -522,7 +512,6 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
         autoStopInterval,
         resources: resourcesFromLimits(spec.resourceLimits),
         ...(envVars && { envVars }),
-        ...(volumes && { volumes }),
       });
     let sdkSandbox: DaytonaSdkSandbox;
     if (warmedSnapshot) {
@@ -532,7 +521,6 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
           labels,
           autoStopInterval,
           ...(envVars && { envVars }),
-          ...(volumes && { volumes }),
         });
       } catch (err) {
         // The cache holds the snapshot name from the last successful
@@ -754,27 +742,6 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
     // exit cleanly when the keepalive is the only remaining handle.
     handle.unref();
     this.#keepalives.set(sandboxId, handle);
-  }
-
-  /** Get-or-create the deps-cache volume by name. Caches the id. */
-  async #resolveVolumeId(name: string): Promise<string> {
-    const cached = this.#volumeIdByName.get(name);
-    if (cached !== undefined) return cached;
-    const inFlight = this.#volumeResolves.get(name);
-    if (inFlight) return inFlight;
-    const promise = (async () => {
-      try {
-        const volume = await this.#daytona.volume.get(name, true);
-        this.#volumeIdByName.set(name, volume.id);
-        log.debug({ volumeName: name, volumeId: volume.id }, "resolved Daytona deps-cache volume");
-        return volume.id;
-      } finally {
-        // Clear the in-flight slot so a failed resolve retries.
-        this.#volumeResolves.delete(name);
-      }
-    })();
-    this.#volumeResolves.set(name, promise);
-    return promise;
   }
 
   #stopKeepalive(sandboxId: string): void {
