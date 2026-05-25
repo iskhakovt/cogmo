@@ -77,3 +77,16 @@ export function parseProviderJson(raw: string, toolName: string, context: string
     }
   }
 }
+
+/**
+ * Parse a tool-call argument payload. Empty / whitespace-only `raw` is
+ * the canonical wire shape for a tool called with no arguments —
+ * Anthropic streaming emits zero `input_json_delta` events, some
+ * OpenAI-compatible providers return `arguments: ""` instead of `"{}"`
+ * — and yields `{}` here to match the non-streaming SDK behavior.
+ * Anything else delegates to {@link parseProviderJson}.
+ */
+export function parseToolArgs(raw: string, toolName: string, context: string): unknown {
+  if (raw.trim() === "") return {};
+  return parseProviderJson(raw, toolName, context);
+}

@@ -134,6 +134,42 @@ describe("OpenAICompatibleProvider", () => {
       ]);
     });
 
+    it("maps tool_calls response with empty arguments to input: {}", async () => {
+      // Some OpenAI-compatible providers (OpenRouter, xAI-via-OpenRouter,
+      // Together) return arguments: "" for zero-arg tools instead of
+      // "{}". A bare JSON.parse would throw SyntaxError, which the
+      // fallback chain would misclassify as a transient network error.
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        choices: [
+          {
+            message: {
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_empty",
+                  type: "function",
+                  function: { name: "now", arguments: "" },
+                },
+              ],
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+        model: "m",
+        usage: { prompt_tokens: 8, completion_tokens: 2 },
+      });
+      const result = await provider.chat({
+        model: "m",
+        system: "sys",
+        messages: [{ role: "user", content: "time" }],
+      });
+      expect(result.stopReason).toBe("tool_use");
+      expect(result.content).toEqual([
+        { type: "tool_use", id: "call_empty", name: "now", input: {} },
+      ]);
+    });
+
     it("sends system as first message", async () => {
       const provider = createProvider();
       mockCreate.mockResolvedValueOnce({
@@ -259,6 +295,41 @@ describe("OpenAICompatibleProvider", () => {
       const meta = await response;
       expect(meta.stopReason).toBe("end_turn");
       expect(meta.usage).toEqual({ inputTokens: 10, outputTokens: 5 });
+    });
+
+    it("yields tool_start with empty input when the stream emits no arguments delta (zero-arg tool)", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            model: "m",
+            choices: [
+              {
+                delta: {
+                  tool_calls: [{ index: 0, id: "call_zero", function: { name: "now" } }],
+                },
+                finish_reason: null,
+              },
+            ],
+            usage: null,
+          },
+          {
+            model: "m",
+            choices: [{ delta: {}, finish_reason: "tool_calls" }],
+            usage: { prompt_tokens: 8, completion_tokens: 2 },
+          },
+        ]),
+      );
+      const { events, response } = provider.chatStream({
+        model: "m",
+        system: "sys",
+        messages: [{ role: "user", content: "time" }],
+      });
+      const collected: StreamEvent[] = [];
+      for await (const event of events) collected.push(event);
+      expect(collected).toEqual([{ type: "tool_start", id: "call_zero", name: "now", input: {} }]);
+      const meta = await response;
+      expect(meta.stopReason).toBe("tool_use");
     });
 
     it("accumulates tool calls and yields tool_start after stream ends", async () => {
