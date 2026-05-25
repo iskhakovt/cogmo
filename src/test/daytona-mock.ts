@@ -34,6 +34,7 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { dirname } from "node:path";
+import * as R from "remeda";
 import WebSocket, { WebSocketServer } from "ws";
 import { z } from "zod";
 import { logger } from "../logger.js";
@@ -118,9 +119,33 @@ const WsCallSchema = z
     frames: z.array(WsFrameSchema),
   })
   .strict();
+type WsCall = z.infer<typeof WsCallSchema>;
 
 const CallSchema = z.discriminatedUnion("kind", [HttpCallSchema, WsCallSchema]);
 type Call = z.infer<typeof CallSchema>;
+
+/**
+ * Cursor-first FIFO scan with wrap-around fallback. Walks the fixture
+ * starting at `cursor`, wrapping past the end, and returns the first
+ * `{ i, call }` whose `call` passes `predicate`. Polling drift (record
+ * polls a slow API N times, replay's mock fires once and skips ahead)
+ * doesn't strand subsequent unique calls. Mirrors Polly.js's
+ * `order: false` fallback.
+ */
+function findWrappedCall<T extends Call>(
+  calls: ReadonlyArray<Call>,
+  cursor: number,
+  predicate: (call: Call) => call is T,
+): { i: number; call: T } | undefined {
+  return R.pipe(
+    R.range(0, calls.length),
+    R.map((j) => (cursor + j) % calls.length),
+    R.map((i) => ({ i, call: calls[i] })),
+    R.find(
+      (entry): entry is { i: number; call: T } => entry.call !== undefined && predicate(entry.call),
+    ),
+  );
+}
 
 /**
  * On-disk fixture shape. `recordedAt` is intentionally absent: every
@@ -649,21 +674,19 @@ export class DaytonaMock {
     }
     const extra = this.#opts.mode === "replay" ? (this.#opts.pathNormalizations ?? []) : [];
     const normalizedIncoming = normalizePath(path, extra);
-    // Same cursor-first-then-wrap policy as the HTTP path.
-    const indices: number[] = [];
-    for (let i = replay.cursor; i < replay.fixture.calls.length; i++) indices.push(i);
-    for (let i = 0; i < replay.cursor; i++) indices.push(i);
-    for (const i of indices) {
-      const call = replay.fixture.calls[i];
-      if (!call || call.kind !== "ws") continue;
-      if (normalizePath(call.path, extra) === normalizedIncoming) {
-        replay.cursor = i + 1;
-        this.#emitFrames(ws, call.frames);
-        return;
-      }
+    const match = findWrappedCall(
+      replay.fixture.calls,
+      replay.cursor,
+      (call): call is WsCall =>
+        call.kind === "ws" && normalizePath(call.path, extra) === normalizedIncoming,
+    );
+    if (!match) {
+      log.warn({ path, cursor: replay.cursor }, "no WS fixture match");
+      ws.close(1011, "no fixture match");
+      return;
     }
-    log.warn({ path, cursor: replay.cursor }, "no WS fixture match");
-    ws.close(1011, "no fixture match");
+    replay.cursor = match.i + 1;
+    this.#emitFrames(ws, match.call.frames);
   }
 
   /**
@@ -920,58 +943,50 @@ export class DaytonaMock {
       res.end("daytona-mock: replay state not initialized");
       return;
     }
-    // Linear scan from cursor — find the next matching call by
-    // (method, path). FIFO order within a bucket so multiple POST
-    // /sandbox calls return different sandboxes in the order they
-    // were recorded.
     const extra = this.#opts.mode === "replay" ? (this.#opts.pathNormalizations ?? []) : [];
     const normalizedIncoming = normalizePath(path, extra);
-    // Cursor-first FIFO; on miss, wrap and scan from the start so polling
-    // drift (record polls a slow API N times, replay's mock fires once
-    // and skips ahead) doesn't strand subsequent unique calls. Mirrors
-    // Polly.js's `order: false` fallback over its primary cursor.
-    const indices: number[] = [];
-    for (let i = replay.cursor; i < replay.fixture.calls.length; i++) indices.push(i);
-    for (let i = 0; i < replay.cursor; i++) indices.push(i);
-    for (const i of indices) {
-      const call = replay.fixture.calls[i];
-      if (!call || call.kind !== "http") continue;
-      if (call.method === method && normalizePath(call.path, extra) === normalizedIncoming) {
-        replay.cursor = i + 1;
-        res.statusCode = call.response.status;
-        for (const [k, v] of Object.entries(call.response.headers ?? {})) {
-          // Skip headers Node computes from the actual body; the
-          // recorded values are bound to the original body bytes and
-          // mismatch ours after body materialization, which axios sees
-          // as premature stream close ("stream has been aborted").
-          if (BODY_BOUND_HEADERS.has(k.toLowerCase())) continue;
-          res.setHeader(k, v);
-        }
-        if (call.response.bodyJson !== undefined) {
-          const materialized = this.#materializePlaceholders(
-            JSON.parse(JSON.stringify(call.response.bodyJson)),
-          );
-          res.end(JSON.stringify(materialized));
-        } else if (call.response.bodyText !== undefined) {
-          const text = call.response.bodyText.includes(MOCK_URL_PLACEHOLDER)
-            ? call.response.bodyText.replaceAll(MOCK_URL_PLACEHOLDER, this.url)
-            : call.response.bodyText;
-          res.end(text);
-        } else {
-          res.end();
-        }
-        log.debug(
-          { method, path, status: call.response.status, cursor: replay.cursor },
-          "replay match",
-        );
-        return;
-      }
+    const match = findWrappedCall(
+      replay.fixture.calls,
+      replay.cursor,
+      (call): call is HttpCall =>
+        call.kind === "http" &&
+        call.method === method &&
+        normalizePath(call.path, extra) === normalizedIncoming,
+    );
+    if (!match) {
+      log.warn({ method, path, cursor: replay.cursor }, "no fixture match");
+      res.statusCode = 503;
+      res.setHeader("content-type", "text/plain");
+      res.end(
+        `daytona-mock replay: no fixture match for ${method} ${path} after cursor ${replay.cursor}. Re-record via \`pnpm test:record\` with DAYTONA_API_KEY set.`,
+      );
+      return;
     }
-    log.warn({ method, path, cursor: replay.cursor }, "no fixture match");
-    res.statusCode = 503;
-    res.setHeader("content-type", "text/plain");
-    res.end(
-      `daytona-mock replay: no fixture match for ${method} ${path} after cursor ${replay.cursor}. Re-record via \`pnpm test:record\` with DAYTONA_API_KEY set.`,
+    replay.cursor = match.i + 1;
+    res.statusCode = match.call.response.status;
+    for (const [k, v] of Object.entries(match.call.response.headers ?? {})) {
+      // Skip headers Node computes from the actual body; recorded values
+      // are bound to original bytes and mismatch ours after body
+      // materialization, which axios sees as premature stream close.
+      if (BODY_BOUND_HEADERS.has(k.toLowerCase())) continue;
+      res.setHeader(k, v);
+    }
+    if (match.call.response.bodyJson !== undefined) {
+      const materialized = this.#materializePlaceholders(
+        JSON.parse(JSON.stringify(match.call.response.bodyJson)),
+      );
+      res.end(JSON.stringify(materialized));
+    } else if (match.call.response.bodyText !== undefined) {
+      const text = match.call.response.bodyText.includes(MOCK_URL_PLACEHOLDER)
+        ? match.call.response.bodyText.replaceAll(MOCK_URL_PLACEHOLDER, this.url)
+        : match.call.response.bodyText;
+      res.end(text);
+    } else {
+      res.end();
+    }
+    log.debug(
+      { method, path, status: match.call.response.status, cursor: replay.cursor },
+      "replay match",
     );
   }
 
