@@ -126,6 +126,8 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
   /** Tracks branches/PRs created during the test so afterAll can clean them up. */
   const createdBranches: string[] = [];
   const createdPrNumbers: number[] = [];
+  /** Tmp dirs created in replay mode (local bare remote); removed in afterAll. */
+  const cleanupPaths: string[] = [];
 
   beforeAll(async () => {
     inngestBaseUrl = inject("inngestBaseUrl");
@@ -186,7 +188,9 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
       remoteUrl = expectDefined(process.env.COGMO_TEST_SKILLS_REMOTE);
       remoteSlug = parseGitHubSlug(remoteUrl);
     } else {
-      remoteUrl = await createLocalBareRemote();
+      const bare = await createLocalBareRemote();
+      remoteUrl = bare.url;
+      cleanupPaths.push(bare.path);
       remoteSlug = "replay/local";
     }
 
@@ -283,6 +287,11 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     // test may have failed before creating any of these.
     if (RECORDABLE) await cleanupGitHub();
     if (db) await db.$client.end();
+    // Best-effort: removing the bare-remote tmpdir is housekeeping;
+    // an ENOENT on a half-built path shouldn't fail the suite.
+    for (const p of cleanupPaths) {
+      await rm(p, { recursive: true, force: true }).catch(() => undefined);
+    }
   });
 
   it("creates a skill via chat and invokes it on the next turn", async () => {
@@ -425,7 +434,7 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
 // --- Helpers ─────────────────────────────────────────────────────────
 
 /** Replay-mode remote: bare git repo on disk, seeded with empty main. */
-async function createLocalBareRemote(): Promise<string> {
+async function createLocalBareRemote(): Promise<{ url: string; path: string }> {
   const bareDir = await mkdtemp(join(tmpdir(), "skill-auth-replay-remote-"));
   await execFileP("git", ["init", "--bare", "--initial-branch=main", bareDir]);
   // `git fetch` against a refless bare fails; seed an empty main.
@@ -439,7 +448,7 @@ async function createLocalBareRemote(): Promise<string> {
   } finally {
     await rm(seed, { recursive: true, force: true });
   }
-  return `file://${bareDir}`;
+  return { url: `file://${bareDir}`, path: bareDir };
 }
 
 /** Real Octokit + stub fetch — synthesizes the GitHub calls replay can't reach. */
