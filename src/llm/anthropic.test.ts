@@ -385,6 +385,47 @@ describe("AnthropicProvider", () => {
       expect(meta.usage).toEqual({ inputTokens: 10, outputTokens: 5 });
     });
 
+    it("yields tool_start with empty input when the stream emits no input_json_delta (zero-arg tool)", async () => {
+      // Anthropic streaming omits input_json_delta for tools called
+      // with no arguments; non-streaming returns input: {}. Match the
+      // non-streaming shape so zero-arg tools don't burn the
+      // stream-truncation repair budget.
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            type: "message_start",
+            message: {
+              model: "claude-sonnet-4-6",
+              usage: { input_tokens: 10, output_tokens: 0 },
+            },
+          },
+          {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "tool_use", id: "tu_zero", name: "btc_spot" },
+          },
+          { type: "content_block_stop", index: 0 },
+          {
+            type: "message_delta",
+            delta: { stop_reason: "tool_use" },
+            usage: { output_tokens: 5 },
+          },
+          { type: "message_stop" },
+        ]),
+      );
+      const { events, response } = provider.chatStream(defaultParams);
+      const collected: StreamEvent[] = [];
+      for await (const event of events) {
+        collected.push(event);
+      }
+      expect(collected).toEqual([
+        { type: "tool_start", id: "tu_zero", name: "btc_spot", input: {} },
+      ]);
+      const meta = await response;
+      expect(meta.stopReason).toBe("tool_use");
+    });
+
     it("accumulates tool input and yields tool_start on block stop", async () => {
       const provider = createProvider();
       mockCreate.mockResolvedValueOnce(

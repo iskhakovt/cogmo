@@ -261,6 +261,41 @@ describe("OpenAICompatibleProvider", () => {
       expect(meta.usage).toEqual({ inputTokens: 10, outputTokens: 5 });
     });
 
+    it("yields tool_start with empty input when the stream emits no arguments delta (zero-arg tool)", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            model: "m",
+            choices: [
+              {
+                delta: {
+                  tool_calls: [{ index: 0, id: "call_zero", function: { name: "now" } }],
+                },
+                finish_reason: null,
+              },
+            ],
+            usage: null,
+          },
+          {
+            model: "m",
+            choices: [{ delta: {}, finish_reason: "tool_calls" }],
+            usage: { prompt_tokens: 8, completion_tokens: 2 },
+          },
+        ]),
+      );
+      const { events, response } = provider.chatStream({
+        model: "m",
+        system: "sys",
+        messages: [{ role: "user", content: "time" }],
+      });
+      const collected: StreamEvent[] = [];
+      for await (const event of events) collected.push(event);
+      expect(collected).toEqual([{ type: "tool_start", id: "call_zero", name: "now", input: {} }]);
+      const meta = await response;
+      expect(meta.stopReason).toBe("tool_use");
+    });
+
     it("accumulates tool calls and yields tool_start after stream ends", async () => {
       const provider = createProvider();
       mockCreate.mockResolvedValueOnce(

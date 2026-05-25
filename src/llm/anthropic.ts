@@ -120,13 +120,19 @@ export class AnthropicProvider implements LlmProvider {
                 // the throw as ProviderProtocolError so FallbackLlmProvider's
                 // status-less network-error heuristic doesn't misclassify a
                 // bare SyntaxError as transient.
+                // Empty `jsonChunks` is the canonical shape for a tool
+                // called with no arguments — Anthropic streaming emits
+                // zero `input_json_delta` events in that case, while the
+                // non-streaming SDK returns `input: {}`. Match the
+                // non-streaming behavior so zero-arg tools don't trip
+                // the stream-truncation repair budget.
+                const raw = toolBlock.jsonChunks.join("");
                 let input: unknown;
                 try {
-                  input = parseProviderJson(
-                    toolBlock.jsonChunks.join(""),
-                    toolBlock.name,
-                    "Anthropic streamed tool_use input",
-                  );
+                  input =
+                    raw.trim() === ""
+                      ? {}
+                      : parseProviderJson(raw, toolBlock.name, "Anthropic streamed tool_use input");
                 } catch (parseErr) {
                   completed = true;
                   failChatSpan(span, parseErr);

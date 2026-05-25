@@ -273,13 +273,21 @@ export class OpenAICompatibleProvider implements LlmProvider {
         // so FallbackLlmProvider's status-less network-error heuristic doesn't
         // misclassify a bare SyntaxError as transient.
         for (const [, call] of [...toolCalls.entries()].sort(([a], [b]) => a - b)) {
+          // Empty arguments is the canonical shape for a tool called
+          // with no parameters; non-streaming responses surface it as
+          // `arguments: "{}"`. Match that here so zero-arg tools don't
+          // trip the stream-truncation repair budget.
+          const raw = call.argumentChunks.join("");
           let input: unknown;
           try {
-            input = parseProviderJson(
-              call.argumentChunks.join(""),
-              call.name,
-              "OpenAI-compatible streamed tool_calls arguments",
-            );
+            input =
+              raw.trim() === ""
+                ? {}
+                : parseProviderJson(
+                    raw,
+                    call.name,
+                    "OpenAI-compatible streamed tool_calls arguments",
+                  );
           } catch (parseErr) {
             completed = true;
             failChatSpan(span, parseErr);
