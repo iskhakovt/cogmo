@@ -9,6 +9,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PtyHandle } from "@daytonaio/sdk";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { DaytonaMock } from "./daytona-mock.js";
@@ -527,6 +528,150 @@ describe("DaytonaMock", () => {
         expect(received).toHaveLength(1);
         expect(received[0]?.isBinary).toBe(true);
         expect(received[0]?.bytes.equals(ptyBytes)).toBe(true);
+      } finally {
+        await mock.stop();
+      }
+    });
+
+    it("keeps WS open through SDK's sendInput, even when fixture has a trailing close", async () => {
+      // Recordings of an interactive PTY session capture the trailing
+      // `close` (Daytona signals exit via close-reason JSON). Without
+      // synchronizing replay against the client's `sendInput` traffic,
+      // the mock would emit every recorded frame back-to-back —
+      // including the close — before the application calls
+      // `sendInput`. The SDK's `handleClose` flips `connected = false`,
+      // and the subsequent `sendInput` throws "PTY is not connected".
+      // The mock must hold the close until the recorded `up` frames
+      // have been consumed by real client traffic.
+      const fixturePath = join(fixtureDir, "ws-pty-interactive.json");
+      await writeFixture(fixturePath, {
+        scenario: "ws-pty-interactive",
+        calls: [
+          {
+            kind: "ws",
+            path: "/toolbox/sb-1/process/pty/sess-x/connect",
+            frames: [
+              {
+                direction: "down",
+                text: JSON.stringify({ type: "control", status: "connected" }),
+              },
+              { direction: "up", bytes: Buffer.from("ls\n").toString("base64") },
+              {
+                direction: "down",
+                bytes: Buffer.from("file.txt\n").toString("base64"),
+              },
+              {
+                direction: "close",
+                code: 1000,
+                reason: JSON.stringify({ exitCode: 0 }),
+              },
+            ],
+          },
+        ],
+      });
+
+      const mock = await DaytonaMock.create({ mode: "replay", fixturePath });
+      try {
+        const ws = new WebSocket(
+          `${mock.url.replace(/^http/, "ws")}/toolbox/sb-1/process/pty/sess-x/connect`,
+        );
+        const ptyChunks: Uint8Array[] = [];
+        // handleResize is typed to return `PtySessionInfo` (from the
+        // toolbox-api-client subpackage); the full structural shape
+        // satisfies it without a cast. resize is never called in this
+        // flow but the type checker needs every field.
+        const pty = new PtyHandle(
+          ws,
+          async (cols, rows) => ({
+            active: true,
+            cols,
+            rows,
+            createdAt: new Date().toISOString(),
+            cwd: "/",
+            envs: {},
+            id: "sess-x",
+            lazyStart: false,
+          }),
+          async () => undefined,
+          async (bytes) => {
+            ptyChunks.push(bytes);
+          },
+          "sess-x",
+        );
+        await pty.waitForConnection();
+        // This is the bug under test: without the fix, by the time
+        // sendInput runs, the mock has already emitted the close
+        // frame and the SDK's handleClose set `connected = false`.
+        await pty.sendInput("ls\n");
+        const result = await pty.wait();
+        expect(result.exitCode).toBe(0);
+        // The down PTY chunk made it through onPty.
+        const text = Buffer.concat(ptyChunks.map((c) => Buffer.from(c))).toString("utf8");
+        expect(text).toContain("file.txt");
+      } finally {
+        await mock.stop();
+      }
+    });
+
+    it("consumes one up checkpoint per client message — N sends advance through N up frames", async () => {
+      // Pins the one-checkpoint-per-message contract: a single
+      // `ws.once('message', …)` handler must consume exactly one
+      // recorded `up`. A regression where one handler swallowed
+      // multiple checkpoints would let downstream `down` frames race
+      // ahead, breaking interleaved bash-style sessions where each
+      // sendInput should release the next batch of output.
+      const fixturePath = join(fixtureDir, "ws-multi-up.json");
+      await writeFixture(fixturePath, {
+        scenario: "ws-multi-up",
+        calls: [
+          {
+            kind: "ws",
+            path: "/toolbox/sb-1/process/pty/multi/connect",
+            frames: [
+              { direction: "up", bytes: Buffer.from("a\n").toString("base64") },
+              { direction: "down", text: "after-a" },
+              { direction: "up", bytes: Buffer.from("b\n").toString("base64") },
+              { direction: "down", text: "after-b" },
+              { direction: "close", code: 1000, reason: "" },
+            ],
+          },
+        ],
+      });
+      const mock = await DaytonaMock.create({ mode: "replay", fixturePath });
+      try {
+        const ws = new WebSocket(
+          `${mock.url.replace(/^http/, "ws")}/toolbox/sb-1/process/pty/multi/connect`,
+        );
+        const messages: string[] = [];
+        const closed = new Promise<void>((resolve, reject) => {
+          ws.on("message", (data) => messages.push(data.toString()));
+          ws.on("close", () => resolve());
+          ws.on("error", reject);
+        });
+        await new Promise<void>((resolve, reject) => {
+          ws.once("open", () => resolve());
+          ws.once("error", reject);
+        });
+        ws.send("a\n");
+        // The mock should now have advanced past the first `up` and
+        // emitted `after-a`. Wait for that frame to arrive before
+        // sending the second; otherwise we can't observe per-step
+        // sequencing.
+        await new Promise<void>((resolve) => {
+          if (messages.includes("after-a")) {
+            resolve();
+            return;
+          }
+          ws.on("message", function handler(data) {
+            if (data.toString() === "after-a") {
+              ws.off("message", handler);
+              resolve();
+            }
+          });
+        });
+        ws.send("b\n");
+        await closed;
+        expect(messages).toEqual(["after-a", "after-b"]);
       } finally {
         await mock.stop();
       }

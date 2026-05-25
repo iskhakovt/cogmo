@@ -697,22 +697,39 @@ export class DaytonaMock {
   }
 
   /**
-   * Emit recorded server→client frames in order. Schedules via
-   * `queueMicrotask` so each frame surfaces as its own `message` event
-   * on the client side, matching the per-chunk delivery the SDK sees
-   * over a real Daytona toolbox WS. `close` frames terminate the
-   * connection with the recorded code/reason. Binary frames (`bytes`)
-   * are emitted as binary so consumers seeing `isBinary === true` on
-   * replay match the live-record signal.
+   * Emit recorded server→client frames. `up` frames are presence
+   * checkpoints: pause until the client actually sends a message,
+   * then resume — without this the recorded `close` races ahead of
+   * `sendInput` and the SDK's `handleClose` trips `connected = false`
+   * mid-flow. Payload is not compared; any client message satisfies
+   * any recorded `up`, mirroring the loose body matching on the HTTP
+   * path. A fixture with more `up` frames than the client speaks will
+   * stall until the test's outer timeout fires.
    */
   #emitFrames(ws: WebSocket, frames: ReadonlyArray<WsFrame>): void {
     let i = 0;
     const next = (): void => {
       while (i < frames.length) {
-        const frame = frames[i++];
-        if (!frame) continue;
-        if (frame.direction === "up") continue; // client→server frames are not replayed
+        const frame = frames[i];
+        if (!frame) {
+          i++;
+          continue;
+        }
+        if (frame.direction === "up") {
+          // Wait for the client to actually send something before
+          // advancing past this checkpoint. Real recordings interleave
+          // client→server and server→client traffic; replay must
+          // preserve the dependency or downstream `down`/`close`
+          // frames race past the client's first message.
+          i++;
+          if (ws.readyState !== WebSocket.OPEN) return;
+          ws.once("message", () => {
+            next();
+          });
+          return;
+        }
         if (frame.direction === "down") {
+          i++;
           if (ws.readyState !== WebSocket.OPEN) return;
           if (frame.bytes !== undefined) {
             ws.send(Buffer.from(frame.bytes, "base64"), { binary: true });
@@ -728,6 +745,7 @@ export class DaytonaMock {
           continue;
         }
         if (frame.direction === "close") {
+          i++;
           try {
             ws.close(frame.code ?? 1000, frame.reason ?? "");
           } catch {
@@ -735,6 +753,7 @@ export class DaytonaMock {
           }
           return;
         }
+        i++;
       }
       // Fixture ended without an explicit close — close cleanly.
       try {
