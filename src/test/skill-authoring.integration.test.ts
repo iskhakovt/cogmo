@@ -47,22 +47,28 @@
 
 import { execFile as execFileCb } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { Daytona, Image } from "@daytonaio/sdk";
+import { Octokit } from "@octokit/rest";
 import { and, desc, eq, ne } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { connect } from "inngest/connect";
+import { ok } from "neverthrow";
 import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
 import { codingTasks } from "../agent/coding/store/schema.js";
 import { conversations, llmProviders, modelProviders, profiles } from "../agent/store/schema.js";
 import * as schema from "../db/schemas.js";
 import { bootstrap } from "../index.js";
 import { directOutbound } from "../inngest/events.js";
+import { AnthropicProvider } from "../llm/anthropic.js";
 import { DaytonaSandboxClient, snapshotNameFor } from "../sandbox/daytona/client.js";
 import { deriveMasterKey, encrypt, parseMasterKey, toBase64 } from "../secrets/encryption.js";
+import { withGitAskpass } from "../secrets/git-askpass.js";
 import { secrets } from "../secrets/store/schema.js";
+import { bootstrapSkillsRepo } from "../skills/repo.js";
 import { skills } from "../skills/store/schema.js";
 import { channelSessions, channels, inboundMessages } from "../transport/store/schema.js";
 import { expectDefined } from "./assertions.js";
@@ -75,6 +81,15 @@ const execFileP = promisify(execFileCb);
 const SCENARIO = "skill-authoring";
 const FIXTURE_DIR = "./test/fixtures/daytona";
 const FIXTURE_PATH = `${FIXTURE_DIR}/${SCENARIO}.json`;
+/**
+ * Captured at record time from the cogmo-skills branch the orchestrator
+ * authors. In replay, `gitFetchOverride` writes these files into the
+ * bare repo on the requested branch ref so `runner.register` sees the
+ * same content the recording produced. Refresh whenever the cassette
+ * is re-recorded — they must match what the cassette's LLM trace
+ * authored.
+ */
+const BRANCH_FIXTURE_DIR = "./test/fixtures/skill-authoring-branch";
 const IS_RECORD = process.env.RECORD === "1";
 const HAS_RECORDING_INPUTS =
   !!process.env.DAYTONA_API_KEY &&
@@ -82,13 +97,7 @@ const HAS_RECORDING_INPUTS =
   !!process.env.COGMO_TEST_SKILLS_REMOTE;
 const RECORDABLE = IS_RECORD && HAS_RECORDING_INPUTS;
 const FIXTURE_EXISTS = existsSync(FIXTURE_PATH);
-// Replay mode also requires `COGMO_TEST_SKILLS_REMOTE` because the
-// host-side `setOriginAndFetch` step runs unconditionally — the
-// Daytona mock doesn't intercept host-side git. CI without the env
-// var set skips cleanly; an operator running locally with both the
-// fixture and the env present runs the full replay.
-const HAS_REPLAY_INPUTS = !!process.env.COGMO_TEST_SKILLS_REMOTE;
-const RUNNABLE = RECORDABLE || (FIXTURE_EXISTS && HAS_REPLAY_INPUTS);
+const RUNNABLE = RECORDABLE || FIXTURE_EXISTS;
 
 // --- Outbound capture (mirrors pipeline.integration.test.ts) ─────────
 
@@ -160,10 +169,6 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
       : {
           mode: "replay",
           fixturePath: FIXTURE_PATH,
-          // Test injects `skill-author-<seq>` into every random()-derived
-          // identifier (session IDs, tmpfile paths). Seq drifts between
-          // record and replay; normalize to match regardless of call order.
-          pathNormalizations: [{ pattern: /skill-author-\d+/g, replacement: "skill-author-<N>" }],
         };
     mock = await DaytonaMock.create(mockOpts);
     if (RECORDABLE) mock.beginScenario(SCENARIO);
@@ -181,14 +186,16 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
         }),
     });
 
-    // `COGMO_TEST_SKILLS_REMOTE` is required in BOTH record and replay
-    // modes. `setOriginAndFetch` below runs a host-side `git fetch
-    // origin +refs/heads/main:refs/heads/main` against this URL — the
-    // Daytona mock only proxies traffic between Cogmo and Daytona, not
-    // host-side git. A placeholder URL fails with "Could not read from
-    // remote repository" before the test reaches the mock at all.
-    remoteUrl = expectDefined(process.env.COGMO_TEST_SKILLS_REMOTE);
-    remoteSlug = parseGitHubSlug(remoteUrl);
+    // Record uses real GitHub (sandbox pushes there, orchestrator
+    // opens a real PR). Replay uses a freshly-init'd local bare repo
+    // (file://) so host-side fetches stay hermetic.
+    if (RECORDABLE) {
+      remoteUrl = expectDefined(process.env.COGMO_TEST_SKILLS_REMOTE);
+      remoteSlug = parseGitHubSlug(remoteUrl);
+    } else {
+      remoteUrl = await createLocalBareRemote();
+      remoteSlug = "replay/local";
+    }
 
     // Fall back to a fake PAT only when gh is missing; other failures surface.
     const ghAuth = await readGhAuth().catch((err: Error) => {
@@ -203,7 +210,6 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
       process.env.COGMO_SKILLS_PATH,
       "COGMO_SKILLS_PATH not set by integration setup",
     );
-    const { bootstrapSkillsRepo } = await import("../skills/repo.js");
     await bootstrapSkillsRepo({ path: skillsPath });
     await setOriginAndFetch(skillsPath, remoteUrl, ghAuth.pat);
 
@@ -221,7 +227,6 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     });
 
     // 6. LLM provider override for the host's agent loop.
-    const { AnthropicProvider } = await import("../llm/anthropic.js");
     const anthropicKey = RECORDABLE ? expectDefined(process.env.ANTHROPIC_API_KEY) : "test-key";
     const provider = new AnthropicProvider(anthropicKey, inject("llmockBaseUrl"));
 
@@ -235,16 +240,22 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     bootstrapResult = await bootstrap({
       providerOverride: provider,
       sandboxClientOverride: daytonaClient,
-      codingAuthOverride: async () => {
-        const { ok } = await import("neverthrow");
+      codingAuthOverride: async () =>
         // Pinned model + disabled thinking match `claude-cli.integration.test.ts`
         // and keep the recorded stream-json output stable across runs.
-        return ok({
+        ok({
           ANTHROPIC_API_KEY: anthropicKey,
           ANTHROPIC_MODEL: "claude-haiku-4-5-20251001",
           MAX_THINKING_TOKENS: "0",
-        });
-      },
+        }),
+      // Replay-mode only: stub the GitHub interactions the cassette
+      // can't cover. Record-mode keeps real-octokit + real-git-fetch
+      // so the cassette captures real-world behavior.
+      ...(!RECORDABLE && {
+        octokitFactory: makeStubOctokitFactory(),
+        gitFetchOverride: ({ branch, skillsRepoPath }) =>
+          materializeBranchFromFixture({ branch, skillsRepoPath, fixtureDir: BRANCH_FIXTURE_DIR }),
+      }),
     });
 
     const captureOutbound = bootstrapResult.inngest.createFunction(
@@ -313,8 +324,14 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
       inboundMessageId: await latestInboundId(db, conversationId),
     });
 
-    // Full flow: plan + execute + verify + push + open-PR. 30m budget.
-    const task = await waitForCodingTask(db, conversationId, 30 * 60_000);
+    // Record budgets the real Daytona round-trip (claude-cli streaming,
+    // sandbox boot, git push). Replay should reach terminal status in
+    // well under a minute — if it doesn't, the orchestrator silently
+    // errored (Inngest function failure, ZodError on event emission,
+    // …) and the task row is stuck in a non-terminal state. Fail fast
+    // so the iteration loop isn't 30 minutes.
+    const taskTimeoutMs = RECORDABLE ? 30 * 60_000 : 60_000;
+    const task = await waitForCodingTask(db, conversationId, taskTimeoutMs);
     if (task.status !== "pr_open") {
       console.error(
         `[skill-authoring e2e] task ended in ${task.status} — failureReason="${task.failureReason}"`,
@@ -421,6 +438,115 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
 // --- Helpers ─────────────────────────────────────────────────────────
 
 /** Owner/repo slug extracted from an HTTPS or SSH GitHub URL. */
+/**
+ * Replay-mode stub for `octokit.pulls.create`. Builds a real Octokit
+ * with a custom `fetch` that synthesizes a draft-PR response — the
+ * verify orchestrator advances to `pr_open` without hitting GitHub.
+ * The branch the recording pushed is long-deleted on GitHub; the
+ * cassette can only cover Cogmo-to-Daytona traffic.
+ */
+/**
+ * Replay-mode "remote": a freshly initialised bare git repo on disk
+ * with an empty main commit. Returns a `file://` URL the orchestrator's
+ * git operations (`setOriginAndFetch`, `allocate-worktree`, etc.) can
+ * fetch from without internet access. Avoids the Daytona-can't-reach-
+ * localhost-Gitea problem that blocks running a real git server: in
+ * replay, no sandbox actually executes git, so file:// is fine.
+ */
+async function createLocalBareRemote(): Promise<string> {
+  const bareDir = await mkdtemp(join(tmpdir(), "skill-auth-replay-remote-"));
+  await execFileP("git", ["init", "--bare", "--initial-branch=main", bareDir]);
+  // Seed main with an empty initial commit so `git fetch origin
+  // +main:refs/remotes/origin/main` has something to pull. A bare repo
+  // with no refs would refuse the fetch.
+  const seed = await mkdtemp(join(tmpdir(), "skill-auth-replay-seed-"));
+  try {
+    await execFileP("git", ["init", "--initial-branch=main", seed]);
+    await execFileP("git", ["-C", seed, "config", "user.email", "replay@cogmo.test"]);
+    await execFileP("git", ["-C", seed, "config", "user.name", "replay"]);
+    await execFileP("git", ["-C", seed, "commit", "--allow-empty", "-m", "initial"]);
+    await execFileP("git", ["-C", seed, "push", bareDir, "main:main"]);
+  } finally {
+    await rm(seed, { recursive: true, force: true });
+  }
+  return `file://${bareDir}`;
+}
+
+function makeStubOctokitFactory(): (pat: string) => Octokit {
+  const stubFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const method = init?.method ?? "GET";
+    const pullsMatch = url.match(/\/repos\/([^/]+)\/([^/]+)\/pulls$/);
+    if (method === "POST" && pullsMatch) {
+      const [, owner, repo] = pullsMatch;
+      const bodyText = typeof init?.body === "string" ? init.body : "";
+      const body = bodyText ? (JSON.parse(bodyText) as { head?: string }) : {};
+      return new Response(
+        JSON.stringify({
+          number: 1,
+          html_url: `https://github.example/${owner}/${repo}/pull/1`,
+          head: { sha: "0".repeat(40), ref: body.head ?? "" },
+        }),
+        { status: 201, headers: { "content-type": "application/json" } },
+      );
+    }
+    // The cleanup-run-branch subscriber DELETEs the per-task branch
+    // after the task reaches a terminal state. Return 204 so cleanup
+    // succeeds without a real GitHub round-trip.
+    if (method === "DELETE" && /\/repos\/[^/]+\/[^/]+\/git\/refs\/heads%2F/.test(url)) {
+      return new Response(null, { status: 204 });
+    }
+    return new Response(`stub octokit: unexpected ${method} ${url}`, { status: 503 });
+  };
+  return (pat: string) => new Octokit({ auth: pat, request: { fetch: stubFetch } });
+}
+
+/**
+ * Replay-mode override for `auto-register`'s host-side `git fetch
+ * origin +<branch>:<branch>`. Writes the captured SKILL.md + skill.py
+ * fixture files into the bare repo on the requested branch ref so
+ * `runner.register({ branch })` sees the same content the recording
+ * produced. Runs entirely against the local bare repo — no remote
+ * traffic.
+ */
+async function materializeBranchFromFixture(opts: {
+  branch: string;
+  skillsRepoPath: string;
+  fixtureDir: string;
+}): Promise<void> {
+  const { branch, skillsRepoPath, fixtureDir } = opts;
+  const tmpRoot = await mkdtemp(join(tmpdir(), "skill-auth-fixture-"));
+  try {
+    // Clone the bare repo to a workdir, branch from main, drop in the
+    // recorded SKILL.md + skill.py, commit, push back to the bare.
+    await execFileP("git", ["clone", skillsRepoPath, tmpRoot]);
+    await execFileP("git", ["-C", tmpRoot, "checkout", "-b", "fixture-staging"]);
+    const entries = await readdir(fixtureDir);
+    for (const entry of entries) {
+      await copyFile(join(fixtureDir, entry), join(tmpRoot, entry));
+    }
+    await execFileP("git", ["-C", tmpRoot, "add", "."]);
+    await execFileP(
+      "git",
+      [
+        "-C",
+        tmpRoot,
+        "-c",
+        "user.email=fixture@cogmo.test",
+        "-c",
+        "user.name=fixture",
+        "commit",
+        "-m",
+        "fixture: replay-mode skill content",
+      ],
+      { env: { ...process.env, GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z" } },
+    );
+    await execFileP("git", ["-C", tmpRoot, "push", skillsRepoPath, `HEAD:refs/heads/${branch}`]);
+  } finally {
+    await rm(tmpRoot, { recursive: true, force: true });
+  }
+}
+
 function parseGitHubSlug(url: string): string {
   // HTTPS: https://github.com/owner/repo.git
   // SSH: git@github.com:owner/repo.git
@@ -469,7 +595,6 @@ async function ensureSnapshot(
 async function resetRemoteMain(remoteUrl: string, pat: string): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "cogmo-skills-reset-"));
   try {
-    const { withGitAskpass } = await import("../secrets/git-askpass.js");
     await execFileP("git", ["init", "--initial-branch=main", dir]);
     await execFileP("git", ["-C", dir, "config", "user.email", "skill-author-test@cogmo"]);
     await execFileP("git", ["-C", dir, "config", "user.name", "skill-author-test"]);
@@ -502,7 +627,6 @@ async function prebuildDaytonaPrereqs(): Promise<void> {
     `snapshotNameFor(${imageRef}) returned null — COGMO_DEVBASE_IMAGE must include a non-latest tag`,
   );
   const depsVolumeName = expectDefined(process.env.COGMO_SKILLS_DEPS_VOLUME);
-  const { Daytona, Image } = await import("@daytonaio/sdk");
   const apiKey = expectDefined(process.env.DAYTONA_API_KEY);
   const realSdk = new Daytona({
     apiKey,
@@ -608,7 +732,6 @@ async function setOriginAndFetch(
   // Bare repo: fetch main into refs/heads/main directly so worktrees
   // can branch from it. Uses the project's askpass helper so the PAT
   // never lands on disk in the bare repo's config.
-  const { withGitAskpass } = await import("../secrets/git-askpass.js");
   await withGitAskpass(pat, async (env) => {
     await execFileP(
       "git",

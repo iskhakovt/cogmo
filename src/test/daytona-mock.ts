@@ -247,25 +247,32 @@ const KNOWN_API_KEY_PATTERNS: ReadonlyArray<{ pattern: RegExp; replacement: stri
 ];
 
 /**
- * Strip runtime-random IDs from request paths so record / replay match
- * regardless of what task/sandbox/session IDs Postgres or Daytona
- * generated this run. Covers two shapes:
- *   - full UUIDs (sandbox / command / file IDs from Daytona responses)
- *   - cogmo session-ID prefix `cogmo-<8hex>-<3hex>` where the hex run is
- *     a 12-char slice of a task UUID (DaytonaSandboxSession.execStreaming)
- * The fixture stores the original path; matching compares normalized.
+ * Strip cogmo-side identifiers from request paths so record / replay
+ * match across runs. Daytona-server UUIDs (sandbox, command, file)
+ * are NOT stripped — the mock replays them from the cassette response
+ * cycle, so they're stable and serve as per-call identity for
+ * `/command/<UUID>/logs`-style follow-ups.
+ *
+ * Two cogmo-side identifiers drift across runs:
+ *
+ *   - **Task UUID prefix** in session IDs `cogmo-<8hex>-<3hex>-` —
+ *     fresh per run. The suffix (`skill-author-N` etc) stays
+ *     untouched because it disambiguates per-session traffic;
+ *     collapsing it scrambles cmd-id FIFO across sessions.
+ *   - **Task UUID** inside `labels` query params (e.g.
+ *     `labels={"cogmo.task":"<uuid>"}`) — fresh per run.
  */
-const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
-// Session ID = `cogmo-<12-char-task-prefix>-<random-suffix>`. The suffix
-// is randomUUID() in production and `<TEST_RUN_ID>-<seq>` in tests; seq
-// drifts between record and replay because the call order doesn't always
-// line up byte-for-byte. Match the whole session ID through the suffix.
-const COGMO_SESSION_ID_RE = /cogmo-[0-9a-f]{8}-[0-9a-f]{3}-[^/?]+/gi;
+const COGMO_SESSION_PREFIX_RE = /cogmo-[0-9a-f]{8}-[0-9a-f]{3}-/gi;
+// URL-encoded `"cogmo.task":"<uuid>"` — `%22` = `"`, `%3A` = `:`.
+const COGMO_TASK_LABEL_RE =
+  /cogmo\.task%22%3A%22[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}%22/gi;
 function normalizePath(
   path: string,
   extra: ReadonlyArray<{ pattern: RegExp; replacement: string }> = [],
 ): string {
-  let out = path.replace(UUID_RE, "<UUID>").replace(COGMO_SESSION_ID_RE, "cogmo-<SESSION>");
+  let out = path
+    .replace(COGMO_SESSION_PREFIX_RE, "cogmo-<TASK>-")
+    .replace(COGMO_TASK_LABEL_RE, "cogmo.task%22%3A%22<TASK>%22");
   for (const { pattern, replacement } of extra) out = out.replace(pattern, replacement);
   return out;
 }
@@ -762,7 +769,14 @@ export class DaytonaMock {
         // already closed
       }
     };
-    queueMicrotask(next);
+    // Yield once via `setImmediate` before emitting: client SDKs
+    // typically attach the `message` listener in a microtask after
+    // the WS `open` event resolves (`@daytonaio/sdk`'s
+    // `stdDemuxStream` does this). A frame sent in `queueMicrotask`
+    // races the listener and can be dropped on the floor. One
+    // macrotask hop is enough to drain that gap on every WS client
+    // we use.
+    setImmediate(next);
   }
 
   #resolveWsUpstreamUrl(path: string): string | null {

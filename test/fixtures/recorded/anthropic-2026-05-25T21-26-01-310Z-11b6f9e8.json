@@ -1,0 +1,35 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Create a skill called btc-spot that fetches the current bitcoin USD price from coingecko (https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd) and returns { price: <number> }. Use Python stdlib (urllib.request + json) — no third-party deps. Do NOT declare dependencies in SKILL.md, do NOT create a requirements.lock file.",
+        "model": "claude-sonnet-4-6",
+        "turnIndex": 1,
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "Submitted! 🚀 Claude Code is drafting the plan for `btc-spot` — you'll see it in a moment with **Approve / Revise / Cancel** buttons. Once approved and the branch is pushed, I'll register the skill and it'll be live as a callable tool."
+      },
+      "recordedTimings": {
+        "ttftMs": 1,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          447,
+          419,
+          466,
+          203,
+          1,
+          0,
+          0
+        ],
+        "totalDurationMs": 1537
+      },
+      "metadata": {
+        "systemHash": "02ff6710",
+        "toolsHash": "2406aaa9"
+      }
+    }
+  ]
+}

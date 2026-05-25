@@ -142,90 +142,139 @@ describe("DaytonaMock", () => {
   });
 
   describe("replay mode — path normalization", () => {
-    it("matches when the request UUID differs from the recorded UUID", async () => {
-      // Daytona echoes server-generated UUIDs back into subsequent
-      // request paths (sandbox id, command id, etc.) — those UUIDs are
-      // fresh every record run, so literal-path matching would never
-      // hit. The mock normalizes both sides to `<UUID>` before compare.
-      const fixturePath = join(fixtureDir, "replay-uuid-normalize.json");
+    it("matches when the cogmo.task UUID in a labels query differs across runs", async () => {
+      // Daytona's own UUIDs (sandbox / command / file ids) are preserved
+      // verbatim across record/replay because the mock replays them from
+      // the cassette response cycle. The only UUID that drifts is the
+      // cogmo task UUID — fresh per replay run from Postgres uuidv7,
+      // visible in `labels` query params on `/sandbox/paginated`.
+      const fixturePath = join(fixtureDir, "replay-task-label.json");
       await writeFixture(fixturePath, {
-        scenario: "uuid",
+        scenario: "task-label",
         calls: [
           {
             kind: "http",
             method: "GET",
-            path: "/sandbox/abc12345-1111-2222-3333-444444444444/state",
+            path: "/sandbox/paginated?labels=%7B%22cogmo.task%22%3A%22019e6107-c0a9-7608-ab4b-fb70b8dba05d%22%7D",
             request: {},
-            response: { status: 200, bodyJson: { state: "started" } },
+            response: { status: 200, bodyJson: { items: [] } },
           },
         ],
       });
       const mock = await DaytonaMock.create({ mode: "replay", fixturePath });
       try {
-        const resp = await fetch(`${mock.url}/sandbox/deadbeef-9999-8888-7777-666666666666/state`);
+        const resp = await fetch(
+          `${mock.url}/sandbox/paginated?labels=%7B%22cogmo.task%22%3A%22deadbeef-9999-8888-7777-666666666666%22%7D`,
+        );
         expect(resp.status).toBe(200);
-        expect(await resp.json()).toEqual({ state: "started" });
+        expect(await resp.json()).toEqual({ items: [] });
       } finally {
         await mock.stop();
       }
     });
 
-    it("matches when cogmo session-IDs differ between record and replay", async () => {
-      // Session IDs are `cogmo-<12hex-task-prefix>-<suffix>`. The
-      // task-UUID prefix and suffix both drift between runs; the regex
-      // normalizes the whole session ID to `cogmo-<SESSION>`.
-      const fixturePath = join(fixtureDir, "replay-session-normalize.json");
+    it("does NOT normalize Daytona-server UUIDs — preserves call identity", async () => {
+      // Critical for `/command/<cmd-id>/logs` and similar create-then-poll
+      // flows: the cmd-id is the stable identity across record/replay
+      // (mock plays it back from the recorded `/exec` response). Blanket
+      // UUID normalization would collapse every poll into one bucket and
+      // serve responses by FIFO position, which drifts as soon as call
+      // ordering does. Pin this so the next "let's normalize all UUIDs"
+      // refactor has to make a deliberate decision.
+      const fixturePath = join(fixtureDir, "replay-cmd-id-distinct.json");
       await writeFixture(fixturePath, {
-        scenario: "session",
+        scenario: "cmd-id",
         calls: [
           {
             kind: "http",
             method: "POST",
-            path: "/toolbox/sb-1/process/session/cogmo-aaaaaaaa-bbb-record-run-1/commands",
+            path: "/toolbox/sb-1/command/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/logs",
             request: {},
-            response: { status: 200, bodyJson: { cmdId: "x" } },
+            response: { status: 200, bodyJson: { cmd: "A" } },
+          },
+          {
+            kind: "http",
+            method: "POST",
+            path: "/toolbox/sb-1/command/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/logs",
+            request: {},
+            response: { status: 200, bodyJson: { cmd: "B" } },
           },
         ],
       });
       const mock = await DaytonaMock.create({ mode: "replay", fixturePath });
       try {
-        const resp = await fetch(
-          `${mock.url}/toolbox/sb-1/process/session/cogmo-deadbeef-c0d-replay-run-99/commands`,
-          { method: "POST" },
-        );
-        expect(resp.status).toBe(200);
+        // Replay in REVERSE order. Strict-FIFO matching would return A
+        // here (since the path's cmd-id is normalized away). With
+        // identity preserved, B's response is returned correctly.
+        const b = await (
+          await fetch(
+            `${mock.url}/toolbox/sb-1/command/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/logs`,
+            {
+              method: "POST",
+            },
+          )
+        ).json();
+        expect(b).toEqual({ cmd: "B" });
+        const a = await (
+          await fetch(
+            `${mock.url}/toolbox/sb-1/command/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/logs`,
+            {
+              method: "POST",
+            },
+          )
+        ).json();
+        expect(a).toEqual({ cmd: "A" });
       } finally {
         await mock.stop();
       }
     });
 
-    it("session-ID normalization stops at path/query boundary", async () => {
-      // The session-ID suffix matcher is `[^/?]+` — must stop at the
-      // next path segment or the query string so adjacent path
-      // segments don't get absorbed.
-      const fixturePath = join(fixtureDir, "replay-session-boundary.json");
+    it("normalizes the cogmo task-UUID prefix in session IDs (preserves suffix)", async () => {
+      // Session IDs look like `cogmo-<8hex>-<3hex>-<suffix>`. The
+      // prefix is task-UUID-derived (drifts per run); the suffix is
+      // a per-call seq counter (stable when `random()` is seeded).
+      // Normalize ONLY the prefix so suffix-distinct sessions match
+      // each other one-to-one — collapsing the suffix would scramble
+      // cmd-id FIFO across sessions.
+      const fixturePath = join(fixtureDir, "replay-session-prefix.json");
       await writeFixture(fixturePath, {
-        scenario: "session-boundary",
+        scenario: "session-prefix",
         calls: [
           {
             kind: "http",
-            method: "GET",
-            path: "/session/cogmo-aaaaaaaa-bbb-recorded/logs?follow=true",
+            method: "POST",
+            path: "/toolbox/sb-1/process/session/cogmo-aaaaaaaa-bbb-skill-author-3/exec",
             request: {},
-            response: { status: 200, bodyJson: { ok: 1 } },
+            response: { status: 200, bodyJson: { cmdId: "alpha" } },
+          },
+          {
+            kind: "http",
+            method: "POST",
+            path: "/toolbox/sb-1/process/session/cogmo-aaaaaaaa-bbb-skill-author-7/exec",
+            request: {},
+            response: { status: 200, bodyJson: { cmdId: "bravo" } },
           },
         ],
       });
       const mock = await DaytonaMock.create({ mode: "replay", fixturePath });
       try {
-        // Different session ID, but `/logs?follow=true` must still
-        // line up — if the regex consumed across `/` or `?` the
-        // suffix on either side would diverge and the match would
-        // miss.
-        const resp = await fetch(
-          `${mock.url}/session/cogmo-deadbeef-fed-replayed/logs?follow=true`,
-        );
-        expect(resp.status).toBe(200);
+        // Replay uses a different task UUID but same suffix seq.
+        // Order matters: matching skill-author-7 first should NOT
+        // serve the cassette's skill-author-3 response.
+        const seven = await (
+          await fetch(
+            `${mock.url}/toolbox/sb-1/process/session/cogmo-deadbeef-fed-skill-author-7/exec`,
+            { method: "POST" },
+          )
+        ).json();
+        expect(seven).toEqual({ cmdId: "bravo" });
+        const three = await (
+          await fetch(
+            `${mock.url}/toolbox/sb-1/process/session/cogmo-deadbeef-fed-skill-author-3/exec`,
+            { method: "POST" },
+          )
+        ).json();
+        expect(three).toEqual({ cmdId: "alpha" });
       } finally {
         await mock.stop();
       }

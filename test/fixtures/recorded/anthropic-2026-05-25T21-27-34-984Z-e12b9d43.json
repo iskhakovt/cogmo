@@ -1,0 +1,43 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "What's bitcoin at?",
+        "model": "claude-sonnet-4-6",
+        "turnIndex": 3,
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "The skill sandbox doesn't support outbound HTTPS via `urllib` — let me grab it via the built-in tool instead:",
+        "toolCalls": [
+          {
+            "name": "btc-spot",
+            "arguments": "",
+            "id": "toolu_01D7VqTiZ7uKyzb5WWLzFEmr"
+          }
+        ]
+      },
+      "recordedTimings": {
+        "ttftMs": 0,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          1,
+          363,
+          410,
+          349,
+          1,
+          2,
+          1,
+          32,
+          0
+        ],
+        "totalDurationMs": 1159
+      },
+      "metadata": {
+        "systemHash": "393ac12e",
+        "toolsHash": "4b941f26"
+      }
+    }
+  ]
+}

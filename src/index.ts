@@ -1,8 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { S3Client } from "@aws-sdk/client-s3";
+import type { Octokit } from "@octokit/rest";
 import Docker from "dockerode";
-import { createAutoRegisterSkillSubscriber } from "./agent/coding/auto-register-skill.js";
+import {
+  type AutoRegisterSkillDeps,
+  createAutoRegisterSkillSubscriber,
+} from "./agent/coding/auto-register-skill.js";
 import { ClaudeCodeBackend } from "./agent/coding/claude.js";
 import { createOrphanRunBranchSweepFunctions } from "./agent/coding/cleanup-orphan-run-branches.js";
 import { createRunBranchCleanupSubscriber } from "./agent/coding/cleanup-run-branch.js";
@@ -154,6 +158,24 @@ export interface BootstrapOptions {
    * `claude setup-token`).
    */
   codingAuthOverride?: CodingOrchestratorDeps["loadCodingSandboxEnv"];
+  /**
+   * Test-only Octokit factory. Threaded into the verify orchestrator's
+   * draft-PR step and the cleanup-run-branch subscriber. Replay-mode
+   * tests inject a stub that returns synthetic PR responses without
+   * hitting real GitHub. Production omits this; both call sites
+   * construct a real `@octokit/rest` client from the resolved PAT.
+   */
+  octokitFactory?: (pat: string) => Octokit;
+  /**
+   * Test-only override for the auto-register subscriber's host-side
+   * `git fetch origin +<branch>:<branch>` step. Replay-mode tests use
+   * this to materialize the branch ref in the local bare repo from
+   * fixture content instead of hitting the real remote (which doesn't
+   * have the branch — Daytona's push step was cassette-mocked).
+   * Production omits this so auto-register uses the real `execFileP`
+   * path with the resolved PAT.
+   */
+  gitFetchOverride?: AutoRegisterSkillDeps["gitFetchOverride"];
 }
 
 /**
@@ -809,6 +831,7 @@ export async function bootstrapRuntime(
           taskTtlMs: orchestratorDeps.taskTtlMs,
           openExecuteStream: orchestratorDeps.openExecuteStream,
           ...(opts.codingAuthOverride && { loadCodingSandboxEnv: opts.codingAuthOverride }),
+          ...(opts.octokitFactory && { octokitFactory: opts.octokitFactory }),
         },
         inngest,
       ),
@@ -824,6 +847,7 @@ export async function bootstrapRuntime(
           runInTx: core.runInTx,
           store: core.codingStore,
           secretsStore: core.secretsStore,
+          ...(opts.octokitFactory && { octokitFactory: opts.octokitFactory }),
         },
         inngest,
       ),
@@ -839,6 +863,7 @@ export async function bootstrapRuntime(
           secretsStore: core.secretsStore,
           skillRunner,
           skillsRepoPath: env.COGMO_SKILLS_PATH,
+          ...(opts.gitFetchOverride && { gitFetchOverride: opts.gitFetchOverride }),
         },
         inngest,
       ),
