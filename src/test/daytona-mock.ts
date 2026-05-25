@@ -697,10 +697,14 @@ export class DaytonaMock {
   }
 
   /**
-   * Emit recorded server→client frames. `up` frames are checkpoints:
-   * pause until the client actually sends a message, then resume.
-   * Without this, the recorded `close` races ahead of `sendInput` and
-   * the SDK's `handleClose` trips `connected = false` mid-flow.
+   * Emit recorded server→client frames. `up` frames are presence
+   * checkpoints: pause until the client actually sends a message,
+   * then resume — without this the recorded `close` races ahead of
+   * `sendInput` and the SDK's `handleClose` trips `connected = false`
+   * mid-flow. Payload is not compared; any client message satisfies
+   * any recorded `up`, mirroring the loose body matching on the HTTP
+   * path. A fixture with more `up` frames than the client speaks will
+   * stall until the test's outer timeout fires.
    */
   #emitFrames(ws: WebSocket, frames: ReadonlyArray<WsFrame>): void {
     let i = 0;

@@ -576,22 +576,22 @@ describe("DaytonaMock", () => {
           `${mock.url.replace(/^http/, "ws")}/toolbox/sb-1/process/pty/sess-x/connect`,
         );
         const ptyChunks: Uint8Array[] = [];
-        // PtyHandle's constructor types ws as the browser WebSocket
-        // and handleResize as returning PtySessionInfo (from the
-        // toolbox-api-client subpackage we don't import). The runtime
-        // shape is fine — ws.send/close/readyState are what
-        // setupWebSocketHandlers actually touches, and handleResize
-        // never gets called in this flow.
-        type PtyCtor = new (
-          ws: unknown,
-          handleResize: (cols: number, rows: number) => Promise<unknown>,
-          handleKill: () => Promise<void>,
-          onPty: (data: Uint8Array) => void | Promise<void>,
-          sessionId: string,
-        ) => PtyHandle;
-        const pty = new (PtyHandle as unknown as PtyCtor)(
+        // handleResize is typed to return `PtySessionInfo` (from the
+        // toolbox-api-client subpackage); the full structural shape
+        // satisfies it without a cast. resize is never called in this
+        // flow but the type checker needs every field.
+        const pty = new PtyHandle(
           ws,
-          async () => ({}),
+          async (cols, rows) => ({
+            active: true,
+            cols,
+            rows,
+            createdAt: new Date().toISOString(),
+            cwd: "/",
+            envs: {},
+            id: "sess-x",
+            lazyStart: false,
+          }),
           async () => undefined,
           async (bytes) => {
             ptyChunks.push(bytes);
@@ -608,6 +608,70 @@ describe("DaytonaMock", () => {
         // The down PTY chunk made it through onPty.
         const text = Buffer.concat(ptyChunks.map((c) => Buffer.from(c))).toString("utf8");
         expect(text).toContain("file.txt");
+      } finally {
+        await mock.stop();
+      }
+    });
+
+    it("consumes one up checkpoint per client message — N sends advance through N up frames", async () => {
+      // Pins the one-checkpoint-per-message contract: a single
+      // `ws.once('message', …)` handler must consume exactly one
+      // recorded `up`. A regression where one handler swallowed
+      // multiple checkpoints would let downstream `down` frames race
+      // ahead, breaking interleaved bash-style sessions where each
+      // sendInput should release the next batch of output.
+      const fixturePath = join(fixtureDir, "ws-multi-up.json");
+      await writeFixture(fixturePath, {
+        scenario: "ws-multi-up",
+        calls: [
+          {
+            kind: "ws",
+            path: "/toolbox/sb-1/process/pty/multi/connect",
+            frames: [
+              { direction: "up", bytes: Buffer.from("a\n").toString("base64") },
+              { direction: "down", text: "after-a" },
+              { direction: "up", bytes: Buffer.from("b\n").toString("base64") },
+              { direction: "down", text: "after-b" },
+              { direction: "close", code: 1000, reason: "" },
+            ],
+          },
+        ],
+      });
+      const mock = await DaytonaMock.create({ mode: "replay", fixturePath });
+      try {
+        const ws = new WebSocket(
+          `${mock.url.replace(/^http/, "ws")}/toolbox/sb-1/process/pty/multi/connect`,
+        );
+        const messages: string[] = [];
+        const closed = new Promise<void>((resolve, reject) => {
+          ws.on("message", (data) => messages.push(data.toString()));
+          ws.on("close", () => resolve());
+          ws.on("error", reject);
+        });
+        await new Promise<void>((resolve, reject) => {
+          ws.once("open", () => resolve());
+          ws.once("error", reject);
+        });
+        ws.send("a\n");
+        // The mock should now have advanced past the first `up` and
+        // emitted `after-a`. Wait for that frame to arrive before
+        // sending the second; otherwise we can't observe per-step
+        // sequencing.
+        await new Promise<void>((resolve) => {
+          if (messages.includes("after-a")) {
+            resolve();
+            return;
+          }
+          ws.on("message", function handler(data) {
+            if (data.toString() === "after-a") {
+              ws.off("message", handler);
+              resolve();
+            }
+          });
+        });
+        ws.send("b\n");
+        await closed;
+        expect(messages).toEqual(["after-a", "after-b"]);
       } finally {
         await mock.stop();
       }
