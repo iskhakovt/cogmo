@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { logger } from "../logger.js";
-import { parseProviderJson } from "./errors.js";
+import { parseToolArgs } from "./errors.js";
 import { withFailureLogging } from "./logging-fetch.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
@@ -115,24 +115,15 @@ export class AnthropicProvider implements LlmProvider {
             case "content_block_stop": {
               const toolBlock = toolBlocks.get(event.index);
               if (toolBlock) {
-                // Malformed tool-use JSON: attribute to the span before the
-                // generator unwinds, matching the catch branch below. Wrap
-                // the throw as ProviderProtocolError so FallbackLlmProvider's
-                // status-less network-error heuristic doesn't misclassify a
-                // bare SyntaxError as transient.
-                // Empty `jsonChunks` is the canonical shape for a tool
-                // called with no arguments — Anthropic streaming emits
-                // zero `input_json_delta` events in that case, while the
-                // non-streaming SDK returns `input: {}`. Match the
-                // non-streaming behavior so zero-arg tools don't trip
-                // the stream-truncation repair budget.
-                const raw = toolBlock.jsonChunks.join("");
+                // parseToolArgs wraps SyntaxError as ProviderProtocolError so
+                // the fallback chain doesn't misclassify it as transient.
                 let input: unknown;
                 try {
-                  input =
-                    raw.trim() === ""
-                      ? {}
-                      : parseProviderJson(raw, toolBlock.name, "Anthropic streamed tool_use input");
+                  input = parseToolArgs(
+                    toolBlock.jsonChunks.join(""),
+                    toolBlock.name,
+                    "Anthropic streamed tool_use input",
+                  );
                 } catch (parseErr) {
                   completed = true;
                   failChatSpan(span, parseErr);

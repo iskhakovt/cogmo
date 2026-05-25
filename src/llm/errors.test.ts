@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ProviderProtocolError, parseProviderJson } from "./errors.js";
+import { ProviderProtocolError, parseProviderJson, parseToolArgs } from "./errors.js";
 
 describe("parseProviderJson", () => {
   it("returns the parsed value when the input is valid JSON on first try", () => {
@@ -41,5 +41,23 @@ describe("parseProviderJson", () => {
     expect(protoErr.message).toMatch(/initial: .+; after jsonrepair: /);
     expect(protoErr.message).toContain('"web_search"');
     expect(protoErr.message).toContain("Anthropic streamed tool_use input");
+  });
+});
+
+describe("parseToolArgs", () => {
+  it("returns {} for empty string (canonical zero-arg shape)", () => {
+    expect(parseToolArgs("", "btc_spot", "ctx")).toEqual({});
+  });
+
+  it("returns {} for whitespace-only input", () => {
+    expect(parseToolArgs("   \n\t ", "btc_spot", "ctx")).toEqual({});
+  });
+
+  it("parses well-formed JSON via parseProviderJson", () => {
+    expect(parseToolArgs('{"q":"x"}', "search", "ctx")).toEqual({ q: "x" });
+  });
+
+  it("propagates ProviderProtocolError for unrepairable input — empty-check doesn't mask real bugs", () => {
+    expect(() => parseToolArgs("}}}]]]", "search", "ctx")).toThrow(ProviderProtocolError);
   });
 });

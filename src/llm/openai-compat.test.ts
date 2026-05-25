@@ -134,6 +134,42 @@ describe("OpenAICompatibleProvider", () => {
       ]);
     });
 
+    it("maps tool_calls response with empty arguments to input: {}", async () => {
+      // Some OpenAI-compatible providers (OpenRouter, xAI-via-OpenRouter,
+      // Together) return arguments: "" for zero-arg tools instead of
+      // "{}". A bare JSON.parse would throw SyntaxError, which the
+      // fallback chain would misclassify as a transient network error.
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        choices: [
+          {
+            message: {
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_empty",
+                  type: "function",
+                  function: { name: "now", arguments: "" },
+                },
+              ],
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+        model: "m",
+        usage: { prompt_tokens: 8, completion_tokens: 2 },
+      });
+      const result = await provider.chat({
+        model: "m",
+        system: "sys",
+        messages: [{ role: "user", content: "time" }],
+      });
+      expect(result.stopReason).toBe("tool_use");
+      expect(result.content).toEqual([
+        { type: "tool_use", id: "call_empty", name: "now", input: {} },
+      ]);
+    });
+
     it("sends system as first message", async () => {
       const provider = createProvider();
       mockCreate.mockResolvedValueOnce({
