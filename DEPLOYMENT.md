@@ -143,7 +143,7 @@ Defaults below match the in-image expectations: every host-state path sits under
 | `DAYTONA_ORGANIZATION_ID` | — | Daytona organization id. Only needed when the API key is scoped to multiple orgs and the default isn't the right one. |
 | `SANDBOX_PROXY_SOCKET_DIR` | `/var/lib/cogmo/sockets` | Host directory for per-task Docker proxy sockets. Each task container gets `<dir>/<taskId>.sock` bind-mounted at `/var/run/docker.sock` so child-container creation flows through the proxy (label injection, runtime override, deny rules). Created at boot if missing. |
 | `SANDBOX_HOST_DOCKER_SOCKET` | `/var/run/docker.sock` | Host Docker socket the proxy forwards to. Override only for rootless Docker / snap / unusual installs. |
-| `SANDBOX_ASKPASS_DIR` | `/var/lib/cogmo/askpass` | Host root for per-task git-askpass material (PAT, SSH signing key, helper script). Bind-mounted at `/.cogmo-askpass/` per task; wiped on task stop. |
+| `SANDBOX_ASKPASS_DIR` | `/var/lib/cogmo/askpass` | Host root for per-task git-askpass material (PAT, SSH signing key, helper script). Bind-mounted at `/tmp/cogmo-askpass` per task; wiped on task stop. |
 
 #### Coding delegation
 

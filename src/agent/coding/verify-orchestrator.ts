@@ -231,7 +231,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     );
 
     // Create a fresh container with the askpass dir mounted read-only at
-    // /.cogmo-askpass. Cleanup goes through `deleteByTaskId(taskId)`
+    // /tmp/cogmo-askpass. Cleanup goes through `deleteByTaskId(taskId)`
     // unconditionally in the finally block — idempotent at the
     // label-index layer, sweeps any provider-side state that survived
     // a thrown create on managed backends, and a no-op when nothing

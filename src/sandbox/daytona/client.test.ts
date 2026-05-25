@@ -384,7 +384,7 @@ describe("DaytonaSandboxClient", () => {
         const client = await makeClient();
         await client.create({
           ...BASE_SPEC,
-          askpass: { hostDir, containerDir: "/.cogmo-askpass" },
+          askpass: { hostDir, containerDir: "/tmp/cogmo-askpass" },
         });
 
         expect(sb.__spies.fsUploadFiles).toHaveBeenCalledTimes(1);
@@ -435,7 +435,7 @@ describe("DaytonaSandboxClient", () => {
         await expect(
           client.create({
             ...BASE_SPEC,
-            askpass: { hostDir, containerDir: "/.cogmo-askpass" },
+            askpass: { hostDir, containerDir: "/tmp/cogmo-askpass" },
           }),
         ).rejects.toThrow(/perm denied/);
         // 600 on signing-key is non-negotiable for ssh-keygen -Y sign;
@@ -467,7 +467,7 @@ describe("DaytonaSandboxClient", () => {
             branch: "cogmo/run/combined",
             auth: { username: "x-access-token", password: "ghp_combined" },
           },
-          askpass: { hostDir, containerDir: "/.cogmo-askpass" },
+          askpass: { hostDir, containerDir: "/tmp/cogmo-askpass" },
         });
 
         // Production shape (3b.2 coding pipeline) sets both — this

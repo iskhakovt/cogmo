@@ -1,6 +1,6 @@
 /**
  * Upload the per-task askpass bundle into a Daytona sandbox at the same
- * `/.cogmo-askpass/` layout `provisionAskpass` writes on the host, so
+ * `/tmp/cogmo-askpass/` layout `provisionAskpass` writes on the host, so
  * `runCommitAndPush` and the `GIT_ASKPASS` helper see identical files
  * regardless of transport. Modes match what `ssh-keygen -Y sign` and
  * the helper script require — 0o600 on the signing key is the strict

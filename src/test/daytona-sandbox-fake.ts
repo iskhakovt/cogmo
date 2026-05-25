@@ -12,7 +12,7 @@
  *     `pushTaskBranchToRemote`, `WorktreeSpec.git-remote` construction,
  *     post-create `git checkout -B`, post-PR `fetchFeatureBranch`).
  *   - The full askpass-upload contract (`fs.uploadFiles` + path layout)
- *     because consumers see the same `/.cogmo-askpass/` path the real
+ *     because consumers see the same `/tmp/cogmo-askpass` path the real
  *     backend serves.
  *   - The cleanup-cron / cleanup-event-subscriber paths (because they
  *     run against `coding_tasks` rows + GitHub, the sandbox shape only
@@ -71,14 +71,21 @@ interface FakeSandboxRecord {
   /**
    * Root host path that stands in for the sandbox's filesystem. The
    * `/workspace` checkout lives at `<sandboxRoot>/workspace`; the
-   * askpass dir at `<sandboxRoot>/.cogmo-askpass`.
+   * askpass dir at `<sandboxRoot>/cogmo-askpass`.
    */
   sandboxRoot: string;
   askpass?: {
     /** Original host dir provisioned by `provisionAskpass` — read source. */
     sourceHostDir: string;
-    /** Mirrored copy inside the sandbox root — the path the orchestrator threads in `GIT_ASKPASS`. */
-    containerDir: string;
+    /**
+     * Host-side mirror of the askpass dir under `<sandboxRoot>/`. The
+     * orchestrator threads `GIT_ASKPASS=${ASKPASS_CONTAINER_DIR}/helper`;
+     * the fake rewrites that to point at this host path so host-side
+     * `git` can `exec` the helper directly. Named `hostMirrorDir` rather
+     * than `containerDir` because nothing here actually lives inside a
+     * container — every path is a host filesystem path the fake creates.
+     */
+    hostMirrorDir: string;
   };
 }
 
@@ -254,33 +261,33 @@ export class FakeDaytonaSandboxClient implements SandboxClient<DaytonaSessionSta
 
   /**
    * Mirror the orchestrator-side askpass dir into the sandbox root so
-   * host-side `git` running with `GIT_ASKPASS=<sandboxRoot>/.cogmo-askpass/helper`
+   * host-side `git` running with `GIT_ASKPASS=<sandboxRoot>/cogmo-askpass/helper`
    * sees the same file layout the real Daytona path produces. The helper
-   * script's body bakes in a path under `containerDir` ; rewrite it to
+   * script's body bakes in the canonical container path; rewrite it to
    * point at the mirrored copy so `cat` finds the PAT file.
    */
   async #mirrorAskpass(
     sourceHostDir: string,
     sandboxRoot: string,
   ): Promise<FakeSandboxRecord["askpass"]> {
-    const containerDir = join(sandboxRoot, ".cogmo-askpass");
-    await mkdir(containerDir, { recursive: true });
+    const hostMirrorDir = join(sandboxRoot, "cogmo-askpass");
+    await mkdir(hostMirrorDir, { recursive: true });
 
     for (const name of ["helper", "pat", "signing-key", "signing-key.pub"]) {
       const src = join(sourceHostDir, name);
-      const dst = join(containerDir, name);
+      const dst = join(hostMirrorDir, name);
       if (!existsSync(src)) continue;
       const body = readFileSync(src, "utf8");
       // The helper script embeds the container path. Rewrite it to the
       // mirrored host copy so host-side `git` can execute it directly.
       const rewritten =
-        name === "helper" ? body.split(ASKPASS_CONTAINER_DIR).join(containerDir) : body;
+        name === "helper" ? body.split(ASKPASS_CONTAINER_DIR).join(hostMirrorDir) : body;
       // Modes: `helper` 0o755, signing-key 0o600, others 0o644 (matches
       // the real askpass-upload step's modes).
       const mode = name === "helper" ? 0o755 : name === "signing-key" ? 0o600 : 0o644;
       writeFileSync(dst, rewritten, { mode });
     }
-    return { sourceHostDir, containerDir };
+    return { sourceHostDir, hostMirrorDir };
   }
 
   #wrap(record: FakeSandboxRecord): SandboxSession<DaytonaSessionState> {
@@ -423,10 +430,10 @@ class FakeDaytonaSandboxSession implements SandboxSession<DaytonaSessionState> {
     const cwd = resolveCwd(opts?.workingDir, this.#record);
     const env = composeEnv(opts?.env, this.#record);
     // The path-substitution mirror for askpass paths: the orchestrator
-    // threads `GIT_ASKPASS=/.cogmo-askpass/helper` etc. The real backend
+    // threads `GIT_ASKPASS=/tmp/cogmo-askpass/helper` etc. The real backend
     // serves the askpass dir at that container path; the fake remaps to
-    // `<sandboxRoot>/.cogmo-askpass/...` so host-side `git` can resolve.
-    const askpassMirror = this.#record.askpass?.containerDir;
+    // `<sandboxRoot>/cogmo-askpass/...` so host-side `git` can resolve.
+    const askpassMirror = this.#record.askpass?.hostMirrorDir;
     const argv = askpassMirror ? cmd.map((a) => rewriteAskpass(a, askpassMirror)) : [...cmd];
     return { argv, cwd, env };
   }
@@ -454,7 +461,7 @@ function composeEnv(
 ): Record<string, string> {
   // Inherited `process.env` is NOT rewritten — only the orchestrator-
   // injected `override` values are. The orchestrator threads
-  // `GIT_ASKPASS=/.cogmo-askpass/helper` exclusively via override; an
+  // `GIT_ASKPASS=/tmp/cogmo-askpass/helper` exclusively via override; an
   // inherited env var that happens to contain the canonical path
   // would be host-side already and shouldn't be rewritten.
   const base: Record<string, string> = Object.fromEntries(
@@ -464,7 +471,7 @@ function composeEnv(
   );
   if (override) {
     for (const [k, v] of Object.entries(override)) {
-      base[k] = record.askpass ? rewriteAskpass(v, record.askpass.containerDir) : v;
+      base[k] = record.askpass ? rewriteAskpass(v, record.askpass.hostMirrorDir) : v;
     }
   }
   return base;
@@ -472,7 +479,7 @@ function composeEnv(
 
 /**
  * Rewrite any reference to the canonical container path
- * (`/.cogmo-askpass`) to the host-mirrored copy. Operates string-by-string
+ * (`/tmp/cogmo-askpass`) to the host-mirrored copy. Operates string-by-string
  * so paths embedded in env values, exec args, or signing-key paths all
  * resolve to the host filesystem.
  */
