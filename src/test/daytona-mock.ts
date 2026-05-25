@@ -131,6 +131,13 @@ type Call = z.infer<typeof CallSchema>;
  * polls a slow API N times, replay's mock fires once and skips ahead)
  * doesn't strand subsequent unique calls. Mirrors Polly.js's
  * `order: false` fallback.
+ *
+ * Trade-off: there's no consumed-set — only the cursor — so a fixture
+ * with duplicate `(method, path)` entries can re-match an already-played
+ * entry after the cursor wraps past the end. Strict FIFO would catch
+ * this; we accept it because the alternative (stranded calls when poll
+ * counts diverge) is worse for our recorded integration flows. O(n) per
+ * lookup is fine at fixture sizes in the low hundreds.
  */
 function findWrappedCall<T extends Call>(
   calls: ReadonlyArray<Call>,
@@ -736,12 +743,7 @@ export class DaytonaMock {
         // already closed
       }
     };
-    // Let the client process its 'open' event before frames arrive —
-    // SDK's `connected` flips on that event and sendInput rejects with
-    // "PTY is not connected" if a frame races ahead of it. A microtask
-    // isn't enough; the open event crosses the WS handshake boundary
-    // and ordering vs server-side frame delivery isn't deterministic.
-    setTimeout(next, 10);
+    queueMicrotask(next);
   }
 
   #resolveWsUpstreamUrl(path: string): string | null {
