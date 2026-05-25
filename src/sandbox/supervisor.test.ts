@@ -445,13 +445,13 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
       expiresAt: new Date(Date.now() + 60_000),
       askpass: {
         hostDir: "/var/lib/cogmo/askpass/019d0000-0000-7000-8000-000000000fff",
-        containerDir: "/.cogmo-askpass",
+        containerDir: "/tmp/cogmo-askpass",
       },
     });
 
     const binds = expectDefined(calls.create[0], "first create call").HostConfig?.Binds ?? [];
     expect(binds).toContain(
-      "/var/lib/cogmo/askpass/019d0000-0000-7000-8000-000000000fff:/.cogmo-askpass:ro",
+      "/var/lib/cogmo/askpass/019d0000-0000-7000-8000-000000000fff:/tmp/cogmo-askpass:ro",
     );
   });
 

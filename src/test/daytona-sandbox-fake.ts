@@ -12,7 +12,7 @@
  *     `pushTaskBranchToRemote`, `WorktreeSpec.git-remote` construction,
  *     post-create `git checkout -B`, post-PR `fetchFeatureBranch`).
  *   - The full askpass-upload contract (`fs.uploadFiles` + path layout)
- *     because consumers see the same `/.cogmo-askpass/` path the real
+ *     because consumers see the same `/tmp/cogmo-askpass/` path the real
  *     backend serves.
  *   - The cleanup-cron / cleanup-event-subscriber paths (because they
  *     run against `coding_tasks` rows + GitHub, the sandbox shape only
@@ -422,7 +422,7 @@ class FakeDaytonaSandboxSession implements SandboxSession<DaytonaSessionState> {
     const cwd = resolveCwd(opts?.workingDir, this.#record);
     const env = composeEnv(opts?.env, this.#record);
     // The path-substitution mirror for askpass paths: the orchestrator
-    // threads `GIT_ASKPASS=/.cogmo-askpass/helper` etc. The real backend
+    // threads `GIT_ASKPASS=/tmp/cogmo-askpass/helper` etc. The real backend
     // serves the askpass dir at that container path; the fake remaps to
     // `<sandboxRoot>/.cogmo-askpass/...` so host-side `git` can resolve.
     const askpassMirror = this.#record.askpass?.containerDir;
@@ -453,7 +453,7 @@ function composeEnv(
 ): Record<string, string> {
   // Inherited `process.env` is NOT rewritten — only the orchestrator-
   // injected `override` values are. The orchestrator threads
-  // `GIT_ASKPASS=/.cogmo-askpass/helper` exclusively via override; an
+  // `GIT_ASKPASS=/tmp/cogmo-askpass/helper` exclusively via override; an
   // inherited env var that happens to contain the canonical path
   // would be host-side already and shouldn't be rewritten.
   const base: Record<string, string> = Object.fromEntries(
@@ -471,7 +471,7 @@ function composeEnv(
 
 /**
  * Rewrite any reference to the canonical container path
- * (`/.cogmo-askpass`) to the host-mirrored copy. Operates string-by-string
+ * (`/tmp/cogmo-askpass`) to the host-mirrored copy. Operates string-by-string
  * so paths embedded in env values, exec args, or signing-key paths all
  * resolve to the host filesystem.
  */

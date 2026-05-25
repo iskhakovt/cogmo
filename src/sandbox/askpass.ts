@@ -9,18 +9,18 @@
  *     signing-key.pub  0644 — `ssh-ed25519 ... <comment>`
  *
  * Each file's host path is bind-mounted read-only into the container at
- * `/.cogmo-askpass/`, so the in-container view is:
- *   /.cogmo-askpass/helper
- *   /.cogmo-askpass/pat
- *   /.cogmo-askpass/signing-key
- *   /.cogmo-askpass/signing-key.pub
+ * `/tmp/cogmo-askpass/`, so the in-container view is:
+ *   /tmp/cogmo-askpass/helper
+ *   /tmp/cogmo-askpass/pat
+ *   /tmp/cogmo-askpass/signing-key
+ *   /tmp/cogmo-askpass/signing-key.pub
  *
  * Env vars threaded into `exec`:
- *   GIT_ASKPASS=/.cogmo-askpass/helper
+ *   GIT_ASKPASS=/tmp/cogmo-askpass/helper
  *   GIT_TERMINAL_PROMPT=0
  *
  * Commit signing is configured per-invocation by the commit-and-push step
- * (slice 4.0f) via `git -c gpg.format=ssh -c user.signingkey=/.cogmo-askpass/signing-key`,
+ * (slice 4.0f) via `git -c gpg.format=ssh -c user.signingkey=/tmp/cogmo-askpass/signing-key`,
  * not via env — git's signing path doesn't read env, only config.
  *
  * Lifecycle: `provisionAskpass` writes the directory, `cleanupAskpass`
