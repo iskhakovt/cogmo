@@ -42,13 +42,11 @@ export interface AutoRegisterSkillDeps {
    */
   skillsRepoPath: string;
   /**
-   * Test-only override for the host-side `git fetch origin
-   * +<branch>:<branch>` step. Replay-mode tests use this to write
-   * fixture content to the bare repo on the requested branch without
-   * touching the real remote (the orchestrator's push step ran in
-   * cassette-mocked Daytona, so no bytes reached the remote).
-   * Production omits this; the default uses `execFileP("git", …)`
-   * with the resolved PAT via `withGitAskpass`.
+   * Test seam for the host-side `git fetch` of the PR branch.
+   * Replay tests stub this to write fixture content into the bare
+   * repo (the orchestrator's push never reached the real remote
+   * since Daytona was cassette-mocked). Production omits and the
+   * default uses `execFileP("git", …)` + `withGitAskpass`.
    */
   gitFetchOverride?: (params: {
     remoteUrl: string;

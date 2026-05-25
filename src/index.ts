@@ -158,23 +158,9 @@ export interface BootstrapOptions {
    * `claude setup-token`).
    */
   codingAuthOverride?: CodingOrchestratorDeps["loadCodingSandboxEnv"];
-  /**
-   * Test-only Octokit factory. Threaded into the verify orchestrator's
-   * draft-PR step and the cleanup-run-branch subscriber. Replay-mode
-   * tests inject a stub that returns synthetic PR responses without
-   * hitting real GitHub. Production omits this; both call sites
-   * construct a real `@octokit/rest` client from the resolved PAT.
-   */
+  /** Test seam — stub injected by replay tests in lieu of real GitHub. */
   octokitFactory?: (pat: string) => Octokit;
-  /**
-   * Test-only override for the auto-register subscriber's host-side
-   * `git fetch origin +<branch>:<branch>` step. Replay-mode tests use
-   * this to materialize the branch ref in the local bare repo from
-   * fixture content instead of hitting the real remote (which doesn't
-   * have the branch — Daytona's push step was cassette-mocked).
-   * Production omits this so auto-register uses the real `execFileP`
-   * path with the resolved PAT.
-   */
+  /** Test seam — see `AutoRegisterSkillDeps.gitFetchOverride`. */
   gitFetchOverride?: AutoRegisterSkillDeps["gitFetchOverride"];
 }
 

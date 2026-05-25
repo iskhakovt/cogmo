@@ -81,14 +81,9 @@ const execFileP = promisify(execFileCb);
 const SCENARIO = "skill-authoring";
 const FIXTURE_DIR = "./test/fixtures/daytona";
 const FIXTURE_PATH = `${FIXTURE_DIR}/${SCENARIO}.json`;
-/**
- * Captured at record time from the cogmo-skills branch the orchestrator
- * authors. In replay, `gitFetchOverride` writes these files into the
- * bare repo on the requested branch ref so `runner.register` sees the
- * same content the recording produced. Refresh whenever the cassette
- * is re-recorded — they must match what the cassette's LLM trace
- * authored.
- */
+// Recorded SKILL.md + skill.py; `gitFetchOverride` writes these into
+// the bare repo on the requested branch in replay. Refresh together
+// with the cassette.
 const BRANCH_FIXTURE_DIR = "./test/fixtures/skill-authoring-branch";
 const IS_RECORD = process.env.RECORD === "1";
 const HAS_RECORDING_INPUTS =
@@ -186,9 +181,7 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
         }),
     });
 
-    // Record uses real GitHub (sandbox pushes there, orchestrator
-    // opens a real PR). Replay uses a freshly-init'd local bare repo
-    // (file://) so host-side fetches stay hermetic.
+    // Record → real GitHub. Replay → local bare repo (file://).
     if (RECORDABLE) {
       remoteUrl = expectDefined(process.env.COGMO_TEST_SKILLS_REMOTE);
       remoteSlug = parseGitHubSlug(remoteUrl);
@@ -248,9 +241,7 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
           ANTHROPIC_MODEL: "claude-haiku-4-5-20251001",
           MAX_THINKING_TOKENS: "0",
         }),
-      // Replay-mode only: stub the GitHub interactions the cassette
-      // can't cover. Record-mode keeps real-octokit + real-git-fetch
-      // so the cassette captures real-world behavior.
+      // Replay-only: stub the GitHub bits the cassette can't reach.
       ...(!RECORDABLE && {
         octokitFactory: makeStubOctokitFactory(),
         gitFetchOverride: ({ branch, skillsRepoPath }) =>
@@ -324,12 +315,8 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
       inboundMessageId: await latestInboundId(db, conversationId),
     });
 
-    // Record budgets the real Daytona round-trip (claude-cli streaming,
-    // sandbox boot, git push). Replay should reach terminal status in
-    // well under a minute — if it doesn't, the orchestrator silently
-    // errored (Inngest function failure, ZodError on event emission,
-    // …) and the task row is stuck in a non-terminal state. Fail fast
-    // so the iteration loop isn't 30 minutes.
+    // Record runs span the real Daytona round-trip; replay should
+    // reach terminal status in <1m or it's silently stuck.
     const taskTimeoutMs = RECORDABLE ? 30 * 60_000 : 60_000;
     const task = await waitForCodingTask(db, conversationId, taskTimeoutMs);
     if (task.status !== "pr_open") {
@@ -437,28 +424,11 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
 
 // --- Helpers ─────────────────────────────────────────────────────────
 
-/** Owner/repo slug extracted from an HTTPS or SSH GitHub URL. */
-/**
- * Replay-mode stub for `octokit.pulls.create`. Builds a real Octokit
- * with a custom `fetch` that synthesizes a draft-PR response — the
- * verify orchestrator advances to `pr_open` without hitting GitHub.
- * The branch the recording pushed is long-deleted on GitHub; the
- * cassette can only cover Cogmo-to-Daytona traffic.
- */
-/**
- * Replay-mode "remote": a freshly initialised bare git repo on disk
- * with an empty main commit. Returns a `file://` URL the orchestrator's
- * git operations (`setOriginAndFetch`, `allocate-worktree`, etc.) can
- * fetch from without internet access. Avoids the Daytona-can't-reach-
- * localhost-Gitea problem that blocks running a real git server: in
- * replay, no sandbox actually executes git, so file:// is fine.
- */
+/** Replay-mode remote: bare git repo on disk, seeded with empty main. */
 async function createLocalBareRemote(): Promise<string> {
   const bareDir = await mkdtemp(join(tmpdir(), "skill-auth-replay-remote-"));
   await execFileP("git", ["init", "--bare", "--initial-branch=main", bareDir]);
-  // Seed main with an empty initial commit so `git fetch origin
-  // +main:refs/remotes/origin/main` has something to pull. A bare repo
-  // with no refs would refuse the fetch.
+  // `git fetch` against a refless bare fails; seed an empty main.
   const seed = await mkdtemp(join(tmpdir(), "skill-auth-replay-seed-"));
   try {
     await execFileP("git", ["init", "--initial-branch=main", seed]);
@@ -472,6 +442,7 @@ async function createLocalBareRemote(): Promise<string> {
   return `file://${bareDir}`;
 }
 
+/** Real Octokit + custom fetch that synthesizes the GitHub calls replay can't reach. */
 function makeStubOctokitFactory(): (pat: string) => Octokit {
   const stubFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -501,14 +472,7 @@ function makeStubOctokitFactory(): (pat: string) => Octokit {
   return (pat: string) => new Octokit({ auth: pat, request: { fetch: stubFetch } });
 }
 
-/**
- * Replay-mode override for `auto-register`'s host-side `git fetch
- * origin +<branch>:<branch>`. Writes the captured SKILL.md + skill.py
- * fixture files into the bare repo on the requested branch ref so
- * `runner.register({ branch })` sees the same content the recording
- * produced. Runs entirely against the local bare repo — no remote
- * traffic.
- */
+/** Replay's `gitFetchOverride` — write fixture files into the bare repo on `branch`. */
 async function materializeBranchFromFixture(opts: {
   branch: string;
   skillsRepoPath: string;
@@ -517,8 +481,6 @@ async function materializeBranchFromFixture(opts: {
   const { branch, skillsRepoPath, fixtureDir } = opts;
   const tmpRoot = await mkdtemp(join(tmpdir(), "skill-auth-fixture-"));
   try {
-    // Clone the bare repo to a workdir, branch from main, drop in the
-    // recorded SKILL.md + skill.py, commit, push back to the bare.
     await execFileP("git", ["clone", skillsRepoPath, tmpRoot]);
     await execFileP("git", ["-C", tmpRoot, "checkout", "-b", "fixture-staging"]);
     const entries = await readdir(fixtureDir);

@@ -246,24 +246,13 @@ const KNOWN_API_KEY_PATTERNS: ReadonlyArray<{ pattern: RegExp; replacement: stri
   { pattern: /\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{32,}\b/g, replacement: "sk-REDACTED" },
 ];
 
-/**
- * Strip cogmo-side identifiers from request paths so record / replay
- * match across runs. Daytona-server UUIDs (sandbox, command, file)
- * are NOT stripped — the mock replays them from the cassette response
- * cycle, so they're stable and serve as per-call identity for
- * `/command/<UUID>/logs`-style follow-ups.
- *
- * Two cogmo-side identifiers drift across runs:
- *
- *   - **Task UUID prefix** in session IDs `cogmo-<8hex>-<3hex>-` —
- *     fresh per run. The suffix (`skill-author-N` etc) stays
- *     untouched because it disambiguates per-session traffic;
- *     collapsing it scrambles cmd-id FIFO across sessions.
- *   - **Task UUID** inside `labels` query params (e.g.
- *     `labels={"cogmo.task":"<uuid>"}`) — fresh per run.
- */
+// Normalize cogmo-side identifiers that drift per run. Daytona-server
+// UUIDs (sandbox / command / file) are preserved — the mock plays
+// them back from the cassette response cycle and they serve as
+// per-call identity for `/command/<UUID>/logs`-style follow-ups.
+// Session-ID suffix (`skill-author-N`) is preserved too; collapsing
+// it scrambles cmd-id FIFO across sessions.
 const COGMO_SESSION_PREFIX_RE = /cogmo-[0-9a-f]{8}-[0-9a-f]{3}-/gi;
-// URL-encoded `"cogmo.task":"<uuid>"` — `%22` = `"`, `%3A` = `:`.
 const COGMO_TASK_LABEL_RE =
   /cogmo\.task%22%3A%22[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}%22/gi;
 function normalizePath(
@@ -769,13 +758,8 @@ export class DaytonaMock {
         // already closed
       }
     };
-    // Yield once via `setImmediate` before emitting: client SDKs
-    // typically attach the `message` listener in a microtask after
-    // the WS `open` event resolves (`@daytonaio/sdk`'s
-    // `stdDemuxStream` does this). A frame sent in `queueMicrotask`
-    // races the listener and can be dropped on the floor. One
-    // macrotask hop is enough to drain that gap on every WS client
-    // we use.
+    // Yield one macrotask so the client SDK's microtask-deferred
+    // `message` listener attaches before frames arrive.
     setImmediate(next);
   }
 
