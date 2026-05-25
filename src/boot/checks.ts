@@ -17,7 +17,8 @@
  *   and degrading gracefully on the affected surface.
  */
 
-import { readFileSync } from "node:fs";
+import { constants as fsConstants, readFileSync } from "node:fs";
+import { access, mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { HeadBucketCommand, type S3Client } from "@aws-sdk/client-s3";
 import { sql } from "drizzle-orm";
@@ -162,6 +163,33 @@ export async function checkHindsightVersion(
     );
   }
   logger.info({ actual, range }, "hindsight version check passed");
+}
+
+/**
+ * Verify a host directory the runtime needs to write into is reachable
+ * and writable by the current process. Creates it with `mkdir -p` first
+ * (matches the on-demand creation that `provisionAskpass` /
+ * `CogmoSocketProxy.create` would otherwise do); then probes `W_OK`.
+ *
+ * Catches the common misconfiguration where an operator overrides
+ * `SANDBOX_ASKPASS_DIR` / `SANDBOX_PROXY_SOCKET_DIR` to a path the
+ * runtime user can't write — without this probe the failure surfaces as
+ * a sub-second EACCES on the first task and looks transient. The error
+ * names the env var so the operator knows exactly what to override.
+ */
+export async function checkDirWritable(path: string, envVarName: string): Promise<void> {
+  try {
+    await mkdir(path, { recursive: true });
+    await access(path, fsConstants.W_OK);
+  } catch (err) {
+    throw new BootCheckError(
+      `${envVarName}=${path} is not writable by the cogmo runtime user. ` +
+        `Pre-create the directory and chown it to the runtime user, or set ` +
+        `${envVarName} to a path the runtime user can write (the shipping ` +
+        `image pre-creates /var/lib/cogmo/* with the right ownership). ` +
+        `Underlying error: ${stringifyError(err)}`,
+    );
+  }
 }
 
 function stringifyError(err: unknown): string {

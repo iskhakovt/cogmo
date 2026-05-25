@@ -1,3 +1,6 @@
+import { chmod, mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { HeadBucketCommand, type S3Client } from "@aws-sdk/client-s3";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
@@ -5,6 +8,7 @@ import type { Database } from "../db/index.js";
 import type { HindsightMemoryProvider } from "../memory/hindsight.js";
 import {
   BootCheckError,
+  checkDirWritable,
   checkHindsightVersion,
   checkS3Bucket,
   checkUuidv7,
@@ -55,6 +59,47 @@ describe("checkUuidv7", () => {
     db.execute.mockRejectedValue(new Error("function uuidv7() does not exist"));
     await expect(checkUuidv7(db)).rejects.toThrow(BootCheckError);
     await expect(checkUuidv7(db)).rejects.toThrow(/init-db\.sql/);
+  });
+});
+
+describe("checkDirWritable", () => {
+  it("creates a missing directory and returns when writable", async () => {
+    const base = await mkdtemp(join(tmpdir(), "cogmo-checkdir-"));
+    const target = join(base, "nested", "dir");
+    try {
+      await expect(checkDirWritable(target, "TEST_DIR")).resolves.toBeUndefined();
+      const s = await stat(target);
+      expect(s.isDirectory()).toBe(true);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it("returns when the directory already exists and is writable", async () => {
+    const base = await mkdtemp(join(tmpdir(), "cogmo-checkdir-"));
+    try {
+      await expect(checkDirWritable(base, "TEST_DIR")).resolves.toBeUndefined();
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it("throws BootCheckError naming the env var when the path is unwritable", async () => {
+    // chmod 0o555 (r-x for everyone, no write) on a directory the test
+    // user owns — DAC respects mode bits even for the owner, so mkdir
+    // of a child path returns EACCES deterministically. Skip if running
+    // as root (CI container) since root bypasses DAC.
+    if (process.getuid?.() === 0) return;
+    const base = await mkdtemp(join(tmpdir(), "cogmo-checkdir-ro-"));
+    try {
+      await chmod(base, 0o555);
+      const target = join(base, "child");
+      await expect(checkDirWritable(target, "TEST_DIR")).rejects.toThrow(BootCheckError);
+      await expect(checkDirWritable(target, "TEST_DIR")).rejects.toThrow(/TEST_DIR/);
+    } finally {
+      await chmod(base, 0o755);
+      await rm(base, { recursive: true, force: true });
+    }
   });
 });
 

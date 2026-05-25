@@ -20,7 +20,7 @@ import { generateMasterKey } from "../src/secrets/encryption.js";
 /**
  * Project-local scratch root for `pnpm dev`. Holds skills repo, cloned
  * repos, worktrees, sockets, askpass material — anything `env.ts` would
- * default to `/var/lib/cogmo/...` or `/run/cogmo/...` in production.
+ * default to `/var/lib/cogmo/...` in production.
  *
  * In-repo (gitignored) follows the same convention as `node_modules`,
  * `.next`, `.turbo`, `target/`, `.gradle/` — dev artifacts owned by the
@@ -68,10 +68,10 @@ async function main() {
   const inngestConnectGatewayUrl = `ws://${inn.getHost()}:${inn.getMappedPort(8289)}/v0/connect`;
   const hindsightUrl = `http://${hindsightContainer.getHost()}:${hindsightContainer.getMappedPort(8888)}`;
 
-  // Override the prod-flavoured `/var/lib/cogmo/...` and `/run/cogmo/...`
-  // defaults from `env.ts` with project-local scratch paths under `.dev/`
-  // so `pnpm dev` runs without sudo. Anything the developer pre-exports
-  // wins (`process.env.X` spread last).
+  // Override the prod-flavoured `/var/lib/cogmo/...` defaults from
+  // `env.ts` with project-local scratch paths under `.dev/` so `pnpm dev`
+  // runs without sudo. Anything the developer pre-exports wins
+  // (`process.env.X` spread last).
   mkdirSync(DEV_ROOT, { recursive: true });
 
   // Auto-generate and persist a master key on first run so devs don't have

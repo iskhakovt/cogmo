@@ -111,9 +111,10 @@ export async function setup({ provide }: GlobalSetupContext) {
   // Per-test-run volume name so parallel integration files don't share
   // a populated venv cache.
   process.env.COGMO_SKILLS_DEPS_VOLUME = `cogmo-skills-deps-test-${randomUUID()}`;
-  // `SANDBOX_ASKPASS_DIR` defaults to `/run/cogmo/askpass` for production
-  // (root-owned tmpfs, written by the cogmo service user). Tests run as
-  // the developer's user; redirect to a tmpdir we can mkdir into.
+  // `SANDBOX_ASKPASS_DIR` defaults to `/var/lib/cogmo/askpass` (image-
+  // provisioned, chowned to the cogmo runtime user). Tests run as the
+  // developer's user, who has no write access there; redirect to a
+  // tmpdir we can mkdir into.
   askpassPath = await mkdtemp(join(tmpdir(), "cogmo-askpass-it-"));
   process.env.SANDBOX_ASKPASS_DIR = askpassPath;
 
