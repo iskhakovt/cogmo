@@ -56,12 +56,15 @@ export const DEPS_CACHE_VOLUME_TARGET = "/skill-venvs";
  * subsequent task on any worker reads the same `<hash>/.ready` and
  * skips the populate.
  *
- * Local-Docker: one named Docker volume per host. The same name is
- * passed to every worker the pool spawns, so all containers see the
- * same `<hash>/` entries.
+ * Only valid on backends that advertise
+ * `capabilities.depsCacheSharing === "shared-volume"` — those provide
+ * POSIX storage that honours uv's hardlink + atomic-rename publish.
+ * Backends with `depsCacheSharing === "per-sandbox"` reject this field
+ * at `create()` so a wiring bug surfaces immediately instead of as a
+ * silent EPERM inside uv.
  */
 export interface DepsCacheVolumeSpec {
-  /** Local-Docker: named Docker volume; created on demand. */
+  /** Named Docker volume; created on demand by the backend. */
   volumeName: string;
 }
 
@@ -217,6 +220,28 @@ export interface SandboxCapabilities {
   customImage: boolean;
   volumes: "docker" | "managed" | "none";
   workingTreeTransport: "bind-mount" | "git-remote";
+  /**
+   * Skills tier-2 deps-cache placement.
+   *
+   * `shared-volume` — the backend provides a persistent volume with POSIX
+   * semantics (hardlinks, rename(2), O_RDWR on existing files). The skill
+   * runner mounts one volume across every pool worker so the uv cache
+   * and per-lockfile-hash venvs are reused. Local-Docker (ext4 named
+   * volume).
+   *
+   * `per-sandbox` — the backend's only persistent storage is FUSE-backed
+   * object storage that lacks the POSIX ops uv's cache requires (e.g.
+   * Daytona Volumes / mountpoint-s3: no hardlinks, no general rename,
+   * no O_RDWR on existing files). The runner skips the shared volume
+   * and lets each sandbox use container-local ephemeral disk at
+   * `/skill-venvs`. Cold populate per worker; amortised across the
+   * worker's lifetime.
+   *
+   * Consumers gate on this rather than backend identity so a future
+   * backend with a POSIX-compatible volume class can pick `shared-volume`
+   * by declaring the capability.
+   */
+  depsCacheSharing: "shared-volume" | "per-sandbox";
 }
 
 /**

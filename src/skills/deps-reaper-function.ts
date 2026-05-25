@@ -64,6 +64,15 @@ export function createSkillDepsReaper(deps: SkillDepsReaperDeps, inngest: Innges
         log.info("skill-venvs-reaper: sandbox or deps volume not configured; skipping");
         return { skipped: true } as const;
       }
+      if (deps.sandbox.capabilities.depsCacheSharing === "per-sandbox") {
+        // No persistent shared volume to sweep — each sandbox already
+        // disposes its container-local /skill-venvs on delete.
+        log.info(
+          { backend: deps.sandbox.backendId },
+          "skill-venvs-reaper: backend uses per-sandbox cache; nothing to reap",
+        );
+        return { skipped: true } as const;
+      }
       const sandbox = deps.sandbox;
       const depsCacheVolumeName = deps.depsCacheVolumeName;
 

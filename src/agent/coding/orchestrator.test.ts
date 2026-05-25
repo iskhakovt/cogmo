@@ -153,6 +153,7 @@ function fakeSandbox(opts: FakeContainerOpts = {}): FakeSandboxResult {
       customImage: true,
       volumes: "docker",
       workingTreeTransport: "bind-mount",
+      depsCacheSharing: "shared-volume",
     },
     healthCheck: async () => ({ ok: true, runtime: "runc" }),
     reconcileCrashedInstances: async () => ({ orphansReaped: 0 }),

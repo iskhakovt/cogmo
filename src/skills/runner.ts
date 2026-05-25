@@ -449,7 +449,22 @@ export class SkillRunnerImpl implements SkillRunner {
     this.#pyodidePackageCacheDir = opts.pyodidePackageCacheDir;
     this.#sandbox = opts.sandbox;
     this.#tier2Image = opts.tier2Image ?? DEFAULT_TIER2_IMAGE;
-    this.#depsCacheVolumeName = opts.depsCacheVolumeName;
+    // A shared deps-cache volume only makes sense when the sandbox
+    // backend can honour uv's POSIX assumptions (hardlinks, atomic
+    // rename, O_RDWR). Backends that advertise `per-sandbox` use
+    // container-local /skill-venvs and pay a cold populate per worker;
+    // omit the volume name regardless of what wiring passed in.
+    const sandboxIncompatible = opts.sandbox?.capabilities.depsCacheSharing === "per-sandbox";
+    this.#depsCacheVolumeName = sandboxIncompatible ? undefined : opts.depsCacheVolumeName;
+    if (sandboxIncompatible && opts.depsCacheVolumeName !== undefined) {
+      log.warn(
+        {
+          backend: opts.sandbox?.backendId,
+          depsCacheVolumeName: opts.depsCacheVolumeName,
+        },
+        "ignoring depsCacheVolumeName — backend advertises depsCacheSharing: 'per-sandbox' (each sandbox uses ephemeral /skill-venvs)",
+      );
+    }
     this.#poolOptions = opts.poolOptions;
     this.#clock = opts.clock ?? (() => new Date());
     this.#ajv = new Ajv({ allErrors: true, strict: false });

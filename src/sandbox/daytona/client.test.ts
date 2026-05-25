@@ -47,10 +47,6 @@ type DaytonaSnapshot = { name: string; state: string };
 // is the shape of calls Cogmo's client makes against it (labels, resources,
 // auto-stop math, lifecycle order).
 //
-// Deliberately narrower than the SDK's `Volume` model — client.ts only
-// reads `.id` from the resolved volume, so the structural subset suffices.
-type FakeDaytonaVolume = { id: string; name: string };
-
 const daytonaCalls = {
   list: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
   get: vi.fn<(...args: unknown[]) => Promise<DaytonaSdkSandbox>>(),
@@ -58,13 +54,20 @@ const daytonaCalls = {
   snapshotGet: vi.fn<(name: string) => Promise<DaytonaSnapshot>>(),
   snapshotCreate: vi.fn<(...args: unknown[]) => Promise<DaytonaSnapshot>>(),
   snapshotDelete: vi.fn<(snap: DaytonaSnapshot) => Promise<void>>(),
-  volumeGet: vi.fn<(name: string, create?: boolean) => Promise<FakeDaytonaVolume>>(),
 };
 vi.mock("@daytonaio/sdk", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@daytonaio/sdk")>();
   // Constructor-shaped mock — `new Daytona(...)` in client.ts requires a
   // callable that produces an object via `new`, so a plain `vi.fn()` won't
   // do. A class declaration is the cleanest way to satisfy `new`.
+  //
+  // No `volume` field: production code never touches `daytona.volume` (the
+  // backend advertises `depsCacheSharing: "per-sandbox"` and `create()`
+  // throws on `SessionSpec.depsCacheVolume` before any volume API call).
+  // If a regression re-introduces a `daytona.volume.*` access, the test
+  // crashes with "Cannot read properties of undefined" — a stronger
+  // contract than a `.not.toHaveBeenCalled()` assertion, which only fires
+  // after the bad call already shipped.
   class MockDaytona {
     list = daytonaCalls.list;
     get = daytonaCalls.get;
@@ -73,9 +76,6 @@ vi.mock("@daytonaio/sdk", async (importOriginal) => {
       get: daytonaCalls.snapshotGet,
       create: daytonaCalls.snapshotCreate,
       delete: daytonaCalls.snapshotDelete,
-    };
-    volume = {
-      get: daytonaCalls.volumeGet,
     };
   }
   return { ...actual, Daytona: MockDaytona };
@@ -135,7 +135,6 @@ beforeEach(() => {
   daytonaCalls.snapshotGet.mockReset();
   daytonaCalls.snapshotCreate.mockReset();
   daytonaCalls.snapshotDelete.mockReset();
-  daytonaCalls.volumeGet.mockReset();
 });
 afterEach(() => {
   vi.clearAllTimers();
@@ -189,61 +188,21 @@ describe("DaytonaSandboxClient", () => {
       });
     });
 
-    it("resolves depsCacheVolume name → id via volume.get(name, true) and mounts at /skill-venvs", async () => {
+    it("rejects depsCacheVolume because Daytona Volumes can't honour uv's POSIX assumptions", async () => {
       daytonaCalls.create.mockResolvedValue(
         fakeSandbox({ id: "sb-vol", state: SandboxState.STARTED }),
       );
-      daytonaCalls.volumeGet.mockResolvedValue({
-        id: "vol-id-abc",
-        name: "cogmo-skills-deps-cache",
-      });
 
       const client = await makeClient();
-      await client.create({
-        ...BASE_SPEC,
-        depsCacheVolume: { volumeName: "cogmo-skills-deps-cache" },
-      });
-
-      expect(daytonaCalls.volumeGet).toHaveBeenCalledWith("cogmo-skills-deps-cache", true);
-      const call = daytonaCalls.create.mock.calls[0]?.[0] as {
-        volumes?: Array<{ volumeId: string; mountPath: string }>;
-      };
-      expect(call.volumes).toEqual([{ volumeId: "vol-id-abc", mountPath: "/skill-venvs" }]);
-    });
-
-    it("caches the resolved volume id across concurrent + sequential create calls", async () => {
-      daytonaCalls.create.mockImplementation(async () =>
-        fakeSandbox({ id: `sb-${Math.random()}`, state: SandboxState.STARTED }),
-      );
-      daytonaCalls.volumeGet.mockImplementation(async (name) => ({
-        id: `id-${String(name)}`,
-        name: String(name),
-      }));
-
-      const client = await makeClient();
-      const depsCacheVolume = { volumeName: "cogmo-skills-deps-cache" } as const;
-      // Concurrent first-callers — should dedupe on the in-flight resolve.
-      await Promise.all([
+      await expect(
         client.create({
           ...BASE_SPEC,
-          taskId: "019d0000-0000-7000-8000-000000000001",
-          depsCacheVolume,
+          depsCacheVolume: { volumeName: "cogmo-skills-deps-cache" },
         }),
-        client.create({
-          ...BASE_SPEC,
-          taskId: "019d0000-0000-7000-8000-000000000002",
-          depsCacheVolume,
-        }),
-      ]);
-      // Sequential third call — should hit the cache, no extra volume.get.
-      await client.create({
-        ...BASE_SPEC,
-        taskId: "019d0000-0000-7000-8000-000000000003",
-        depsCacheVolume,
-      });
+      ).rejects.toThrow(/depsCacheSharing: 'per-sandbox'/);
 
-      expect(daytonaCalls.volumeGet).toHaveBeenCalledTimes(1);
-      expect(daytonaCalls.create).toHaveBeenCalledTimes(3);
+      // No Daytona SDK calls made — the spec is rejected before we touch the wire.
+      expect(daytonaCalls.create).not.toHaveBeenCalled();
     });
 
     it("omits volumes from create when depsCacheVolume is absent", async () => {
@@ -254,33 +213,6 @@ describe("DaytonaSandboxClient", () => {
       await client.create(BASE_SPEC);
       const call = daytonaCalls.create.mock.calls[0]?.[0] as { volumes?: unknown };
       expect("volumes" in call).toBe(false);
-      expect(daytonaCalls.volumeGet).not.toHaveBeenCalled();
-    });
-
-    it("retries the volume resolve after a failure (transient blip doesn't poison)", async () => {
-      daytonaCalls.create.mockResolvedValue(
-        fakeSandbox({ id: "sb-retry", state: SandboxState.STARTED }),
-      );
-      daytonaCalls.volumeGet
-        .mockRejectedValueOnce(new Error("transient blip"))
-        .mockResolvedValueOnce({ id: "vol-id-retry", name: "cogmo-skills-deps-cache" });
-
-      const client = await makeClient();
-      const depsCacheVolume = { volumeName: "cogmo-skills-deps-cache" } as const;
-
-      // First call fails — the in-flight slot must clear so the next
-      // attempt isn't stuck on the rejected promise.
-      await expect(client.create({ ...BASE_SPEC, depsCacheVolume })).rejects.toThrow(
-        /transient blip/,
-      );
-
-      // Second call succeeds and resolves cleanly.
-      await client.create({
-        ...BASE_SPEC,
-        taskId: "019d0000-0000-7000-8000-000000000004",
-        depsCacheVolume,
-      });
-      expect(daytonaCalls.volumeGet).toHaveBeenCalledTimes(2);
     });
 
     it("rounds memory_bytes up to GiB (Daytona's unit) and cpus up to integer", async () => {
@@ -1027,6 +959,7 @@ describe("DaytonaSandboxClient", () => {
         customImage: true,
         volumes: "managed",
         workingTreeTransport: "git-remote",
+        depsCacheSharing: "per-sandbox",
       });
     });
   });

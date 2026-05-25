@@ -860,6 +860,86 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     expect(createSpy).not.toHaveBeenCalled();
   });
 
+  it("drops depsCacheVolumeName when sandbox advertises depsCacheSharing: 'per-sandbox'", async () => {
+    const fakePool = makeFakePool();
+    createSpy.mockResolvedValue(fakePool);
+    const perSandbox = mock<SandboxClient>({
+      backendId: "daytona",
+      capabilities: {
+        siblingContainers: "sandbox-internal",
+        hostBindMount: false,
+        customImage: true,
+        volumes: "managed",
+        workingTreeTransport: "git-remote",
+        depsCacheSharing: "per-sandbox",
+      },
+    });
+
+    const runner = await SkillRunnerImpl.create({
+      store,
+      runInTx: tx,
+      memory: makeMockMemory(),
+      secretsStore: makeMockSecrets(),
+      files: makeMockFiles(),
+      user: { id: "user-1", timezone: "UTC" },
+      memoryBankId: "bank-1",
+      sandbox: perSandbox,
+      // Operator-configured value flowing in from env — the runner must
+      // ignore it because the backend can't honour POSIX semantics.
+      depsCacheVolumeName: "cogmo-skills-deps-cache",
+    });
+    await runner.__registerForTests({
+      name: "tier2-test",
+      manifestSource: TIER2_MANIFEST,
+      body: TIER2_BODY,
+    });
+
+    await runner.invoke({ name: "tier2-test", inputs: {} });
+
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    const poolArgs = createSpy.mock.calls[0]?.[0] as { depsCacheVolumeName?: string };
+    expect(poolArgs.depsCacheVolumeName).toBeUndefined();
+  });
+
+  it("forwards depsCacheVolumeName when sandbox advertises depsCacheSharing: 'shared-volume'", async () => {
+    const fakePool = makeFakePool();
+    createSpy.mockResolvedValue(fakePool);
+    const sharedVolume = mock<SandboxClient>({
+      backendId: "local-docker",
+      capabilities: {
+        siblingContainers: "host-proxy",
+        hostBindMount: true,
+        customImage: true,
+        volumes: "docker",
+        workingTreeTransport: "bind-mount",
+        depsCacheSharing: "shared-volume",
+      },
+    });
+
+    const runner = await SkillRunnerImpl.create({
+      store,
+      runInTx: tx,
+      memory: makeMockMemory(),
+      secretsStore: makeMockSecrets(),
+      files: makeMockFiles(),
+      user: { id: "user-1", timezone: "UTC" },
+      memoryBankId: "bank-1",
+      sandbox: sharedVolume,
+      depsCacheVolumeName: "cogmo-skills-deps-cache",
+    });
+    await runner.__registerForTests({
+      name: "tier2-test",
+      manifestSource: TIER2_MANIFEST,
+      body: TIER2_BODY,
+    });
+
+    await runner.invoke({ name: "tier2-test", inputs: {} });
+
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    const poolArgs = createSpy.mock.calls[0]?.[0] as { depsCacheVolumeName?: string };
+    expect(poolArgs.depsCacheVolumeName).toBe("cogmo-skills-deps-cache");
+  });
+
   it("shutdown awaits in-flight pool init and disposes the late-arriving pool", async () => {
     const fakePool = makeFakePool();
     let resolveCreate: (p: SysboxWorkerPool) => void = () => {};

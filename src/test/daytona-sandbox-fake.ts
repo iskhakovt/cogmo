@@ -59,6 +59,7 @@ const CAPABILITIES: SandboxCapabilities = {
   customImage: true,
   volumes: "managed",
   workingTreeTransport: "git-remote",
+  depsCacheSharing: "per-sandbox",
 };
 
 /** Path the orchestrator + git-as-transport helpers expect inside the sandbox. */
