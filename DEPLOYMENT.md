@@ -93,7 +93,7 @@ All configuration is via environment variables. The schema is in [`src/env.ts`](
 
 ### Optional
 
-Defaults below match the in-image expectations: persistent-state paths align with `/var/lib/cogmo`, socket and askpass paths sit under `/run/cogmo`. Override only when bind-mounts or runtime configuration demand it.
+Defaults below match the in-image expectations: every host-state path sits under `/var/lib/cogmo/`, which the shipping image pre-creates and chowns to the runtime user. `/run/<app>/` would be FHS-canonical on a bare-metal systemd host but requires a `RuntimeDirectory=` equivalent that OCI runtimes do not provide — non-root containers cannot create subdirs under the root-owned `/run` tmpfs without it. Override these only when bind-mounts or runtime configuration demand it; the cogmo bootstrap probes each one at startup and fails loudly if the runtime user can't write to it.
 
 #### Inngest
 
@@ -141,9 +141,9 @@ Defaults below match the in-image expectations: persistent-state paths align wit
 | `SANDBOX_RUNTIME` | — | OCI runtime for sandbox containers. `sysbox` in production, `runc` in dev / CI. When unset the sandbox module doesn't initialize and coding-delegation features fail with a clear error on first use. Only consulted when `SANDBOX_BACKEND=local-docker`. |
 | `DAYTONA_API_URL` | `https://app.daytona.io/api` | Daytona Cloud or self-hosted base URL. Only consulted when `SANDBOX_BACKEND=daytona`. |
 | `DAYTONA_ORGANIZATION_ID` | — | Daytona organization id. Only needed when the API key is scoped to multiple orgs and the default isn't the right one. |
-| `SANDBOX_PROXY_SOCKET_DIR` | `/run/cogmo/sockets` | Host directory for per-task Docker proxy sockets. Each task container gets `<dir>/<taskId>.sock` bind-mounted at `/var/run/docker.sock` so child-container creation flows through the proxy (label injection, runtime override, deny rules). Created at boot if missing. |
+| `SANDBOX_PROXY_SOCKET_DIR` | `/var/lib/cogmo/sockets` | Host directory for per-task Docker proxy sockets. Each task container gets `<dir>/<taskId>.sock` bind-mounted at `/var/run/docker.sock` so child-container creation flows through the proxy (label injection, runtime override, deny rules). Created at boot if missing. |
 | `SANDBOX_HOST_DOCKER_SOCKET` | `/var/run/docker.sock` | Host Docker socket the proxy forwards to. Override only for rootless Docker / snap / unusual installs. |
-| `SANDBOX_ASKPASS_DIR` | `/run/cogmo/askpass` | Host root for per-task git-askpass material (PAT, SSH signing key, helper script). Bind-mounted at `/.cogmo-askpass/` per task; wiped on task stop. |
+| `SANDBOX_ASKPASS_DIR` | `/var/lib/cogmo/askpass` | Host root for per-task git-askpass material (PAT, SSH signing key, helper script). Bind-mounted at `/.cogmo-askpass/` per task; wiped on task stop. |
 
 #### Coding delegation
 

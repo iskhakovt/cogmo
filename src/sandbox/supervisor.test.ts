@@ -150,7 +150,7 @@ function fakeProxy(): {
   const proxy = {
     registerTask: vi.fn(async (scope: TaskScope) => {
       registers.push(scope);
-      return `/run/cogmo/sockets/${scope.taskId}.sock`;
+      return `/var/lib/cogmo/sockets/${scope.taskId}.sock`;
     }),
     unregisterTask: vi.fn(async (taskId: string) => {
       unregisters.push(taskId);
@@ -161,7 +161,7 @@ function fakeProxy(): {
     proxy,
     registers,
     unregisters,
-    socketDirAt: (taskId) => `/run/cogmo/sockets/${taskId}.sock`,
+    socketDirAt: (taskId) => `/var/lib/cogmo/sockets/${taskId}.sock`,
   };
 }
 
@@ -213,7 +213,7 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
     const binds = create0.HostConfig?.Binds ?? [];
     expect(binds).toContain("/tmp/wt:/workspace");
     expect(binds).toContain(
-      "/run/cogmo/sockets/019d0000-0000-7000-8000-000000000aaa.sock:/var/run/docker.sock",
+      "/var/lib/cogmo/sockets/019d0000-0000-7000-8000-000000000aaa.sock:/var/run/docker.sock",
     );
     // Task container itself pinned to the slice — Docker creates the
     // slice on demand and aborts here if systemd refuses (e.g. on a
@@ -444,14 +444,14 @@ describe("LocalDockerSandboxClient — proxy wiring", () => {
       resourceLimits: RESOURCE_LIMITS,
       expiresAt: new Date(Date.now() + 60_000),
       askpass: {
-        hostDir: "/run/cogmo/askpass/019d0000-0000-7000-8000-000000000fff",
+        hostDir: "/var/lib/cogmo/askpass/019d0000-0000-7000-8000-000000000fff",
         containerDir: "/.cogmo-askpass",
       },
     });
 
     const binds = expectDefined(calls.create[0], "first create call").HostConfig?.Binds ?? [];
     expect(binds).toContain(
-      "/run/cogmo/askpass/019d0000-0000-7000-8000-000000000fff:/.cogmo-askpass:ro",
+      "/var/lib/cogmo/askpass/019d0000-0000-7000-8000-000000000fff:/.cogmo-askpass:ro",
     );
   });
 

@@ -48,7 +48,7 @@ describe("createSandboxBackend", () => {
         runtime: "runc",
         instanceId: "inst-1",
         proxy,
-        askpassBaseDir: "/run/cogmo/askpass",
+        askpassBaseDir: "/var/lib/cogmo/askpass",
       });
       expect(localDockerCreate).toHaveBeenCalledTimes(1);
       const callArg = localDockerCreate.mock.calls[0]?.[0] as Record<string, unknown>;
@@ -59,7 +59,7 @@ describe("createSandboxBackend", () => {
         runtime: "runc",
         instanceId: "inst-1",
         proxy,
-        askpassBaseDir: "/run/cogmo/askpass",
+        askpassBaseDir: "/var/lib/cogmo/askpass",
       });
       expect(daytonaCreate).not.toHaveBeenCalled();
     });

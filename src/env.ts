@@ -213,8 +213,13 @@ export const env = createEnv({
      * missing. Each task container gets `${SANDBOX_PROXY_SOCKET_DIR}/<taskId>.sock`
      * bind-mounted at `/var/run/docker.sock` so child container creation
      * flows through the proxy (label injection, runtime override, deny rules).
+     * Defaults under `/var/lib/cogmo/` because that is the only host-state
+     * root the shipping image pre-creates and chowns to the runtime user;
+     * `/run/<app>/` requires a systemd `RuntimeDirectory=` equivalent that
+     * OCI runtimes do not provide, so a `/run/cogmo/...` default would
+     * EACCES on non-root deployments. See `boot/checks.ts → checkDirWritable`.
      */
-    SANDBOX_PROXY_SOCKET_DIR: z.string().default("/run/cogmo/sockets"),
+    SANDBOX_PROXY_SOCKET_DIR: z.string().default("/var/lib/cogmo/sockets"),
     /**
      * Host Docker socket the proxy forwards to. Override only for unusual
      * deployments (rootless docker, snap, etc.).
@@ -225,8 +230,9 @@ export const env = createEnv({
      * `${SANDBOX_ASKPASS_DIR}/<task-id>/` provisioned with a helper script,
      * the bot account's PAT, and the SSH signing key — bind-mounted into
      * the task container at `/tmp/cogmo-askpass/`. Wiped on `stopTask`.
+     * Default rationale matches `SANDBOX_PROXY_SOCKET_DIR` above.
      */
-    SANDBOX_ASKPASS_DIR: z.string().default("/run/cogmo/askpass"),
+    SANDBOX_ASKPASS_DIR: z.string().default("/var/lib/cogmo/askpass"),
     /**
      * Host path of the bare git repo backing the skill library. Initialized
      * on first boot via `bootstrapSkillsRepo`; advanced exclusively by the

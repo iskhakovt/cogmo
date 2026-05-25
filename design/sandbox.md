@@ -234,7 +234,7 @@ The local-Docker backend runs task containers as siblings on the host's Docker d
 Host daemon runs normally. Cogmo adds:
 
 1. **Container supervisor** — creates task containers directly against the host daemon with `HostConfig.Runtime = "sysbox-runc"` by default.
-2. **Docker API proxy** — per task container, Cogmo allocates a Unix socket at `/run/cogmo/sockets/<task-id>.sock`, mounted into the task container at `/var/run/docker.sock`.
+2. **Docker API proxy** — per task container, Cogmo allocates a Unix socket at `${SANDBOX_PROXY_SOCKET_DIR}/<task-id>.sock` (default `/var/lib/cogmo/sockets/`, image-provisioned and chowned to the runtime user), mounted into the task container at `/var/run/docker.sock`.
 3. **Sibling-container spawn model** — when the task container (or its tooling) calls the proxy to create a child, the child is a *sibling* on the host daemon, not a truly nested container. The parent relationship lives in Cogmo's DB and in Docker labels. Proxy injects `HostConfig.Runtime = "sysbox-runc"` on children by default so every container in the tree is userns-isolated.
 
 Topology 2 — nested `dockerd` inside the task container — is deferred. Only added if a specific use case requires a private daemon (rare for personal scale).
@@ -384,8 +384,8 @@ Task startup:
 
 1. Supervisor allocates a task id `T`.
 2. Supervisor inserts placeholder row for the task container (depth 0, no `docker_id` yet).
-3. Supervisor creates `/run/cogmo/sockets/T.sock`, registers `T.sock → {parent: null, root_task: T}` in the proxy's in-memory map. The task container's own docker id is written back once Docker returns it.
-4. Supervisor creates the task container via host daemon: `HostConfig.Runtime = "sysbox-runc"`, mounts `/run/cogmo/sockets/T.sock` → `/var/run/docker.sock`, injects labels.
+3. Supervisor creates `${SANDBOX_PROXY_SOCKET_DIR}/T.sock`, registers `T.sock → {parent: null, root_task: T}` in the proxy's in-memory map. The task container's own docker id is written back once Docker returns it.
+4. Supervisor creates the task container via host daemon: `HostConfig.Runtime = "sysbox-runc"`, mounts `${SANDBOX_PROXY_SOCKET_DIR}/T.sock` → `/var/run/docker.sock`, injects labels.
 5. Supervisor starts the container.
 6. Updates placeholder row with `docker_id`; updates proxy map entry with task container's `docker_id` for ownership checks on `DELETE` etc.
 
@@ -460,7 +460,7 @@ Default shipping configuration. `cogmo serve` boots the proxy as a module on its
 Two processes sharing the image:
 
 - `cogmo serve` — main orchestrator. No docker daemon access.
-- `cogmo sandbox-proxy` — socket proxy. Holds `docker` group membership. Owns `/run/cogmo/`.
+- `cogmo sandbox-proxy` — socket proxy. Holds `docker` group membership. Owns the proxy-socket directory (`${SANDBOX_PROXY_SOCKET_DIR}`).
 
 Industry-standard separation (every reference proxy runs this way — see Reference Implementations below). Extracted when an in-process crash first disrupts a live task.
 
@@ -494,7 +494,7 @@ Configured via environment:
 
 | `SANDBOX_PROXY_LISTEN` | Use case | Auth |
 |-|-|-|
-| `unix:///run/cogmo/sandbox.sock` | Single host, systemd or Compose with shared tmpfs (default) | Filesystem perms |
+| `unix:///var/lib/cogmo/sandbox.sock` | Single host, systemd or Compose with shared bind-mount (default) | Filesystem perms |
 | `tcp://127.0.0.1:<port>` | Single host, no shared filesystem | Loopback-only, implicit trust |
 | `tcp://<bind>:<port>` | Split hosts (proxy colocated with docker daemon, main elsewhere) | Deployer supplies mTLS or an authenticating reverse proxy; Cogmo does not mint credentials |
 

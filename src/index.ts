@@ -42,6 +42,7 @@ import { DrizzleAgentStore } from "./agent/store/index.js";
 import { createDefaultTools } from "./agent/tools.js";
 import { createWebTools } from "./agent/web-tools.js";
 import {
+  checkDirWritable,
   checkHindsightVersion,
   checkS3Bucket,
   checkUuidv7,
@@ -504,6 +505,16 @@ export async function bootstrapSandbox(
       );
       return NO_SANDBOX;
     }
+    // Fail-fast: both dirs receive per-task writes (proxy sockets,
+    // askpass material) and a permission problem on either surfaces as
+    // a generic EACCES on the first task otherwise. Askpass is also
+    // needed on the daytona backend (host-side `provisionAskpass` writes
+    // the files that `askpass-upload.ts` then uploads via the SDK), so
+    // that probe runs in both branches.
+    await Promise.all([
+      checkDirWritable(env.SANDBOX_PROXY_SOCKET_DIR, "SANDBOX_PROXY_SOCKET_DIR"),
+      checkDirWritable(env.SANDBOX_ASKPASS_DIR, "SANDBOX_ASKPASS_DIR"),
+    ]);
     const docker = new Docker();
     const instance = await core.runInTx((trx) =>
       core.sandboxStore.insertInstance(trx, { host: hostname(), pid: process.pid }),
@@ -549,6 +560,9 @@ export async function bootstrapSandbox(
       );
       return NO_SANDBOX;
     }
+    // Host-side: `provisionAskpass` writes the per-task files that
+    // `askpass-upload.ts` then ships into the daytona sandbox.
+    await checkDirWritable(env.SANDBOX_ASKPASS_DIR, "SANDBOX_ASKPASS_DIR");
     // Daytona needs a process-run id for label-stamping orphan
     // detection in a future reconcile pass. We don't insert into
     // sandbox_instances (that table FK's to local-docker
