@@ -863,7 +863,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
   it("drops depsCacheVolumeName when sandbox advertises depsCacheSharing: 'per-sandbox'", async () => {
     const fakePool = makeFakePool();
     createSpy.mockResolvedValue(fakePool);
-    const perSandbox: Partial<SandboxClient> = {
+    const perSandbox = mock<SandboxClient>({
       backendId: "daytona",
       capabilities: {
         siblingContainers: "sandbox-internal",
@@ -873,7 +873,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
         workingTreeTransport: "git-remote",
         depsCacheSharing: "per-sandbox",
       },
-    };
+    });
 
     const runner = await SkillRunnerImpl.create({
       store,
@@ -883,7 +883,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
       files: makeMockFiles(),
       user: { id: "user-1", timezone: "UTC" },
       memoryBankId: "bank-1",
-      sandbox: perSandbox as SandboxClient,
+      sandbox: perSandbox,
       // Operator-configured value flowing in from env — the runner must
       // ignore it because the backend can't honour POSIX semantics.
       depsCacheVolumeName: "cogmo-skills-deps-cache",
@@ -904,7 +904,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
   it("forwards depsCacheVolumeName when sandbox advertises depsCacheSharing: 'shared-volume'", async () => {
     const fakePool = makeFakePool();
     createSpy.mockResolvedValue(fakePool);
-    const sharedVolume: Partial<SandboxClient> = {
+    const sharedVolume = mock<SandboxClient>({
       backendId: "local-docker",
       capabilities: {
         siblingContainers: "host-proxy",
@@ -914,7 +914,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
         workingTreeTransport: "bind-mount",
         depsCacheSharing: "shared-volume",
       },
-    };
+    });
 
     const runner = await SkillRunnerImpl.create({
       store,
@@ -924,7 +924,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
       files: makeMockFiles(),
       user: { id: "user-1", timezone: "UTC" },
       memoryBankId: "bank-1",
-      sandbox: sharedVolume as SandboxClient,
+      sandbox: sharedVolume,
       depsCacheVolumeName: "cogmo-skills-deps-cache",
     });
     await runner.__registerForTests({

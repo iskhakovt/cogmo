@@ -454,17 +454,12 @@ export class SkillRunnerImpl implements SkillRunner {
     // rename, O_RDWR). Backends that advertise `per-sandbox` use
     // container-local /skill-venvs and pay a cold populate per worker;
     // omit the volume name regardless of what wiring passed in.
-    this.#depsCacheVolumeName =
-      opts.sandbox?.capabilities.depsCacheSharing === "per-sandbox"
-        ? undefined
-        : opts.depsCacheVolumeName;
-    if (
-      opts.depsCacheVolumeName !== undefined &&
-      opts.sandbox?.capabilities.depsCacheSharing === "per-sandbox"
-    ) {
+    const sandboxIncompatible = opts.sandbox?.capabilities.depsCacheSharing === "per-sandbox";
+    this.#depsCacheVolumeName = sandboxIncompatible ? undefined : opts.depsCacheVolumeName;
+    if (sandboxIncompatible && opts.depsCacheVolumeName !== undefined) {
       log.warn(
         {
-          backend: opts.sandbox.backendId,
+          backend: opts.sandbox?.backendId,
           depsCacheVolumeName: opts.depsCacheVolumeName,
         },
         "ignoring depsCacheVolumeName — backend advertises depsCacheSharing: 'per-sandbox' (each sandbox uses ephemeral /skill-venvs)",

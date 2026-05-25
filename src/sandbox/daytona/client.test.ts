@@ -47,10 +47,6 @@ type DaytonaSnapshot = { name: string; state: string };
 // is the shape of calls Cogmo's client makes against it (labels, resources,
 // auto-stop math, lifecycle order).
 //
-// Deliberately narrower than the SDK's `Volume` model — client.ts only
-// reads `.id` from the resolved volume, so the structural subset suffices.
-type FakeDaytonaVolume = { id: string; name: string };
-
 const daytonaCalls = {
   list: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
   get: vi.fn<(...args: unknown[]) => Promise<DaytonaSdkSandbox>>(),
@@ -58,13 +54,20 @@ const daytonaCalls = {
   snapshotGet: vi.fn<(name: string) => Promise<DaytonaSnapshot>>(),
   snapshotCreate: vi.fn<(...args: unknown[]) => Promise<DaytonaSnapshot>>(),
   snapshotDelete: vi.fn<(snap: DaytonaSnapshot) => Promise<void>>(),
-  volumeGet: vi.fn<(name: string, create?: boolean) => Promise<FakeDaytonaVolume>>(),
 };
 vi.mock("@daytonaio/sdk", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@daytonaio/sdk")>();
   // Constructor-shaped mock — `new Daytona(...)` in client.ts requires a
   // callable that produces an object via `new`, so a plain `vi.fn()` won't
   // do. A class declaration is the cleanest way to satisfy `new`.
+  //
+  // No `volume` field: production code never touches `daytona.volume` (the
+  // backend advertises `depsCacheSharing: "per-sandbox"` and `create()`
+  // throws on `SessionSpec.depsCacheVolume` before any volume API call).
+  // If a regression re-introduces a `daytona.volume.*` access, the test
+  // crashes with "Cannot read properties of undefined" — a stronger
+  // contract than a `.not.toHaveBeenCalled()` assertion, which only fires
+  // after the bad call already shipped.
   class MockDaytona {
     list = daytonaCalls.list;
     get = daytonaCalls.get;
@@ -73,9 +76,6 @@ vi.mock("@daytonaio/sdk", async (importOriginal) => {
       get: daytonaCalls.snapshotGet,
       create: daytonaCalls.snapshotCreate,
       delete: daytonaCalls.snapshotDelete,
-    };
-    volume = {
-      get: daytonaCalls.volumeGet,
     };
   }
   return { ...actual, Daytona: MockDaytona };
@@ -135,7 +135,6 @@ beforeEach(() => {
   daytonaCalls.snapshotGet.mockReset();
   daytonaCalls.snapshotCreate.mockReset();
   daytonaCalls.snapshotDelete.mockReset();
-  daytonaCalls.volumeGet.mockReset();
 });
 afterEach(() => {
   vi.clearAllTimers();
@@ -204,7 +203,6 @@ describe("DaytonaSandboxClient", () => {
 
       // No Daytona SDK calls made — the spec is rejected before we touch the wire.
       expect(daytonaCalls.create).not.toHaveBeenCalled();
-      expect(daytonaCalls.volumeGet).not.toHaveBeenCalled();
     });
 
     it("omits volumes from create when depsCacheVolume is absent", async () => {
@@ -215,7 +213,6 @@ describe("DaytonaSandboxClient", () => {
       await client.create(BASE_SPEC);
       const call = daytonaCalls.create.mock.calls[0]?.[0] as { volumes?: unknown };
       expect("volumes" in call).toBe(false);
-      expect(daytonaCalls.volumeGet).not.toHaveBeenCalled();
     });
 
     it("rounds memory_bytes up to GiB (Daytona's unit) and cpus up to integer", async () => {

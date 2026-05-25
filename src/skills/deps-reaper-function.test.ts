@@ -68,15 +68,15 @@ describe("createSkillDepsReaper", () => {
 
   it("skips when no deps-cache volume name is configured", async () => {
     const store = mock<SkillStore>();
-    const sandbox: Partial<SandboxClient> = {
+    const sandbox = mock<SandboxClient>({
       backendId: "local-docker",
       capabilities: sharedVolumeCapabilities(),
-    };
+    });
     const fn = createSkillDepsReaper(
       {
         runInTx,
         store,
-        sandbox: sandbox as SandboxClient,
+        sandbox,
         image: "cogmo-skills:test",
         depsCacheVolumeName: undefined,
       },
@@ -96,15 +96,15 @@ describe("createSkillDepsReaper", () => {
     const store = mock<SkillStore>();
     // Even with a volume name passed in, the per-sandbox capability wins —
     // there's no shared volume to reap. Matches the runner's gating.
-    const sandbox: Partial<SandboxClient> = {
+    const sandbox = mock<SandboxClient>({
       backendId: "daytona",
       capabilities: perSandboxCapabilities(),
-    };
+    });
     const fn = createSkillDepsReaper(
       {
         runInTx,
         store,
-        sandbox: sandbox as SandboxClient,
+        sandbox,
         image: "cogmo-skills:test",
         depsCacheVolumeName: "deps-vol-x",
       },
@@ -117,11 +117,7 @@ describe("createSkillDepsReaper", () => {
     }).execute();
 
     expect(result).toEqual({ skipped: true });
-    // No call into the store; the early return short-circuits before
-    // any sandbox interaction. `sandbox.create` is intentionally unset
-    // on the partial — if the gating regressed, the test would crash on
-    // missing method, which surfaces the regression more loudly than a
-    // toHaveBeenCalledTimes assertion.
     expect(store.listReachableLockfileHashes).not.toHaveBeenCalled();
+    expect(sandbox.create).not.toHaveBeenCalled();
   });
 });
