@@ -111,12 +111,15 @@ export async function setup({ provide }: GlobalSetupContext) {
   // Per-test-run volume name so parallel integration files don't share
   // a populated venv cache.
   process.env.COGMO_SKILLS_DEPS_VOLUME = `cogmo-skills-deps-test-${randomUUID()}`;
-  // `SANDBOX_ASKPASS_DIR` defaults to `/var/lib/cogmo/askpass` (image-
-  // provisioned, chowned to the cogmo runtime user). Tests run as the
-  // developer's user, who has no write access there; redirect to a
-  // tmpdir we can mkdir into.
+  // `SANDBOX_ASKPASS_DIR` and `SANDBOX_PROXY_SOCKET_DIR` default to
+  // `/var/lib/cogmo/{askpass,sockets}` (image-provisioned, chowned to
+  // the cogmo runtime user). Tests run as the developer's user, who
+  // has no write access there; redirect both to a tmpdir we can mkdir
+  // into. The sockets dir is nested under the askpass tmpdir so it
+  // gets cleaned up by the same teardown.
   askpassPath = await mkdtemp(join(tmpdir(), "cogmo-askpass-it-"));
   process.env.SANDBOX_ASKPASS_DIR = askpassPath;
+  process.env.SANDBOX_PROXY_SOCKET_DIR = join(askpassPath, "sockets");
 
   // Skills bare repo lives on the host (not in a container) — bootstrap
   // initializes it on every boot. Use a tempdir so tests don't try to write

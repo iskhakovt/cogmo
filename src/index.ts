@@ -511,8 +511,10 @@ export async function bootstrapSandbox(
     // needed on the daytona backend (host-side `provisionAskpass` writes
     // the files that `askpass-upload.ts` then uploads via the SDK), so
     // that probe runs in both branches.
-    await checkDirWritable(env.SANDBOX_PROXY_SOCKET_DIR, "SANDBOX_PROXY_SOCKET_DIR");
-    await checkDirWritable(env.SANDBOX_ASKPASS_DIR, "SANDBOX_ASKPASS_DIR");
+    await Promise.all([
+      checkDirWritable(env.SANDBOX_PROXY_SOCKET_DIR, "SANDBOX_PROXY_SOCKET_DIR"),
+      checkDirWritable(env.SANDBOX_ASKPASS_DIR, "SANDBOX_ASKPASS_DIR"),
+    ]);
     const docker = new Docker();
     const instance = await core.runInTx((trx) =>
       core.sandboxStore.insertInstance(trx, { host: hostname(), pid: process.pid }),

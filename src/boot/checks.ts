@@ -169,7 +169,13 @@ export async function checkHindsightVersion(
  * Verify a host directory the runtime needs to write into is reachable
  * and writable by the current process. Creates it with `mkdir -p` first
  * (matches the on-demand creation that `provisionAskpass` /
- * `CogmoSocketProxy.create` would otherwise do); then probes `W_OK`.
+ * `CogmoSocketProxy.create` would otherwise do); then probes `W_OK | X_OK`.
+ *
+ * Probing both is necessary: POSIX requires write *and* search/traverse
+ * on a directory to create files inside it. `mkdir -p` of a fresh dir
+ * always sets X via the umask-derived default mode, but a pre-existing
+ * dir chmod'd to W-without-X would pass a `W_OK`-only check and still
+ * refuse `socket()`/`open()` at runtime.
  *
  * Catches the common misconfiguration where an operator overrides
  * `SANDBOX_ASKPASS_DIR` / `SANDBOX_PROXY_SOCKET_DIR` to a path the
@@ -180,7 +186,7 @@ export async function checkHindsightVersion(
 export async function checkDirWritable(path: string, envVarName: string): Promise<void> {
   try {
     await mkdir(path, { recursive: true });
-    await access(path, fsConstants.W_OK);
+    await access(path, fsConstants.W_OK | fsConstants.X_OK);
   } catch (err) {
     throw new BootCheckError(
       `${envVarName}=${path} is not writable by the cogmo runtime user. ` +
@@ -188,6 +194,7 @@ export async function checkDirWritable(path: string, envVarName: string): Promis
         `${envVarName} to a path the runtime user can write (the shipping ` +
         `image pre-creates /var/lib/cogmo/* with the right ownership). ` +
         `Underlying error: ${stringifyError(err)}`,
+      { cause: err },
     );
   }
 }

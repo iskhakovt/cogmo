@@ -101,6 +101,37 @@ describe("checkDirWritable", () => {
       await rm(base, { recursive: true, force: true });
     }
   });
+
+  it("rejects an existing directory with write but no execute permission", async () => {
+    // 0o600 (rw, no x) on an existing dir — mkdir -p is a no-op so the
+    // check falls through to access(W_OK | X_OK), which must reject.
+    // Without the X_OK part of the check this would silently pass at
+    // boot and then EACCES at the first socket()/open() inside the dir.
+    if (process.getuid?.() === 0) return;
+    const base = await mkdtemp(join(tmpdir(), "cogmo-checkdir-nox-"));
+    try {
+      await chmod(base, 0o600);
+      await expect(checkDirWritable(base, "TEST_DIR")).rejects.toThrow(BootCheckError);
+    } finally {
+      await chmod(base, 0o755);
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves the underlying error as `cause`", async () => {
+    if (process.getuid?.() === 0) return;
+    const base = await mkdtemp(join(tmpdir(), "cogmo-checkdir-cause-"));
+    try {
+      await chmod(base, 0o555);
+      const target = join(base, "child");
+      const err = await checkDirWritable(target, "TEST_DIR").catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(BootCheckError);
+      expect((err as Error).cause).toBeInstanceOf(Error);
+    } finally {
+      await chmod(base, 0o755);
+      await rm(base, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("checkS3Bucket", () => {
