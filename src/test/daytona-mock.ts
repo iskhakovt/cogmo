@@ -214,6 +214,40 @@ const KNOWN_API_KEY_PATTERNS: ReadonlyArray<{ pattern: RegExp; replacement: stri
   { pattern: /\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{32,}\b/g, replacement: "sk-REDACTED" },
 ];
 
+/**
+ * Strip runtime-random IDs from request paths so record / replay match
+ * regardless of what task/sandbox/session IDs Postgres or Daytona
+ * generated this run. Covers two shapes:
+ *   - full UUIDs (sandbox / command / file IDs from Daytona responses)
+ *   - cogmo session-ID prefix `cogmo-<8hex>-<3hex>` where the hex run is
+ *     a 12-char slice of a task UUID (DaytonaSandboxSession.execStreaming)
+ * The fixture stores the original path; matching compares normalized.
+ */
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+// Session ID = `cogmo-<12-char-task-prefix>-<random-suffix>`. The suffix
+// is randomUUID() in production and `<TEST_RUN_ID>-<seq>` in tests; seq
+// drifts between record and replay because the call order doesn't always
+// line up byte-for-byte. Match the whole session ID through the suffix.
+const COGMO_SESSION_ID_RE = /cogmo-[0-9a-f]{8}-[0-9a-f]{3}-[^/?]+/gi;
+function normalizePath(
+  path: string,
+  extra: ReadonlyArray<{ pattern: RegExp; replacement: string }> = [],
+): string {
+  let out = path.replace(UUID_RE, "<UUID>").replace(COGMO_SESSION_ID_RE, "cogmo-<SESSION>");
+  for (const { pattern, replacement } of extra) out = out.replace(pattern, replacement);
+  return out;
+}
+
+const BODY_BOUND_HEADERS = new Set([
+  "content-length",
+  "transfer-encoding",
+  "content-encoding",
+  "connection",
+  "keep-alive",
+  "date",
+  "etag",
+]);
+
 function redactSecrets(input: string): string {
   let out = input;
   for (const { pattern, replacement } of KNOWN_API_KEY_PATTERNS) {
@@ -274,6 +308,15 @@ export interface DaytonaMockReplayOptions {
    * fixture for *other* calls keeps its FIFO order intact.
    */
   faults?: ReadonlyArray<{ wsPathPattern: RegExp; kind: "ws-hold-open" }>;
+  /**
+   * Per-test path normalizations applied to both incoming and recorded
+   * paths before matching. Use this to strip test-specific random
+   * tokens (e.g. `skill-author-\d+` sequence numbers) so call order can
+   * drift between record and replay without breaking exact-path match.
+   * The mock always strips full UUIDs and the `cogmo-<sandboxShort>-`
+   * session prefix; tests add tokens beyond those defaults.
+   */
+  pathNormalizations?: ReadonlyArray<{ pattern: RegExp; replacement: string }>;
 }
 
 export type DaytonaMockOptions = DaytonaMockRecordOptions | DaytonaMockReplayOptions;
@@ -604,10 +647,16 @@ export class DaytonaMock {
       ws.close(1011, "replay state not initialized");
       return;
     }
-    for (let i = replay.cursor; i < replay.fixture.calls.length; i++) {
+    const extra = this.#opts.mode === "replay" ? (this.#opts.pathNormalizations ?? []) : [];
+    const normalizedIncoming = normalizePath(path, extra);
+    // Same cursor-first-then-wrap policy as the HTTP path.
+    const indices: number[] = [];
+    for (let i = replay.cursor; i < replay.fixture.calls.length; i++) indices.push(i);
+    for (let i = 0; i < replay.cursor; i++) indices.push(i);
+    for (const i of indices) {
       const call = replay.fixture.calls[i];
       if (!call || call.kind !== "ws") continue;
-      if (call.path === path) {
+      if (normalizePath(call.path, extra) === normalizedIncoming) {
         replay.cursor = i + 1;
         this.#emitFrames(ws, call.frames);
         return;
@@ -664,7 +713,12 @@ export class DaytonaMock {
         // already closed
       }
     };
-    queueMicrotask(next);
+    // Let the client process its 'open' event before frames arrive —
+    // SDK's `connected` flips on that event and sendInput rejects with
+    // "PTY is not connected" if a frame races ahead of it. A microtask
+    // isn't enough; the open event crosses the WS handshake boundary
+    // and ordering vs server-side frame delivery isn't deterministic.
+    setTimeout(next, 10);
   }
 
   #resolveWsUpstreamUrl(path: string): string | null {
@@ -870,13 +924,27 @@ export class DaytonaMock {
     // (method, path). FIFO order within a bucket so multiple POST
     // /sandbox calls return different sandboxes in the order they
     // were recorded.
-    for (let i = replay.cursor; i < replay.fixture.calls.length; i++) {
+    const extra = this.#opts.mode === "replay" ? (this.#opts.pathNormalizations ?? []) : [];
+    const normalizedIncoming = normalizePath(path, extra);
+    // Cursor-first FIFO; on miss, wrap and scan from the start so polling
+    // drift (record polls a slow API N times, replay's mock fires once
+    // and skips ahead) doesn't strand subsequent unique calls. Mirrors
+    // Polly.js's `order: false` fallback over its primary cursor.
+    const indices: number[] = [];
+    for (let i = replay.cursor; i < replay.fixture.calls.length; i++) indices.push(i);
+    for (let i = 0; i < replay.cursor; i++) indices.push(i);
+    for (const i of indices) {
       const call = replay.fixture.calls[i];
       if (!call || call.kind !== "http") continue;
-      if (call.method === method && call.path === path) {
+      if (call.method === method && normalizePath(call.path, extra) === normalizedIncoming) {
         replay.cursor = i + 1;
         res.statusCode = call.response.status;
         for (const [k, v] of Object.entries(call.response.headers ?? {})) {
+          // Skip headers Node computes from the actual body; the
+          // recorded values are bound to the original body bytes and
+          // mismatch ours after body materialization, which axios sees
+          // as premature stream close ("stream has been aborted").
+          if (BODY_BOUND_HEADERS.has(k.toLowerCase())) continue;
           res.setHeader(k, v);
         }
         if (call.response.bodyJson !== undefined) {

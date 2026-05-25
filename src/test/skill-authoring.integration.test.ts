@@ -157,7 +157,14 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
             upstreamOrganizationId: process.env.DAYTONA_ORGANIZATION_ID,
           }),
         }
-      : { mode: "replay", fixturePath: FIXTURE_PATH };
+      : {
+          mode: "replay",
+          fixturePath: FIXTURE_PATH,
+          // Test injects `skill-author-<seq>` into every random()-derived
+          // identifier (session IDs, tmpfile paths). Seq drifts between
+          // record and replay; normalize to match regardless of call order.
+          pathNormalizations: [{ pattern: /skill-author-\d+/g, replacement: "skill-author-<N>" }],
+        };
     mock = await DaytonaMock.create(mockOpts);
     if (RECORDABLE) mock.beginScenario(SCENARIO);
 
