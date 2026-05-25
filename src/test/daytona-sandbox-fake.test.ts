@@ -198,10 +198,10 @@ describe("FakeDaytonaSandboxClient.create — askpass mirror", () => {
     // the cmd args through the path-rewriter, which (correctly) treats
     // any `/tmp/cogmo-askpass` substring as a fixup target.
     const sandboxRoot = join(baseDir, session.state.sandboxId);
-    expect(existsSync(join(sandboxRoot, ".cogmo-askpass", "helper"))).toBe(true);
-    expect(existsSync(join(sandboxRoot, ".cogmo-askpass", "pat"))).toBe(true);
-    expect(existsSync(join(sandboxRoot, ".cogmo-askpass", "signing-key"))).toBe(true);
-    expect(existsSync(join(sandboxRoot, ".cogmo-askpass", "signing-key.pub"))).toBe(true);
+    expect(existsSync(join(sandboxRoot, "cogmo-askpass", "helper"))).toBe(true);
+    expect(existsSync(join(sandboxRoot, "cogmo-askpass", "pat"))).toBe(true);
+    expect(existsSync(join(sandboxRoot, "cogmo-askpass", "signing-key"))).toBe(true);
+    expect(existsSync(join(sandboxRoot, "cogmo-askpass", "signing-key.pub"))).toBe(true);
   });
 
   it("rewrites the helper script's PAT path to the host-mirrored location", async () => {
@@ -211,18 +211,18 @@ describe("FakeDaytonaSandboxClient.create — askpass mirror", () => {
       }),
     );
 
-    const helperPath = join(baseDir, session.state.sandboxId, ".cogmo-askpass", "helper");
+    const helperPath = join(baseDir, session.state.sandboxId, "cogmo-askpass", "helper");
     const helperBody = readFileSync(helperPath, "utf8");
-    const expectedHostPath = join(baseDir, session.state.sandboxId, ".cogmo-askpass", "pat");
+    const expectedHostPath = join(baseDir, session.state.sandboxId, "cogmo-askpass", "pat");
 
     // Body must reference the rewritten host path. (We can't simply check
     // `not.toContain("/tmp/cogmo-askpass/pat")` because the rewritten host
-    // path itself ends in `.cogmo-askpass/pat`.)
+    // path itself ends in `cogmo-askpass/pat`.)
     expect(helperBody).toContain(expectedHostPath);
     // The bare canonical path (without the host prefix) must NOT appear
     // as a quoted argument anywhere — the helper would `cat` a missing
     // file and `git` would silently fail to authenticate.
-    expect(helperBody).not.toMatch(/'\/\.cogmo-askpass\/pat'/);
+    expect(helperBody).not.toMatch(/'\/tmp\/cogmo-askpass\/pat'/);
   });
 });
 
