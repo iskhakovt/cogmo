@@ -442,7 +442,7 @@ async function createLocalBareRemote(): Promise<string> {
   return `file://${bareDir}`;
 }
 
-/** Real Octokit + custom fetch that synthesizes the GitHub calls replay can't reach. */
+/** Real Octokit + stub fetch — synthesizes the GitHub calls replay can't reach. */
 function makeStubOctokitFactory(): (pat: string) => Octokit {
   const stubFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -472,7 +472,7 @@ function makeStubOctokitFactory(): (pat: string) => Octokit {
   return (pat: string) => new Octokit({ auth: pat, request: { fetch: stubFetch } });
 }
 
-/** Replay's `gitFetchOverride` — write fixture files into the bare repo on `branch`. */
+/** Replay's gitFetchOverride: writes fixture files into the bare repo on branch. */
 async function materializeBranchFromFixture(opts: {
   branch: string;
   skillsRepoPath: string;
