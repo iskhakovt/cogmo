@@ -56,9 +56,19 @@ async function seedStubProvider(): Promise<void> {
       if (!provider) throw new Error("provider insert returned no row");
       const [profile] = await tx<{ model: string }[]>`SELECT model FROM profiles LIMIT 1`;
       if (!profile) throw new Error("default profile not found");
+      // Pick the next free position for this model so a peer integration
+      // file that seeded its own provider at position 0 doesn't trip the
+      // `uq_model_position` constraint. The CLI's skills handler only
+      // needs *some* provider routed for the default model — which slot
+      // it occupies doesn't matter.
+      const [next] = await tx<{ pos: number }[]>`
+        SELECT COALESCE(MAX(position) + 1, 0)::int AS pos
+        FROM model_providers WHERE model = ${profile.model}
+      `;
+      const position = next?.pos ?? 0;
       await tx`
         INSERT INTO model_providers (id, model, provider_id, position, user_selectable)
-        VALUES (uuidv7(), ${profile.model}, ${provider.id}, 0, true)
+        VALUES (uuidv7(), ${profile.model}, ${provider.id}, ${position}, true)
       `;
     });
   } finally {
