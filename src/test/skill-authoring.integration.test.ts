@@ -104,7 +104,14 @@ const HAS_RECORDING_INPUTS =
   !!process.env.COGMO_TEST_SKILLS_REMOTE;
 const RECORDABLE = IS_RECORD && HAS_RECORDING_INPUTS;
 const FIXTURE_EXISTS = existsSync(FIXTURE_PATH);
-const RUNNABLE = RECORDABLE || FIXTURE_EXISTS;
+// Replay runs locally but is gated out of CI until the parallel-fork
+// Inngest-app-id contention is fixed (this test's heavy coding
+// orchestrator steals `inbound/arrived` events from peers under the
+// shared `id: "cogmo"` app, breaking pipeline + others). Opt-in via
+// `COGMO_TEST_SKILLS_REMOTE` — solo-dev runs already set it for the
+// record path. CI doesn't.
+const HAS_REPLAY_INPUTS = !!process.env.COGMO_TEST_SKILLS_REMOTE;
+const RUNNABLE = RECORDABLE || (FIXTURE_EXISTS && HAS_REPLAY_INPUTS);
 
 // --- Outbound capture (mirrors pipeline.integration.test.ts) ─────────
 
