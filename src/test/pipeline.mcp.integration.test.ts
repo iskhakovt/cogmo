@@ -2,7 +2,7 @@
 
 import { eq } from "drizzle-orm";
 import { connect } from "inngest/connect";
-import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
 import { conversations, messages } from "../agent/store/schema.js";
 import { db } from "../db/index.js";
 import { bootstrap } from "../index.js";
@@ -126,17 +126,20 @@ async function waitForFinalAssistantMessage(
   predicate: (msg: PersistedMessage) => boolean,
   timeoutMs: number,
 ): Promise<PersistedMessage> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const rows = await db
-      .select()
-      .from(messages)
-      .where(eq(messages.conversationId, conversationId));
-    const lastAssistant = [...rows].reverse().find((m) => m.role === "assistant");
-    if (lastAssistant && predicate(lastAssistant)) return lastAssistant;
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  throw new Error("Timed out waiting for final assistant message");
+  return vi.waitFor(
+    async () => {
+      const rows = await db
+        .select()
+        .from(messages)
+        .where(eq(messages.conversationId, conversationId));
+      const lastAssistant = [...rows].reverse().find((m) => m.role === "assistant");
+      if (!lastAssistant || !predicate(lastAssistant)) {
+        throw new Error("no matching final assistant message yet");
+      }
+      return lastAssistant;
+    },
+    { timeout: timeoutMs, interval: 500 },
+  );
 }
 
 function flattenText(content: unknown): string {

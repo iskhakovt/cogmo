@@ -1,0 +1,37 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "What's bitcoin at?",
+        "model": "claude-sonnet-4-6",
+        "turnIndex": 2,
+        "hasToolResult": true
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "btc-spot",
+            "arguments": "",
+            "id": "toolu_01C8naW4Sz7N1xjJDCoGUZ5m"
+          }
+        ]
+      },
+      "recordedTimings": {
+        "ttftMs": 0,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          1,
+          0,
+          0
+        ],
+        "totalDurationMs": 1
+      },
+      "metadata": {
+        "systemHash": "393ac12e",
+        "toolsHash": "4b941f26"
+      }
+    }
+  ]
+}

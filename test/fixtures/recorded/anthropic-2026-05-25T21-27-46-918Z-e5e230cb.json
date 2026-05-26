@@ -1,0 +1,38 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "What's bitcoin at?",
+        "model": "claude-sonnet-4-6",
+        "turnIndex": 5,
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "Bitcoin is currently around **$91,400 USD** (give or take depending on the exchange — Revolut shows ~$91,440, Coinbase ~$91,150).\n\n---\n\n**FYI on the skill:** The `btc-spot` skill is running in a Pyodide (WebAssembly) sandbox that doesn't support outbound HTTPS via `urllib`. The skill works correctly code-wise — it's a sandbox networking constraint. Would you like me to update the skill to use a sandbox-compatible HTTP method (e.g. `ctx.fetch` if available), or is using the native `btc-spot` built-in tool sufficient for your needs?"
+      },
+      "recordedTimings": {
+        "ttftMs": 1,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          319,
+          499,
+          512,
+          412,
+          306,
+          408,
+          305,
+          0,
+          34,
+          0
+        ],
+        "totalDurationMs": 2796
+      },
+      "metadata": {
+        "systemHash": "393ac12e",
+        "toolsHash": "4b941f26"
+      }
+    }
+  ]
+}

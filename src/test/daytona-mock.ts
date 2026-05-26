@@ -246,26 +246,22 @@ const KNOWN_API_KEY_PATTERNS: ReadonlyArray<{ pattern: RegExp; replacement: stri
   { pattern: /\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{32,}\b/g, replacement: "sk-REDACTED" },
 ];
 
-/**
- * Strip runtime-random IDs from request paths so record / replay match
- * regardless of what task/sandbox/session IDs Postgres or Daytona
- * generated this run. Covers two shapes:
- *   - full UUIDs (sandbox / command / file IDs from Daytona responses)
- *   - cogmo session-ID prefix `cogmo-<8hex>-<3hex>` where the hex run is
- *     a 12-char slice of a task UUID (DaytonaSandboxSession.execStreaming)
- * The fixture stores the original path; matching compares normalized.
- */
-const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
-// Session ID = `cogmo-<12-char-task-prefix>-<random-suffix>`. The suffix
-// is randomUUID() in production and `<TEST_RUN_ID>-<seq>` in tests; seq
-// drifts between record and replay because the call order doesn't always
-// line up byte-for-byte. Match the whole session ID through the suffix.
-const COGMO_SESSION_ID_RE = /cogmo-[0-9a-f]{8}-[0-9a-f]{3}-[^/?]+/gi;
+// Normalize cogmo-side identifiers that drift per run. Daytona-server
+// UUIDs (sandbox / command / file) are preserved — the mock plays
+// them back from the cassette response cycle and they serve as
+// per-call identity for `/command/<UUID>/logs`-style follow-ups.
+// Session-ID suffix (`skill-author-N`) is preserved too; collapsing
+// it scrambles cmd-id FIFO across sessions.
+const COGMO_SESSION_PREFIX_RE = /cogmo-[0-9a-f]{8}-[0-9a-f]{3}-/gi;
+const COGMO_TASK_LABEL_RE =
+  /cogmo\.task%22%3A%22[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}%22/gi;
 function normalizePath(
   path: string,
   extra: ReadonlyArray<{ pattern: RegExp; replacement: string }> = [],
 ): string {
-  let out = path.replace(UUID_RE, "<UUID>").replace(COGMO_SESSION_ID_RE, "cogmo-<SESSION>");
+  let out = path
+    .replace(COGMO_SESSION_PREFIX_RE, "cogmo-<TASK>-")
+    .replace(COGMO_TASK_LABEL_RE, "cogmo.task%22%3A%22<TASK>%22");
   for (const { pattern, replacement } of extra) out = out.replace(pattern, replacement);
   return out;
 }
@@ -342,11 +338,11 @@ export interface DaytonaMockReplayOptions {
   faults?: ReadonlyArray<{ wsPathPattern: RegExp; kind: "ws-hold-open" }>;
   /**
    * Per-test path normalizations applied to both incoming and recorded
-   * paths before matching. Use this to strip test-specific random
-   * tokens (e.g. `skill-author-\d+` sequence numbers) so call order can
-   * drift between record and replay without breaking exact-path match.
-   * The mock always strips full UUIDs and the `cogmo-<sandboxShort>-`
-   * session prefix; tests add tokens beyond those defaults.
+   * paths before matching. Use for test-specific random tokens not
+   * covered by the built-ins. The mock strips the cogmo task-UUID
+   * prefix in session IDs and the `cogmo.task` query label; everything
+   * else (Daytona-server UUIDs, session-ID suffix) is preserved as
+   * per-call identity.
    */
   pathNormalizations?: ReadonlyArray<{ pattern: RegExp; replacement: string }>;
 }
@@ -762,7 +758,11 @@ export class DaytonaMock {
         // already closed
       }
     };
-    queueMicrotask(next);
+    // Yield a macrotask: `@daytonaio/sdk`'s `getSessionCommandLogs` pipes
+    // the WS through `stdDemuxStream`, which attaches its `message`
+    // handler after an `await`. `queueMicrotask` fires inside the same
+    // turn and loses the first frame.
+    setImmediate(next);
   }
 
   #resolveWsUpstreamUrl(path: string): string | null {

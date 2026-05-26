@@ -17,7 +17,10 @@ import { env } from "../env.js";
 // don't propagate `traceparent` through event payloads (see DEPLOYMENT.md →
 // Observability for rationale), so the processor would be dormant. Skipping
 // it keeps setup minimal; re-add if we adopt traceparent propagation.
+// `INNGEST_APP_ID` override gives each parallel test fork a unique
+// app id so the connect-mode gateway doesn't round-robin events
+// across peer workers.
 export const inngest = new Inngest({
-  id: "cogmo",
+  id: process.env.INNGEST_APP_ID ?? "cogmo",
   isDev: env.INNGEST_DEV,
 });

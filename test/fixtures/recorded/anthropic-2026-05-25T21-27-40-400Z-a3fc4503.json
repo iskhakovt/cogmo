@@ -1,0 +1,50 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "What's bitcoin at?",
+        "model": "claude-sonnet-4-6",
+        "turnIndex": 4,
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "The skill itself is hitting a sandbox networking limitation (HTTPS not supported in the Pyodide environment). Let me use the native built-in tool:",
+        "toolCalls": [
+          {
+            "name": "web_answer",
+            "arguments": "{\"question\": \"What is the current Bitcoin price in USD?\"}",
+            "id": "toolu_01KUXCG8GkkkGvdWcTdUzWun"
+          }
+        ]
+      },
+      "recordedTimings": {
+        "ttftMs": 0,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          490,
+          540,
+          0,
+          0,
+          0,
+          339,
+          1,
+          0,
+          1,
+          0,
+          1,
+          2,
+          3,
+          27,
+          1
+        ],
+        "totalDurationMs": 1405
+      },
+      "metadata": {
+        "systemHash": "393ac12e",
+        "toolsHash": "4b941f26"
+      }
+    }
+  ]
+}

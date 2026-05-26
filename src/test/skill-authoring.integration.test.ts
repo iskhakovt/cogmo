@@ -43,26 +43,44 @@
  * scaffold (timeouts, polling cadence, assertion shapes) — that's the
  * intended feedback loop. Each iteration costs ~$1-2 in Daytona
  * compute + Anthropic tokens.
+ *
+ * ## When the cassette needs a refresh
+ *
+ *   - Anthropic / OpenAI SDK bump that changes the wire shape.
+ *   - `@daytonaio/sdk` bump that adds calls or renames endpoints.
+ *   - Prompt restructure (system prompt, tool definitions, skill
+ *     conventions) that the model's response would differ on.
+ *   - Pinned model swap (currently `claude-haiku-4-5-20251001`).
+ *   - The cogmo-skills repo's `SKILL.md` template or skill.py shape
+ *     changes (the recorded fixture in
+ *     `test/fixtures/skill-authoring-branch/` would also need to
+ *     match).
  */
 
 import { execFile as execFileCb } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { Daytona, Image } from "@daytonaio/sdk";
+import { Octokit } from "@octokit/rest";
 import { and, desc, eq, ne } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { connect } from "inngest/connect";
-import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
+import { ok } from "neverthrow";
+import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
 import { codingTasks } from "../agent/coding/store/schema.js";
 import { conversations, llmProviders, modelProviders, profiles } from "../agent/store/schema.js";
 import * as schema from "../db/schemas.js";
 import { bootstrap } from "../index.js";
 import { directOutbound } from "../inngest/events.js";
+import { AnthropicProvider } from "../llm/anthropic.js";
 import { DaytonaSandboxClient, snapshotNameFor } from "../sandbox/daytona/client.js";
 import { deriveMasterKey, encrypt, parseMasterKey, toBase64 } from "../secrets/encryption.js";
+import { withGitAskpass } from "../secrets/git-askpass.js";
 import { secrets } from "../secrets/store/schema.js";
+import { bootstrapSkillsRepo } from "../skills/repo.js";
 import { skills } from "../skills/store/schema.js";
 import { channelSessions, channels, inboundMessages } from "../transport/store/schema.js";
 import { expectDefined } from "./assertions.js";
@@ -75,6 +93,10 @@ const execFileP = promisify(execFileCb);
 const SCENARIO = "skill-authoring";
 const FIXTURE_DIR = "./test/fixtures/daytona";
 const FIXTURE_PATH = `${FIXTURE_DIR}/${SCENARIO}.json`;
+// Recorded SKILL.md + skill.py; `gitFetchOverride` writes these into
+// the bare repo on the requested branch in replay. Refresh together
+// with the cassette.
+const BRANCH_FIXTURE_DIR = "./test/fixtures/skill-authoring-branch";
 const IS_RECORD = process.env.RECORD === "1";
 const HAS_RECORDING_INPUTS =
   !!process.env.DAYTONA_API_KEY &&
@@ -82,13 +104,7 @@ const HAS_RECORDING_INPUTS =
   !!process.env.COGMO_TEST_SKILLS_REMOTE;
 const RECORDABLE = IS_RECORD && HAS_RECORDING_INPUTS;
 const FIXTURE_EXISTS = existsSync(FIXTURE_PATH);
-// Replay mode also requires `COGMO_TEST_SKILLS_REMOTE` because the
-// host-side `setOriginAndFetch` step runs unconditionally — the
-// Daytona mock doesn't intercept host-side git. CI without the env
-// var set skips cleanly; an operator running locally with both the
-// fixture and the env present runs the full replay.
-const HAS_REPLAY_INPUTS = !!process.env.COGMO_TEST_SKILLS_REMOTE;
-const RUNNABLE = RECORDABLE || (FIXTURE_EXISTS && HAS_REPLAY_INPUTS);
+const RUNNABLE = RECORDABLE || FIXTURE_EXISTS;
 
 // --- Outbound capture (mirrors pipeline.integration.test.ts) ─────────
 
@@ -122,6 +138,8 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
   /** Tracks branches/PRs created during the test so afterAll can clean them up. */
   const createdBranches: string[] = [];
   const createdPrNumbers: number[] = [];
+  /** Tmp path for the replay-mode local bare remote; removed in afterAll. */
+  let bareRemotePath: string | undefined;
 
   beforeAll(async () => {
     inngestBaseUrl = inject("inngestBaseUrl");
@@ -160,10 +178,6 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
       : {
           mode: "replay",
           fixturePath: FIXTURE_PATH,
-          // Test injects `skill-author-<seq>` into every random()-derived
-          // identifier (session IDs, tmpfile paths). Seq drifts between
-          // record and replay; normalize to match regardless of call order.
-          pathNormalizations: [{ pattern: /skill-author-\d+/g, replacement: "skill-author-<N>" }],
         };
     mock = await DaytonaMock.create(mockOpts);
     if (RECORDABLE) mock.beginScenario(SCENARIO);
@@ -181,20 +195,23 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
         }),
     });
 
-    // `COGMO_TEST_SKILLS_REMOTE` is required in BOTH record and replay
-    // modes. `setOriginAndFetch` below runs a host-side `git fetch
-    // origin +refs/heads/main:refs/heads/main` against this URL — the
-    // Daytona mock only proxies traffic between Cogmo and Daytona, not
-    // host-side git. A placeholder URL fails with "Could not read from
-    // remote repository" before the test reaches the mock at all.
-    remoteUrl = expectDefined(process.env.COGMO_TEST_SKILLS_REMOTE);
-    remoteSlug = parseGitHubSlug(remoteUrl);
+    // Record → real GitHub. Replay → local bare repo (file://).
+    if (RECORDABLE) {
+      remoteUrl = expectDefined(process.env.COGMO_TEST_SKILLS_REMOTE);
+      remoteSlug = parseGitHubSlug(remoteUrl);
+    } else {
+      const bare = await createLocalBareRemote();
+      remoteUrl = bare.url;
+      bareRemotePath = bare.path;
+      remoteSlug = "replay/local";
+    }
 
-    // Fall back to a fake PAT only when gh is missing; other failures surface.
-    const ghAuth = await readGhAuth().catch((err: Error) => {
-      if (!/enoent|not found|command not found/i.test(err.message)) throw err;
-      return { pat: "test-pat", login: "test-user", id: "0" };
-    });
+    // Replay doesn't talk to real GitHub — file:// remote needs no PAT
+    // and the octokit stub ignores the token. Record-mode surfaces gh
+    // failures (missing OR unauthenticated) so the operator notices.
+    const ghAuth = RECORDABLE
+      ? await readGhAuth()
+      : { pat: "test-pat", login: "test-user", id: "0" };
     const signingKeypair = await generateSigningKeypair();
 
     // Init the bare skills repo + wire origin BEFORE `bootstrap()` so
@@ -203,7 +220,6 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
       process.env.COGMO_SKILLS_PATH,
       "COGMO_SKILLS_PATH not set by integration setup",
     );
-    const { bootstrapSkillsRepo } = await import("../skills/repo.js");
     await bootstrapSkillsRepo({ path: skillsPath });
     await setOriginAndFetch(skillsPath, remoteUrl, ghAuth.pat);
 
@@ -221,7 +237,6 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     });
 
     // 6. LLM provider override for the host's agent loop.
-    const { AnthropicProvider } = await import("../llm/anthropic.js");
     const anthropicKey = RECORDABLE ? expectDefined(process.env.ANTHROPIC_API_KEY) : "test-key";
     const provider = new AnthropicProvider(anthropicKey, inject("llmockBaseUrl"));
 
@@ -235,16 +250,20 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     bootstrapResult = await bootstrap({
       providerOverride: provider,
       sandboxClientOverride: daytonaClient,
-      codingAuthOverride: async () => {
-        const { ok } = await import("neverthrow");
+      codingAuthOverride: async () =>
         // Pinned model + disabled thinking match `claude-cli.integration.test.ts`
         // and keep the recorded stream-json output stable across runs.
-        return ok({
+        ok({
           ANTHROPIC_API_KEY: anthropicKey,
           ANTHROPIC_MODEL: "claude-haiku-4-5-20251001",
           MAX_THINKING_TOKENS: "0",
-        });
-      },
+        }),
+      // Replay-only: stub the GitHub bits the cassette can't reach.
+      ...(!RECORDABLE && {
+        octokitFactory: makeStubOctokitFactory(),
+        gitFetchOverride: ({ branch, skillsRepoPath }) =>
+          materializeBranchFromFixture({ branch, skillsRepoPath, fixtureDir: BRANCH_FIXTURE_DIR }),
+      }),
     });
 
     const captureOutbound = bootstrapResult.inngest.createFunction(
@@ -281,6 +300,11 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     // test may have failed before creating any of these.
     if (RECORDABLE) await cleanupGitHub();
     if (db) await db.$client.end();
+    // Best-effort: removing the bare-remote tmpdir is housekeeping;
+    // an ENOENT on a half-built path shouldn't fail the suite.
+    if (bareRemotePath) {
+      await rm(bareRemotePath, { recursive: true, force: true }).catch(() => undefined);
+    }
   });
 
   it("creates a skill via chat and invokes it on the next turn", async () => {
@@ -313,8 +337,10 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
       inboundMessageId: await latestInboundId(db, conversationId),
     });
 
-    // Full flow: plan + execute + verify + push + open-PR. 30m budget.
-    const task = await waitForCodingTask(db, conversationId, 30 * 60_000);
+    // Record runs span the real Daytona round-trip; replay should
+    // reach terminal status in <1m or it's silently stuck.
+    const taskTimeoutMs = RECORDABLE ? 30 * 60_000 : 60_000;
+    const task = await waitForCodingTask(db, conversationId, taskTimeoutMs);
     if (task.status !== "pr_open") {
       console.error(
         `[skill-authoring e2e] task ended in ${task.status} — failureReason="${task.failureReason}"`,
@@ -420,7 +446,112 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
 
 // --- Helpers ─────────────────────────────────────────────────────────
 
-/** Owner/repo slug extracted from an HTTPS or SSH GitHub URL. */
+/** Replay-mode remote: bare git repo on disk, seeded with empty main. */
+async function createLocalBareRemote(): Promise<{ url: string; path: string }> {
+  const bareDir = await mkdtemp(join(tmpdir(), "skill-auth-replay-remote-"));
+  try {
+    await execFileP("git", ["init", "--bare", "--initial-branch=main", bareDir]);
+    // `git fetch` against a refless bare fails; seed an empty main.
+    const seed = await mkdtemp(join(tmpdir(), "skill-auth-replay-seed-"));
+    try {
+      await execFileP("git", ["init", "--initial-branch=main", seed]);
+      await execFileP("git", ["-C", seed, "config", "user.email", "replay@cogmo.test"]);
+      await execFileP("git", ["-C", seed, "config", "user.name", "replay"]);
+      await execFileP("git", ["-C", seed, "commit", "--allow-empty", "-m", "initial"]);
+      await execFileP("git", ["-C", seed, "push", bareDir, "main:main"]);
+    } finally {
+      await rm(seed, { recursive: true, force: true });
+    }
+  } catch (err) {
+    // Partial failure between mkdtemp and successful return: caller
+    // doesn't have `bareDir` to clean up. Drop it here, then rethrow.
+    await rm(bareDir, { recursive: true, force: true }).catch(() => undefined);
+    throw err;
+  }
+  return { url: `file://${bareDir}`, path: bareDir };
+}
+
+/** Real Octokit + stub fetch — synthesizes the GitHub calls replay can't reach. */
+function makeStubOctokitFactory(): (pat: string) => Octokit {
+  const stubFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const method = init?.method ?? "GET";
+    const pullsMatch = url.match(/\/repos\/([^/]+)\/([^/]+)\/pulls$/);
+    if (method === "POST" && pullsMatch) {
+      const [, owner, repo] = pullsMatch;
+      const bodyText = typeof init?.body === "string" ? init.body : "";
+      const body = bodyText ? (JSON.parse(bodyText) as { head?: string }) : {};
+      return new Response(
+        JSON.stringify({
+          number: 1,
+          html_url: `https://github.example/${owner}/${repo}/pull/1`,
+          head: { sha: "0".repeat(40), ref: body.head ?? "" },
+        }),
+        { status: 201, headers: { "content-type": "application/json" } },
+      );
+    }
+    // The cleanup-run-branch subscriber DELETEs the per-task branch
+    // after the task reaches a terminal state. Accept either form of
+    // ref encoding (heads%2F<branch> or heads/<branch>) so an Octokit
+    // bump that flips URL-templating doesn't silently 503 us.
+    if (method === "DELETE" && /\/repos\/[^/]+\/[^/]+\/git\/refs\/(heads%2F|heads\/)/.test(url)) {
+      return new Response(null, { status: 204 });
+    }
+    // Fail loud: a 503 here would surface as a generic Octokit retry
+    // exhaustion several layers from the missing handler. Throwing
+    // puts the unsupported call directly in the test stack trace.
+    // Extend this stub (above) when adding new GitHub touchpoints.
+    throw new Error(`stub octokit: unsupported ${method} ${url}`);
+  };
+  return (pat: string) => new Octokit({ auth: pat, request: { fetch: stubFetch } });
+}
+
+/**
+ * Replay's gitFetchOverride: writes fixture files into the bare repo
+ * on branch. `pat` is ignored — file:// remote needs no auth — but
+ * the param stays for parity with the AutoRegisterSkillDeps signature.
+ */
+async function materializeBranchFromFixture(opts: {
+  branch: string;
+  skillsRepoPath: string;
+  fixtureDir: string;
+}): Promise<void> {
+  const { branch, skillsRepoPath, fixtureDir } = opts;
+  const tmpRoot = await mkdtemp(join(tmpdir(), "skill-auth-fixture-"));
+  try {
+    await execFileP("git", ["clone", skillsRepoPath, tmpRoot]);
+    await execFileP("git", ["-C", tmpRoot, "checkout", "-b", "fixture-staging"]);
+    const entries = await readdir(fixtureDir);
+    if (entries.length === 0) {
+      throw new Error(
+        `branch fixture dir ${fixtureDir} is empty — refresh it alongside the Daytona cassette`,
+      );
+    }
+    await Promise.all(
+      entries.map((entry) => copyFile(join(fixtureDir, entry), join(tmpRoot, entry))),
+    );
+    await execFileP("git", ["-C", tmpRoot, "add", "."]);
+    await execFileP(
+      "git",
+      [
+        "-C",
+        tmpRoot,
+        "-c",
+        "user.email=fixture@cogmo.test",
+        "-c",
+        "user.name=fixture",
+        "commit",
+        "-m",
+        "fixture: replay-mode skill content",
+      ],
+      { env: { ...process.env, GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z" } },
+    );
+    await execFileP("git", ["-C", tmpRoot, "push", skillsRepoPath, `HEAD:refs/heads/${branch}`]);
+  } finally {
+    await rm(tmpRoot, { recursive: true, force: true });
+  }
+}
+
 function parseGitHubSlug(url: string): string {
   // HTTPS: https://github.com/owner/repo.git
   // SSH: git@github.com:owner/repo.git
@@ -469,7 +600,6 @@ async function ensureSnapshot(
 async function resetRemoteMain(remoteUrl: string, pat: string): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "cogmo-skills-reset-"));
   try {
-    const { withGitAskpass } = await import("../secrets/git-askpass.js");
     await execFileP("git", ["init", "--initial-branch=main", dir]);
     await execFileP("git", ["-C", dir, "config", "user.email", "skill-author-test@cogmo"]);
     await execFileP("git", ["-C", dir, "config", "user.name", "skill-author-test"]);
@@ -502,7 +632,6 @@ async function prebuildDaytonaPrereqs(): Promise<void> {
     `snapshotNameFor(${imageRef}) returned null — COGMO_DEVBASE_IMAGE must include a non-latest tag`,
   );
   const depsVolumeName = expectDefined(process.env.COGMO_SKILLS_DEPS_VOLUME);
-  const { Daytona, Image } = await import("@daytonaio/sdk");
   const apiKey = expectDefined(process.env.DAYTONA_API_KEY);
   const realSdk = new Daytona({
     apiKey,
@@ -541,16 +670,16 @@ async function prebuildDaytonaPrereqs(): Promise<void> {
   // `requirements_lock_transport_failed`.
   console.log(`[skill-authoring e2e] ensuring deps-cache volume ${depsVolumeName} is ready...`);
   await realSdk.volume.get(depsVolumeName, true);
-  const start = Date.now();
-  while (Date.now() - start < 120_000) {
-    const v = await realSdk.volume.get(depsVolumeName);
-    if (v.state === "ready") {
-      console.log(`[skill-authoring e2e] deps-cache volume ${depsVolumeName} ready`);
-      return;
-    }
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-  throw new Error(`deps-cache volume ${depsVolumeName} did not become ready within 120s`);
+  await vi.waitFor(
+    async () => {
+      const v = await realSdk.volume.get(depsVolumeName);
+      if (v.state !== "ready") {
+        throw new Error(`deps-cache volume ${depsVolumeName} state=${v.state}`);
+      }
+    },
+    { timeout: 120_000, interval: 2000 },
+  );
+  console.log(`[skill-authoring e2e] deps-cache volume ${depsVolumeName} ready`);
 }
 
 async function readGhAuth(): Promise<{ pat: string; login: string; id: string }> {
@@ -608,7 +737,6 @@ async function setOriginAndFetch(
   // Bare repo: fetch main into refs/heads/main directly so worktrees
   // can branch from it. Uses the project's askpass helper so the PAT
   // never lands on disk in the bare repo's config.
-  const { withGitAskpass } = await import("../secrets/git-askpass.js");
   await withGitAskpass(pat, async (env) => {
     await execFileP(
       "git",
@@ -792,27 +920,31 @@ async function waitForCodingTask(
 ): Promise<typeof codingTasks.$inferSelect> {
   const start = Date.now();
   let lastSeenStatus = "";
-  while (Date.now() - start < timeoutMs) {
-    const rows = await db
-      .select()
-      .from(codingTasks)
-      .where(and(eq(codingTasks.conversationId, conversationId), ne(codingTasks.status, "queued")))
-      .orderBy(desc(codingTasks.createdAt));
-    const latest = rows[0];
-    if (latest && latest.status !== lastSeenStatus) {
-      lastSeenStatus = latest.status;
-      console.error(
-        `[skill-authoring e2e] task status: ${latest.status} (${Math.round((Date.now() - start) / 1000)}s)`,
+  return vi.waitFor(
+    async () => {
+      const rows = await db
+        .select()
+        .from(codingTasks)
+        .where(
+          and(eq(codingTasks.conversationId, conversationId), ne(codingTasks.status, "queued")),
+        )
+        .orderBy(desc(codingTasks.createdAt));
+      const latest = rows[0];
+      if (latest && latest.status !== lastSeenStatus) {
+        lastSeenStatus = latest.status;
+        console.error(
+          `[skill-authoring e2e] task status: ${latest.status} (${Math.round((Date.now() - start) / 1000)}s)`,
+        );
+      }
+      const terminal = rows.find(
+        (r) => r.status === "pr_open" || r.status === "failed" || r.status === "cancelled",
       );
-    }
-    const terminal = rows.find(
-      (r) => r.status === "pr_open" || r.status === "failed" || r.status === "cancelled",
-    );
-    if (terminal) return terminal;
-    await new Promise((r) => setTimeout(r, 1000));
-  }
-  throw new Error(
-    `coding task did not reach terminal state within ${timeoutMs}ms; last status: ${lastSeenStatus}`,
+      if (!terminal) {
+        throw new Error(`coding task not terminal yet; last status: ${lastSeenStatus}`);
+      }
+      return terminal;
+    },
+    { timeout: timeoutMs, interval: 1000 },
   );
 }
 
@@ -821,24 +953,27 @@ async function waitForSkill(
   name: string,
   timeoutMs: number,
 ): Promise<typeof skills.$inferSelect> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const rows = await db.select().from(skills).where(eq(skills.name, name)).limit(1);
-    if (rows[0]) return rows[0];
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  throw new Error(`skill '${name}' was not registered within ${timeoutMs}ms`);
+  return vi.waitFor(
+    async () => {
+      const rows = await db.select().from(skills).where(eq(skills.name, name)).limit(1);
+      const row = rows[0];
+      if (!row) throw new Error(`skill '${name}' not yet registered`);
+      return row;
+    },
+    { timeout: timeoutMs, interval: 500 },
+  );
 }
 
 async function waitForOutbound(
   predicate: (e: CapturedOutbound) => boolean,
   timeoutMs: number,
 ): Promise<CapturedOutbound> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const match = capturedOutbound.find(predicate);
-    if (match) return match;
-    await new Promise((r) => setTimeout(r, 200));
-  }
-  throw new Error(`Timed out waiting for matching directOutbound event`);
+  return vi.waitFor(
+    () => {
+      const match = capturedOutbound.find(predicate);
+      if (!match) throw new Error("no matching directOutbound event yet");
+      return match;
+    },
+    { timeout: timeoutMs, interval: 200 },
+  );
 }

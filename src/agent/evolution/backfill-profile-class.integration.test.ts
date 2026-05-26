@@ -1,6 +1,6 @@
 /// <reference path="../../../test/vitest.d.ts" />
 import { createClient, createConfig, HindsightClient, sdk } from "@vectorize-io/hindsight-client";
-import { beforeAll, describe, expect, inject, it } from "vitest";
+import { beforeAll, describe, expect, inject, it, vi } from "vitest";
 import {
   type BackfillDeps,
   backfillProfileClass,
@@ -26,13 +26,15 @@ beforeAll(async () => {
  * downstream assertion runs.
  */
 async function waitForCount(bankId: string, expected: number, timeoutMs = 60_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const page = await hindsight.listMemories(bankId, { limit: 100, offset: 0 });
-    if (page.total >= expected) return;
-    await new Promise((r) => setTimeout(r, 1000));
-  }
-  throw new Error(`waitForCount: bank ${bankId} did not reach ${expected} within ${timeoutMs}ms`);
+  await vi.waitFor(
+    async () => {
+      const page = await hindsight.listMemories(bankId, { limit: 100, offset: 0 });
+      if (page.total < expected) {
+        throw new Error(`bank ${bankId} count ${page.total} < expected ${expected}`);
+      }
+    },
+    { timeout: timeoutMs, interval: 1000 },
+  );
 }
 
 function makeDeps(captured: { backup?: ReadonlyArray<unknown> }): BackfillDeps {
