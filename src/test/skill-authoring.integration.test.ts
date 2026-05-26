@@ -138,8 +138,8 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
   /** Tracks branches/PRs created during the test so afterAll can clean them up. */
   const createdBranches: string[] = [];
   const createdPrNumbers: number[] = [];
-  /** Tmp dirs created in replay mode (local bare remote); removed in afterAll. */
-  const cleanupPaths: string[] = [];
+  /** Tmp path for the replay-mode local bare remote; removed in afterAll. */
+  let bareRemotePath: string | undefined;
 
   beforeAll(async () => {
     inngestBaseUrl = inject("inngestBaseUrl");
@@ -202,7 +202,7 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     } else {
       const bare = await createLocalBareRemote();
       remoteUrl = bare.url;
-      cleanupPaths.push(bare.path);
+      bareRemotePath = bare.path;
       remoteSlug = "replay/local";
     }
 
@@ -302,8 +302,8 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     if (db) await db.$client.end();
     // Best-effort: removing the bare-remote tmpdir is housekeeping;
     // an ENOENT on a half-built path shouldn't fail the suite.
-    for (const p of cleanupPaths) {
-      await rm(p, { recursive: true, force: true }).catch(() => undefined);
+    if (bareRemotePath) {
+      await rm(bareRemotePath, { recursive: true, force: true }).catch(() => undefined);
     }
   });
 
@@ -497,11 +497,11 @@ function makeStubOctokitFactory(): (pat: string) => Octokit {
     if (method === "DELETE" && /\/repos\/[^/]+\/[^/]+\/git\/refs\/(heads%2F|heads\/)/.test(url)) {
       return new Response(null, { status: 204 });
     }
-    // Surface unexpected calls loudly: a 503 swallowed inside Octokit's
-    // retry/error machinery becomes unhelpful by the time it bubbles
-    // to the test. The warn pairs with the body for grep-ability.
-    console.warn(`[stub-octokit] unexpected ${method} ${url}`);
-    return new Response(`stub octokit: unexpected ${method} ${url}`, { status: 503 });
+    // Fail loud: a 503 here would surface as a generic Octokit retry
+    // exhaustion several layers from the missing handler. Throwing
+    // puts the unsupported call directly in the test stack trace.
+    // Extend this stub (above) when adding new GitHub touchpoints.
+    throw new Error(`stub octokit: unsupported ${method} ${url}`);
   };
   return (pat: string) => new Octokit({ auth: pat, request: { fetch: stubFetch } });
 }
@@ -522,6 +522,11 @@ async function materializeBranchFromFixture(opts: {
     await execFileP("git", ["clone", skillsRepoPath, tmpRoot]);
     await execFileP("git", ["-C", tmpRoot, "checkout", "-b", "fixture-staging"]);
     const entries = await readdir(fixtureDir);
+    if (entries.length === 0) {
+      throw new Error(
+        `branch fixture dir ${fixtureDir} is empty — refresh it alongside the Daytona cassette`,
+      );
+    }
     await Promise.all(
       entries.map((entry) => copyFile(join(fixtureDir, entry), join(tmpRoot, entry))),
     );

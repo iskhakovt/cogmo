@@ -61,6 +61,13 @@ async function seedStubProvider(): Promise<void> {
       // `uq_model_position` constraint. The CLI's skills handler only
       // needs *some* provider routed for the default model — which slot
       // it occupies doesn't matter.
+      //
+      // Known race: two forks reading MAX(position) concurrently could
+      // both compute the same `next` value and one would lose the
+      // unique-constraint check. Snapshot isolation doesn't predicate-
+      // lock. Acceptable today because only one integration file runs
+      // this seed; revisit with `pg_advisory_xact_lock(hashtext(model))`
+      // if a second seed-side fork is ever added.
       const [next] = await tx<{ pos: number }[]>`
         SELECT COALESCE(MAX(position) + 1, 0)::int AS pos
         FROM model_providers WHERE model = ${profile.model}

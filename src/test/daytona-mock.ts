@@ -758,8 +758,10 @@ export class DaytonaMock {
         // already closed
       }
     };
-    // Yield one macrotask so the client SDK's microtask-deferred
-    // `message` listener attaches before frames arrive.
+    // Yield a macrotask: `@daytonaio/sdk`'s `getSessionCommandLogs` pipes
+    // the WS through `stdDemuxStream`, which attaches its `message`
+    // handler after an `await`. `queueMicrotask` fires inside the same
+    // turn and loses the first frame.
     setImmediate(next);
   }
 
