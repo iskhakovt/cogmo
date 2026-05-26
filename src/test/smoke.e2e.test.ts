@@ -2,7 +2,7 @@
 import { execFileSync } from "node:child_process";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
-import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
 import { conversations, messages, profiles, users } from "../agent/store/schema.js";
 import * as schema from "../db/schemas.js";
 import { transactor } from "../db/transactor.js";
@@ -85,18 +85,17 @@ describe("e2e smoke", () => {
     });
     expect(res.ok).toBe(true);
 
-    // Poll for assistant response
-    const start = Date.now();
-    let assistantMsg = null;
-    while (Date.now() - start < 30_000) {
-      const rows = await db.select().from(messages).where(eq(messages.conversationId, conv!.id));
-      assistantMsg = rows.find((r) => r.role === "assistant");
-      if (assistantMsg) break;
-      await new Promise((r) => setTimeout(r, 500));
-    }
+    const assistantMsg = await vi.waitFor(
+      async () => {
+        const rows = await db.select().from(messages).where(eq(messages.conversationId, conv!.id));
+        const found = rows.find((r) => r.role === "assistant");
+        if (!found) throw new Error("no assistant message yet");
+        return found;
+      },
+      { timeout: 30_000, interval: 500 },
+    );
 
-    expect(assistantMsg).toBeDefined();
-    expect(assistantMsg!.content).toBeDefined();
+    expect(assistantMsg.content).toBeDefined();
   });
 
   it("bundled binary loads the LiteLLM snapshot — `cogmo model list` reports source=litellm", async () => {

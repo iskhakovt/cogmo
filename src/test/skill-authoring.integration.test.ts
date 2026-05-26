@@ -69,7 +69,7 @@ import { and, desc, eq, ne } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { connect } from "inngest/connect";
 import { ok } from "neverthrow";
-import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
 import { codingTasks } from "../agent/coding/store/schema.js";
 import { conversations, llmProviders, modelProviders, profiles } from "../agent/store/schema.js";
 import * as schema from "../db/schemas.js";
@@ -104,14 +104,7 @@ const HAS_RECORDING_INPUTS =
   !!process.env.COGMO_TEST_SKILLS_REMOTE;
 const RECORDABLE = IS_RECORD && HAS_RECORDING_INPUTS;
 const FIXTURE_EXISTS = existsSync(FIXTURE_PATH);
-// Replay runs locally but is gated out of CI until the parallel-fork
-// Inngest-app-id contention is fixed (this test's heavy coding
-// orchestrator steals `inbound/arrived` events from peers under the
-// shared `id: "cogmo"` app, breaking pipeline + others). Opt-in via
-// `COGMO_TEST_SKILLS_REMOTE` — solo-dev runs already set it for the
-// record path. CI doesn't.
-const HAS_REPLAY_INPUTS = !!process.env.COGMO_TEST_SKILLS_REMOTE;
-const RUNNABLE = RECORDABLE || (FIXTURE_EXISTS && HAS_REPLAY_INPUTS);
+const RUNNABLE = RECORDABLE || FIXTURE_EXISTS;
 
 // --- Outbound capture (mirrors pipeline.integration.test.ts) ─────────
 
@@ -672,16 +665,16 @@ async function prebuildDaytonaPrereqs(): Promise<void> {
   // `requirements_lock_transport_failed`.
   console.log(`[skill-authoring e2e] ensuring deps-cache volume ${depsVolumeName} is ready...`);
   await realSdk.volume.get(depsVolumeName, true);
-  const start = Date.now();
-  while (Date.now() - start < 120_000) {
-    const v = await realSdk.volume.get(depsVolumeName);
-    if (v.state === "ready") {
-      console.log(`[skill-authoring e2e] deps-cache volume ${depsVolumeName} ready`);
-      return;
-    }
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-  throw new Error(`deps-cache volume ${depsVolumeName} did not become ready within 120s`);
+  await vi.waitFor(
+    async () => {
+      const v = await realSdk.volume.get(depsVolumeName);
+      if (v.state !== "ready") {
+        throw new Error(`deps-cache volume ${depsVolumeName} state=${v.state}`);
+      }
+    },
+    { timeout: 120_000, interval: 2000 },
+  );
+  console.log(`[skill-authoring e2e] deps-cache volume ${depsVolumeName} ready`);
 }
 
 async function readGhAuth(): Promise<{ pat: string; login: string; id: string }> {
@@ -922,27 +915,31 @@ async function waitForCodingTask(
 ): Promise<typeof codingTasks.$inferSelect> {
   const start = Date.now();
   let lastSeenStatus = "";
-  while (Date.now() - start < timeoutMs) {
-    const rows = await db
-      .select()
-      .from(codingTasks)
-      .where(and(eq(codingTasks.conversationId, conversationId), ne(codingTasks.status, "queued")))
-      .orderBy(desc(codingTasks.createdAt));
-    const latest = rows[0];
-    if (latest && latest.status !== lastSeenStatus) {
-      lastSeenStatus = latest.status;
-      console.error(
-        `[skill-authoring e2e] task status: ${latest.status} (${Math.round((Date.now() - start) / 1000)}s)`,
+  return vi.waitFor(
+    async () => {
+      const rows = await db
+        .select()
+        .from(codingTasks)
+        .where(
+          and(eq(codingTasks.conversationId, conversationId), ne(codingTasks.status, "queued")),
+        )
+        .orderBy(desc(codingTasks.createdAt));
+      const latest = rows[0];
+      if (latest && latest.status !== lastSeenStatus) {
+        lastSeenStatus = latest.status;
+        console.error(
+          `[skill-authoring e2e] task status: ${latest.status} (${Math.round((Date.now() - start) / 1000)}s)`,
+        );
+      }
+      const terminal = rows.find(
+        (r) => r.status === "pr_open" || r.status === "failed" || r.status === "cancelled",
       );
-    }
-    const terminal = rows.find(
-      (r) => r.status === "pr_open" || r.status === "failed" || r.status === "cancelled",
-    );
-    if (terminal) return terminal;
-    await new Promise((r) => setTimeout(r, 1000));
-  }
-  throw new Error(
-    `coding task did not reach terminal state within ${timeoutMs}ms; last status: ${lastSeenStatus}`,
+      if (!terminal) {
+        throw new Error(`coding task not terminal yet; last status: ${lastSeenStatus}`);
+      }
+      return terminal;
+    },
+    { timeout: timeoutMs, interval: 1000 },
   );
 }
 
@@ -951,24 +948,27 @@ async function waitForSkill(
   name: string,
   timeoutMs: number,
 ): Promise<typeof skills.$inferSelect> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const rows = await db.select().from(skills).where(eq(skills.name, name)).limit(1);
-    if (rows[0]) return rows[0];
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  throw new Error(`skill '${name}' was not registered within ${timeoutMs}ms`);
+  return vi.waitFor(
+    async () => {
+      const rows = await db.select().from(skills).where(eq(skills.name, name)).limit(1);
+      const row = rows[0];
+      if (!row) throw new Error(`skill '${name}' not yet registered`);
+      return row;
+    },
+    { timeout: timeoutMs, interval: 500 },
+  );
 }
 
 async function waitForOutbound(
   predicate: (e: CapturedOutbound) => boolean,
   timeoutMs: number,
 ): Promise<CapturedOutbound> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const match = capturedOutbound.find(predicate);
-    if (match) return match;
-    await new Promise((r) => setTimeout(r, 200));
-  }
-  throw new Error(`Timed out waiting for matching directOutbound event`);
+  return vi.waitFor(
+    () => {
+      const match = capturedOutbound.find(predicate);
+      if (!match) throw new Error("no matching directOutbound event yet");
+      return match;
+    },
+    { timeout: timeoutMs, interval: 200 },
+  );
 }

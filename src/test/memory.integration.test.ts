@@ -1,5 +1,5 @@
 /// <reference path="../../test/vitest.d.ts" />
-import { beforeAll, describe, expect, inject, it } from "vitest";
+import { beforeAll, describe, expect, inject, it, vi } from "vitest";
 import { HindsightMemoryProvider } from "../memory/hindsight.js";
 import type { TagGroup } from "../memory/provider.js";
 
@@ -23,20 +23,14 @@ describe("hindsight memory", () => {
 
     // Hindsight extracts facts via llmock (instant responses).
     // Still need to poll — Hindsight has internal async processing.
-    let found = false;
-    for (let attempt = 0; attempt < 30; attempt++) {
-      await new Promise((r) => setTimeout(r, 1000));
-      const result = await memory.recall(BANK_ID, "what is the user's favorite color?");
-      if (result.memories.length > 0) {
+    await vi.waitFor(
+      async () => {
+        const result = await memory.recall(BANK_ID, "what is the user's favorite color?");
         const match = result.memories.find((m) => m.content.toLowerCase().includes("blue"));
-        if (match) {
-          found = true;
-          break;
-        }
-      }
-    }
-
-    expect(found).toBe(true);
+        if (!match) throw new Error("favorite-color memory not yet recalled");
+      },
+      { timeout: 30_000, interval: 1000 },
+    );
   });
 
   // Profile-scope ACL — retain memories tagged across two compartments,
@@ -101,14 +95,16 @@ describe("hindsight memory", () => {
     // Poll the personal-scoped recall first — Hindsight processes
     // retainBatch async, so we wait for at least one memory to
     // materialise before asserting on either scope.
-    let personal: { memories: { content: string }[] } = { memories: [] };
-    for (let attempt = 0; attempt < 60; attempt++) {
-      await new Promise((r) => setTimeout(r, 1000));
-      personal = await memory.recall(COMPARTMENT_BANK_ID, personalQuery, {
-        tagGroups: personalScope,
-      });
-      if (personal.memories.length > 0) break;
-    }
+    const personal = await vi.waitFor(
+      async () => {
+        const result = await memory.recall(COMPARTMENT_BANK_ID, personalQuery, {
+          tagGroups: personalScope,
+        });
+        if (result.memories.length === 0) throw new Error("no personal-scope memories yet");
+        return result;
+      },
+      { timeout: 60_000, interval: 1000 },
+    );
 
     expect(personal.memories.length).toBeGreaterThan(0);
     const personalHaystack = personal.memories.map((m) => m.content.toLowerCase()).join("\n");

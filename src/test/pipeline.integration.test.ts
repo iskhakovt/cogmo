@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { sql as drizzleSql, eq } from "drizzle-orm";
 import { connect } from "inngest/connect";
-import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from "vitest";
 import { conversations, messages, profiles, voiceConfig } from "../agent/store/schema.js";
 import { db, transactor } from "../db/index.js";
 import { bootstrap } from "../index.js";
@@ -194,18 +194,48 @@ async function sendEvent(name: string, data: Record<string, unknown>) {
   return res.json();
 }
 
-async function waitForAssistantMessage(conversationId: string, timeoutMs = 30_000) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const rows = await db
-      .select()
-      .from(messages)
-      .where(eq(messages.conversationId, conversationId));
-    const match = rows.find((r) => r.role === "assistant");
-    if (match) return match;
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  throw new Error("Timed out waiting for assistant message");
+/**
+ * Poll the OTel reader until every name in `requiredNames` is present in a
+ * single `collectMetrics()` snapshot, then return that snapshot.
+ *
+ * DELTA temporality drains the accumulator on each `collect()`, so splitting
+ * the wait from the assertion would consume the very metrics the assertion
+ * needs to read. Asserting inside the poll body keeps both observations on
+ * one snapshot. The retry handles cross-process races: when a peer fork
+ * subscribes to the same trigger under its own app id, the gateway
+ * broadcasts to both apps and waitForAssistantMessage may return on the
+ * peer's DB write before this fork's handle-message finishes recording.
+ */
+async function collectMetricsWhen(otel: OtelHarness, requiredNames: ReadonlyArray<string>) {
+  return vi.waitFor(
+    async () => {
+      const result = await otel.collectMetrics();
+      const allMetrics = result.scopeMetrics.flatMap((s) => s.metrics);
+      for (const name of requiredNames) {
+        const found = allMetrics.find((m) => m.descriptor.name === name);
+        if (!found || found.dataPoints.length === 0) {
+          throw new Error(`metric "${name}" not yet recorded`);
+        }
+      }
+      return allMetrics;
+    },
+    { timeout: 5_000, interval: 100 },
+  );
+}
+
+async function waitForAssistantMessage(conversationId: string) {
+  return vi.waitFor(
+    async () => {
+      const rows = await db
+        .select()
+        .from(messages)
+        .where(eq(messages.conversationId, conversationId));
+      const match = rows.find((r) => r.role === "assistant");
+      if (!match) throw new Error("no assistant message yet");
+      return match;
+    },
+    { timeout: 30_000, interval: 500 },
+  );
 }
 
 /**
@@ -220,13 +250,14 @@ async function waitForOutbound(
   predicate: (e: CapturedOutbound) => boolean,
   timeoutMs = 30_000,
 ): Promise<CapturedOutbound> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const match = capturedOutbound.find(predicate);
-    if (match) return match;
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  throw new Error(`Timed out waiting for directOutbound for conversation ${conversationId}`);
+  return vi.waitFor(
+    () => {
+      const match = capturedOutbound.find(predicate);
+      if (!match) throw new Error(`no directOutbound for ${conversationId} yet`);
+      return match;
+    },
+    { timeout: timeoutMs, interval: 500 },
+  );
 }
 
 describe("message pipeline", () => {
@@ -492,8 +523,10 @@ describe("message pipeline", () => {
 
     await waitForAssistantMessage(conv!.id);
 
-    // Spans land via SimpleSpanProcessor; small grace for any in-flight ends.
-    await new Promise((r) => setTimeout(r, 200));
+    const allMetrics = await collectMetricsWhen(otel, [
+      "cogmo.agent.iterations",
+      "cogmo.llm.tokens",
+    ]);
 
     const spans = otel.getSpans();
     // `inngest.execution` is opened by Inngest's engine unconditionally via
@@ -514,8 +547,6 @@ describe("message pipeline", () => {
     // usage `{0, 0}`, so values land at zero. The contract we care about is
     // "tokens are being recorded with proper labels"; re-record fixtures to
     // verify magnitudes.
-    const result = await otel.collectMetrics();
-    const allMetrics = result.scopeMetrics.flatMap((s) => s.metrics);
     const tokenMetric = allMetrics.find((m) => m.descriptor.name === "cogmo.llm.tokens");
     expect(tokenMetric).toBeDefined();
     const types = new Set((tokenMetric?.dataPoints ?? []).map((p) => p.attributes.type));

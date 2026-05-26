@@ -30,7 +30,7 @@
 import { eq } from "drizzle-orm";
 import { Inngest } from "inngest";
 import { connect } from "inngest/connect";
-import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
 import { db, transactor } from "../../db/index.js";
 import { codingTaskFailed } from "../../inngest/events.js";
 import { createCodingTaskReconcile } from "./reconcile-on-failure.js";
@@ -186,32 +186,34 @@ const TRIGGER_EXECUTE = "test/reconcile/trigger-execute";
 async function waitForTaskStatus(
   taskId: string,
   status: "failed",
-  timeoutMs = 30_000,
 ): Promise<{ status: string; failureReason: string | null }> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const rows = await db
-      .select({ status: codingTasks.status, failureReason: codingTasks.failureReason })
-      .from(codingTasks)
-      .where(eq(codingTasks.id, taskId));
-    const row = rows[0];
-    if (row && row.status === status) return row;
-    await new Promise((r) => setTimeout(r, 200));
-  }
-  throw new Error(`timed out waiting for task ${taskId} to reach status=${status}`);
+  return vi.waitFor(
+    async () => {
+      const rows = await db
+        .select({ status: codingTasks.status, failureReason: codingTasks.failureReason })
+        .from(codingTasks)
+        .where(eq(codingTasks.id, taskId));
+      const row = rows[0];
+      if (!row || row.status !== status) {
+        throw new Error(`task ${taskId} not yet at status=${status}`);
+      }
+      return row;
+    },
+    { timeout: 30_000, interval: 200 },
+  );
 }
 
 async function waitForFailedEvent(
   taskId: string,
-  timeoutMs = 30_000,
 ): Promise<{ id: string | undefined; taskId: string; reason: string }> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const match = capturedFailedEvents.find((e) => e.taskId === taskId);
-    if (match) return match;
-    await new Promise((r) => setTimeout(r, 200));
-  }
-  throw new Error(`timed out waiting for coding/task/failed for ${taskId}`);
+  return vi.waitFor(
+    () => {
+      const match = capturedFailedEvents.find((e) => e.taskId === taskId);
+      if (!match) throw new Error(`no coding/task/failed for ${taskId} yet`);
+      return match;
+    },
+    { timeout: 30_000, interval: 200 },
+  );
 }
 
 describe("coding-task-reconcile — Inngest integration", () => {
