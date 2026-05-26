@@ -43,6 +43,18 @@
  * scaffold (timeouts, polling cadence, assertion shapes) — that's the
  * intended feedback loop. Each iteration costs ~$1-2 in Daytona
  * compute + Anthropic tokens.
+ *
+ * ## When the cassette needs a refresh
+ *
+ *   - Anthropic / OpenAI SDK bump that changes the wire shape.
+ *   - `@daytonaio/sdk` bump that adds calls or renames endpoints.
+ *   - Prompt restructure (system prompt, tool definitions, skill
+ *     conventions) that the model's response would differ on.
+ *   - Pinned model swap (currently `claude-haiku-4-5-20251001`).
+ *   - The cogmo-skills repo's `SKILL.md` template or skill.py shape
+ *     changes (the recorded fixture in
+ *     `test/fixtures/skill-authoring-branch/` would also need to
+ *     match).
  */
 
 import { execFile as execFileCb } from "node:child_process";
@@ -437,17 +449,24 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
 /** Replay-mode remote: bare git repo on disk, seeded with empty main. */
 async function createLocalBareRemote(): Promise<{ url: string; path: string }> {
   const bareDir = await mkdtemp(join(tmpdir(), "skill-auth-replay-remote-"));
-  await execFileP("git", ["init", "--bare", "--initial-branch=main", bareDir]);
-  // `git fetch` against a refless bare fails; seed an empty main.
-  const seed = await mkdtemp(join(tmpdir(), "skill-auth-replay-seed-"));
   try {
-    await execFileP("git", ["init", "--initial-branch=main", seed]);
-    await execFileP("git", ["-C", seed, "config", "user.email", "replay@cogmo.test"]);
-    await execFileP("git", ["-C", seed, "config", "user.name", "replay"]);
-    await execFileP("git", ["-C", seed, "commit", "--allow-empty", "-m", "initial"]);
-    await execFileP("git", ["-C", seed, "push", bareDir, "main:main"]);
-  } finally {
-    await rm(seed, { recursive: true, force: true });
+    await execFileP("git", ["init", "--bare", "--initial-branch=main", bareDir]);
+    // `git fetch` against a refless bare fails; seed an empty main.
+    const seed = await mkdtemp(join(tmpdir(), "skill-auth-replay-seed-"));
+    try {
+      await execFileP("git", ["init", "--initial-branch=main", seed]);
+      await execFileP("git", ["-C", seed, "config", "user.email", "replay@cogmo.test"]);
+      await execFileP("git", ["-C", seed, "config", "user.name", "replay"]);
+      await execFileP("git", ["-C", seed, "commit", "--allow-empty", "-m", "initial"]);
+      await execFileP("git", ["-C", seed, "push", bareDir, "main:main"]);
+    } finally {
+      await rm(seed, { recursive: true, force: true });
+    }
+  } catch (err) {
+    // Partial failure between mkdtemp and successful return: caller
+    // doesn't have `bareDir` to clean up. Drop it here, then rethrow.
+    await rm(bareDir, { recursive: true, force: true }).catch(() => undefined);
+    throw err;
   }
   return { url: `file://${bareDir}`, path: bareDir };
 }
@@ -472,17 +491,26 @@ function makeStubOctokitFactory(): (pat: string) => Octokit {
       );
     }
     // The cleanup-run-branch subscriber DELETEs the per-task branch
-    // after the task reaches a terminal state. Return 204 so cleanup
-    // succeeds without a real GitHub round-trip.
-    if (method === "DELETE" && /\/repos\/[^/]+\/[^/]+\/git\/refs\/heads%2F/.test(url)) {
+    // after the task reaches a terminal state. Accept either form of
+    // ref encoding (heads%2F<branch> or heads/<branch>) so an Octokit
+    // bump that flips URL-templating doesn't silently 503 us.
+    if (method === "DELETE" && /\/repos\/[^/]+\/[^/]+\/git\/refs\/(heads%2F|heads\/)/.test(url)) {
       return new Response(null, { status: 204 });
     }
+    // Surface unexpected calls loudly: a 503 swallowed inside Octokit's
+    // retry/error machinery becomes unhelpful by the time it bubbles
+    // to the test. The warn pairs with the body for grep-ability.
+    console.warn(`[stub-octokit] unexpected ${method} ${url}`);
     return new Response(`stub octokit: unexpected ${method} ${url}`, { status: 503 });
   };
   return (pat: string) => new Octokit({ auth: pat, request: { fetch: stubFetch } });
 }
 
-/** Replay's gitFetchOverride: writes fixture files into the bare repo on branch. */
+/**
+ * Replay's gitFetchOverride: writes fixture files into the bare repo
+ * on branch. `pat` is ignored — file:// remote needs no auth — but
+ * the param stays for parity with the AutoRegisterSkillDeps signature.
+ */
 async function materializeBranchFromFixture(opts: {
   branch: string;
   skillsRepoPath: string;
@@ -494,9 +522,9 @@ async function materializeBranchFromFixture(opts: {
     await execFileP("git", ["clone", skillsRepoPath, tmpRoot]);
     await execFileP("git", ["-C", tmpRoot, "checkout", "-b", "fixture-staging"]);
     const entries = await readdir(fixtureDir);
-    for (const entry of entries) {
-      await copyFile(join(fixtureDir, entry), join(tmpRoot, entry));
-    }
+    await Promise.all(
+      entries.map((entry) => copyFile(join(fixtureDir, entry), join(tmpRoot, entry))),
+    );
     await execFileP("git", ["-C", tmpRoot, "add", "."]);
     await execFileP(
       "git",

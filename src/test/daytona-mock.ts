@@ -338,11 +338,11 @@ export interface DaytonaMockReplayOptions {
   faults?: ReadonlyArray<{ wsPathPattern: RegExp; kind: "ws-hold-open" }>;
   /**
    * Per-test path normalizations applied to both incoming and recorded
-   * paths before matching. Use this to strip test-specific random
-   * tokens (e.g. `skill-author-\d+` sequence numbers) so call order can
-   * drift between record and replay without breaking exact-path match.
-   * The mock always strips full UUIDs and the `cogmo-<sandboxShort>-`
-   * session prefix; tests add tokens beyond those defaults.
+   * paths before matching. Use for test-specific random tokens not
+   * covered by the built-ins. The mock strips the cogmo task-UUID
+   * prefix in session IDs and the `cogmo.task` query label; everything
+   * else (Daytona-server UUIDs, session-ID suffix) is preserved as
+   * per-call identity.
    */
   pathNormalizations?: ReadonlyArray<{ pattern: RegExp; replacement: string }>;
 }
