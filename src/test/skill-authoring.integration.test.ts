@@ -194,11 +194,12 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
       remoteSlug = "replay/local";
     }
 
-    // Fall back to a fake PAT only when gh is missing; other failures surface.
-    const ghAuth = await readGhAuth().catch((err: Error) => {
-      if (!/enoent|not found|command not found/i.test(err.message)) throw err;
-      return { pat: "test-pat", login: "test-user", id: "0" };
-    });
+    // Replay doesn't talk to real GitHub — file:// remote needs no PAT
+    // and the octokit stub ignores the token. Record-mode surfaces gh
+    // failures (missing OR unauthenticated) so the operator notices.
+    const ghAuth = RECORDABLE
+      ? await readGhAuth()
+      : { pat: "test-pat", login: "test-user", id: "0" };
     const signingKeypair = await generateSigningKeypair();
 
     // Init the bare skills repo + wire origin BEFORE `bootstrap()` so
