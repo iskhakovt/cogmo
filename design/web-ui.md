@@ -31,7 +31,7 @@ Reuses the agent loop verbatim — the orchestrator is never touched.
 
 ## Admin path
 
-Every management screen drives the existing identity-checked `Transport` namespaces (`conversations, chats, profiles, profileClasses, compartments, models, repos, coding, skills, scheduling, mcp, evolution, boundary`) through **oRPC** — typed RPC, framework-agnostic over `node:http`, with native SSE for live panels and an OpenAPI surface kept internal-only in v1.
+Every management screen drives the existing identity-checked `Transport` namespaces (`conversations, chats, profiles, profileClasses, compartments, models, repos, coding, skills, scheduling, mcp, evolution, boundary`) through **oRPC** — typed RPC, framework-agnostic over `node:http`, with native SSE for live panels and an OpenAPI surface kept internal-only.
 
 - oRPC procedures are thin wrappers: resolve the authenticated `platformUserHandle` **server-side from the session cookie** (never the request body), call the matching `Transport` method, return the `neverthrow` `Result`. The `TransportError` code-discriminated union (with structured fields like `profileRefs`, `limit`/`current`) is mirrored to the client, which re-narrows to a `Result`. No business logic in the layer.
 - **Live admin panels** (coding-task log tails, status ticks, the evolution feed) use oRPC's SSE event-iterator + the **Client Retry Plugin** for reconnect — one typed mechanism for both request/response and streaming, distinct from the bespoke chat path above.
@@ -43,11 +43,12 @@ Single-user, lock-the-internet-out — not multi-tenant SaaS auth.
 - **Bind** `HOST`/`PORT` are configurable. Default binds all interfaces inside the container (matching the health server); the security boundary is the publish/proxy layer — `-p 127.0.0.1:9090:9090` (host-loopback only), or no published port plus a `cloudflared` / `tailscale` sidecar reaching the container by service name. App auth is defense-in-depth on top, never the only control.
 - **Trusted identity header:** when fronted by a gateway, the server maps a verified upstream identity to the owner's `user_identities` row — but only when the header's origin is proven, never the plaintext header alone. For Cloudflare Access, verify the signed `Cf-Access-Jwt-Assertion` JWT (against Cloudflare's public keys + the configured AUD), not `Cf-Access-Authenticated-User-Email`. Otherwise accept the identity header (`Tailscale-User-Login`, `X-Forwarded-User`) only from a configured trusted source-IP range or with a proxy-injected shared secret. Plaintext-header trust is never enabled on a publicly-reachable bind: an attacker reaching the port directly (a misconfigured publish, a sibling container on the Docker network) could otherwise spoof it and authenticate as the owner.
 - **Fallback login:** when that header is absent, a 32-byte shared token (stored encrypted in the secrets store, printed once like `gen-key`) is exchanged at `POST /api/session` for an **HMAC-signed, httpOnly, SameSite=Strict cookie**, signed with a key derived via the existing HKDF from `COGMO_MASTER_KEY` — no new secret, no auth dependency.
-- Passkeys (`SimpleWebAuthn`, one credential row) are the upgrade path for direct exposure; deferred until needed.
+- **Fail-closed + CSRF:** the gate denies by default — a request with neither a verified upstream identity nor a valid session cookie is rejected, never allowed through (load-bearing under the default all-interfaces bind: an unconfigured "allow" path would be the whole ballgame). State-changing requests rely on the `SameSite=Strict` cookie for CSRF; no separate anti-CSRF token.
+- Passkeys (`SimpleWebAuthn`, one credential row) are the upgrade path for direct exposure.
 
 ## Web channel identity
 
-The web channel uses `fixed` identity mode -> the single owner (no per-user resolution needed). Each browser tab mints a per-tab id used as its `platformAddress`, so every tab is its own `channel_session` and can view a different conversation via the sidebar. A tab opens its session with `receive: "all"`; the `DeliveryRouter` resolves every session on a conversation and fans a streamed response out to each, so multiple tabs watching the same conversation all receive it. The per-tab address also keys the SSE connection map, so tabs never evict one another.
+The web channel uses `fixed` identity mode -> the single owner (no per-user resolution needed). Each browser tab mints a per-tab id used as its `platformAddress`, so every tab is its own `channel_session` and can view a different conversation via the sidebar. A tab opens its session with `receive: "all"`; the `DeliveryRouter` resolves every session on a conversation and fans a streamed response out to each, so multiple tabs watching the same conversation all receive it. The per-tab address also keys the SSE connection map, so tabs never evict one another. Abandoned tabs' sessions are reclaimed by the existing idle-timeout lifecycle (and reused on reconnect), so they don't accumulate.
 
 ## Monorepo layout
 
@@ -76,7 +77,7 @@ Docker: one extra build stage (`pnpm --filter web build`) + one `COPY apps/web/d
 | Routing / data | TanStack Router + Query (with `@orpc/tanstack-query`) | Typed routes + server-state cache for Transport reads, no second server. |
 | Chat runtime | `@assistant-ui/react` `ExternalStoreRuntime` | Zero wire protocol — the `StreamEvent` union flows in unchanged; persistence stays in Postgres. |
 | Chat reader | `@microsoft/fetch-event-source` | POST + headers + Page-Visibility-aware reconnect with `Last-Event-ID`. |
-| Admin API | oRPC (+ Client Retry Plugin) | Typed RPC + native SSE + OpenAPI over raw `node:http`; no backend framework. Internal-only in v1. |
+| Admin API | oRPC (+ Client Retry Plugin) | Typed RPC + native SSE + OpenAPI over raw `node:http`; no backend framework. Internal-only. |
 | Components | shadcn/ui copy-in on unified `radix-ui` | Own every line; accessible primitives, total visual control. |
 | Styling | Tailwind v4 (`@theme`, OKLCH) | One auditable token file is the design-system source of truth. |
 | Tables / lists | TanStack Table v8 + Virtual | Right-sized for skills/MCP/schedule grids and virtualized history/memory. |
@@ -102,6 +103,8 @@ Dark-theme tokens (light values are the second ramp under `[data-theme="light"]`
 | accent / accent-ink / accent-wash | `oklch(0.70 0.13 256)` / `oklch(0.80 0.11 256)` / `oklch(0.70 0.13 256 / 0.14)` |
 | verified / hinted / retracted | `oklch(0.74 0.13 150)` / `oklch(0.78 0.13 75)` / `oklch(0.66 0.15 25)` |
 
+The Tailwind v4 `@theme` token file is the canonical source for these values; the committed mockup and this table are visual references, reconciled against `@theme` once it exists.
+
 ## Information architecture
 
 One keyboard-first app shell (slim left section-nav + content pane) with a cmdk Cmd+K palette as the universal jump/action layer. The screens consolidate into four sections, never a flat list:
@@ -115,7 +118,7 @@ One keyboard-first app shell (slim left section-nav + content pane) with a cmdk 
 
 Setup is a one-time CLI wizard ([setup.md](setup.md)); the web UI does post-setup config only — there is no web onboarding wizard. Every screen renders the `Result` error variant as an explicit inline error row.
 
-**Responsive incl. phone:** the inverted-L shell adapts via Tailwind v4 container queries — the section-nav collapses to a drawer / bottom-tab bar, the right inspector becomes a swipe-up bottom sheet, and dense tables fall back to stacked cards on narrow widths. Voice (TTS/STT) is deferred to a later phase; inline image rendering ships from the start.
+**Responsive incl. phone:** the inverted-L shell adapts via Tailwind v4 container queries — the section-nav collapses to a drawer / bottom-tab bar, the right inspector becomes a swipe-up bottom sheet, and dense tables fall back to stacked cards on narrow widths. Images render inline; voice (TTS/STT) is tracked separately, not part of the web cockpit.
 
 ## Dependencies
 

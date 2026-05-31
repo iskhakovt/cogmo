@@ -12,7 +12,7 @@ data/litellm-models.json linguist-generated=true
 
 # Web UI design mockups are generated reference artifacts (see design/web-ui.md).
 # Mark generated so GitHub collapses the diff and language stats stay TypeScript.
-design/web-ui/mockups/* linguist-generated=true
+design/web-ui/mockups/** linguist-generated=true
 
 # Binary test fixtures — skip line-ending normalization, suppress diffs,
 # force binary merges. `binary` is a macro for `-text -diff -merge`.
