@@ -212,6 +212,18 @@ These items came out of the testing retrospective on PRs #76/#78/#80/#86 (resolv
 - [ ] **Setup wizard e2e** — fake-tty test running `cogmo setup` with scripted input, asserting config is written correctly.
 - [ ] **Version-pinning canaries** — explicit tests that octokit, dockerode, sysbox image tag, Claude CLI flag set haven't drifted. Pin versions in fixtures and assert the CLI/API surface our code uses still exists. Currently a runtime regression would only surface in an integration test.
 
+## Phase 7: Web UI
+
+Single-user browser cockpit — a chat channel + the admin surface over `Transport`. Design: [web-ui.md](design/web-ui.md).
+
+- [ ] Phase 0 — workspace split (`apps/* + packages/*`, backend stays package `cogmo`, `packages/contracts` types-only)
+- [ ] Phase 1 — in-process UI server (promoted health server) + oRPC admin API over `Transport` + trusted-header / HMAC-cookie auth
+- [ ] Phase 2 — chat: `WebUiAdapter` (`StreamingAdapter`) + `assistant-ui` `ExternalStoreRuntime` + fetch SSE reader + `Last-Event-ID` DB replay (needs a per-turn event sequence)
+- [ ] Phase 3 — app shell (cmdk + four sections) + read-mostly AGENT/SYSTEM screens + Tailwind v4 OKLCH "Ledger" theme (dark default + light toggle)
+- [ ] Phase 4 — hero screens: memory browser, coding-task live view, evolution audit
+- [ ] Phase 5 — responsive (container-query mobile) + polish + test matrix (oRPC serialization, SSE replay idempotency, auth gate, health-route regression)
+- [ ] Voice (deferred) — mic-in / audio-out in chat; programmatic OpenAPI channel (deferred)
+
 ## Monitoring Thresholds (Scaling Triggers)
 
 | Signal | Action |

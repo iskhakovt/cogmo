@@ -38,6 +38,11 @@
 | Worker-death reconciliation | Subscribe to `inngest/function.failed` system event, not per-function `onFailure` | Inngest's documented contract for `onFailure` is "after maximum retries" — connect-mode worker death (worker stops responding to the gateway) is observed not to invoke it reliably (open issue [inngest/inngest#3549](https://github.com/inngest/inngest/issues/3549)). The system event fires environment-wide on every terminal-failed run regardless of how the worker exited, so a single subscriber filtered by `function_id` is strictly more general than per-function `onFailure` plumbing and survives the worker-disconnect class. The in-worker catch path still runs for normal failures; the reconciler's conditional-UPDATE-on-non-terminal makes the two paths racefight-safe. See [coding-delegation.md](coding-delegation.md) → Worker-death reconciliation. |
 | Personal agents | Build own | No existing tool covers memory + agent runtime + evolution together. |
 | Team tool | Dust.tt or Onyx | Separate from personal bot. Dust: $315/mo, 88% DAU. Onyx: MIT, self-hosted. |
+| Web UI architecture | In-process UI server (promoted health server), reuse `StreamingAdapter` + `Transport` | One process, one container, no backend framework. Chat reuses the confirmed SSE `StreamingAdapter`; admin screens drive the existing `Transport`. `assistant-ui` `ExternalStoreRuntime` imposes no wire protocol, so the `StreamEvent` union flows in unchanged. See [web-ui.md](web-ui.md). |
+| Web UI admin API | oRPC over `Transport`, internal-only v1 | Typed RPC + native SSE event-iterator + OpenAPI over raw `node:http`, no framework. The `Transport` interface IS the API; the `TransportError` union mirrors to the client to preserve `Result`. OpenAPI surface also seeds the future programmatic-API channel. See [web-ui.md](web-ui.md). |
+| Web UI streaming | SSE out + POST in (chat); oRPC SSE event-iterator (live admin panels) | Server-push dominates; SSE + `Last-Event-ID` + DB replay gives resumability with zero extra infra in one process. Client reads SSE via fetch (`eventsource-client`, on the `eventsource-parser` primitive), not native `EventSource`, so it carries cookies/headers. See [web-ui.md](web-ui.md). |
+| Web UI auth | Configurable bind + trusted identity header + HMAC-cookie fallback | Single-user lock-the-internet-out. Network boundary (loopback publish / `cloudflared` / `tailscale` sidecar) is the real control; app trusts a configurable identity header (CF Access / Tailscale / oauth2-proxy) and falls back to a shared-token HMAC cookie signed via existing HKDF — no new secret. Passkeys deferred. See [web-ui.md](web-ui.md). |
+| Web UI design system | "Ledger" theme (dark-default + light toggle), shadcn/Radix copy-in + Tailwind v4 OKLCH | Headless accessible primitives + copy-in source = own every line, distinctive identity without fighting a styled kit. Warm engineering-document look, mono-forward (IBM Plex), ruled tables, one ink-blue accent + meaning-only trust palette. See [web-ui.md](web-ui.md). |
 
 ## Eliminated Options `[confirmed]`
 
@@ -64,6 +69,12 @@
 | OpenRouter | LLM routing | Adds 50-100ms latency + 5.5% markup. Useful for multi-provider A/B testing — keep as future `LlmProvider` implementation if needed. |
 | PAI | Reference arch | 95% single-author, breaking changes every 2 weeks, 80% false-positive ratings |
 | Peer mesh | Topology | 17x error amplification, 3-5x dev cost, 0 production deployments |
+| Next.js / TanStack Start (framework mode) | Web UI framework | Second supervised process; RSC/SSR fights the SSE + Transport-RPC model on a single-user box with no SEO. Vite React SPA instead. |
+| AI SDK `useChat` | Web UI chat | Protocol tax — a `StreamEvent`->`UIMessageChunk` shim for a backend with no AI SDK route. `ExternalStoreRuntime` imposes no wire protocol. |
+| tRPC | Web UI API | React/Query-coupled, mirrors the `Transport` surface as a second description, no OpenAPI. oRPC gives the same typed RPC + SSE, framework-agnostic. |
+| MUI / Mantine / Chakra / Ant | Web UI components | Styled kits inherit their own design language; restyling to a distinctive identity fights the framework. Headless Radix + shadcn copy-in instead. |
+| Redis `resumable-stream` / Durable Streams | Web UI streaming | External broker for serverless-without-sticky-routing; one long-lived process + Postgres replay is simpler and strictly better. |
+| WebTransport | Web UI streaming | Needs HTTP/3/QUIC termination (QUIC proxy, UDP/443) — breaks the single-container deploy; workload is server-push, uses nothing WebTransport uniquely provides. |
 
 ## Adopted Patterns
 
