@@ -126,5 +126,5 @@ jobs:
         if: always()
         with:
           name: Sysbox E2E Test Results
-          path: test-results/junit.xml
+          path: apps/server/test-results/junit.xml
           reporter: java-junit
