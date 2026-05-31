@@ -6,7 +6,8 @@ Each adapter implements the `AdapterModule` contract (`channelType` + `setup()`)
 
 - **Direct** — event-driven via Inngest (`adapter/direct/inbound`, `adapter/direct/outbound`). Console script (`scripts/console.ts`) for dev interaction.
 - [transport/telegram.md](transport/telegram.md) — Telegram (primary): grammY, long polling, DMs only
-- Discord, Slack, Web UI — future
+- [web-ui.md](web-ui.md) — Web UI: single-user browser cockpit (chat channel + admin surface over `Transport`), designed, not yet implemented
+- Discord, Slack — future
 
 ## MCP Integrations `[proposed]`
 

@@ -31,6 +31,7 @@ Read `design/` for the full picture. Key docs:
 | [crash-recovery.md](design/crash-recovery.md) | Durability map of `handle-message`, what re-executes on retry, test contract |
 | [context-management.md](design/context-management.md) | Token counting, compaction pipeline, model registry |
 | [transport/](design/transport/) | Messaging architecture — adapters, sessions, debounce, routing, identity |
+| [web-ui.md](design/web-ui.md) | Browser cockpit — in-process UI server, oRPC admin API, SSE chat, auth, Ledger design system |
 | [integrations.md](design/integrations.md) | Channel adapters, skill library, permission tiers, plugin extensibility |
 | [integrations/mcp.md](design/integrations/mcp.md) | MCP client — server config, lifecycle, sandboxing, schema pinning, profile filtering |
 | [providers.md](design/providers.md) | Multi-provider LLM routing, `llm_providers` table, profile FK, provider dispatch |
