@@ -7,13 +7,15 @@
 !pnpm-lock.yaml
 !pnpm-workspace.yaml
 !patches/
-!tsconfig.json
-!tsup.config.ts
-!src/
-!migrations/
-!vendor/
-!data/
+!apps/
+!packages/
 
-# Exclude test files that live inside src/
-src/**/*.test.ts
-src/test/
+# Re-exclude artifacts, deps, tests, and any local secrets from the context.
+# These come after the allow-list, so last-match-wins keeps them out.
+**/node_modules/
+apps/server/dist/
+apps/web/dist/
+apps/server/test/
+apps/server/src/**/*.test.ts
+**/.env
+**/.env.*

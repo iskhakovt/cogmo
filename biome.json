@@ -6,7 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!test/fixtures", "!design/web-ui/mockups"]
+    "includes": ["**", "!apps/server/test/fixtures", "!design/web-ui/mockups"]
   },
   "plugins": ["./biome-plugins/no-unsafe-cast.grit"],
   "formatter": {
@@ -45,7 +45,7 @@
       }
     },
     {
-      "includes": ["src/util/with-retry.ts"],
+      "includes": ["apps/server/src/util/with-retry.ts"],
       "linter": {
         "rules": {
           "style": {

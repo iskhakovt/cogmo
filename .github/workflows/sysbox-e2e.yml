@@ -9,9 +9,9 @@ on:
   push:
     branches: [main]
     paths:
-      - "src/sandbox/**"
-      - "src/agent/coding/**"
-      - "src/skills/**"
+      - "apps/server/src/sandbox/**"
+      - "apps/server/src/agent/coding/**"
+      - "apps/server/src/skills/**"
       - "images/skills/**"
       - "images/devbase/**"
       - "docker-bake.hcl"
@@ -20,9 +20,9 @@ on:
       - "pnpm-lock.yaml"
   pull_request:
     paths:
-      - "src/sandbox/**"
-      - "src/agent/coding/**"
-      - "src/skills/**"
+      - "apps/server/src/sandbox/**"
+      - "apps/server/src/agent/coding/**"
+      - "apps/server/src/skills/**"
       - "images/skills/**"
       - "images/devbase/**"
       - "docker-bake.hcl"

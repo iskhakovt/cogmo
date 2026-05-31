@@ -2,22 +2,29 @@ FROM mirror.gcr.io/library/node:24-trixie-slim@sha256:05c08ce4291e9a58f59456a798
 
 FROM base AS build
 WORKDIR /app
+# Root workspace manifest + every member package.json must be present before
+# the frozen install so pnpm can resolve the workspace lockfile.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/server/package.json apps/server/
+COPY apps/web/package.json apps/web/
+COPY packages/contracts/package.json packages/contracts/
 COPY patches/ patches/
 # Corepack runs only in this stage; `prepare --activate` verifies the +sha512 hash from packageManager.
 RUN corepack enable \
  && corepack prepare --activate "$(node -p "require('./package.json').packageManager")"
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
-COPY tsconfig.json tsup.config.ts ./
-COPY src/ src/
-COPY migrations/ migrations/
-COPY vendor/ vendor/
-COPY data/ data/
+COPY apps/server/tsconfig.json apps/server/tsup.config.ts apps/server/
+COPY apps/server/src/ apps/server/src/
+COPY apps/server/migrations/ apps/server/migrations/
+COPY apps/server/vendor/ apps/server/vendor/
+COPY apps/server/data/ apps/server/data/
+# Types-only package the backend re-imports; tsc needs its source present.
+COPY packages/contracts/ packages/contracts/
 # Build-time guard: the resolver's LiteLLM snapshot loader expects this
 # file at the deploy root. Failing here is louder than silently falling
 # back to the conservative default (128k/4k) for every model in prod.
-RUN test -s data/litellm-models.json
+RUN test -s apps/server/data/litellm-models.json
 RUN pnpm build
 RUN pnpm --filter cogmo deploy --prod /deploy
 
