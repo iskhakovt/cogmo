@@ -522,7 +522,7 @@
 
   /* streaming line with caret */
   .stream { font-size: 14px; color: var(--text); margin-top: calc(var(--u) * 1); }
-  .caret {
+  .stream-caret {
     display: inline-block;
     width: 7px;
     height: 1.05em;
@@ -1103,7 +1103,7 @@
                 <div class="pr-item"><span class="id">#350</span><span class="ttl">askpass path drift</span></div>
               </div>
 
-              <p class="stream">Want me to open #349 in a worktr<span class="caret"></span></p>
+              <p class="stream">Want me to open #349 in a worktr<span class="stream-caret"></span></p>
             </div>
           </div>
         </div>
@@ -1385,6 +1385,8 @@
       rows[idx].classList.add('focus');
     }
     document.addEventListener('keydown', function (e) {
+      var t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
       if (e.key === 'j' || e.key === 'ArrowDown') { set(idx + 1); e.preventDefault(); }
       else if (e.key === 'k' || e.key === 'ArrowUp') { set(idx - 1); e.preventDefault(); }
     });
