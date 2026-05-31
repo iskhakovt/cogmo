@@ -83,6 +83,8 @@ Other tracking docs:
 
 ## Module Structure
 
+**Workspace layout.** The repo is a pnpm workspace. The backend is the `cogmo` package at **`apps/server/`** — every `src/...` path in this file, `.claude/rules/`, and `design/` is relative to it (the package's internal layout is unchanged by the workspace split). The other members are `apps/web/` (the web UI SPA) and `packages/contracts/` (types-only, shared by both apps). The repo root holds workspace config (`pnpm-workspace.yaml`, root `package.json`, `biome.json`), the docs (`design/`, `todo.md`, `PROGRESS.md`, `changelog.d/`), and tooling. Root scripts (`pnpm typecheck` / `lint` / `test` / `build`) proxy to `--filter cogmo`. See [design/web-ui.md](design/web-ui.md).
+
 | Module | Responsibility | Rule |
 |-|-|-|
 | `src/agent/` | Agentic loop, tool registry, service interface, prompt assembly, tools (memory, web, file, core memory) | Domain logic — how the agent thinks and acts |
