@@ -24,7 +24,7 @@ Reuses the agent loop verbatim — the orchestrator is never touched.
 
 - **Inbound:** `POST /api/chat/:conversationId` calls `transport.emit()`, exactly as the Direct adapter does. Feeds the existing `handle-message`.
 - **Outbound:** a `WebUiAdapter` implements the existing `StreamingAdapter` (`openStream(platformAddress, runId, opts) -> { push, finish, abort }`). It registers the open SSE `ServerResponse` in a process-local map keyed by the per-tab platform address (so tabs never evict one another); `push(event)` writes `id: <seq>\ndata: <json>\n\n` for each `StreamEvent` (`text_delta | thinking_delta | tool_start | tool_result | status`); `finish`/`abort` close it. It joins the same adapters map the `DeliveryRouter` already fans out to, on a `receive: "all"` web session so every tab watching a conversation gets the response.
-- **Client reader:** the browser consumes the stream with **`@microsoft/fetch-event-source`** (fetch + `ReadableStream`), not native `EventSource` — so the streaming request carries the session cookie/identity header and owns its reconnect + `Last-Event-ID` loop. Each event maps into `assistant-ui`'s `ExternalStoreRuntime` via a stable `convertMessage`.
+- **Client reader:** the browser consumes the stream with **`eventsource-client`** (a maintained fetch-based SSE client over the `eventsource-parser` primitive), not native `EventSource` — its custom `fetch` carries cookies/credentials (same-origin sends them by default) and it owns reconnect + `Last-Event-ID`. Each event maps into `assistant-ui`'s `ExternalStoreRuntime` via a stable `convertMessage`.
 - **Durability:** Postgres is the substrate — no Redis, no external broker. On `Last-Event-ID`, the server replays missed events reconstructed from persisted `messages` rows, then resumes the live writer.
 
 **Prerequisite (transport-layer change):** the `StreamEvent` union has an `id` on `tool_start` but not on `tool_result`, so `Last-Event-ID` replay needs a **per-turn monotonic event sequence assigned at persist time** to be correct and idempotent. This lands before chat reconnect is load-bearing.
@@ -76,7 +76,7 @@ Docker: one extra build stage (`pnpm --filter web build`) + one `COPY apps/web/d
 | Framework | React 19 SPA, no SSR/RSC | SSR buys nothing on a self-hosted box and fights the SSE + RPC model; inherits the Radix/shadcn polish gravity. |
 | Routing / data | TanStack Router + Query (with `@orpc/tanstack-query`) | Typed routes + server-state cache for Transport reads, no second server. |
 | Chat runtime | `@assistant-ui/react` `ExternalStoreRuntime` | Zero wire protocol — the `StreamEvent` union flows in unchanged; persistence stays in Postgres. |
-| Chat reader | `@microsoft/fetch-event-source` | POST + headers + Page-Visibility-aware reconnect with `Last-Event-ID`. |
+| Chat reader | `eventsource-client` (on `eventsource-parser`) | maintained fetch-based SSE client: custom `fetch` (cookies/headers), reconnect + `Last-Event-ID`. |
 | Admin API | oRPC (+ Client Retry Plugin) | Typed RPC + native SSE + OpenAPI over raw `node:http`; no backend framework. Internal-only. |
 | Components | shadcn/ui copy-in on unified `radix-ui` | Own every line; accessible primitives, total visual control. |
 | Styling | Tailwind v4 (`@theme`, OKLCH) | One auditable token file is the design-system source of truth. |
