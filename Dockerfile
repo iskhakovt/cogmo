@@ -25,7 +25,10 @@ COPY packages/contracts/ packages/contracts/
 # file at the deploy root. Failing here is louder than silently falling
 # back to the conservative default (128k/4k) for every model in prod.
 RUN test -s apps/server/data/litellm-models.json
-RUN pnpm build
+# Build only the backend package explicitly — don't depend on the root
+# `build` proxy script, so the image build can't break if that script later
+# fans out to workspace members (e.g. apps/web) whose source isn't COPYed here.
+RUN pnpm --filter cogmo build
 RUN pnpm --filter cogmo deploy --prod /deploy
 
 FROM base
