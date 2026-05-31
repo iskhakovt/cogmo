@@ -1,19 +1,37 @@
 # Deny all, allow only what the Dockerfile COPYs.
-# Keeps the build context small and prevents accidental secret inclusion.
+# Default-deny keeps the build context minimal and prevents accidental
+# secret inclusion (.dev/env, .npmrc, keys never enter the context).
 *
 
-# Build inputs (must match Dockerfile COPY lines)
+# Root workspace manifests + patches
 !package.json
 !pnpm-lock.yaml
 !pnpm-workspace.yaml
 !patches/
-!tsconfig.json
-!tsup.config.ts
-!src/
-!migrations/
-!vendor/
-!data/
 
-# Exclude test files that live inside src/
-src/**/*.test.ts
-src/test/
+# Descend into apps/ + packages/ to reach the specific COPYed inputs. A
+# nested path can only be re-included after its parents are, so each level
+# un-excludes the dir, re-excludes its children, then allows what we COPY.
+!apps/
+apps/*
+!apps/server/
+apps/server/*
+!apps/server/package.json
+!apps/server/tsconfig.json
+!apps/server/tsup.config.ts
+!apps/server/src/
+!apps/server/migrations/
+!apps/server/vendor/
+!apps/server/data/
+!apps/web/
+apps/web/*
+!apps/web/package.json
+!packages/
+packages/*
+!packages/contracts/
+
+# Trim what the build doesn't need from the allowed trees.
+apps/server/src/test/
+apps/server/src/**/*.test.ts
+**/node_modules/
+**/dist/

@@ -2,13 +2,17 @@ import { execFile } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const execFileAsync = promisify(execFile);
 
-const BIOME_BIN = resolve("node_modules/.bin/biome");
-const PLUGIN_ABS_PATH = resolve("biome-plugins/no-unsafe-cast.grit");
+// biome + biome-plugins are workspace-root tooling; this test lives in the
+// cogmo package (apps/server), so resolve them from the repo root, not cwd.
+const REPO_ROOT = fileURLToPath(new URL("../../../..", import.meta.url));
+const BIOME_BIN = resolve(REPO_ROOT, "node_modules/.bin/biome");
+const PLUGIN_ABS_PATH = resolve(REPO_ROOT, "biome-plugins/no-unsafe-cast.grit");
 
 interface BiomeResult {
   exitCode: number;

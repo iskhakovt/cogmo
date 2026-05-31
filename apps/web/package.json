@@ -1,0 +1,13 @@
+{
+  "name": "web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cogmo/contracts": "workspace:*",
+    "typescript": "^6.0.3"
+  }
+}

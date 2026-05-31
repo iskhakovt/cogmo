@@ -35,12 +35,14 @@ flag_management:
         threshold: 1%
         informational: true
 
+# `**/`-prefixed so they match codecov's path-fixed report paths
+# (`apps/server/src/...`) regardless of the workspace prefix it computes.
 ignore:
-  - "src/test/**"
-  - "src/**/store/schema.ts"
-  - "src/**/types.ts"
-  - "src/inngest/events.ts"
-  - "migrations/**"
-  - "scripts/**"
-  - "dev/**"
-  - "test/**"
+  - "**/src/test/**"
+  - "**/store/schema.ts"
+  - "**/types.ts"
+  - "**/inngest/events.ts"
+  - "**/migrations/**"
+  - "**/scripts/**"
+  - "**/dev/**"
+  - "**/test/**"
