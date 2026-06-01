@@ -1,5 +1,6 @@
 import type http from "node:http";
 import { type ChatCompletionRequest, LLMock } from "@copilotkit/aimock";
+import { HAPPENED_IN_RE, normalizeHappenedIn } from "../src/test/llmock-happened-in.js";
 
 const FIXTURE_DIR = "./test/fixtures/recorded";
 
@@ -36,18 +37,6 @@ const countTokensHandler = {
  * deterministic matching. With requestTransform set, llmock uses exact match
  * (===) instead of substring (includes).
  */
-// Hindsight stamps each extracted fact with a "(happened in <Month> <Year>)"
-// temporal suffix derived from the *current* date before embedding it, so a
-// fixture recorded one month replay-mismatches the next (the month rolls over).
-// Collapse the month/year to a stable token. Shared by normalizeContent (chat)
-// and the embedding match path.
-const HAPPENED_IN_RE =
-  /\(happened in (?:January|February|March|April|May|June|July|August|September|October|November|December) \d{4}\)/g;
-
-function normalizeHappenedIn(text: string | undefined): string | undefined {
-  return text?.replace(HAPPENED_IN_RE, "(happened in [WHEN])");
-}
-
 function normalizeContent(text: string): string {
   return (
     text
