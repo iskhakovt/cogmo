@@ -36,6 +36,18 @@ const countTokensHandler = {
  * deterministic matching. With requestTransform set, llmock uses exact match
  * (===) instead of substring (includes).
  */
+// Hindsight stamps each extracted fact with a "(happened in <Month> <Year>)"
+// temporal suffix derived from the *current* date before embedding it, so a
+// fixture recorded one month replay-mismatches the next (the month rolls over).
+// Collapse the month/year to a stable token. Shared by normalizeContent (chat)
+// and the embedding match path.
+const HAPPENED_IN_RE =
+  /\(happened in (?:January|February|March|April|May|June|July|August|September|October|November|December) \d{4}\)/g;
+
+function normalizeHappenedIn(text: string): string {
+  return text.replace(HAPPENED_IN_RE, "(happened in [WHEN])");
+}
+
 function normalizeContent(text: string): string {
   return (
     text
@@ -62,6 +74,8 @@ function normalizeContent(text: string): string {
       // every turn's user message — collapse to a stable token so
       // record/replay matching doesn't miss after the first turn.
       .replace(/\.claude\/plans\/task-[a-z0-9-]+\.md/g, ".claude/plans/task-[SLUG].md")
+      // Month-rollover-safe temporal suffix (see HAPPENED_IN_RE).
+      .replace(HAPPENED_IN_RE, "(happened in [WHEN])")
   );
 }
 
@@ -72,7 +86,9 @@ function requestTransform(req: ChatCompletionRequest): ChatCompletionRequest {
       ...m,
       content: typeof m.content === "string" ? normalizeContent(m.content) : m.content,
     })),
-    embeddingInput: req.embeddingInput?.split(" | ")[0],
+    embeddingInput: req.embeddingInput
+      ? normalizeHappenedIn(req.embeddingInput.split(" | ")[0] ?? "")
+      : undefined,
   };
 }
 
