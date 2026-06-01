@@ -1,5 +1,6 @@
 import type http from "node:http";
 import { type ChatCompletionRequest, LLMock } from "@copilotkit/aimock";
+import { HAPPENED_IN_RE, normalizeHappenedIn } from "../src/test/llmock-happened-in.js";
 
 const FIXTURE_DIR = "./test/fixtures/recorded";
 
@@ -62,6 +63,8 @@ function normalizeContent(text: string): string {
       // every turn's user message — collapse to a stable token so
       // record/replay matching doesn't miss after the first turn.
       .replace(/\.claude\/plans\/task-[a-z0-9-]+\.md/g, ".claude/plans/task-[SLUG].md")
+      // Month-rollover-safe temporal suffix (see HAPPENED_IN_RE).
+      .replace(HAPPENED_IN_RE, "(happened in [WHEN])")
   );
 }
 
@@ -72,7 +75,7 @@ function requestTransform(req: ChatCompletionRequest): ChatCompletionRequest {
       ...m,
       content: typeof m.content === "string" ? normalizeContent(m.content) : m.content,
     })),
-    embeddingInput: req.embeddingInput?.split(" | ")[0],
+    embeddingInput: normalizeHappenedIn(req.embeddingInput?.split(" | ")[0]),
   };
 }
 

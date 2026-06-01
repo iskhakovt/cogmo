@@ -3,7 +3,7 @@
     {
       "match": {
         "endpoint": "embedding",
-        "inputText": "Homelab IP is 10.0.10.10 (happened in May 2026)"
+        "inputText": "Homelab IP is 10.0.10.10 (happened in [WHEN])"
       },
       "response": {
         "embedding": [
