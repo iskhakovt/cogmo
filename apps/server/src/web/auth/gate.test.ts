@@ -66,6 +66,7 @@ describe("csrfReject", () => {
   });
 
   it("accepts a same-hostname Origin despite a port mismatch (TLS-terminating proxy)", () => {
+    // No Sec-Fetch-Site (legacy browser) -> Origin host fallback, hostname-only.
     expect(
       csrfReject(
         req("POST", {
@@ -75,6 +76,22 @@ describe("csrfReject", () => {
         }),
       ),
     ).toBe(false);
+  });
+
+  it("rejects a same-site request (sibling-port origin) even when the hostname matches", () => {
+    // Modern browser: Sec-Fetch-Site is authoritative and port-aware, so a
+    // same-hostname-different-port origin ("same-site", not "same-origin") is
+    // rejected despite the Origin hostname matching the Host.
+    expect(
+      csrfReject(
+        req("POST", {
+          "sec-fetch-site": "same-site",
+          origin: "https://cogmo.example:8080",
+          host: "cogmo.example:9090",
+          "content-type": "application/json",
+        }),
+      ),
+    ).toBe(true);
   });
 
   it("rejects a cross-hostname Origin regardless of port", () => {

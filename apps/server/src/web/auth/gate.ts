@@ -34,26 +34,32 @@ export function csrfReject(req: IncomingMessage): boolean {
   const method = (req.method ?? "GET").toUpperCase();
   if (!STATE_CHANGING.has(method)) return false;
 
-  // Origin gate: trust Sec-Fetch-Site same-origin/none, else an exact Origin-host match.
+  // Origin gate. Prefer Sec-Fetch-Site: it's browser-computed and port/scheme-
+  // aware, and behind a TLS-terminating proxy it still reflects the true origin
+  // relationship (unlike the proxied Host header). Fall back to an Origin match
+  // only for legacy browsers that don't send it.
   const secFetchSite = headerValue(req, "sec-fetch-site");
-  const sameSite = secFetchSite === "same-origin" || secFetchSite === "none";
-  let originOk = false;
-  if (!sameSite) {
+  if (secFetchSite !== undefined) {
+    // `none` = direct navigation / non-browser client; `same-origin` = our own
+    // page. Anything else — `same-site` (a sibling-port origin) or `cross-site`
+    // — is a different origin and is rejected.
+    if (secFetchSite !== "same-origin" && secFetchSite !== "none") return true;
+  } else {
     const origin = headerValue(req, "origin");
     const host = headerValue(req, "host");
+    let originOk = false;
     if (origin && host) {
       try {
-        // Compare hostnames only — a TLS-terminating proxy commonly leaves the
-        // Origin port implicit (:443) while the Host header keeps the internal
-        // port, and a port mismatch isn't an attacker vector for CSRF. Parsing
-        // the Host via URL handles IPv6 brackets that a `split(":")` would break.
+        // Hostname-only — a TLS-terminating proxy commonly leaves the Origin
+        // port implicit (:443) while the Host header keeps the internal port.
+        // Parsing the Host via URL handles IPv6 brackets a `split(":")` breaks.
         originOk = new URL(origin).hostname === new URL(`http://${host}`).hostname;
       } catch {
         originOk = false;
       }
     }
+    if (!originOk) return true;
   }
-  if (!sameSite && !originOk) return true;
 
   // Content-type gate for body-bearing methods: an HTML form can't send
   // application/json, so requiring it blocks classic form CSRF. DELETE carries

@@ -215,8 +215,14 @@ export function createWebServer(deps: CreateWebServerDeps): Server {
 /** Start the web server on `host:port`. Returns the node `Server` for shutdown. */
 export function startWebServer(deps: StartWebServerDeps): Promise<Server> {
   const server = createWebServer(deps);
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    // Surface a bind failure (EADDRINUSE / EACCES) as a rejected promise; without
+    // this the 'error' event is unhandled (uncaught exception) and the await never
+    // settles. Scoped to startup — removed once listening so runtime errors aren't
+    // swallowed.
+    server.once("error", reject);
     server.listen(deps.port, deps.host, () => {
+      server.removeListener("error", reject);
       logger.info({ host: deps.host, port: deps.port }, "web server listening");
       resolve(server);
     });

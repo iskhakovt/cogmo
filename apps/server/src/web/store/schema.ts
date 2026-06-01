@@ -16,9 +16,11 @@ export const webSessions = pgTable(
     // SHA-256 hex of the raw 32-byte session token (the cookie value). Unique
     // because one cookie maps to at most one row.
     tokenHash: text("token_hash").notNull().unique(),
+    // Cascade: a session is ephemeral, owned data — deleting the owner deletes
+    // its sessions (and never lets them block the delete).
     userId: uuid("user_id")
       .notNull()
-      .references(() => users.id),
+      .references(() => users.id, { onDelete: "cascade" }),
     // Bumped on each authenticated request — idle bookkeeping + the future
     // "active sessions" view.
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }).notNull().defaultNow(),

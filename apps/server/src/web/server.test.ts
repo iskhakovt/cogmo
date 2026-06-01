@@ -1,3 +1,4 @@
+import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createORPCClient } from "@orpc/client";
 import { RPCLink } from "@orpc/client/fetch";
@@ -9,7 +10,7 @@ import { expectDefined } from "../test/assertions.js";
 import { mockTransportDeep } from "../test/factories.js";
 import { createTestDatabase } from "../test/pglite.js";
 import type { webRouter } from "./rpc/router.js";
-import { createWebServer } from "./server.js";
+import { createWebServer, startWebServer } from "./server.js";
 import { hashSessionToken } from "./session/token.js";
 import { DrizzleWebSessionStore } from "./store/index.js";
 import { webSessions } from "./store/schema.js";
@@ -227,5 +228,30 @@ describe("web server", () => {
       }),
     );
     await expect(rpcClient("__Host-session=expired-raw").models.list()).rejects.toThrow();
+  });
+
+  it("startWebServer rejects on a bind failure instead of crashing", async () => {
+    // Occupy a port, then start the web server on the same one -> EADDRINUSE.
+    const blocker = createServer();
+    await new Promise<void>((resolve) => blocker.listen(0, "127.0.0.1", resolve));
+    const port = (blocker.address() as AddressInfo).port;
+    try {
+      await expect(
+        startWebServer({
+          webTransport: null,
+          webSessionStore: new DrizzleWebSessionStore(),
+          runInTx: tx,
+          verifyLoginToken: () => false,
+          ownerUserId,
+          sessionTtlDays: 30,
+          cookieSecure: true,
+          staticRoot: "/nonexistent-cogmo-dist",
+          host: "127.0.0.1",
+          port,
+        }),
+      ).rejects.toThrow();
+    } finally {
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    }
   });
 });
