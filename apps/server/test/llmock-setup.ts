@@ -44,8 +44,8 @@ const countTokensHandler = {
 const HAPPENED_IN_RE =
   /\(happened in (?:January|February|March|April|May|June|July|August|September|October|November|December) \d{4}\)/g;
 
-function normalizeHappenedIn(text: string): string {
-  return text.replace(HAPPENED_IN_RE, "(happened in [WHEN])");
+function normalizeHappenedIn(text: string | undefined): string | undefined {
+  return text?.replace(HAPPENED_IN_RE, "(happened in [WHEN])");
 }
 
 function normalizeContent(text: string): string {
@@ -86,9 +86,7 @@ function requestTransform(req: ChatCompletionRequest): ChatCompletionRequest {
       ...m,
       content: typeof m.content === "string" ? normalizeContent(m.content) : m.content,
     })),
-    embeddingInput: req.embeddingInput
-      ? normalizeHappenedIn(req.embeddingInput.split(" | ")[0] ?? "")
-      : undefined,
+    embeddingInput: normalizeHappenedIn(req.embeddingInput?.split(" | ")[0]),
   };
 }
 
