@@ -1,5 +1,5 @@
 {
-  "id": "426f4e55-43ed-4f58-8518-9097cf9d7d25",
+  "id": "04891c4d-9690-48f1-8688-0680982e2e6d",
   "prevId": "eb252137-c549-4bf1-b16f-589a14e85245",
   "version": "7",
   "dialect": "postgresql",
@@ -3622,6 +3622,21 @@
           "columns": [
             {
               "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_web_sessions_expires": {
+          "name": "idx_web_sessions_expires",
+          "columns": [
+            {
+              "expression": "expires_at",
               "isExpression": false,
               "asc": true,
               "nulls": "last"

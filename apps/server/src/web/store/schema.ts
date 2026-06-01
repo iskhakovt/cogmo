@@ -30,5 +30,9 @@ export const webSessions = pgTable(
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: ts(),
   },
-  (t) => [index("idx_web_sessions_user").on(t.userId)],
+  (t) => [
+    index("idx_web_sessions_user").on(t.userId),
+    // `deleteExpired` (login-time purge) range-filters on expires_at.
+    index("idx_web_sessions_expires").on(t.expiresAt),
+  ],
 );

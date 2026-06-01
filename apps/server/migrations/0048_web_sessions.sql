@@ -9,4 +9,5 @@ CREATE TABLE "web_sessions" (
 );
 --> statement-breakpoint
 ALTER TABLE "web_sessions" ADD CONSTRAINT "web_sessions_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-CREATE INDEX "idx_web_sessions_user" ON "web_sessions" USING btree ("user_id");
+CREATE INDEX "idx_web_sessions_user" ON "web_sessions" USING btree ("user_id");--> statement-breakpoint
+CREATE INDEX "idx_web_sessions_expires" ON "web_sessions" USING btree ("expires_at");
