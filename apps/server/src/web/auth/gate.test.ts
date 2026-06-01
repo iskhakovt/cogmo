@@ -65,6 +65,30 @@ describe("csrfReject", () => {
     ).toBe(true);
   });
 
+  it("accepts a same-hostname Origin despite a port mismatch (TLS-terminating proxy)", () => {
+    expect(
+      csrfReject(
+        req("POST", {
+          origin: "https://cogmo.example",
+          host: "cogmo.example:9090",
+          "content-type": "application/json",
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects a cross-hostname Origin regardless of port", () => {
+    expect(
+      csrfReject(
+        req("POST", {
+          origin: "https://evil.example:9090",
+          host: "cogmo.example:9090",
+          "content-type": "application/json",
+        }),
+      ),
+    ).toBe(true);
+  });
+
   it("origin-gates DELETE but skips its content-type", () => {
     expect(csrfReject(req("DELETE", { "sec-fetch-site": "same-origin" }))).toBe(false);
     expect(csrfReject(req("DELETE", { "sec-fetch-site": "cross-site" }))).toBe(true);

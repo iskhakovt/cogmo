@@ -21,7 +21,14 @@ export function parseCookies(header: string | undefined): Record<string, string>
     if (eq === -1) continue;
     const name = part.slice(0, eq).trim();
     if (!name) continue;
-    out[name] = decodeURIComponent(part.slice(eq + 1).trim());
+    const raw = part.slice(eq + 1).trim();
+    // A malformed percent-encoding (`%zz`) in any cookie on the host would
+    // otherwise throw a URIError and 500 the whole request — fall back to raw.
+    try {
+      out[name] = decodeURIComponent(raw);
+    } catch {
+      out[name] = raw;
+    }
   }
   return out;
 }

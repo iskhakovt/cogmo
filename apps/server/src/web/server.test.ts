@@ -131,6 +131,15 @@ describe("web server", () => {
       });
       expect(res.status).toBe(403);
     });
+
+    it("413s an oversized body (unauthenticated DoS guard)", async () => {
+      const res = await fetch(`${base}/api/session`, {
+        method: "POST",
+        headers: jsonHeaders(),
+        body: JSON.stringify({ token: "x".repeat(70 * 1024) }),
+      });
+      expect(res.status).toBe(413);
+    });
   });
 
   describe("/rpc (gated)", () => {

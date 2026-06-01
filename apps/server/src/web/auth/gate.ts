@@ -43,7 +43,11 @@ export function csrfReject(req: IncomingMessage): boolean {
     const host = headerValue(req, "host");
     if (origin && host) {
       try {
-        originOk = new URL(origin).host === host;
+        // Compare hostnames only — a TLS-terminating proxy commonly leaves the
+        // Origin port implicit (:443) while the Host header keeps the internal
+        // port, and a port mismatch isn't an attacker vector for CSRF. Parsing
+        // the Host via URL handles IPv6 brackets that a `split(":")` would break.
+        originOk = new URL(origin).hostname === new URL(`http://${host}`).hostname;
       } catch {
         originOk = false;
       }

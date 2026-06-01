@@ -44,9 +44,28 @@ function send(res: ServerResponse, status: number, message: string): void {
   res.end(message);
 }
 
+/** Login bodies are tiny (`{ token }`). Cap the unauthenticated read so a public
+ * endpoint can't be used to exhaust memory with an unbounded stream. */
+const MAX_BODY_BYTES = 64 * 1024;
+
+class PayloadTooLargeError extends Error {}
+
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  // Reject an honestly-declared oversized body before reading a byte; the
+  // streaming cap below backstops chunked / lying Content-Length. Stop reading
+  // (don't destroy the socket — that races the 413 response) once over the cap.
+  const declared = Number(req.headers["content-length"]);
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+    throw new PayloadTooLargeError();
+  }
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
+  let total = 0;
+  for await (const chunk of req) {
+    const buf = chunk as Buffer;
+    total += buf.length;
+    if (total > MAX_BODY_BYTES) throw new PayloadTooLargeError();
+    chunks.push(buf);
+  }
   const raw = Buffer.concat(chunks).toString("utf8");
   return raw ? JSON.parse(raw) : undefined;
 }
@@ -81,8 +100,8 @@ export function createWebServer(deps: CreateWebServerDeps): Server {
     let body: unknown;
     try {
       body = await readJsonBody(req);
-    } catch {
-      send(res, 400, "Bad Request");
+    } catch (err) {
+      send(res, err instanceof PayloadTooLargeError ? 413 : 400, "Bad Request");
       return;
     }
     const token =

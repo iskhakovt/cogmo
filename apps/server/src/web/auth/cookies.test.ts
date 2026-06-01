@@ -22,6 +22,14 @@ describe("parseCookies", () => {
   it("url-decodes values", () => {
     expect(parseCookies("x=a%20b")).toEqual({ x: "a b" });
   });
+
+  it("falls back to the raw value on a malformed percent-encoding", () => {
+    // A bad cookie from another app on the host must not throw (would 500 the request).
+    expect(parseCookies("x=%zz; __Host-session=ok")).toEqual({
+      x: "%zz",
+      "__Host-session": "ok",
+    });
+  });
 });
 
 describe("sessionCookieName", () => {
