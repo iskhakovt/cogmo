@@ -32,8 +32,11 @@ export async function createSession(
   const maxAgeSeconds = deps.ttlDays * 24 * 60 * 60;
   const expiresAt = new Date(args.now.getTime() + maxAgeSeconds * 1000);
 
-  await deps.runInTx((tx) =>
-    deps.webSessionStore.create(tx, { tokenHash, userId: deps.ownerUserId, expiresAt }),
-  );
+  await deps.runInTx(async (tx) => {
+    // Opportunistic purge of expired rows — login is rare, so this bounds the
+    // table without a periodic reaper or any per-request write amplification.
+    await deps.webSessionStore.deleteExpired(tx, args.now);
+    await deps.webSessionStore.create(tx, { tokenHash, userId: deps.ownerUserId, expiresAt });
+  });
   return { rawToken, maxAgeSeconds };
 }

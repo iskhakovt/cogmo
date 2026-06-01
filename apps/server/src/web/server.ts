@@ -52,8 +52,10 @@ class PayloadTooLargeError extends Error {}
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   // Reject an honestly-declared oversized body before reading a byte; the
-  // streaming cap below backstops chunked / lying Content-Length. Stop reading
-  // (don't destroy the socket — that races the 413 response) once over the cap.
+  // streaming cap below backstops chunked / lying Content-Length. Throwing
+  // unwinds the read — the `for await` iterator's return() ends the request
+  // stream — and the handler replies 413. We just don't call `req.destroy()`
+  // ourselves, which tore down the socket before the response could flush.
   const declared = Number(req.headers["content-length"]);
   if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
     throw new PayloadTooLargeError();

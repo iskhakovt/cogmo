@@ -201,8 +201,13 @@ async function main() {
     }
   } finally {
     // Drain HTTP first — stop accepting requests before the Transport and
-    // stores the oRPC layer depends on are torn down.
-    await new Promise<void>((resolve) => webServer.close(() => resolve()));
+    // stores the oRPC layer depends on are torn down. `closeIdleConnections`
+    // drops idle keep-alive sockets (a browser holding one open would otherwise
+    // make `close()` wait indefinitely); in-flight requests still drain.
+    await new Promise<void>((resolve) => {
+      webServer.close(() => resolve());
+      webServer.closeIdleConnections();
+    });
     for (const adapter of adapters) {
       await adapter.stop();
     }

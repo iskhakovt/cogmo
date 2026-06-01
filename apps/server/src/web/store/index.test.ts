@@ -76,4 +76,15 @@ describe("DrizzleWebSessionStore", () => {
     await tx((trx) => store.deleteByTokenHash(trx, "h4"));
     expect(await tx((trx) => store.findValidByTokenHash(trx, "h4", new Date()))).toBeUndefined();
   });
+
+  it("deleteExpired purges only expired rows", async () => {
+    const userId = await makeUser();
+    await tx((trx) => store.create(trx, { tokenHash: "live", userId, expiresAt: future() }));
+    await tx((trx) =>
+      store.create(trx, { tokenHash: "dead", userId, expiresAt: new Date(Date.now() - 1000) }),
+    );
+    await tx((trx) => store.deleteExpired(trx, new Date()));
+    const remaining = await db.select({ tokenHash: webSessions.tokenHash }).from(webSessions);
+    expect(remaining.map((r) => r.tokenHash)).toEqual(["live"]);
+  });
 });

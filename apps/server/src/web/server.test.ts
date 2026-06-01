@@ -140,6 +140,15 @@ describe("web server", () => {
       });
       expect(res.status).toBe(413);
     });
+
+    it("400s a malformed JSON body", async () => {
+      const res = await fetch(`${base}/api/session`, {
+        method: "POST",
+        headers: jsonHeaders(),
+        body: "{not valid json",
+      });
+      expect(res.status).toBe(400);
+    });
   });
 
   describe("/rpc (gated)", () => {
@@ -160,6 +169,38 @@ describe("web server", () => {
         body: "{}",
       });
       expect(res.status).toBe(403);
+    });
+
+    it("503s behind a valid cookie when the web channel isn't provisioned", async () => {
+      // Separate server with no web-scoped Transport (web channel unprovisioned).
+      const server503 = createWebServer({
+        webTransport: null,
+        webSessionStore: new DrizzleWebSessionStore(),
+        runInTx: tx,
+        verifyLoginToken: (candidate) => candidate === VALID_TOKEN,
+        ownerUserId,
+        sessionTtlDays: 30,
+        cookieSecure: true,
+        staticRoot: "/nonexistent-cogmo-dist",
+      });
+      await new Promise<void>((resolve) => server503.listen(0, "127.0.0.1", resolve));
+      const base503 = `http://127.0.0.1:${(server503.address() as AddressInfo).port}`;
+      try {
+        const loginRes = await fetch(`${base503}/api/session`, {
+          method: "POST",
+          headers: jsonHeaders(),
+          body: JSON.stringify({ token: VALID_TOKEN }),
+        });
+        const setCookie = expectDefined(loginRes.headers.get("set-cookie"), "set-cookie");
+        const cookie = expectDefined(setCookie.split(";")[0], "cookie pair");
+        // Gate passes (valid cookie); the null Transport is what surfaces 503.
+        const res = await fetch(`${base503}/rpc/models/list`, {
+          headers: { cookie, "sec-fetch-site": "same-origin" },
+        });
+        expect(res.status).toBe(503);
+      } finally {
+        await new Promise<void>((resolve) => server503.close(() => resolve()));
+      }
     });
   });
 

@@ -1,4 +1,4 @@
-import { and, eq, gt } from "drizzle-orm";
+import { and, eq, gt, lt } from "drizzle-orm";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
 import { webSessions } from "./schema.js";
@@ -17,13 +17,16 @@ export interface WebSessionStore {
     tx: Transaction,
     tokenHash: string,
     now: Date,
-  ): Promise<{ id: string; userId: string; expiresAt: Date } | undefined>;
+  ): Promise<{ id: string; userId: string; expiresAt: Date; lastUsedAt: Date } | undefined>;
 
   /** Update last_used_at on a successful gate pass. */
   touch(tx: Transaction, id: string, now: Date): Promise<void>;
 
   /** Delete a session by token hash (logout). */
   deleteByTokenHash(tx: Transaction, tokenHash: string): Promise<void>;
+
+  /** Purge already-expired rows. Called opportunistically at login. */
+  deleteExpired(tx: Transaction, now: Date): Promise<void>;
 }
 
 // --- Implementation ---
@@ -49,12 +52,13 @@ export class DrizzleWebSessionStore implements WebSessionStore {
     tx: Transaction,
     tokenHash: string,
     now: Date,
-  ): Promise<{ id: string; userId: string; expiresAt: Date } | undefined> {
+  ): Promise<{ id: string; userId: string; expiresAt: Date; lastUsedAt: Date } | undefined> {
     const rows = await tx
       .select({
         id: webSessions.id,
         userId: webSessions.userId,
         expiresAt: webSessions.expiresAt,
+        lastUsedAt: webSessions.lastUsedAt,
       })
       .from(webSessions)
       .where(and(eq(webSessions.tokenHash, tokenHash), gt(webSessions.expiresAt, now)))
@@ -68,5 +72,9 @@ export class DrizzleWebSessionStore implements WebSessionStore {
 
   async deleteByTokenHash(tx: Transaction, tokenHash: string): Promise<void> {
     await tx.delete(webSessions).where(eq(webSessions.tokenHash, tokenHash));
+  }
+
+  async deleteExpired(tx: Transaction, now: Date): Promise<void> {
+    await tx.delete(webSessions).where(lt(webSessions.expiresAt, now));
   }
 }
