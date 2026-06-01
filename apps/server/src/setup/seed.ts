@@ -74,6 +74,25 @@ export async function ensureDirectChannel(
   });
 }
 
+/** Create the web channel + wildcard identity if none exists. Single-owner, fixed identity (like direct). */
+export async function ensureWebChannel(
+  runInTx: Transactor,
+  transportStore: TransportStore,
+  userId: string,
+): Promise<void> {
+  await runInTx(async (tx) => {
+    const existing = await transportStore.getChannelByType(tx, "web");
+    if (existing) return;
+    const { id: channelId } = await transportStore.createChannel(tx, {
+      type: "web",
+      credentials: {},
+      identityMode: "fixed",
+    });
+    await transportStore.createWildcardIdentity(tx, { userId, channelId });
+    logger.info({ channelId }, "created web channel");
+  });
+}
+
 const TELEGRAM_DEFAULT_RULES = [
   "Avoid tables — they don't render on this channel. Use bullet lists instead.",
   "Prefer concise replies. For longer answers, use headings and short paragraphs.",
@@ -115,6 +134,7 @@ export async function seedDefaults(
   const userId = await ensureDefaultUser(runInTx, agentStore);
   const profileId = await ensureDefaultProfile(runInTx, agentStore);
   await ensureDirectChannel(runInTx, transportStore, userId);
+  await ensureWebChannel(runInTx, transportStore, userId);
   return { userId, profileId };
 }
 

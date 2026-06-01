@@ -93,6 +93,7 @@ Other tracking docs:
 | `src/inngest/` | Inngest client, event definitions | Orchestration infrastructure — client setup and event schemas only, no business logic |
 | `src/llm/` | LLM provider interface, SDK adapters (Anthropic, OpenAI-compatible), canonical types (ContentBlock, StreamEvent, ImageBlock) | Single LLM call — provider abstraction, request/response translation |
 | `src/memory/` | Memory provider interface, Hindsight adapter | Memory access — provider abstraction, HTTP client |
+| `src/web/` | Web UI server — promoted health router, oRPC admin API over `Transport`, fail-closed session auth (`web_sessions`), static SPA serving | Transport edge — a thin HTTP/RPC adapter that calls `Transport`/use-cases, no domain logic |
 | `src/util/` | Cross-cutting pure helpers (retry, etc.) | Stateless utilities only — no I/O ownership, no domain logic. If a helper needs DI, it belongs in a domain module instead. |
 
 **Infrastructure modules (`db/`, `inngest/`, `llm/`, `memory/`) contain only core setup and abstractions.** Business logic that uses them lives in domain modules (`agent/`, `transport/`). Example: the Inngest event definitions live in `src/inngest/events.ts`, but the `handle-message` orchestrator function that uses them lives in `src/agent/`. Respond functions live in `src/transport/`, not `src/inngest/functions/`.

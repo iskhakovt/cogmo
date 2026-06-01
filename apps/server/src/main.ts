@@ -35,6 +35,25 @@ async function dispatch(cmd: string): Promise<number> {
       );
       return 0;
     }
+    case "web-token": {
+      // Read the master key directly (with the `_FILE` convention) rather than
+      // the full env — like `gen-key`, this prints standalone without a
+      // configured runtime (no DB / Inngest / Hindsight URLs needed).
+      const { resolveEnvFile } = await import("./secrets/env-file.js");
+      const masterKey = resolveEnvFile(process.env, "COGMO_MASTER_KEY");
+      if (!masterKey) {
+        console.error("COGMO_MASTER_KEY is required. Generate one with: cogmo gen-key");
+        return 1;
+      }
+      const { deriveWebLoginToken } = await import("./web/auth/login-token.js");
+      console.log(deriveWebLoginToken(masterKey));
+      console.log(
+        "# Paste this token into the web UI login to mint a session cookie.\n" +
+          "# Derived from COGMO_MASTER_KEY — stored nowhere, safe to reprint.\n" +
+          "# Rotate by bumping the purpose version in src/web/auth/login-token.ts.",
+      );
+      return 0;
+    }
     case "skills": {
       const { runSkillsCli } = await import("./skills/cli.js");
       const { bootstrapCore, bootstrapSkillRunner, NO_SANDBOX } = await import("./index.js");
@@ -115,7 +134,7 @@ async function dispatch(cmd: string): Promise<number> {
     default:
       console.error(`Unknown command: ${cmd}`);
       console.error(
-        "Usage: main.js [serve|seed|setup|gen-key|provider|model|image-provider|image-model|skills|migrate-memories|backfill|migrate-skills-remote]",
+        "Usage: main.js [serve|seed|setup|gen-key|web-token|provider|model|image-provider|image-model|skills|migrate-memories|backfill|migrate-skills-remote]",
       );
       return 1;
   }
@@ -126,7 +145,8 @@ async function main() {
   const { createServer: createInngestServer } = await import("inngest/node");
   const { bootstrap } = await import("./index.js");
   const { env } = await import("./env.js");
-  const { startHealthServer } = await import("./health.js");
+  const { startWebServer } = await import("./web/server.js");
+  const { verifyWebLoginToken } = await import("./web/auth/login-token.js");
   const { logger } = await import("./logger.js");
 
   const {
@@ -138,8 +158,23 @@ async function main() {
     sandboxInstanceId,
     mcpRegistry,
     runInTx,
+    webTransport,
+    webSessionStore,
+    webLoginToken,
+    user,
   } = await bootstrap();
-  const healthServer = await startHealthServer();
+  const webServer = await startWebServer({
+    webTransport,
+    webSessionStore,
+    runInTx,
+    verifyLoginToken: (candidate) => verifyWebLoginToken(candidate, webLoginToken),
+    ownerUserId: user.id,
+    sessionTtlDays: env.WEB_SESSION_TTL_DAYS,
+    cookieSecure: !env.WEB_INSECURE_COOKIES,
+    staticRoot: env.WEB_STATIC_ROOT,
+    host: env.WEB_HOST,
+    port: env.WEB_PORT,
+  });
 
   try {
     if (env.INNGEST_MODE === "serve") {
@@ -165,6 +200,9 @@ async function main() {
       await connection.closed;
     }
   } finally {
+    // Drain HTTP first — stop accepting requests before the Transport and
+    // stores the oRPC layer depends on are torn down.
+    await new Promise<void>((resolve) => webServer.close(() => resolve()));
     for (const adapter of adapters) {
       await adapter.stop();
     }
@@ -173,7 +211,6 @@ async function main() {
     if (sandboxInstanceId) {
       await runInTx((tx) => sandboxStore.closeInstance(tx, sandboxInstanceId));
     }
-    await new Promise<void>((resolve) => healthServer.close(() => resolve()));
   }
 
   logger.info("cogmo stopped");

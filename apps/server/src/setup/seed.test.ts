@@ -7,7 +7,13 @@ import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../secrets/e
 import { DrizzleSecretsStore } from "../secrets/store/index.js";
 import { expectDefined } from "../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
-import { ensureFalImageDefaults } from "./seed.js";
+import { DrizzleTransportStore } from "../transport/store/index.js";
+import {
+  ensureDefaultUser,
+  ensureFalImageDefaults,
+  ensureWebChannel,
+  seedDefaults,
+} from "./seed.js";
 
 /**
  * Tests for `ensureFalImageDefaults` — the bootstrap-time seed that wires
@@ -22,10 +28,12 @@ let tx: Transactor;
 let close: () => Promise<void>;
 let agentStore: DrizzleAgentStore;
 let secretsStore: DrizzleSecretsStore;
+let transportStore: DrizzleTransportStore;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
   agentStore = new DrizzleAgentStore();
+  transportStore = new DrizzleTransportStore();
   const key = deriveMasterKey(parseMasterKey(generateMasterKey()), "cogmo/secrets-at-rest/v1");
   secretsStore = new DrizzleSecretsStore(key);
 });
@@ -173,5 +181,34 @@ describe("ensureFalImageDefaults", () => {
     expect(providers).toHaveLength(1);
     const after = await tx((trx) => agentStore.listImageModels(trx));
     expect(after.length).toBe(modelsBefore.length); // back to original count
+  });
+});
+
+describe("ensureWebChannel", () => {
+  it("creates a fixed-identity web channel with a wildcard identity", async () => {
+    const userId = await ensureDefaultUser(tx, agentStore);
+    await ensureWebChannel(tx, transportStore, userId);
+
+    const channel = expectDefined(
+      await tx((trx) => transportStore.getChannelByType(trx, "web")),
+      "web channel",
+    );
+    expect(channel.identityMode).toBe("fixed");
+    // The wildcard resolves any handle to the single owner.
+    const resolved = await tx((trx) => transportStore.resolveUser(trx, channel.id, "any-handle"));
+    expect(resolved?.userId).toBe(userId);
+  });
+
+  it("is idempotent — a second call no-ops", async () => {
+    const userId = await ensureDefaultUser(tx, agentStore);
+    await ensureWebChannel(tx, transportStore, userId);
+    await ensureWebChannel(tx, transportStore, userId);
+    expect(await tx((trx) => transportStore.getChannelByType(trx, "web"))).toBeDefined();
+  });
+
+  it("seedDefaults provisions both the direct and web channels", async () => {
+    await seedDefaults(tx, agentStore, transportStore);
+    expect(await tx((trx) => transportStore.getChannelByType(trx, "direct"))).toBeDefined();
+    expect(await tx((trx) => transportStore.getChannelByType(trx, "web"))).toBeDefined();
   });
 });
