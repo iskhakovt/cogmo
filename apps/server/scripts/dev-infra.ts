@@ -195,14 +195,17 @@ async function main() {
   });
 
   // Spawn the Vite dev server for the web UI. It serves apps/web and proxies
-  // /rpc + /api to the backend on :9090. Vite's proxy fails until the backend
+  // /rpc + /api to the backend on :9090. The proxy fails until the backend
   // finishes booting — that's fine, it retries per request; load the page once
-  // the backend logs ready.
+  // the backend logs ready. No env override — vite needs nothing beyond the
+  // inherited process.env (the infra/secret vars are backend-only).
+  //
+  // Ctrl+C signals the whole foreground process group, so vite (a pnpm
+  // grandchild) dies directly. On the programmatic shutdown() path below,
+  // killing the pnpm wrapper may not forward to that grandchild — so a crash
+  // of the *other* child can leave :5173 occupied until the orphan is reaped.
   console.log("Running web UI (vite, apps/web)...\n");
-  const web = spawn("pnpm", ["--filter", "web", "dev"], {
-    stdio: "inherit",
-    env: { ...process.env },
-  });
+  const web = spawn("pnpm", ["--filter", "web", "dev"], { stdio: "inherit" });
 
   const children = [app, web];
 
@@ -226,8 +229,9 @@ async function main() {
   function shutdown(code: number): void {
     if (exiting) return;
     exiting = true;
+    // SIGTERM both and exit without awaiting — the children reparent and clean
+    // up on their own; containers stay up (reuse).
     for (const ch of children) ch.kill("SIGTERM");
-    // Don't stop containers — they're reusable.
     console.log(`\nDev processes stopped (code ${code}). Containers still running (reuse).`);
     process.exit(code);
   }
