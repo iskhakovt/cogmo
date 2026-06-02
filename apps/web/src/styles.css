@@ -1,0 +1,85 @@
+/* Minimal styling for the Phase 1b proof — neutral, no Ledger theme yet. */
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, sans-serif;
+  color: #1c1c1c;
+  background: #f4f4f2;
+}
+
+.page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+}
+
+.card {
+  width: min(28rem, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1.5rem;
+  background: #fff;
+  border: 1px solid #d8d8d4;
+  border-radius: 8px;
+}
+
+.card h1 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+label {
+  font-size: 0.8rem;
+  color: #555;
+}
+
+input {
+  padding: 0.5rem 0.6rem;
+  font: inherit;
+  border: 1px solid #c9c9c4;
+  border-radius: 6px;
+}
+
+button {
+  padding: 0.5rem 0.9rem;
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid #2f3aa3;
+  border-radius: 6px;
+  background: #2f3aa3;
+  color: #fff;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-family: ui-monospace, monospace;
+}
+
+.error {
+  margin: 0;
+  color: #b00020;
+  font-size: 0.85rem;
+}
+
+.hint {
+  margin: 0;
+  color: #777;
+  font-size: 0.8rem;
+}

@@ -31,6 +31,14 @@ RUN test -s apps/server/data/litellm-models.json
 RUN pnpm --filter cogmo build
 RUN pnpm --filter cogmo deploy --prod /deploy
 
+# Build the SPA last: server-source edits (the common case) don't invalidate the
+# Vite build, and SPA edits don't touch the server layers above. `pnpm deploy`
+# only bundles the cogmo package, so the dist is COPYed into the runtime stage
+# separately below. Output lands at /app/apps/web/dist (WEB_STATIC_ROOT default).
+COPY apps/web/index.html apps/web/vite.config.ts apps/web/tsconfig.json apps/web/
+COPY apps/web/src/ apps/web/src/
+RUN pnpm --filter web build
+
 FROM base
 ENV NODE_ENV=production
 WORKDIR /app
@@ -68,11 +76,14 @@ RUN apt-get update \
 
 USER node
 COPY --from=build --chown=node:node /deploy .
+# The Vite SPA sirv serves from WEB_STATIC_ROOT (default ./apps/web/dist, relative
+# to this WORKDIR). `pnpm deploy` doesn't carry it, so copy the build output here.
+COPY --from=build --chown=node:node /app/apps/web/dist ./apps/web/dist
 
 ARG VERSION=dev
 ENV VERSION=$VERSION
 
-# health endpoint
+# web UI + health endpoint
 EXPOSE 9090
 ENTRYPOINT ["node", "--import", "./dist/otel.js", "dist/main.js"]
 CMD ["serve"]
