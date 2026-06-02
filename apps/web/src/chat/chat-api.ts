@@ -7,6 +7,15 @@ export async function createConversation(tab: string): Promise<string> {
     body: "{}",
   });
   if (!res.ok) throw new Error(`Couldn't start a conversation (${res.status}).`);
-  const { conversationId } = (await res.json()) as { conversationId: string };
-  return conversationId;
+  const data: unknown = await res.json();
+  if (
+    typeof data !== "object" ||
+    data === null ||
+    !("conversationId" in data) ||
+    typeof data.conversationId !== "string" ||
+    data.conversationId.length === 0
+  ) {
+    throw new Error("Couldn't start a conversation (invalid response payload).");
+  }
+  return data.conversationId;
 }

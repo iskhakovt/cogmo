@@ -23,10 +23,9 @@ export function Shell() {
           <Link
             key={section.to}
             to={section.to}
-            className={`${navItemBase} text-muted hover:bg-accent-wash hover:text-ink`}
-            activeProps={{
-              className: `${navItemBase} bg-accent-wash font-medium text-accent-ink`,
-            }}
+            className={navItemBase}
+            inactiveProps={{ className: "text-muted hover:bg-accent-wash hover:text-ink" }}
+            activeProps={{ className: "bg-accent-wash font-medium text-accent-ink" }}
           >
             {section.label}
           </Link>

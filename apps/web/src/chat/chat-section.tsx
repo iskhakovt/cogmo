@@ -21,7 +21,11 @@ export function ChatIndex() {
         if (cancelled) return;
         const id = list[0]?.id ?? (await createConversation(tab));
         if (!cancelled) {
-          navigate({ to: "/chat/$conversationId", params: { conversationId: id }, replace: true });
+          await navigate({
+            to: "/chat/$conversationId",
+            params: { conversationId: id },
+            replace: true,
+          });
         }
       })
       .catch((err) => {
