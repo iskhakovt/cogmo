@@ -7,7 +7,7 @@ import type {
   WebStreamRegistry,
 } from "../transport/adapters/web/stream-registry.js";
 import type { Transport, TransportError } from "../transport/transport.js";
-import { MAX_BODY_BYTES, PayloadTooLargeError, readJsonBody } from "./body.js";
+import { MAX_BODY_BYTES, readJsonBody, sendBodyError } from "./body.js";
 
 /**
  * Chat HTTP surface for the web channel — the inbound + streaming half of the UI
@@ -141,7 +141,7 @@ async function handleCreate(
   try {
     await readJsonBody(req);
   } catch (err) {
-    sendText(res, err instanceof PayloadTooLargeError ? 413 : 400, "Bad Request");
+    sendBodyError(res, err);
     return;
   }
   const result = await deps.transport.createConversation(tab, deps.ownerHandle, {
@@ -176,6 +176,15 @@ async function handleStream(
   }
   const sessionId = resumed.value.id;
 
+  // The client may have disconnected while `resumeConversation` was awaited. The
+  // connection's `close` fires once, before we attach a listener below — so a
+  // listener registered now would never run, leaking the heartbeat + the open
+  // session. Bail with cleanup instead of opening a stream nothing is attached to.
+  if (req.destroyed) {
+    closeSessionBestEffort(deps.transport, sessionId);
+    return;
+  }
+
   res.writeHead(200, SSE_HEADERS);
   res.flushHeaders();
   const deregister = deps.registry.register(tab, sseConnection(res));
@@ -185,18 +194,25 @@ async function handleStream(
     if (!res.writableEnded) res.write(": ping\n\n");
   }, HEARTBEAT_MS);
 
-  // Close the session on disconnect so abandoned tabs don't accumulate
-  // `receive:"all"` sessions; a reconnect resumes a fresh one. Best-effort —
-  // a failed close is logged, not surfaced (the socket is already gone).
-  req.on("close", () => {
+  // Anchor disconnect cleanup on the long-lived RESPONSE stream: we never call
+  // `res.end()`, so `res` `close` fires only when the connection drops. (`req`
+  // `close` is ambiguous for a bodyless GET — it can also signal that the
+  // request was fully received.) Closing the session keeps abandoned tabs from
+  // accumulating `receive:"all"` sessions; a reconnect resumes a fresh one.
+  res.on("close", () => {
     clearInterval(heartbeat);
     deregister();
-    void deps.transport
-      .closeSession(sessionId)
-      .catch((err) =>
-        logger.debug({ err, sessionId }, "web chat: closeSession on disconnect failed"),
-      );
+    closeSessionBestEffort(deps.transport, sessionId);
   });
+}
+
+/** Fire-and-forget session close — a failed close is logged, not surfaced (the socket is gone). */
+function closeSessionBestEffort(transport: Transport, sessionId: string): void {
+  void transport
+    .closeSession(sessionId)
+    .catch((err) =>
+      logger.debug({ err, sessionId }, "web chat: closeSession on disconnect failed"),
+    );
 }
 
 async function handleSend(
@@ -214,7 +230,7 @@ async function handleSend(
   try {
     body = await readJsonBody(req);
   } catch (err) {
-    sendText(res, err instanceof PayloadTooLargeError ? 413 : 400, "Bad Request");
+    sendBodyError(res, err);
     return;
   }
   const parsed = SendBody.safeParse(body);

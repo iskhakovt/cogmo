@@ -11,7 +11,7 @@ import {
   sessionCookieName,
 } from "./auth/cookies.js";
 import { type AuthStrategy, authenticate, cookieStrategy, csrfReject } from "./auth/gate.js";
-import { PayloadTooLargeError, readJsonBody } from "./body.js";
+import { readJsonBody, sendBodyError } from "./body.js";
 import { handleChat } from "./chat.js";
 import { writeHealth } from "./health-route.js";
 import { OWNER_HANDLE } from "./rpc/context.js";
@@ -89,7 +89,7 @@ export function createWebServer(deps: CreateWebServerDeps): Server {
     try {
       body = await readJsonBody(req);
     } catch (err) {
-      send(res, err instanceof PayloadTooLargeError ? 413 : 400, "Bad Request");
+      sendBodyError(res, err);
       return;
     }
     const parsed = LoginBody.safeParse(body);

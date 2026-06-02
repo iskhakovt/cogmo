@@ -400,6 +400,26 @@ describe("web chat routes", () => {
     }
   });
 
+  it("closes the session and deregisters the tab when the stream drops", async () => {
+    await start();
+    const cookie = await login();
+    const ac = new AbortController();
+    const res = await fetch(`${chatBase}/api/chat/conv-1/stream?tab=tab-1`, {
+      headers: { cookie, "sec-fetch-site": "same-origin" },
+      signal: ac.signal,
+    });
+    const reader = expectDefined(res.body, "sse body").getReader();
+    await reader.read(); // stream established + tab registered
+    expect(chatRegistry.size).toBe(1);
+    await reader.cancel();
+    ac.abort();
+    // The server's res `close` fires once the socket drops -> cleanup runs.
+    await vi.waitFor(() => {
+      expect(transport.closeSession).toHaveBeenCalledWith("session-resumed");
+      expect(chatRegistry.size).toBe(0);
+    });
+  });
+
   it("401s the stream without a session cookie (fail-closed)", async () => {
     await start();
     const res = await fetch(`${chatBase}/api/chat/conv-1/stream?tab=tab-1`, {

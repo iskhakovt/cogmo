@@ -1,4 +1,4 @@
-import type { IncomingMessage } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 
 /**
  * Cap on a request body the UI server reads into memory. Login + chat bodies are
@@ -36,4 +36,22 @@ export async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   }
   const raw = Buffer.concat(chunks).toString("utf8");
   return raw ? JSON.parse(raw) : undefined;
+}
+
+/**
+ * Reply to a `readJsonBody` failure. A 413 sets `Connection: close`: the
+ * streaming-cap path throws mid-read, after consuming has begun, so the unread
+ * remainder of the body stays in the socket buffer — Node only auto-drains a
+ * request it never started reading, so on a keep-alive socket those bytes would
+ * desync the next request. Closing the connection sidesteps that (the response
+ * still flushes first). A parse failure is a plain 400.
+ */
+export function sendBodyError(res: ServerResponse, err: unknown): void {
+  if (err instanceof PayloadTooLargeError) {
+    res.writeHead(413, { "Content-Type": "text/plain", Connection: "close" });
+    res.end("Payload Too Large");
+    return;
+  }
+  res.writeHead(400, { "Content-Type": "text/plain" });
+  res.end("Bad Request");
 }
