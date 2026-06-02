@@ -115,6 +115,10 @@ async function main() {
       COGMO_MASTER_KEY: masterKey,
       COGMO_LLM_PROVIDER_TYPE: "anthropic",
       COGMO_LLM_API_KEY: apiKey,
+      // `env.ts` validates the whole schema eagerly on import, so even the
+      // setup command (which doesn't talk to either) needs these infra URLs.
+      HINDSIGHT_URL: hindsightUrl,
+      INNGEST_BASE_URL: inngestBaseUrl,
     },
   });
   console.log("Setup complete.\n");
