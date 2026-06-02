@@ -17,3 +17,5 @@ export type SkillRiskTier = "auto" | "notify" | "approve";
 export type MemoryTrust = "first-party" | "any";
 export type MemoryCompartment = string;
 export type EvolutionTriggerValue = "idle" | "manual";
+export type McpServerApprovalStatus = "pending" | "approved" | "needs_reapproval";
+export type McpTransportKind = "stdio" | "http" | "sse";

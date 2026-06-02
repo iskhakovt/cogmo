@@ -30,6 +30,7 @@ import type {
   ToolSet,
 } from "../agent/store/schema.js";
 import type { StreamEvent } from "../llm/types.js";
+import type { McpServerApprovalStatus, McpTransportKind } from "../mcp/config.js";
 import type { SkillRiskTier, SkillTier } from "../skills/store/index.js";
 import type {
   ConversationStatusSummary,
@@ -64,6 +65,8 @@ assertParity<Mutual<SkillTier, C.SkillTier>>();
 assertParity<Mutual<SkillRiskTier, C.SkillRiskTier>>();
 assertParity<Mutual<MemoryTrust, C.MemoryTrust>>();
 assertParity<Mutual<EvolutionTriggerValue, C.EvolutionTriggerValue>>();
+assertParity<Mutual<McpServerApprovalStatus, C.McpServerApprovalStatus>>();
+assertParity<Mutual<McpTransportKind, C.McpTransportKind>>();
 
 // --- value shapes (z.infer-derived) ---
 assertParity<Mutual<CooldownState, C.CooldownState>>();

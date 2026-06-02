@@ -1,11 +1,12 @@
 import { z } from "zod";
+import type { TransportError } from "./transport.js";
 
 /**
- * Runtime mirror of the `TransportError` discriminated union
- * (`src/transport/transport.ts`). Carried as the `data` of the single generic
- * oRPC `TRANSPORT_ERROR` so the typed client re-narrows on `code`. A
- * compile-time parity guard in `transport-error-schema.test.ts` fails typecheck
- * if this drifts from the TS union.
+ * Runtime mirror of the `TransportError` discriminated union, carried as the
+ * `data` of the single generic oRPC `TRANSPORT_ERROR` so the typed client
+ * re-narrows on `code`. The `_ErrorParity` assert below fails typecheck if this
+ * drifts from the TS union; representative-variant parse tests live in
+ * `apps/server/src/web/transport-error-schema.test.ts`.
  */
 export const TransportErrorSchema = z.discriminatedUnion("code", [
   z.object({ code: z.literal("session_not_found"), sessionId: z.string() }),
@@ -69,3 +70,9 @@ export const TransportErrorSchema = z.discriminatedUnion("code", [
   z.object({ code: z.literal("schedule_id_malformed"), id: z.string() }),
   z.object({ code: z.literal("evolution_unavailable") }),
 ]);
+
+// Compile-time parity: the Zod schema and the TS union must be mutually
+// assignable. A new/renamed variant or field on either side fails typecheck.
+type Mutual<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+type Assert<T extends true> = T;
+type _ErrorParity = Assert<Mutual<TransportError, z.infer<typeof TransportErrorSchema>>>;

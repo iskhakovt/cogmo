@@ -1,6 +1,8 @@
 import { createRouterClient } from "@orpc/server";
 import { err, ok } from "neverthrow";
 import { describe, expect, it } from "vitest";
+import type { McpServerStatus } from "../../mcp/config.js";
+import { expectDefined } from "../../test/assertions.js";
 import { mockTransportDeep } from "../../test/factories.js";
 import type { Transport } from "../../transport/transport.js";
 import { OWNER_HANDLE, type WebRpcContext } from "./context.js";
@@ -47,6 +49,42 @@ describe("webRouter", () => {
   it("passes the sync mcp.toolBudget through", async () => {
     const client = clientFor(mockTransportDeep({ mcp: { toolBudget: () => 25 } }));
     expect(await client.mcp.toolBudget()).toBe(25);
+  });
+
+  it("projects mcp.listServers to a config-free summary (no secret-source leak)", async () => {
+    const status: McpServerStatus = {
+      id: "srv-1",
+      name: "files",
+      config: {
+        transport: "stdio",
+        command: "mcp-files",
+        args: ["--root", "/data"],
+        env: { TOKEN: { kind: "secret", name: "files-token" } },
+      },
+      enabled: true,
+      approvalStatus: "approved",
+      lastConnectedAt: new Date("2026-01-01T00:00:00Z"),
+      lastError: null,
+      createdAt: new Date("2026-01-01T00:00:00Z"),
+      toolCount: 5,
+      approvedToolCount: 3,
+    };
+    const client = clientFor(mockTransportDeep({ mcp: { listServers: async () => ok([status]) } }));
+
+    const summary = expectDefined((await client.mcp.listServers())[0], "mcp summary");
+    expect(summary).not.toHaveProperty("config");
+    expect(summary).toMatchObject({
+      id: "srv-1",
+      name: "files",
+      transport: "stdio",
+      enabled: true,
+      approvalStatus: "approved",
+      toolCount: 5,
+      approvedToolCount: 3,
+      lastError: null,
+    });
+    // The secret-source name from `config.env` must never reach the client.
+    expect(JSON.stringify(summary)).not.toContain("files-token");
   });
 
   it("forwards input to a parameterized procedure (evolution.getEvent)", async () => {

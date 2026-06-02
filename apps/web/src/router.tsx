@@ -1,5 +1,7 @@
 import { createRootRoute, createRoute, createRouter, redirect } from "@tanstack/react-router";
 import { ChatIndex, ChatSection } from "./chat/chat-section.js";
+import { AgentScreen } from "./screens/AgentScreen.js";
+import { SystemScreen } from "./screens/SystemScreen.js";
 import { Shell } from "./shell/Shell.js";
 import { StubSection } from "./shell/StubSection.js";
 
@@ -31,21 +33,6 @@ function MemorySection() {
   );
 }
 
-function AgentSection() {
-  return (
-    <StubSection title="Agent" note="Profiles, models, MCP servers, and skills — next slice." />
-  );
-}
-
-function SystemSection() {
-  return (
-    <StubSection
-      title="System"
-      note="Scheduled tasks, coding tasks, and the evolution audit — next slice."
-    />
-  );
-}
-
 const memoryRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/memory",
@@ -55,13 +42,13 @@ const memoryRoute = createRoute({
 const agentRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/agent",
-  component: AgentSection,
+  component: AgentScreen,
 });
 
 const systemRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/system",
-  component: SystemSection,
+  component: SystemScreen,
 });
 
 const routeTree = rootRoute.addChildren([
