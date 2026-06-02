@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import { createORPCClient } from "@orpc/client";
 import { RPCLink } from "@orpc/client/fetch";
 import type { RouterClient } from "@orpc/server";
+import { err } from "neverthrow";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { DrizzleAgentStore } from "../agent/store/index.js";
 import type { Database, Transactor } from "../db/index.js";
@@ -323,6 +324,8 @@ describe("web chat routes", () => {
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ conversationId: "conv-1" });
+    // The side-effect session create opens is closed — the stream open owns it.
+    expect(transport.closeSession).toHaveBeenCalledWith("session-1");
   });
 
   it("emits a user turn to the resolved session (202)", async () => {
@@ -339,6 +342,20 @@ describe("web chat routes", () => {
 
   it("409s a send when the tab has no open session", async () => {
     await start({ resolveSession: vi.fn().mockResolvedValue(null) });
+    const cookie = await login();
+    const res = await fetch(`${chatBase}/api/chat/conv-1?tab=tab-1`, {
+      method: "POST",
+      headers: jsonHeaders({ cookie }),
+      body: JSON.stringify({ text: "hi" }),
+    });
+    expect(res.status).toBe(409);
+  });
+
+  it("409s a send when emit reports the session vanished (race)", async () => {
+    await start({
+      resolveSession: vi.fn().mockResolvedValue(session),
+      emit: vi.fn().mockResolvedValue(err({ code: "session_not_found", sessionId: "sess-1" })),
+    });
     const cookie = await login();
     const res = await fetch(`${chatBase}/api/chat/conv-1?tab=tab-1`, {
       method: "POST",

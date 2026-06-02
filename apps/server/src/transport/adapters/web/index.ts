@@ -56,9 +56,10 @@ class WebStreamHandle implements StreamHandle {
  * every tab watching it (each a `receive:"all"` session on its own address), so
  * — unlike Telegram's one-chat-per-run — keying on `runId` alone would hand a
  * second tab the first tab's handle. On an Inngest retry the same
- * `(runId, address)` pair reopens and returns the existing handle. The key
- * separator is `:` — a server-minted `runId` never contains one, so the split
- * point is unambiguous regardless of the tab address.
+ * `(runId, address)` pair reopens and returns the existing handle. The `:`
+ * separator keeps the concatenation injective — a server-minted `runId` never
+ * contains one, so no two distinct pairs collide on the same key (the key is
+ * only ever compared for Map equality; it's never split back apart).
  */
 class WebUiAdapter implements StreamingAdapter {
   readonly #registry: WebStreamRegistry;

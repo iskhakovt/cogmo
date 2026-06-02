@@ -7,7 +7,7 @@ import type {
   WebStreamRegistry,
 } from "../transport/adapters/web/stream-registry.js";
 import type { Transport, TransportError } from "../transport/transport.js";
-import { MAX_BODY_BYTES, readJsonBody, sendBodyError } from "./body.js";
+import { readJsonBody, sendBodyError } from "./body.js";
 
 /**
  * Chat HTTP surface for the web channel — the inbound + streaming half of the UI
@@ -27,11 +27,11 @@ import { MAX_BODY_BYTES, readJsonBody, sendBodyError } from "./body.js";
  */
 
 const HEARTBEAT_MS = 15_000;
-/** Generous cap on one chat turn's text — backstops the body cap with a field-level limit. */
-const MESSAGE_MAX_CHARS = MAX_BODY_BYTES;
 const TAB_MAX_CHARS = 200;
 
-const SendBody = z.object({ text: z.string().trim().min(1).max(MESSAGE_MAX_CHARS) });
+// Only non-emptiness is enforced here; the 64 KB request-body cap (413) is the
+// real length bound, and it trips before any larger field limit could.
+const SendBody = z.object({ text: z.string().trim().min(1) });
 
 const STREAM_PATH = /^\/api\/chat\/([^/]+)\/stream$/;
 const CONVO_PATH = /^\/api\/chat\/([^/]+)$/;
@@ -52,7 +52,7 @@ const SSE_HEADERS = {
   "X-Accel-Buffering": "no",
 } as const;
 
-function serializeFrame(frame: SseFrame): string {
+export function serializeFrame(frame: SseFrame): string {
   const lines: string[] = [];
   if (frame.id !== undefined) lines.push(`id: ${frame.id}`);
   if (frame.event !== undefined) lines.push(`event: ${frame.event}`);
@@ -64,7 +64,9 @@ function serializeFrame(frame: SseFrame): string {
 function sseConnection(res: ServerResponse): SseConnection {
   return {
     send(frame) {
-      if (!res.writableEnded) res.write(serializeFrame(frame));
+      // `destroyed` is the precise "socket gone" signal — `writableEnded` only
+      // flips on our own `end()`, which never happens for a long-lived stream.
+      if (!res.destroyed && !res.writableEnded) res.write(serializeFrame(frame));
     },
   };
 }
@@ -87,6 +89,10 @@ function transportErrorStatus(error: TransportError): number {
     case "access_denied":
     case "identity_rejected":
       return 403;
+    case "session_not_found":
+      // The send route's session can be closed between resolve and emit (e.g. a
+      // racing disconnect cleanup) — a benign 409, same as the no-session case.
+      return 409;
     default:
       return 500;
   }
@@ -151,6 +157,11 @@ async function handleCreate(
     sendText(res, transportErrorStatus(result.error), result.error.code);
     return;
   }
+  // `createConversation` opens a session as a side effect, but the stream open
+  // (`resumeConversation`) is the real session owner. Close the one we just
+  // opened so a create-without-streaming doesn't orphan a `receive:"all"`
+  // session until the idle timer reclaims it; the stream open mints a fresh one.
+  closeSessionBestEffort(deps.transport, result.value.id);
   sendJson(res, 200, { conversationId: result.value.conversationId });
 }
 
@@ -191,7 +202,7 @@ async function handleStream(
   res.write(serializeFrame({ event: "ready", data: JSON.stringify({ conversationId }) }));
 
   const heartbeat = setInterval(() => {
-    if (!res.writableEnded) res.write(": ping\n\n");
+    if (!res.destroyed && !res.writableEnded) res.write(": ping\n\n");
   }, HEARTBEAT_MS);
 
   // Anchor disconnect cleanup on the long-lived RESPONSE stream: we never call
