@@ -1,15 +1,12 @@
-import { existsSync } from "node:fs";
-import { loadEnvFile } from "node:process";
 import type { LLMock } from "@copilotkit/aimock";
 import type { StartedTestContainer } from "testcontainers";
 import { GenericContainer, Network, Wait } from "testcontainers";
 import type { GlobalSetupContext } from "vitest/node";
 import * as c from "../dev/containers.js";
 import { createMock } from "./llmock-setup.js";
+import { loadRootEnv } from "./load-root-env.js";
 
-// Load the repo-root .env for recording mode — API keys needed for real upstream calls.
-// vitest runs with cwd = apps/server (the cogmo package), so the root .env is two levels up.
-if (existsSync("../../.env")) loadEnvFile("../../.env");
+loadRootEnv();
 
 /// <reference path="./vitest.d.ts" />
 

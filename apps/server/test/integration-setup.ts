@@ -1,10 +1,8 @@
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadEnvFile } from "node:process";
 import type { LLMock } from "@copilotkit/aimock";
 import type { StartedTestContainer } from "testcontainers";
 import { Network } from "testcontainers";
@@ -12,11 +10,10 @@ import type { GlobalSetupContext } from "vitest/node";
 import * as c from "../dev/containers.js";
 import { startMcpEchoHttpServer } from "../src/test/mcp-http-echo-server.js";
 import { createMock } from "./llmock-setup.js";
+import { loadRootEnv } from "./load-root-env.js";
 import { startTelegramMockServer, type TelegramMockServer } from "./telegram-mock.js";
 
-// Load the repo-root .env for recording mode — API keys needed for real upstream calls.
-// vitest runs with cwd = apps/server (the cogmo package), so the root .env is two levels up.
-if (existsSync("../../.env")) loadEnvFile("../../.env");
+loadRootEnv();
 
 /// <reference path="./vitest.d.ts" />
 
