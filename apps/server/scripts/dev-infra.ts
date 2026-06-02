@@ -232,7 +232,17 @@ async function main() {
     process.exit(code);
   }
 
-  // If either child exits, tear the other down and exit with its code.
+  // A failed spawn (tsx/pnpm not on PATH, OS exec error) emits 'error', not
+  // 'exit' — without a handler that's an unhandled crash that orphans the
+  // sibling. Handle both events: surface the failure and tear the other down.
+  app.on("error", (err) => {
+    console.error("Failed to start backend (tsx):", err);
+    shutdown(1);
+  });
+  web.on("error", (err) => {
+    console.error("Failed to start web UI (vite):", err);
+    shutdown(1);
+  });
   app.on("exit", (code) => shutdown(code ?? 0));
   web.on("exit", (code) => shutdown(code ?? 0));
 
