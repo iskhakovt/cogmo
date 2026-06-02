@@ -27,12 +27,24 @@ function Chat({ conversationId, tab }: { conversationId: string; tab: string }) 
 }
 
 /**
- * The post-login chat screen — opens the most recent conversation (or creates
- * one) and streams it. No sidebar/switcher yet; that's the Phase 3 app shell.
+ * The post-login chat screen — opens the most-recently-created conversation
+ * (`conversations.list` is creation-ordered; for a single user that's the active
+ * one) or creates one, and streams it. No sidebar/switcher yet — Phase 3 shell.
  */
+/**
+ * Per-tab id — the channel session's address + SSE registry key. Not a
+ * credential (the cookie is), just a per-tab discriminator. `crypto.randomUUID`
+ * needs a secure context, so fall back for a plain-HTTP LAN bind without a TLS
+ * proxy; uniqueness, not unpredictability, is what matters here.
+ */
+function newTabId(): string {
+  return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 export function ChatView({ onLogout }: { onLogout: () => Promise<void> }) {
-  // Per-tab id: the channel session's address + the SSE registry key. Minted once.
-  const tab = useRef(crypto.randomUUID()).current;
+  const tab = useRef(newTabId()).current;
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 

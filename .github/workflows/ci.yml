@@ -182,6 +182,9 @@ jobs:
       - name: Unit tests
         if: github.event_name != 'push'
         run: pnpm test
+      # apps/web's vitest (the pure chat converters); the SPA's jsdom harness lands in Phase 5.
+      - name: Web unit tests
+        run: pnpm --filter web test
       - uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6.0.1
         if: always() && github.event_name == 'push'
         with:

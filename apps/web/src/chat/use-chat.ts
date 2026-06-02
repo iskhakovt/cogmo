@@ -26,20 +26,24 @@ export function useChat(conversationId: string, tab: string) {
   const [isRunning, setIsRunning] = useState(false);
   // Id of the assistant message currently being streamed (null between turns).
   const streamingId = useRef<string | null>(null);
+  // Whether any local message (a user send or a streamed turn) has landed since
+  // open. Once true, a late history fetch must not replace the in-memory state.
+  const touched = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
     streamingId.current = null;
+    touched.current = false;
     setIsRunning(false);
     setMessages([]);
 
     void api.conversations
       .getMessages({ conversationId })
       .then((history) => {
-        // Don't clobber a turn already streaming: if a live event beat the
-        // history fetch (an in-flight turn on open), it set `streamingId`, so
-        // skip the replace and let the live message stand.
-        if (!cancelled && streamingId.current === null) {
+        // Only seed history if nothing local has happened yet. A late fetch must
+        // not clobber an optimistic user send or an already-streaming turn —
+        // neither is in `history` yet, so a replace would drop them.
+        if (!cancelled && !touched.current) {
           setMessages(history.map(historyToUi));
         }
       })
@@ -48,6 +52,7 @@ export function useChat(conversationId: string, tab: string) {
       });
 
     const onStreamEvent = (event: StreamEvent): void => {
+      touched.current = true;
       const current = streamingId.current;
       if (current === null) {
         const id = localId("a");
@@ -79,6 +84,14 @@ export function useChat(conversationId: string, tab: string) {
               setMessages((prev) =>
                 prev.map((m) => (m.id === id ? { ...m, text: `${m.text}\n\n⚠️ ${message}` } : m)),
               );
+            } else {
+              // Aborted before any delta — no in-flight message to annotate, so
+              // surface a fresh one rather than clearing the spinner silently.
+              touched.current = true;
+              setMessages((prev) => [
+                ...prev,
+                { id: localId("a"), role: "assistant", text: `⚠️ ${message}`, tools: [] },
+              ]);
             }
             streamingId.current = null;
             setIsRunning(false);
@@ -102,6 +115,7 @@ export function useChat(conversationId: string, tab: string) {
         .join("")
         .trim();
       if (text.length === 0) return;
+      touched.current = true;
       setMessages((prev) => [...prev, { id: localId("u"), role: "user", text, tools: [] }]);
       setIsRunning(true);
       try {
