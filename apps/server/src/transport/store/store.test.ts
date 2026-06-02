@@ -1150,6 +1150,9 @@ describe("DrizzleTransportStore", () => {
       const { profileId, conversationId } = await seedConversation();
       const sessionId = await seedSession(channelId, conversationId, "chat-A");
       for (let i = 0; i < 3; i++) {
+        // 2ms between inserts — PGlite's pg_uuidv7 uses random low bits, so
+        // same-ms rows don't sort by insertion order; firstUserSnippet relies on it.
+        if (i > 0) await new Promise((r) => setTimeout(r, 2));
         await seedUserMessage(conversationId, profileId, `hello world ${i}`);
       }
       await tx((trx) => store.closeSession(trx, sessionId));
@@ -1203,12 +1206,16 @@ describe("DrizzleTransportStore", () => {
       const channelId = await seedChannel();
       const { profileId, conversationId } = await seedConversation();
       const sessionId = await seedSession(channelId, conversationId, "chat-D");
+      // 2ms between inserts so uuidv7 ids sort by insertion order (random low
+      // bits don't) — firstUserSnippet must resolve to the long opening message.
       await seedUserMessage(
         conversationId,
         profileId,
         "this is a very long opening message that exceeds the cap",
       );
+      await new Promise((r) => setTimeout(r, 2));
       await seedUserMessage(conversationId, profileId, "two");
+      await new Promise((r) => setTimeout(r, 2));
       await seedUserMessage(conversationId, profileId, "three");
       await tx((trx) => store.closeSession(trx, sessionId));
 
