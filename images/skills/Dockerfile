@@ -18,7 +18,7 @@
 # the per-skill venvs populated by `uv pip sync --target …` against a
 # manifest's `requirements.lock` introduce wheels into the runtime.
 
-FROM mirror.gcr.io/library/python:3.14-slim@sha256:a7185a8e40af01bf891414a4df16ef10fc6000cee460a404a13da9029fe41604 AS builder
+FROM mirror.gcr.io/library/python:3.14.4-slim@sha256:2ca02f32b4d9d893863367ce07ec1972819f476dd38d8612f2a9cb6a41cbb727 AS builder
 
 # uv binary copied from astral's distroless image — no apt install,
 # pinned to a specific astral release tag + digest so a `uv sync` is
@@ -45,7 +45,7 @@ COPY src /app/src/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-editable
 
-FROM mirror.gcr.io/library/python:3.14-slim@sha256:a7185a8e40af01bf891414a4df16ef10fc6000cee460a404a13da9029fe41604
+FROM mirror.gcr.io/library/python:3.14.4-slim@sha256:2ca02f32b4d9d893863367ce07ec1972819f476dd38d8612f2a9cb6a41cbb727
 
 ENV PYTHONUNBUFFERED=1
 
