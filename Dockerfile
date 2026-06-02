@@ -31,10 +31,11 @@ RUN test -s apps/server/data/litellm-models.json
 RUN pnpm --filter cogmo build
 RUN pnpm --filter cogmo deploy --prod /deploy
 
-# Build the SPA last: server-source edits (the common case) don't invalidate the
-# Vite build, and SPA edits don't touch the server layers above. `pnpm deploy`
-# only bundles the cogmo package, so the dist is COPYed into the runtime stage
-# separately below. Output lands at /app/apps/web/dist (WEB_STATIC_ROOT default).
+# Build the SPA last. Docker invalidates layers forward, so this keeps an
+# SPA-source edit from busting the expensive server build above. A server-source
+# edit does re-run this Vite build (~200ms) — the cheap side to leave exposed.
+# `pnpm deploy` bundles only the cogmo package, so the dist is COPYed into the
+# runtime stage separately below; it lands at /app/apps/web/dist (WEB_STATIC_ROOT).
 COPY apps/web/index.html apps/web/vite.config.ts apps/web/tsconfig.json apps/web/
 COPY apps/web/src/ apps/web/src/
 RUN pnpm --filter web build
