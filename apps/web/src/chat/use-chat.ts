@@ -42,7 +42,11 @@ export function useChat(conversationId: string, tab: string) {
       .then((history) => {
         // Only seed history if nothing local has happened yet. A late fetch must
         // not clobber an optimistic user send or an already-streaming turn —
-        // neither is in `history` yet, so a replace would drop them.
+        // neither is in `history` yet, so a replace would drop them. Side effect
+        // (Phase 2b): on a mid-stream refresh an early delta also suppresses the
+        // *prior* history for this session (it returns on the next reload). Since
+        // history ids (DB UUID) and live ids (localId) are disjoint, 2b can
+        // prepend history instead of suppressing it.
         if (!cancelled && !touched.current) {
           setMessages(history.map(historyToUi));
         }
@@ -62,6 +66,9 @@ export function useChat(conversationId: string, tab: string) {
           applyStreamEvent({ id, role: "assistant", text: "", tools: [] }, event),
         ]);
       } else {
+        // O(n) array rebuild per delta — fine at proof scale (assistant-ui only
+        // re-converts the changed message). Track the in-flight message apart
+        // from the settled list if long turns make the allocation churn matter.
         setMessages((prev) => prev.map((m) => (m.id === current ? applyStreamEvent(m, event) : m)));
       }
     };
@@ -70,36 +77,42 @@ export function useChat(conversationId: string, tab: string) {
       url: `/api/chat/${conversationId}/stream?tab=${encodeURIComponent(tab)}`,
       fetch: credentialed,
       onMessage: (msg) => {
-        switch (msg.event) {
-          case "ready":
-            return;
-          case "turn-end":
-            streamingId.current = null;
-            setIsRunning(false);
-            return;
-          case "turn-abort": {
-            const id = streamingId.current;
-            const { message } = JSON.parse(msg.data) as { message: string };
-            if (id) {
-              setMessages((prev) =>
-                prev.map((m) => (m.id === id ? { ...m, text: `${m.text}\n\n⚠️ ${message}` } : m)),
-              );
-            } else {
-              // Aborted before any delta — no in-flight message to annotate, so
-              // surface a fresh one rather than clearing the spinner silently.
-              touched.current = true;
-              setMessages((prev) => [
-                ...prev,
-                { id: localId("a"), role: "assistant", text: `⚠️ ${message}`, tools: [] },
-              ]);
-            }
-            streamingId.current = null;
-            setIsRunning(false);
-            return;
-          }
-          default:
-            onStreamEvent(JSON.parse(msg.data) as StreamEvent);
+        if (msg.event === "ready") return;
+        if (msg.event === "turn-end") {
+          streamingId.current = null;
+          setIsRunning(false);
+          return;
         }
+        // Every other frame carries JSON. The server only emits valid frames, so
+        // a parse failure is defensive-only — skip the bad frame rather than let
+        // it throw inside the reader and wedge the stream.
+        let data: unknown;
+        try {
+          data = JSON.parse(msg.data);
+        } catch {
+          return;
+        }
+        if (msg.event === "turn-abort") {
+          const { message } = data as { message: string };
+          const id = streamingId.current;
+          if (id) {
+            setMessages((prev) =>
+              prev.map((m) => (m.id === id ? { ...m, text: `${m.text}\n\n⚠️ ${message}` } : m)),
+            );
+          } else {
+            // Aborted before any delta — no in-flight message to annotate, so
+            // surface a fresh one rather than clearing the spinner silently.
+            touched.current = true;
+            setMessages((prev) => [
+              ...prev,
+              { id: localId("a"), role: "assistant", text: `⚠️ ${message}`, tools: [] },
+            ]);
+          }
+          streamingId.current = null;
+          setIsRunning(false);
+          return;
+        }
+        onStreamEvent(data as StreamEvent);
       },
     });
     return () => {
