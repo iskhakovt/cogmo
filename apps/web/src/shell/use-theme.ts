@@ -2,6 +2,7 @@ import { useState } from "react";
 
 export type Theme = "dark" | "light";
 
+// Mirrored by the pre-paint script in index.html — rename both together or the anti-flash drifts.
 const STORAGE_KEY = "cogmo-theme";
 
 /** Read the current theme, and toggle it — persisting to localStorage + the `data-theme` attribute. */

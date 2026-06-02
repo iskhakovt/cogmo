@@ -75,8 +75,6 @@ const routeTree = rootRoute.addChildren([
 
 export const router = createRouter({ routeTree, defaultPreload: "intent" });
 
-export { chatConversationRoute };
-
 declare module "@tanstack/react-router" {
   interface Register {
     router: typeof router;
