@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { z } from "zod";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import type { Transport } from "../transport/transport.js";
@@ -19,7 +20,12 @@ import { createStaticHandler } from "./static.js";
 import type { WebSessionStore } from "./store/index.js";
 
 export interface CreateWebServerDeps {
-  /** Web-scoped Transport for the oRPC layer. Null when the web channel isn't provisioned. */
+  /**
+   * Web-scoped Transport for the oRPC layer. The `null` arm is defensive-only:
+   * `bootstrapRuntime` provisions the web channel before building this, so a
+   * real boot is always non-null — the null path + its 503 are a tested
+   * backstop, not a runtime state to chase down.
+   */
   webTransport: Transport | null;
   webSessionStore: WebSessionStore;
   runInTx: Transactor;
@@ -63,14 +69,19 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of req) {
-    const buf = chunk as Buffer;
-    total += buf.length;
+    // Node's Readable async-iterator element type is `any`; a request body in
+    // binary mode always yields Buffers, so narrow cast-free.
+    if (!Buffer.isBuffer(chunk)) continue;
+    total += chunk.length;
     if (total > MAX_BODY_BYTES) throw new PayloadTooLargeError();
-    chunks.push(buf);
+    chunks.push(chunk);
   }
   const raw = Buffer.concat(chunks).toString("utf8");
   return raw ? JSON.parse(raw) : undefined;
 }
+
+/** Login request body. Validated with Zod rather than a hand-rolled typeof ladder. */
+const LoginBody = z.object({ token: z.string() });
 
 /**
  * Create the in-process web server without listening — the promoted health
@@ -106,12 +117,11 @@ export function createWebServer(deps: CreateWebServerDeps): Server {
       send(res, err instanceof PayloadTooLargeError ? 413 : 400, "Bad Request");
       return;
     }
-    const token =
-      typeof body === "object" &&
-      body !== null &&
-      typeof (body as { token?: unknown }).token === "string"
-        ? (body as { token: string }).token
-        : "";
+    const parsed = LoginBody.safeParse(body);
+    if (!parsed.success) {
+      send(res, 400, "Bad Request");
+      return;
+    }
     const result = await createSession(
       {
         runInTx: deps.runInTx,
@@ -120,7 +130,7 @@ export function createWebServer(deps: CreateWebServerDeps): Server {
         ownerUserId: deps.ownerUserId,
         ttlDays: deps.sessionTtlDays,
       },
-      { token, now: new Date() },
+      { token: parsed.data.token, now: new Date() },
     );
     if (!result) {
       send(res, 401, "Unauthorized");

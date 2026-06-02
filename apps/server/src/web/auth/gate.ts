@@ -64,6 +64,13 @@ export function csrfReject(req: IncomingMessage): boolean {
   // Content-type gate for body-bearing methods: an HTML form can't send
   // application/json, so requiring it blocks classic form CSRF. DELETE carries
   // no body here and can't be form-issued anyway, so it's origin-gated only.
+  //
+  // TODO(uploads): the Origin/Sec-Fetch-Site check above is the actual CSRF
+  // defense; this content-type requirement is belt-and-suspenders for legacy
+  // browsers. When Phase 2+ exposes uploads (oRPC switches to multipart for
+  // File/Blob inputs — skill code, chat attachments, image inputs), relax this
+  // to "require application/json only when Sec-Fetch-Site didn't already prove
+  // same-origin", or same-origin multipart POSTs will 403. See design/web-ui.md.
   if (method !== "DELETE") {
     const media = headerValue(req, "content-type")?.split(";", 1)[0]?.trim().toLowerCase();
     if (media !== "application/json") return true;

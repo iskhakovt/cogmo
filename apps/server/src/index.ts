@@ -278,7 +278,12 @@ export interface RuntimeDeps {
   functions: any[];
   adapters: Awaited<ReturnType<typeof startChannels>>["adapters"];
   mcpRegistry: McpRegistryImpl;
-  /** Web-scoped Transport for the UI server's oRPC layer. Null if the web channel isn't provisioned. */
+  /**
+   * Web-scoped Transport for the UI server's oRPC layer. `null` is
+   * defensive-only: `ensureWebChannel` runs just above, so a real boot always
+   * resolves a channel — the null arm backstops a since-deleted channel and is
+   * exercised by tests, not a runtime gap.
+   */
   webTransport: Transport | null;
 }
 

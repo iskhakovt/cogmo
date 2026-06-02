@@ -31,6 +31,8 @@ export const webSessions = pgTable(
     createdAt: ts(),
   },
   (t) => [
+    // Backs the `ON DELETE CASCADE` cleanup (deleting a user scans by user_id)
+    // and the future "log out everywhere" / active-sessions reads.
     index("idx_web_sessions_user").on(t.userId),
     // `deleteExpired` (login-time purge) range-filters on expires_at.
     index("idx_web_sessions_expires").on(t.expiresAt),

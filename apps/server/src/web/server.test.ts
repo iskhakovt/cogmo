@@ -88,11 +88,21 @@ function rpcClient(cookie?: string): RouterClient<typeof webRouter> {
 }
 
 describe("web server", () => {
-  it("serves the health route (promoted, unauthenticated)", async () => {
+  it("serves the health route (promoted, unauthenticated) with the full body shape", async () => {
     const res = await fetch(`${base}/health`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("application/health+json");
-    expect(await res.json()).toMatchObject({ status: "pass" });
+    // The IETF health+json contract: status + version + description + notes
+    // (node version + start time).
+    expect(await res.json()).toMatchObject({
+      status: "pass",
+      description: "cogmo",
+      version: expect.any(String),
+      notes: expect.arrayContaining([
+        expect.stringMatching(/^node: /),
+        expect.stringMatching(/^startedAt: /),
+      ]),
+    });
   });
 
   it("404s unknown paths when no SPA dist is present", async () => {
