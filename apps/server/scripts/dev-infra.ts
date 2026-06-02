@@ -138,6 +138,8 @@ async function main() {
     DATABASE_URL: databaseUrl,
     INNGEST_BASE_URL: inngestBaseUrl,
     INNGEST_CONNECT_GATEWAY_URL: inngestConnectGatewayUrl,
+    // Dev mode — connect to the local Inngest dev server without a signing key.
+    INNGEST_DEV: "true",
     HINDSIGHT_URL: hindsightUrl,
     // Override any real-S3 config from the shell/.env — dev is self-contained on MinIO.
     S3_ENDPOINT: s3Endpoint,
