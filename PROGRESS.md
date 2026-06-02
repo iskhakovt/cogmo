@@ -218,7 +218,7 @@ Single-user browser cockpit — a chat channel + the admin surface over `Transpo
 
 - [x] Phase 0 — workspace split (`apps/* + packages/*`, backend stays package `cogmo`, `packages/contracts` types-only with a compile-time parity guard, `apps/web` scaffolded)
 - [x] Phase 1a — in-process UI server (promoted health server) + oRPC admin API over `Transport` (read surface) + fail-closed auth: server-side session cookie (`web_sessions`) + HKDF-derived login token; trusted-header strategy deferred
-- [ ] Phase 1b — minimal SPA proof: login (token -> cookie) + one `models.list` read screen served via sirv; Dockerfile SPA build stage
+- [x] Phase 1b — minimal SPA proof: Vite 8 + React 19, login (token -> cookie) + one `models.list` read screen over a hand-typed oRPC client served via sirv; Dockerfile SPA build stage
 - [ ] Phase 2 — chat: `WebUiAdapter` (`StreamingAdapter`) + `assistant-ui` `ExternalStoreRuntime` + fetch SSE reader + `Last-Event-ID` DB replay (needs a per-turn event sequence)
 - [ ] Phase 3 — app shell (cmdk + four sections) + read-mostly AGENT/SYSTEM screens + Tailwind v4 OKLCH "Ledger" theme (dark default + light toggle)
 - [ ] Phase 4 — hero screens: memory browser, coding-task live view, evolution audit
