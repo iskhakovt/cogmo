@@ -1,14 +1,21 @@
 #!/usr/bin/env tsx
 /**
- * Start dev infrastructure + app in one command.
+ * Start dev infrastructure + backend + web UI in one command.
  *
  * Usage:
- *   pnpm dev:infra        — start infra, apply migrations, spawn the app
- *   pnpm dev:infra --only — start infra only (print env vars, no app)
+ *   pnpm dev              — start infra, seed, then spawn the backend AND the
+ *                           Vite dev server for the web UI
+ *   pnpm dev:infra        — start infra only (print env vars, no backend/web)
+ *
+ * The web UI is the Vite dev server (apps/web) proxying /rpc + /api to the
+ * backend on :9090 (see apps/web/vite.config.ts), so the browser sees one
+ * origin — the session cookie and `Sec-Fetch-Site: same-origin` survive, which
+ * the CSRF gate requires. The dev cookie is unprefixed (WEB_INSECURE_COOKIES)
+ * so it's accepted on plain http://localhost.
  *
  * Containers use withReuse() — they survive across restarts.
  * First run pulls images + applies migrations. Subsequent runs reuse existing containers.
- * Ctrl+C stops the app; containers keep running (reuse). Use `docker stop` to kill them.
+ * Ctrl+C stops the backend + web; containers keep running (reuse). Use `docker stop` to kill them.
  */
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -16,6 +23,7 @@ import { join } from "node:path";
 import { Network } from "testcontainers";
 import * as c from "../dev/containers.js";
 import { generateMasterKey } from "../src/secrets/encryption.js";
+import { deriveWebLoginToken } from "../src/web/auth/login-token.js";
 
 /**
  * Project-local scratch root for `pnpm dev`. Holds skills repo, cloned
@@ -128,6 +136,10 @@ async function main() {
 
   const envVars = {
     NODE_ENV: "development",
+    // Unprefixed dev cookie so the session survives on plain http://localhost
+    // through the Vite proxy (Chrome/Safari reject `__Host-`+`Secure` there).
+    // A dev fronting the backend with local TLS can pre-export to override.
+    WEB_INSECURE_COOKIES: "1",
     COGMO_SKILLS_PATH: join(DEV_ROOT, "skills"),
     COGMO_REPOS_DIR: join(DEV_ROOT, "repos"),
     COGMO_WORKTREES_DIR: join(DEV_ROOT, "worktrees"),
@@ -172,25 +184,77 @@ async function main() {
     return;
   }
 
-  // Spawn the app with infra env vars injected. `src/main.ts` is the actual
-  // entrypoint (it calls bootstrap() and starts the health server);
+  // Spawn the backend with infra env vars injected. `src/main.ts` is the
+  // actual entrypoint (it calls bootstrap() and starts the web server);
   // `src/index.ts` only exports bootstrap() and never executes anything at
   // module load.
-  console.log("Running app (tsx watch src/main.ts serve). Ctrl+C to stop.\n");
-  const child = spawn("tsx", ["watch", "src/main.ts", "serve"], {
+  console.log("Running backend (tsx watch src/main.ts serve)...");
+  const app = spawn("tsx", ["watch", "src/main.ts", "serve"], {
     stdio: "inherit",
     env: { ...process.env, ...envVars },
   });
 
-  child.on("exit", (code) => {
-    // Don't stop containers — they're reusable
-    console.log(`\nApp exited (code ${code}). Containers still running (reuse).`);
-    process.exit(code ?? 0);
-  });
+  // Spawn the Vite dev server for the web UI. It serves apps/web and proxies
+  // /rpc + /api to the backend on :9090. The proxy fails until the backend
+  // finishes booting — that's fine, it retries per request; load the page once
+  // the backend logs ready. No env override — vite needs nothing beyond the
+  // inherited process.env (the infra/secret vars are backend-only).
+  //
+  // Ctrl+C signals the whole foreground process group, so vite (a pnpm
+  // grandchild) dies directly. On the programmatic shutdown() path below,
+  // killing the pnpm wrapper may not forward to that grandchild — so a crash
+  // of the *other* child can leave :5173 occupied until the orphan is reaped.
+  console.log("Running web UI (vite, apps/web)...\n");
+  const web = spawn("pnpm", ["--filter", "web", "dev"], { stdio: "inherit" });
 
-  // Forward signals to child
+  const children = [app, web];
+
+  // Banner with the login token (derived from the master key, stable across
+  // runs) + the Vite URL. Scrolls past as boot logs flow; the token doesn't
+  // change, so a dev only needs it once.
+  const rule = "─".repeat(64);
+  console.log(
+    [
+      "",
+      rule,
+      "  Web UI:      http://localhost:5173  (Vite dev server)",
+      `  Login token: ${deriveWebLoginToken(masterKey)}`,
+      "  Paste the token into the web UI login to mint a session cookie.",
+      rule,
+      "",
+    ].join("\n"),
+  );
+
+  let exiting = false;
+  function shutdown(code: number): void {
+    if (exiting) return;
+    exiting = true;
+    // SIGTERM both and exit without awaiting — the children reparent and clean
+    // up on their own; containers stay up (reuse).
+    for (const ch of children) ch.kill("SIGTERM");
+    console.log(`\nDev processes stopped (code ${code}). Containers still running (reuse).`);
+    process.exit(code);
+  }
+
+  // A failed spawn (tsx/pnpm not on PATH, OS exec error) emits 'error', not
+  // 'exit' — without a handler that's an unhandled crash that orphans the
+  // sibling. Handle both events: surface the failure and tear the other down.
+  app.on("error", (err) => {
+    console.error("Failed to start backend (tsx):", err);
+    shutdown(1);
+  });
+  web.on("error", (err) => {
+    console.error("Failed to start web UI (vite):", err);
+    shutdown(1);
+  });
+  app.on("exit", (code) => shutdown(code ?? 0));
+  web.on("exit", (code) => shutdown(code ?? 0));
+
+  // Forward Ctrl+C / termination to both children.
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
-    process.on(sig, () => child.kill(sig));
+    process.on(sig, () => {
+      for (const ch of children) ch.kill(sig);
+    });
   }
 }
 

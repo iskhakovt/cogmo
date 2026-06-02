@@ -16,6 +16,7 @@
     "build": "pnpm --filter cogmo build",
     "dev": "pnpm --filter cogmo dev",
     "dev:app": "pnpm --filter cogmo dev:app",
+    "dev:web": "pnpm --filter web dev",
     "dev:infra": "pnpm --filter cogmo dev:infra",
     "console": "pnpm --filter cogmo console",
     "tokei": "pnpm --filter cogmo tokei",
