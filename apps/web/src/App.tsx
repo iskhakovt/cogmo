@@ -1,19 +1,28 @@
+import { RouterProvider } from "@tanstack/react-router";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
-import { ChatView } from "./chat/ChatView.js";
+import { AppProvider } from "./app-context.js";
 import { api } from "./orpc.js";
+import { router } from "./router.js";
 
 /**
- * A token login that exchanges for a session cookie, then the streaming chat
- * screen behind the cookie. No Ledger theme / app shell yet — those land with
- * the Phase 3 screens.
+ * Per-tab id — the channel session's address + SSE registry key. Not a credential
+ * (the cookie is). `crypto.randomUUID` needs a secure context, so fall back for a
+ * plain-HTTP LAN bind; uniqueness, not unpredictability, is what matters.
  */
+function newTabId(): string {
+  return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 type View = { kind: "loading" } | { kind: "login"; error?: string } | { kind: "ready" };
 
+/** Auth boundary: probe the session, then mount the routed cockpit or the login screen. */
 export function App() {
+  const [tab] = useState(newTabId);
   const [view, setView] = useState<View>({ kind: "loading" });
 
-  // Probe a gated read to check the session. Success means we hold a valid
-  // session; any failure behind the gate is "not authenticated" -> login.
+  // Probe a gated read to check the session; any failure behind the gate -> login.
   const probe = useCallback(async () => {
     try {
       await api.models.list();
@@ -44,31 +53,30 @@ export function App() {
         error: res.status === 401 ? "Invalid token." : `Login failed (${res.status}).`,
       });
     } catch {
-      // A throw here is a transport failure (server down, connection refused) —
-      // `probe` swallows its own errors, so this only fires on the fetch itself.
       setView({ kind: "login", error: "Connection failed — is the server running?" });
     }
   }
 
-  async function logout(): Promise<void> {
-    // Best-effort: the session cookie is httpOnly, so the client can't clear it
-    // and a transport failure can't be surfaced usefully. Drop to the login view
-    // regardless; a still-valid server session simply resurfaces on next load.
+  const logout = useCallback(async () => {
     try {
       await fetch("/api/session", { method: "DELETE", credentials: "include" });
     } catch {
-      // ignore — fall through to the login view
+      // ignore — fall through to the login view regardless
     }
     setView({ kind: "login" });
-  }
+  }, []);
 
   if (view.kind === "loading") {
-    return <main className="page">Loading…</main>;
+    return <main className="grid h-dvh place-items-center text-sm text-muted">Loading…</main>;
   }
   if (view.kind === "login") {
     return <LoginForm error={view.error} onSubmit={login} />;
   }
-  return <ChatView onLogout={logout} />;
+  return (
+    <AppProvider value={{ tab, logout }}>
+      <RouterProvider router={router} />
+    </AppProvider>
+  );
 }
 
 function LoginForm({
@@ -83,8 +91,6 @@ function LoginForm({
 
   async function handleSubmit(event: FormEvent): Promise<void> {
     event.preventDefault();
-    // The login token is base64url (no internal whitespace); trim so a pasted
-    // trailing newline doesn't read back as an invalid token.
     const trimmed = token.trim();
     if (trimmed.length === 0) return;
     setBusy(true);
@@ -96,10 +102,15 @@ function LoginForm({
   }
 
   return (
-    <main className="page">
-      <form className="card" onSubmit={handleSubmit}>
-        <h1>Cogmo</h1>
-        <label htmlFor="token">Login token</label>
+    <main className="grid h-dvh place-items-center px-6">
+      <form
+        onSubmit={handleSubmit}
+        className="flex w-full max-w-sm flex-col gap-3 rounded-lg border border-line bg-surface p-6"
+      >
+        <h1 className="font-mono text-base font-semibold tracking-wide text-ink">Cogmo</h1>
+        <label htmlFor="token" className="text-xs text-muted">
+          Login token
+        </label>
         <input
           id="token"
           type="password"
@@ -107,13 +118,18 @@ function LoginForm({
           value={token}
           disabled={busy}
           onChange={(e) => setToken(e.target.value)}
+          className="rounded border border-line bg-bg px-3 py-2 text-sm text-ink outline-none focus:border-accent"
         />
-        <button type="submit" disabled={busy || token.trim().length === 0}>
+        <button
+          type="submit"
+          disabled={busy || token.trim().length === 0}
+          className="rounded bg-accent px-3 py-2 text-sm font-medium text-on-accent disabled:opacity-50"
+        >
           {busy ? "Signing in…" : "Sign in"}
         </button>
-        {error ? <p className="error">{error}</p> : null}
-        <p className="hint">
-          Run <code>cogmo web-token</code> to print the token.
+        {error ? <p className="text-xs text-bad">{error}</p> : null}
+        <p className="text-xs text-faint">
+          Run <code className="font-mono text-muted">cogmo web-token</code> to print the token.
         </p>
       </form>
     </main>

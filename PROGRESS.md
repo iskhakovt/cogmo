@@ -221,7 +221,8 @@ Single-user browser cockpit — a chat channel + the admin surface over `Transpo
 - [x] Phase 1b — minimal SPA proof: Vite 8 + React 19, login (token -> cookie) + one `models.list` read screen over a hand-typed oRPC client served via sirv; Dockerfile SPA build stage
 - [x] Phase 2a — live streaming chat. Backend: `WebUiAdapter` (SSE `StreamingAdapter`) + `WebStreamRegistry` bridge + chat routes (create / `:cid/stream` / send) + per-tab `receive:"all"` sessions. SPA: `assistant-ui` `ExternalStoreRuntime` + `eventsource-client` SSE reader + `convertMessage`, history load on open (`conversations.getMessages`), new-chat/send.
 - [ ] Phase 2b — reconnect durability: per-turn monotonic event sequence + `Last-Event-ID` DB replay so a mid-stream refresh resumes seamlessly
-- [ ] Phase 3 — app shell (cmdk + four sections) + read-mostly AGENT/SYSTEM screens + Tailwind v4 OKLCH "Ledger" theme (dark default + light toggle)
+- [x] Phase 3a — app shell + theme. Inverted-L shell (slim section-nav + section pane), cmdk command palette, TanStack Router code-based route tree over the four sections, dark/light toggle (`data-theme` + localStorage), Tailwind v4 OKLCH "Ledger" token system + self-hosted IBM Plex; CHAT wired into its section, MEMORY/AGENT/SYSTEM as placeholder stubs.
+- [ ] Phase 3b — read-mostly AGENT/SYSTEM screens as forms/tables over `Transport` with inline `Result`-error rows, replacing the 3a stubs
 - [ ] Phase 4 — hero screens: memory browser, coding-task live view, evolution audit
 - [ ] Phase 5 — responsive (container-query mobile) + polish + test matrix (oRPC serialization, SSE replay idempotency, auth gate, health-route regression)
 - [ ] Voice (deferred) — mic-in / audio-out in chat; programmatic OpenAPI channel (deferred)

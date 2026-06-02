@@ -1,9 +1,17 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Cogmo</title>
+    <script>
+      // Apply the saved theme before first paint (dark is the default) to avoid a flash.
+      // The "cogmo-theme" key must match STORAGE_KEY in src/shell/use-theme.ts (can't import here).
+      try {
+        const t = localStorage.getItem("cogmo-theme");
+        if (t === "light") document.documentElement.dataset.theme = "light";
+      } catch {}
+    </script>
   </head>
   <body>
     <div id="root"></div>
