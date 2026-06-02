@@ -35,7 +35,7 @@ Reuses the agent loop verbatim — the orchestrator is never touched.
 
 Every management screen drives the existing identity-checked `Transport` namespaces (`conversations, chats, profiles, profileClasses, compartments, models, repos, coding, skills, scheduling, mcp, evolution, boundary`) through **oRPC** — typed RPC, framework-agnostic over `node:http`, with native SSE for live panels and an OpenAPI surface kept internal-only.
 
-- oRPC procedures are thin wrappers: resolve the authenticated `platformUserHandle` **server-side from the session cookie** (never the request body), call the matching `Transport` method, return the `neverthrow` `Result`. The `TransportError` code-discriminated union (with structured fields like `profileRefs`, `limit`/`current`) is mirrored to the client, which re-narrows to a `Result`. No business logic in the layer.
+- The API is **contract-first**: `webContract` (in `packages/contracts`) is the single source of truth — the server `implement`s it, the SPA derives a fully-typed client from it (no hand-authoring). Procedures are thin wrappers: resolve the authenticated `platformUserHandle` **server-side from the session cookie** (never the request body), call the matching `Transport` method, and on a `Result` error throw the single generic `TRANSPORT_ERROR` carrying the `TransportError` code-discriminated union (with structured fields like `profileRefs`, `limit`/`current`) as `data`; the typed client re-narrows on `data.code`. No business logic in the layer.
 - **Live admin panels** (coding-task log tails, status ticks, the evolution feed) use oRPC's SSE event-iterator + the **Client Retry Plugin** for reconnect — one typed mechanism for both request/response and streaming, distinct from the bespoke chat path above.
 
 ## Auth and bind
@@ -66,8 +66,11 @@ apps/
   web/                     # the Vite SPA — own tsconfig (DOM, bundler resolution) + own Biome config
     src/{app,chat,shell,screens,components,theme,lib}/
 packages/
-  contracts/               # TYPES ONLY: StreamEvent, Transport DTOs, the TransportError code union.
-                           # apps/web imports types here, never server runtime code.
+  contracts/               # StreamEvent, Transport DTOs, the TransportError code union + schema,
+                           # and the oRPC `webContract` the server implements and the SPA derives
+                           # its typed client from. Ships TS source (exports.import -> ./src) that
+                           # tsx/vite transpile and tsup bundles into the server; apps/web imports
+                           # the contract type-only, never server runtime code.
 ```
 
 Docker: one extra build stage (`pnpm --filter web build`) + one `COPY apps/web/dist`; add `apps/web/` to the deny-all `.dockerignore` allow-list. One image, `EXPOSE 9090` stays the only port.
