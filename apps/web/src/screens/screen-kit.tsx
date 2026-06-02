@@ -25,7 +25,7 @@ export function Panel({
   children,
 }: {
   title: string;
-  count?: number;
+  count?: number | undefined;
   children: ReactNode;
 }) {
   return (
@@ -60,6 +60,27 @@ export function Resource<T>({
     );
   }
   return <>{children(state.data)}</>;
+}
+
+/**
+ * A titled panel whose body is a list-returning resource: the title (and count,
+ * once ready) persist while the body swaps between loading / inline-error /
+ * table — so the loading and error states stay anchored under their heading.
+ */
+export function PanelResource<T>({
+  title,
+  state,
+  children,
+}: {
+  title: string;
+  state: ResourceState<readonly T[]>;
+  children: (data: readonly T[]) => ReactNode;
+}) {
+  return (
+    <Panel title={title} count={state.status === "ready" ? state.data.length : undefined}>
+      <Resource state={state}>{children}</Resource>
+    </Panel>
+  );
 }
 
 /** A right-aligned drawer for detail views (e.g. an evolution event). */

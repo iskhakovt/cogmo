@@ -5,9 +5,8 @@ import {
   Drawer,
   EmptyRow,
   fmtDateTime,
-  Panel,
+  PanelResource,
   Pill,
-  Resource,
   Screen,
   table,
   td,
@@ -36,83 +35,77 @@ export function SystemScreen() {
 function SchedulingPanel() {
   const state = useResource(() => api.scheduling.list(), []);
   return (
-    <Resource state={state}>
+    <PanelResource title="Scheduled tasks" state={state}>
       {(tasks) => (
-        <Panel title="Scheduled tasks" count={tasks.length}>
-          <table className={table}>
-            <thead>
-              <tr>
-                <th className={th}>Kind</th>
-                <th className={th}>Schedule</th>
-                <th className={th}>Prompt</th>
-                <th className={th}>Timezone</th>
-                <th className={th}>Next run</th>
-                <th className={th}>Last run</th>
-                <th className={th}>Status</th>
+        <table className={table}>
+          <thead>
+            <tr>
+              <th className={th}>Kind</th>
+              <th className={th}>Schedule</th>
+              <th className={th}>Prompt</th>
+              <th className={th}>Timezone</th>
+              <th className={th}>Next run</th>
+              <th className={th}>Last run</th>
+              <th className={th}>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {tasks.length === 0 ? <EmptyRow colSpan={7} label="No scheduled tasks." /> : null}
+            {tasks.map((t: ScheduledTaskSummary) => (
+              <tr key={t.id} className={trHover}>
+                <td className={tdMono}>{t.kind}</td>
+                <td className={tdMono}>{t.cron ?? "one-off"}</td>
+                <td className={`${td} max-w-sm truncate`} title={t.prompt}>
+                  {t.prompt}
+                </td>
+                <td className={tdMono}>{t.timezone}</td>
+                <td className={tdMono}>{fmtDateTime(t.nextRunAt)}</td>
+                <td className={tdMono}>{fmtDateTime(t.lastRunAt)}</td>
+                <td className={td}>
+                  {t.enabled ? <Pill tone="ok">enabled</Pill> : <Pill tone="muted">paused</Pill>}
+                </td>
               </tr>
-            </thead>
-            <tbody>
-              {tasks.length === 0 ? <EmptyRow colSpan={7} label="No scheduled tasks." /> : null}
-              {tasks.map((t: ScheduledTaskSummary) => (
-                <tr key={t.id} className={trHover}>
-                  <td className={tdMono}>{t.kind}</td>
-                  <td className={tdMono}>{t.cron ?? "one-off"}</td>
-                  <td className={`${td} max-w-sm truncate`} title={t.prompt}>
-                    {t.prompt}
-                  </td>
-                  <td className={tdMono}>{t.timezone}</td>
-                  <td className={tdMono}>{fmtDateTime(t.nextRunAt)}</td>
-                  <td className={tdMono}>{fmtDateTime(t.lastRunAt)}</td>
-                  <td className={td}>
-                    {t.enabled ? <Pill tone="ok">enabled</Pill> : <Pill tone="muted">paused</Pill>}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </Panel>
+            ))}
+          </tbody>
+        </table>
       )}
-    </Resource>
+    </PanelResource>
   );
 }
 
 function EvolutionPanel({ onSelect }: { onSelect: (event: EvolutionEventEntry) => void }) {
   const state = useResource(() => api.evolution.listEvents(), []);
   return (
-    <Resource state={state}>
+    <PanelResource title="Evolution audit" state={state}>
       {(events) => (
-        <Panel title="Evolution audit" count={events.length}>
-          <table className={table}>
-            <thead>
-              <tr>
-                <th className={th}>When</th>
-                <th className={th}>Trigger</th>
-                <th className={th}>Rules ±</th>
-                <th className={th}>Memories</th>
-                <th className={th}>Messages</th>
+        <table className={table}>
+          <thead>
+            <tr>
+              <th className={th}>When</th>
+              <th className={th}>Trigger</th>
+              <th className={th}>Rules ±</th>
+              <th className={th}>Memories</th>
+              <th className={th}>Messages</th>
+            </tr>
+          </thead>
+          <tbody>
+            {events.length === 0 ? <EmptyRow colSpan={5} label="No evolution events yet." /> : null}
+            {events.map((e: EvolutionEventEntry) => (
+              <tr key={e.id} className={`${trHover} cursor-pointer`} onClick={() => onSelect(e)}>
+                <td className={tdMono}>{fmtDateTime(e.createdAt)}</td>
+                <td className={tdMono}>{e.triggeredBy}</td>
+                <td className={tdMono}>
+                  +{e.payload.corrections.extracted} / ↻{e.payload.corrections.reinforced} / ↑
+                  {e.payload.corrections.promoted}
+                </td>
+                <td className={tdMono}>{e.payload.memories.extracted}</td>
+                <td className={tdMono}>{e.payload.messageCount}</td>
               </tr>
-            </thead>
-            <tbody>
-              {events.length === 0 ? (
-                <EmptyRow colSpan={5} label="No evolution events yet." />
-              ) : null}
-              {events.map((e: EvolutionEventEntry) => (
-                <tr key={e.id} className={`${trHover} cursor-pointer`} onClick={() => onSelect(e)}>
-                  <td className={tdMono}>{fmtDateTime(e.createdAt)}</td>
-                  <td className={tdMono}>{e.triggeredBy}</td>
-                  <td className={tdMono}>
-                    +{e.payload.corrections.extracted} / ↻{e.payload.corrections.reinforced} / ↑
-                    {e.payload.corrections.promoted}
-                  </td>
-                  <td className={tdMono}>{e.payload.memories.extracted}</td>
-                  <td className={tdMono}>{e.payload.messageCount}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </Panel>
+            ))}
+          </tbody>
+        </table>
       )}
-    </Resource>
+    </PanelResource>
   );
 }
 

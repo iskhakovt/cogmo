@@ -59,6 +59,7 @@
     "@opentelemetry/sdk-node": "^0.218.0",
     "@opentelemetry/sdk-trace-base": "^2.7.1",
     "@opentelemetry/semantic-conventions": "^1.41.1",
+    "@orpc/contract": "1.14.4",
     "@orpc/server": "1.14.4",
     "@t3-oss/env-core": "^0.13.11",
     "@vectorize-io/hindsight-client": "^0.6.2",

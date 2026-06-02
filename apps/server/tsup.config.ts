@@ -16,6 +16,10 @@ export default defineConfig({
   clean: true,
   sourcemap: true,
   // Bundle the workspace `@cogmo/contracts` (shipped as TS source) into the
-  // output — it has no built JS to resolve at runtime.
+  // output — it has no built JS to resolve at runtime. Its own runtime deps
+  // (`@orpc/contract`, `zod`) are declared in this package's `dependencies` so
+  // tsup externalizes them and the bundled contract code resolves them at
+  // runtime — `@orpc/contract` is imported only by that bundled code, not by
+  // `src/`, so don't drop it as "unused".
   noExternal: [/^@cogmo\//],
 });

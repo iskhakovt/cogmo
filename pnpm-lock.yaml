@@ -99,6 +99,9 @@ importers:
       '@opentelemetry/semantic-conventions':
         specifier: ^1.41.1
         version: 1.41.1
+      '@orpc/contract':
+        specifier: 1.14.4
+        version: 1.14.4(@opentelemetry/api@1.9.1)
       '@orpc/server':
         specifier: 1.14.4
         version: 1.14.4(@opentelemetry/api@1.9.1)(ws@8.21.0)
