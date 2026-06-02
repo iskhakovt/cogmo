@@ -34,7 +34,11 @@ export function useResource<T>(fetcher: () => Promise<T>, deps: DependencyList):
   return state;
 }
 
-/** Extract a display message: the transport `code` when present, else the error text. */
+/**
+ * Extract a display message: the transport `code` plus any contextual fields it
+ * carries (`reason`, `name`, `serverId`, `limit`/`current`, …), else the error
+ * text. e.g. `mcp_connection_failed (serverId: srv, reason: timeout)`.
+ */
 export function errorMessage(err: unknown): string {
   if (typeof err === "object" && err !== null) {
     if (
@@ -44,7 +48,12 @@ export function errorMessage(err: unknown): string {
       "code" in err.data &&
       typeof err.data.code === "string"
     ) {
-      return err.data.code;
+      const code = err.data.code;
+      const extra = Object.entries(err.data)
+        .filter(([key]) => key !== "code")
+        .map(([key, value]) => `${key}: ${String(value)}`)
+        .join(", ");
+      return extra ? `${code} (${extra})` : code;
     }
     if ("message" in err && typeof err.message === "string") return err.message;
   }

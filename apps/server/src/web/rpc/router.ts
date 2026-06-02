@@ -109,9 +109,11 @@ export const webRouter = os.router({
   },
   mcp: {
     listServers: os.mcp.listServers.handler(async ({ context, errors }) => {
-      const result = await context.transport.mcp.listServers(context.platformUserHandle);
-      if (result.isErr()) throw errors.TRANSPORT_ERROR({ data: result.error });
-      return result.value.map(toMcpServerSummary);
+      const servers = unwrap(
+        await context.transport.mcp.listServers(context.platformUserHandle),
+        errors.TRANSPORT_ERROR,
+      );
+      return servers.map(toMcpServerSummary);
     }),
     toolBudget: os.mcp.toolBudget.handler(({ context }) => context.transport.mcp.toolBudget()),
   },
