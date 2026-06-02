@@ -33,9 +33,24 @@ function resultProcedure<T>(fn: (ctx: WebRpcContext) => Promise<Result<T, Transp
   });
 }
 
+/** Same, for a `Result`-returning accessor that takes a validated input. */
+function inputResultProcedure<TInput, T>(
+  schema: z.ZodType<TInput>,
+  fn: (ctx: WebRpcContext, input: TInput) => Promise<Result<T, TransportError>>,
+) {
+  return base.input(schema).handler(async ({ input, context, errors }) => {
+    const result = await fn(context, input);
+    if (result.isErr()) throw errors.TRANSPORT_ERROR({ data: result.error });
+    return result.value;
+  });
+}
+
 export const webRouter = {
   conversations: {
     list: resultProcedure((c) => c.transport.conversations.list(c.platformUserHandle)),
+    getMessages: inputResultProcedure(z.object({ conversationId: z.string() }), (c, input) =>
+      c.transport.conversations.getMessages(c.platformUserHandle, input.conversationId),
+    ),
   },
   profiles: {
     list: resultProcedure((c) => c.transport.profiles.list(c.platformUserHandle)),
@@ -67,15 +82,8 @@ export const webRouter = {
   },
   evolution: {
     listEvents: resultProcedure((c) => c.transport.evolution.listEvents(c.platformUserHandle)),
-    getEvent: base
-      .input(z.object({ id: z.string() }))
-      .handler(async ({ input, context, errors }) => {
-        const result = await context.transport.evolution.getEvent(
-          context.platformUserHandle,
-          input.id,
-        );
-        if (result.isErr()) throw errors.TRANSPORT_ERROR({ data: result.error });
-        return result.value;
-      }),
+    getEvent: inputResultProcedure(z.object({ id: z.string() }), (c, input) =>
+      c.transport.evolution.getEvent(c.platformUserHandle, input.id),
+    ),
   },
 };

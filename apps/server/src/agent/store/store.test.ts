@@ -634,6 +634,37 @@ describe("DrizzleAgentStore", () => {
       expect(history[1]).toEqual({ role: "assistant", content: "Hi there" });
     });
 
+    it("listMessages returns messages with ids in order", async () => {
+      const { conversationId, stamp } = await seedConversation();
+      const inboundId = "019d0000-0000-7000-8000-000000000001";
+
+      const first = await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId,
+          role: "user",
+          content: "Hello",
+          lastInboundMessageId: inboundId,
+          ...stamp,
+        }),
+      );
+      await new Promise((r) => setTimeout(r, 2));
+      const second = await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId,
+          role: "assistant",
+          content: [{ type: "text", text: "Hi" }],
+          lastInboundMessageId: inboundId,
+          ...stamp,
+        }),
+      );
+
+      const list = await tx((trx) => store.listMessages(trx, conversationId));
+      expect(list).toEqual([
+        { id: first.id, role: "user", content: "Hello" },
+        { id: second.id, role: "assistant", content: [{ type: "text", text: "Hi" }] },
+      ]);
+    });
+
     it("getMessage returns a single message", async () => {
       const { conversationId, stamp } = await seedConversation();
       const inboundId = "019d0000-0000-7000-8000-000000000001";

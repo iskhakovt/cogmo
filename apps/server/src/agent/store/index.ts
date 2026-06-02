@@ -223,6 +223,17 @@ export interface ConversationSummary {
   lastMessageAt: Date;
 }
 
+/**
+ * One past turn for the web chat history read — `text` is the message's
+ * displayable prose. Mirrored in `@cogmo/contracts`; see that definition for
+ * why tool-call cards aren't reconstructed here.
+ */
+export interface ChatHistoryMessage {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+}
+
 /** A row from `image_providers`. `type` is narrowed via the `pgEnum`. */
 export interface ImageProviderRow {
   id: string;
@@ -467,6 +478,16 @@ export interface AgentStore {
 
   /** Load full message history for a conversation, ordered by id. */
   getHistory(tx: Transaction, conversationId: string): Promise<ReadonlyArray<Message>>;
+
+  /**
+   * List a conversation's messages with their ids, ordered by id — for the web
+   * UI history read, which needs a stable per-message key. (`getHistory` projects
+   * only role + content for the agent loop.)
+   */
+  listMessages(
+    tx: Transaction,
+    conversationId: string,
+  ): Promise<ReadonlyArray<Message & { id: string }>>;
 
   /** Load a profile by ID. */
   getProfile(tx: Transaction, profileId: string): Promise<Profile | undefined>;
@@ -1428,6 +1449,18 @@ export class DrizzleAgentStore implements AgentStore {
       .where(eq(messages.conversationId, conversationId))
       .orderBy(asc(messages.id));
     return rows as ReadonlyArray<Message>;
+  }
+
+  async listMessages(
+    tx: Transaction,
+    conversationId: string,
+  ): Promise<ReadonlyArray<Message & { id: string }>> {
+    const rows = await tx
+      .select({ id: messages.id, role: messages.role, content: messages.content })
+      .from(messages)
+      .where(eq(messages.conversationId, conversationId))
+      .orderBy(asc(messages.id));
+    return rows as ReadonlyArray<Message & { id: string }>;
   }
 
   async getProfile(tx: Transaction, profileId: string): Promise<Profile | undefined> {

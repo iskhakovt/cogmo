@@ -64,6 +64,7 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     insertMessages: vi.fn().mockResolvedValue({ id: "msg-1" }),
     getLastAssistantMessage: vi.fn().mockResolvedValue(null),
     getHistory: vi.fn().mockResolvedValue([]),
+    listMessages: vi.fn().mockResolvedValue([]),
     getProfile: vi.fn().mockResolvedValue({
       id: "profile-1",
       userId: null,
@@ -339,6 +340,7 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
     uploadAttachment: vi.fn().mockResolvedValue("inbound/test.jpg"),
     conversations: {
       list: vi.fn().mockResolvedValue(ok([])),
+      getMessages: vi.fn().mockResolvedValue(ok([])),
       getCurrent: vi.fn().mockResolvedValue(ok(null)),
       summary: vi.fn().mockResolvedValue(ok(null)),
       setAlias: vi.fn().mockResolvedValue(ok(undefined)),

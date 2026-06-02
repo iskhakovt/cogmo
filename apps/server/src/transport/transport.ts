@@ -18,6 +18,7 @@ import {
 } from "../agent/store/errors.js";
 import type {
   AgentStore,
+  ChatHistoryMessage,
   CodingAutoapproveMode,
   ConversationSummary,
   CustomCompartment,
@@ -431,6 +432,15 @@ export interface Transport {
     list(
       platformUserHandle: string,
     ): Promise<Result<ReadonlyArray<ConversationSummary>, TransportError>>;
+    /**
+     * Ordered message history of a conversation the caller owns — the web chat
+     * history read. Each turn is flattened to displayable `text`. Identity- and
+     * ownership-checked: `access_denied` when the conversation isn't the caller's.
+     */
+    getMessages(
+      platformUserHandle: string,
+      conversationId: string,
+    ): Promise<Result<ReadonlyArray<ChatHistoryMessage>, TransportError>>;
     /** Current session's conversation + profile, or null if no active session exists for the address. */
     getCurrent(
       platformUserHandle: string,
@@ -1184,6 +1194,32 @@ export function createTransport(deps: {
           const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
           if (!identity) return err({ code: "identity_rejected" as const });
           return ok(await agentStore.listConversationsForUser(tx, identity.userId));
+        });
+      },
+
+      async getMessages(platformUserHandle, conversationId) {
+        return runInTx(async (tx) => {
+          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+          if (!identity) return err({ code: "identity_rejected" as const });
+          const conv = await agentStore.getConversation(tx, conversationId);
+          if (!conv) return err({ code: "conversation_not_found" as const });
+          if (conv.userId !== identity.userId) {
+            return err({
+              code: "access_denied" as const,
+              reason: "conversation not owned by caller",
+            });
+          }
+          const rows = await agentStore.listMessages(tx, conversationId);
+          const history = rows.flatMap((m) => {
+            const text =
+              typeof m.content === "string"
+                ? m.content
+                : m.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("");
+            // Drop internal tool-roundtrip turns (tool_use / tool_result only) —
+            // they carry no displayable prose.
+            return text.length > 0 ? [{ id: m.id, role: m.role, text }] : [];
+          });
+          return ok(history);
         });
       },
 
