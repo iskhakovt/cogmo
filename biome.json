@@ -8,6 +8,11 @@
   "files": {
     "includes": ["**", "!apps/server/test/fixtures", "!design/web-ui/mockups"]
   },
+  "css": {
+    "parser": {
+      "tailwindDirectives": true
+    }
+  },
   "plugins": ["./biome-plugins/no-unsafe-cast.grit"],
   "formatter": {
     "indentStyle": "space",

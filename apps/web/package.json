@@ -12,16 +12,22 @@
   },
   "dependencies": {
     "@assistant-ui/react": "0.14.8",
+    "@fontsource-variable/ibm-plex-sans": "^5.2.8",
+    "@fontsource/ibm-plex-mono": "^5.2.7",
     "@orpc/client": "1.14.4",
+    "@tanstack/react-router": "^1.170.8",
+    "cmdk": "^1.1.1",
     "eventsource-client": "^1.2.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6"
   },
   "devDependencies": {
     "@cogmo/contracts": "workspace:*",
+    "@tailwindcss/vite": "^4.3.0",
     "@types/react": "^19.2.15",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.2",
+    "tailwindcss": "^4.3.0",
     "typescript": "^6.0.3",
     "vite": "8.0.14",
     "vitest": "^4.1.7"
