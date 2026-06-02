@@ -1,3 +1,0 @@
-Gave Dependabot a 7-day `cooldown` on the npm ecosystem so it stops opening PRs that fail CI. pnpm 11 enforces a 24h `minimumReleaseAge` soak at install time, and Dependabot — which bumps the instant a version is published — was producing lockfiles that `pnpm install --frozen-lockfile` rejected whenever a release was fresh (every job died at the install step). The cooldown waits out the soak with margin; it covers version updates only, so security updates still land immediately.
-
-Also widened the docker ecosystem from `directory: /` to `directories: ["/", "/images/devbase", "/images/skills"]` so the sandbox and skills base images get their digest-pinned `FROM`s watched, not just the runtime image.
