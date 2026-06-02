@@ -4,10 +4,11 @@ import type { CodingStore } from "../agent/coding/store/index.js";
 import type { CodingStreamingRegistry } from "../agent/coding/streaming-registry.js";
 import type { Transactor } from "../db/index.js";
 import type { SkillStore } from "../skills/store/index.js";
+import type { WebStreamRegistry } from "./adapters/web/stream-registry.js";
 import type { AttachmentStore } from "./attachment-store.js";
 import type { TransportStore } from "./store/index.js";
 import type { Transport } from "./transport.js";
-import type { Adapter } from "./types.js";
+import type { Adapter, StreamingAdapter } from "./types.js";
 
 /**
  * Coding-progress wiring — optional adapter dependency. Adapters that
@@ -65,14 +66,23 @@ export interface AdapterDeps {
   codingProgress?: CodingProgressDeps;
   /** Optional — present only when the skills module is wired. */
   skillsApproval?: SkillsApprovalDeps;
+  /**
+   * SSE stream registry — present only for the web channel. The bridge the
+   * `WebUiAdapter` writes streamed turns through to a tab's open connection;
+   * the UI server's SSE route registers connections on the same instance.
+   */
+  webStream?: WebStreamRegistry;
 }
 
 /**
  * Result of setting up an adapter for a channel.
  */
 export interface AdapterSetupResult {
-  /** Running adapter instance (deliver + stop). */
-  adapter: Adapter;
+  /**
+   * Running adapter instance. A batch `Adapter` (deliver + stop), a streaming
+   * adapter (openStream + stop), or both — the web channel is streaming-only.
+   */
+  adapter: Adapter | StreamingAdapter;
   /** Inngest functions the adapter needs registered (e.g., event-driven inbound). */
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   functions: any[];

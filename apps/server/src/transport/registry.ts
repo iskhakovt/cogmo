@@ -13,11 +13,12 @@ import type { SkillRunner } from "../skills/runner.js";
 import type { SkillStore } from "../skills/store/index.js";
 import type { BoundaryConfig } from "./adapter-module.js";
 import { adaptersByType } from "./adapters/index.js";
+import type { WebStreamRegistry } from "./adapters/web/stream-registry.js";
 import type { AttachmentStore } from "./attachment-store.js";
 import type { AdapterEntry } from "./delivery-router.js";
 import type { TransportStore } from "./store/index.js";
 import { createTransport } from "./transport.js";
-import type { Adapter } from "./types.js";
+import type { Adapter, StreamingAdapter } from "./types.js";
 
 export interface RegistryDeps {
   defaultUserId: string;
@@ -62,12 +63,17 @@ export interface RegistryDeps {
    * stay available.
    */
   triggerReflection?: (conversationId: string) => Promise<TriggerReflectionResult>;
+  /**
+   * SSE stream registry — threaded to the web adapter's setup. Production
+   * bootstrap supplies it; setups without a web channel omit it.
+   */
+  webStream?: WebStreamRegistry;
 }
 
 export interface RegistryResult {
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   functions: any[];
-  adapters: Adapter[];
+  adapters: Array<Adapter | StreamingAdapter>;
   adapterMap: Map<string, AdapterEntry>;
 }
 
@@ -82,7 +88,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
   const { transportStore, agentStore } = deps;
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const functions: any[] = [];
-  const adapters: Adapter[] = [];
+  const adapters: Array<Adapter | StreamingAdapter> = [];
   const adapterMap = new Map<string, AdapterEntry>();
 
   const channels = await deps.runInTx((tx) => transportStore.getAllChannels(tx));
@@ -149,6 +155,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
           transportStore: deps.transportStore,
         },
       }),
+      ...(deps.webStream && { webStream: deps.webStream }),
     });
 
     adapters.push(result.adapter);

@@ -160,12 +160,14 @@ async function main() {
     runInTx,
     webTransport,
     webSessionStore,
+    webStreamRegistry,
     webLoginToken,
     user,
   } = await bootstrap();
   const webServer = await startWebServer({
     webTransport,
     webSessionStore,
+    webStreamRegistry,
     runInTx,
     verifyLoginToken: (candidate) => verifyWebLoginToken(candidate, webLoginToken),
     ownerUserId: user.id,
