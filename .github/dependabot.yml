@@ -6,6 +6,14 @@ updates:
       interval: weekly
     commit-message:
       prefix: "chore(deps)"
+    # Wait 7 days after a release before bumping. pnpm 11 enforces a 24h
+    # minimumReleaseAge soak at install time, so Dependabot's default
+    # (bump the instant a version is published) produces lockfiles that
+    # fail `pnpm install --frozen-lockfile` whenever a release is fresh.
+    # 7 days clears that gate with margin and gives a real soak window.
+    # Applies to version-updates only — security updates are exempt.
+    cooldown:
+      default-days: 7
     # Group updates so the lockfile only has one merge state to validate
     # at a time. Multiple overlapping PRs touching pnpm-lock.yaml can
     # produce a corrupted lockfile because GitHub's textual auto-rebase
@@ -61,7 +69,10 @@ updates:
         applies-to: security-updates
         patterns: ["*"]
   - package-ecosystem: docker
-    directory: /
+    # The runtime image plus the two base images for the sandbox (devbase)
+    # and skills (python) runtimes. Each holds its own digest-pinned FROM,
+    # so all three need watching for base-image bumps.
+    directories: ["/", "/images/devbase", "/images/skills"]
     schedule:
       interval: weekly
     commit-message:
