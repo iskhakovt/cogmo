@@ -31,24 +31,37 @@ export function App() {
   }, [probe]);
 
   async function login(token: string): Promise<void> {
-    const res = await fetch("/api/session", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token }),
-      credentials: "include",
-    });
-    if (res.ok) {
-      await probe();
-      return;
+    try {
+      const res = await fetch("/api/session", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token }),
+        credentials: "include",
+      });
+      if (res.ok) {
+        await probe();
+        return;
+      }
+      setView({
+        kind: "login",
+        error: res.status === 401 ? "Invalid token." : `Login failed (${res.status}).`,
+      });
+    } catch {
+      // A throw here is a transport failure (server down, connection refused) —
+      // `probe` swallows its own errors, so this only fires on the fetch itself.
+      setView({ kind: "login", error: "Connection failed — is the server running?" });
     }
-    setView({
-      kind: "login",
-      error: res.status === 401 ? "Invalid token." : `Login failed (${res.status}).`,
-    });
   }
 
   async function logout(): Promise<void> {
-    await fetch("/api/session", { method: "DELETE", credentials: "include" });
+    // Best-effort: the session cookie is httpOnly, so the client can't clear it
+    // and a transport failure can't be surfaced usefully. Drop to the login view
+    // regardless; a still-valid server session simply resurfaces on next load.
+    try {
+      await fetch("/api/session", { method: "DELETE", credentials: "include" });
+    } catch {
+      // ignore — fall through to the login view
+    }
     setView({ kind: "login" });
   }
 
@@ -73,9 +86,13 @@ function LoginForm({
 
   async function handleSubmit(event: FormEvent): Promise<void> {
     event.preventDefault();
+    // The login token is base64url (no internal whitespace); trim so a pasted
+    // trailing newline doesn't read back as an invalid token.
+    const trimmed = token.trim();
+    if (trimmed.length === 0) return;
     setBusy(true);
     try {
-      await onSubmit(token);
+      await onSubmit(trimmed);
     } finally {
       setBusy(false);
     }
@@ -91,9 +108,10 @@ function LoginForm({
           type="password"
           autoComplete="off"
           value={token}
+          disabled={busy}
           onChange={(e) => setToken(e.target.value)}
         />
-        <button type="submit" disabled={busy || token.length === 0}>
+        <button type="submit" disabled={busy || token.trim().length === 0}>
           {busy ? "Signing in…" : "Sign in"}
         </button>
         {error ? <p className="error">{error}</p> : null}
