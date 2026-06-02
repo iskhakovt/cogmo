@@ -2,6 +2,7 @@ import { chmod, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HeadBucketCommand, type S3Client } from "@aws-sdk/client-s3";
+import { CLIENT_VERSION } from "@vectorize-io/hindsight-client";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database } from "../db/index.js";
@@ -9,6 +10,7 @@ import type { HindsightMemoryProvider } from "../memory/hindsight.js";
 import {
   BootCheckError,
   checkDirWritable,
+  checkHindsightClientVersion,
   checkHindsightVersion,
   checkS3Bucket,
   checkUuidv7,
@@ -44,6 +46,39 @@ describe("HindsightCompatSchema", () => {
     for (const wildcard of ["*", "x", "X", ">=0.0.0", ">=0.0.0-0", ">=0.0.0-pre"]) {
       expect(() => HindsightCompatSchema.parse(wildcard)).toThrow();
     }
+  });
+});
+
+describe("checkHindsightClientVersion", () => {
+  const range = ">=0.7.0 <0.8.0";
+
+  it("passes when the client version satisfies the range", () => {
+    expect(() => checkHindsightClientVersion(range, "0.7.2")).not.toThrow();
+  });
+
+  it("throws when the client version is below the range", () => {
+    expect(() => checkHindsightClientVersion(range, "0.6.2")).toThrow(BootCheckError);
+    expect(() => checkHindsightClientVersion(range, "0.6.2")).toThrow(
+      /outside the supported range/,
+    );
+  });
+
+  it("throws when the client version is at the exclusive upper bound", () => {
+    expect(() => checkHindsightClientVersion(range, "0.8.0")).toThrow(BootCheckError);
+  });
+
+  it("coerces build metadata before comparing", () => {
+    expect(() => checkHindsightClientVersion(range, "0.7.2+build.9")).not.toThrow();
+  });
+
+  it("throws when the client reports an unparseable version", () => {
+    expect(() => checkHindsightClientVersion(range, "not-a-version")).toThrow(BootCheckError);
+  });
+
+  it("the bundled client version agrees with the pinned compat range", () => {
+    // Drift guard: bumping @vectorize-io/hindsight-client without bumping
+    // cogmo.hindsightCompat (or vice versa) fails here, in CI, before boot.
+    expect(() => checkHindsightClientVersion(loadHindsightCompat(), CLIENT_VERSION)).not.toThrow();
   });
 });
 

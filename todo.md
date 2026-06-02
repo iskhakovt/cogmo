@@ -44,7 +44,6 @@
 - [ ] `p3` Adopt `recallResponseToPromptString()` — richer memory injection with temporal fields, entity summaries
 - [ ] `p3` Use native OpenRouter provider for prod Hindsight — replaces `openai` + custom base URL workaround
 - [ ] `p3` Hindsight error classification — wrap `HindsightClient` calls in `HindsightMemoryProvider` with `AbortError` logic for known-permanent failures (4xx auth/validation). Currently retries indiscriminately, wasting up to ~10s on every misconfigured request. Requires investigating `HindsightClient`'s error shape (is it `e.status`? `e.response.status`? `e.code`?) before classifying safely.
-- [ ] `p2` Move Hindsight to 0.7.x. Dev/test images are pinned to 0.6.0 (`dev/containers.ts` `hindsight()` + `hindsightSlim()`), `cogmo.hindsightCompat` is `>=0.6.0 <0.7.0`, and `@vectorize-io/hindsight-client` is `^0.6.2` — all 0.6.x because `latest` drifted to 0.7.2 and tripped the boot version check. To upgrade: bump the client dep, review the 0.6→0.7 server API/wire diff, bump both image pins + `hindsightCompat`, re-record the llmock fixtures the slim image feeds, and re-run the integration tier.
 
 ### Agent loop, context & conversations
 

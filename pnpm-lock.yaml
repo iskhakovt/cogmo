@@ -103,8 +103,8 @@ importers:
         specifier: ^0.13.11
         version: 0.13.11(typescript@6.0.3)(zod@4.4.3)
       '@vectorize-io/hindsight-client':
-        specifier: ^0.6.2
-        version: 0.6.2
+        specifier: ^0.7.2
+        version: 0.7.2
       ai:
         specifier: ^6.0.191
         version: 6.0.191(zod@4.4.3)
@@ -3530,8 +3530,8 @@ packages:
   '@types/ws@8.18.1':
     resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
 
-  '@vectorize-io/hindsight-client@0.6.2':
-    resolution: {integrity: sha512-bymmlMWI1z0zOjgY+wRMLudNxzqcW20VHMtyV3QLhwJm63NeQN/nEZ4plWPR0p28DffaUM5nk2VSxzQljN+Mow==}
+  '@vectorize-io/hindsight-client@0.7.2':
+    resolution: {integrity: sha512-wl0ICqGyr1Ui29+sOiJMJl+4zhGJplgQOlTR6oH60DZBH38uFePuSyxpX87hknEpCw62/xxk56uwHawxYIrwHQ==}
 
   '@vercel/oidc@3.2.0':
     resolution: {integrity: sha512-UycprH3T6n3jH0k44NHMa7pnFHGu/N05MjojYr+Mc6I7obkoLIJujSWwin1pCvdy/eOxrI/l3uDLQsmcrOb4ug==}
@@ -9377,7 +9377,7 @@ snapshots:
     dependencies:
       '@types/node': 25.9.1
 
-  '@vectorize-io/hindsight-client@0.6.2': {}
+  '@vectorize-io/hindsight-client@0.7.2': {}
 
   '@vercel/oidc@3.2.0': {}
 

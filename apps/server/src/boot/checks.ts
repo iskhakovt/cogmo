@@ -166,6 +166,36 @@ export async function checkHindsightVersion(
 }
 
 /**
+ * Assert the bundled `@vectorize-io/hindsight-client` version falls within
+ * the same `cogmo.hindsightCompat` range enforced on the server. Client and
+ * server publish in lockstep, so a client whose version sits outside the
+ * range means the npm dependency and the pin drifted apart in this repo —
+ * one was bumped without the other.
+ *
+ * Pure (no I/O) — the version is a build-time constant the caller passes in.
+ * Hard fail, matching `checkHindsightVersion`: a deterministic config error
+ * that won't self-heal is worth surfacing at boot before a mismatched client
+ * talks to a server it wasn't validated against.
+ */
+export function checkHindsightClientVersion(range: HindsightCompat, clientVersion: string): void {
+  // Coerce to strip any prerelease/build suffix, mirroring the server check —
+  // wire-compat is the major/minor/patch question, not the build tag.
+  const coerced = semver.coerce(clientVersion)?.version;
+  if (coerced === undefined) {
+    throw new BootCheckError(
+      `@vectorize-io/hindsight-client reported an unparseable version: ${JSON.stringify(clientVersion)}`,
+    );
+  }
+  if (!semver.satisfies(coerced, range)) {
+    throw new BootCheckError(
+      `@vectorize-io/hindsight-client version ${clientVersion} is outside the supported range "${range}". ` +
+        `Bump the client dependency and cogmo.hindsightCompat together.`,
+    );
+  }
+  logger.info({ clientVersion, range }, "hindsight client version check passed");
+}
+
+/**
  * Verify a host directory the runtime needs to write into is reachable
  * and writable by the current process. Creates it with `mkdir -p` first
  * (matches the on-demand creation that `provisionAskpass` /
