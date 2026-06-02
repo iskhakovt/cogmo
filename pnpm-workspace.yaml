@@ -22,3 +22,11 @@ overrides:
 
 patchedDependencies:
   '@daytonaio/sdk@0.175.0': patches/@daytonaio__sdk@0.175.0.patch
+
+# The Hindsight client is a first-party dependency (we contribute upstream and
+# pin the server to the matching image), so the supply-chain soak that guards
+# against unknown third-party same-day releases doesn't apply — track its
+# releases immediately. Bump in lockstep with the hindsight-api image pins in
+# apps/server/dev/containers.ts and cogmo.hindsightCompat.
+minimumReleaseAgeExclude:
+  - '@vectorize-io/hindsight-client@0.7.2'

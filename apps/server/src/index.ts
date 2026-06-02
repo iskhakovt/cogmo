@@ -47,6 +47,7 @@ import { createDefaultTools } from "./agent/tools.js";
 import { createWebTools } from "./agent/web-tools.js";
 import {
   checkDirWritable,
+  checkHindsightClientVersion,
   checkHindsightVersion,
   checkS3Bucket,
   checkUuidv7,
@@ -66,7 +67,7 @@ import { logger } from "./logger.js";
 import { HostRunner as McpHostRunner } from "./mcp/client/runner.js";
 import { McpRegistryImpl } from "./mcp/registry.js";
 import { DrizzleMcpStore } from "./mcp/store/index.js";
-import { HindsightMemoryProvider } from "./memory/hindsight.js";
+import { HINDSIGHT_CLIENT_VERSION, HindsightMemoryProvider } from "./memory/hindsight.js";
 import { DAYTONA_API_KEY_SECRET } from "./sandbox/daytona/auth.js";
 import { createSandboxBackend } from "./sandbox/factory.js";
 import { CogmoSocketProxy, type ResourceLimits, type SandboxClient } from "./sandbox/index.js";
@@ -425,7 +426,11 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
   // compat range pinned in `package.json` → `cogmo.hindsightCompat`.
   // Soft-fail (warn) when /version itself can't be reached — memory
   // tools surface their own errors at request time. See `src/boot/checks.ts`.
-  await checkHindsightVersion(memory, loadHindsightCompat());
+  // The client check is instant (no I/O) and catches dependency↔pin drift
+  // before the network probe, so run it first.
+  const hindsightCompat = loadHindsightCompat();
+  checkHindsightClientVersion(hindsightCompat, HINDSIGHT_CLIENT_VERSION);
+  await checkHindsightVersion(memory, hindsightCompat);
 
   return {
     db,

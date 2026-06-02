@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { SpanStatusCode, trace } from "@opentelemetry/api";
 import {
+  CLIENT_VERSION,
   type Client,
   createClient,
   createConfig,
@@ -21,6 +22,14 @@ import type {
   RetainBatchItem,
   RetainOptions,
 } from "./provider.js";
+
+/**
+ * Build-time version of the bundled Hindsight npm client, injected by the
+ * client's own build. Re-exported here so the boot check can assert the
+ * dependency and `cogmo.hindsightCompat` haven't drifted apart, keeping the
+ * client SDK import confined to this module.
+ */
+export const HINDSIGHT_CLIENT_VERSION = CLIENT_VERSION;
 
 /**
  * Hindsight fact_type values. The server defaults recall to
