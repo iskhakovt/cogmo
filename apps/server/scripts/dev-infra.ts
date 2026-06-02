@@ -69,23 +69,7 @@ async function main() {
   const inngestConnectGatewayUrl = `ws://${inn.getHost()}:${inn.getMappedPort(8289)}/v0/connect`;
   const hindsightUrl = `http://${hindsightContainer.getHost()}:${hindsightContainer.getMappedPort(8888)}`;
   const s3Endpoint = `http://${mn.getHost()}:${mn.getMappedPort(9000)}`;
-
-  // Ensure the files bucket exists in MinIO. Idempotent: withReuse persists the
-  // container's data across runs, so a re-run hits BucketAlreadyOwnedByYou.
-  const { S3Client, CreateBucketCommand } = await import("@aws-sdk/client-s3");
-  const s3 = new S3Client({
-    endpoint: s3Endpoint,
-    region: "us-east-1",
-    forcePathStyle: true,
-    credentials: { accessKeyId: "minioadmin", secretAccessKey: "minioadmin" },
-  });
-  try {
-    await s3.send(new CreateBucketCommand({ Bucket: "cogmo-files" }));
-  } catch (err) {
-    const name = err instanceof Error ? err.name : "";
-    if (name !== "BucketAlreadyOwnedByYou" && name !== "BucketAlreadyExists") throw err;
-  }
-  s3.destroy();
+  await c.ensureFilesBucket(s3Endpoint);
 
   // Override the prod-flavoured `/var/lib/cogmo/...` defaults from
   // `env.ts` with project-local scratch paths under `.dev/` so `pnpm dev`

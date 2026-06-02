@@ -53,16 +53,7 @@ export async function setup({ provide }: GlobalSetupContext) {
   if (!hindsightUrl) throw new Error("hindsight is required for e2e");
   if (!s3Endpoint) throw new Error("minio is required for e2e");
 
-  // Create the S3 bucket in MinIO
-  const { S3Client, CreateBucketCommand } = await import("@aws-sdk/client-s3");
-  const s3 = new S3Client({
-    endpoint: s3Endpoint,
-    region: "us-east-1",
-    forcePathStyle: true,
-    credentials: { accessKeyId: "minioadmin", secretAccessKey: "minioadmin" },
-  });
-  await s3.send(new CreateBucketCommand({ Bucket: "cogmo-files" }));
-  s3.destroy();
+  await c.ensureFilesBucket(s3Endpoint);
 
   // Use pre-built Docker image if available (CI builds it), otherwise build from Dockerfile.
   const imageName = process.env.E2E_IMAGE ?? "cogmo-e2e";
