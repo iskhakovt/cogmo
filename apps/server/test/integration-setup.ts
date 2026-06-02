@@ -14,8 +14,9 @@ import { startMcpEchoHttpServer } from "../src/test/mcp-http-echo-server.js";
 import { createMock } from "./llmock-setup.js";
 import { startTelegramMockServer, type TelegramMockServer } from "./telegram-mock.js";
 
-// Load .env for recording mode — API keys needed for real upstream calls
-if (existsSync(".env")) loadEnvFile(".env");
+// Load the repo-root .env for recording mode — API keys needed for real upstream calls.
+// vitest runs with cwd = apps/server (the cogmo package), so the root .env is two levels up.
+if (existsSync("../../.env")) loadEnvFile("../../.env");
 
 /// <reference path="./vitest.d.ts" />
 
