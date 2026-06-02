@@ -36,6 +36,16 @@ function resultProcedure<T>(fn: (ctx: WebRpcContext) => Promise<Result<T, Transp
 export const webRouter = {
   conversations: {
     list: resultProcedure((c) => c.transport.conversations.list(c.platformUserHandle)),
+    getMessages: base
+      .input(z.object({ conversationId: z.string() }))
+      .handler(async ({ input, context, errors }) => {
+        const result = await context.transport.conversations.getMessages(
+          context.platformUserHandle,
+          input.conversationId,
+        );
+        if (result.isErr()) throw errors.TRANSPORT_ERROR({ data: result.error });
+        return result.value;
+      }),
   },
   profiles: {
     list: resultProcedure((c) => c.transport.profiles.list(c.platformUserHandle)),

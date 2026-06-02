@@ -13,6 +13,7 @@ import type { MemoryTrust } from "../agent/evolution/memory-extraction-schema.js
 import type { AutoRecallMode } from "../agent/recall-gate.js";
 import type { ScheduledTaskSummary } from "../agent/scheduling/scheduling-service.js";
 import type {
+  ChatHistoryMessage,
   CodingAutoapproveMode,
   ConversationSummary,
   CustomCompartment,
@@ -75,6 +76,7 @@ assertParity<Mutual<Profile, C.Profile>>();
 assertParity<Mutual<ProfileClass, C.ProfileClass>>();
 assertParity<Mutual<CustomCompartment, C.CustomCompartment>>();
 assertParity<Mutual<ConversationSummary, C.ConversationSummary>>();
+assertParity<Mutual<ChatHistoryMessage, C.ChatHistoryMessage>>();
 assertParity<Mutual<ScheduledTaskSummary, C.ScheduledTaskSummary>>();
 assertParity<Mutual<EvolutionEventRow, C.EvolutionEventRow>>();
 

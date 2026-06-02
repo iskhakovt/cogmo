@@ -76,6 +76,18 @@ export interface ConversationSummary {
   lastMessageAt: Date;
 }
 
+/**
+ * One past turn for the web chat history read. Lean by design: `text` is the
+ * displayable prose of the message (concatenated text blocks). Tool-call cards
+ * render live during streaming; reconstructing them from history is deferred to
+ * the reconnect-replay work, which pairs tool_use/tool_result across messages.
+ */
+export interface ChatHistoryMessage {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+}
+
 export interface ScheduledTaskSummary {
   id: string;
   kind: ScheduleKind;

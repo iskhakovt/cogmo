@@ -603,6 +603,68 @@ describe("createTransport", () => {
     });
   });
 
+  describe("conversations.getMessages", () => {
+    it("returns identity_rejected when the handle doesn't resolve", async () => {
+      const transportStore = mockTransportStore({ resolveUser: vi.fn().mockResolvedValue(null) });
+      const { transport } = setup({ transportStore });
+      const res = await transport.conversations.getMessages("handle", "c1");
+      expect(res._unsafeUnwrapErr()).toMatchObject({ code: "identity_rejected" });
+    });
+
+    it("returns conversation_not_found for a missing conversation", async () => {
+      const agentStore = mockAgentStore({ getConversation: vi.fn().mockResolvedValue(undefined) });
+      const { transport } = setup({ agentStore });
+      const res = await transport.conversations.getMessages("handle", "c1");
+      expect(res._unsafeUnwrapErr()).toMatchObject({ code: "conversation_not_found" });
+    });
+
+    it("returns access_denied when caller does not own the conversation", async () => {
+      const agentStore = mockAgentStore({
+        getConversation: vi
+          .fn()
+          .mockResolvedValue({ id: "c1", userId: "someone-else", profileId: "p", isPrivate: true }),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.conversations.getMessages("handle", "c1");
+      expect(res._unsafeUnwrapErr()).toMatchObject({ code: "access_denied" });
+    });
+
+    it("flattens content to text and drops tool-only turns", async () => {
+      const agentStore = mockAgentStore({
+        getConversation: vi
+          .fn()
+          .mockResolvedValue({ id: "c1", userId: "user-1", profileId: "p", isPrivate: true }),
+        listMessages: vi.fn().mockResolvedValue([
+          { id: "m1", role: "user", content: "hello" },
+          {
+            id: "m2",
+            role: "assistant",
+            content: [
+              { type: "text", text: "hi " },
+              { type: "text", text: "there" },
+            ],
+          },
+          {
+            id: "m3",
+            role: "assistant",
+            content: [{ type: "tool_use", id: "t1", name: "x", input: {} }],
+          },
+          {
+            id: "m4",
+            role: "user",
+            content: [{ type: "tool_result", toolUseId: "t1", content: "ok" }],
+          },
+        ]),
+      });
+      const { transport } = setup({ agentStore });
+      const res = await transport.conversations.getMessages("handle", "c1");
+      expect(res._unsafeUnwrap()).toEqual([
+        { id: "m1", role: "user", text: "hello" },
+        { id: "m2", role: "assistant", text: "hi there" },
+      ]);
+    });
+  });
+
   describe("conversations.setProfile", () => {
     it("returns conversation_not_found when conversation missing", async () => {
       const agentStore = mockAgentStore({

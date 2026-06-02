@@ -1,26 +1,23 @@
 import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { ChatView } from "./chat/ChatView.js";
 import { api } from "./orpc.js";
 
 /**
- * Phase 1b proof: a token login that exchanges for a session cookie, then one
- * screen that reads `models.list` over oRPC behind the cookie. No Ledger theme,
- * no app shell — those land with the Phase 3 screens. The single read proves
- * the full loop: gate -> session -> Transport namespace.
+ * A token login that exchanges for a session cookie, then the streaming chat
+ * screen behind the cookie. No Ledger theme / app shell yet — those land with
+ * the Phase 3 screens.
  */
-type View =
-  | { kind: "loading" }
-  | { kind: "login"; error?: string }
-  | { kind: "ready"; models: readonly string[] };
+type View = { kind: "loading" } | { kind: "login"; error?: string } | { kind: "ready" };
 
 export function App() {
   const [view, setView] = useState<View>({ kind: "loading" });
 
-  // Probe the gated read. Success means we hold a valid session; any failure
-  // behind the gate is "not authenticated", so the login screen is the next step.
+  // Probe a gated read to check the session. Success means we hold a valid
+  // session; any failure behind the gate is "not authenticated" -> login.
   const probe = useCallback(async () => {
     try {
-      const models = await api.models.list();
-      setView({ kind: "ready", models });
+      await api.models.list();
+      setView({ kind: "ready" });
     } catch {
       setView({ kind: "login" });
     }
@@ -71,7 +68,7 @@ export function App() {
   if (view.kind === "login") {
     return <LoginForm error={view.error} onSubmit={login} />;
   }
-  return <Models models={view.models} onLogout={logout} />;
+  return <ChatView onLogout={logout} />;
 }
 
 function LoginForm({
@@ -119,36 +116,6 @@ function LoginForm({
           Run <code>cogmo web-token</code> to print the token.
         </p>
       </form>
-    </main>
-  );
-}
-
-function Models({
-  models,
-  onLogout,
-}: {
-  models: readonly string[];
-  onLogout: () => Promise<void>;
-}) {
-  return (
-    <main className="page">
-      <div className="card">
-        <header className="row">
-          <h1>Models</h1>
-          <button type="button" onClick={() => void onLogout()}>
-            Log out
-          </button>
-        </header>
-        {models.length === 0 ? (
-          <p className="hint">No models configured.</p>
-        ) : (
-          <ul>
-            {models.map((model) => (
-              <li key={model}>{model}</li>
-            ))}
-          </ul>
-        )}
-      </div>
     </main>
   );
 }
