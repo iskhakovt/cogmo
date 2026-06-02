@@ -1,19 +1,9 @@
+import { type TransportError, TransportErrorSchema } from "@cogmo/contracts";
 import { describe, expect, it } from "vitest";
-import type { z } from "zod";
-import type { TransportError } from "../transport/transport.js";
-import { TransportErrorSchema } from "./transport-error-schema.js";
 
-/**
- * Compile-time parity guard: the Zod schema and the TS union must be mutually
- * assignable. A new/renamed variant or field on either side fails typecheck
- * here (no runtime effect).
- */
-type Mutual<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
-function assertParity<_T extends true>(): void {}
-assertParity<Mutual<TransportError, z.infer<typeof TransportErrorSchema>>>();
-
-// One representative per field-shape (typed as TransportError, so each is also
-// compile-checked to be a real variant).
+// The compile-time schema↔union parity guard lives next to the schema in
+// `packages/contracts/src/transport-error-schema.ts`. This covers runtime parse
+// behaviour for a representative of each field-shape.
 const SAMPLES: TransportError[] = [
   { code: "identity_rejected" },
   { code: "session_not_found", sessionId: "s1" },

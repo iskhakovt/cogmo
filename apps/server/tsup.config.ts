@@ -15,4 +15,7 @@ export default defineConfig({
   outDir: "dist",
   clean: true,
   sourcemap: true,
+  // Bundle the workspace `@cogmo/contracts` (shipped as TS source) into the
+  // output — it has no built JS to resolve at runtime.
+  noExternal: [/^@cogmo\//],
 });

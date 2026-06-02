@@ -23,6 +23,7 @@
   },
   "devDependencies": {
     "@cogmo/contracts": "workspace:*",
+    "@orpc/contract": "1.14.4",
     "@tailwindcss/vite": "^4.3.0",
     "@types/react": "^19.2.15",
     "@types/react-dom": "^19.2.3",

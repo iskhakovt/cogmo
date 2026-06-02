@@ -15,6 +15,8 @@ import type {
 import type {
   AutoRecallMode,
   CodingAutoapproveMode,
+  McpServerApprovalStatus,
+  McpTransportKind,
   SkillRiskTier,
   SkillTier,
   VoiceMode,
@@ -150,6 +152,24 @@ export interface SkillListEntry {
   riskTier: SkillRiskTier;
   disabled: boolean;
   gitSha: string;
+}
+
+/**
+ * UI-facing projection of an MCP server for the admin table. A flat `transport`
+ * kind replaces the full `McpServerConfig` union so command/url/header
+ * value-sources (which can name secrets) never cross to the client.
+ */
+export interface McpServerSummary {
+  id: string;
+  name: string;
+  transport: McpTransportKind;
+  enabled: boolean;
+  approvalStatus: McpServerApprovalStatus;
+  toolCount: number;
+  approvedToolCount: number;
+  lastConnectedAt: Date | null;
+  lastError: string | null;
+  createdAt: Date;
 }
 
 export type ScheduledTaskAdminEntry = ScheduledTaskSummary;
