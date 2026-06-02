@@ -892,6 +892,14 @@ export function createTransport(deps: {
   inboundArrived: typeof InboundArrivedEvent;
   attachments: AttachmentStore;
   idleTimeoutMs: number;
+  /**
+   * `receive` mode stamped on sessions this transport opens
+   * (`createConversation` / `resumeConversation`). Defaults to `"routed"`
+   * (source routing). The web channel passes `"all"` so every tab watching a
+   * conversation receives its streamed responses, not just the tab that sent
+   * the turn.
+   */
+  sessionReceive?: "routed" | "all";
 }): Transport {
   const {
     channelId,
@@ -910,6 +918,7 @@ export function createTransport(deps: {
     inboundArrived,
     attachments,
     idleTimeoutMs,
+    sessionReceive = "routed",
   } = deps;
 
   // Helper for the three transport clear-trigger sites (`/repair`,
@@ -1079,7 +1088,7 @@ export function createTransport(deps: {
           platformAddress,
           conversationId: conv.id,
           status: "active" as const,
-          receive: "routed" as const,
+          receive: sessionReceive,
         };
         const { id } = await transportStore.createSession(tx, params);
         return ok({ id, ...params, profileName: profile.name });
@@ -1127,7 +1136,7 @@ export function createTransport(deps: {
         const newParams = {
           conversationId,
           status: "active" as const,
-          receive: "routed" as const,
+          receive: sessionReceive,
         };
         const { id } = await transportStore.swapSession(tx, channelId, platformAddress, newParams);
         return ok({ id, channelId, platformAddress, ...newParams });

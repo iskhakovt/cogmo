@@ -83,6 +83,7 @@ import { SkillRunnerImpl } from "./skills/runner.js";
 import { registerSkillTool, SKILLS_PROMPT_GUIDANCE } from "./skills/skills-tool.js";
 import { DrizzleSkillStore } from "./skills/store/index.js";
 import { DEFAULT_RESOURCE_LIMITS as SKILLS_DEFAULT_RESOURCE_LIMITS } from "./skills/worker-sysbox/host.js";
+import { WebStreamRegistry } from "./transport/adapters/web/stream-registry.js";
 import type { AttachmentStore } from "./transport/attachment-store.js";
 import { createAttachmentStore } from "./transport/attachment-store.js";
 import { createBoundaryJanitor } from "./transport/boundary/janitor.js";
@@ -285,6 +286,11 @@ export interface RuntimeDeps {
    * exercised by tests, not a runtime gap.
    */
   webTransport: Transport | null;
+  /**
+   * SSE bridge shared by the WebUiAdapter and the UI server's chat routes.
+   * Always present (created unconditionally); empty until tabs connect.
+   */
+  webStreamRegistry: WebStreamRegistry;
 }
 
 /**
@@ -1020,11 +1026,16 @@ export async function bootstrapRuntime(
   // deployments the channel on upgrade without re-running the wizard.
   await ensureWebChannel(core.runInTx, core.transportStore, core.user.id);
 
+  // Bridge between the WebUiAdapter (streamed turns) and the UI server's SSE
+  // routes (open tab connections) — one shared instance, both sides below.
+  const webStreamRegistry = new WebStreamRegistry();
+
   const {
     functions: channelFunctions,
     adapters,
     adapterMap,
   } = await startChannels({
+    webStream: webStreamRegistry,
     defaultUserId: core.user.id,
     defaultProfileId: core.profile.id,
     runInTx: core.runInTx,
@@ -1077,6 +1088,8 @@ export async function bootstrapRuntime(
         inboundArrived,
         attachments: core.attachmentStore,
         idleTimeoutMs,
+        // Tabs watch the whole conversation, not just turns they sent.
+        sessionReceive: "all",
       })
     : null;
   const idleTimer = createIdleTimer({ idleTimeoutMs });
@@ -1223,7 +1236,7 @@ export async function bootstrapRuntime(
     ...codingFunctions,
   ];
 
-  return { functions, adapters, mcpRegistry, webTransport };
+  return { functions, adapters, mcpRegistry, webTransport, webStreamRegistry };
 }
 
 /**

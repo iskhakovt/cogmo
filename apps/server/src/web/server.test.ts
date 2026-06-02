@@ -3,12 +3,13 @@ import type { AddressInfo } from "node:net";
 import { createORPCClient } from "@orpc/client";
 import { RPCLink } from "@orpc/client/fetch";
 import type { RouterClient } from "@orpc/server";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { DrizzleAgentStore } from "../agent/store/index.js";
 import type { Database, Transactor } from "../db/index.js";
 import { expectDefined } from "../test/assertions.js";
 import { mockTransportDeep } from "../test/factories.js";
 import { createTestDatabase } from "../test/pglite.js";
+import { WebStreamRegistry } from "../transport/adapters/web/stream-registry.js";
 import type { webRouter } from "./rpc/router.js";
 import { createWebServer, startWebServer } from "./server.js";
 import { hashSessionToken } from "./session/token.js";
@@ -32,6 +33,7 @@ beforeAll(async () => {
   server = createWebServer({
     webTransport: mockTransportDeep({ models: { list: async () => ["gpt", "claude"] } }),
     webSessionStore: new DrizzleWebSessionStore(),
+    webStreamRegistry: new WebStreamRegistry(),
     runInTx: tx,
     verifyLoginToken: (candidate) => candidate === VALID_TOKEN,
     ownerUserId,
@@ -187,6 +189,7 @@ describe("web server", () => {
       const server503 = createWebServer({
         webTransport: null,
         webSessionStore: new DrizzleWebSessionStore(),
+        webStreamRegistry: new WebStreamRegistry(),
         runInTx: tx,
         verifyLoginToken: (candidate) => candidate === VALID_TOKEN,
         ownerUserId,
@@ -250,6 +253,7 @@ describe("web server", () => {
         startWebServer({
           webTransport: null,
           webSessionStore: new DrizzleWebSessionStore(),
+          webStreamRegistry: new WebStreamRegistry(),
           runInTx: tx,
           verifyLoginToken: () => false,
           ownerUserId,
@@ -263,5 +267,154 @@ describe("web server", () => {
     } finally {
       await new Promise<void>((resolve) => blocker.close(() => resolve()));
     }
+  });
+});
+
+describe("web chat routes", () => {
+  let chatServer: ReturnType<typeof createWebServer>;
+  let chatBase: string;
+  let chatRegistry: WebStreamRegistry;
+  let transport: ReturnType<typeof mockTransportDeep>;
+
+  const session = {
+    id: "sess-1",
+    channelId: "ch-1",
+    platformAddress: "tab-1",
+    conversationId: "conv-1",
+    status: "active" as const,
+    receive: "all" as const,
+  };
+
+  /** Start a chat server with a fresh registry + transport mock (default or overridden). */
+  async function start(overrides: Parameters<typeof mockTransportDeep>[0] = {}): Promise<void> {
+    chatRegistry = new WebStreamRegistry();
+    transport = mockTransportDeep(overrides);
+    chatServer = createWebServer({
+      webTransport: transport,
+      webSessionStore: new DrizzleWebSessionStore(),
+      webStreamRegistry: chatRegistry,
+      runInTx: tx,
+      verifyLoginToken: (candidate) => candidate === VALID_TOKEN,
+      ownerUserId,
+      sessionTtlDays: 30,
+      cookieSecure: true,
+      staticRoot: "/nonexistent-cogmo-dist",
+    });
+    await new Promise<void>((resolve) => chatServer.listen(0, "127.0.0.1", resolve));
+    chatBase = `http://127.0.0.1:${(chatServer.address() as AddressInfo).port}`;
+  }
+
+  afterEach(async () => {
+    if (chatServer?.listening) {
+      await new Promise<void>((resolve) => {
+        chatServer.closeIdleConnections();
+        chatServer.close(() => resolve());
+      });
+    }
+  });
+
+  it("creates a conversation and returns its id", async () => {
+    await start();
+    const cookie = await login();
+    const res = await fetch(`${chatBase}/api/chat?tab=tab-1`, {
+      method: "POST",
+      headers: jsonHeaders({ cookie }),
+      body: "{}",
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ conversationId: "conv-1" });
+  });
+
+  it("emits a user turn to the resolved session (202)", async () => {
+    await start({ resolveSession: vi.fn().mockResolvedValue(session) });
+    const cookie = await login();
+    const res = await fetch(`${chatBase}/api/chat/conv-1?tab=tab-1`, {
+      method: "POST",
+      headers: jsonHeaders({ cookie }),
+      body: JSON.stringify({ text: "hello" }),
+    });
+    expect(res.status).toBe(202);
+    expect(transport.emit).toHaveBeenCalledWith("sess-1", "hello", expect.any(Date));
+  });
+
+  it("409s a send when the tab has no open session", async () => {
+    await start({ resolveSession: vi.fn().mockResolvedValue(null) });
+    const cookie = await login();
+    const res = await fetch(`${chatBase}/api/chat/conv-1?tab=tab-1`, {
+      method: "POST",
+      headers: jsonHeaders({ cookie }),
+      body: JSON.stringify({ text: "hi" }),
+    });
+    expect(res.status).toBe(409);
+  });
+
+  it("409s a send when the session points at a different conversation", async () => {
+    await start({
+      resolveSession: vi.fn().mockResolvedValue({ ...session, conversationId: "conv-other" }),
+    });
+    const cookie = await login();
+    const res = await fetch(`${chatBase}/api/chat/conv-1?tab=tab-1`, {
+      method: "POST",
+      headers: jsonHeaders({ cookie }),
+      body: JSON.stringify({ text: "hi" }),
+    });
+    expect(res.status).toBe(409);
+  });
+
+  it("400s a send with a missing tab or empty body", async () => {
+    await start({ resolveSession: vi.fn().mockResolvedValue(session) });
+    const cookie = await login();
+    const noTab = await fetch(`${chatBase}/api/chat/conv-1`, {
+      method: "POST",
+      headers: jsonHeaders({ cookie }),
+      body: JSON.stringify({ text: "hi" }),
+    });
+    expect(noTab.status).toBe(400);
+    const noText = await fetch(`${chatBase}/api/chat/conv-1?tab=tab-1`, {
+      method: "POST",
+      headers: jsonHeaders({ cookie }),
+      body: "{}",
+    });
+    expect(noText.status).toBe(400);
+  });
+
+  it("opens an SSE stream that registers the tab and emits a ready frame", async () => {
+    await start();
+    const cookie = await login();
+    const ac = new AbortController();
+    const res = await fetch(`${chatBase}/api/chat/conv-1/stream?tab=tab-1`, {
+      headers: { cookie, "sec-fetch-site": "same-origin" },
+      signal: ac.signal,
+    });
+    try {
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("text/event-stream");
+      const reader = expectDefined(res.body, "sse body").getReader();
+      const first = await reader.read();
+      const text = new TextDecoder().decode(expectDefined(first.value, "first frame"));
+      expect(text).toContain("event: ready");
+      expect(chatRegistry.size).toBe(1);
+      await reader.cancel();
+    } finally {
+      ac.abort();
+    }
+  });
+
+  it("401s the stream without a session cookie (fail-closed)", async () => {
+    await start();
+    const res = await fetch(`${chatBase}/api/chat/conv-1/stream?tab=tab-1`, {
+      headers: { "sec-fetch-site": "same-origin" },
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("403s a create with a non-JSON content-type (CSRF)", async () => {
+    await start();
+    const res = await fetch(`${chatBase}/api/chat?tab=tab-1`, {
+      method: "POST",
+      headers: jsonHeaders({ "content-type": "text/plain" }),
+      body: "{}",
+    });
+    expect(res.status).toBe(403);
   });
 });

@@ -14,6 +14,7 @@ ONE Node process (Inngest connect + agent loop + UI server) on :9090
   POST /api/session                    exchange the derived login token for a session cookie
   DELETE /api/session                  log out (delete the session row)
   ALL  /rpc/*                          oRPC handler over the Transport namespaces
+  POST /api/chat                       create a conversation -> { conversationId }
   GET  /api/chat/:cid/stream           SSE: web StreamingAdapter writer + Last-Event-ID replay
   POST /api/chat/:cid                  transport.emit() (inbound user turn)
   *                                    static apps/web/dist via sirv (SPA fallback)

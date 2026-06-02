@@ -8,6 +8,22 @@
  * casts at the call site, no `!` assertions hiding real undefined cases.
  */
 
+import type { Adapter, StreamingAdapter } from "../transport/types.js";
+
+/**
+ * Narrow an adapter-setup result to a batch `Adapter`. `AdapterSetupResult.adapter`
+ * is `Adapter | StreamingAdapter` (the web channel is streaming-only); batch-adapter
+ * tests that exercise `deliver` use this to drop the streaming arm without a cast.
+ * Keyed on `deliver` (not `isStreamingAdapter`) so Telegram — which implements
+ * both — still narrows correctly.
+ */
+export function asBatchAdapter(adapter: Adapter | StreamingAdapter): Adapter {
+  if (!("deliver" in adapter)) {
+    throw new Error("expected a batch Adapter (no `deliver` method present)");
+  }
+  return adapter;
+}
+
 /**
  * Throw if `value` is `null` / `undefined`, otherwise return it narrowed.
  * Use for `arr[i]`, `map.get(k)`, `.find(...)`, `.mock.calls[0]`, etc.

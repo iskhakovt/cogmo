@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { z } from "zod";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
+import type { WebStreamRegistry } from "../transport/adapters/web/stream-registry.js";
 import type { Transport } from "../transport/transport.js";
 import {
   buildClearCookie,
@@ -10,6 +11,8 @@ import {
   sessionCookieName,
 } from "./auth/cookies.js";
 import { type AuthStrategy, authenticate, cookieStrategy, csrfReject } from "./auth/gate.js";
+import { PayloadTooLargeError, readJsonBody } from "./body.js";
+import { handleChat } from "./chat.js";
 import { writeHealth } from "./health-route.js";
 import { OWNER_HANDLE } from "./rpc/context.js";
 import { handleRpc } from "./rpc/handler.js";
@@ -28,6 +31,8 @@ export interface CreateWebServerDeps {
    */
   webTransport: Transport | null;
   webSessionStore: WebSessionStore;
+  /** SSE bridge the chat routes register tab connections on; the WebUiAdapter writes through it. */
+  webStreamRegistry: WebStreamRegistry;
   runInTx: Transactor;
   /** Constant-time compare of a presented bootstrap token to the derived one. */
   verifyLoginToken: (candidate: string) => boolean;
@@ -48,36 +53,6 @@ export interface StartWebServerDeps extends CreateWebServerDeps {
 function send(res: ServerResponse, status: number, message: string): void {
   res.writeHead(status, { "Content-Type": "text/plain" });
   res.end(message);
-}
-
-/** Login bodies are tiny (`{ token }`). Cap the unauthenticated read so a public
- * endpoint can't be used to exhaust memory with an unbounded stream. */
-const MAX_BODY_BYTES = 64 * 1024;
-
-class PayloadTooLargeError extends Error {}
-
-async function readJsonBody(req: IncomingMessage): Promise<unknown> {
-  // Reject an honestly-declared oversized body before reading a byte; the
-  // streaming cap below backstops chunked / lying Content-Length. Throwing
-  // unwinds the read — the `for await` iterator's return() ends the request
-  // stream — and the handler replies 413. We just don't call `req.destroy()`
-  // ourselves, which tore down the socket before the response could flush.
-  const declared = Number(req.headers["content-length"]);
-  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
-    throw new PayloadTooLargeError();
-  }
-  const chunks: Buffer[] = [];
-  let total = 0;
-  for await (const chunk of req) {
-    // Node's Readable async-iterator element type is `any`; a request body in
-    // binary mode always yields Buffers, so narrow cast-free.
-    if (!Buffer.isBuffer(chunk)) continue;
-    total += chunk.length;
-    if (total > MAX_BODY_BYTES) throw new PayloadTooLargeError();
-    chunks.push(chunk);
-  }
-  const raw = Buffer.concat(chunks).toString("utf8");
-  return raw ? JSON.parse(raw) : undefined;
 }
 
 /** Login request body. Validated with Zod rather than a hand-rolled typeof ladder. */
@@ -182,8 +157,9 @@ export function createWebServer(deps: CreateWebServerDeps): Server {
 
     const isLogout = method === "DELETE" && path === "/api/session";
     const isRpc = path === "/rpc" || path.startsWith("/rpc/");
+    const isChat = path === "/api/chat" || path.startsWith("/api/chat/");
 
-    if (isLogout || isRpc) {
+    if (isLogout || isRpc || isChat) {
       const identity = await authenticate(req, strategies);
       if (!identity) {
         send(res, 401, "Unauthorized");
@@ -193,8 +169,17 @@ export function createWebServer(deps: CreateWebServerDeps): Server {
         await handleLogout(req, res);
         return;
       }
+      // Both the oRPC and chat surfaces drive the web-scoped Transport.
       if (!deps.webTransport) {
         send(res, 503, "Web channel not provisioned — run `cogmo setup`");
+        return;
+      }
+      if (isChat) {
+        await handleChat(req, res, path, {
+          transport: deps.webTransport,
+          registry: deps.webStreamRegistry,
+          ownerHandle: identity.platformUserHandle,
+        });
         return;
       }
       const { matched } = await handleRpc(req, res, {

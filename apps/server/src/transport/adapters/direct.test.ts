@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { z } from "zod";
 import { inngest } from "../../inngest/client.js";
 import type { directInbound } from "../../inngest/events.js";
+import { asBatchAdapter } from "../../test/assertions.js";
 import {
   invokeInngestFn,
   type MockStep,
@@ -57,7 +58,7 @@ async function setupAdapter(transportOverrides?: Partial<ReturnType<typeof mockT
   // The inbound Inngest function
   const inboundFn = result.functions[0];
 
-  return { transport, adapter: result.adapter, inboundFn };
+  return { transport, adapter: asBatchAdapter(result.adapter), inboundFn };
 }
 
 describe("direct adapter", () => {
