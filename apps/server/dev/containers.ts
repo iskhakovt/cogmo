@@ -100,8 +100,8 @@ export function hindsight(
 
   // API-only image — same runtime as the full `hindsight` image but without
   // the Control Plane web UI (which Cogmo never talks to). Pinned within
-  // `cogmo.hindsightCompat`: a floating `latest` drifts past the range (now
-  // 0.7.x) and trips the boot version check.
+  // `cogmo.hindsightCompat`: a floating `latest` drifts past the range and
+  // trips the boot version check.
   return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:0.6.0")
     .withNetwork(network)
     .withNetworkAliases("hindsight")
