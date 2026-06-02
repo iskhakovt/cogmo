@@ -36,7 +36,12 @@ export function useChat(conversationId: string, tab: string) {
     void api.conversations
       .getMessages({ conversationId })
       .then((history) => {
-        if (!cancelled) setMessages(history.map(historyToUi));
+        // Don't clobber a turn already streaming: if a live event beat the
+        // history fetch (an in-flight turn on open), it set `streamingId`, so
+        // skip the replace and let the live message stand.
+        if (!cancelled && streamingId.current === null) {
+          setMessages(history.map(historyToUi));
+        }
       })
       .catch(() => {
         if (!cancelled) setMessages([]);
@@ -99,11 +104,26 @@ export function useChat(conversationId: string, tab: string) {
       if (text.length === 0) return;
       setMessages((prev) => [...prev, { id: localId("u"), role: "user", text, tools: [] }]);
       setIsRunning(true);
-      await credentialed(`/api/chat/${conversationId}?tab=${encodeURIComponent(tab)}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text }),
-      });
+      try {
+        const res = await credentialed(
+          `/api/chat/${conversationId}?tab=${encodeURIComponent(tab)}`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ text }),
+          },
+        );
+        if (!res.ok) throw new Error(`send failed (${res.status})`);
+        // On success the turn streams back over the SSE, which clears isRunning
+        // at `turn-end`. On failure no events arrive, so clear it here and
+        // surface the error instead of leaving the UI stuck "thinking".
+      } catch {
+        setIsRunning(false);
+        setMessages((prev) => [
+          ...prev,
+          { id: localId("a"), role: "assistant", text: "⚠️ Couldn't send your message.", tools: [] },
+        ]);
+      }
     },
     [conversationId, tab],
   );

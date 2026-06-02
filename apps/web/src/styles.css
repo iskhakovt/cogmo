@@ -88,7 +88,8 @@ ul {
 .chat-view {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  /* dvh tracks the *visible* viewport — mobile browser chrome doesn't clip it. */
+  height: 100dvh;
 }
 
 .chat-header {
@@ -139,6 +140,8 @@ ul {
   padding: 0.6rem 0.85rem;
   border-radius: 10px;
   white-space: pre-wrap;
+  /* Break unbreakable runs (long URLs, hashes) instead of overflowing the bubble. */
+  overflow-wrap: break-word;
   line-height: 1.45;
 }
 
@@ -178,6 +181,7 @@ ul {
 .tool-result {
   margin: 0.35rem 0 0;
   white-space: pre-wrap;
+  overflow-wrap: break-word;
 }
 
 .composer {

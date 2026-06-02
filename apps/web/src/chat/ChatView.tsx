@@ -41,6 +41,9 @@ export function ChatView({ onLogout }: { onLogout: () => Promise<void> }) {
     void api.conversations
       .list()
       .then(async (list) => {
+        // Bail before creating: an unmount mid-fetch would otherwise POST a
+        // fresh conversation that's immediately abandoned (orphaned server-side).
+        if (cancelled) return;
         const id = list[0]?.id ?? (await createConversation(tab));
         if (!cancelled) setConversationId(id);
       })

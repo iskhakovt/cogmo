@@ -14,7 +14,7 @@ const ToolCall: ToolCallMessagePartComponent = ({ toolName, result, isError }) =
         <span className="tool-running">running…</span>
       ) : (
         <pre className="tool-result">
-          {typeof result === "string" ? result : JSON.stringify(result)}
+          {typeof result === "string" ? result : JSON.stringify(result, null, 2)}
         </pre>
       )}
     </div>
