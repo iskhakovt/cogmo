@@ -1,10 +1,8 @@
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadEnvFile } from "node:process";
 import type { LLMock } from "@copilotkit/aimock";
 import type { StartedTestContainer } from "testcontainers";
 import { Network } from "testcontainers";
@@ -12,10 +10,10 @@ import type { GlobalSetupContext } from "vitest/node";
 import * as c from "../dev/containers.js";
 import { startMcpEchoHttpServer } from "../src/test/mcp-http-echo-server.js";
 import { createMock } from "./llmock-setup.js";
+import { loadRootEnv } from "./load-root-env.js";
 import { startTelegramMockServer, type TelegramMockServer } from "./telegram-mock.js";
 
-// Load .env for recording mode — API keys needed for real upstream calls
-if (existsSync(".env")) loadEnvFile(".env");
+loadRootEnv();
 
 /// <reference path="./vitest.d.ts" />
 
@@ -74,16 +72,7 @@ export async function setup({ provide }: GlobalSetupContext) {
   if (!hindsightUrl) throw new Error("hindsight is required for integration tests");
   if (!s3Endpoint) throw new Error("minio is required for integration tests");
 
-  // Create the S3 bucket in MinIO
-  const { S3Client, CreateBucketCommand } = await import("@aws-sdk/client-s3");
-  const s3 = new S3Client({
-    endpoint: s3Endpoint,
-    region: "us-east-1",
-    forcePathStyle: true,
-    credentials: { accessKeyId: "minioadmin", secretAccessKey: "minioadmin" },
-  });
-  await s3.send(new CreateBucketCommand({ Bucket: "cogmo-files" }));
-  s3.destroy();
+  await c.ensureFilesBucket(s3Endpoint);
 
   // Set process.env — propagates to Vitest test workers.
   process.env.DATABASE_URL = urls.databaseUrl;

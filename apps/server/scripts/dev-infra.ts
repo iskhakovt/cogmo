@@ -42,10 +42,11 @@ async function main() {
     });
   }
 
-  const [pg, _rd, inn] = await Promise.all([
+  const [pg, _rd, inn, mn] = await Promise.all([
     startWithProgress("Postgres", () => c.postgres(network).withReuse().start()),
     startWithProgress("Redis", () => c.redis(network).withReuse().start()),
     startWithProgress("Inngest", () => c.inngest(network).withReuse().start()),
+    startWithProgress("MinIO", () => c.minio(network).withReuse().start()),
   ]);
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -67,6 +68,8 @@ async function main() {
   // container, manifesting as "Reconnecting after failure" in a loop.
   const inngestConnectGatewayUrl = `ws://${inn.getHost()}:${inn.getMappedPort(8289)}/v0/connect`;
   const hindsightUrl = `http://${hindsightContainer.getHost()}:${hindsightContainer.getMappedPort(8888)}`;
+  const s3Endpoint = `http://${mn.getHost()}:${mn.getMappedPort(9000)}`;
+  await c.ensureFilesBucket(s3Endpoint);
 
   // Override the prod-flavoured `/var/lib/cogmo/...` defaults from
   // `env.ts` with project-local scratch paths under `.dev/` so `pnpm dev`
@@ -115,6 +118,10 @@ async function main() {
       COGMO_MASTER_KEY: masterKey,
       COGMO_LLM_PROVIDER_TYPE: "anthropic",
       COGMO_LLM_API_KEY: apiKey,
+      // `env.ts` validates the whole schema eagerly on import, so even the
+      // setup command (which doesn't talk to either) needs these infra URLs.
+      HINDSIGHT_URL: hindsightUrl,
+      INNGEST_BASE_URL: inngestBaseUrl,
     },
   });
   console.log("Setup complete.\n");
@@ -131,7 +138,15 @@ async function main() {
     DATABASE_URL: databaseUrl,
     INNGEST_BASE_URL: inngestBaseUrl,
     INNGEST_CONNECT_GATEWAY_URL: inngestConnectGatewayUrl,
+    // Dev mode — connect to the local Inngest dev server without a signing key.
+    INNGEST_DEV: "true",
     HINDSIGHT_URL: hindsightUrl,
+    // Override any real-S3 config from the shell/.env — dev is self-contained on MinIO.
+    S3_ENDPOINT: s3Endpoint,
+    S3_ACCESS_KEY: "minioadmin",
+    S3_SECRET_KEY: "minioadmin",
+    S3_BUCKET: "cogmo-files",
+    S3_REGION: "us-east-1",
   };
 
   // Write the resolved infra URLs to a sidecar env file so other dev tools

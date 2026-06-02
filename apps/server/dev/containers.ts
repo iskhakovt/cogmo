@@ -62,6 +62,29 @@ export function minio(network: StartedNetwork) {
     .withStartupTimeout(30_000);
 }
 
+/**
+ * Create the files bucket in MinIO. Idempotent — a reused MinIO volume (dev's
+ * `withReuse`) already has it, so BucketAlreadyOwnedByYou / BucketAlreadyExists
+ * is swallowed; any other failure propagates.
+ */
+export async function ensureFilesBucket(s3Endpoint: string): Promise<void> {
+  const { S3Client, CreateBucketCommand } = await import("@aws-sdk/client-s3");
+  const s3 = new S3Client({
+    endpoint: s3Endpoint,
+    region: "us-east-1",
+    forcePathStyle: true,
+    credentials: { accessKeyId: "minioadmin", secretAccessKey: "minioadmin" },
+  });
+  try {
+    await s3.send(new CreateBucketCommand({ Bucket: "cogmo-files" }));
+  } catch (err) {
+    const name = err instanceof Error ? err.name : "";
+    if (name !== "BucketAlreadyOwnedByYou" && name !== "BucketAlreadyExists") throw err;
+  } finally {
+    s3.destroy();
+  }
+}
+
 export function hindsight(
   network: StartedNetwork,
   opts: {
@@ -76,8 +99,10 @@ export function hindsight(
   if (opts.baseUrl) env.HINDSIGHT_API_LLM_BASE_URL = opts.baseUrl;
 
   // API-only image — same runtime as the full `hindsight` image but without
-  // the Control Plane web UI (which Cogmo never talks to).
-  return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:latest")
+  // the Control Plane web UI (which Cogmo never talks to). Pinned within
+  // `cogmo.hindsightCompat`: a floating `latest` drifts past the range and
+  // trips the boot version check.
+  return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:0.6.0")
     .withNetwork(network)
     .withNetworkAliases("hindsight")
     .withExposedPorts(8888)
