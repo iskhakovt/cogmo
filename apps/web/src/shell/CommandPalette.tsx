@@ -35,7 +35,9 @@ export function CommandPalette({
 
   function run(action: () => void | Promise<void>): void {
     setOpen(false);
-    void action();
+    Promise.resolve(action()).catch((err) => {
+      console.error("Command palette action failed:", err);
+    });
   }
 
   async function newChat(): Promise<void> {

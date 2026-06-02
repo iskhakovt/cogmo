@@ -25,31 +25,43 @@ const chatConversationRoute = createRoute({
   component: ChatSection,
 });
 
+function MemorySection() {
+  return (
+    <StubSection title="Memory" note="Hindsight browser, search, and trust filters — Phase 4." />
+  );
+}
+
+function AgentSection() {
+  return (
+    <StubSection title="Agent" note="Profiles, models, MCP servers, and skills — next slice." />
+  );
+}
+
+function SystemSection() {
+  return (
+    <StubSection
+      title="System"
+      note="Scheduled tasks, coding tasks, and the evolution audit — next slice."
+    />
+  );
+}
+
 const memoryRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/memory",
-  component: () => (
-    <StubSection title="Memory" note="Hindsight browser, search, and trust filters — Phase 4." />
-  ),
+  component: MemorySection,
 });
 
 const agentRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/agent",
-  component: () => (
-    <StubSection title="Agent" note="Profiles, models, MCP servers, and skills — next slice." />
-  ),
+  component: AgentSection,
 });
 
 const systemRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/system",
-  component: () => (
-    <StubSection
-      title="System"
-      note="Scheduled tasks, coding tasks, and the evolution audit — next slice."
-    />
-  ),
+  component: SystemSection,
 });
 
 const routeTree = rootRoute.addChildren([

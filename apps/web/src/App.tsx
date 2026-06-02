@@ -1,5 +1,5 @@
 import { RouterProvider } from "@tanstack/react-router";
-import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useState } from "react";
 import { AppProvider } from "./app-context.js";
 import { api } from "./orpc.js";
 import { router } from "./router.js";
@@ -19,7 +19,7 @@ type View = { kind: "loading" } | { kind: "login"; error?: string } | { kind: "r
 
 /** Auth boundary: probe the session, then mount the routed cockpit or the login screen. */
 export function App() {
-  const tab = useRef(newTabId()).current;
+  const [tab] = useState(newTabId);
   const [view, setView] = useState<View>({ kind: "loading" });
 
   // Probe a gated read to check the session; any failure behind the gate -> login.
