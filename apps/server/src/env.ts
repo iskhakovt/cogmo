@@ -59,6 +59,33 @@ export const env = createEnv({
     HINDSIGHT_RECALL_MAX_QUERY_TOKENS: z.coerce.number().int().positive().default(500),
     INNGEST_MODE: z.enum(["connect", "serve"]).default("connect"),
     INNGEST_SERVE_PORT: z.coerce.number().default(3000),
+    /**
+     * Web UI bind host. Default `0.0.0.0` (container convention — required for
+     * published ports / orchestrator probes). The security boundary is the
+     * publish/proxy layer (`-p 127.0.0.1:9090:9090`) plus fail-closed auth, not
+     * the bind. Set `127.0.0.1` for a bare-metal/systemd run with no proxy.
+     */
+    WEB_HOST: z.string().default("0.0.0.0"),
+    /** Web UI port. The web server replaces the health server on this port. */
+    WEB_PORT: z.coerce.number().int().positive().default(9090),
+    /** Absolute web-session TTL (days). */
+    WEB_SESSION_TTL_DAYS: z.coerce.number().int().positive().default(30),
+    /**
+     * Filesystem root of the built SPA (`apps/web/dist`) served by sirv. sirv
+     * 404s gracefully when absent (PR1 ships no dist; PR2 adds it).
+     */
+    WEB_STATIC_ROOT: z.string().default("./apps/web/dist"),
+    /**
+     * Dev escape hatch: drop the `__Host-` prefix + `Secure` so the session
+     * cookie works on plain `http://localhost` (Chrome/Safari reject
+     * `__Host-`+`Secure` there). Local dev only — prod leaves this unset for the
+     * hardened cookie. Same `"true" | "1"` semantics as `INNGEST_DEV` (no
+     * `z.coerce`).
+     */
+    WEB_INSECURE_COOKIES: z
+      .string()
+      .optional()
+      .transform((v) => v === "true" || v === "1"),
     // `z.coerce.boolean()` is JS-truthy on any non-empty string —
     // `INNGEST_DEV=false` or `INNGEST_DEV=0` would both come out `true`,
     // which would force Dev mode in production and disable the SDK's

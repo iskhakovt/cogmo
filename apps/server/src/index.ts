@@ -74,7 +74,7 @@ import { createSandboxReaper } from "./sandbox/reaper.js";
 import { DrizzleSandboxStore } from "./sandbox/store/index.js";
 import { deriveMasterKey, parseMasterKey } from "./secrets/encryption.js";
 import { DrizzleSecretsStore } from "./secrets/store/index.js";
-import { ensureFalImageDefaults } from "./setup/seed.js";
+import { ensureFalImageDefaults, ensureWebChannel } from "./setup/seed.js";
 import { createSkillCronFireHandler } from "./skills/cron-fire-handler.js";
 import { createSkillCronTicker } from "./skills/cron-ticker.js";
 import { createSkillDepsReaper } from "./skills/deps-reaper-function.js";
@@ -91,7 +91,10 @@ import { createDeliveryRouter } from "./transport/delivery-router.js";
 import { wrapAttachmentStoreWithEncryption } from "./transport/encrypted-attachment-store.js";
 import { startChannels } from "./transport/registry.js";
 import { DrizzleTransportStore } from "./transport/store/index.js";
+import { createTransport, type Transport } from "./transport/transport.js";
 import { createDbVoiceResolver } from "./voice/resolver.js";
+import { deriveWebLoginToken } from "./web/auth/login-token.js";
+import { DrizzleWebSessionStore } from "./web/store/index.js";
 
 /**
  * Per-stage option ownership — keep in sync when adding fields:
@@ -183,6 +186,9 @@ export interface CoreDeps {
   mcpStore: DrizzleMcpStore;
   skillStore: DrizzleSkillStore;
   secretsStore: DrizzleSecretsStore;
+  webSessionStore: DrizzleWebSessionStore;
+  /** Bootstrap login token, derived from the master key. Stored nowhere. */
+  webLoginToken: string;
   s3Client: S3Client;
   attachmentStore: AttachmentStore;
   fileService: Service["files"];
@@ -272,6 +278,13 @@ export interface RuntimeDeps {
   functions: any[];
   adapters: Awaited<ReturnType<typeof startChannels>>["adapters"];
   mcpRegistry: McpRegistryImpl;
+  /**
+   * Web-scoped Transport for the UI server's oRPC layer. `null` is
+   * defensive-only: `ensureWebChannel` runs just above, so a real boot always
+   * resolves a channel — the null arm backstops a since-deleted channel and is
+   * exercised by tests, not a runtime gap.
+   */
+  webTransport: Transport | null;
 }
 
 /**
@@ -310,6 +323,7 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
   const codingStore = new DrizzleCodingStore();
   const mcpStore = new DrizzleMcpStore();
   const skillStore = new DrizzleSkillStore();
+  const webSessionStore = new DrizzleWebSessionStore();
 
   // DB half of the skills-repo bootstrap: keep `coding_repos.skills.remote_url`
   // in sync with the bare repo's `origin`. Idempotent — inserts on first run,
@@ -328,6 +342,9 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
   const secretsStore = new DrizzleSecretsStore(
     deriveMasterKey(parseMasterKey(env.COGMO_MASTER_KEY), "cogmo/secrets-at-rest/v1"),
   );
+  // Derived bootstrap login token for the web UI — nothing persisted; the gate
+  // recomputes + constant-time-compares the presented value.
+  const webLoginToken = deriveWebLoginToken(env.COGMO_MASTER_KEY);
 
   const { user, profile } = await tx(async (trx) => {
     const u = await agentStore.getFirstUser(trx);
@@ -414,6 +431,8 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
     mcpStore,
     skillStore,
     secretsStore,
+    webSessionStore,
+    webLoginToken,
     s3Client,
     attachmentStore,
     fileService,
@@ -995,6 +1014,12 @@ export async function bootstrapRuntime(
       memory: core.memory,
     });
 
+  // Provision the web channel before startChannels so its placeholder adapter
+  // is matched (no "unknown channel type" warning). Idempotent + boot-time:
+  // seedDefaults runs only under `cogmo setup`, so this gives existing
+  // deployments the channel on upgrade without re-running the wizard.
+  await ensureWebChannel(core.runInTx, core.transportStore, core.user.id);
+
   const {
     functions: channelFunctions,
     adapters,
@@ -1028,6 +1053,32 @@ export async function bootstrapRuntime(
     adapters: adapterMap,
     transportStore: core.transportStore,
   });
+
+  // Web-scoped Transport the UI server's oRPC layer drives directly — distinct
+  // from the inert Transport startChannels builds for the placeholder web
+  // adapter. Scoped to the web channel's fixed/wildcard identity -> the owner.
+  const webChannel = await core.runInTx((tx) => core.transportStore.getChannelByType(tx, "web"));
+  const webTransport: Transport | null = webChannel
+    ? createTransport({
+        channelId: webChannel.id,
+        defaultUserId: core.user.id,
+        defaultProfileId: core.profile.id,
+        runInTx: core.runInTx,
+        transportStore: core.transportStore,
+        agentStore: core.agentStore,
+        codingStore: core.codingStore,
+        secretsStore: core.secretsStore,
+        reposDir: env.COGMO_REPOS_DIR,
+        skillRunner,
+        skillStore: core.skillStore,
+        mcpRegistry,
+        triggerReflection: reflectionTrigger,
+        inngest,
+        inboundArrived,
+        attachments: core.attachmentStore,
+        idleTimeoutMs,
+      })
+    : null;
   const idleTimer = createIdleTimer({ idleTimeoutMs });
   const debounceFunctions = createDebounceFunctions(debounceConfig);
   const boundaryWaiter = createBoundaryWaiter({
@@ -1172,7 +1223,7 @@ export async function bootstrapRuntime(
     ...codingFunctions,
   ];
 
-  return { functions, adapters, mcpRegistry };
+  return { functions, adapters, mcpRegistry, webTransport };
 }
 
 /**

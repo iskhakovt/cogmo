@@ -55,23 +55,47 @@ export async function ensureDefaultProfile(
   });
 }
 
-/** Create the direct channel + wildcard identity if none exists. */
-export async function ensureDirectChannel(
+/**
+ * Create a single-owner `fixed`-identity channel of `type` + its wildcard
+ * identity if none exists. Both the direct (CLI) and web channels are
+ * single-owner with the same fixed/wildcard wiring; a future single-owner
+ * channel type reuses this directly.
+ */
+async function ensureFixedChannel(
   runInTx: Transactor,
   transportStore: TransportStore,
   userId: string,
+  type: "direct" | "web",
 ): Promise<void> {
   await runInTx(async (tx) => {
-    const existing = await transportStore.getChannelByType(tx, "direct");
+    const existing = await transportStore.getChannelByType(tx, type);
     if (existing) return;
     const { id: channelId } = await transportStore.createChannel(tx, {
-      type: "direct",
+      type,
       credentials: {},
       identityMode: "fixed",
     });
     await transportStore.createWildcardIdentity(tx, { userId, channelId });
-    logger.info({ channelId }, "created direct channel");
+    logger.info({ channelId, type }, "created fixed-identity channel");
   });
+}
+
+/** Create the direct channel + wildcard identity if none exists. */
+export function ensureDirectChannel(
+  runInTx: Transactor,
+  transportStore: TransportStore,
+  userId: string,
+): Promise<void> {
+  return ensureFixedChannel(runInTx, transportStore, userId, "direct");
+}
+
+/** Create the web channel + wildcard identity if none exists. */
+export function ensureWebChannel(
+  runInTx: Transactor,
+  transportStore: TransportStore,
+  userId: string,
+): Promise<void> {
+  return ensureFixedChannel(runInTx, transportStore, userId, "web");
 }
 
 const TELEGRAM_DEFAULT_RULES = [
@@ -115,6 +139,7 @@ export async function seedDefaults(
   const userId = await ensureDefaultUser(runInTx, agentStore);
   const profileId = await ensureDefaultProfile(runInTx, agentStore);
   await ensureDirectChannel(runInTx, transportStore, userId);
+  await ensureWebChannel(runInTx, transportStore, userId);
   return { userId, profileId };
 }
 

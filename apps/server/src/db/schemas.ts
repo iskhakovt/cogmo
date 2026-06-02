@@ -6,3 +6,4 @@ export * from "../sandbox/store/schema.js";
 export * from "../secrets/store/schema.js";
 export * from "../skills/store/schema.js";
 export * from "../transport/store/schema.js";
+export * from "../web/store/schema.js";

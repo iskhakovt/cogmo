@@ -11,6 +11,7 @@ import * as sandboxSchema from "../sandbox/store/schema.js";
 import * as secretsSchema from "../secrets/store/schema.js";
 import * as skillsSchema from "../skills/store/schema.js";
 import * as transportSchema from "../transport/store/schema.js";
+import * as webSchema from "../web/store/schema.js";
 
 const schema = {
   ...agentSchema,
@@ -20,6 +21,7 @@ const schema = {
   ...codingSchema,
   ...skillsSchema,
   ...mcpSchema,
+  ...webSchema,
 };
 
 /**
