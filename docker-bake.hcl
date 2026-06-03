@@ -35,6 +35,27 @@ variable "VERSION" {
   default = "dev"
 }
 
+// Toolchain versions for the task images. Base-image FROM digests stay
+// literal in each Dockerfile for Dependabot; these are bumped here.
+// uv is shared by devbase + skills.
+variable "UV_VERSION" {
+  default = "0.11.12"
+}
+variable "UV_DIGEST" {
+  default = "sha256:3a59a3cdd5f7c217faa36e32dbc7fddbb0412889c2a0a5229f6d790e5a019dd7"
+}
+// Match package.json packageManager.
+variable "PNPM_VERSION" {
+  default = "11.5.1"
+}
+variable "NPM_VERSION" {
+  default = "11.16.0"
+}
+// Coupled to the claude.ts stream-json parser — bump with it.
+variable "CLAUDE_CODE_VERSION" {
+  default = "2.1.138"
+}
+
 // Default group builds every image — used by publish.yml on release.
 // Per-image targeting (`--targets skills`) is for the sysbox-e2e
 // build→test loop.
@@ -92,6 +113,13 @@ target "devbase" {
   inherits   = ["_common", "devbase-meta"]
   context    = "./images/devbase"
   dockerfile = "Dockerfile"
+  args = {
+    NPM_VERSION         = "${NPM_VERSION}"
+    PNPM_VERSION        = "${PNPM_VERSION}"
+    CLAUDE_CODE_VERSION = "${CLAUDE_CODE_VERSION}"
+    UV_VERSION          = "${UV_VERSION}"
+    UV_DIGEST           = "${UV_DIGEST}"
+  }
   // Sysbox amd64-only today — see _common comment. Single-platform cache
   // scope matches the platform.
   platforms  = ["linux/amd64"]
@@ -103,6 +131,10 @@ target "skills" {
   inherits   = ["_common", "skills-meta"]
   context    = "./images/skills"
   dockerfile = "Dockerfile"
+  args = {
+    UV_VERSION = "${UV_VERSION}"
+    UV_DIGEST  = "${UV_DIGEST}"
+  }
   platforms  = ["linux/amd64"]
   cache-from = ["type=gha,scope=skills-amd64"]
   cache-to   = ["type=gha,scope=skills-amd64,mode=max"]

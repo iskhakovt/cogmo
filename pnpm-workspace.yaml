@@ -13,6 +13,7 @@ allowBuilds:
 overrides:
   "ip-address@<10.1.1": ">=10.1.1"
   "qs@<6.15.2": ">=6.15.2"
+  "tmp@<0.2.6": ">=0.2.6"
   "@opentelemetry/otlp-transformer@0.217.0": "^0.218.0"
   # @assistant-ui/react@0.14.8 declares core@^0.2.5 but imports an export
   # (useToolInvocations) that core dropped by 0.2.9 — a broken peer range in this

@@ -1,4 +1,5 @@
 # syntax=docker/dockerfile:1
+# check=skip=InvalidDefaultArgInFrom
 #
 # cogmo-skills — base task-container image for tier-2 (sysbox) skills.
 #
@@ -18,12 +19,15 @@
 # the per-skill venvs populated by `uv pip sync --target …` against a
 # manifest's `requirements.lock` introduce wheels into the runtime.
 
+# uv toolchain as a stage — version + digest from docker-bake.hcl, shared
+# with cogmo-devbase. ARG-in-FROM needs global scope.
+ARG UV_VERSION
+ARG UV_DIGEST
+FROM ghcr.io/astral-sh/uv:${UV_VERSION}@${UV_DIGEST} AS uv
+
 FROM mirror.gcr.io/library/python:3.14.5-slim@sha256:c845af9399020c7e562969a13689e929074a10fd057acd1b1fad06a2fb068e97 AS builder
 
-# uv binary copied from astral's distroless image — no apt install,
-# pinned to a specific astral release tag + digest so a `uv sync` is
-# deterministic across rebuilds. Bump in lockstep with `images/devbase/Dockerfile`.
-COPY --from=ghcr.io/astral-sh/uv:0.11.12@sha256:3a59a3cdd5f7c217faa36e32dbc7fddbb0412889c2a0a5229f6d790e5a019dd7 /uv /uvx /bin/
+COPY --from=uv /uv /uvx /bin/
 
 ENV UV_COMPILE_BYTECODE=1
 ENV UV_LINK_MODE=copy
@@ -71,13 +75,9 @@ COPY --from=builder --chown=cogmo:cogmo /app/.venv /opt/cogmo-skills/.venv
 ENV PATH="/opt/cogmo-skills/.venv/bin:${PATH}"
 ENV VIRTUAL_ENV="/opt/cogmo-skills/.venv"
 
-# uv binary lives in the runtime image too — the host runs
-# `uv pip compile` here at register (to verify the committed
-# requirements.lock is current) and `uv venv` + `uv pip sync` at first
-# invocation (to populate the per-skill venv at /skill-venvs/<hash>/).
-# Pinned to the same astral release tag as the builder stage so the
-# resolver behaviour is identical end-to-end.
-COPY --from=ghcr.io/astral-sh/uv:0.11.12 /uv /uvx /usr/local/bin/
+# uv in the runtime image too — the host runs `uv pip compile` at register
+# and `uv venv` + `uv pip sync` at first invoke.
+COPY --from=uv /uv /uvx /usr/local/bin/
 
 # Pre-create /skill-venvs owned by `cogmo`. A fresh Docker named volume
 # inherits this ownership on first mount, so the non-root supervisor

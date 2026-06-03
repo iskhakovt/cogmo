@@ -139,8 +139,9 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          # Match the version pinned in images/skills/Dockerfile so a CI
-          # green doesn't drift from what the published image uses.
+          # Keep in sync with UV_VERSION in docker-bake.hcl — the single
+          # source for the image's uv pin. (GitHub Actions can't read the
+          # HCL variable, so this literal is the one manual mirror.)
           version: "0.11.12"
           enable-cache: true
           cache-dependency-glob: "images/skills/uv.lock"

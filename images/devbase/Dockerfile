@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+# check=skip=InvalidDefaultArgInFrom
 # cogmo-devbase — base task-container image for coding-delegation.
 #
 # Built and published as the `devbase` target of `/docker-bake.hcl` by
@@ -18,12 +20,23 @@
 # Codex CLI and Go/Rust toolchains are deferred to whenever real verify
 # commands need them.
 
+# uv toolchain as a stage — version + digest (docker-bake.hcl) drive the
+# COPY below; shared with cogmo-skills. ARG-in-FROM needs global scope.
+ARG UV_VERSION
+ARG UV_DIGEST
+FROM ghcr.io/astral-sh/uv:${UV_VERSION}@${UV_DIGEST} AS uv
+
 FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04@sha256:d94c97dd9cacf183d0a6fd12a8e87b526e9e928307674ae9c94139139c0c6eae
 
 # Make `RUN ... | ...` fail when any element of the pipe fails. The
 # nodesource install (`curl ... | bash -`) below silently succeeds on a
 # truncated curl without this.
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# Toolchain versions — defaults in docker-bake.hcl.
+ARG NPM_VERSION
+ARG PNPM_VERSION
+ARG CLAUDE_CODE_VERSION
 
 # devcontainers/base already ships git, gh, curl, jq, ripgrep — but `fd-find`
 # is missing on Ubuntu and the binary is named `fdfind` rather than `fd`.
@@ -42,28 +55,27 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && ln -s /usr/bin/fdfind /usr/local/bin/fd
 
-# Node 24 LTS via NodeSource — required for the claude-code CLI runtime.
+# Node 24 LTS via NodeSource. Upgrade npm past the bundled version — its
+# bundled deps (picomatch / ip-address / brace-expansion) lag upstream and
+# show up as image CVEs.
 RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && npm install -g "npm@${NPM_VERSION}"
 
-# pnpm via corepack (bundled with Node 24). Pin matches the host repo.
-RUN corepack enable \
- && corepack prepare pnpm@10.27.0 --activate
+# pnpm via npm, not corepack — corepack's cached pnpm bundle (tar /
+# picomatch / minimatch / brace-expansion) lags upstream and shows up as
+# image CVEs.
+RUN npm install -g "pnpm@${PNPM_VERSION}" \
+ && pnpm --version
 
-# Claude Code CLI — pinned. Version drift breaks the stream-json contract that
-# src/agent/coding/claude.ts depends on. Bump deliberately in the same PR
-# that bumps the parser, so the next cogmo release ships matched code +
-# image at the same semver. Never `latest`.
-ARG CLAUDE_CODE_VERSION=2.1.138
+# Claude Code CLI.
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
  && claude --version
 
-# uv — copied from astral's distroless image, pinned to the same version
-# (+ digest) `images/skills/Dockerfile` uses so author-side `uv pip compile`
-# produces lockfiles byte-identical to what `cogmo-skills` re-resolves at
-# register time. Bump both Dockerfiles together.
-COPY --from=ghcr.io/astral-sh/uv:0.11.12@sha256:3a59a3cdd5f7c217faa36e32dbc7fddbb0412889c2a0a5229f6d790e5a019dd7 /uv /uvx /usr/local/bin/
+# uv — shared pin with cogmo-skills so author-side `uv pip compile` produces
+# lockfiles byte-identical to what cogmo-skills re-resolves at register time.
+COPY --from=uv /uv /uvx /usr/local/bin/
 
 # Drop privileges. Cogmo's supervisor mounts the worktree at /workspace and
 # always overrides Entrypoint/Cmd at create-container time, so we leave the
