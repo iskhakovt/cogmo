@@ -61,10 +61,10 @@ describe("Pill", () => {
         <Pill tone="muted">off</Pill>
       </>,
     );
-    expect(page.getByText("live").element().className).toContain("text-ok");
-    expect(page.getByText("pending").element().className).toContain("text-warn");
-    expect(page.getByText("failed").element().className).toContain("text-bad");
-    expect(page.getByText("off").element().className).toContain("text-muted");
+    await expect.element(page.getByText("live")).toHaveClass("text-ok");
+    await expect.element(page.getByText("pending")).toHaveClass("text-warn");
+    await expect.element(page.getByText("failed")).toHaveClass("text-bad");
+    await expect.element(page.getByText("off")).toHaveClass("text-muted");
   });
 });
 
@@ -77,8 +77,7 @@ describe("EmptyRow", () => {
         </tbody>
       </table>,
     );
-    const cell = page.getByText("No profiles.").element();
-    expect(cell.getAttribute("colspan")).toBe("4");
+    await expect.element(page.getByText("No profiles.")).toHaveAttribute("colspan", "4");
   });
 });
 
@@ -104,7 +103,17 @@ describe("fmtDateTime", () => {
     expect(fmtDateTime(undefined)).toBe("—");
   });
 
-  it("formats a real date with its year", () => {
-    expect(fmtDateTime(new Date("2026-03-04T08:09:00Z"))).toMatch(/2026/);
+  it("formats a real date via the documented Intl options", () => {
+    const date = new Date("2026-03-04T08:09:00Z");
+    // Compare against the same locale's output so the assertion holds regardless
+    // of the runtime's default locale, calendar, or digit set.
+    const expected = date.toLocaleString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    expect(fmtDateTime(date)).toBe(expected);
   });
 });

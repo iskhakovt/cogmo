@@ -34,12 +34,12 @@ describe("CommandPalette", () => {
 
   it("is closed until the meta+k chord opens it, and Escape closes it again", async () => {
     renderPalette();
-    expect(page.getByPlaceholder(/Jump to a section/).elements()).toHaveLength(0);
+    await expect.element(page.getByPlaceholder(/Jump to a section/)).not.toBeInTheDocument();
 
     await openPalette();
 
     await userEvent.keyboard("{Escape}");
-    expect(page.getByPlaceholder(/Jump to a section/).elements()).toHaveLength(0);
+    await expect.element(page.getByPlaceholder(/Jump to a section/)).not.toBeInTheDocument();
   });
 
   it("navigates to the selected section", async () => {

@@ -85,7 +85,7 @@ describe("SystemScreen", () => {
     await expect.element(page.getByText("prof-9")).toBeVisible();
 
     await page.getByRole("button", { name: "Close" }).click();
-    expect(page.getByText("event e1abc234").elements()).toHaveLength(0);
+    await expect.element(page.getByText("event e1abc234")).not.toBeInTheDocument();
   });
 
   it("shows empty states when there is nothing scheduled or learned", async () => {
