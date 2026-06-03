@@ -507,6 +507,28 @@ describe("dev CORS (WEB_DEV_ALLOW_ORIGIN)", () => {
     expect(res.headers.get("access-control-allow-methods")).toContain("GET");
   });
 
+  it("reflects the requested headers on the OPTIONS preflight", async () => {
+    const res = await fetch(`${corsBase}/health`, {
+      method: "OPTIONS",
+      headers: {
+        origin: DEV_ORIGIN,
+        "access-control-request-method": "GET",
+        "access-control-request-headers": "x-custom, content-type",
+      },
+    });
+    expect(res.status).toBe(204);
+    expect(res.headers.get("access-control-allow-headers")).toBe("x-custom, content-type");
+  });
+
+  it("does not short-circuit a non-allowed origin's OPTIONS to 204", async () => {
+    const res = await fetch(`${corsBase}/health`, {
+      method: "OPTIONS",
+      headers: { origin: "http://evil.example", "access-control-request-method": "GET" },
+    });
+    expect(res.status).not.toBe(204);
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
   it("the same-origin (prod) server adds no CORS even with an Origin", async () => {
     const res = await fetch(`${base}/health`, { headers: { origin: DEV_ORIGIN } });
     expect(res.headers.get("access-control-allow-origin")).toBeNull();

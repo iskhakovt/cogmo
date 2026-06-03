@@ -91,8 +91,10 @@ export const env = createEnv({
      * Vite dev server on a different origin than the API, its EventSource hits
      * the API cross-origin (the Vite proxy can't hold a long-lived SSE open).
      * Set to the SPA's dev origin (e.g. `http://localhost:5173`) so the API
-     * answers a matching `Origin` with credentialed CORS. Local dev only — prod
-     * serves the SPA same-origin and leaves this unset (no CORS, locked down).
+     * answers a matching `Origin` with credentialed CORS. Origin only
+     * (`scheme://host:port`) — a value with a path never matches the browser's
+     * `Origin` header, so CORS silently stays off. Local dev only — prod serves
+     * the SPA same-origin and leaves this unset (no CORS, locked down).
      */
     WEB_DEV_ALLOW_ORIGIN: z.string().url().optional(),
     // `z.coerce.boolean()` is JS-truthy on any non-empty string —

@@ -151,11 +151,13 @@ export function createWebServer(deps: CreateWebServerDeps): Server {
     const method = (req.method ?? "GET").toUpperCase();
     const path = (req.url ?? "/").split("?", 1)[0] ?? "/";
 
-    // Dev-only CORS for the SPA's cross-origin SSE stream. In dev the Vite
+    // Dev-only CORS for the SPA's cross-origin chat SSE stream. In dev the Vite
     // server serves the SPA on a different origin and its EventSource hits the
     // API directly (the Vite proxy can't hold an SSE open), so answer the
-    // configured dev origin with credentialed CORS. Unset in prod -> no headers,
-    // same-origin only. `setHeader` survives the handlers' `writeHead` merges.
+    // configured dev origin with credentialed CORS. Applied to ANY request from
+    // that origin, not just the stream — broader than strictly needed but simpler,
+    // and only the one exact configured dev origin is ever allowed. Unset in prod
+    // -> no headers, same-origin only. `setHeader` survives the `writeHead` merges.
     // `allowOrigin` is the configured allow-list value (never the raw request
     // `Origin`), so the credentialed response only ever names that one
     // pre-configured origin; a non-matching `Origin` gets no headers at all.
