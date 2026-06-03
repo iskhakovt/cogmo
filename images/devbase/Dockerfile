@@ -61,17 +61,20 @@ RUN apt-get update \
 RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/* \
- && npm install -g "npm@${NPM_VERSION}"
+ && npm install -g "npm@${NPM_VERSION}" \
+ && npm cache clean --force
 
 # pnpm via npm, not corepack — corepack's cached pnpm bundle (tar /
 # picomatch / minimatch / brace-expansion) lags upstream and shows up as
 # image CVEs.
 RUN npm install -g "pnpm@${PNPM_VERSION}" \
- && pnpm --version
+ && pnpm --version \
+ && npm cache clean --force
 
 # Claude Code CLI.
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
- && claude --version
+ && claude --version \
+ && npm cache clean --force
 
 # uv — shared pin with cogmo-skills so author-side `uv pip compile` produces
 # lockfiles byte-identical to what cogmo-skills re-resolves at register time.
