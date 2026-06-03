@@ -1,5 +1,4 @@
 # syntax=docker/dockerfile:1
-# check=skip=InvalidDefaultArgInFrom
 # cogmo-devbase — base task-container image for coding-delegation.
 #
 # Built and published as the `devbase` target of `/docker-bake.hcl` by
@@ -20,10 +19,11 @@
 # Codex CLI and Go/Rust toolchains are deferred to whenever real verify
 # commands need them.
 
-# uv toolchain as a stage — version + digest (docker-bake.hcl) drive the
-# COPY below; shared with cogmo-skills. ARG-in-FROM needs global scope.
-ARG UV_VERSION
-ARG UV_DIGEST
+# uv as a stage, shared with cogmo-skills. Defaults are the standalone-build
+# fallback; docker-bake.hcl overrides them for published builds and
+# version-pins.test.ts enforces the match. ARG-in-FROM needs global scope.
+ARG UV_VERSION=0.11.12
+ARG UV_DIGEST=sha256:3a59a3cdd5f7c217faa36e32dbc7fddbb0412889c2a0a5229f6d790e5a019dd7
 FROM ghcr.io/astral-sh/uv:${UV_VERSION}@${UV_DIGEST} AS uv
 
 FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04@sha256:d94c97dd9cacf183d0a6fd12a8e87b526e9e928307674ae9c94139139c0c6eae
@@ -33,10 +33,10 @@ FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04@sha256:d94c97dd9cacf183d0
 # truncated curl without this.
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# Toolchain versions — defaults in docker-bake.hcl.
-ARG NPM_VERSION
-ARG PNPM_VERSION
-ARG CLAUDE_CODE_VERSION
+# Toolchain versions — defaults mirror docker-bake.hcl (see the uv note above).
+ARG NPM_VERSION=11.16.0
+ARG PNPM_VERSION=11.5.1
+ARG CLAUDE_CODE_VERSION=2.1.138
 
 # devcontainers/base already ships git, gh, curl, jq, ripgrep — but `fd-find`
 # is missing on Ubuntu and the binary is named `fdfind` rather than `fd`.
