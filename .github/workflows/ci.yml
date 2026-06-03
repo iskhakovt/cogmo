@@ -215,6 +215,19 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Cache the Chromium binary keyed on the Playwright version so only the
+      # ~110 MB download is skipped on a hit; `--with-deps` still runs apt below
+      # (the OS libs aren't cacheable). Resolve the version after install so the
+      # key tracks the actual pinned Playwright.
+      - name: Resolve Playwright version
+        id: pw
+        working-directory: apps/web
+        run: echo "version=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright browsers
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
       # Node tier (chat converters) + Browser Mode tier (component/hook tests
       # in real Chromium). Install the browser + its OS libs before the run.
       - name: Install Playwright Chromium
