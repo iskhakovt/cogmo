@@ -11,7 +11,10 @@
  * backend on :9090 (see apps/web/vite.config.ts), so the browser sees one
  * origin — the session cookie and `Sec-Fetch-Site: same-origin` survive, which
  * the CSRF gate requires. The dev cookie is unprefixed (WEB_INSECURE_COOKIES)
- * so it's accepted on plain http://localhost.
+ * so it's accepted on plain http://localhost. The one exception is the chat SSE
+ * stream: the Vite proxy can't hold a long-lived SSE open, so the SPA's
+ * EventSource hits the backend directly (VITE_SSE_BASE_URL) and the backend
+ * answers that origin with credentialed CORS (WEB_DEV_ALLOW_ORIGIN).
  *
  * Containers use withReuse() — they survive across restarts.
  * First run pulls images + applies migrations. Subsequent runs reuse existing containers.
@@ -140,6 +143,11 @@ async function main() {
     // through the Vite proxy (Chrome/Safari reject `__Host-`+`Secure` there).
     // A dev fronting the backend with local TLS can pre-export to override.
     WEB_INSECURE_COOKIES: "1",
+    // Let the Vite dev server's cross-origin SSE stream through: its EventSource
+    // hits the backend directly (the proxy can't keep an SSE open), so the API
+    // must answer this origin with credentialed CORS. Pairs with the web child's
+    // VITE_SSE_BASE_URL below.
+    WEB_DEV_ALLOW_ORIGIN: "http://localhost:5173",
     COGMO_SKILLS_PATH: join(DEV_ROOT, "skills"),
     COGMO_REPOS_DIR: join(DEV_ROOT, "repos"),
     COGMO_WORKTREES_DIR: join(DEV_ROOT, "worktrees"),
@@ -205,7 +213,12 @@ async function main() {
   // killing the pnpm wrapper may not forward to that grandchild — so a crash
   // of the *other* child can leave :5173 occupied until the orphan is reaped.
   console.log("Running web UI (vite, apps/web)...\n");
-  const web = spawn("pnpm", ["--filter", "web", "dev"], { stdio: "inherit" });
+  const web = spawn("pnpm", ["--filter", "web", "dev"], {
+    stdio: "inherit",
+    // Point the SPA's chat EventSource straight at the backend — the Vite proxy
+    // can't hold a long-lived SSE open. Empty in prod (same-origin, no bypass).
+    env: { ...process.env, VITE_SSE_BASE_URL: "http://localhost:9090" },
+  });
 
   const children = [app, web];
 

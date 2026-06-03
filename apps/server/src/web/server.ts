@@ -43,6 +43,12 @@ export interface CreateWebServerDeps {
   cookieSecure: boolean;
   /** Filesystem root of the built SPA (sirv). */
   staticRoot: string;
+  /**
+   * Dev-only: when set to the SPA's dev origin, the server answers a matching
+   * `Origin` with credentialed CORS so the Vite dev server's cross-origin SSE
+   * stream works. `null` in prod (same-origin) — no CORS, locked down.
+   */
+  webDevAllowOrigin: string | null;
 }
 
 export interface StartWebServerDeps extends CreateWebServerDeps {
@@ -53,6 +59,12 @@ export interface StartWebServerDeps extends CreateWebServerDeps {
 function send(res: ServerResponse, status: number, message: string): void {
   res.writeHead(status, { "Content-Type": "text/plain" });
   res.end(message);
+}
+
+/** The configured dev origin iff it exactly matches the request's `Origin`, else null. */
+function devCorsOrigin(req: IncomingMessage, allowed: string | null): string | null {
+  if (!allowed) return null;
+  return req.headers.origin === allowed ? allowed : null;
 }
 
 /** Login request body. Validated with Zod rather than a hand-rolled typeof ladder. */
@@ -136,6 +148,29 @@ export function createWebServer(deps: CreateWebServerDeps): Server {
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const method = (req.method ?? "GET").toUpperCase();
     const path = (req.url ?? "/").split("?", 1)[0] ?? "/";
+
+    // Dev-only CORS for the SPA's cross-origin SSE stream. In dev the Vite
+    // server serves the SPA on a different origin and its EventSource hits the
+    // API directly (the Vite proxy can't hold an SSE open), so answer the
+    // configured dev origin with credentialed CORS. Unset in prod -> no headers,
+    // same-origin only. `setHeader` survives the handlers' `writeHead` merges.
+    const corsOrigin = devCorsOrigin(req, deps.webDevAllowOrigin);
+    if (corsOrigin) {
+      res.setHeader("Access-Control-Allow-Origin", corsOrigin);
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+      res.setHeader("Vary", "Origin");
+      if (method === "OPTIONS") {
+        const requested = req.headers["access-control-request-headers"];
+        res.writeHead(204, {
+          "Access-Control-Allow-Methods": "GET, OPTIONS",
+          "Access-Control-Allow-Headers":
+            typeof requested === "string" ? requested : "content-type",
+          "Access-Control-Max-Age": "600",
+        });
+        res.end();
+        return;
+      }
+    }
 
     // Public, safe: liveness.
     if (method === "GET" && path === "/health") {

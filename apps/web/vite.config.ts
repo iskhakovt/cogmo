@@ -6,7 +6,9 @@ import { defineConfig } from "vite";
 // apps/web/dist, same origin as the API. In dev, Vite serves the SPA and proxies
 // the API routes to a running `cogmo serve` so the browser still sees one origin
 // — the session cookie and `Sec-Fetch-Site: same-origin` survive the round-trip,
-// which the CSRF gate requires.
+// which the CSRF gate requires. The chat SSE stream is the exception: the proxy
+// can't hold a long-lived SSE open, so in dev the EventSource targets the backend
+// directly via VITE_SSE_BASE_URL (the backend answers that origin's CORS).
 const API_TARGET = "http://localhost:9090";
 
 export default defineConfig({

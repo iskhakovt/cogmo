@@ -86,6 +86,15 @@ export const env = createEnv({
       .string()
       .optional()
       .transform((v) => v === "true" || v === "1"),
+    /**
+     * Dev escape hatch for the SSE chat stream. When the SPA is served by the
+     * Vite dev server on a different origin than the API, its EventSource hits
+     * the API cross-origin (the Vite proxy can't hold a long-lived SSE open).
+     * Set to the SPA's dev origin (e.g. `http://localhost:5173`) so the API
+     * answers a matching `Origin` with credentialed CORS. Local dev only — prod
+     * serves the SPA same-origin and leaves this unset (no CORS, locked down).
+     */
+    WEB_DEV_ALLOW_ORIGIN: z.string().url().optional(),
     // `z.coerce.boolean()` is JS-truthy on any non-empty string —
     // `INNGEST_DEV=false` or `INNGEST_DEV=0` would both come out `true`,
     // which would force Dev mode in production and disable the SDK's

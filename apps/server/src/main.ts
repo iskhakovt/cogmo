@@ -174,6 +174,7 @@ async function main() {
     sessionTtlDays: env.WEB_SESSION_TTL_DAYS,
     cookieSecure: !env.WEB_INSECURE_COOKIES,
     staticRoot: env.WEB_STATIC_ROOT,
+    webDevAllowOrigin: env.WEB_DEV_ALLOW_ORIGIN ?? null,
     host: env.WEB_HOST,
     port: env.WEB_PORT,
   });
