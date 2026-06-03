@@ -84,4 +84,4 @@ Then message your bot on Telegram. Liveness is exposed at `GET /health` on port 
 | Track what's queued / in progress | [`todo.md`](todo.md), [`PROGRESS.md`](PROGRESS.md) |
 | Deploy to your own host | [`DEPLOYMENT.md`](DEPLOYMENT.md) |
 
-Local dev uses testcontainers — `pnpm dev` boots Postgres, Redis, Inngest, and Hindsight, applies migrations, and runs the app. No `docker-compose.yml` is shipped for end users.
+Local dev uses testcontainers — `pnpm dev` boots Postgres, Redis, Inngest, MinIO, and Hindsight, applies migrations, runs the backend, and starts the web UI (Vite dev server on http://localhost:5173, proxying to the backend on :9090). It prints a login token to paste into the web UI. No `docker-compose.yml` is shipped for end users.
