@@ -48,6 +48,7 @@ describe("CommandPalette", () => {
 
     await page.getByText("Memory").click();
 
+    await expect.poll(() => navigate.mock.calls.length).toBeGreaterThan(0);
     expect(navigate).toHaveBeenCalledWith({ to: "/memory" });
   });
 
@@ -56,11 +57,11 @@ describe("CommandPalette", () => {
 
     await openPalette();
     await page.getByText("Toggle theme").click();
-    expect(toggleTheme).toHaveBeenCalledTimes(1);
+    await expect.poll(() => toggleTheme.mock.calls.length).toBe(1);
 
     await openPalette();
     await page.getByText("Log out").click();
-    expect(logout).toHaveBeenCalledTimes(1);
+    await expect.poll(() => logout.mock.calls.length).toBe(1);
   });
 
   it("starts a new chat and routes to its conversation", async () => {
