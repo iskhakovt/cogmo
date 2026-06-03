@@ -136,3 +136,10 @@ Setup is a one-time CLI wizard ([setup.md](setup.md)); the web UI does post-setu
 | oRPC handler | `apps/server/src/web/` | `Transport`, `TransportError` union |
 | Per-turn event sequence | `src/llm/types.ts` + persist path | `StreamEvent` |
 | `packages/contracts` | shared | `StreamEvent`, Transport DTOs (types only) |
+
+## Testing
+
+Two test surfaces, split by where the code runs:
+
+- **`apps/server/src/web/`** — the HTTP edge, oRPC router, auth gate, session store, and chat routes are unit-tested in Node against ephemeral ports + PGlite: the fail-closed gate, cookie/token derivation, the `web_sessions` store, oRPC `Result` passthrough carrying each `TransportError` code, and a `/health` regression.
+- **`apps/web/`** — two tiers, split by extension. `.test.ts` is pure logic with no DOM (the chat stream/history converters) and runs in Node. `.test.tsx` is a component or hook test and runs in **real Chromium via Vitest Browser Mode** (Playwright provider), so accessibility roles, focus, and keyboard handling are exercised the way a browser runs them. The `api` oRPC client is mocked at the module boundary; screens assert their loading / inline-`Result`-error / ready states, and the command palette and the `App` auth boundary are driven through real key and click events. CI installs Chromium for the unit job; this Browser-Mode tier is the project's component/hook harness.

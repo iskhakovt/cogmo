@@ -223,8 +223,9 @@ Single-user browser cockpit — a chat channel + the admin surface over `Transpo
 - [ ] Phase 2b — reconnect durability: per-turn monotonic event sequence + `Last-Event-ID` DB replay so a mid-stream refresh resumes seamlessly
 - [x] Phase 3a — app shell + theme. Inverted-L shell (slim section-nav + section pane), cmdk command palette, TanStack Router code-based route tree over the four sections, dark/light toggle (`data-theme` + localStorage), Tailwind v4 OKLCH "Ledger" token system + self-hosted IBM Plex; CHAT wired into its section, MEMORY/AGENT/SYSTEM as placeholder stubs.
 - [x] Phase 3b — contract-first oRPC + read-mostly AGENT/SYSTEM screens. `webContract` in `packages/contracts` (server `implement`s it, SPA derives a fully-typed client); `contracts` ships TS source bundled into the server. AGENT (profiles / models / MCP servers / skills) + SYSTEM (scheduled tasks + evolution audit with a detail drawer) as ruled Ledger tables over the typed client, with loading + inline `Result`-error states, replacing the 3a stubs. MEMORY stays a stub (Phase 4).
+- [x] Web UI component-test harness — `apps/web` gains a Browser-Mode tier (Vitest Browser Mode, real Chromium via Playwright) beside the Node converter tier; covers the AGENT/SYSTEM screens, `screen-kit`, `use-resource`, `use-theme`, `CommandPalette`, and the `App` auth boundary. CI installs Chromium for the unit job.
 - [ ] Phase 4 — hero screens: memory browser, coding-task live view, evolution audit
-- [ ] Phase 5 — responsive (container-query mobile) + polish + test matrix (oRPC serialization, SSE replay idempotency, auth gate, health-route regression)
+- [ ] Phase 5 — responsive (container-query mobile) + polish + code-split
 - [ ] Voice (deferred) — mic-in / audio-out in chat; programmatic OpenAPI channel (deferred)
 
 ## Monitoring Thresholds (Scaling Triggers)
