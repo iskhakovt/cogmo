@@ -12,6 +12,10 @@ const API_TARGET = "http://localhost:9090";
 export default defineConfig({
   plugins: [tailwindcss(), react()],
   build: { outDir: "dist" },
+  // Pre-bundle deps the browser test runner would otherwise discover mid-run and
+  // reload — a reload mid-test resets React's singleton and breaks cmdk's hooks.
+  // In dev these also avoid a first-request stall.
+  optimizeDeps: { include: ["@orpc/client", "@orpc/client/fetch", "cmdk"] },
   server: {
     proxy: {
       "/rpc": API_TARGET,
