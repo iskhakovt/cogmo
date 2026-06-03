@@ -205,8 +205,9 @@ async function main() {
   // Spawn the Vite dev server for the web UI. It serves apps/web and proxies
   // /rpc + /api to the backend on :9090. The proxy fails until the backend
   // finishes booting — that's fine, it retries per request; load the page once
-  // the backend logs ready. No env override — vite needs nothing beyond the
-  // inherited process.env (the infra/secret vars are backend-only).
+  // the backend logs ready. The only env vite needs is VITE_SSE_BASE_URL (set
+  // below) so the chat EventSource reaches the backend directly; the infra/secret
+  // vars stay backend-only.
   //
   // Ctrl+C signals the whole foreground process group, so vite (a pnpm
   // grandchild) dies directly. On the programmatic shutdown() path below,

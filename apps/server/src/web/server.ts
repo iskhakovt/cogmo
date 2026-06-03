@@ -61,10 +61,12 @@ function send(res: ServerResponse, status: number, message: string): void {
   res.end(message);
 }
 
-/** The configured dev origin iff it exactly matches the request's `Origin`, else null. */
-function devCorsOrigin(req: IncomingMessage, allowed: string | null): string | null {
-  if (!allowed) return null;
-  return req.headers.origin === allowed ? allowed : null;
+/**
+ * Strip a trailing slash so a copy-pasted `http://host:port/` still matches the
+ * browser's `Origin` header, which never carries one.
+ */
+function normalizeOrigin(origin: string): string {
+  return origin.endsWith("/") ? origin.slice(0, -1) : origin;
 }
 
 /** Login request body. Validated with Zod rather than a hand-rolled typeof ladder. */
@@ -154,9 +156,13 @@ export function createWebServer(deps: CreateWebServerDeps): Server {
     // API directly (the Vite proxy can't hold an SSE open), so answer the
     // configured dev origin with credentialed CORS. Unset in prod -> no headers,
     // same-origin only. `setHeader` survives the handlers' `writeHead` merges.
-    const corsOrigin = devCorsOrigin(req, deps.webDevAllowOrigin);
-    if (corsOrigin) {
-      res.setHeader("Access-Control-Allow-Origin", corsOrigin);
+    // `allowOrigin` is the configured allow-list value (never the raw request
+    // `Origin`), so the credentialed response only ever names that one
+    // pre-configured origin; a non-matching `Origin` gets no headers at all.
+    const allowOrigin =
+      deps.webDevAllowOrigin === null ? null : normalizeOrigin(deps.webDevAllowOrigin);
+    if (allowOrigin !== null && req.headers.origin === allowOrigin) {
+      res.setHeader("Access-Control-Allow-Origin", allowOrigin);
       res.setHeader("Access-Control-Allow-Credentials", "true");
       res.setHeader("Vary", "Origin");
       if (method === "OPTIONS") {

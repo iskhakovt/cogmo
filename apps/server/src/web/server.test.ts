@@ -511,4 +511,27 @@ describe("dev CORS (WEB_DEV_ALLOW_ORIGIN)", () => {
     const res = await fetch(`${base}/health`, { headers: { origin: DEV_ORIGIN } });
     expect(res.headers.get("access-control-allow-origin")).toBeNull();
   });
+
+  it("tolerates a trailing slash in the configured origin", async () => {
+    const slashServer = createWebServer({
+      webTransport: mockTransportDeep(),
+      webSessionStore: new DrizzleWebSessionStore(),
+      webStreamRegistry: new WebStreamRegistry(),
+      runInTx: tx,
+      verifyLoginToken: (candidate) => candidate === VALID_TOKEN,
+      ownerUserId,
+      sessionTtlDays: 30,
+      cookieSecure: true,
+      staticRoot: "/nonexistent-cogmo-dist",
+      webDevAllowOrigin: `${DEV_ORIGIN}/`,
+    });
+    await new Promise<void>((resolve) => slashServer.listen(0, "127.0.0.1", resolve));
+    const slashBase = `http://127.0.0.1:${(slashServer.address() as AddressInfo).port}`;
+    try {
+      const res = await fetch(`${slashBase}/health`, { headers: { origin: DEV_ORIGIN } });
+      expect(res.headers.get("access-control-allow-origin")).toBe(DEV_ORIGIN);
+    } finally {
+      await new Promise<void>((resolve) => slashServer.close(() => resolve()));
+    }
+  });
 });
