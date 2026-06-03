@@ -41,6 +41,7 @@ beforeAll(async () => {
     sessionTtlDays: 30,
     cookieSecure: true,
     staticRoot: "/nonexistent-cogmo-dist",
+    webDevAllowOrigin: null,
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -197,6 +198,7 @@ describe("web server", () => {
         sessionTtlDays: 30,
         cookieSecure: true,
         staticRoot: "/nonexistent-cogmo-dist",
+        webDevAllowOrigin: null,
       });
       await new Promise<void>((resolve) => server503.listen(0, "127.0.0.1", resolve));
       const base503 = `http://127.0.0.1:${(server503.address() as AddressInfo).port}`;
@@ -261,6 +263,7 @@ describe("web server", () => {
           sessionTtlDays: 30,
           cookieSecure: true,
           staticRoot: "/nonexistent-cogmo-dist",
+          webDevAllowOrigin: null,
           host: "127.0.0.1",
           port,
         }),
@@ -300,6 +303,7 @@ describe("web chat routes", () => {
       sessionTtlDays: 30,
       cookieSecure: true,
       staticRoot: "/nonexistent-cogmo-dist",
+      webDevAllowOrigin: null,
     });
     await new Promise<void>((resolve) => chatServer.listen(0, "127.0.0.1", resolve));
     chatBase = `http://127.0.0.1:${(chatServer.address() as AddressInfo).port}`;
@@ -453,5 +457,103 @@ describe("web chat routes", () => {
       body: "{}",
     });
     expect(res.status).toBe(403);
+  });
+});
+
+describe("dev CORS (WEB_DEV_ALLOW_ORIGIN)", () => {
+  const DEV_ORIGIN = "http://localhost:5173";
+  let corsServer: ReturnType<typeof createWebServer>;
+  let corsBase: string;
+
+  beforeAll(async () => {
+    corsServer = createWebServer({
+      webTransport: mockTransportDeep(),
+      webSessionStore: new DrizzleWebSessionStore(),
+      webStreamRegistry: new WebStreamRegistry(),
+      runInTx: tx,
+      verifyLoginToken: (candidate) => candidate === VALID_TOKEN,
+      ownerUserId,
+      sessionTtlDays: 30,
+      cookieSecure: true,
+      staticRoot: "/nonexistent-cogmo-dist",
+      webDevAllowOrigin: DEV_ORIGIN,
+    });
+    await new Promise<void>((resolve) => corsServer.listen(0, "127.0.0.1", resolve));
+    corsBase = `http://127.0.0.1:${(corsServer.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => corsServer.close(() => resolve()));
+  });
+
+  it("answers a matching Origin with credentialed CORS headers", async () => {
+    const res = await fetch(`${corsBase}/health`, { headers: { origin: DEV_ORIGIN } });
+    expect(res.headers.get("access-control-allow-origin")).toBe(DEV_ORIGIN);
+    expect(res.headers.get("access-control-allow-credentials")).toBe("true");
+  });
+
+  it("omits CORS for a non-allowed Origin", async () => {
+    const res = await fetch(`${corsBase}/health`, { headers: { origin: "http://evil.example" } });
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
+  it("answers an OPTIONS preflight with 204 + CORS", async () => {
+    const res = await fetch(`${corsBase}/health`, {
+      method: "OPTIONS",
+      headers: { origin: DEV_ORIGIN, "access-control-request-method": "GET" },
+    });
+    expect(res.status).toBe(204);
+    expect(res.headers.get("access-control-allow-origin")).toBe(DEV_ORIGIN);
+    expect(res.headers.get("access-control-allow-methods")).toContain("GET");
+  });
+
+  it("reflects the requested headers on the OPTIONS preflight", async () => {
+    const res = await fetch(`${corsBase}/health`, {
+      method: "OPTIONS",
+      headers: {
+        origin: DEV_ORIGIN,
+        "access-control-request-method": "GET",
+        "access-control-request-headers": "x-custom, content-type",
+      },
+    });
+    expect(res.status).toBe(204);
+    expect(res.headers.get("access-control-allow-headers")).toBe("x-custom, content-type");
+  });
+
+  it("does not short-circuit a non-allowed origin's OPTIONS to 204", async () => {
+    const res = await fetch(`${corsBase}/health`, {
+      method: "OPTIONS",
+      headers: { origin: "http://evil.example", "access-control-request-method": "GET" },
+    });
+    expect(res.status).not.toBe(204);
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
+  it("the same-origin (prod) server adds no CORS even with an Origin", async () => {
+    const res = await fetch(`${base}/health`, { headers: { origin: DEV_ORIGIN } });
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
+  it("tolerates a trailing slash in the configured origin", async () => {
+    const slashServer = createWebServer({
+      webTransport: mockTransportDeep(),
+      webSessionStore: new DrizzleWebSessionStore(),
+      webStreamRegistry: new WebStreamRegistry(),
+      runInTx: tx,
+      verifyLoginToken: (candidate) => candidate === VALID_TOKEN,
+      ownerUserId,
+      sessionTtlDays: 30,
+      cookieSecure: true,
+      staticRoot: "/nonexistent-cogmo-dist",
+      webDevAllowOrigin: `${DEV_ORIGIN}/`,
+    });
+    await new Promise<void>((resolve) => slashServer.listen(0, "127.0.0.1", resolve));
+    const slashBase = `http://127.0.0.1:${(slashServer.address() as AddressInfo).port}`;
+    try {
+      const res = await fetch(`${slashBase}/health`, { headers: { origin: DEV_ORIGIN } });
+      expect(res.headers.get("access-control-allow-origin")).toBe(DEV_ORIGIN);
+    } finally {
+      await new Promise<void>((resolve) => slashServer.close(() => resolve()));
+    }
   });
 });

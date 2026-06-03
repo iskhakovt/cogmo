@@ -43,6 +43,12 @@ export interface CreateWebServerDeps {
   cookieSecure: boolean;
   /** Filesystem root of the built SPA (sirv). */
   staticRoot: string;
+  /**
+   * Dev-only: when set to the SPA's dev origin, the server answers a matching
+   * `Origin` with credentialed CORS so the Vite dev server's cross-origin SSE
+   * stream works. `null` in prod (same-origin) — no CORS, locked down.
+   */
+  webDevAllowOrigin: string | null;
 }
 
 export interface StartWebServerDeps extends CreateWebServerDeps {
@@ -53,6 +59,14 @@ export interface StartWebServerDeps extends CreateWebServerDeps {
 function send(res: ServerResponse, status: number, message: string): void {
   res.writeHead(status, { "Content-Type": "text/plain" });
   res.end(message);
+}
+
+/**
+ * Strip a trailing slash so a copy-pasted `http://host:port/` still matches the
+ * browser's `Origin` header, which never carries one.
+ */
+function normalizeOrigin(origin: string): string {
+  return origin.endsWith("/") ? origin.slice(0, -1) : origin;
 }
 
 /** Login request body. Validated with Zod rather than a hand-rolled typeof ladder. */
@@ -136,6 +150,35 @@ export function createWebServer(deps: CreateWebServerDeps): Server {
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const method = (req.method ?? "GET").toUpperCase();
     const path = (req.url ?? "/").split("?", 1)[0] ?? "/";
+
+    // Dev-only CORS for the SPA's cross-origin chat SSE stream. In dev the Vite
+    // server serves the SPA on a different origin and its EventSource hits the
+    // API directly (the Vite proxy can't hold an SSE open), so answer the
+    // configured dev origin with credentialed CORS. Applied to ANY request from
+    // that origin, not just the stream — broader than strictly needed but simpler,
+    // and only the one exact configured dev origin is ever allowed. Unset in prod
+    // -> no headers, same-origin only. `setHeader` survives the `writeHead` merges.
+    // `allowOrigin` is the configured allow-list value (never the raw request
+    // `Origin`), so the credentialed response only ever names that one
+    // pre-configured origin; a non-matching `Origin` gets no headers at all.
+    const allowOrigin =
+      deps.webDevAllowOrigin === null ? null : normalizeOrigin(deps.webDevAllowOrigin);
+    if (allowOrigin !== null && req.headers.origin === allowOrigin) {
+      res.setHeader("Access-Control-Allow-Origin", allowOrigin);
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+      res.setHeader("Vary", "Origin");
+      if (method === "OPTIONS") {
+        const requested = req.headers["access-control-request-headers"];
+        res.writeHead(204, {
+          "Access-Control-Allow-Methods": "GET, OPTIONS",
+          "Access-Control-Allow-Headers":
+            typeof requested === "string" ? requested : "content-type",
+          "Access-Control-Max-Age": "600",
+        });
+        res.end();
+        return;
+      }
+    }
 
     // Public, safe: liveness.
     if (method === "GET" && path === "/health") {

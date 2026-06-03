@@ -14,6 +14,11 @@ function localId(prefix: string): string {
 const credentialed = (input: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
   fetch(input, { ...init, credentials: "include" });
 
+// In dev the SPA is served by Vite on a different origin than the API, and the
+// Vite proxy can't hold a long-lived SSE open — so the stream goes straight to
+// the backend (VITE_SSE_BASE_URL). Empty in prod, where the SPA is same-origin.
+const SSE_BASE = import.meta.env.VITE_SSE_BASE_URL ?? "";
+
 /**
  * Chat runtime for one conversation over the web SSE + inbound routes. Maintains
  * the message list, loads history on open, streams the assistant turn from the
@@ -74,7 +79,7 @@ export function useChat(conversationId: string, tab: string) {
     };
 
     const es = createEventSource({
-      url: `/api/chat/${conversationId}/stream?tab=${encodeURIComponent(tab)}`,
+      url: `${SSE_BASE}/api/chat/${conversationId}/stream?tab=${encodeURIComponent(tab)}`,
       fetch: credentialed,
       onMessage: (msg) => {
         if (msg.event === "ready") return;
