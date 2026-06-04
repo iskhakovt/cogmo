@@ -127,6 +127,9 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     listImageModels: vi.fn().mockResolvedValue([]),
     listImageModelsWithProvider: vi.fn().mockResolvedValue([]),
     deleteImageModel: vi.fn().mockResolvedValue(undefined),
+    listSubAgents: vi.fn().mockResolvedValue([]),
+    createSubAgent: vi.fn().mockResolvedValue({ id: "sub-agent-1" }),
+    deleteSubAgent: vi.fn().mockResolvedValue({ deleted: true }),
     listProfileClasses: vi.fn().mockResolvedValue([]),
     createProfileClass: vi.fn().mockResolvedValue({
       id: "class-1",

@@ -423,6 +423,49 @@ export const imageModels = pgTable("image_models", {
 });
 
 /**
+ * Per-user catalog of sub-agents — specialist models the orchestrator can
+ * delegate a subtask to as a tool. A sub-agent is a *binding* over a model
+ * already routable via `model_providers` + the resolver: it reuses that
+ * model's provider/credentials/limits and adds the two things delegation
+ * needs that a bare model id lacks.
+ *
+ * - `name` is the LLM-facing handle. The tool builder surfaces each row as a
+ *   tool named `subagent__<name>` (namespaced like MCP's `mcp__<server>__`),
+ *   so sub-agent tools can never collide with a built-in and a profile can
+ *   opt into all of them with a `subagent__*` glob.
+ * - `description` is read by the *orchestrator* to decide when to delegate —
+ *   the routing signal. Required: without it the orchestrator routes blind.
+ * - `system_prompt` is read by the *sub-agent model* as standing behaviour
+ *   across every call. Nullable: NULL = pure model-as-tool (the orchestrator's
+ *   per-call task carries all instruction — e.g. a strong reasoning model that
+ *   can't run tools); set = a persona/format/policy reused across calls.
+ * - `model` is validated to exist in `model_providers` at write time but is
+ *   NOT `user_selectable`-gated — like `profiles.summarization_model`, it's an
+ *   internal-use model that needn't appear in the `/model` picker.
+ *
+ * **Availability is per-profile, not on this row.** Which profiles may call a
+ * sub-agent is expressed through `profiles.tool_set` globs (the same mechanism
+ * that gates built-ins, skills, and MCP tools) — there is no profile↔sub-agent
+ * join table. `tool_set` holds plain strings with no FK, so deleting a row just
+ * makes the tool vanish from profiles next turn (no dangling references).
+ */
+export const subAgents = pgTable(
+  "sub_agents",
+  {
+    id: pk(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description").notNull(),
+    systemPrompt: text("system_prompt"), // null = pure model-as-tool (no standing persona)
+    model: text("model").notNull(), // resolved via LlmProviderResolver; validated against model_providers at write time
+    createdAt: ts(),
+  },
+  (t) => [unique("uq_sub_agents_user_name").on(t.userId, t.name)],
+);
+
+/**
  * Per-user registry of named "custom compartments" — extensions of the
  * curated `MemoryCompartmentSchema` enum. The classifier loads these per
  * Observer fire and templates `description` into the prompt alongside the

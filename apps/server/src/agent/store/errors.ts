@@ -99,12 +99,26 @@ export class UnknownCompartmentError extends Error {
 export class InvalidNameError extends Error {
   constructor(
     public readonly proposedName: string,
-    public readonly kind: "compartment" | "profile_class",
+    public readonly kind: "compartment" | "profile_class" | "sub_agent",
   ) {
     super(
       `invalid ${kind} name "${proposedName}": must be lowercase ASCII letters/digits/hyphen/underscore, start with a letter, ≤32 chars`,
     );
     this.name = "InvalidNameError";
+  }
+}
+
+/**
+ * Thrown by the create-sub-agent use case when the requested `model` has no
+ * row in `model_providers` — it isn't routable, so a sub-agent pointing at it
+ * could never run. Deliberately not `user_selectable`-gated: a sub-agent may
+ * use an internal model hidden from the `/model` picker, the same way
+ * `profiles.summarization_model` can.
+ */
+export class UnknownModelError extends Error {
+  constructor(public readonly model: string) {
+    super(`unknown model: "${model}" has no provider in model_providers`);
+    this.name = "UnknownModelError";
   }
 }
 

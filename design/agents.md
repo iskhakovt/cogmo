@@ -119,9 +119,24 @@ Claude (and most modern tool-use protocols) can emit multiple `tool_use` blocks 
 
 Reference: `executeToolCalls` in `src/agent/loop.ts`. See `design/decisions.md` for the tradeoff that drove this shape.
 
-## Routing: Agents-as-Tools `[proposed]`
+## Routing: Agents-as-Tools `[confirmed]`
 
-Define each sub-agent as a tool. Claude's native tool selection handles routing. No router agent needed. Sub-agents are just nested `runAgentLoop()` calls with their own system prompts and tool sets.
+A **sub-agent** is a specialist model the orchestrator can delegate a subtask to, exposed as a tool. It's the answer to "this model is great at a feature but can't run tools": the orchestrator holds the tools, the specialist runs tool-free and returns text. Claude's native tool selection handles routing — no router agent.
+
+**Data model.** `sub_agents` (owned here; schema in `src/agent/store/schema.ts`) is a per-user catalog — a thin binding over a model already routable via `model_providers`:
+
+- `name` → surfaced as a tool `subagent__<name>` (namespaced like `mcp__`, so it can't collide with a built-in and a profile can opt in with a `subagent__*` glob).
+- `description` → the routing signal the orchestrator reads to decide *when* to delegate. Required.
+- `system_prompt` → standing persona/format/policy for the specialist. **Nullable**: null = pure model-as-tool (the per-call task carries all instruction); set = a persona reused across calls. The two readers differ — `description` is read by the orchestrator, `system_prompt` by the specialist.
+- `model` → resolved via the `LlmProviderResolver`, so a sub-agent can target any provider (including one the main turn doesn't use). Validated to exist in `model_providers` at write time but **not** `user_selectable`-gated — like `profiles.summarization_model`, it's an internal-use model.
+
+**No profile↔sub-agent join table.** Availability is per-profile through the existing `profiles.tool_set` globs — the same mechanism that gates built-ins, skills, and MCP tools. Definitions are global/reusable; a profile opts in by listing `subagent__<name>` (or `subagent__*`). `tool_set` holds plain strings with no FK, so deleting a sub-agent just removes the tool next turn.
+
+**Runtime (v0 — text-in/text-out).** `buildSubAgentTools` (`src/agent/subagent/sub-agent-tool-builder.ts`) turns each row into a `ToolSpec` whose handler resolves the model and runs a single `provider.chat({ system, messages, /* no tools */ })`. The specialist gets no `Service` and no tools — the orchestrator curates context in via `{ task, context }` and acts on the text out. Tool metadata: `parallelSafe` (independent LLM call), `sideEffectful: false` (keeps the Class-D loop gate honest), `invocationBudget: 3` (caps runaway delegation), `durable: true` (a `handle-message` retry replays the cached result instead of re-billing). `handle-message` loads the rows each turn and folds the specs into the built-ins set fed to `composeTurnTools`. Managed via `cogmo subagent add/list/remove`.
+
+This satisfies **Security: Orchestrator Holds Secrets** trivially — the specialist never receives a `Service` or a key; the orchestrator's process makes the call.
+
+**Deferred.** Nested `runAgentLoop()` sub-agents with their own toolset (re-opens secrets/ACL + nested durability) and richer CRUD surfaces (wizard step, web UI, Telegram `/subagent`).
 
 ## Security: Orchestrator Holds Secrets `[confirmed]`
 

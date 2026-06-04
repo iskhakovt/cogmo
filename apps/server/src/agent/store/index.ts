@@ -45,6 +45,7 @@ import {
   type SttProviderTypeValue,
   scheduledTasks,
   steeringRules,
+  subAgents,
   type ToolSet,
   type TtsProviderTypeValue,
   users,
@@ -262,6 +263,18 @@ export interface ImageModelRow {
  */
 export interface ImageModelWithProvider extends ImageModelRow {
   provider: ImageProviderRow;
+}
+
+/**
+ * A row from `sub_agents`. `systemPrompt` is null for a pure model-as-tool
+ * sub-agent (no standing persona); `model` routes via the LlmProviderResolver.
+ */
+export interface SubAgent {
+  id: string;
+  name: string;
+  description: string;
+  systemPrompt: string | null;
+  model: string;
 }
 
 const PREVIEW_MAX_CHARS = 120;
@@ -964,6 +977,36 @@ export interface AgentStore {
 
   /** Delete a single image model. */
   deleteImageModel(tx: Transaction, modelId: string): Promise<void>;
+
+  // --- Sub-agents ---
+
+  /**
+   * List a user's sub-agents, ordered by name for stable tool-catalog output
+   * across turns. The per-turn tool builder turns each into a
+   * `subagent__<name>` tool; `profiles.tool_set` then gates which surface for
+   * a given profile.
+   */
+  listSubAgents(tx: Transaction, userId: string): Promise<ReadonlyArray<SubAgent>>;
+
+  /**
+   * Insert a sub-agent. A `(user_id, name)` collision surfaces as
+   * `UniqueViolationError`. The caller (the create-sub-agent use case)
+   * validates the name shape and that `model` exists in `model_providers`
+   * first.
+   */
+  createSubAgent(
+    tx: Transaction,
+    params: {
+      userId: string;
+      name: string;
+      description: string;
+      systemPrompt: string | null;
+      model: string;
+    },
+  ): Promise<{ id: string }>;
+
+  /** Delete a sub-agent by name. `deleted: false` when no row matched. */
+  deleteSubAgent(tx: Transaction, userId: string, name: string): Promise<{ deleted: boolean }>;
 
   // --- Evolution: correction extraction ---
 
@@ -2455,6 +2498,41 @@ export class DrizzleAgentStore implements AgentStore {
 
   async deleteImageModel(tx: Transaction, modelId: string): Promise<void> {
     await tx.delete(imageModels).where(eq(imageModels.id, modelId));
+  }
+
+  async listSubAgents(tx: Transaction, userId: string): Promise<ReadonlyArray<SubAgent>> {
+    return tx
+      .select()
+      .from(subAgents)
+      .where(eq(subAgents.userId, userId))
+      .orderBy(asc(subAgents.name));
+  }
+
+  async createSubAgent(
+    tx: Transaction,
+    params: {
+      userId: string;
+      name: string;
+      description: string;
+      systemPrompt: string | null;
+      model: string;
+    },
+  ): Promise<{ id: string }> {
+    return translateUniqueViolation(async () =>
+      single(await tx.insert(subAgents).values(params).returning({ id: subAgents.id })),
+    );
+  }
+
+  async deleteSubAgent(
+    tx: Transaction,
+    userId: string,
+    name: string,
+  ): Promise<{ deleted: boolean }> {
+    const deleted = await tx
+      .delete(subAgents)
+      .where(and(eq(subAgents.userId, userId), eq(subAgents.name, name)))
+      .returning({ id: subAgents.id });
+    return { deleted: deleted.length > 0 };
   }
 
   async hasChannelRules(tx: Transaction, channelType: string): Promise<boolean> {
