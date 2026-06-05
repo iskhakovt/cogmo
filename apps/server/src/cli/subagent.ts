@@ -207,21 +207,32 @@ interface ParsedFlags {
 function parseFlags(args: readonly string[]): ParsedFlags {
   const out: ParsedFlags = {};
   for (let i = 0; i < args.length; i++) {
-    const flag = args[i];
+    const arg = args[i] ?? "";
+    // Support both `--flag value` and `--flag=value`. The `=` form is the
+    // unambiguous way to pass a value that itself starts with `-` (e.g. a
+    // system prompt opening with a markdown rule), which the space form rejects
+    // to avoid swallowing the next flag.
+    const eq = arg.startsWith("--") ? arg.indexOf("=") : -1;
+    const flag = eq === -1 ? arg : arg.slice(0, eq);
+    if (flag !== "--model" && flag !== "--description" && flag !== "--system-prompt") {
+      continue;
+    }
+    let value: string;
+    if (eq !== -1) {
+      value = arg.slice(eq + 1);
+    } else {
+      value = takeValue(args, i, flag);
+      i += 1;
+    }
     switch (flag) {
       case "--model":
-        out.model = takeValue(args, i, flag);
-        i++;
+        out.model = value;
         break;
       case "--description":
-        out.description = takeValue(args, i, flag);
-        i++;
+        out.description = value;
         break;
       case "--system-prompt":
-        out.systemPrompt = takeValue(args, i, flag);
-        i++;
-        break;
-      default:
+        out.systemPrompt = value;
         break;
     }
   }
@@ -229,10 +240,11 @@ function parseFlags(args: readonly string[]): ParsedFlags {
 }
 
 /**
- * Read the value following a flag, refusing the case where the next token is
- * itself a flag (so `--model --description x` doesn't silently set
- * `model = "--description"`). Free-text values that legitimately start with
- * `--` must be quoted so the shell strips the leading dashes.
+ * Read the value following a space-separated flag, refusing the case where the
+ * next token is itself a flag (so `--model --description x` doesn't silently
+ * set `model = "--description"`). The space form therefore can't carry a value
+ * that legitimately starts with `--` — shell quoting preserves the dashes, it
+ * doesn't strip them — so use the `--flag=value` form for those.
  */
 function takeValue(args: readonly string[], i: number, flag: string | undefined): string {
   const next = args[i + 1];

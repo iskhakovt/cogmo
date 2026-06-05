@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { type LlmProviderResolver, ProviderConfigError } from "../../llm/resolver.js";
 import { composeTurnTools } from "../../skills/skill-tool-builder.js";
 import { expectDefined } from "../../test/assertions.js";
 import { mockProvider, mockResolver } from "../../test/factories.js";
@@ -89,6 +90,49 @@ describe("buildSubAgentTools", () => {
     expect(expectDefined(chat.mock.calls[0], "call")[0].messages[0].content).toBe(
       "Summarize\n\nContext:\nPROJECT NOTES",
     );
+  });
+
+  it("extracts only text blocks, ignoring non-text content", async () => {
+    const chat = vi.fn().mockResolvedValue({
+      content: [
+        { type: "thinking", thinking: "hmm", signature: "sig" },
+        { type: "text", text: "answer" },
+      ],
+      stopReason: "end_turn",
+      model: "claude-test",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+    const tools = buildSubAgentTools([row()], mockResolver(mockProvider({ chat })));
+    const out = await expectDefined(tools[0], "spec").handler({ task: "t" }, mock<Service>());
+    expect(out).toBe("answer");
+  });
+
+  it("returns a sentinel when the specialist emits no text blocks", async () => {
+    const chat = vi.fn().mockResolvedValue({
+      content: [],
+      stopReason: "end_turn",
+      model: "claude-test",
+      usage: { inputTokens: 1, outputTokens: 0 },
+    });
+    const tools = buildSubAgentTools([row()], mockResolver(mockProvider({ chat })));
+    const out = await expectDefined(tools[0], "spec").handler({ task: "t" }, mock<Service>());
+    expect(out).toBe("(the sub-agent returned no text output)");
+  });
+
+  it("returns a permanent config error as content instead of throwing (no retry burn)", async () => {
+    const resolveProvider: LlmProviderResolver = () =>
+      Promise.reject(new ProviderConfigError('No provider configured for model "ghost".'));
+    const tools = buildSubAgentTools([row({ model: "ghost" })], resolveProvider);
+    const out = await expectDefined(tools[0], "spec").handler({ task: "t" }, mock<Service>());
+    expect(out).toContain("No provider configured");
+  });
+
+  it("rethrows a transient resolve error so the durable step can retry", async () => {
+    const resolveProvider: LlmProviderResolver = () => Promise.reject(new Error("network blip"));
+    const tools = buildSubAgentTools([row()], resolveProvider);
+    await expect(
+      expectDefined(tools[0], "spec").handler({ task: "t" }, mock<Service>()),
+    ).rejects.toThrow("network blip");
   });
 
   it("is gated per-profile by tool_set globs (same path as every other tool source)", () => {

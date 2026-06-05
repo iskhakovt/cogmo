@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { resolveLimits } from "../../llm/models.js";
-import type { LlmProviderResolver } from "../../llm/resolver.js";
+import {
+  type LlmProviderResolver,
+  ProviderConfigError,
+  type ResolvedLlm,
+} from "../../llm/resolver.js";
 import type { ContentBlock } from "../../llm/types.js";
 import type { SubAgent } from "../store/index.js";
 import { defineTool, type ToolSpec } from "../tools.js";
@@ -77,11 +81,27 @@ export function buildSubAgentTools(
       // the specialist call.
       durable: true,
       handler: async (input) => {
-        const { provider, limits } = await resolveProvider(row.model);
+        // Resolve the specialist's model. A ProviderConfigError is permanent —
+        // the model's routing was removed after this sub-agent was created (the
+        // sub_agents.model dangle). Return it as tool_result content rather than
+        // throwing, so a config error that can never succeed doesn't burn the
+        // durable step's Inngest retries; transient chat() failures below still
+        // throw, so the step retries those.
+        let resolved: ResolvedLlm;
+        try {
+          resolved = await resolveProvider(row.model);
+        } catch (err) {
+          if (err instanceof ProviderConfigError) return `Error: ${err.message}`;
+          throw err;
+        }
+        const { provider, limits } = resolved;
         const userText =
           input.context !== undefined && input.context.length > 0
             ? `${input.task}\n\nContext:\n${input.context}`
             : input.task;
+        // No pre-send context-window guard: an oversized task+context surfaces
+        // as a provider error → isError tool_result (degraded, not a crash).
+        // A token check before the call is deferred (see todo → sub-agents v1).
         const response = await provider.chat({
           model: row.model,
           system: row.systemPrompt ?? "",
@@ -90,11 +110,14 @@ export function buildSubAgentTools(
         });
         // Return the specialist's text verbatim — no trim — so exact output
         // fidelity (leading/trailing whitespace, formatting) survives for the
-        // orchestrator to use as-is.
-        return response.content
+        // orchestrator. A response with no text blocks joins to "" (the model
+        // emitted only thinking, or stopped early); return a sentinel so the
+        // orchestrator can tell "produced nothing" from a genuine empty answer.
+        const text = response.content
           .filter((b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text")
           .map((b) => b.text)
           .join("");
+        return text.length > 0 ? text : "(the sub-agent returned no text output)";
       },
     }),
   );

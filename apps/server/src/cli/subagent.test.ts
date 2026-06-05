@@ -108,6 +108,48 @@ describe("runSubAgentCli", () => {
       expect(code).toBe(1);
       expect(err.join("\n")).toContain("already exists");
     });
+
+    it("accepts the --flag=value form", async () => {
+      const { io } = makeIo();
+      const d = deps(routable);
+      const code = await runSubAgentCli(
+        ["add", "writer", "--model=claude-test", "--description=long-form prose"],
+        d,
+        io,
+      );
+      expect(code).toBe(0);
+      expect(d.agentStore.createSubAgent).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ model: "claude-test", description: "long-form prose" }),
+      );
+    });
+
+    it("passes a value that starts with dashes via the = form", async () => {
+      const d = deps(routable);
+      await runSubAgentCli(
+        ["add", "writer", "--model=m", "--description=d", "--system-prompt=--- always JSON"],
+        d,
+        makeIo().io,
+      );
+      expect(d.agentStore.createSubAgent).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ systemPrompt: "--- always JSON" }),
+      );
+    });
+
+    it("errors (exit 2) when a flag has no value", async () => {
+      const { io, err } = makeIo();
+      expect(await runSubAgentCli(["add", "writer", "--model"], deps(), io)).toBe(2);
+      expect(err.join("\n")).toContain("requires a value");
+    });
+
+    it("errors (exit 2) when a flag value is itself a flag", async () => {
+      const { io, err } = makeIo();
+      expect(
+        await runSubAgentCli(["add", "writer", "--model", "--description", "d"], deps(), io),
+      ).toBe(2);
+      expect(err.join("\n")).toContain("requires a value");
+    });
   });
 
   describe("list", () => {
