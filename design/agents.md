@@ -140,7 +140,7 @@ This satisfies **Security: Orchestrator Holds Secrets** trivially — the specia
 
 ## Security: Orchestrator Holds Secrets `[confirmed]`
 
-Sub-agents never see API keys. Orchestrator makes all external calls. Sub-agents return tool calls and text; orchestrator validates and executes.
+Sub-agents never see API keys — the orchestrator makes all external calls. In v0 a sub-agent runs tool-free and returns only text (see Routing: Agents-as-Tools above). The deferred nested-loop variant would instead return tool calls for the orchestrator to validate and execute — still never holding a key itself.
 
 ## Messaging Architecture
 

@@ -88,11 +88,13 @@ export function buildSubAgentTools(
           messages: [{ role: "user", content: userText }],
           maxTokens: resolveLimits(row.model, limits).maxOutputTokens,
         });
+        // Return the specialist's text verbatim — no trim — so exact output
+        // fidelity (leading/trailing whitespace, formatting) survives for the
+        // orchestrator to use as-is.
         return response.content
           .filter((b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text")
           .map((b) => b.text)
-          .join("")
-          .trim();
+          .join("");
       },
     }),
   );

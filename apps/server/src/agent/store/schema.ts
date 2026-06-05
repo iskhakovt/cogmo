@@ -441,7 +441,12 @@ export const imageModels = pgTable("image_models", {
  *   can't run tools); set = a persona/format/policy reused across calls.
  * - `model` is validated to exist in `model_providers` at write time but is
  *   NOT `user_selectable`-gated — like `profiles.summarization_model`, it's an
- *   internal-use model that needn't appear in the `/model` picker.
+ *   internal-use model that needn't appear in the `/model` picker. It's free
+ *   text, not an FK: `model_providers` has no unique key on `model` alone
+ *   (only `(model, position)` / `(model, provider_id)`), so an FK has no target
+ *   and the same dangle as `profiles.model` applies — a later `cogmo model
+ *   remove` can orphan it, after which the tool surfaces a clear "no provider
+ *   configured" error at call time rather than failing the delete.
  *
  * **Availability is per-profile, not on this row.** Which profiles may call a
  * sub-agent is expressed through `profiles.tool_set` globs (the same mechanism
