@@ -1,3 +1,4 @@
+import { NonRetriableError } from "inngest";
 import { z } from "zod";
 import { resolveLimits } from "../../llm/models.js";
 import {
@@ -83,15 +84,17 @@ export function buildSubAgentTools(
       handler: async (input) => {
         // Resolve the specialist's model. A ProviderConfigError is permanent —
         // the model's routing was removed after this sub-agent was created (the
-        // sub_agents.model dangle). Return it as tool_result content rather than
-        // throwing, so a config error that can never succeed doesn't burn the
-        // durable step's Inngest retries; transient chat() failures below still
-        // throw, so the step retries those.
+        // sub_agents.model dangle). Rethrow as NonRetriableError: Inngest fails
+        // the durable step on the first attempt (no retry burn on an error that
+        // can't succeed) and the loop records a proper isError tool_result.
+        // Transient resolve failures rethrow as-is, so the step retries them.
         let resolved: ResolvedLlm;
         try {
           resolved = await resolveProvider(row.model);
         } catch (err) {
-          if (err instanceof ProviderConfigError) return `Error: ${err.message}`;
+          if (err instanceof ProviderConfigError) {
+            throw new NonRetriableError(err.message, { cause: err });
+          }
           throw err;
         }
         const { provider, limits } = resolved;
@@ -108,16 +111,22 @@ export function buildSubAgentTools(
           messages: [{ role: "user", content: userText }],
           maxTokens: resolveLimits(row.model, limits).maxOutputTokens,
         });
-        // Return the specialist's text verbatim — no trim — so exact output
-        // fidelity (leading/trailing whitespace, formatting) survives for the
-        // orchestrator. A response with no text blocks joins to "" (the model
-        // emitted only thinking, or stopped early); return a sentinel so the
-        // orchestrator can tell "produced nothing" from a genuine empty answer.
+        // Concatenate the text blocks verbatim — no trim — so exact output
+        // fidelity (leading/trailing whitespace, formatting) survives.
         const text = response.content
           .filter((b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text")
           .map((b) => b.text)
           .join("");
-        return text.length > 0 ? text : "(the sub-agent returned no text output)";
+        // No text (the model emitted only thinking, refused, or stopped early)
+        // is a failed delegation, not an empty answer — throw so the loop
+        // records an isError tool_result, rather than handing the orchestrator
+        // fabricated content it might surface to the user or reason over.
+        if (text.length === 0) {
+          throw new NonRetriableError(
+            `sub-agent "${row.name}" (model ${row.model}) returned no text output`,
+          );
+        }
+        return text;
       },
     }),
   );

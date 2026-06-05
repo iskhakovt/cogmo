@@ -1,3 +1,4 @@
+import { NonRetriableError } from "inngest";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { type LlmProviderResolver, ProviderConfigError } from "../../llm/resolver.js";
@@ -107,7 +108,7 @@ describe("buildSubAgentTools", () => {
     expect(out).toBe("answer");
   });
 
-  it("returns a sentinel when the specialist emits no text blocks", async () => {
+  it("throws on empty specialist output instead of fabricating content", async () => {
     const chat = vi.fn().mockResolvedValue({
       content: [],
       stopReason: "end_turn",
@@ -115,16 +116,18 @@ describe("buildSubAgentTools", () => {
       usage: { inputTokens: 1, outputTokens: 0 },
     });
     const tools = buildSubAgentTools([row()], mockResolver(mockProvider({ chat })));
-    const out = await expectDefined(tools[0], "spec").handler({ task: "t" }, mock<Service>());
-    expect(out).toBe("(the sub-agent returned no text output)");
+    await expect(
+      expectDefined(tools[0], "spec").handler({ task: "t" }, mock<Service>()),
+    ).rejects.toThrow(/no text output/);
   });
 
-  it("returns a permanent config error as content instead of throwing (no retry burn)", async () => {
+  it("throws NonRetriableError on a permanent config error (loop makes an isError result, no retry)", async () => {
     const resolveProvider: LlmProviderResolver = () =>
       Promise.reject(new ProviderConfigError('No provider configured for model "ghost".'));
     const tools = buildSubAgentTools([row({ model: "ghost" })], resolveProvider);
-    const out = await expectDefined(tools[0], "spec").handler({ task: "t" }, mock<Service>());
-    expect(out).toContain("No provider configured");
+    await expect(
+      expectDefined(tools[0], "spec").handler({ task: "t" }, mock<Service>()),
+    ).rejects.toBeInstanceOf(NonRetriableError);
   });
 
   it("rethrows a transient resolve error so the durable step can retry", async () => {
