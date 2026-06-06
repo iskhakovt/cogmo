@@ -215,6 +215,11 @@ function parseFlags(args: readonly string[]): ParsedFlags {
     const eq = arg.startsWith("--") ? arg.indexOf("=") : -1;
     const flag = eq === -1 ? arg : arg.slice(0, eq);
     if (flag !== "--model" && flag !== "--description" && flag !== "--system-prompt") {
+      // Surface a typo (`--modle`) directly instead of letting it fall through
+      // to a confusing "--model is required". Bare positionals are ignored.
+      if (flag.startsWith("--")) {
+        throw new Error(`unknown flag: ${flag}`);
+      }
       continue;
     }
     let value: string;

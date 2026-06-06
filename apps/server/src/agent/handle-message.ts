@@ -530,7 +530,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // takes effect without a restart). The handler closes over the same
       // per-turn `resolveProvider`, so a sub-agent can target any routable
       // model — including a different provider than the main turn. Joins the
-      // built-ins set: first-party, wins on any name collision.
+      // built-ins set; the `subagent__` namespace makes a collision with a
+      // built-in structurally impossible.
       const subAgentTools = buildSubAgentTools(
         await deps.runInTx((tx) => agentStore.listSubAgents(tx, userId)),
         resolveProvider,

@@ -16,6 +16,18 @@ describe("createSubAgent use case", () => {
     expect(agentStore.createSubAgent).not.toHaveBeenCalled();
   });
 
+  it("rejects a blank description before touching the store", async () => {
+    const agentStore = mockAgentStore();
+    await expect(
+      createSubAgent(
+        { runInTx: fakeRunInTx, agentStore },
+        { userId: "u1", name: "writer", description: "   ", systemPrompt: null, model: "m" },
+      ),
+    ).rejects.toThrow(/description/);
+    expect(agentStore.listProvidersForModel).not.toHaveBeenCalled();
+    expect(agentStore.createSubAgent).not.toHaveBeenCalled();
+  });
+
   it("rejects a model with no provider routing", async () => {
     // mockAgentStore defaults listProvidersForModel → [] (no routing).
     const agentStore = mockAgentStore();

@@ -35,6 +35,12 @@ export async function createSubAgent(
   if (!SUB_AGENT_NAME_RE.test(args.name)) {
     throw new InvalidNameError(args.name, "sub_agent");
   }
+  // `description` is the routing signal the orchestrator reads to decide when to
+  // delegate. The column is NOT NULL but "" satisfies it — enforce non-empty
+  // here so every surface (CLI, future wizard / Transport) inherits the rule.
+  if (args.description.trim().length === 0) {
+    throw new Error("sub-agent description must not be empty (it is the routing signal)");
+  }
   return deps.runInTx(async (tx) => {
     const providers = await deps.agentStore.listProvidersForModel(tx, args.model);
     if (providers.length === 0) {

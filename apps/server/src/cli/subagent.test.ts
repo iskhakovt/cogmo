@@ -109,6 +109,14 @@ describe("runSubAgentCli", () => {
       expect(err.join("\n")).toContain("already exists");
     });
 
+    it("errors (exit 2) on an unknown flag", async () => {
+      const { io, err } = makeIo();
+      expect(
+        await runSubAgentCli(["add", "writer", "--modle", "x", "--description", "d"], deps(), io),
+      ).toBe(2);
+      expect(err.join("\n")).toContain("unknown flag: --modle");
+    });
+
     it("accepts the --flag=value form", async () => {
       const { io } = makeIo();
       const d = deps(routable);
