@@ -1,0 +1,18 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Write a haiku about the sea.",
+        "model": "gpt-4o-mini",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "Waves whisper to shore,  \nEndless blue meets the sky's edge,  \nSecrets hold in foam."
+      },
+      "metadata": {
+        "systemHash": "28c7339e"
+      }
+    }
+  ]
+}

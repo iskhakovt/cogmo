@@ -189,6 +189,42 @@ describe("OpenAICompatibleProvider", () => {
       expect(getMessage(args, 1)).toEqual({ role: "user", content: "hi" });
     });
 
+    it("omits the system message when the system prompt is empty (non-caching)", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        model: "m",
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      });
+
+      await provider.chat({ model: "m", system: "", messages: [{ role: "user", content: "hi" }] });
+
+      const args = firstCreateArgs();
+      expect(args.messages.some((m) => m.role === "system")).toBe(false);
+      expect(getMessage(args, 0).role).toBe("user");
+    });
+
+    it("omits the system message when the system prompt is empty (prompt caching)", async () => {
+      // A null-persona sub-agent routed via OpenRouter → Anthropic: an empty
+      // system text block 400s downstream, so it must be dropped, not sent.
+      mockCreate.mockReset();
+      const provider = new OpenAICompatibleProvider("test", {
+        apiKey: "test-key",
+        baseURL: "http://test",
+        promptCaching: true,
+      });
+      mockCreate.mockResolvedValueOnce({
+        choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        model: "m",
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      });
+
+      await provider.chat({ model: "m", system: "", messages: [{ role: "user", content: "hi" }] });
+
+      const args = firstCreateArgs();
+      expect(args.messages.some((m) => m.role === "system")).toBe(false);
+    });
+
     it("translates tool_result blocks to tool role messages", async () => {
       const provider = createProvider();
       mockCreate.mockResolvedValueOnce({

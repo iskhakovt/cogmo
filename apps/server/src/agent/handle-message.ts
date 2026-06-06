@@ -44,6 +44,7 @@ import { createSchedulingService } from "./scheduling/scheduling-service.js";
 import type { Service } from "./service.js";
 import { createService } from "./service.js";
 import type { AgentStore } from "./store/index.js";
+import { buildSubAgentTools } from "./subagent/sub-agent-tool-builder.js";
 import type { ToolRegistry } from "./tools.js";
 
 export interface HandleMessageDeps {
@@ -525,12 +526,22 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // skills, and MCP tools entirely.
       const imageTools = deps.imageToolsLoader ? await deps.imageToolsLoader.getTools() : [];
       const skillTools = deps.skillRunner ? await buildSkillTools(deps.skillRunner) : [];
+      // One `subagent__<name>` tool per row, loaded fresh each turn (CLI CRUD
+      // takes effect without a restart). The handler closes over the same
+      // per-turn `resolveProvider`, so a sub-agent can target any routable
+      // model — including a different provider than the main turn. Joins the
+      // built-ins set; the `subagent__` namespace makes a collision with a
+      // built-in structurally impossible.
+      const subAgentTools = buildSubAgentTools(
+        await deps.runInTx((tx) => agentStore.listSubAgents(tx, userId)),
+        resolveProvider,
+      );
       const turnToolSetGlobs = profile?.toolSet ?? [];
       const mcpTools = deps.mcpRegistry
         ? await deps.mcpRegistry.resolveTools({ toolGlobs: turnToolSetGlobs })
         : [];
       const turnTools = composeTurnTools({
-        builtIns: [...tools.snapshot(), ...imageTools],
+        builtIns: [...tools.snapshot(), ...imageTools, ...subAgentTools],
         skillTools,
         mcpTools,
         toolSetGlobs: turnToolSetGlobs,

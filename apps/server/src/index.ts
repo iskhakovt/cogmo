@@ -43,6 +43,7 @@ import { schedulingTools } from "./agent/scheduling/tools.js";
 import type { Service } from "./agent/service.js";
 import { CORE_MEMORY_PROMPT_GUIDANCE, MEMORY_PROMPT_GUIDANCE } from "./agent/service.js";
 import { DrizzleAgentStore } from "./agent/store/index.js";
+import { SUBAGENT_PROMPT_GUIDANCE } from "./agent/subagent/sub-agent-tool-builder.js";
 import { createDefaultTools } from "./agent/tools.js";
 import { createWebTools } from "./agent/web-tools.js";
 import {
@@ -979,6 +980,7 @@ export async function bootstrapRuntime(
       CORE_MEMORY_PROMPT_GUIDANCE,
       DELEGATE_CODING_GUIDANCE,
       SKILLS_PROMPT_GUIDANCE,
+      SUBAGENT_PROMPT_GUIDANCE,
     ],
     getUserContext: async () => {
       const blocks = await core.runInTx((trx) =>

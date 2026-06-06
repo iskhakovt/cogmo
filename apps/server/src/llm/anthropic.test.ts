@@ -57,6 +57,46 @@ describe("AnthropicProvider", () => {
     expect(result.usage).toEqual({ inputTokens: 15, outputTokens: 8 });
   });
 
+  it("omits the system field when the system prompt is empty", async () => {
+    // Anthropic rejects an empty-text content block; a null-persona sub-agent
+    // passes system: "". The adapter must drop the field, not send "".
+    const provider = createProvider();
+    mockCreate.mockResolvedValueOnce({
+      content: [{ type: "text", text: "ok", citations: null }],
+      stop_reason: "end_turn",
+      model: "claude-sonnet-4-6",
+      usage: { input_tokens: 5, output_tokens: 2 },
+    });
+
+    await provider.chat({
+      model: "claude-sonnet-4-6",
+      system: "",
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    expect(mockCreate.mock.calls[0]?.[0].system).toBeUndefined();
+  });
+
+  it("sends a non-empty system prompt as a cached text block", async () => {
+    const provider = createProvider();
+    mockCreate.mockResolvedValueOnce({
+      content: [{ type: "text", text: "ok", citations: null }],
+      stop_reason: "end_turn",
+      model: "claude-sonnet-4-6",
+      usage: { input_tokens: 5, output_tokens: 2 },
+    });
+
+    await provider.chat({
+      model: "claude-sonnet-4-6",
+      system: "Be terse.",
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    expect(mockCreate.mock.calls[0]?.[0].system).toEqual([
+      { type: "text", text: "Be terse.", cache_control: { type: "ephemeral" } },
+    ]);
+  });
+
   it("maps a tool_use response", async () => {
     const provider = createProvider();
     mockCreate.mockResolvedValueOnce({

@@ -1121,6 +1121,11 @@ describe("DrizzleAgentStore", () => {
   describe("findMostRecentConversationForUserProfile", () => {
     it("returns the latest private conversation with its last-message timestamp", async () => {
       const { userId, profileId, stamp } = await seedConversation();
+      // 2ms sleep — PGlite's pg_uuidv7 uses random bits, not a monotonic
+      // counter, so a same-millisecond insert isn't guaranteed to sort after
+      // the seeded conversation. The gap makes `newer` the strictly-latest id
+      // (the `id DESC` ordering this test asserts).
+      await new Promise((r) => setTimeout(r, 2));
       // Second conversation for the same user+profile, created later
       // (UUIDv7 = time-ordered) so this is the "most recent" one.
       const newer = (

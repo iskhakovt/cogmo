@@ -248,9 +248,12 @@ export class AnthropicProvider implements LlmProvider {
 function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNonStreaming {
   // System prompt as content block array with cache_control on the last block.
   // Tools + system are static per conversation — caching saves 90% on reads.
-  const systemBlocks: Anthropic.TextBlockParam[] = [
-    { type: "text", text: params.system, cache_control: { type: "ephemeral" } },
-  ];
+  // Omit the block when there's no prompt: Anthropic rejects an empty-text
+  // content block, and a null-persona sub-agent passes system: "".
+  const systemBlocks: Anthropic.TextBlockParam[] =
+    params.system.trim().length > 0
+      ? [{ type: "text", text: params.system, cache_control: { type: "ephemeral" } }]
+      : [];
 
   // When responseFormat is set, use the tool_use trick: define a synthetic tool
   // with the schema and force the model to call it via tool_choice.
@@ -266,7 +269,7 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
     return {
       model: params.model,
       max_tokens: maxTokens,
-      system: systemBlocks,
+      ...(systemBlocks.length > 0 && { system: systemBlocks }),
       messages: params.messages.map(toAnthropicMessage),
       tools: [syntheticTool],
       tool_choice: { type: "tool", name: params.responseFormat.name },
@@ -286,7 +289,7 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
   const result: Anthropic.MessageCreateParamsNonStreaming = {
     model: params.model,
     max_tokens: params.thinking ? params.thinking.budgetTokens + maxTokens : maxTokens,
-    system: systemBlocks,
+    ...(systemBlocks.length > 0 && { system: systemBlocks }),
     messages: params.messages.map(toAnthropicMessage),
     ...(tools && { tools }),
     ...(params.temperature !== undefined && { temperature: params.temperature }),

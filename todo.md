@@ -228,6 +228,7 @@
 
 - [ ] `p3` Prompt optimization — evaluation rubrics, bootstrapped few-shot (Phase 4)
 - [ ] `p3` HyDE for auto-recall — generate a short hypothetical answer with a small/fast LLM, embed that instead of the raw user message. Improves recall quality on long/multi-turn turns where a mean-pooled embedding of raw chatter dilutes intent. Adds an LLM call on the hot path, so gate behind a profile setting and only consider after bumping `HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS` + truncation (issue #120) is in place and measured insufficient.
+- [ ] `p3` Sub-agents v1 follow-ons — the v0 (agents-as-tools) ships CLI-only CRUD and text-in/text-out delegation. Two extensions when warranted: (1) richer CRUD surfaces — a setup-wizard step, a web UI panel (oRPC `webContract` mutation + `sub_agents` list/create/delete), and a Telegram `/subagent` admin command, mirroring how `model_providers` / `image_models` grew their surfaces; (2) nested-loop sub-agents — a sub-agent that runs its own `runAgentLoop()` with a scoped (read-only?) `Service` and/or its own toolset, which re-opens the orchestrator-holds-secrets boundary and nested-durability (`step.run` IDs) questions deferred in v0. Start with read-only memory recall before any write/tool capability. (3) a pre-send context-window guard in the tool handler — today an oversized `task` + `context` surfaces as a provider error → `isError` tool_result (degraded, not a crash); a token check before the `provider.chat` call would fail faster with a clearer message.
 
 ### Future testing & code style
 

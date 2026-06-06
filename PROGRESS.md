@@ -65,6 +65,7 @@ The minimum useful system: talk to it, it remembers things.
 - [x] Guided setup wizard — `cogmo setup` via `@clack/prompts`, provider validation (`/v1/models`, `getMe`), Telegram channel + allowlist, re-runnable (Keep/Modify/Skip), `--reset` scopes, `--non-interactive` mode (fully reads `COGMO_*` env vars with `_FILE` support, validates before writing, idempotent on re-run), post-setup "how do I know it's working?" block with bot username
 - [x] Telegram response formatting — `marked` + custom HTML post-processor, `renderOutput` on AdapterModule, `steering_rules.channel_type` scope, channel-scoped rules seeded at setup
 - [x] Image generation — `generate_image` tool via Vercel AI SDK + `@ai-sdk/fal`, curated model catalog, mid-stream delivery via `tool_result` events in Telegram stream handle, batch delivery step-wrapped, integration test via scoped `fetch` injection (fal-mock)
+- [x] Agents-as-tools (sub-agents) — `sub_agents` catalog binding a routable model to a `subagent__<name>` tool, v0 text-in/text-out delegation to a tool-free specialist (orchestrator holds the tools), per-profile via `tool_set` globs (no join table), `cogmo subagent add/list/remove` CLI
 
 ## Phase 2: Scheduling + Ingestion
 
