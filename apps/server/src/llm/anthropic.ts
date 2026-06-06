@@ -248,10 +248,8 @@ export class AnthropicProvider implements LlmProvider {
 function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNonStreaming {
   // System prompt as content block array with cache_control on the last block.
   // Tools + system are static per conversation — caching saves 90% on reads.
-  // Omit the block entirely when there's no system prompt: Anthropic rejects an
-  // empty-text content block (≥1 char required), and a tool-free sub-agent with
-  // a null persona passes system: "". The `system` key is dropped (conditional
-  // spread below) rather than sent as an empty array, which is also malformed.
+  // Omit the block when there's no prompt: Anthropic rejects an empty-text
+  // content block, and a null-persona sub-agent passes system: "".
   const systemBlocks: Anthropic.TextBlockParam[] =
     params.system.trim().length > 0
       ? [{ type: "text", text: params.system, cache_control: { type: "ephemeral" } }]
