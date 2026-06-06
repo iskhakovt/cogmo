@@ -315,15 +315,23 @@ function buildMessages(
   messages: Message[],
   promptCaching: boolean,
 ): OpenAI.ChatCompletionMessageParam[] {
-  // When promptCaching is enabled (OpenRouter → Anthropic), add cache_control
-  // on the system message content block. OpenRouter passes it through to Claude.
-  const systemPart: OpenAI.ChatCompletionContentPartText & {
-    cache_control: { type: "ephemeral" };
-  } = { type: "text", text: system, cache_control: { type: "ephemeral" } };
-  const systemMsg: OpenAI.ChatCompletionMessageParam = promptCaching
-    ? { role: "system", content: [systemPart] }
-    : { role: "system", content: system };
-  const result: OpenAI.ChatCompletionMessageParam[] = [systemMsg];
+  // Omit the system message entirely when blank — a null-persona sub-agent
+  // passes system: "". An empty system block is rejected downstream by stricter
+  // servers (vLLM/llama.cpp) and, on the OpenRouter → Anthropic caching path, by
+  // Anthropic itself; mirrors the Anthropic adapter's omit-when-empty behaviour.
+  const result: OpenAI.ChatCompletionMessageParam[] = [];
+  if (system.trim().length > 0) {
+    // When promptCaching is enabled (OpenRouter → Anthropic), add cache_control
+    // on the system content block. OpenRouter passes it through to Claude.
+    const systemPart: OpenAI.ChatCompletionContentPartText & {
+      cache_control: { type: "ephemeral" };
+    } = { type: "text", text: system, cache_control: { type: "ephemeral" } };
+    result.push(
+      promptCaching
+        ? { role: "system", content: [systemPart] }
+        : { role: "system", content: system },
+    );
+  }
 
   for (const msg of messages) {
     if (typeof msg.content === "string") {

@@ -88,6 +88,8 @@ export function buildSubAgentTools(
         // the durable step on the first attempt (no retry burn on an error that
         // can't succeed) and the loop records a proper isError tool_result.
         // Transient resolve failures rethrow as-is, so the step retries them.
+        // Mirrors `resolveOrFail` (handle-message.ts) — duplicated, not imported,
+        // to avoid a handle-message → builder dependency cycle.
         let resolved: ResolvedLlm;
         try {
           resolved = await resolveProvider(row.model);
