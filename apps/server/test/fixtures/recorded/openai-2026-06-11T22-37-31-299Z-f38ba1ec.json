@@ -1,0 +1,18 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Return valid json only.\n\nExtract facts from the following text chunk.\n\nChunk: 1/1\nEvent Date: [DATE] ([TS])\nContext: none\n\nText:\nThe user lives in a small apartment in the Kreuzberg district of Berlin",
+        "model": "gpt-4o-mini",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\n  \"facts\": [\n    {\n      \"what\": \"User lives in a small apartment in the Kreuzberg district of Berlin\",\n      \"when\": \"N/A\",\n      \"where\": \"Kreuzberg district of Berlin\",\n      \"who\": \"user\",\n      \"why\": \"N/A\",\n      \"fact_kind\": \"conversation\",\n      \"occurred_start\": null,\n      \"occurred_end\": null,\n      \"fact_type\": \"assistant\",\n      \"entities\": [\n        {\n          \"text\": \"user\"\n        },\n        {\n          \"text\": \"Kreuzberg\"\n        },\n        {\n          \"text\": \"Berlin\"\n        }\n      ],\n      \"causal_relations\": null\n    }\n  ]\n}"
+      },
+      "metadata": {
+        "systemHash": "3642a1ed"
+      }
+    }
+  ]
+}

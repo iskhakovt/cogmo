@@ -1,0 +1,18 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Return valid json only.\n\n## MISSION\n\nTrack anything notable in the new facts — names, numbers, dates, places, events, decisions, claims, relationships, and recurring patterns.\n\n## INPUT\n\n### New facts\n\n[[UUID]] User's homelab IP is 10.0.10.10 | Involving: user (mentioned_at=2026-06-11 22:37:14.307061+00:00)\n\n### Existing observations\n\n[]",
+        "model": "gpt-4o-mini",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\n  \"creates\": [\n    {\n      \"text\": \"User's homelab IP is 10.0.10.10.\",\n      \"source_fact_ids\": [\"1c8a7fc7-878d-41d1-96c8-bd8ccb425cc5\"],\n      \"reason\": \"This is a new piece of durable knowledge with no existing observations to match.\"\n    }\n  ],\n  \"updates\": [],\n  \"deletes\": []\n}"
+      },
+      "metadata": {
+        "systemHash": "3bfbb032"
+      }
+    }
+  ]
+}
