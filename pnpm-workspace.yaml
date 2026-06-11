@@ -30,4 +30,4 @@ patchedDependencies:
 # releases immediately. Bump in lockstep with the hindsight-api image pins in
 # apps/server/dev/containers.ts and cogmo.hindsightCompat.
 minimumReleaseAgeExclude:
-  - '@vectorize-io/hindsight-client@0.7.2'
+  - '@vectorize-io/hindsight-client@0.8.1'
