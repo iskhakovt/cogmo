@@ -1,0 +1,18 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Return valid json only.\n\n## MISSION\n\nTrack anything notable in the new facts — names, numbers, dates, places, events, decisions, claims, relationships, and recurring patterns.\n\n## INPUT\n\n### New facts\n\n[[UUID]] User's homelab IP is 10.0.10.10 | Involving: user (mentioned_at=2026-06-11 22:37:15.671897+00:00)\n[[UUID]] User's wife's birthday is March 15 | Involving: user's wife (mentioned_at=2026-06-11 22:37:15.671937+00:00)\n\n### Existing observations\n\n[]",
+        "model": "gpt-4o-mini",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\n  \"creates\": [\n    {\n      \"text\": \"User's homelab IP is 10.0.10.10.\",\n      \"source_fact_ids\": [\"1a3ca763-b1d3-4476-b189-cd65430b14bf\"],\n      \"reason\": \"New observation about user's homelab IP, no existing observations cover this facet.\"\n    },\n    {\n      \"text\": \"User's wife's birthday is March 15.\",\n      \"source_fact_ids\": [\"80100171-691d-4ff1-9253-5bc8f0ccfef6\"],\n      \"reason\": \"New observation about user's wife's birthday, no existing observations cover this facet.\"\n    }\n  ],\n  \"updates\": [],\n  \"deletes\": []\n}"
+      },
+      "metadata": {
+        "systemHash": "3bfbb032"
+      }
+    }
+  ]
+}

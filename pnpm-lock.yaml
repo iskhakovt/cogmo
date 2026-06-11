@@ -110,8 +110,8 @@ importers:
         specifier: ^0.13.11
         version: 0.13.11(typescript@6.0.3)(zod@4.4.3)
       '@vectorize-io/hindsight-client':
-        specifier: ^0.7.2
-        version: 0.7.2
+        specifier: ^0.8.1
+        version: 0.8.1
       ai:
         specifier: ^6.0.191
         version: 6.0.191(zod@4.4.3)
@@ -137,8 +137,8 @@ importers:
         specifier: ^1.43.0
         version: 1.43.0
       inngest:
-        specifier: ^4.4.0
-        version: 4.4.0(@opentelemetry/core@2.7.1(@opentelemetry/api@1.9.1))(express@5.2.1)(hono@4.12.18)(react@19.2.6)(typescript@6.0.3)(zod@4.4.3)
+        specifier: ^4.5.1
+        version: 4.5.1(@opentelemetry/core@2.7.1(@opentelemetry/api@1.9.1))(express@5.2.1)(hono@4.12.18)(react@19.2.6)(typescript@6.0.3)(zod@4.4.3)
       js-tiktoken:
         specifier: ^1.0.21
         version: 1.0.21
@@ -205,7 +205,7 @@ importers:
         version: 0.4.6
       '@inngest/test':
         specifier: ^1.0.0
-        version: 1.0.0(inngest@4.4.0(@opentelemetry/core@2.7.1(@opentelemetry/api@1.9.1))(express@5.2.1)(hono@4.12.18)(react@19.2.6)(typescript@6.0.3)(zod@4.4.3))
+        version: 1.0.0(inngest@4.5.1(@opentelemetry/core@2.7.1(@opentelemetry/api@1.9.1))(express@5.2.1)(hono@4.12.18)(react@19.2.6)(typescript@6.0.3)(zod@4.4.3))
       '@modelcontextprotocol/server-everything':
         specifier: ^2026.1.26
         version: 2026.1.26
@@ -3559,8 +3559,8 @@ packages:
   '@types/ws@8.18.1':
     resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
 
-  '@vectorize-io/hindsight-client@0.7.2':
-    resolution: {integrity: sha512-wl0ICqGyr1Ui29+sOiJMJl+4zhGJplgQOlTR6oH60DZBH38uFePuSyxpX87hknEpCw62/xxk56uwHawxYIrwHQ==}
+  '@vectorize-io/hindsight-client@0.8.1':
+    resolution: {integrity: sha512-F0mMep0DuF2bTagoFsooDWUk28DLjdTqb8oKtrTVcipe/eytsNuPuqdfXrqkwWGvRthrcwokuugBLzQXpMyHtA==}
 
   '@vercel/oidc@3.2.0':
     resolution: {integrity: sha512-UycprH3T6n3jH0k44NHMa7pnFHGu/N05MjojYr+Mc6I7obkoLIJujSWwin1pCvdy/eOxrI/l3uDLQsmcrOb4ug==}
@@ -4530,8 +4530,8 @@ packages:
   inherits@2.0.4:
     resolution: {integrity: sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ==}
 
-  inngest@4.4.0:
-    resolution: {integrity: sha512-OdNedhkjTK1EPij6k4nbQ70uWjxxjES1xJJPNFPp7XQJMyr0PrKg0SOoCL+FNsXp1Zrb7ZZG06sru9WHgFdE/g==}
+  inngest@4.5.1:
+    resolution: {integrity: sha512-Gf8m1wI4huUQpqnzRuKfdd1+9N8tc+I5LZERodRMDcVPpzzhhfwnOVVhlIoMNa4JN/rtBuu22Ev1sj7g2UySQw==}
     engines: {node: '>=20'}
     peerDependencies:
       '@sveltejs/kit': '>=1.27.3'
@@ -6967,9 +6967,9 @@ snapshots:
       '@types/node': 22.19.19
       typescript: 5.9.3
 
-  '@inngest/test@1.0.0(inngest@4.4.0(@opentelemetry/core@2.7.1(@opentelemetry/api@1.9.1))(express@5.2.1)(hono@4.12.18)(react@19.2.6)(typescript@6.0.3)(zod@4.4.3))':
+  '@inngest/test@1.0.0(inngest@4.5.1(@opentelemetry/core@2.7.1(@opentelemetry/api@1.9.1))(express@5.2.1)(hono@4.12.18)(react@19.2.6)(typescript@6.0.3)(zod@4.4.3))':
     dependencies:
-      inngest: 4.4.0(@opentelemetry/core@2.7.1(@opentelemetry/api@1.9.1))(express@5.2.1)(hono@4.12.18)(react@19.2.6)(typescript@6.0.3)(zod@4.4.3)
+      inngest: 4.5.1(@opentelemetry/core@2.7.1(@opentelemetry/api@1.9.1))(express@5.2.1)(hono@4.12.18)(react@19.2.6)(typescript@6.0.3)(zod@4.4.3)
       tinyspy: 3.0.2
       ulid: 2.4.0
 
@@ -9452,7 +9452,7 @@ snapshots:
     dependencies:
       '@types/node': 25.9.1
 
-  '@vectorize-io/hindsight-client@0.7.2': {}
+  '@vectorize-io/hindsight-client@0.8.1': {}
 
   '@vercel/oidc@3.2.0': {}
 
@@ -10510,7 +10510,7 @@ snapshots:
 
   inherits@2.0.4: {}
 
-  inngest@4.4.0(@opentelemetry/core@2.7.1(@opentelemetry/api@1.9.1))(express@5.2.1)(hono@4.12.18)(react@19.2.6)(typescript@6.0.3)(zod@4.4.3):
+  inngest@4.5.1(@opentelemetry/core@2.7.1(@opentelemetry/api@1.9.1))(express@5.2.1)(hono@4.12.18)(react@19.2.6)(typescript@6.0.3)(zod@4.4.3):
     dependencies:
       '@bufbuild/protobuf': 2.12.0
       '@inngest/ai': 0.1.7

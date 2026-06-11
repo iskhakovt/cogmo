@@ -5,7 +5,7 @@
   "license": "MIT",
   "type": "module",
   "cogmo": {
-    "hindsightCompat": ">=0.7.0 <0.8.0"
+    "hindsightCompat": ">=0.8.0 <0.9.0"
   },
   "files": [
     "dist",
@@ -62,7 +62,7 @@
     "@orpc/contract": "1.14.4",
     "@orpc/server": "1.14.4",
     "@t3-oss/env-core": "^0.13.11",
-    "@vectorize-io/hindsight-client": "^0.7.2",
+    "@vectorize-io/hindsight-client": "^0.8.1",
     "ai": "^6.0.191",
     "ajv": "^8.20.0",
     "canonicalize": "3.0.0",
@@ -71,7 +71,7 @@
     "dockerode": "5.0.0",
     "drizzle-orm": "^0.45.2",
     "grammy": "^1.43.0",
-    "inngest": "^4.4.0",
+    "inngest": "^4.5.1",
     "js-tiktoken": "^1.0.21",
     "jsdom": "^29.1.1",
     "jsonrepair": "^3.14.0",

@@ -17,7 +17,7 @@ const fakeSdkClient = { __sdkClient: true };
 
 vi.mock("@vectorize-io/hindsight-client", () => {
   return {
-    CLIENT_VERSION: "0.7.2",
+    CLIENT_VERSION: "0.8.1",
     HindsightClient: class {
       retain = mockRetain;
       retainBatch = mockRetainBatch;

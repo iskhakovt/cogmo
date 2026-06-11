@@ -50,25 +50,25 @@ describe("HindsightCompatSchema", () => {
 });
 
 describe("checkHindsightClientVersion", () => {
-  const range = ">=0.7.0 <0.8.0";
+  const range = ">=0.8.0 <0.9.0";
 
   it("passes when the client version satisfies the range", () => {
-    expect(() => checkHindsightClientVersion(range, "0.7.2")).not.toThrow();
+    expect(() => checkHindsightClientVersion(range, "0.8.1")).not.toThrow();
   });
 
   it("throws when the client version is below the range", () => {
-    expect(() => checkHindsightClientVersion(range, "0.6.2")).toThrow(BootCheckError);
-    expect(() => checkHindsightClientVersion(range, "0.6.2")).toThrow(
+    expect(() => checkHindsightClientVersion(range, "0.7.2")).toThrow(BootCheckError);
+    expect(() => checkHindsightClientVersion(range, "0.7.2")).toThrow(
       /outside the supported range/,
     );
   });
 
   it("throws when the client version is at the exclusive upper bound", () => {
-    expect(() => checkHindsightClientVersion(range, "0.8.0")).toThrow(BootCheckError);
+    expect(() => checkHindsightClientVersion(range, "0.9.0")).toThrow(BootCheckError);
   });
 
   it("coerces build metadata before comparing", () => {
-    expect(() => checkHindsightClientVersion(range, "0.7.2+build.9")).not.toThrow();
+    expect(() => checkHindsightClientVersion(range, "0.8.1+build.9")).not.toThrow();
   });
 
   it("throws when the client reports an unparseable version", () => {
