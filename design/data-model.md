@@ -50,8 +50,8 @@ Design sketches — added via Drizzle migrations when their phase begins.
 | `mcp_servers` | 2 | MCP server configs (transport, config blob, enabled, approval). See [integrations/mcp.md](integrations/mcp.md). |
 | `mcp_server_tools` | 2 | Per-tool schema hash + approval state. Cascades from `mcp_servers`. |
 | `skills` | 3 | Skill library metadata. Code on filesystem, descriptions for retrieval. |
-| `pipeline_definitions` | 6 | Versioned user-defined pipeline definitions (free-text source + compiled JSONB; immutable except `active`). See [pipelines.md](pipelines.md). |
-| `pipeline_runs` | 6 | Pipeline run state — pinned definition version, current stage, typed stage outputs, wait keys. See [pipelines.md](pipelines.md). |
+| `pipeline_definitions` | 8 | Versioned user-defined pipeline definitions (free-text source + compiled JSONB; immutable except `active`). See [pipelines.md](pipelines.md). |
+| `pipeline_runs` | 8 | Pipeline run state — pinned definition version, current stage, typed stage outputs, wait keys. See [pipelines.md](pipelines.md). |
 
 ## Hindsight Tables (Managed Externally) `[confirmed]`
 
