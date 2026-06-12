@@ -77,6 +77,9 @@ interface Stage {
 
 // Every timeout resolves to a terminating action — "remind" re-arms the deadline and notifies
 // at most maxReminders times, then falls through to a terminal action. No unbounded waits.
+// The ~1-year park ceiling bounds the checkpoint's TOTAL effective park — timeout ×
+// (maxReminders + 1), not per re-arm — so "no parked run older than a year" holds as a global
+// invariant the ticker and cleanup can rely on. Zero-duration timeouts are rejected.
 type TimeoutAction =
   | { kind: "proceed" }
   | { kind: "abort" }
@@ -144,7 +147,7 @@ Typed `output` artifacts flow forward (Anthropic's delegation guidance: objectiv
 
 ## Safety `[proposed]`
 
-- **Per-stage tool allowlists** compile into the envelope and resolve through the existing `Service` ACL boundary ([agents.md](agents.md) → Tool Architecture) — the orchestrator scopes what each stage's agent can touch. A "gather context" stage gets read tools only.
+- **Per-stage tool allowlists** compile into the envelope and resolve through the existing `Service` ACL boundary ([agents.md](agents.md) → Tool Architecture) — the orchestrator scopes what each stage's agent can touch. A "gather context" stage gets read tools only. The pipeline tools themselves (`define_pipeline` / `activate_pipeline` / `list_pipelines`) are excluded from allowlist resolution — a run must not define or activate pipelines mid-run; that self-modification path always goes through the user-facing preview/confirm gate.
 - **Writes as safe-outputs** (gh-aw's flagship pattern, already Cogmo's shape): agentic stages never hold "open PR" / "push" capabilities — they produce artifacts; the orchestrator executes the side effects deterministically, exactly as coding delegation's CLI is told "do NOT open a PR."
 - **Risk-rate tools** (read-only / reversible / irreversible — OpenAI's guide). Irreversible tools in a stage allowlist force an implicit gate before that stage unless the user explicitly waived it in the definition (and the preview says so).
 - **Budgets**: per-run token/wall-time caps and per-definition daily run quotas, enforced like coding delegation's admission checks. A runaway pipeline pauses with backoff, never silently retries forever.

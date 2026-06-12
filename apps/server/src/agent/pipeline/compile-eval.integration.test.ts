@@ -14,6 +14,7 @@
  * definition schema, or the pinned model changes.
  */
 
+import picomatch from "picomatch";
 import { describe, expect, inject, it } from "vitest";
 import { AnthropicProvider } from "../../llm/anthropic.js";
 import { expectDefined } from "../../test/assertions.js";
@@ -143,9 +144,10 @@ describe("pipeline compiler eval", () => {
     expect(restricted.length).toBeGreaterThan(0);
     for (const stage of restricted) {
       for (const glob of stage.tools ?? []) {
-        expect(AVAILABLE_TOOLS.some((t) => t === glob || t.includes(glob.replace(/\*/g, "")))).toBe(
-          true,
-        );
+        // Same resolution as production validation — a bare "*" must not
+        // pass via a degenerate substring check.
+        expect(glob).not.toBe("*");
+        expect(AVAILABLE_TOOLS.some((t) => picomatch.isMatch(t, glob))).toBe(true);
       }
     }
   });

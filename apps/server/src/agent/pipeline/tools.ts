@@ -115,6 +115,16 @@ export const pipelineTools: ReadonlyArray<ToolSpec> = [
   listPipelinesTool,
 ];
 
+/**
+ * Excluded from stage tool-allowlist resolution: a pipeline run must not
+ * be able to define or activate pipelines mid-run — that is a
+ * self-modification surface the preview/confirm gate exists to prevent.
+ * The exclusion is enforced where `availableTools` is assembled
+ * (handle-message), so a compiled allowlist naming these fails the
+ * deterministic validation pass.
+ */
+export const PIPELINE_TOOL_NAMES: ReadonlyArray<string> = pipelineTools.map((t) => t.name);
+
 function requirePipelines(service: Service): PipelinesService {
   if (!service.pipelines) {
     throw new Error("Pipelines are unavailable in this context.");

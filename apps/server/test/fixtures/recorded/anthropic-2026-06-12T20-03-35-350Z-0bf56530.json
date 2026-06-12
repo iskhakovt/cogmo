@@ -1,0 +1,25 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Every Sunday evening, tidy up and reorganize my notes.",
+        "model": "claude-sonnet-4-6",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "pipeline_definition",
+            "arguments": "{\"name\":\"weekly-notes-tidy-up\",\"trigger\":{\"kind\":\"cron\",\"schedule\":\"0 18 * * 0\",\"timezone\":\"America/New_York\"},\"stages\":[{\"id\":\"tidy-and-reorganize-notes\",\"kind\":\"agentic\",\"instructions\":\"Tidy up and reorganize the user's notes. Review all existing notes, clean up any clutter or redundancy, group related notes together, and ensure everything is well-structured and easy to navigate. Preserve the user's original content and intent throughout.\",\"tools\":[\"memory_recall\",\"memory_retain\",\"read_file\",\"write_file\"]}]}",
+            "id": "toolu_013aFTQu99W399aaheC562fr"
+          }
+        ]
+      },
+      "metadata": {
+        "systemHash": "cf73c5e5",
+        "toolsHash": "c2dc880f"
+      }
+    }
+  ]
+}

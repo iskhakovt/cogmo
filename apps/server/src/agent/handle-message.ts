@@ -39,6 +39,7 @@ import type { ImageToolsLoader } from "./image-tools-loader.js";
 import type { AgentLoopResult, StreamingAgentLoopParams } from "./loop.js";
 import { createPipelinesService } from "./pipeline/pipelines-service.js";
 import type { PipelineStore } from "./pipeline/store/index.js";
+import { PIPELINE_TOOL_NAMES } from "./pipeline/tools.js";
 import type { PromptSource } from "./prompt.js";
 import { shouldSkipRecall } from "./recall-gate.js";
 import { synthesizeDegradedReply } from "./repair.js";
@@ -666,7 +667,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       });
       // Pipelines service compiles on the conversation's current model and
       // validates stage tool-globs against this turn's composed tool list,
-      // so a definition can't allowlist a tool the profile can't see.
+      // so a definition can't allowlist a tool the profile can't see. The
+      // pipeline tools themselves are excluded — a run defining/activating
+      // pipelines mid-run is a self-modification surface the
+      // preview/confirm gate exists to prevent.
       const pipelinesService = deps.pipelineStore
         ? createPipelinesService({
             runInTx: deps.runInTx,
@@ -675,7 +679,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             resolveProvider,
             model: snapshot.model,
             validation: {
-              availableTools: toolDefs.map((d) => d.name),
+              availableTools: toolDefs
+                .map((d) => d.name)
+                .filter((name) => !PIPELINE_TOOL_NAMES.includes(name)),
               knownEventSources: [],
             },
           })

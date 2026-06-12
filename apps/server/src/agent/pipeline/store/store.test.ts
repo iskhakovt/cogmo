@@ -130,6 +130,16 @@ describe("DrizzlePipelineStore", () => {
     expect(String(cause)).toMatch(/duplicate key|uq_pipeline_definitions_active/);
   });
 
+  it("countDefinitions counts all versions, scoped per user", async () => {
+    const userId = await createUser();
+    const otherUser = await createUser();
+    await insertDefinition(userId);
+    await insertDefinition(userId);
+    await insertDefinition(otherUser, "other");
+    expect(await tx((trx) => store.countDefinitions(trx, userId))).toBe(2);
+    expect(await tx((trx) => store.countDefinitions(trx, otherUser))).toBe(1);
+  });
+
   it("listDefinitions orders by name then version desc, scoped per user", async () => {
     const userId = await createUser();
     const otherUser = await createUser();

@@ -42,6 +42,7 @@ function makeDeps(
 ): PipelinesServiceDeps & { store: MockProxy<PipelineStore> } {
   const store = mock<PipelineStore>();
   store.listDefinitions.mockResolvedValue([]);
+  store.countDefinitions.mockResolvedValue(0);
   store.insertDefinition.mockResolvedValue(row());
   return {
     runInTx: fakeRunInTx,
@@ -109,7 +110,7 @@ describe("pipelines service", () => {
 
     it("enforces the definition cap before the billable compile call", async () => {
       const deps = makeDeps({ definitionCap: 1 });
-      deps.store.listDefinitions.mockResolvedValue([row()]);
+      deps.store.countDefinitions.mockResolvedValue(1);
       const service = createPipelinesService(deps);
 
       const result = await service.define({ sourceText: "gather context, gate, implement" });

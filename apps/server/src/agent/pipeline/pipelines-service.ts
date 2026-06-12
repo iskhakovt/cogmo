@@ -94,8 +94,8 @@ export function createPipelinesService(deps: PipelinesServiceDeps): PipelinesSer
       // Cheap cap pre-check before the billable compile — a capped user
       // shouldn't burn an LLM call to learn they're capped. The in-tx
       // check below stays authoritative (this read is racy by design).
-      const precheckCount = await deps.runInTx(
-        async (tx) => (await deps.store.listDefinitions(tx, deps.userId)).length,
+      const precheckCount = await deps.runInTx((tx) =>
+        deps.store.countDefinitions(tx, deps.userId),
       );
       if (precheckCount >= definitionCap) {
         return err({
@@ -120,12 +120,12 @@ export function createPipelinesService(deps: PipelinesServiceDeps): PipelinesSer
       // concurrent defines can exceed the cap by one — benign at this
       // scale (see .claude/rules/store-pattern.md).
       const result = await deps.runInTx(async (tx) => {
-        const existing = await deps.store.listDefinitions(tx, deps.userId);
-        if (existing.length >= definitionCap) {
+        const current = await deps.store.countDefinitions(tx, deps.userId);
+        if (current >= definitionCap) {
           return err({
             kind: "definition_cap_exceeded" as const,
             limit: definitionCap,
-            current: existing.length,
+            current,
           });
         }
         const row = await deps.store.insertDefinition(tx, {

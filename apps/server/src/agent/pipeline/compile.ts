@@ -109,7 +109,7 @@ Rules:
 - Stage ids and the pipeline name are kebab-case slugs derived from the content.
 - Stage kinds: "agentic" (the agent works), "gate" (a human checkpoint — approval or discussion), "wait" (park on an external event).
 - agentic and gate stages REQUIRE instructions. Tool allowlists and typed outputs belong on agentic stages only.
-- Every gate and wait carries a timeout (ms-style: "30m", "3h", "3d", "2w" — nothing longer than a year) and an onTimeout action. Prefer {"kind":"remind","maxReminders":3,"finalAction":"abort"} for human gates unless the user says otherwise. Never leave a wait unbounded.
+- Every gate and wait carries a timeout (ms-style: "30m", "3h", "3d", "2w" — never zero) and an onTimeout action. Prefer {"kind":"remind","maxReminders":3,"finalAction":"abort"} for human gates unless the user says otherwise. Never leave a wait unbounded, and keep the total park under a year: timeout × (maxReminders + 1) must stay below 366 days.
 - "Repeat / iterate / until" requests compile to a loop on the LAST stage of the repeated span: backTo = first stage of the span, until = the user's exit condition as prose, maxIterations = the user's number or 5 if unstated. Loop spans must not nest or overlap.
 - Triggers: "command" (a chat phrase) unless the user clearly describes a schedule ("every morning" → cron with a sensible timezone from context).
 - Tool allowlists: only include tools from the available list, and only when the user implies restriction; omit otherwise. Available tools: ${[...ctx.availableTools].sort().join(", ") || "(none)"}.

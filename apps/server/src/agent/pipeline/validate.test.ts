@@ -190,11 +190,37 @@ describe("validateDefinition", () => {
     expect(validateDefinition(def, CTX)).toEqual([]);
   });
 
-  it("flags durations over the 1-year ceiling", () => {
+  it("flags single-arm durations over the 1-year park ceiling", () => {
     const def = validPipelineDefinition();
     const gate = expectDefined(stage(def, 1).gate, "gate config");
     gate.timeout = "60w";
+    gate.onTimeout = { kind: "abort" };
     const issues = validateDefinition(def, CTX);
-    expect(issues.some((i) => i.message.includes("1-year wait ceiling"))).toBe(true);
+    expect(issues.some((i) => i.message.includes("1-year park ceiling"))).toBe(true);
+  });
+
+  it("flags remind checkpoints whose TOTAL park (timeout × arms) exceeds the ceiling", () => {
+    const def = validPipelineDefinition();
+    const gate = expectDefined(stage(def, 1).gate, "gate config");
+    // 15w alone is fine; ×(3+1) arms = 60w > 366d.
+    gate.timeout = "15w";
+    gate.onTimeout = { kind: "remind", maxReminders: 3, finalAction: "abort" };
+    const issues = validateDefinition(def, CTX);
+    const issue = expectDefined(
+      issues.find((i) => i.path === "stages[1].gate.timeout"),
+      "total-park issue",
+    );
+    expect(issue.message).toContain("maxReminders + 1");
+
+    gate.onTimeout = { kind: "abort" };
+    expect(validateDefinition(def, CTX)).toEqual([]);
+  });
+
+  it("flags zero-duration timeouts", () => {
+    const def = validPipelineDefinition();
+    const gate = expectDefined(stage(def, 1).gate, "gate config");
+    gate.timeout = "0m";
+    const issues = validateDefinition(def, CTX);
+    expect(issues.some((i) => i.message.includes("zero-duration"))).toBe(true);
   });
 });

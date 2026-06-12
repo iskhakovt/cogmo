@@ -133,12 +133,31 @@ export function validateDefinition(
       });
     }
 
-    for (const [field, duration] of [
-      ["gate.timeout", stage.gate?.timeout],
-      ["wait.timeout", stage.wait?.timeout],
+    for (const [field, checkpoint] of [
+      ["gate", stage.gate],
+      ["wait", stage.wait],
     ] as const) {
-      if (duration !== undefined && parseDurationMs(duration) > MAX_DURATION_MS) {
-        issues.push({ path: at(field), message: `"${duration}" exceeds the 1-year wait ceiling` });
+      if (checkpoint === undefined) continue;
+      const ms = parseDurationMs(checkpoint.timeout);
+      if (ms === 0) {
+        issues.push({
+          path: at(`${field}.timeout`),
+          message: `"${checkpoint.timeout}" is a zero-duration timeout — it would fire instantly`,
+        });
+      }
+      // The ceiling bounds the checkpoint's TOTAL effective park: remind
+      // re-arms the deadline, so the worst case is timeout × (maxReminders
+      // + 1) before the terminal action (design/pipelines.md → schema).
+      const arms =
+        checkpoint.onTimeout.kind === "remind" ? checkpoint.onTimeout.maxReminders + 1 : 1;
+      if (ms * arms > MAX_DURATION_MS) {
+        issues.push({
+          path: at(`${field}.timeout`),
+          message:
+            arms === 1
+              ? `"${checkpoint.timeout}" exceeds the 1-year park ceiling`
+              : `"${checkpoint.timeout}" × ${arms} arms (timeout × (maxReminders + 1)) exceeds the 1-year park ceiling`,
+        });
       }
     }
   });

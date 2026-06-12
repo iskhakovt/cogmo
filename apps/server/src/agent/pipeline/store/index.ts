@@ -1,4 +1,4 @@
-import { and, desc, eq, max, sql } from "drizzle-orm";
+import { and, count, desc, eq, max, sql } from "drizzle-orm";
 import { single } from "../../../db/helpers.js";
 import type { Transaction } from "../../../db/index.js";
 import type { PipelineDefinition } from "../types.js";
@@ -48,6 +48,15 @@ export interface PipelineStore {
 
   /** All definition rows for a user, name ASC then version DESC. */
   listDefinitions(tx: Transaction, userId: string): Promise<readonly PipelineDefinitionRow[]>;
+
+  /**
+   * Row count for a user — the cap checks' shape. A dedicated COUNT(*)
+   * because every full-row read runs the `compiled` column through
+   * jsonbZod's `PipelineDefinitionSchema.parse`; counting via
+   * `listDefinitions().length` near the cap would Zod-parse hundreds of
+   * definitions to produce one integer.
+   */
+  countDefinitions(tx: Transaction, userId: string): Promise<number>;
 
   /**
    * Activate one version: deactivate the current active row for
@@ -139,6 +148,14 @@ export class DrizzlePipelineStore implements PipelineStore {
       .from(pipelineDefinitions)
       .where(eq(pipelineDefinitions.userId, userId))
       .orderBy(pipelineDefinitions.name, desc(pipelineDefinitions.version));
+  }
+
+  async countDefinitions(tx: Transaction, userId: string): Promise<number> {
+    const rows = await tx
+      .select({ value: count() })
+      .from(pipelineDefinitions)
+      .where(eq(pipelineDefinitions.userId, userId));
+    return rows[0]?.value ?? 0;
   }
 
   async activateDefinition(

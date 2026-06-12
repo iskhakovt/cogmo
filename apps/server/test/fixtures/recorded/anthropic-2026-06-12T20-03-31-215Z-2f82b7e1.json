@@ -1,0 +1,25 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "On my command: pick up the task I describe, plan the work, get my sign-off on the plan, implement it via coding delegation, then report back what changed.",
+        "model": "claude-sonnet-4-6",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "pipeline_definition",
+            "arguments": "{\"name\":\"command-plan-implement-report\",\"trigger\":{\"kind\":\"command\",\"phrase\":\"pick up this task\"},\"stages\":[{\"id\":\"plan-work\",\"kind\":\"agentic\",\"instructions\":\"Read the task description provided by the user in the triggering command. Thoroughly analyse what is being asked, break it down into clear, ordered steps, and produce a detailed plan of the work to be done. The plan should be specific enough for an engineer to act on, covering what will be changed, created, or removed, and why.\",\"output\":{\"kind\":\"plan\"}},{\"id\":\"sign-off\",\"kind\":\"gate\",\"instructions\":\"Present the plan produced in the previous stage to the user and ask for their explicit approval before any implementation begins. Highlight any risks, assumptions, or open questions that the user should be aware of. Wait for a clear go/no-go decision.\",\"gate\":{\"timeout\":\"3d\",\"onTimeout\":{\"kind\":\"remind\",\"maxReminders\":3,\"finalAction\":\"abort\"}}},{\"id\":\"implement\",\"kind\":\"agentic\",\"instructions\":\"Using the approved plan as the specification, delegate all coding and file-change work to the coding tool. Follow each step of the plan faithfully. If you encounter any ambiguity or a step turns out to require a decision not covered by the plan, make the conservative choice and note it for the report.\",\"tools\":[\"delegate_coding\",\"read_file\",\"write_file\"]},{\"id\":\"report-changes\",\"kind\":\"agentic\",\"instructions\":\"Compile a clear, human-readable summary of everything that changed during implementation. For each change, describe: what was modified/created/deleted, why it was changed (linking back to the plan), and any deviations or noteworthy decisions made during implementation. Present this report to the user.\",\"output\":{\"kind\":\"text\"}}]}",
+            "id": "toolu_0134j5C5yGDsUQ1d4aWyqYvH"
+          }
+        ]
+      },
+      "metadata": {
+        "systemHash": "cf73c5e5",
+        "toolsHash": "c2dc880f"
+      }
+    }
+  ]
+}

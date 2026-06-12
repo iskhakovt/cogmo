@@ -1,0 +1,25 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "When I say 'start the issue pipeline': chat with me to gather context about the issue, draft a plan and wait for my approval — remind me if I forget, give up after 3 days — then implement it, and redo it based on my feedback, at most 5 times.",
+        "model": "claude-sonnet-4-6",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "pipeline_definition",
+            "arguments": "{\"name\":\"issue-pipeline\",\"trigger\":{\"kind\":\"command\",\"phrase\":\"start the issue pipeline\"},\"stages\":[{\"id\":\"gather-context\",\"kind\":\"gate\",\"instructions\":\"Chat with the user to gather context about the issue. Ask clarifying questions to understand the problem, its scope, any constraints, and the desired outcome. Keep the conversation going until you have enough information to draft a solid plan.\",\"gate\":{\"timeout\":\"7d\",\"onTimeout\":{\"kind\":\"remind\",\"maxReminders\":3,\"finalAction\":\"abort\"}}},{\"id\":\"draft-plan\",\"kind\":\"agentic\",\"instructions\":\"Using the context gathered from the user, draft a clear and detailed plan to address the issue. The plan should outline the steps to be taken, any assumptions made, and the expected outcome.\",\"output\":{\"kind\":\"plan\"}},{\"id\":\"approve-plan\",\"kind\":\"gate\",\"instructions\":\"Present the drafted plan to the user and ask for their approval. Incorporate any feedback or changes the user requests before proceeding.\",\"gate\":{\"timeout\":\"1d\",\"onTimeout\":{\"kind\":\"remind\",\"maxReminders\":3,\"finalAction\":\"abort\"}}},{\"id\":\"implement\",\"kind\":\"agentic\",\"instructions\":\"Implement the approved plan, addressing the issue as specified. Follow the plan steps carefully and document any decisions or deviations made during implementation.\",\"tools\":[\"delegate_coding\",\"read_file\",\"write_file\"]},{\"id\":\"review-feedback\",\"kind\":\"gate\",\"instructions\":\"Present the implementation results to the user and ask for their feedback. If the user is satisfied, the pipeline is complete. If they have feedback or request changes, collect the details so the implementation can be revised.\",\"gate\":{\"timeout\":\"7d\",\"onTimeout\":{\"kind\":\"remind\",\"maxReminders\":3,\"finalAction\":\"abort\"}},\"loop\":{\"backTo\":\"implement\",\"until\":\"The user is satisfied with the implementation and has no further feedback or change requests.\",\"maxIterations\":5}}]}",
+            "id": "toolu_0127mwW8pZgufNjrFNUjwVZp"
+          }
+        ]
+      },
+      "metadata": {
+        "systemHash": "cf73c5e5",
+        "toolsHash": "c2dc880f"
+      }
+    }
+  ]
+}
