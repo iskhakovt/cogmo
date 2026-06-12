@@ -1187,10 +1187,9 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   // events stream through the registry.
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const functions: any[] = [];
+  const { inngest, channelId } = deps;
   if (deps.codingProgress) {
-    const { inngest, codingStore, runInTx, transportStore, streamingRegistry } =
-      deps.codingProgress;
-    const channelId = deps.channelId;
+    const { codingStore, runInTx, transportStore, streamingRegistry } = deps.codingProgress;
     functions.push(
       inngest.createFunction(
         {
@@ -1235,8 +1234,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   // already returned with status=pending_approval; the keyboard tap routes
   // straight to transport.skills.approveDeploy/denyDeploy.
   if (deps.skillsApproval) {
-    const { inngest, skillStore, runInTx, transportStore } = deps.skillsApproval;
-    const channelId = deps.channelId;
+    const { skillStore, runInTx, transportStore } = deps.skillsApproval;
     functions.push(
       inngest.createFunction(
         {
@@ -1262,26 +1260,23 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   // keyboard. A button tap also drops the keyboard synchronously in its
   // callback handler; this listener owns the text edit and is the only path
   // that fires for a waiter-timeout resolution (no callback runs there).
-  if (deps.boundaryCleanup) {
-    const { inngest } = deps.boundaryCleanup;
-    const channelId = deps.channelId;
-    functions.push(
-      inngest.createFunction(
-        {
-          id: `telegram-boundary-resolved-${channelId}`,
-          triggers: [boundaryResolvedEvent],
-          retries: 0,
-        },
-        async ({ event }) =>
-          editResolvedBoundaryPrompt({
-            event: event.data,
-            channelId,
-            editMessageText: (chatId, messageId, text, opts) =>
-              bot.api.editMessageText(chatId, messageId, text, opts),
-          }),
-      ),
-    );
-  }
+  // Always registered — every Telegram channel can fire the boundary prompt.
+  functions.push(
+    inngest.createFunction(
+      {
+        id: `telegram-boundary-resolved-${channelId}`,
+        triggers: [boundaryResolvedEvent],
+        retries: 0,
+      },
+      async ({ event }) =>
+        editResolvedBoundaryPrompt({
+          event: event.data,
+          channelId,
+          editMessageText: (chatId, messageId, text, opts) =>
+            bot.api.editMessageText(chatId, messageId, text, opts),
+        }),
+    ),
+  );
 
   return { adapter, functions };
 }

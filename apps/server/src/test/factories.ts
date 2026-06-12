@@ -803,3 +803,13 @@ export function spyOnInngestSend(client: Inngest) {
   type InngestSendShape = { _send(args: unknown): Promise<{ ids: string[] }> };
   return vi.spyOn(client as unknown as InngestSendShape, "_send");
 }
+
+/**
+ * Inngest client stub for adapter-setup tests. The adapter only calls
+ * `createFunction` to collect its event listeners into `AdapterSetupResult.
+ * functions`; tests exercise those handlers directly, never through the
+ * returned function objects, so an auto-mocked proxy is enough.
+ */
+export function mockInngest(): Inngest {
+  return mock<Inngest>();
+}

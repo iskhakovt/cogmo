@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PLAN_CALLBACK_REGEX } from "../../../agent/coding/plan-keyboard.js";
 import { SKILLS_APPROVAL_CALLBACK_REGEX } from "../../../skills/skills-keyboard.js";
 import { asBatchAdapter } from "../../../test/assertions.js";
-import { mockAttachmentStore, mockTransport } from "../../../test/factories.js";
+import { mockAttachmentStore, mockInngest, mockTransport } from "../../../test/factories.js";
 import type { StreamingAdapter } from "../../types.js";
 import { findTelegramSplitBoundary, rebalanceCodeFence, setup } from "./index.js";
 
@@ -175,6 +175,7 @@ describe("telegram adapter", () => {
       credentials: { token: "fake" },
       transport,
       attachments,
+      inngest: mockInngest(),
       boundary: { promptTimeoutMs: 30000, minUserTurns: 3 },
     });
 
@@ -282,6 +283,7 @@ describe("telegram adapter", () => {
       credentials: { token: "fake" },
       transport,
       attachments: mockAttachmentStore(),
+      inngest: mockInngest(),
       boundary: { promptTimeoutMs: 30000, minUserTurns: 3 },
     });
 
@@ -1066,6 +1068,7 @@ describe("telegram adapter", () => {
         credentials: { token: "fake" },
         transport,
         attachments,
+        inngest: mockInngest(),
         boundary: { promptTimeoutMs: 30000, minUserTurns: 3 },
       });
       return { adapter: result.adapter as unknown as StreamingAdapter, attachments };
@@ -1494,6 +1497,7 @@ describe("telegram adapter", () => {
         credentials: { token: "fake" },
         transport,
         attachments,
+        inngest: mockInngest(),
         boundary: { promptTimeoutMs: 30000, minUserTurns: 3 },
       });
       return { adapter: result.adapter as unknown as StreamingAdapter, attachments };
@@ -1666,6 +1670,7 @@ describe("telegram adapter", () => {
         credentials: { token: "fake" },
         transport,
         attachments: mockAttachmentStore(),
+        inngest: mockInngest(),
         boundary: { promptTimeoutMs: 30000, minUserTurns: 3 },
       });
       return { transport };
