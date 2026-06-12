@@ -80,7 +80,7 @@ interface Stage {
 type TimeoutAction =
   | { kind: "proceed" }
   | { kind: "abort" }
-  | { kind: "remind"; maxReminders: number; then: "proceed" | "abort" };
+  | { kind: "remind"; maxReminders: number; finalAction: "proceed" | "abort" };
 
 // Built-in artifact kinds are the shapes the orchestrator can act on deterministically
 // (safe-outputs). "json" carries a compiler-emitted JSON Schema validated structurally at

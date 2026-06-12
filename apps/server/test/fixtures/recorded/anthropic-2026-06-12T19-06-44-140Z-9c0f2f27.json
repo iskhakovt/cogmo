@@ -1,0 +1,25 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Research a topic I give you using only web search — no other tools — then write a summary.",
+        "model": "claude-sonnet-4-6",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "pipeline_definition",
+            "arguments": "{\"name\":\"research-and-summarize\",\"trigger\":{\"kind\":\"command\",\"phrase\":\"research this topic\"},\"stages\":[{\"id\":\"web-research\",\"kind\":\"agentic\",\"instructions\":\"Using only web search, research the topic provided by the user. Gather relevant, accurate, and up-to-date information from multiple sources. Do not use any other tools.\",\"tools\":[\"web_search\"],\"output\":{\"kind\":\"text\"}},{\"id\":\"write-summary\",\"kind\":\"agentic\",\"instructions\":\"Using the research findings from the previous stage, write a clear, well-structured, and concise summary of the topic. The summary should cover the key points, important details, and any notable insights uncovered during research.\",\"tools\":[\"web_search\"],\"output\":{\"kind\":\"text\"}}]}",
+            "id": "toolu_01LKe3tXAgt3FzBo8DP8XCt1"
+          }
+        ]
+      },
+      "metadata": {
+        "systemHash": "de78ec60",
+        "toolsHash": "c2dc880f"
+      }
+    }
+  ]
+}

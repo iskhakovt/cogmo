@@ -10,6 +10,7 @@ import type {
 } from "../memory/provider.js";
 import type { SkillsService } from "../skills/skills-service.js";
 import type { CodingService } from "./coding/service.js";
+import type { PipelinesService } from "./pipeline/pipelines-service.js";
 import type { SchedulingService } from "./scheduling/scheduling-service.js";
 import type { ProfileMemoryScope } from "./store/schema.js";
 
@@ -106,6 +107,13 @@ export interface Service {
    * it (factory in `src/agent/scheduling/scheduling-service.ts`).
    */
   scheduling?: SchedulingService;
+  /**
+   * User-defined pipelines surface — `define_pipeline` /
+   * `activate_pipeline` / `list_pipelines` agent tools. Optional so tests
+   * can opt out; production wiring always populates it (factory in
+   * `src/agent/pipeline/pipelines-service.ts`).
+   */
+  pipelines?: PipelinesService;
 }
 
 /**
@@ -140,6 +148,7 @@ export function createService(
   coding?: CodingService,
   skills?: SkillsService,
   scheduling?: SchedulingService,
+  pipelines?: PipelinesService,
 ): Service {
   return {
     memory: {
@@ -163,6 +172,7 @@ export function createService(
     ...(coding !== undefined && { coding }),
     ...(skills !== undefined && { skills }),
     ...(scheduling !== undefined && { scheduling }),
+    ...(pipelines !== undefined && { pipelines }),
   };
 }
 

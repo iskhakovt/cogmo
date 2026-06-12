@@ -1,0 +1,25 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "On my command: pick up the task I describe, plan the work, get my sign-off on the plan, implement it via coding delegation, then report back what changed.",
+        "model": "claude-sonnet-4-6",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "pipeline_definition",
+            "arguments": "{\"name\":\"command-plan-implement-report\",\"trigger\":{\"kind\":\"command\",\"phrase\":\"pick up this task\"},\"stages\":[{\"id\":\"plan-work\",\"kind\":\"agentic\",\"instructions\":\"Read the task the user described in their command. Think it through carefully and produce a clear, structured plan for how the work will be carried out. Break it into logical steps, call out any assumptions or risks, and make the plan easy for a non-technical reviewer to understand.\",\"tools\":[\"memory_recall\",\"read_file\",\"web_search\"],\"output\":{\"kind\":\"plan\"}},{\"id\":\"sign-off\",\"kind\":\"gate\",\"instructions\":\"Present the plan produced in the previous stage to the user and ask for their explicit approval before any code is written. Highlight any open questions or decisions that need their input. Wait for a clear go-ahead (or revision requests — if revisions are requested, note them and ask the planning stage to be re-run).\",\"gate\":{\"timeout\":\"3d\",\"onTimeout\":{\"kind\":\"remind\",\"maxReminders\":3,\"finalAction\":\"abort\"}}},{\"id\":\"implement\",\"kind\":\"agentic\",\"instructions\":\"Implement the approved plan faithfully using coding delegation. Follow each step in the plan, respect any decisions or constraints the user stated during sign-off, and keep changes focused and minimal. Do not deviate from the agreed plan without flagging it.\",\"tools\":[\"delegate_coding\",\"read_file\",\"write_file\",\"memory_recall\",\"memory_retain\"]},{\"id\":\"report-changes\",\"kind\":\"agentic\",\"instructions\":\"Summarise everything that was changed during implementation. For each meaningful change, describe what was done, why, and where (file paths, modules, etc.). Keep the report concise but complete enough that the user can verify the work matches the approved plan. Flag anything that deviated from the plan, even slightly.\",\"tools\":[\"read_file\",\"memory_recall\"],\"output\":{\"kind\":\"text\"}}]}",
+            "id": "toolu_01Dxmp4sSh9T2gF9UCPbfdaH"
+          }
+        ]
+      },
+      "metadata": {
+        "systemHash": "de78ec60",
+        "toolsHash": "c2dc880f"
+      }
+    }
+  ]
+}

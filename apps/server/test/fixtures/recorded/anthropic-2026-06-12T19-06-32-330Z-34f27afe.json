@@ -1,0 +1,25 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "On request: draft my weekly status report, show it to me for review, then after I approve save it to my files.",
+        "model": "claude-sonnet-4-6",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "pipeline_definition",
+            "arguments": "{\"name\":\"weekly-status-report\",\"trigger\":{\"kind\":\"command\",\"phrase\":\"draft my weekly status report\"},\"stages\":[{\"id\":\"draft-report\",\"kind\":\"agentic\",\"instructions\":\"Draft a weekly status report for the user. Recall any relevant context about their work, recent activities, ongoing projects, and accomplishments from memory. Produce a well-structured report covering: highlights from the past week, work in progress, blockers or risks, and plans for the upcoming week. Write in a professional but concise tone.\",\"tools\":[\"memory_recall\",\"web_search\"],\"output\":{\"kind\":\"text\"}},{\"id\":\"review-report\",\"kind\":\"gate\",\"instructions\":\"Present the drafted weekly status report to the user for review. Ask them to approve it as-is, or request any edits before it is saved. Do not proceed to saving until explicit approval is given.\",\"gate\":{\"timeout\":\"3d\",\"onTimeout\":{\"kind\":\"remind\",\"maxReminders\":3,\"finalAction\":\"abort\"}}},{\"id\":\"save-report\",\"kind\":\"agentic\",\"instructions\":\"Save the approved weekly status report to the user's files. Use a clear, descriptive filename that includes the current date (e.g. 'weekly-status-report-YYYY-MM-DD.md'). Confirm to the user that the file has been saved and provide the filename.\",\"tools\":[\"write_file\"]}]}",
+            "id": "toolu_01AXafbcagwbePfgDv6MRT5n"
+          }
+        ]
+      },
+      "metadata": {
+        "systemHash": "de78ec60",
+        "toolsHash": "c2dc880f"
+      }
+    }
+  ]
+}

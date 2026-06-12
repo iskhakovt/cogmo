@@ -1,0 +1,25 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Whenever one of my PRs gets a review, address the review comments.",
+        "model": "claude-sonnet-4-6",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "pipeline_definition",
+            "arguments": "{\"name\":\"address-pr-review-comments\",\"trigger\":{\"kind\":\"command\",\"phrase\":\"address review comments on this PR\"},\"stages\":[{\"id\":\"recall-context\",\"kind\":\"agentic\",\"instructions\":\"Use memory recall to retrieve any relevant context about this repository, coding conventions, or prior decisions that may be useful when addressing the PR review comments.\",\"tools\":[\"memory_recall\"]},{\"id\":\"read-pr-and-comments\",\"kind\":\"agentic\",\"instructions\":\"Read the current PR diff and all review comments left by reviewers. Identify every comment that requires a code change, a response, or a follow-up action. Summarise the full list of requested changes.\",\"tools\":[\"web_search\",\"read_file\"],\"output\":{\"kind\":\"json\",\"schema\":{\"comments\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\"author\":{\"type\":\"string\"},\"file\":{\"type\":\"string\"},\"line\":{\"type\":\"number\"},\"body\":{\"type\":\"string\"},\"action_required\":{\"type\":\"string\"}}}}}}},{\"id\":\"implement-changes\",\"kind\":\"agentic\",\"instructions\":\"For each review comment that requires a code change, update the relevant file(s) accordingly. Follow the repository's existing coding style and conventions. Do not make unrelated changes. After completing all edits, produce a clear summary of what was changed and why, mapping each change back to the original review comment.\",\"tools\":[\"delegate_coding\",\"read_file\",\"write_file\",\"memory_recall\"]},{\"id\":\"human-review-gate\",\"kind\":\"gate\",\"instructions\":\"Review the changes made in the previous step. Verify that all review comments have been addressed correctly and that no unintended modifications were introduced. Approve to proceed with updating the PR, or request further revisions.\",\"gate\":{\"timeout\":\"3h\",\"onTimeout\":{\"kind\":\"remind\",\"maxReminders\":3,\"finalAction\":\"abort\"}}},{\"id\":\"update-pr\",\"kind\":\"agentic\",\"instructions\":\"Commit and push the implemented changes to the PR branch. Write a clear commit message that references the review comments being addressed. Update the PR description if necessary to reflect the changes made.\",\"tools\":[\"delegate_coding\",\"write_file\",\"memory_retain\"]}]}",
+            "id": "toolu_01NEJWQujPpK8Knwi8MqQt4X"
+          }
+        ]
+      },
+      "metadata": {
+        "systemHash": "de78ec60",
+        "toolsHash": "c2dc880f"
+      }
+    }
+  ]
+}
