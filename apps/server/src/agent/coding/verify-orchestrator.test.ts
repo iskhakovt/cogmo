@@ -1,7 +1,7 @@
 /**
  * Unit test for `runCodingVerify` — drives the full verify → push → PR
  * sequence with stubbed sandbox + secretsStore. The runners (verify,
- * commit-push, draft-pr) are not mocked; they're invoked with stub
+ * commit-push, open-pr) are not mocked; they're invoked with stub
  * containers so we exercise the orchestration in isolation but still
  * catch wiring bugs (env threading, branch flow, status transitions).
  */
@@ -244,7 +244,6 @@ describe("runCodingVerify", () => {
         base: string;
         title: string;
         body: string;
-        draft: boolean;
       }) => ({
         data: { html_url: "https://github.com/user/cogmo/pull/42", number: 42 },
       }),
@@ -302,8 +301,9 @@ describe("runCodingVerify", () => {
       repo: "cogmo",
       head: "cogmo/abc12345",
       base: "main",
-      draft: true,
     });
+    // Ready-for-review PR — no draft flag in the request.
+    expect(create.mock.calls[0]?.[0]).not.toHaveProperty("draft");
   });
 
   it("verify failure → status=failed, no commit/push attempted", async () => {

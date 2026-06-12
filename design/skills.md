@@ -231,7 +231,7 @@ $COGMO_SKILLS_PATH/                # default /var/lib/cogmo/skills (configurable
 
 **Why a remote at all (even for local-Docker bind-mount users):** off-host backup of the agent's skill library. A single-host failure should not erase the operator's accumulated personalisation. The marginal setup cost is one URL during the wizard.
 
-**Provider-agnostic in the steady state:** every code path past setup uses plain `git` — clone, push, fetch — with credentials supplied via the askpass helper. The only provider-specific surfaces are (a) the wizard's optional GitHub auto-provision step and (b) the draft-PR opener (`design/coding-delegation.md` → Draft PR step), which currently knows only GitHub; non-GitHub remotes still receive pushes, with the PR step degrading to "branch pushed, open the PR yourself."
+**Provider-agnostic in the steady state:** every code path past setup uses plain `git` — clone, push, fetch — with credentials supplied via the askpass helper. The only provider-specific surfaces are (a) the wizard's optional GitHub auto-provision step and (b) the PR opener (`design/coding-delegation.md` → Merge gate), which currently knows only GitHub; non-GitHub remotes still receive pushes, with the PR step degrading to "branch pushed, open the PR yourself."
 
 **Why not inside the Cogmo repo:** skills are personal, per-deployment. Committing them to a fork of Cogmo creates merge conflicts on upstream pull, leaks private workflows through misconfigured remotes, and couples release cadences that naturally diverge.
 

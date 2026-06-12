@@ -6,14 +6,14 @@ Cogmo delegates heavy coding tasks to Claude Code and Codex CLI, leveraging the 
 
 Enable flows like:
 
-> *[Telegram]* "Please refactor the steering rules module to support per-channel scoping; run the integration tests; open a draft PR."
+> *[Telegram]* "Please refactor the steering rules module to support per-channel scoping; run the integration tests; open a PR."
 
 Cogmo:
 
 1. Creates a sandboxed task container (worktree, git identity, tools).
 2. Runs `claude -p` in plan mode first; posts the plan to Telegram with Approve / Revise / Cancel buttons (user-initiated tasks; automated triggers skip this gate).
 3. On approval, executes the plan. Tool calls run unattended inside the sandbox container — the sandbox isolation is the security boundary, not a runtime permission gate (see *Autonomy Gates → Sandbox isolation*).
-4. Verifies (typecheck, lint, tests), commits, pushes, opens a draft PR.
+4. Verifies (typecheck, lint, tests), commits, pushes, opens a PR.
 5. Sends the PR URL to Telegram for final review.
 
 Scope explicitly *not* in this doc: writing code inline in the agent's own responses. That's what the existing `files` capability in `Service` covers. This doc is about **delegating multi-step coding work to a specialized subprocess** that can run commands, install deps, execute tests.
@@ -127,7 +127,7 @@ Instead, three things replace the retry loop:
 
 1. **The self-verify clause above** — tells the CLI to run the verify command itself and iterate until passing or stuck.
 2. **Budget caps on `coding_repos`** (see schema update) — `task_token_budget` and `task_wall_time_seconds`. Cogmo kills the task subprocess if either is exceeded. Backstop against infinite loops. **Enforcement boundary:** Cogmo aggregates input+output tokens from each `turn.completed` event as the JSONL stream flows back; after each turn, if the running total is over budget, Cogmo sends `SIGTERM` between turns (never mid-turn — we never cut off a partial response that the CLI would retry in a loop). `task_wall_time_seconds` is enforced the same way by the streaming loop's wall-clock check on each event batch.
-3. **Post-hoc verify** — after the CLI declares done, Cogmo runs the verify command *once more* from outside the session. Trust but verify. If it passes, push and open the draft PR. If it fails, mark task failed and notify the user — no feedback-loop retry. The CLI had its chance during its own loop; a post-hoc miss is a "stuck" signal worth a human eye, not more tokens.
+3. **Post-hoc verify** — after the CLI declares done, Cogmo runs the verify command *once more* from outside the session. Trust but verify. If it passes, push and open the PR. If it fails, mark task failed and notify the user — no feedback-loop retry. The CLI had its chance during its own loop; a post-hoc miss is a "stuck" signal worth a human eye, not more tokens.
 
 Flakiness is not handled specially. A flaky test that fails only on the post-hoc run surfaces to the user as a failed task with a link to the worktree — they rerun and merge if it's spurious.
 
@@ -150,7 +150,7 @@ We do **not** populate `CLAUDE.local.md` variants; those are for personal, gitig
 1. **Immutability at the image layer.** `/etc/claude-code/CLAUDE.md` is a file in the `cogmo/devbase` image. The repo's worktree is bind-mounted at `/workspace` and has no write path to `/etc/claude-code/`. An adversarial repo cannot delete or modify the managed-policy file; it can only attempt to contradict it via its own `/workspace/CLAUDE.md` content.
 2. **LLM-level authority resolution.** When the managed-policy content and the repo content conflict, the managed-policy file contains explicit text telling Claude to treat its guidance as authoritative. Claude follows that because it follows instructions, not because any runtime enforces it. If Claude were to be jailbroken or otherwise persuaded by the repo's content, the managed-policy text would lose.
 
-So the practical guarantee is **"managed policy cannot be removed, and Claude is instructed to let it win on conflict"** — not "managed policy is hard-enforced." This is enough because (a) the repo owner is the person who registered the repo with Cogmo in the first place (trust boundary is human, not technical), and (b) the sandbox + draft-PR gate contain blast radius even if the instruction-following fails.
+So the practical guarantee is **"managed policy cannot be removed, and Claude is instructed to let it win on conflict"** — not "managed policy is hard-enforced." This is enough because (a) the repo owner is the person who registered the repo with Cogmo in the first place (trust boundary is human, not technical), and (b) the sandbox + PR gate contain blast radius even if the instruction-following fails.
 
 A prose "repo guidance is advisory" disclaimer in our prompt would add nothing on top of this — it would only repeat what the managed-policy file already says, and Claude already reads.
 
@@ -182,7 +182,7 @@ Wiring this into `DefaultPromptSource` is P2 — P1 prompts are hardcoded templa
 
 ## Task Model `[confirmed]` (slice 1 — `coding_repos` + `coding_tasks` with the slice-1 column set; `conversation_id` added to track triggering conversation)
 
-**One coding task = one working tree + one branch + one CLI session + one draft PR.** The task container from [sandbox.md](sandbox.md) is the execution environment; the working tree lives inside it (mounted from the host's worktree path). On bind-mount backends the tree is a **standalone clone** of the registered parent repo (`git clone --no-hardlinks`, `origin` set to `remote_url`), never a linked `git worktree`: a linked worktree's `.git` is a file pointing at an absolute gitdir inside the parent repo, which doesn't exist in the container once the tree is mounted at `/workspace` — and mounting the parent `.git` read-write would hand the sandbox write access to config/hooks that host-side git later executes. The self-contained clone is the same shape the Daytona backend gets from cloning inside the sandbox.
+**One coding task = one working tree + one branch + one CLI session + one PR.** The task container from [sandbox.md](sandbox.md) is the execution environment; the working tree lives inside it (mounted from the host's worktree path). On bind-mount backends the tree is a **standalone clone** of the registered parent repo (`git clone --no-hardlinks`, `origin` set to `remote_url`), never a linked `git worktree`: a linked worktree's `.git` is a file pointing at an absolute gitdir inside the parent repo, which doesn't exist in the container once the tree is mounted at `/workspace` — and mounting the parent `.git` read-write would hand the sandbox write access to config/hooks that host-side git later executes. The self-contained clone is the same shape the Daytona backend gets from cloning inside the sandbox.
 
 > **In-container ownership assumption (tracked follow-up).** In-container git over the bind-mounted clone assumes the container CLI user's uid matches the host worktree-owner uid; otherwise git's CVE-2022-24765 dubious-ownership check fires on the first command (`git status --porcelain` in `runCommitAndPush`). This holds today via sysbox id-mapped mounts plus the `vscode(1000) == cogmo(1000)` contract, so nothing sets `safe.directory` in production — but a `runc` deployment with mismatched uids would break it untested. The `worktree-in-container` integration test sets `safe.directory=/workspace` to scope itself to gitdir resolution, so it does not exercise this path. Hardening (a universal in-container `safe.directory`, a `chown` at create time, or a mismatched-uid test) is tracked as a `p2` in `todo.md`.
 
@@ -211,7 +211,7 @@ coding_tasks (
   allow_privileged_runc   BOOLEAN NOT NULL,                       -- compat escape hatch; explicit at insert (no default)
   plan                    TEXT,                                   -- set after plan phase
   plan_approved_at        TIMESTAMPTZ,                            -- null for automated triggers (plan gate skipped)
-  pr_metadata             JSONB,                                  -- PrMetadataSchema = { url, number, branchSha, openedAt }; null until 4.0g opens the draft PR. Atomic-by-Zod — no half-recorded state. Replaces the previous `pr_url TEXT` column.
+  pr_metadata             JSONB,                                  -- PrMetadataSchema = { url, number, branchSha, openedAt }; null until 4.0g opens the PR. Atomic-by-Zod — no half-recorded state. Replaces the previous `pr_url TEXT` column.
   status                  coding_task_status NOT NULL,
   failure_reason          TEXT,
   resource_usage          JSONB,                                  -- ResourceUsageSchema; nullable = no stats poll yet; populated by sandbox aggregator from turn.completed events
@@ -289,7 +289,7 @@ Teardown policy keyed on worktree state:
 
 | State at teardown | Action |
 |-|-|
-| Clean, branch pushed, draft PR open | remove the clone — remote is authoritative |
+| Clean, branch pushed, PR open | remove the clone — remote is authoritative |
 | Dirty (uncommitted edits or unpushed commits) | Stage all, commit as `wip: <task-id>` on the task branch, push as `refs/cogmo-wip/<task-id>`, then remove |
 | Failed before first commit with no remote yet (new repo bootstrap) | Fall back: tar under `~/.cogmo/archives/<task-id>.tar.zst` with 14-day TTL; only case that keeps a local dump |
 
@@ -328,7 +328,7 @@ When the user sends a follow-up ("also add X", "now do Y"), Cogmo resolves to re
 | Prior task state | Default resolution |
 |-|-|
 | Non-terminal (`planning` / `executing` / `pending_verify` / `verifying`) | Resume — same task, same branch, same session |
-| `pr_open`, PR still draft | Ask — follow-up commit on the branch (resume) vs new task |
+| `pr_open`, PR open unmerged | Ask — follow-up commit on the branch (resume) vs new task |
 | `pr_open`, PR merged | New task, new branch; repo-knowledge from Hindsight carries context |
 | `pr_open`, PR closed unmerged | Ask — retry on the same branch vs new task |
 | `failed` / `cancelled` | New task by default; resume is opt-in |
@@ -340,7 +340,7 @@ Conversation context is the primary signal — a follow-up inside an active task
 
 Per-repo concurrency is capped by `coding_repos.max_concurrent_tasks` (default 1). New tasks beyond the cap queue and the user is told on Telegram that they're queued behind an active task.
 
-**Branch and PR ownership is a non-issue.** Each task owns its own branch (`cogmo/<task-id-short>`) and its own draft PR. Two tasks editing the same files produce two PRs; the merge conflict surfaces at human review time, same as with any two humans on the same repo. No coordination required.
+**Branch and PR ownership is a non-issue.** Each task owns its own branch (`cogmo/<task-id-short>`) and its own PR. Two tasks editing the same files produce two PRs; the merge conflict surfaces at human review time, same as with any two humans on the same repo. No coordination required.
 
 **The real tension is cache contention.** Our cache volumes are shared across tasks (see [sandbox.md → Cache volume scoping](sandbox.md#cache-volume-scoping)) so concurrent `pnpm install`s on the same store can race. Three ships considered:
 
@@ -431,7 +431,7 @@ Verify step (inside container):
         ▼
 Push + PR:
   git push origin cogmo/<id-short>
-  gh pr create --draft --title "..." --body "<plan summary + test results>"
+  gh pr create --title "..." --body "<plan summary + test results>"
         │
         ▼
 Telegram: "Task done. Draft PR: <url>. Review from GitHub mobile when ready."
@@ -459,7 +459,7 @@ Same pattern as `handle-message` ([crash-recovery.md](crash-recovery.md)) — du
 | `emit-cli-done` | `step.run` | Hand-off to the verify orchestrator via `coding/task/cli-done` event. Emitted after the durable `pending_verify` transition. |
 | `verify` | `step.run` | Single post-hoc execution of `<coding_repos.verify_command>` inside the container (via `bash -lc`). **No retry loop in this step.** Iterating on failure was the CLI's job during the execute phase per *Prompt Construction → Self-verify clause*; this step exists only to confirm the CLI's "done" claim. Pass → proceed to push + PR; fail → mark task failed with the verify output. Budget caps (`task_token_budget`, `task_wall_time_seconds`) enforce termination of the execute phase upstream; this step is bounded by `coding_repos.verify_timeout_seconds`. |
 | `push` | `step.run` | `git push origin cogmo/<idShort>` via slice 4.0f's `runCommitAndPush`. Non-fast-forward / rejected → `branch_conflict`; PAT auth fail → `auth_failed`; both surface as task failure with discriminated reason, no force push. Backend-agnostic: `runCommitAndPush` shells out via `execStreaming` inside the sandbox, so the same code path serves bind-mount and git-remote. |
-| `create-pr` | `step.run` | `octokit.pulls.create({draft:true})` via slice 4.0g. Captured into `coding_tasks.pr_metadata` (atomic JSONB blob). Idempotent: 422 "already exists" surfaces as `validation_failed` with the existing PR's number in the message. |
+| `create-pr` | `step.run` | `octokit.pulls.create()` (ready for review, no draft flag) via slice 4.0g. Captured into `coding_tasks.pr_metadata` (atomic JSONB blob). Idempotent: 422 "already exists" surfaces as `validation_failed` with the existing PR's number in the message. |
 | `fetch-feature-branch` | `step.run` (git-remote only) | After PR open, host-side `fetchFeatureBranch` updates `refs/remotes/origin/cogmo/<idShort>` in the local mirror so the host's commit graph reflects the sandbox's push. Best-effort — origin is the source of truth. Skipped on bind-mount (the host worktree IS the source of truth). |
 | `emit-task-failed` | `step.run` | On any failure path in plan / execute / verify, emits `coding/task/failed` so cleanup subscribers (run-branch deletion, future telemetry) hook in without polling the row. |
 | `teardown-worktree` | `step.run` (host-path assignments only) | `safeTeardownWorktree` removes the clone on clean, `git add -A && commit && force-push HEAD:refs/cogmo-wip/<task-id>` on dirty/unpushed. git-remote assignments have no host worktree — the helper early-returns. |
@@ -484,7 +484,7 @@ A timeout fire is mapped to a task-level failure by the caller — `checkoutFeat
 
 ## Autonomy Gates `[proposed]`
 
-Two gates remain: plan approval (human reviews + approves the plan before execute) and merge (human reviews + merges the draft PR). The execute phase runs unattended inside the sandbox container — there is no per-tool-call runtime permission gate.
+Two gates remain: plan approval (human reviews + approves the plan before execute) and merge (human reviews + merges the PR). The execute phase runs unattended inside the sandbox container — there is no per-tool-call runtime permission gate.
 
 ### Plan gate `[confirmed]`
 
@@ -495,7 +495,7 @@ Gating depends on `trigger_source`:
 - **`user`** — Plan posted to Telegram with inline keyboard: **Approve**, **Revise** (cancels the task and asks the user to describe what should change; the agent's next turn issues a fresh `delegate_coding`), **Cancel**. No edits happen until approved. Approval writes `plan_approved_at` and emits `coding/task/plan-approved`, which triggers the execute orchestrator. Identity check: `callback.from.id` resolves via `transportStore.resolveUser` to a Cogmo `userId` and must match the conversation owner — strangers in the same chat get `identity_rejected`.
 - **`evolution` / `signal_pipeline`** — Plan proceeds to execute automatically. `plan_approved_at` stays null. The PR merge gate remains the single human checkpoint; no interactive approval on Telegram.
 
-This keeps automated self-improvement flows non-blocking while preserving a human veto where it matters — at PR review. An automated task that produces a bad plan wastes its own tokens and parks a draft PR; it cannot modify the system without the human reviewer.
+This keeps automated self-improvement flows non-blocking while preserving a human veto where it matters — at PR review. An automated task that produces a bad plan wastes its own tokens and parks a PR; it cannot modify the system without the human reviewer.
 
 **Approval does not expire.** Once a plan is approved (`plan_approved_at` set), that approval stands until the task reaches a terminal state. The plan text lives durably in `coding_tasks.plan`; the task's branch is isolated from base-branch drift until merge; container resources are freed by the idle-TTL path independently of approval freshness. If execution is resumed hours or days after approval, the preserved `session_id` rehydrates the same plan into a fresh container. State-based invalidation (code SHA drift) is the industry norm here, not time-based; our task-branch isolation makes even that a non-issue. P3 polish: post a "still want to proceed?" confirmation if execution would start >24h after approval — reminder, not expiry.
 
@@ -536,7 +536,7 @@ No deny list, no auto-approve, no decision log, no Telegram inline keyboard, no 
 
 ### Merge gate `[confirmed]`
 
-The final artifact is a **draft PR**. Cogmo never pushes to `main`, never merges, never marks ready-for-review. The user reviews the diff in GitHub Mobile (or desktop) using their normal review flow — branch protection, required checks, and reviewers apply.
+The final artifact is a **ready-for-review PR**. Cogmo never pushes to `main` and never merges — the merge is the human-approval gate. The PR opens ready rather than as a draft: creation is already gated on the verify step passing, the sole reviewer is the user, and the draft state would only add a manual "ready for review" click (and suppress review-request notifications and some CI configurations) without guarding anything the merge gate doesn't. The user reviews the diff in GitHub Mobile (or desktop) using their normal review flow — branch protection, required checks, and reviewers apply.
 
 ## Git Identity `[confirmed]`
 
@@ -620,7 +620,7 @@ Four layers, clean separation:
 
 **Observer for coding tasks** ([memory.md](memory.md)) runs post-task but its sink is a proposed `CLAUDE.md` edit, filed as a small follow-up coding task (`trigger_source = 'evolution'`, goal like "update `CLAUDE.md` with lesson from task `<id>`: `<fact>`"). The usual PR gate applies. Humans review and merge, and the knowledge then loads natively on every future task via Claude Code's project-tier memory. No separate store, no dual-writes, no recall-filtering.
 
-This reuses the whole coding-delegation pipeline (sandbox, plan gate for user triggers, draft PR) for its own metacognition, which keeps one pattern rather than two.
+This reuses the whole coding-delegation pipeline (sandbox, plan gate for user triggers, PR) for its own metacognition, which keeps one pattern rather than two.
 
 ## Base Image `[proposed]`
 
@@ -659,7 +659,7 @@ One Telegram message per task, edited in place as the task progresses. Format:
 
 Editing one message keeps the chat clean and matches established patterns ([RichardAtCT/claude-code-telegram](https://github.com/RichardAtCT/claude-code-telegram), [gergomiklos/heyagent](https://github.com/gergomiklos/heyagent)).
 
-Diffs are not rendered in Telegram. Link to GitHub for review. GitHub Mobile (since April 2026) natively supports reviewing Copilot cloud-agent diffs from a phone — Cogmo draft PRs use the same surface.
+Diffs are not rendered in Telegram. Link to GitHub for review. GitHub Mobile (since April 2026) natively supports reviewing Copilot cloud-agent diffs from a phone — Cogmo PRs use the same surface.
 
 ## Failure Modes `[proposed]`
 
@@ -703,7 +703,7 @@ The 7-day permission-prompt wait is not at risk: it's a `step.waitForEvent`, not
 Lines up with documented industry patterns (late 2025 / Q1 2026):
 
 - **Plan-first gating** is standard — Claude Code's plan mode, Cursor's plan mode, Cursor Auto's classifier-reviewed actions all converge here.
-- **Draft PR as merge gate** is universal — GitHub Copilot coding agent, Devin, Cursor background agents all end tasks with a draft PR rather than trying to render diffs in chat.
+- **PR as merge gate** is universal — GitHub Copilot coding agent, Devin, Cursor background agents all end tasks with a PR rather than trying to render diffs in chat. (Multi-tenant products open drafts because their PRs land in repos with many watchers; Cogmo opens ready-for-review since the single user is the only reviewer — see Merge gate.)
 - **Worktree-per-task** is Claude Code's own `-w` flag shape and Codex's experimental multi-agent pattern.
 - **Session resume** via `--resume` or `--continue` is both CLIs' native feature — use it, don't reinvent.
 - **Telegram UX** patterns (inline approvals, progress-in-one-message, ANSI stripping) are well-trodden in the reference bots.
@@ -717,7 +717,7 @@ Ship order. Each phase is independently useful — stop at any point and the pri
 1. **Sandbox primitives.** `containers`, `cogmo_instances`, `networks`, `volumes` tables; sibling-container creation against host daemon with sysbox runtime; label injection; root-task cascade on teardown; reaper cron (TTL + orphan + stale-row passes). Proxy is **body-level pass-through** on `POST /containers/create` (no `HostConfig` filtering yet — P2 adds the Privileged/NetworkMode/Binds/CapAdd denies). Endpoint-category blocks (`/swarm/*`, `/plugins/*`, `/nodes/*`) are *always on* regardless of phase — they're structural, not body policy.
 2. **Claude backend, plan-only.** Subprocess wrap with `--permission-mode plan`, JSONL parsing, session capture. Stream plan text to Telegram. Emit `plan_ready` with inline keyboard. No execute path wired yet.
 3. **Plan approval + execute.** Approval writes `plan_approved_at`, orchestrator resumes the session via `--resume <sid>`. Text-delta streaming into a single edited Telegram message. Tool calls render as observability events (`tool_call` / `tool_result`); the sandbox container is the security boundary.
-4. **Verify + push + draft PR.** In-container `pnpm typecheck && pnpm lint && pnpm test`, git commit + sign + push, `gh pr create --draft`. Teardown policy (worktree persistence table) executes. Resource usage written to `coding_tasks.resource_usage`.
+4. **Verify + push + PR.** In-container `pnpm typecheck && pnpm lint && pnpm test`, git commit + sign + push, `gh pr create`. Teardown policy (worktree persistence table) executes. Resource usage written to `coding_tasks.resource_usage`.
 
 After (5): end-to-end working flow for the single-backend, trusted-repo case.
 
@@ -729,7 +729,7 @@ After (5): end-to-end working flow for the single-backend, trusted-repo case.
 9. **Vault socket for credentials.** Replace disk-based `.git-credentials` with a per-task Unix socket helper. Enables short-lived GitHub App installation tokens without writing them to disk.
 10. **GitHub App migration.** Replace bot PAT with a Cogmo GitHub App and installation tokens. ~1-hour token expiry, per-task minted via the App's private key.
 11. **Extract sandbox proxy to sidecar.** Second subcommand on the same image (`cogmo sandbox-proxy`), communicating with `cogmo serve` over tRPC. See [sandbox.md → Deployment Topology](sandbox.md#deployment-topology). Triggered when an in-process crash first disrupts a live task.
-12. **Automated self-modification surface.** For `trigger_source IN ('evolution', 'signal_pipeline')`, expose read/write access to non-code configuration — `steering_rules`, `profiles.base_prompt`, and similar DB-backed assets — as direct domain operations, not through coding-delegation. Data changes don't need a diff, a PR, or a sandbox; they're atomic DB writes gated by which evolution stage holds the capability. Code/skill changes continue to flow through coding-delegation with its draft-PR gate. Specified properly in [evolution.md](evolution.md); this phase is the wiring from evolution stages into those capabilities.
+12. **Automated self-modification surface.** For `trigger_source IN ('evolution', 'signal_pipeline')`, expose read/write access to non-code configuration — `steering_rules`, `profiles.base_prompt`, and similar DB-backed assets — as direct domain operations, not through coding-delegation. Data changes don't need a diff, a PR, or a sandbox; they're atomic DB writes gated by which evolution stage holds the capability. Code/skill changes continue to flow through coding-delegation with its PR gate. Specified properly in [evolution.md](evolution.md); this phase is the wiring from evolution stages into those capabilities.
 
 ### P3 — polish
 

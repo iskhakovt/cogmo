@@ -20,8 +20,8 @@ import { codingTaskFailed, codingTaskPrOpened } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
 import { describeResolveIdentityError, resolveGitHubIdentity } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
-import { parseRemoteUrl } from "./draft-pr.js";
 import { runBranchFor } from "./git-as-transport.js";
+import { parseRemoteUrl } from "./open-pr.js";
 import type { CodingStore } from "./store/index.js";
 
 const log = logger.child({ component: "coding.cleanup-run-branch" });

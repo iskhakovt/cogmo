@@ -1,7 +1,7 @@
 import { RequestError } from "@octokit/request-error";
 import type { Octokit } from "@octokit/rest";
 import { describe, expect, it, vi } from "vitest";
-import { buildBody, parseRemoteUrl, runOpenDraftPr, truncateTitle } from "./draft-pr.js";
+import { buildBody, parseRemoteUrl, runOpenPr, truncateTitle } from "./open-pr.js";
 
 function fakeOctokit(create: ReturnType<typeof vi.fn>): Octokit {
   return { pulls: { create } } as unknown as Octokit;
@@ -120,19 +120,21 @@ const BASE_PARAMS = {
   branchSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
 };
 
-describe("runOpenDraftPr", () => {
-  it("calls pulls.create with draft=true and returns kind=opened", async () => {
+describe("runOpenPr", () => {
+  it("calls pulls.create ready-for-review (no draft flag) and returns kind=opened", async () => {
     const create = vi.fn(async () => ({
       data: {
         html_url: "https://github.com/user/cogmo/pull/42",
         number: 42,
       },
     }));
-    const result = await runOpenDraftPr({
+    const result = await runOpenPr({
       ...BASE_PARAMS,
       octokit: fakeOctokit(create),
     });
 
+    // Exact-match equality: a `draft` key sneaking back into the request
+    // would fail this assertion.
     expect(create).toHaveBeenCalledWith({
       owner: "user",
       repo: "cogmo",
@@ -140,7 +142,6 @@ describe("runOpenDraftPr", () => {
       head: "cogmo/abc12345",
       base: "main",
       body: expect.stringContaining("## Plan"),
-      draft: true,
     });
     expect(result.kind).toBe("opened");
     if (result.kind === "opened") {
@@ -155,7 +156,7 @@ describe("runOpenDraftPr", () => {
     const create = vi.fn(async () => {
       throw requestError(401, "Bad credentials");
     });
-    const result = await runOpenDraftPr({
+    const result = await runOpenPr({
       ...BASE_PARAMS,
       octokit: fakeOctokit(create),
     });
@@ -167,7 +168,7 @@ describe("runOpenDraftPr", () => {
     const create = vi.fn(async () => {
       throw requestError(403, "Resource not accessible by integration");
     });
-    const result = await runOpenDraftPr({
+    const result = await runOpenPr({
       ...BASE_PARAMS,
       octokit: fakeOctokit(create),
     });
@@ -178,7 +179,7 @@ describe("runOpenDraftPr", () => {
     const create = vi.fn(async () => {
       throw requestError(422, "A pull request already exists for cogmo/abc12345");
     });
-    const result = await runOpenDraftPr({
+    const result = await runOpenPr({
       ...BASE_PARAMS,
       octokit: fakeOctokit(create),
     });
@@ -192,7 +193,7 @@ describe("runOpenDraftPr", () => {
     const create = vi.fn(async () => {
       throw new Error("ETIMEDOUT");
     });
-    const result = await runOpenDraftPr({
+    const result = await runOpenPr({
       ...BASE_PARAMS,
       octokit: fakeOctokit(create),
     });
@@ -204,7 +205,7 @@ describe("runOpenDraftPr", () => {
     const create = vi.fn(async () => {
       throw requestError(500, "Server Error");
     });
-    const result = await runOpenDraftPr({
+    const result = await runOpenPr({
       ...BASE_PARAMS,
       octokit: fakeOctokit(create),
     });
@@ -216,7 +217,7 @@ describe("runOpenDraftPr", () => {
     const create = vi.fn(async (_args: { title: string; body: string }) => ({
       data: { html_url: "https://github.com/x/y/pull/1", number: 1 },
     }));
-    await runOpenDraftPr({
+    await runOpenPr({
       ...BASE_PARAMS,
       goal: "x".repeat(200),
       octokit: fakeOctokit(create),

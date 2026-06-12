@@ -1,5 +1,5 @@
 /**
- * Verify → push → draft-PR orchestrator (slice 4.0h).
+ * Verify → push → PR orchestrator (slice 4.0h).
  *
  * Triggered by `coding/task/cli-done` after the execute orchestrator
  * (`coding-task-execute`) flips the task to `pending_verify`. Drives:
@@ -36,8 +36,8 @@ import {
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { loadCodingSandboxEnv } from "./auth.js";
 import { commitAuthorFor, runCommitAndPush } from "./commit-push.js";
-import { parseRemoteUrl, runOpenDraftPr } from "./draft-pr.js";
 import { fetchFeatureBranch } from "./git-as-transport.js";
+import { parseRemoteUrl, runOpenPr } from "./open-pr.js";
 import {
   buildWorktreeSpec,
   checkoutFeatureBranchInSandbox,
@@ -69,7 +69,7 @@ export interface VerifyOrchestratorDeps {
   openExecuteStream?: (taskId: string) => Promise<ExecuteStreamHandle>;
   /**
    * Optional Octokit factory. Tests inject a stub; production omits it
-   * and `runOpenDraftPr` constructs a real client from the resolved PAT.
+   * and `runOpenPr` constructs a real client from the resolved PAT.
    * Threaded as a factory rather than a pre-built instance because the
    * PAT isn't known until the identity bundle is decrypted per-task.
    */
@@ -348,9 +348,9 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
         .then(() => undefined),
     );
 
-    // 3. Open draft PR ────────────────────────────────────────────────
+    // 3. Open PR ─────────────────────────────────────────────────────
     const planText = task.plan ?? "";
-    const prResult = await runOpenDraftPr({
+    const prResult = await runOpenPr({
       pat: identity.pat,
       owner: remote.owner,
       repo: remote.repo,
@@ -364,14 +364,11 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     });
 
     if (prResult.kind === "auth_failed") {
-      return await failAndTeardown(
-        `draft PR open failed (auth): ${prResult.message}`,
-        executeStream,
-      );
+      return await failAndTeardown(`PR open failed (auth): ${prResult.message}`, executeStream);
     }
     if (prResult.kind === "validation_failed") {
       return await failAndTeardown(
-        `draft PR open failed (validation): ${prResult.message}`,
+        `PR open failed (validation): ${prResult.message}`,
         executeStream,
       );
     }
@@ -380,7 +377,7 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
       // slice4-plan.md. Surface as failed so the operator sees it on
       // Telegram and can re-delegate; the pushed branch is preserved
       // upstream.
-      return await failAndTeardown(`draft PR open failed: ${prResult.message}`, executeStream);
+      return await failAndTeardown(`PR open failed: ${prResult.message}`, executeStream);
     }
 
     const metadata: PrMetadata = {

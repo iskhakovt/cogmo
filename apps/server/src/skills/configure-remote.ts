@@ -30,7 +30,7 @@ import { promisify } from "node:util";
 import { RequestError } from "@octokit/request-error";
 import { Octokit } from "@octokit/rest";
 import { err, ok, type Result } from "neverthrow";
-import { parseRemoteUrl } from "../agent/coding/draft-pr.js";
+import { parseRemoteUrl } from "../agent/coding/open-pr.js";
 import type { CodingRepoRow, CodingStore } from "../agent/coding/store/index.js";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
