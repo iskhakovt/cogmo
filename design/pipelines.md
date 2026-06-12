@@ -64,7 +64,7 @@ interface Stage {
   };
   wait?: {                            // kind: "wait" — external event, e.g. PR review submitted
     event: string;
-    filter?: string;                  // CEL expression, evaluated with @marcbachmann/cel-js (zero-dep, actively maintained) — the same dialect as Inngest match expressions, so short waits pass the filter through to waitForEvent's `if` verbatim and parked waits evaluate it locally
+    filter?: string;                  // CEL expression, evaluated with @marcbachmann/cel-js (zero-dep, actively maintained) — the same dialect as Inngest `if` expressions, so short waits pass the filter through to waitForEvent's `if` verbatim and parked waits evaluate it locally
     timeout: string;                  // same duration grammar as gate.timeout
     onTimeout: TimeoutAction;
   };
