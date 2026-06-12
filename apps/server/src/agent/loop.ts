@@ -284,7 +284,7 @@ function computeVolumeClusterInterceptions(
   // pass a stale `iterationContent` that disagrees with what's
   // actually on the end of `messages`.
   const lastMsg = messages.at(-1);
-  if (!lastMsg || lastMsg.role !== "assistant" || !Array.isArray(lastMsg.content)) {
+  if (lastMsg?.role !== "assistant" || !Array.isArray(lastMsg.content)) {
     return interceptions;
   }
   const iterationContent: ReadonlyArray<ContentBlock> = lastMsg.content;
