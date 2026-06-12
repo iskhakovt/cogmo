@@ -38,6 +38,7 @@ import { mock } from "vitest-mock-extended";
 import type { AgentStore } from "../agent/store/index.js";
 import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { runClackValidate } from "../test/assertions.js";
 import type { TransportStore } from "../transport/store/index.js";
 
 const FAKE_TX = { __mockTx: true } as never;
@@ -306,9 +307,9 @@ describe("stepConfigureClaudeCodeAuth", () => {
     await stepConfigureClaudeCodeAuth(deps);
 
     const passCall = vi.mocked(p.password).mock.calls[0]?.[0];
-    expect(passCall?.validate?.("")).toMatch(/too short/);
-    expect(passCall?.validate?.("short")).toMatch(/too short/);
-    expect(passCall?.validate?.("sk-this-is-long-enough-for-real")).toBeUndefined();
+    expect(runClackValidate(passCall?.validate, "")).toMatch(/too short/);
+    expect(runClackValidate(passCall?.validate, "short")).toMatch(/too short/);
+    expect(runClackValidate(passCall?.validate, "sk-this-is-long-enough-for-real")).toBeUndefined();
   });
 
   it("throws WizardCancelled when select is cancelled", async () => {
@@ -669,8 +670,8 @@ describe("stepConfigureTelegram", () => {
     await stepConfigureTelegram(deps, "u-1");
 
     const passCall = vi.mocked(p.password).mock.calls[0]?.[0];
-    expect(passCall?.validate?.("nocolon")).toMatch(/colon/);
-    expect(passCall?.validate?.("123:ABC")).toBeUndefined();
+    expect(runClackValidate(passCall?.validate, "nocolon")).toMatch(/colon/);
+    expect(runClackValidate(passCall?.validate, "123:ABC")).toBeUndefined();
   });
 
   it("validates allowlist format: rejects non-numeric IDs", async () => {
@@ -688,9 +689,9 @@ describe("stepConfigureTelegram", () => {
     await stepConfigureTelegram(deps, "u-1");
 
     const textCall = vi.mocked(p.text).mock.calls[0]?.[0];
-    expect(textCall?.validate?.("")).toMatch(/required/);
-    expect(textCall?.validate?.("abc,42")).toMatch(/not a valid numeric/);
-    expect(textCall?.validate?.("42, 99")).toBeUndefined();
+    expect(runClackValidate(textCall?.validate, "")).toMatch(/required/);
+    expect(runClackValidate(textCall?.validate, "abc,42")).toMatch(/not a valid numeric/);
+    expect(runClackValidate(textCall?.validate, "42, 99")).toBeUndefined();
   });
 });
 
@@ -869,9 +870,9 @@ describe("stepConfigureGitHubIdentity", () => {
     await stepConfigureGitHubIdentity(deps);
 
     const passCall = vi.mocked(p.password).mock.calls[0]?.[0];
-    expect(passCall?.validate?.("")).toMatch(/too short/);
-    expect(passCall?.validate?.("ghp_x")).toMatch(/too short/);
-    expect(passCall?.validate?.("ghp_long_enough_pat_value")).toBeUndefined();
+    expect(runClackValidate(passCall?.validate, "")).toMatch(/too short/);
+    expect(runClackValidate(passCall?.validate, "ghp_x")).toMatch(/too short/);
+    expect(runClackValidate(passCall?.validate, "ghp_long_enough_pat_value")).toBeUndefined();
   });
 });
 
@@ -1062,9 +1063,9 @@ describe("stepConfigureProvider", () => {
     await expect(stepConfigureProvider(deps)).rejects.toBeInstanceOf(WizardCancelled);
 
     const passCall = vi.mocked(p.password).mock.calls[0]?.[0];
-    expect(passCall?.validate?.("")).toMatch(/too short/);
-    expect(passCall?.validate?.("short")).toMatch(/too short/);
-    expect(passCall?.validate?.("a long enough api key")).toBeUndefined();
+    expect(runClackValidate(passCall?.validate, "")).toMatch(/too short/);
+    expect(runClackValidate(passCall?.validate, "short")).toMatch(/too short/);
+    expect(runClackValidate(passCall?.validate, "a long enough api key")).toBeUndefined();
   });
 
   it("custom provider: prompts for base URL before API key", async () => {
@@ -1264,8 +1265,8 @@ describe("stepConfigureImageProviders", () => {
     await expect(stepConfigureImageProviders(deps)).rejects.toBeInstanceOf(WizardCancelled);
 
     const nameCall = vi.mocked(p.text).mock.calls[0]?.[0];
-    expect(nameCall?.validate?.("Bad Name!")).toMatch(/Lowercase/);
-    expect(nameCall?.validate?.("venice")).toBeUndefined();
+    expect(runClackValidate(nameCall?.validate, "Bad Name!")).toMatch(/Lowercase/);
+    expect(runClackValidate(nameCall?.validate, "venice")).toBeUndefined();
   });
 
   it("validator: base URL must start with https:// and reject trailing slash", async () => {
@@ -1286,8 +1287,10 @@ describe("stepConfigureImageProviders", () => {
     await expect(stepConfigureImageProviders(deps)).rejects.toBeInstanceOf(WizardCancelled);
 
     const baseUrlCall = vi.mocked(p.text).mock.calls[1]?.[0];
-    expect(baseUrlCall?.validate?.("http://insecure")).toMatch(/https/);
-    expect(baseUrlCall?.validate?.("https://api.example.com/")).toMatch(/trailing slash/);
-    expect(baseUrlCall?.validate?.("https://api.example.com")).toBeUndefined();
+    expect(runClackValidate(baseUrlCall?.validate, "http://insecure")).toMatch(/https/);
+    expect(runClackValidate(baseUrlCall?.validate, "https://api.example.com/")).toMatch(
+      /trailing slash/,
+    );
+    expect(runClackValidate(baseUrlCall?.validate, "https://api.example.com")).toBeUndefined();
   });
 });

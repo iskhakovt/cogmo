@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Transactor } from "../db/index.js";
 import type { GitHubIdentity, GitHubIdentitySecretsLookup } from "../secrets/github.js";
 import { gitHubIdentitySecretName } from "../secrets/github.js";
+import { runClackValidate } from "../test/assertions.js";
 
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
@@ -204,9 +205,9 @@ describe("collectSkillsRemoteMode", () => {
       );
 
       const validate = vi.mocked(p.text).mock.calls[0]?.[0]?.validate;
-      expect(validate?.("")).toBe("URL is required");
-      expect(validate?.("   ")).toBe("URL is required");
-      expect(validate?.("git@github.com:x/y.git")).toBeUndefined();
+      expect(runClackValidate(validate, "")).toBe("URL is required");
+      expect(runClackValidate(validate, "   ")).toBe("URL is required");
+      expect(runClackValidate(validate, "git@github.com:x/y.git")).toBeUndefined();
     });
   });
 });
