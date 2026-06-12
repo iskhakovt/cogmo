@@ -39,6 +39,7 @@ Read `design/` for the full picture. Key docs:
 | [sandbox.md](design/sandbox.md) | Container sandbox — sysbox-default runtime, Docker API proxy, lineage tracking, reaper |
 | [skills.md](design/skills.md) | Skill execution — Python, two-tier runtime (Pyodide WASM + sysbox), warm pool, git-backed library |
 | [coding-delegation.md](design/coding-delegation.md) | Claude Code / Codex CLI subprocess delegation, worktree + draft-PR flow, autonomy gates |
+| [pipelines.md](design/pipelines.md) | User-defined pipelines — free text compiled to typed stage definitions, DB-backed runs, gates, bounded loops |
 | [agent-resilience.md](design/agent-resilience.md) | Failure taxonomy, in-loop repair, degraded reply, stuck-loop detection |
 | [setup.md](design/setup.md) | Guided setup wizard UX contract — interactive flow, re-runnable behavior, non-interactive mode |
 | [infrastructure.md](design/infrastructure.md) | Runtime requirements, Docker Compose, secrets (encrypted DB, master key, HKDF, `_FILE` convention), deployment |
