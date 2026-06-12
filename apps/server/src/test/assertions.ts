@@ -8,6 +8,8 @@
  * casts at the call site, no `!` assertions hiding real undefined cases.
  */
 
+import type { TextOptions } from "@clack/prompts";
+
 import type { Adapter, StreamingAdapter } from "../transport/types.js";
 
 /**
@@ -55,4 +57,19 @@ export function assertKind<U extends { kind: string }, K extends U["kind"]>(
   if (value.kind !== kind) {
     throw new Error(`expected kind '${kind}', got '${value.kind}'`);
   }
+}
+
+/**
+ * Run a `@clack/prompts` string `validate` option. The option is a union of a
+ * validator function and a Standard Schema object; wizard prompts always pass
+ * the function form, so this narrows to it (throwing otherwise) and calls it.
+ */
+export function runClackValidate(
+  validate: TextOptions["validate"],
+  value: string,
+): string | Error | undefined {
+  if (typeof validate !== "function") {
+    throw new Error("expected a clack validate function, got a schema or undefined");
+  }
+  return validate(value);
 }
