@@ -6,15 +6,16 @@
  *
  *   | State             | Action                                              |
  *   |-------------------|-----------------------------------------------------|
- *   | Clean, no commits | `git worktree remove`                                |
+ *   | Clean, no commits | remove the working tree                              |
  *   | Dirty or unpushed | `git add -A` → `git commit -m "wip: <id>"` →         |
  *   |                   | `git push --force origin HEAD:refs/cogmo-wip/<id>` → |
- *   |                   | `git worktree remove`                                |
+ *   |                   | remove the working tree                              |
  *   | Push fails        | Keep worktree (preserve work for manual recovery)    |
  *
- * Resume reverses: `git fetch origin refs/cogmo-wip/<id>:wip-<id>` →
- * `git worktree add <path> wip-<id>` → `git reset --soft HEAD~1` to
- * unstage the WIP commit and continue editing.
+ * Resume reverses: re-materialize the clone, `git fetch origin
+ * refs/cogmo-wip/<id>:wip-<id>` → `git checkout wip-<id>` →
+ * `git reset --soft HEAD~1` to unstage the WIP commit and continue
+ * editing.
  *
  * The bootstrap "no remote yet" case (tar fallback per design line 263)
  * is deferred — it never arises for repos registered via `/repo add`,
@@ -81,11 +82,10 @@ export async function teardownWorktree(opts: TeardownWorktreeOpts): Promise<Tear
   const { repoPath, worktreePath, branch, taskId, identity, remoteName = "origin" } = opts;
 
   if (!existsSync(worktreePath)) {
-    // Even when the path is gone, the parent repo's `.git/worktrees/<name>`
-    // metadata can linger from a prior crashed teardown. `removeWorktree`
-    // detects the missing path and falls back to `git worktree prune`,
-    // clearing the stale entry so a later `allocateWorktree` at the same
-    // path doesn't fail with "already registered".
+    // Even when the path is gone, the parent repo can hold a stale
+    // linked-worktree registration for it (`worktrees/<name>` metadata).
+    // `removeWorktree` prunes that so a later `allocateWorktree` at the
+    // same path isn't blocked by "already registered".
     await removeWorktree(repoPath, worktreePath);
     return { kind: "no_worktree" };
   }
