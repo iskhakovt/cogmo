@@ -87,7 +87,10 @@ export const activatePipelineTool: ToolSpec = defineTool({
       ok: true,
       name: result.value.name,
       version: result.value.version,
-      note: "Active. Command-triggered pipelines start when the user says the trigger phrase.",
+      note:
+        "Active. Pipeline execution is not implemented yet — the definition is saved and " +
+        "activated, but runs will not start from any trigger until the run engine ships. " +
+        "Tell the user this honestly if they ask when it will fire.",
     });
   },
 });

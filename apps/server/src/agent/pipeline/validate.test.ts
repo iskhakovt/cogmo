@@ -167,7 +167,12 @@ describe("validateDefinition", () => {
       loop: { backTo: "gather-context", until: "everything is wrapped up", maxIterations: 2 },
     });
     const issues = validateDefinition(def, CTX);
-    expect(issues.some((i) => i.message.includes("must be disjoint"))).toBe(true);
+    const overlap = expectDefined(
+      issues.find((i) => i.message.includes("must be disjoint")),
+      "overlap issue",
+    );
+    // Path points at the looping stage by index ("wrap-up" is stages[3]).
+    expect(overlap.path).toBe("stages[3].loop");
   });
 
   it("accepts disjoint loop scopes", () => {

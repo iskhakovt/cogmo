@@ -215,7 +215,9 @@ function validateLoops(
       const disjoint = first.end < second.start || second.end < first.start;
       if (!disjoint) {
         issues.push({
-          path: `stages[${stageIndexById.get(second.stageId)}].loop`,
+          // `end` IS the looping stage's index — exact even when duplicate
+          // stage ids (flagged separately) make an id lookup ambiguous.
+          path: `stages[${second.end}].loop`,
           message: `loop scope of "${second.stageId}" overlaps the loop scope of "${first.stageId}" — loop scopes must be disjoint (no nesting or crossing)`,
         });
       }

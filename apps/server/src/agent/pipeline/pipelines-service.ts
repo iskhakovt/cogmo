@@ -91,6 +91,20 @@ export function createPipelinesService(deps: PipelinesServiceDeps): PipelinesSer
         });
       }
 
+      // Cheap cap pre-check before the billable compile — a capped user
+      // shouldn't burn an LLM call to learn they're capped. The in-tx
+      // check below stays authoritative (this read is racy by design).
+      const precheckCount = await deps.runInTx(
+        async (tx) => (await deps.store.listDefinitions(tx, deps.userId)).length,
+      );
+      if (precheckCount >= definitionCap) {
+        return err({
+          kind: "definition_cap_exceeded" as const,
+          limit: definitionCap,
+          current: precheckCount,
+        });
+      }
+
       const { provider } = await deps.resolveProvider(deps.model);
       const compiled = await compilePipeline(
         { provider, model: deps.model, validation: deps.validation },

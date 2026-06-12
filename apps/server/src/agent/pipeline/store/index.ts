@@ -1,4 +1,4 @@
-import { and, desc, eq, max } from "drizzle-orm";
+import { and, desc, eq, max, sql } from "drizzle-orm";
 import { single } from "../../../db/helpers.js";
 import type { Transaction } from "../../../db/index.js";
 import type { PipelineDefinition } from "../types.js";
@@ -150,8 +150,16 @@ export class DrizzlePipelineStore implements PipelineStore {
     | { kind: "already_active"; name: string; version: number }
     | { kind: "not_found" }
   > {
-    // Row-lock the target so two concurrent activations of sibling
-    // versions serialize here instead of racing the deactivate step.
+    // Advisory xact lock on (userId, name-space) so concurrent activations
+    // of sibling versions serialize fully. A per-row FOR UPDATE is too
+    // narrow here: two txs activating v1 and v2 lock different rows, and
+    // the loser surfaces a non-retried 23505 from the partial unique index
+    // instead of queueing. Advisory lock over SERIALIZABLE per
+    // .claude/rules/store-pattern.md — this race wants prevention, not
+    // retry-on-detection. Keyed on userId alone (not name) to avoid a
+    // pre-lock read of the row's name; per-user serialization of
+    // activations is more than fine at this scale.
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${userId}))`);
     const rows = await tx
       .select()
       .from(pipelineDefinitions)

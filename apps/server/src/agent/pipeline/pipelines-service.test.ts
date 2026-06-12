@@ -107,7 +107,7 @@ describe("pipelines service", () => {
       expect(deps.store.insertDefinition).not.toHaveBeenCalled();
     });
 
-    it("enforces the definition cap before inserting", async () => {
+    it("enforces the definition cap before the billable compile call", async () => {
       const deps = makeDeps({ definitionCap: 1 });
       deps.store.listDefinitions.mockResolvedValue([row()]);
       const service = createPipelinesService(deps);
@@ -117,6 +117,8 @@ describe("pipelines service", () => {
       const error = expectDefined(result.isErr() ? result.error : undefined, "err");
       expect(error).toEqual({ kind: "definition_cap_exceeded", limit: 1, current: 1 });
       expect(deps.store.insertDefinition).not.toHaveBeenCalled();
+      // The pre-check fires before any LLM work — no provider resolution.
+      expect(deps.resolveProvider).not.toHaveBeenCalled();
     });
   });
 
