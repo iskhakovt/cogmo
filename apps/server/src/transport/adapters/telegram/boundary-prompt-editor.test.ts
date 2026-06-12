@@ -20,7 +20,7 @@ function makeEvent(overrides: Partial<BoundaryResolvedData> = {}): BoundaryResol
 describe("boundaryOutcomeText", () => {
   it.each<[BoundaryResolvedReason, string]>([
     ["user_resume", "↶ Picking up where we left off."],
-    ["user_resume_target", "↶ Picking up where we left off."],
+    ["user_resume_target", "↶ Resuming that conversation."],
     ["user_fresh", "✦ Started a fresh chat."],
     ["user_command", "✦ Started a fresh chat."],
     ["waiter_timeout", "✦ No reply — started a fresh chat."],

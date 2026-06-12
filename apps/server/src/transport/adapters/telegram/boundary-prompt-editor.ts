@@ -10,11 +10,17 @@ import { logger } from "../../../logger.js";
  * unmapped future reason a compile error.
  */
 export function boundaryOutcomeText(reason: BoundaryResolvedReason): string {
-  return match(reason)
-    .with("user_resume", "user_resume_target", () => "↶ Picking up where we left off.")
-    .with("user_fresh", "user_command", () => "✦ Started a fresh chat.")
-    .with("waiter_timeout", () => "✦ No reply — started a fresh chat.")
-    .exhaustive();
+  return (
+    match(reason)
+      .with("user_resume", () => "↶ Picking up where we left off.")
+      // `/resume <alias>` during a hold can target a conversation other than the
+      // one the prompt referenced, so "where we left off" wouldn't be literally
+      // true here.
+      .with("user_resume_target", () => "↶ Resuming that conversation.")
+      .with("user_fresh", "user_command", () => "✦ Started a fresh chat.")
+      .with("waiter_timeout", () => "✦ No reply — started a fresh chat.")
+      .exhaustive()
+  );
 }
 
 /**

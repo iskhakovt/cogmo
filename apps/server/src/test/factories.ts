@@ -805,10 +805,12 @@ export function spyOnInngestSend(client: Inngest) {
 }
 
 /**
- * Inngest client stub for adapter-setup tests. The adapter only calls
- * `createFunction` to collect its event listeners into `AdapterSetupResult.
- * functions`; tests exercise those handlers directly, never through the
- * returned function objects, so an auto-mocked proxy is enough.
+ * Inngest client stub for adapter-setup tests. Adapters touch two methods:
+ * `createFunction` to collect their event listeners into `AdapterSetupResult.
+ * functions` (tests exercise those handlers directly, not through the returned
+ * function objects), and `send` for outbound delivery (the Direct adapter's
+ * `deliver`/`sendVoice`). Both land as `vi.fn()`s on the proxy, so `send`
+ * calls are assertable and `createFunction` records its `(opts, handler)` args.
  */
 export function mockInngest(): Inngest {
   return mock<Inngest>();
