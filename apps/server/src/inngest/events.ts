@@ -346,6 +346,12 @@ export function buildBoundaryPendingEvent(data: BoundaryPendingData) {
  * `resolvedConversationId` carries the conversation the buffered inbounds
  * landed in — the prior id for `resume`/`resume_target`, a freshly
  * created id for `fresh`/`waiter_timeout`.
+ *
+ * `promptMessageId` is the channel-side id of the prompt message the adapter
+ * posted, copied off the holding row before it's deleted. The owning adapter's
+ * listener uses it to rewrite the prompt to its outcome and strip the
+ * keyboard — so a resolved hold doesn't linger as an open question (including
+ * the timeout path, where no channel callback runs).
  */
 export const boundaryResolvedReason = [
   "user_resume",
@@ -361,6 +367,7 @@ export const boundaryResolvedEvent = eventType("conversation/boundary/resolved",
     boundaryId: z.string(),
     channelId: z.string(),
     platformAddress: z.string(),
+    promptMessageId: z.string(),
     resolvedConversationId: z.string(),
     reason: z.enum(boundaryResolvedReason),
     drainedInboundCount: z.number().int().nonnegative(),

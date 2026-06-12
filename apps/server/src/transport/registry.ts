@@ -135,12 +135,12 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
       channelId: channel.id,
       credentials,
       transport,
+      inngest: deps.inngest,
       attachments: deps.attachments,
       boundary: deps.boundary,
       ...(deps.codingStore &&
         deps.codingStreamingRegistry && {
           codingProgress: {
-            inngest: deps.inngest,
             runInTx: deps.runInTx,
             codingStore: deps.codingStore,
             transportStore: deps.transportStore,
@@ -149,7 +149,6 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
         }),
       ...(deps.skillStore && {
         skillsApproval: {
-          inngest: deps.inngest,
           runInTx: deps.runInTx,
           skillStore: deps.skillStore,
           transportStore: deps.transportStore,
