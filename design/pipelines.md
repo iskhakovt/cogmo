@@ -55,18 +55,18 @@ type Trigger =
 interface Stage {
   id: string;                         // stable slug — run state and resume keys hang off it
   kind: "agentic" | "gate" | "wait";
-  instructions: string;               // the user's prose for this stage, interpreted at run time
+  instructions?: string;              // the user's prose, interpreted at run time. Required for agentic/gate (validation pass enforces); optional annotation on wait stages, which have nothing to interpret.
   tools?: string[];                   // allowlist globs resolved against the tool registry (envelope, not prose)
-  output?: string;                    // name of a registered Zod schema for the stage's typed handoff
+  output?: StageOutput;               // typed handoff to later stages
   gate?: {                            // kind: "gate" — human checkpoint on Telegram
     timeout: string;                  // e.g. "3d"
-    onTimeout: "remind" | "proceed" | "abort";
+    onTimeout: TimeoutAction;
   };
   wait?: {                            // kind: "wait" — external event, e.g. PR review submitted
     event: string;
-    filter?: string;                  // CEL-ish match against run correlation keys
+    filter?: string;                  // CEL expression via a maintained JS implementation (e.g. cel-js — same dialect Inngest match expressions use); if no library earns its keep, a deliberately tiny equality-only DSL instead. Decide at implementation; not ad hoc.
     timeout: string;
-    onTimeout: "remind" | "proceed" | "abort";
+    onTimeout: TimeoutAction;
   };
   loop?: {                            // optional back-edge: "address comments, repeat"
     backTo: string;                   // earlier stage id
@@ -74,9 +74,25 @@ interface Stage {
     maxIterations: number;            // hard code-owned cap; the LLM cannot extend it
   };
 }
+
+// Every timeout resolves to a terminating action — "remind" re-arms the deadline and notifies
+// at most maxReminders times, then falls through to a terminal action. No unbounded waits.
+type TimeoutAction =
+  | { kind: "proceed" }
+  | { kind: "abort" }
+  | { kind: "remind"; maxReminders: number; then: "proceed" | "abort" };
+
+// Built-in artifact kinds are the shapes the orchestrator can act on deterministically
+// (safe-outputs). "json" carries a compiler-emitted JSON Schema validated structurally at
+// run time — user-shaped handoffs need no Cogmo code change, keeping the Purpose promise.
+type StageOutput =
+  | { kind: "plan" }
+  | { kind: "pr_metadata" }
+  | { kind: "text" }
+  | { kind: "json"; schema: JsonSchema };
 ```
 
-Compiler hardening (n8n's lesson): the LLM never emits the definition as freeform JSON to be trusted — it goes through Zod structured output with retry + feedback, then a deterministic validation pass (stage ids unique, `loop.backTo` references an earlier stage, tool globs resolve, trigger source exists, every gate/wait has a timeout). Validation failures feed back into the retry loop; persistent failure surfaces to the user as "I couldn't compile this — here's what's ambiguous."
+Compiler hardening (n8n's lesson): the LLM never emits the definition as freeform JSON to be trusted — it goes through Zod structured output with retry + feedback, then a deterministic validation pass (stage ids unique, `loop.backTo` references an earlier stage, loop scopes neither nest nor cross — back-edge ranges are disjoint, `instructions` present on `agentic`/`gate` stages, tool globs resolve, trigger source exists, every gate/wait has a timeout with a terminating action). Validation failures feed back into the retry loop; persistent failure surfaces to the user as "I couldn't compile this — here's what's ambiguous."
 
 ## Definition Lifecycle `[proposed]`
 
@@ -85,11 +101,11 @@ Compiler hardening (n8n's lesson): the LLM never emits the definition as freefor
 3. **Preview.** Cogmo echoes the compiled pipeline as a readable stage list — trigger, numbered stages, gates bolded, loop bounds explicit:
    > Trigger: you say "start the issue pipeline".
    > 1. Gather context — chat with you until I have enough.
-   > 2. Draft a plan → **gate: your approval, 3d timeout, reminds**.
+   > 2. Draft a plan → **gate: your approval, 3d timeout, reminds ×3 then aborts**.
    > 3. Implement (coding delegation) → open draft PR.
    > 4. Wait for review comments (14d timeout) → address them → back to 4, max 5 rounds.
 4. **Confirm.** Explicit user approval activates the definition. The preview *is* the contract — no hidden prompts (gh-aw's trust lesson).
-5. **Version.** `pipeline_definitions` rows are immutable (insert-only — fits the prefer-immutable-rows rule). The original free text is stored alongside the compiled JSON as the editable source. Editing recompiles into a new version; **in-flight runs keep the version they started with** (Temporal's stance — the only safe choice given week-long waits). New runs use the latest active version.
+5. **Version.** `pipeline_definitions` rows are immutable in every column except `active` (fits the prefer-immutable-rows rule — `active` is a status transition, like `coding_tasks.status`). Activation flips the old version off and the new one on in a single tx, deactivate-then-activate so the partial unique index holds throughout. The original free text is stored alongside the compiled JSON as the editable source. Editing recompiles into a new version; **in-flight runs keep the version they started with** (Temporal's stance — the only safe choice given week-long waits). New runs use the latest active version.
 
 ## Execution Model `[proposed]`
 
@@ -120,11 +136,11 @@ Shape:
 
 ### Loops
 
-The back-edge is code-owned: the runner checks `iteration < maxIterations` and emits `pipeline/stage.due` for `backTo`. The `until` condition is evaluated by an LLM step (structured `{ done: boolean, reason: string }`), but the LLM cannot raise `maxIterations` — exhausting the cap surfaces to the user as a gate ("5 review rounds done, threads still open — continue?"). Temporal's "deterministic but not predetermined."
+The back-edge is code-owned: the runner checks `iteration < maxIterations` and emits `pipeline/stage.due` for `backTo`. Loop scopes are flat — the validation pass rejects nested or crossing back-edges — so the single `iteration` counter on the run suffices; it resets to 0 when the run advances past the loop's back-edge stage (exits the scope). The `until` condition is evaluated by an LLM step (structured `{ done: boolean, reason: string }`), but the LLM cannot raise `maxIterations` — exhausting the cap surfaces to the user as a gate ("5 review rounds done, threads still open — continue?"). Temporal's "deterministic but not predetermined."
 
 ### Context handoff
 
-Typed `output` artifacts flow forward (Anthropic's delegation guidance: objective, format, boundaries), **and** the full prior-stage transcripts stay retrievable — each run owns a conversation, stages append to it, so later stages can read everything (Cognition: don't summarize away decisions; actions carry implicit decisions). For review loops specifically: same branch, same coding session resumed via `--resume <sid>` — the draft PR is the durable checkpoint.
+Typed `output` artifacts flow forward (Anthropic's delegation guidance: objective, format, boundaries), **and** the full prior-stage transcripts stay retrievable — each run owns a conversation, stages append to it, so later stages can read everything (Cognition: don't summarize away decisions; actions carry implicit decisions). Within a loop, `stage_outputs` keeps only the latest iteration's artifact per stage (latest-wins, intentional) — earlier iterations' reasoning survives in the run conversation, which is where decision history belongs. For review loops specifically: same branch, same coding session resumed via `--resume <sid>` — the draft PR is the durable checkpoint.
 
 ## Safety `[proposed]`
 
@@ -160,7 +176,7 @@ pipeline_definitions (
   id            UUID v7 PK,
   user_id       UUID NOT NULL,                  -- multi-user from day 1, like scheduled_tasks
   name          TEXT NOT NULL,
-  version       INT NOT NULL,                   -- UNIQUE(user_id, name, version); rows immutable
+  version       INT NOT NULL,                   -- UNIQUE(user_id, name, version); all columns except active are immutable
   source_text   TEXT NOT NULL,                  -- the user's free text — the editable source
   compiled      JSONB NOT NULL,                 -- PipelineDefinitionSchema (jsonbZod)
   active        BOOLEAN NOT NULL,               -- partial unique index (user_id, name) WHERE active enforces one active version
@@ -174,13 +190,15 @@ pipeline_runs (
   status             pipeline_run_status NOT NULL,
   current_stage      TEXT NOT NULL,             -- stage id from the pinned definition
   iteration          INT NOT NULL,              -- loop counter for current_stage's loop scope
-  stage_outputs      JSONB NOT NULL,            -- StageOutputsSchema: stageId → typed artifact
+  stage_outputs      JSONB NOT NULL,            -- StageOutputsSchema: stageId → typed artifact; latest loop iteration wins (see Context handoff)
   wait_key           TEXT,                      -- correlation key; partial index WHERE status='waiting_event' serves event-resume lookups
   wait_deadline      TIMESTAMPTZ,               -- ticker fires onTimeout when passed
   failure_reason     TEXT,
   created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 ```
+
+No `user_id` on `pipeline_runs` — deliberate: every run load also fetches the pinned definition (the stages live in its `compiled` blob), and that row carries `user_id`, so the join is free on every path that needs it. The hot run lookups — `wait_key` event-resume, `wait_deadline` ticker scan — are not user-keyed, and admission quotas count per definition. Denormalize only if a user-keyed hot path materializes.
 
 Owned by a new `agent/pipeline/` domain folder (pipelines are agent work items, like `coding_tasks`). Listed in [data-model.md](data-model.md) → Deferred Tables.
 
