@@ -46,9 +46,7 @@ export async function withGitAskpass<T>(pat: string, fn: (env: GitEnv) => Promis
     writeFileSync(secretPath, pat, { mode: 0o600 });
     // `cat` via PATH, not `/bin/cat` — this helper runs on the HOST, and
     // non-FHS hosts (NixOS) have no /bin/cat. git invokes the helper with
-    // the trusted host process env, so PATH resolution is safe here. The
-    // in-container helper (src/sandbox/askpass.ts) keeps the absolute path:
-    // task images are FHS and their PATH is not ours to trust.
+    // the trusted host process env, so PATH resolution is safe here.
     writeFileSync(helperPath, `#!/bin/sh\nexec cat ${shellQuote(secretPath)}\n`, {
       mode: 0o700,
     });
