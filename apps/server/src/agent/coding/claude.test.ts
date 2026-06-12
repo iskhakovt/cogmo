@@ -269,7 +269,7 @@ describe("ClaudeCodeBackend.plan", () => {
       await collect(new ClaudeCodeBackend().plan({ task, repo, container }));
 
       const handlePromise = execStreaming.mock.results[0];
-      if (!handlePromise || handlePromise.type !== "return") {
+      if (handlePromise?.type !== "return") {
         throw new Error("execStreaming did not return a handle");
       }
       const handle = await handlePromise.value;
@@ -415,7 +415,7 @@ describe("ClaudeCodeBackend.execute", () => {
     );
 
     const handlePromise = execStreaming.mock.results[0];
-    if (!handlePromise || handlePromise.type !== "return") {
+    if (handlePromise?.type !== "return") {
       throw new Error("execStreaming did not return a handle");
     }
     const handle = await handlePromise.value;

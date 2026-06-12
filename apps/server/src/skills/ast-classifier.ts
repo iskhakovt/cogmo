@@ -214,7 +214,7 @@ function extractImportFromModule(node: Node): string | null {
   // about absolute imports; relative imports inside a skill don't map
   // to standalone packages.
   const firstChild = node.namedChild(0);
-  if (!firstChild || firstChild.type !== "dotted_name") return null;
+  if (firstChild?.type !== "dotted_name") return null;
   const root = firstChild.namedChild(0);
   if (root?.type !== "identifier") return null;
   return root.text;
