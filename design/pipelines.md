@@ -105,7 +105,7 @@ Compiler hardening (n8n's lesson): the LLM never emits the definition as freefor
 Shape:
 
 - `pipeline_runs` row is the source of truth: definition version FK, current stage, per-stage typed outputs, loop counters, status.
-- A generic `pipeline-stage-runner` Inngest function is triggered by `pipeline/stage.due { runId, stageId, iteration }`. It loads the run + pinned definition, executes the stage, persists the typed output and transition in one tx, and emits the next `pipeline/stage.due` (or a terminal event). Stage-internal work uses normal `step.run` durability.
+- A generic `pipeline-stage-runner` Inngest function is triggered by `pipeline/stage.due { runId, stageId, iteration }`. It loads the run + pinned definition, executes the stage, persists the typed output and transition in one tx inside a `step.run`, then emits the next `pipeline/stage.due` (or a terminal event) via a separate `step.sendEvent` — the same persist/emit step split as coding delegation's `emit-cli-done`, so a retry after the commit replays only the emit, never the transition. Stage-internal work uses normal `step.run` durability.
 - **Short gates may still use `step.waitForEvent` inside the stage function** — that's exactly how coding delegation's plan approval works today (`wait-for-approval`, [coding-delegation.md](coding-delegation.md) → Inngest step boundaries). Multi-day waits (`kind: "wait"` stages, e.g. PR review) park the run in the DB (`status = 'waiting'`, a `wait_key` correlation column) and resume when the matching inbound event arrives — no Inngest function stays in flight across deploys. The cutover heuristic: waits expected ≤ hours → `waitForEvent`; days+ → DB-park.
 - Every gate/wait is **bounded**: timeout + declared default action. Timeouts for DB-parked waits fire via the existing 1-minute ticker (same `FOR UPDATE SKIP LOCKED` scan shape as `scheduled_tasks`).
 - One run at a time per definition by default (`max_concurrent_runs = 1`), same admission-control spirit as [coding-delegation.md](coding-delegation.md) → Admission & Rate Limiting.
@@ -152,8 +152,9 @@ External event sources are deliberately out of scope here; parked findings for w
 
 ```sql
 CREATE TYPE pipeline_run_status AS ENUM (
-  'running', 'waiting_gate', 'waiting_event', 'completed', 'failed', 'cancelled'
+  'queued', 'running', 'waiting_gate', 'waiting_event', 'completed', 'failed', 'cancelled'
 );
+-- 'queued' = admitted-pending behind max_concurrent_runs, same naming convention as coding_task_status.
 
 pipeline_definitions (
   id            UUID v7 PK,
@@ -162,7 +163,7 @@ pipeline_definitions (
   version       INT NOT NULL,                   -- UNIQUE(user_id, name, version); rows immutable
   source_text   TEXT NOT NULL,                  -- the user's free text — the editable source
   compiled      JSONB NOT NULL,                 -- PipelineDefinitionSchema (jsonbZod)
-  active        BOOLEAN NOT NULL,               -- one active version per (user_id, name)
+  active        BOOLEAN NOT NULL,               -- partial unique index (user_id, name) WHERE active enforces one active version
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 
@@ -174,7 +175,7 @@ pipeline_runs (
   current_stage      TEXT NOT NULL,             -- stage id from the pinned definition
   iteration          INT NOT NULL,              -- loop counter for current_stage's loop scope
   stage_outputs      JSONB NOT NULL,            -- StageOutputsSchema: stageId → typed artifact
-  wait_key           TEXT,                      -- correlation key while status='waiting_event'
+  wait_key           TEXT,                      -- correlation key; partial index WHERE status='waiting_event' serves event-resume lookups
   wait_deadline      TIMESTAMPTZ,               -- ticker fires onTimeout when passed
   failure_reason     TEXT,
   created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
