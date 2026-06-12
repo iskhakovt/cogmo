@@ -137,6 +137,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
       transport,
       attachments: deps.attachments,
       boundary: deps.boundary,
+      boundaryCleanup: { inngest: deps.inngest },
       ...(deps.codingStore &&
         deps.codingStreamingRegistry && {
           codingProgress: {

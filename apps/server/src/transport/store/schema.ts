@@ -205,6 +205,13 @@ export const boundaryPending = pgTable(
     priorConversationId: uuid("prior_conversation_id")
       .notNull()
       .references(() => conversations.id, { onDelete: "cascade" }),
+    /**
+     * Channel-side id of the prompt message. Used first to attach the
+     * inline keyboard after the row exists, then carried onto
+     * `boundary/resolved` so the adapter can edit the prompt to its outcome
+     * and strip the keyboard once the hold resolves (including the timeout
+     * path, where no channel callback runs).
+     */
     promptMessageId: text("prompt_message_id").notNull(),
     bufferedInbounds: jsonbZod("buffered_inbounds", BufferedInboundsSchema).notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),

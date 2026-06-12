@@ -68,6 +68,12 @@ send prompt, persist boundary_pending, emit boundary/pending
 
 Any inbound (text, photo, document, voice) that arrives while a hold is open is appended to the buffered list rather than starting a second prompt. The buffer drains in arrival order into `inbound_messages` on resolution, and one `inbound/arrived` event fires per drained row.
 
+### Prompt cleanup on resolution `[confirmed]`
+
+Once a hold resolves, the prompt message is rewritten in place to its settled outcome — `↶ Picking up where we left off.` / `✦ Started a fresh chat.` / `✦ No reply — started a fresh chat.` (timeout) — and its keyboard is stripped. Otherwise a resolved hold lingers as an already-answered question: a button tap leaves the question text dangling, a `/new` or `/resume` during the hold leaves the buttons live, and the waiter-timeout path leaves a keyboard whose taps only report "Already resolved."
+
+Cleanup hangs off `boundary/resolved` rather than the channel callback, so it covers every resolution path uniformly — crucially the timeout path, where no Telegram callback runs. The event carries `promptMessageId` (copied off the holding row before it's deleted in `resolveBoundary`); the Telegram adapter registers a listener on `boundary/resolved`, filters to its own `channelId`, and edits the message. The edit is best-effort — a user-deleted prompt or a rejected edit logs at warn and no-ops; the resolution already committed and isn't reversed by a failed edit. The button-tap callback still drops the keyboard synchronously for an instant de-fang; the listener owns the authoritative text edit.
+
 ### Idempotency
 
 Three layers of dedup keep events from double-firing:
@@ -100,7 +106,7 @@ boundary_pending (
   platform_address       TEXT NOT NULL,
   platform_user_handle   TEXT NOT NULL,                          -- for waiter-timeout identity check
   prior_conversation_id  UUID FK → conversations NOT NULL ON DELETE CASCADE,
-  prompt_message_id      TEXT NOT NULL,                          -- for editMessageReplyMarkup
+  prompt_message_id      TEXT NOT NULL,                          -- attach keyboard, then edit to outcome on resolve
   buffered_inbounds      JSONB NOT NULL,                         -- BufferedInboundsSchema
   expires_at             TIMESTAMPTZ NOT NULL,
   created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),

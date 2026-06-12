@@ -156,6 +156,9 @@ export async function resolveBoundary(
       conversationId,
       inboundIds,
       platformAddress: row.platformAddress,
+      // Carried onto `boundary/resolved` so the adapter can clean up the
+      // prompt message — the row holding it is deleted just above.
+      promptMessageId: row.promptMessageId,
     } as const;
   });
 
@@ -185,6 +188,7 @@ export async function resolveBoundary(
       boundaryId: args.boundaryId,
       channelId,
       platformAddress: dbResult.platformAddress,
+      promptMessageId: dbResult.promptMessageId,
       resolvedConversationId: dbResult.conversationId,
       reason: args.reason,
       drainedInboundCount: dbResult.inboundIds.length,

@@ -53,6 +53,18 @@ export interface BoundaryConfig {
 }
 
 /**
+ * Boundary-prompt cleanup wiring — adapters that fire the "Resume / Start
+ * fresh" prompt (today: Telegram) use this to register an Inngest function
+ * listening on `conversation/boundary/resolved`. The listener rewrites the
+ * prompt message to its outcome and strips the keyboard once the hold
+ * resolves, covering the timeout path where no channel callback runs.
+ * Adapters that don't fire the prompt leave it undefined.
+ */
+export interface BoundaryCleanupDeps {
+  inngest: Inngest;
+}
+
+/**
  * Dependencies available to adapter setup.
  */
 export interface AdapterDeps {
@@ -62,6 +74,8 @@ export interface AdapterDeps {
   /** Binary storage — adapters may download generated attachments for outbound delivery. */
   attachments: AttachmentStore;
   boundary: BoundaryConfig;
+  /** Optional — present only for adapters that fire the boundary prompt (Telegram). */
+  boundaryCleanup?: BoundaryCleanupDeps;
   /** Optional — present only when the sandbox module is initialized. */
   codingProgress?: CodingProgressDeps;
   /** Optional — present only when the skills module is wired. */
