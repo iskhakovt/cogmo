@@ -229,6 +229,15 @@ Single-user browser cockpit — a chat channel + the admin surface over `Transpo
 - [ ] Phase 5 — responsive (container-query mobile) + polish + code-split
 - [ ] Voice (deferred) — mic-in / audio-out in chat; programmatic OpenAPI channel (deferred)
 
+## Phase 8: User-Defined Pipelines
+
+Free-text pipeline definitions compiled into typed stage envelopes, executed durably with human gates, bounded loops, and long external waits. Design: [pipelines.md](design/pipelines.md).
+
+- [ ] Slice 1 — definitions spine: `pipeline_definitions` table + store, `PipelineDefinitionSchema` (Stage / TimeoutAction / StageOutput, ms-style duration grammar), compiler use case (typed LLM contract + deterministic validation pass), Telegram preview + confirm/activate, version flip. Includes a ~10-case free-text → expected-envelope eval set in the record/replay tier. No execution.
+- [ ] Slice 2 — run engine MVP: `pipeline_runs` table, `pipeline-stage-runner` Inngest function (persist/emit step split), `agentic` stages under per-stage tool allowlists via `Service`, `gate` stages via `step.waitForEvent` + Telegram keyboard, `text`/`json` outputs, `start_pipeline` command trigger. Linear pipelines only — no loops, no `wait` stages, no cron.
+- [ ] Slice 3 — loops + parked waits + cron + admission: back-edges with iteration reset and the `until` LLM evaluator; `wait` stages with `wait_key` resume and ticker-fired `TimeoutAction` (remind×N re-arm); cron triggers riding `scheduled_tasks`; `queued` status, `max_concurrent_runs`, per-definition quotas. Adds runtime dep `@marcbachmann/cel-js` for wait filters.
+- [ ] Slice 4 — integration breadth (independent items): coding delegation invokable from an `agentic` stage (`plan` / `pr_metadata` artifact kinds); first external event source (GitHub PR review via tunnel webhook or ETag poller) to close the review-loop example.
+
 ## Monitoring Thresholds (Scaling Triggers)
 
 | Signal | Action |

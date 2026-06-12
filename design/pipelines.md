@@ -59,13 +59,13 @@ interface Stage {
   tools?: string[];                   // allowlist globs resolved against the tool registry (envelope, not prose)
   output?: StageOutput;               // typed handoff to later stages
   gate?: {                            // kind: "gate" — human checkpoint on Telegram
-    timeout: string;                  // e.g. "3d"
+    timeout: string;                  // ms-style duration, grammar ^\d+(\.\d+)?(m|h|d|w)$ — Zod-enforced. Passes to Inngest waitForEvent untouched; the DB-park path parses it with a tiny unit-multiplier table (no `ms` dep). No months/years: excludes the M-ambiguity and engine waits cap at ~1y anyway.
     onTimeout: TimeoutAction;
   };
   wait?: {                            // kind: "wait" — external event, e.g. PR review submitted
     event: string;
-    filter?: string;                  // CEL expression via a maintained JS implementation (e.g. cel-js — same dialect Inngest match expressions use); if no library earns its keep, a deliberately tiny equality-only DSL instead. Decide at implementation; not ad hoc.
-    timeout: string;
+    filter?: string;                  // CEL expression, evaluated with @marcbachmann/cel-js (zero-dep, actively maintained) — the same dialect as Inngest match expressions, so short waits pass the filter through to waitForEvent's `if` verbatim and parked waits evaluate it locally
+    timeout: string;                  // same duration grammar as gate.timeout
     onTimeout: TimeoutAction;
   };
   loop?: {                            // optional back-edge: "address comments, repeat"
@@ -211,6 +211,10 @@ Owned by a new `agent/pipeline/` domain folder (pipelines are agent work items, 
 | Skills | Orthogonal: a skill is a capability inside a stage; a pipeline is the spine across stages. A stage's tool allowlist can include skills. |
 | Steering rules | Apply per-profile as usual inside `agentic` stages; pipeline definitions are not steering rules (different lifecycle: versioned artifacts vs. accumulated guidance). |
 | Evolution | Stage-1 corrections during pipeline runs graduate into steering rules normally. A later evolution stage could propose pipeline edits — gated like code changes, since a definition is executable configuration. |
+
+## Implementation Plan `[confirmed]`
+
+Phased as **PROGRESS.md → Phase 8**, four slices mirroring coding delegation's thin-slice precedent: (1) definitions spine — compile → preview → activate, no execution, plus the compile-quality eval set; (2) run engine MVP — command trigger, linear `agentic`/`gate` stages; (3) loops, DB-parked waits, cron triggers, admission control; (4) integration breadth — coding delegation as a stage, first external event source. The only new runtime dependency is `@marcbachmann/cel-js`, deferred to slice 3. Durations use the ms-style grammar above (decision: legibility in previews and pass-through to Inngest beat ISO-8601's standardness; the Zod regex removes ms-style's ambiguity).
 
 ## Open Questions
 
