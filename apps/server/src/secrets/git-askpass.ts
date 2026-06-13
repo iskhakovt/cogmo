@@ -44,7 +44,10 @@ export async function withGitAskpass<T>(pat: string, fn: (env: GitEnv) => Promis
     const secretPath = join(dir, "pat");
     const helperPath = join(dir, "askpass.sh");
     writeFileSync(secretPath, pat, { mode: 0o600 });
-    writeFileSync(helperPath, `#!/bin/sh\nexec /bin/cat ${shellQuote(secretPath)}\n`, {
+    // `cat` via PATH, not `/bin/cat` — this helper runs on the HOST, and
+    // non-FHS hosts (NixOS) have no /bin/cat. git invokes the helper with
+    // the trusted host process env, so PATH resolution is safe here.
+    writeFileSync(helperPath, `#!/bin/sh\nexec cat ${shellQuote(secretPath)}\n`, {
       mode: 0o700,
     });
     return await fn({ GIT_ASKPASS: helperPath, GIT_TERMINAL_PROMPT: "0" });
