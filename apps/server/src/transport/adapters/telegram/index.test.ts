@@ -1,9 +1,11 @@
 import { err, ok } from "neverthrow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PLAN_CALLBACK_REGEX } from "../../../agent/coding/plan-keyboard.js";
+import type { BoundaryResolvedData } from "../../../inngest/events.js";
+import { boundaryResolvedEvent } from "../../../inngest/events.js";
 import { SKILLS_APPROVAL_CALLBACK_REGEX } from "../../../skills/skills-keyboard.js";
-import { asBatchAdapter } from "../../../test/assertions.js";
-import { mockAttachmentStore, mockTransport } from "../../../test/factories.js";
+import { asBatchAdapter, expectDefined } from "../../../test/assertions.js";
+import { mockAttachmentStore, mockInngest, mockTransport } from "../../../test/factories.js";
 import type { StreamingAdapter } from "../../types.js";
 import { findTelegramSplitBoundary, rebalanceCodeFence, setup } from "./index.js";
 
@@ -175,6 +177,7 @@ describe("telegram adapter", () => {
       credentials: { token: "fake" },
       transport,
       attachments,
+      inngest: mockInngest(),
       boundary: { promptTimeoutMs: 30000, minUserTurns: 3 },
     });
 
@@ -282,6 +285,7 @@ describe("telegram adapter", () => {
       credentials: { token: "fake" },
       transport,
       attachments: mockAttachmentStore(),
+      inngest: mockInngest(),
       boundary: { promptTimeoutMs: 30000, minUserTurns: 3 },
     });
 
@@ -1066,6 +1070,7 @@ describe("telegram adapter", () => {
         credentials: { token: "fake" },
         transport,
         attachments,
+        inngest: mockInngest(),
         boundary: { promptTimeoutMs: 30000, minUserTurns: 3 },
       });
       return { adapter: result.adapter as unknown as StreamingAdapter, attachments };
@@ -1494,6 +1499,7 @@ describe("telegram adapter", () => {
         credentials: { token: "fake" },
         transport,
         attachments,
+        inngest: mockInngest(),
         boundary: { promptTimeoutMs: 30000, minUserTurns: 3 },
       });
       return { adapter: result.adapter as unknown as StreamingAdapter, attachments };
@@ -1666,6 +1672,7 @@ describe("telegram adapter", () => {
         credentials: { token: "fake" },
         transport,
         attachments: mockAttachmentStore(),
+        inngest: mockInngest(),
         boundary: { promptTimeoutMs: 30000, minUserTurns: 3 },
       });
       return { transport };
@@ -1935,6 +1942,58 @@ describe("telegram adapter", () => {
       expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({
         text: "Already resolved",
       });
+    });
+
+    it("registers a boundary/resolved listener whose handler edits the prompt to its outcome", async () => {
+      // The handler itself is covered in boundary-prompt-editor.test.ts; this
+      // pins the thin setup() glue the unit test can't reach — that the
+      // listener is triggered by boundary/resolved and that its closure binds
+      // this channel's id and forwards (chatId, messageId, text) to
+      // bot.api.editMessageText in the right order.
+      const inngest = mockInngest();
+      await setup({
+        channelId: "tg-ch",
+        credentials: { token: "fake" },
+        transport: mockTransport(),
+        inngest,
+        attachments: mockAttachmentStore(),
+        boundary: { promptTimeoutMs: 30000, minUserTurns: 3 },
+      });
+
+      const registration = vi
+        .mocked(inngest.createFunction)
+        .mock.calls.find(
+          (call) => (call[0] as { id?: string }).id === "telegram-boundary-resolved-tg-ch",
+        );
+      const [opts, handler] = expectDefined(registration) as [
+        { triggers: unknown[] },
+        (ctx: { event: { data: BoundaryResolvedData } }) => Promise<unknown>,
+      ];
+
+      expect(opts.triggers).toContain(boundaryResolvedEvent);
+
+      await handler({
+        event: {
+          data: {
+            boundaryId: "b-1",
+            channelId: "tg-ch",
+            platformAddress: "42",
+            promptMessageId: "9001",
+            resolvedConversationId: "conv-1",
+            reason: "user_fresh",
+            drainedInboundCount: 0,
+          },
+        },
+      });
+
+      expect(mockBotApi.editMessageText).toHaveBeenCalledWith(
+        "42",
+        9001,
+        "✦ Started a fresh chat.",
+        {
+          reply_markup: { inline_keyboard: [] },
+        },
+      );
     });
   });
 });

@@ -34,6 +34,8 @@ import { createIdleTimer } from "./agent/idle-timer.js";
 import { ImageToolsLoader } from "./agent/image-tools-loader.js";
 import { runStreamingAgentLoop } from "./agent/loop.js";
 import { memoryTools } from "./agent/memory-tools.js";
+import { DrizzlePipelineStore } from "./agent/pipeline/store/index.js";
+import { PIPELINES_PROMPT_GUIDANCE, pipelineTools } from "./agent/pipeline/tools.js";
 import { DefaultPromptSource } from "./agent/prompt.js";
 import { createHandleMessageReconcile } from "./agent/reconcile-on-failure.js";
 import { createRecoverConversation } from "./agent/recover-conversation.js";
@@ -186,6 +188,7 @@ export interface CoreDeps {
   transportStore: DrizzleTransportStore;
   sandboxStore: DrizzleSandboxStore;
   codingStore: DrizzleCodingStore;
+  pipelineStore: DrizzlePipelineStore;
   mcpStore: DrizzleMcpStore;
   skillStore: DrizzleSkillStore;
   secretsStore: DrizzleSecretsStore;
@@ -329,6 +332,7 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
   const transportStore = new DrizzleTransportStore();
   const sandboxStore = new DrizzleSandboxStore();
   const codingStore = new DrizzleCodingStore();
+  const pipelineStore = new DrizzlePipelineStore();
   const mcpStore = new DrizzleMcpStore();
   const skillStore = new DrizzleSkillStore();
   const webSessionStore = new DrizzleWebSessionStore();
@@ -440,6 +444,7 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
     transportStore,
     sandboxStore,
     codingStore,
+    pipelineStore,
     mcpStore,
     skillStore,
     secretsStore,
@@ -967,6 +972,7 @@ export async function bootstrapRuntime(
       ...coreMemoryTools,
       ...documentTools,
       ...schedulingTools,
+      ...pipelineTools,
       delegateCodingTool,
       registerSkillTool,
     ],
@@ -981,6 +987,7 @@ export async function bootstrapRuntime(
       DELEGATE_CODING_GUIDANCE,
       SKILLS_PROMPT_GUIDANCE,
       SUBAGENT_PROMPT_GUIDANCE,
+      PIPELINES_PROMPT_GUIDANCE,
     ],
     getUserContext: async () => {
       const blocks = await core.runInTx((trx) =>
@@ -1149,6 +1156,7 @@ export async function bootstrapRuntime(
     mcpRegistry,
     userTimezone: env.USER_TIMEZONE,
     voiceResolver,
+    pipelineStore: core.pipelineStore,
   });
 
   const observer = createObserver({

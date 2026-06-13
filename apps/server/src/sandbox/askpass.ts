@@ -3,7 +3,7 @@
  *
  * Layout (host side):
  *   ${baseDir}/<rootTaskId>/
- *     helper       0700 — `#!/bin/sh; exec /bin/cat ${baseDir}/.../pat`
+ *     helper       0700 — `#!/bin/sh; exec cat ${baseDir}/.../pat`
  *     pat          0600 — the bot account's fine-grained PAT
  *     signing-key  0600 — OpenSSH-armored Ed25519 signing key
  *     signing-key.pub  0644 — `ssh-ed25519 ... <comment>`
@@ -112,8 +112,12 @@ export function provisionAskpass(opts: {
   // same value for both Username and Password fields when paired with a
   // fine-grained PAT, and wrong-username retries don't happen on the
   // happy path.
+  // `cat` via PATH, not an absolute path: PATH resolution costs nothing
+  // security-wise (anything that can poison the container's PATH already
+  // executes arbitrary code in the container), and it keeps the helper
+  // runnable on non-FHS hosts when tests exercise it outside a container.
   const containerPatPath = `${CONTAINER_ASKPASS_DIR}/pat`;
-  const helperBody = `#!/bin/sh\nexec /bin/cat ${shellQuote(containerPatPath)}\n`;
+  const helperBody = `#!/bin/sh\nexec cat ${shellQuote(containerPatPath)}\n`;
   writeFileSync(helperPath, helperBody, { mode: 0o755 });
 
   const env: Readonly<Record<string, string>> = Object.freeze({

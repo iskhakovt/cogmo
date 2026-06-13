@@ -1,0 +1,25 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Prepare the quarterly summary, then ask for my approval and wait as long as it takes for me to answer before archiving it.",
+        "model": "claude-sonnet-4-6",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "pipeline_definition",
+            "arguments": "{\"name\":\"quarterly-summary-pipeline\",\"trigger\":{\"kind\":\"command\",\"phrase\":\"Prepare the quarterly summary\"},\"stages\":[{\"id\":\"prepare-quarterly-summary\",\"kind\":\"agentic\",\"instructions\":\"Prepare the quarterly summary. Gather all relevant data and produce a clear, well-structured summary report ready for review.\"},{\"id\":\"approval-gate\",\"kind\":\"gate\",\"instructions\":\"Please review the quarterly summary produced in the previous stage and provide your approval before it is archived. Approve to proceed or reject to abort.\",\"gate\":{\"timeout\":\"2w\",\"onTimeout\":{\"kind\":\"remind\",\"maxReminders\":10,\"finalAction\":\"abort\"}}},{\"id\":\"archive-summary\",\"kind\":\"agentic\",\"instructions\":\"Archive the approved quarterly summary. Store it in the appropriate location for long-term record keeping.\"}]}",
+            "id": "toolu_01F7xVhL6aXF8AJ9y6p68t5V"
+          }
+        ]
+      },
+      "metadata": {
+        "systemHash": "cf73c5e5",
+        "toolsHash": "c2dc880f"
+      }
+    }
+  ]
+}

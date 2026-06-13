@@ -1,0 +1,25 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Every weekday at 9am London time, research what happened in AI overnight and write me a short summary.",
+        "model": "claude-sonnet-4-6",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "pipeline_definition",
+            "arguments": "{\"name\":\"daily-ai-overnight-summary\",\"trigger\":{\"kind\":\"cron\",\"schedule\":\"0 9 * * 1-5\",\"timezone\":\"Europe/London\"},\"stages\":[{\"id\":\"research-ai-news\",\"kind\":\"agentic\",\"instructions\":\"Search the web for the latest AI news and developments that happened overnight (since yesterday evening). Focus on significant model releases, research papers, product launches, funding rounds, and industry developments. Cast a wide net across sources — research labs, major tech companies, AI startups, and reputable news outlets.\",\"tools\":[\"web_search\"]},{\"id\":\"write-summary\",\"kind\":\"agentic\",\"instructions\":\"Using the research gathered, write a concise, engaging daily summary of what happened in AI overnight. The summary should be easy to read over morning coffee — use clear language, highlight the most important stories first, and keep the total length to a short digestible briefing (roughly 200–400 words). Group related items where helpful.\",\"tools\":[\"write_file\"],\"output\":{\"kind\":\"text\"}}]}",
+            "id": "toolu_01LxLKiwYmpy1pHgaPDbAKiT"
+          }
+        ]
+      },
+      "metadata": {
+        "systemHash": "cf73c5e5",
+        "toolsHash": "c2dc880f"
+      }
+    }
+  ]
+}

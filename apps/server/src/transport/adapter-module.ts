@@ -18,7 +18,6 @@ import type { Adapter, StreamingAdapter } from "./types.js";
  * that don't show coding output (Direct CLI) ignore the field.
  */
 export interface CodingProgressDeps {
-  inngest: Inngest;
   runInTx: Transactor;
   codingStore: CodingStore;
   transportStore: TransportStore;
@@ -33,7 +32,6 @@ export interface CodingProgressDeps {
  * leave it undefined.
  */
 export interface SkillsApprovalDeps {
-  inngest: Inngest;
   runInTx: Transactor;
   skillStore: SkillStore;
   transportStore: TransportStore;
@@ -59,6 +57,12 @@ export interface AdapterDeps {
   channelId: string;
   credentials: JsonValue;
   transport: Transport;
+  /**
+   * Inngest client — adapters register event-driven listeners with it (e.g.
+   * Telegram's boundary-prompt cleanup, coding-progress, skills-approval).
+   * Returned in `AdapterSetupResult.functions` for the runtime to serve.
+   */
+  inngest: Inngest;
   /** Binary storage — adapters may download generated attachments for outbound delivery. */
   attachments: AttachmentStore;
   boundary: BoundaryConfig;

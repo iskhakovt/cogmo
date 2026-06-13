@@ -1,0 +1,25 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Whenever one of my PRs gets a review, address the review comments.",
+        "model": "claude-sonnet-4-6",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "pipeline_definition",
+            "arguments": "{\"name\":\"address-pr-review-comments\",\"trigger\":{\"kind\":\"command\",\"phrase\":\"address review comments on this PR\"},\"stages\":[{\"id\":\"recall-context\",\"kind\":\"agentic\",\"instructions\":\"Recall any relevant context about this repository, coding conventions, or prior decisions that may be useful for addressing the review comments. Use memory_recall to surface anything pertinent.\",\"tools\":[\"memory_recall\",\"read_file\"]},{\"id\":\"read-review-comments\",\"kind\":\"agentic\",\"instructions\":\"Read the PR description, the diff, and all review comments left by reviewers. Summarise each comment clearly: what was flagged, where (file + line), and what change is being requested or suggested.\",\"tools\":[\"read_file\",\"web_search\"]},{\"id\":\"address-comments\",\"kind\":\"agentic\",\"instructions\":\"For each review comment identified in the previous stage, make the appropriate code or documentation change. Follow the repository's existing style and conventions. If a comment is ambiguous, apply the most conservative interpretation. Write the changes to the relevant files.\",\"tools\":[\"read_file\",\"write_file\",\"delegate_coding\",\"memory_recall\"]},{\"id\":\"review-changes\",\"kind\":\"agentic\",\"instructions\":\"Re-read all modified files and cross-check every change against the original review comments. Confirm that each comment has been addressed. Note any comments that were intentionally skipped or that require human judgement, and explain why.\",\"tools\":[\"read_file\"],\"output\":{\"kind\":\"text\"}},{\"id\":\"human-approval\",\"kind\":\"gate\",\"instructions\":\"Review the summary of changes made to address the PR review comments. Approve to proceed with updating the PR, or request further adjustments. Any comments flagged as requiring human judgement are listed in the previous stage's output.\",\"gate\":{\"timeout\":\"2d\",\"onTimeout\":{\"kind\":\"remind\",\"maxReminders\":3,\"finalAction\":\"abort\"}}},{\"id\":\"update-pr\",\"kind\":\"agentic\",\"instructions\":\"Update the PR with the approved changes. Retain the existing PR title and description unless a review comment specifically asked for them to change. Preserve PR metadata such as labels, assignees, and reviewers.\",\"tools\":[\"write_file\",\"memory_retain\"],\"output\":{\"kind\":\"pr_metadata\"}}]}",
+            "id": "toolu_01CPXFpT5vUsGQ8DzYbBDYM3"
+          }
+        ]
+      },
+      "metadata": {
+        "systemHash": "cf73c5e5",
+        "toolsHash": "c2dc880f"
+      }
+    }
+  ]
+}

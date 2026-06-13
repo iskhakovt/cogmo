@@ -128,6 +128,7 @@ describe("resolveBoundary", () => {
       boundaryId: "b1",
       channelId: "ch-1",
       platformAddress: "chat-X",
+      promptMessageId: "tg-msg:1",
       resolvedConversationId: "conv-prior",
       reason: "user_resume",
       drainedInboundCount: 2,

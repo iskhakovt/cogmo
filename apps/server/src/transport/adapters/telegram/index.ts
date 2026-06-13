@@ -4,7 +4,11 @@ import { PLAN_CALLBACK_REGEX, parsePlanCallback } from "../../../agent/coding/pl
 import { startCodingProgressSubscriber } from "../../../agent/coding/progress-subscriber.js";
 import { parseGeneratedDocumentPayload } from "../../../agent/document-tools.js";
 import { parseGeneratedImagePayload } from "../../../agent/image-tools.js";
-import { codingTaskStart, skillsDeployApprovalRequested } from "../../../inngest/events.js";
+import {
+  boundaryResolvedEvent,
+  codingTaskStart,
+  skillsDeployApprovalRequested,
+} from "../../../inngest/events.js";
 import type { StreamEvent } from "../../../llm/types.js";
 import { logger } from "../../../logger.js";
 import {
@@ -23,6 +27,7 @@ import { type AttachmentStore, mediaTypeToExt } from "../../attachment-store.js"
 import type { InboundContent } from "../../content.js";
 import type { BufferedInboundEntry, PriorClosedConversation } from "../../store/index.js";
 import type { Adapter, StreamHandle, StreamingAdapter, StreamOpts } from "../../types.js";
+import { editResolvedBoundaryPrompt } from "./boundary-prompt-editor.js";
 import {
   handleClasses,
   handleCompartments,
@@ -1182,10 +1187,9 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   // events stream through the registry.
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const functions: any[] = [];
+  const { inngest, channelId } = deps;
   if (deps.codingProgress) {
-    const { inngest, codingStore, runInTx, transportStore, streamingRegistry } =
-      deps.codingProgress;
-    const channelId = deps.channelId;
+    const { codingStore, runInTx, transportStore, streamingRegistry } = deps.codingProgress;
     functions.push(
       inngest.createFunction(
         {
@@ -1230,8 +1234,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   // already returned with status=pending_approval; the keyboard tap routes
   // straight to transport.skills.approveDeploy/denyDeploy.
   if (deps.skillsApproval) {
-    const { inngest, skillStore, runInTx, transportStore } = deps.skillsApproval;
-    const channelId = deps.channelId;
+    const { skillStore, runInTx, transportStore } = deps.skillsApproval;
     functions.push(
       inngest.createFunction(
         {
@@ -1251,6 +1254,29 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       ),
     );
   }
+
+  // Boundary-prompt cleanup — listen on conversation/boundary/resolved and
+  // rewrite the "Resume / Start fresh" prompt to its outcome, clearing the
+  // keyboard. A button tap also drops the keyboard synchronously in its
+  // callback handler; this listener owns the text edit and is the only path
+  // that fires for a waiter-timeout resolution (no callback runs there).
+  // Always registered — every Telegram channel can fire the boundary prompt.
+  functions.push(
+    inngest.createFunction(
+      {
+        id: `telegram-boundary-resolved-${channelId}`,
+        triggers: [boundaryResolvedEvent],
+        retries: 0,
+      },
+      async ({ event }) =>
+        editResolvedBoundaryPrompt({
+          event: event.data,
+          channelId,
+          editMessageText: (chatId, messageId, text, opts) =>
+            bot.api.editMessageText(chatId, messageId, text, opts),
+        }),
+    ),
+  );
 
   return { adapter, functions };
 }
