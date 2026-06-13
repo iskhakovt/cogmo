@@ -4,6 +4,7 @@ import { pushSchema } from "drizzle-kit/api";
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import * as codingSchema from "../agent/coding/store/schema.js";
+import * as pipelineSchema from "../agent/pipeline/store/schema.js";
 import * as agentSchema from "../agent/store/schema.js";
 import { type Database, type Transactor, transactor } from "../db/index.js";
 import * as mcpSchema from "../mcp/store/schema.js";
@@ -19,6 +20,7 @@ const schema = {
   ...secretsSchema,
   ...sandboxSchema,
   ...codingSchema,
+  ...pipelineSchema,
   ...skillsSchema,
   ...mcpSchema,
   ...webSchema,

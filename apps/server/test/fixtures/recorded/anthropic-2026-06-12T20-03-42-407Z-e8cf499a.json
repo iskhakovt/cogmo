@@ -1,0 +1,25 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "After I approve the change, wait until the tests pass, then summarize the outcome for me.",
+        "model": "claude-sonnet-4-6",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "pipeline_definition",
+            "arguments": "{\"name\":\"approve-test-summarize\",\"trigger\":{\"kind\":\"command\",\"phrase\":\"approve the change\"},\"stages\":[{\"id\":\"approve-change\",\"kind\":\"gate\",\"instructions\":\"Wait for the user to approve the change before proceeding. Present the pending change for review and request explicit approval.\",\"gate\":{\"timeout\":\"3d\",\"onTimeout\":{\"kind\":\"remind\",\"maxReminders\":3,\"finalAction\":\"abort\"}}},{\"id\":\"wait-for-tests\",\"kind\":\"gate\",\"instructions\":\"Wait until the tests pass. Note: true event-based waiting (e.g. listening for a CI webhook) is not yet supported — instead, periodically check the test status and proceed only once all tests are confirmed passing. If tests are failing, surface the failure details for the user and hold until resolved.\",\"gate\":{\"timeout\":\"3h\",\"onTimeout\":{\"kind\":\"remind\",\"maxReminders\":3,\"finalAction\":\"abort\"}}},{\"id\":\"summarize-outcome\",\"kind\":\"agentic\",\"instructions\":\"Summarize the outcome for the user. Include: whether the change was approved, the final test results (pass/fail counts, any notable failures), and an overall status of whether the pipeline completed successfully.\"}]}",
+            "id": "toolu_01LnPjL4RjD8CVZPXccMikSe"
+          }
+        ]
+      },
+      "metadata": {
+        "systemHash": "cf73c5e5",
+        "toolsHash": "c2dc880f"
+      }
+    }
+  ]
+}

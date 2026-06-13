@@ -351,6 +351,13 @@
       "when": 1780610544752,
       "tag": "0049_sub_agents",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1781289510119,
+      "tag": "0050_pipeline_definitions",
+      "breakpoints": true
     }
   ]
 }

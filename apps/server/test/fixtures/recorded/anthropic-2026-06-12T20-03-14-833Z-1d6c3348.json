@@ -1,0 +1,25 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Keep refining the document with me until I'm happy, but at most 3 rounds.",
+        "model": "claude-sonnet-4-6",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "pipeline_definition",
+            "arguments": "{\"name\":\"collaborative-document-refinement\",\"trigger\":{\"kind\":\"command\",\"phrase\":\"start document refinement\"},\"stages\":[{\"id\":\"refine-document\",\"kind\":\"agentic\",\"instructions\":\"Work collaboratively with the user to refine the document. Review the current state of the document, apply any improvements or changes the user requests, and present the updated version for their review.\",\"tools\":[\"read_file\",\"write_file\",\"memory_recall\",\"memory_retain\"]},{\"id\":\"user-approval\",\"kind\":\"gate\",\"instructions\":\"Ask the user if they are happy with the current version of the document. If they are satisfied, approve to finish. If they have more changes, dismiss/reject to trigger another round of refinement.\",\"gate\":{\"timeout\":\"7d\",\"onTimeout\":{\"kind\":\"abort\"}},\"loop\":{\"backTo\":\"refine-document\",\"until\":\"The user is happy with the document and explicitly approves it.\",\"maxIterations\":3}}]}",
+            "id": "toolu_01HVAVSyUBnxg6UosrcAzkKc"
+          }
+        ]
+      },
+      "metadata": {
+        "systemHash": "cf73c5e5",
+        "toolsHash": "c2dc880f"
+      }
+    }
+  ]
+}
