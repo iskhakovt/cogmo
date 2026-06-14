@@ -211,7 +211,10 @@ describe("allocateWorktree output inside a task container (real Docker, runc)", 
           { workingDir: "/workspace", timeoutMs: 60_000, idleTimeoutMs: 30_000 },
         )
         .catch(() => {});
-      await sandbox.delete(session);
+      // Swallow teardown errors so a failure here can't replace an
+      // assertion error from the try block (afterAll force-removes any
+      // container this leaks).
+      await sandbox.delete(session).catch(() => {});
     }
   }, 120_000);
 });

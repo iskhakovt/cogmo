@@ -156,11 +156,20 @@ describe("teardownWorktree", () => {
     await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: bareRemote });
     writeFileSync(join(worktreePath, "feature.ts"), "export const foo = 1;\n");
     await execFileP("git", ["-C", worktreePath, "add", "."]);
+    // Identity is passed inline because the working tree is a standalone
+    // clone, which (unlike a linked worktree) inherits no user.name /
+    // user.email from the parent repo — every real committer (the
+    // in-container CLI, host-side teardown) supplies its own, and CI
+    // runners have no global git identity to fall back on.
     await execFileP("git", [
       "-C",
       worktreePath,
       "-c",
       "commit.gpgsign=false",
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=t",
       "commit",
       "-m",
       "feat: add foo",

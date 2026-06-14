@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   renameSync,
   rmSync,
   statSync,
@@ -59,6 +60,24 @@ async function headOf(path: string): Promise<string> {
 async function originUrlOf(path: string): Promise<string> {
   const { stdout } = await execFileP("git", ["-C", path, "remote", "get-url", "origin"]);
   return stdout.trim();
+}
+
+/**
+ * Recursively collect files under `dir` whose hard-link count exceeds 1.
+ * Native walk rather than `find -links +1` so the assertion isn't tied to a
+ * platform-specific `find`.
+ */
+function filesWithMultipleLinks(dir: string): string[] {
+  const hits: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      hits.push(...filesWithMultipleLinks(full));
+    } else if (entry.isFile() && statSync(full).nlink > 1) {
+      hits.push(full);
+    }
+  }
+  return hits;
 }
 
 describe("allocateWorktree", () => {
@@ -221,14 +240,7 @@ describe("allocateWorktree", () => {
     // Every object file in the clone must have link count 1 — a hardlinked
     // object would share an inode with the parent repo, letting an
     // in-container write corrupt host state.
-    const { stdout } = await execFileP("find", [
-      join(worktreePath, ".git", "objects"),
-      "-type",
-      "f",
-      "-links",
-      "+1",
-    ]);
-    expect(stdout.trim()).toBe("");
+    expect(filesWithMultipleLinks(join(worktreePath, ".git", "objects"))).toEqual([]);
     await removeWorktree(repoPath, worktreePath);
   });
 });

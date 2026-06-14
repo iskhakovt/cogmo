@@ -1,6 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
-import { mkdir, rename, rm } from "node:fs/promises";
+import { mkdir, rename, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { logger } from "../../logger.js";
@@ -70,28 +69,27 @@ export async function allocateWorktree(
   const { repoPath, branch, worktreePath, remoteUrl } = params;
   await mkdir(dirname(worktreePath), { recursive: true });
 
-  if (existsSync(worktreePath)) {
-    if (isStandaloneClone(worktreePath)) {
-      const head = await currentBranch(worktreePath);
-      if (head === branch) {
-        log.info({ worktreePath, branch }, "adopting existing clone");
-        return { adopted: true };
-      }
-      throw new Error(
-        `worktree path ${worktreePath} exists with branch ${head ?? "<detached>"}, expected ${branch}`,
-      );
+  const existing = await classifyPath(worktreePath);
+  if (existing === "clone") {
+    const head = await currentBranch(worktreePath);
+    if (head === branch) {
+      log.info({ worktreePath, branch }, "adopting existing clone");
+      return { adopted: true };
     }
-    if (isLinkedWorktree(worktreePath)) {
-      // A linked worktree at this path predates the clone-based
-      // materialization and is unusable in the container — replace it.
-      log.warn({ worktreePath, branch }, "replacing legacy linked worktree with standalone clone");
-      await rm(worktreePath, { recursive: true, force: true });
-      await pruneWorktreeMetadata(repoPath, worktreePath);
-    } else {
-      throw new Error(
-        `worktree path ${worktreePath} exists but is not a git working tree — refusing to overwrite`,
-      );
-    }
+    throw new Error(
+      `worktree path ${worktreePath} exists with branch ${head ?? "<detached>"}, expected ${branch}`,
+    );
+  }
+  if (existing === "linked") {
+    // A linked worktree at this path predates the clone-based
+    // materialization and is unusable in the container — replace it.
+    log.warn({ worktreePath, branch }, "replacing legacy linked worktree with standalone clone");
+    await rm(worktreePath, { recursive: true, force: true });
+    await pruneWorktreeMetadata(repoPath, worktreePath);
+  } else if (existing === "non-git") {
+    throw new Error(
+      `worktree path ${worktreePath} exists but is not a git working tree — refusing to overwrite`,
+    );
   }
 
   const staging = stagingPathFor(worktreePath);
@@ -131,22 +129,32 @@ function stagingPathFor(worktreePath: string): string {
   return `${worktreePath}.partial`;
 }
 
-/** A standalone clone keeps its gitdir as a `.git` DIRECTORY inside the tree. */
-function isStandaloneClone(path: string): boolean {
-  return isGitEntryDirectory(path) === true;
-}
+type PathClass =
+  /** Nothing at the path — fresh clone. */
+  | "absent"
+  /** `.git` is a directory — a standalone clone (adopt or wrong-branch). */
+  | "clone"
+  /** `.git` is a file — a legacy linked worktree, unusable in-container. */
+  | "linked"
+  /** Path exists but holds no `.git` — refuse to overwrite. */
+  | "non-git";
 
-/** A linked worktree's `.git` is a FILE pointing at a gitdir in the parent repo. */
-function isLinkedWorktree(path: string): boolean {
-  return isGitEntryDirectory(path) === false;
-}
-
-/** True = `.git` is a directory, false = a file, null = absent. */
-function isGitEntryDirectory(path: string): boolean | null {
+/**
+ * Classify what (if anything) occupies `worktreePath`. Async `stat` rather
+ * than the sync variants so a concurrent allocation doesn't block the event
+ * loop. One stat on the path, one on its `.git`.
+ */
+async function classifyPath(worktreePath: string): Promise<PathClass> {
   try {
-    return statSync(join(path, ".git")).isDirectory();
+    await stat(worktreePath);
   } catch {
-    return null;
+    return "absent";
+  }
+  try {
+    const gitEntry = await stat(join(worktreePath, ".git"));
+    return gitEntry.isDirectory() ? "clone" : "linked";
+  } catch {
+    return "non-git";
   }
 }
 
