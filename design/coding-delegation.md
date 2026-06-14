@@ -434,7 +434,7 @@ Push + PR:
   gh pr create --title "..." --body "<plan summary + test results>"
         │
         ▼
-Telegram: "Task done. Draft PR: <url>. Review from GitHub mobile when ready."
+Telegram: "Task done. PR: <url>. Review from GitHub mobile when ready."
 ```
 
 Failure at any stage: `status = 'failed'`, reason written, sandbox torn down, user notified with a link to the partial worktree for manual inspection.
