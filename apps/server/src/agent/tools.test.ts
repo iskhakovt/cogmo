@@ -278,7 +278,12 @@ describe("createDefaultTools", () => {
     expect(parsed.iso).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     expect(parsed.dayOfWeek).toBeTruthy();
     expect(parsed.timezone).toBe("UTC");
-    expect(parsed.utcOffset).toBe("UTC+0");
+    // Assert the offset *shape*, not the exact string: ICU renders the zero
+    // offset as "UTC"/"UTC+0" depending on the bundled CLDR version, so a
+    // hardcoded value is host-dependent (passes in CI, fails on other ICU
+    // builds). The contract is "a UTC-relative offset", which this matches
+    // for "UTC", "UTC+0", "UTC-5", "UTC+5:30", etc.
+    expect(parsed.utcOffset).toMatch(/^UTC([+-]\d{1,2}(:\d{2})?)?$/);
     expect(parsed.date).toMatch(/\w+, \w+ \d+, \d{4}/);
     expect(parsed.time).toMatch(/^\d{2}:\d{2}$/);
   });
