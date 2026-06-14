@@ -773,7 +773,7 @@ describe("runCodingTask", () => {
   });
 
   it("worktree allocation failure → status=failed", async () => {
-    // Repo with a non-existent local path so `git worktree add` errors out.
+    // Repo with a non-existent local path so the clone errors out.
     const badRepo = await tx((trx) =>
       store.insertRepo(trx, {
         name: "bad-path-repo",

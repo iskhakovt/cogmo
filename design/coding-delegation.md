@@ -182,7 +182,9 @@ Wiring this into `DefaultPromptSource` is P2 — P1 prompts are hardcoded templa
 
 ## Task Model `[confirmed]` (slice 1 — `coding_repos` + `coding_tasks` with the slice-1 column set; `conversation_id` added to track triggering conversation)
 
-**One coding task = one git worktree + one branch + one CLI session + one draft PR.** The task container from [sandbox.md](sandbox.md) is the execution environment; the worktree lives inside it (mounted from the host's worktree path).
+**One coding task = one working tree + one branch + one CLI session + one draft PR.** The task container from [sandbox.md](sandbox.md) is the execution environment; the working tree lives inside it (mounted from the host's worktree path). On bind-mount backends the tree is a **standalone clone** of the registered parent repo (`git clone --no-hardlinks`, `origin` set to `remote_url`), never a linked `git worktree`: a linked worktree's `.git` is a file pointing at an absolute gitdir inside the parent repo, which doesn't exist in the container once the tree is mounted at `/workspace` — and mounting the parent `.git` read-write would hand the sandbox write access to config/hooks that host-side git later executes. The self-contained clone is the same shape the Daytona backend gets from cloning inside the sandbox.
+
+> **In-container ownership assumption (tracked follow-up).** In-container git over the bind-mounted clone assumes the container CLI user's uid matches the host worktree-owner uid; otherwise git's CVE-2022-24765 dubious-ownership check fires on the first command (`git status --porcelain` in `runCommitAndPush`). This holds today via sysbox id-mapped mounts plus the `vscode(1000) == cogmo(1000)` contract, so nothing sets `safe.directory` in production — but a `runc` deployment with mismatched uids would break it untested. The `worktree-in-container` integration test sets `safe.directory=/workspace` to scope itself to gitdir resolution, so it does not exercise this path. Hardening (a universal in-container `safe.directory`, a `chown` at create time, or a mismatched-uid test) is tracked as a `p2` in `todo.md`.
 
 ```sql
 -- Enumerated types (Drizzle pgEnum in the store schema)
@@ -287,11 +289,11 @@ Teardown policy keyed on worktree state:
 
 | State at teardown | Action |
 |-|-|
-| Clean, branch pushed, draft PR open | `git worktree remove` — remote is authoritative |
+| Clean, branch pushed, draft PR open | remove the clone — remote is authoritative |
 | Dirty (uncommitted edits or unpushed commits) | Stage all, commit as `wip: <task-id>` on the task branch, push as `refs/cogmo-wip/<task-id>`, then remove |
 | Failed before first commit with no remote yet (new repo bootstrap) | Fall back: tar under `~/.cogmo/archives/<task-id>.tar.zst` with 14-day TTL; only case that keeps a local dump |
 
-Resume after full teardown replays this in reverse: `git worktree add <path> <branch>` (or the `refs/cogmo-wip/<id>` ref), cache volumes rewarm automatically, `--resume <session_id>` rehydrates the CLI. Costs a few extra seconds vs resume-within-TTL, which keeps the worktree live.
+Resume after full teardown replays this in reverse: re-materialize the clone on `<branch>` (or fetch the `refs/cogmo-wip/<id>` ref), cache volumes rewarm automatically, `--resume <session_id>` rehydrates the CLI. Costs a few extra seconds vs resume-within-TTL, which keeps the worktree live.
 
 **`refs/cogmo-wip/<task-id>` retention.** These refs are append-only on the remote and accumulate if nothing prunes them. **P1: weekly cron** — prunes any WIP ref whose `coding_tasks` row is terminal and older than 30 days. Sufficient for personal scale; the refs live under `refs/cogmo-wip/` and don't clutter the branches list, so 30-day retention is low-pressure. Per-repo GitHub webhooks for minute-level cleanup on PR merge/close are a P3 optional — useful if hygiene becomes annoying, not worth the setup friction per registered repo at P1.
 
@@ -401,7 +403,7 @@ Cogmo orchestrator
   1. Resolve repo (keyword match or ask)
   2. Insert coding_tasks row, status='queued'
   3. Allocate working tree per `sandbox.capabilities.workingTreeTransport`:
-     - bind-mount: git worktree add <path> -b cogmo/<id-short>
+     - bind-mount: git clone --no-hardlinks <repo> <path> && git checkout -B cogmo/<id-short>
      - git-remote: pushTaskBranchToRemote pushes default-branch tip to cogmo/run/<task-id>
   4. sandbox.create({worktree, ...}) → task container up; askpass mounted (Local-Docker) or uploaded (Daytona)
         │
@@ -443,7 +445,7 @@ Same pattern as `handle-message` ([crash-recovery.md](crash-recovery.md)) — du
 
 | Step | Kind | Notes |
 |-|-|-|
-| `allocate-worktree` | `step.run` | Branches on `sandbox.capabilities.workingTreeTransport`. **bind-mount:** idempotent host worktree reconcile — `git -C <path> rev-parse --is-inside-work-tree` adoption check, `git worktree add` with the branch already present, or `git worktree add -b`. **git-remote:** persists `{type:"git-remote", branch:"cogmo/<idShort>"}`, calls `pushTaskBranchToRemote` (`src/agent/coding/git-as-transport.ts`) which fetches `origin/<defaultBranch>` and force-pushes it to `cogmo/run/<task-id>` on the remote under one askpass helper. Identity is loaded inline from the secrets table — NOT inside `step.run` — so the PAT + SSH key never become a step return value. |
+| `allocate-worktree` | `step.run` | Branches on `sandbox.capabilities.workingTreeTransport`. **bind-mount:** idempotent host reconcile of a standalone clone — adopt when a clone already sits at the path on the right branch; otherwise stage `git clone --no-hardlinks` + `git checkout -B <branch>` + `git remote set-url origin <remote_url>` into `<path>.partial` and atomically rename into place (a legacy linked worktree found at the path is removed and re-materialized). **git-remote:** persists `{type:"git-remote", branch:"cogmo/<idShort>"}`, calls `pushTaskBranchToRemote` (`src/agent/coding/git-as-transport.ts`) which fetches `origin/<defaultBranch>` and force-pushes it to `cogmo/run/<task-id>` on the remote under one askpass helper. Identity is loaded inline from the secrets table — NOT inside `step.run` — so the PAT + SSH key never become a step return value. |
 | `create-container` | `step.run` | Returns just `sessionState` (the discriminated `SandboxSessionState` blob). `sandbox.create()` builds the right `WorktreeSpec` variant via `buildWorktreeSpec`: bind-mount → `host-path` pointing at the host worktree; git-remote → `git-remote` pointing at `cogmo/run/<task-id>` with HTTPS basic-auth (`x-access-token`:`<pat>`). The Daytona SDK's `sandbox.git.clone()` materializes the run-branch inside the sandbox. Auth resolution happens INSIDE the step body — the PAT is consumed by `buildWorktreeSpec` and never returned, so Inngest doesn't persist it. |
 | *plan streaming* | non-durable | Spawns `claude -p --permission-mode plan`, streams JSONL to Telegram. Not wrapped in `step.run` — can't replay a stream. On retry, re-invoked with `--resume <sid>` so it continues the same session instead of replanning from scratch |
 | `persist-container-id` | `step.run` (local-docker only) | Stamps `coding_tasks.container_id` with the local-Docker FK target. Skipped on managed backends (column stays null; lineage carried by sandbox-side task-id labels). Split out of `create-container` so a DB-write failure doesn't lose the container — `containerCreated` flag is set OUTSIDE the create step (Inngest replay safety) and the catch path's `deleteByTaskId` reaps via the task-id label regardless of whether the FK row was inserted. |
@@ -460,7 +462,7 @@ Same pattern as `handle-message` ([crash-recovery.md](crash-recovery.md)) — du
 | `create-pr` | `step.run` | `octokit.pulls.create({draft:true})` via slice 4.0g. Captured into `coding_tasks.pr_metadata` (atomic JSONB blob). Idempotent: 422 "already exists" surfaces as `validation_failed` with the existing PR's number in the message. |
 | `fetch-feature-branch` | `step.run` (git-remote only) | After PR open, host-side `fetchFeatureBranch` updates `refs/remotes/origin/cogmo/<idShort>` in the local mirror so the host's commit graph reflects the sandbox's push. Best-effort — origin is the source of truth. Skipped on bind-mount (the host worktree IS the source of truth). |
 | `emit-task-failed` | `step.run` | On any failure path in plan / execute / verify, emits `coding/task/failed` so cleanup subscribers (run-branch deletion, future telemetry) hook in without polling the row. |
-| `teardown-worktree` | `step.run` (host-path assignments only) | `safeTeardownWorktree` runs `git worktree remove` on clean, `git add -A && commit && force-push HEAD:refs/cogmo-wip/<task-id>` on dirty/unpushed. git-remote assignments have no host worktree — the helper early-returns. |
+| `teardown-worktree` | `step.run` (host-path assignments only) | `safeTeardownWorktree` removes the clone on clean, `git add -A && commit && force-push HEAD:refs/cogmo-wip/<task-id>` on dirty/unpushed. git-remote assignments have no host worktree — the helper early-returns. |
 | `teardown` | `try/finally` | `sandbox.deleteByTaskId(taskId)` cascades sandbox kill + clears the per-task askpass dir (slice 4.0d). Runs whether the orchestrator path succeeded or threw. The catch-path catch always calls `deleteByTaskId` when `containerCreated` is true — flag is set OUTSIDE the create step body so it survives Inngest replay. |
 
 **Slice 4.0h orchestrator function.** The verify → push → PR sequence runs in its own Inngest function (`coding-task-verify`), triggered by `coding/task/cli-done` which the execute orchestrator emits after the durable `pending_verify` transition. The hand-off pattern keeps each function's retry policy independent and lets the execute container be torn down cleanly before verify spins up a fresh one with the askpass mount bound. Fires `coding/task/verify-complete`, `coding/task/pushed`, and `coding/task/pr-opened` events for observability + Telegram delivery.

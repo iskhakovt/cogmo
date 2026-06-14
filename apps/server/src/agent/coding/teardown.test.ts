@@ -86,27 +86,23 @@ describe("teardownWorktree", () => {
     expect(result.kind).toBe("no_worktree");
   });
 
-  it("prunes stale `.git/worktrees/<name>` metadata when the worktree dir is gone", async () => {
-    // Models a host crash mid-teardown: the worktree directory was deleted
-    // (or never created on disk) but the parent repo still tracks it under
-    // `.git/worktrees/<name>`. Without a `git worktree prune`, a later
-    // `allocateWorktree` at the same path fails with "already registered".
+  it("leaves the path re-allocatable when the working tree dir is gone", async () => {
+    // Models a host crash mid-teardown: the working tree was deleted out
+    // of band. Teardown reports no_worktree and a later allocation at the
+    // same path succeeds.
     const taskId = uniqueTaskId();
     const branch = uniqueBranch(taskId);
     const worktreePath = uniqueWorktreePath();
-    await allocateWorktree({ repoPath, branch, worktreePath });
-    // Delete the worktree dir directly without notifying git.
+    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: bareRemote });
+    // Delete the working tree directly without notifying teardown.
     rmSync(worktreePath, { recursive: true, force: true });
 
     const result = await teardownWorktree({ repoPath, worktreePath, branch, taskId });
     expect(result.kind).toBe("no_worktree");
 
-    // Stale metadata should be pruned — re-allocating at the same path
-    // succeeds (would fail with "already registered" if the prune was
-    // skipped). Use a different branch since the prior one still exists.
     const newBranch = uniqueBranch(uniqueTaskId());
     await expect(
-      allocateWorktree({ repoPath, branch: newBranch, worktreePath }),
+      allocateWorktree({ repoPath, branch: newBranch, worktreePath, remoteUrl: bareRemote }),
     ).resolves.toBeDefined();
   });
 
@@ -114,11 +110,12 @@ describe("teardownWorktree", () => {
     const taskId = uniqueTaskId();
     const branch = uniqueBranch(taskId);
     const worktreePath = uniqueWorktreePath();
-    await allocateWorktree({ repoPath, branch, worktreePath });
-    // Push the branch so HEAD matches origin/<branch> — this is the
-    // "clean, pushed" terminal state we expect on happy paths.
-    await execFileP("git", ["-C", repoPath, "push", "origin", branch]);
-    await execFileP("git", ["-C", worktreePath, "fetch", "origin", branch]);
+    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: bareRemote });
+    // Push the branch from the clone so HEAD matches origin/<branch> —
+    // this is the "clean, pushed" terminal state we expect on happy
+    // paths. The push also updates the clone's remote-tracking ref,
+    // which is what `hasUnpushedCommits` reads.
+    await execFileP("git", ["-C", worktreePath, "push", "origin", branch]);
 
     const result = await teardownWorktree({
       repoPath,
@@ -135,7 +132,7 @@ describe("teardownWorktree", () => {
     const taskId = uniqueTaskId();
     const branch = uniqueBranch(taskId);
     const worktreePath = uniqueWorktreePath();
-    await allocateWorktree({ repoPath, branch, worktreePath });
+    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: bareRemote });
     writeFileSync(join(worktreePath, "in-progress.ts"), "// claude was here\n");
 
     const result = await teardownWorktree({
@@ -156,14 +153,23 @@ describe("teardownWorktree", () => {
     const taskId = uniqueTaskId();
     const branch = uniqueBranch(taskId);
     const worktreePath = uniqueWorktreePath();
-    await allocateWorktree({ repoPath, branch, worktreePath });
+    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: bareRemote });
     writeFileSync(join(worktreePath, "feature.ts"), "export const foo = 1;\n");
     await execFileP("git", ["-C", worktreePath, "add", "."]);
+    // Identity is passed inline because the working tree is a standalone
+    // clone, which (unlike a linked worktree) inherits no user.name /
+    // user.email from the parent repo — every real committer (the
+    // in-container CLI, host-side teardown) supplies its own, and CI
+    // runners have no global git identity to fall back on.
     await execFileP("git", [
       "-C",
       worktreePath,
       "-c",
       "commit.gpgsign=false",
+      "-c",
+      "user.email=t@t",
+      "-c",
+      "user.name=t",
       "commit",
       "-m",
       "feat: add foo",
@@ -185,7 +191,7 @@ describe("teardownWorktree", () => {
     const taskId = uniqueTaskId();
     const branch = uniqueBranch(taskId);
     const worktreePath = uniqueWorktreePath();
-    await allocateWorktree({ repoPath, branch, worktreePath });
+    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: bareRemote });
     writeFileSync(join(worktreePath, "in-progress.ts"), "// claude was here\n");
 
     const result = await teardownWorktree({
@@ -206,7 +212,7 @@ describe("teardownWorktree", () => {
     const taskId = uniqueTaskId();
     const branch = uniqueBranch(taskId);
     const worktreePath = uniqueWorktreePath();
-    await allocateWorktree({ repoPath, branch, worktreePath });
+    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: bareRemote });
     writeFileSync(join(worktreePath, "in-progress.ts"), "// claude was here\n");
     // Point the worktree's origin at a nonexistent path so push fails fast.
     await execFileP("git", [
@@ -233,9 +239,8 @@ describe("teardownWorktree", () => {
     const taskId = uniqueTaskId();
     const branch = uniqueBranch(taskId);
     const worktreePath = uniqueWorktreePath();
-    await allocateWorktree({ repoPath, branch, worktreePath });
-    await execFileP("git", ["-C", repoPath, "push", "origin", branch]);
-    await execFileP("git", ["-C", worktreePath, "fetch", "origin", branch]);
+    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: bareRemote });
+    await execFileP("git", ["-C", worktreePath, "push", "origin", branch]);
 
     const first = await teardownWorktree({ repoPath, worktreePath, branch, taskId });
     expect(first.kind).toBe("removed_clean");
@@ -252,7 +257,7 @@ describe("teardownWorktree", () => {
     const taskId = uniqueTaskId();
     const branch = uniqueBranch(taskId);
     const worktreePath = uniqueWorktreePath();
-    await allocateWorktree({ repoPath, branch, worktreePath });
+    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: bareRemote });
     writeFileSync(join(worktreePath, "in-progress.ts"), "// first\n");
 
     const first = await teardownWorktree({
@@ -265,7 +270,7 @@ describe("teardownWorktree", () => {
     expect(first.kind).toBe("wip_pushed_and_removed");
 
     // Re-allocate at the same path, dirty again, re-teardown.
-    await allocateWorktree({ repoPath, branch, worktreePath });
+    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: bareRemote });
     writeFileSync(join(worktreePath, "in-progress.ts"), "// second\n");
     const second = await teardownWorktree({
       repoPath,

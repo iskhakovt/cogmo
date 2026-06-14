@@ -267,6 +267,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
           repoPath: repo.localPath,
           branch: assignment.branch,
           worktreePath: assignment.worktreePath,
+          remoteUrl: repo.remoteUrl,
         });
       } else {
         // git-remote: no host worktree. The orchestrator force-pushes the

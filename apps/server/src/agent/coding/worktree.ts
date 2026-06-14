@@ -1,7 +1,6 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
+import { mkdir, rename, rm, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { logger } from "../../logger.js";
 
@@ -13,97 +12,156 @@ export interface AllocateWorktreeParams {
   repoPath: string;
   /** Branch name to create or check out (e.g. `cogmo/abc123de`). */
   branch: string;
-  /** Host filesystem path where the worktree should live. */
+  /** Host filesystem path where the working tree should live. */
   worktreePath: string;
+  /**
+   * Remote URL (`coding_repos.remote_url`) installed as `origin` on the
+   * materialized clone. In-container `git push origin <branch>` and the
+   * host-side WIP teardown both resolve `origin` from the clone's own
+   * config, so it must point at the real remote, not at `repoPath`.
+   */
+  remoteUrl: string;
 }
 
 export interface AllocateWorktreeResult {
-  /** True if we adopted an existing worktree on the right branch (crash-recovery happy path). */
+  /** True if we adopted an existing clone on the right branch (crash-recovery happy path). */
   adopted: boolean;
 }
 
 /**
+ * Materialize the task's working tree as a STANDALONE clone of the parent
+ * repo — never a linked `git worktree`. A linked worktree's `.git` is a
+ * file pointing at an absolute gitdir inside the parent repo; bind-mounted
+ * at `/workspace` in the task container (where the parent repo doesn't
+ * exist) every git command dies with "not a git repository". A standalone
+ * clone carries its whole `.git` directory inside the tree, so it works at
+ * any mount path — the same shape the Daytona backend gets from cloning
+ * inside the sandbox.
+ *
+ * Mounting the parent repo's `.git` into the container instead would fix
+ * the path but hand the sandboxed task write access to state that
+ * host-side git (teardown, prune) later executes — config and hooks — so
+ * the clone is also the isolation-preserving choice.
+ *
+ * `--no-hardlinks` keeps the isolation story complete: a default local
+ * clone hardlinks object files, sharing inodes with the parent repo, and
+ * an in-container write through a shared inode would corrupt the host's
+ * objects.
+ *
  * Idempotent reconcile per design/coding-delegation.md → "Inngest step
  * boundaries → allocate-worktree". Three cases:
  *
- *   1. Worktree path already exists, is a git worktree, HEAD = `branch` →
- *      adopt and return. (Inngest crash between `worktree add` and the DB
- *      update; the worktree is already there.)
- *   2. Branch already exists in the parent repo but no worktree at the
- *      target path → `git worktree add <path> <branch>` (re-attach).
- *   3. Neither → `git worktree add -b <branch> <path>` (fresh).
+ *   1. A standalone clone already exists at the path with HEAD = `branch`
+ *      → adopt and return. (Inngest crash between materialization and the
+ *      DB update; the clone is already there.)
+ *   2. A legacy linked worktree exists at the path (its `.git` is a file)
+ *      → remove it and re-materialize as a clone. Linked worktrees never
+ *      worked in the container, so there's nothing in one worth keeping.
+ *   3. Nothing at the path → fresh clone.
  *
- * The first case is what makes the step safe to retry. Without it the raw
- * `git worktree add` would error on "path already exists" and the retry
- * would fail forever.
+ * Materialization stages into `<path>.partial` and finishes with an atomic
+ * rename, so a crash mid-clone never leaves a half-built tree at the final
+ * path — retries either adopt a complete clone or start over.
  */
 export async function allocateWorktree(
   params: AllocateWorktreeParams,
 ): Promise<AllocateWorktreeResult> {
-  const { repoPath, branch, worktreePath } = params;
+  const { repoPath, branch, worktreePath, remoteUrl } = params;
   await mkdir(dirname(worktreePath), { recursive: true });
 
-  // Case 1: adopt an existing worktree on the right branch.
-  if (existsSync(worktreePath)) {
-    const isWorktree = await isInsideWorkTree(worktreePath);
-    if (isWorktree) {
-      const head = await currentBranch(worktreePath);
-      if (head === branch) {
-        log.info({ worktreePath, branch }, "adopting existing worktree");
-        return { adopted: true };
-      }
-      throw new Error(
-        `worktree path ${worktreePath} exists with branch ${head ?? "<detached>"}, expected ${branch}`,
-      );
+  const existing = await classifyPath(worktreePath);
+  if (existing === "clone") {
+    const head = await currentBranch(worktreePath);
+    if (head === branch) {
+      log.info({ worktreePath, branch }, "adopting existing clone");
+      return { adopted: true };
     }
     throw new Error(
-      `worktree path ${worktreePath} exists but is not a git worktree — refusing to overwrite`,
+      `worktree path ${worktreePath} exists with branch ${head ?? "<detached>"}, expected ${branch}`,
+    );
+  }
+  if (existing === "linked") {
+    // A linked worktree at this path predates the clone-based
+    // materialization and is unusable in the container — replace it.
+    log.warn({ worktreePath, branch }, "replacing legacy linked worktree with standalone clone");
+    await rm(worktreePath, { recursive: true, force: true });
+    await pruneWorktreeMetadata(repoPath, worktreePath);
+  } else if (existing === "non-git") {
+    throw new Error(
+      `worktree path ${worktreePath} exists but is not a git working tree — refusing to overwrite`,
     );
   }
 
-  // Case 2 vs 3: branch may already exist in the parent repo (from a prior
-  // crashed attempt). `git worktree add <path> <branch>` re-attaches; with
-  // `-b` the same call would fail because the branch is taken. Resolve by
-  // probing first.
-  const branchExists = await refExists(repoPath, `refs/heads/${branch}`);
-  const args = branchExists
-    ? ["worktree", "add", worktreePath, branch]
-    : ["worktree", "add", "-b", branch, worktreePath];
-  log.info({ worktreePath, branch, branchExists }, "creating worktree");
-  await git(repoPath, args);
+  const staging = stagingPathFor(worktreePath);
+  await rm(staging, { recursive: true, force: true });
+  log.info({ worktreePath, branch }, "materializing standalone clone");
+  await execFileP("git", ["clone", "--no-hardlinks", repoPath, staging]);
+  // `-B` rather than `-b`: the parent repo may carry this branch from a
+  // crashed prior attempt (it gets copied into the clone's refs), and the
+  // task always starts from the parent's HEAD tip anyway.
+  await git(staging, ["checkout", "-B", branch]);
+  await git(staging, ["remote", "set-url", "origin", remoteUrl]);
+  await rename(staging, worktreePath);
   return { adopted: false };
 }
 
 /**
- * Remove a worktree (best effort — used in teardown). `--force` covers
- * dirty worktrees that the supervisor decided not to preserve.
+ * Remove a task working tree (best effort — used in teardown). The clone
+ * is fully self-contained, so removal is a plain recursive delete of the
+ * tree plus any staging directory a crashed allocation left behind.
  *
- * When the worktree directory is already gone but git still tracks it in
- * `.git/worktrees/<name>` (typical after a container crash that wiped the
- * mount), `worktree remove` fails with "worktree is locked" or "worktree
- * is missing" — `worktree prune` cleans up the stale metadata instead.
- * Without this, a later `allocateWorktree` at the same path would fail.
+ * The parent repo can still hold `worktrees/<name>` metadata from the
+ * legacy linked-worktree era; `git worktree prune` clears it so a later
+ * `allocateWorktree` at the same path isn't blocked by a stale
+ * registration. No-op on repos with no worktree metadata.
  */
 export async function removeWorktree(repoPath: string, worktreePath: string): Promise<void> {
-  if (!existsSync(worktreePath)) {
-    // Path is gone — fall back to prune to clear any stale metadata.
-    await git(repoPath, ["worktree", "prune"]).catch((err) => {
-      log.warn({ err: (err as Error).message, worktreePath }, "git worktree prune failed");
-    });
-    return;
-  }
-  await git(repoPath, ["worktree", "remove", "--force", worktreePath]).catch((err) => {
-    log.warn({ err: (err as Error).message, worktreePath }, "git worktree remove failed");
+  await rm(worktreePath, { recursive: true, force: true }).catch((err) => {
+    log.warn({ err: (err as Error).message, worktreePath }, "failed to remove working tree");
   });
+  await rm(stagingPathFor(worktreePath), { recursive: true, force: true }).catch((err) => {
+    log.warn({ err: (err as Error).message, worktreePath }, "failed to remove staging dir");
+  });
+  await pruneWorktreeMetadata(repoPath, worktreePath);
 }
 
-async function isInsideWorkTree(path: string): Promise<boolean> {
+function stagingPathFor(worktreePath: string): string {
+  return `${worktreePath}.partial`;
+}
+
+type PathClass =
+  /** Nothing at the path — fresh clone. */
+  | "absent"
+  /** `.git` is a directory — a standalone clone (adopt or wrong-branch). */
+  | "clone"
+  /** `.git` is a file — a legacy linked worktree, unusable in-container. */
+  | "linked"
+  /** Path exists but holds no `.git` — refuse to overwrite. */
+  | "non-git";
+
+/**
+ * Classify what (if anything) occupies `worktreePath`. Async `stat` rather
+ * than the sync variants so a concurrent allocation doesn't block the event
+ * loop. One stat on the path, one on its `.git`.
+ */
+async function classifyPath(worktreePath: string): Promise<PathClass> {
   try {
-    const { stdout } = await execFileP("git", ["-C", path, "rev-parse", "--is-inside-work-tree"]);
-    return stdout.trim() === "true";
+    await stat(worktreePath);
   } catch {
-    return false;
+    return "absent";
   }
+  try {
+    const gitEntry = await stat(join(worktreePath, ".git"));
+    return gitEntry.isDirectory() ? "clone" : "linked";
+  } catch {
+    return "non-git";
+  }
+}
+
+async function pruneWorktreeMetadata(repoPath: string, worktreePath: string): Promise<void> {
+  await git(repoPath, ["worktree", "prune"]).catch((err) => {
+    log.warn({ err: (err as Error).message, worktreePath }, "git worktree prune failed");
+  });
 }
 
 async function currentBranch(path: string): Promise<string | null> {
@@ -113,15 +171,6 @@ async function currentBranch(path: string): Promise<string | null> {
     return ref === "HEAD" ? null : ref;
   } catch {
     return null;
-  }
-}
-
-async function refExists(repoPath: string, ref: string): Promise<boolean> {
-  try {
-    await execFileP("git", ["-C", repoPath, "rev-parse", "--verify", "--quiet", ref]);
-    return true;
-  } catch {
-    return false;
   }
 }
 
