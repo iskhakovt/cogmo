@@ -1,5 +1,5 @@
 {
-  "id": "d87b82ba-27b9-4dbe-a8be-586a7369adde",
+  "id": "62f11abf-a0b1-431f-b564-56ce03fbef91",
   "prevId": "06e91efa-7110-4912-8a26-0b79172be590",
   "version": "7",
   "dialect": "postgresql",
@@ -241,6 +241,15 @@
           "onDelete": "no action",
           "onUpdate": "no action"
         },
+        "coding_tasks_conversation_id_conversations_id_fk": {
+          "name": "coding_tasks_conversation_id_conversations_id_fk",
+          "tableFrom": "coding_tasks",
+          "tableTo": "conversations",
+          "columnsFrom": ["conversation_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
         "coding_tasks_container_id_containers_id_fk": {
           "name": "coding_tasks_container_id_containers_id_fk",
           "tableFrom": "coding_tasks",
@@ -449,6 +458,15 @@
           "tableFrom": "pipeline_runs",
           "tableTo": "pipeline_definitions",
           "columnsFrom": ["definition_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "pipeline_runs_conversation_id_conversations_id_fk": {
+          "name": "pipeline_runs_conversation_id_conversations_id_fk",
+          "tableFrom": "pipeline_runs",
+          "tableTo": "conversations",
+          "columnsFrom": ["conversation_id"],
           "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"

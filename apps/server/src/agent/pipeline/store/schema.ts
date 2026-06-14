@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import { boolean, integer, pgEnum, pgTable, text, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { jsonbZod, pk, ts } from "../../../db/helpers.js";
-import { users } from "../../store/schema.js";
+import { conversations, users } from "../../store/schema.js";
 import { StageOutputsSchema } from "../run-types.js";
 import { PipelineDefinitionSchema } from "../types.js";
 
@@ -64,11 +64,12 @@ export const pipelineRuns = pgTable("pipeline_runs", {
   definitionId: uuid("definition_id")
     .notNull()
     .references(() => pipelineDefinitions.id),
-  // The run's own conversation — gates and progress land here. Informational
-  // link, not an FK: a run's history outlives its conversation, and the
-  // conversation lives in the agent store with an independent lifecycle (same
-  // choice as `coding_tasks.conversation_id`).
-  conversationId: uuid("conversation_id").notNull(),
+  // The run's own conversation — gates and progress land here. A run always
+  // owns one (NOT NULL), created at run start; same agent-store module, so a
+  // real FK gives referential integrity for free.
+  conversationId: uuid("conversation_id")
+    .notNull()
+    .references(() => conversations.id),
   status: pipelineRunStatus("status").notNull(),
   // Stage id from the pinned definition the run currently sits on.
   currentStage: text("current_stage").notNull(),

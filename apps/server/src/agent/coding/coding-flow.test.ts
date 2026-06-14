@@ -21,6 +21,7 @@ import {
 } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { createTransport } from "../../transport/transport.js";
+import { DrizzleAgentStore } from "../store/index.js";
 import type { CodingBackend, CodingEvent } from "./backend.js";
 import {
   type ExecuteStreamHandle,
@@ -44,6 +45,7 @@ let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleCodingStore;
 let sandboxStore: DrizzleSandboxStore;
+let agentStore: DrizzleAgentStore;
 let baseDir: string;
 let repoPath: string;
 let instanceId: string;
@@ -52,6 +54,7 @@ beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
   store = new DrizzleCodingStore();
   sandboxStore = new DrizzleSandboxStore();
+  agentStore = new DrizzleAgentStore();
 
   baseDir = mkdtempSync(join(tmpdir(), "cogmo-flow-test-"));
   repoPath = join(baseDir, "repo");
@@ -68,6 +71,24 @@ beforeEach(async () => {
   await truncateAll(db);
   instanceId = (await tx((trx) => sandboxStore.insertInstance(trx, { host: "test", pid: 1 }))).id;
 });
+
+/** Real conversation (user → profile → conversation) for the task FK. */
+async function seedConversation(): Promise<string> {
+  const user = await tx((trx) => agentStore.createUser(trx));
+  const profile = await tx((trx) =>
+    agentStore.createProfile(trx, {
+      userId: user.id,
+      name: "default",
+      basePrompt: "p",
+      model: "test-model",
+      toolSet: [],
+    }),
+  );
+  const conv = await tx((trx) =>
+    agentStore.createConversation(trx, { userId: user.id, profileId: profile.id, isPrivate: true }),
+  );
+  return conv.id;
+}
 
 afterAll(async () => {
   rmSync(baseDir, { recursive: true, force: true });
@@ -209,7 +230,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
       }),
     );
 
-    const conversationId = "019d0000-0000-7000-8000-000000000001";
+    const conversationId = await seedConversation();
     const ownerUserId = "user-owner";
 
     const { sandbox, createCalls, stopCalls, liveContainerDockerIds } = fakeSandbox();
@@ -445,7 +466,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
       }),
     );
 
-    const conversationId = "019d0000-0000-7000-8000-000000000002";
+    const conversationId = await seedConversation();
     const task = await tx((trx) =>
       store.insertTask(trx, {
         repoId: repo.id,

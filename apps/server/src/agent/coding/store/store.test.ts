@@ -57,6 +57,28 @@ async function seedRepo(name = "cogmo"): Promise<string> {
   return row.id;
 }
 
+/** Create a real conversation (user → profile → conversation) for the FK. */
+async function seedConversation(): Promise<string> {
+  const user = await tx((trx) => agentStore.createUser(trx));
+  const profile = await tx((trx) =>
+    agentStore.createProfile(trx, {
+      userId: user.id,
+      name: "default",
+      basePrompt: "p",
+      model: "test-model",
+      toolSet: [],
+    }),
+  );
+  const conv = await tx((trx) =>
+    agentStore.createConversation(trx, {
+      userId: user.id,
+      profileId: profile.id,
+      isPrivate: true,
+    }),
+  );
+  return conv.id;
+}
+
 function labels(extra: Partial<ContainerLabels> = {}): ContainerLabels {
   return {
     "cogmo.managed": "true",
@@ -806,7 +828,7 @@ describe("DrizzleCodingStore", () => {
       );
       expect(noConv.conversationId).toBeNull();
 
-      const convId = "019d0000-0000-7000-8000-00000000aabb";
+      const convId = await seedConversation();
       const withConv = await tx((trx) =>
         store.insertTask(trx, {
           repoId,
@@ -822,8 +844,8 @@ describe("DrizzleCodingStore", () => {
 
     it("listTasksForConversation returns rows in createdAt DESC order, scoped to the conversation", async () => {
       const repoId = await seedRepo();
-      const convA = "019d0000-0000-7000-8000-000000000a01";
-      const convB = "019d0000-0000-7000-8000-000000000b02";
+      const convA = await seedConversation();
+      const convB = await seedConversation();
       const t1 = await tx((trx) =>
         store.insertTask(trx, {
           repoId,
@@ -869,7 +891,7 @@ describe("DrizzleCodingStore", () => {
   describe("approvePlanIfPending / cancelTaskIfActive", () => {
     it("approve happy path: status awaiting_approval, plan_approved_at null → stamps", async () => {
       const repoId = await seedRepo();
-      const convId = "019d0000-0000-7000-8000-00000000aabb";
+      const convId = await seedConversation();
       const task = await tx((trx) =>
         store.insertTask(trx, {
           repoId,

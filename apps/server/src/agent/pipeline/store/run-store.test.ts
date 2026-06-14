@@ -29,9 +29,21 @@ afterAll(async () => {
   await close();
 });
 
-/** Insert a user + definition and open a run on its first stage. */
+/** Insert a user + profile + conversation + definition and open a run on its first stage. */
 async function seedRun(currentStage = "gather-context") {
   const userId = (await tx((trx) => agentStore.createUser(trx))).id;
+  const profile = await tx((trx) =>
+    agentStore.createProfile(trx, {
+      userId,
+      name: "default",
+      basePrompt: "p",
+      model: "test-model",
+      toolSet: [],
+    }),
+  );
+  const conversation = await tx((trx) =>
+    agentStore.createConversation(trx, { userId, profileId: profile.id, isPrivate: true }),
+  );
   const def = await tx((trx) =>
     defStore.insertDefinition(trx, {
       userId,
@@ -40,11 +52,14 @@ async function seedRun(currentStage = "gather-context") {
       compiled: validPipelineDefinition(),
     }),
   );
-  const conversationId = randomUUID();
   const run = await tx((trx) =>
-    runStore.createRun(trx, { definitionId: def.id, conversationId, currentStage }),
+    runStore.createRun(trx, {
+      definitionId: def.id,
+      conversationId: conversation.id,
+      currentStage,
+    }),
   );
-  return { userId, definitionId: def.id, conversationId, run };
+  return { userId, definitionId: def.id, conversationId: conversation.id, run };
 }
 
 const textArtifact: StageArtifact = { kind: "text", text: "gathered context" };
