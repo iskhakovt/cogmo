@@ -357,21 +357,22 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
     from: PipelineRunStatus,
     to: PipelineRunStatus,
   ): Promise<RunTransition> {
-    const updated = await tx
-      .update(pipelineRuns)
-      .set({ status: to })
-      .where(and(eq(pipelineRuns.id, id), eq(pipelineRuns.status, from)))
-      .returning({ id: pipelineRuns.id });
-    if (updated.length > 0) return { kind: "transitioned" as const };
-
+    // `.for("update")` row-locks, and the terminal guard makes "terminal is
+    // final" hold store-wide: a flip out of completed/failed/cancelled is
+    // refused even if a caller passes a terminal `from`.
     const rows = await tx
       .select({ status: pipelineRuns.status })
       .from(pipelineRuns)
       .where(eq(pipelineRuns.id, id))
-      .limit(1);
+      .limit(1)
+      .for("update");
     const row = rows[0];
     if (!row) return { kind: "not_found" as const };
-    return { kind: "stale" as const, status: row.status };
+    if (isTerminalPipelineRunStatus(row.status) || row.status !== from) {
+      return { kind: "stale" as const, status: row.status };
+    }
+    await tx.update(pipelineRuns).set({ status: to }).where(eq(pipelineRuns.id, id));
+    return { kind: "transitioned" as const };
   }
 
   async advanceStage(
@@ -404,7 +405,11 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
   /**
    * Shared read-merge-write for `advanceStage` / `completeRun`. `.for("update")`
    * row-locks so a duplicate delivery for the same run serializes; the
-   * `current_stage === fromStage` guard makes a retried persist idempotent.
+   * terminal-status and `current_stage === fromStage` guards make a retried
+   * persist idempotent. The terminal guard matters because the terminal
+   * paths leave `current_stage` untouched — without it, a stage.due replay
+   * that arrives after a cancel/fail would match `fromStage` and resurrect
+   * the run.
    */
   async #recordAndMove(
     tx: Transaction,
@@ -414,14 +419,18 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
     move: { currentStage: string; status: PipelineRunStatus },
   ): Promise<RunAdvance> {
     const rows = await tx
-      .select({ currentStage: pipelineRuns.currentStage, stageOutputs: pipelineRuns.stageOutputs })
+      .select({
+        status: pipelineRuns.status,
+        currentStage: pipelineRuns.currentStage,
+        stageOutputs: pipelineRuns.stageOutputs,
+      })
       .from(pipelineRuns)
       .where(eq(pipelineRuns.id, runId))
       .limit(1)
       .for("update");
     const row = rows[0];
     if (!row) return { kind: "not_found" as const };
-    if (row.currentStage !== fromStage) {
+    if (isTerminalPipelineRunStatus(row.status) || row.currentStage !== fromStage) {
       return { kind: "stale" as const, currentStage: row.currentStage };
     }
     const stageOutputs =

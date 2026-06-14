@@ -115,6 +115,17 @@ describe("DrizzlePipelineRunStore", () => {
       );
       expect(result).toEqual({ kind: "not_found" });
     });
+
+    it("refuses to flip a terminal run, even when a terminal from is passed", async () => {
+      const { run } = await seedRun();
+      await tx((trx) => runStore.cancelRunIfActive(trx, run.id, "done"));
+      // A caller naming the terminal status as `from` must not reopen it.
+      const result = await tx((trx) =>
+        runStore.transitionStatus(trx, run.id, "cancelled", "running"),
+      );
+      expect(result).toEqual({ kind: "stale", status: "cancelled" });
+      expect((await tx((trx) => runStore.getRun(trx, run.id)))?.status).toBe("cancelled");
+    });
   });
 
   describe("advanceStage", () => {
@@ -207,6 +218,25 @@ describe("DrizzlePipelineRunStore", () => {
         }),
       );
       expect(result).toEqual({ kind: "not_found" });
+    });
+
+    it("refuses to resurrect a terminal run whose cursor still matches fromStage", async () => {
+      const { run } = await seedRun();
+      // fail/cancel leave current_stage untouched, so a replayed stage.due for
+      // the same stage must not advance the now-terminal run.
+      await tx((trx) => runStore.cancelRunIfActive(trx, run.id, "user cancelled"));
+      const result = await tx((trx) =>
+        runStore.advanceStage(trx, {
+          runId: run.id,
+          fromStage: "gather-context",
+          output: textArtifact,
+          toStage: "plan-gate",
+        }),
+      );
+      expect(result).toEqual({ kind: "stale", currentStage: "gather-context" });
+      const after = await tx((trx) => runStore.getRun(trx, run.id));
+      expect(after?.status).toBe("cancelled");
+      expect(after?.stageOutputs).toEqual({});
     });
   });
 
