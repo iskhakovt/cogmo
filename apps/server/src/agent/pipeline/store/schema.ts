@@ -1,7 +1,8 @@
 import { sql } from "drizzle-orm";
-import { boolean, integer, pgTable, text, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { boolean, integer, pgEnum, pgTable, text, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { jsonbZod, pk, ts } from "../../../db/helpers.js";
 import { users } from "../../store/schema.js";
+import { StageOutputsSchema } from "../run-types.js";
 import { PipelineDefinitionSchema } from "../types.js";
 
 /**
@@ -32,3 +33,49 @@ export const pipelineDefinitions = pgTable(
     uniqueIndex("uq_pipeline_definitions_active").on(t.userId, t.name).where(sql`active = true`),
   ],
 );
+
+/**
+ * Run status (design/pipelines.md → Data Model). The full set is declared
+ * up front so slice 3 doesn't pay an `ALTER TYPE ADD VALUE` migration:
+ * `queued` (admission control) and `waiting_event` (DB-parked waits) are
+ * unused until then. `waiting_gate` IS used in slice 2 — set before the
+ * stage runner's `step.waitForEvent` so a parked gate is queryable for
+ * `/status` without going through Inngest.
+ */
+export const pipelineRunStatus = pgEnum("pipeline_run_status", [
+  "queued",
+  "running",
+  "waiting_gate",
+  "waiting_event",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+
+/**
+ * One pipeline run — the source of truth for an in-flight execution. The
+ * pinned `definition_id` carries the stages (in its `compiled` blob) and the
+ * owning `user_id`, so no `user_id` is denormalized here (design/pipelines.md
+ * → Data Model). `wait_key` / `wait_deadline` arrive with slice 3's DB-parked
+ * `wait` stages; slice 2 gates park inside Inngest, not the DB.
+ */
+export const pipelineRuns = pgTable("pipeline_runs", {
+  id: pk(),
+  definitionId: uuid("definition_id")
+    .notNull()
+    .references(() => pipelineDefinitions.id),
+  // The run's own conversation — gates and progress land here. Informational
+  // link, not an FK: a run's history outlives its conversation, and the
+  // conversation lives in the agent store with an independent lifecycle (same
+  // choice as `coding_tasks.conversation_id`).
+  conversationId: uuid("conversation_id").notNull(),
+  status: pipelineRunStatus("status").notNull(),
+  // Stage id from the pinned definition the run currently sits on.
+  currentStage: text("current_stage").notNull(),
+  // Loop counter for `current_stage`'s loop scope. Always 0 until slice 3
+  // back-edges land; carried now because `pipeline/stage.due` keys off it.
+  iteration: integer("iteration").notNull(),
+  stageOutputs: jsonbZod("stage_outputs", StageOutputsSchema).notNull(),
+  failureReason: text("failure_reason"),
+  createdAt: ts(),
+});
