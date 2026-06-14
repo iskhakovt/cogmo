@@ -199,7 +199,7 @@ function makeOctokitFactory(opts: {
             throw Object.assign(new Error((body as { message: string }).message), {
               status: resp.status,
               // Mark as RequestError-shaped so `error instanceof RequestError`
-              // checks in `runOpenDraftPr` recognise it; we don't actually
+              // checks in `runOpenPr` recognise it; we don't actually
               // import the constructor here to keep this fixture loose.
               name: "HttpError",
             });
@@ -554,15 +554,16 @@ describe("verify orchestrator integration — gitea + scoped octokit", () => {
     );
     expect(branchResp.status).toBe(200);
 
-    // Octokit POST happened with the right payload shape.
+    // Octokit POST happened with the right payload shape — ready for
+    // review, no draft flag.
     expect(capture).toHaveLength(1);
     expect(capture[0]?.body).toMatchObject({
       owner: GITEA_USER,
       repo: GITEA_REPO,
       head: branch,
       base: GITEA_DEFAULT_BRANCH,
-      draft: true,
     });
+    expect(capture[0]?.body).not.toHaveProperty("draft");
     expect(capture[0]?.body.title).toMatch(/integration test fixture goal/);
 
     // pr_metadata persisted with the canned mock URL + number.
@@ -783,15 +784,16 @@ describe("verify orchestrator integration — git-remote transport (fake daytona
     );
     expect(branchResp.status).toBe(200);
 
-    // PR-create was captured by the scoped octokit factory.
+    // PR-create was captured by the scoped octokit factory — ready for
+    // review, no draft flag.
     expect(capture).toHaveLength(1);
     expect(capture[0]?.body).toMatchObject({
       owner: GITEA_USER,
       repo: GITEA_REPO,
       head: branch,
       base: GITEA_DEFAULT_BRANCH,
-      draft: true,
     });
+    expect(capture[0]?.body).not.toHaveProperty("draft");
 
     // Post-PR `fetchFeatureBranch` updated the local mirror's
     // remote-tracking ref. Resolves to a 40-char SHA on success.

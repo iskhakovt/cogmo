@@ -54,7 +54,7 @@ export const WorktreeAssignmentSchema = z.discriminatedUnion("type", [
 export type WorktreeAssignment = z.infer<typeof WorktreeAssignmentSchema>;
 
 /**
- * PR metadata captured by slice 4.0g's draft-PR step. Stored as one JSONB
+ * PR metadata captured by slice 4.0g's PR step. Stored as one JSONB
  * blob (`coding_tasks.pr_metadata`) rather than four nullable columns so the
  * fields are atomic by construction: either the PR is open (all four
  * present, validated by Zod on read and write) or it isn't (column is

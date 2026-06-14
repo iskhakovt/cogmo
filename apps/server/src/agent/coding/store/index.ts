@@ -80,7 +80,7 @@ export interface CodingTaskRow {
   allowPrivilegedRunc: boolean;
   plan: string | null;
   planApprovedAt: Date | null;
-  /** PR state, atomic — null until 4.0g's draft-PR step populates it. */
+  /** PR state, atomic — null until 4.0g's PR step populates it. */
   prMetadata: PrMetadata | null;
   status: CodingTaskStatus;
   failureReason: string | null;
@@ -216,7 +216,7 @@ export interface CodingStore {
   /** Persist the plan text once the plan phase produces it. */
   setTaskPlan(tx: Transaction, id: string, plan: string): Promise<void>;
 
-  /** Persist the PR metadata blob once the draft PR is opened (slice 4.0g). */
+  /** Persist the PR metadata blob once the PR is opened (slice 4.0g). */
   setTaskPrMetadata(tx: Transaction, id: string, metadata: PrMetadata): Promise<void>;
 
   /**

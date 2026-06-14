@@ -105,7 +105,7 @@ Compiler hardening (n8n's lesson): the LLM never emits the definition as freefor
    > Trigger: you say "start the issue pipeline".
    > 1. Gather context — chat with you until I have enough.
    > 2. Draft a plan → **gate: your approval, 3d timeout, reminds ×3 then aborts**.
-   > 3. Implement (coding delegation) → open draft PR.
+   > 3. Implement (coding delegation) → open PR.
    > 4. Wait for review comments (14d timeout) → address them → back to 4, max 5 rounds.
 4. **Confirm.** Explicit user approval activates the definition. The preview *is* the contract — no hidden prompts (gh-aw's trust lesson).
 5. **Version.** `pipeline_definitions` rows are immutable in every column except `active` (fits the prefer-immutable-rows rule — `active` is a status transition, like `coding_tasks.status`). Activation flips the old version off and the new one on in a single tx, deactivate-then-activate so the partial unique index holds throughout. The original free text is stored alongside the compiled JSON as the editable source. Editing recompiles into a new version; **in-flight runs keep the version they started with** (Temporal's stance — the only safe choice given week-long waits). New runs use the latest active version.
@@ -143,7 +143,7 @@ The back-edge is code-owned: the runner checks `iteration < maxIterations` and e
 
 ### Context handoff
 
-Typed `output` artifacts flow forward (Anthropic's delegation guidance: objective, format, boundaries), **and** the full prior-stage transcripts stay retrievable — each run owns a conversation, stages append to it, so later stages can read everything (Cognition: don't summarize away decisions; actions carry implicit decisions). Within a loop, `stage_outputs` keeps only the latest iteration's artifact per stage (latest-wins, intentional) — earlier iterations' reasoning survives in the run conversation, which is where decision history belongs. For review loops specifically: same branch, same coding session resumed via `--resume <sid>` — the draft PR is the durable checkpoint.
+Typed `output` artifacts flow forward (Anthropic's delegation guidance: objective, format, boundaries), **and** the full prior-stage transcripts stay retrievable — each run owns a conversation, stages append to it, so later stages can read everything (Cognition: don't summarize away decisions; actions carry implicit decisions). Within a loop, `stage_outputs` keeps only the latest iteration's artifact per stage (latest-wins, intentional) — earlier iterations' reasoning survives in the run conversation, which is where decision history belongs. For review loops specifically: same branch, same coding session resumed via `--resume <sid>` — the PR is the durable checkpoint.
 
 ## Safety `[proposed]`
 

@@ -70,7 +70,7 @@ export const codingRepos = pgTable("coding_repos", {
 
 /**
  * One coding task = one git worktree + one branch + one CLI session +
- * (eventually) one draft PR. Slice 1 fields drive plan-only flows; later
+ * (eventually) one PR. Slice 1 fields drive plan-only flows; later
  * slices fill in `pr_url`, `pending_verify`/`verifying`/`pushed`/`pr_open`
  * statuses, etc.
  */
@@ -102,7 +102,7 @@ export const codingTasks = pgTable("coding_tasks", {
   plan: text("plan"),
   planApprovedAt: timestamp("plan_approved_at", { withTimezone: true }),
   // Slice 4.0g: PrMetadataSchema = { url, number, branchSha, openedAt };
-  // null until the draft PR step populates it. Replaces the prior
+  // null until the PR step populates it. Replaces the prior
   // `pr_url TEXT` column (no in-flight data — slice 4 is the first to
   // populate PR state).
   prMetadata: jsonbZod("pr_metadata", PrMetadataSchema),

@@ -438,7 +438,7 @@ export const codingTaskPlanApproved = eventType("coding/task/plan-approved", {
 /**
  * Coding delegation — execute phase reached `pending_verify`. Triggers
  * the slice 4.0h `coding-task-verify` orchestrator function which runs
- * verify → push → draft PR. Emitted by the execute orchestrator after
+ * verify → push → PR. Emitted by the execute orchestrator after
  * the status transition committed durably; consumed exactly once per
  * task (Inngest dedup on the event id is implicit via task id).
  */
@@ -476,7 +476,7 @@ export const codingTaskPushed = eventType("coding/task/pushed", {
 });
 
 /**
- * Coding delegation — draft PR opened on GitHub. Consumed by the
+ * Coding delegation — PR opened on GitHub. Consumed by the
  * Telegram adapter to post the final progress edit (`✅ PR opened: <url>`)
  * and by metrics / observer extraction.
  */

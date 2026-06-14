@@ -13,7 +13,7 @@
  * through the dialog.
  */
 
-import { parseRemoteUrl } from "../../../agent/coding/draft-pr.js";
+import { parseRemoteUrl } from "../../../agent/coding/open-pr.js";
 import type { RepoSummary, Transport, TransportError } from "../../transport.js";
 import type { TelegramCommandContext } from "./commands.js";
 

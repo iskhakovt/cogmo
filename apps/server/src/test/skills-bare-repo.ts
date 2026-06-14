@@ -29,7 +29,7 @@ export interface BareRepoFixture {
 /**
  * Create a bare repo at `<parentDir>/<subdir>/<name>` with one seed commit
  * on `refs/heads/main`. The owner/repo segment shape makes the resulting
- * `file://` URL parse cleanly via `src/agent/coding/draft-pr.ts:parseRemoteUrl`.
+ * `file://` URL parse cleanly via `src/agent/coding/open-pr.ts:parseRemoteUrl`.
  */
 export async function makePopulatedBareRepo(
   parentDir: string,

@@ -20,7 +20,7 @@
  *     authorized). All test branches sit under
  *     `cogmo/run/skill-author-<uuid>*` + `refs/cogmo-wip/skill-author-<uuid>*`
  *     orphan namespaces — main is never touched. `afterAll` deletes
- *     branches + closes the draft PR.
+ *     branches + closes the PR.
  *
  * See `design/testing.md` -> Skill-Authoring Integration for the
  * contract.
