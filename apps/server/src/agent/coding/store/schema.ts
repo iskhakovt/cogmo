@@ -1,6 +1,7 @@
 import { boolean, integer, pgEnum, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { jsonbZod, pk, ts } from "../../../db/helpers.js";
 import { containers } from "../../../sandbox/store/schema.js";
+import { conversations } from "../../store/schema.js";
 import {
   DevcontainerSpecSchema,
   PrMetadataSchema,
@@ -80,11 +81,14 @@ export const codingTasks = pgTable("coding_tasks", {
     .notNull()
     .references(() => codingRepos.id),
   // Conversation that triggered this task — null for non-conversation triggers
-  // (evolution, signal_pipeline). Drives `/repo list` scoping and slice-2
-  // Telegram delivery. Not declared as an FK to conversations because the
-  // FK would cross module boundaries (transport store) and the link is
-  // informational, not referential.
-  conversationId: uuid("conversation_id"),
+  // (evolution, signal_pipeline). Drives `/repo list` scoping and Telegram
+  // delivery. Nullable FK: `conversations` lives in the same agent-store
+  // module, and a non-null value always points at a real conversation in
+  // production, so the constraint holds without coupling lifecycles. ON DELETE
+  // is the default no-action by design — `messages.conversation_id` is
+  // likewise no-action and conversations are not pruned; a future prune would
+  // pick an onDelete policy across all referencing tables together, not here.
+  conversationId: uuid("conversation_id").references(() => conversations.id),
   goal: text("goal").notNull(),
   triggerSource: codingTriggerSource("trigger_source").notNull(),
   triggerRef: text("trigger_ref"), // pointer into the originating subsystem (evolution proposal id, etc.)

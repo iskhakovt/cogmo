@@ -189,7 +189,7 @@ pipeline_definitions (
 pipeline_runs (
   id                 UUID v7 PK,
   definition_id      UUID NOT NULL REFERENCES pipeline_definitions(id),  -- pins the version
-  conversation_id    UUID NOT NULL,             -- the run's thread; gates and progress land here
+  conversation_id    UUID NOT NULL REFERENCES conversations(id),  -- the run's thread; gates and progress land here (ON DELETE no-action — conversations are not pruned)
   status             pipeline_run_status NOT NULL,
   current_stage      TEXT NOT NULL,             -- stage id from the pinned definition
   iteration          INT NOT NULL,              -- loop counter for current_stage's loop scope

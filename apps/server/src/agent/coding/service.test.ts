@@ -1,7 +1,8 @@
 import type { Inngest } from "inngest";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
+import { DrizzleAgentStore } from "../store/index.js";
 import { createCodingService } from "./service.js";
 import { DrizzleCodingStore } from "./store/index.js";
 
@@ -9,10 +10,32 @@ let db: Database;
 let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleCodingStore;
+let agentStore: DrizzleAgentStore;
 
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
   store = new DrizzleCodingStore();
+  agentStore = new DrizzleAgentStore();
+});
+
+// A real conversation per test for `coding_tasks.conversation_id`'s FK —
+// reset because afterEach truncates everything.
+let conversationId: string;
+beforeEach(async () => {
+  const user = await tx((trx) => agentStore.createUser(trx));
+  const profile = await tx((trx) =>
+    agentStore.createProfile(trx, {
+      userId: user.id,
+      name: "default",
+      basePrompt: "p",
+      model: "test-model",
+      toolSet: [],
+    }),
+  );
+  const conv = await tx((trx) =>
+    agentStore.createConversation(trx, { userId: user.id, profileId: profile.id, isPrivate: true }),
+  );
+  conversationId = conv.id;
 });
 
 afterEach(async () => {
@@ -22,8 +45,6 @@ afterEach(async () => {
 afterAll(async () => {
   await close();
 });
-
-const conversationId = "019d0000-0000-7000-8000-000000000001";
 
 function fakeInngest(): Pick<Inngest, "send"> & { send: ReturnType<typeof vi.fn> } {
   return { send: vi.fn().mockResolvedValue({ ids: ["evt-1"] }) };

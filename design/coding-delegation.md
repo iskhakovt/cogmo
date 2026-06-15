@@ -200,7 +200,7 @@ CREATE TYPE coding_task_status AS ENUM (
 coding_tasks (
   id                      UUID v7 PK,
   repo_id                 UUID NOT NULL REFERENCES coding_repos(id),
-  conversation_id         UUID,                                   -- triggering conversation; null for automated triggers (evolution, signal_pipeline). Not declared as an FK across module boundaries.
+  conversation_id         UUID REFERENCES conversations(id),       -- triggering conversation; null for automated triggers (evolution, signal_pipeline). Nullable FK (ON DELETE no-action — same agent-store module, conversations are not pruned).
   goal                    TEXT NOT NULL,                          -- the task description (user-authored or machine-authored)
   trigger_source          coding_trigger_source NOT NULL,         -- determines gating (plan approval path)
   trigger_ref             TEXT,                                   -- optional pointer into the originating subsystem (evolution proposal id, signal batch id)
