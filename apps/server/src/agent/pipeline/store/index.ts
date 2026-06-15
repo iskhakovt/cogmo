@@ -3,7 +3,7 @@ import { single } from "../../../db/helpers.js";
 import type { Transaction } from "../../../db/index.js";
 import type { StageArtifact, StageOutputs } from "../run-types.js";
 import type { PipelineDefinition } from "../types.js";
-import { pipelineDefinitions, pipelineRuns } from "./schema.js";
+import { pipelineDefinitions, type pipelineRunStatus, pipelineRuns } from "./schema.js";
 
 export interface PipelineDefinitionRow {
   id: string;
@@ -210,14 +210,10 @@ export class DrizzlePipelineStore implements PipelineStore {
 
 // --- Runs ---
 
-export type PipelineRunStatus =
-  | "queued"
-  | "running"
-  | "waiting_gate"
-  | "waiting_event"
-  | "completed"
-  | "failed"
-  | "cancelled";
+// Derived from the pgEnum so the enum stays the single source of truth — no
+// hand-maintained union to drift from the DB type (architecture-rules: pgEnum
+// → TypeScript union).
+export type PipelineRunStatus = (typeof pipelineRunStatus.enumValues)[number];
 
 const TERMINAL_RUN_STATUSES: ReadonlyArray<PipelineRunStatus> = [
   "completed",
@@ -430,6 +426,10 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
       .for("update");
     const row = rows[0];
     if (!row) return { kind: "not_found" as const };
+    // TODO(slice 3): once back-edges land, the cursor is (stage, iteration) —
+    // this guard must also match `iteration`, or a replayed stage.due for
+    // (stageA, iter 0) could re-fire against a run that legitimately looped
+    // back to (stageA, iter 1). Sufficient now: iteration is invariantly 0.
     if (isTerminalPipelineRunStatus(row.status) || row.currentStage !== fromStage) {
       return { kind: "stale" as const, currentStage: row.currentStage };
     }
@@ -471,10 +471,13 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
   }
 
   /**
-   * Move a non-terminal run to a terminal status with a reason. `.for("update")`
-   * so two concurrent terminations (cancel racing an abort) can't both win.
-   * Returns `kind: "failed"` on success regardless of target status — the
-   * public methods relabel.
+   * Move a non-terminal run to a terminal status with a reason. The race
+   * between two concurrent terminations (cancel vs. abort) resolves through
+   * the store's isolation contract: `.for("update")` blocks the second tx on
+   * the row lock, then REPEATABLE READ raises a 40001 on it when the first
+   * commits, and the transactor's one-shot retry re-reads the now-terminal
+   * row and returns `already_terminal`. Returns `kind: "failed"` on success
+   * regardless of target status — the public methods relabel.
    */
   async #terminate(
     tx: Transaction,

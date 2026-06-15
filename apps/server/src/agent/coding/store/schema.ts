@@ -84,7 +84,10 @@ export const codingTasks = pgTable("coding_tasks", {
   // (evolution, signal_pipeline). Drives `/repo list` scoping and Telegram
   // delivery. Nullable FK: `conversations` lives in the same agent-store
   // module, and a non-null value always points at a real conversation in
-  // production, so the constraint holds without coupling lifecycles.
+  // production, so the constraint holds without coupling lifecycles. ON DELETE
+  // is the default no-action by design — `messages.conversation_id` is
+  // likewise no-action and conversations are not pruned; a future prune would
+  // pick an onDelete policy across all referencing tables together, not here.
   conversationId: uuid("conversation_id").references(() => conversations.id),
   goal: text("goal").notNull(),
   triggerSource: codingTriggerSource("trigger_source").notNull(),
