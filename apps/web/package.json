@@ -11,11 +11,11 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@assistant-ui/react": "0.14.14",
+    "@assistant-ui/react": "0.14.15",
     "@fontsource-variable/ibm-plex-sans": "^5.2.8",
     "@fontsource/ibm-plex-mono": "^5.2.7",
-    "@orpc/client": "1.14.4",
-    "@tanstack/react-router": "^1.170.11",
+    "@orpc/client": "1.14.5",
+    "@tanstack/react-router": "^1.170.15",
     "cmdk": "^1.1.1",
     "eventsource-client": "^1.2.0",
     "react": "^19.2.7",
@@ -23,7 +23,7 @@
   },
   "devDependencies": {
     "@cogmo/contracts": "workspace:*",
-    "@orpc/contract": "1.14.4",
+    "@orpc/contract": "1.14.5",
     "@tailwindcss/vite": "^4.3.0",
     "@types/react": "^19.2.16",
     "@types/react-dom": "^19.2.3",
