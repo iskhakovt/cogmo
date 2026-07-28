@@ -84,13 +84,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+      - uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       # Per-platform: override platforms + cache scope to the matrix arch
       # and push by digest only — the merge job applies tags afterwards.
@@ -98,7 +98,7 @@ jobs:
       # push-by-digest mode rejects any tagged ref ("can't push tagged ref
       # ... by digest"), and the merge job is the one that applies the
       # final semver + latest tags via `imagetools create`.
-      - uses: docker/bake-action@6614cfa25eff9a0b2b2697efb0b6159e7680d584 # v7.2.0
+      - uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
         id: bake
         env:
           VERSION: ${{ needs.setup.outputs.version }}
@@ -140,13 +140,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+      - uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         id: meta-devbase
         with:
           images: ghcr.io/${{ github.repository }}-devbase
@@ -155,7 +155,7 @@ jobs:
             type=raw,value=latest
           bake-target: devbase-meta
 
-      - uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         id: meta-skills
         with:
           images: ghcr.io/${{ github.repository }}-skills
@@ -164,13 +164,13 @@ jobs:
             type=raw,value=latest
           bake-target: skills-meta
 
-      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       # VERSION env passed for symmetry with the cogmo job + defense-in-depth.
       # metadata-action's bake-files override the in-file `*-meta` fallback
       # tags at runtime, so this is belt-and-suspenders against a future
       # path where metadata-action's output isn't wired.
-      - uses: docker/bake-action@6614cfa25eff9a0b2b2697efb0b6159e7680d584 # v7.2.0
+      - uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
         env:
           VERSION: ${{ needs.setup.outputs.version }}
         with:
@@ -192,7 +192,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+      - uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -204,7 +204,7 @@ jobs:
           pattern: cogmo-digest-*
           merge-multiple: true
 
-      - uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         id: meta
         with:
           images: ghcr.io/${{ github.repository }}
@@ -212,7 +212,7 @@ jobs:
             type=raw,value=${{ needs.setup.outputs.version }}
             type=raw,value=latest
 
-      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Create multi-arch manifest
         working-directory: /tmp/digests
@@ -256,7 +256,7 @@ jobs:
       matrix:
         image: [cogmo, cogmo-devbase, cogmo-skills]
     steps:
-      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+      - uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -283,7 +283,7 @@ jobs:
           # hits anyway, so caching only buys log noise.
           cache: false
 
-      - uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+      - uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         # Run even if Trivy itself errored (e.g. DB download flake) so we
         # don't lose partial results. The upload action no-ops on a missing
         # file but logs a clear message.
