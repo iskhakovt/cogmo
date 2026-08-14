@@ -184,25 +184,43 @@ interface PgUniqueViolation {
   constraint?: string;
 }
 
+/**
+ * Referential-integrity violation SQLSTATEs. Postgres splits these by the
+ * referential action that rejected the write: a plain `NO ACTION` FK raises
+ * `23503` (foreign_key_violation), while an `ON DELETE RESTRICT` FK raises
+ * `23001` (restrict_violation) as of PostgreSQL 18 — the major that dev,
+ * prod (`pgvector/pgvector:pg18`) and the PGlite test tier all run. Both
+ * carry the constraint name, and callers match on that, so both are treated
+ * as the same class of failure here.
+ */
+const FK_VIOLATION_CODES = ["23503", "23001"] as const;
+
+type FkViolationCode = (typeof FK_VIOLATION_CODES)[number];
+
 interface PgForeignKeyViolation {
-  code: "23503";
+  code: FkViolationCode;
   constraint_name?: string;
   constraint?: string;
 }
 
 /**
- * Walk `err.cause` looking for a Postgres error matching `code`. Drizzle
- * wraps driver errors in `DrizzleQueryError` whose `cause` holds the
- * original postgres.js / PGlite error; we walk a few levels to reach it.
+ * Walk `err.cause` looking for a Postgres error whose `code` is one of
+ * `codes`. Drizzle wraps driver errors in `DrizzleQueryError` whose `cause`
+ * holds the original postgres.js / PGlite error; we walk a few levels to
+ * reach it. Returns the matched code alongside the constraint fields so
+ * callers can preserve it.
  */
 function findPgErrorByCode(
   err: unknown,
-  code: string,
-): { constraint?: string; constraint_name?: string } | null {
+  codes: ReadonlyArray<string>,
+): { code: string; constraint?: string; constraint_name?: string } | null {
   let cur: unknown = err;
   for (let depth = 0; depth < 4 && cur != null; depth++) {
-    if (typeof cur === "object" && "code" in cur && (cur as { code: unknown }).code === code) {
-      return cur as { constraint?: string; constraint_name?: string };
+    if (typeof cur === "object" && "code" in cur) {
+      const code = (cur as { code: unknown }).code;
+      if (typeof code === "string" && codes.includes(code)) {
+        return { ...(cur as { constraint?: string; constraint_name?: string }), code };
+      }
     }
     if (typeof cur === "object" && "cause" in cur) {
       cur = (cur as { cause: unknown }).cause;
@@ -215,14 +233,21 @@ function findPgErrorByCode(
 
 /** Narrow an unknown error to a Postgres unique-violation shape. */
 export function findPostgresUniqueViolation(err: unknown): PgUniqueViolation | null {
-  const found = findPgErrorByCode(err, "23505");
-  return found ? ({ code: "23505", ...found } as PgUniqueViolation) : null;
+  const found = findPgErrorByCode(err, ["23505"]);
+  return found ? { ...found, code: "23505" } : null;
 }
 
-/** Narrow an unknown error to a Postgres foreign-key-violation shape. */
+/**
+ * Narrow an unknown error to a Postgres referential-integrity violation —
+ * either a foreign-key violation or a RESTRICT violation. See
+ * `FK_VIOLATION_CODES`.
+ */
 export function findPostgresForeignKeyViolation(err: unknown): PgForeignKeyViolation | null {
-  const found = findPgErrorByCode(err, "23503");
-  return found ? ({ code: "23503", ...found } as PgForeignKeyViolation) : null;
+  const found = findPgErrorByCode(err, FK_VIOLATION_CODES);
+  if (!found) return null;
+  // `findPgErrorByCode` only returns codes it was asked for, so the widening
+  // back to the literal union is sound.
+  return { ...found, code: found.code as FkViolationCode };
 }
 
 function constraintNameOf(pg: { constraint_name?: string; constraint?: string }): string {

@@ -15,7 +15,7 @@ Use Vitest (fast, native TS, ESM). Test what's deterministic:
 
 | Layer | What to test | How |
 |-|-|-|
-| Store implementations | Drizzle queries against real SQL | PGlite (in-process PG17 WASM), `pushSchema` from `drizzle-kit/api` |
+| Store implementations | Drizzle queries against real SQL | PGlite (in-process PG18 WASM), `pushSchema` from `drizzle-kit/api` |
 | Typed LLM calls | Zod schema validation, retry logic | Mock the SDK client, inject known responses |
 | Adapter modules | Setup, deliver, inbound handling | Mock Transport, use shared test factories |
 | Prompt assembly | System prompt + rules + memories | Mock AgentStore |
@@ -24,7 +24,7 @@ Use Vitest (fast, native TS, ESM). Test what's deterministic:
 
 Shared test factories in `src/test/factories.ts` — `mockAgentStore()`, `mockTransportStore()`, `mockTransport()`, `mockAdapter()`, `mockStep()`, etc.
 
-**PGlite setup:** `src/test/pglite.ts` — `createTestDatabase()` boots PGlite with `pg_uuidv7` extension, applies schema via `pushSchema`, returns driver-agnostic `Database` type. `truncateAll()` clears tables between tests.
+**PGlite setup:** `src/test/pglite.ts` — `createTestDatabase()` boots PGlite (PG18, so the schema's `uuidv7()` PK default resolves against core), applies schema via `pushSchema`, returns driver-agnostic `Database` type. `truncateAll()` clears tables between tests.
 
 **Naming:** `.test.ts` suffix. `pnpm test`.
 

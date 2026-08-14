@@ -26,10 +26,10 @@ Commands: `pnpm test` (unit), `pnpm test:integration`, `pnpm test:e2e`, `pnpm te
 
 ## Store Tests with PGlite
 
-Store implementations (`DrizzleAgentStore`, `DrizzleTransportStore`) are tested against real SQL via PGlite — an in-memory WASM PostgreSQL (PG17). No Docker needed.
+Store implementations (`DrizzleAgentStore`, `DrizzleTransportStore`) are tested against real SQL via PGlite — an in-memory WASM PostgreSQL (PG18, the same major as the `pgvector/pgvector:pg18` image dev and prod run). No Docker needed.
 
 - **Schema:** Applied via `pushSchema()` from `drizzle-kit/api` — no migration files in tests.
-- **UUIDs:** `pg_uuidv7` PGlite extension + `uuidv7()` SQL alias (the extension exposes `uuid_generate_v7()`).
+- **UUIDs:** `uuidv7()` comes from PostgreSQL 18 core — no extension, no alias.
 - **Type:** `Database` is `PgDatabase<PgQueryResultHKT, schema>` — driver-agnostic. Works with postgres-js, PGlite, or any Drizzle PG driver. No `as any` casts needed.
 - **Cleanup:** Truncate all tables via `db.execute(sql\`...\`)` between tests. One PGlite instance per test file.
 - **Helper:** `src/test/pglite.ts` — `createTestDatabase()` and `truncateAll()`.
