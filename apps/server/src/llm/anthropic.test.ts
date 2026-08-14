@@ -1085,34 +1085,37 @@ describe("AnthropicProvider", () => {
       ["application/xml", "data.xml", "<r/>"],
       ["application/yaml", "config.yaml", "k: v"],
       ["application/x-yaml", "config.yml", "k: v"],
-    ])("transcodes %s as text source with original filename in title", async (mediaType, name, plain) => {
-      const provider = setup();
-      await provider.chat({
-        model: "claude-sonnet-4-6",
-        system: "sys",
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "document",
-                source: "base64",
-                data: Buffer.from(plain, "utf-8").toString("base64"),
-                mediaType,
-                name,
-              },
-            ],
-          },
-        ],
-      });
+    ])(
+      "transcodes %s as text source with original filename in title",
+      async (mediaType, name, plain) => {
+        const provider = setup();
+        await provider.chat({
+          model: "claude-sonnet-4-6",
+          system: "sys",
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "document",
+                  source: "base64",
+                  data: Buffer.from(plain, "utf-8").toString("base64"),
+                  mediaType,
+                  name,
+                },
+              ],
+            },
+          ],
+        });
 
-      const block = mockCreate.mock.calls[0]![0].messages[0].content[0];
-      expect(block).toEqual({
-        type: "document",
-        source: { type: "text", media_type: "text/plain", data: plain },
-        title: name,
-      });
-    });
+        const block = mockCreate.mock.calls[0]![0].messages[0].content[0];
+        expect(block).toEqual({
+          type: "document",
+          source: { type: "text", media_type: "text/plain", data: plain },
+          title: name,
+        });
+      },
+    );
 
     it("throws a clear error pre-flight on unsupported binary mediaType", async () => {
       const provider = setup();

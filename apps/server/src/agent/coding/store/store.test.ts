@@ -1105,23 +1105,24 @@ describe("DrizzleCodingStore", () => {
       { terminal: "pr_open" },
       { terminal: "failed" },
       { terminal: "cancelled" },
-    ])("failTaskIfNonTerminal: returns already_terminal for status=$terminal (no write)", async ({
-      terminal,
-    }) => {
-      const repoId = await seedRepo(`fail-noop-${terminal}`);
-      const task = await tx((trx) =>
-        store.insertTask(trx, {
-          repoId,
-          goal: "g",
-          triggerSource: "user",
-          backend: "claude",
-          allowPrivilegedRunc: false,
-        }),
-      );
-      await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: terminal }));
-      const result = await tx((trx) => store.failTaskIfNonTerminal(trx, task.id, "ignored"));
-      expect(result.kind).toBe("already_terminal");
-    });
+    ])(
+      "failTaskIfNonTerminal: returns already_terminal for status=$terminal (no write)",
+      async ({ terminal }) => {
+        const repoId = await seedRepo(`fail-noop-${terminal}`);
+        const task = await tx((trx) =>
+          store.insertTask(trx, {
+            repoId,
+            goal: "g",
+            triggerSource: "user",
+            backend: "claude",
+            allowPrivilegedRunc: false,
+          }),
+        );
+        await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: terminal }));
+        const result = await tx((trx) => store.failTaskIfNonTerminal(trx, task.id, "ignored"));
+        expect(result.kind).toBe("already_terminal");
+      },
+    );
 
     it("failTaskIfNonTerminal: not_found for unknown id", async () => {
       const result = await tx((trx) =>

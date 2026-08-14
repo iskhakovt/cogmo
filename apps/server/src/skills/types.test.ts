@@ -162,29 +162,19 @@ describe("SkillManifestSchema cross-field rules", () => {
 });
 
 describe("SkillManifestSchema name regex", () => {
-  it.each([
-    "a",
-    "valid",
-    "valid-name",
-    "valid_name",
-    "abc123",
-    "a".repeat(64),
-  ])("accepts %s", (name) => {
-    expect(() => SkillManifestSchema.parse({ ...MIN_MANIFEST, name })).not.toThrow();
-  });
+  it.each(["a", "valid", "valid-name", "valid_name", "abc123", "a".repeat(64)])(
+    "accepts %s",
+    (name) => {
+      expect(() => SkillManifestSchema.parse({ ...MIN_MANIFEST, name })).not.toThrow();
+    },
+  );
 
-  it.each([
-    "",
-    "1abc",
-    "ABC",
-    "Bad-Name",
-    "a name",
-    "a.b",
-    "a/b",
-    "a".repeat(65),
-  ])("rejects %s", (name) => {
-    expect(() => SkillManifestSchema.parse({ ...MIN_MANIFEST, name })).toThrow();
-  });
+  it.each(["", "1abc", "ABC", "Bad-Name", "a name", "a.b", "a/b", "a".repeat(65)])(
+    "rejects %s",
+    (name) => {
+      expect(() => SkillManifestSchema.parse({ ...MIN_MANIFEST, name })).toThrow();
+    },
+  );
 });
 
 describe("SkillManifestSchema description boundaries", () => {

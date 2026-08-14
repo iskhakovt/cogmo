@@ -22,17 +22,15 @@ afterAll(async () => {
 });
 
 describe("migration 0017_tough_bedlam (skills foundation)", () => {
-  it.each([
-    "skills",
-    "skill_deploys",
-    "skill_runs",
-    "skill_context_calls",
-  ])("table %s exists", async (table) => {
-    const rows = await sql<{ to_regclass: string | null }[]>`
+  it.each(["skills", "skill_deploys", "skill_runs", "skill_context_calls"])(
+    "table %s exists",
+    async (table) => {
+      const rows = await sql<{ to_regclass: string | null }[]>`
       SELECT to_regclass(${table})::text AS to_regclass
     `;
-    expect(rows[0]?.to_regclass).toBe(table);
-  });
+      expect(rows[0]?.to_regclass).toBe(table);
+    },
+  );
 
   it.each([
     ["skill_tier", ["wasm", "container"]],

@@ -1230,10 +1230,10 @@ describe("telegram adapter", () => {
         parse_mode: "HTML",
       });
       expect(mockBotApi.sendPhoto).toHaveBeenCalledTimes(2);
-      const call0 = mockBotApi.sendPhoto.mock.calls[0];
-      const call1 = mockBotApi.sendPhoto.mock.calls[1];
-      expect((call0?.[1] as { filename: string }).filename).toBe("image.png");
-      expect((call1?.[1] as { filename: string }).filename).toBe("image.jpg");
+      const call0 = expectDefined(mockBotApi.sendPhoto.mock.calls[0], "sendPhoto call 0");
+      const call1 = expectDefined(mockBotApi.sendPhoto.mock.calls[1], "sendPhoto call 1");
+      expect((call0[1] as { filename: string }).filename).toBe("image.png");
+      expect((call1[1] as { filename: string }).filename).toBe("image.jpg");
     });
   });
 

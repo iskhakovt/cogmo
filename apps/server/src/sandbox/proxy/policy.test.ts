@@ -80,15 +80,13 @@ describe("applyContainerCreatePolicy", () => {
       }
     });
 
-    it.each([
-      "/etc:/host-etc",
-      "/var:/var:ro",
-      "/home/user/secrets:/secrets",
-      "/:/host-root",
-    ])("rejects host-path bind %s", (bind) => {
-      const r = applyContainerCreatePolicy(body({ HostConfig: { Binds: [bind] } }), SCOPE);
-      expect(r.kind).toBe("deny");
-    });
+    it.each(["/etc:/host-etc", "/var:/var:ro", "/home/user/secrets:/secrets", "/:/host-root"])(
+      "rejects host-path bind %s",
+      (bind) => {
+        const r = applyContainerCreatePolicy(body({ HostConfig: { Binds: [bind] } }), SCOPE);
+        expect(r.kind).toBe("deny");
+      },
+    );
 
     it("allows named-volume binds", () => {
       const r = applyContainerCreatePolicy(
