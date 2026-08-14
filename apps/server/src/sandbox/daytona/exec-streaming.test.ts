@@ -1,4 +1,4 @@
-import { DaytonaNotFoundError, type Process } from "@daytonaio/sdk";
+import { DaytonaNotFoundError, type Process } from "@daytona/sdk";
 import { describe, expect, it, vi } from "vitest";
 import { ExecTimeoutError } from "../index.js";
 import { DisposedError, startExecStreaming } from "./exec-streaming.js";

@@ -9,8 +9,11 @@
  * the SDK exposes today, and it works against an empty account.
  */
 
-import type { Daytona } from "@daytonaio/sdk";
+import type { Daytona } from "@daytona/sdk";
 
 export async function daytonaHealthProbe(daytona: Daytona): Promise<void> {
-  await daytona.list({}, 1, 1);
+  // `list` returns a lazy async iterator that pages on demand, so the first
+  // `next()` is what actually issues the authenticated request. `limit: 1`
+  // keeps that first page to a single row; we never ask for a second.
+  await daytona.list({ limit: 1 }).next();
 }

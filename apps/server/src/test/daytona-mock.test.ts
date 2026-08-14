@@ -9,7 +9,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PtyHandle } from "@daytonaio/sdk";
+import { PtyHandle } from "@daytona/sdk";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { DaytonaMock } from "./daytona-mock.js";

@@ -13,7 +13,7 @@ import {
   DaytonaTimeoutError,
   DaytonaValidationError,
   SandboxState,
-} from "@daytonaio/sdk";
+} from "@daytona/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { logger } from "../../logger.js";
 import { expectDefined } from "../../test/assertions.js";
@@ -47,16 +47,28 @@ type DaytonaSnapshot = { name: string; state: string };
 // is the shape of calls Cogmo's client makes against it (labels, resources,
 // auto-stop math, lifecycle order).
 //
+/**
+ * `Daytona.list()` hands back a lazy async iterator that pages on demand
+ * rather than a resolved page object, so stubs have to be iterable — and
+ * re-iterable, since a generator instance is consumed once. Each call gets a
+ * fresh one via `mockImplementation`.
+ */
+function sandboxStream<T>(items: ReadonlyArray<T>): AsyncIterableIterator<T> {
+  return (async function* () {
+    yield* items;
+  })();
+}
+
 const daytonaCalls = {
-  list: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
+  list: vi.fn<(...args: unknown[]) => AsyncIterableIterator<unknown>>(),
   get: vi.fn<(...args: unknown[]) => Promise<DaytonaSdkSandbox>>(),
   create: vi.fn<(...args: unknown[]) => Promise<DaytonaSdkSandbox>>(),
   snapshotGet: vi.fn<(name: string) => Promise<DaytonaSnapshot>>(),
   snapshotCreate: vi.fn<(...args: unknown[]) => Promise<DaytonaSnapshot>>(),
   snapshotDelete: vi.fn<(snap: DaytonaSnapshot) => Promise<void>>(),
 };
-vi.mock("@daytonaio/sdk", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@daytonaio/sdk")>();
+vi.mock("@daytona/sdk", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@daytona/sdk")>();
   // Constructor-shaped mock — `new Daytona(...)` in client.ts requires a
   // callable that produces an object via `new`, so a plain `vi.fn()` won't
   // do. A class declaration is the cleanest way to satisfy `new`.
@@ -567,29 +579,16 @@ describe("DaytonaSandboxClient", () => {
 
   describe("tryResumeByTaskId", () => {
     it("filters by cogmo.task + cogmo.role labels", async () => {
-      daytonaCalls.list.mockResolvedValue({
-        items: [],
-        totalPages: 0,
-        currentPage: 1,
-        totalItems: 0,
-        itemsPerPage: 50,
-      });
+      daytonaCalls.list.mockImplementation(() => sandboxStream([]));
       const client = await makeClient();
       await client.tryResumeByTaskId("task-x");
       expect(daytonaCalls.list).toHaveBeenCalledWith({
-        "cogmo.task": "task-x",
-        "cogmo.role": "root",
+        labels: { "cogmo.task": "task-x", "cogmo.role": "root" },
       });
     });
 
     it("returns null when the list is empty", async () => {
-      daytonaCalls.list.mockResolvedValue({
-        items: [],
-        totalPages: 0,
-        currentPage: 1,
-        totalItems: 0,
-        itemsPerPage: 50,
-      });
+      daytonaCalls.list.mockImplementation(() => sandboxStream([]));
       const client = await makeClient();
       const session = await client.tryResumeByTaskId("missing");
       expect(session).toBeNull();
@@ -598,13 +597,7 @@ describe("DaytonaSandboxClient", () => {
     it("skips terminal sandboxes and returns the first non-terminal one", async () => {
       const dead = fakeSandbox({ id: "sb-dead", state: SandboxState.DESTROYED });
       const alive = fakeSandbox({ id: "sb-alive", state: SandboxState.STARTED });
-      daytonaCalls.list.mockResolvedValue({
-        items: [dead, alive],
-        totalPages: 1,
-        currentPage: 1,
-        totalItems: 2,
-        itemsPerPage: 50,
-      });
+      daytonaCalls.list.mockImplementation(() => sandboxStream([dead, alive]));
       const client = await makeClient();
       const session = await client.tryResumeByTaskId("t1");
       expect(session?.state.sandboxId).toBe("sb-alive");
@@ -612,13 +605,7 @@ describe("DaytonaSandboxClient", () => {
 
     it("restarts a STOPPED candidate before returning it", async () => {
       const sb = fakeSandbox({ id: "sb-stopped", state: SandboxState.STOPPED });
-      daytonaCalls.list.mockResolvedValue({
-        items: [sb],
-        totalPages: 1,
-        currentPage: 1,
-        totalItems: 1,
-        itemsPerPage: 50,
-      });
+      daytonaCalls.list.mockImplementation(() => sandboxStream([sb]));
       const client = await makeClient();
       await client.tryResumeByTaskId("t1");
       expect(sb.start).toHaveBeenCalled();
@@ -644,13 +631,7 @@ describe("DaytonaSandboxClient", () => {
         await new Promise<void>((resolve) => setImmediate(resolve));
         sb.state = SandboxState.STARTED;
       });
-      daytonaCalls.list.mockResolvedValue({
-        items: [sb],
-        totalPages: 1,
-        currentPage: 1,
-        totalItems: 1,
-        itemsPerPage: 50,
-      });
+      daytonaCalls.list.mockImplementation(() => sandboxStream([sb]));
       const client = await makeClient();
       const [aMaybe, bMaybe] = await Promise.all([
         client.tryResumeByTaskId("t1"),
@@ -673,13 +654,7 @@ describe("DaytonaSandboxClient", () => {
     it("calls .delete() on every matching sandbox", async () => {
       const a = fakeSandbox({ id: "sb-a", state: SandboxState.STARTED });
       const b = fakeSandbox({ id: "sb-b", state: SandboxState.STOPPED });
-      daytonaCalls.list.mockResolvedValue({
-        items: [a, b],
-        totalPages: 1,
-        currentPage: 1,
-        totalItems: 2,
-        itemsPerPage: 50,
-      });
+      daytonaCalls.list.mockImplementation(() => sandboxStream([a, b]));
       const client = await makeClient();
       await client.deleteByTaskId("t1");
       expect(a.delete).toHaveBeenCalled();
@@ -687,16 +662,10 @@ describe("DaytonaSandboxClient", () => {
     });
 
     it("filters by cogmo.task label only (catches stale duplicates regardless of role)", async () => {
-      daytonaCalls.list.mockResolvedValue({
-        items: [],
-        totalPages: 0,
-        currentPage: 1,
-        totalItems: 0,
-        itemsPerPage: 50,
-      });
+      daytonaCalls.list.mockImplementation(() => sandboxStream([]));
       const client = await makeClient();
       await client.deleteByTaskId("t1");
-      expect(daytonaCalls.list).toHaveBeenCalledWith({ "cogmo.task": "t1" });
+      expect(daytonaCalls.list).toHaveBeenCalledWith({ labels: { "cogmo.task": "t1" } });
     });
 
     it("swallows per-sandbox delete failures and continues", async () => {
@@ -705,13 +674,7 @@ describe("DaytonaSandboxClient", () => {
       a.delete = vi.fn(async () => {
         throw new Error("daemon error");
       });
-      daytonaCalls.list.mockResolvedValue({
-        items: [a, b],
-        totalPages: 1,
-        currentPage: 1,
-        totalItems: 2,
-        itemsPerPage: 50,
-      });
+      daytonaCalls.list.mockImplementation(() => sandboxStream([a, b]));
       const client = await makeClient();
       await client.deleteByTaskId("t1");
       // b still gets deleted even though a threw
@@ -835,13 +798,7 @@ describe("DaytonaSandboxClient", () => {
       try {
         const sb = fakeSandbox({ id: "sb-del", state: SandboxState.STARTED });
         daytonaCalls.create.mockResolvedValue(sb);
-        daytonaCalls.list.mockResolvedValue({
-          items: [sb],
-          totalPages: 1,
-          currentPage: 1,
-          totalItems: 1,
-          itemsPerPage: 50,
-        });
+        daytonaCalls.list.mockImplementation(() => sandboxStream([sb]));
         const client = await makeClient();
         const session = await client.create({
           ...BASE_SPEC,
@@ -915,13 +872,7 @@ describe("DaytonaSandboxClient", () => {
       try {
         const sb = fakeSandbox({ id: "sb-gone", state: SandboxState.STARTED });
         daytonaCalls.create.mockResolvedValue(sb);
-        daytonaCalls.list.mockResolvedValue({
-          items: [],
-          totalPages: 0,
-          currentPage: 1,
-          totalItems: 0,
-          itemsPerPage: 50,
-        });
+        daytonaCalls.list.mockImplementation(() => sandboxStream([]));
 
         const client = await makeClient();
         const session = await client.create({
@@ -1792,20 +1743,21 @@ describe("DaytonaSandboxClient", () => {
 
   describe("healthCheck", () => {
     it("succeeds when the API is reachable", async () => {
-      daytonaCalls.list.mockResolvedValue({
-        items: [],
-        totalPages: 0,
-        currentPage: 1,
-        totalItems: 0,
-        itemsPerPage: 50,
-      });
+      daytonaCalls.list.mockImplementation(() => sandboxStream([]));
       const client = await makeClient();
       const result = await client.healthCheck();
       expect(result).toEqual({ ok: true, runtime: "daytona" });
     });
 
     it("propagates SDK errors when unreachable", async () => {
-      daytonaCalls.list.mockRejectedValue(new Error("network down"));
+      // The probe's request fires on the iterator's first `next()`, so the
+      // failure has to surface from inside the stream rather than from `list()`.
+      daytonaCalls.list.mockImplementation(() => ({
+        [Symbol.asyncIterator]() {
+          return this;
+        },
+        next: () => Promise.reject(new Error("network down")),
+      }));
       const client = await makeClient();
       await expect(client.healthCheck()).rejects.toThrow("network down");
     });

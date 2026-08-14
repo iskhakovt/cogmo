@@ -12,7 +12,7 @@ import {
   DaytonaAuthorizationError,
   DaytonaConnectionError,
   DaytonaError,
-} from "@daytonaio/sdk";
+} from "@daytona/sdk";
 import { daytonaHealthProbe } from "../sandbox/daytona/probe.js";
 
 export interface ValidationResult {

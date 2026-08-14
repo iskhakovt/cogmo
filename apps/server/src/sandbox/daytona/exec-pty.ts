@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { PassThrough, Writable } from "node:stream";
-import type { PtyHandle } from "@daytonaio/sdk";
+import type { PtyHandle } from "@daytona/sdk";
 import { logger } from "../../logger.js";
 import { type ExecOptions, type ExecStreamingHandle, ExecTimeoutError } from "../index.js";
 import { DisposedError } from "./exec-streaming.js";

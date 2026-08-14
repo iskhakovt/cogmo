@@ -94,7 +94,7 @@ const WsFrameSchema = z
      * Binary-frame payload, base64-encoded. Mutually exclusive with
      * `text`. Used for PTY terminal output and for client-side
      * `PtyHandle.sendInput` (the SDK always sends binary, even for
-     * string inputs — see `@daytonaio/sdk/esm/PtyHandle.js`).
+     * string inputs — see `@daytona/sdk/esm/PtyHandle.js`).
      */
     bytes: z
       .string()
@@ -326,7 +326,7 @@ export interface DaytonaMockReplayOptions {
    * Per-path fault injection. When an incoming request matches a
    * configured pattern, the mock injects the configured failure mode
    * instead of consulting the fixture cursor. Used by wedge-regression
-   * tests to drive a real `@daytonaio/sdk` client + real `ws`
+   * tests to drive a real `@daytona/sdk` client + real `ws`
    * WebSocket into a hung state without a recorded "hang" fixture
    * (Daytona doesn't emit a recordable hang — it's an upstream
    * transport failure mode we model directly).
@@ -758,7 +758,7 @@ export class DaytonaMock {
         // already closed
       }
     };
-    // Yield a macrotask: `@daytonaio/sdk`'s `getSessionCommandLogs` pipes
+    // Yield a macrotask: `@daytona/sdk`'s `getSessionCommandLogs` pipes
     // the WS through `stdDemuxStream`, which attaches its `message`
     // handler after an `await`. `queueMicrotask` fires inside the same
     // turn and loses the first frame.

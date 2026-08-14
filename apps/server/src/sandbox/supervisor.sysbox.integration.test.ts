@@ -20,7 +20,7 @@ import type { ResourceLimits } from "./types.js";
  *
  * Gated by SANDBOX_RUNTIME=sysbox env. Skipped on dev machines that don't
  * have sysbox installed; runs in the GHA `sysbox-e2e` job which installs
- * sysbox 0.7.0 via .deb on `ubuntu-24.04`. The runc-flavoured supervisor
+ * sysbox 0.7.1 via .deb on `ubuntu-24.04`. The runc-flavoured supervisor
  * tests in `supervisor.integration.test.ts` cover the rest of the lifecycle.
  */
 

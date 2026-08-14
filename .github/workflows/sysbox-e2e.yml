@@ -1,6 +1,6 @@
 name: Sysbox E2E
 
-# Sysbox-runtime e2e — installs sysbox 0.7.0 on a fresh ubuntu-24.04 runner
+# Sysbox-runtime e2e — installs sysbox 0.7.1 on a fresh ubuntu-24.04 runner
 # and runs the supervisor's sysbox-flavoured tests. Path-filtered so it only
 # fires on changes that could plausibly affect the sandbox supervisor or its
 # Docker-API integration.
@@ -45,7 +45,7 @@ permissions: {}
 jobs:
   sysbox:
     name: Sysbox supervisor tests
-    # Pinned to ubuntu-24.04 — sysbox 0.7.0's .deb only supports up to Noble
+    # Pinned to ubuntu-24.04 — sysbox 0.7.1's .deb only supports up to Noble
     # (kernel 6.8+). Ubuntu-26.04 bump is tracked in todo.md once both
     # actions/runner-images and sysbox catch up.
     runs-on: ubuntu-24.04
@@ -71,7 +71,7 @@ jobs:
             exit 1
           fi
 
-      - name: Install sysbox-ce 0.7.0
+      - name: Install sysbox-ce 0.7.1
         run: ./.github/scripts/install-sysbox.sh
 
       - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8

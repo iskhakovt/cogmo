@@ -4,13 +4,13 @@
 # bumping sysbox is "edit version + recompute SHA"; runtime registration
 # is the postcondition that gates the rest of the sysbox-e2e workflow.
 #
-# v0.7.0 is genuine upstream Nestybox — `nestybox/sysbox` carries the
-# `v0.7.0` git tag with a CHANGELOG entry (2025-03-02; runc CVE patches
-# + sysbox-deploy-k8s updates), and `downloads.nestybox.com/sysbox/
-# releases/v0.7.0/` redirects to Nestybox's own GCS bucket
-# (`storage.googleapis.com/sysbox-releases/`). Nestybox stopped
-# publishing GitHub *Releases* after v0.6.7, so the /releases page is
-# stale — the canonical distribution channel is the downloads server.
+# v0.7.1 is genuine upstream Nestybox — `nestybox/sysbox` carries the
+# `v0.7.1` git tag and GitHub Release (2026-07-31; containerd 2.x support
+# on kernel 6.8+, sysbox-fs deadlock and nil-deref fixes, grpc HTTP/2
+# flood-protection bump). The `.deb` itself is served from
+# `downloads.nestybox.com/sysbox/releases/v0.7.1/`, which redirects to
+# Nestybox's own GCS bucket (`storage.googleapis.com/sysbox-releases/`);
+# GitHub Releases carry the notes, not the amd64 package.
 #
 # The `sysbox-ce` postinst stops Docker, registers `sysbox-runc`, then
 # restarts Docker. On busy runners, `sysbox-mgr` (a `Wants=` dep of
@@ -24,9 +24,9 @@
 
 set -euo pipefail
 
-readonly SYSBOX_VERSION="0.7.0"
+readonly SYSBOX_VERSION="0.7.1"
 readonly SYSBOX_URL="https://downloads.nestybox.com/sysbox/releases/v${SYSBOX_VERSION}/sysbox-ce_${SYSBOX_VERSION}-0.linux_amd64.deb"
-readonly SYSBOX_SHA256="eeff273671467b8fa351ab3d40709759462dc03d9f7b50a1b207b37982ce40a9"
+readonly SYSBOX_SHA256="9d6d5484f980d0a17f86c492c1262015c2afb66280bdb97215b79fde6a0261c5"
 
 echo "::group::Download + install sysbox-ce ${SYSBOX_VERSION}"
 curl -fsSL "${SYSBOX_URL}" -o /tmp/sysbox.deb

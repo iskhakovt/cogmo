@@ -7,7 +7,7 @@ import {
   DaytonaRateLimitError,
   type Sandbox as DaytonaSdkSandbox,
   SandboxState,
-} from "@daytonaio/sdk";
+} from "@daytona/sdk";
 import { logger } from "../../logger.js";
 import { withRetry } from "../../util/with-retry.js";
 import {
@@ -25,7 +25,7 @@ import { DaytonaSandboxSession } from "./session.js";
 
 /**
  * Snapshot lifecycle states. The literal set comes from `@daytona/api-client`'s
- * `SnapshotState` enum, which `@daytonaio/sdk` exposes only via the `Snapshot`
+ * `SnapshotState` enum, which `@daytona/sdk` exposes only via the `Snapshot`
  * type but doesn't re-export as a runtime value. Hardcoded here so we don't
  * have to depend on `@daytona/api-client` (transitive) directly. If the SDK
  * grows a state, the state-machine in `#ensureSnapshotActive` defaults to
@@ -626,8 +626,8 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
   }
 
   async tryResumeByTaskId(taskId: string): Promise<SandboxSession<DaytonaSessionState> | null> {
-    const result = await this.#daytona.list({ [LABEL_TASK]: taskId, [LABEL_ROLE]: "root" });
-    for (const sdkSandbox of result.items) {
+    const matches = this.#daytona.list({ labels: { [LABEL_TASK]: taskId, [LABEL_ROLE]: "root" } });
+    for await (const sdkSandbox of matches) {
       if (
         sdkSandbox.state === SandboxState.DESTROYED ||
         sdkSandbox.state === SandboxState.ERROR ||
@@ -665,8 +665,8 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
     // child / sibling sandboxes per task. Catching every sandbox
     // tagged with the taskId at delete time guarantees a single
     // deleteByTaskId call cascades the whole tree, not just the root.
-    const result = await this.#daytona.list({ [LABEL_TASK]: taskId });
-    for (const sdkSandbox of result.items) {
+    const matches = this.#daytona.list({ labels: { [LABEL_TASK]: taskId } });
+    for await (const sdkSandbox of matches) {
       this.#stopKeepalive(sdkSandbox.id);
       try {
         await sdkSandbox.delete();

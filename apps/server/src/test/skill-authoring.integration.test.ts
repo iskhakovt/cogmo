@@ -47,7 +47,7 @@
  * ## When the cassette needs a refresh
  *
  *   - Anthropic / OpenAI SDK bump that changes the wire shape.
- *   - `@daytonaio/sdk` bump that adds calls or renames endpoints.
+ *   - `@daytona/sdk` bump that adds calls or renames endpoints.
  *   - Prompt restructure (system prompt, tool definitions, skill
  *     conventions) that the model's response would differ on.
  *   - Pinned model swap (currently `claude-haiku-4-5-20251001`).
@@ -63,7 +63,7 @@ import { copyFile, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { Daytona, Image } from "@daytonaio/sdk";
+import { Daytona, Image } from "@daytona/sdk";
 import { Octokit } from "@octokit/rest";
 import { and, desc, eq, ne } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";

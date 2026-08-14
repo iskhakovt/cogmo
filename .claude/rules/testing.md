@@ -44,7 +44,7 @@ Integration tests run against frozen wire fixtures captured from real upstreams.
 | fal-mock | `src/test/fal-mock.ts` | fal.ai image generation, scoped `fetch` wrapper |
 | openai-voice-mock | `src/test/openai-voice-mock.ts` | OpenAI `/v1/audio/{speech,transcriptions}` for TTS/STT |
 | xAI llmock | `src/test/xai-grok.integration.test.ts` | One-off llmock proxying `openai → openrouter.ai/api` |
-| daytona-mock | `src/test/daytona-mock.ts` | `@daytonaio/sdk` REST + WebSocket (toolbox proxy, `getSessionCommandLogs`) |
+| daytona-mock | `src/test/daytona-mock.ts` | `@daytona/sdk` REST + WebSocket (toolbox proxy, `getSessionCommandLogs`) |
 
 **To re-record:** `pnpm test:record` (or `:e2e`) sets `RECORD=1` and runs the integration tier. Each mock guards on its own upstream API key — only adapters with keys present in `.env` actually record. CI never sets `RECORD=1`; unmatched requests fail with `503` (or `1011` for WS) carrying a "re-record" hint.
 

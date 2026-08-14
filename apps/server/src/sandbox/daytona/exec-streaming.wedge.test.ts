@@ -1,10 +1,10 @@
 /**
- * Wedge regression — real `@daytonaio/sdk` against a stub HTTP+WS server
+ * Wedge regression — real `@daytona/sdk` against a stub HTTP+WS server
  * whose log-stream WebSocket holds open and never closes.
  *
  * Unit-tier `exec-streaming.test.ts` covers the timeout + cleanup paths
  * with a `fakeProcess()` stub. This test goes one layer down: a real
- * `Daytona` client built from `@daytonaio/sdk` calls `getSessionCommandLogs`
+ * `Daytona` client built from `@daytona/sdk` calls `getSessionCommandLogs`
  * which opens a real `ws` WebSocket against a hand-rolled test server.
  * The server accepts the upgrade and emits nothing — modelling the
  * Daytona wedge (Daytona [#2513](https://github.com/daytonaio/daytona/issues/2513)
@@ -25,7 +25,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
-import { Daytona } from "@daytonaio/sdk";
+import { Daytona } from "@daytona/sdk";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type WebSocket from "ws";
 import { WebSocketServer } from "ws";
@@ -210,7 +210,7 @@ afterAll(async () => {
   await stub.stop();
 });
 
-describe("startExecStreaming wedge regression (real @daytonaio/sdk + real ws)", () => {
+describe("startExecStreaming wedge regression (real @daytona/sdk + real ws)", () => {
   // The 4-day wedge in production happened because `getSessionCommandLogs`
   // returned a Promise that never settled — the WS held open without a
   // close frame. Without `timeoutMs`, `await handle.wait()` blocked
