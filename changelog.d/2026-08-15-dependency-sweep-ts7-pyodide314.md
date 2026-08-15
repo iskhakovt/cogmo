@@ -21,4 +21,10 @@ canonicalize 4 enforces RFC 8785 §3.2.2.2 and throws on unpaired surrogates. `c
 
 **npm 12 gates install scripts.** It added an `--allow-scripts` allowlist independent of `ignore-scripts`, and Claude Code relies on its postinstall to place a per-platform native binary — so the devbase global install reported success and `claude --version` then failed with "native binary not installed". The Dockerfile now names that one package explicitly, preserving default-deny for the rest of the tree.
 
-**Known gap: the Daytona record/replay fixtures are stale.** Daytona 0.204 moved log streaming from a plain WebSocket at `/toolbox/.../logs?follow=true` to socket.io, so `daytona-mock` finds no fixture match on replay. This is a protocol change, not a cosmetic version-string difference, so it needs `RECORD=1 DAYTONA_API_KEY=… pnpm test:integration` against real Daytona rather than a matcher tweak. The llmock / fal / voice fixtures are also due a re-record on the SDK-bump trigger.
+**Record/replay fixtures re-recorded.** Two of the bumps changed upstream wire traffic enough to invalidate the committed cassettes, and both were re-recorded against the real APIs and then verified in replay mode (the mode CI runs).
+
+Daytona 0.204 sends `list()`'s label filter as a single JSON query parameter — `/sandbox?labels=%7B%22cogmo.task%22…` — which appears nowhere in the old recordings, and the lazy paging iterator collapses the call sequence (wrapper-success: 72 recorded calls down to 31).
+
+Claude Code 2.1.233 changes the prompts the CLI sends to `/v1/messages`, so llmock had no useful response to replay. Both legs still reached `complete`, so the shutdown contract held, but the model never emitted a tool call — which is what the plan and execute assertions pin. The stream-json contract itself is unchanged: run against the real API, 2.1.233 emits only `system:init`, `assistant`, `user` and `result:success`, all shapes `claude.ts` already parses. No parser work was needed despite the coupling warning on `CLAUDE_CODE_VERSION` in `docker-bake.hcl`.
+
+Worth knowing for the next sweep: `pnpm test:record -- <file>` silently ignores the file filter and re-records the entire integration tier against every live upstream. Scope a recording with `RECORD=1 pnpm exec vitest run --project integration <file>` instead.
