@@ -100,8 +100,8 @@ importers:
         specifier: ^0.13.11
         version: 0.13.11(typescript@6.0.3)(zod@4.4.3)
       '@vectorize-io/hindsight-client':
-        specifier: ^0.8.1
-        version: 0.8.1
+        specifier: ^0.9.1
+        version: 0.9.1
       ai:
         specifier: ^7.0.65
         version: 7.0.65(zod@4.4.3)
@@ -707,11 +707,11 @@ packages:
 
   '@esbuild-kit/core-utils@3.3.2':
     resolution: {integrity: sha512-sPRAnw9CdSsRmEtnsl2WXWdyquogVpB3yZ3dgwJfe8zrOzTsV7cJvmwrKVa+0ma5BoiGJ+BoqkMvawbayKUsqQ==}
-    deprecated: 'Merged into tsx: https://tsx.is'
+    deprecated: 'Merged into tsx: https://tsx.hirok.io'
 
   '@esbuild-kit/esm-loader@2.6.5':
     resolution: {integrity: sha512-FxEMIkJKnodyA1OaCUoEvbYRkoZlLZ4d/eXFu9Fh8CbBBgP5EmZxrfTRyN0qpXZ4vOvqnE5YdRdcrmUUXuU+dA==}
-    deprecated: 'Merged into tsx: https://tsx.is'
+    deprecated: 'Merged into tsx: https://tsx.hirok.io'
 
   '@esbuild/aix-ppc64@0.25.12':
     resolution: {integrity: sha512-Hhmwd6CInZ3dwpuGTF8fJG6yoWmsToE+vYgD4nytZVxcu1ulHpUQRAB1UJ8+N1Am3Mz4+xOByoQoSZf4D+CpkA==}
@@ -3481,8 +3481,8 @@ packages:
   '@types/ws@8.18.1':
     resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
 
-  '@vectorize-io/hindsight-client@0.8.1':
-    resolution: {integrity: sha512-F0mMep0DuF2bTagoFsooDWUk28DLjdTqb8oKtrTVcipe/eytsNuPuqdfXrqkwWGvRthrcwokuugBLzQXpMyHtA==}
+  '@vectorize-io/hindsight-client@0.9.1':
+    resolution: {integrity: sha512-BoYMvdQkFe5699cutsg6qQ3NYZoxKjs/HcgwM5IqQuXZa1K85is3JhvdZ0ALE8E9YD1FKLLy3qpBbSO7PFwwoA==}
 
   '@vercel/oidc@3.2.0':
     resolution: {integrity: sha512-UycprH3T6n3jH0k44NHMa7pnFHGu/N05MjojYr+Mc6I7obkoLIJujSWwin1pCvdy/eOxrI/l3uDLQsmcrOb4ug==}
@@ -9190,7 +9190,7 @@ snapshots:
     dependencies:
       '@types/node': 26.2.0
 
-  '@vectorize-io/hindsight-client@0.8.1': {}
+  '@vectorize-io/hindsight-client@0.9.1': {}
 
   '@vercel/oidc@3.2.0': {}
 
