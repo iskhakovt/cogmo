@@ -815,3 +815,33 @@ export function spyOnInngestSend(client: Inngest) {
 export function mockInngest(): Inngest {
   return mock<Inngest>();
 }
+
+/**
+ * Stub a lazily-paging async-iterator API — `Daytona.list()` is the current
+ * one: it returns an `AsyncIterableIterator` rather than a resolved page, so
+ * the request only fires when the consumer advances the iterator.
+ *
+ * Pair with `mockImplementation` rather than `mockReturnValue`; a generator
+ * instance is consumed once, so a re-invoked mock would otherwise hand back an
+ * already-exhausted iterator.
+ */
+export function asyncIterableOf<T>(items: ReadonlyArray<T>): AsyncIterableIterator<T> {
+  return (async function* () {
+    yield* items;
+  })();
+}
+
+/**
+ * Counterpart to {@link asyncIterableOf} for the failure path. The rejection
+ * surfaces from the first `next()`, matching where a paging API's request
+ * actually fails — throwing from the call itself would test the wrong thing.
+ * Hand-rolled rather than an empty generator, which `useYield` rejects.
+ */
+export function asyncIterableThrowing<T>(err: unknown): AsyncIterableIterator<T> {
+  return {
+    [Symbol.asyncIterator]() {
+      return this;
+    },
+    next: () => Promise.reject(err),
+  };
+}
