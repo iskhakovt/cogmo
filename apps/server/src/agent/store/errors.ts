@@ -206,10 +206,10 @@ interface PgUniqueViolation {
  * `profiles(user_id, profile_class)`. Both codes carry the constraint name and
  * callers discriminate on that, so both are treated as one class here.
  */
-const FK_VIOLATION_CODES = ["23503", "23001"] as const;
+const REFERENTIAL_VIOLATION_CODES = ["23503", "23001"] as const;
 
-interface PgForeignKeyViolation {
-  code: (typeof FK_VIOLATION_CODES)[number];
+interface PgReferentialViolation {
+  code: (typeof REFERENTIAL_VIOLATION_CODES)[number];
   constraint_name?: string;
   constraint?: string;
 }
@@ -250,12 +250,12 @@ export function findPostgresUniqueViolation(err: unknown): PgUniqueViolation | n
 }
 
 /**
- * Narrow an unknown error to a Postgres referential-integrity violation —
- * either a foreign-key violation or a RESTRICT violation. See
- * `FK_VIOLATION_CODES`.
+ * Narrow an unknown error to a Postgres referential-integrity violation — a
+ * foreign key rejecting a write, under either referential action. See
+ * `REFERENTIAL_VIOLATION_CODES`.
  */
-export function findPostgresForeignKeyViolation(err: unknown): PgForeignKeyViolation | null {
-  return findPgErrorByCode(err, FK_VIOLATION_CODES);
+export function findPostgresReferentialViolation(err: unknown): PgReferentialViolation | null {
+  return findPgErrorByCode(err, REFERENTIAL_VIOLATION_CODES);
 }
 
 function constraintNameOf(pg: { constraint_name?: string; constraint?: string }): string {
@@ -286,20 +286,21 @@ export async function translateUniqueViolation<T>(fn: () => Promise<T>): Promise
 }
 
 /**
- * Wrap a block and convert Postgres FK violations on `constraintName` to
- * the supplied error. Other FK violations and non-FK errors propagate
- * unchanged. Used to translate composite-FK enforcement on
+ * Wrap a block and convert a referential violation on `constraintName` into
+ * the supplied error, whichever referential action raised it. Violations on
+ * other constraints, and non-referential errors, propagate unchanged. Used to
+ * translate composite-FK enforcement on
  * `(profiles.user_id, profiles.profile_class)` into the typed
  * `UnknownProfileClassError` / `ProfileClassInUseError`.
  */
-export async function translateForeignKeyViolation<T>(
+export async function translateReferentialViolation<T>(
   fn: () => Promise<T>,
   match: { constraintName: string; rethrow: () => Error },
 ): Promise<T> {
   try {
     return await fn();
   } catch (e) {
-    const pg = findPostgresForeignKeyViolation(e);
+    const pg = findPostgresReferentialViolation(e);
     if (pg && constraintNameOf(pg) === match.constraintName) {
       throw match.rethrow();
     }

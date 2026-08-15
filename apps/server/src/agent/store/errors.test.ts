@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  findPostgresForeignKeyViolation,
+  findPostgresReferentialViolation,
   findPostgresUniqueViolation,
   ProfileClassInUseError,
-  translateForeignKeyViolation,
+  translateReferentialViolation,
 } from "./errors.js";
 
 /**
@@ -25,25 +25,25 @@ function wrapped(inner: Error): Error {
   return Object.assign(new Error("Failed query: delete from ..."), { cause: inner });
 }
 
-describe("findPostgresForeignKeyViolation", () => {
+describe("findPostgresReferentialViolation", () => {
   it("matches 23503 (NO ACTION foreign-key violation)", () => {
-    const found = findPostgresForeignKeyViolation(pgError("23503", "fk_a"));
+    const found = findPostgresReferentialViolation(pgError("23503", "fk_a"));
     expect(found).toMatchObject({ code: "23503", constraint: "fk_a" });
   });
 
   it("matches 23001 (RESTRICT violation — the PG18 shape)", () => {
-    const found = findPostgresForeignKeyViolation(pgError("23001", "fk_b"));
+    const found = findPostgresReferentialViolation(pgError("23001", "fk_b"));
     expect(found).toMatchObject({ code: "23001", constraint: "fk_b" });
   });
 
   it("walks the Drizzle cause chain to reach the driver error", () => {
-    const found = findPostgresForeignKeyViolation(wrapped(wrapped(pgError("23001", "fk_c"))));
+    const found = findPostgresReferentialViolation(wrapped(wrapped(pgError("23001", "fk_c"))));
     expect(found).toMatchObject({ code: "23001", constraint: "fk_c" });
   });
 
   it("returns null for unrelated Postgres codes", () => {
-    expect(findPostgresForeignKeyViolation(pgError("23505", "uq_a"))).toBeNull();
-    expect(findPostgresForeignKeyViolation(new Error("boom"))).toBeNull();
+    expect(findPostgresReferentialViolation(pgError("23505", "uq_a"))).toBeNull();
+    expect(findPostgresReferentialViolation(new Error("boom"))).toBeNull();
   });
 
   it("does not treat a unique violation as a foreign-key violation, or vice versa", () => {
@@ -52,7 +52,7 @@ describe("findPostgresForeignKeyViolation", () => {
   });
 });
 
-describe("translateForeignKeyViolation", () => {
+describe("translateReferentialViolation", () => {
   const match = {
     constraintName: "fk_profiles_profile_class",
     rethrow: () => new ProfileClassInUseError(1),
@@ -60,7 +60,7 @@ describe("translateForeignKeyViolation", () => {
 
   it.each(["23503", "23001"])("translates a %s violation on the named constraint", async (code) => {
     await expect(
-      translateForeignKeyViolation(() => {
+      translateReferentialViolation(() => {
         throw wrapped(pgError(code, "fk_profiles_profile_class"));
       }, match),
     ).rejects.toBeInstanceOf(ProfileClassInUseError);
@@ -69,7 +69,7 @@ describe("translateForeignKeyViolation", () => {
   it("propagates a violation on a different constraint unchanged", async () => {
     const original = wrapped(pgError("23001", "fk_something_else"));
     await expect(
-      translateForeignKeyViolation(() => {
+      translateReferentialViolation(() => {
         throw original;
       }, match),
     ).rejects.toBe(original);
@@ -78,7 +78,7 @@ describe("translateForeignKeyViolation", () => {
   it("propagates non-violation errors unchanged", async () => {
     const original = new Error("connection reset");
     await expect(
-      translateForeignKeyViolation(() => {
+      translateReferentialViolation(() => {
         throw original;
       }, match),
     ).rejects.toBe(original);
@@ -86,7 +86,7 @@ describe("translateForeignKeyViolation", () => {
 
   it("returns the block's value when it does not throw", async () => {
     await expect(
-      translateForeignKeyViolation(async () => ({ deleted: true }), match),
+      translateReferentialViolation(async () => ({ deleted: true }), match),
     ).resolves.toEqual({
       deleted: true,
     });

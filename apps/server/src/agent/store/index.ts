@@ -16,7 +16,7 @@ import {
   ProfileClassInUseError,
   ProfileInUseError,
   ReservedCompartmentNameError,
-  translateForeignKeyViolation,
+  translateReferentialViolation,
   translateUniqueViolation,
   UnknownProfileClassError,
 } from "./errors.js";
@@ -1747,7 +1747,7 @@ export class DrizzleAgentStore implements AgentStore {
       .from(profiles)
       .where(and(eq(profiles.userId, userId), eq(profiles.profileClass, name)));
     const refCount = refRows[0]?.value ?? 0;
-    return translateForeignKeyViolation(
+    return translateReferentialViolation(
       async () => {
         const deleted = await tx
           .delete(profileClasses)
@@ -1792,7 +1792,7 @@ export class DrizzleAgentStore implements AgentStore {
     // Concurrent deleteProfileClass landing between this UPDATE and
     // commit fails the same way, so stale-snapshot races can't leave a
     // dangling pointer.
-    await translateForeignKeyViolation(
+    await translateReferentialViolation(
       async () => {
         await tx
           .update(profiles)
