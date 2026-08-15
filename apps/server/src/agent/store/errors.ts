@@ -178,27 +178,38 @@ export class ImageModelSlugCollisionError extends Error {
   }
 }
 
+const UNIQUE_VIOLATION_CODES = ["23505"] as const;
+
 interface PgUniqueViolation {
-  code: "23505";
+  code: (typeof UNIQUE_VIOLATION_CODES)[number];
   constraint_name?: string;
   constraint?: string;
 }
 
 /**
- * Referential-integrity violation SQLSTATEs. Postgres splits these by the
- * referential action that rejected the write: a plain `NO ACTION` FK raises
- * `23503` (foreign_key_violation), while an `ON DELETE RESTRICT` FK raises
- * `23001` (restrict_violation) as of PostgreSQL 18 — the major that dev,
- * prod (`pgvector/pgvector:pg18`) and the PGlite test tier all run. Both
- * carry the constraint name, and callers match on that, so both are treated
- * as the same class of failure here.
+ * Referential-integrity violation SQLSTATEs.
+ *
+ * Postgres 18 splits these by the referential action that rejected the write:
+ * a `RESTRICT` action raises `23001` (restrict_violation, the SQL-standard
+ * code), while `NO ACTION` and a plain orphan insert raise `23503`
+ * (foreign_key_violation). Verified against the official images — on 17 all
+ * five cases raise `23503`, on 18 only the two `RESTRICT` paths move:
+ *
+ *   action                       pg17     pg18
+ *   DELETE + RESTRICT            23503    23001
+ *   UPDATE + RESTRICT            23503    23001
+ *   DELETE / UPDATE + NO ACTION  23503    23503
+ *   INSERT orphan child          23503    23503
+ *
+ * Dev, prod (`pgvector/pgvector:pg18`) and the PGlite test tier all run 18,
+ * so the `23001` arm is the live one for the RESTRICT FK on
+ * `profiles(user_id, profile_class)`. Both codes carry the constraint name and
+ * callers discriminate on that, so both are treated as one class here.
  */
 const FK_VIOLATION_CODES = ["23503", "23001"] as const;
 
-type FkViolationCode = (typeof FK_VIOLATION_CODES)[number];
-
 interface PgForeignKeyViolation {
-  code: FkViolationCode;
+  code: (typeof FK_VIOLATION_CODES)[number];
   constraint_name?: string;
   constraint?: string;
 }
@@ -210,16 +221,18 @@ interface PgForeignKeyViolation {
  * reach it. Returns the matched code alongside the constraint fields so
  * callers can preserve it.
  */
-function findPgErrorByCode(
+function findPgErrorByCode<C extends string>(
   err: unknown,
-  codes: ReadonlyArray<string>,
-): { code: string; constraint?: string; constraint_name?: string } | null {
+  codes: ReadonlyArray<C>,
+): { code: C; constraint?: string; constraint_name?: string } | null {
   let cur: unknown = err;
   for (let depth = 0; depth < 4 && cur != null; depth++) {
     if (typeof cur === "object" && "code" in cur) {
-      const code = (cur as { code: unknown }).code;
-      if (typeof code === "string" && codes.includes(code)) {
-        return { ...(cur as { constraint?: string; constraint_name?: string }), code };
+      // `find` rather than `includes` so the match carries `C`, not `string` —
+      // the callers' literal unions survive without an assertion.
+      const matched = codes.find((c) => c === (cur as { code: unknown }).code);
+      if (matched !== undefined) {
+        return { ...(cur as { constraint?: string; constraint_name?: string }), code: matched };
       }
     }
     if (typeof cur === "object" && "cause" in cur) {
@@ -233,8 +246,7 @@ function findPgErrorByCode(
 
 /** Narrow an unknown error to a Postgres unique-violation shape. */
 export function findPostgresUniqueViolation(err: unknown): PgUniqueViolation | null {
-  const found = findPgErrorByCode(err, ["23505"]);
-  return found ? { ...found, code: "23505" } : null;
+  return findPgErrorByCode(err, UNIQUE_VIOLATION_CODES);
 }
 
 /**
@@ -243,11 +255,7 @@ export function findPostgresUniqueViolation(err: unknown): PgUniqueViolation | n
  * `FK_VIOLATION_CODES`.
  */
 export function findPostgresForeignKeyViolation(err: unknown): PgForeignKeyViolation | null {
-  const found = findPgErrorByCode(err, FK_VIOLATION_CODES);
-  if (!found) return null;
-  // `findPgErrorByCode` only returns codes it was asked for, so the widening
-  // back to the literal union is sound.
-  return { ...found, code: found.code as FkViolationCode };
+  return findPgErrorByCode(err, FK_VIOLATION_CODES);
 }
 
 function constraintNameOf(pg: { constraint_name?: string; constraint?: string }): string {
