@@ -8,7 +8,6 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/server/package.json apps/server/
 COPY apps/web/package.json apps/web/
 COPY packages/contracts/package.json packages/contracts/
-COPY patches/ patches/
 # Corepack runs only in this stage; `prepare --activate` verifies the +sha512 hash from packageManager.
 RUN corepack enable \
  && corepack prepare --activate "$(node -p "require('./package.json').packageManager")"

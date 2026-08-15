@@ -3,11 +3,13 @@
 # secret inclusion (.dev/env, .npmrc, keys never enter the context).
 *
 
-# Root workspace manifests + patches
+# Root workspace manifests. Re-add `!patches/` alongside a `COPY patches/`
+# in the Dockerfile if `pnpm-workspace.yaml` ever regains `patchedDependencies`
+# — the frozen install fails loudly when a declared patch is missing, so the
+# two can't drift silently.
 !package.json
 !pnpm-lock.yaml
 !pnpm-workspace.yaml
-!patches/
 
 # Descend into apps/ + packages/ to reach the specific COPYed inputs. A
 # nested path can only be re-included after its parents are, so each level
