@@ -2,13 +2,19 @@ import { describe, expect, it } from "vitest";
 import pkg from "../../node_modules/pyodide/package.json" with { type: "json" };
 
 /**
- * Pin the pyodide major+minor we test against. Pyodide ships breaking
- * changes in JS API and Python interpreter version across minors (e.g.
- * 0.27→0.28→0.29 each had behavioral diffs). When this test fails,
- * intentionally bump the constant after re-recording fixtures and
- * re-validating ctx.* + interrupt-buffer behavior.
+ * Pin the pyodide release line we test against.
+ *
+ * Pyodide's major tracks the CPython version it embeds — the 314 line is
+ * Python 3.14 — and a major carries both a new interpreter and a new package
+ * ABI, so the bundled wheel set turns over with it. Minors within a line still
+ * move the JS API and interpreter patch level.
+ *
+ * When this test fails, bump the constant deliberately: re-record fixtures,
+ * re-validate `ctx.*` round-tripping and interrupt-buffer / wall-clock-cap
+ * behavior, and check `pyodide-compat.ts` still resolves the packages skills
+ * declare against the new `pyodide-lock.json`.
  */
-const EXPECTED_PYODIDE = "0.29.";
+const EXPECTED_PYODIDE = "314.";
 
 describe("pyodide version pin", () => {
   it(`is on the ${EXPECTED_PYODIDE}x line`, () => {

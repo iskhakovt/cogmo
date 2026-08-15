@@ -116,7 +116,7 @@
     "tsup": "^8.5.1",
     "tsx": "^4.23.12",
     "type-fest": "^5.8.0",
-    "typescript": "^6.0.3",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.10",
     "vitest-mock-extended": "5.1.1",
     "ws": "^8.21.3"
