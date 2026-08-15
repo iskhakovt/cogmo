@@ -209,6 +209,34 @@ describe("computeIterationFingerprint", () => {
     const b = computeIterationFingerprint([toolUse("ID-Z", "read_file", { path: "x" })]);
     expect(a).toBe(b);
   });
+
+  // RFC 8785 rejects lone surrogates and `canonicalize` throws on them. Tool
+  // args are model output, so that has to degrade rather than abort the turn —
+  // the call site in the agent loop treats a throw here as fatal.
+  it("hashes args containing a lone surrogate instead of throwing", () => {
+    const loneHigh = computeIterationFingerprint([toolUse("t1", "search", { q: "bad\uD800end" })]);
+    const loneLow = computeIterationFingerprint([toolUse("t2", "search", { q: "bad\uDC00end" })]);
+    expect(loneHigh).not.toBeNull();
+    expect(loneLow).not.toBeNull();
+  });
+
+  it("hashes a lone surrogate in an object key instead of throwing", () => {
+    expect(
+      computeIterationFingerprint([toolUse("t1", "search", { "k\uD800": "v" })]),
+    ).not.toBeNull();
+  });
+
+  it("stays deterministic for a lone surrogate — equal args still hash equal", () => {
+    const a = computeIterationFingerprint([toolUse("t1", "search", { q: "x\uD800y" })]);
+    const b = computeIterationFingerprint([toolUse("t2", "search", { q: "x\uD800y" })]);
+    expect(a).toBe(b);
+  });
+
+  it("leaves well-formed surrogate pairs alone — emoji args stay distinct", () => {
+    const a = computeIterationFingerprint([toolUse("t1", "search", { q: "😀" })]);
+    const b = computeIterationFingerprint([toolUse("t2", "search", { q: "🎉" })]);
+    expect(a).not.toBe(b);
+  });
 });
 
 describe("classifyClassDTrip", () => {

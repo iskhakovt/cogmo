@@ -518,6 +518,32 @@ function sha256(s: string): string {
 }
 
 /**
+ * Replace lone surrogates with U+FFFD throughout a JSON-shaped value, keys
+ * included.
+ *
+ * RFC 8785 §3.2.2.2 rejects malformed strings, and `canonicalize` enforces
+ * that by throwing `Lone surrogate is not allowed`. Tool arguments come from
+ * the model, so a stray unpaired surrogate is untrusted input rather than a
+ * bug on our side — and this runs on the resilience path, where throwing
+ * would abort the whole turn to protect a best-effort dedup signal.
+ * Substitution keeps the encoding total and deterministic: equal inputs still
+ * hash equal, which is the only property Class D depends on. Distinct lone
+ * surrogates collapse to the same replacement character, so two otherwise
+ * identical iterations could compare equal on that basis — a far cheaper
+ * failure than crashing the turn.
+ */
+function toWellFormedDeep(value: unknown): unknown {
+  if (typeof value === "string") return value.toWellFormed();
+  if (Array.isArray(value)) return value.map(toWellFormedDeep);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [k.toWellFormed(), toWellFormedDeep(v)]),
+    );
+  }
+  return value;
+}
+
+/**
  * Stable canonical-JSON encoding for fingerprint hashing. Wraps the
  * `canonicalize` library (RFC 8785 JSON Canonicalization Scheme) — sorted
  * object keys at every depth, arrays preserve order. Tool arguments are
@@ -530,7 +556,7 @@ function sha256(s: string): string {
  * iteration to `sha256("")` and falsely tripping Class D.
  */
 function canonicalJson(value: unknown): string {
-  const encoded = canonicalize(value);
+  const encoded = canonicalize(toWellFormedDeep(value));
   if (encoded === undefined) {
     throw new Error(
       "canonicalJson: input is not JSON-representable (undefined / function / symbol)",
