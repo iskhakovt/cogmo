@@ -1,9 +1,13 @@
-import { describe, expect, it, vi } from "vitest";
+import { InngestTestEngine } from "@inngest/test";
+import type { EventPayload } from "inngest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { z } from "zod";
+import { inngest } from "../inngest/client.js";
 import type { inboundArrived } from "../inngest/events.js";
+import { debounceWaitMs } from "../metrics.js";
 import { expectDefined } from "../test/assertions.js";
-import { invokeInngestFn, type MockStep, mockStep } from "../test/factories.js";
-import { createDebounceFunctions } from "./debounce.js";
+import { invokeInngestFn, type MockStep, mockStep, spyOnInngestSend } from "../test/factories.js";
+import { createDebounceFunctions, durableSleepMs } from "./debounce.js";
 
 type InboundArrivedData = z.infer<typeof inboundArrived.schema>;
 
@@ -245,4 +249,84 @@ describe("legacy router — handler behavior", () => {
     expect(events).toHaveLength(1);
     expect(events[0]?.name).toBe("debounce/maxwait");
   });
+});
+
+/**
+ * Durable waits have a one-second resolution: Inngest parses `step.sleep`'s
+ * argument and rounds any positive sub-second duration up before the op
+ * reaches the executor. These tests run the timer functions through the real
+ * execution engine rather than a `step` stub, because a stub records whatever
+ * string it was handed and so cannot observe that rewrite at all.
+ */
+describe("legacy timers — durable sleep floor", () => {
+  let sendSpy: ReturnType<typeof spyOnInngestSend>;
+
+  beforeEach(() => {
+    sendSpy = spyOnInngestSend(inngest);
+    sendSpy.mockResolvedValue({ ids: ["fake"] });
+  });
+
+  afterEach(() => {
+    sendSpy.mockRestore();
+  });
+
+  /** Parse the `<n>s` duration strings these timers produce back to ms. */
+  function sleepDurationToMs(duration: string): number {
+    const match = /^(\d+)s$/.exec(duration);
+    if (!match) throw new Error(`unexpected sleep duration string: ${duration}`);
+    return Number(expectDefined(match[1], "seconds")) * 1000;
+  }
+
+  it.each([
+    [0, 0],
+    [1, 1000],
+    [500, 1000],
+    [999, 1000],
+    [1000, 1000],
+    [3000, 3000],
+  ])("durableSleepMs(%i) is %i", (requested, expected) => {
+    expect(durableSleepMs(requested)).toBe(expected);
+  });
+
+  // Columns: histogram kind, index into `createDebounceFunctions`' legacy
+  // `[router, idle, maxwait]` tuple, config, trigger event name, that event's
+  // `timeoutMs`, and the duration string Inngest ends up handing the executor.
+  it.each([
+    ["idle" as const, 1, { idleTimeoutMs: 500, maxWaitMs: 5000 }, "debounce/idle", 500, "1s"],
+    ["maxwait" as const, 2, { idleTimeoutMs: 3000, maxWaitMs: 500 }, "debounce/maxwait", 500, "1s"],
+    ["idle" as const, 1, { idleTimeoutMs: 3000, maxWaitMs: 500 }, "debounce/idle", 3000, "3s"],
+  ])(
+    "%s timer records the wait Inngest performs, not the one requested (%#)",
+    async (kind, fnIndex, config, eventName, timeoutMs, expectedDuration) => {
+      const recordSpy = vi.spyOn(debounceWaitMs, "record");
+      try {
+        const fns = createDebounceFunctions({ ...config, resumePolicy: "debounce" });
+        const timer = expectDefined(fns[fnIndex], `${kind} timer`);
+        const events: [EventPayload, ...EventPayload[]] = [
+          {
+            name: eventName,
+            data: { conversationId: "conv-1", inboundMessageId: "inbound-1", timeoutMs },
+          },
+        ];
+
+        // `step.name` on the sleep op is the duration string after Inngest's
+        // own parsing — the wait the executor will really perform.
+        const { step } = await new InngestTestEngine({ function: timer, events }).executeStep(
+          "wait",
+        );
+        const sleepDuration = expectDefined(step.name, "sleep duration");
+        expect(sleepDuration).toBe(expectedDuration);
+
+        // Memoize the sleep as already elapsed so the run continues into the
+        // record + emit tail; the engine has no clock to advance.
+        await new InngestTestEngine({ function: timer, events }).execute({
+          steps: [{ id: "wait", handler: () => null }],
+        });
+
+        expect(recordSpy).toHaveBeenCalledWith(sleepDurationToMs(sleepDuration), { kind });
+      } finally {
+        recordSpy.mockRestore();
+      }
+    },
+  );
 });

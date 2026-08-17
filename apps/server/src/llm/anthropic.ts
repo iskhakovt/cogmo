@@ -451,20 +451,63 @@ function isTextLikeDocumentMediaType(mt: string): boolean {
   );
 }
 
-function fromAnthropicStopReason(reason: string | null): StopReason {
+/**
+ * Map Anthropic's `stop_reason` onto our canonical {@link StopReason}.
+ *
+ * The parameter is the SDK's own `StopReason` union rather than `string`, so
+ * the switch below is exhaustive and the `default` arm's `never` assignment
+ * is a compile error the moment the SDK grows a value we haven't decided how
+ * to map. A widened parameter type would let a new upstream stop reason fold
+ * silently into `end_turn`, which is the worst possible default: `end_turn`
+ * with no content blocks is the signal `classifyPostStream` reads as "model
+ * returned an empty turn", so the loop would answer an unmapped terminal
+ * condition with a continuation prompt.
+ */
+function fromAnthropicStopReason(reason: Anthropic.StopReason | null): StopReason {
   switch (reason) {
     case "end_turn":
+    case "stop_sequence":
+      return "end_turn";
+    case null:
+      // Streamed `message_delta` carries `stop_reason: null` until the final
+      // delta; a nullish terminal value means the turn ended without the API
+      // naming a reason.
+      return "end_turn";
+    case "pause_turn":
+      // A long-running server-tool turn the API paused and expects to be
+      // handed back for continuation. We don't drive server tools, so this
+      // arrives with content and terminates the turn like a normal stop.
       return "end_turn";
     case "tool_use":
       return "tool_use";
     case "max_tokens":
+      return "max_tokens";
+    case "model_context_window_exceeded":
+      // Input plus output overran the model's context window. Distinct from
+      // `max_tokens` upstream, but the canonical union has no context-overflow
+      // member and both mean "the turn ran out of token room" — the loop ends
+      // the turn either way. Mapping it to `end_turn` instead would be
+      // actively harmful: an overflow that produced no content blocks would
+      // match `classifyPostStream`'s empty-`end_turn` arm and earn a
+      // continuation prompt, i.e. more tokens appended to a context that
+      // already overflowed.
       return "max_tokens";
     case "refusal":
       // Anthropic's explicit refusal signal on recent models. Surfaces the
       // Class C "model refusal" subtype (design/agent-resilience.md) to the
       // in-loop classifier.
       return "refusal";
-    default:
+    default: {
+      // Compile-time exhaustiveness guard: this assignment fails to type-check
+      // when the SDK union grows a member the switch doesn't name. At runtime
+      // the API can still send a value newer than the installed SDK types, so
+      // log it and end the turn rather than failing the request.
+      const _exhaustive: never = reason;
+      logger.warn(
+        { stopReason: _exhaustive },
+        "unmapped Anthropic stop_reason; treating the turn as ended",
+      );
       return "end_turn";
+    }
   }
 }

@@ -314,6 +314,87 @@ describe("AnthropicProvider", () => {
     expect(result.stopReason).toBe("max_tokens");
   });
 
+  it("maps model_context_window_exceeded to max_tokens, never end_turn", async () => {
+    // Context overflow terminates the turn with no content. Folding it into
+    // `end_turn` would match `classifyPostStream`'s empty-`end_turn` arm and
+    // earn a continuation prompt — more tokens appended to a context that
+    // just overflowed, guaranteeing the same failure on the retry and burning
+    // the empty_end_turn budget on the way to the wrong degrade subtype.
+    const provider = createProvider();
+    mockCreate.mockResolvedValueOnce({
+      content: [],
+      stop_reason: "model_context_window_exceeded",
+      model: "claude-sonnet-4-6",
+      usage: { input_tokens: 900_000, output_tokens: 0 },
+    });
+
+    const result = await provider.chat({
+      model: "claude-sonnet-4-6",
+      system: "sys",
+      messages: [{ role: "user", content: "a very long conversation" }],
+    });
+
+    expect(result.stopReason).toBe("max_tokens");
+    expect(result.content).toEqual([]);
+  });
+
+  it("maps model_context_window_exceeded in stream", async () => {
+    const provider = createProvider();
+    mockCreate.mockResolvedValueOnce(
+      mockStream([
+        {
+          type: "message_start",
+          message: {
+            model: "claude-sonnet-4-6",
+            usage: { input_tokens: 900_000, output_tokens: 0 },
+          },
+        },
+        {
+          type: "message_delta",
+          delta: { stop_reason: "model_context_window_exceeded" },
+          usage: { output_tokens: 0 },
+        },
+        { type: "message_stop" },
+      ]),
+    );
+
+    const { events, response } = provider.chatStream({
+      model: "claude-sonnet-4-6",
+      system: "sys",
+      messages: [{ role: "user", content: "a very long conversation" }],
+    });
+    for await (const _ of events) {
+      /* drain */
+    }
+
+    const meta = await response;
+    expect(meta.stopReason).toBe("max_tokens");
+  });
+
+  it.each([
+    ["stop_sequence", "end_turn"],
+    ["pause_turn", "end_turn"],
+  ] as const)("maps %s stop reason to %s", async (anthropicReason, expected) => {
+    // These arms are named explicitly rather than left to a catch-all so the
+    // switch stays exhaustive over the SDK union — the compile error on the
+    // next added stop reason is the whole point.
+    const provider = createProvider();
+    mockCreate.mockResolvedValueOnce({
+      content: [{ type: "text", text: "partial", citations: null }],
+      stop_reason: anthropicReason,
+      model: "claude-sonnet-4-6",
+      usage: { input_tokens: 10, output_tokens: 4 },
+    });
+
+    const result = await provider.chat({
+      model: "claude-sonnet-4-6",
+      system: "sys",
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    expect(result.stopReason).toBe(expected);
+  });
+
   it("maps refusal stop reason", async () => {
     // Anthropic surfaces explicit policy refusals on recent models as
     // `stop_reason: "refusal"`. The Class C subtype in

@@ -31,7 +31,7 @@ export class HostRunner implements Runner {
   ): Promise<McpConnection> {
     const transport = await createTransport(server.config, secrets, runInTx);
     const client = new Client(CLIENT_INFO);
-    const connection = new SdkMcpConnection(client, transport);
+    const connection = new SdkMcpConnection(client, transport, server.name);
     try {
       await connection.connect();
     } catch (err) {

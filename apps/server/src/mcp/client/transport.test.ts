@@ -1,5 +1,9 @@
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import {
+  ReadBuffer,
+  STDIO_DEFAULT_MAX_BUFFER_SIZE,
+} from "@modelcontextprotocol/sdk/shared/stdio.js";
 import { describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transaction, Transactor } from "../../db/index.js";
@@ -39,6 +43,28 @@ describe("createTransport", () => {
 
     expect(transport).toBeInstanceOf(StdioClientTransport);
     expect(secrets.getSecret).toHaveBeenCalledWith(FAKE_TX, "mcp:test:token");
+  });
+
+  it("gives the stdio read buffer headroom beyond the SDK's default cap", async () => {
+    const secrets = mock<SecretsStore>();
+    const transport = await createTransport(
+      { transport: "stdio", command: "node", args: ["-v"], env: {} },
+      secrets,
+      fakeRunInTx,
+    );
+
+    // Overflow is not a per-call failure: `ReadBuffer.append` throws, the
+    // stdio transport's stdout handler catches it and closes the connection,
+    // so one oversized frame takes the subprocess with it. A default-sized
+    // buffer rejects this frame; ours must accept it.
+    const oversizedFrame = Buffer.alloc(STDIO_DEFAULT_MAX_BUFFER_SIZE + 1);
+    expect(() => new ReadBuffer().append(oversizedFrame)).toThrow(/exceeded maximum size/);
+
+    // The buffer is a private field on the transport; reading it is the same
+    // deliberate seam as `_requestInit` below, and beats spawning a
+    // subprocess that emits 10 MB of stdout.
+    const readBuffer = (transport as unknown as { _readBuffer: ReadBuffer })._readBuffer;
+    expect(() => readBuffer.append(oversizedFrame)).not.toThrow();
   });
 
   it("builds a streamable-http transport and resolves header secret refs", async () => {

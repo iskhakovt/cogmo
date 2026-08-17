@@ -27,10 +27,13 @@ export interface DebounceConfig {
  *    `inbound/ready`. Skips the idle/maxwait timer functions entirely.
  *
  * 2. **Legacy state machine** — for `idleTimeoutMs == 0` (no-debounce mode),
- *    sub-second debounce, or maxwait-only configs that native debounce can't
+ *    sub-second timeouts, or maxwait-only configs that native debounce can't
  *    express (it requires `period`). The router fans out into `debounce-idle`
  *    + `debounce-maxwait`, with the documented cancel-listener race that
- *    handle-message's stale-trigger guard mops up after the fact.
+ *    handle-message's stale-trigger guard mops up after the fact. A
+ *    sub-second timeout buys no extra responsiveness on this path either:
+ *    durable sleeps have a one-second floor (see {@link durableSleepMs}), so
+ *    the wait matches what the native path would have given.
  *
  * Future direction (`design/transport/debounce.md` → "Future migration"):
  * if no realistic config ever falls outside the fast path's eligibility,
@@ -51,6 +54,30 @@ export function createDebounceFunctions(config: DebounceConfig) {
  */
 function canUseNativeDebounce(config: DebounceConfig): boolean {
   return config.idleTimeoutMs >= 1000 && (config.maxWaitMs === 0 || config.maxWaitMs >= 1000);
+}
+
+/**
+ * Inngest's durable-wait resolution. `step.sleep` runs its argument through
+ * the SDK's `timeStr`, which rounds any positive duration below one second up
+ * to one second before the op reaches the executor — a request for `"500ms"`
+ * is a one-second wait on the wire.
+ */
+const MIN_DURABLE_SLEEP_MS = 1000;
+
+/**
+ * The wait `step.sleep` will actually perform for a requested duration.
+ *
+ * Timer handlers sleep for this value and record it on the histogram, so the
+ * requested duration, the durable wait, and the observed sample are the same
+ * number. Passing the raw request through instead would leave the histogram
+ * claiming a sub-second hold that never happened.
+ *
+ * Zero passes through untouched: the platform floor applies to positive
+ * durations only, and a zero timeout means the timer isn't scheduled at all.
+ */
+export function durableSleepMs(requestedMs: number): number {
+  if (requestedMs <= 0) return requestedMs;
+  return Math.max(requestedMs, MIN_DURABLE_SLEEP_MS);
 }
 
 function msToSeconds(ms: number): `${number}s` {
@@ -138,7 +165,7 @@ function createLegacyStateMachine(config: DebounceConfig) {
   // so two debounce/idle events arriving within ~tens of milliseconds can both
   // complete (issue #121). The fast path above eliminates this; this code path
   // only runs for sub-second configs that can't use native debounce, where the
-  // race window is comparable to the configured idle anyway.
+  // race window is small relative to the one-second minimum wait anyway.
   const idle = inngest.createFunction(
     {
       id: "debounce-idle",
@@ -149,10 +176,10 @@ function createLegacyStateMachine(config: DebounceConfig) {
       ],
     },
     async ({ event, step }) => {
-      const ms = event.data.timeoutMs;
-      // Use `${ms}ms` unconditionally so the requested sleep and the recorded
-      // histogram value match. Rounding to whole seconds silently diverged
-      // the two by up to ~500ms on non-round timeouts.
+      // Sleep and histogram sample share one millisecond value, so "how long
+      // did debounce hold this turn" reads the same in the config, on the
+      // wire, and in the metric. See {@link durableSleepMs} for the floor.
+      const ms = durableSleepMs(event.data.timeoutMs);
       await step.sleep("wait", `${ms}ms`);
       debounceWaitMs.record(ms, { kind: "idle" });
       await step.sendEvent(
@@ -174,7 +201,7 @@ function createLegacyStateMachine(config: DebounceConfig) {
       cancelOn: [{ event: debounceCancel, match: "data.conversationId" }],
     },
     async ({ event, step }) => {
-      const ms = event.data.timeoutMs;
+      const ms = durableSleepMs(event.data.timeoutMs);
       await step.sleep("wait", `${ms}ms`);
       debounceWaitMs.record(ms, { kind: "maxwait" });
       await step.sendEvent(
