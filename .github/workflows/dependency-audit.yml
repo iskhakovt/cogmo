@@ -1,0 +1,98 @@
+name: Dependency Audit
+
+# Re-runs the production advisory check that the 2026-08 sweep left as a
+# point-in-time measurement. Dropping the seven `overrides:` entries was
+# correct — each had been superseded by a real dependency bump — but an
+# `overrides:` floor is a ratchet and a satisfied lockfile entry is not, so
+# "0 advisories" went from something enforced to something asserted in a
+# changelog. @grpc/grpc-js in particular resolves to exactly 1.14.4, the floor
+# its override used to hold, so a parent narrowing its range would re-resolve
+# under a critical advisory with nothing to notice.
+#
+# Deliberately scheduled rather than a PR gate. Auditing on pull_request would
+# let a fresh advisory in any transitive dependency block every unrelated PR
+# until somebody fixes it, which is a merge-gate policy change this repo
+# doesn't want. Dependabot's `npm-security` group still opens PRs for
+# advisories it can fix; this covers the rest — an advisory with no patched
+# version yet, or one whose fix needs a decision — by making it visible
+# instead of silent.
+
+on:
+  schedule:
+    # Monday 05:00 UTC, clear of the Sunday GHCR prune.
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  audit:
+    name: Audit production dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: dependency-audit-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # `--prod` scopes this to what actually ships. A dev-only advisory is
+      # worth knowing about eventually, not worth an issue at 05:00 on Monday.
+      # pnpm exits non-zero when it finds something, which is the signal, so
+      # the step must not treat that as a failure.
+      - name: Run pnpm audit
+        id: audit
+        run: |
+          set +e
+          report=$(pnpm audit --prod 2>&1)
+          status=$?
+          set -e
+          printf '%s\n' "$report"
+          {
+            echo "found=$([ "$status" -eq 0 ] && echo false || echo true)"
+            echo "report<<AUDIT_EOF"
+            # Cap the excerpt: an issue body is limited, and the first
+            # advisories are the ones worth reading in a notification.
+            printf '%s\n' "$report" | head -c 30000
+            echo ""
+            echo "AUDIT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open or update the tracking issue
+        if: steps.audit.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT: ${{ steps.audit.outputs.report }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          body=$(printf '`pnpm audit --prod` reported advisories in the resolved production tree.\n\n```\n%s\n```\n\n[Workflow run](%s)\n' "$REPORT" "$RUN_URL")
+          existing=$(gh issue list --label dependency-advisory --state open --limit 1 --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh label create dependency-advisory --description "pnpm audit --prod found something" --color B60205 --force
+            gh issue create --title "Production dependency advisories" --label dependency-advisory --body "$body"
+          fi
+
+      # Closing on a clean run is what keeps this a ratchet rather than a
+      # backlog: the open issue means "the production tree has an advisory
+      # right now", not "one was seen once".
+      - name: Close the tracking issue when the tree is clean
+        if: steps.audit.outputs.found == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          existing=$(gh issue list --label dependency-advisory --state open --limit 1 --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue close "$existing" --comment "\`pnpm audit --prod\` is clean as of [this run]($RUN_URL)."
+          fi
