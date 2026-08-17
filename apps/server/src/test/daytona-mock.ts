@@ -579,6 +579,20 @@ export class DaytonaMock {
       ws.close(1011, "no upstream for path");
       return;
     }
+    // Subprotocols are semantic payload, not handshake bookkeeping: the SDK
+    // ships PTY env vars (`X-Daytona-Pty-Envs~<b64url>`) and exit-control
+    // (`X-Daytona-Pty-Exit-Control`) as offered subprotocols rather than in a
+    // request body. They arrive in `sec-websocket-protocol`, which the strip
+    // below removes, so they are lifted out here and re-offered on the
+    // upstream socket. Dropping them records a PTY session with no env
+    // forwarding and no exit frames — a cassette that replays green while
+    // covering neither.
+    const offeredProtocols = (incomingHeaders["sec-websocket-protocol"] ?? "")
+      .toString()
+      .split(",")
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+
     // Forward the SDK's full header set to the upstream WS. Stripping
     // hop-by-hop + WS-upgrade headers (the new connection sets its own)
     // and overwriting `authorization` with our upstream key. The
@@ -599,7 +613,7 @@ export class DaytonaMock {
     wsHeaders.authorization = `Bearer ${this.#opts.upstreamApiKey}`;
     log.debug({ path, upstreamUrl }, "ws upgrade");
     const frames: WsFrame[] = [];
-    const upstream = new WebSocket(upstreamUrl, { headers: wsHeaders });
+    const upstream = new WebSocket(upstreamUrl, offeredProtocols, { headers: wsHeaders });
 
     // Track journal completion so `endScenario()` can wait for the
     // upstream close to land + frames to flush before writing the

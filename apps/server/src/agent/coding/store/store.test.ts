@@ -856,9 +856,12 @@ describe("DrizzleCodingStore", () => {
           allowPrivilegedRunc: false,
         }),
       );
-      // Tiny delay so UUIDv7 timestamps differ — PGlite's pg_uuidv7 uses
-      // random bits, not a monotonic counter, so we can't rely on insertion
-      // order to give a strict createdAt ordering inside one ms.
+      // Separate the two inserts in wall-clock time. This asserts a
+      // `createdAt DESC` ordering, and `created_at` defaults to `now()`, which
+      // is the transaction timestamp — two transactions inside the same
+      // millisecond get identical values and the tie-break is unspecified.
+      // UUIDv7 monotonicity doesn't help here because the ordering column
+      // isn't the id.
       await new Promise((r) => setTimeout(r, 5));
       const t2 = await tx((trx) =>
         store.insertTask(trx, {

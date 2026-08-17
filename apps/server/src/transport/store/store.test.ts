@@ -1150,9 +1150,6 @@ describe("DrizzleTransportStore", () => {
       const { profileId, conversationId } = await seedConversation();
       const sessionId = await seedSession(channelId, conversationId, "chat-A");
       for (let i = 0; i < 3; i++) {
-        // 2ms between inserts — PGlite's pg_uuidv7 uses random low bits, so
-        // same-ms rows don't sort by insertion order; firstUserSnippet relies on it.
-        if (i > 0) await new Promise((r) => setTimeout(r, 2));
         await seedUserMessage(conversationId, profileId, `hello world ${i}`);
       }
       await tx((trx) => store.closeSession(trx, sessionId));

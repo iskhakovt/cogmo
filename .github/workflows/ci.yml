@@ -216,6 +216,12 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Bundle the SPA before the browser tests. `tsc` and the component tests
+      # both miss module-resolution failures — a mismatched peer inside a
+      # pre-1.0 dependency surfaces only when rollup actually resolves the
+      # graph. The Dockerfile builds this too, but only the label-gated e2e
+      # job reaches it, so without this step a broken bundle merges green.
+      - run: pnpm --filter web build
       # Cache the Chromium binary keyed on the Playwright version so only the
       # ~110 MB download is skipped on a hit; `--with-deps` still runs apt below
       # (the OS libs aren't cacheable). Resolve the version after install so the

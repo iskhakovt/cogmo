@@ -32,7 +32,7 @@
     "db:migrate": "drizzle-kit migrate"
   },
   "engines": {
-    "node": ">=24"
+    "node": "^24.15.0 || >=26.0.0"
   },
   "dependencies": {
     "@ai-sdk/fal": "^3.0.28",
