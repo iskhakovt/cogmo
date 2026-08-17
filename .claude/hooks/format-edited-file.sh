@@ -20,14 +20,19 @@ payload=$(cat)
 file=$(jq -r '.tool_input.file_path // empty' <<<"$payload" 2>/dev/null)
 [[ -n "$file" && -f "$file" ]] || exit 0
 
-# Only the languages biome parses; it rejects anything else as unmatched.
-case "$file" in
-  *.ts | *.tsx | *.js | *.jsx | *.mjs | *.cjs | *.json | *.jsonc | *.css) ;;
-  *) exit 0 ;;
-esac
-
-root=$(find_repo_root "$(jq -r '.cwd // empty' <<<"$payload" 2>/dev/null)")
+root=$(find_repo_root)
+[[ -n "$root" && -d "$root" ]] || exit 0
 biome=$(find_biome "$root") || exit 0
 
+# Run from the root: biome discovers biome.json from the working directory, so
+# invoked from anywhere else it silently formats to built-in defaults — tabs
+# where this repo uses two spaces — and rewrites the file into exactly the red
+# build this hook exists to prevent.
+cd "$root" || exit 0
+
+# No extension allowlist. `--no-errors-on-unmatched` makes a file biome does
+# not handle a no-op costing a few milliseconds, whereas a hand-kept list is a
+# second source of truth that goes stale — biome 2.5 lints `.html` and formats
+# `.graphql`, and `.mts`/`.cts` are easy to forget.
 "$biome" check --write --no-errors-on-unmatched "$file" >/dev/null 2>&1
 exit 0

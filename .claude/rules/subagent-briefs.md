@@ -29,8 +29,12 @@ absence cost real work in this repo.
 - **Do not run the full suite while agents are working.** The unit tier is ~140s
   of heavy parallelism; several agents plus a full run drives load into the tens
   and produces `Hook timed out in 30000ms` failures in PGlite tests that pass
-  fine in isolation. Tell each agent to run only the files it touched, and save
-  the full run for after they report.
+  fine in isolation. Scope each agent to its own files, and save the full run
+  for after they report. The exception is the integration tier, where
+  [testing.md](testing.md) requires a file to run alongside its noisiest peers —
+  running one integration file alone hides the collisions that tier exists to
+  surface. An agent that needs that should be told to run the peer set, or the
+  run should wait until the agents are done.
 - **Give each agent a disjoint file set.** Where that is impossible, run them
   sequentially or with `isolation: "worktree"`.
 - **Never read an artefact an agent is still writing.** A grep that raced a
