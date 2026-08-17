@@ -82,6 +82,51 @@ describe("classifyPostStream", () => {
     // The loop owns the decrement — the classifier is a pure read.
     expect(budgets.empty_end_turn).toBe(1);
   });
+
+  // A contentless overflow must not be mistaken for either neighbour: a
+  // normal `max_tokens` completion (which returns `ok` and lets the blank
+  // turn persist as the answer) or an empty `end_turn` (which earns a
+  // continuation prompt — more tokens appended to a full window).
+  it("returns immediate degrade on stop_reason: context_overflow with no content", () => {
+    const budgets = freshBudgets();
+    const outcome = classifyPostStream([], "context_overflow", budgets);
+    expect(outcome).toEqual({
+      kind: "degrade",
+      reason: "request exceeded the model's context window",
+      subtype: "context_overflow",
+    });
+    // No repair means no budget to consult — both counters stay whole so a
+    // later empty turn still gets its one continuation nudge.
+    expect(budgets.empty_end_turn).toBe(INITIAL_BUDGETS.empty_end_turn);
+    expect(budgets.stream_truncation).toBe(INITIAL_BUDGETS.stream_truncation);
+  });
+
+  // The partial case is the quieter half of the bug: content present plus a
+  // "the turn ran out of room" stop reason is a truncated answer, and `ok`
+  // would persist the fragment as if the model had finished.
+  it("degrades on context_overflow even when the turn produced partial content", () => {
+    const budgets = freshBudgets();
+    const outcome = classifyPostStream(
+      [{ type: "text", text: "Here are the first three of the ten items you as" }],
+      "context_overflow",
+      budgets,
+    );
+    expect(outcome).toEqual({
+      kind: "degrade",
+      reason: "request exceeded the model's context window",
+      subtype: "context_overflow",
+    });
+  });
+
+  it("context_overflow never yields a repair, so no continuation prompt is ever built", () => {
+    // Exhausting every budget can't flip the verdict — there's no budgeted
+    // arm on this path to exhaust in the first place.
+    const drained: RepairBudgets = { empty_end_turn: 0, stream_truncation: 0 };
+    for (const budgets of [freshBudgets(), drained]) {
+      const outcome = classifyPostStream([], "context_overflow", budgets);
+      expect(outcome.kind).toBe("degrade");
+    }
+  });
 });
 
 describe("classifyStreamError", () => {
@@ -208,6 +253,111 @@ describe("computeIterationFingerprint", () => {
     const a = computeIterationFingerprint([toolUse("ID-A", "read_file", { path: "x" })]);
     const b = computeIterationFingerprint([toolUse("ID-Z", "read_file", { path: "x" })]);
     expect(a).toBe(b);
+  });
+
+  // RFC 8785 rejects lone surrogates and `canonicalize` throws on them. Tool
+  // args are model output, so that has to degrade rather than abort the turn —
+  // the call site in the agent loop treats a throw here as fatal.
+  it("hashes args containing a lone surrogate instead of throwing", () => {
+    const loneHigh = computeIterationFingerprint([toolUse("t1", "search", { q: "bad\uD800end" })]);
+    const loneLow = computeIterationFingerprint([toolUse("t2", "search", { q: "bad\uDC00end" })]);
+    expect(loneHigh).not.toBeNull();
+    expect(loneLow).not.toBeNull();
+  });
+
+  it("hashes a lone surrogate in an object key instead of throwing", () => {
+    expect(
+      computeIterationFingerprint([toolUse("t1", "search", { "k\uD800": "v" })]),
+    ).not.toBeNull();
+  });
+
+  it("stays deterministic for a lone surrogate — equal args still hash equal", () => {
+    const a = computeIterationFingerprint([toolUse("t1", "search", { q: "x\uD800y" })]);
+    const b = computeIterationFingerprint([toolUse("t2", "search", { q: "x\uD800y" })]);
+    expect(a).toBe(b);
+  });
+
+  it("leaves well-formed surrogate pairs alone — emoji args stay distinct", () => {
+    const a = computeIterationFingerprint([toolUse("t1", "search", { q: "😀" })]);
+    const b = computeIterationFingerprint([toolUse("t2", "search", { q: "🎉" })]);
+    expect(a).not.toBe(b);
+  });
+
+  // A replacement-character substitution would map every lone surrogate onto
+  // one value, so two iterations doing different work would tie and feed the
+  // Class D counters toward a `stuck_loop` degrade on a turn that was
+  // progressing.
+  it("discriminates between distinct lone surrogates in a value", () => {
+    const a = computeIterationFingerprint([toolUse("t1", "search", { q: "x\uD800y" })]);
+    const b = computeIterationFingerprint([toolUse("t2", "search", { q: "x\uD801y" })]);
+    expect(a).not.toBe(b);
+  });
+
+  it("keeps a lone surrogate distinct from the literal U+FFFD it escapes with", () => {
+    const lone = computeIterationFingerprint([toolUse("t1", "search", { q: "x\uD800" })]);
+    const literal = computeIterationFingerprint([toolUse("t2", "search", { q: "x�d800" })]);
+    expect(lone).not.toBe(literal);
+  });
+
+  // `Object.fromEntries` over replacement-char-normalized keys drops one of a
+  // colliding pair, turning a 2-key object into a 1-key one.
+  it("preserves keys that differ only in their lone surrogates", () => {
+    const both = computeIterationFingerprint([
+      toolUse("t1", "search", { "a\uD800": 1, "a\uD801": 2 }),
+    ]);
+    const onlyFirst = computeIterationFingerprint([toolUse("t2", "search", { "a\uD800": 1 })]);
+    const onlySecond = computeIterationFingerprint([toolUse("t3", "search", { "a\uD801": 2 })]);
+    expect(new Set([both, onlyFirst, onlySecond]).size).toBe(3);
+  });
+
+  // Key-collapsing is last-wins over insertion order, so it would make the
+  // hash depend on the order the model happened to emit the keys in — exactly
+  // the invariance `canonicalize` was chosen for.
+  it("ignores key order even when keys carry lone surrogates", () => {
+    const a = computeIterationFingerprint([
+      toolUse("t1", "search", { "a\uD800": 1, "a\uD801": 2 }),
+    ]);
+    const b = computeIterationFingerprint([
+      toolUse("t2", "search", { "a\uD801": 2, "a\uD800": 1 }),
+    ]);
+    expect(a).toBe(b);
+  });
+
+  // `JSON.parse('{"n":1e999}')` is valid JSON yielding Infinity, and
+  // `canonicalize` rejects non-finite numbers.
+  it("hashes non-finite numbers instead of throwing", () => {
+    const parsed: unknown = JSON.parse('{"limit":1e999}');
+    const overflow = computeIterationFingerprint([toolUse("t1", "search", parsed)]);
+    expect(overflow).not.toBeNull();
+    expect(overflow).toBe(
+      computeIterationFingerprint([toolUse("t2", "search", { limit: Number.POSITIVE_INFINITY })]),
+    );
+  });
+
+  it("discriminates between non-finite values and finite args", () => {
+    const hashes = [
+      { limit: Number.POSITIVE_INFINITY },
+      { limit: Number.NEGATIVE_INFINITY },
+      { limit: Number.NaN },
+      { limit: 1 },
+    ].map((input, i) => computeIterationFingerprint([toolUse(`t${i}`, "search", input)]));
+    expect(new Set(hashes).size).toBe(4);
+  });
+
+  it("hashes a circular arg object instead of overflowing the stack", () => {
+    const cyclic: Record<string, unknown> = { name: "x" };
+    cyclic.self = cyclic;
+    const a = computeIterationFingerprint([toolUse("t1", "search", cyclic)]);
+    expect(a).not.toBeNull();
+
+    const twin: Record<string, unknown> = { name: "x" };
+    twin.self = twin;
+    expect(computeIterationFingerprint([toolUse("t2", "search", twin)])).toBe(a);
+  });
+
+  it("hashes args no encoder can render instead of throwing", () => {
+    expect(computeIterationFingerprint([toolUse("t1", "search", { n: 1n })])).not.toBeNull();
+    expect(computeIterationFingerprint([toolUse("t2", "search", undefined)])).not.toBeNull();
   });
 });
 
@@ -511,6 +661,16 @@ describe("degradedReplyText", () => {
     expect(degradedReplyText("refusal")).toMatch(/declined/i);
   });
 
+  it("returns the overflow-specific message for the context_overflow subtype", () => {
+    // "Rephrase and try again" is the wrong advice when the window is full;
+    // the two moves that actually help are a fresh conversation or a
+    // bigger-context model.
+    const text = degradedReplyText("context_overflow");
+    expect(text).toMatch(/context window/i);
+    expect(text).toContain("/new");
+    expect(text).not.toMatch(/trouble generating/i);
+  });
+
   it("returns the generic apology for empty_end_turn / stream_truncation / stuck_loop / null", () => {
     const generic = degradedReplyText("empty_end_turn");
     expect(generic).toMatch(/trouble generating/i);
@@ -601,6 +761,44 @@ describe("synthesizeDegradedReply", () => {
     });
     expect(result.ok).toBe(false);
     expect(result.text).toMatch(/trouble generating/i);
+  });
+
+  it("names the context overflow in the synthesis prompt so the reply can explain it", async () => {
+    const chatFn = vi.fn<LlmProvider["chat"]>(async () => textResponse("ok"));
+    const provider: LlmProvider = {
+      name: "synth-test",
+      chat: chatFn,
+      chatStream: vi.fn(),
+      countTokens: vi.fn(),
+    };
+    await synthesizeDegradedReply({
+      ...baseDeps(),
+      subtype: "context_overflow",
+      reason: "request exceeded the model's context window",
+      provider,
+    });
+    expect(chatFn.mock.calls[0]?.[0]?.system).toMatch(/context window/i);
+  });
+
+  it("uses the overflow-specific fixed string when subtype is context_overflow and synthesis fails", async () => {
+    // The synthesis call re-sends the history that just overflowed; when it
+    // overflows again the provider answers with no content, which is the
+    // empty-text fallback rather than a throw.
+    const provider = providerThat(async () => ({
+      content: [],
+      stopReason: "context_overflow" as const,
+      model: "test-model",
+      usage: { inputTokens: 900_000, outputTokens: 0 },
+    }));
+    const result = await synthesizeDegradedReply({
+      ...baseDeps(),
+      subtype: "context_overflow",
+      reason: "request exceeded the model's context window",
+      provider,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.text).toBe(degradedReplyText("context_overflow"));
+    expect(result.text).toContain("/new");
   });
 
   it("uses the refusal-specific fixed string when subtype is refusal and synthesis fails", async () => {

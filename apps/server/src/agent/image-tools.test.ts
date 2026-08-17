@@ -6,12 +6,15 @@ import type { ImageModelWithProvider } from "../agent/store/index.js";
 import type { ImageProvider } from "../llm/image-providers.js";
 import type { VeniceImageProvider } from "../llm/venice.js";
 import { logger } from "../logger.js";
+import { expectDefined } from "../test/assertions.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
+import type { RetryOptions } from "../util/with-retry.js";
 import { ImageGenerationFailedError, SUSPICIOUS_SIZE_THRESHOLD_BYTES } from "./image-failure.js";
 import {
   createImageTools,
   type GeneratedImagePayload,
   imageModelSlug,
+  openAiCompatibleResponseFormat,
   parseGeneratedImagePayload,
 } from "./image-tools.js";
 import type { Service } from "./service.js";
@@ -33,13 +36,20 @@ function healthyImage(mediaType = "image/png"): {
 
 // Passthrough withRetry — tests exercise the handler's error classification
 // without paying real backoff delays. Retry behaviour itself is covered in
-// src/util/with-retry.test.ts.
+// src/util/with-retry.test.ts; the options the handler *asks* for (retry
+// budget, `shouldRetry` policy) are asserted here via `retryOptionsSeen`.
+const { retryOptionsSeen } = vi.hoisted(() => ({
+  retryOptionsSeen: [] as RetryOptions[],
+}));
 vi.mock("../util/with-retry.js", async () => {
   const actual =
     await vi.importActual<typeof import("../util/with-retry.js")>("../util/with-retry.js");
   return {
     ...actual,
-    withRetry: <T>(fn: () => Promise<T>) => fn(),
+    withRetry: <T>(fn: () => Promise<T>, opts?: RetryOptions) => {
+      if (opts) retryOptionsSeen.push(opts);
+      return fn();
+    },
   };
 });
 
@@ -62,6 +72,7 @@ vi.mock("ai", () => ({
 
 afterEach(() => {
   mockGenerateImage.mockReset();
+  retryOptionsSeen.length = 0;
 });
 
 function falModel(overrides: Partial<ImageModelWithProvider> = {}): ImageModelWithProvider {
@@ -186,6 +197,28 @@ describe("imageModelSlug", () => {
 
   it("returns the input unchanged when there is no slash", () => {
     expect(imageModelSlug("flux-dev")).toBe("flux-dev");
+  });
+});
+
+describe("openAiCompatibleResponseFormat", () => {
+  it("asks for b64_json on models that default to url", () => {
+    expect(openAiCompatibleResponseFormat("dall-e-3")).toBe("b64_json");
+    expect(openAiCompatibleResponseFormat("dall-e-2")).toBe("b64_json");
+    expect(openAiCompatibleResponseFormat("black-forest-labs/FLUX.1-schnell")).toBe("b64_json");
+  });
+
+  it("omits the field for the gpt-image family, which 400s on it", () => {
+    expect(openAiCompatibleResponseFormat("gpt-image-1")).toBeUndefined();
+    expect(openAiCompatibleResponseFormat("gpt-image-1-mini")).toBeUndefined();
+  });
+
+  it("matches the last path segment so gateway-prefixed ids resolve the same", () => {
+    expect(openAiCompatibleResponseFormat("openai/gpt-image-1")).toBeUndefined();
+    expect(openAiCompatibleResponseFormat("openai/dall-e-3")).toBe("b64_json");
+  });
+
+  it("matches case-insensitively", () => {
+    expect(openAiCompatibleResponseFormat("GPT-Image-1")).toBeUndefined();
   });
 });
 
@@ -319,6 +352,99 @@ describe("createImageTools", () => {
     await tool!.handler({ prompt: "x", model: "flux" }, FAKE_SERVICE);
 
     expect(imageModelFn).toHaveBeenCalledWith("flux-dev");
+  });
+
+  it("asks for b64_json on openai_compatible models that accept the field", async () => {
+    // `@ai-sdk/openai-compatible` parses the response with a schema that
+    // requires `data[].b64_json` but does not put `response_format` in the
+    // request body, and the Images API defaults to `url`. Dropping the
+    // field means a generated, billed image that the adapter rejects while
+    // parsing. The key is the provider `name` — the SDK folds
+    // `providerOptions[name]` into the request body.
+    mockGenerateImage.mockResolvedValueOnce({ image: healthyImage() });
+    const { provider } = fakeOaiProvider();
+    const model = falModel({
+      providerId: "provider-2",
+      name: "venice-oai/flux",
+      modelString: "flux-dev",
+      capabilities: {},
+      provider: provider.row,
+    });
+    const [tool] = createImageTools({
+      models: [model],
+      providers: new Map([["provider-2", provider]]),
+      attachments: fakeAttachments(),
+    });
+    await tool!.handler({ prompt: "x", model: "flux" }, FAKE_SERVICE);
+
+    const callArg = mockGenerateImage.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(callArg.providerOptions).toEqual({
+      // Key is `openAiCompatibleOptionsKey("venice-oai")` — the camelCased
+      // form the adapter derives from the provider name it was built with.
+      veniceOai: { response_format: "b64_json" },
+    });
+  });
+
+  it("omits response_format for gpt-image-* models, which reject the parameter", async () => {
+    // OpenAI's gpt-image line answers `HTTP 400 unknown_parameter:
+    // "Unknown parameter: 'response_format'."`, so naming the field turns
+    // every configured gpt-image model into a hard failure. It returns
+    // base64 natively, so the adapter's `data[].b64_json` schema is
+    // satisfied without asking. Nothing else rides the bag on this call,
+    // so `providerOptions` drops out entirely rather than shipping an
+    // empty object.
+    mockGenerateImage.mockResolvedValueOnce({ image: healthyImage() });
+    const { provider } = fakeOaiProvider();
+    const model = falModel({
+      providerId: "provider-2",
+      name: "openai/gpt-image-1",
+      modelString: "gpt-image-1",
+      capabilities: {},
+      provider: provider.row,
+    });
+    const [tool] = createImageTools({
+      models: [model],
+      providers: new Map([["provider-2", provider]]),
+      attachments: fakeAttachments(),
+    });
+    await tool!.handler({ prompt: "x", model: "gpt-image-1" }, FAKE_SERVICE);
+
+    const callArg = mockGenerateImage.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(callArg.providerOptions).toBeUndefined();
+  });
+
+  it("does not send response_format on the fal path", async () => {
+    // `response_format` is an openai-compatible wire concern. fal returns
+    // image URLs its own adapter resolves, and unknown body fields are the
+    // kind of thing inference servers 400 on.
+    mockGenerateImage.mockResolvedValueOnce({ image: healthyImage() });
+    const [tool] = createImageTools({
+      models: [falModel()],
+      providers: new Map([["provider-1", fakeFalProvider().provider]]),
+      attachments: fakeAttachments(),
+    });
+    await tool!.handler({ prompt: "x", model: "flux-dev" }, FAKE_SERVICE);
+
+    const callArg = mockGenerateImage.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(callArg.providerOptions).toBeUndefined();
+  });
+
+  it("asks for a 2-retry budget per generation", async () => {
+    // Each attempt is a paid generation, so the budget stays small.
+    // Whether a given failure actually consumes it is behaviour, not
+    // options — pinned against the real `withRetry` in
+    // image-tools-retry.test.ts.
+    mockGenerateImage.mockResolvedValueOnce({ image: healthyImage() });
+    const [tool] = createImageTools({
+      models: [falModel()],
+      providers: new Map([["provider-1", fakeFalProvider().provider]]),
+      attachments: fakeAttachments(),
+    });
+    await tool!.handler({ prompt: "x", model: "flux-dev" }, FAKE_SERVICE);
+
+    const opts = expectDefined(retryOptionsSeen[0], "withRetry options");
+    expect(opts.retries).toBe(2);
+    expect(opts.context).toBe("image.generate.fal/flux-dev");
   });
 
   it("returns a text error for an unsupported aspect ratio (per-model narrowing)", async () => {
@@ -662,8 +788,8 @@ describe("createImageTools", () => {
     // (Together, Replicate's shim, custom inference) accept the field —
     // the capability flag is the operator's declaration of "my server
     // takes this." The handler forwards via the @ai-sdk/openai-compatible
-    // passthrough keyed by provider name, matching how the SDK was
-    // constructed in `image-providers.ts`.
+    // passthrough, sharing the key with `response_format` rather than
+    // opening a second bag.
     mockGenerateImage.mockResolvedValueOnce({
       image: { uint8Array: new Uint8Array(8192), mediaType: "image/png" },
     });
@@ -692,8 +818,8 @@ describe("createImageTools", () => {
       FAKE_SERVICE,
     );
     const callArg = mockGenerateImage.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(callArg.providerOptions).toMatchObject({
-      "venice-oai": { negative_prompt: "low quality" },
+    expect(callArg.providerOptions).toEqual({
+      veniceOai: { negative_prompt: "low quality", response_format: "b64_json" },
     });
   });
 
@@ -862,7 +988,7 @@ describe("createImageTools", () => {
     // Non-moderation 4xx (auth, unknown model, quota) — no
     // content-policy substring in the body — surface as
     // `kind: "provider_error"` in the LLM-facing string. The throw
-    // is caught inside the tool handler's `.catch` so the LLM gets
+    // is caught inside the retried generation block so the LLM gets
     // a structured failure instead of an exception propagating up
     // the agent loop.
     mockGenerateImage.mockRejectedValueOnce(new FakeAPICallError("auth failed", false));
@@ -877,10 +1003,10 @@ describe("createImageTools", () => {
 
   it("surfaces a venice-thrown ImageGenerationFailedError through surfaceFailure (symmetry)", async () => {
     // Venice's adapter throws `ImageGenerationFailedError` from
-    // response-header parsing; the tool handler's `.catch` shim
-    // must convert that into the same `Error: <reason>` + structured
-    // warn log that fal NSFW / size canary / oai content-policy
-    // produce. Without this test we'd have:
+    // response-header parsing; the tool handler must convert that into
+    // the same `Error: <reason>` + structured warn log that fal NSFW /
+    // size canary / oai content-policy produce. Without this test we'd
+    // have:
     //  - venice.test.ts proving the throw,
     //  - image-tools.test.ts proving the catch on fal/oai paths,
     // but not the venice-throw → tool-handler-catch path on the

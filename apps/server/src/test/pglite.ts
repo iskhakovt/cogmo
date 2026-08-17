@@ -1,5 +1,4 @@
 import { PGlite } from "@electric-sql/pglite";
-import { pg_uuidv7 } from "@electric-sql/pglite/pg_uuidv7";
 import { pushSchema } from "drizzle-kit/api";
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
@@ -41,12 +40,10 @@ export async function createTestDatabase(): Promise<{
   tx: Transactor;
   close: () => Promise<void>;
 }> {
-  const client = new PGlite({ extensions: { pg_uuidv7 } });
-  await client.exec("CREATE EXTENSION IF NOT EXISTS pg_uuidv7;");
-  // pg_uuidv7 exposes uuid_generate_v7(); our schema uses uuidv7() — alias it
-  await client.exec(
-    "CREATE FUNCTION uuidv7() RETURNS uuid LANGUAGE sql AS $$ SELECT uuid_generate_v7() $$;",
-  );
+  // PGlite bundles PostgreSQL 18, which provides `uuidv7()` in core — the same
+  // function the schema's PK default calls and the same major the dev/prod
+  // `pgvector/pgvector:pg18` image runs, so no extension is needed here.
+  const client = new PGlite();
 
   const db = drizzle({ client, schema });
 

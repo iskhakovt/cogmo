@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { asyncIterableOf, asyncIterableThrowing } from "../test/factories.js";
 import {
   validateAnthropicKey,
   validateDaytonaApiKey,
@@ -15,18 +16,28 @@ import {
 // `vi.hoisted` because `vi.mock` is hoisted to the top of the module:
 // state and class declared inline would be in the temporal dead zone
 // when the factory runs.
-const { daytonaListMock, daytonaConfigCalls } = vi.hoisted(() => ({
+const { daytonaListMock, daytonaDisposeMock, daytonaConfigCalls } = vi.hoisted(() => ({
   daytonaListMock: vi.fn(),
+  daytonaDisposeMock: vi.fn(),
   daytonaConfigCalls: [] as Array<unknown>,
 }));
-vi.mock("@daytonaio/sdk", async () => {
-  const actual = await vi.importActual<typeof import("@daytonaio/sdk")>("@daytonaio/sdk");
+vi.mock("@daytona/sdk", async () => {
+  const actual = await vi.importActual<typeof import("@daytona/sdk")>("@daytona/sdk");
   // `new Daytona(config)` must work, so the mock has to be constructible —
   // a class fits, while `vi.fn().mockImplementation(() => obj)` does not.
   class MockDaytona {
     list = daytonaListMock;
-    constructor(config: unknown) {
+    // The real client is `AsyncDisposable` and its constructor opens an
+    // authenticated event-stream socket, so the validator disposes it.
+    [Symbol.asyncDispose] = daytonaDisposeMock;
+    constructor(config: { apiKey?: string }) {
       daytonaConfigCalls.push(config);
+      // Mirrors the real constructor: credentials are checked before any
+      // request goes out, so a blank key with no env fallback throws
+      // synchronously rather than surfacing as an API rejection.
+      if (!config.apiKey) {
+        throw new actual.DaytonaAuthenticationError("Authentication credentials not found.");
+      }
     }
   }
   return { ...actual, Daytona: MockDaytona };
@@ -186,25 +197,64 @@ describe("validateGitHubPat", () => {
 describe("validateDaytonaApiKey", () => {
   afterEach(() => {
     daytonaListMock.mockReset();
+    daytonaDisposeMock.mockReset();
     daytonaConfigCalls.length = 0;
   });
 
   it("returns valid on success", async () => {
-    daytonaListMock.mockResolvedValue([]);
+    daytonaListMock.mockImplementation(() => asyncIterableOf([]));
     const result = await validateDaytonaApiKey("dtn_test_api_key_abcdef0123456789");
     expect(result.valid).toBe(true);
   });
 
+  it("disposes the throwaway client on the success path", async () => {
+    // The constructor opens an authenticated event-stream socket, so a
+    // wizard run that validates once still has to close one.
+    daytonaListMock.mockImplementation(() => asyncIterableOf([]));
+    await validateDaytonaApiKey("dtn_test_api_key_abcdef0123456789");
+    expect(daytonaDisposeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("disposes the throwaway client after a rejected key", async () => {
+    // The retry loop — operator fixes a typo and validates again — is
+    // exactly where an undisposed client per attempt accumulates.
+    const { DaytonaAuthenticationError } = await import("@daytona/sdk");
+    daytonaListMock.mockImplementation(() =>
+      asyncIterableThrowing(new DaytonaAuthenticationError("nope")),
+    );
+    await validateDaytonaApiKey("bad_key_abcdef0123456789");
+    expect(daytonaDisposeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns a result rather than rejecting when SDK construction throws", async () => {
+    // The wizard renders `error` next to a "Save anyway?" prompt and the
+    // non-interactive validator collects it into a failure list — neither
+    // guards against a rejected promise, so a synchronous constructor
+    // throw must not escape as one.
+    const result = await validateDaytonaApiKey("");
+    expect(result.valid).toBe(false);
+    expect(result.error).toBe("Daytona client setup failed: Authentication credentials not found.");
+  });
+
+  it("skips disposal when construction never produced a client", async () => {
+    await validateDaytonaApiKey("");
+    expect(daytonaDisposeMock).not.toHaveBeenCalled();
+  });
+
   it("returns invalid on DaytonaAuthenticationError", async () => {
-    const { DaytonaAuthenticationError } = await import("@daytonaio/sdk");
-    daytonaListMock.mockRejectedValue(new DaytonaAuthenticationError("nope"));
+    const { DaytonaAuthenticationError } = await import("@daytona/sdk");
+    daytonaListMock.mockImplementation(() =>
+      asyncIterableThrowing(new DaytonaAuthenticationError("nope")),
+    );
     const result = await validateDaytonaApiKey("bad_key_abcdef0123456789");
     expect(result).toEqual({ valid: false, error: "API key rejected (401 Unauthorized)" });
   });
 
   it("returns invalid on DaytonaAuthorizationError naming the org pin", async () => {
-    const { DaytonaAuthorizationError } = await import("@daytonaio/sdk");
-    daytonaListMock.mockRejectedValue(new DaytonaAuthorizationError("forbidden"));
+    const { DaytonaAuthorizationError } = await import("@daytona/sdk");
+    daytonaListMock.mockImplementation(() =>
+      asyncIterableThrowing(new DaytonaAuthorizationError("forbidden")),
+    );
     const result = await validateDaytonaApiKey("dtn_test_api_key_abcdef0123456789");
     expect(result.valid).toBe(false);
     expect(result.error).toMatch(/403/);
@@ -212,31 +262,37 @@ describe("validateDaytonaApiKey", () => {
   });
 
   it("returns invalid on connection failure", async () => {
-    const { DaytonaConnectionError } = await import("@daytonaio/sdk");
-    daytonaListMock.mockRejectedValue(new DaytonaConnectionError("ECONNREFUSED"));
+    const { DaytonaConnectionError } = await import("@daytona/sdk");
+    daytonaListMock.mockImplementation(() =>
+      asyncIterableThrowing(new DaytonaConnectionError("ECONNREFUSED")),
+    );
     const result = await validateDaytonaApiKey("dtn_test_api_key_abcdef0123456789");
     expect(result.valid).toBe(false);
     expect(result.error).toContain("ECONNREFUSED");
   });
 
   it("surfaces DaytonaRateLimitError via the base-class arm so retries during setup are obvious", async () => {
-    const { DaytonaRateLimitError } = await import("@daytonaio/sdk");
-    daytonaListMock.mockRejectedValue(new DaytonaRateLimitError("Rate limit exceeded (60/min)"));
+    const { DaytonaRateLimitError } = await import("@daytona/sdk");
+    daytonaListMock.mockImplementation(() =>
+      asyncIterableThrowing(new DaytonaRateLimitError("Rate limit exceeded (60/min)")),
+    );
     const result = await validateDaytonaApiKey("dtn_test_api_key_abcdef0123456789");
     expect(result.valid).toBe(false);
     expect(result.error).toBe("Daytona API error: Rate limit exceeded (60/min)");
   });
 
   it("surfaces an arbitrary DaytonaError subclass via the base-class arm", async () => {
-    const { DaytonaTimeoutError } = await import("@daytonaio/sdk");
-    daytonaListMock.mockRejectedValue(new DaytonaTimeoutError("request timed out"));
+    const { DaytonaTimeoutError } = await import("@daytona/sdk");
+    daytonaListMock.mockImplementation(() =>
+      asyncIterableThrowing(new DaytonaTimeoutError("request timed out")),
+    );
     const result = await validateDaytonaApiKey("dtn_test_api_key_abcdef0123456789");
     expect(result.valid).toBe(false);
     expect(result.error).toBe("Daytona API error: request timed out");
   });
 
   it("forwards apiUrl + organizationId to the Daytona constructor", async () => {
-    daytonaListMock.mockResolvedValue([]);
+    daytonaListMock.mockImplementation(() => asyncIterableOf([]));
     await validateDaytonaApiKey("dtn_test_api_key_abcdef0123456789", {
       apiUrl: "https://daytona.example.com/api",
       organizationId: "org-7",
@@ -366,7 +422,7 @@ describe("validate* small uncovered branches", () => {
   });
 
   it("validateDaytonaApiKey: non-Daytona Error falls through to Unexpected error arm", async () => {
-    daytonaListMock.mockRejectedValue(new Error("plain js error"));
+    daytonaListMock.mockImplementation(() => asyncIterableThrowing(new Error("plain js error")));
     const result = await validateDaytonaApiKey("dtn_test_api_key_abcdef0123456789");
     expect(result.valid).toBe(false);
     expect(result.error).toMatch(/Unexpected error: plain js error/);

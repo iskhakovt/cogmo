@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GitHubIdentity } from "../../secrets/github.js";
 import { teardownWorktree } from "./teardown.js";
 import { allocateWorktree } from "./worktree.js";
@@ -50,9 +50,39 @@ beforeEach(async () => {
   ({ repoPath, bareRemote } = await setupRepoWithRemote());
 });
 
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
 afterAll(() => {
   if (baseDir) rmSync(baseDir, { recursive: true, force: true });
 });
+
+/**
+ * Install a git hook in `worktreePath` that records the values git resolved
+ * for `keys`, as seen from inside the invocation that triggers the hook.
+ * The record lands outside the working tree because teardown deletes it.
+ */
+function writeConfigProbe(
+  worktreePath: string,
+  hook: "post-commit" | "pre-push",
+  keys: ReadonlyArray<string>,
+): string {
+  const probePath = join(baseDir, `${hook}-${Math.random().toString(36).slice(2, 10)}.txt`);
+  const script = [
+    "#!/bin/sh",
+    // `pre-push` gets the ref list on stdin; drain it so git never writes
+    // into a closed pipe.
+    ...(hook === "pre-push" ? ["cat >/dev/null"] : []),
+    "{",
+    ...keys.map((key) => `printf '${key}=%s\\n' "$(git config --get ${key} || true)"`),
+    `} > '${probePath}'`,
+    "exit 0",
+    "",
+  ].join("\n");
+  writeFileSync(join(worktreePath, ".git", "hooks", hook), script, { mode: 0o755 });
+  return probePath;
+}
 
 function uniqueTaskId(): string {
   return `019d0000-0000-7000-8000-${Math.random().toString(16).slice(2, 14).padEnd(12, "0")}`;
@@ -281,5 +311,74 @@ describe("teardownWorktree", () => {
     });
     expect(second.kind).toBe("wip_pushed_and_removed");
     expect(await refExists(bareRemote, `refs/cogmo-wip/${taskId}`)).toBe(true);
+  });
+
+  it("runs the WIP commit and push with background git maintenance disabled", async () => {
+    // `git commit` and `git push` each spawn `git maintenance run --auto
+    // --detach`, which keeps writing inside `.git/` after the foreground
+    // command exits. The working tree is a standalone clone, so that `.git`
+    // is inside the directory `removeWorktree` deletes on the next line —
+    // the two race and `fs.rm` fails with ENOTEMPTY. The hooks report the
+    // config git actually resolved for each invocation.
+    const taskId = uniqueTaskId();
+    const branch = uniqueBranch(taskId);
+    const worktreePath = uniqueWorktreePath();
+    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: bareRemote });
+    const keys = ["maintenance.auto", "gc.auto"];
+    const commitProbe = writeConfigProbe(worktreePath, "post-commit", keys);
+    const pushProbe = writeConfigProbe(worktreePath, "pre-push", keys);
+    writeFileSync(join(worktreePath, "in-progress.ts"), "// claude was here\n");
+
+    // The test runner injects the same two settings process-wide, which
+    // would mask whichever ones teardown supplies itself. Drop that
+    // injection so the assertion measures teardown, not the runner.
+    vi.stubEnv("GIT_CONFIG_COUNT", "0");
+    const result = await teardownWorktree({
+      repoPath,
+      worktreePath,
+      branch,
+      taskId,
+      identity: FAKE_IDENTITY,
+    });
+    expect(result.kind).toBe("wip_pushed_and_removed");
+
+    for (const probe of [commitProbe, pushProbe]) {
+      const observed = readFileSync(probe, "utf8");
+      expect(observed).toContain("maintenance.auto=false");
+      expect(observed).toContain("gc.auto=0");
+    }
+  });
+
+  it("appends its git config to pairs already present in the environment", async () => {
+    const taskId = uniqueTaskId();
+    const branch = uniqueBranch(taskId);
+    const worktreePath = uniqueWorktreePath();
+    await allocateWorktree({ repoPath, branch, worktreePath, remoteUrl: bareRemote });
+    const commitProbe = writeConfigProbe(worktreePath, "post-commit", [
+      "cogmo.probe",
+      "maintenance.auto",
+      "gc.auto",
+    ]);
+    writeFileSync(join(worktreePath, "in-progress.ts"), "// claude was here\n");
+
+    // An ambient `GIT_CONFIG_COUNT` pair — a wrapper script or the test
+    // runner — must survive teardown's own injection, which numbers its
+    // keys from the inherited count rather than overwriting index 0.
+    vi.stubEnv("GIT_CONFIG_COUNT", "1");
+    vi.stubEnv("GIT_CONFIG_KEY_0", "cogmo.probe");
+    vi.stubEnv("GIT_CONFIG_VALUE_0", "ambient");
+    const result = await teardownWorktree({
+      repoPath,
+      worktreePath,
+      branch,
+      taskId,
+      identity: FAKE_IDENTITY,
+    });
+    expect(result.kind).toBe("wip_pushed_and_removed");
+
+    const observed = readFileSync(commitProbe, "utf8");
+    expect(observed).toContain("cogmo.probe=ambient");
+    expect(observed).toContain("maintenance.auto=false");
+    expect(observed).toContain("gc.auto=0");
   });
 });

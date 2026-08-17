@@ -23,9 +23,39 @@ A single delivery router resolves all targets upfront and handles both paths. Th
 ```typescript
 type StreamEvent =
   | { type: "text_delta"; text: string }
-  | { type: "tool_start"; name: string; input: unknown }
+  | { type: "thinking_delta"; thinking: string; signature: string }
+  | { type: "tool_start"; id: string; name: string; input: unknown }
   | { type: "tool_result"; name: string; output: string; isError?: boolean }
+  | { type: "status"; message: string }
+  | { type: "retract"; text: string; toolUseIds: ReadonlyArray<string> }
 ```
+
+Not every member comes from a provider stream — the union is the
+orchestrator→adapter presentation channel. `status` is emitted by the pre-flight
+compaction stage, and `retract` by the degraded off-ramp: it names the streamed
+output the turn will not persist — the degrade-triggering iteration's text (the
+tail of what streamed) and its tool-call ids — so what the user is left reading
+is what history holds (see `design/agent-resilience.md` → Degraded reply).
+Output from earlier iterations of the turn is persisted, is not named, and
+stays; mid-stream attachments cannot be taken back.
+
+`tool_start` carries an `id` because `retract` names tool calls by it. An
+adapter that renders a marker for a tool call must be able to find that marker
+again from the id alone.
+
+**`thinking_delta` is not rendered, and that is the contract, not an
+oversight.** It carries Anthropic extended-thinking output: the loop emits one
+event per thinking block, at block end rather than per token, with the full
+accumulated text and the block's `signature`. The signature is what lets the
+block be replayed back to the provider on a later turn, so the event exists to
+keep thinking in the transcript and in the request, not to put it on a screen.
+Both current adapters drop it — Telegram has no branch for it, the web client
+skips it in `applyStreamEvent`. A new adapter should drop it too unless the
+surface is explicitly a debugging view: reasoning text is the model's scratch
+work, it is often long enough to blow a message budget on its own, and it is
+not part of what the turn persists as the assistant's reply. An adapter that
+does choose to show it must render it as visibly distinct from the reply and
+must not let it consume the text budget the reply needs.
 
 Finish and abort are signaled via `StreamHandle` methods, not events — they are adapter lifecycle, not broadcast content.
 
@@ -96,6 +126,7 @@ Each adapter decides how to render `StreamEvent`s. The interface delivers typed 
 - `text_delta` → accumulate text; if `allowEdits` (default), throttled `editMessage` every ~500ms; rotate to a new message once accumulated source exceeds `chunkChars`
 - `tool_start` / `status` → append status text (e.g. "Searching..."). **Append-only mode (`allowEdits=false`) drops these** — the typing heartbeat carries progress instead
 - `tool_result` → skip (LLM will summarize); image/document results deliver out-of-band via `sendPhoto` / `sendDocument`
+- `retract` → cut the named text — and anything the buffer holds after it, i.e. that iteration's own banners — out of the accumulated buffer, keeping the message id so the next text edits the message the fragment was in. Text from earlier iterations stays buffered and visible. Chunks that already overflowed into their own messages can't be edited back, so a retraction reaching into one clears the editable remainder and leaves the chunk
 - First push in append-only mode also kicks `sendChatAction("typing")` on a 3.5s refresh loop, cleared on `finish` / `abort`
 - `finish()` → emit any remaining buffer with HTML formatting; in edit mode this is the final `editMessage`, in append-only mode it's a fresh `sendMessage`
 - `abort(error)` → append `⚠️ ${error}` and emit (edit in edit mode, fresh send in append-only mode)

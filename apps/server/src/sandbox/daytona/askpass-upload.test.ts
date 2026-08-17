@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Sandbox as DaytonaSdkSandbox } from "@daytonaio/sdk";
+import type { Sandbox as DaytonaSdkSandbox } from "@daytona/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { uploadAskpassToSandbox } from "./askpass-upload.js";
 

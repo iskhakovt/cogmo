@@ -273,7 +273,7 @@ async function directFetch(url: string): Promise<string> {
         throw new Error(`Fetch failed: ${r.status} ${r.statusText}`);
       }
       if (!r.ok) {
-        throw new AbortError(`Fetch failed: ${r.status} ${r.statusText}`);
+        throw new PermanentFetchError(r.status, r.statusText);
       }
       return r;
     },
@@ -286,6 +286,11 @@ async function directFetch(url: string): Promise<string> {
       retries: 2,
       maxRetryTimeMs: 20_000,
       context: `fetch_url ${new URL(url).hostname}`,
+      // `shouldRetry` rather than `AbortError` because the caller has to
+      // tell the two failure shapes apart afterwards, and only this path
+      // reaches it with its class intact — see `withRetry`'s note on
+      // AbortError being unwrapped to a plain `Error`.
+      shouldRetry: (err) => !(err instanceof PermanentFetchError),
     },
   );
 
@@ -295,18 +300,37 @@ async function directFetch(url: string): Promise<string> {
 }
 
 /**
+ * A response `directFetch` will not retry: 404, 401 and the other 4xx
+ * statuses that mean the page genuinely isn't there or isn't ours to read,
+ * as opposed to 403/429 which bot filters hand out on a no-referer first hit.
+ *
+ * A distinct class rather than an `AbortError` because the class has to
+ * survive out of `withRetry` for `looksLikeBotBlock` to read it — p-retry
+ * unwraps `AbortError` to its `originalError`, which for a string message is
+ * a plain `Error`.
+ */
+class PermanentFetchError extends Error {
+  constructor(
+    readonly status: number,
+    statusText: string,
+  ) {
+    super(`Fetch failed: ${status} ${statusText}`);
+    this.name = "PermanentFetchError";
+  }
+}
+
+/**
  * Decide whether a `directFetch` failure is bot-block-shaped enough to
- * be worth retrying via Tavily Extract. `directFetch` already encodes
- * the dichotomy: permanent failures (404 / 401 / other non-retryable
- * 4xx) are thrown as `AbortError`, retryable failures (403 / 429 / 5xx
- * after exhausting retries, network timeouts, undici-level fetch
- * errors) are thrown as plain `Error`. Tavily can only help with the
- * latter — it can't conjure pages that don't exist or unauthenticated
- * ones, and falling back there would just burn a credit to relay the
- * same 404.
+ * be worth retrying via Tavily Extract. `directFetch` encodes the
+ * dichotomy: permanent failures carry {@link PermanentFetchError},
+ * retryable ones (403 / 429 / 5xx after exhausting retries, network
+ * timeouts, undici-level fetch errors) arrive as a plain `Error`. Tavily
+ * can only help with the latter — it can't conjure pages that don't exist
+ * or unauthenticated ones, and falling back there burns a credit to relay
+ * the same 404.
  */
 function looksLikeBotBlock(error: unknown): boolean {
-  return error instanceof Error && !(error instanceof AbortError);
+  return error instanceof Error && !(error instanceof PermanentFetchError);
 }
 
 interface TavilyExtractResult {

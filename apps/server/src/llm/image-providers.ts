@@ -36,6 +36,23 @@ export type ImageProvider =
   | { kind: "venice"; row: ImageProviderRow; provider: VeniceImageProvider };
 
 /**
+ * The `providerOptions` key `@ai-sdk/openai-compatible` reads extra image
+ * request-body fields from — everything under it is merged into the
+ * `/images/generations` body verbatim.
+ *
+ * The adapter derives the key from the `name` handed to
+ * `createOpenAICompatible` below: the segment before the first `.`, in
+ * camelCase. It also honours the un-camelCased name, but flags that form
+ * deprecated on every call, so callers assembling `providerOptions` go
+ * through here. Keeping the derivation next to the construction means one
+ * place decides how a row's `name` reaches the adapter.
+ */
+export function openAiCompatibleOptionsKey(providerName: string): string {
+  const base = providerName.split(".")[0]?.trim() ?? providerName;
+  return base.replace(/[_-]([a-z])/g, (match) => match[1]?.toUpperCase() ?? match);
+}
+
+/**
  * Build a single image provider from its row. Decrypts the secret via
  * `SecretsStore.getSecretById`. Throws if the secret is missing — every
  * `image_providers` row carries a NOT NULL FK to `secrets.id`, so a

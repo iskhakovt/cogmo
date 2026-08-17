@@ -10,34 +10,10 @@ allowBuilds:
   protobufjs: false
   ssh2: false
 
-overrides:
-  "ip-address@<10.1.1": ">=10.1.1"
-  "qs@<6.15.2": ">=6.15.2"
-  "tmp@<0.2.6": ">=0.2.6"
-  # Force patched versions of transitive deps carrying open security advisories
-  # the parents haven't yet bumped. Drop each once a dependency update pulls the
-  # patched range in directly.
-  "shell-quote@<1.8.4": ">=1.8.4" # GHSA-w7jw-789q-3m8p (critical) via @daytonaio/sdk
-  "@grpc/grpc-js@<1.14.4": ">=1.14.4" # GHSA-5375-pq7m-f5r2, GHSA-99f4-grh7-6pcq (high) via opentelemetry/dockerode
-  "hono@<4.12.21": ">=4.12.21" # GHSA-xrhx-7g5j-rcj5, -3hrh-pfw6-9m5x, -f577-qrjj-4474, -2gcr-mfcq-wcc3 (moderate) via @modelcontextprotocol/sdk, inngest
-  "@opentelemetry/otlp-transformer@0.217.0": "^0.218.0"
-  # @assistant-ui is a pre-1.0 line whose sibling peer ranges don't stay mutually
-  # consistent: @assistant-ui/react@0.14.14 caps tap at ^0.5.14, but pnpm's
-  # highest-in-range pick floats store to 0.2.14, which requires tap ^0.6.0 — and
-  # the resulting store/tap mismatch breaks the web bundle (missing tap/react-shim).
-  # Pin core+store to the batch that ships alongside the pinned @assistant-ui/react
-  # (0.14.14 ↔ core 0.2.10 ↔ store 0.2.13, all needing tap ^0.5.14). Bump all three
-  # in lockstep with @assistant-ui/react.
-  "@assistant-ui/core": "0.2.10"
-  "@assistant-ui/store": "0.2.13"
-
-patchedDependencies:
-  '@daytonaio/sdk@0.175.0': patches/@daytonaio__sdk@0.175.0.patch
-
 # The Hindsight client is a first-party dependency (we contribute upstream and
 # pin the server to the matching image), so the supply-chain soak that guards
 # against unknown third-party same-day releases doesn't apply — track its
 # releases immediately. Bump in lockstep with the hindsight-api image pins in
 # apps/server/dev/containers.ts and cogmo.hindsightCompat.
 minimumReleaseAgeExclude:
-  - '@vectorize-io/hindsight-client@0.8.1'
+  - '@vectorize-io/hindsight-client@0.9.1'

@@ -856,9 +856,12 @@ describe("DrizzleCodingStore", () => {
           allowPrivilegedRunc: false,
         }),
       );
-      // Tiny delay so UUIDv7 timestamps differ — PGlite's pg_uuidv7 uses
-      // random bits, not a monotonic counter, so we can't rely on insertion
-      // order to give a strict createdAt ordering inside one ms.
+      // Separate the two inserts in wall-clock time. This asserts a
+      // `createdAt DESC` ordering, and `created_at` defaults to `now()`, which
+      // is the transaction timestamp — two transactions inside the same
+      // millisecond get identical values and the tie-break is unspecified.
+      // UUIDv7 monotonicity doesn't help here because the ordering column
+      // isn't the id.
       await new Promise((r) => setTimeout(r, 5));
       const t2 = await tx((trx) =>
         store.insertTask(trx, {
@@ -1105,23 +1108,24 @@ describe("DrizzleCodingStore", () => {
       { terminal: "pr_open" },
       { terminal: "failed" },
       { terminal: "cancelled" },
-    ])("failTaskIfNonTerminal: returns already_terminal for status=$terminal (no write)", async ({
-      terminal,
-    }) => {
-      const repoId = await seedRepo(`fail-noop-${terminal}`);
-      const task = await tx((trx) =>
-        store.insertTask(trx, {
-          repoId,
-          goal: "g",
-          triggerSource: "user",
-          backend: "claude",
-          allowPrivilegedRunc: false,
-        }),
-      );
-      await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: terminal }));
-      const result = await tx((trx) => store.failTaskIfNonTerminal(trx, task.id, "ignored"));
-      expect(result.kind).toBe("already_terminal");
-    });
+    ])(
+      "failTaskIfNonTerminal: returns already_terminal for status=$terminal (no write)",
+      async ({ terminal }) => {
+        const repoId = await seedRepo(`fail-noop-${terminal}`);
+        const task = await tx((trx) =>
+          store.insertTask(trx, {
+            repoId,
+            goal: "g",
+            triggerSource: "user",
+            backend: "claude",
+            allowPrivilegedRunc: false,
+          }),
+        );
+        await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: terminal }));
+        const result = await tx((trx) => store.failTaskIfNonTerminal(trx, task.id, "ignored"));
+        expect(result.kind).toBe("already_terminal");
+      },
+    );
 
     it("failTaskIfNonTerminal: not_found for unknown id", async () => {
       const result = await tx((trx) =>

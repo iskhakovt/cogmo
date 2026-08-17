@@ -1,4 +1,4 @@
-import type { Sandbox as DaytonaSdkSandbox } from "@daytonaio/sdk";
+import type { Sandbox as DaytonaSdkSandbox } from "@daytona/sdk";
 import type {
   DaytonaSessionState,
   ExecOptions,

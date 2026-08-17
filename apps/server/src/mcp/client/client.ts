@@ -38,13 +38,15 @@ export interface McpConnection {
 export class SdkMcpConnection implements McpConnection {
   #client: Client;
   #transport: Transport;
+  #serverName: string;
   #closed = false;
   #closeListeners = new Set<() => void>();
   #toolsChangedListeners = new Set<() => void>();
 
-  constructor(client: Client, transport: Transport) {
+  constructor(client: Client, transport: Transport, serverName: string) {
     this.#client = client;
     this.#transport = transport;
+    this.#serverName = serverName;
   }
 
   async connect(): Promise<void> {
@@ -58,6 +60,17 @@ export class SdkMcpConnection implements McpConnection {
       this.#closed = true;
       for (const cb of this.#closeListeners) cb();
       this.#closeListeners.clear();
+    };
+    // Transport-level errors are the only place several fatal conditions
+    // announce themselves: a stdio frame overrunning the read buffer, or a
+    // streamable-HTTP peer answering with a media type that is neither
+    // `application/json` nor `text/event-stream`. Both surface here and then
+    // close the connection, so without this handler the operator sees a bare
+    // disconnect with no cause. `Protocol.connect` chains onto whatever
+    // handler it finds rather than replacing it, so registering before
+    // `connect()` keeps the SDK's own error routing intact.
+    this.#transport.onerror = (err) => {
+      logger.warn({ err, mcpServer: this.#serverName }, "MCP transport error");
     };
     await this.#client.connect(this.#transport);
 
@@ -73,7 +86,8 @@ export class SdkMcpConnection implements McpConnection {
     if (stderr) {
       const rl = createInterface({ input: stderr, crlfDelay: Infinity });
       rl.on("line", (line) => {
-        if (line.length > 0) logger.warn({ mcpStderr: line }, "MCP server stderr");
+        if (line.length > 0)
+          logger.warn({ mcpStderr: line, mcpServer: this.#serverName }, "MCP server stderr");
       });
     }
   }

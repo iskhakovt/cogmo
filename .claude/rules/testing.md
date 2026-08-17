@@ -26,10 +26,10 @@ Commands: `pnpm test` (unit), `pnpm test:integration`, `pnpm test:e2e`, `pnpm te
 
 ## Store Tests with PGlite
 
-Store implementations (`DrizzleAgentStore`, `DrizzleTransportStore`) are tested against real SQL via PGlite — an in-memory WASM PostgreSQL (PG17). No Docker needed.
+Store implementations (`DrizzleAgentStore`, `DrizzleTransportStore`) are tested against real SQL via PGlite — an in-memory WASM PostgreSQL (PG18, the same major as the `pgvector/pgvector:pg18` image dev and prod run). No Docker needed.
 
 - **Schema:** Applied via `pushSchema()` from `drizzle-kit/api` — no migration files in tests.
-- **UUIDs:** `pg_uuidv7` PGlite extension + `uuidv7()` SQL alias (the extension exposes `uuid_generate_v7()`).
+- **UUIDs:** `uuidv7()` comes from PostgreSQL 18 core — no extension, no alias.
 - **Type:** `Database` is `PgDatabase<PgQueryResultHKT, schema>` — driver-agnostic. Works with postgres-js, PGlite, or any Drizzle PG driver. No `as any` casts needed.
 - **Cleanup:** Truncate all tables via `db.execute(sql\`...\`)` between tests. One PGlite instance per test file.
 - **Helper:** `src/test/pglite.ts` — `createTestDatabase()` and `truncateAll()`.
@@ -44,7 +44,7 @@ Integration tests run against frozen wire fixtures captured from real upstreams.
 | fal-mock | `src/test/fal-mock.ts` | fal.ai image generation, scoped `fetch` wrapper |
 | openai-voice-mock | `src/test/openai-voice-mock.ts` | OpenAI `/v1/audio/{speech,transcriptions}` for TTS/STT |
 | xAI llmock | `src/test/xai-grok.integration.test.ts` | One-off llmock proxying `openai → openrouter.ai/api` |
-| daytona-mock | `src/test/daytona-mock.ts` | `@daytonaio/sdk` REST + WebSocket (toolbox proxy, `getSessionCommandLogs`) |
+| daytona-mock | `src/test/daytona-mock.ts` | `@daytona/sdk` REST + WebSocket (toolbox proxy, `getSessionCommandLogs`) |
 
 **To re-record:** `pnpm test:record` (or `:e2e`) sets `RECORD=1` and runs the integration tier. Each mock guards on its own upstream API key — only adapters with keys present in `.env` actually record. CI never sets `RECORD=1`; unmatched requests fail with `503` (or `1011` for WS) carrying a "re-record" hint.
 

@@ -34,17 +34,10 @@ describe("shouldSkipRecall", () => {
     });
 
     describe("skips greetings and acks", () => {
-      it.each([
-        "hi",
-        "Hello",
-        "HEY",
-        "thanks",
-        "Thank you",
-        "bye",
-        "ty",
-        "thx",
-        "np",
-      ])("skips '%s'", (msg) => expect(shouldSkipRecall("heuristic", msg)).toBe(true));
+      it.each(["hi", "Hello", "HEY", "thanks", "Thank you", "bye", "ty", "thx", "np"])(
+        "skips '%s'",
+        (msg) => expect(shouldSkipRecall("heuristic", msg)).toBe(true),
+      );
     });
 
     describe("skips continuations", () => {

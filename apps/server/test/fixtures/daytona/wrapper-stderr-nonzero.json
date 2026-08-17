@@ -8,880 +8,60 @@
       "request": {
         "headers": {
           "accept": "application/json",
-          "user-agent": "sdk-typescript-legacy/0.173.0",
-          "x-daytona-source": "sdk-typescript-legacy",
-          "x-daytona-sdk-version": "0.173.0"
-        }
-      },
-      "response": {
-        "status": 404,
-        "headers": {
-          "access-control-allow-credentials": "true",
-          "connection": "keep-alive",
-          "content-length": "206",
-          "content-security-policy": "frame-ancestors 'none'",
-          "content-type": "application/json; charset=utf-8",
-          "date": "Tue, 19 May 2026 15:28:20 GMT",
-          "etag": "W/\"ce-BLOc92BdTZLK4hDytHPD0LDXhJc\"",
-          "referrer-policy": "strict-origin-when-cross-origin",
-          "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
-          "vary": "Origin",
-          "via": "1.1 4aaf4116b04a91c2bdea1c5937b0ec2a.cloudfront.net (CloudFront)",
-          "x-amz-cf-id": "j5o17oB1HcyD20zrI-CMkRizJG6EUT7vYVc35KV0HpgnCF4aR9cRCg==",
-          "x-amz-cf-pop": "LHR50-P5",
-          "x-cache": "Error from cloudfront",
-          "x-content-type-options": "nosniff",
-          "x-daytona-api-version": "v0.177.0",
-          "x-frame-options": "DENY",
-          "x-powered-by": "Express",
-          "x-ratelimit-limit-authenticated": "50000",
-          "x-ratelimit-remaining-authenticated": "49995",
-          "x-ratelimit-reset-authenticated": "53"
-        },
-        "bodyJson": {
-          "path": "/api/snapshots/cogmo-python-3.14-slim-79eab4bf",
-          "timestamp": "2026-05-19T15:28:20.084Z",
-          "statusCode": 404,
-          "error": "Not Found",
-          "message": "Snapshot with name cogmo-python-3.14-slim-79eab4bf not found"
-        }
-      }
-    },
-    {
-      "kind": "http",
-      "method": "POST",
-      "path": "/snapshots",
-      "request": {
-        "headers": {
-          "accept": "application/json",
-          "content-type": "application/json",
-          "user-agent": "sdk-typescript-legacy/0.173.0",
-          "x-daytona-source": "sdk-typescript-legacy",
-          "x-daytona-sdk-version": "0.173.0"
-        },
-        "bodyJson": {
-          "name": "cogmo-python-3.14-slim-79eab4bf",
-          "imageName": "python:3.14-slim",
-          "cpu": 1,
-          "memory": 1,
-          "disk": 1
+          "user-agent": "sdk-typescript/0.204.1",
+          "x-daytona-source": "sdk-typescript",
+          "x-daytona-sdk-version": "0.204.1"
         }
       },
       "response": {
         "status": 200,
         "headers": {
-          "access-control-allow-credentials": "true",
           "connection": "keep-alive",
-          "content-length": "449",
+          "content-length": "682",
           "content-security-policy": "frame-ancestors 'none'",
           "content-type": "application/json; charset=utf-8",
-          "date": "Tue, 19 May 2026 15:28:20 GMT",
-          "etag": "W/\"1c1-lIZI4JL7XzIsLaXyve1aw2/KdrA\"",
+          "date": "Sat, 15 Aug 2026 15:44:31 GMT",
+          "etag": "W/\"2aa-+GIssYjJ9RfIow0XW1+aUuWUZXs\"",
           "referrer-policy": "strict-origin-when-cross-origin",
           "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
           "vary": "Origin",
-          "via": "1.1 4aaf4116b04a91c2bdea1c5937b0ec2a.cloudfront.net (CloudFront)",
-          "x-amz-cf-id": "4ycjeMoAsePzOXozgLvNTzxUoFIltQwnetu9UfVupN6NXmMOycMq-g==",
+          "via": "1.1 0d9654203c80fbb80a9b2587938dc646.cloudfront.net (CloudFront)",
+          "x-amz-cf-id": "Ow2BIMWnjO0ps5Zt19xfKW6Vrb0kW4_R25IwB5FUVD0A0fep9bv22g==",
           "x-amz-cf-pop": "LHR50-P5",
           "x-cache": "Miss from cloudfront",
           "x-content-type-options": "nosniff",
-          "x-daytona-api-version": "v0.177.0",
+          "x-daytona-api-version": "v0.204.0",
           "x-frame-options": "DENY",
           "x-powered-by": "Express",
           "x-ratelimit-limit-authenticated": "50000",
-          "x-ratelimit-remaining-authenticated": "49994",
-          "x-ratelimit-reset-authenticated": "53"
+          "x-ratelimit-remaining-authenticated": "49968",
+          "x-ratelimit-reset-authenticated": "27"
         },
         "bodyJson": {
-          "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "00000000-0000-0000-0000-000000000000",
-          "general": false,
-          "name": "cogmo-python-3.14-slim-79eab4bf",
-          "imageName": "python:3.14-slim",
-          "state": "pending",
-          "size": null,
-          "entrypoint": null,
-          "cpu": 1,
-          "gpu": 0,
-          "mem": 1,
-          "disk": 1,
-          "errorReason": null,
-          "createdAt": "2026-05-19T15:28:20.196Z",
-          "updatedAt": "2026-05-19T15:28:20.196Z",
-          "lastUsedAt": null,
-          "skipValidation": false,
-          "regionIds": [
-            "eu"
-          ],
-          "androidDevice": false
-        }
-      }
-    },
-    {
-      "kind": "http",
-      "method": "GET",
-      "path": "/snapshots/cogmo-python-3.14-slim-79eab4bf",
-      "request": {
-        "headers": {
-          "accept": "application/json",
-          "user-agent": "sdk-typescript-legacy/0.173.0",
-          "x-daytona-source": "sdk-typescript-legacy",
-          "x-daytona-sdk-version": "0.173.0"
-        }
-      },
-      "response": {
-        "status": 200,
-        "headers": {
-          "access-control-allow-credentials": "true",
-          "connection": "keep-alive",
-          "content-length": "517",
-          "content-security-policy": "frame-ancestors 'none'",
-          "content-type": "application/json; charset=utf-8",
-          "date": "Tue, 19 May 2026 15:28:21 GMT",
-          "etag": "W/\"205-1XCn/lKnSP/2k1cavc7cg4pIvV4\"",
-          "referrer-policy": "strict-origin-when-cross-origin",
-          "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
-          "vary": "Origin",
-          "via": "1.1 4aaf4116b04a91c2bdea1c5937b0ec2a.cloudfront.net (CloudFront)",
-          "x-amz-cf-id": "7KkJnO4R2zsaGuD115pnn0Vj4fEFu1LYMDfWo8oFtjFssm3FL4K9zg==",
-          "x-amz-cf-pop": "LHR50-P5",
-          "x-cache": "Miss from cloudfront",
-          "x-content-type-options": "nosniff",
-          "x-daytona-api-version": "v0.177.0",
-          "x-frame-options": "DENY",
-          "x-powered-by": "Express",
-          "x-ratelimit-limit-authenticated": "50000",
-          "x-ratelimit-remaining-authenticated": "49993",
-          "x-ratelimit-reset-authenticated": "52"
-        },
-        "bodyJson": {
-          "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "00000000-0000-0000-0000-000000000000",
-          "general": false,
-          "name": "cogmo-python-3.14-slim-79eab4bf",
-          "imageName": "python:3.14-slim",
-          "state": "pending",
-          "size": null,
-          "entrypoint": null,
-          "cpu": 1,
-          "gpu": 0,
-          "mem": 1,
-          "disk": 1,
-          "errorReason": null,
-          "createdAt": "2026-05-19T15:28:20.196Z",
-          "updatedAt": "2026-05-19T15:28:20.206Z",
-          "lastUsedAt": null,
-          "skipValidation": false,
-          "regionIds": [
-            "eu"
-          ],
-          "initialRunnerId": "2bd30165-78ca-47b0-87b7-4bd961313726",
-          "ref": null,
-          "androidDevice": false
-        }
-      }
-    },
-    {
-      "kind": "http",
-      "method": "GET",
-      "path": "/snapshots/cogmo-python-3.14-slim-79eab4bf",
-      "request": {
-        "headers": {
-          "accept": "application/json",
-          "user-agent": "sdk-typescript-legacy/0.173.0",
-          "x-daytona-source": "sdk-typescript-legacy",
-          "x-daytona-sdk-version": "0.173.0"
-        }
-      },
-      "response": {
-        "status": 200,
-        "headers": {
-          "access-control-allow-credentials": "true",
-          "connection": "keep-alive",
-          "content-length": "633",
-          "content-security-policy": "frame-ancestors 'none'",
-          "content-type": "application/json; charset=utf-8",
-          "date": "Tue, 19 May 2026 15:28:22 GMT",
-          "etag": "W/\"279-Uh3qzaq9D0fUcNDFNGYOvQshQQg\"",
-          "referrer-policy": "strict-origin-when-cross-origin",
-          "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
-          "vary": "Origin",
-          "via": "1.1 4aaf4116b04a91c2bdea1c5937b0ec2a.cloudfront.net (CloudFront)",
-          "x-amz-cf-id": "hT-RiPTZFBegePZ4q4o2hOf4klDAlv9HXUlTCYq9248WoMoSdRK4Hg==",
-          "x-amz-cf-pop": "LHR50-P5",
-          "x-cache": "Miss from cloudfront",
-          "x-content-type-options": "nosniff",
-          "x-daytona-api-version": "v0.177.0",
-          "x-frame-options": "DENY",
-          "x-powered-by": "Express",
-          "x-ratelimit-limit-authenticated": "50000",
-          "x-ratelimit-remaining-authenticated": "49992",
-          "x-ratelimit-reset-authenticated": "51"
-        },
-        "bodyJson": {
-          "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "00000000-0000-0000-0000-000000000000",
-          "general": false,
-          "name": "cogmo-python-3.14-slim-79eab4bf",
-          "imageName": "python:3.14-slim",
-          "state": "pulling",
-          "size": 0.04042619187384844,
-          "entrypoint": null,
-          "cpu": 1,
-          "gpu": 0,
-          "mem": 1,
-          "disk": 1,
-          "errorReason": null,
-          "createdAt": "2026-05-19T15:28:20.196Z",
-          "updatedAt": "2026-05-19T15:28:22.282Z",
-          "lastUsedAt": null,
-          "skipValidation": false,
-          "regionIds": [
-            "eu"
-          ],
-          "initialRunnerId": "2bd30165-78ca-47b0-87b7-4bd961313726",
-          "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
-          "androidDevice": false
-        }
-      }
-    },
-    {
-      "kind": "http",
-      "method": "GET",
-      "path": "/snapshots/cogmo-python-3.14-slim-79eab4bf",
-      "request": {
-        "headers": {
-          "accept": "application/json",
-          "user-agent": "sdk-typescript-legacy/0.173.0",
-          "x-daytona-source": "sdk-typescript-legacy",
-          "x-daytona-sdk-version": "0.173.0"
-        }
-      },
-      "response": {
-        "status": 200,
-        "headers": {
-          "access-control-allow-credentials": "true",
-          "connection": "keep-alive",
-          "content-length": "633",
-          "content-security-policy": "frame-ancestors 'none'",
-          "content-type": "application/json; charset=utf-8",
-          "date": "Tue, 19 May 2026 15:28:23 GMT",
-          "etag": "W/\"279-Uh3qzaq9D0fUcNDFNGYOvQshQQg\"",
-          "referrer-policy": "strict-origin-when-cross-origin",
-          "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
-          "vary": "Origin",
-          "via": "1.1 4aaf4116b04a91c2bdea1c5937b0ec2a.cloudfront.net (CloudFront)",
-          "x-amz-cf-id": "b8Zb5LZ57S-28Z4EuYkX-nmyM93iuyVEiLc6iTqQcveySPlMd6EF9A==",
-          "x-amz-cf-pop": "LHR50-P5",
-          "x-cache": "Miss from cloudfront",
-          "x-content-type-options": "nosniff",
-          "x-daytona-api-version": "v0.177.0",
-          "x-frame-options": "DENY",
-          "x-powered-by": "Express",
-          "x-ratelimit-limit-authenticated": "50000",
-          "x-ratelimit-remaining-authenticated": "49991",
-          "x-ratelimit-reset-authenticated": "50"
-        },
-        "bodyJson": {
-          "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "00000000-0000-0000-0000-000000000000",
-          "general": false,
-          "name": "cogmo-python-3.14-slim-79eab4bf",
-          "imageName": "python:3.14-slim",
-          "state": "pulling",
-          "size": 0.04042619187384844,
-          "entrypoint": null,
-          "cpu": 1,
-          "gpu": 0,
-          "mem": 1,
-          "disk": 1,
-          "errorReason": null,
-          "createdAt": "2026-05-19T15:28:20.196Z",
-          "updatedAt": "2026-05-19T15:28:22.282Z",
-          "lastUsedAt": null,
-          "skipValidation": false,
-          "regionIds": [
-            "eu"
-          ],
-          "initialRunnerId": "2bd30165-78ca-47b0-87b7-4bd961313726",
-          "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
-          "androidDevice": false
-        }
-      }
-    },
-    {
-      "kind": "http",
-      "method": "GET",
-      "path": "/snapshots/cogmo-python-3.14-slim-79eab4bf",
-      "request": {
-        "headers": {
-          "accept": "application/json",
-          "user-agent": "sdk-typescript-legacy/0.173.0",
-          "x-daytona-source": "sdk-typescript-legacy",
-          "x-daytona-sdk-version": "0.173.0"
-        }
-      },
-      "response": {
-        "status": 200,
-        "headers": {
-          "access-control-allow-credentials": "true",
-          "connection": "keep-alive",
-          "content-length": "633",
-          "content-security-policy": "frame-ancestors 'none'",
-          "content-type": "application/json; charset=utf-8",
-          "date": "Tue, 19 May 2026 15:28:24 GMT",
-          "etag": "W/\"279-Uh3qzaq9D0fUcNDFNGYOvQshQQg\"",
-          "referrer-policy": "strict-origin-when-cross-origin",
-          "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
-          "vary": "Origin",
-          "via": "1.1 4aaf4116b04a91c2bdea1c5937b0ec2a.cloudfront.net (CloudFront)",
-          "x-amz-cf-id": "2tqQOvCpcofHk9Q5ep-3dE0qmQmtYwwfAuCJSlcGHgz-Q3NgMoH7IA==",
-          "x-amz-cf-pop": "LHR50-P5",
-          "x-cache": "Miss from cloudfront",
-          "x-content-type-options": "nosniff",
-          "x-daytona-api-version": "v0.177.0",
-          "x-frame-options": "DENY",
-          "x-powered-by": "Express",
-          "x-ratelimit-limit-authenticated": "50000",
-          "x-ratelimit-remaining-authenticated": "49990",
-          "x-ratelimit-reset-authenticated": "49"
-        },
-        "bodyJson": {
-          "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "00000000-0000-0000-0000-000000000000",
-          "general": false,
-          "name": "cogmo-python-3.14-slim-79eab4bf",
-          "imageName": "python:3.14-slim",
-          "state": "pulling",
-          "size": 0.04042619187384844,
-          "entrypoint": null,
-          "cpu": 1,
-          "gpu": 0,
-          "mem": 1,
-          "disk": 1,
-          "errorReason": null,
-          "createdAt": "2026-05-19T15:28:20.196Z",
-          "updatedAt": "2026-05-19T15:28:22.282Z",
-          "lastUsedAt": null,
-          "skipValidation": false,
-          "regionIds": [
-            "eu"
-          ],
-          "initialRunnerId": "2bd30165-78ca-47b0-87b7-4bd961313726",
-          "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
-          "androidDevice": false
-        }
-      }
-    },
-    {
-      "kind": "http",
-      "method": "GET",
-      "path": "/snapshots/cogmo-python-3.14-slim-79eab4bf",
-      "request": {
-        "headers": {
-          "accept": "application/json",
-          "user-agent": "sdk-typescript-legacy/0.173.0",
-          "x-daytona-source": "sdk-typescript-legacy",
-          "x-daytona-sdk-version": "0.173.0"
-        }
-      },
-      "response": {
-        "status": 200,
-        "headers": {
-          "access-control-allow-credentials": "true",
-          "connection": "keep-alive",
-          "content-length": "633",
-          "content-security-policy": "frame-ancestors 'none'",
-          "content-type": "application/json; charset=utf-8",
-          "date": "Tue, 19 May 2026 15:28:25 GMT",
-          "etag": "W/\"279-Uh3qzaq9D0fUcNDFNGYOvQshQQg\"",
-          "referrer-policy": "strict-origin-when-cross-origin",
-          "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
-          "vary": "Origin",
-          "via": "1.1 4aaf4116b04a91c2bdea1c5937b0ec2a.cloudfront.net (CloudFront)",
-          "x-amz-cf-id": "Ht9ROAz8ONRdDK_KlgrvcseJBehueZBP1_PmIdudmEK6w7UT47dulA==",
-          "x-amz-cf-pop": "LHR50-P5",
-          "x-cache": "Miss from cloudfront",
-          "x-content-type-options": "nosniff",
-          "x-daytona-api-version": "v0.177.0",
-          "x-frame-options": "DENY",
-          "x-powered-by": "Express",
-          "x-ratelimit-limit-authenticated": "50000",
-          "x-ratelimit-remaining-authenticated": "49989",
-          "x-ratelimit-reset-authenticated": "47"
-        },
-        "bodyJson": {
-          "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "00000000-0000-0000-0000-000000000000",
-          "general": false,
-          "name": "cogmo-python-3.14-slim-79eab4bf",
-          "imageName": "python:3.14-slim",
-          "state": "pulling",
-          "size": 0.04042619187384844,
-          "entrypoint": null,
-          "cpu": 1,
-          "gpu": 0,
-          "mem": 1,
-          "disk": 1,
-          "errorReason": null,
-          "createdAt": "2026-05-19T15:28:20.196Z",
-          "updatedAt": "2026-05-19T15:28:22.282Z",
-          "lastUsedAt": null,
-          "skipValidation": false,
-          "regionIds": [
-            "eu"
-          ],
-          "initialRunnerId": "2bd30165-78ca-47b0-87b7-4bd961313726",
-          "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
-          "androidDevice": false
-        }
-      }
-    },
-    {
-      "kind": "http",
-      "method": "GET",
-      "path": "/snapshots/cogmo-python-3.14-slim-79eab4bf",
-      "request": {
-        "headers": {
-          "accept": "application/json",
-          "user-agent": "sdk-typescript-legacy/0.173.0",
-          "x-daytona-source": "sdk-typescript-legacy",
-          "x-daytona-sdk-version": "0.173.0"
-        }
-      },
-      "response": {
-        "status": 200,
-        "headers": {
-          "access-control-allow-credentials": "true",
-          "connection": "keep-alive",
-          "content-length": "633",
-          "content-security-policy": "frame-ancestors 'none'",
-          "content-type": "application/json; charset=utf-8",
-          "date": "Tue, 19 May 2026 15:28:26 GMT",
-          "etag": "W/\"279-Uh3qzaq9D0fUcNDFNGYOvQshQQg\"",
-          "referrer-policy": "strict-origin-when-cross-origin",
-          "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
-          "vary": "Origin",
-          "via": "1.1 4aaf4116b04a91c2bdea1c5937b0ec2a.cloudfront.net (CloudFront)",
-          "x-amz-cf-id": "SWXbEoDzqTPYZ9c3c7g_uyVVf12fJeuebYybEbbIKSgSOJnnrqz94w==",
-          "x-amz-cf-pop": "LHR50-P5",
-          "x-cache": "Miss from cloudfront",
-          "x-content-type-options": "nosniff",
-          "x-daytona-api-version": "v0.177.0",
-          "x-frame-options": "DENY",
-          "x-powered-by": "Express",
-          "x-ratelimit-limit-authenticated": "50000",
-          "x-ratelimit-remaining-authenticated": "49988",
-          "x-ratelimit-reset-authenticated": "46"
-        },
-        "bodyJson": {
-          "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "00000000-0000-0000-0000-000000000000",
-          "general": false,
-          "name": "cogmo-python-3.14-slim-79eab4bf",
-          "imageName": "python:3.14-slim",
-          "state": "pulling",
-          "size": 0.04042619187384844,
-          "entrypoint": null,
-          "cpu": 1,
-          "gpu": 0,
-          "mem": 1,
-          "disk": 1,
-          "errorReason": null,
-          "createdAt": "2026-05-19T15:28:20.196Z",
-          "updatedAt": "2026-05-19T15:28:22.282Z",
-          "lastUsedAt": null,
-          "skipValidation": false,
-          "regionIds": [
-            "eu"
-          ],
-          "initialRunnerId": "2bd30165-78ca-47b0-87b7-4bd961313726",
-          "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
-          "androidDevice": false
-        }
-      }
-    },
-    {
-      "kind": "http",
-      "method": "GET",
-      "path": "/snapshots/cogmo-python-3.14-slim-79eab4bf",
-      "request": {
-        "headers": {
-          "accept": "application/json",
-          "user-agent": "sdk-typescript-legacy/0.173.0",
-          "x-daytona-source": "sdk-typescript-legacy",
-          "x-daytona-sdk-version": "0.173.0"
-        }
-      },
-      "response": {
-        "status": 200,
-        "headers": {
-          "access-control-allow-credentials": "true",
-          "connection": "keep-alive",
-          "content-length": "633",
-          "content-security-policy": "frame-ancestors 'none'",
-          "content-type": "application/json; charset=utf-8",
-          "date": "Tue, 19 May 2026 15:28:27 GMT",
-          "etag": "W/\"279-Uh3qzaq9D0fUcNDFNGYOvQshQQg\"",
-          "referrer-policy": "strict-origin-when-cross-origin",
-          "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
-          "vary": "Origin",
-          "via": "1.1 4aaf4116b04a91c2bdea1c5937b0ec2a.cloudfront.net (CloudFront)",
-          "x-amz-cf-id": "p7fCG8yC3dmSG92uIjlpG-mpBS9v647cI_8XWqDAVRhurS9yXy35yg==",
-          "x-amz-cf-pop": "LHR50-P5",
-          "x-cache": "Miss from cloudfront",
-          "x-content-type-options": "nosniff",
-          "x-daytona-api-version": "v0.177.0",
-          "x-frame-options": "DENY",
-          "x-powered-by": "Express",
-          "x-ratelimit-limit-authenticated": "50000",
-          "x-ratelimit-remaining-authenticated": "49987",
-          "x-ratelimit-reset-authenticated": "45"
-        },
-        "bodyJson": {
-          "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "00000000-0000-0000-0000-000000000000",
-          "general": false,
-          "name": "cogmo-python-3.14-slim-79eab4bf",
-          "imageName": "python:3.14-slim",
-          "state": "pulling",
-          "size": 0.04042619187384844,
-          "entrypoint": null,
-          "cpu": 1,
-          "gpu": 0,
-          "mem": 1,
-          "disk": 1,
-          "errorReason": null,
-          "createdAt": "2026-05-19T15:28:20.196Z",
-          "updatedAt": "2026-05-19T15:28:22.282Z",
-          "lastUsedAt": null,
-          "skipValidation": false,
-          "regionIds": [
-            "eu"
-          ],
-          "initialRunnerId": "2bd30165-78ca-47b0-87b7-4bd961313726",
-          "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
-          "androidDevice": false
-        }
-      }
-    },
-    {
-      "kind": "http",
-      "method": "GET",
-      "path": "/snapshots/cogmo-python-3.14-slim-79eab4bf",
-      "request": {
-        "headers": {
-          "accept": "application/json",
-          "user-agent": "sdk-typescript-legacy/0.173.0",
-          "x-daytona-source": "sdk-typescript-legacy",
-          "x-daytona-sdk-version": "0.173.0"
-        }
-      },
-      "response": {
-        "status": 200,
-        "headers": {
-          "access-control-allow-credentials": "true",
-          "connection": "keep-alive",
-          "content-length": "633",
-          "content-security-policy": "frame-ancestors 'none'",
-          "content-type": "application/json; charset=utf-8",
-          "date": "Tue, 19 May 2026 15:28:29 GMT",
-          "etag": "W/\"279-Uh3qzaq9D0fUcNDFNGYOvQshQQg\"",
-          "referrer-policy": "strict-origin-when-cross-origin",
-          "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
-          "vary": "Origin",
-          "via": "1.1 4aaf4116b04a91c2bdea1c5937b0ec2a.cloudfront.net (CloudFront)",
-          "x-amz-cf-id": "J2QQPxWrEsONEf5FWzBFixYN1Y7GDIP7BAwLdgQo8ncifBfrkIvzMA==",
-          "x-amz-cf-pop": "LHR50-P5",
-          "x-cache": "Miss from cloudfront",
-          "x-content-type-options": "nosniff",
-          "x-daytona-api-version": "v0.177.0",
-          "x-frame-options": "DENY",
-          "x-powered-by": "Express",
-          "x-ratelimit-limit-authenticated": "50000",
-          "x-ratelimit-remaining-authenticated": "49986",
-          "x-ratelimit-reset-authenticated": "44"
-        },
-        "bodyJson": {
-          "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "00000000-0000-0000-0000-000000000000",
-          "general": false,
-          "name": "cogmo-python-3.14-slim-79eab4bf",
-          "imageName": "python:3.14-slim",
-          "state": "pulling",
-          "size": 0.04042619187384844,
-          "entrypoint": null,
-          "cpu": 1,
-          "gpu": 0,
-          "mem": 1,
-          "disk": 1,
-          "errorReason": null,
-          "createdAt": "2026-05-19T15:28:20.196Z",
-          "updatedAt": "2026-05-19T15:28:22.282Z",
-          "lastUsedAt": null,
-          "skipValidation": false,
-          "regionIds": [
-            "eu"
-          ],
-          "initialRunnerId": "2bd30165-78ca-47b0-87b7-4bd961313726",
-          "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
-          "androidDevice": false
-        }
-      }
-    },
-    {
-      "kind": "http",
-      "method": "GET",
-      "path": "/snapshots/cogmo-python-3.14-slim-79eab4bf",
-      "request": {
-        "headers": {
-          "accept": "application/json",
-          "user-agent": "sdk-typescript-legacy/0.173.0",
-          "x-daytona-source": "sdk-typescript-legacy",
-          "x-daytona-sdk-version": "0.173.0"
-        }
-      },
-      "response": {
-        "status": 200,
-        "headers": {
-          "access-control-allow-credentials": "true",
-          "connection": "keep-alive",
-          "content-length": "633",
-          "content-security-policy": "frame-ancestors 'none'",
-          "content-type": "application/json; charset=utf-8",
-          "date": "Tue, 19 May 2026 15:28:30 GMT",
-          "etag": "W/\"279-Uh3qzaq9D0fUcNDFNGYOvQshQQg\"",
-          "referrer-policy": "strict-origin-when-cross-origin",
-          "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
-          "vary": "Origin",
-          "via": "1.1 4aaf4116b04a91c2bdea1c5937b0ec2a.cloudfront.net (CloudFront)",
-          "x-amz-cf-id": "3xDF3oA7JQ726VdHGM8r8DZeHFF8ajXrr5LBl9tiG3VNZkgXtoiVIA==",
-          "x-amz-cf-pop": "LHR50-P5",
-          "x-cache": "Miss from cloudfront",
-          "x-content-type-options": "nosniff",
-          "x-daytona-api-version": "v0.177.0",
-          "x-frame-options": "DENY",
-          "x-powered-by": "Express",
-          "x-ratelimit-limit-authenticated": "50000",
-          "x-ratelimit-remaining-authenticated": "49985",
-          "x-ratelimit-reset-authenticated": "43"
-        },
-        "bodyJson": {
-          "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "00000000-0000-0000-0000-000000000000",
-          "general": false,
-          "name": "cogmo-python-3.14-slim-79eab4bf",
-          "imageName": "python:3.14-slim",
-          "state": "pulling",
-          "size": 0.04042619187384844,
-          "entrypoint": null,
-          "cpu": 1,
-          "gpu": 0,
-          "mem": 1,
-          "disk": 1,
-          "errorReason": null,
-          "createdAt": "2026-05-19T15:28:20.196Z",
-          "updatedAt": "2026-05-19T15:28:22.282Z",
-          "lastUsedAt": null,
-          "skipValidation": false,
-          "regionIds": [
-            "eu"
-          ],
-          "initialRunnerId": "2bd30165-78ca-47b0-87b7-4bd961313726",
-          "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
-          "androidDevice": false
-        }
-      }
-    },
-    {
-      "kind": "http",
-      "method": "GET",
-      "path": "/snapshots/cogmo-python-3.14-slim-79eab4bf",
-      "request": {
-        "headers": {
-          "accept": "application/json",
-          "user-agent": "sdk-typescript-legacy/0.173.0",
-          "x-daytona-source": "sdk-typescript-legacy",
-          "x-daytona-sdk-version": "0.173.0"
-        }
-      },
-      "response": {
-        "status": 200,
-        "headers": {
-          "access-control-allow-credentials": "true",
-          "connection": "keep-alive",
-          "content-length": "633",
-          "content-security-policy": "frame-ancestors 'none'",
-          "content-type": "application/json; charset=utf-8",
-          "date": "Tue, 19 May 2026 15:28:31 GMT",
-          "etag": "W/\"279-Uh3qzaq9D0fUcNDFNGYOvQshQQg\"",
-          "referrer-policy": "strict-origin-when-cross-origin",
-          "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
-          "vary": "Origin",
-          "via": "1.1 4aaf4116b04a91c2bdea1c5937b0ec2a.cloudfront.net (CloudFront)",
-          "x-amz-cf-id": "1yz6Vj7vMZzhMGU3CNNboftHI03nc7bTYu0jpm1ejiJiVZY-Jatlsg==",
-          "x-amz-cf-pop": "LHR50-P5",
-          "x-cache": "Miss from cloudfront",
-          "x-content-type-options": "nosniff",
-          "x-daytona-api-version": "v0.177.0",
-          "x-frame-options": "DENY",
-          "x-powered-by": "Express",
-          "x-ratelimit-limit-authenticated": "50000",
-          "x-ratelimit-remaining-authenticated": "49984",
-          "x-ratelimit-reset-authenticated": "42"
-        },
-        "bodyJson": {
-          "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "00000000-0000-0000-0000-000000000000",
-          "general": false,
-          "name": "cogmo-python-3.14-slim-79eab4bf",
-          "imageName": "python:3.14-slim",
-          "state": "pulling",
-          "size": 0.04042619187384844,
-          "entrypoint": null,
-          "cpu": 1,
-          "gpu": 0,
-          "mem": 1,
-          "disk": 1,
-          "errorReason": null,
-          "createdAt": "2026-05-19T15:28:20.196Z",
-          "updatedAt": "2026-05-19T15:28:22.282Z",
-          "lastUsedAt": null,
-          "skipValidation": false,
-          "regionIds": [
-            "eu"
-          ],
-          "initialRunnerId": "2bd30165-78ca-47b0-87b7-4bd961313726",
-          "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
-          "androidDevice": false
-        }
-      }
-    },
-    {
-      "kind": "http",
-      "method": "GET",
-      "path": "/snapshots/cogmo-python-3.14-slim-79eab4bf",
-      "request": {
-        "headers": {
-          "accept": "application/json",
-          "user-agent": "sdk-typescript-legacy/0.173.0",
-          "x-daytona-source": "sdk-typescript-legacy",
-          "x-daytona-sdk-version": "0.173.0"
-        }
-      },
-      "response": {
-        "status": 200,
-        "headers": {
-          "access-control-allow-credentials": "true",
-          "connection": "keep-alive",
-          "content-length": "633",
-          "content-security-policy": "frame-ancestors 'none'",
-          "content-type": "application/json; charset=utf-8",
-          "date": "Tue, 19 May 2026 15:28:32 GMT",
-          "etag": "W/\"279-Uh3qzaq9D0fUcNDFNGYOvQshQQg\"",
-          "referrer-policy": "strict-origin-when-cross-origin",
-          "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
-          "vary": "Origin",
-          "via": "1.1 4aaf4116b04a91c2bdea1c5937b0ec2a.cloudfront.net (CloudFront)",
-          "x-amz-cf-id": "3nQj2chcCN97uZVQ377DJU_svW1x0Iab75IwbbFbO3X67yKjdchfEA==",
-          "x-amz-cf-pop": "LHR50-P5",
-          "x-cache": "Miss from cloudfront",
-          "x-content-type-options": "nosniff",
-          "x-daytona-api-version": "v0.177.0",
-          "x-frame-options": "DENY",
-          "x-powered-by": "Express",
-          "x-ratelimit-limit-authenticated": "50000",
-          "x-ratelimit-remaining-authenticated": "49983",
-          "x-ratelimit-reset-authenticated": "41"
-        },
-        "bodyJson": {
-          "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
-          "organizationId": "00000000-0000-0000-0000-000000000000",
-          "general": false,
-          "name": "cogmo-python-3.14-slim-79eab4bf",
-          "imageName": "python:3.14-slim",
-          "state": "pulling",
-          "size": 0.04042619187384844,
-          "entrypoint": null,
-          "cpu": 1,
-          "gpu": 0,
-          "mem": 1,
-          "disk": 1,
-          "errorReason": null,
-          "createdAt": "2026-05-19T15:28:20.196Z",
-          "updatedAt": "2026-05-19T15:28:22.282Z",
-          "lastUsedAt": null,
-          "skipValidation": false,
-          "regionIds": [
-            "eu"
-          ],
-          "initialRunnerId": "2bd30165-78ca-47b0-87b7-4bd961313726",
-          "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
-          "androidDevice": false
-        }
-      }
-    },
-    {
-      "kind": "http",
-      "method": "GET",
-      "path": "/snapshots/cogmo-python-3.14-slim-79eab4bf",
-      "request": {
-        "headers": {
-          "accept": "application/json",
-          "user-agent": "sdk-typescript-legacy/0.173.0",
-          "x-daytona-source": "sdk-typescript-legacy",
-          "x-daytona-sdk-version": "0.173.0"
-        }
-      },
-      "response": {
-        "status": 200,
-        "headers": {
-          "access-control-allow-credentials": "true",
-          "connection": "keep-alive",
-          "content-length": "654",
-          "content-security-policy": "frame-ancestors 'none'",
-          "content-type": "application/json; charset=utf-8",
-          "date": "Tue, 19 May 2026 15:28:33 GMT",
-          "etag": "W/\"28e-oYpBcKURWnpIcL9E/IVPpq5fjzs\"",
-          "referrer-policy": "strict-origin-when-cross-origin",
-          "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
-          "vary": "Origin",
-          "via": "1.1 4aaf4116b04a91c2bdea1c5937b0ec2a.cloudfront.net (CloudFront)",
-          "x-amz-cf-id": "aB7jcxyK2swIQatesHZC6sqxUqeQYGL9iLDysB3fQx8HNqY3WZaC3A==",
-          "x-amz-cf-pop": "LHR50-P5",
-          "x-cache": "Miss from cloudfront",
-          "x-content-type-options": "nosniff",
-          "x-daytona-api-version": "v0.177.0",
-          "x-frame-options": "DENY",
-          "x-powered-by": "Express",
-          "x-ratelimit-limit-authenticated": "50000",
-          "x-ratelimit-remaining-authenticated": "49982",
-          "x-ratelimit-reset-authenticated": "40"
-        },
-        "bodyJson": {
-          "id": "1d0f93ef-5af9-41f2-8f57-5bdefd98c7d7",
+          "id": "4ff1509f-7cec-40fb-87b1-15666bf0415f",
           "organizationId": "00000000-0000-0000-0000-000000000000",
           "general": false,
           "name": "cogmo-python-3.14-slim-79eab4bf",
           "imageName": "python:3.14-slim",
           "state": "active",
-          "size": 0.04042619187384844,
+          "size": 0.04045920725911856,
           "entrypoint": null,
           "cpu": 1,
           "gpu": 0,
           "mem": 1,
           "disk": 1,
           "errorReason": null,
-          "createdAt": "2026-05-19T15:28:20.196Z",
-          "updatedAt": "2026-05-19T15:28:32.909Z",
-          "lastUsedAt": "2026-05-19T15:28:31.412Z",
+          "createdAt": "2026-08-15T15:44:05.247Z",
+          "updatedAt": "2026-08-15T15:44:28.312Z",
+          "lastUsedAt": "2026-08-15T15:44:28.301Z",
           "skipValidation": false,
           "regionIds": [
             "eu"
           ],
-          "initialRunnerId": "2bd30165-78ca-47b0-87b7-4bd961313726",
-          "ref": "cr.app.daytona.io/sbox/daytona-7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856:daytona",
-          "androidDevice": false
+          "initialRunnerId": "d4508bc6-83ae-4ef0-b2d2-3e2288b1fa8c",
+          "ref": "cr.app.daytona.io/sbox/daytona-ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4:daytona",
+          "sourceSandboxId": null,
+          "sandboxClass": "container"
         }
       }
     },
@@ -893,9 +73,9 @@
         "headers": {
           "accept": "application/json",
           "content-type": "application/json",
-          "user-agent": "sdk-typescript-legacy/0.173.0",
-          "x-daytona-source": "sdk-typescript-legacy",
-          "x-daytona-sdk-version": "0.173.0"
+          "user-agent": "sdk-typescript/0.204.1",
+          "x-daytona-source": "sdk-typescript",
+          "x-daytona-sdk-version": "0.204.1"
         },
         "bodyJson": {
           "snapshot": "cogmo-python-3.14-slim-79eab4bf",
@@ -912,32 +92,31 @@
       "response": {
         "status": 200,
         "headers": {
-          "access-control-allow-credentials": "true",
           "connection": "keep-alive",
-          "content-length": "873",
+          "content-length": "852",
           "content-security-policy": "frame-ancestors 'none'",
           "content-type": "application/json; charset=utf-8",
-          "date": "Tue, 19 May 2026 15:28:36 GMT",
-          "etag": "W/\"372-PhndrKM0q8dfMBOB5HknywANhl4\"",
+          "date": "Sat, 15 Aug 2026 15:44:32 GMT",
+          "etag": "W/\"35d-xV+S8JXQThXk5O7VsLOCsggZmGA\"",
           "referrer-policy": "strict-origin-when-cross-origin",
           "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
           "vary": "Origin",
-          "via": "1.1 4aaf4116b04a91c2bdea1c5937b0ec2a.cloudfront.net (CloudFront)",
-          "x-amz-cf-id": "0JLIGrum90rUvO1-vto98xSkqzSx8eCHLFWWgDaNKrgygLP3NuuLqQ==",
+          "via": "1.1 0d9654203c80fbb80a9b2587938dc646.cloudfront.net (CloudFront)",
+          "x-amz-cf-id": "SDNgrq9bZT5b6kQjvWVBSaFFX2SAbrtWLzuOoE6S3LxvccBzI18FYA==",
           "x-amz-cf-pop": "LHR50-P5",
           "x-cache": "Miss from cloudfront",
           "x-content-type-options": "nosniff",
-          "x-daytona-api-version": "v0.177.0",
+          "x-daytona-api-version": "v0.204.0",
           "x-frame-options": "DENY",
           "x-powered-by": "Express",
           "x-ratelimit-limit-sandbox-create": "600",
-          "x-ratelimit-remaining-sandbox-create": "599",
-          "x-ratelimit-reset-sandbox-create": "60"
+          "x-ratelimit-remaining-sandbox-create": "596",
+          "x-ratelimit-reset-sandbox-create": "27"
         },
         "bodyJson": {
-          "id": "69fab865-a902-477e-ab31-f9835ee49154",
+          "id": "20156a91-0b30-4bff-be85-011cb8dc03fa",
           "organizationId": "00000000-0000-0000-0000-000000000000",
-          "name": "69fab865-a902-477e-ab31-f9835ee49154",
+          "name": "20156a91-0b30-4bff-be85-011cb8dc03fa",
           "target": "eu",
           "snapshot": "cogmo-python-3.14-slim-79eab4bf",
           "user": "daytona",
@@ -958,15 +137,14 @@
           "state": "creating",
           "desiredState": "started",
           "recoverable": false,
-          "backupState": "None",
           "autoStopInterval": 5,
+          "autoPauseInterval": 0,
           "autoArchiveInterval": 10080,
           "autoDeleteInterval": -1,
           "sandboxClass": "container",
-          "androidDevice": false,
-          "createdAt": "2026-05-19T15:28:33.532Z",
-          "updatedAt": "2026-05-19T15:28:33.532Z",
-          "lastActivityAt": "2026-05-19T15:28:33.532Z",
+          "createdAt": "2026-08-15T15:44:31.674Z",
+          "updatedAt": "2026-08-15T15:44:31.674Z",
+          "lastActivityAt": "2026-08-15T15:44:31.674Z",
           "runnerId": "11111111-1111-1111-1111-111111111111",
           "toolboxProxyUrl": "http://__daytona_mock__/toolbox"
         }
@@ -975,44 +153,43 @@
     {
       "kind": "http",
       "method": "GET",
-      "path": "/sandbox/69fab865-a902-477e-ab31-f9835ee49154",
+      "path": "/sandbox/20156a91-0b30-4bff-be85-011cb8dc03fa",
       "request": {
         "headers": {
           "accept": "application/json",
-          "user-agent": "sdk-typescript-legacy/0.173.0",
-          "x-daytona-source": "sdk-typescript-legacy",
-          "x-daytona-sdk-version": "0.173.0"
+          "user-agent": "sdk-typescript/0.204.1",
+          "x-daytona-source": "sdk-typescript",
+          "x-daytona-sdk-version": "0.204.1"
         }
       },
       "response": {
         "status": 200,
         "headers": {
-          "access-control-allow-credentials": "true",
           "connection": "keep-alive",
-          "content-length": "969",
+          "content-length": "970",
           "content-security-policy": "frame-ancestors 'none'",
           "content-type": "application/json; charset=utf-8",
-          "date": "Tue, 19 May 2026 15:28:37 GMT",
-          "etag": "W/\"3c9-Pn1xfnuOZdhV1t1yywiT5TJXfCI\"",
+          "date": "Sat, 15 Aug 2026 15:44:32 GMT",
+          "etag": "W/\"3d3-XZH/dWCGY3DLGkC8hWY4lGEdvF8\"",
           "referrer-policy": "strict-origin-when-cross-origin",
           "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
           "vary": "Origin",
-          "via": "1.1 4aaf4116b04a91c2bdea1c5937b0ec2a.cloudfront.net (CloudFront)",
-          "x-amz-cf-id": "0r8uI9jP9O2CHD9KppvxULVMauwNVLYFRQ4Jka5etSU3uXROueEbRQ==",
+          "via": "1.1 0d9654203c80fbb80a9b2587938dc646.cloudfront.net (CloudFront)",
+          "x-amz-cf-id": "yqmf5Prg8yZ7eDktybuBqyOpHZz0O8TLWSq89BrjKT4tygn9wxbnsA==",
           "x-amz-cf-pop": "LHR50-P5",
           "x-cache": "Miss from cloudfront",
           "x-content-type-options": "nosniff",
-          "x-daytona-api-version": "v0.177.0",
+          "x-daytona-api-version": "v0.204.0",
           "x-frame-options": "DENY",
           "x-powered-by": "Express",
           "x-ratelimit-limit-authenticated": "50000",
-          "x-ratelimit-remaining-authenticated": "49981",
-          "x-ratelimit-reset-authenticated": "36"
+          "x-ratelimit-remaining-authenticated": "49967",
+          "x-ratelimit-reset-authenticated": "26"
         },
         "bodyJson": {
-          "id": "69fab865-a902-477e-ab31-f9835ee49154",
+          "id": "20156a91-0b30-4bff-be85-011cb8dc03fa",
           "organizationId": "00000000-0000-0000-0000-000000000000",
-          "name": "69fab865-a902-477e-ab31-f9835ee49154",
+          "name": "20156a91-0b30-4bff-be85-011cb8dc03fa",
           "target": "eu",
           "snapshot": "cogmo-python-3.14-slim-79eab4bf",
           "user": "daytona",
@@ -1024,6 +201,8 @@
           "public": false,
           "networkBlockAll": false,
           "networkAllowList": null,
+          "domainAllowList": null,
+          "outboundProxyUrl": null,
           "labels": {
             "cogmo.role": "root",
             "cogmo.task": "wrapper-conf",
@@ -1035,32 +214,31 @@
           "desiredState": "started",
           "errorReason": null,
           "recoverable": false,
-          "backupState": "None",
           "autoStopInterval": 5,
+          "autoPauseInterval": 0,
           "autoArchiveInterval": 10080,
           "autoDeleteInterval": -1,
           "sandboxClass": "container",
-          "androidDevice": false,
-          "createdAt": "2026-05-19T15:28:33.532Z",
-          "updatedAt": "2026-05-19T15:28:36.719Z",
-          "lastActivityAt": "2026-05-19T15:28:36.722Z",
-          "daemonVersion": "v0.177.0-prod-reaper-patch",
+          "createdAt": "2026-08-15T15:44:31.674Z",
+          "updatedAt": "2026-08-15T15:44:32.150Z",
+          "lastActivityAt": "2026-08-15T15:44:32.152Z",
+          "daemonVersion": "v0.203.0-2",
           "runnerId": "11111111-1111-1111-1111-111111111111",
-          "toolboxProxyUrl": "https://proxy.app-eu.daytona.io/toolbox"
+          "toolboxProxyUrl": "http://__daytona_mock__/toolbox"
         }
       }
     },
     {
       "kind": "http",
       "method": "POST",
-      "path": "/toolbox/69fab865-a902-477e-ab31-f9835ee49154/process/session",
+      "path": "/toolbox/20156a91-0b30-4bff-be85-011cb8dc03fa/process/session",
       "request": {
         "headers": {
-          "accept": "application/json, text/plain, */*",
+          "accept": "application/json",
           "content-type": "application/json",
-          "user-agent": "sdk-typescript-legacy/0.173.0",
-          "x-daytona-source": "sdk-typescript-legacy",
-          "x-daytona-sdk-version": "0.173.0"
+          "user-agent": "sdk-typescript/0.204.1",
+          "x-daytona-source": "sdk-typescript",
+          "x-daytona-sdk-version": "0.204.1"
         },
         "bodyJson": {
           "sessionId": "cogmo-wrapper-conf-wrapper-stderr-nonzero-1"
@@ -1071,23 +249,23 @@
         "headers": {
           "connection": "keep-alive",
           "content-length": "0",
-          "date": "Tue, 19 May 2026 15:28:38 GMT",
+          "date": "Sat, 15 Aug 2026 15:44:32 GMT",
           "strict-transport-security": "max-age=31536000;includeSubDomains;preload",
-          "x-request-id": "d6d3046c-212d-4eac-a3f8-09c6e1719913"
+          "x-request-id": "4d8ae91a-2b17-4048-aac8-2ee1c17c6877"
         }
       }
     },
     {
       "kind": "http",
       "method": "POST",
-      "path": "/toolbox/69fab865-a902-477e-ab31-f9835ee49154/process/session/cogmo-wrapper-conf-wrapper-stderr-nonzero-1/exec",
+      "path": "/toolbox/20156a91-0b30-4bff-be85-011cb8dc03fa/process/session/cogmo-wrapper-conf-wrapper-stderr-nonzero-1/exec",
       "request": {
         "headers": {
           "accept": "application/json",
           "content-type": "application/json",
-          "user-agent": "sdk-typescript-legacy/0.173.0",
-          "x-daytona-source": "sdk-typescript-legacy",
-          "x-daytona-sdk-version": "0.173.0"
+          "user-agent": "sdk-typescript/0.204.1",
+          "x-daytona-source": "sdk-typescript",
+          "x-daytona-sdk-version": "0.204.1"
         },
         "bodyJson": {
           "command": "'sh' '-c' 'echo out; echo err >&2; exit 3'",
@@ -1100,12 +278,12 @@
           "connection": "keep-alive",
           "content-length": "106",
           "content-type": "application/json; charset=utf-8",
-          "date": "Tue, 19 May 2026 15:28:38 GMT",
+          "date": "Sat, 15 Aug 2026 15:44:33 GMT",
           "strict-transport-security": "max-age=31536000;includeSubDomains;preload",
-          "x-request-id": "67ba26a7-9297-49ef-b21b-c92a705bb792"
+          "x-request-id": "c67ad148-a77d-417b-84b2-e0aaa35ebf94"
         },
         "bodyJson": {
-          "cmdId": "6928e359-05a4-4b59-94bd-b8d8e61fb77d",
+          "cmdId": "9aad9dbd-2058-4c61-97ec-3cbf8af73d54",
           "output": null,
           "stdout": null,
           "stderr": null,
@@ -1115,11 +293,11 @@
     },
     {
       "kind": "ws",
-      "path": "/toolbox/69fab865-a902-477e-ab31-f9835ee49154/process/session/cogmo-wrapper-conf-wrapper-stderr-nonzero-1/command/6928e359-05a4-4b59-94bd-b8d8e61fb77d/logs?follow=true",
+      "path": "/toolbox/20156a91-0b30-4bff-be85-011cb8dc03fa/process/session/cogmo-wrapper-conf-wrapper-stderr-nonzero-1/command/9aad9dbd-2058-4c61-97ec-3cbf8af73d54/logs?follow=true",
       "frames": [
         {
           "direction": "down",
-          "text": "\u0002\u0002\u0002err\n\u0001\u0001\u0001out\n"
+          "bytes": "AQEBb3V0CgICAmVycgo="
         },
         {
           "direction": "close",
@@ -1131,13 +309,13 @@
     {
       "kind": "http",
       "method": "GET",
-      "path": "/toolbox/69fab865-a902-477e-ab31-f9835ee49154/process/session/cogmo-wrapper-conf-wrapper-stderr-nonzero-1/command/6928e359-05a4-4b59-94bd-b8d8e61fb77d",
+      "path": "/toolbox/20156a91-0b30-4bff-be85-011cb8dc03fa/process/session/cogmo-wrapper-conf-wrapper-stderr-nonzero-1/command/9aad9dbd-2058-4c61-97ec-3cbf8af73d54",
       "request": {
         "headers": {
           "accept": "application/json",
-          "user-agent": "sdk-typescript-legacy/0.173.0",
-          "x-daytona-source": "sdk-typescript-legacy",
-          "x-daytona-sdk-version": "0.173.0"
+          "user-agent": "sdk-typescript/0.204.1",
+          "x-daytona-source": "sdk-typescript",
+          "x-daytona-sdk-version": "0.204.1"
         }
       },
       "response": {
@@ -1146,12 +324,12 @@
           "connection": "keep-alive",
           "content-length": "113",
           "content-type": "application/json; charset=utf-8",
-          "date": "Tue, 19 May 2026 15:28:39 GMT",
+          "date": "Sat, 15 Aug 2026 15:44:34 GMT",
           "strict-transport-security": "max-age=31536000;includeSubDomains;preload",
-          "x-request-id": "2d703b05-6753-4dce-a689-7242cc5988d8"
+          "x-request-id": "1f9b5eb3-c6e2-419d-8a00-9079304acf30"
         },
         "bodyJson": {
-          "id": "6928e359-05a4-4b59-94bd-b8d8e61fb77d",
+          "id": "9aad9dbd-2058-4c61-97ec-3cbf8af73d54",
           "command": "'sh' '-c' 'echo out; echo err >&2; exit 3'",
           "exitCode": 3
         }
@@ -1160,154 +338,146 @@
     {
       "kind": "http",
       "method": "DELETE",
-      "path": "/toolbox/69fab865-a902-477e-ab31-f9835ee49154/process/session/cogmo-wrapper-conf-wrapper-stderr-nonzero-1",
+      "path": "/toolbox/20156a91-0b30-4bff-be85-011cb8dc03fa/process/session/cogmo-wrapper-conf-wrapper-stderr-nonzero-1",
       "request": {
         "headers": {
-          "accept": "application/json, text/plain, */*",
-          "user-agent": "sdk-typescript-legacy/0.173.0",
-          "x-daytona-source": "sdk-typescript-legacy",
-          "x-daytona-sdk-version": "0.173.0"
+          "accept": "*/*",
+          "user-agent": "sdk-typescript/0.204.1",
+          "x-daytona-source": "sdk-typescript",
+          "x-daytona-sdk-version": "0.204.1"
         }
       },
       "response": {
         "status": 204,
         "headers": {
           "connection": "keep-alive",
-          "date": "Tue, 19 May 2026 15:28:39 GMT",
+          "date": "Sat, 15 Aug 2026 15:44:34 GMT",
           "strict-transport-security": "max-age=31536000;includeSubDomains;preload",
-          "x-request-id": "79c8ec5f-3757-434c-ae33-f2f77dec1d72"
+          "x-request-id": "5ec28548-6100-48ce-8847-13ac82e51f90"
         }
       }
     },
     {
       "kind": "http",
       "method": "GET",
-      "path": "/sandbox/paginated?labels=%7B%22cogmo.task%22%3A%22wrapper-conf%22%7D",
+      "path": "/sandbox?labels=%7B%22cogmo.task%22%3A%22wrapper-conf%22%7D",
       "request": {
         "headers": {
           "accept": "application/json",
-          "user-agent": "sdk-typescript-legacy/0.173.0",
-          "x-daytona-source": "sdk-typescript-legacy",
-          "x-daytona-sdk-version": "0.173.0"
+          "user-agent": "sdk-typescript/0.204.1",
+          "x-daytona-source": "sdk-typescript",
+          "x-daytona-sdk-version": "0.204.1"
         }
       },
       "response": {
         "status": 200,
         "headers": {
-          "access-control-allow-credentials": "true",
           "connection": "keep-alive",
-          "content-length": "1015",
+          "content-length": "967",
           "content-security-policy": "frame-ancestors 'none'",
           "content-type": "application/json; charset=utf-8",
-          "date": "Tue, 19 May 2026 15:28:39 GMT",
-          "etag": "W/\"3f7-Xb/Z/lC6n266VJKiHybWiRo9FF8\"",
+          "date": "Sat, 15 Aug 2026 15:44:34 GMT",
+          "etag": "W/\"3d0-H+1H0DKTh+xQPIc6xqv0iRDfH+0\"",
           "referrer-policy": "strict-origin-when-cross-origin",
           "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
           "vary": "Origin",
-          "via": "1.1 4aaf4116b04a91c2bdea1c5937b0ec2a.cloudfront.net (CloudFront)",
-          "x-amz-cf-id": "xUqH3SYhEdV4Cc9zRVe03OFHzuFKlCxGlSm0k-ZwF85GRUDJUoEWqg==",
+          "via": "1.1 0d9654203c80fbb80a9b2587938dc646.cloudfront.net (CloudFront)",
+          "x-amz-cf-id": "STQUWUjH6Y-UXhygtNNXsEU7TWRG2hp2kQjwjqeM7lL0yosL-vyavg==",
           "x-amz-cf-pop": "LHR50-P5",
           "x-cache": "Miss from cloudfront",
           "x-content-type-options": "nosniff",
-          "x-daytona-api-version": "v0.177.0",
+          "x-daytona-api-version": "v0.204.0",
           "x-frame-options": "DENY",
           "x-powered-by": "Express",
           "x-ratelimit-limit-authenticated": "50000",
-          "x-ratelimit-limit-sandbox-list": "500",
-          "x-ratelimit-remaining-authenticated": "49979",
-          "x-ratelimit-remaining-sandbox-list": "498",
-          "x-ratelimit-reset-authenticated": "34",
-          "x-ratelimit-reset-sandbox-list": "6"
+          "x-ratelimit-remaining-authenticated": "49965",
+          "x-ratelimit-reset-authenticated": "24"
         },
         "bodyJson": {
           "items": [
             {
-              "id": "69fab865-a902-477e-ab31-f9835ee49154",
+              "id": "20156a91-0b30-4bff-be85-011cb8dc03fa",
               "organizationId": "00000000-0000-0000-0000-000000000000",
-              "name": "69fab865-a902-477e-ab31-f9835ee49154",
+              "name": "20156a91-0b30-4bff-be85-011cb8dc03fa",
               "target": "eu",
+              "runnerId": "11111111-1111-1111-1111-111111111111",
+              "sandboxClass": "container",
+              "state": "started",
+              "desiredState": "started",
               "snapshot": "cogmo-python-3.14-slim-79eab4bf",
               "user": "daytona",
-              "env": {},
+              "errorReason": null,
+              "recoverable": false,
+              "public": false,
+              "networkBlockAll": false,
               "cpu": 1,
               "gpu": 0,
               "memory": 1,
               "disk": 1,
-              "public": false,
-              "networkBlockAll": false,
-              "networkAllowList": null,
               "labels": {
+                "code-toolbox-language": "python",
                 "cogmo.role": "root",
                 "cogmo.task": "wrapper-conf",
-                "cogmo.instance": "conformance",
-                "code-toolbox-language": "python"
+                "cogmo.instance": "conformance"
               },
-              "volumes": [],
-              "state": "started",
-              "desiredState": "started",
-              "errorReason": null,
-              "recoverable": false,
               "backupState": "None",
               "autoStopInterval": 5,
+              "autoPauseInterval": 0,
               "autoArchiveInterval": 10080,
               "autoDeleteInterval": -1,
-              "sandboxClass": "container",
-              "androidDevice": false,
-              "createdAt": "2026-05-19T15:28:33.532Z",
-              "updatedAt": "2026-05-19T15:28:36.719Z",
-              "lastActivityAt": "2026-05-19T15:28:36.722Z",
-              "daemonVersion": "v0.177.0-prod-reaper-patch",
-              "runnerId": "11111111-1111-1111-1111-111111111111",
-              "toolboxProxyUrl": "https://proxy.app-eu.daytona.io/toolbox"
+              "autoDestroyAt": null,
+              "createdAt": "2026-08-15T15:44:31.674Z",
+              "updatedAt": "2026-08-15T15:44:32.150Z",
+              "lastActivityAt": "2026-08-15T15:44:32.152Z",
+              "daemonVersion": "v0.203.0-2",
+              "warmPoolId": null,
+              "toolboxProxyUrl": "http://__daytona_mock__/toolbox"
             }
           ],
-          "total": 1,
-          "page": 1,
-          "totalPages": 1
+          "nextCursor": null
         }
       }
     },
     {
       "kind": "http",
       "method": "DELETE",
-      "path": "/sandbox/69fab865-a902-477e-ab31-f9835ee49154",
+      "path": "/sandbox/20156a91-0b30-4bff-be85-011cb8dc03fa",
       "request": {
         "headers": {
           "accept": "application/json",
-          "user-agent": "sdk-typescript-legacy/0.173.0",
-          "x-daytona-source": "sdk-typescript-legacy",
-          "x-daytona-sdk-version": "0.173.0"
+          "user-agent": "sdk-typescript/0.204.1",
+          "x-daytona-source": "sdk-typescript",
+          "x-daytona-sdk-version": "0.204.1"
         }
       },
       "response": {
         "status": 200,
         "headers": {
-          "access-control-allow-credentials": "true",
           "connection": "keep-alive",
-          "content-length": "954",
+          "content-length": "955",
           "content-security-policy": "frame-ancestors 'none'",
           "content-type": "application/json; charset=utf-8",
-          "date": "Tue, 19 May 2026 15:28:39 GMT",
-          "etag": "W/\"3ba-GBofd4BH4R95QekhEyE7mSQ4OUA\"",
+          "date": "Sat, 15 Aug 2026 15:44:34 GMT",
+          "etag": "W/\"3c4-byiDoPuTKsUOj2c88PmcBbpjdns\"",
           "referrer-policy": "strict-origin-when-cross-origin",
           "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
           "vary": "Origin",
-          "via": "1.1 4aaf4116b04a91c2bdea1c5937b0ec2a.cloudfront.net (CloudFront)",
-          "x-amz-cf-id": "c8llTq07JoNFdENDQkr47jsAsCrhFzG32RBKZ2fmIlF1I3WTfQP3xQ==",
+          "via": "1.1 0d9654203c80fbb80a9b2587938dc646.cloudfront.net (CloudFront)",
+          "x-amz-cf-id": "I_FeR96yqxGd0QqQlPDghVhH8OwQLreSYzI0yPntLWa3gQxTsSQZhw==",
           "x-amz-cf-pop": "LHR50-P5",
           "x-cache": "Miss from cloudfront",
           "x-content-type-options": "nosniff",
-          "x-daytona-api-version": "v0.177.0",
+          "x-daytona-api-version": "v0.204.0",
           "x-frame-options": "DENY",
           "x-powered-by": "Express",
           "x-ratelimit-limit-sandbox-lifecycle": "50000",
-          "x-ratelimit-remaining-sandbox-lifecycle": "49998",
-          "x-ratelimit-reset-sandbox-lifecycle": "36"
+          "x-ratelimit-remaining-sandbox-lifecycle": "49996",
+          "x-ratelimit-reset-sandbox-lifecycle": "27"
         },
         "bodyJson": {
-          "id": "69fab865-a902-477e-ab31-f9835ee49154",
+          "id": "20156a91-0b30-4bff-be85-011cb8dc03fa",
           "organizationId": "00000000-0000-0000-0000-000000000000",
-          "name": "DESTROYED_69fab865-a902-477e-ab31-f9835ee49154_1779204519693",
+          "name": "DESTROYED_20156a91-0b30-4bff-be85-011cb8dc03fa_1786808674782",
           "target": "eu",
           "snapshot": "cogmo-python-3.14-slim-79eab4bf",
           "user": "daytona",
@@ -1319,6 +489,8 @@
           "public": false,
           "networkBlockAll": false,
           "networkAllowList": null,
+          "domainAllowList": null,
+          "outboundProxyUrl": null,
           "labels": {
             "cogmo.role": "root",
             "cogmo.task": "wrapper-conf",
@@ -1330,17 +502,16 @@
           "desiredState": "destroyed",
           "errorReason": null,
           "recoverable": false,
-          "backupState": "None",
           "autoStopInterval": 5,
+          "autoPauseInterval": 0,
           "autoArchiveInterval": 10080,
           "autoDeleteInterval": -1,
           "sandboxClass": "container",
-          "androidDevice": false,
-          "createdAt": "2026-05-19T15:28:33.532Z",
-          "updatedAt": "2026-05-19T15:28:39.696Z",
-          "daemonVersion": "v0.177.0-prod-reaper-patch",
+          "createdAt": "2026-08-15T15:44:31.674Z",
+          "updatedAt": "2026-08-15T15:44:34.785Z",
+          "daemonVersion": "v0.203.0-2",
           "runnerId": "11111111-1111-1111-1111-111111111111",
-          "toolboxProxyUrl": "https://proxy.app-eu.daytona.io/toolbox"
+          "toolboxProxyUrl": "http://__daytona_mock__/toolbox"
         }
       }
     }

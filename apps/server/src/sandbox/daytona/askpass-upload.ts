@@ -9,7 +9,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Sandbox as DaytonaSdkSandbox } from "@daytonaio/sdk";
+import type { Sandbox as DaytonaSdkSandbox } from "@daytona/sdk";
 
 const ASKPASS_FILES = [
   { name: "helper", mode: "755" },

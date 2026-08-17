@@ -314,6 +314,87 @@ describe("AnthropicProvider", () => {
     expect(result.stopReason).toBe("max_tokens");
   });
 
+  it("maps model_context_window_exceeded to context_overflow, not max_tokens", async () => {
+    // The overflow has to stay distinguishable from every other stop reason
+    // downstream. `end_turn` would match `classifyPostStream`'s empty-turn
+    // arm and earn a continuation prompt; `max_tokens` reads as a normal
+    // completion and lets a contentless turn persist as the model's answer.
+    // Only its own member routes the turn to the degraded off-ramp.
+    const provider = createProvider();
+    mockCreate.mockResolvedValueOnce({
+      content: [],
+      stop_reason: "model_context_window_exceeded",
+      model: "claude-sonnet-4-6",
+      usage: { input_tokens: 900_000, output_tokens: 0 },
+    });
+
+    const result = await provider.chat({
+      model: "claude-sonnet-4-6",
+      system: "sys",
+      messages: [{ role: "user", content: "a very long conversation" }],
+    });
+
+    expect(result.stopReason).toBe("context_overflow");
+    expect(result.content).toEqual([]);
+  });
+
+  it("maps model_context_window_exceeded in stream", async () => {
+    const provider = createProvider();
+    mockCreate.mockResolvedValueOnce(
+      mockStream([
+        {
+          type: "message_start",
+          message: {
+            model: "claude-sonnet-4-6",
+            usage: { input_tokens: 900_000, output_tokens: 0 },
+          },
+        },
+        {
+          type: "message_delta",
+          delta: { stop_reason: "model_context_window_exceeded" },
+          usage: { output_tokens: 0 },
+        },
+        { type: "message_stop" },
+      ]),
+    );
+
+    const { events, response } = provider.chatStream({
+      model: "claude-sonnet-4-6",
+      system: "sys",
+      messages: [{ role: "user", content: "a very long conversation" }],
+    });
+    for await (const _ of events) {
+      /* drain */
+    }
+
+    const meta = await response;
+    expect(meta.stopReason).toBe("context_overflow");
+  });
+
+  it.each([
+    ["stop_sequence", "end_turn"],
+    ["pause_turn", "end_turn"],
+  ] as const)("maps %s stop reason to %s", async (anthropicReason, expected) => {
+    // These arms are named explicitly rather than left to a catch-all so the
+    // switch stays exhaustive over the SDK union — the compile error on the
+    // next added stop reason is the whole point.
+    const provider = createProvider();
+    mockCreate.mockResolvedValueOnce({
+      content: [{ type: "text", text: "partial", citations: null }],
+      stop_reason: anthropicReason,
+      model: "claude-sonnet-4-6",
+      usage: { input_tokens: 10, output_tokens: 4 },
+    });
+
+    const result = await provider.chat({
+      model: "claude-sonnet-4-6",
+      system: "sys",
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    expect(result.stopReason).toBe(expected);
+  });
+
   it("maps refusal stop reason", async () => {
     // Anthropic surfaces explicit policy refusals on recent models as
     // `stop_reason: "refusal"`. The Class C subtype in
@@ -1085,34 +1166,37 @@ describe("AnthropicProvider", () => {
       ["application/xml", "data.xml", "<r/>"],
       ["application/yaml", "config.yaml", "k: v"],
       ["application/x-yaml", "config.yml", "k: v"],
-    ])("transcodes %s as text source with original filename in title", async (mediaType, name, plain) => {
-      const provider = setup();
-      await provider.chat({
-        model: "claude-sonnet-4-6",
-        system: "sys",
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "document",
-                source: "base64",
-                data: Buffer.from(plain, "utf-8").toString("base64"),
-                mediaType,
-                name,
-              },
-            ],
-          },
-        ],
-      });
+    ])(
+      "transcodes %s as text source with original filename in title",
+      async (mediaType, name, plain) => {
+        const provider = setup();
+        await provider.chat({
+          model: "claude-sonnet-4-6",
+          system: "sys",
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "document",
+                  source: "base64",
+                  data: Buffer.from(plain, "utf-8").toString("base64"),
+                  mediaType,
+                  name,
+                },
+              ],
+            },
+          ],
+        });
 
-      const block = mockCreate.mock.calls[0]![0].messages[0].content[0];
-      expect(block).toEqual({
-        type: "document",
-        source: { type: "text", media_type: "text/plain", data: plain },
-        title: name,
-      });
-    });
+        const block = mockCreate.mock.calls[0]![0].messages[0].content[0];
+        expect(block).toEqual({
+          type: "document",
+          source: { type: "text", media_type: "text/plain", data: plain },
+          title: name,
+        });
+      },
+    );
 
     it("throws a clear error pre-flight on unsupported binary mediaType", async () => {
       const provider = setup();

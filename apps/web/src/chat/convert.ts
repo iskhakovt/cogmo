@@ -38,6 +38,18 @@ export function applyStreamEvent(message: UiMessage, event: StreamEvent): UiMess
         ...message,
         tools: [...message.tools, { id: event.id, name: event.name, args: event.input }],
       };
+    case "retract": {
+      // The event names the streamed output the turn won't persist — the
+      // degrade-triggering iteration's text (always the tail of what streamed)
+      // and its tool calls, which on a context-overflow degrade never ran.
+      // Whatever it doesn't name came from an iteration that completed and is
+      // in the persisted transcript, so it stays on screen.
+      const text = message.text.endsWith(event.text)
+        ? message.text.slice(0, message.text.length - event.text.length)
+        : message.text;
+      const retracted = new Set(event.toolUseIds);
+      return { ...message, text, tools: message.tools.filter((t) => !retracted.has(t.id)) };
+    }
     case "tool_result": {
       const tools = [...message.tools];
       for (let i = tools.length - 1; i >= 0; i--) {

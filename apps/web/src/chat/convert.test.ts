@@ -37,6 +37,37 @@ describe("applyStreamEvent", () => {
     expect(applyStreamEvent(assistant, { type: "status", message: "working" })).toBe(assistant);
   });
 
+  it("drops the retracted text and tool cards, keeping what the turn persists", () => {
+    // A multi-iteration turn: `search` ran to completion and is in the turn's
+    // persisted messages, so its card and the narration around it stay. The
+    // degrade-triggering iteration's fragment and its never-executed `fetch`
+    // call are named by the retraction and go.
+    let m = applyStreamEvent(assistant, { type: "text_delta", text: "Let me look that up. " });
+    m = applyStreamEvent(m, { type: "tool_start", id: "t1", name: "search", input: {} });
+    m = applyStreamEvent(m, { type: "tool_result", name: "search", output: "found" });
+    m = applyStreamEvent(m, { type: "text_delta", text: "the three points are: (1) the dep" });
+    m = applyStreamEvent(m, { type: "tool_start", id: "t2", name: "fetch", input: {} });
+    m = applyStreamEvent(m, {
+      type: "retract",
+      text: "the three points are: (1) the dep",
+      toolUseIds: ["t2"],
+    });
+    m = applyStreamEvent(m, { type: "text_delta", text: "This conversation is too long." });
+    expect(m.text).toBe("Let me look that up. This conversation is too long.");
+    expect(m.tools).toEqual([{ id: "t1", name: "search", args: {}, result: "found" }]);
+  });
+
+  it("retracts nothing on an empty retraction", () => {
+    // The orchestrator sends no text when the streamed and persisted text
+    // can't be lined up (the non-streaming replay path), and no ids when the
+    // dropped iteration issued no tool calls.
+    let m = applyStreamEvent(assistant, { type: "text_delta", text: "partial answer" });
+    m = applyStreamEvent(m, { type: "tool_start", id: "t1", name: "search", input: {} });
+    m = applyStreamEvent(m, { type: "retract", text: "", toolUseIds: [] });
+    expect(m.text).toBe("partial answer");
+    expect(m.tools).toEqual([{ id: "t1", name: "search", args: {} }]);
+  });
+
   it("drops a tool_result with no matching pending tool", () => {
     const m = applyStreamEvent(assistant, { type: "tool_result", name: "nope", output: "x" });
     expect(m.tools).toEqual([]);

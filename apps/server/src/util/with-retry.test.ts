@@ -48,6 +48,41 @@ describe("withRetry", () => {
     expect(fn).toHaveBeenCalledTimes(1);
   });
 
+  // The message survives an abort but the CLASS does not: p-retry rethrows the
+  // AbortError's `originalError`, which it builds from the message when the
+  // abort was constructed from a string. Callers that branch on the error's
+  // type after `withRetry` therefore cannot use AbortError to carry it — they
+  // need `shouldRetry`, which rethrows the error untouched. Pinned here
+  // because a caller reading `instanceof` on an aborted failure gets `false`
+  // and silently takes the wrong branch.
+  it("unwraps AbortError to a plain Error, losing the subclass", async () => {
+    class Marker extends AbortError {}
+    const fn = vi.fn().mockRejectedValue(new Marker("permanent 404"));
+
+    const caught = await withRetry(fn, { minTimeoutMs: 1, maxTimeoutMs: 5 }).catch(
+      (e: unknown) => e,
+    );
+
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught).not.toBeInstanceOf(AbortError);
+    expect(caught).not.toBeInstanceOf(Marker);
+    expect((caught as Error).message).toBe("permanent 404");
+  });
+
+  it("shouldRetry rethrows the original error with its class intact", async () => {
+    class Permanent extends Error {}
+    const fn = vi.fn().mockRejectedValue(new Permanent("permanent 404"));
+
+    const caught = await withRetry(fn, {
+      minTimeoutMs: 1,
+      maxTimeoutMs: 5,
+      shouldRetry: (err) => !(err instanceof Permanent),
+    }).catch((e: unknown) => e);
+
+    expect(caught).toBeInstanceOf(Permanent);
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
   it("does not log a warn line on AbortError", async () => {
     // Locks in pRetry's documented contract that onFailedAttempt is never
     // called for AbortError. Without this guarantee every permanent 4xx

@@ -716,8 +716,27 @@ describe("telegram adapter", () => {
 
       await handle.finish();
 
-      // First call: HTML attempt, second call would be absent (keeps plain text from stream)
-      expect(mockBotApi.editMessageText).toHaveBeenCalledTimes(1);
+      // First call is the HTML attempt; the retry writes the plain body rather
+      // than trusting whatever the throttled edits left on the message.
+      expect(mockBotApi.editMessageText).toHaveBeenCalledTimes(2);
+      expect(mockBotApi.editMessageText).toHaveBeenLastCalledWith(42, 100, "done");
+    });
+
+    it("finish swallows not-modified on the plain-text retry", async () => {
+      // The common case: the throttled edits already wrote this exact plain
+      // body, so Telegram rejects the retry as redundant. That's the no-op the
+      // retry wants — it must not surface as a failed turn.
+      const adapter = await createStreamingAdapter();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({ type: "text_delta", text: "done" });
+      mockBotApi.editMessageText
+        .mockReset()
+        .mockRejectedValueOnce(new Error("can't parse entities"))
+        .mockRejectedValueOnce(new Error("message is not modified"))
+        .mockResolvedValue(true);
+
+      await expect(handle.finish()).resolves.toBeUndefined();
     });
 
     it("abort appends error to message", async () => {
@@ -729,6 +748,196 @@ describe("telegram adapter", () => {
       await handle.abort("LLM failed");
 
       expect(mockBotApi.editMessageText).toHaveBeenCalledWith(42, 100, "partial\n\n⚠️ LLM failed");
+    });
+
+    it("retract drops the streamed fragment so the next text owns the message alone", async () => {
+      // The degraded off-ramp's shape: text streamed and was edited into the
+      // live message, then the turn was cut off and the orchestrator retracts
+      // before pushing its reply. Without the retraction the reply is appended
+      // to the fragment and the user reads a mid-word splice of the two.
+      const adapter = await createStreamingAdapter();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({ type: "text_delta", text: "The three key points are: (1) the dep" });
+      expect(mockBotApi.sendMessage).toHaveBeenCalledWith(
+        42,
+        "The three key points are: (1) the dep",
+      );
+      mockBotApi.editMessageText.mockClear();
+
+      await handle.push({
+        type: "retract",
+        text: "The three key points are: (1) the dep",
+        toolUseIds: [],
+      });
+      await handle.push({ type: "text_delta", text: "This conversation is too long." });
+      await handle.finish();
+
+      // Every write after the retraction carries the reply and nothing else,
+      // and it edits the message the fragment was in rather than trailing it.
+      const bodies = mockBotApi.editMessageText.mock.calls.map((call) => String(call[2]));
+      expect(bodies.length).toBeGreaterThan(0);
+      for (const body of bodies) {
+        expect(body).toContain("This conversation is too long.");
+        expect(body).not.toContain("three key points");
+      }
+      expect(mockBotApi.editMessageText).toHaveBeenCalledWith(42, 100, expect.anything(), {
+        parse_mode: "HTML",
+      });
+      // No second message: the fragment was replaced, not followed.
+      expect(mockBotApi.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it("retract keeps the earlier iteration's text and cuts only the named tail", async () => {
+      // A multi-iteration turn: the first iteration narrated and ran a tool, so
+      // it is in the turn's persisted messages; the second streamed a fragment
+      // and then degraded. The retraction names that fragment alone, and the
+      // banner appended after it belongs to the same dropped iteration — so
+      // both go, and the narration the transcript holds stays on the message.
+      const adapter = await createStreamingAdapter();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({ type: "text_delta", text: "Let me check the weather.\n" });
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 600);
+      await handle.push({ type: "tool_start", id: "t1", name: "get_weather", input: {} });
+      await handle.push({ type: "text_delta", text: "18C in Paris and rising, so" });
+      await handle.push({ type: "tool_start", id: "t2", name: "get_weather", input: {} });
+      mockBotApi.editMessageText.mockClear();
+
+      await handle.push({
+        type: "retract",
+        text: "18C in Paris and rising, so",
+        toolUseIds: ["t2"],
+      });
+      await handle.push({ type: "text_delta", text: "I ran out of room, ask me again." });
+      await handle.finish();
+
+      const bodies = mockBotApi.editMessageText.mock.calls.map((call) => String(call[2]));
+      const final = expectDefined(bodies.at(-1), "final message body");
+      expect(final).toContain("Let me check the weather.");
+      expect(final).toContain("get_weather");
+      expect(final).toContain("I ran out of room, ask me again.");
+      expect(final).not.toContain("18C in Paris");
+      // The retraction edits the message the turn was already writing into.
+      expect(mockBotApi.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it("retracts an iteration whose text straddles its own tool banner", async () => {
+      // The dropped iteration streamed prose, ran a tool, then streamed more.
+      // Its text is therefore not contiguous in the live message — the banner
+      // sits between the two halves — so the retraction has to be located by
+      // stream structure. Searching the rendered message for the named text
+      // finds nothing here, and treating "not found" as "already flushed"
+      // takes the earlier iteration's narration down with it.
+      const adapter = await createStreamingAdapter();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({ type: "text_delta", text: "Let me check the weather.\n" });
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 600);
+      await handle.push({ type: "tool_start", id: "t1", name: "get_weather", input: {} });
+      await handle.push({ type: "text_delta", text: "Paris is " });
+      await handle.push({ type: "tool_start", id: "t2", name: "get_forecast", input: {} });
+      await handle.push({ type: "text_delta", text: "18C right now" });
+      mockBotApi.editMessageText.mockClear();
+
+      await handle.push({
+        type: "retract",
+        text: "Paris is 18C right now",
+        toolUseIds: ["t2"],
+      });
+      await handle.push({ type: "text_delta", text: "I ran out of room, ask me again." });
+      await handle.finish();
+
+      const final = expectDefined(
+        mockBotApi.editMessageText.mock.calls.map((call) => String(call[2])).at(-1),
+        "final message body",
+      );
+      expect(final).toContain("Let me check the weather.");
+      expect(final).toContain("get_weather");
+      expect(final).toContain("I ran out of room, ask me again.");
+      expect(final).not.toContain("Paris is");
+      expect(final).not.toContain("18C right now");
+      expect(final).not.toContain("get_forecast");
+    });
+
+    it("retracts a dropped iteration that streamed only a tool call", async () => {
+      // `text` is empty and `toolUseIds` is not: the degrade landed before the
+      // iteration produced prose. The banner belongs to a call that is not
+      // persisted — and on a context overflow never ran at all — so it goes,
+      // while the earlier iteration's banner and narration stay.
+      const adapter = await createStreamingAdapter();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({ type: "text_delta", text: "Checking the weather.\n" });
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 600);
+      await handle.push({ type: "tool_start", id: "t1", name: "get_weather", input: {} });
+      await handle.push({ type: "tool_start", id: "t2", name: "get_forecast", input: {} });
+      mockBotApi.editMessageText.mockClear();
+
+      await handle.push({ type: "retract", text: "", toolUseIds: ["t2"] });
+      await handle.push({ type: "text_delta", text: "I ran out of room, ask me again." });
+      await handle.finish();
+
+      const final = expectDefined(
+        mockBotApi.editMessageText.mock.calls.map((call) => String(call[2])).at(-1),
+        "final message body",
+      );
+      expect(final).toContain("Checking the weather.");
+      expect(final).toContain("get_weather");
+      expect(final).toContain("I ran out of room, ask me again.");
+      expect(final).not.toContain("get_forecast");
+    });
+
+    it("retracts the named text in append-only mode, where no banners exist", async () => {
+      // Append-only mode never appends banners, so the buffer is text alone and
+      // `toolUseIds` names nothing present. The text cut must still land in the
+      // right place.
+      const adapter = await createStreamingAdapter();
+      const handle = await adapter.openStream("42", "run-1", {
+        chunkChars: 4000,
+        allowEdits: false,
+      });
+
+      await handle.push({ type: "text_delta", text: "Let me check the weather.\n" });
+      await handle.push({ type: "tool_start", id: "t1", name: "get_weather", input: {} });
+      await handle.push({ type: "text_delta", text: "Paris is 18C" });
+
+      await handle.push({ type: "retract", text: "Paris is 18C", toolUseIds: ["t1"] });
+      await handle.push({ type: "text_delta", text: "I ran out of room." });
+      await handle.finish();
+
+      const sent = mockBotApi.sendMessage.mock.calls.map((call) => String(call[1])).join("\n");
+      expect(sent).toContain("Let me check the weather.");
+      expect(sent).toContain("I ran out of room.");
+      expect(sent).not.toContain("Paris is 18C");
+    });
+
+    it("delivers the reply as plain text when its HTML render fails after a retraction", async () => {
+      // A retraction cuts the body the throttled edits wrote out of the chunk,
+      // so on a parse failure the message shows retracted text and the reply
+      // has never been written. The plain-text retry has to write it.
+      const adapter = await createStreamingAdapter();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({ type: "text_delta", text: "The three key points are: (1) the dep" });
+      await handle.push({
+        type: "retract",
+        text: "The three key points are: (1) the dep",
+        toolUseIds: [],
+      });
+      await handle.push({ type: "text_delta", text: "I hit a **wall** there, try again." });
+
+      mockBotApi.editMessageText
+        .mockReset()
+        .mockRejectedValueOnce(new Error("can't parse entities"))
+        .mockResolvedValue(true);
+      await handle.finish();
+
+      const bodies = mockBotApi.editMessageText.mock.calls.map((call) => String(call[2]));
+      // First the HTML render, then the source markdown as plain text — the
+      // user ends up with the reply either way, never the retracted fragment.
+      expect(bodies[0]).toContain("<b>wall</b>");
+      expect(bodies.at(-1)).toBe("I hit a **wall** there, try again.");
     });
 
     it("retry dedup returns same handle for same runId", async () => {
@@ -1230,10 +1439,10 @@ describe("telegram adapter", () => {
         parse_mode: "HTML",
       });
       expect(mockBotApi.sendPhoto).toHaveBeenCalledTimes(2);
-      const call0 = mockBotApi.sendPhoto.mock.calls[0];
-      const call1 = mockBotApi.sendPhoto.mock.calls[1];
-      expect((call0?.[1] as { filename: string }).filename).toBe("image.png");
-      expect((call1?.[1] as { filename: string }).filename).toBe("image.jpg");
+      const call0 = expectDefined(mockBotApi.sendPhoto.mock.calls[0], "sendPhoto call 0");
+      const call1 = expectDefined(mockBotApi.sendPhoto.mock.calls[1], "sendPhoto call 1");
+      expect((call0[1] as { filename: string }).filename).toBe("image.png");
+      expect((call1[1] as { filename: string }).filename).toBe("image.jpg");
     });
   });
 

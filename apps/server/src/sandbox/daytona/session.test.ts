@@ -1,5 +1,5 @@
 import { PassThrough, type Readable } from "node:stream";
-import type { Sandbox as DaytonaSdkSandbox, Process } from "@daytonaio/sdk";
+import type { Sandbox as DaytonaSdkSandbox, Process } from "@daytona/sdk";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { DaytonaSessionState, ExecStreamingHandle } from "../index.js";

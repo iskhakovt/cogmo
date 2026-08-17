@@ -47,16 +47,15 @@ describe("router.classify", () => {
   });
 
   describe("policy: container_create", () => {
-    it.each([
-      "/containers/create",
-      "/v1.43/containers/create",
-      "/v1.999/containers/create",
-    ])("policy on POST %s", (path) => {
-      const r = classify("POST", path);
-      expect(r.kind).toBe("policy");
-      if (r.kind !== "policy") return;
-      expect(r.subject).toBe("container_create");
-    });
+    it.each(["/containers/create", "/v1.43/containers/create", "/v1.999/containers/create"])(
+      "policy on POST %s",
+      (path) => {
+        const r = classify("POST", path);
+        expect(r.kind).toBe("policy");
+        if (r.kind !== "policy") return;
+        expect(r.subject).toBe("container_create");
+      },
+    );
 
     it("query string doesn't affect classification", () => {
       const r = classify("POST", "/containers/create?name=foo");

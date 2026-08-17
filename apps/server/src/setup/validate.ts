@@ -12,7 +12,8 @@ import {
   DaytonaAuthorizationError,
   DaytonaConnectionError,
   DaytonaError,
-} from "@daytonaio/sdk";
+} from "@daytona/sdk";
+import { disposeDaytona } from "../sandbox/daytona/dispose.js";
 import { daytonaHealthProbe } from "../sandbox/daytona/probe.js";
 
 export interface ValidationResult {
@@ -176,16 +177,41 @@ export interface DaytonaProbeOpts {
  * `DaytonaValidationError`, `DaytonaNotFoundError`) so a rate-limit hit
  * during repeated `cogmo setup` runs surfaces the SDK message instead
  * of the generic "Unexpected error" arm.
+ *
+ * The client is disposed before returning: its constructor opens an
+ * authenticated event-stream socket, and a wizard user correcting a
+ * mistyped key runs this more than once.
+ *
+ * Every failure — including a client that never got built — comes back as
+ * a `ValidationResult`. Both callers (`wizard.ts` spinner, the
+ * non-interactive validator set) render `error` and offer a retry; a
+ * rejection would abort the setup flow instead.
  */
 export async function validateDaytonaApiKey(
   apiKey: string,
   opts: DaytonaProbeOpts = {},
 ): Promise<ValidationResult> {
+  const config: ConstructorParameters<typeof Daytona>[0] = { apiKey };
+  if (opts.apiUrl) config.apiUrl = opts.apiUrl;
+  if (opts.organizationId) config.organizationId = opts.organizationId;
+
+  let daytona: Daytona;
   try {
-    const config: ConstructorParameters<typeof Daytona>[0] = { apiKey };
-    if (opts.apiUrl) config.apiUrl = opts.apiUrl;
-    if (opts.organizationId) config.organizationId = opts.organizationId;
-    await daytonaHealthProbe(new Daytona(config));
+    daytona = new Daytona(config);
+  } catch (err) {
+    // The constructor validates its config before it creates anything
+    // disposable: a blank credential throws `DaytonaAuthenticationError`
+    // and a non-finite `requestTimeoutMs` throws
+    // `DaytonaInvalidArgumentError`, both ahead of the event dispatcher
+    // whose socket `disposeDaytona` exists to close. So there is nothing to
+    // dispose on this path — construction is what failed. The message is
+    // generic rather than one of the HTTP-status arms below because no
+    // request reached the API.
+    return { valid: false, error: `Daytona client setup failed: ${(err as Error).message}` };
+  }
+
+  try {
+    await daytonaHealthProbe(daytona);
     return { valid: true };
   } catch (err) {
     if (err instanceof DaytonaAuthenticationError) {
@@ -207,6 +233,8 @@ export async function validateDaytonaApiKey(
       return { valid: false, error: `Daytona API error: ${err.message}` };
     }
     return { valid: false, error: `Unexpected error: ${(err as Error).message}` };
+  } finally {
+    await disposeDaytona(daytona);
   }
 }
 

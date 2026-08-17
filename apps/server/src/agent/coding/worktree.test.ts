@@ -9,11 +9,22 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { allocateWorktree, removeWorktree } from "./worktree.js";
+
+// A pass-through spy on `rm`, so every other case in this file keeps deleting
+// for real and only the retry contract below inspects the options. Node applies
+// `maxRetries` inside `rm` itself, so a stub that failed once to prove the
+// retry would be mocking away the mechanism under test — the call contract is
+// the most this can honestly assert.
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, rm: vi.fn(actual.rm) };
+});
 
 const execFileP = promisify(execFile);
 
@@ -271,5 +282,25 @@ describe("removeWorktree", () => {
     // clone path doesn't care, but the metadata shouldn't accumulate.
     const { stdout } = await execFileP("git", ["-C", repoPath, "worktree", "list", "--porcelain"]);
     expect(stdout).not.toContain(worktreePath);
+  });
+
+  it("retries the delete so a process still writing in the tree can't leave it half-removed", async () => {
+    // `force` only swallows ENOENT. A writer inside the tree — git's own
+    // background maintenance, or a sandbox process on a bind mount — makes the
+    // walk fail with ENOTEMPTY partway through, and `removeWorktree` logs that
+    // rather than raising it, so the half-deleted tree is only noticed when the
+    // next allocation at the path refuses it.
+    const branch = uniqueBranch();
+    const worktreePath = uniqueWorktreePath();
+    await allocateWorktree({ repoPath, worktreePath, branch, remoteUrl: REMOTE_URL });
+
+    const rmSpy = vi.mocked(rm);
+    rmSpy.mockClear();
+    await removeWorktree(repoPath, worktreePath);
+
+    expect(rmSpy).toHaveBeenCalled();
+    for (const call of rmSpy.mock.calls) {
+      expect(call[1]).toMatchObject({ recursive: true, force: true, maxRetries: 3 });
+    }
   });
 });

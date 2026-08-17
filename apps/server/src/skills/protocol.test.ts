@@ -333,18 +333,12 @@ describe("WorkerMessageSchema (discriminated union)", () => {
     expect(() => WorkerMessageSchema.parse(msg)).not.toThrow();
   });
 
-  it.each([
-    null,
-    undefined,
-    42,
-    "string",
-    [],
-    { type: "garbage" },
-    {},
-    { type: "ctx_call" },
-  ])("rejects garbage input %#", (input) => {
-    expect(() => WorkerMessageSchema.parse(input)).toThrow();
-  });
+  it.each([null, undefined, 42, "string", [], { type: "garbage" }, {}, { type: "ctx_call" }])(
+    "rejects garbage input %#",
+    (input) => {
+      expect(() => WorkerMessageSchema.parse(input)).toThrow();
+    },
+  );
 
   it("rejects unknown type literal", () => {
     expect(() => WorkerMessageSchema.parse({ type: "task_started", id: "t" })).toThrow();

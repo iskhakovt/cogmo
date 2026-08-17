@@ -1,5 +1,6 @@
 /** Typed store errors. Thrown from DrizzleAgentStore; caught + mapped by Transport. */
 
+import { constraintNameOf, findPgErrorByCode, type PgError } from "../../db/pg-errors.js";
 import { logger } from "../../logger.js";
 
 /**
@@ -178,55 +179,46 @@ export class ImageModelSlugCollisionError extends Error {
   }
 }
 
-interface PgUniqueViolation {
-  code: "23505";
-  constraint_name?: string;
-  constraint?: string;
-}
+const UNIQUE_VIOLATION_CODES = ["23505"] as const;
 
-interface PgForeignKeyViolation {
-  code: "23503";
-  constraint_name?: string;
-  constraint?: string;
-}
+type PgUniqueViolation = PgError<(typeof UNIQUE_VIOLATION_CODES)[number]>;
 
 /**
- * Walk `err.cause` looking for a Postgres error matching `code`. Drizzle
- * wraps driver errors in `DrizzleQueryError` whose `cause` holds the
- * original postgres.js / PGlite error; we walk a few levels to reach it.
+ * Referential-integrity violation SQLSTATEs.
+ *
+ * Postgres 18 splits these by the referential action that rejected the write:
+ * a `RESTRICT` action raises `23001` (restrict_violation, the SQL-standard
+ * code), while `NO ACTION` and a plain orphan insert raise `23503`
+ * (foreign_key_violation). Verified against the official images — on 17 all
+ * five cases raise `23503`, on 18 only the two `RESTRICT` paths move:
+ *
+ *   action                       pg17     pg18
+ *   DELETE + RESTRICT            23503    23001
+ *   UPDATE + RESTRICT            23503    23001
+ *   DELETE / UPDATE + NO ACTION  23503    23503
+ *   INSERT orphan child          23503    23503
+ *
+ * Dev, prod (`pgvector/pgvector:pg18`) and the PGlite test tier all run 18,
+ * so the `23001` arm is the live one for the RESTRICT FK on
+ * `profiles(user_id, profile_class)`. Both codes carry the constraint name and
+ * callers discriminate on that, so both are treated as one class here.
  */
-function findPgErrorByCode(
-  err: unknown,
-  code: string,
-): { constraint?: string; constraint_name?: string } | null {
-  let cur: unknown = err;
-  for (let depth = 0; depth < 4 && cur != null; depth++) {
-    if (typeof cur === "object" && "code" in cur && (cur as { code: unknown }).code === code) {
-      return cur as { constraint?: string; constraint_name?: string };
-    }
-    if (typeof cur === "object" && "cause" in cur) {
-      cur = (cur as { cause: unknown }).cause;
-      continue;
-    }
-    break;
-  }
-  return null;
-}
+const REFERENTIAL_VIOLATION_CODES = ["23503", "23001"] as const;
+
+type PgReferentialViolation = PgError<(typeof REFERENTIAL_VIOLATION_CODES)[number]>;
 
 /** Narrow an unknown error to a Postgres unique-violation shape. */
 export function findPostgresUniqueViolation(err: unknown): PgUniqueViolation | null {
-  const found = findPgErrorByCode(err, "23505");
-  return found ? ({ code: "23505", ...found } as PgUniqueViolation) : null;
+  return findPgErrorByCode(err, UNIQUE_VIOLATION_CODES);
 }
 
-/** Narrow an unknown error to a Postgres foreign-key-violation shape. */
-export function findPostgresForeignKeyViolation(err: unknown): PgForeignKeyViolation | null {
-  const found = findPgErrorByCode(err, "23503");
-  return found ? ({ code: "23503", ...found } as PgForeignKeyViolation) : null;
-}
-
-function constraintNameOf(pg: { constraint_name?: string; constraint?: string }): string {
-  return pg.constraint_name ?? pg.constraint ?? "unknown";
+/**
+ * Narrow an unknown error to a Postgres referential-integrity violation — a
+ * foreign key rejecting a write, under either referential action. See
+ * `REFERENTIAL_VIOLATION_CODES`.
+ */
+export function findPostgresReferentialViolation(err: unknown): PgReferentialViolation | null {
+  return findPgErrorByCode(err, REFERENTIAL_VIOLATION_CODES);
 }
 
 /** Wrap a block and convert Postgres unique violations to `UniqueViolationError`. */
@@ -253,20 +245,21 @@ export async function translateUniqueViolation<T>(fn: () => Promise<T>): Promise
 }
 
 /**
- * Wrap a block and convert Postgres FK violations on `constraintName` to
- * the supplied error. Other FK violations and non-FK errors propagate
- * unchanged. Used to translate composite-FK enforcement on
+ * Wrap a block and convert a referential violation on `constraintName` into
+ * the supplied error, whichever referential action raised it. Violations on
+ * other constraints, and non-referential errors, propagate unchanged. Used to
+ * translate composite-FK enforcement on
  * `(profiles.user_id, profiles.profile_class)` into the typed
  * `UnknownProfileClassError` / `ProfileClassInUseError`.
  */
-export async function translateForeignKeyViolation<T>(
+export async function translateReferentialViolation<T>(
   fn: () => Promise<T>,
   match: { constraintName: string; rethrow: () => Error },
 ): Promise<T> {
   try {
     return await fn();
   } catch (e) {
-    const pg = findPostgresForeignKeyViolation(e);
+    const pg = findPostgresReferentialViolation(e);
     if (pg && constraintNameOf(pg) === match.constraintName) {
       throw match.rethrow();
     }

@@ -3,6 +3,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { logger } from "../../logger.js";
 import { SdkMcpConnection } from "./client.js";
 
 /**
@@ -12,8 +13,11 @@ import { SdkMcpConnection } from "./client.js";
  * notification through the `transport.onclose` path.
  */
 
+const SERVER_NAME = "everything";
+
 interface FakeTransport extends Transport {
   triggerClose(): void;
+  triggerError(err: Error): void;
 }
 
 function fakeTransport(): FakeTransport {
@@ -25,6 +29,7 @@ function fakeTransport(): FakeTransport {
     }),
   };
   t.triggerClose = () => t.onclose?.();
+  t.triggerError = (err: Error) => t.onerror?.(err);
   return t as FakeTransport;
 }
 
@@ -51,7 +56,7 @@ describe("SdkMcpConnection", () => {
   it("notifies onToolsChanged subscribers when the SDK emits tools/list_changed", async () => {
     const client = fakeClient();
     const transport = fakeTransport();
-    const conn = new SdkMcpConnection(client as unknown as Client, transport);
+    const conn = new SdkMcpConnection(client as unknown as Client, transport, SERVER_NAME);
     await conn.connect();
 
     const cb = vi.fn();
@@ -70,7 +75,7 @@ describe("SdkMcpConnection", () => {
   it("unsubscribe stops further notifications", async () => {
     const client = fakeClient();
     const transport = fakeTransport();
-    const conn = new SdkMcpConnection(client as unknown as Client, transport);
+    const conn = new SdkMcpConnection(client as unknown as Client, transport, SERVER_NAME);
     await conn.connect();
 
     const cb = vi.fn();
@@ -83,7 +88,7 @@ describe("SdkMcpConnection", () => {
   it("fires onClose listeners exactly once when the transport closes remotely", async () => {
     const client = fakeClient();
     const transport = fakeTransport();
-    const conn = new SdkMcpConnection(client as unknown as Client, transport);
+    const conn = new SdkMcpConnection(client as unknown as Client, transport, SERVER_NAME);
     await conn.connect();
 
     const cb = vi.fn();
@@ -96,7 +101,7 @@ describe("SdkMcpConnection", () => {
   it("close() routes through transport.onclose so listeners are notified", async () => {
     const client = fakeClient();
     const transport = fakeTransport();
-    const conn = new SdkMcpConnection(client as unknown as Client, transport);
+    const conn = new SdkMcpConnection(client as unknown as Client, transport, SERVER_NAME);
     await conn.connect();
 
     const cb = vi.fn();
@@ -108,7 +113,7 @@ describe("SdkMcpConnection", () => {
   it("invokes onClose immediately if subscribed after the connection is already closed", async () => {
     const client = fakeClient();
     const transport = fakeTransport();
-    const conn = new SdkMcpConnection(client as unknown as Client, transport);
+    const conn = new SdkMcpConnection(client as unknown as Client, transport, SERVER_NAME);
     await conn.connect();
     transport.triggerClose();
 
@@ -117,10 +122,52 @@ describe("SdkMcpConnection", () => {
     expect(cb).toHaveBeenCalledTimes(1);
   });
 
+  it("logs the cause when the transport reports an error", async () => {
+    // The SDK's stdio transport reacts to a read-buffer overflow by handing
+    // the reason to `onerror` and then closing; streamable-HTTP does the same
+    // for a response whose media type is neither `application/json` nor
+    // `text/event-stream`. `onclose` carries no reason, so an unwired
+    // `onerror` leaves the operator with a disconnect and no cause.
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    try {
+      const client = fakeClient();
+      const transport = fakeTransport();
+      const conn = new SdkMcpConnection(client as unknown as Client, transport, SERVER_NAME);
+      await conn.connect();
+
+      const err = new Error("ReadBuffer exceeded maximum size of 33554432 bytes");
+      transport.triggerError(err);
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        { err, mcpServer: SERVER_NAME },
+        expect.stringContaining("transport error"),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("registers onerror before connect so the SDK chains rather than replaces it", async () => {
+    // `Protocol.connect` captures the transport's existing handlers and calls
+    // them ahead of its own. Registering after connect would overwrite the
+    // SDK's error routing; registering before is what keeps both live.
+    const client = fakeClient();
+    const transport = fakeTransport();
+    let onErrorAtConnect: unknown;
+    vi.mocked(client.connect).mockImplementation(async () => {
+      onErrorAtConnect = transport.onerror;
+    });
+
+    const conn = new SdkMcpConnection(client as unknown as Client, transport, SERVER_NAME);
+    await conn.connect();
+
+    expect(onErrorAtConnect).toBeTypeOf("function");
+  });
+
   it("rejects callTool / listTools after close", async () => {
     const client = fakeClient();
     const transport = fakeTransport();
-    const conn = new SdkMcpConnection(client as unknown as Client, transport);
+    const conn = new SdkMcpConnection(client as unknown as Client, transport, SERVER_NAME);
     await conn.connect();
     await conn.close();
     await expect(conn.callTool("x", {}, { timeoutMs: 1000 })).rejects.toThrow(/closed/);
@@ -140,7 +187,7 @@ describe("SdkMcpConnection", () => {
       httpTransport.onclose?.();
     });
 
-    const conn = new SdkMcpConnection(client, httpTransport as unknown as Transport);
+    const conn = new SdkMcpConnection(client, httpTransport as unknown as Transport, SERVER_NAME);
     await conn.connect();
     await conn.close();
 
@@ -160,7 +207,7 @@ describe("SdkMcpConnection", () => {
         httpTransport.onclose?.();
       });
 
-      const conn = new SdkMcpConnection(client, httpTransport as unknown as Transport);
+      const conn = new SdkMcpConnection(client, httpTransport as unknown as Transport, SERVER_NAME);
       await conn.connect();
 
       const closePromise = conn.close();
@@ -180,7 +227,7 @@ describe("SdkMcpConnection", () => {
       httpTransport.onclose?.();
     });
 
-    const conn = new SdkMcpConnection(client, httpTransport as unknown as Transport);
+    const conn = new SdkMcpConnection(client, httpTransport as unknown as Transport, SERVER_NAME);
     await conn.connect();
 
     const cb = vi.fn();

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { PassThrough } from "node:stream";
-import type { Process } from "@daytonaio/sdk";
+import type { Process } from "@daytona/sdk";
 import { logger } from "../../logger.js";
 import { type ExecOptions, type ExecStreamingHandle, ExecTimeoutError } from "../index.js";
 import { shellEscape } from "./shell-quote.js";

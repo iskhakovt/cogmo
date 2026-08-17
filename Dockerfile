@@ -1,4 +1,4 @@
-FROM mirror.gcr.io/library/node:24-trixie-slim@sha256:05c08ce4291e9a58f59456a7985176defb12cdd42271f35ff81a3e167ea61d4c AS base
+FROM mirror.gcr.io/library/node:24-trixie-slim@sha256:0711b541c1c33a8a530ac4f0d391baa9a15b3d804695b1b24a47daa5fb60e74d AS base
 
 FROM base AS build
 WORKDIR /app
@@ -8,7 +8,6 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/server/package.json apps/server/
 COPY apps/web/package.json apps/web/
 COPY packages/contracts/package.json packages/contracts/
-COPY patches/ patches/
 # Corepack runs only in this stage; `prepare --activate` verifies the +sha512 hash from packageManager.
 RUN corepack enable \
  && corepack prepare --activate "$(node -p "require('./package.json').packageManager")"

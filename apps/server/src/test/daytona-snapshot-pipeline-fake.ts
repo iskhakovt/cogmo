@@ -33,7 +33,7 @@
  * ```
  */
 
-import { DaytonaConflictError, DaytonaNotFoundError } from "@daytonaio/sdk";
+import { DaytonaConflictError, DaytonaNotFoundError } from "@daytona/sdk";
 import { expect, type Mock } from "vitest";
 
 /**

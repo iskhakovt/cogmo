@@ -47,6 +47,50 @@ import { removeWorktree } from "./worktree.js";
 const execFileP = promisify(execFile);
 const log = logger.child({ component: "coding.teardown" });
 
+/** Config that switches off git's background maintenance. See {@link gitEnv}. */
+const NO_BACKGROUND_MAINTENANCE: ReadonlyArray<readonly [key: string, value: string]> = [
+  ["maintenance.auto", "false"],
+  ["gc.auto", "0"],
+];
+
+/**
+ * Environment for every git invocation this module makes: the inherited
+ * process environment plus config that switches off background maintenance.
+ *
+ * `git commit` and `git push` each spawn `git maintenance run --auto
+ * --detach`, and that detached process goes on writing inside the
+ * repository's `.git/` — new packs, `objects/info/packs`, `info/refs` —
+ * after the foreground command has already exited. A task working tree is a
+ * standalone clone, so its `.git` sits *inside* `worktreePath`, the very
+ * tree `removeWorktree` deletes a few statements later: the writer
+ * repopulates directories mid-delete and `fs.rm` fails with `ENOTEMPTY`.
+ * `removeWorktree` only warns on that failure, so the visible damage is a
+ * half-deleted clone left at a path that is stable per task, which then
+ * blocks the next `allocateWorktree` there ("exists but is not a git
+ * working tree").
+ *
+ * `GIT_CONFIG_COUNT` plus numbered key/value pairs is git's documented way
+ * to inject config into a subprocess without writing a config file, and it
+ * outranks repo-local config. Pairs already present in the environment are
+ * preserved and ours appended after them, so an ambient injection (wrapper
+ * script, test runner) keeps working.
+ */
+function gitEnv(): NodeJS.ProcessEnv {
+  const inherited = Number(process.env.GIT_CONFIG_COUNT);
+  const offset = Number.isInteger(inherited) && inherited > 0 ? inherited : 0;
+  const pairs = Object.fromEntries(
+    NO_BACKGROUND_MAINTENANCE.flatMap(([key, value], i) => [
+      [`GIT_CONFIG_KEY_${offset + i}`, key],
+      [`GIT_CONFIG_VALUE_${offset + i}`, value],
+    ]),
+  );
+  return {
+    ...process.env,
+    ...pairs,
+    GIT_CONFIG_COUNT: String(offset + NO_BACKGROUND_MAINTENANCE.length),
+  };
+}
+
 export interface TeardownWorktreeOpts {
   /** Path to the parent git clone (`coding_repos.local_path`). */
   repoPath: string;
@@ -130,12 +174,13 @@ export async function teardownWorktree(opts: TeardownWorktreeOpts): Promise<Tear
       ]);
     }
 
-    const { stdout: shaOut } = await execFileP("git", ["-C", worktreePath, "rev-parse", "HEAD"]);
-    const sha = shaOut.trim();
+    const sha = (await git(worktreePath, ["rev-parse", "HEAD"])).trim();
     const wipRef = `refs/cogmo-wip/${taskId}`;
 
     await withGitAskpass(identity.pat, async (env) => {
-      await runGit(["-C", worktreePath, "push", "--force", remoteName, `HEAD:${wipRef}`], env);
+      await runGit(["-C", worktreePath, "push", "--force", remoteName, `HEAD:${wipRef}`], env, {
+        env: gitEnv(),
+      });
     });
 
     log.info({ taskId, worktreePath, wipRef, sha }, "teardown: WIP pushed, removing worktree");
@@ -152,7 +197,7 @@ export async function teardownWorktree(opts: TeardownWorktreeOpts): Promise<Tear
 }
 
 async function isDirty(worktreePath: string): Promise<boolean> {
-  const { stdout } = await execFileP("git", ["-C", worktreePath, "status", "--porcelain"]);
+  const stdout = await git(worktreePath, ["status", "--porcelain"]);
   return stdout.trim().length > 0;
 }
 
@@ -165,10 +210,8 @@ async function hasUnpushedCommits(
   // git updates after a successful fetch / push. If it doesn't exist
   // the branch was never pushed — treat as unpushed.
   try {
-    const { stdout: localHead } = await execFileP("git", ["-C", worktreePath, "rev-parse", "HEAD"]);
-    const { stdout: remoteHead } = await execFileP("git", [
-      "-C",
-      worktreePath,
+    const localHead = await git(worktreePath, ["rev-parse", "HEAD"]);
+    const remoteHead = await git(worktreePath, [
       "rev-parse",
       `refs/remotes/${remoteName}/${branch}`,
     ]);
@@ -178,8 +221,16 @@ async function hasUnpushedCommits(
   }
 }
 
-async function git(cwd: string, args: ReadonlyArray<string>): Promise<void> {
-  await execFileP("git", ["-C", cwd, ...args]);
+/**
+ * The single git call site for this module's local invocations — every one
+ * of them inherits {@link gitEnv}, so a new call added here can't
+ * reintroduce the background-maintenance race by forgetting the override.
+ * The WIP push is the one exception (it needs the askpass helper) and
+ * passes the same environment through `runGit`.
+ */
+async function git(cwd: string, args: ReadonlyArray<string>): Promise<string> {
+  const { stdout } = await execFileP("git", ["-C", cwd, ...args], { env: gitEnv() });
+  return stdout;
 }
 
 /**

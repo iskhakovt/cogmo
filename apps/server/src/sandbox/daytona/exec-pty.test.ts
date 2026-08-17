@@ -1,4 +1,4 @@
-import type { PtyHandle, PtyResult } from "@daytonaio/sdk";
+import type { PtyHandle, PtyResult } from "@daytona/sdk";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { ExecTimeoutError } from "../index.js";

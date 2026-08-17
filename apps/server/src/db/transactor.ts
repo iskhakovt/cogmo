@@ -1,5 +1,6 @@
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { withRetry } from "../util/with-retry.js";
+import { findPgErrorByCode } from "./pg-errors.js";
 import type * as schema from "./schemas.js";
 
 /**
@@ -61,12 +62,18 @@ export function transactor(db: Database): Transactor {
 }
 
 /**
- * True for Postgres's `40001 serialization_failure` SQLSTATE — the
- * error a REPEATABLE READ or SERIALIZABLE tx raises when a concurrent
- * commit invalidated its snapshot. Drivers surface the SQLSTATE on
- * `err.code` (postgres-js, pg) but the property isn't typed, so we
- * read it through a narrow runtime check.
+ * Postgres's `serialization_failure` SQLSTATE — what a REPEATABLE READ or
+ * SERIALIZABLE tx raises when a concurrent commit invalidated its snapshot.
+ */
+const SERIALIZATION_FAILURE_CODES = ["40001"] as const;
+
+/**
+ * True when a serialization failure appears anywhere in the error's `cause`
+ * chain. Under REPEATABLE READ the conflict is raised by the conflicting
+ * statement, and Drizzle wraps every statement error in a `DrizzleQueryError`
+ * that carries the driver error on `cause` — so the SQLSTATE is one level
+ * down, not on the thrown error itself. See `findPgErrorByCode`.
  */
 function isSerializationFailure(err: unknown): boolean {
-  return typeof err === "object" && err !== null && "code" in err && err.code === "40001";
+  return findPgErrorByCode(err, SERIALIZATION_FAILURE_CODES) !== null;
 }

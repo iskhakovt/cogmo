@@ -16,7 +16,10 @@
  * - Inngest function steps — Inngest retries failed steps itself
  *
  * Use AbortError to mark permanent failures (e.g. HTTP 4xx) that should
- * NOT be retried.
+ * NOT be retried — but only when the caller just needs the loop to stop.
+ * p-retry rethrows an AbortError's `originalError`, so a subclass of it
+ * does not survive to the caller; when the caller must discriminate on the
+ * error's type, use `shouldRetry` instead.
  */
 
 import pRetry, { AbortError } from "p-retry";
@@ -40,10 +43,13 @@ export interface RetryOptions {
   context?: string;
   /**
    * Predicate run on every caught error. Return `false` to skip
-   * remaining attempts and re-throw the error unchanged — preserves
-   * the caller's error type, unlike `AbortError` which would replace
-   * the thrown value with itself. Use this for code-specific retry
-   * policy (e.g. retry only Postgres SQLSTATE 40001).
+   * remaining attempts and re-throw the error unchanged — preserving the
+   * caller's error type. `AbortError` does not: p-retry rethrows its
+   * `originalError`, which for a string message is a freshly-constructed
+   * plain `Error`, so an `AbortError` subclass never reaches the caller as
+   * itself. Use this predicate whenever the caller has to tell failure
+   * shapes apart afterwards, or for code-specific retry policy (e.g. retry
+   * only Postgres SQLSTATE 40001).
    *
    * Called twice per failure (once in `onFailedAttempt` to gate the
    * warn log, once via p-retry's native `shouldRetry` hook). Keep
@@ -79,7 +85,8 @@ export function withRetry<T>(fn: () => Promise<T>, opts?: RetryOptions): Promise
     randomize: true,
     // Native p-retry hook — returning `false` re-throws the original
     // error unchanged to the caller, preserving its type. Unlike
-    // AbortError, which would replace the thrown value with itself.
+    // AbortError, which p-retry unwraps to its `originalError` (a plain
+    // `Error` when constructed from a string), losing the subclass.
     ...(userShouldRetry !== undefined && {
       shouldRetry: ({ error }: { error: Error }) => userShouldRetry(error),
     }),

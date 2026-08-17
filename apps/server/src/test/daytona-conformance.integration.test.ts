@@ -1,7 +1,7 @@
 /// <reference path="../../test/vitest.d.ts" />
 
 /**
- * Daytona conformance suite — runs `@daytonaio/sdk` against `DaytonaMock`.
+ * Daytona conformance suite — runs `@daytona/sdk` against `DaytonaMock`.
  * Same shape as `fal-mock` and `openai-voice-mock` in `pipeline.integration.test.ts`:
  *
  *   - **Replay** (default, free in CI): `DaytonaMock` serves
@@ -51,7 +51,7 @@
 
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { Daytona } from "@daytonaio/sdk";
+import { Daytona } from "@daytona/sdk";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { DaytonaSandboxClient } from "../sandbox/daytona/client.js";
 import { DaytonaMock, type DaytonaMockOptions } from "./daytona-mock.js";
@@ -243,7 +243,7 @@ describe("Daytona conformance — create-exec-delete", () => {
   afterAll(scenario.shutdown);
 
   it.skipIf(!scenario.runnable)(
-    "create → exec-stream → delete round-trips through @daytonaio/sdk",
+    "create → exec-stream → delete round-trips through @daytona/sdk",
     async () => {
       const mock = scenario.getMock();
       const daytona = makeDaytonaClient(mock, scenario.recordable);
@@ -424,7 +424,7 @@ describe("Daytona conformance — python-upload-fail", () => {
 // ─── Scenario 3: wrapper-level happy path ───────────────────────────
 
 /**
- * The first two scenarios drive `@daytonaio/sdk` directly with hand-
+ * The first two scenarios drive `@daytona/sdk` directly with hand-
  * rolled command strings. Production code goes through Cogmo's wrapper
  * (`DaytonaSandboxClient` → `DaytonaSandboxSession.execStreaming` →
  * `startExecStreaming` → `buildShellCommand`). Without coverage of that

@@ -616,8 +616,6 @@ describe("DrizzleAgentStore", () => {
           ...stamp,
         }),
       );
-      // 2ms sleep — PGlite's pg_uuidv7 uses random bits, not monotonic counter
-      await new Promise((r) => setTimeout(r, 2));
       await tx((trx) =>
         store.insertMessage(trx, {
           conversationId,
@@ -722,8 +720,8 @@ describe("DrizzleAgentStore", () => {
 
       const history = await tx((trx) => store.getHistory(trx, conversationId));
       expect(history).toHaveLength(3);
-      // PGlite's pg_uuidv7 uses random bits (not monotonic counter), so
-      // batch-inserted rows may sort in any order. Check content regardless of position.
+      // Asserts on content presence rather than position — the subject here is
+      // what `insertMessages` wrote, not the order `getHistory` returns it in.
       const contents = history.map((m) => m.content);
       expect(contents).toContainEqual([
         { type: "tool_use", id: "t1", name: "search", input: { q: "test" } },
@@ -732,6 +730,45 @@ describe("DrizzleAgentStore", () => {
         { type: "tool_result", toolUseId: "t1", content: "search result" },
       ]);
       expect(contents).toContainEqual([{ type: "text", text: "Here is the answer" }]);
+    });
+
+    // A lone surrogate in `tool_use.input` survives Zod (`input` is
+    // `z.unknown()`) and reaches JSON.stringify, which escapes it as `\udXXX`
+    // — a form Postgres rejects with 22P02. The turn's tool side effects have
+    // already run by then, so the rejection repeats identically on every
+    // Inngest retry.
+    it("insertMessages persists tool_use input carrying a lone surrogate", async () => {
+      const { conversationId, stamp } = await seedConversation();
+
+      await tx((trx) =>
+        store.insertMessages(trx, {
+          conversationId,
+          messages: [
+            {
+              role: "assistant",
+              content: [
+                {
+                  type: "tool_use",
+                  id: "t1",
+                  name: "search",
+                  input: { q: "bad\uD800end", "k\uDC00": "v" },
+                },
+              ],
+            },
+            { role: "assistant", content: [{ type: "text", text: "done\uD800" }] },
+          ],
+          lastInboundMessageId: "019d0000-0000-7000-8000-000000000001",
+          lastMessageOutputTokens: 10,
+          ...stamp,
+        }),
+      );
+
+      const history = await tx((trx) => store.getHistory(trx, conversationId));
+      const contents = history.map((m) => m.content);
+      expect(contents).toContainEqual([
+        { type: "tool_use", id: "t1", name: "search", input: { q: "bad�end", "k�": "v" } },
+      ]);
+      expect(contents).toContainEqual([{ type: "text", text: "done�" }]);
     });
 
     it("insertMessages throws on empty array", async () => {
@@ -768,8 +805,8 @@ describe("DrizzleAgentStore", () => {
         }),
       );
 
-      // Query raw table — don't rely on UUID ordering (PGlite's pg_uuidv7
-      // uses random bits, so ORDER BY id is non-deterministic within a batch)
+      // Read the raw table: the token columns this asserts on aren't part of
+      // what `getHistory` projects, so the store can't answer the question.
       const rows = await db
         .select({
           role: messages.role,
@@ -1121,11 +1158,6 @@ describe("DrizzleAgentStore", () => {
   describe("findMostRecentConversationForUserProfile", () => {
     it("returns the latest private conversation with its last-message timestamp", async () => {
       const { userId, profileId, stamp } = await seedConversation();
-      // 2ms sleep — PGlite's pg_uuidv7 uses random bits, not a monotonic
-      // counter, so a same-millisecond insert isn't guaranteed to sort after
-      // the seeded conversation. The gap makes `newer` the strictly-latest id
-      // (the `id DESC` ordering this test asserts).
-      await new Promise((r) => setTimeout(r, 2));
       // Second conversation for the same user+profile, created later
       // (UUIDv7 = time-ordered) so this is the "most recent" one.
       const newer = (

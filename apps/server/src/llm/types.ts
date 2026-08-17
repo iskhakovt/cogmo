@@ -117,8 +117,18 @@ export interface ToolDefinition {
  * reply rather than retrying. The signal is best-effort and scoped to
  * Anthropic-direct + OpenAI-direct; OpenAI-compat shims (OpenRouter, Venice,
  * xAI) ride along when they happen to emit the same shape.
+ *
+ * `context_overflow` is input-plus-output overrunning the model's context
+ * window — Anthropic's `stop_reason: "model_context_window_exceeded"`. It is
+ * deliberately separate from `max_tokens`: `max_tokens` is a *budget* stop
+ * (there is room left in the window, the output cap was hit) and re-prompting
+ * can complete the thought, whereas `context_overflow` means there is no room
+ * left at all, so appending anything to the request guarantees the identical
+ * failure. `classifyPostStream` routes it straight to the degraded off-ramp.
+ * Providers without a distinct overflow signal (the OpenAI wire format folds
+ * it into `finish_reason: "length"`) never produce this value.
  */
-export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "refusal";
+export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "refusal" | "context_overflow";
 
 export interface Usage {
   inputTokens: number;
@@ -136,12 +146,37 @@ export interface LlmResponse {
 
 // --- Stream events ---
 
+/**
+ * Events the agent loop and orchestrator push at the delivery layer.
+ *
+ * Most members mirror what a provider stream yields, but the union is the
+ * orchestrator→adapter presentation channel, not a pure provider transcript:
+ * `status` is emitted by the pre-flight compaction stage, and `retract` by the
+ * degraded off-ramp.
+ *
+ * `retract` names the streamed assistant output that the turn is NOT going to
+ * persist, so the user is never left reading something the transcript doesn't
+ * contain. The orchestrator emits it immediately before the degraded reply:
+ * `text` is the exact streamed text the loop dropped from the turn's messages
+ * — always the tail, since the degrade-triggering iteration is the last one —
+ * and `toolUseIds` are that same iteration's tool calls, which on a
+ * `context_overflow` or `refusal` degrade never even executed. Output from
+ * earlier iterations of the turn is deliberately NOT named: those messages are
+ * persisted, so they stay on screen. See design/agent-resilience.md → Degraded
+ * reply.
+ *
+ * Attachments already delivered mid-stream (`sendPhoto`, `sendDocument`) can't
+ * be taken back and are never named. Adapters apply the retraction to whatever
+ * is still editable — output already committed to an immutable surface (a
+ * Telegram chunk that overflowed into its own message) stays visible.
+ */
 export type StreamEvent =
   | { type: "text_delta"; text: string }
   | { type: "thinking_delta"; thinking: string; signature: string }
   | { type: "tool_start"; id: string; name: string; input: unknown }
   | { type: "tool_result"; name: string; output: string; isError?: boolean }
-  | { type: "status"; message: string };
+  | { type: "status"; message: string }
+  | { type: "retract"; text: string; toolUseIds: ReadonlyArray<string> };
 
 /**
  * Result of a streaming LLM call.

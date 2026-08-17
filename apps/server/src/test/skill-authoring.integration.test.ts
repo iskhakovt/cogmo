@@ -47,7 +47,7 @@
  * ## When the cassette needs a refresh
  *
  *   - Anthropic / OpenAI SDK bump that changes the wire shape.
- *   - `@daytonaio/sdk` bump that adds calls or renames endpoints.
+ *   - `@daytona/sdk` bump that adds calls or renames endpoints.
  *   - Prompt restructure (system prompt, tool definitions, skill
  *     conventions) that the model's response would differ on.
  *   - Pinned model swap (currently `claude-haiku-4-5-20251001`).
@@ -61,9 +61,10 @@ import { execFile as execFileCb } from "node:child_process";
 import { existsSync } from "node:fs";
 import { copyFile, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { Daytona, Image } from "@daytonaio/sdk";
+import { Daytona, Image } from "@daytona/sdk";
 import { Octokit } from "@octokit/rest";
 import { and, desc, eq, ne } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
@@ -87,6 +88,20 @@ import { expectDefined } from "./assertions.js";
 import { DaytonaMock, type DaytonaMockOptions } from "./daytona-mock.js";
 
 const execFileP = promisify(execFileCb);
+
+/**
+ * Walk up to the workspace root. Build context for the devbase snapshot lives
+ * at `images/` next to `pnpm-workspace.yaml`, one level above this package.
+ */
+function repoRoot(): string {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  while (!existsSync(join(dir, "pnpm-workspace.yaml"))) {
+    const parent = dirname(dir);
+    if (parent === dir) throw new Error("repo root (pnpm-workspace.yaml) not found");
+    dir = parent;
+  }
+  return dir;
+}
 
 // --- Mode gating ─────────────────────────────────────────────────────
 
@@ -641,9 +656,11 @@ async function prebuildDaytonaPrereqs(): Promise<void> {
     }),
   });
 
-  // 1a. Devbase snapshot
+  // 1a. Devbase snapshot. `images/` sits at the repo root while Vitest runs
+  // with `apps/server` as its cwd, so the path is resolved from the root
+  // rather than passed through relative.
   await ensureSnapshot(realSdk, "devbase", snapshotName, () =>
-    Image.fromDockerfile("images/devbase/Dockerfile"),
+    Image.fromDockerfile(join(repoRoot(), "images/devbase/Dockerfile")),
   );
 
   // 1b. cogmo-skills snapshot — register's lockfile-compile sandbox uses

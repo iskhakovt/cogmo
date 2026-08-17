@@ -116,10 +116,19 @@ export async function allocateWorktree(
  * registration. No-op on repos with no worktree metadata.
  */
 export async function removeWorktree(repoPath: string, worktreePath: string): Promise<void> {
-  await rm(worktreePath, { recursive: true, force: true }).catch((err) => {
+  // `force` only swallows ENOENT. A process still writing inside the tree —
+  // git's own background maintenance is the usual one, and it is suppressed at
+  // the source in teardown, but a sandbox process on a bind mount can do it
+  // too — makes the walk fail with ENOTEMPTY on whichever directory it was
+  // mid-way through. Retries let the delete outlast a writer that is finishing
+  // up; without them the tree is left half-removed, and because the failure is
+  // logged rather than raised, the next allocation at this path is the first
+  // thing that notices.
+  const retry = { recursive: true, force: true, maxRetries: 3, retryDelay: 50 } as const;
+  await rm(worktreePath, retry).catch((err) => {
     log.warn({ err: (err as Error).message, worktreePath }, "failed to remove working tree");
   });
-  await rm(stagingPathFor(worktreePath), { recursive: true, force: true }).catch((err) => {
+  await rm(stagingPathFor(worktreePath), retry).catch((err) => {
     log.warn({ err: (err as Error).message, worktreePath }, "failed to remove staging dir");
   });
   await pruneWorktreeMetadata(repoPath, worktreePath);

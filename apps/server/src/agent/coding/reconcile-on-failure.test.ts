@@ -281,34 +281,36 @@ describe("createCodingTaskReconcile — durable wrapper", () => {
     });
   });
 
-  it.each([
-    "already_terminal",
-    "not_coding_orchestrator",
-    "missing_task_id",
-    "task_not_found",
-  ])("on skipped (reason=%s): does NOT emit coding/task/failed", async (reason) => {
-    const store = mock<CodingStore>();
-    const fn = createCodingTaskReconcile(
-      { runInTx: ((cb) => cb({ __mockTx: true } as never)) as Transactor, store },
-      inngest,
-    );
-    const cachedResult =
-      reason === "already_terminal"
-        ? { status: "skipped" as const, reason: "already_terminal" as const, priorStatus: "failed" }
-        : { status: "skipped" as const, reason: reason as "not_coding_orchestrator" };
-    const engine = new InngestTestEngine({
-      function: fn,
-      events: [
-        makeFailureEvent({
-          taskId: "task-skip",
-          runId: "run-skip",
-          functionId: "cogmo-coding-task-start",
-        }),
-      ],
-      steps: [{ id: "reconcile", handler: () => cachedResult }],
-    });
+  it.each(["already_terminal", "not_coding_orchestrator", "missing_task_id", "task_not_found"])(
+    "on skipped (reason=%s): does NOT emit coding/task/failed",
+    async (reason) => {
+      const store = mock<CodingStore>();
+      const fn = createCodingTaskReconcile(
+        { runInTx: ((cb) => cb({ __mockTx: true } as never)) as Transactor, store },
+        inngest,
+      );
+      const cachedResult =
+        reason === "already_terminal"
+          ? {
+              status: "skipped" as const,
+              reason: "already_terminal" as const,
+              priorStatus: "failed",
+            }
+          : { status: "skipped" as const, reason: reason as "not_coding_orchestrator" };
+      const engine = new InngestTestEngine({
+        function: fn,
+        events: [
+          makeFailureEvent({
+            taskId: "task-skip",
+            runId: "run-skip",
+            functionId: "cogmo-coding-task-start",
+          }),
+        ],
+        steps: [{ id: "reconcile", handler: () => cachedResult }],
+      });
 
-    await engine.execute();
-    expect(sendSpy).not.toHaveBeenCalled();
-  });
+      await engine.execute();
+      expect(sendSpy).not.toHaveBeenCalled();
+    },
+  );
 });

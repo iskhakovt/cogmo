@@ -21,7 +21,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
-import { pg_uuidv7 } from "@electric-sql/pglite/pg_uuidv7";
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -48,11 +47,7 @@ let client: PGlite;
 let db: Database;
 
 beforeEach(async () => {
-  client = new PGlite({ extensions: { pg_uuidv7 } });
-  await client.exec("CREATE EXTENSION IF NOT EXISTS pg_uuidv7;");
-  await client.exec(
-    "CREATE FUNCTION uuidv7() RETURNS uuid LANGUAGE sql AS $$ SELECT uuid_generate_v7() $$;",
-  );
+  client = new PGlite();
   db = drizzle({ client, schema });
 });
 
@@ -60,7 +55,11 @@ afterEach(async () => {
   await client.close();
 });
 
-describe("migratePerFile", () => {
+// Each test boots a fresh PGlite in `beforeEach` and replays the whole
+// committed journal. That runs ~1-2s in isolation but exceeds the unit
+// project's 5s default under parallel-fork CPU contention, so this file
+// carries the same widened budget the config gives store `beforeAll` hooks.
+describe("migratePerFile", { timeout: 30_000 }, () => {
   it("applies every committed migration on a fresh DB", async () => {
     // Smoke: full journal replays cleanly. The 0036→0037 enum-then-CHECK
     // split is the load-bearing case, but a regression in any earlier

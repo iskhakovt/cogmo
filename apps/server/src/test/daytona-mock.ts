@@ -94,7 +94,7 @@ const WsFrameSchema = z
      * Binary-frame payload, base64-encoded. Mutually exclusive with
      * `text`. Used for PTY terminal output and for client-side
      * `PtyHandle.sendInput` (the SDK always sends binary, even for
-     * string inputs — see `@daytonaio/sdk/esm/PtyHandle.js`).
+     * string inputs — see `@daytona/sdk/esm/PtyHandle.js`).
      */
     bytes: z
       .string()
@@ -326,7 +326,7 @@ export interface DaytonaMockReplayOptions {
    * Per-path fault injection. When an incoming request matches a
    * configured pattern, the mock injects the configured failure mode
    * instead of consulting the fixture cursor. Used by wedge-regression
-   * tests to drive a real `@daytonaio/sdk` client + real `ws`
+   * tests to drive a real `@daytona/sdk` client + real `ws`
    * WebSocket into a hung state without a recorded "hang" fixture
    * (Daytona doesn't emit a recordable hang — it's an upstream
    * transport failure mode we model directly).
@@ -579,6 +579,20 @@ export class DaytonaMock {
       ws.close(1011, "no upstream for path");
       return;
     }
+    // Subprotocols are semantic payload, not handshake bookkeeping: the SDK
+    // ships PTY env vars (`X-Daytona-Pty-Envs~<b64url>`) and exit-control
+    // (`X-Daytona-Pty-Exit-Control`) as offered subprotocols rather than in a
+    // request body. They arrive in `sec-websocket-protocol`, which the strip
+    // below removes, so they are lifted out here and re-offered on the
+    // upstream socket. Dropping them records a PTY session with no env
+    // forwarding and no exit frames — a cassette that replays green while
+    // covering neither.
+    const offeredProtocols = (incomingHeaders["sec-websocket-protocol"] ?? "")
+      .toString()
+      .split(",")
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+
     // Forward the SDK's full header set to the upstream WS. Stripping
     // hop-by-hop + WS-upgrade headers (the new connection sets its own)
     // and overwriting `authorization` with our upstream key. The
@@ -599,7 +613,7 @@ export class DaytonaMock {
     wsHeaders.authorization = `Bearer ${this.#opts.upstreamApiKey}`;
     log.debug({ path, upstreamUrl }, "ws upgrade");
     const frames: WsFrame[] = [];
-    const upstream = new WebSocket(upstreamUrl, { headers: wsHeaders });
+    const upstream = new WebSocket(upstreamUrl, offeredProtocols, { headers: wsHeaders });
 
     // Track journal completion so `endScenario()` can wait for the
     // upstream close to land + frames to flush before writing the
@@ -758,7 +772,7 @@ export class DaytonaMock {
         // already closed
       }
     };
-    // Yield a macrotask: `@daytonaio/sdk`'s `getSessionCommandLogs` pipes
+    // Yield a macrotask: `@daytona/sdk`'s `getSessionCommandLogs` pipes
     // the WS through `stdDemuxStream`, which attaches its `message`
     // handler after an `await`. `queueMicrotask` fires inside the same
     // turn and loses the first frame.

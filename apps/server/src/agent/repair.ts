@@ -37,6 +37,10 @@ import type { ContentBlock, Message, StopReason, ToolUseBlock } from "../llm/typ
  *  - `empty_end_turn`, `stream_truncation`, `refusal` — Class C model
  *    misbehavior subtypes ({@link classifyPostStream},
  *    {@link classifyStreamError}).
+ *  - `context_overflow` — the request overran the model's context window
+ *    ({@link classifyPostStream}). Immediate-degrade with no repair: the
+ *    only thing that would help is a smaller request, and compaction runs
+ *    pre-flight per turn, outside the loop.
  *  - `stuck_loop`, `stuck_loop_cumulative` — Class D loop-pathology trips
  *    fired from the loop body when {@link computeIterationFingerprint}
  *    repeats without an observable side effect.
@@ -51,6 +55,7 @@ export type RepairSubtype =
   | "empty_end_turn"
   | "stream_truncation"
   | "refusal"
+  | "context_overflow"
   | "stuck_loop"
   | "stuck_loop_cumulative"
   | "volume_cluster";
@@ -66,11 +71,11 @@ export type DegradeSubtype = Exclude<RepairSubtype, "volume_cluster">;
 
 /**
  * Subset of {@link RepairSubtype} that carries a per-turn repair budget.
- * Refusal is excluded — it's immediate-degrade with nothing to decrement.
- * Class D subtypes are excluded — they're trip-only (loop-pathology), no
- * repair attempt to budget against. Used to keep the `repair` arm of
- * {@link TurnOutcome} narrow so a `budgets[outcome.subtype]--` decrement
- * is always sound.
+ * Refusal and context overflow are excluded — both are immediate-degrade
+ * with nothing to decrement. Class D subtypes are excluded — they're
+ * trip-only (loop-pathology), no repair attempt to budget against. Used to
+ * keep the `repair` arm of {@link TurnOutcome} narrow so a
+ * `budgets[outcome.subtype]--` decrement is always sound.
  */
 export type BudgetedSubtype = keyof RepairBudgets;
 
@@ -95,10 +100,10 @@ export interface RepairBudgets {
  *    continuation nudge.
  *  - `stream_truncation: 1` — one non-streaming replay of the same turn.
  *
- * Refusal has no budget entry: the classifier degrades immediately and
- * the loop never decrements anything on the refusal path. If a future
- * "try refusal-recovery prompt" experiment wants a budget, it can re-add
- * the field deliberately with logic.
+ * Refusal and context overflow have no budget entry: the classifier
+ * degrades immediately and the loop never decrements anything on either
+ * path. If a future "try refusal-recovery prompt" experiment wants a
+ * budget, it can re-add the field deliberately with logic.
  */
 export const INITIAL_BUDGETS: Readonly<RepairBudgets> = Object.freeze({
   empty_end_turn: 1,
@@ -162,6 +167,28 @@ export function classifyPostStream(
       kind: "degrade",
       reason: "model returned a policy refusal",
       subtype: "refusal",
+    };
+  }
+
+  if (stopReason === "context_overflow") {
+    // Immediate-degrade, and deliberately blind to `content.length`. An
+    // overflow that emitted some text is a truncated turn, not a complete
+    // one: returning `ok` would persist the fragment as the model's final
+    // answer. Both the empty and partial cases exit here, and the loop
+    // drops the offending assistant message before returning (see
+    // design/agent-resilience.md → Persistence boundary on a degraded
+    // turn), so no half-answer lands in history claiming to be finished.
+    //
+    // No repair arm: compaction is a pre-flight stage in `handle-message`
+    // (design/context-management.md), so the loop has no lever to shrink
+    // the request mid-turn. Every in-loop repair appends to the request,
+    // which is exactly what a full window cannot absorb. Ending the turn
+    // hands control back to the orchestrator, whose next turn re-runs
+    // compaction against the freshly-grown history.
+    return {
+      kind: "degrade",
+      reason: "request exceeded the model's context window",
+      subtype: "context_overflow",
     };
   }
 
@@ -239,12 +266,16 @@ export function classifyStreamError(
 
 /**
  * The text the orchestrator shows the user when a turn ends via the
- * degraded off-ramp. Refusal carries a refusal-specific message; every
- * other subtype shares the same apology.
+ * degraded off-ramp. Refusal and context overflow each carry a subtype-
+ * specific message because the user's next move differs; every other
+ * subtype shares the same apology.
  */
 export function degradedReplyText(subtype: DegradeSubtype | null): string {
   if (subtype === "refusal") {
     return "The model declined that request. Try rephrasing, or switch model with `/model`.";
+  }
+  if (subtype === "context_overflow") {
+    return "This conversation is too long for the model's context window. Start a fresh one with `/new`, or switch to a larger-context model with `/model`.";
   }
   return "I had trouble generating a clean response — the model returned an output I couldn't process. Could you rephrase or try again?";
 }
@@ -307,6 +338,12 @@ export interface SynthesizeDegradedReplyResult {
  * Provider-outage during synthesis falls through cleanly to the fixed
  * string. A `synthesis ok: false` spike correlated with provider-outage
  * events is an upstream symptom, not a synthesis-logic bug.
+ *
+ * The `context_overflow` subtype still attempts synthesis. The call is not
+ * a re-run of the failed turn: it drops the tool definitions and caps
+ * output at 512 tokens, which is often enough headroom for the same
+ * history to fit. When it isn't, the provider answers with an overflow and
+ * no content, which lands on the empty-text fallback below.
  */
 export async function synthesizeDegradedReply(
   deps: SynthesizeDegradedReplyDeps,
@@ -425,6 +462,8 @@ function humanReasonForDegrade(subtype: DegradeSubtype | null, reason: string): 
       return "your response stream was truncated mid-tool-call and the recovery replay also failed to parse";
     case "refusal":
       return "you declined the request on policy grounds";
+    case "context_overflow":
+      return "the conversation plus your reply exceeded the model's context window, so the turn was cut off";
     case "stuck_loop":
       return "the loop detected the same tool call repeated three times in a row without observable progress";
     case "stuck_loop_cumulative":
@@ -492,7 +531,9 @@ export function classifyClassDTrip(
  *
  * Args are stringified through the `canonicalize` library (RFC 8785 JSON
  * Canonicalization Scheme) so object key order (`{a: 1, b: 2}` vs
- * `{b: 2, a: 1}`) doesn't move the hash.
+ * `{b: 2, a: 1}`) doesn't move the hash. Args are model output, so
+ * {@link canonicalJson} is total: the loop's call site treats a throw from
+ * here as fatal to the turn, and no dedup signal is worth that.
  *
  * Assistant text is deliberately **excluded** — text prefixes are
  * brittle (timestamps, hedging preambles, emoji noise), so two iterations
@@ -513,30 +554,113 @@ export function computeIterationFingerprint(toolUses: ReadonlyArray<ToolUseBlock
   return sha256(pairs.join("|"));
 }
 
-function sha256(s: string): string {
-  return createHash("sha256").update(s).digest("hex");
+/**
+ * Escape marker for the encodings {@link toCanonicalizable} substitutes.
+ *
+ * U+FFFD is doubled wherever it already occurs in the input, which makes the
+ * escape alphabet prefix-free: a single U+FFFD in the output always opens an
+ * escape, a doubled one always denotes the literal character. The whole
+ * substitution is therefore injective — distinct inputs stay distinct, which
+ * is the property Class D counting depends on.
+ */
+const ESCAPE = "�";
+
+/** Single-key wrappers standing in for values RFC 8785 cannot express. */
+const NON_FINITE_KEY = `${ESCAPE}non-finite`;
+const CIRCULAR_KEY = `${ESCAPE}circular`;
+
+/** Any surrogate code unit or a literal U+FFFD — a cheap "might need escaping" test. */
+const NEEDS_ESCAPE = /[\uD800-\uDFFF�]/;
+
+/** A high surrogate with no low after it, or a low surrogate with no high before it. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+/**
+ * Encode lone surrogates so the result is well-formed without merging
+ * distinct inputs. Each unpaired code unit becomes `ESCAPE` plus its four hex
+ * digits; pre-existing U+FFFD is doubled first so the two cases never alias.
+ * Well-formed surrogate pairs pass through untouched.
+ */
+function escapeIllFormed(s: string): string {
+  if (!NEEDS_ESCAPE.test(s)) return s;
+  return s
+    .replaceAll(ESCAPE, ESCAPE + ESCAPE)
+    .replace(LONE_SURROGATE, (cu) => `${ESCAPE}${cu.charCodeAt(0).toString(16)}`);
 }
 
 /**
- * Stable canonical-JSON encoding for fingerprint hashing. Wraps the
+ * Rewrite a value into the subset `canonicalize` accepts.
+ *
+ * RFC 8785 has no encoding for three things `tool_use.input` can carry, and
+ * `canonicalize` throws on each: ill-formed strings, non-finite numbers
+ * (`JSON.parse('{"n":1e999}')` yields `Infinity` from perfectly valid JSON
+ * text), and reference cycles. Tool arguments are model output on the
+ * resilience path, so a throw would abort the whole turn to protect a
+ * best-effort dedup signal. Each case gets a deterministic stand-in instead.
+ *
+ * The substitutions are injective, and every escape is anchored on a lone
+ * U+FFFD that {@link escapeIllFormed} guarantees cannot occur in a translated
+ * string or key. Two consequences the counters rely on: a 2-key object stays
+ * a 2-key object, and the pre-pass never reorders anything, so `canonicalize`
+ * still sorts the same key set regardless of emission order.
+ *
+ * Only arrays and plain objects are walked. Anything else with a `toJSON`
+ * reaches `canonicalize` untouched and takes its own path there.
+ */
+function toCanonicalizable(value: unknown, ancestors: Set<object>): unknown {
+  if (typeof value === "string") return escapeIllFormed(value);
+  if (typeof value === "number" && !Number.isFinite(value)) {
+    return { [NON_FINITE_KEY]: String(value) };
+  }
+  if (value === null || typeof value !== "object") return value;
+  if (!Array.isArray(value) && !R.isPlainObject(value)) return value;
+  if (ancestors.has(value)) return { [CIRCULAR_KEY]: true };
+
+  ancestors.add(value);
+  const encoded = Array.isArray(value)
+    ? value.map((v) => toCanonicalizable(v, ancestors))
+    : Object.fromEntries(
+        Object.entries(value).map(([k, v]) => [
+          escapeIllFormed(k),
+          toCanonicalizable(v, ancestors),
+        ]),
+      );
+  ancestors.delete(value);
+  return encoded;
+}
+
+/**
+ * Stand-in hash input for arguments no encoder could render. Distinct
+ * unencodable inputs share it and therefore compare equal, which can only
+ * inflate the counters for repeated calls to the *same* tool; the loop's
+ * side-effect gate and `DEFAULT_MAX_ITERATIONS` bound what that can cost. The
+ * alternative — propagating the throw — ends the turn outright, which is the
+ * failure mode Class D detection exists to avoid.
+ */
+const UNENCODABLE_ARGS = `${ESCAPE}unencodable`;
+
+/**
+ * Total canonical-JSON encoding for fingerprint hashing. Wraps the
  * `canonicalize` library (RFC 8785 JSON Canonicalization Scheme) — sorted
- * object keys at every depth, arrays preserve order. Tool arguments are
- * JSON-compatible by construction (they flow through the
- * `tool_use.input` field, which providers serialize as JSON), so RFC 8785
- * coverage matches what the LLM emits. The library returns `undefined`
- * only for top-level `undefined` / function / symbol input — values that
- * cannot appear in a parsed `tool_use.input`. Throwing on `undefined`
- * surfaces such a bug instead of silently collapsing every offending
- * iteration to `sha256("")` and falsely tripping Class D.
+ * object keys at every depth, arrays preserve order — behind
+ * {@link toCanonicalizable}, which pre-translates the values RFC 8785 cannot
+ * express.
+ *
+ * Never throws. `canonicalize` returns `undefined` for top-level `undefined` /
+ * function / symbol input; the catch covers whatever the library rejects that
+ * the pre-pass doesn't anticipate (a `BigInt`, a throwing `toJSON`). Both land
+ * on {@link UNENCODABLE_ARGS}.
  */
 function canonicalJson(value: unknown): string {
-  const encoded = canonicalize(value);
-  if (encoded === undefined) {
-    throw new Error(
-      "canonicalJson: input is not JSON-representable (undefined / function / symbol)",
-    );
+  try {
+    return canonicalize(toCanonicalizable(value, new Set())) ?? UNENCODABLE_ARGS;
+  } catch {
+    return UNENCODABLE_ARGS;
   }
-  return encoded;
+}
+
+function sha256(s: string): string {
+  return createHash("sha256").update(s).digest("hex");
 }
 
 /**

@@ -4,10 +4,21 @@ import { z } from "zod";
 import type { Service } from "./service.js";
 import { createWebTools } from "./web-tools.js";
 
-// Mock withRetry as a no-delay retry loop that honours AbortError. We
-// reproduce the retry semantics (including AbortError = stop) without
-// paying the real exponential-backoff delays. The retry behaviour
-// itself is covered in src/util/with-retry.test.ts.
+// Mock withRetry as a no-delay retry loop, so these tests don't pay the
+// real exponential backoff. The retry mechanics themselves are covered in
+// src/util/with-retry.test.ts.
+//
+// Two details of p-retry's contract are reproduced deliberately, because
+// `fetch_url` branches on both and a double that got either wrong would let
+// a production defect through green:
+//
+//   - An `AbortError` reaches the caller as its `originalError`, NOT as
+//     itself. p-retry constructs that from the message when the abort was
+//     built from a string, so the class is lost and `instanceof AbortError`
+//     is false downstream.
+//   - `shouldRetry` returning false stops the loop and rethrows the error
+//     unchanged, preserving its class. That is the only way a caller gets a
+//     typed error back out.
 //
 // Tests that mock a 5xx (retryable) response must use mockResolvedValue
 // instead of mockResolvedValueOnce — otherwise the second attempt sees
@@ -17,7 +28,10 @@ vi.mock("../util/with-retry.js", async () => {
     await vi.importActual<typeof import("../util/with-retry.js")>("../util/with-retry.js");
   return {
     ...actual,
-    withRetry: async <T>(fn: () => Promise<T>, opts?: { retries?: number }): Promise<T> => {
+    withRetry: async <T>(
+      fn: () => Promise<T>,
+      opts?: { retries?: number; shouldRetry?: (err: unknown) => boolean },
+    ): Promise<T> => {
       const maxAttempts = (opts?.retries ?? 3) + 1;
       let lastError: unknown;
       for (let i = 0; i < maxAttempts; i++) {
@@ -25,7 +39,10 @@ vi.mock("../util/with-retry.js", async () => {
           return await fn();
         } catch (e) {
           lastError = e;
-          if (e instanceof actual.AbortError) throw e;
+          if (e instanceof actual.AbortError) {
+            throw (e as { originalError?: unknown }).originalError ?? e;
+          }
+          if (opts?.shouldRetry && !opts.shouldRetry(e)) throw e;
         }
       }
       throw lastError;
