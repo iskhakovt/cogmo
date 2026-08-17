@@ -78,7 +78,7 @@ async function startGitea(): Promise<{ url: string; pat: string }> {
   // default paths (under `/data/gitea/`) keep this single-container.
   // Pull from Gitea's own registry rather than Docker Hub — keeps CI off
   // the Docker Hub rate-limit budget that pgvector + inngest still spend.
-  const container = await new GenericContainer("docker.gitea.com/gitea:1.22")
+  const container = await new GenericContainer("docker.gitea.com/gitea:1.27.2")
     .withExposedPorts(3000)
     .withEnvironment({
       GITEA__security__INSTALL_LOCK: "true",
