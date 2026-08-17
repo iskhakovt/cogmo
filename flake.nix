@@ -35,6 +35,14 @@
           # own browser download in play, so the revision it wants stays
           # decoupled from whichever `playwright-driver` nixpkgs happens to
           # carry — a mismatch there surfaces as "Executable doesn't exist".
+          #
+          # Linux-only, and not merely as a tidy-up: several of these (alsa-lib,
+          # systemd, libdrm, libgbm) declare no darwin platform, so forcing
+          # their paths into `LD_LIBRARY_PATH` fails evaluation with "Refusing
+          # to evaluate package … not available on the requested hostPlatform".
+          # macOS needs none of it — Playwright's darwin build is a normal
+          # dynamically-linked Mach-O that finds its libraries the usual way,
+          # and nix-ld is a NixOS mechanism with no darwin counterpart.
           browserLibs = with pkgs; [
             alsa-lib
             at-spi2-atk
@@ -50,46 +58,49 @@
             libdrm
             libGL
             libgbm
+            libx11
+            libxcb
+            libxcomposite
+            libxdamage
+            libxext
+            libxfixes
             libxkbcommon
+            libxrandr
             nspr
             nss
             pango
             systemd
-            xorg.libX11
-            xorg.libXcomposite
-            xorg.libXdamage
-            xorg.libXext
-            xorg.libXfixes
-            xorg.libXrandr
-            xorg.libxcb
           ];
 
+          isLinux = pkgs.stdenv.hostPlatform.isLinux;
           libraryPath = pkgs.lib.makeLibraryPath browserLibs;
         in
         {
-          default = pkgs.mkShell {
-            packages = with pkgs; [
-              nodejs_24
-              # Corepack activates the `packageManager` pin in package.json, so
-              # the pnpm version comes from the repo, not from nixpkgs.
-              corepack
-              git
-              docker-client
-            ];
+          default = pkgs.mkShell (
+            {
+              packages = with pkgs; [
+                nodejs_24
+                # Corepack activates the `packageManager` pin in package.json,
+                # so the pnpm version comes from the repo, not from nixpkgs.
+                corepack
+                git
+                docker-client
+              ];
 
-            # Two variables for two consumers: `LD_LIBRARY_PATH` covers anything
-            # launched from this shell directly, while `NIX_LD_LIBRARY_PATH` is
-            # what nix-ld hands to a binary that was never patchelf'd — the path
-            # `chrome-headless-shell` actually takes.
-            LD_LIBRARY_PATH = libraryPath;
-            NIX_LD_LIBRARY_PATH = libraryPath;
-            NIX_LD = pkgs.lib.fileContents "${pkgs.stdenv.cc}/nix-support/dynamic-linker";
-
-            shellHook = ''
-              echo "cogmo dev shell — node $(node --version)"
-              echo "browser libs on NIX_LD_LIBRARY_PATH; 'pnpm --filter web test' can drive Chromium here."
-            '';
-          };
+              shellHook = ''
+                echo "cogmo dev shell — node $(node --version)"
+              '';
+            }
+            // pkgs.lib.optionalAttrs isLinux {
+              # Two variables for two consumers: `LD_LIBRARY_PATH` covers
+              # anything launched from this shell directly, while
+              # `NIX_LD_LIBRARY_PATH` is what nix-ld hands to a binary that was
+              # never patchelf'd — the path `chrome-headless-shell` takes.
+              LD_LIBRARY_PATH = libraryPath;
+              NIX_LD_LIBRARY_PATH = libraryPath;
+              NIX_LD = pkgs.lib.fileContents "${pkgs.stdenv.cc}/nix-support/dynamic-linker";
+            }
+          );
         }
       );
     };
