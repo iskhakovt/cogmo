@@ -127,6 +127,38 @@ runs over the encoded text escape by escape.
 and the sub-second debounce clamp now pinned by feeding a raw `"500ms"` to the
 real engine rather than asserting the mapping our own helper already applied.
 
+## Review round three
+
+**The engines guard checked a fraction of what it claimed.** It read the
+`engines.node` of `apps/server`'s direct dependencies and called that the
+narrowest runtime constraint, but a floor raised three levels down breaks an
+install just as thoroughly, and the resolution step lost 23 of the 57 direct
+dependencies anyway: `require.resolve("<dep>/package.json")` throws for any
+package whose `exports` map omits `"./package.json"`, which covers `openai`,
+`drizzle-orm`, `inngest`, `postgres`, `grammy` and `p-retry` among others. Of
+the direct dependencies that declare a Node range, 13 of 39 were being skipped
+silently by a `catch { continue }`.
+
+The comparison is now `ls-engines`, which intersects `engines.node` across the
+whole installed graph and exits non-zero when the declared range is wider than
+that intersection — the check the previous code was approximating by hand.
+`--mode=actual` reads the tree from `node_modules`, so it handles pnpm's layout
+without parsing a lockfile, and it degrades to the comparison alone when the
+network is unavailable. Replacing the walk also retired a bug in it: resolving
+by climbing parent `node_modules` directories escapes into pnpm's hoisted
+`.pnpm/node_modules`, so the "production" closure it measured included dev-only
+packages.
+
+pnpm's built-in `engine-strict` is not a substitute, which measurement settles
+rather than assumption: on pnpm 11.21.0 a dependency requiring `node>=99`
+installs on Node 24.18 with no diagnostic and exit 0, whether declared directly
+or transitively. `engine-strict` compares only the current project's own
+`engines` against the running interpreter, and even then it warns and exits 0.
+
+The guard is now verified in the direction that matters. Restoring the old
+`>=24` makes it fail with ls-engines' own diagnostic; the hand-rolled version
+had only ever been observed passing.
+
 One finding did not hold: a claim that `dispose.test.ts`'s log assertion was
 vacuous because pino child loggers own their level methods. They don't, for a
 single-argument `child()` — pino installs own methods only via `setLevel`, so the

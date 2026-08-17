@@ -1,18 +1,16 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import semver from "semver";
 import { describe, expect, it } from "vitest";
 
 /**
  * Declared-runtime consistency guard.
  *
  * `engines.node` is a promise to whoever installs the published package. It is
- * only as good as its narrowest runtime dependency: if a dependency requires a
- * newer Node than we advertise, an install on a Node inside our range hits an
- * engine mismatch on a package the app needs to run — a warning by default, a
- * hard failure under `engine-strict`.
+ * only as good as its narrowest dependency, at any depth: if anything in the
+ * installed tree requires a newer Node than we advertise, an install on a Node
+ * inside our range hits an engine mismatch on a package the app needs.
  *
  * Nothing enforces that on its own. `pnpm update --latest` treats a dependency
  * that raised its Node floor like any other bump, and no tier notices because
@@ -21,9 +19,19 @@ import { describe, expect, it } from "vitest";
  * manifests still said `>=24`, leaving Node 24.0–24.14 admitted by us and
  * refused by it.
  *
- * When this fails, either raise `engines.node` in BOTH manifests to a range the
- * dependency accepts, or hold the dependency back. Prefer the former — the
- * failure means we were advertising support we didn't have.
+ * The comparison itself is `ls-engines`, which intersects `engines.node` across
+ * the whole installed graph and exits non-zero when our declared range is wider
+ * than that intersection. `--mode=actual` reads the tree from `node_modules`,
+ * so it understands pnpm's layout without parsing the lockfile. pnpm's own
+ * `engine-strict` is not a substitute: it only compares the current project's
+ * `engines` against the running interpreter, ignores dependency `engines`
+ * entirely, and warns rather than failing.
+ *
+ * When this fails, either raise `engines.node` in BOTH manifests to a range
+ * every dependency accepts, or hold the offending dependency back. Prefer the
+ * former — the failure means we were advertising support we didn't have.
+ * `pnpm --filter cogmo engines:check` reproduces it, and `ls-engines --save`
+ * prints the range the graph actually supports.
  */
 
 function repoRoot(): string {
@@ -40,7 +48,6 @@ const ROOT = repoRoot();
 const SERVER_PKG_DIR = join(ROOT, "apps", "server");
 
 interface Manifest {
-  dependencies?: Record<string, string>;
   engines?: { node?: string };
 }
 
@@ -51,56 +58,43 @@ function manifest(path: string): Manifest {
 const serverPkg = manifest(join(SERVER_PKG_DIR, "package.json"));
 const rootPkg = manifest(join(ROOT, "package.json"));
 
-/**
- * Node majors to probe. `semver.subset` would be tidier but treats an
- * open-ended `>=` range as unbounded, which makes every future major a
- * failure the moment a dependency caps its upper bound. Sampling the majors
- * we could plausibly run answers the question that actually matters: is there
- * a Node we tell people to use that a runtime dependency rejects?
- */
-const PROBE_VERSIONS = [
-  "24.0.0",
-  "24.14.0",
-  "24.15.0",
-  "24.99.0",
-  "25.0.0",
-  "26.0.0",
-  "27.0.0",
-] as const;
-
-describe("engines.node stays within every runtime dependency's range", () => {
+describe("engines.node stays within every dependency's range", () => {
   it("both manifests declare the same range", () => {
+    // ls-engines checks one package at a time; keeping the two in step is
+    // ours to assert. The root range governs a workspace install, the server
+    // range travels with the published package.
     expect(serverPkg.engines?.node).toBe(rootPkg.engines?.node);
   });
 
-  it("no runtime dependency rejects a Node version we advertise", () => {
-    const ours = serverPkg.engines?.node;
-    expect(ours, "apps/server/package.json must declare engines.node").toBeDefined();
-    if (!ours) return;
+  it("no dependency in the installed graph rejects a Node version we advertise", () => {
+    const binary = join(SERVER_PKG_DIR, "node_modules", ".bin", "ls-engines");
+    expect(
+      existsSync(binary),
+      "ls-engines is a devDependency of apps/server — run pnpm install",
+    ).toBe(true);
 
-    const require = createRequire(join(SERVER_PKG_DIR, "package.json"));
-    const conflicts: string[] = [];
-
-    for (const dep of Object.keys(serverPkg.dependencies ?? {})) {
-      let depEngines: string | undefined;
-      try {
-        const depPkgPath = require.resolve(`${dep}/package.json`);
-        depEngines = manifest(depPkgPath).engines?.node;
-      } catch {
-        // Not every package exports its own manifest, and workspace links
-        // resolve elsewhere. An unreadable dependency can't be checked; it
-        // also can't be the source of a mismatch we could act on here.
-        continue;
-      }
-      if (!depEngines) continue;
-
-      for (const v of PROBE_VERSIONS) {
-        if (semver.satisfies(v, ours) && !semver.satisfies(v, depEngines)) {
-          conflicts.push(`${dep} (${depEngines}) rejects Node ${v}, which "${ours}" admits`);
-        }
-      }
+    let output: string;
+    try {
+      // --dev covers devDependencies too: they never reach a consumer, but
+      // they do decide whether a contributor on the low end of our advertised
+      // range can install the workspace at all.
+      // --no-current drops the "does the running interpreter qualify" check,
+      // which asks a different question and needs the network to enumerate
+      // published Node releases.
+      output = execFileSync(binary, ["--mode=actual", "--dev", "--no-current"], {
+        cwd: SERVER_PKG_DIR,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (err) {
+      const failure = err as { stdout?: string; stderr?: string };
+      throw new Error(
+        `ls-engines rejected the declared engines.node range:\n${failure.stdout ?? ""}${failure.stderr ?? ""}`,
+      );
     }
 
-    expect(conflicts).toEqual([]);
-  });
+    // A wider declared range than the graph supports is the failure mode, and
+    // it exits non-zero. Declaring a narrower range is safe and only informs.
+    expect(output).not.toMatch(/allows more node versions/);
+  }, 60_000);
 });
