@@ -132,16 +132,30 @@ describe("engines.node stays within every dependency's range", () => {
     expect(conflicts(ours, ranges)).toEqual([]);
   });
 
-  it("flags a range that admits a Node version the graph excludes", () => {
-    // jsdom 30 accepts `^22.22.2 || ^24.15.0 || >=26.0.0`, so a declared
-    // `>=24.15.0` admits Node 25 while the graph refuses it. Pinning the
-    // failing direction is what proves the assertion above can fail at all —
-    // and this gap is precisely the shape `ls-engines` reports as an exact
-    // match.
-    const ranges = declaredNodeRanges();
-    const gapped = conflicts(">=24.15.0", ranges);
+  it("flags a declared range that admits a Node version a dependency excludes", () => {
+    // A fixed range rather than the lockfile's: naming a package that happens
+    // to be installed today would turn any routine dependency change into a
+    // failure here, and the claim under test is about `conflicts`, not about
+    // who currently ships a gap.
+    //
+    // The shape is what matters — a hole in the middle of an `||` range.
+    // jsdom 30's `^22.22.2 || ^24.15.0 || >=26.0.0` is the real instance that
+    // motivated this guard, and the same shape is what `ls-engines` reports as
+    // an exact match for `>=24.15.0` (ljharb/ls-engines#32).
+    const gapped = [{ id: "example@1.0.0", range: "^22.22.2 || ^24.15.0 || >=26.0.0" }];
 
-    expect(gapped).not.toEqual([]);
-    expect(gapped.some((entry) => entry.startsWith("jsdom@"))).toBe(true);
+    // `>=24.15.0` admits Node 25, which the dependency refuses.
+    expect(conflicts(">=24.15.0", gapped)).toHaveLength(1);
+    // Our actual shape steps over the hole.
+    expect(conflicts("^24.15.0 || >=26.0.0", gapped)).toEqual([]);
+  });
+
+  it("can flag something in the real graph", () => {
+    // Keeps the lockfile-backed path honest without depending on any package
+    // in particular: a range this wide is refused by essentially every
+    // published dependency, so an empty result here means `declaredNodeRanges`
+    // stopped producing usable ranges and the assertion above is passing
+    // vacuously.
+    expect(conflicts(">=1.0.0", declaredNodeRanges())).not.toEqual([]);
   });
 });

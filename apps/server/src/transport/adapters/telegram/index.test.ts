@@ -822,6 +822,96 @@ describe("telegram adapter", () => {
       expect(mockBotApi.sendMessage).toHaveBeenCalledTimes(1);
     });
 
+    it("retracts an iteration whose text straddles its own tool banner", async () => {
+      // The dropped iteration streamed prose, ran a tool, then streamed more.
+      // Its text is therefore not contiguous in the live message — the banner
+      // sits between the two halves — so the retraction has to be located by
+      // stream structure. Searching the rendered message for the named text
+      // finds nothing here, and treating "not found" as "already flushed"
+      // takes the earlier iteration's narration down with it.
+      const adapter = await createStreamingAdapter();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({ type: "text_delta", text: "Let me check the weather.\n" });
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 600);
+      await handle.push({ type: "tool_start", id: "t1", name: "get_weather", input: {} });
+      await handle.push({ type: "text_delta", text: "Paris is " });
+      await handle.push({ type: "tool_start", id: "t2", name: "get_forecast", input: {} });
+      await handle.push({ type: "text_delta", text: "18C right now" });
+      mockBotApi.editMessageText.mockClear();
+
+      await handle.push({
+        type: "retract",
+        text: "Paris is 18C right now",
+        toolUseIds: ["t2"],
+      });
+      await handle.push({ type: "text_delta", text: "I ran out of room, ask me again." });
+      await handle.finish();
+
+      const final = expectDefined(
+        mockBotApi.editMessageText.mock.calls.map((call) => String(call[2])).at(-1),
+        "final message body",
+      );
+      expect(final).toContain("Let me check the weather.");
+      expect(final).toContain("get_weather");
+      expect(final).toContain("I ran out of room, ask me again.");
+      expect(final).not.toContain("Paris is");
+      expect(final).not.toContain("18C right now");
+      expect(final).not.toContain("get_forecast");
+    });
+
+    it("retracts a dropped iteration that streamed only a tool call", async () => {
+      // `text` is empty and `toolUseIds` is not: the degrade landed before the
+      // iteration produced prose. The banner belongs to a call that is not
+      // persisted — and on a context overflow never ran at all — so it goes,
+      // while the earlier iteration's banner and narration stay.
+      const adapter = await createStreamingAdapter();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({ type: "text_delta", text: "Checking the weather.\n" });
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 600);
+      await handle.push({ type: "tool_start", id: "t1", name: "get_weather", input: {} });
+      await handle.push({ type: "tool_start", id: "t2", name: "get_forecast", input: {} });
+      mockBotApi.editMessageText.mockClear();
+
+      await handle.push({ type: "retract", text: "", toolUseIds: ["t2"] });
+      await handle.push({ type: "text_delta", text: "I ran out of room, ask me again." });
+      await handle.finish();
+
+      const final = expectDefined(
+        mockBotApi.editMessageText.mock.calls.map((call) => String(call[2])).at(-1),
+        "final message body",
+      );
+      expect(final).toContain("Checking the weather.");
+      expect(final).toContain("get_weather");
+      expect(final).toContain("I ran out of room, ask me again.");
+      expect(final).not.toContain("get_forecast");
+    });
+
+    it("retracts the named text in append-only mode, where no banners exist", async () => {
+      // Append-only mode never appends banners, so the buffer is text alone and
+      // `toolUseIds` names nothing present. The text cut must still land in the
+      // right place.
+      const adapter = await createStreamingAdapter();
+      const handle = await adapter.openStream("42", "run-1", {
+        chunkChars: 4000,
+        allowEdits: false,
+      });
+
+      await handle.push({ type: "text_delta", text: "Let me check the weather.\n" });
+      await handle.push({ type: "tool_start", id: "t1", name: "get_weather", input: {} });
+      await handle.push({ type: "text_delta", text: "Paris is 18C" });
+
+      await handle.push({ type: "retract", text: "Paris is 18C", toolUseIds: ["t1"] });
+      await handle.push({ type: "text_delta", text: "I ran out of room." });
+      await handle.finish();
+
+      const sent = mockBotApi.sendMessage.mock.calls.map((call) => String(call[1])).join("\n");
+      expect(sent).toContain("Let me check the weather.");
+      expect(sent).toContain("I ran out of room.");
+      expect(sent).not.toContain("Paris is 18C");
+    });
+
     it("delivers the reply as plain text when its HTML render fails after a retraction", async () => {
       // A retraction cuts the body the throttled edits wrote out of the chunk,
       // so on a parse failure the message shows retracted text and the reply
