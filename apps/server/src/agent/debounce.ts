@@ -32,8 +32,8 @@ export interface DebounceConfig {
  *    + `debounce-maxwait`, with the documented cancel-listener race that
  *    handle-message's stale-trigger guard mops up after the fact. A
  *    sub-second timeout buys no extra responsiveness on this path either:
- *    durable sleeps have a one-second floor (see {@link durableSleepMs}), so
- *    the wait matches what the native path would have given.
+ *    durable sleeps have a one-second resolution (see {@link durableSleepMs}),
+ *    so the wait matches what the native path would have given.
  *
  * Future direction (`design/transport/debounce.md` → "Future migration"):
  * if no realistic config ever falls outside the fast path's eligibility,
@@ -56,35 +56,46 @@ function canUseNativeDebounce(config: DebounceConfig): boolean {
   return config.idleTimeoutMs >= 1000 && (config.maxWaitMs === 0 || config.maxWaitMs >= 1000);
 }
 
-/**
- * Inngest's durable-wait resolution. `step.sleep` runs its argument through
- * the SDK's `timeStr`, which rounds any positive duration below one second up
- * to one second before the op reaches the executor — a request for `"500ms"`
- * is a one-second wait on the wire.
- */
-const MIN_DURABLE_SLEEP_MS = 1000;
+const MS_PER_SECOND = 1000;
 
 /**
- * The wait `step.sleep` will actually perform for a requested duration.
+ * Whole seconds `step.sleep` will really wait for a requested duration.
+ *
+ * Inngest's durable waits have a one-second resolution. `step.sleep` runs its
+ * argument through the SDK's `timeStr`, which decomposes the duration into
+ * whole `w`/`d`/`h`/`m`/`s` units — there is no millisecond unit to carry a
+ * remainder. So a positive duration below one second rounds up to one second,
+ * and anything longer keeps only its whole seconds: a request for `"2500ms"`
+ * is a two-second wait on the wire.
+ */
+function durableSleepSeconds(requestedMs: number): number {
+  return Math.max(1, Math.floor(requestedMs / MS_PER_SECOND));
+}
+
+/**
+ * The wait `step.sleep` will actually perform for a requested duration,
+ * quantised to the resolution described on {@link durableSleepSeconds}.
  *
  * Timer handlers sleep for this value and record it on the histogram, so the
- * requested duration, the durable wait, and the observed sample are the same
- * number. Passing the raw request through instead would leave the histogram
- * claiming a sub-second hold that never happened.
+ * durable wait and the observed sample are the same number. Passing the raw
+ * request through instead would leave the histogram claiming a precision the
+ * platform cannot hold — a sub-second hold that never happened, or a
+ * fractional-second tail that was dropped before the op left the SDK.
  *
- * Zero passes through untouched: the platform floor applies to positive
- * durations only, and a zero timeout means the timer isn't scheduled at all.
+ * Non-positive values pass through untouched: the resolution applies to
+ * positive durations only, and a timeout of zero or less means the timer isn't
+ * scheduled at all.
  */
 export function durableSleepMs(requestedMs: number): number {
   if (requestedMs <= 0) return requestedMs;
-  return Math.max(requestedMs, MIN_DURABLE_SLEEP_MS);
+  return durableSleepSeconds(requestedMs) * MS_PER_SECOND;
 }
 
 function msToSeconds(ms: number): `${number}s` {
   // Native debounce period/timeout types accept whole-second strings only.
   // Floor on the way down so "3500ms" debounces for 3s, not 4s — under-shooting
   // the configured idle is safer than over-shooting (more responsive UX).
-  return `${Math.max(1, Math.floor(ms / 1000))}s`;
+  return `${durableSleepSeconds(ms)}s`;
 }
 
 function createNativeRouter(config: DebounceConfig) {
@@ -176,9 +187,11 @@ function createLegacyStateMachine(config: DebounceConfig) {
       ],
     },
     async ({ event, step }) => {
-      // Sleep and histogram sample share one millisecond value, so "how long
-      // did debounce hold this turn" reads the same in the config, on the
-      // wire, and in the metric. See {@link durableSleepMs} for the floor.
+      // Sleep and histogram sample share one millisecond value, and it is a
+      // whole number of seconds, so "how long did debounce hold this turn"
+      // reads the same on the wire as in the metric. A configured duration
+      // finer than one second is quantised by {@link durableSleepMs} first —
+      // the metric reports the honoured wait, not the requested one.
       const ms = durableSleepMs(event.data.timeoutMs);
       await step.sleep("wait", `${ms}ms`);
       debounceWaitMs.record(ms, { kind: "idle" });

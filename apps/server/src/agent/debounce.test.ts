@@ -1,5 +1,6 @@
 import { InngestTestEngine } from "@inngest/test";
 import type { EventPayload } from "inngest";
+import * as R from "remeda";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { z } from "zod";
 import { inngest } from "../inngest/client.js";
@@ -252,19 +253,53 @@ describe("legacy router — handler behavior", () => {
 });
 
 /**
- * Durable waits have a one-second resolution: Inngest parses `step.sleep`'s
- * argument and rounds any positive sub-second duration up before the op
- * reaches the executor. These tests run through the real execution engine
- * rather than a `step` stub, because a stub records whatever string it was
- * handed and so cannot observe that rewrite at all.
- *
- * Two layers, and the order matters. The first suite pins the SDK's clamp on
- * raw sub-second durations — the premise {@link durableSleepMs} exists to
- * mirror, and the reason a sub-second idle config is allowed to wait a full
- * second. The second suite pins our own timers, which pre-floor their
- * duration and so never exercise the clamp themselves.
+ * Milliseconds per suffix in the duration strings Inngest emits for a sleep op.
+ * Mirrors the SDK's own unit table, which is the whole vocabulary a sleep name
+ * can be written in — note the absence of a millisecond unit.
  */
-describe("inngest step.sleep — sub-second clamp (upstream behavior)", () => {
+const DURATION_UNIT_MS: Readonly<Record<string, number>> = {
+  w: 7 * 24 * 60 * 60 * 1000,
+  d: 24 * 60 * 60 * 1000,
+  h: 60 * 60 * 1000,
+  m: 60 * 1000,
+  s: 1000,
+};
+
+/**
+ * Decode an Inngest duration string (`"3s"`, `"1m30s"`) back to milliseconds.
+ *
+ * Reads the engine's own output rather than re-deriving it, so an assertion
+ * built on this measures the wait the executor was actually asked for instead
+ * of restating the mapping the code under test just applied.
+ */
+function inngestDurationToMs(duration: string): number {
+  const parts = [...duration.matchAll(/(\d+)([wdhms])/g)];
+  if (R.pipe(parts, R.map(R.prop(0)), R.join("")) !== duration) {
+    throw new Error(`unexpected sleep duration string: ${duration}`);
+  }
+  return R.sumBy(
+    parts,
+    (part) =>
+      Number(expectDefined(part[1], "duration count")) *
+      expectDefined(DURATION_UNIT_MS[expectDefined(part[2], "duration unit")], "duration unit ms"),
+  );
+}
+
+/**
+ * Durable waits have a one-second resolution. Inngest parses `step.sleep`'s
+ * argument into whole time units, so a positive sub-second duration rounds up
+ * to one second and anything longer truncates down to whole seconds. These
+ * tests run through the real execution engine rather than a `step` stub,
+ * because a stub records whatever string it was handed and so cannot observe
+ * that rewrite at all.
+ *
+ * Two layers, and the order matters. The first suite pins the SDK's parsing of
+ * raw durations — the premise {@link durableSleepMs} exists to mirror, and the
+ * reason a sub-second idle config is allowed to wait a full second. The second
+ * suite pins our own timers, which pre-quantise their duration and so never
+ * exercise the rewrite themselves.
+ */
+describe("inngest step.sleep — duration quantisation (upstream behavior)", () => {
   /**
    * Minimal function whose only op is a sleep of exactly the duration under
    * test. `step.name` on that op is the duration string after the SDK's own
@@ -297,6 +332,32 @@ describe("inngest step.sleep — sub-second clamp (upstream behavior)", () => {
     // still be green.
     expect(await engineSleepDuration("3000ms")).toBe("3s");
   });
+
+  // A duration over one second keeps only whole units, so the sub-second
+  // remainder is dropped rather than rounded — there is no millisecond suffix
+  // for the SDK to write it into.
+  it.each([
+    ["1500ms", "1s"],
+    ["2500ms", "2s"],
+    ["59999ms", "59s"],
+    ["90500ms", "1m30s"],
+  ])("truncates the requested duration %s to %s", async (requested, expected) => {
+    expect(await engineSleepDuration(requested)).toBe(expected);
+  });
+
+  /**
+   * The invariant the timer handlers rely on: a duration derived from
+   * {@link durableSleepMs} survives the SDK's parsing unchanged, so the value
+   * recorded on the histogram is the wait the executor was asked for.
+   */
+  it.each([[1], [500], [999], [1000], [1500], [2500], [3000], [59999], [90500]])(
+    "durableSleepMs(%i) round-trips through the engine unchanged",
+    async (requested) => {
+      const ms = durableSleepMs(requested);
+      const duration = expectDefined(await engineSleepDuration(`${ms}ms`), "sleep duration");
+      expect(inngestDurationToMs(duration)).toBe(ms);
+    },
+  );
 });
 
 describe("legacy timers — durable sleep floor", () => {
@@ -311,20 +372,17 @@ describe("legacy timers — durable sleep floor", () => {
     sendSpy.mockRestore();
   });
 
-  /** Parse the `<n>s` duration strings these timers produce back to ms. */
-  function sleepDurationToMs(duration: string): number {
-    const match = /^(\d+)s$/.exec(duration);
-    if (!match) throw new Error(`unexpected sleep duration string: ${duration}`);
-    return Number(expectDefined(match[1], "seconds")) * 1000;
-  }
-
   it.each([
     [0, 0],
     [1, 1000],
     [500, 1000],
     [999, 1000],
     [1000, 1000],
+    [1500, 1000],
+    [2500, 2000],
     [3000, 3000],
+    [59999, 59000],
+    [90500, 90000],
   ])("durableSleepMs(%i) is %i", (requested, expected) => {
     expect(durableSleepMs(requested)).toBe(expected);
   });
@@ -336,6 +394,23 @@ describe("legacy timers — durable sleep floor", () => {
     ["idle" as const, 1, { idleTimeoutMs: 500, maxWaitMs: 5000 }, "debounce/idle", 500, "1s"],
     ["maxwait" as const, 2, { idleTimeoutMs: 3000, maxWaitMs: 500 }, "debounce/maxwait", 500, "1s"],
     ["idle" as const, 1, { idleTimeoutMs: 3000, maxWaitMs: 500 }, "debounce/idle", 3000, "3s"],
+    ["idle" as const, 1, { idleTimeoutMs: 2500, maxWaitMs: 500 }, "debounce/idle", 2500, "2s"],
+    [
+      "maxwait" as const,
+      2,
+      { idleTimeoutMs: 0, maxWaitMs: 30500 },
+      "debounce/maxwait",
+      30500,
+      "30s",
+    ],
+    [
+      "maxwait" as const,
+      2,
+      { idleTimeoutMs: 0, maxWaitMs: 90500 },
+      "debounce/maxwait",
+      90500,
+      "1m30s",
+    ],
   ])(
     "%s timer records the wait Inngest performs, not the one requested (%#)",
     async (kind, fnIndex, config, eventName, timeoutMs, expectedDuration) => {
@@ -364,7 +439,7 @@ describe("legacy timers — durable sleep floor", () => {
           steps: [{ id: "wait", handler: () => null }],
         });
 
-        expect(recordSpy).toHaveBeenCalledWith(sleepDurationToMs(sleepDuration), { kind });
+        expect(recordSpy).toHaveBeenCalledWith(inngestDurationToMs(sleepDuration), { kind });
       } finally {
         recordSpy.mockRestore();
       }

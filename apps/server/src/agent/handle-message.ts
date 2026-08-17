@@ -1,4 +1,6 @@
 import { NonRetriableError } from "inngest";
+import type { Logger } from "pino";
+import * as R from "remeda";
 import type { Transactor } from "../db/index.js";
 import { inngest } from "../inngest/client.js";
 import {
@@ -146,6 +148,72 @@ async function resolveOrFail(
     }
     throw err;
   }
+}
+
+/** What the streaming adapters were shown during one turn. */
+interface StreamedOutput {
+  /** Every `text_delta` forwarded this turn, concatenated in order. */
+  text: string;
+  /** Every `tool_start` id forwarded this turn, in order. */
+  toolUseIds: ReadonlyArray<string>;
+}
+
+/**
+ * Work out what the degraded off-ramp has to take back off the user's screen.
+ *
+ * The orchestrator is the only component that sees both sides: `streamed` is
+ * what the adapters were told during the turn, `newMessages` is what the
+ * persist step is about to write. The difference is the degrade-triggering
+ * iteration's output — the loop drops that iteration, so the user must not be
+ * left reading it. Everything else streamed this turn is persisted and stays
+ * exactly where it is.
+ *
+ * The persisted assistant text is a prefix of the streamed text: the dropped
+ * iteration is always the last one, and each earlier iteration's text blocks
+ * are reassembled from precisely the deltas that were forwarded. When that
+ * prefix relationship doesn't hold, the turn is persisting text that was never
+ * streamed — the non-streaming replay is the one path that does this, since it
+ * deliberately doesn't re-emit its deltas — and there is no honest retraction
+ * to make, so the text stands and only tool cards are reconciled.
+ *
+ * Returns null when everything streamed is being persisted (the iteration-cap
+ * degrade drops nothing) — there is no retraction to push.
+ */
+function computeRetraction(
+  streamed: StreamedOutput,
+  newMessages: ReadonlyArray<Message>,
+  log: Logger,
+): { text: string; toolUseIds: ReadonlyArray<string> } | null {
+  const persistedText = R.pipe(
+    newMessages,
+    R.filter((m) => m.role === "assistant"),
+    R.flatMap((m) =>
+      typeof m.content === "string"
+        ? [m.content]
+        : R.flatMap(m.content, (b) => (b.type === "text" ? [b.text] : [])),
+    ),
+    R.join(""),
+  );
+  const persistedToolUseIds = new Set(
+    R.pipe(
+      newMessages,
+      R.flatMap((m) => (typeof m.content === "string" ? [] : m.content)),
+      R.flatMap((b) => (b.type === "tool_use" ? [b.id] : [])),
+    ),
+  );
+
+  const textIsPrefix = streamed.text.startsWith(persistedText);
+  if (!textIsPrefix) {
+    log.warn(
+      { streamedChars: streamed.text.length, persistedChars: persistedText.length },
+      "degraded turn persists assistant text that was never streamed; retracting no text",
+    );
+  }
+  const text = textIsPrefix ? streamed.text.slice(persistedText.length) : "";
+  const toolUseIds = streamed.toolUseIds.filter((id) => !persistedToolUseIds.has(id));
+
+  if (text.length === 0 && toolUseIds.length === 0) return null;
+  return { text, toolUseIds };
 }
 
 /**
@@ -852,6 +920,14 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       );
       historyMessages = compactResult.messages;
 
+      // Ledger of what the streaming adapters were actually shown. The degraded
+      // off-ramp below diffs it against the messages the loop hands back to
+      // persistence, so the retraction names exactly the output that isn't
+      // going into the transcript. Non-durable by nature: on an Inngest retry
+      // the whole streaming section re-runs and the ledger refills with the
+      // replayed turn's own output.
+      const streamed: { text: string; toolUseIds: string[] } = { text: "", toolUseIds: [] };
+
       let result: AgentLoopResult;
       try {
         result = await runStreamingAgentLoop({
@@ -861,7 +937,11 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           messages: historyMessages,
           tools: turnTools,
           service,
-          onEvent: (event: StreamEvent) => delivery.push(event),
+          onEvent: (event: StreamEvent) => {
+            if (event.type === "text_delta") streamed.text += event.text;
+            else if (event.type === "tool_start") streamed.toolUseIds.push(event.id);
+            return delivery.push(event);
+          },
           // Opt-in per-tool durability. The streaming section itself is
           // non-durable (can't stream out of `step.run`), but tool handlers
           // run *between* stream events — wrapping an individual handler in
@@ -891,14 +971,20 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             subtype: result.degraded.subtype,
             log: turnLogger,
           });
-          // Retract first. Text streamed before the degrade fired is already
+          // Retract first. Output streamed before the degrade fired is already
           // on the user's screen (Telegram edits the live message every ~500ms;
           // the web adapter forwards every delta as an SSE frame), and the loop
-          // drops that iteration from `newMessages` — so appending the apology
-          // to it would leave the user reading a truncated fragment welded to
-          // an apology, none of which matches the single assistant message this
-          // turn actually persists. `retract` is a no-op when nothing streamed.
-          await delivery.push({ type: "retract" });
+          // drops the triggering iteration from `newMessages` — so appending
+          // the apology to it would leave the user reading a truncated fragment
+          // welded to an apology that history doesn't contain. The retraction
+          // names that iteration's output and nothing else: text and tool calls
+          // from earlier iterations are persisted, so they stay. Nothing to
+          // retract (nothing streamed, or an iteration-cap degrade that
+          // persists every iteration) means no event at all.
+          const retraction = computeRetraction(streamed, result.newMessages, turnLogger);
+          if (retraction) {
+            await delivery.push({ type: "retract", ...retraction });
+          }
           await delivery.push({ type: "text_delta", text: apology });
           result = {
             ...result,

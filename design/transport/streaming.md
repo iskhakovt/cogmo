@@ -27,16 +27,17 @@ type StreamEvent =
   | { type: "tool_start"; name: string; input: unknown }
   | { type: "tool_result"; name: string; output: string; isError?: boolean }
   | { type: "status"; message: string }
-  | { type: "retract" }
+  | { type: "retract"; text: string; toolUseIds: ReadonlyArray<string> }
 ```
 
 Not every member comes from a provider stream — the union is the
 orchestrator→adapter presentation channel. `status` is emitted by the pre-flight
-compaction stage, and `retract` by the degraded off-ramp: it tells adapters to
-discard the assistant text streamed so far this turn so the degraded reply is
-the whole of what the user reads (see `design/agent-resilience.md` → Degraded
-reply). It covers text only; mid-stream attachments and tool records belong to
-iterations that completed and stand.
+compaction stage, and `retract` by the degraded off-ramp: it names the streamed
+output the turn will not persist — the degrade-triggering iteration's text (the
+tail of what streamed) and its tool-call ids — so what the user is left reading
+is what history holds (see `design/agent-resilience.md` → Degraded reply).
+Output from earlier iterations of the turn is persisted, is not named, and
+stays; mid-stream attachments cannot be taken back.
 
 Finish and abort are signaled via `StreamHandle` methods, not events — they are adapter lifecycle, not broadcast content.
 
@@ -107,7 +108,7 @@ Each adapter decides how to render `StreamEvent`s. The interface delivers typed 
 - `text_delta` → accumulate text; if `allowEdits` (default), throttled `editMessage` every ~500ms; rotate to a new message once accumulated source exceeds `chunkChars`
 - `tool_start` / `status` → append status text (e.g. "Searching..."). **Append-only mode (`allowEdits=false`) drops these** — the typing heartbeat carries progress instead
 - `tool_result` → skip (LLM will summarize); image/document results deliver out-of-band via `sendPhoto` / `sendDocument`
-- `retract` → clear the accumulated buffer, keep the message id so the next text edits the message the fragment was in. Chunks that already overflowed into their own messages can't be edited back and stay
+- `retract` → cut the named text — and anything the buffer holds after it, i.e. that iteration's own banners — out of the accumulated buffer, keeping the message id so the next text edits the message the fragment was in. Text from earlier iterations stays buffered and visible. Chunks that already overflowed into their own messages can't be edited back, so a retraction reaching into one clears the editable remainder and leaves the chunk
 - First push in append-only mode also kicks `sendChatAction("typing")` on a 3.5s refresh loop, cleared on `finish` / `abort`
 - `finish()` → emit any remaining buffer with HTML formatting; in edit mode this is the final `editMessage`, in append-only mode it's a fresh `sendMessage`
 - `abort(error)` → append `⚠️ ${error}` and emit (edit in edit mode, fresh send in append-only mode)

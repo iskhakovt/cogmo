@@ -320,16 +320,27 @@ class TelegramStreamHandle implements StreamHandle {
 
   async push(event: StreamEvent): Promise<void> {
     if (event.type === "retract") {
-      // Drop the buffered text (and any tool/status banners woven into it).
+      // Cut the retracted text — and everything the buffer holds after it —
+      // out of the live message's body. The event names only the output the
+      // turn won't persist, which is always the tail of the stream, so the
+      // trailing tool / status banners belong to that same un-persisted
+      // iteration and go with it; text from earlier iterations is persisted
+      // and stays visible. An empty `text` (a degrade that streamed no prose)
+      // leaves the buffer alone.
+      //
       // `#messageId` is deliberately kept: the next push writes the degraded
       // reply into the same message via `#edit`, replacing the fragment the
       // user can see rather than leaving it above a second message. When the
-      // buffer had already overflowed, `#finalizeChunk` cleared `#messageId`
-      // and those chunks are their own messages — Telegram gives no handle to
-      // edit them back, so they stay and the reply lands in a fresh message.
+      // retracted text is no longer in the buffer — `#finalizeChunk` already
+      // flushed part of it into its own message, which Telegram gives no
+      // handle to edit back — the whole editable remainder is that text's
+      // suffix, so the buffer clears and the already-sent chunk stays.
       // Nothing is emitted here: Telegram rejects an empty message body, so
       // there is no "blank it now" call to make.
-      this.#accumulated = "";
+      if (event.text.length > 0) {
+        const idx = this.#accumulated.lastIndexOf(event.text);
+        this.#accumulated = idx >= 0 ? this.#accumulated.slice(0, idx) : "";
+      }
       return;
     }
     if (event.type === "text_delta") {
@@ -559,14 +570,22 @@ class TelegramStreamHandle implements StreamHandle {
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : "";
         if (msg.includes("can't parse entities")) {
-          // On the edit path the message already shows the plain-text body
-          // from prior throttled edits, so no follow-up call is needed. On
-          // the send path the chunk hasn't been delivered yet — retry plain.
-          if (this.#messageId == null) {
-            logger.warn("telegram: chunk HTML parse failed, retrying as plain text");
-            await this.#bot.api.sendMessage(this.#chatId, text);
-          } else {
-            logger.warn("telegram: stream finish HTML parse failed, keeping plain text");
+          logger.warn("telegram: chunk HTML parse failed, retrying as plain text");
+          // Put the plain body on the surface on both paths. The edit path
+          // can't lean on "the throttled edits already left this text there":
+          // a retraction cuts the body those edits wrote out of the chunk, so
+          // skipping the retry would leave the user looking at retracted text
+          // with the reply nowhere. Telegram answers a genuinely redundant
+          // edit with "message is not modified", which is the intended no-op.
+          try {
+            if (this.#messageId == null) {
+              await this.#bot.api.sendMessage(this.#chatId, text);
+            } else {
+              await this.#bot.api.editMessageText(this.#chatId, this.#messageId, text);
+            }
+          } catch (plainErr: unknown) {
+            const plainMsg = plainErr instanceof Error ? plainErr.message : "";
+            if (!plainMsg.includes("message is not modified")) throw plainErr;
           }
         } else if (!msg.includes("message is not modified")) {
           throw err;

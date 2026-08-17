@@ -58,8 +58,17 @@ const LABEL_ROLE = "cogmo.role";
 /**
  * What re-attaching to a sandbox in a given provider state requires
  * before the next `execStreaming` can run against it.
+ *
+ *   - `ready`    — nothing to do.
+ *   - `start`    — dispatch `Sandbox.start()`.
+ *   - `wait`     — dispatch `Sandbox.waitUntilStarted()`; the sandbox is
+ *                  already headed for `STARTED`.
+ *   - `settle`   — the sandbox is mid-transition to a state that isn't
+ *                  necessarily `STARTED`. Poll until it lands, then
+ *                  re-decide from the state it landed on.
+ *   - `terminal` — unusable.
  */
-type ReattachAction = "ready" | "start" | "wait" | "terminal";
+type ReattachAction = "ready" | "start" | "wait" | "settle" | "terminal";
 
 /**
  * Every `SandboxState` the SDK knows, mapped to its re-attach action.
@@ -72,22 +81,44 @@ const REATTACH_ACTIONS: Record<SandboxState, ReattachAction> = {
   [SandboxState.STARTED]: "ready",
 
   // Resting states. Daytona persists the filesystem across stop and
-  // archive and the memory image across pause; `start()` covers all
-  // three and returns once the sandbox is running.
+  // archive and the memory image across pause, and these three are
+  // exactly the input domain the API documents for its start endpoint:
+  // "Starts a stopped or archived sandbox, or resumes a paused sandbox.
+  // The transition taken depends on the current sandbox state."
   [SandboxState.STOPPED]: "start",
   [SandboxState.ARCHIVED]: "start",
   [SandboxState.PAUSED]: "start",
 
-  // On the way to one of those resting states. `start()` is still the
-  // request to make: the provider either queues it behind the in-flight
-  // transition or rejects it, and a rejection is an error the
-  // orchestrator's retry budget can act on.
-  [SandboxState.STOPPING]: "start",
-  [SandboxState.ARCHIVING]: "start",
-  [SandboxState.PAUSING]: "start",
+  // On the way to one of those resting states, so outside the start
+  // endpoint's documented input domain — and Daytona's sandbox docs say
+  // a sandbox in `stopping` "does not accept new requests". Nothing in
+  // the SDK or the generated API client documents a start request being
+  // queued behind an in-flight transition, so don't dispatch one: let
+  // the transition land, then decide from the state it landed on.
+  [SandboxState.STOPPING]: "settle",
+  [SandboxState.ARCHIVING]: "settle",
+  [SandboxState.PAUSING]: "settle",
 
-  // Already climbing towards STARTED — a `start()` here would race the
-  // provider's own transition, so wait for it to land instead.
+  // Transitions that return to whatever the sandbox was before, which
+  // for a re-attach is as likely to be STOPPED as STARTED.
+  // `Sandbox.createSnapshot`'s SDK docstring: the sandbox "will
+  // temporarily enter a 'snapshotting' state and return to its previous
+  // state when complete"; `Sandbox.resize`'s: "Disk resize requires a
+  // stopped Sandbox". The SDK's own waiters for both
+  // (`waitForSnapshotComplete`, `waitForResizeComplete`) target every
+  // state except the transitional one, not STARTED — whereas
+  // `waitUntilStarted` resolves on STARTED alone, so waiting on it here
+  // would burn its full 60s cap and then throw a timeout at a sandbox
+  // that had settled back to STOPPED and only needed a start.
+  [SandboxState.SNAPSHOTTING]: "settle",
+  [SandboxState.RESIZING]: "settle",
+
+  // Already climbing towards STARTED — `waitUntilStarted` is the SDK's
+  // own completion condition on every path that produces these:
+  // `Daytona.create` for CREATING / PENDING_BUILD / BUILDING_SNAPSHOT /
+  // PULLING_SNAPSHOT, `Sandbox.start` for STARTING / RESUMING /
+  // RESTORING, `Sandbox.fork` for the forked sandbox. A `start()` here
+  // would race the provider's own transition.
   [SandboxState.CREATING]: "wait",
   [SandboxState.STARTING]: "wait",
   [SandboxState.RESUMING]: "wait",
@@ -95,8 +126,6 @@ const REATTACH_ACTIONS: Record<SandboxState, ReattachAction> = {
   [SandboxState.PENDING_BUILD]: "wait",
   [SandboxState.BUILDING_SNAPSHOT]: "wait",
   [SandboxState.PULLING_SNAPSHOT]: "wait",
-  [SandboxState.SNAPSHOTTING]: "wait",
-  [SandboxState.RESIZING]: "wait",
   [SandboxState.FORKING]: "wait",
 
   // No way back: gone, going, or broken.
@@ -105,11 +134,22 @@ const REATTACH_ACTIONS: Record<SandboxState, ReattachAction> = {
   [SandboxState.ERROR]: "terminal",
   [SandboxState.BUILD_FAILED]: "terminal",
 
-  // The provider can't say. One `waitUntilStarted` poll loop settles it
-  // — either the sandbox reaches STARTED or the SDK throws.
-  [SandboxState.UNKNOWN]: "wait",
-  [SandboxState.UNKNOWN_DEFAULT_OPEN_API]: "wait",
+  // The provider can't say what the sandbox is doing, so there's no
+  // grounds to assume it is climbing to STARTED. Poll until it reports
+  // something actionable.
+  [SandboxState.UNKNOWN]: "settle",
+  [SandboxState.UNKNOWN_DEFAULT_OPEN_API]: "settle",
 };
+
+/**
+ * Poll cadence and wall-clock cap for driving a mid-transition sandbox
+ * (`ReattachAction` `"settle"`) to a state we can act on. The cap
+ * matches `Sandbox.waitUntilStarted`'s own 60s default, so settling
+ * plus the follow-up start each get one SDK-sized budget rather than
+ * one of them silently swallowing both.
+ */
+const SETTLE_POLL_INTERVAL_MS = 1_000;
+const SETTLE_TIMEOUT_MS = 60_000;
 
 /** Refresh the sandbox's auto-stop activity timer this often, while a session is live. */
 const KEEPALIVE_INTERVAL_MS = 5 * 60 * 1000;
@@ -826,13 +866,14 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
  * `Sandbox.state` is optional in the DTO and the API can report a state
  * string newer than the installed api-client's enum, so the lookup can
  * miss at runtime even though `REATTACH_ACTIONS` is total at the type
- * level. Both misses resolve to `"wait"`: one poll loop either confirms
- * the sandbox is usable or throws, which beats assuming it runs.
+ * level. Both misses resolve to `"settle"`: a state we can't interpret
+ * says nothing about which of `start()` and `waitUntilStarted()` applies,
+ * and one refresh is enough to find out.
  */
 function reattachAction(state: SandboxState | undefined): ReattachAction {
-  if (state === undefined) return "wait";
+  if (state === undefined) return "settle";
   const known: ReattachAction | undefined = REATTACH_ACTIONS[state];
-  return known ?? "wait";
+  return known ?? "settle";
 }
 
 /**
@@ -848,11 +889,55 @@ async function bringUpForReattach(
     { sandboxId: sdkSandbox.id, prior: sdkSandbox.state, action },
     "bringing re-attached Daytona sandbox up to started",
   );
-  if (action === "start") {
-    await sdkSandbox.start();
-    return;
+  const settled = action === "settle" ? await settleReattachAction(sdkSandbox) : action;
+  switch (settled) {
+    case "ready":
+      return;
+    case "start":
+      await sdkSandbox.start();
+      return;
+    case "wait":
+      await sdkSandbox.waitUntilStarted();
+      return;
+    case "terminal":
+      throw new Error(
+        `Daytona sandbox ${sdkSandbox.id} settled into terminal state=${sdkSandbox.state}; cannot resume`,
+      );
   }
-  await sdkSandbox.waitUntilStarted();
+}
+
+/**
+ * Poll a mid-transition sandbox until it leaves the state it was
+ * observed in, and return the re-attach action its settled state calls
+ * for.
+ *
+ * `Sandbox.refreshData()` issues one `GET /sandbox/{id}` and writes the
+ * response back onto the handle, so `sdkSandbox.state` is current after
+ * each iteration. It raises `DaytonaNotFoundError` if the sandbox has
+ * gone away mid-poll — the same class `daytona.get` raises for a missing
+ * sandbox, which `resume` already propagates.
+ */
+async function settleReattachAction(
+  sdkSandbox: DaytonaSdkSandbox,
+): Promise<Exclude<ReattachAction, "settle">> {
+  const deadline = Date.now() + SETTLE_TIMEOUT_MS;
+  while (true) {
+    await sdkSandbox.refreshData();
+    const action = reattachAction(sdkSandbox.state);
+    if (action !== "settle") {
+      log.info(
+        { sandboxId: sdkSandbox.id, settled: sdkSandbox.state, action },
+        "re-attached Daytona sandbox left its mid-transition state",
+      );
+      return action;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Daytona sandbox ${sdkSandbox.id} stayed in state=${sdkSandbox.state} for ${SETTLE_TIMEOUT_MS}ms; cannot resume`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, SETTLE_POLL_INTERVAL_MS));
+  }
 }
 
 /**

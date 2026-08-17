@@ -10,5 +10,9 @@ export type StreamEvent =
   | { type: "tool_start"; id: string; name: string; input: unknown }
   | { type: "tool_result"; name: string; output: string; isError?: boolean }
   | { type: "status"; message: string }
-  /** Discard the assistant text streamed so far this turn; keep tool records. */
-  | { type: "retract" };
+  /**
+   * Un-show the streamed assistant output the turn won't persist: `text` is the
+   * exact (tail) text to drop, `toolUseIds` the tool cards to drop with it.
+   * Everything not named here is persisted and stays.
+   */
+  | { type: "retract"; text: string; toolUseIds: ReadonlyArray<string> };

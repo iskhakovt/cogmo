@@ -154,17 +154,21 @@ export interface LlmResponse {
  * `status` is emitted by the pre-flight compaction stage, and `retract` by the
  * degraded off-ramp.
  *
- * `retract` tells every adapter to discard the assistant text it has streamed
- * so far this turn. The orchestrator emits it immediately before the degraded
- * reply so the user's visible turn ends as the single coherent apology instead
- * of a truncated fragment with the apology glued onto its last word — and so
- * what the user sees matches what gets persisted (the fragment is dropped from
- * history; see design/agent-resilience.md → Degraded reply). It retracts
- * *text* only: attachments already delivered mid-stream (`sendPhoto`,
- * `sendDocument`) and tool-call records are side effects of iterations that ran
- * to completion, so they stand. Adapters apply it to whatever is still
- * editable — output already committed to an immutable surface (a Telegram
- * chunk that overflowed into its own message) stays visible.
+ * `retract` names the streamed assistant output that the turn is NOT going to
+ * persist, so the user is never left reading something the transcript doesn't
+ * contain. The orchestrator emits it immediately before the degraded reply:
+ * `text` is the exact streamed text the loop dropped from the turn's messages
+ * — always the tail, since the degrade-triggering iteration is the last one —
+ * and `toolUseIds` are that same iteration's tool calls, which on a
+ * `context_overflow` or `refusal` degrade never even executed. Output from
+ * earlier iterations of the turn is deliberately NOT named: those messages are
+ * persisted, so they stay on screen. See design/agent-resilience.md → Degraded
+ * reply.
+ *
+ * Attachments already delivered mid-stream (`sendPhoto`, `sendDocument`) can't
+ * be taken back and are never named. Adapters apply the retraction to whatever
+ * is still editable — output already committed to an immutable surface (a
+ * Telegram chunk that overflowed into its own message) stays visible.
  */
 export type StreamEvent =
   | { type: "text_delta"; text: string }
@@ -172,7 +176,7 @@ export type StreamEvent =
   | { type: "tool_start"; id: string; name: string; input: unknown }
   | { type: "tool_result"; name: string; output: string; isError?: boolean }
   | { type: "status"; message: string }
-  | { type: "retract" };
+  | { type: "retract"; text: string; toolUseIds: ReadonlyArray<string> };
 
 /**
  * Result of a streaming LLM call.

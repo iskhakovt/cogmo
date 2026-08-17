@@ -2778,17 +2778,20 @@ describe("createHandleMessage", () => {
     const deps = mockDeps({
       resolveProvider: mockResolver(synthesisProvider),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
-      runStreamingAgentLoop: vi.fn().mockResolvedValue({
-        text: "",
-        messages: [],
-        newMessages: [],
-        usage: { inputTokens: 10, outputTokens: 5 },
-        model: "mock-model",
-        iterations: 2,
-        degraded: {
-          reason: "request exceeded the model's context window",
-          subtype: "context_overflow",
-        },
+      runStreamingAgentLoop: vi.fn().mockImplementation(async (params) => {
+        await params.onEvent({ type: "text_delta", text: "The three key points are: (1) the dep" });
+        return {
+          text: "",
+          messages: [],
+          newMessages: [],
+          usage: { inputTokens: 10, outputTokens: 5 },
+          model: "mock-model",
+          iterations: 1,
+          degraded: {
+            reason: "request exceeded the model's context window",
+            subtype: "context_overflow",
+          },
+        };
       }),
     });
 
@@ -2800,13 +2803,171 @@ describe("createHandleMessage", () => {
 
     const pushed = vi.mocked(handle.push).mock.calls.flat();
     const retractIdx = pushed.findIndex((e) => e.type === "retract");
-    const apologyIdx = pushed.findIndex((e) => e.type === "text_delta");
+    const apologyIdx = pushed.findIndex(
+      (e) => e.type === "text_delta" && e.text.startsWith("The conversation outgrew"),
+    );
     expect(retractIdx).toBeGreaterThanOrEqual(0);
     expect(apologyIdx).toBeGreaterThan(retractIdx);
+    expect(pushed[retractIdx]).toEqual({
+      type: "retract",
+      text: "The three key points are: (1) the dep",
+      toolUseIds: [],
+    });
     expect(pushed[apologyIdx]).toEqual({
       type: "text_delta",
       text: "The conversation outgrew the window — start a new one.",
     });
+  });
+
+  it("retracts only the un-persisted iteration on a multi-iteration degrade", async () => {
+    // The loop drops the degrade-triggering iteration and keeps every
+    // completed one, so a turn that narrated its first iteration has that
+    // prose in `newMessages` and therefore in history. The retraction has to
+    // name the trailing fragment alone — naming the whole turn would erase
+    // text from the user's screen that the transcript still holds, and leave
+    // the persisted tool card of a completed iteration unexplained. The
+    // overflowing iteration's own tool call never executed (the loop exits
+    // before `executeToolCalls`), so its card goes with the fragment.
+    const handle = mockDeliveryHandle();
+    const synthesisProvider = mockProvider({
+      chat: vi.fn().mockResolvedValue({
+        content: [{ type: "text", text: "Ran out of room mid-answer — ask me again." }],
+        stopReason: "end_turn",
+        model: "mock-model",
+        usage: { inputTokens: 100, outputTokens: 12 },
+      }),
+    });
+    const persisted = [
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Let me check the weather." },
+          { type: "tool_use", id: "t1", name: "get_weather", input: { city: "Paris" } },
+        ],
+      },
+      {
+        role: "user",
+        content: [{ type: "tool_result", toolUseId: "t1", content: "18C, sunny" }],
+      },
+    ];
+    const deps = mockDeps({
+      resolveProvider: mockResolver(synthesisProvider),
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      runStreamingAgentLoop: vi.fn().mockImplementation(async (params) => {
+        // Iteration 1 — narration + a tool call that ran to completion.
+        await params.onEvent({ type: "text_delta", text: "Let me check the weather." });
+        await params.onEvent({
+          type: "tool_start",
+          id: "t1",
+          name: "get_weather",
+          input: { city: "Paris" },
+        });
+        await params.onEvent({ type: "tool_result", name: "get_weather", output: "18C, sunny" });
+        // Iteration 2 — streams a fragment and another tool call, then the
+        // window overflows and the whole iteration is dropped.
+        await params.onEvent({ type: "text_delta", text: " It's 18C in Paris and" });
+        await params.onEvent({
+          type: "tool_start",
+          id: "t2",
+          name: "get_weather",
+          input: { city: "Tokyo" },
+        });
+        return {
+          text: "",
+          messages: [],
+          newMessages: persisted,
+          usage: { inputTokens: 10, outputTokens: 5 },
+          model: "mock-model",
+          iterations: 2,
+          degraded: {
+            reason: "request exceeded the model's context window",
+            subtype: "context_overflow",
+          },
+        };
+      }),
+    });
+
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    const pushed = vi.mocked(handle.push).mock.calls.flat();
+    const retract = expectDefined(
+      pushed.find((e) => e.type === "retract"),
+      "retract event",
+    );
+    expect(retract).toEqual({
+      type: "retract",
+      text: " It's 18C in Paris and",
+      toolUseIds: ["t2"],
+    });
+
+    // Everything the retraction leaves alone is what persistence writes.
+    expect(deps.agentStore.insertMessages).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        messages: [
+          ...persisted,
+          {
+            role: "assistant",
+            content: [{ type: "text", text: "Ran out of room mid-answer — ask me again." }],
+          },
+        ],
+      }),
+    );
+  });
+
+  it("pushes no retract when the degrade persists every streamed iteration", async () => {
+    // The iteration-cap backstop degrades without dropping anything — all 20
+    // iterations are in `newMessages`. There is nothing un-persisted on the
+    // user's screen, so retracting would delete text that history holds.
+    const handle = mockDeliveryHandle();
+    const synthesisProvider = mockProvider({
+      chat: vi.fn().mockResolvedValue({
+        content: [{ type: "text", text: "I went in circles on that — try narrowing it down." }],
+        stopReason: "end_turn",
+        model: "mock-model",
+        usage: { inputTokens: 100, outputTokens: 12 },
+      }),
+    });
+    const deps = mockDeps({
+      resolveProvider: mockResolver(synthesisProvider),
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      runStreamingAgentLoop: vi.fn().mockImplementation(async (params) => {
+        await params.onEvent({ type: "text_delta", text: "Still working on it." });
+        await params.onEvent({ type: "tool_start", id: "t1", name: "get_weather", input: {} });
+        await params.onEvent({ type: "tool_result", name: "get_weather", output: "18C" });
+        return {
+          text: "",
+          messages: [],
+          newMessages: [
+            {
+              role: "assistant",
+              content: [
+                { type: "text", text: "Still working on it." },
+                { type: "tool_use", id: "t1", name: "get_weather", input: {} },
+              ],
+            },
+            { role: "user", content: [{ type: "tool_result", toolUseId: "t1", content: "18C" }] },
+          ],
+          usage: { inputTokens: 10, outputTokens: 5 },
+          model: "mock-model",
+          iterations: 20,
+          degraded: { reason: "iteration_cap", subtype: null },
+        };
+      }),
+    });
+
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    const pushed = vi.mocked(handle.push).mock.calls.flat();
+    expect(pushed.some((e) => e.type === "retract")).toBe(false);
   });
 
   it("does not retract on a healthy turn", async () => {

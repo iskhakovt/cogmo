@@ -716,8 +716,27 @@ describe("telegram adapter", () => {
 
       await handle.finish();
 
-      // First call: HTML attempt, second call would be absent (keeps plain text from stream)
-      expect(mockBotApi.editMessageText).toHaveBeenCalledTimes(1);
+      // First call is the HTML attempt; the retry writes the plain body rather
+      // than trusting whatever the throttled edits left on the message.
+      expect(mockBotApi.editMessageText).toHaveBeenCalledTimes(2);
+      expect(mockBotApi.editMessageText).toHaveBeenLastCalledWith(42, 100, "done");
+    });
+
+    it("finish swallows not-modified on the plain-text retry", async () => {
+      // The common case: the throttled edits already wrote this exact plain
+      // body, so Telegram rejects the retry as redundant. That's the no-op the
+      // retry wants — it must not surface as a failed turn.
+      const adapter = await createStreamingAdapter();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({ type: "text_delta", text: "done" });
+      mockBotApi.editMessageText
+        .mockReset()
+        .mockRejectedValueOnce(new Error("can't parse entities"))
+        .mockRejectedValueOnce(new Error("message is not modified"))
+        .mockResolvedValue(true);
+
+      await expect(handle.finish()).resolves.toBeUndefined();
     });
 
     it("abort appends error to message", async () => {
@@ -746,7 +765,11 @@ describe("telegram adapter", () => {
       );
       mockBotApi.editMessageText.mockClear();
 
-      await handle.push({ type: "retract" });
+      await handle.push({
+        type: "retract",
+        text: "The three key points are: (1) the dep",
+        toolUseIds: [],
+      });
       await handle.push({ type: "text_delta", text: "This conversation is too long." });
       await handle.finish();
 
@@ -763,6 +786,68 @@ describe("telegram adapter", () => {
       });
       // No second message: the fragment was replaced, not followed.
       expect(mockBotApi.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it("retract keeps the earlier iteration's text and cuts only the named tail", async () => {
+      // A multi-iteration turn: the first iteration narrated and ran a tool, so
+      // it is in the turn's persisted messages; the second streamed a fragment
+      // and then degraded. The retraction names that fragment alone, and the
+      // banner appended after it belongs to the same dropped iteration — so
+      // both go, and the narration the transcript holds stays on the message.
+      const adapter = await createStreamingAdapter();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({ type: "text_delta", text: "Let me check the weather.\n" });
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 600);
+      await handle.push({ type: "tool_start", id: "t1", name: "get_weather", input: {} });
+      await handle.push({ type: "text_delta", text: "18C in Paris and rising, so" });
+      await handle.push({ type: "tool_start", id: "t2", name: "get_weather", input: {} });
+      mockBotApi.editMessageText.mockClear();
+
+      await handle.push({
+        type: "retract",
+        text: "18C in Paris and rising, so",
+        toolUseIds: ["t2"],
+      });
+      await handle.push({ type: "text_delta", text: "I ran out of room, ask me again." });
+      await handle.finish();
+
+      const bodies = mockBotApi.editMessageText.mock.calls.map((call) => String(call[2]));
+      const final = expectDefined(bodies.at(-1), "final message body");
+      expect(final).toContain("Let me check the weather.");
+      expect(final).toContain("get_weather");
+      expect(final).toContain("I ran out of room, ask me again.");
+      expect(final).not.toContain("18C in Paris");
+      // The retraction edits the message the turn was already writing into.
+      expect(mockBotApi.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it("delivers the reply as plain text when its HTML render fails after a retraction", async () => {
+      // A retraction cuts the body the throttled edits wrote out of the chunk,
+      // so on a parse failure the message shows retracted text and the reply
+      // has never been written. The plain-text retry has to write it.
+      const adapter = await createStreamingAdapter();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({ type: "text_delta", text: "The three key points are: (1) the dep" });
+      await handle.push({
+        type: "retract",
+        text: "The three key points are: (1) the dep",
+        toolUseIds: [],
+      });
+      await handle.push({ type: "text_delta", text: "I hit a **wall** there, try again." });
+
+      mockBotApi.editMessageText
+        .mockReset()
+        .mockRejectedValueOnce(new Error("can't parse entities"))
+        .mockResolvedValue(true);
+      await handle.finish();
+
+      const bodies = mockBotApi.editMessageText.mock.calls.map((call) => String(call[2]));
+      // First the HTML render, then the source markdown as plain text — the
+      // user ends up with the reply either way, never the retracted fragment.
+      expect(bodies[0]).toContain("<b>wall</b>");
+      expect(bodies.at(-1)).toBe("I hit a **wall** there, try again.");
     });
 
     it("retry dedup returns same handle for same runId", async () => {

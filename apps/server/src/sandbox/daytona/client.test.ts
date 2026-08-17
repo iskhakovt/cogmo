@@ -74,10 +74,32 @@ vi.mock("@daytona/sdk", async (importOriginal) => {
   return { ...actual, Daytona: MockDaytona };
 });
 
+/**
+ * The input domain Daytona's start endpoint documents for itself:
+ * "Starts a stopped or archived sandbox, or resumes a paused sandbox."
+ * `fakeSandbox().start` rejects anything else so a re-attach that
+ * dispatches `start()` at a mid-transition sandbox fails the test
+ * instead of quietly passing against a permissive stub.
+ */
+const STARTABLE_STATES: ReadonlySet<SandboxState> = new Set([
+  SandboxState.STOPPED,
+  SandboxState.ARCHIVED,
+  SandboxState.PAUSED,
+]);
+
 interface FakeSandboxOptions {
   id: string;
   state: SandboxState;
   labels?: Record<string, string>;
+  /**
+   * States `refreshData()` reports, one per call, in order — models
+   * Daytona's `GET /sandbox/{id}` handing back a fresh state on each
+   * poll. The last entry sticks once the script runs out, so a
+   * one-element script means "settles here and stays". Omitted means
+   * `refreshData()` leaves the state alone (a sandbox stuck in its
+   * transition).
+   */
+  refreshStates?: ReadonlyArray<SandboxState>;
 }
 
 interface FakeSandbox extends DaytonaSdkSandbox {
@@ -98,15 +120,28 @@ function fakeSandbox(opts: FakeSandboxOptions): FakeSandbox {
     fsUploadFiles: vi.fn(async () => {}),
     fsSetFilePermissions: vi.fn(async () => {}),
   };
+  let refreshCount = 0;
   const sandbox = {
     id: opts.id,
     state: opts.state,
     labels: opts.labels ?? {},
     start: vi.fn(async () => {
+      if (!STARTABLE_STATES.has(sandbox.state)) {
+        throw new DaytonaConflictError(
+          `sandbox ${opts.id} is ${sandbox.state} — start accepts stopped / archived / paused only`,
+        );
+      }
       sandbox.state = SandboxState.STARTED;
     }),
     waitUntilStarted: vi.fn(async () => {
       sandbox.state = SandboxState.STARTED;
+    }),
+    refreshData: vi.fn(async () => {
+      const script = opts.refreshStates;
+      if (script === undefined || script.length === 0) return;
+      const index = Math.min(refreshCount, script.length - 1);
+      refreshCount += 1;
+      sandbox.state = expectDefined(script[index], "refreshStates entry");
     }),
     stop: vi.fn(async () => {}),
     delete: spies.delete,
@@ -549,48 +584,34 @@ describe("DaytonaSandboxClient", () => {
       expect(sb.waitUntilStarted).not.toHaveBeenCalled();
     });
 
-    it.each([
-      ["PAUSED", SandboxState.PAUSED],
-      ["PAUSING", SandboxState.PAUSING],
-      ["STOPPING", SandboxState.STOPPING],
-      ["ARCHIVING", SandboxState.ARCHIVING],
-    ])(
-      "starts a %s sandbox instead of handing back a sandbox nothing runs on",
-      async (_l, state) => {
-        // Out-of-band pause (dashboard, org policy) or a stop/archive
-        // still draining. Returning the handle untouched would make the
-        // next `execStreaming` 4xx with "sandbox not running".
-        const sb = fakeSandbox({ id: "sb-paused", state });
-        daytonaCalls.get.mockResolvedValue(sb);
-        const client = await makeClient();
-        await client.resume({ type: "daytona", taskId: "t1", sandboxId: "sb-paused" });
-        expect(sb.start).toHaveBeenCalled();
-      },
-    );
+    it("starts a PAUSED sandbox instead of handing back a sandbox nothing runs on", async () => {
+      // Out-of-band pause (dashboard, org policy). Returning the handle
+      // untouched would make the next `execStreaming` 4xx with "sandbox
+      // not running".
+      const sb = fakeSandbox({ id: "sb-paused", state: SandboxState.PAUSED });
+      daytonaCalls.get.mockResolvedValue(sb);
+      const client = await makeClient();
+      await client.resume({ type: "daytona", taskId: "t1", sandboxId: "sb-paused" });
+      expect(sb.start).toHaveBeenCalled();
+    });
 
     it.each([
       ["RESUMING", SandboxState.RESUMING],
       ["STARTING", SandboxState.STARTING],
       ["RESTORING", SandboxState.RESTORING],
-      ["UNKNOWN", SandboxState.UNKNOWN],
+      ["CREATING", SandboxState.CREATING],
+      ["PULLING_SNAPSHOT", SandboxState.PULLING_SNAPSHOT],
     ])("waits for a %s sandbox to land rather than racing it with start()", async (_l, state) => {
+      // Every one of these is produced by an SDK path whose own
+      // completion condition is `waitUntilStarted`, so STARTED is where
+      // they are headed.
       const sb = fakeSandbox({ id: "sb-climbing", state });
       daytonaCalls.get.mockResolvedValue(sb);
       const client = await makeClient();
       await client.resume({ type: "daytona", taskId: "t1", sandboxId: "sb-climbing" });
       expect(sb.waitUntilStarted).toHaveBeenCalled();
       expect(sb.start).not.toHaveBeenCalled();
-    });
-
-    it("waits when the provider reports a state this SDK build doesn't know", async () => {
-      // Server-side enum drift: a state string newer than the installed
-      // `@daytona/api-client`. Assuming it means "running" is what let a
-      // paused sandbox through; waiting either confirms or throws.
-      const sb = fakeSandbox({ id: "sb-future", state: "hibernating" as unknown as SandboxState });
-      daytonaCalls.get.mockResolvedValue(sb);
-      const client = await makeClient();
-      await client.resume({ type: "daytona", taskId: "t1", sandboxId: "sb-future" });
-      expect(sb.waitUntilStarted).toHaveBeenCalled();
+      expect(sb.refreshData).not.toHaveBeenCalled();
     });
 
     it.each([
@@ -607,6 +628,163 @@ describe("DaytonaSandboxClient", () => {
       ).rejects.toThrow(/terminal/);
       expect(sb.start).not.toHaveBeenCalled();
       expect(sb.waitUntilStarted).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("resume — mid-transition states settle before we act", () => {
+    // Daytona's start endpoint accepts stopped / archived / paused, and
+    // Daytona's docs say a sandbox in `stopping` "does not accept new
+    // requests", so dispatching `start()` at a draining sandbox is a
+    // request outside the endpoint's domain. `waitUntilStarted` is no
+    // better for transitions that settle back into a resting state: it
+    // resolves on STARTED alone, so a sandbox that returns to STOPPED
+    // burns the SDK's whole 60s cap and then throws. Both cases want the
+    // same thing — let the transition land, then decide.
+    it.each([
+      ["STOPPING", SandboxState.STOPPING, SandboxState.STOPPED],
+      ["ARCHIVING", SandboxState.ARCHIVING, SandboxState.ARCHIVED],
+      ["PAUSING", SandboxState.PAUSING, SandboxState.PAUSED],
+    ])("lets a %s sandbox drain, then starts it", async (_l, observed, settled) => {
+      const sb = fakeSandbox({ id: "sb-draining", state: observed, refreshStates: [settled] });
+      daytonaCalls.get.mockResolvedValue(sb);
+      const client = await makeClient();
+      await client.resume({ type: "daytona", taskId: "t1", sandboxId: "sb-draining" });
+      expect(sb.refreshData).toHaveBeenCalled();
+      expect(sb.start).toHaveBeenCalled();
+      expect(sb.state).toBe(SandboxState.STARTED);
+    });
+
+    it.each([
+      // `createSnapshot`'s SDK docstring: the sandbox "will temporarily
+      // enter a 'snapshotting' state and return to its previous state
+      // when complete".
+      ["SNAPSHOTTING", SandboxState.SNAPSHOTTING],
+      // `resize`'s: "Disk resize requires a stopped Sandbox".
+      ["RESIZING", SandboxState.RESIZING],
+      // No claim available either way, so no assuming it climbs.
+      ["UNKNOWN", SandboxState.UNKNOWN],
+    ])("starts a %s sandbox that settles back to STOPPED", async (_l, observed) => {
+      const sb = fakeSandbox({
+        id: "sb-transient",
+        state: observed,
+        refreshStates: [SandboxState.STOPPED],
+      });
+      daytonaCalls.get.mockResolvedValue(sb);
+      const client = await makeClient();
+      await client.resume({ type: "daytona", taskId: "t1", sandboxId: "sb-transient" });
+      expect(sb.start).toHaveBeenCalled();
+      expect(sb.waitUntilStarted).not.toHaveBeenCalled();
+      expect(sb.state).toBe(SandboxState.STARTED);
+    });
+
+    it("touches nothing when a SNAPSHOTTING sandbox settles back to STARTED", async () => {
+      const sb = fakeSandbox({
+        id: "sb-snapshotting",
+        state: SandboxState.SNAPSHOTTING,
+        refreshStates: [SandboxState.STARTED],
+      });
+      daytonaCalls.get.mockResolvedValue(sb);
+      const client = await makeClient();
+      await client.resume({ type: "daytona", taskId: "t1", sandboxId: "sb-snapshotting" });
+      expect(sb.start).not.toHaveBeenCalled();
+      expect(sb.waitUntilStarted).not.toHaveBeenCalled();
+    });
+
+    it("waits out a settled state that is still climbing to STARTED", async () => {
+      // STOPPING → STOPPED, then the auto-stop reaper's own restart (or
+      // a racing operator) puts it in STARTING before our refresh lands.
+      const sb = fakeSandbox({
+        id: "sb-restarted",
+        state: SandboxState.STOPPING,
+        refreshStates: [SandboxState.STARTING],
+      });
+      daytonaCalls.get.mockResolvedValue(sb);
+      const client = await makeClient();
+      await client.resume({ type: "daytona", taskId: "t1", sandboxId: "sb-restarted" });
+      expect(sb.waitUntilStarted).toHaveBeenCalled();
+      expect(sb.start).not.toHaveBeenCalled();
+    });
+
+    it("settles a state string this SDK build doesn't know", async () => {
+      // Server-side enum drift: a state newer than the installed
+      // `@daytona/api-client`. It says nothing about whether the sandbox
+      // needs a start or is already on its way, so refresh and find out.
+      const sb = fakeSandbox({
+        id: "sb-future",
+        state: "hibernating" as unknown as SandboxState,
+        refreshStates: [SandboxState.STOPPED],
+      });
+      daytonaCalls.get.mockResolvedValue(sb);
+      const client = await makeClient();
+      await client.resume({ type: "daytona", taskId: "t1", sandboxId: "sb-future" });
+      expect(sb.refreshData).toHaveBeenCalled();
+      expect(sb.start).toHaveBeenCalled();
+    });
+
+    it("throws without dispatching start when the transition settles into ERROR", async () => {
+      const sb = fakeSandbox({
+        id: "sb-broke",
+        state: SandboxState.STOPPING,
+        refreshStates: [SandboxState.ERROR],
+      });
+      daytonaCalls.get.mockResolvedValue(sb);
+      const client = await makeClient();
+      await expect(
+        client.resume({ type: "daytona", taskId: "t1", sandboxId: "sb-broke" }),
+      ).rejects.toThrow(/terminal state=error/);
+      expect(sb.start).not.toHaveBeenCalled();
+      expect(sb.waitUntilStarted).not.toHaveBeenCalled();
+    });
+
+    it("polls across several refreshes before the transition lands", async () => {
+      vi.useFakeTimers();
+      try {
+        const sb = fakeSandbox({
+          id: "sb-slow",
+          state: SandboxState.PAUSING,
+          refreshStates: [SandboxState.PAUSING, SandboxState.PAUSING, SandboxState.PAUSED],
+        });
+        daytonaCalls.get.mockResolvedValue(sb);
+        const client = await makeClient();
+        const resumed = client.resume({ type: "daytona", taskId: "t1", sandboxId: "sb-slow" });
+        await vi.advanceTimersByTimeAsync(3_000);
+        await resumed;
+        expect(sb.refreshData).toHaveBeenCalledTimes(3);
+        expect(sb.start).toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("gives up with the stuck state in the message when the transition never lands", async () => {
+      vi.useFakeTimers();
+      try {
+        // `refreshStates` omitted: every refresh reports ARCHIVING again.
+        const sb = fakeSandbox({ id: "sb-wedged", state: SandboxState.ARCHIVING });
+        daytonaCalls.get.mockResolvedValue(sb);
+        const client = await makeClient();
+        const resumed = client.resume({ type: "daytona", taskId: "t1", sandboxId: "sb-wedged" });
+        const asserted = expect(resumed).rejects.toThrow(/stayed in state=archiving/);
+        await vi.advanceTimersByTimeAsync(120_000);
+        await asserted;
+        expect(sb.start).not.toHaveBeenCalled();
+        expect(sb.waitUntilStarted).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("brings a draining candidate up in tryResumeByTaskId too", async () => {
+      const sb = fakeSandbox({
+        id: "sb-listed",
+        state: SandboxState.STOPPING,
+        refreshStates: [SandboxState.STOPPED],
+      });
+      daytonaCalls.list.mockImplementation(() => asyncIterableOf([sb]));
+      const client = await makeClient();
+      const session = await client.tryResumeByTaskId("t1");
+      expect(session?.state.sandboxId).toBe("sb-listed");
+      expect(sb.start).toHaveBeenCalled();
     });
   });
 
