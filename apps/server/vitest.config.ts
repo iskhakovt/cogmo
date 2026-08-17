@@ -20,6 +20,25 @@ const PYODIDE_HEAVY_UNIT_GLOBS: readonly string[] = [
   "src/skills/worker-wasm/**/*.test.ts",
 ];
 
+/**
+ * `git commit` spawns `git maintenance run --auto --detach`, and that detached
+ * process goes on writing inside `.git/` after the commit command has already
+ * returned. A fixture that builds a repo under `tmpdir()` and removes it in
+ * teardown races that writer, and `fs.rm` fails with `ENOTEMPTY` on whichever
+ * directory it was mid-way through — `.git/info` in practice. Around twenty
+ * test files across every tier drive real `git`, so the switch belongs here
+ * rather than in each fixture: `GIT_CONFIG_COUNT` and its numbered key/value
+ * pairs are git's documented way to inject config into every subprocess
+ * without writing a config file.
+ */
+const GIT_NO_BACKGROUND_MAINTENANCE = {
+  GIT_CONFIG_COUNT: "2",
+  GIT_CONFIG_KEY_0: "maintenance.auto",
+  GIT_CONFIG_VALUE_0: "false",
+  GIT_CONFIG_KEY_1: "gc.auto",
+  GIT_CONFIG_VALUE_1: "0",
+} as const;
+
 /** Shared by both unit projects. `HINDSIGHT_URL` + `INNGEST_BASE_URL` are
  * required by the runtime schema in `src/env.ts` — any test that touches
  * code importing the full `env` (e.g. `db/index.ts`, `health.ts`) needs
@@ -29,6 +48,7 @@ const UNIT_ENV = {
   NODE_ENV: "test",
   HINDSIGHT_URL: "http://localhost:8080",
   INNGEST_BASE_URL: "http://localhost:8288",
+  ...GIT_NO_BACKGROUND_MAINTENANCE,
 } as const;
 
 export default defineConfig({
@@ -106,6 +126,7 @@ export default defineConfig({
             // Surface transient container/network blips as hard failures
             // instead of letting withRetry mask them. See src/util/with-retry.ts.
             RETRY_DISABLED: "true",
+            ...GIT_NO_BACKGROUND_MAINTENANCE,
           },
         },
       },
@@ -119,6 +140,7 @@ export default defineConfig({
           hookTimeout: 600_000,
           env: {
             NODE_ENV: "test",
+            ...GIT_NO_BACKGROUND_MAINTENANCE,
           },
         },
       },
