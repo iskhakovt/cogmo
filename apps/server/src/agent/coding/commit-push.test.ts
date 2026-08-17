@@ -128,7 +128,7 @@ describe("runCommitAndPush", () => {
     expect(commitCall?.args).toContain("-m");
     expect(commitCall?.args).toContain("test goal");
     expect(commitCall?.workingDir).toBe("/workspace");
-    expect(commitCall?.env).toBe(askpassEnv);
+    expect(commitCall?.env).toMatchObject(askpassEnv);
 
     const pushCall = calls.find((c) => c.args.includes("push"));
     expect(pushCall?.args).toEqual(["git", "push", "origin", "cogmo/abc12345"]);
@@ -245,8 +245,91 @@ describe("runCommitAndPush", () => {
     });
 
     for (const call of calls) {
-      expect(call.env).toBe(askpassEnv);
+      expect(call.env).toMatchObject(askpassEnv);
       expect(call.workingDir).toBe("/workspace");
+    }
+  });
+
+  it("runs every git invocation with git's background maintenance disabled", async () => {
+    // `git commit` and `git push` each spawn a detached `git maintenance run
+    // --auto` that goes on writing inside `.git/` after the foreground
+    // command exits. On the bind-mount backend `worktreeDir` is the host
+    // working tree teardown deletes once the task settles, so the detached
+    // writer repopulates directories mid-delete and leaves a half-deleted
+    // clone at a path that is stable per task — which then blocks the next
+    // `allocateWorktree` there. `GIT_CONFIG_*` outranks the repo-local
+    // config the sandbox image ships, so the suppression always wins.
+    const { container, calls } = fakeContainer({
+      status: { stdout: "M src/foo.ts\n" },
+      add: { exitCode: 0 },
+      commit: { exitCode: 0 },
+      push: { exitCode: 0 },
+      "rev-parse": { stdout: "deadbeef\n", exitCode: 0 },
+    });
+
+    const result = await runCommitAndPush({
+      container,
+      worktreeDir: "/workspace",
+      branch: "cogmo/abc",
+      commitMessage: "x",
+      signingKeyPath: "/tmp/cogmo-askpass/signing-key",
+      askpassEnv,
+      author,
+    });
+
+    expect(result.kind).toBe("pushed");
+    // Covers status, add, commit, push, rev-parse.
+    expect(calls).toHaveLength(5);
+    for (const call of calls) {
+      expect(call.env).toMatchObject({
+        GIT_CONFIG_COUNT: "2",
+        GIT_CONFIG_KEY_0: "maintenance.auto",
+        GIT_CONFIG_VALUE_0: "false",
+        GIT_CONFIG_KEY_1: "gc.auto",
+        GIT_CONFIG_VALUE_1: "0",
+      });
+    }
+  });
+
+  it("numbers its git config after pairs the askpass env already declares", async () => {
+    // A caller's env record can carry config pairs of its own — the
+    // `safe.directory` entry in-container git needs when the mount's owner
+    // uid doesn't match the exec user, say. Numbering from 0 would shadow
+    // them; ours start at the declared count instead.
+    const envWithConfig = Object.freeze({
+      ...askpassEnv,
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "safe.directory",
+      GIT_CONFIG_VALUE_0: "/workspace",
+    });
+    const { container, calls } = fakeContainer({
+      status: { stdout: "M src/foo.ts\n" },
+      add: { exitCode: 0 },
+      commit: { exitCode: 0 },
+      push: { exitCode: 0 },
+      "rev-parse": { stdout: "deadbeef\n", exitCode: 0 },
+    });
+
+    await runCommitAndPush({
+      container,
+      worktreeDir: "/workspace",
+      branch: "cogmo/abc",
+      commitMessage: "x",
+      signingKeyPath: "/tmp/cogmo-askpass/signing-key",
+      askpassEnv: envWithConfig,
+      author,
+    });
+
+    for (const call of calls) {
+      expect(call.env).toMatchObject({
+        GIT_CONFIG_COUNT: "3",
+        GIT_CONFIG_KEY_0: "safe.directory",
+        GIT_CONFIG_VALUE_0: "/workspace",
+        GIT_CONFIG_KEY_1: "maintenance.auto",
+        GIT_CONFIG_VALUE_1: "false",
+        GIT_CONFIG_KEY_2: "gc.auto",
+        GIT_CONFIG_VALUE_2: "0",
+      });
     }
   });
 
