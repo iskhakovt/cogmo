@@ -37,6 +37,10 @@ import type { ContentBlock, Message, StopReason, ToolUseBlock } from "../llm/typ
  *  - `empty_end_turn`, `stream_truncation`, `refusal` — Class C model
  *    misbehavior subtypes ({@link classifyPostStream},
  *    {@link classifyStreamError}).
+ *  - `context_overflow` — the request overran the model's context window
+ *    ({@link classifyPostStream}). Immediate-degrade with no repair: the
+ *    only thing that would help is a smaller request, and compaction runs
+ *    pre-flight per turn, outside the loop.
  *  - `stuck_loop`, `stuck_loop_cumulative` — Class D loop-pathology trips
  *    fired from the loop body when {@link computeIterationFingerprint}
  *    repeats without an observable side effect.
@@ -51,6 +55,7 @@ export type RepairSubtype =
   | "empty_end_turn"
   | "stream_truncation"
   | "refusal"
+  | "context_overflow"
   | "stuck_loop"
   | "stuck_loop_cumulative"
   | "volume_cluster";
@@ -66,11 +71,11 @@ export type DegradeSubtype = Exclude<RepairSubtype, "volume_cluster">;
 
 /**
  * Subset of {@link RepairSubtype} that carries a per-turn repair budget.
- * Refusal is excluded — it's immediate-degrade with nothing to decrement.
- * Class D subtypes are excluded — they're trip-only (loop-pathology), no
- * repair attempt to budget against. Used to keep the `repair` arm of
- * {@link TurnOutcome} narrow so a `budgets[outcome.subtype]--` decrement
- * is always sound.
+ * Refusal and context overflow are excluded — both are immediate-degrade
+ * with nothing to decrement. Class D subtypes are excluded — they're
+ * trip-only (loop-pathology), no repair attempt to budget against. Used to
+ * keep the `repair` arm of {@link TurnOutcome} narrow so a
+ * `budgets[outcome.subtype]--` decrement is always sound.
  */
 export type BudgetedSubtype = keyof RepairBudgets;
 
@@ -95,10 +100,10 @@ export interface RepairBudgets {
  *    continuation nudge.
  *  - `stream_truncation: 1` — one non-streaming replay of the same turn.
  *
- * Refusal has no budget entry: the classifier degrades immediately and
- * the loop never decrements anything on the refusal path. If a future
- * "try refusal-recovery prompt" experiment wants a budget, it can re-add
- * the field deliberately with logic.
+ * Refusal and context overflow have no budget entry: the classifier
+ * degrades immediately and the loop never decrements anything on either
+ * path. If a future "try refusal-recovery prompt" experiment wants a
+ * budget, it can re-add the field deliberately with logic.
  */
 export const INITIAL_BUDGETS: Readonly<RepairBudgets> = Object.freeze({
   empty_end_turn: 1,
@@ -162,6 +167,28 @@ export function classifyPostStream(
       kind: "degrade",
       reason: "model returned a policy refusal",
       subtype: "refusal",
+    };
+  }
+
+  if (stopReason === "context_overflow") {
+    // Immediate-degrade, and deliberately blind to `content.length`. An
+    // overflow that emitted some text is a truncated turn, not a complete
+    // one: returning `ok` would persist the fragment as the model's final
+    // answer. Both the empty and partial cases exit here, and the loop
+    // drops the offending assistant message before returning (see
+    // design/agent-resilience.md → Persistence boundary on a degraded
+    // turn), so no half-answer lands in history claiming to be finished.
+    //
+    // No repair arm: compaction is a pre-flight stage in `handle-message`
+    // (design/context-management.md), so the loop has no lever to shrink
+    // the request mid-turn. Every in-loop repair appends to the request,
+    // which is exactly what a full window cannot absorb. Ending the turn
+    // hands control back to the orchestrator, whose next turn re-runs
+    // compaction against the freshly-grown history.
+    return {
+      kind: "degrade",
+      reason: "request exceeded the model's context window",
+      subtype: "context_overflow",
     };
   }
 
@@ -239,12 +266,16 @@ export function classifyStreamError(
 
 /**
  * The text the orchestrator shows the user when a turn ends via the
- * degraded off-ramp. Refusal carries a refusal-specific message; every
- * other subtype shares the same apology.
+ * degraded off-ramp. Refusal and context overflow each carry a subtype-
+ * specific message because the user's next move differs; every other
+ * subtype shares the same apology.
  */
 export function degradedReplyText(subtype: DegradeSubtype | null): string {
   if (subtype === "refusal") {
     return "The model declined that request. Try rephrasing, or switch model with `/model`.";
+  }
+  if (subtype === "context_overflow") {
+    return "This conversation is too long for the model's context window. Start a fresh one with `/new`, or switch to a larger-context model with `/model`.";
   }
   return "I had trouble generating a clean response — the model returned an output I couldn't process. Could you rephrase or try again?";
 }
@@ -307,6 +338,12 @@ export interface SynthesizeDegradedReplyResult {
  * Provider-outage during synthesis falls through cleanly to the fixed
  * string. A `synthesis ok: false` spike correlated with provider-outage
  * events is an upstream symptom, not a synthesis-logic bug.
+ *
+ * The `context_overflow` subtype still attempts synthesis. The call is not
+ * a re-run of the failed turn: it drops the tool definitions and caps
+ * output at 512 tokens, which is often enough headroom for the same
+ * history to fit. When it isn't, the provider answers with an overflow and
+ * no content, which lands on the empty-text fallback below.
  */
 export async function synthesizeDegradedReply(
   deps: SynthesizeDegradedReplyDeps,
@@ -425,6 +462,8 @@ function humanReasonForDegrade(subtype: DegradeSubtype | null, reason: string): 
       return "your response stream was truncated mid-tool-call and the recovery replay also failed to parse";
     case "refusal":
       return "you declined the request on policy grounds";
+    case "context_overflow":
+      return "the conversation plus your reply exceeded the model's context window, so the turn was cut off";
     case "stuck_loop":
       return "the loop detected the same tool call repeated three times in a row without observable progress";
     case "stuck_loop_cumulative":

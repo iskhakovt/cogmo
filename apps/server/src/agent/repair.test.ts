@@ -82,6 +82,51 @@ describe("classifyPostStream", () => {
     // The loop owns the decrement — the classifier is a pure read.
     expect(budgets.empty_end_turn).toBe(1);
   });
+
+  // A contentless overflow must not be mistaken for either neighbour: a
+  // normal `max_tokens` completion (which returns `ok` and lets the blank
+  // turn persist as the answer) or an empty `end_turn` (which earns a
+  // continuation prompt — more tokens appended to a full window).
+  it("returns immediate degrade on stop_reason: context_overflow with no content", () => {
+    const budgets = freshBudgets();
+    const outcome = classifyPostStream([], "context_overflow", budgets);
+    expect(outcome).toEqual({
+      kind: "degrade",
+      reason: "request exceeded the model's context window",
+      subtype: "context_overflow",
+    });
+    // No repair means no budget to consult — both counters stay whole so a
+    // later empty turn still gets its one continuation nudge.
+    expect(budgets.empty_end_turn).toBe(INITIAL_BUDGETS.empty_end_turn);
+    expect(budgets.stream_truncation).toBe(INITIAL_BUDGETS.stream_truncation);
+  });
+
+  // The partial case is the quieter half of the bug: content present plus a
+  // "the turn ran out of room" stop reason is a truncated answer, and `ok`
+  // would persist the fragment as if the model had finished.
+  it("degrades on context_overflow even when the turn produced partial content", () => {
+    const budgets = freshBudgets();
+    const outcome = classifyPostStream(
+      [{ type: "text", text: "Here are the first three of the ten items you as" }],
+      "context_overflow",
+      budgets,
+    );
+    expect(outcome).toEqual({
+      kind: "degrade",
+      reason: "request exceeded the model's context window",
+      subtype: "context_overflow",
+    });
+  });
+
+  it("context_overflow never yields a repair, so no continuation prompt is ever built", () => {
+    // Exhausting every budget can't flip the verdict — there's no budgeted
+    // arm on this path to exhaust in the first place.
+    const drained: RepairBudgets = { empty_end_turn: 0, stream_truncation: 0 };
+    for (const budgets of [freshBudgets(), drained]) {
+      const outcome = classifyPostStream([], "context_overflow", budgets);
+      expect(outcome.kind).toBe("degrade");
+    }
+  });
 });
 
 describe("classifyStreamError", () => {
@@ -616,6 +661,16 @@ describe("degradedReplyText", () => {
     expect(degradedReplyText("refusal")).toMatch(/declined/i);
   });
 
+  it("returns the overflow-specific message for the context_overflow subtype", () => {
+    // "Rephrase and try again" is the wrong advice when the window is full;
+    // the two moves that actually help are a fresh conversation or a
+    // bigger-context model.
+    const text = degradedReplyText("context_overflow");
+    expect(text).toMatch(/context window/i);
+    expect(text).toContain("/new");
+    expect(text).not.toMatch(/trouble generating/i);
+  });
+
   it("returns the generic apology for empty_end_turn / stream_truncation / stuck_loop / null", () => {
     const generic = degradedReplyText("empty_end_turn");
     expect(generic).toMatch(/trouble generating/i);
@@ -706,6 +761,44 @@ describe("synthesizeDegradedReply", () => {
     });
     expect(result.ok).toBe(false);
     expect(result.text).toMatch(/trouble generating/i);
+  });
+
+  it("names the context overflow in the synthesis prompt so the reply can explain it", async () => {
+    const chatFn = vi.fn<LlmProvider["chat"]>(async () => textResponse("ok"));
+    const provider: LlmProvider = {
+      name: "synth-test",
+      chat: chatFn,
+      chatStream: vi.fn(),
+      countTokens: vi.fn(),
+    };
+    await synthesizeDegradedReply({
+      ...baseDeps(),
+      subtype: "context_overflow",
+      reason: "request exceeded the model's context window",
+      provider,
+    });
+    expect(chatFn.mock.calls[0]?.[0]?.system).toMatch(/context window/i);
+  });
+
+  it("uses the overflow-specific fixed string when subtype is context_overflow and synthesis fails", async () => {
+    // The synthesis call re-sends the history that just overflowed; when it
+    // overflows again the provider answers with no content, which is the
+    // empty-text fallback rather than a throw.
+    const provider = providerThat(async () => ({
+      content: [],
+      stopReason: "context_overflow" as const,
+      model: "test-model",
+      usage: { inputTokens: 900_000, outputTokens: 0 },
+    }));
+    const result = await synthesizeDegradedReply({
+      ...baseDeps(),
+      subtype: "context_overflow",
+      reason: "request exceeded the model's context window",
+      provider,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.text).toBe(degradedReplyText("context_overflow"));
+    expect(result.text).toContain("/new");
   });
 
   it("uses the refusal-specific fixed string when subtype is refusal and synthesis fails", async () => {

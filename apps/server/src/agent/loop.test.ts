@@ -1878,6 +1878,103 @@ describe("in-loop model-misbehavior repair", () => {
     );
   });
 
+  it("context_overflow stopReason with no content → immediate degrade, no continuation prompt", async () => {
+    // The dangerous shape: an overflow that emitted nothing. Read as a
+    // normal `max_tokens` completion this returns a successful turn with an
+    // empty assistant message; read as an empty `end_turn` it earns a
+    // continuation prompt, which appends tokens to a window that just
+    // overflowed. Neither happens — one stream call, then degrade.
+    const { provider, streamCalls } = repairStreamProvider([
+      { kind: "stream", events: [], stopReason: "context_overflow" },
+    ]);
+    const turnLogger = mock<Logger>();
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "the tenth turn of a huge conversation" }],
+      tools: new ToolRegistry(),
+      onEvent: async () => {},
+      turnLogger,
+    });
+
+    expect(result.degraded).toEqual({
+      reason: "request exceeded the model's context window",
+      subtype: "context_overflow",
+    });
+    expect(streamCalls).toHaveLength(1);
+    expect(result.iterations).toBe(1);
+    // Nothing persistable: no blank assistant message, no synthetic prompt.
+    expect(result.newMessages).toHaveLength(0);
+    expect(result.text).toBe("");
+    expect(turnLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "agent.degrade", subtype: "context_overflow" }),
+      expect.any(String),
+    );
+  });
+
+  it("context_overflow stopReason with partial content → degrade; the fragment is not persisted", async () => {
+    const { provider } = repairStreamProvider([
+      {
+        kind: "stream",
+        events: [{ type: "text_delta", text: "Here are the first three of the ten items you as" }],
+        stopReason: "context_overflow",
+      },
+    ]);
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "list ten things" }],
+      tools: new ToolRegistry(),
+      onEvent: async () => {},
+    });
+
+    expect(result.degraded).toEqual({
+      reason: "request exceeded the model's context window",
+      subtype: "context_overflow",
+    });
+    // A truncated answer must not land in history looking complete — the
+    // orchestrator's apology replaces it.
+    expect(result.newMessages).toHaveLength(0);
+    expect(result.text).toBe("");
+  });
+
+  it("context_overflow degrades even mid-turn, with completed tool iterations still persisted", async () => {
+    // Overflow can arrive after real work has landed. The prior iteration's
+    // tool_use / tool_result pair completed and stays; only the overflowing
+    // iteration is dropped.
+    const { provider } = repairStreamProvider([
+      {
+        kind: "stream",
+        events: [{ type: "tool_start", id: "t1", name: "echo", input: {} }],
+        stopReason: "tool_use",
+      },
+      { kind: "stream", events: [], stopReason: "context_overflow" },
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echo",
+        schema: z.object({}),
+        handler: async () => "ok",
+      }),
+    );
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "echo then answer" }],
+      tools,
+      onEvent: async () => {},
+    });
+
+    expect(result.degraded?.subtype).toBe("context_overflow");
+    expect(result.iterations).toBe(2);
+    expect(result.newMessages).toEqual([
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "echo", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", toolUseId: "t1", content: "ok" }] },
+    ]);
+  });
+
   it("openai-compat RefusalError thrown from stream → degrade with refusal subtype", async () => {
     // FallbackLlmProvider treats RefusalError as non-retriable (per
     // isRetriableProviderError) and propagates it through `chatStream`

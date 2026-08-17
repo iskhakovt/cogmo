@@ -483,15 +483,13 @@ function fromAnthropicStopReason(reason: Anthropic.StopReason | null): StopReaso
     case "max_tokens":
       return "max_tokens";
     case "model_context_window_exceeded":
-      // Input plus output overran the model's context window. Distinct from
-      // `max_tokens` upstream, but the canonical union has no context-overflow
-      // member and both mean "the turn ran out of token room" — the loop ends
-      // the turn either way. Mapping it to `end_turn` instead would be
-      // actively harmful: an overflow that produced no content blocks would
-      // match `classifyPostStream`'s empty-`end_turn` arm and earn a
-      // continuation prompt, i.e. more tokens appended to a context that
-      // already overflowed.
-      return "max_tokens";
+      // Input plus output overran the model's context window. Its own
+      // canonical member because the recovery differs from every other stop:
+      // there is no token room left, so any repair that appends to the
+      // request (continuation prompt, replay) re-fails identically.
+      // `classifyPostStream` degrades the turn on this value — see
+      // `StopReason` in llm/types.ts.
+      return "context_overflow";
     case "refusal":
       // Anthropic's explicit refusal signal on recent models. Surfaces the
       // Class C "model refusal" subtype (design/agent-resilience.md) to the

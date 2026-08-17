@@ -82,9 +82,11 @@ export const conversationIdle = eventType("conversation/idle", {
  *
  * `subtype` carries the classifier verdict when the loop exited through a
  * Class C / D tagged off-ramp (`empty_end_turn`, `stream_truncation`,
- * `refusal`, `stuck_loop`, `stuck_loop_cumulative`). It is `null` when the
- * loop exited via the iteration-cap backstop — that path has no classifier
- * subtype; `reason: "iteration_cap"` carries the distinguishing label.
+ * `refusal`, `context_overflow`, `stuck_loop`, `stuck_loop_cumulative`).
+ * It is `null` when the loop exited via the iteration-cap backstop — that
+ * path has no classifier subtype; `reason: "iteration_cap"` carries the
+ * distinguishing label. The enum mirrors `DegradeSubtype` in
+ * `agent/repair.ts`; the two move together.
  */
 export const conversationDegraded = eventType("conversation/degraded", {
   schema: z.object({
@@ -96,6 +98,7 @@ export const conversationDegraded = eventType("conversation/degraded", {
         "empty_end_turn",
         "stream_truncation",
         "refusal",
+        "context_overflow",
         "stuck_loop",
         "stuck_loop_cumulative",
       ])

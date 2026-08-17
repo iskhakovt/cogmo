@@ -254,10 +254,51 @@ describe("legacy router — handler behavior", () => {
 /**
  * Durable waits have a one-second resolution: Inngest parses `step.sleep`'s
  * argument and rounds any positive sub-second duration up before the op
- * reaches the executor. These tests run the timer functions through the real
- * execution engine rather than a `step` stub, because a stub records whatever
- * string it was handed and so cannot observe that rewrite at all.
+ * reaches the executor. These tests run through the real execution engine
+ * rather than a `step` stub, because a stub records whatever string it was
+ * handed and so cannot observe that rewrite at all.
+ *
+ * Two layers, and the order matters. The first suite pins the SDK's clamp on
+ * raw sub-second durations — the premise {@link durableSleepMs} exists to
+ * mirror, and the reason a sub-second idle config is allowed to wait a full
+ * second. The second suite pins our own timers, which pre-floor their
+ * duration and so never exercise the clamp themselves.
  */
+describe("inngest step.sleep — sub-second clamp (upstream behavior)", () => {
+  /**
+   * Minimal function whose only op is a sleep of exactly the duration under
+   * test. `step.name` on that op is the duration string after the SDK's own
+   * parsing, which is the wait the executor will really perform.
+   */
+  async function engineSleepDuration(requested: string): Promise<string | undefined> {
+    const probe = inngest.createFunction(
+      { id: "sleep-clamp-probe", triggers: [{ event: "test/sleep-clamp" }] },
+      async ({ step }) => {
+        await step.sleep("wait", requested);
+      },
+    );
+    const { step } = await new InngestTestEngine({
+      function: probe,
+      events: [{ name: "test/sleep-clamp" }],
+    }).executeStep("wait");
+    return step.name;
+  }
+
+  it.each([["1ms"], ["500ms"], ["999ms"]])(
+    "rounds the raw sub-second duration %s up to 1s",
+    async (requested) => {
+      expect(await engineSleepDuration(requested)).toBe("1s");
+    },
+  );
+
+  it("leaves a whole-second duration alone", async () => {
+    // Guards the assertion above against passing for the wrong reason — if
+    // the engine collapsed every duration to "1s", the clamp cases would
+    // still be green.
+    expect(await engineSleepDuration("3000ms")).toBe("3s");
+  });
+});
+
 describe("legacy timers — durable sleep floor", () => {
   let sendSpy: ReturnType<typeof spyOnInngestSend>;
 

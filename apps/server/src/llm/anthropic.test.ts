@@ -314,12 +314,12 @@ describe("AnthropicProvider", () => {
     expect(result.stopReason).toBe("max_tokens");
   });
 
-  it("maps model_context_window_exceeded to max_tokens, never end_turn", async () => {
-    // Context overflow terminates the turn with no content. Folding it into
-    // `end_turn` would match `classifyPostStream`'s empty-`end_turn` arm and
-    // earn a continuation prompt — more tokens appended to a context that
-    // just overflowed, guaranteeing the same failure on the retry and burning
-    // the empty_end_turn budget on the way to the wrong degrade subtype.
+  it("maps model_context_window_exceeded to context_overflow, not max_tokens", async () => {
+    // The overflow has to stay distinguishable from every other stop reason
+    // downstream. `end_turn` would match `classifyPostStream`'s empty-turn
+    // arm and earn a continuation prompt; `max_tokens` reads as a normal
+    // completion and lets a contentless turn persist as the model's answer.
+    // Only its own member routes the turn to the degraded off-ramp.
     const provider = createProvider();
     mockCreate.mockResolvedValueOnce({
       content: [],
@@ -334,7 +334,7 @@ describe("AnthropicProvider", () => {
       messages: [{ role: "user", content: "a very long conversation" }],
     });
 
-    expect(result.stopReason).toBe("max_tokens");
+    expect(result.stopReason).toBe("context_overflow");
     expect(result.content).toEqual([]);
   });
 
@@ -368,7 +368,7 @@ describe("AnthropicProvider", () => {
     }
 
     const meta = await response;
-    expect(meta.stopReason).toBe("max_tokens");
+    expect(meta.stopReason).toBe("context_overflow");
   });
 
   it.each([
