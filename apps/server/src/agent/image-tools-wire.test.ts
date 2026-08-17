@@ -11,10 +11,12 @@
  * `/images/generations` responses with a schema requiring
  * `data[].b64_json` but leaves `response_format` out of the body it
  * builds, and the Images API defaults to `url`. A request missing the
- * field produces a generated, billed image the adapter then rejects. Only
- * an assertion on the outgoing body catches that — a recorded-fixture
- * replay can't, because the mock server emits `b64_json` regardless of
- * what the request asked for.
+ * field produces a generated, billed image the adapter then rejects. The
+ * gpt-image family is the mirror case — it answers in base64 either way
+ * and returns HTTP 400 when the field is present at all. Both directions
+ * are decided per model, and only an assertion on the outgoing body
+ * catches a wrong call — a recorded-fixture replay can't, because the mock
+ * server emits `b64_json` regardless of what the request asked for.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -62,11 +64,18 @@ async function buildCapturingTool(args: {
   capabilities: ImageModelWithProvider["capabilities"];
   /** Provider `name` — drives the `providerOptions` key the adapter reads. */
   providerName?: string;
+  /**
+   * API-facing model id. Drives the per-model `response_format` decision
+   * (see `openAiCompatibleResponseFormat`) and, via the row `name`, the
+   * LLM-facing slug callers pass as `model`.
+   */
+  modelString?: string;
 }): Promise<{
   requests: CapturedRequest[];
   handler: (input: Record<string, unknown>) => Promise<string>;
 }> {
   const providerRow = providerRowNamed(args.providerName ?? "acme-images");
+  const modelString = args.modelString ?? "dall-e-3";
   const requests: CapturedRequest[] = [];
   const fetchOverride = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     requests.push({
@@ -96,8 +105,8 @@ async function buildCapturingTool(args: {
       {
         id: "model-1",
         providerId: PROVIDER_ID,
-        name: `${providerRow.name}/dall-e-3`,
-        modelString: "dall-e-3",
+        name: `${providerRow.name}/${modelString}`,
+        modelString,
         description: "openai-compatible test model",
         capabilities: args.capabilities,
         userSelectable: true,
@@ -139,6 +148,25 @@ describe("openai_compatible image request body", () => {
     });
     // The adapter only decodes `data[].b64_json`, so a body that asked for
     // the right format round-trips all the way to an uploaded attachment.
+    expect(JSON.parse(result)).toMatchObject({ path: "generated/wire.png" });
+  });
+
+  it("leaves response_format out of a gpt-image-* body", async () => {
+    // OpenAI's gpt-image line rejects the parameter outright — `HTTP 400
+    // unknown_parameter: "Unknown parameter: 'response_format'."` — and
+    // returns base64 with no `url` mode to opt out of, so the adapter's
+    // `data[].b64_json` schema is satisfied without asking. A body
+    // carrying the field makes every gpt-image model a hard failure.
+    const { requests, handler } = await buildCapturingTool({
+      capabilities: {},
+      modelString: "gpt-image-1",
+    });
+
+    const result = await handler({ prompt: "a lighthouse at dusk", model: "gpt-image-1" });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.body).toMatchObject({ model: "gpt-image-1" });
+    expect(requests[0]?.body).not.toHaveProperty("response_format");
     expect(JSON.parse(result)).toMatchObject({ path: "generated/wire.png" });
   });
 
