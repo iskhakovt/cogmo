@@ -237,6 +237,83 @@ describe("computeIterationFingerprint", () => {
     const b = computeIterationFingerprint([toolUse("t2", "search", { q: "🎉" })]);
     expect(a).not.toBe(b);
   });
+
+  // A replacement-character substitution would map every lone surrogate onto
+  // one value, so two iterations doing different work would tie and feed the
+  // Class D counters toward a `stuck_loop` degrade on a turn that was
+  // progressing.
+  it("discriminates between distinct lone surrogates in a value", () => {
+    const a = computeIterationFingerprint([toolUse("t1", "search", { q: "x\uD800y" })]);
+    const b = computeIterationFingerprint([toolUse("t2", "search", { q: "x\uD801y" })]);
+    expect(a).not.toBe(b);
+  });
+
+  it("keeps a lone surrogate distinct from the literal U+FFFD it escapes with", () => {
+    const lone = computeIterationFingerprint([toolUse("t1", "search", { q: "x\uD800" })]);
+    const literal = computeIterationFingerprint([toolUse("t2", "search", { q: "x�d800" })]);
+    expect(lone).not.toBe(literal);
+  });
+
+  // `Object.fromEntries` over replacement-char-normalized keys drops one of a
+  // colliding pair, turning a 2-key object into a 1-key one.
+  it("preserves keys that differ only in their lone surrogates", () => {
+    const both = computeIterationFingerprint([
+      toolUse("t1", "search", { "a\uD800": 1, "a\uD801": 2 }),
+    ]);
+    const onlyFirst = computeIterationFingerprint([toolUse("t2", "search", { "a\uD800": 1 })]);
+    const onlySecond = computeIterationFingerprint([toolUse("t3", "search", { "a\uD801": 2 })]);
+    expect(new Set([both, onlyFirst, onlySecond]).size).toBe(3);
+  });
+
+  // Key-collapsing is last-wins over insertion order, so it would make the
+  // hash depend on the order the model happened to emit the keys in — exactly
+  // the invariance `canonicalize` was chosen for.
+  it("ignores key order even when keys carry lone surrogates", () => {
+    const a = computeIterationFingerprint([
+      toolUse("t1", "search", { "a\uD800": 1, "a\uD801": 2 }),
+    ]);
+    const b = computeIterationFingerprint([
+      toolUse("t2", "search", { "a\uD801": 2, "a\uD800": 1 }),
+    ]);
+    expect(a).toBe(b);
+  });
+
+  // `JSON.parse('{"n":1e999}')` is valid JSON yielding Infinity, and
+  // `canonicalize` rejects non-finite numbers.
+  it("hashes non-finite numbers instead of throwing", () => {
+    const parsed: unknown = JSON.parse('{"limit":1e999}');
+    const overflow = computeIterationFingerprint([toolUse("t1", "search", parsed)]);
+    expect(overflow).not.toBeNull();
+    expect(overflow).toBe(
+      computeIterationFingerprint([toolUse("t2", "search", { limit: Number.POSITIVE_INFINITY })]),
+    );
+  });
+
+  it("discriminates between non-finite values and finite args", () => {
+    const hashes = [
+      { limit: Number.POSITIVE_INFINITY },
+      { limit: Number.NEGATIVE_INFINITY },
+      { limit: Number.NaN },
+      { limit: 1 },
+    ].map((input, i) => computeIterationFingerprint([toolUse(`t${i}`, "search", input)]));
+    expect(new Set(hashes).size).toBe(4);
+  });
+
+  it("hashes a circular arg object instead of overflowing the stack", () => {
+    const cyclic: Record<string, unknown> = { name: "x" };
+    cyclic.self = cyclic;
+    const a = computeIterationFingerprint([toolUse("t1", "search", cyclic)]);
+    expect(a).not.toBeNull();
+
+    const twin: Record<string, unknown> = { name: "x" };
+    twin.self = twin;
+    expect(computeIterationFingerprint([toolUse("t2", "search", twin)])).toBe(a);
+  });
+
+  it("hashes args no encoder can render instead of throwing", () => {
+    expect(computeIterationFingerprint([toolUse("t1", "search", { n: 1n })])).not.toBeNull();
+    expect(computeIterationFingerprint([toolUse("t2", "search", undefined)])).not.toBeNull();
+  });
 });
 
 describe("classifyClassDTrip", () => {

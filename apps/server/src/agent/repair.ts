@@ -492,7 +492,9 @@ export function classifyClassDTrip(
  *
  * Args are stringified through the `canonicalize` library (RFC 8785 JSON
  * Canonicalization Scheme) so object key order (`{a: 1, b: 2}` vs
- * `{b: 2, a: 1}`) doesn't move the hash.
+ * `{b: 2, a: 1}`) doesn't move the hash. Args are model output, so
+ * {@link canonicalJson} is total: the loop's call site treats a throw from
+ * here as fatal to the turn, and no dedup signal is worth that.
  *
  * Assistant text is deliberately **excluded** — text prefixes are
  * brittle (timestamps, hedging preambles, emoji noise), so two iterations
@@ -513,56 +515,113 @@ export function computeIterationFingerprint(toolUses: ReadonlyArray<ToolUseBlock
   return sha256(pairs.join("|"));
 }
 
-function sha256(s: string): string {
-  return createHash("sha256").update(s).digest("hex");
-}
-
 /**
- * Replace lone surrogates with U+FFFD throughout a JSON-shaped value, keys
- * included.
+ * Escape marker for the encodings {@link toCanonicalizable} substitutes.
  *
- * RFC 8785 §3.2.2.2 rejects malformed strings, and `canonicalize` enforces
- * that by throwing `Lone surrogate is not allowed`. Tool arguments come from
- * the model, so a stray unpaired surrogate is untrusted input rather than a
- * bug on our side — and this runs on the resilience path, where throwing
- * would abort the whole turn to protect a best-effort dedup signal.
- * Substitution keeps the encoding total and deterministic: equal inputs still
- * hash equal, which is the only property Class D depends on. Distinct lone
- * surrogates collapse to the same replacement character, so two otherwise
- * identical iterations could compare equal on that basis — a far cheaper
- * failure than crashing the turn.
+ * U+FFFD is doubled wherever it already occurs in the input, which makes the
+ * escape alphabet prefix-free: a single U+FFFD in the output always opens an
+ * escape, a doubled one always denotes the literal character. The whole
+ * substitution is therefore injective — distinct inputs stay distinct, which
+ * is the property Class D counting depends on.
  */
-function toWellFormedDeep(value: unknown): unknown {
-  if (typeof value === "string") return value.toWellFormed();
-  if (Array.isArray(value)) return value.map(toWellFormedDeep);
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([k, v]) => [k.toWellFormed(), toWellFormedDeep(v)]),
-    );
-  }
-  return value;
+const ESCAPE = "�";
+
+/** Single-key wrappers standing in for values RFC 8785 cannot express. */
+const NON_FINITE_KEY = `${ESCAPE}non-finite`;
+const CIRCULAR_KEY = `${ESCAPE}circular`;
+
+/** Any surrogate code unit or a literal U+FFFD — a cheap "might need escaping" test. */
+const NEEDS_ESCAPE = /[\uD800-\uDFFF�]/;
+
+/** A high surrogate with no low after it, or a low surrogate with no high before it. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+/**
+ * Encode lone surrogates so the result is well-formed without merging
+ * distinct inputs. Each unpaired code unit becomes `ESCAPE` plus its four hex
+ * digits; pre-existing U+FFFD is doubled first so the two cases never alias.
+ * Well-formed surrogate pairs pass through untouched.
+ */
+function escapeIllFormed(s: string): string {
+  if (!NEEDS_ESCAPE.test(s)) return s;
+  return s
+    .replaceAll(ESCAPE, ESCAPE + ESCAPE)
+    .replace(LONE_SURROGATE, (cu) => `${ESCAPE}${cu.charCodeAt(0).toString(16)}`);
 }
 
 /**
- * Stable canonical-JSON encoding for fingerprint hashing. Wraps the
+ * Rewrite a value into the subset `canonicalize` accepts.
+ *
+ * RFC 8785 has no encoding for three things `tool_use.input` can carry, and
+ * `canonicalize` throws on each: ill-formed strings, non-finite numbers
+ * (`JSON.parse('{"n":1e999}')` yields `Infinity` from perfectly valid JSON
+ * text), and reference cycles. Tool arguments are model output on the
+ * resilience path, so a throw would abort the whole turn to protect a
+ * best-effort dedup signal. Each case gets a deterministic stand-in instead.
+ *
+ * The substitutions are injective, and every escape is anchored on a lone
+ * U+FFFD that {@link escapeIllFormed} guarantees cannot occur in a translated
+ * string or key. Two consequences the counters rely on: a 2-key object stays
+ * a 2-key object, and the pre-pass never reorders anything, so `canonicalize`
+ * still sorts the same key set regardless of emission order.
+ *
+ * Only arrays and plain objects are walked. Anything else with a `toJSON`
+ * reaches `canonicalize` untouched and takes its own path there.
+ */
+function toCanonicalizable(value: unknown, ancestors: Set<object>): unknown {
+  if (typeof value === "string") return escapeIllFormed(value);
+  if (typeof value === "number" && !Number.isFinite(value)) {
+    return { [NON_FINITE_KEY]: String(value) };
+  }
+  if (value === null || typeof value !== "object") return value;
+  if (!Array.isArray(value) && !R.isPlainObject(value)) return value;
+  if (ancestors.has(value)) return { [CIRCULAR_KEY]: true };
+
+  ancestors.add(value);
+  const encoded = Array.isArray(value)
+    ? value.map((v) => toCanonicalizable(v, ancestors))
+    : Object.fromEntries(
+        Object.entries(value).map(([k, v]) => [
+          escapeIllFormed(k),
+          toCanonicalizable(v, ancestors),
+        ]),
+      );
+  ancestors.delete(value);
+  return encoded;
+}
+
+/**
+ * Stand-in hash input for arguments no encoder could render. Distinct
+ * unencodable inputs share it and therefore compare equal, which can only
+ * inflate the counters for repeated calls to the *same* tool; the loop's
+ * side-effect gate and `DEFAULT_MAX_ITERATIONS` bound what that can cost. The
+ * alternative — propagating the throw — ends the turn outright, which is the
+ * failure mode Class D detection exists to avoid.
+ */
+const UNENCODABLE_ARGS = `${ESCAPE}unencodable`;
+
+/**
+ * Total canonical-JSON encoding for fingerprint hashing. Wraps the
  * `canonicalize` library (RFC 8785 JSON Canonicalization Scheme) — sorted
- * object keys at every depth, arrays preserve order. Tool arguments are
- * JSON-compatible by construction (they flow through the
- * `tool_use.input` field, which providers serialize as JSON), so RFC 8785
- * coverage matches what the LLM emits. The library returns `undefined`
- * only for top-level `undefined` / function / symbol input — values that
- * cannot appear in a parsed `tool_use.input`. Throwing on `undefined`
- * surfaces such a bug instead of silently collapsing every offending
- * iteration to `sha256("")` and falsely tripping Class D.
+ * object keys at every depth, arrays preserve order — behind
+ * {@link toCanonicalizable}, which pre-translates the values RFC 8785 cannot
+ * express.
+ *
+ * Never throws. `canonicalize` returns `undefined` for top-level `undefined` /
+ * function / symbol input; the catch covers whatever the library rejects that
+ * the pre-pass doesn't anticipate (a `BigInt`, a throwing `toJSON`). Both land
+ * on {@link UNENCODABLE_ARGS}.
  */
 function canonicalJson(value: unknown): string {
-  const encoded = canonicalize(toWellFormedDeep(value));
-  if (encoded === undefined) {
-    throw new Error(
-      "canonicalJson: input is not JSON-representable (undefined / function / symbol)",
-    );
+  try {
+    return canonicalize(toCanonicalizable(value, new Set())) ?? UNENCODABLE_ARGS;
+  } catch {
+    return UNENCODABLE_ARGS;
   }
-  return encoded;
+}
+
+function sha256(s: string): string {
+  return createHash("sha256").update(s).digest("hex");
 }
 
 /**
