@@ -1,7 +1,7 @@
 import { APICallError, generateImage } from "ai";
 import { z } from "zod";
 import type { ImageModelWithProvider } from "../agent/store/index.js";
-import type { ImageProvider } from "../llm/image-providers.js";
+import { type ImageProvider, openAiCompatibleOptionsKey } from "../llm/image-providers.js";
 import { logger } from "../logger.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { withRetry } from "../util/with-retry.js";
@@ -157,18 +157,31 @@ interface ImageGenerationResult {
 }
 
 /**
+ * `response_format` every openai-compatible image request carries.
+ *
+ * `@ai-sdk/openai-compatible` parses `/images/generations` responses with a
+ * schema that requires `data[].b64_json`, but it leaves `response_format`
+ * out of the request body — and the Images API defaults to `url`. Omitting
+ * the field means the provider generates (and bills for) an image the
+ * adapter then rejects as a non-retryable `Invalid JSON response`, so the
+ * request has to name the format the adapter is prepared to read.
+ */
+const OAI_IMAGE_RESPONSE_FORMAT = "b64_json";
+
+/**
  * Run the AI-SDK-backed providers (fal, openai_compatible). Pulled out of
  * the handler body so the per-provider request assembly stays declarative
  * and the surrounding control flow reads as a switch over `provider.kind`.
  *
- * Negative-prompt forwarding is provider-shaped:
- * - `fal` accepts it via `providerOptions.fal.negative_prompt` (a
- *   provider-specific extension layered on top of the SDK's generic
- *   `providerOptions` knob).
- * - `oai` (`@ai-sdk/openai-compatible`) has no documented negative-prompt
- *   surface, so we drop the field here. The capability gate at the call
- *   site should keep us out of this branch in practice; this is the
- *   belt-and-braces backup.
+ * Extra request-body fields ride the SDK's generic `providerOptions` knob,
+ * keyed per provider:
+ * - `fal` — `providerOptions.fal.negative_prompt`, folded into the body by
+ *   `@ai-sdk/fal`.
+ * - `oai` — `providerOptions[openAiCompatibleOptionsKey(row.name)]`, folded
+ *   into the `/images/generations` body by `@ai-sdk/openai-compatible`
+ *   ("additional provider-specific options are passed through to the
+ *   provider API unchanged"). Carries `response_format` on every call plus
+ *   `negative_prompt` when the model advertises the capability.
  */
 async function generateViaAiSdk(args: {
   provider: Extract<ImageProvider, { kind: "fal" | "oai" }>;
@@ -213,26 +226,34 @@ async function generateViaAiSdk(args: {
         aspectRatio: args.aspectRatio as `${number}:${number}`,
       }),
       ...(args.seed !== undefined && { seed: args.seed }),
-      // negative_prompt routing differs by provider shape:
-      //   - fal: passes through `providerOptions.fal.negative_prompt`
-      //     which the @ai-sdk/fal adapter folds into the request body.
-      //   - openai_compatible: same passthrough mechanism, keyed by the
-      //     provider's `name` (the value used when `createOpenAICompatible({
-      //     name, ... })` was constructed in `image-providers.ts`).
-      //     Canonical OpenAI rejects with HTTP 400; servers that accept
-      //     extra body fields (Together, Replicate's shim, custom)
-      //     forward the value. The capability flag is the operator's
-      //     declaration of "my chosen server takes this".
+      // Body-field routing differs by provider shape:
+      //   - fal: `providerOptions.fal.*`, folded into the request body by
+      //     the @ai-sdk/fal adapter. Only `negative_prompt` today.
+      //   - openai_compatible: same passthrough mechanism, keyed by
+      //     `openAiCompatibleOptionsKey(row.name)` — the form the adapter
+      //     derives from the `name` it was constructed with in
+      //     `image-providers.ts`. `response_format` is unconditional (see
+      //     `OAI_IMAGE_RESPONSE_FORMAT`); `negative_prompt` is opt-in.
+      //     Canonical OpenAI rejects `negative_prompt` with HTTP 400;
+      //     servers that accept extra body fields (Together, Replicate's
+      //     shim, custom) forward the value. The capability flag is the
+      //     operator's declaration of "my chosen server takes this".
       //   - venice: forwarded via the native adapter, not the AI SDK
       //     `providerOptions` shape — handled in the venice branch.
       ...(args.provider.kind === "fal" &&
         args.negativePrompt !== undefined && {
           providerOptions: { fal: { negative_prompt: args.negativePrompt } },
         }),
-      ...(args.provider.kind === "oai" &&
-        args.negativePrompt !== undefined && {
-          providerOptions: { [args.provider.row.name]: { negative_prompt: args.negativePrompt } },
-        }),
+      ...(args.provider.kind === "oai" && {
+        providerOptions: {
+          [openAiCompatibleOptionsKey(args.provider.row.name)]: {
+            response_format: OAI_IMAGE_RESPONSE_FORMAT,
+            ...(args.negativePrompt !== undefined && {
+              negative_prompt: args.negativePrompt,
+            }),
+          },
+        },
+      }),
     });
     return { image, providerMetadata };
   } catch (err) {
@@ -513,7 +534,18 @@ export function createImageTools(deps: {
               }
             }
           },
-          { retries: 2, context: `image.generate.${row.name}` },
+          {
+            retries: 2,
+            context: `image.generate.${row.name}`,
+            // `ImageGenerationFailedError` is terminal by construction: it
+            // only ever wraps an outcome the provider already classified as
+            // non-retryable (4xx, moderation blocks) or that Venice reported
+            // through its response headers. Every attempt here is a paid
+            // generation, so re-running one changes the bill and nothing
+            // else. Transport-shaped failures (5xx, socket resets) still
+            // surface as their own error types and keep the full budget.
+            shouldRetry: (err: unknown) => !(err instanceof ImageGenerationFailedError),
+          },
         ).catch((err: unknown): { failure: ImageFailure } => {
           // Adapter-thrown failures (Venice headers, openai-compat
           // moderation 4xx) come in as `ImageGenerationFailedError`.

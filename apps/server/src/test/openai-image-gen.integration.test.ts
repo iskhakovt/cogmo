@@ -22,10 +22,13 @@
  * `test/fixtures/recorded/openai-*.json`. Subsequent CI runs replay against
  * the captured fixture — no API key, no cost, no network.
  *
- * The wire-format coverage is the point: if the AI SDK's
- * `@ai-sdk/openai-compatible` adapter ever changes how it builds the
- * `POST /v1/images/generations` request body, or how it parses the
- * `data[0].b64_json` response, this test catches it on the next refresh.
+ * Scope: the *response* half of the wire contract — that
+ * `buildImageProvider` → `createImageTools` → adapter turns a real
+ * `data[0].b64_json` envelope into an uploaded attachment. llmock routes on
+ * `(model, prompt)` and emits `b64_json` unconditionally, so it cannot see
+ * the request body at all; the fields we send (notably `response_format`)
+ * are pinned in `src/agent/image-tools-wire.test.ts`, which asserts against
+ * a captured `fetch`.
  */
 
 import { describe, expect, inject, it, vi } from "vitest";
@@ -47,15 +50,16 @@ import { fakeRunInTx } from "./factories.js";
  * string here means the existing fixture stops matching.
  */
 const PROMPT = "A serene watercolor mountain landscape at golden hour, soft brushstrokes.";
-// dall-e-3 (not gpt-image-1/2): `@ai-sdk/openai-compatible` sends
-// `response_format` on every image request — a dall-e-era field. The
-// gpt-image-* line uses `output_format` instead and rejects unknown
-// params with HTTP 400 ("Unknown parameter: 'response_format'"). dall-e-3
-// accepts the SDK's defaults, is still publicly available, and exercises
-// the same wire shape this test exists to pin (POST
-// /v1/images/generations + `data[0].b64_json` response). When operators
-// want gpt-image-* they should configure a dedicated `openai` adapter
-// rather than the generic `openai_compatible` one — tracked separately.
+// dall-e-3 (not gpt-image-1/2): the tool sends `response_format:
+// "b64_json"` on every openai_compatible image request (see
+// `OAI_IMAGE_RESPONSE_FORMAT` in `src/agent/image-tools.ts`) — a dall-e-era
+// field. The gpt-image-* line uses `output_format` instead and rejects
+// unknown params with HTTP 400 ("Unknown parameter: 'response_format'").
+// dall-e-3 accepts it, is still publicly available, and exercises the wire
+// shape this test exists to pin (POST /v1/images/generations +
+// `data[0].b64_json` response). When operators want gpt-image-* they should
+// configure a dedicated `openai` adapter rather than the generic
+// `openai_compatible` one — tracked separately.
 const MODEL_STRING = "dall-e-3";
 const MODEL_NAME = "openai/dall-e-3";
 // LLM-facing slug for MODEL_NAME (see imageModelSlug). Pinned as a literal
