@@ -731,6 +731,40 @@ describe("telegram adapter", () => {
       expect(mockBotApi.editMessageText).toHaveBeenCalledWith(42, 100, "partial\n\n⚠️ LLM failed");
     });
 
+    it("retract drops the streamed fragment so the next text owns the message alone", async () => {
+      // The degraded off-ramp's shape: text streamed and was edited into the
+      // live message, then the turn was cut off and the orchestrator retracts
+      // before pushing its reply. Without the retraction the reply is appended
+      // to the fragment and the user reads a mid-word splice of the two.
+      const adapter = await createStreamingAdapter();
+      const handle = await adapter.openStream("42", "run-1");
+
+      await handle.push({ type: "text_delta", text: "The three key points are: (1) the dep" });
+      expect(mockBotApi.sendMessage).toHaveBeenCalledWith(
+        42,
+        "The three key points are: (1) the dep",
+      );
+      mockBotApi.editMessageText.mockClear();
+
+      await handle.push({ type: "retract" });
+      await handle.push({ type: "text_delta", text: "This conversation is too long." });
+      await handle.finish();
+
+      // Every write after the retraction carries the reply and nothing else,
+      // and it edits the message the fragment was in rather than trailing it.
+      const bodies = mockBotApi.editMessageText.mock.calls.map((call) => String(call[2]));
+      expect(bodies.length).toBeGreaterThan(0);
+      for (const body of bodies) {
+        expect(body).toContain("This conversation is too long.");
+        expect(body).not.toContain("three key points");
+      }
+      expect(mockBotApi.editMessageText).toHaveBeenCalledWith(42, 100, expect.anything(), {
+        parse_mode: "HTML",
+      });
+      // No second message: the fragment was replaced, not followed.
+      expect(mockBotApi.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
     it("retry dedup returns same handle for same runId", async () => {
       const adapter = await createStreamingAdapter();
       const handle1 = await adapter.openStream("42", "run-1");

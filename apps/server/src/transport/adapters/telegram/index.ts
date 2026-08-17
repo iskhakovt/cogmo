@@ -319,6 +319,19 @@ class TelegramStreamHandle implements StreamHandle {
   }
 
   async push(event: StreamEvent): Promise<void> {
+    if (event.type === "retract") {
+      // Drop the buffered text (and any tool/status banners woven into it).
+      // `#messageId` is deliberately kept: the next push writes the degraded
+      // reply into the same message via `#edit`, replacing the fragment the
+      // user can see rather than leaving it above a second message. When the
+      // buffer had already overflowed, `#finalizeChunk` cleared `#messageId`
+      // and those chunks are their own messages — Telegram gives no handle to
+      // edit them back, so they stay and the reply lands in a fresh message.
+      // Nothing is emitted here: Telegram rejects an empty message body, so
+      // there is no "blank it now" call to make.
+      this.#accumulated = "";
+      return;
+    }
     if (event.type === "text_delta") {
       this.#accumulated += event.text;
     } else if (event.type === "tool_start") {

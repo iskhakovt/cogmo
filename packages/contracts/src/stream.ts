@@ -9,4 +9,6 @@ export type StreamEvent =
   | { type: "thinking_delta"; thinking: string; signature: string }
   | { type: "tool_start"; id: string; name: string; input: unknown }
   | { type: "tool_result"; name: string; output: string; isError?: boolean }
-  | { type: "status"; message: string };
+  | { type: "status"; message: string }
+  /** Discard the assistant text streamed so far this turn; keep tool records. */
+  | { type: "retract" };

@@ -891,6 +891,14 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             subtype: result.degraded.subtype,
             log: turnLogger,
           });
+          // Retract first. Text streamed before the degrade fired is already
+          // on the user's screen (Telegram edits the live message every ~500ms;
+          // the web adapter forwards every delta as an SSE frame), and the loop
+          // drops that iteration from `newMessages` — so appending the apology
+          // to it would leave the user reading a truncated fragment welded to
+          // an apology, none of which matches the single assistant message this
+          // turn actually persists. `retract` is a no-op when nothing streamed.
+          await delivery.push({ type: "retract" });
           await delivery.push({ type: "text_delta", text: apology });
           result = {
             ...result,

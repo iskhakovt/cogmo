@@ -38,6 +38,10 @@ export function applyStreamEvent(message: UiMessage, event: StreamEvent): UiMess
         ...message,
         tools: [...message.tools, { id: event.id, name: event.name, args: event.input }],
       };
+    case "retract":
+      // Text only. The tool cards describe iterations that ran to completion
+      // and stay in the persisted transcript, so they survive the retraction.
+      return { ...message, text: "" };
     case "tool_result": {
       const tools = [...message.tools];
       for (let i = tools.length - 1; i >= 0; i--) {

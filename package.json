@@ -28,8 +28,7 @@
     "test:all": "pnpm --filter cogmo test:all",
     "test:watch": "pnpm --filter cogmo test:watch",
     "db:generate": "pnpm --filter cogmo db:generate",
-    "db:migrate": "pnpm --filter cogmo db:migrate",
-    "engines:check": "pnpm --filter cogmo engines:check"
+    "db:migrate": "pnpm --filter cogmo db:migrate"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.8",

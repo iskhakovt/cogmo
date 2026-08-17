@@ -146,12 +146,33 @@ export interface LlmResponse {
 
 // --- Stream events ---
 
+/**
+ * Events the agent loop and orchestrator push at the delivery layer.
+ *
+ * Most members mirror what a provider stream yields, but the union is the
+ * orchestrator→adapter presentation channel, not a pure provider transcript:
+ * `status` is emitted by the pre-flight compaction stage, and `retract` by the
+ * degraded off-ramp.
+ *
+ * `retract` tells every adapter to discard the assistant text it has streamed
+ * so far this turn. The orchestrator emits it immediately before the degraded
+ * reply so the user's visible turn ends as the single coherent apology instead
+ * of a truncated fragment with the apology glued onto its last word — and so
+ * what the user sees matches what gets persisted (the fragment is dropped from
+ * history; see design/agent-resilience.md → Degraded reply). It retracts
+ * *text* only: attachments already delivered mid-stream (`sendPhoto`,
+ * `sendDocument`) and tool-call records are side effects of iterations that ran
+ * to completion, so they stand. Adapters apply it to whatever is still
+ * editable — output already committed to an immutable surface (a Telegram
+ * chunk that overflowed into its own message) stays visible.
+ */
 export type StreamEvent =
   | { type: "text_delta"; text: string }
   | { type: "thinking_delta"; thinking: string; signature: string }
   | { type: "tool_start"; id: string; name: string; input: unknown }
   | { type: "tool_result"; name: string; output: string; isError?: boolean }
-  | { type: "status"; message: string };
+  | { type: "status"; message: string }
+  | { type: "retract" };
 
 /**
  * Result of a streaming LLM call.

@@ -19,11 +19,11 @@ DELETE / UPDATE + NO ACTION  23503    23503
 INSERT orphan child          23503    23503
 ```
 
-Since they no longer match foreign-key violations alone, `findPostgresForeignKeyViolation` / `translateForeignKeyViolation` are now `findPostgresReferentialViolation` / `translateReferentialViolation` — "referential" rather than "constraint" because the pair deliberately ignores the rest of class 23 (unique, not-null, check). `findPgErrorByCode` is generic over its code list so both callers keep their literal unions without an assertion. `errors.test.ts` pins both arms plus the Drizzle cause-chain walk and the passthrough paths, none of which had direct coverage.
+Since they no longer match foreign-key violations alone, the helpers are `findPostgresReferentialViolation` / `translateReferentialViolation` — "referential" rather than "constraint" because the pair deliberately ignores the rest of class 23 (unique, not-null, check). `findPgErrorByCode` is generic over its code list so both callers keep their literal unions without an assertion. `errors.test.ts` pins both arms plus the Drizzle cause-chain walk and the passthrough paths, none of which had direct coverage.
 
 PG18 also makes `pg_uuidv7` redundant — `uuidv7()` is in core — so `createTestDatabase` boots plain PGlite with no extension and no SQL alias.
 
-canonicalize 4 enforces RFC 8785 §3.2.2.2 and throws on unpaired surrogates. `canonicalJson` feeds it `tool_use.input` — model output — and the Class D stuck-loop call site in the agent loop treats the result as infallible, so a stray lone surrogate in any tool argument would have aborted the turn to protect a best-effort dedup signal. Arguments are now escaped before canonicalizing (see "Behaviour the majors moved silently" below for why that escape has to be injective, and for the two sibling rejections — non-finite numbers and cycles — that the same call site was equally exposed to).
+canonicalize 4 enforces RFC 8785 §3.2.2.2 and throws on unpaired surrogates. `canonicalJson` feeds it `tool_use.input` — model output — and the Class D stuck-loop call site in the agent loop treats the result as infallible, so a stray lone surrogate in any tool argument would have aborted the turn to protect a best-effort dedup signal. Arguments are escaped before canonicalizing; the escape is injective, for reasons the fingerprint paragraph below covers.
 
 **Advisories: 16 → 0.** jsdom 30 clears twelve undici findings, `@assistant-ui/react` 0.15 clears nanoid, and the three `fast-uri` host-confusion findings needed no override — ajv already allowed the patched range and the lockfile had simply never re-resolved. All seven pre-existing `overrides:` entries are dropped, each verified dead by re-resolving without it (ip-address 10.5.0, qs 6.15.3, tmp 0.2.7, shell-quote 1.10.0, hono 4.13.2, otlp-transformer 0.221.0, and @grpc/grpc-js 1.14.4). The `@assistant-ui` core/store lockstep pins go too: the 0.15 batch resolves to one consistent tap version, which is what those pins existed to force. `overrides:` is now empty.
 
@@ -31,11 +31,11 @@ Dropping them is what the block's own comment prescribes — "drop each once a d
 
 **Majors.** TypeScript 7's native Go compiler typechecks the workspace clean with no source changes — nothing here drives the compiler API, which is 7.0's sharpest edge before the 7.1 stable API. Pyodide moves to Python-aligned versioning (0.29.4 → 314.0.3), taking the tier-1 WASM runtime to CPython 3.14.2 and closing a Python-minor gap against tier-2's `python:3.14-slim`.
 
-The bundled set goes 379 → 354, but that number nets out two opposite movements and reads as pure loss if taken at face value. Seven of the removals are the `cpython_module` entries — `ssl`, `sqlite3`, `hashlib`, `lzma`, `pydecimal` and friends — which are gone from the lockfile because the unvendored-stdlib mechanism was removed, not because of ABI churn: they now ship inside `python_stdlib.zip` and **import without `loadPackage`**, so a tier-1 skill imports `ssl` / `sqlite3` / `lzma` with no `loadPackage` call and no manifest declaration. The lockfile now reports `{package: 345, shared_library: 9}` and no `cpython_module` at all, and `loadPyodide`'s `fullStdLib` option is documented as having no effect. The genuine ABI-driven shrink is the remainder. `pyodide-compat.ts` needs no change either way — it reads `pyodide-lock.json` at register time.
+The bundled set goes 379 → 354, but that number nets out two opposite movements and reads as pure loss if taken at face value. Seven of the removals are the `cpython_module` entries — `ssl`, `sqlite3`, `hashlib`, `lzma`, `pydecimal` and friends — which are gone from the lockfile because the unvendored-stdlib mechanism was removed, not because of ABI churn: they ship inside `python_stdlib.zip` and **import without `loadPackage`**, so a tier-1 skill imports `ssl` / `sqlite3` / `lzma` with no `loadPackage` call and no manifest declaration. The lockfile reports `{package: 345, shared_library: 9}` and no `cpython_module` at all, and `loadPyodide`'s `fullStdLib` option is documented as having no effect. The genuine ABI-driven shrink is the remainder. `pyodide-compat.ts` needs no change either way — it reads `pyodide-lock.json` at register time.
 
 Cold start: `loadPyodide` plus a trivial `runPython` measures ~2.5s warm on 314, up from ~2.2s on 0.29.4 — a measurement worth carrying because `runOnWorker` spawns a one-shot worker per task, so tier-1 skills pay this per call. AI SDK 7 and OpenAI SDK 7 land without source changes. Hindsight 0.9.1 moves client, `hindsightCompat`, both container image tags and the `minimumReleaseAgeExclude` entry together.
 
-**`@daytonaio/sdk` → `@daytona/sdk`.** The old name is deprecated. Its "same API, no breaking changes" notice covers the rename but not the 0.175 → 0.204 span: `Daytona.list()` now returns a lazy `AsyncIterableIterator<Sandbox>` that pages on demand, and label filters moved under a `labels` key. Both call sites consume the iterator, so `deleteByTaskId` sweeps every sandbox a task owns, not just one page of them. It drains the pager into an array before issuing any delete, which is what keeps a mid-enumeration failure from leaving the sweep half-done (see below). The local `require('stream')` patch is dropped; upstream replaced both sites with `dynamicImport`.
+**`@daytonaio/sdk` → `@daytona/sdk`.** The old name is deprecated. Its "same API, no breaking changes" notice covers the rename but not the 0.175 → 0.204 span: `Daytona.list()` returns a lazy `AsyncIterableIterator<Sandbox>` that pages on demand, and label filters moved under a `labels` key. Both call sites consume the iterator, so `deleteByTaskId` sweeps every sandbox a task owns, not just one page of them. It drains the pager into an array before issuing any delete, which keeps a mid-enumeration failure from leaving the sweep half-done. The local `require('stream')` patch is dropped; upstream replaced both sites with `dynamicImport`.
 
 **npm 12 gates install scripts.** It adds an `--allow-scripts` allowlist independent of `ignore-scripts`, and Claude Code relies on its postinstall to place a per-platform native binary. The devbase Dockerfile names that one package on the install, so the binary lands and `claude --version` works, while everything else in the tree keeps npm 12's default deny. Without the allowlist the install reports success and the CLI fails at runtime, which is why it is named explicitly rather than left implicit.
 
@@ -47,121 +47,34 @@ Daytona 0.204 sends `list()`'s label filter as a single JSON query parameter —
 
 Claude Code 2.1.233 changes the prompts the CLI sends to `/v1/messages`, so llmock had no useful response to replay. Both legs still reached `complete`, so the shutdown contract held, but the model never emitted a tool call — which is what the plan and execute assertions pin. The stream-json contract itself is unchanged: run against the real API, 2.1.233 emits only `system:init`, `assistant`, `user` and `result:success`, all shapes `claude.ts` already parses. No parser work was needed despite the coupling warning on `CLAUDE_CODE_VERSION` in `docker-bake.hcl`.
 
-The third, `skill-authoring`, exercises both surfaces end to end. Refreshing it surfaced a latent break fixed here: it built its devbase snapshot from `Image.fromDockerfile("images/devbase/Dockerfile")`, a cwd-relative path, but Vitest runs in `apps/server` while `images/` sits at the workspace root. Record mode died before any assertion; replay never touched that path, so it stayed invisible until the cassette needed refreshing. It now resolves from the root the way `version-pins.test.ts` does.
+The third, `skill-authoring`, exercises both surfaces end to end. It built its devbase snapshot from `Image.fromDockerfile("images/devbase/Dockerfile")`, a cwd-relative path, but Vitest runs in `apps/server` while `images/` sits at the workspace root — record mode died before any assertion while replay never touched that path, so the break stayed invisible until the cassette needed refreshing. It resolves from the root the way `version-pins.test.ts` does. Recording the Daytona cassettes also needed the WebSocket handshake to forward `sec-websocket-protocol` upstream, since 0.204 carries PTY env and exit control on subprotocols rather than in the URL.
 
 Worth knowing for the next sweep: `pnpm test:record -- <file>` silently ignores the file filter and re-records the entire integration tier against every live upstream. Scope a recording with `RECORD=1 pnpm exec vitest run --project integration <file>` instead.
 
 ## Behaviour the majors moved silently
 
-A review of the sweep found ten places where `tsc` and the tests stayed green while a bumped dependency changed behaviour underneath. That is the characteristic risk of a sweep this size, and it is worth recording as a class rather than as ten unrelated fixes.
+The characteristic risk of a sweep this size is a dependency changing behaviour while `tsc` and the tests stay green. These are recorded as a class rather than as unrelated fixes.
 
-**Image generation asks for base64 explicitly.** @ai-sdk/openai-compatible 3.0.13 stopped forcing `response_format: "b64_json"` on image requests but kept requiring `b64_json` in the response schema. OpenAI defaults dall-e-2/3 to `url`, so an `openai_compatible` provider generated the image, got billed, and then failed the Zod parse with a non-retryable `APICallError` — three times over, because the `withRetry` wrapper had no `shouldRetry` predicate. `image-tools.ts` now sends the flag through the SDK's `providerOptions` hook (the documented mechanism, keyed off the provider name) and `shouldRetry` excludes `ImageGenerationFailedError`, so drift costs one generation instead of three. The integration test that was supposed to pin this wire shape could not fail on it — llmock emits `b64_json` regardless of the request — so a unit test now asserts the outgoing request body through the real SDK.
+**Image generation asks for base64 per model.** @ai-sdk/openai-compatible 3.0.13 stopped forcing `response_format: "b64_json"` on image requests but kept requiring `b64_json` in the response schema. OpenAI defaults dall-e-2/3 to `url`, so an `openai_compatible` provider generated the image, got billed, and then failed the Zod parse. The flag is a per-model property, not a provider-wide one: `gpt-image-*` rejects it outright with `400 unknown_parameter`, and the setup wizard offers that family as a provider option. It now derives from the model id's last path segment, so a gateway prefix resolves the same way, and travels through the SDK's `providerOptions` hook — the documented mechanism, keyed off the provider name. The integration test that was supposed to pin this wire shape could not fail on it, because llmock emits `b64_json` regardless of the request, so a unit test asserts the outgoing request body through the real SDK.
 
-**Ill-formed model output no longer wedges a turn**, at either place it lands. `jsonbZod`'s `toDriver` encodes through `stringifyWellFormedJson`, replacing lone surrogates (object keys included) before a value becomes Postgres JSON text: `tool_use.input` is `z.unknown()`, so a lone surrogate reached `JSON.stringify`, which escapes it as `\udXXX`, and Postgres rejects such a row with `22P02`. That write lives in `persist-new-messages`, after the turn's side effects, so it repeated identically on every Inngest retry while re-running those side effects. Separately `computeIterationFingerprint` is now total: its pre-pass normalized strings only, leaving non-finite numbers (`JSON.parse('{"n":1e999}')` yields `Infinity`) and reference cycles free to abort the turn from a call site with no `try`/`catch`. The string normalization also became injective — mapping every lone surrogate to one replacement character collapsed distinct object keys through `Object.fromEntries` and, running before `canonicalize`'s key sort, made the fingerprint depend on the order the model emitted keys in, which is the exact invariance `canonicalize` was chosen for.
+**Terminal image failures are values, not exceptions.** p-retry rethrows an `AbortError`'s `originalError` — a plain `Error` when the abort was built from a string — so an `AbortError` subclass never reaches the caller as itself. `generate_image`'s terminal-failure catch therefore lives inside the retried callback and returns the failure as a value, so no abort crosses the p-retry boundary and Venice content-policy blocks and openai-compatible moderation refusals surface as tool results rather than unstructured exceptions. `withRetry`'s `shouldRetry` predicate is the path that preserves an error's class, and `with-retry.test.ts` pins both halves of that contract.
 
-**The 40001 retry now fires.** `isSerializationFailure` read a top-level `err.code`, but drizzle-orm wraps every statement error in a `DrizzleQueryError` that carries only `query`/`params`/`cause` — so the in-tx retry that `CLAUDE.md` and the store-pattern rule both document as a contract was dead, and every serialization conflict escaped to Inngest's step-retry budget. Same wrapped-SQLSTATE class as the `23001` bug above, so the walker is now shared from `db/pg-errors.ts` and both classifiers use it. Its tests now cover the wrapped shape and the genuinely unwrapped one postgres-js raises from its own `begin`/`commit` — a bare top-level `code` is a shape the production driver never produces, so asserting on it proved nothing.
+**A permanent 404 no longer buys a Tavily credit.** `looksLikeBotBlock` decides whether a failed fetch is worth retrying through Tavily Extract, and testing `!(error instanceof AbortError)` there can never be true after an abort — so every permanent 4xx looked like a bot block and a 404 fell through to Tavily, paying a credit to relay the same status, which the docstring exists to prevent. The permanent case carries its own error class and stops the loop through `shouldRetry`, the only path that returns a typed error to the caller. `web-tools.test.ts`'s `withRetry` double had asserted a contract p-retry does not offer — preserving `AbortError` identity and ignoring `shouldRetry` — and now matches the library.
 
-**Smaller behaviour moves, each with the guard that would have caught it.** @anthropic-ai/sdk 0.117 added the `model_context_window_exceeded` stop reason, which fell through a `string | null` parameter to `end_turn` — where an empty turn earns a continuation prompt, adding *more* tokens to an already-overflowing context; the mapper now takes the SDK union with an exhaustiveness guard, so the next added reason is a compile error. @modelcontextprotocol/sdk 1.30 added a 10 MB stdio read-buffer cap whose overflow closes the transport, and the connection wired `onclose` but never `onerror`, so the reason was dropped; the bound is now explicit and the reason reaches the log. inngest 4.18's `timeStr` clamps sub-second durations up to 1s, so a sub-second debounce slept 1000ms while recording 500 — both now derive from one value. The Daytona SDK's `SnapshotState` and `SandboxState` gained members (`SNAPSHOTTING`; `PAUSING`/`PAUSED`/`RESUMING`) that hardcoded copies didn't know about, so a snapshot mid-capture was deleted and rebuilt, and a paused sandbox was returned as if running; both now derive from the SDK enum through total maps, and `deleteByTaskId` drains the lazy pager before deleting so a mid-enumeration failure can't leave half a task's sandboxes alive and billable.
+**Ill-formed model output no longer wedges a turn**, at either place it lands. `jsonbZod`'s `toDriver` encodes through `stringifyWellFormedJson`: `tool_use.input` is `z.unknown()`, so a lone surrogate reached `JSON.stringify`, which escapes it as `\udXXX`, and Postgres rejects such a row with `22P02`. That write lives in `persist-new-messages`, after the turn's side effects, so it repeated identically on every Inngest retry while re-running those side effects. The invariant is a property of the encoded text — no value walk covers every shape `JSON.stringify` serializes without reimplementing it, and `toJSON` results and plain class instances both slip past one — so the pass runs over the encoded text escape by escape. Separately `computeIterationFingerprint` is total: a pre-pass normalizing strings alone left non-finite numbers (`JSON.parse('{"n":1e999}')` yields `Infinity`) and reference cycles free to abort the turn from a call site with no `try`/`catch`. The string normalization is injective because mapping every lone surrogate to one replacement character collapses distinct object keys through `Object.fromEntries` and, running before `canonicalize`'s key sort, would make the fingerprint depend on the order the model emitted keys in — the exact invariance `canonicalize` was chosen for.
 
-**Two guards now hold at the level they claim.** `engines.node` said `>=24` while jsdom 30 — a runtime dependency — requires `^24.15.0 || >=26.0.0`, so installing on Node 24.0–24.14 hit an engine mismatch on a package the web-fetch path needs; the declared range is now a subset of what our dependencies allow. And no always-on PR job ran `vite build`: the only `vite build` in the repo is in the Dockerfile, reached solely by the label-gated e2e job, so a module-resolution failure of exactly the kind the deleted `@assistant-ui` pins guarded against could merge green. The web job now bundles before it runs browser tests.
+**The 40001 retry fires.** `isSerializationFailure` read a top-level `err.code`, but drizzle-orm wraps every statement error in a `DrizzleQueryError` that carries only `query`/`params`/`cause` — so the in-tx retry that `CLAUDE.md` and the store-pattern rule both document as a contract was dead, and every serialization conflict escaped to Inngest's step-retry budget. Same wrapped-SQLSTATE class as the `23001` bug above, so the walker is shared from `db/pg-errors.ts` and both classifiers use it. Its tests cover the wrapped shape and the genuinely unwrapped one postgres-js raises from its own `begin`/`commit`; a bare top-level `code` is a shape the production driver never produces, so asserting on it proved nothing.
+
+**Context overflow ends the turn instead of persisting a blank one.** @anthropic-ai/sdk 0.117 added the `model_context_window_exceeded` stop reason, which fell through a `string | null` parameter to `end_turn` — where an empty turn earns a continuation prompt, adding *more* tokens to an already-overflowing context. `StopReason` gains a `context_overflow` member with an immediate degrade and its own subtype, chosen over a compaction repair because compaction is a pre-flight stage and every existing repair appends to a request the window cannot absorb; ending the turn hands control back to the orchestrator, whose next turn compacts the grown history. The mapper takes the SDK union with an exhaustiveness guard, so the next added reason is a compile error rather than a silent fallthrough.
+
+**A degraded reply retracts what it replaces.** An overflow stop reason means generation ran and was cut at the window boundary, so text can already be on the user's screen when the degrade fires — Telegram edits its live message roughly every 500ms and the web adapter forwards every delta as an SSE frame — while the loop drops that iteration from the turn's messages. Appending the apology to it left the user reading a truncated fragment welded to an apology at its last word, none of which matched the single assistant message the turn persists. `StreamEvent` gains a `retract` member that the orchestrator emits immediately before the degraded reply; Telegram clears its buffer but keeps the message id so the apology overwrites the fragment in place, and the web client clears the streamed text. It retracts text only — attachments already delivered and tool records belong to iterations that ran to completion and are persisted, so they stand — and it is best-effort where the surface is immutable, since a Telegram chunk that already overflowed into its own message cannot be edited back. This covers every degrade subtype that can fire after partial output, not overflow alone.
+
+**Smaller behaviour moves, each with the guard that would have caught it.** @modelcontextprotocol/sdk 1.30 added a 10 MB stdio read-buffer cap whose overflow closes the transport, and the connection wired `onclose` but never `onerror`, so the reason was dropped; the bound is explicit and the reason reaches the log. inngest 4.18's `timeStr` clamps sub-second durations up to 1s, so a sub-second debounce slept 1000ms while recording 500 — both derive from one value, pinned by feeding a raw `"500ms"` to the real engine rather than asserting the mapping our own helper applied. The Daytona SDK's `SnapshotState` and `SandboxState` gained members (`SNAPSHOTTING`; `PAUSING`/`PAUSED`/`RESUMING`) that hardcoded copies didn't know about, so a snapshot mid-capture was deleted and rebuilt, and a paused sandbox was returned as if running; both derive from the SDK enum through total maps.
+
+**Two guards hold at the level they claim.** `engines.node` said `>=24` while jsdom 30 — a runtime dependency — requires `^24.15.0 || >=26.0.0`, so installing on Node 24.0–24.14 hit an engine mismatch on a package the web-fetch path needs. The declared range is now checked with `semver.subset` against every `engines.node` in the resolved graph: `pnpm-lock.yaml` already records them per package, transitive dependencies included, so 657 ranges are compared with no `node_modules` walk, no network and no version sampling that could step over a gap. Both `semver` and `yaml` are already dependencies, so the check adds nothing to the tree.
+
+Two mechanisms that look like they would cover this do not, which measurement settles rather than assumption. pnpm's `engineStrict` can only ever answer a point query about one interpreter, and on pnpm 11.21.0 a dependency requiring `node>=99` installs on Node 24.18 with no diagnostic and exit 0, declared directly or transitively. `ls-engines` does intersect the whole graph, but it collapses an `||`-gapped intersection to `>= <lowest>` (ljharb/ls-engines#32), so it calls `>=24.15.0` an exact match of a graph containing jsdom 30 — a range that admits Node 25, which jsdom rejects. The suite pins that gap as a test of its own, alongside the whole-graph assertion, so the guard's ability to fail is asserted rather than observed once.
+
+And no always-on PR job ran `vite build`: the only `vite build` in the repo is in the Dockerfile, reached solely by the label-gated e2e job, so a module-resolution failure of exactly the kind the deleted `@assistant-ui` pins guarded against could merge green. The web job bundles before it runs browser tests.
 
 Finally, PG18's core `uuidv7()` has a 12-bit sub-millisecond counter, so id-order equals insertion-order even for same-millisecond rows. Three store tests no longer need their inter-insert sleeps. One does: `listTasksForConversation` orders by `createdAt`, which defaults to `now()` and is therefore transaction-scoped, so two transactions inside one millisecond still tie regardless of the id generator.
-
-## Review round two
-
-A second review pass over the fixes above found eight more issues; seven held.
-
-**Two of the earlier fixes were themselves wrong.** The image path restored
-`response_format: "b64_json"` unconditionally, which fixed dall-e and broke
-`gpt-image-*` — that family rejects the parameter outright
-(`400 unknown_parameter`), and the setup wizard offers it as a provider option.
-Sending it unconditionally is what @ai-sdk/openai-compatible v2 did and what
-v3.0.13 removed; the flag is a per-model property, and it now derives from the
-model id's last path segment so a gateway prefix resolves the same way. And the
-`shouldRetry` predicate added alongside it never ran: `ImageGenerationFailedError`
-extends p-retry's `AbortError`, which p-retry throws on before consulting the
-predicate, so the error was already terminal and no attempt was ever re-billed.
-
-Removing that predicate exposed the real defect it was sitting on. p-retry
-rethrows an `AbortError`'s `originalError` — a plain `Error` when the abort was
-built from a string — so a `.catch` chained outside `withRetry` and testing
-`instanceof ImageGenerationFailedError` could never match, and Venice
-content-policy blocks and openai-compatible moderation refusals escaped
-`generate_image` as unstructured exceptions instead of a tool result. The
-terminal-failure catch now lives inside the retried callback, returning the
-failure as a value so no abort crosses the p-retry boundary.
-
-**The same root cause was live in the web tools, with a billing consequence.**
-`looksLikeBotBlock` tested `!(error instanceof AbortError)` to decide whether a
-failed fetch was worth retrying through Tavily Extract, and that is never true
-after an abort — so every permanent 4xx looked like a bot block and a 404 fell
-through to Tavily, paying a credit to relay the same status, which its docstring
-exists to prevent. The permanent case now carries its own error class and stops
-the loop through `shouldRetry`, the only path that returns a typed error to the
-caller. `web-tools.test.ts`'s `withRetry` double had preserved `AbortError`
-identity and ignored `shouldRetry`, so the suite asserted a contract p-retry does
-not offer; corrected, it fails against the old code. `with-retry.test.ts` now
-pins both halves of that contract, and the helper's own comments no longer
-describe an abort as replacing the thrown value with itself.
-
-**Context overflow no longer lands as a successful blank turn.** Mapping
-Anthropic's `model_context_window_exceeded` to `max_tokens` kept it out of the
-empty-turn repair, but `classifyPostStream` has no `max_tokens` arm, so it
-returned `ok` and the loop persisted the turn — blank when the overflow carried
-no content, truncated-as-complete when it carried some. `StopReason` gains a
-`context_overflow` member with an immediate degrade and its own subtype, chosen
-over a compaction repair because compaction is a pre-flight stage and every
-existing repair appends to a request the window cannot absorb. Ending the turn
-hands control back to the orchestrator, whose next turn compacts the grown
-history.
-
-**The jsonb sanitizer was sanitizing the wrong thing.** It walked the input
-value and skipped non-plain shapes to preserve their `toJSON`, so a `toJSON`
-returning a lone surrogate — and any class instance without one, whose fields
-`JSON.stringify` serializes regardless — still produced text Postgres rejects.
-The invariant is a property of the encoded text, and no value walk covers every
-shape `JSON.stringify` serializes without reimplementing it, so the pass now
-runs over the encoded text escape by escape.
-
-**Also:** `engines.node` and `design/skills.md`'s Pyodide reference corrected,
-and the sub-second debounce clamp now pinned by feeding a raw `"500ms"` to the
-real engine rather than asserting the mapping our own helper already applied.
-
-## Review round three
-
-**The engines guard checked a fraction of what it claimed.** It read the
-`engines.node` of `apps/server`'s direct dependencies and called that the
-narrowest runtime constraint, but a floor raised three levels down breaks an
-install just as thoroughly, and the resolution step lost 23 of the 57 direct
-dependencies anyway: `require.resolve("<dep>/package.json")` throws for any
-package whose `exports` map omits `"./package.json"`, which covers `openai`,
-`drizzle-orm`, `inngest`, `postgres`, `grammy` and `p-retry` among others. Of
-the direct dependencies that declare a Node range, 13 of 39 were being skipped
-silently by a `catch { continue }`.
-
-The comparison is now `ls-engines`, which intersects `engines.node` across the
-whole installed graph and exits non-zero when the declared range is wider than
-that intersection — the check the previous code was approximating by hand.
-`--mode=actual` reads the tree from `node_modules`, so it handles pnpm's layout
-without parsing a lockfile, and it degrades to the comparison alone when the
-network is unavailable. Replacing the walk also retired a bug in it: resolving
-by climbing parent `node_modules` directories escapes into pnpm's hoisted
-`.pnpm/node_modules`, so the "production" closure it measured included dev-only
-packages.
-
-pnpm's built-in `engine-strict` is not a substitute, which measurement settles
-rather than assumption: on pnpm 11.21.0 a dependency requiring `node>=99`
-installs on Node 24.18 with no diagnostic and exit 0, whether declared directly
-or transitively. `engine-strict` compares only the current project's own
-`engines` against the running interpreter, and even then it warns and exits 0.
-
-The guard is now verified in the direction that matters. Restoring the old
-`>=24` makes it fail with ls-engines' own diagnostic; the hand-rolled version
-had only ever been observed passing.
-
-One finding did not hold: a claim that `dispose.test.ts`'s log assertion was
-vacuous because pino child loggers own their level methods. They don't, for a
-single-argument `child()` — pino installs own methods only via `setLevel`, so the
-child resolves `warn` through the prototype chain to the root at call time.
-Removing the production log makes the test fail, which is the check that settles
-it.

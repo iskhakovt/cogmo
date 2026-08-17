@@ -199,12 +199,14 @@ export async function validateDaytonaApiKey(
   try {
     daytona = new Daytona(config);
   } catch (err) {
-    // The constructor validates its config before any request goes out, so
-    // a blank credential throws `DaytonaAuthenticationError` synchronously,
-    // and `DAYTONA_OTEL_ENABLED=true` without the OpenTelemetry peer deps
-    // throws too. Nothing to dispose on this path — construction is what
-    // failed. The message is generic rather than one of the HTTP-status
-    // arms below because no request reached the API.
+    // The constructor validates its config before it creates anything
+    // disposable: a blank credential throws `DaytonaAuthenticationError`
+    // and a non-finite `requestTimeoutMs` throws
+    // `DaytonaInvalidArgumentError`, both ahead of the event dispatcher
+    // whose socket `disposeDaytona` exists to close. So there is nothing to
+    // dispose on this path — construction is what failed. The message is
+    // generic rather than one of the HTTP-status arms below because no
+    // request reached the API.
     return { valid: false, error: `Daytona client setup failed: ${(err as Error).message}` };
   }
 

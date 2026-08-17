@@ -37,6 +37,20 @@ describe("applyStreamEvent", () => {
     expect(applyStreamEvent(assistant, { type: "status", message: "working" })).toBe(assistant);
   });
 
+  it("clears streamed text on retract but keeps the tool cards", () => {
+    let m = applyStreamEvent(assistant, {
+      type: "tool_start",
+      id: "t1",
+      name: "search",
+      input: {},
+    });
+    m = applyStreamEvent(m, { type: "text_delta", text: "the three points are: (1) the dep" });
+    m = applyStreamEvent(m, { type: "retract" });
+    m = applyStreamEvent(m, { type: "text_delta", text: "This conversation is too long." });
+    expect(m.text).toBe("This conversation is too long.");
+    expect(m.tools).toEqual([{ id: "t1", name: "search", args: {} }]);
+  });
+
   it("drops a tool_result with no matching pending tool", () => {
     const m = applyStreamEvent(assistant, { type: "tool_result", name: "nope", output: "x" });
     expect(m.tools).toEqual([]);

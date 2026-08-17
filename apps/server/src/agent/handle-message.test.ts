@@ -2758,6 +2758,73 @@ describe("createHandleMessage", () => {
     );
   });
 
+  it("retracts the already-streamed fragment before pushing the degraded apology", async () => {
+    // A degrade can fire after the model streamed text (context_overflow and
+    // the Class D trips both can), and that text is already on the user's
+    // screen — Telegram edits the live message every ~500ms, the web adapter
+    // forwards each delta as an SSE frame. The loop drops that iteration from
+    // `newMessages`, so appending the apology to it would leave the user
+    // reading a truncated fragment welded to an apology while history holds
+    // only the apology. `retract` has to precede the apology delta.
+    const handle = mockDeliveryHandle();
+    const synthesisProvider = mockProvider({
+      chat: vi.fn().mockResolvedValue({
+        content: [{ type: "text", text: "The conversation outgrew the window — start a new one." }],
+        stopReason: "end_turn",
+        model: "mock-model",
+        usage: { inputTokens: 100, outputTokens: 12 },
+      }),
+    });
+    const deps = mockDeps({
+      resolveProvider: mockResolver(synthesisProvider),
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      runStreamingAgentLoop: vi.fn().mockResolvedValue({
+        text: "",
+        messages: [],
+        newMessages: [],
+        usage: { inputTokens: 10, outputTokens: 5 },
+        model: "mock-model",
+        iterations: 2,
+        degraded: {
+          reason: "request exceeded the model's context window",
+          subtype: "context_overflow",
+        },
+      }),
+    });
+
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    const pushed = vi.mocked(handle.push).mock.calls.flat();
+    const retractIdx = pushed.findIndex((e) => e.type === "retract");
+    const apologyIdx = pushed.findIndex((e) => e.type === "text_delta");
+    expect(retractIdx).toBeGreaterThanOrEqual(0);
+    expect(apologyIdx).toBeGreaterThan(retractIdx);
+    expect(pushed[apologyIdx]).toEqual({
+      type: "text_delta",
+      text: "The conversation outgrew the window — start a new one.",
+    });
+  });
+
+  it("does not retract on a healthy turn", async () => {
+    const handle = mockDeliveryHandle();
+    const deps = mockDeps({
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+    });
+
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    const pushed = vi.mocked(handle.push).mock.calls.flat();
+    expect(pushed.some((e) => e.type === "retract")).toBe(false);
+  });
+
   it("falls back to the fixed string when synthesis fails", async () => {
     const handle = mockDeliveryHandle();
     const failingSynthesis = mockProvider({
