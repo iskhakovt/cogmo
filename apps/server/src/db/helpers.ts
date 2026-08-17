@@ -1,7 +1,6 @@
 import { sql } from "drizzle-orm";
 import { customType, timestamp, uuid } from "drizzle-orm/pg-core";
 import type { Notice } from "postgres";
-import * as R from "remeda";
 import type { z } from "zod";
 import { logger } from "../logger.js";
 
@@ -61,26 +60,37 @@ export function ts() {
 const ESCAPED_LONE_SURROGATE = /\\ud[89a-f]/i;
 
 /**
- * Well-form every string reachable from a JSON-shaped value, object keys
- * included, replacing lone surrogates with U+FFFD.
+ * One escape sequence of JSON text: `\uXXXX` or a single-character escape.
  *
- * Only arrays and plain objects are walked. Anything else (a `Date`, a class
- * instance) is handed to `JSON.stringify` untouched so its own `toJSON`
- * governs the encoding.
- *
- * Two keys that differ only in their lone surrogates map onto one replacement
- * and collapse to the last of them — the same rule Postgres applies to
- * duplicate `jsonb` keys, so the stored row is unchanged either way.
+ * Scanning escape by escape is what keeps backslashes straight. `\\` is one
+ * token, so a `ud800` following it reads as the plain text it is, while a
+ * `\ud800` that opens a token of its own reads as the escape it is.
  */
-function toWellFormedDeep(value: unknown): unknown {
-  if (typeof value === "string") return value.toWellFormed();
-  if (Array.isArray(value)) return value.map(toWellFormedDeep);
-  if (R.isPlainObject(value)) {
-    return Object.fromEntries(
-      Object.entries(value).map(([k, v]) => [k.toWellFormed(), toWellFormedDeep(v)]),
-    );
-  }
-  return value;
+const JSON_ESCAPE = /\\(u[0-9a-f]{4}|.)/gi;
+
+/** The body of a `\uXXXX` escape naming a surrogate code point. */
+const SURROGATE_ESCAPE_BODY = /^ud[89a-f]/i;
+
+/**
+ * Replace every lone surrogate in JSON text with U+FFFD.
+ *
+ * Works on the encoded text rather than on the source value, so the result
+ * doesn't depend on how a string reached that text. A string field, an object
+ * key, a field of a class instance, and a string returned from some value's own
+ * `toJSON` all arrive here as the same `\udXXX` escape, and `JSON.stringify`
+ * having produced the escape at all is what proves the code unit was unpaired.
+ *
+ * U+FFFD needs no escape of its own, so it goes in as a literal character —
+ * what `JSON.stringify` emits for it.
+ *
+ * Two keys differing only in their lone surrogates become one key written
+ * twice; `jsonb` keeps the last, the rule Postgres applies to any duplicate
+ * key.
+ */
+function wellFormJsonText(json: string): string {
+  return json.replace(JSON_ESCAPE, (match, body: string) =>
+    SURROGATE_ESCAPE_BODY.test(body) ? "�" : match,
+  );
 }
 
 /**
@@ -97,15 +107,19 @@ function toWellFormedDeep(value: unknown): unknown {
  * whichever way we turn, so substituting U+FFFD — exactly what UTF-8 encoding
  * does to them — is the option that lets the turn land.
  *
- * The common path pays one regex test over the encoded text; the value is only
- * walked and re-encoded when that test hits. Sanitising is logged because it
- * silently changes what the row stores.
+ * The common path pays one regex test over the encoded text; only a hit buys the
+ * escape-by-escape pass. Sanitising is logged because it silently changes what
+ * the row stores — and only when it actually replaced something, so text that
+ * merely spells `\ud800` stays quiet.
  */
 export function stringifyWellFormedJson(value: unknown, column: string): string {
   const encoded = JSON.stringify(value);
   if (!ESCAPED_LONE_SURROGATE.test(encoded)) return encoded;
-  logger.warn({ column }, "jsonb value contained lone surrogates — replaced with U+FFFD");
-  return JSON.stringify(toWellFormedDeep(value));
+  const wellFormed = wellFormJsonText(encoded);
+  if (wellFormed !== encoded) {
+    logger.warn({ column }, "jsonb value contained lone surrogates — replaced with U+FFFD");
+  }
+  return wellFormed;
 }
 
 /**
