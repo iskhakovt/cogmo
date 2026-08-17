@@ -125,36 +125,6 @@ function sanitizeHistory(messages: ReadonlyArray<Message>, log: Logger): Message
 }
 
 /**
- * Clear thinking content from all assistant messages except the most recent.
- *
- * Anthropic requires thinking blocks in history but the content is only useful
- * for the model's immediate next response. Replacing with empty string preserves
- * the block structure while freeing tokens.
- */
-export function clearOldThinking(messages: ReadonlyArray<Message>): Message[] {
-  let lastAssistantIdx = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]?.role === "assistant") {
-      lastAssistantIdx = i;
-      break;
-    }
-  }
-
-  return messages.map((msg, idx) => {
-    if (msg.role !== "assistant" || idx === lastAssistantIdx) return msg;
-    if (typeof msg.content === "string") return msg;
-
-    const hasThinking = msg.content.some((b) => b.type === "thinking");
-    if (!hasThinking) return msg;
-
-    return {
-      ...msg,
-      content: msg.content.map((b) => (b.type === "thinking" ? { ...b, thinking: "" } : b)),
-    };
-  });
-}
-
-/**
  * Run the agentic loop: call LLM → execute tools → repeat until done.
  *
  * Each iteration calls the LLM. If the response contains tool_use blocks,
@@ -172,7 +142,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     maxIterations = DEFAULT_MAX_ITERATIONS,
     turnLogger: log,
   } = params;
-  const messages = clearOldThinking(sanitizeHistory(params.messages, log));
+  const messages = sanitizeHistory(params.messages, log);
   const initialLength = messages.length;
   const toolDefs = tools.definitions();
   const totalUsage = { inputTokens: 0, outputTokens: 0 };
@@ -644,7 +614,7 @@ export async function runStreamingAgentLoop(
     maxIterations = DEFAULT_MAX_ITERATIONS,
     turnLogger: log,
   } = params;
-  const messages = clearOldThinking(sanitizeHistory(params.messages, log));
+  const messages = sanitizeHistory(params.messages, log);
   const initialLength = messages.length;
   const toolDefs = tools.definitions();
   const totalUsage = { inputTokens: 0, outputTokens: 0 };

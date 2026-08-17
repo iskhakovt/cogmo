@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { logger } from "../logger.js";
 import { AnthropicProvider } from "./anthropic.js";
 import { ProviderProtocolError } from "./errors.js";
 import type { StreamEvent } from "./types.js";
@@ -897,7 +898,7 @@ describe("AnthropicProvider", () => {
   });
 
   describe("thinking", () => {
-    it("passes thinking config to the API", async () => {
+    it("sends no thinking parameter, leaving each model its own default", async () => {
       const provider = createProvider();
       mockCreate.mockResolvedValueOnce({
         content: [
@@ -905,21 +906,19 @@ describe("AnthropicProvider", () => {
           { type: "text", text: "answer", citations: null },
         ],
         stop_reason: "end_turn",
-        model: "claude-sonnet-4-6",
+        model: "claude-sonnet-5",
         usage: { input_tokens: 50, output_tokens: 30 },
       });
 
       await provider.chat({
-        model: "claude-sonnet-4-6",
+        model: "claude-sonnet-5",
         system: "sys",
         messages: [{ role: "user", content: "think hard" }],
-        thinking: { budgetTokens: 10000 },
       });
 
       const callArgs = mockCreate.mock.calls[0]![0];
-      expect(callArgs.thinking).toEqual({ type: "enabled", budget_tokens: 10000 });
-      // max_tokens = budgetTokens + default (8192)
-      expect(callArgs.max_tokens).toBe(10000 + 8192);
+      expect(callArgs.thinking).toBeUndefined();
+      expect(callArgs.max_tokens).toBe(8192);
     });
 
     it("translates thinking blocks in history back to Anthropic format", async () => {
@@ -953,6 +952,97 @@ describe("AnthropicProvider", () => {
         thinking: "previous reasoning",
         signature: "sig",
       });
+    });
+
+    it("captures the signature from signature_delta, not content_block_start", async () => {
+      // The signature arrives as its own delta just before
+      // `content_block_stop`; `content_block_start` carries an empty one.
+      // Reading only the start event yields a block the API rejects on
+      // replay as a modified thinking block.
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            type: "message_start",
+            message: { model: "claude-sonnet-5", usage: { input_tokens: 10, output_tokens: 0 } },
+          },
+          {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "thinking", thinking: "", signature: "" },
+          },
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "thinking_delta", thinking: "reasoning" },
+          },
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "signature_delta", signature: "real-sig" },
+          },
+          { type: "content_block_stop", index: 0 },
+          {
+            type: "message_delta",
+            delta: { stop_reason: "end_turn" },
+            usage: { output_tokens: 5 },
+          },
+        ]),
+      );
+
+      const { events } = provider.chatStream({
+        model: "claude-sonnet-5",
+        system: "sys",
+        messages: [{ role: "user", content: "think" }],
+      });
+
+      const collected: StreamEvent[] = [];
+      for await (const event of events) collected.push(event);
+
+      expect(collected).toEqual([
+        { type: "thinking_delta", thinking: "reasoning", signature: "real-sig" },
+      ]);
+    });
+
+    it("captures the signature when the thinking text is empty (display: omitted)", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            type: "message_start",
+            message: { model: "claude-sonnet-5", usage: { input_tokens: 10, output_tokens: 0 } },
+          },
+          {
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "thinking", thinking: "", signature: "" },
+          },
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "signature_delta", signature: "sig-no-text" },
+          },
+          { type: "content_block_stop", index: 0 },
+          {
+            type: "message_delta",
+            delta: { stop_reason: "end_turn" },
+            usage: { output_tokens: 5 },
+          },
+        ]),
+      );
+
+      const { events } = provider.chatStream({
+        model: "claude-sonnet-5",
+        system: "sys",
+        messages: [{ role: "user", content: "think" }],
+      });
+
+      const collected: StreamEvent[] = [];
+      for await (const event of events) collected.push(event);
+
+      expect(collected).toEqual([
+        { type: "thinking_delta", thinking: "", signature: "sig-no-text" },
+      ]);
     });
 
     it("accumulates thinking in stream and emits as thinking_delta", async () => {
@@ -1005,7 +1095,6 @@ describe("AnthropicProvider", () => {
         model: "claude-sonnet-4-6",
         system: "sys",
         messages: [{ role: "user", content: "think" }],
-        thinking: { budgetTokens: 5000 },
       });
 
       const collected: StreamEvent[] = [];
@@ -1018,6 +1107,114 @@ describe("AnthropicProvider", () => {
 
       const meta = await response;
       expect(meta.stopReason).toBe("end_turn");
+    });
+  });
+
+  // The Messages API rejects sampling parameters with a 400 on every
+  // current model. `temperature` stays on ChatParams for the
+  // OpenAI-compatible adapter, so this adapter has to strip it — a
+  // forwarded value fails the whole request, and on the degraded-reply
+  // path that failure is swallowed into the fixed fallback string.
+  describe("sampling parameters", () => {
+    it("drops temperature instead of forwarding it", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "ok", citations: null }],
+        stop_reason: "end_turn",
+        model: "claude-sonnet-5",
+        usage: { input_tokens: 10, output_tokens: 5 },
+      });
+
+      await provider.chat({
+        model: "claude-sonnet-5",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+        temperature: 0,
+      });
+
+      expect(mockCreate.mock.calls[0]![0]).not.toHaveProperty("temperature");
+    });
+
+    it("drops temperature on the responseFormat path too", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "tool_use", id: "tu_1", name: "extract", input: { ok: true } }],
+        stop_reason: "tool_use",
+        model: "claude-sonnet-5",
+        usage: { input_tokens: 10, output_tokens: 5 },
+      });
+
+      await provider.chat({
+        model: "claude-sonnet-5",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+        temperature: 0,
+        responseFormat: {
+          type: "json_schema",
+          name: "extract",
+          schema: { type: "object", properties: { ok: { type: "boolean" } } },
+        },
+      });
+
+      expect(mockCreate.mock.calls[0]![0]).not.toHaveProperty("temperature");
+    });
+
+    it("warns once per model when it drops a temperature", async () => {
+      const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+      try {
+        const provider = createProvider();
+        // Unique per run: the warn-once cache is module-level, so a model
+        // id shared with another test would make this assertion depend on
+        // file execution order.
+        const model = `claude-test-warn-once-${Math.random()}`;
+        for (let i = 0; i < 2; i++) {
+          mockCreate.mockResolvedValueOnce({
+            content: [{ type: "text", text: "ok", citations: null }],
+            stop_reason: "end_turn",
+            model,
+            usage: { input_tokens: 10, output_tokens: 5 },
+          });
+          await provider.chat({
+            model,
+            system: "sys",
+            messages: [{ role: "user", content: "hi" }],
+            temperature: 0,
+          });
+        }
+
+        const dropWarnings = warnSpy.mock.calls.filter(
+          (call) => typeof call[1] === "string" && call[1].includes("temperature is not supported"),
+        );
+        expect(dropWarnings).toHaveLength(1);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("stays silent when no temperature was requested", async () => {
+      const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+      try {
+        const provider = createProvider();
+        mockCreate.mockResolvedValueOnce({
+          content: [{ type: "text", text: "ok", citations: null }],
+          stop_reason: "end_turn",
+          model: "claude-sonnet-5",
+          usage: { input_tokens: 10, output_tokens: 5 },
+        });
+
+        await provider.chat({
+          model: "claude-sonnet-5",
+          system: "sys",
+          messages: [{ role: "user", content: "hi" }],
+        });
+
+        const dropWarnings = warnSpy.mock.calls.filter(
+          (call) => typeof call[1] === "string" && call[1].includes("temperature is not supported"),
+        );
+        expect(dropWarnings).toHaveLength(0);
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
   });
 

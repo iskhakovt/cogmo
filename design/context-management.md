@@ -254,7 +254,7 @@ This data is essential for tuning thresholds — if summarization fires too ofte
 - **Anthropic server-side compaction** (`compact_20260112`) — powerful but beta and Anthropic-only. Our pipeline is provider-agnostic. Can layer server-side APIs on top later.
 - **Relevance-based retrieval** — embedding conversation turns and retrieving by similarity. Hindsight handles this for cross-session; within-session relevance scoring is a future enhancement.
 - **Agent-directed memory** (MemGPT/Letta style) — the agent decides what to keep/evict via tool calls. Our core memory blocks are a simpler version of this.
-- **Thinking block management** — Handled by `clearOldThinking()` pre-pass in the agent loop (not the compaction pipeline). Replaces thinking content with empty string in all assistant messages except the most recent. Runs unconditionally every turn — cheaper and more reliable than a budget-triggered strategy.
+- **Thinking block management** — Not ours to do. Thinking blocks travel back to the provider exactly as the model emitted them: the Messages API rejects blocks whose content has been modified, and stripping them can trigger ordering/signature errors. So the loop forwards history verbatim, and the compaction pipeline leaves thinking blocks alone. There is little to reclaim in any case — `thinking.display` defaults to `omitted`, so the blocks arrive with empty text and cost almost nothing to carry. If thinking ever does create real context pressure (which would mean opting into `display: "summarized"`), the mechanism is Anthropic's server-side context editing (`clear_thinking_20251015`), not client-side rewriting.
 
 ## Industry Context
 

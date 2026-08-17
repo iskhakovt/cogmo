@@ -109,6 +109,16 @@ export class AnthropicProvider implements LlmProvider {
                 if (block) {
                   block.chunks.push(event.delta.thinking);
                 }
+              } else if (event.delta.type === "signature_delta") {
+                // The signature arrives here, just before the block's
+                // `content_block_stop` — `content_block_start` carries an
+                // empty one. Without it the block we rebuild is not the
+                // block the model sent, and replaying it into history is
+                // rejected as a modified thinking block.
+                const block = thinkingBlocks.get(event.index);
+                if (block) {
+                  block.signature = event.delta.signature;
+                }
               }
               break;
 
@@ -245,7 +255,30 @@ export class AnthropicProvider implements LlmProvider {
 
 // --- Params builder ---
 
+const warnedSamplingModels = new Set<string>();
+
+/**
+ * The Messages API rejects sampling parameters (`temperature`, `top_p`,
+ * `top_k`) on every current Anthropic model — Opus 4.7 and later, and the
+ * whole 5 series — with a 400. `ChatParams.temperature` stays canonical
+ * because the OpenAI-compatible adapter honours it; this adapter drops it
+ * and says so once per model, so a caller asking for determinism can see
+ * that Anthropic isn't giving it to them rather than assuming it landed.
+ */
+function dropSamplingParams(params: ChatParams): void {
+  if (params.temperature === undefined) return;
+  if (warnedSamplingModels.has(params.model)) return;
+  warnedSamplingModels.add(params.model);
+  logger.warn(
+    { model: params.model, temperature: params.temperature },
+    `temperature is not supported by the Anthropic Messages API — dropping it for "${params.model}". ` +
+      `Control response variance with the prompt, or route this call to an OpenAI-compatible provider.`,
+  );
+}
+
 function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNonStreaming {
+  dropSamplingParams(params);
+
   // System prompt as content block array with cache_control on the last block.
   // Tools + system are static per conversation — caching saves 90% on reads.
   // Omit the block when there's no prompt: Anthropic rejects an empty-text
@@ -273,7 +306,6 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
       messages: params.messages.map(toAnthropicMessage),
       tools: [syntheticTool],
       tool_choice: { type: "tool", name: params.responseFormat.name },
-      ...(params.temperature !== undefined && { temperature: params.temperature }),
     };
   }
 
@@ -286,20 +318,18 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
 
   const maxTokens = params.maxTokens ?? DEFAULT_MAX_TOKENS;
 
-  const result: Anthropic.MessageCreateParamsNonStreaming = {
+  // No `thinking` parameter: each model applies its own default, which is
+  // adaptive thinking on Sonnet 5 and the rest of the 5 series. Explicit
+  // depth control belongs in `output_config.effort`, which nothing needs
+  // yet. Thinking blocks that come back are translated by
+  // `toAnthropicMessage` / `toCanonicalBlock` either way.
+  return {
     model: params.model,
-    max_tokens: params.thinking ? params.thinking.budgetTokens + maxTokens : maxTokens,
+    max_tokens: maxTokens,
     ...(systemBlocks.length > 0 && { system: systemBlocks }),
     messages: params.messages.map(toAnthropicMessage),
     ...(tools && { tools }),
-    ...(params.temperature !== undefined && { temperature: params.temperature }),
   };
-
-  if (params.thinking) {
-    result.thinking = { type: "enabled", budget_tokens: params.thinking.budgetTokens };
-  }
-
-  return result;
 }
 
 // --- To Anthropic format ---

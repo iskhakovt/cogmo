@@ -47,7 +47,7 @@ export async function ensureDefaultProfile(
       userId: null,
       name: "assistant",
       basePrompt: DEFAULT_BASE_PROMPT,
-      model: "claude-sonnet-4-6",
+      model: "claude-sonnet-5",
       toolSet: DEFAULT_TOOL_SET,
     });
     logger.info({ profileId: id }, "created default org profile");

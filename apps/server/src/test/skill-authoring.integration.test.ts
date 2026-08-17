@@ -119,7 +119,9 @@ const HAS_RECORDING_INPUTS =
   !!process.env.COGMO_TEST_SKILLS_REMOTE;
 const RECORDABLE = IS_RECORD && HAS_RECORDING_INPUTS;
 const FIXTURE_EXISTS = existsSync(FIXTURE_PATH);
-const RUNNABLE = RECORDABLE || FIXTURE_EXISTS;
+/** Disables the suite outright — see the note above `describe` below. */
+const TIER1_HAS_NO_HTTP = true;
+const RUNNABLE = !TIER1_HAS_NO_HTTP && (RECORDABLE || FIXTURE_EXISTS);
 
 // --- Outbound capture (mirrors pipeline.integration.test.ts) ─────────
 
@@ -138,6 +140,22 @@ const capturedOutbound: CapturedOutbound[] = [];
 const TEST_RUN_ID = "skill-author";
 const TASK_BRANCH_GLOB = `cogmo/run/${TEST_RUN_ID}`;
 
+// Disabled: the skill this test authors cannot run. Its prompt asks for
+// `urllib.request` and no declared dependencies, which lands the skill in
+// tier 1 (Pyodide/WASM), where there are no raw sockets and no HTTP path
+// of any kind — `design/skills.md` promises a fetch shim that was never
+// wired. The recorded turns show the model discovering that at runtime and
+// falling back to `web_answer`, so the closing price assertion has always
+// been satisfied by a live Perplexity call rather than by the skill under
+// test. Re-recording therefore depends on an unmocked third-party answer
+// being confidently current, which is why it now fails.
+//
+// Everything up to that point does work — authored, pushed, merged,
+// registered, and invoked as a tool on the next turn — so this is worth
+// restoring rather than deleting. Re-enable once `ctx.http` gives tier 1 a
+// real network path: point the skill at it, then re-record. See todo.md.
+// Restoring is dropping `!TIER1_HAS_NO_HTTP &&` from `RUNNABLE`; the
+// record/replay gating around it stays as-is.
 describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () => {
   let mock: DaytonaMock;
   let daytonaClient: DaytonaSandboxClient;

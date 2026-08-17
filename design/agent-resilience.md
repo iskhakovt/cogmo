@@ -240,7 +240,7 @@ Synthesis call shape:
 - **Tools disabled at the API level** (`tools: []`), not via prompt — belt-and-braces against a model that "helpfully" tries to call a tool from a stale system instruction.
 - **Single attempt, no Class C repair on this call.** If it fails for any reason, fall back to the fixed string above and emit `agent.degrade.synthesis` with `ok: false`. Don't degrade-the-degrade — the user has waited long enough.
 - **Wall-clock cap of 5s** — tighter than the normal request budget. The user is already waiting on a failed turn.
-- **`temperature: 0`** — predictability matters more than variety on a failure reply.
+- **`temperature: 0`** — predictability matters more than variety on a failure reply. Best-effort: OpenAI-compatible providers honour it, and the Anthropic adapter drops it (the Messages API rejects sampling parameters on current models) with a once-per-model warning. The reply is 1–3 sentences either way.
 - **System prompt names the stop reason and asks for 1–3 sentences** covering: what was attempted, what went wrong, one concrete next step (rephrase, switch model, try later, etc.). No verbose apology.
 
 Provider for the synthesis call is the same one the failing turn was using — the conversation is already paying for that model's quirks; switching providers on the apology message is a non-sequitur. (A future "this provider is misbehaving" circuit breaker could change this; out of scope here.)
