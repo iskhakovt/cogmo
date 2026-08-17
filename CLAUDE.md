@@ -126,6 +126,12 @@ Principles, three-tier structure, PGlite store tests, record/replay mocks, integ
 
 @.claude/rules/testing.md
 
+## Sub-agents
+
+Constraints every sub-agent brief must carry, and how to run several without them colliding. See [.claude/rules/subagent-briefs.md](.claude/rules/subagent-briefs.md).
+
+@.claude/rules/subagent-briefs.md
+
 ## Working with Tools
 
 - **IMPORTANT: Research the documented approach first.** Before implementing anything that involves infrastructure, library integration, testing patterns, or deployment — search for the official docs and best practices. The documented approach is almost always better than a workaround. This has been validated repeatedly: Docker Compose profiles, Inngest connect mode for testing, testcontainers patterns. Don't debug symptoms when the root cause is "we're not using the tool the way it was designed." If you catch yourself iterating through trial-and-error, stop and google.

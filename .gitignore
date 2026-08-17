@@ -9,8 +9,10 @@ test-results/
 !*.tfvars.example
 .claude/*
 !.claude/commands/
+!.claude/hooks/
 !.claude/rules/
 !.claude/settings.json
+!.claude/skills/
 notes/
 
 # Python sub-projects (images/skills, future)
