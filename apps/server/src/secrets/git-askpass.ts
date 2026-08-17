@@ -68,15 +68,32 @@ export async function withGitAskpass<T>(pat: string, fn: (env: GitEnv) => Promis
  * process's environment unchanged.
  *
  * Background maintenance is deliberately NOT suppressed here, which is a
- * decision rather than an omission. `git commit` and `git push` each spawn a
- * detached `git maintenance run --auto`, and that is a hazard only when the
- * tree it goes on writing into is about to be deleted — a task worktree during
- * teardown. Every other caller of this helper targets a repo that outlives the
- * command: the parent repo behind `git-as-transport`, the registry clone
- * `repos.add` creates, the skills repo. Keeping those packed is the point, so
- * disabling maintenance in here would tax the many to serve the one. That one
- * passes the settings itself through `opts.env` (see `gitEnv` in
- * `agent/coding/teardown.ts`), which is what the escape hatch is for.
+ * decision rather than an omission.
+ *
+ * `git commit` and `git push` each spawn a detached `git maintenance run
+ * --auto` that keeps writing into `.git/` after the foreground command has
+ * returned. Whether that is a hazard or the whole point depends on the
+ * repository, not on the command: it is a hazard exactly where the tree is
+ * about to be deleted, and it is desirable everywhere else. So the setting
+ * belongs to a repo's lifecycle, which is how git itself scopes it — `git
+ * maintenance register` works by writing `maintenance.auto=false` into the
+ * repo it is registering. A helper at this level knows the command and the
+ * credentials, never which kind of tree it is pointed at, so it is the wrong
+ * place to decide.
+ *
+ * Every caller here but one targets a repo that outlives the command — the
+ * parent repo behind `git-as-transport`, the registry clone `repos.add`
+ * creates, the skills repo — and keeping those packed is what maintenance is
+ * for. The exception is teardown's WIP push, which passes the settings itself
+ * through `opts.env` (see `gitEnv` in `agent/coding/teardown.ts`); that is
+ * what the escape hatch is for.
+ *
+ * Two notes for whoever needs this next. `maintenance.auto=false` is the
+ * setting that stops the spawn — `gc.auto=0` alone does not; it gates the work
+ * the spawned process finds to do, not the spawn. And if you want a repo
+ * maintained but not written to behind your back, the knob is
+ * `gc.autoDetach=false`, which runs the same maintenance with `--no-detach` so
+ * it finishes before the command returns, rather than turning it off.
  */
 export function runGit(
   args: ReadonlyArray<string>,
