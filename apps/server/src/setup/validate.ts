@@ -181,6 +181,11 @@ export interface DaytonaProbeOpts {
  * The client is disposed before returning: its constructor opens an
  * authenticated event-stream socket, and a wizard user correcting a
  * mistyped key runs this more than once.
+ *
+ * Every failure — including a client that never got built — comes back as
+ * a `ValidationResult`. Both callers (`wizard.ts` spinner, the
+ * non-interactive validator set) render `error` and offer a retry; a
+ * rejection would abort the setup flow instead.
  */
 export async function validateDaytonaApiKey(
   apiKey: string,
@@ -189,7 +194,20 @@ export async function validateDaytonaApiKey(
   const config: ConstructorParameters<typeof Daytona>[0] = { apiKey };
   if (opts.apiUrl) config.apiUrl = opts.apiUrl;
   if (opts.organizationId) config.organizationId = opts.organizationId;
-  const daytona = new Daytona(config);
+
+  let daytona: Daytona;
+  try {
+    daytona = new Daytona(config);
+  } catch (err) {
+    // The constructor validates its config before any request goes out, so
+    // a blank credential throws `DaytonaAuthenticationError` synchronously,
+    // and `DAYTONA_OTEL_ENABLED=true` without the OpenTelemetry peer deps
+    // throws too. Nothing to dispose on this path — construction is what
+    // failed. The message is generic rather than one of the HTTP-status
+    // arms below because no request reached the API.
+    return { valid: false, error: `Daytona client setup failed: ${(err as Error).message}` };
+  }
+
   try {
     await daytonaHealthProbe(daytona);
     return { valid: true };

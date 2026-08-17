@@ -950,7 +950,7 @@ The orchestration loop is one host-side function parameterised by a small `TierF
 
 #### Future paths
 
-- **JSPI in Pyodide.** Pyodide's filesystem hooks are still synchronous as of the 314 line; [#5720](https://github.com/pyodide/pyodide/discussions/5720) tracks moving FS to JSPI. When that lands AND Node ships JSPI default-on, the WASM tier could swap MEMFS staging for an async-FS adapter that resolves stdlib `open()` directly through `Service["files"]`. The `TierFs` interface is the swap point — skill code never changes.
+- **JSPI in Pyodide.** Pyodide's filesystem hooks are still synchronous in the Pyodide 314.x line (CPython 3.14); [#5720](https://github.com/pyodide/pyodide/discussions/5720) tracks moving FS to JSPI. When that lands AND Node ships JSPI default-on, the WASM tier could swap MEMFS staging for an async-FS adapter that resolves stdlib `open()` directly through `Service["files"]`. The `TierFs` interface is the swap point — skill code never changes.
 - **Live mount opt-in.** If a class of skills materially needs live S3 visibility within a task (long-running cron skills observing a directory written by ad-hoc skills), the sysbox tier could grow a second `TierFs` implementation backed by `rclone mount` behind a manifest opt-in (`live_filesystem: true`). WASM and Daytona keep staging — they have no FUSE option.
 - **Conflict detection at reconcile.** Cheap to add later: if a path's S3 etag changed since stage-in *and* the task wrote it, surface a conflict event rather than silently overwriting. Not in v1 (single-user, low concurrency), trivial to layer on without architectural change.
 

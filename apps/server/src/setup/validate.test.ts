@@ -30,8 +30,14 @@ vi.mock("@daytona/sdk", async () => {
     // The real client is `AsyncDisposable` and its constructor opens an
     // authenticated event-stream socket, so the validator disposes it.
     [Symbol.asyncDispose] = daytonaDisposeMock;
-    constructor(config: unknown) {
+    constructor(config: { apiKey?: string }) {
       daytonaConfigCalls.push(config);
+      // Mirrors the real constructor: credentials are checked before any
+      // request goes out, so a blank key with no env fallback throws
+      // synchronously rather than surfacing as an API rejection.
+      if (!config.apiKey) {
+        throw new actual.DaytonaAuthenticationError("Authentication credentials not found.");
+      }
     }
   }
   return { ...actual, Daytona: MockDaytona };
@@ -218,6 +224,21 @@ describe("validateDaytonaApiKey", () => {
     );
     await validateDaytonaApiKey("bad_key_abcdef0123456789");
     expect(daytonaDisposeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns a result rather than rejecting when SDK construction throws", async () => {
+    // The wizard renders `error` next to a "Save anyway?" prompt and the
+    // non-interactive validator collects it into a failure list — neither
+    // guards against a rejected promise, so a synchronous constructor
+    // throw must not escape as one.
+    const result = await validateDaytonaApiKey("");
+    expect(result.valid).toBe(false);
+    expect(result.error).toBe("Daytona client setup failed: Authentication credentials not found.");
+  });
+
+  it("skips disposal when construction never produced a client", async () => {
+    await validateDaytonaApiKey("");
+    expect(daytonaDisposeMock).not.toHaveBeenCalled();
   });
 
   it("returns invalid on DaytonaAuthenticationError", async () => {
