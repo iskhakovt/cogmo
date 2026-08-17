@@ -1023,3 +1023,94 @@ async function startStubUpstreamWithWs(
       }),
   };
 }
+
+/**
+ * WS upstream stub that records the subprotocols the connecting client offered.
+ * The PTY channel carries its env block and exit-control opt-in as offered
+ * subprotocols rather than in a body, so "what did upstream see offered" is the
+ * question that decides whether a recording covers those features at all.
+ */
+async function startStubUpstreamCapturingProtocols(): Promise<{
+  url: string;
+  offered: () => ReadonlyArray<string>;
+  stop: () => Promise<void>;
+}> {
+  const { WebSocketServer } = await import("ws");
+  let seen: string[] = [];
+  const server: Server = createServer((req, res) => {
+    const ownUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    if (req.method === "POST" && req.url === "/sandbox") {
+      res.statusCode = 200;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ id: "sb-proto-1", state: "started", toolboxProxyUrl: ownUrl }));
+      return;
+    }
+    res.statusCode = 404;
+    res.end();
+  });
+  const wss = new WebSocketServer({ noServer: true });
+  server.on("upgrade", (req, socket, head) => {
+    seen = (req.headers["sec-websocket-protocol"] ?? "")
+      .toString()
+      .split(",")
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+    wss.handleUpgrade(req, socket as import("node:net").Socket, head, (ws) => {
+      ws.close(1000, "");
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("stub address invalid");
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    offered: () => seen,
+    stop: () =>
+      new Promise<void>((resolve, reject) => {
+        wss.close();
+        server.close((err) => (err ? reject(err) : resolve()));
+      }),
+  };
+}
+
+describe("record mode — WS subprotocol forwarding", () => {
+  it("re-offers the client's subprotocols to upstream", async () => {
+    const stub = await startStubUpstreamCapturingProtocols();
+    const fixtureDir = mkdtempSync(join(tmpdir(), "daytona-proto-"));
+    const fixturePath = join(fixtureDir, "record-proto.json");
+    const mock = await DaytonaMock.create({
+      mode: "record",
+      fixturePath,
+      upstreamUrl: stub.url,
+      upstreamApiKey: "real-key-redacted",
+    });
+    try {
+      mock.beginScenario("subprotocol-forwarding");
+      // Registers the sandbox's toolbox base so the WS path resolves upstream.
+      const created = await fetch(`${mock.url}/sandbox`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ image: "python:3.14" }),
+      });
+      const { id } = (await created.json()) as { id: string };
+
+      // Mirrors what the SDK offers for a PTY session: a base64url-encoded env
+      // block plus the exit-control opt-in. Upstream only sends `exited`
+      // control frames to a client that asked for them, so losing these
+      // records a session that silently covers neither.
+      const protocols = ["X-Daytona-Pty-Envs~Zm9vPWJhcg", "X-Daytona-Pty-Exit-Control"];
+      const wsUrl = `${mock.url.replace(/^http/, "ws")}/toolbox/${id}/process/pty/sess-1/connect`;
+      const client = new WebSocket(wsUrl, protocols);
+      await new Promise<void>((resolve) => {
+        client.on("close", () => resolve());
+        client.on("error", () => resolve());
+      });
+
+      expect(stub.offered()).toEqual(protocols);
+    } finally {
+      await mock.stop();
+      await stub.stop();
+      rmSync(fixtureDir, { recursive: true, force: true });
+    }
+  });
+});
