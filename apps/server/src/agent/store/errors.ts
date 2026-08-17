@@ -1,5 +1,6 @@
 /** Typed store errors. Thrown from DrizzleAgentStore; caught + mapped by Transport. */
 
+import { constraintNameOf, findPgErrorByCode, type PgError } from "../../db/pg-errors.js";
 import { logger } from "../../logger.js";
 
 /**
@@ -180,11 +181,7 @@ export class ImageModelSlugCollisionError extends Error {
 
 const UNIQUE_VIOLATION_CODES = ["23505"] as const;
 
-interface PgUniqueViolation {
-  code: (typeof UNIQUE_VIOLATION_CODES)[number];
-  constraint_name?: string;
-  constraint?: string;
-}
+type PgUniqueViolation = PgError<(typeof UNIQUE_VIOLATION_CODES)[number]>;
 
 /**
  * Referential-integrity violation SQLSTATEs.
@@ -208,41 +205,7 @@ interface PgUniqueViolation {
  */
 const REFERENTIAL_VIOLATION_CODES = ["23503", "23001"] as const;
 
-interface PgReferentialViolation {
-  code: (typeof REFERENTIAL_VIOLATION_CODES)[number];
-  constraint_name?: string;
-  constraint?: string;
-}
-
-/**
- * Walk `err.cause` looking for a Postgres error whose `code` is one of
- * `codes`. Drizzle wraps driver errors in `DrizzleQueryError` whose `cause`
- * holds the original postgres.js / PGlite error; we walk a few levels to
- * reach it. Returns the matched code alongside the constraint fields so
- * callers can preserve it.
- */
-function findPgErrorByCode<C extends string>(
-  err: unknown,
-  codes: ReadonlyArray<C>,
-): { code: C; constraint?: string; constraint_name?: string } | null {
-  let cur: unknown = err;
-  for (let depth = 0; depth < 4 && cur != null; depth++) {
-    if (typeof cur === "object" && "code" in cur) {
-      // `find` rather than `includes` so the match carries `C`, not `string` —
-      // the callers' literal unions survive without an assertion.
-      const matched = codes.find((c) => c === (cur as { code: unknown }).code);
-      if (matched !== undefined) {
-        return { ...(cur as { constraint?: string; constraint_name?: string }), code: matched };
-      }
-    }
-    if (typeof cur === "object" && "cause" in cur) {
-      cur = (cur as { cause: unknown }).cause;
-      continue;
-    }
-    break;
-  }
-  return null;
-}
+type PgReferentialViolation = PgError<(typeof REFERENTIAL_VIOLATION_CODES)[number]>;
 
 /** Narrow an unknown error to a Postgres unique-violation shape. */
 export function findPostgresUniqueViolation(err: unknown): PgUniqueViolation | null {
@@ -256,10 +219,6 @@ export function findPostgresUniqueViolation(err: unknown): PgUniqueViolation | n
  */
 export function findPostgresReferentialViolation(err: unknown): PgReferentialViolation | null {
   return findPgErrorByCode(err, REFERENTIAL_VIOLATION_CODES);
-}
-
-function constraintNameOf(pg: { constraint_name?: string; constraint?: string }): string {
-  return pg.constraint_name ?? pg.constraint ?? "unknown";
 }
 
 /** Wrap a block and convert Postgres unique violations to `UniqueViolationError`. */
