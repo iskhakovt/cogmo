@@ -16,8 +16,9 @@ import {
 // `vi.hoisted` because `vi.mock` is hoisted to the top of the module:
 // state and class declared inline would be in the temporal dead zone
 // when the factory runs.
-const { daytonaListMock, daytonaConfigCalls } = vi.hoisted(() => ({
+const { daytonaListMock, daytonaDisposeMock, daytonaConfigCalls } = vi.hoisted(() => ({
   daytonaListMock: vi.fn(),
+  daytonaDisposeMock: vi.fn(),
   daytonaConfigCalls: [] as Array<unknown>,
 }));
 vi.mock("@daytona/sdk", async () => {
@@ -26,6 +27,9 @@ vi.mock("@daytona/sdk", async () => {
   // a class fits, while `vi.fn().mockImplementation(() => obj)` does not.
   class MockDaytona {
     list = daytonaListMock;
+    // The real client is `AsyncDisposable` and its constructor opens an
+    // authenticated event-stream socket, so the validator disposes it.
+    [Symbol.asyncDispose] = daytonaDisposeMock;
     constructor(config: unknown) {
       daytonaConfigCalls.push(config);
     }
@@ -187,6 +191,7 @@ describe("validateGitHubPat", () => {
 describe("validateDaytonaApiKey", () => {
   afterEach(() => {
     daytonaListMock.mockReset();
+    daytonaDisposeMock.mockReset();
     daytonaConfigCalls.length = 0;
   });
 
@@ -194,6 +199,25 @@ describe("validateDaytonaApiKey", () => {
     daytonaListMock.mockImplementation(() => asyncIterableOf([]));
     const result = await validateDaytonaApiKey("dtn_test_api_key_abcdef0123456789");
     expect(result.valid).toBe(true);
+  });
+
+  it("disposes the throwaway client on the success path", async () => {
+    // The constructor opens an authenticated event-stream socket, so a
+    // wizard run that validates once still has to close one.
+    daytonaListMock.mockImplementation(() => asyncIterableOf([]));
+    await validateDaytonaApiKey("dtn_test_api_key_abcdef0123456789");
+    expect(daytonaDisposeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("disposes the throwaway client after a rejected key", async () => {
+    // The retry loop — operator fixes a typo and validates again — is
+    // exactly where an undisposed client per attempt accumulates.
+    const { DaytonaAuthenticationError } = await import("@daytona/sdk");
+    daytonaListMock.mockImplementation(() =>
+      asyncIterableThrowing(new DaytonaAuthenticationError("nope")),
+    );
+    await validateDaytonaApiKey("bad_key_abcdef0123456789");
+    expect(daytonaDisposeMock).toHaveBeenCalledTimes(1);
   });
 
   it("returns invalid on DaytonaAuthenticationError", async () => {

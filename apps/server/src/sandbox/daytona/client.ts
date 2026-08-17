@@ -3,10 +3,12 @@ import {
   Daytona,
   DaytonaConflictError,
   DaytonaConnectionError,
+  DaytonaConnectionTimeoutError,
   DaytonaNotFoundError,
   DaytonaRateLimitError,
   type Sandbox as DaytonaSdkSandbox,
   SandboxState,
+  SnapshotState,
 } from "@daytona/sdk";
 import { logger } from "../../logger.js";
 import { withRetry } from "../../util/with-retry.js";
@@ -20,27 +22,24 @@ import {
   type SessionSpec,
 } from "../index.js";
 import { uploadAskpassToSandbox } from "./askpass-upload.js";
+import { disposeDaytona } from "./dispose.js";
 import { daytonaHealthProbe } from "./probe.js";
 import { DaytonaSandboxSession } from "./session.js";
 
 /**
- * Snapshot lifecycle states. The literal set comes from `@daytona/api-client`'s
- * `SnapshotState` enum, which `@daytona/sdk` exposes only via the `Snapshot`
- * type but doesn't re-export as a runtime value. Hardcoded here so we don't
- * have to depend on `@daytona/api-client` (transitive) directly. If the SDK
- * grows a state, the state-machine in `#ensureSnapshotActive` defaults to
- * delete-and-rebuild for unknown states.
+ * Snapshot states that mean "work on this row is under way": the three
+ * build phases plus `SNAPSHOTTING`, which Daytona reports while it
+ * captures the layers. All four are waited out. `#ensureSnapshotActive`
+ * routes every other state — including one newer than this SDK build —
+ * to delete-and-rebuild, and doing that to a row mid-build destroys the
+ * work in progress and pays for a duplicate build.
  */
-const SnapshotState = {
-  BUILDING: "building",
-  PENDING: "pending",
-  PULLING: "pulling",
-  ACTIVE: "active",
-  INACTIVE: "inactive",
-  ERROR: "error",
-  BUILD_FAILED: "build_failed",
-  REMOVING: "removing",
-} as const;
+const IN_FLIGHT_SNAPSHOT_STATES: ReadonlySet<SnapshotState> = new Set([
+  SnapshotState.BUILDING,
+  SnapshotState.PENDING,
+  SnapshotState.PULLING,
+  SnapshotState.SNAPSHOTTING,
+]);
 
 /**
  * Where the cloned worktree lives inside the sandbox. Matches the
@@ -55,6 +54,62 @@ const log = logger.child({ component: "sandbox.daytona.client" });
 /** Cogmo label keys on Daytona sandboxes — used for `tryResumeByTaskId` lookup. */
 const LABEL_TASK = "cogmo.task";
 const LABEL_ROLE = "cogmo.role";
+
+/**
+ * What re-attaching to a sandbox in a given provider state requires
+ * before the next `execStreaming` can run against it.
+ */
+type ReattachAction = "ready" | "start" | "wait" | "terminal";
+
+/**
+ * Every `SandboxState` the SDK knows, mapped to its re-attach action.
+ * Total `Record` on purpose: an SDK bump that introduces a state fails
+ * the build here, where the policy for it gets decided, instead of
+ * landing in a silent fall-through that hands back a sandbox nothing
+ * has started.
+ */
+const REATTACH_ACTIONS: Record<SandboxState, ReattachAction> = {
+  [SandboxState.STARTED]: "ready",
+
+  // Resting states. Daytona persists the filesystem across stop and
+  // archive and the memory image across pause; `start()` covers all
+  // three and returns once the sandbox is running.
+  [SandboxState.STOPPED]: "start",
+  [SandboxState.ARCHIVED]: "start",
+  [SandboxState.PAUSED]: "start",
+
+  // On the way to one of those resting states. `start()` is still the
+  // request to make: the provider either queues it behind the in-flight
+  // transition or rejects it, and a rejection is an error the
+  // orchestrator's retry budget can act on.
+  [SandboxState.STOPPING]: "start",
+  [SandboxState.ARCHIVING]: "start",
+  [SandboxState.PAUSING]: "start",
+
+  // Already climbing towards STARTED — a `start()` here would race the
+  // provider's own transition, so wait for it to land instead.
+  [SandboxState.CREATING]: "wait",
+  [SandboxState.STARTING]: "wait",
+  [SandboxState.RESUMING]: "wait",
+  [SandboxState.RESTORING]: "wait",
+  [SandboxState.PENDING_BUILD]: "wait",
+  [SandboxState.BUILDING_SNAPSHOT]: "wait",
+  [SandboxState.PULLING_SNAPSHOT]: "wait",
+  [SandboxState.SNAPSHOTTING]: "wait",
+  [SandboxState.RESIZING]: "wait",
+  [SandboxState.FORKING]: "wait",
+
+  // No way back: gone, going, or broken.
+  [SandboxState.DESTROYED]: "terminal",
+  [SandboxState.DESTROYING]: "terminal",
+  [SandboxState.ERROR]: "terminal",
+  [SandboxState.BUILD_FAILED]: "terminal",
+
+  // The provider can't say. One `waitUntilStarted` poll loop settles it
+  // — either the sandbox reaches STARTED or the SDK throws.
+  [SandboxState.UNKNOWN]: "wait",
+  [SandboxState.UNKNOWN_DEFAULT_OPEN_API]: "wait",
+};
 
 /** Refresh the sandbox's auto-stop activity timer this often, while a session is live. */
 const KEEPALIVE_INTERVAL_MS = 5 * 60 * 1000;
@@ -273,7 +328,8 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
    * Drive a snapshot to `ACTIVE` and return the live name. States:
    *
    *   - `ACTIVE` → return as-is.
-   *   - `BUILDING` / `PENDING` / `PULLING` → poll until terminal.
+   *   - `BUILDING` / `PENDING` / `PULLING` / `SNAPSHOTTING` → poll until
+   *     terminal.
    *   - `ERROR` / `BUILD_FAILED` / `INACTIVE` / `REMOVING` → fire-and-
    *     forget delete + rebuild under `<name>-r-<hex>`. Same-name
    *     recreate against an in-`REMOVING` row 409s — Daytona's delete
@@ -295,11 +351,7 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
         log.debug({ image, snapshot: name }, "snapshot already active");
         return name;
       }
-      if (
-        existing.state === SnapshotState.BUILDING ||
-        existing.state === SnapshotState.PENDING ||
-        existing.state === SnapshotState.PULLING
-      ) {
+      if (IN_FLIGHT_SNAPSHOT_STATES.has(existing.state)) {
         log.info(
           { image, snapshot: name, state: existing.state },
           "snapshot build in flight — polling for terminal state",
@@ -413,12 +465,11 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
     // clean it up server-side and our next call would 404 and rebuild.
     //
     // Exit condition is "treat unknown as terminal": continue only on
-    // the documented in-flight set (BUILDING / PENDING / PULLING). Any
-    // other observed state — ACTIVE (done), ERROR / BUILD_FAILED
-    // (settled failure), INACTIVE / REMOVING (someone deactivated /
-    // started deleting the row out from under us), or a future SDK
-    // state we don't know about — returns and lets
-    // `#ensureSnapshotActive` decide (return on ACTIVE, delete +
+    // `IN_FLIGHT_SNAPSHOT_STATES`. Any other observed state — ACTIVE
+    // (done), ERROR / BUILD_FAILED (settled failure), INACTIVE /
+    // REMOVING (someone deactivated / started deleting the row out from
+    // under us), or a future SDK state we don't know about — returns and
+    // lets `#ensureSnapshotActive` decide (return on ACTIVE, delete +
     // rebuild on anything else). Bounds the loop so a stuck state
     // can't wedge the warm-up forever.
     //
@@ -430,11 +481,7 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
     let lastSlowLogAt = startedAt;
     while (true) {
       const snap = await this.#daytona.snapshot.get(name);
-      if (
-        snap.state !== SnapshotState.BUILDING &&
-        snap.state !== SnapshotState.PENDING &&
-        snap.state !== SnapshotState.PULLING
-      ) {
+      if (!IN_FLIGHT_SNAPSHOT_STATES.has(snap.state)) {
         return snap;
       }
       const now = Date.now();
@@ -608,40 +655,22 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
 
   async resume(state: DaytonaSessionState): Promise<SandboxSession<DaytonaSessionState>> {
     const sdkSandbox = await this.#daytona.get(state.sandboxId);
-    // Daytona auto-persists across stops; restart if needed so the next
-    // exec doesn't 4xx with "sandbox not running".
-    if (sdkSandbox.state === SandboxState.STOPPED || sdkSandbox.state === SandboxState.ARCHIVED) {
-      log.info({ sandboxId: state.sandboxId, prior: sdkSandbox.state }, "resuming Daytona sandbox");
-      await sdkSandbox.start();
-    } else if (
-      sdkSandbox.state === SandboxState.DESTROYED ||
-      sdkSandbox.state === SandboxState.ERROR ||
-      sdkSandbox.state === SandboxState.BUILD_FAILED
-    ) {
+    const action = reattachAction(sdkSandbox.state);
+    if (action === "terminal") {
       throw new Error(
         `Daytona sandbox ${state.sandboxId} is terminal (state=${sdkSandbox.state}); cannot resume`,
       );
     }
+    await bringUpForReattach(sdkSandbox, action);
     return this.#wrap(sdkSandbox, state.taskId);
   }
 
   async tryResumeByTaskId(taskId: string): Promise<SandboxSession<DaytonaSessionState> | null> {
     const matches = this.#daytona.list({ labels: { [LABEL_TASK]: taskId, [LABEL_ROLE]: "root" } });
     for await (const sdkSandbox of matches) {
-      if (
-        sdkSandbox.state === SandboxState.DESTROYED ||
-        sdkSandbox.state === SandboxState.ERROR ||
-        sdkSandbox.state === SandboxState.BUILD_FAILED
-      ) {
-        continue;
-      }
-      // STOPPED / ARCHIVED auto-persist across the call — restart on
-      // next `resume()`. Returning the current SDK handle here is fine;
-      // execStreaming will fail until the caller calls `resume(state)`,
-      // which is the canonical re-attach path.
-      if (sdkSandbox.state === SandboxState.STOPPED || sdkSandbox.state === SandboxState.ARCHIVED) {
-        await sdkSandbox.start();
-      }
+      const action = reattachAction(sdkSandbox.state);
+      if (action === "terminal") continue;
+      await bringUpForReattach(sdkSandbox, action);
       return this.#wrap(sdkSandbox, taskId);
     }
     return null;
@@ -665,18 +694,54 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
     // child / sibling sandboxes per task. Catching every sandbox
     // tagged with the taskId at delete time guarantees a single
     // deleteByTaskId call cascades the whole tree, not just the root.
-    const matches = this.#daytona.list({ labels: { [LABEL_TASK]: taskId } });
-    for await (const sdkSandbox of matches) {
-      this.#stopKeepalive(sdkSandbox.id);
-      try {
-        await sdkSandbox.delete();
-      } catch (err) {
-        // Already gone, daemon error, etc. — log and continue.
-        log.warn(
-          { err: (err as Error).message, sandboxId: sdkSandbox.id, taskId },
-          "deleteByTaskId: sandbox.delete failed",
-        );
+    //
+    // Drain the whole result set before deleting anything. `list()` is a
+    // lazy pager: each iteration boundary can issue a fresh
+    // `listSandboxes(cursor)` and every yielded item costs a
+    // `getToolboxProxyUrl` hydration call, so advancing the iterator
+    // throws on its own — a 5xx on page 2, a 404 on a since-reaped row —
+    // and doing that mid-sweep would abandon whatever hadn't been
+    // visited yet, keepalive tickers included. Draining first also keeps
+    // the deletes from mutating the filtered set the server-side cursor
+    // is still walking.
+    const sandboxes: DaytonaSdkSandbox[] = [];
+    let enumerationError: unknown;
+    try {
+      for await (const sdkSandbox of this.#daytona.list({ labels: { [LABEL_TASK]: taskId } })) {
+        sandboxes.push(sdkSandbox);
       }
+    } catch (err) {
+      // Sweep what the pager did yield before surfacing the failure —
+      // deleting some billable sandboxes beats deleting none.
+      enumerationError = err;
+    }
+    for (const sdkSandbox of sandboxes) {
+      this.#stopKeepalive(sdkSandbox.id);
+    }
+    await Promise.all(
+      sandboxes.map(async (sdkSandbox) => {
+        try {
+          await sdkSandbox.delete();
+        } catch (err) {
+          // Already gone, daemon error, etc. — log and let the rest of
+          // the sweep finish.
+          log.warn(
+            { err: (err as Error).message, sandboxId: sdkSandbox.id, taskId },
+            "deleteByTaskId: sandbox.delete failed",
+          );
+        }
+      }),
+    );
+    if (enumerationError !== undefined) {
+      // log.error, not warn: every caller swallows the throw (the
+      // orchestrator with `.catch(() => {})`, the verify orchestrator
+      // with a warn), so this line is the only place the incomplete
+      // sweep becomes visible — and what's left behind is billable.
+      log.error(
+        { err: (enumerationError as Error).message, taskId, swept: sandboxes.length },
+        "deleteByTaskId: listing sandboxes failed part-way — deleted the ones already enumerated, any beyond them stay alive",
+      );
+      throw enumerationError;
     }
   }
 
@@ -694,6 +759,8 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
     for (const sandboxId of this.#keepalives.keys()) {
       this.#stopKeepalive(sandboxId);
     }
+    // Close the SDK's event-stream socket and its reconnect timers.
+    await disposeDaytona(this.#daytona);
   }
 
   // ── internals ───────────────────────────────────────────────────────
@@ -751,6 +818,41 @@ export class DaytonaSandboxClient implements SandboxClient<DaytonaSessionState> 
       this.#keepalives.delete(sandboxId);
     }
   }
+}
+
+/**
+ * Look up the re-attach action for an observed sandbox state.
+ *
+ * `Sandbox.state` is optional in the DTO and the API can report a state
+ * string newer than the installed api-client's enum, so the lookup can
+ * miss at runtime even though `REATTACH_ACTIONS` is total at the type
+ * level. Both misses resolve to `"wait"`: one poll loop either confirms
+ * the sandbox is usable or throws, which beats assuming it runs.
+ */
+function reattachAction(state: SandboxState | undefined): ReattachAction {
+  if (state === undefined) return "wait";
+  const known: ReattachAction | undefined = REATTACH_ACTIONS[state];
+  return known ?? "wait";
+}
+
+/**
+ * Drive a re-attached sandbox to `STARTED` so the next `execStreaming`
+ * doesn't 4xx with "sandbox not running".
+ */
+async function bringUpForReattach(
+  sdkSandbox: DaytonaSdkSandbox,
+  action: Exclude<ReattachAction, "terminal">,
+): Promise<void> {
+  if (action === "ready") return;
+  log.info(
+    { sandboxId: sdkSandbox.id, prior: sdkSandbox.state, action },
+    "bringing re-attached Daytona sandbox up to started",
+  );
+  if (action === "start") {
+    await sdkSandbox.start();
+    return;
+  }
+  await sdkSandbox.waitUntilStarted();
 }
 
 /**
@@ -839,6 +941,13 @@ function rebuildSnapshotName(base: string): string {
  * Exported for the matrix test in `client.test.ts`.
  */
 export function isTransientSnapshotCreateError(err: unknown): boolean {
+  // A client-side deadline says nothing about the server: the SDK's own
+  // message is "any operation already started on the server may still be
+  // running". Retrying races the build that is already underway, and the
+  // duplicate 409s into a second full build under a fresh name. Tested
+  // ahead of the connection arm because `DaytonaConnectionTimeoutError`
+  // sits under `DaytonaConnectionError`.
+  if (err instanceof DaytonaConnectionTimeoutError) return false;
   if (err instanceof DaytonaRateLimitError) return true;
   if (err instanceof DaytonaConnectionError) return true;
   if (!(err instanceof Error)) return false;

@@ -6,6 +6,7 @@ import {
   DaytonaAuthorizationError,
   DaytonaConflictError,
   DaytonaConnectionError,
+  DaytonaConnectionTimeoutError,
   DaytonaError,
   DaytonaNotFoundError,
   DaytonaRateLimitError,
@@ -13,6 +14,7 @@ import {
   DaytonaTimeoutError,
   DaytonaValidationError,
   SandboxState,
+  SnapshotState,
 } from "@daytona/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { logger } from "../../logger.js";
@@ -25,23 +27,9 @@ import { asyncIterableOf, asyncIterableThrowing } from "../../test/factories.js"
 import type { SessionSpec } from "../index.js";
 import { DaytonaSandboxClient, isTransientSnapshotCreateError, snapshotNameFor } from "./client.js";
 
-/**
- * Snapshot state literals match the SDK's `SnapshotState` enum (which
- * isn't re-exported as a runtime value). Hand-pinned here to keep the
- * test off the transitive `@daytona/api-client` dep, matching the
- * approach in `client.ts`.
- */
-const SnapshotState = {
-  BUILDING: "building",
-  PENDING: "pending",
-  PULLING: "pulling",
-  ACTIVE: "active",
-  INACTIVE: "inactive",
-  BUILD_FAILED: "build_failed",
-} as const;
 // Test-side stub shape for Daytona's Snapshot — the client reads only
 // `name` and `state`, so a structural lookalike is enough.
-type DaytonaSnapshot = { name: string; state: string };
+type DaytonaSnapshot = { name: string; state: SnapshotState };
 
 // Mock the SDK at the module boundary so tests don't need a network roundtrip.
 // The Daytona class's internal behaviour isn't under test here — what matters
@@ -55,6 +43,7 @@ const daytonaCalls = {
   snapshotGet: vi.fn<(name: string) => Promise<DaytonaSnapshot>>(),
   snapshotCreate: vi.fn<(...args: unknown[]) => Promise<DaytonaSnapshot>>(),
   snapshotDelete: vi.fn<(snap: DaytonaSnapshot) => Promise<void>>(),
+  asyncDispose: vi.fn<() => Promise<void>>(),
 };
 vi.mock("@daytona/sdk", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@daytona/sdk")>();
@@ -78,6 +67,9 @@ vi.mock("@daytona/sdk", async (importOriginal) => {
       create: daytonaCalls.snapshotCreate,
       delete: daytonaCalls.snapshotDelete,
     };
+    // The real client is `AsyncDisposable`: its constructor opens an
+    // authenticated event-stream socket, so `shutdown()` has to close it.
+    [Symbol.asyncDispose] = daytonaCalls.asyncDispose;
   }
   return { ...actual, Daytona: MockDaytona };
 });
@@ -113,6 +105,9 @@ function fakeSandbox(opts: FakeSandboxOptions): FakeSandbox {
     start: vi.fn(async () => {
       sandbox.state = SandboxState.STARTED;
     }),
+    waitUntilStarted: vi.fn(async () => {
+      sandbox.state = SandboxState.STARTED;
+    }),
     stop: vi.fn(async () => {}),
     delete: spies.delete,
     archive: vi.fn(async () => {}),
@@ -136,12 +131,13 @@ beforeEach(() => {
   daytonaCalls.snapshotGet.mockReset();
   daytonaCalls.snapshotCreate.mockReset();
   daytonaCalls.snapshotDelete.mockReset();
+  daytonaCalls.asyncDispose.mockReset();
 });
 afterEach(() => {
   vi.clearAllTimers();
 });
 
-function fakeSnapshot(opts: { name: string; state: string }): DaytonaSnapshot {
+function fakeSnapshot(opts: { name: string; state: SnapshotState }): DaytonaSnapshot {
   return { name: opts.name, state: opts.state };
 }
 
@@ -550,10 +546,56 @@ describe("DaytonaSandboxClient", () => {
       const client = await makeClient();
       await client.resume({ type: "daytona", taskId: "t1", sandboxId: "sb-running" });
       expect(sb.start).not.toHaveBeenCalled();
+      expect(sb.waitUntilStarted).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["PAUSED", SandboxState.PAUSED],
+      ["PAUSING", SandboxState.PAUSING],
+      ["STOPPING", SandboxState.STOPPING],
+      ["ARCHIVING", SandboxState.ARCHIVING],
+    ])(
+      "starts a %s sandbox instead of handing back a sandbox nothing runs on",
+      async (_l, state) => {
+        // Out-of-band pause (dashboard, org policy) or a stop/archive
+        // still draining. Returning the handle untouched would make the
+        // next `execStreaming` 4xx with "sandbox not running".
+        const sb = fakeSandbox({ id: "sb-paused", state });
+        daytonaCalls.get.mockResolvedValue(sb);
+        const client = await makeClient();
+        await client.resume({ type: "daytona", taskId: "t1", sandboxId: "sb-paused" });
+        expect(sb.start).toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      ["RESUMING", SandboxState.RESUMING],
+      ["STARTING", SandboxState.STARTING],
+      ["RESTORING", SandboxState.RESTORING],
+      ["UNKNOWN", SandboxState.UNKNOWN],
+    ])("waits for a %s sandbox to land rather than racing it with start()", async (_l, state) => {
+      const sb = fakeSandbox({ id: "sb-climbing", state });
+      daytonaCalls.get.mockResolvedValue(sb);
+      const client = await makeClient();
+      await client.resume({ type: "daytona", taskId: "t1", sandboxId: "sb-climbing" });
+      expect(sb.waitUntilStarted).toHaveBeenCalled();
+      expect(sb.start).not.toHaveBeenCalled();
+    });
+
+    it("waits when the provider reports a state this SDK build doesn't know", async () => {
+      // Server-side enum drift: a state string newer than the installed
+      // `@daytona/api-client`. Assuming it means "running" is what let a
+      // paused sandbox through; waiting either confirms or throws.
+      const sb = fakeSandbox({ id: "sb-future", state: "hibernating" as unknown as SandboxState });
+      daytonaCalls.get.mockResolvedValue(sb);
+      const client = await makeClient();
+      await client.resume({ type: "daytona", taskId: "t1", sandboxId: "sb-future" });
+      expect(sb.waitUntilStarted).toHaveBeenCalled();
     });
 
     it.each([
       ["DESTROYED", SandboxState.DESTROYED],
+      ["DESTROYING", SandboxState.DESTROYING],
       ["ERROR", SandboxState.ERROR],
       ["BUILD_FAILED", SandboxState.BUILD_FAILED],
     ])("throws on terminal state %s", async (_label, state) => {
@@ -563,6 +605,8 @@ describe("DaytonaSandboxClient", () => {
       await expect(
         client.resume({ type: "daytona", taskId: "t1", sandboxId: "sb-dead" }),
       ).rejects.toThrow(/terminal/);
+      expect(sb.start).not.toHaveBeenCalled();
+      expect(sb.waitUntilStarted).not.toHaveBeenCalled();
     });
   });
 
@@ -598,6 +642,35 @@ describe("DaytonaSandboxClient", () => {
       const client = await makeClient();
       await client.tryResumeByTaskId("t1");
       expect(sb.start).toHaveBeenCalled();
+    });
+
+    it("restarts a PAUSED candidate before returning it", async () => {
+      const sb = fakeSandbox({ id: "sb-paused", state: SandboxState.PAUSED });
+      daytonaCalls.list.mockImplementation(() => asyncIterableOf([sb]));
+      const client = await makeClient();
+      const session = await client.tryResumeByTaskId("t1");
+      expect(session?.state.sandboxId).toBe("sb-paused");
+      expect(sb.start).toHaveBeenCalled();
+    });
+
+    it("waits out a RESUMING candidate instead of returning it mid-transition", async () => {
+      const sb = fakeSandbox({ id: "sb-resuming", state: SandboxState.RESUMING });
+      daytonaCalls.list.mockImplementation(() => asyncIterableOf([sb]));
+      const client = await makeClient();
+      await client.tryResumeByTaskId("t1");
+      expect(sb.waitUntilStarted).toHaveBeenCalled();
+      expect(sb.start).not.toHaveBeenCalled();
+    });
+
+    it("skips a DESTROYING candidate — it can't be brought back", async () => {
+      const dying = fakeSandbox({ id: "sb-dying", state: SandboxState.DESTROYING });
+      const alive = fakeSandbox({ id: "sb-alive", state: SandboxState.STARTED });
+      daytonaCalls.list.mockImplementation(() => asyncIterableOf([dying, alive]));
+      const client = await makeClient();
+      const session = await client.tryResumeByTaskId("t1");
+      expect(session?.state.sandboxId).toBe("sb-alive");
+      expect(dying.start).not.toHaveBeenCalled();
+      expect(dying.waitUntilStarted).not.toHaveBeenCalled();
     });
 
     it("survives two concurrent calls for the same taskId (both return, both start() tolerated)", async () => {
@@ -668,6 +741,94 @@ describe("DaytonaSandboxClient", () => {
       await client.deleteByTaskId("t1");
       // b still gets deleted even though a threw
       expect(b.delete).toHaveBeenCalled();
+    });
+
+    it("deletes the sandboxes already enumerated when paging fails part-way, then rethrows", async () => {
+      // `list()` fetches a page per iteration boundary and hydrates each
+      // item with a `getToolboxProxyUrl` call, so the *advance* throws —
+      // a 5xx on page 2, a 404 on a since-reaped row. Deleting while
+      // iterating means that throw abandons everything unvisited: still
+      // running, still billable, keepalive tickers still firing.
+      const a = fakeSandbox({ id: "sb-a", state: SandboxState.STARTED });
+      const b = fakeSandbox({ id: "sb-b", state: SandboxState.STARTED });
+      const pageBoundary = new Error("502 Bad Gateway on listSandboxes(cursor)");
+      daytonaCalls.list.mockImplementation(() =>
+        (async function* () {
+          yield a;
+          yield b;
+          throw pageBoundary;
+        })(),
+      );
+      const errSpy = vi.spyOn(logger, "error");
+      try {
+        const client = await makeClient();
+        await expect(client.deleteByTaskId("t1")).rejects.toBe(pageBoundary);
+        expect(a.delete).toHaveBeenCalled();
+        expect(b.delete).toHaveBeenCalled();
+        expect(errSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ taskId: "t1", swept: 2 }),
+          expect.stringContaining("listing sandboxes failed part-way"),
+        );
+      } finally {
+        errSpy.mockRestore();
+      }
+    });
+
+    it("stops the keepalive of every enumerated sandbox even when paging fails part-way", async () => {
+      // The ticker lives in this process, so a partial sweep that skips
+      // `#stopKeepalive` keeps calling `refreshActivity` on a sandbox
+      // Cogmo has already deleted.
+      vi.useFakeTimers();
+      const errSpy = vi.spyOn(logger, "error");
+      try {
+        const sb = fakeSandbox({ id: "sb-keep", state: SandboxState.STARTED });
+        daytonaCalls.create.mockResolvedValue(sb);
+        daytonaCalls.list.mockImplementation(() =>
+          (async function* () {
+            yield sb;
+            throw new Error("502 Bad Gateway on listSandboxes(cursor)");
+          })(),
+        );
+        const client = await makeClient();
+        await client.create({ ...BASE_SPEC, expiresAt: new Date(Date.now() + 60 * 60_000) });
+
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+        expect(sb.refreshActivity).toHaveBeenCalledTimes(1);
+
+        await expect(client.deleteByTaskId(BASE_SPEC.taskId)).rejects.toThrow(/502/);
+
+        await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
+        expect(sb.refreshActivity).toHaveBeenCalledTimes(1);
+      } finally {
+        errSpy.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it("drains the pager before issuing any delete", async () => {
+      // Deletes mutate the filtered set the server-side cursor is still
+      // walking; whether that shifts a row past the cursor is not a
+      // documented guarantee, so the sweep reads first and writes after.
+      const seen: string[] = [];
+      const a = fakeSandbox({ id: "sb-a", state: SandboxState.STARTED });
+      const b = fakeSandbox({ id: "sb-b", state: SandboxState.STARTED });
+      a.delete = vi.fn(async () => {
+        seen.push("delete-a");
+      });
+      b.delete = vi.fn(async () => {
+        seen.push("delete-b");
+      });
+      daytonaCalls.list.mockImplementation(() =>
+        (async function* () {
+          seen.push("yield-a");
+          yield a;
+          seen.push("yield-b");
+          yield b;
+        })(),
+      );
+      const client = await makeClient();
+      await client.deleteByTaskId("t1");
+      expect(seen).toEqual(["yield-a", "yield-b", "delete-a", "delete-b"]);
     });
   });
 
@@ -842,6 +1003,30 @@ describe("DaytonaSandboxClient", () => {
         vi.useRealTimers();
       }
     });
+
+    it("disposes the SDK client so its event-stream socket closes", async () => {
+      // The SDK constructor opens an authenticated socket.io connection
+      // and its reconnect timers; keepalive cleanup alone leaves them on
+      // the process.
+      const client = await makeClient();
+      await client.shutdown();
+      expect(daytonaCalls.asyncDispose).toHaveBeenCalledTimes(1);
+    });
+
+    it("still completes when disposal fails", async () => {
+      daytonaCalls.asyncDispose.mockRejectedValue(new Error("socket already gone"));
+      const warnSpy = vi.spyOn(logger, "warn");
+      try {
+        const client = await makeClient();
+        await expect(client.shutdown()).resolves.toBeUndefined();
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ err: "socket already gone" }),
+          expect.stringContaining("disposing the Daytona SDK client failed"),
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
   });
 
   describe("delete (single-session)", () => {
@@ -1010,10 +1195,37 @@ describe("DaytonaSandboxClient", () => {
       }
     });
 
+    it("snapshot in SNAPSHOTTING → polls until ACTIVE, never deletes the row mid-capture", async () => {
+      // Daytona reports `snapshotting` while it captures the layers.
+      // Treating it as "present but not active" would fire the
+      // fire-and-forget delete against a row that is still being
+      // written, then pay a duplicate build under a fresh name — every
+      // boot, until the state clears.
+      vi.useFakeTimers();
+      try {
+        daytonaCalls.snapshotGet
+          .mockResolvedValueOnce(
+            fakeSnapshot({ name: DEVBASE_SNAPSHOT, state: SnapshotState.SNAPSHOTTING }),
+          )
+          .mockResolvedValueOnce(
+            fakeSnapshot({ name: DEVBASE_SNAPSHOT, state: SnapshotState.SNAPSHOTTING }),
+          )
+          .mockResolvedValue(fakeSnapshot({ name: DEVBASE_SNAPSHOT, state: SnapshotState.ACTIVE }));
+        const client = await makeClient();
+        const warm = client.ensureImagePresent("ghcr.io/iskhakovt/cogmo-devbase:1.66.0");
+        await vi.advanceTimersByTimeAsync(2_500);
+        await warm;
+        expect(daytonaCalls.snapshotDelete).not.toHaveBeenCalled();
+        expect(daytonaCalls.snapshotCreate).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("poll exits on unknown-non-inflight state (INACTIVE) → delete + recreate, no infinite loop", async () => {
       // Regression for gemini-code-assist PR #275 finding: the poll
-      // loop must treat any state outside the documented in-flight set
-      // (BUILDING / PENDING / PULLING) as terminal-from-our-perspective.
+      // loop must treat any state outside the in-flight set as
+      // terminal-from-our-perspective.
       // INACTIVE is the canonical non-{terminal-success, terminal-fail,
       // in-flight} state — if the loop misses it, warm hangs forever.
       // Reaching this branch: initial `get` returns BUILDING (enters
@@ -1627,10 +1839,17 @@ describe("DaytonaSandboxClient", () => {
       },
       {
         label: "DaytonaTimeoutError",
-        err: new DaytonaTimeoutError("request timed out"),
+        err: new DaytonaTimeoutError("gateway timed out", 504),
         expected: false,
         reason:
-          "SDK's axios timeout is 24h, so this only fires on backend-side hangs; short retries won't unstick them",
+          "server-side 408/504 — the request hit a Daytona-side deadline, and short retries won't unstick a hung backend",
+      },
+      {
+        label: "DaytonaConnectionTimeoutError",
+        err: new DaytonaConnectionTimeoutError("HTTP request timed out after 86400000ms"),
+        expected: false,
+        reason:
+          "client-side deadline (`requestTimeoutMs`, 24h by default): the build it started may still be running server-side, so a retry races it, 409s, and buys a second full build. Extends DaytonaConnectionError, so the predicate has to name it before the connection arm",
       },
       {
         label: "DaytonaConnectionError",
@@ -1736,6 +1955,20 @@ describe("DaytonaSandboxClient", () => {
       const client = await makeClient();
       const result = await client.healthCheck();
       expect(result).toEqual({ ok: true, runtime: "daytona" });
+    });
+
+    it("probes with a filter that can't match, so no sandbox gets hydrated", async () => {
+      // `list()` hydrates each yielded item with a second
+      // `getToolboxProxyUrl` request, and `healthCheck` reports whatever
+      // the probe throws — so a probe that can return a row turns a
+      // reaped sandbox or a proxy outage into a failed health check.
+      daytonaCalls.list.mockImplementation(() => asyncIterableOf([]));
+      const client = await makeClient();
+      await client.healthCheck();
+      expect(daytonaCalls.list).toHaveBeenCalledWith({
+        limit: 1,
+        labels: { "cogmo.health-probe": "never-set" },
+      });
     });
 
     it("propagates SDK errors when unreachable", async () => {

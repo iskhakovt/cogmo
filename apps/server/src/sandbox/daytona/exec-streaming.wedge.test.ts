@@ -30,6 +30,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type WebSocket from "ws";
 import { WebSocketServer } from "ws";
 import { ExecTimeoutError } from "../index.js";
+import { disposeDaytona } from "./dispose.js";
 import { startExecStreaming } from "./exec-streaming.js";
 
 const SANDBOX_ID = "wedge-sandbox-id";
@@ -207,6 +208,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // The SDK constructor opens an event-stream socket at the stub's URL;
+  // close it before the stub goes away so no reconnect races teardown.
+  await disposeDaytona(daytona);
   await stub.stop();
 });
 
