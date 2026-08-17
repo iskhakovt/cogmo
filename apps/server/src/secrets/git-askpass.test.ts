@@ -82,4 +82,36 @@ describe("runGit", () => {
       expect(head).toMatch(/^ref: /);
     });
   });
+
+  it("passes opts.env through, so a caller can set git config for one call", async () => {
+    // This helper deliberately leaves background maintenance alone, because
+    // nearly every caller operates on a repo that outlives the command and
+    // wants it packed. The one caller that must suppress it — teardown, whose
+    // tree is deleted moments later — does so per call through `opts.env`, so
+    // that passthrough is load-bearing rather than incidental.
+    // A key nothing else sets. `gc.auto` would be the obvious choice and is
+    // the wrong one: vitest.config.ts injects it into every tier to keep git's
+    // background maintenance away from fixture trees, so the control case
+    // would read that value and prove nothing about this argument.
+    const dir = mkdtempSync(join(tmpdir(), "cogmo-runGit-env-"));
+    await runGit(["init", "--quiet"], undefined, { cwd: dir });
+
+    const inherited = Number(process.env.GIT_CONFIG_COUNT ?? "0");
+    const { stdout } = await runGit(["config", "--get", "cogmo.probe"], undefined, {
+      cwd: dir,
+      env: {
+        ...process.env,
+        GIT_CONFIG_COUNT: String(inherited + 1),
+        [`GIT_CONFIG_KEY_${inherited}`]: "cogmo.probe",
+        [`GIT_CONFIG_VALUE_${inherited}`]: "reached",
+      },
+    });
+    expect(stdout.trim()).toBe("reached");
+
+    // Without it, `--get` on an unset key exits non-zero: the value above came
+    // from this argument, not from whatever the process already carries.
+    await expect(
+      runGit(["config", "--get", "cogmo.probe"], undefined, { cwd: dir }),
+    ).rejects.toThrow(/exited with code/);
+  });
 });
