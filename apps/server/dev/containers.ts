@@ -38,7 +38,7 @@ export function inngest(network: StartedNetwork, opts?: { appUrl?: string }) {
   if (opts?.appUrl) {
     cmd.push("-u", opts.appUrl);
   }
-  return new GenericContainer("mirror.gcr.io/inngest/inngest:v1.27.0")
+  return new GenericContainer("mirror.gcr.io/inngest/inngest:v1.41.1")
     .withNetwork(network)
     .withNetworkAliases("inngest")
     .withExposedPorts(8288, 8289)
@@ -177,7 +177,7 @@ export function hindsightSlim(
  * `/data/gitea/` keep this single-container — no second DB instance.
  */
 export function gitea(network: StartedNetwork) {
-  return new GenericContainer("docker.gitea.com/gitea:1.22")
+  return new GenericContainer("docker.gitea.com/gitea:1.27.2")
     .withNetwork(network)
     .withNetworkAliases("gitea")
     .withExposedPorts(3000)
