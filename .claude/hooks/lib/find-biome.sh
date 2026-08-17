@@ -36,7 +36,12 @@ find_repo_root() {
 find_biome() {
   local root="$1"
   local pkg
-  pkg=$(readlink -f "$root/node_modules/@biomejs/biome" 2>/dev/null)
+  # Canonicalize by entering the directory and asking for the physical path.
+  # `readlink -f` would be the obvious way and is GNU-only: BSD readlink, which
+  # is what macOS ships, rejects `-f` outright, leaving this empty and silently
+  # dropping the native binary — and then the whole gate if node is off PATH.
+  # `cd` + `pwd -P` is POSIX and needs no external tool.
+  pkg=$(cd "$root/node_modules/@biomejs/biome" 2>/dev/null && pwd -P) || pkg=""
 
   if [[ -n "$pkg" && -d "$pkg" ]]; then
     # Exactly one platform package is installed — the optional dependency for
