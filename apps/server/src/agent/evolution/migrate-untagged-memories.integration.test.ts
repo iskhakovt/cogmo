@@ -34,7 +34,7 @@ beforeAll(async () => {
   db = drizzle(pgClient);
   store = new DrizzleAgentStore();
 
-  userId = await createIsolatedUser(pgClient);
+  userId = await createIsolatedUser(db);
   BANK_ID = userId;
   await hindsight.createBank(BANK_ID);
   // Clear before seeding so the strict `result.migrated === 2` assert

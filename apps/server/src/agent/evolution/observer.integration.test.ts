@@ -49,7 +49,7 @@ beforeAll(async () => {
   // scoped by `user_id`, and the integration tier runs files in parallel
   // against one Postgres. A real row because `custom_compartments` and
   // `pending_memories` carry an FK to `users.id`.
-  userId = await createIsolatedUser(pgClient);
+  userId = await createIsolatedUser(db);
 });
 
 afterAll(async () => {

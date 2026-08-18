@@ -1,4 +1,5 @@
-import type postgres from "postgres";
+import { DrizzleAgentStore } from "../agent/store/index.js";
+import type { Database } from "../db/index.js";
 
 /**
  * Create a `users` row owned by one test file.
@@ -14,16 +15,12 @@ import type postgres from "postgres";
  * `pending_memories`, `custom_compartments` and friends only need *a*
  * user, and a private one keeps their assertions honest.
  *
- * The row is a real insert because these tables carry an FK to
- * `users.id`; a synthetic string fails the constraint. `users` holds
- * nothing but its key and timestamp, both DB-generated. Nothing deletes
+ * The row is a real insert because those tables carry an FK to
+ * `users.id`; a synthetic string fails the constraint. Nothing deletes
  * it — the containers are torn down per run.
  */
-export async function createIsolatedUser(sql: postgres.Sql): Promise<string> {
-  const rows = await sql<Array<{ id: string }>>`
-    INSERT INTO users DEFAULT VALUES RETURNING id
-  `;
-  const id = rows[0]?.id;
-  if (!id) throw new Error("failed to create an isolated test user");
+export async function createIsolatedUser(db: Database): Promise<string> {
+  const store = new DrizzleAgentStore();
+  const { id } = await db.transaction((tx) => store.createUser(tx));
   return id;
 }
