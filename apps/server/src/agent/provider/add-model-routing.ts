@@ -39,10 +39,24 @@ export interface AddModelRoutingDeps {
   agentStore: AgentStore;
 }
 
+/**
+ * Reject a limit that cannot describe a real model. Zero max-output makes
+ * every request built from the row invalid, and zero context window drives
+ * the turn budget negative — both are more usefully refused at the point
+ * of entry than resolved around later.
+ */
+function assertPositiveLimit(label: string, value: number | null | undefined): void {
+  if (value != null && value <= 0) {
+    throw new Error(`${label} must be a positive number of tokens, got ${value}`);
+  }
+}
+
 export async function addModelRouting(
   deps: AddModelRoutingDeps,
   args: AddModelRoutingArgs,
 ): Promise<{ id: string; position: number }> {
+  assertPositiveLimit("contextWindow", args.contextWindow);
+  assertPositiveLimit("maxOutputTokens", args.maxOutputTokens);
   return deps.runInTx(async (tx) => {
     const position =
       args.position ?? (await deps.agentStore.getNextModelProviderPosition(tx, args.model));

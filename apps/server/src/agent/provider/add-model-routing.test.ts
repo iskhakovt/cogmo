@@ -66,6 +66,26 @@ describe("addModelRouting", () => {
     );
   });
 
+  // A zero cannot describe a real model — stored, it would make every
+  // request built from the row invalid — and it reaches here because the
+  // CLI's flag parser accepts any non-negative integer (`--position 0` is
+  // meaningful, so the check belongs at this boundary, not that one).
+  it.each([
+    ["contextWindow", { contextWindow: 0 }],
+    ["maxOutputTokens", { maxOutputTokens: 0 }],
+    ["a negative contextWindow", { contextWindow: -1 }],
+    ["a negative maxOutputTokens", { maxOutputTokens: -1 }],
+  ])("refuses %s and writes nothing", async (_label, override) => {
+    const store = makeStore();
+    await expect(
+      addModelRouting(
+        { runInTx: (cb) => cb(FAKE_TX), agentStore: store },
+        { model: "m", providerId: "p-1", ...override },
+      ),
+    ).rejects.toThrow(/must be a positive number of tokens/);
+    expect(store.addModelProvider).not.toHaveBeenCalled();
+  });
+
   it("defaults userSelectable to true when omitted", async () => {
     const store = makeStore();
     await addModelRouting(

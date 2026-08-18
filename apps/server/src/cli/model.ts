@@ -71,7 +71,7 @@ export async function runModelCli(
         return 1;
     }
   } catch (err) {
-    // parseFlags + parsePositiveInt throw on operator error (missing
+    // parseFlags + parseNonNegativeInt throw on operator error (missing
     // value, bad integer, flag-as-value). Surface as a clean exit-2 rather
     // than letting the dispatcher's await unwind with a stack trace.
     io.err(`Error: ${(err as Error).message}`);
@@ -257,15 +257,15 @@ function parseFlags(args: readonly string[]): ParsedFlags {
         i++;
         break;
       case "--context":
-        out.contextWindow = parsePositiveInt(value, "--context");
+        out.contextWindow = parseNonNegativeInt(value, "--context");
         i++;
         break;
       case "--max-output":
-        out.maxOutputTokens = parsePositiveInt(value, "--max-output");
+        out.maxOutputTokens = parseNonNegativeInt(value, "--max-output");
         i++;
         break;
       case "--position":
-        out.position = parsePositiveInt(value, "--position");
+        out.position = parseNonNegativeInt(value, "--position");
         i++;
         break;
       default:
@@ -296,7 +296,7 @@ function takeValue(args: readonly string[], i: number, flag: string | undefined)
   return next;
 }
 
-function parsePositiveInt(value: string, label: string): number {
+function parseNonNegativeInt(value: string, label: string): number {
   // `Number.parseInt("200000abc", 10)` returns 200000 — silently accepting
   // trailing garbage. `Number(value)` rejects mixed-content strings with
   // NaN, which `Number.isInteger` then catches. The trim guards against

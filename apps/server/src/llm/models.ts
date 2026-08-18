@@ -119,7 +119,13 @@ function pickColumn(
   litellm: number | undefined,
   fallback: number,
 ): { value: number; source: LimitsSource } {
-  if (override != null) return { value: override, source: "db" };
+  // A non-positive override is not a smaller budget, it is a nonsensical
+  // one: zero max-output makes every request invalid, and zero context
+  // window drives `computeBudget` negative. Treat it as unset so the row
+  // falls through to the snapshot like any model without an override —
+  // the alternative is propagating it to every consumer, and the write
+  // path cannot retract a value already sitting in the table.
+  if (override != null && override > 0) return { value: override, source: "db" };
   if (litellm != null) return { value: litellm, source: "litellm" };
   return { value: fallback, source: "default" };
 }
