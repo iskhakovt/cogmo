@@ -269,9 +269,11 @@ function parseFlags(args: readonly string[]): ParsedFlags {
         i++;
         break;
       default:
-        // Unknown flag — ignore silently here; main switch will error on
-        // wrong commands. parseFlags is a generic helper.
-        break;
+        // Throw rather than swallow, matching `cogmo image-model`. A
+        // dropped `--max-outputs` registers the model with no limit at
+        // all, and the operator sees a success line reporting the
+        // resolver's own number as though the override had landed.
+        throw new Error(`Unknown flag "${flag}". Run \`cogmo model --help\` for accepted flags.`);
     }
   }
   return out;

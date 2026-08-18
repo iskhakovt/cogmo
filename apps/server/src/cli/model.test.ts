@@ -399,6 +399,24 @@ describe("cogmo model — flag parsing", () => {
     },
   );
 
+  it("rejects an unknown flag instead of dropping it", async () => {
+    // A swallowed `--max-outputs` registers the model with no override and
+    // still prints a success line carrying the resolver's own number, so
+    // the operator has no way to tell the flag never landed.
+    const store = makeStore({
+      providers: [{ id: "p1", name: "vllm", type: "openai_compatible" }],
+    });
+    const { io, err } = makeIo();
+    const code = await runModelCli(
+      ["add", "m", "--provider", "vllm", "--max-outputs", "64000"],
+      { runInTx: tx as never, agentStore: store },
+      io,
+    );
+    expect(code).toBe(2);
+    expect(err.join("\n")).toContain('Unknown flag "--max-outputs"');
+    expect(store.addModelProvider).not.toHaveBeenCalled();
+  });
+
   it("accepts --position 0, the primary routing slot", async () => {
     const store = makeStore({
       providers: [{ id: "p1", name: "vllm", type: "openai_compatible" }],
