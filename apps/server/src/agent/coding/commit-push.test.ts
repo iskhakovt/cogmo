@@ -128,7 +128,7 @@ describe("runCommitAndPush", () => {
     expect(commitCall?.args).toContain("-m");
     expect(commitCall?.args).toContain("test goal");
     expect(commitCall?.workingDir).toBe("/workspace");
-    expect(commitCall?.env).toMatchObject(askpassEnv);
+    expect(commitCall?.env).toBe(askpassEnv);
 
     const pushCall = calls.find((c) => c.args.includes("push"));
     expect(pushCall?.args).toEqual([
@@ -254,7 +254,7 @@ describe("runCommitAndPush", () => {
     });
 
     for (const call of calls) {
-      expect(call.env).toMatchObject(askpassEnv);
+      expect(call.env).toBe(askpassEnv);
       expect(call.workingDir).toBe("/workspace");
     }
   });
