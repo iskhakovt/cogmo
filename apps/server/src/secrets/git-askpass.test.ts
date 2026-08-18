@@ -1,7 +1,7 @@
-import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { runGit, withGitAskpass } from "./git-askpass.js";
 
 describe("withGitAskpass", () => {
@@ -57,6 +57,27 @@ describe("withGitAskpass", () => {
   });
 });
 
+/**
+ * A temp directory the suite removes afterwards.
+ *
+ * The cases below init real repos, so without this every run leaves a
+ * directory and its `.git` tree behind under `tmpdir()`, on developer machines
+ * and CI runners alike.
+ */
+const tempDirs: string[] = [];
+
+function tempRepoDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+  }
+});
+
 describe("runGit", () => {
   it("runs `git --version` successfully and returns stdout", async () => {
     await withGitAskpass("dummy", async (env) => {
@@ -72,7 +93,7 @@ describe("runGit", () => {
   });
 
   it("passes opts.cwd through to the spawned process", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "cogmo-runGit-test-"));
+    const dir = tempRepoDir("cogmo-runGit-test-");
     await withGitAskpass("dummy", async (env) => {
       // `git init` inside an empty dir should succeed and create .git
       await runGit(["init", "--quiet"], env, { cwd: dir });
@@ -81,5 +102,37 @@ describe("runGit", () => {
       const head = readFileSync(join(dir, ".git", "HEAD"), "utf8");
       expect(head).toMatch(/^ref: /);
     });
+  });
+
+  it("passes opts.env through, so a caller can set git config for one call", async () => {
+    // This helper deliberately leaves background maintenance alone, because
+    // nearly every caller operates on a repo that outlives the command and
+    // wants it packed. The one caller that must suppress it — teardown, whose
+    // tree is deleted moments later — does so per call through `opts.env`, so
+    // that passthrough is load-bearing rather than incidental.
+    // A key nothing else sets. `gc.auto` would be the obvious choice and is
+    // the wrong one: vitest.config.ts injects it into every tier to keep git's
+    // background maintenance away from fixture trees, so the control case
+    // would read that value and prove nothing about this argument.
+    const dir = tempRepoDir("cogmo-runGit-env-");
+    await runGit(["init", "--quiet"], undefined, { cwd: dir });
+
+    const inherited = Number(process.env.GIT_CONFIG_COUNT ?? "0");
+    const { stdout } = await runGit(["config", "--get", "cogmo.probe"], undefined, {
+      cwd: dir,
+      env: {
+        ...process.env,
+        GIT_CONFIG_COUNT: String(inherited + 1),
+        [`GIT_CONFIG_KEY_${inherited}`]: "cogmo.probe",
+        [`GIT_CONFIG_VALUE_${inherited}`]: "reached",
+      },
+    });
+    expect(stdout.trim()).toBe("reached");
+
+    // Without it, `--get` on an unset key exits non-zero: the value above came
+    // from this argument, not from whatever the process already carries.
+    await expect(
+      runGit(["config", "--get", "cogmo.probe"], undefined, { cwd: dir }),
+    ).rejects.toThrow(/exited with code/);
   });
 });
