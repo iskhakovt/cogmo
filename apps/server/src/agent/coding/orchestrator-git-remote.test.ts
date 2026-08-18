@@ -276,6 +276,20 @@ function makeDeps(
 
 // --- Tests ---------------------------------------------------------------
 
+/**
+ * The git subcommand of an exec, skipping any leading `-c key=value` pairs.
+ *
+ * Commands Cogmo issues against the task tree carry config on the argv (see
+ * `NO_BACKGROUND_MAINTENANCE_FLAGS`), so the subcommand is not at a fixed
+ * index and matching on `cmd[1]` silently stops finding anything.
+ */
+function gitSubcommand(cmd: ReadonlyArray<string>): string | undefined {
+  if (cmd[0] !== "git") return undefined;
+  let i = 1;
+  while (cmd[i] === "-c") i += 2;
+  return cmd[i];
+}
+
 describe("runCodingTask — git-remote transport", () => {
   it("happy path: pushes run-branch, clones via WorktreeSpec.git-remote, checks out feature branch", async () => {
     const repo = await seedRepo();
@@ -343,7 +357,7 @@ describe("runCodingTask — git-remote transport", () => {
     // (6) post-create `git checkout -B cogmo/<idShort>` exec captured.
     const idShort = task.id.replaceAll("-", "").slice(0, 12);
     const checkoutCall = execCalls.find(
-      (c) => c.cmd[0] === "git" && c.cmd[1] === "checkout" && c.cmd[2] === "-B",
+      (c) => gitSubcommand(c.cmd) === "checkout" && c.cmd.includes("-B"),
     );
     expect(checkoutCall).toBeDefined();
     expect(checkoutCall?.cmd).toEqual(["git", "checkout", "-B", `cogmo/${idShort}`]);
@@ -482,7 +496,7 @@ describe("runCodingExecute — git-remote transport", () => {
     expect(createSpecs).toHaveLength(0);
     // Resume path: no fresh checkout-B either — the existing sandbox
     // is already on the feature branch from the prior attempt.
-    const checkoutCalls = execCalls.filter((c) => c.cmd[0] === "git" && c.cmd[1] === "checkout");
+    const checkoutCalls = execCalls.filter((c) => gitSubcommand(c.cmd) === "checkout");
     expect(checkoutCalls).toHaveLength(0);
     // The commit-and-push step MUST still run on the resume path — the
     // askpass mount on the resumed sandbox came from plan-phase
@@ -490,7 +504,7 @@ describe("runCodingExecute — git-remote transport", () => {
     // verify's clone. Default fake exec returns clean status → push
     // takes the no-commit path, but the push call itself is the
     // load-bearing assertion against a regression that skips this step.
-    const pushCall = execCalls.find((c) => c.cmd[0] === "git" && c.cmd[1] === "push");
+    const pushCall = execCalls.find((c) => gitSubcommand(c.cmd) === "push");
     expect(pushCall?.cmd).toContain(`HEAD:refs/heads/cogmo/run/${task.id}`);
   });
 
@@ -517,7 +531,7 @@ describe("runCodingExecute — git-remote transport", () => {
     // Simulate one tracked-but-unstaged edit so runCommitAndPush hits
     // the commit + push branch (not nothing_to_commit).
     const { sandbox, createSpecs, execCalls } = fakeGitRemoteSandbox((cmd) => {
-      if (cmd[0] === "git" && cmd[1] === "status" && cmd[2] === "--porcelain") {
+      if (gitSubcommand(cmd) === "status" && cmd.includes("--porcelain")) {
         return { exitCode: 0, stdout: "M src/foo.ts\n" };
       }
       return undefined;
@@ -557,13 +571,13 @@ describe("runCodingExecute — git-remote transport", () => {
 
     // The execute-side push step ran with `HEAD:refs/heads/<runBranch>`
     // as the push refspec.
-    const pushCall = execCalls.find((c) => c.cmd[0] === "git" && c.cmd[1] === "push");
+    const pushCall = execCalls.find((c) => gitSubcommand(c.cmd) === "push");
     expect(pushCall).toBeDefined();
     expect(pushCall?.cmd).toContain(`HEAD:refs/heads/cogmo/run/${task.id}`);
     expect(pushCall?.workingDir).toBe("/workspace");
 
     // Commit invocation present + signed with the per-task signing key.
-    const commitCall = execCalls.find((c) => c.cmd[0] === "git" && c.cmd.includes("commit"));
+    const commitCall = execCalls.find((c) => gitSubcommand(c.cmd) === "commit");
     expect(commitCall?.cmd).toContain("-S");
     expect(commitCall?.cmd.some((a) => a.startsWith("user.signingkey="))).toBe(true);
   });
@@ -591,10 +605,10 @@ describe("runCodingExecute — git-remote transport", () => {
     // non-zero exit with stderr that runCommitAndPush classifies as
     // auth_failed via its `looksLikeAuthFailure` pattern.
     const { sandbox, execCalls } = fakeGitRemoteSandbox((cmd) => {
-      if (cmd[0] === "git" && cmd[1] === "status" && cmd[2] === "--porcelain") {
+      if (gitSubcommand(cmd) === "status" && cmd.includes("--porcelain")) {
         return { exitCode: 0, stdout: "M src/foo.ts\n" };
       }
-      if (cmd[0] === "git" && cmd[1] === "push") {
+      if (gitSubcommand(cmd) === "push") {
         return {
           exitCode: 128,
           stderr:
@@ -631,7 +645,7 @@ describe("runCodingExecute — git-remote transport", () => {
     expect(result.failureReason).toContain("execute push failed (auth_failed)");
 
     // Push was attempted before the failure handler kicked in.
-    const pushCall = execCalls.find((c) => c.cmd[0] === "git" && c.cmd[1] === "push");
+    const pushCall = execCalls.find((c) => gitSubcommand(c.cmd) === "push");
     expect(pushCall).toBeDefined();
 
     // Task row is `failed` with the auth-failure reason, never reached
