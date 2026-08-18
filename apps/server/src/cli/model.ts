@@ -299,11 +299,11 @@ function takeValue(args: readonly string[], i: number, flag: string | undefined)
 }
 
 /**
- * `min` differs per flag: a limit of zero describes no model, while
- * position 0 is the primary route. Both are refused again downstream —
- * `addModelRouting` for the limits, the `(model, position)` UNIQUE for
- * position — but a bad value is worth naming here, where the flag it came
- * from is still known.
+ * `min` differs per flag: a zero limit describes no model, while position
+ * 0 is the primary routing slot. Only the limits are checked twice —
+ * `addModelRouting` refuses them again — since a position's real
+ * constraint is the `(model, position)` UNIQUE, which parsing cannot see.
+ * Rejecting a limit here keeps the flag it came from in the message.
  */
 function parseIntAtLeast(value: string, label: string, min: number): number {
   // `Number.parseInt("200000abc", 10)` returns 200000 — silently accepting
