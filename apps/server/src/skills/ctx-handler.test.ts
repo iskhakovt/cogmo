@@ -123,6 +123,130 @@ describe("DefaultCtxHandler", () => {
     });
   });
 
+  describe("http.request", () => {
+    const okResponse = (body: string, status = 200) =>
+      new Response(body, { status, headers: { "content-type": "application/json" } });
+
+    it("returns status, headers and body for a successful request", async () => {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse('{"ok":1}'));
+      try {
+        const h = makeHandler(manifest(""), deps());
+        const out = await h.handle({
+          method: "http.request",
+          args: { method: "GET", url: "https://api.example.com/v1/things" },
+        });
+        expect(out).toMatchObject({ status: 200, body: '{"ok":1}' });
+      } finally {
+        fetchMock.mockRestore();
+      }
+    });
+
+    it("audits origin and path but not the query, which carries credentials", async () => {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse("{}"));
+      try {
+        const d = deps();
+        const h = makeHandler(manifest(""), d);
+        await h.handle({
+          method: "http.request",
+          args: { method: "GET", url: "https://api.example.com/v1/things?api_key=hunter2" },
+        });
+        expect(d.recordContextCall).toHaveBeenCalledWith(
+          expect.objectContaining({
+            method: "http.request",
+            target: "https://api.example.com/v1/things",
+            ok: true,
+          }),
+        );
+        const recorded = JSON.stringify(vi.mocked(d.recordContextCall).mock.calls);
+        expect(recorded).not.toContain("hunter2");
+      } finally {
+        fetchMock.mockRestore();
+      }
+    });
+
+    it("hands back a 4xx as a value rather than throwing", async () => {
+      const fetchMock = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(okResponse("not found", 404));
+      try {
+        const h = makeHandler(manifest(""), deps());
+        const out = await h.handle({
+          method: "http.request",
+          args: { method: "GET", url: "https://api.example.com/missing" },
+        });
+        expect(out).toMatchObject({ status: 404, body: "not found" });
+      } finally {
+        fetchMock.mockRestore();
+      }
+    });
+
+    it.each([["file:///etc/passwd"], ["data:text/plain,hi"]])(
+      "refuses the non-HTTP scheme in %s, which would read the host instead",
+      async (url) => {
+        const fetchMock = vi.spyOn(globalThis, "fetch");
+        try {
+          const h = makeHandler(manifest(""), deps());
+          await expect(
+            h.handle({ method: "http.request", args: { method: "GET", url } }),
+          ).rejects.toThrow(/supports http and https/);
+          expect(fetchMock).not.toHaveBeenCalled();
+        } finally {
+          fetchMock.mockRestore();
+        }
+      },
+    );
+
+    it("refuses a response past the byte cap instead of decoding it", async () => {
+      const chunk = new Uint8Array(1024 * 1024);
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (let i = 0; i < 8; i++) controller.enqueue(chunk);
+          controller.close();
+        },
+      });
+      const fetchMock = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response(stream, { status: 200 }));
+      try {
+        const h = makeHandler(manifest(""), deps());
+        await expect(
+          h.handle({
+            method: "http.request",
+            args: { method: "GET", url: "https://api.example.com/big" },
+          }),
+        ).rejects.toThrow(/exceeded/);
+      } finally {
+        fetchMock.mockRestore();
+      }
+    });
+
+    it("surfaces a transport failure as a typed error naming the target", async () => {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
+      try {
+        const d = deps();
+        const h = makeHandler(manifest(""), d);
+        await expect(
+          h.handle({
+            method: "http.request",
+            args: { method: "GET", url: "https://api.example.com/x" },
+          }),
+        ).rejects.toThrow(/api\.example\.com/);
+        expect(d.recordContextCall).toHaveBeenCalledWith(
+          expect.objectContaining({ ok: false, error: "network_error" }),
+        );
+      } finally {
+        fetchMock.mockRestore();
+      }
+    });
+
+    it("rejects a malformed request shape", async () => {
+      const h = makeHandler(manifest(""), deps());
+      await expect(
+        h.handle({ method: "http.request", args: { url: "https://example.com" } }),
+      ).rejects.toThrow(/expects/);
+    });
+  });
+
   describe("memory.recall / memory.remember", () => {
     it("recall requires the reads_memory effect", async () => {
       const m = manifest();

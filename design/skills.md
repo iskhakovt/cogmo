@@ -46,7 +46,7 @@ Skills execute in one of two sandboxes, chosen by skill metadata. No middle grou
 
 ### Tier 1 — WASM (Pyodide)
 
-**Used for:** skills that only need HTTP, stdlib, and pre-built / pure-Python packages.
+**Used for:** skills that only need HTTP through `ctx`, stdlib, and pre-built / pure-Python packages.
 
 **Why:** capability-based sandbox built into the runtime, sub-50ms cold start, ~0ms warm, ~10 MB memory per instance. In-process execution — no container boot.
 
@@ -55,10 +55,10 @@ Skills execute in one of two sandboxes, chosen by skill metadata. No middle grou
 - No `subprocess`, no shell-outs, no native binaries
 - Packages limited to Pyodide's [pre-built list](https://pyodide.org/en/stable/usage/packages-in-pyodide.html) (~200+ including numpy, pandas, cryptography, sqlalchemy) plus pure-Python wheels installable via `micropip`
 - The full CPython standard library is importable directly — `ssl`, `sqlite3`, `lzma`, `hashlib` and the rest ship inside `python_stdlib.zip` rather than as separately-loadable `cpython_module` entries, so a skill imports them with no `loadPackage` call and no manifest declaration
-- No raw sockets (HTTP via `fetch` shim)
+- No sockets, so stdlib networking (`urllib`, `http.client`, `ftplib`, …) cannot reach anything — HTTP goes through `await ctx.http.get(url)`, performed by the host. `wasm-lint` rejects the stdlib modules at deploy time so the failure is a clear rejection rather than an error on first invocation
 - No `os.fork`, limited threading
 
-**Typical coverage:** HTTP API wrappers (Anthropic / OpenAI SDKs, Slack, GitHub, Google APIs), data transforms, JSON/CSV manipulation, plotting. Roughly the "glue code + data" slice of skills.
+**Typical coverage:** REST calls through `ctx.http`, data transforms, JSON/CSV manipulation, plotting. Roughly the "glue code + data" slice of skills. Vendor SDKs (Anthropic, OpenAI, Slack, Google) belong in tier 2: they reach for `httpx`/`requests` internally, which need the sockets this tier does not have, and cannot be redirected through `ctx`.
 
 ### Tier 2 — Sysbox container
 
@@ -602,7 +602,7 @@ Strict `name==version` only. The Zod regex in `SkillManifestSchema` rejects ever
 
 Skills needing an extra declare the underlying package directly. URL/path forms are a future escape hatch when a real driver appears.
 
-Empty `dependencies` is the common case — HTTP-only skills using `urllib` from the stdlib pay no populate cost and skip the venv-overlay activation entirely.
+Empty `dependencies` is the common case — a tier-1 skill calling REST APIs through `ctx.http` needs no third-party package, so it pays no populate cost and skips the venv-overlay activation entirely.
 
 ### Lockfile
 
@@ -864,6 +864,7 @@ def run(inputs: dict, ctx) -> dict:
 | `ctx.user` | User identity object — `id`, `timezone`, `email` where available |
 | `ctx.notify(channel, message)` | Send a message to the user via their preferred channel (Telegram in v1) |
 | `ctx.log.info(msg, **fields)` | Structured logging to `skill_runs.logs` |
+| `ctx.http.request(method, url, ...)` | Outbound HTTP performed by the host; `get` / `post` wrap it. Tier 1's only network path — Pyodide has no sockets, so `httpx` and `requests` cannot run there and cannot be redirected. Returns `{status, headers, body}`; a 4xx/5xx is a value, not an exception. Capped at 5 MiB and 30s (120s max), `http`/`https` only. Audited to `skill_context_calls` by origin and path, never the query string. Tier 2 uses real sockets and does not go through this. |
 
 Every RPC: validates against the skill's manifest (allowlists, permission scopes) → executes → logs to `skill_context_calls` → returns a result or raises a typed Python exception.
 
@@ -871,7 +872,6 @@ Every RPC: validates against the skill's manifest (allowlists, permission scopes
 
 | Method | Why deferred |
 |-|-|
-| `ctx.http.*` (mediated HTTP) | Skills use `httpx` / `requests` directly. Wrapping costs ergonomics for marginal gain; revisit if rate-limiting or universal logging becomes a need. |
 | `ctx.metrics.*` | Over-engineering at personal scale. `ctx.log` covers most visibility needs. |
 | `ctx.skills.invoke(other_skill, ...)` | No inter-skill composition in v1 (see below). |
 | `ctx.schedule(when, event)` | Scheduling handled externally via Inngest cron declared in `SKILL.md`. |

@@ -24,6 +24,7 @@ export const CTX_METHODS = [
   "now",
   "user",
   "log.info",
+  "http.request",
 ] as const;
 export type CtxMethod = (typeof CTX_METHODS)[number];
 
@@ -64,6 +65,19 @@ export interface DefaultCtxHandlerOptions {
   now?: () => string;
 }
 
+/**
+ * Caps on a single `http.request`. The response is decoded into the WASM
+ * heap, so an unbounded read is an OOM the skill cannot catch; the byte
+ * cap is enforced while streaming rather than after, so an oversized body
+ * is abandoned mid-flight instead of buffered first. The timeout is
+ * independent of the skill's own `wall_clock_s` — that one kills the whole
+ * task, where a hung request should fail as a catchable error and leave
+ * the skill free to continue.
+ */
+const MAX_HTTP_RESPONSE_BYTES = 5 * 1024 * 1024;
+const DEFAULT_HTTP_TIMEOUT_MS = 30_000;
+const MAX_HTTP_TIMEOUT_MS = 120_000;
+
 const SecretsGetArgsSchema = z.object({ name: z.string().min(1) });
 const MemoryRecallArgsSchema = z.object({
   query: z.string().min(1),
@@ -85,6 +99,43 @@ const LogInfoArgsSchema = z.object({
   message: z.string(),
   fields: z.record(z.string(), z.unknown()).optional(),
 });
+const HttpRequestArgsSchema = z.object({
+  method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]),
+  url: z.string().url(),
+  headers: z.record(z.string(), z.string()).optional(),
+  body: z.string().optional(),
+  timeoutMs: z.number().int().positive().max(MAX_HTTP_TIMEOUT_MS).optional(),
+});
+
+/**
+ * Read a response body, refusing anything past `cap`. Counting while
+ * streaming means an oversized body is abandoned as soon as it crosses
+ * the line, rather than buffered in full and measured afterwards — which
+ * is the whole point of a cap when the consumer is a WASM heap.
+ */
+async function readCapped(response: Response, cap: number): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > cap) {
+      await reader.cancel();
+      throw new CtxError("response_too_large", `http.request response exceeded ${cap} bytes`);
+    }
+    chunks.push(value);
+  }
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(joined);
+}
 
 /**
  * Resolves `ctx.*` RPCs from a Tier 1 worker against host services. Every
@@ -153,6 +204,8 @@ export class DefaultCtxHandler implements CtxHandler {
         return this.#userMethod();
       case "log.info":
         return this.#logInfo(args);
+      case "http.request":
+        return this.#httpRequest(args);
     }
   }
 
@@ -317,6 +370,92 @@ export class DefaultCtxHandler implements CtxHandler {
   async #userMethod(): Promise<CtxUser> {
     await this.#audit("user", null, true, null);
     return this.#user;
+  }
+
+  /**
+   * Outbound HTTP on behalf of a tier-1 skill.
+   *
+   * Pyodide has no sockets, so `urllib` / `http.client` cannot work inside
+   * the WASM sandbox at all. Routing through the host is what gives tier 1
+   * a network path, and it puts every request at a point the skill cannot
+   * reach around: the URL is audited here, and any future egress policy
+   * has one place to sit. Tier-2 skills talk to the network directly with
+   * real sockets, so nothing here is a permission boundary today — it is
+   * the mechanism that makes one possible.
+   */
+  async #httpRequest(args: unknown): Promise<{
+    status: number;
+    headers: Record<string, string>;
+    body: string;
+  }> {
+    const parsed = HttpRequestArgsSchema.safeParse(args);
+    if (!parsed.success) {
+      await this.#audit("http.request", null, false, "invalid_args");
+      throw new CtxError(
+        "invalid_args",
+        "http.request expects { method, url, headers?, body?, timeoutMs? }",
+      );
+    }
+    const { method, url, headers, body, timeoutMs } = parsed.data;
+
+    // `z.string().url()` accepts any parseable URL, including `file:` and
+    // `data:`, which would turn a network call into a host-filesystem read.
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(url);
+    } catch {
+      await this.#audit("http.request", null, false, "invalid_args");
+      throw new CtxError("invalid_args", `http.request could not parse url: ${url}`);
+    }
+    if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+      await this.#audit("http.request", parsedUrl.protocol, false, "invalid_args");
+      throw new CtxError(
+        "invalid_args",
+        `http.request supports http and https, got '${parsedUrl.protocol}'`,
+      );
+    }
+    // Query strings routinely carry API keys, so the audit records origin
+    // and path only — enough to see where a skill reached, without
+    // persisting the credential that got it there.
+    const target = `${parsedUrl.origin}${parsedUrl.pathname}`;
+
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method,
+        ...(headers && { headers }),
+        ...(body !== undefined && { body }),
+        signal: AbortSignal.timeout(timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS),
+      });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      const kind = e instanceof Error && e.name === "TimeoutError" ? "timeout" : "network_error";
+      await this.#audit("http.request", target, false, kind);
+      throw new CtxError(kind, `http.request to ${target} failed: ${message}`);
+    }
+
+    let text: string;
+    try {
+      text = await readCapped(response, MAX_HTTP_RESPONSE_BYTES);
+    } catch (e) {
+      if (e instanceof CtxError) {
+        await this.#audit("http.request", target, false, e.kind);
+        throw e;
+      }
+      const message = e instanceof Error ? e.message : String(e);
+      await this.#audit("http.request", target, false, "network_error");
+      throw new CtxError("network_error", `http.request to ${target} failed mid-body: ${message}`);
+    }
+
+    // A 4xx/5xx is a response the skill should get to inspect, not an
+    // exception — the status is right there in the return value. Only a
+    // failure to *obtain* a response throws.
+    await this.#audit("http.request", target, true, null);
+    return {
+      status: response.status,
+      headers: Object.fromEntries(response.headers),
+      body: text,
+    };
   }
 
   async #logInfo(args: unknown): Promise<null> {

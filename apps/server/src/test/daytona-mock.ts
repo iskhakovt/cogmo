@@ -954,9 +954,18 @@ export class DaytonaMock {
     };
     this.#scenario?.calls.push(call);
 
-    // Send the rewritten response back to the SDK.
+    // Send the rewritten response back to the SDK. Body-bound headers are
+    // dropped for the same reason replay drops them: they describe
+    // upstream's framing of a body we have just rewritten. Forwarding
+    // `transfer-encoding: chunked` alongside the `content-length`
+    // recomputed above hands the SDK a response carrying both, which
+    // Node's parser rejects outright — `Parse Error: Content-Length can't
+    // be present with Transfer-Encoding` — and only bites once upstream
+    // decides to chunk, so it looks like an intermittent upstream fault.
+    // `res.end(buffer)` sets the framing itself.
     res.statusCode = upstreamResp.status;
     for (const [k, v] of Object.entries(respHeaders)) {
+      if (BODY_BOUND_HEADERS.has(k.toLowerCase())) continue;
       res.setHeader(k, v);
     }
     res.end(respBodyForClient);

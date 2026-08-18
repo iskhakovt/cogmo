@@ -46,7 +46,19 @@ const RULES: readonly RulePattern[] = [
   {
     name: "raw_socket",
     pattern: /^[ \t]*(?:import[ \t]+socket|from[ \t]+socket[ \t]+import)\b/m,
-    reason: "raw sockets are not available in tier-1 (WASM); use HTTP via httpx/requests",
+    reason: "raw sockets are not available in tier-1 (WASM); use `await ctx.http.get(url)`",
+  },
+  {
+    // The stdlib HTTP clients are the ones a dependency-free skill
+    // actually reaches for, and they fail at first use rather than at
+    // import: they load fine and then find no socket underneath. Without
+    // a rule here the skill deploys clean and breaks on invocation, which
+    // is the outcome this lint exists to prevent.
+    name: "stdlib_network",
+    pattern:
+      /^[ \t]*(?:import[ \t]+(?:urllib|http\.client|ftplib|smtplib|telnetlib|poplib|imaplib)|from[ \t]+(?:urllib|http\.client|ftplib|smtplib|telnetlib|poplib|imaplib)[ \t.\w]*[ \t]+import)\b/m,
+    reason:
+      "stdlib networking has no socket underneath it in tier-1 (WASM); use `await ctx.http.get(url)`, or declare tier: container to use httpx",
   },
   {
     name: "multiprocessing",

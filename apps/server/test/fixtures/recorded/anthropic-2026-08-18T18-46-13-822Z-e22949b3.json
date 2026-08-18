@@ -1,0 +1,34 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "What's bitcoin at?",
+        "model": "claude-sonnet-5",
+        "turnIndex": 4,
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "Bitcoin is at **$64,725 USD** right now.\n\n(Fun fact: that's from the btc-spot skill we just built together — first use!)\n\nStill curious to learn a bit about you when you have a sec — name, what you do, timezone, and how you like me to communicate."
+      },
+      "recordedTimings": {
+        "ttftMs": 1844,
+        "interChunkDelaysMs": [
+          0,
+          1,
+          0,
+          643,
+          440,
+          121,
+          1,
+          8,
+          2
+        ],
+        "totalDurationMs": 3060
+      },
+      "metadata": {
+        "systemHash": "61351513",
+        "toolsHash": "fd51d4bc"
+      }
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 ---
 name: btc-spot
-description: "Fetches the current Bitcoin price in USD from CoinGecko and returns { price: <number> }."
+description: "Fetches the current Bitcoin price in USD from CoinGecko"
 tier: wasm
 inputs:
   type: object
@@ -8,6 +8,20 @@ inputs:
 effects: []
 ---
 
-Fetches the current spot price of Bitcoin in USD from the CoinGecko public API.
+# Bitcoin Spot Price
 
-Returns a dictionary with a single key `price` containing the current BTC/USD exchange rate as a number.
+Fetches the current Bitcoin price in USD from the CoinGecko public API.
+
+## Output
+
+Returns a dictionary with the current BTC/USD price:
+
+```json
+{
+  "price": 42500.50
+}
+```
+
+## API
+
+Uses the CoinGecko simple price endpoint (public, no authentication required).

@@ -82,7 +82,7 @@ import { deriveMasterKey, encrypt, parseMasterKey, toBase64 } from "../secrets/e
 import { withGitAskpass } from "../secrets/git-askpass.js";
 import { secrets } from "../secrets/store/schema.js";
 import { bootstrapSkillsRepo } from "../skills/repo.js";
-import { skills } from "../skills/store/schema.js";
+import { skillRuns, skills } from "../skills/store/schema.js";
 import { channelSessions, channels, inboundMessages } from "../transport/store/schema.js";
 import { expectDefined } from "./assertions.js";
 import { DaytonaMock, type DaytonaMockOptions } from "./daytona-mock.js";
@@ -119,9 +119,7 @@ const HAS_RECORDING_INPUTS =
   !!process.env.COGMO_TEST_SKILLS_REMOTE;
 const RECORDABLE = IS_RECORD && HAS_RECORDING_INPUTS;
 const FIXTURE_EXISTS = existsSync(FIXTURE_PATH);
-/** Disables the suite outright — see the note above `describe` below. */
-const TIER1_HAS_NO_HTTP = true;
-const RUNNABLE = !TIER1_HAS_NO_HTTP && (RECORDABLE || FIXTURE_EXISTS);
+const RUNNABLE = RECORDABLE || FIXTURE_EXISTS;
 
 // --- Outbound capture (mirrors pipeline.integration.test.ts) ─────────
 
@@ -140,16 +138,6 @@ const capturedOutbound: CapturedOutbound[] = [];
 const TEST_RUN_ID = "skill-author";
 const TASK_BRANCH_GLOB = `cogmo/run/${TEST_RUN_ID}`;
 
-// Disabled: the skill this test authors cannot run. Its prompt asks for
-// `urllib.request` with no declared dependencies, which lands it in tier 1
-// (Pyodide/WASM), where there are no raw sockets and no HTTP path at all.
-// The closing price assertion is met by the `web_answer` fallback rather
-// than by the skill, so re-recording rides on a live third-party answer.
-//
-// Everything before that point works — authored, pushed, merged,
-// registered, invoked as a tool on the next turn — so this waits on a
-// tier-1 network path rather than being deleted. Re-enable by dropping
-// `!TIER1_HAS_NO_HTTP &&` from `RUNNABLE`, then re-record. See todo.md.
 describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () => {
   let mock: DaytonaMock;
   let daytonaClient: DaytonaSandboxClient;
@@ -355,9 +343,10 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
       conversationId,
       "Create a skill called btc-spot that fetches the current bitcoin USD price " +
         "from coingecko (https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd) " +
-        "and returns { price: <number> }. Use Python stdlib (urllib.request + json) " +
-        "— no third-party deps. Do NOT declare dependencies in SKILL.md, do NOT " +
-        "create a requirements.lock file.",
+        "and returns { price: <number> }. Fetch it with `await ctx.http.get(url)`, which " +
+        "returns a dict with 'status' and 'body' — parse the body with json.loads. Do NOT " +
+        "use urllib or any third-party HTTP library, do NOT declare dependencies in " +
+        "SKILL.md, do NOT create a requirements.lock file.",
     );
     await sendEvent(inngestBaseUrl, "inbound/arrived", {
       conversationId,
@@ -392,7 +381,20 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
       inboundMessageId: await latestInboundId(db, conversationId),
     });
 
-    // Anchor on tens-of-thousands shape so years / HTTP codes don't false-positive.
+    // Assert on the skill's own run, not on the reply text. The prose the
+    // model writes is a weak proxy — it can produce a plausible number
+    // from any source, which is how this test passed for months while the
+    // skill itself was erroring and the agent quietly fell back to
+    // `web_answer`. A completed run whose output carries a numeric price
+    // is the thing the suite exists to prove.
+    const run = await waitForSkillRun(db, skillRow.id, 60_000);
+    expect(run.status).toBe("success");
+    const price = (run.output as { price?: unknown } | null)?.price;
+    expect(typeof price).toBe("number");
+    expect(price as number).toBeGreaterThan(0);
+
+    // And the number reaches the user. Anchored on tens-of-thousands shape
+    // so years / HTTP codes don't false-positive.
     const replyRe = /\$?\s?\d{2,3}[,.]?\d{3}|\$?\d+k/i;
     const reply = await waitForOutbound(
       (e) => replyRe.test(e.content) && e.platformAddress === sessionId,
@@ -987,6 +989,28 @@ async function waitForSkill(
       const rows = await db.select().from(skills).where(eq(skills.name, name)).limit(1);
       const row = rows[0];
       if (!row) throw new Error(`skill '${name}' not yet registered`);
+      return row;
+    },
+    { timeout: timeoutMs, interval: 500 },
+  );
+}
+
+/** Newest run for the skill, once it has left `running`. */
+async function waitForSkillRun(
+  db: ReturnType<typeof drizzle<typeof schema>>,
+  skillId: string,
+  timeoutMs: number,
+): Promise<typeof skillRuns.$inferSelect> {
+  return vi.waitFor(
+    async () => {
+      const rows = await db
+        .select()
+        .from(skillRuns)
+        .where(and(eq(skillRuns.skillId, skillId), ne(skillRuns.status, "running")))
+        .orderBy(desc(skillRuns.createdAt))
+        .limit(1);
+      const row = rows[0];
+      if (!row) throw new Error(`no finished skill_runs row for skill ${skillId}`);
       return row;
     },
     { timeout: timeoutMs, interval: 500 },
