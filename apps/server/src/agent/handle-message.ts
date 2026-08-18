@@ -941,6 +941,13 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           // the input budget above, so the request can use the room the
           // compaction pass set aside for it. Reasoning shares this
           // allowance on models that think by default.
+          //
+          // The reservation covers one iteration, while the loop applies
+          // the cap to each of them and compaction only runs ahead of the
+          // turn. A long tool-using turn can therefore outgrow the window
+          // mid-loop; that surfaces as a `context_overflow` degrade and a
+          // fresh compaction pass on the next turn, which is the designed
+          // recovery rather than a case this cap is meant to prevent.
           maxTokens: limits.maxOutputTokens,
           onEvent: (event: StreamEvent) => {
             if (event.type === "text_delta") streamed.text += event.text;

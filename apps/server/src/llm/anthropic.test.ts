@@ -1218,6 +1218,81 @@ describe("AnthropicProvider", () => {
     });
   });
 
+  // The SDK throws `AnthropicError: Streaming is required…` client-side,
+  // before any network call, for a non-streaming request whose max_tokens
+  // projects past its 10-minute default timeout — anything above 21_333.
+  // Callers pass the model's full resolved maxOutputTokens (64_000 on the
+  // 5 series), so without the clamp every non-streaming call fails.
+  describe("non-streaming max_tokens ceiling", () => {
+    it("clamps a caller's cap that would trip the SDK guard", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "ok", citations: null }],
+        stop_reason: "end_turn",
+        model: "claude-sonnet-5",
+        usage: { input_tokens: 10, output_tokens: 5 },
+      });
+
+      await provider.chat({
+        model: "claude-sonnet-5",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+        maxTokens: 64_000,
+      });
+
+      expect(mockCreate.mock.calls[0]![0].max_tokens).toBe(21_333);
+    });
+
+    it("leaves a cap under the ceiling alone", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "ok", citations: null }],
+        stop_reason: "end_turn",
+        model: "claude-sonnet-5",
+        usage: { input_tokens: 10, output_tokens: 5 },
+      });
+
+      await provider.chat({
+        model: "claude-sonnet-5",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+        maxTokens: 8192,
+      });
+
+      expect(mockCreate.mock.calls[0]![0].max_tokens).toBe(8192);
+    });
+
+    it("does not clamp the streaming path, which has no such limit", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            type: "message_start",
+            message: { model: "claude-sonnet-5", usage: { input_tokens: 10, output_tokens: 0 } },
+          },
+          {
+            type: "message_delta",
+            delta: { stop_reason: "end_turn" },
+            usage: { output_tokens: 5 },
+          },
+        ]),
+      );
+
+      const { events, response } = provider.chatStream({
+        model: "claude-sonnet-5",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+        maxTokens: 64_000,
+      });
+      for await (const _ of events) {
+        // drain
+      }
+      await response;
+
+      expect(mockCreate.mock.calls[0]![0].max_tokens).toBe(64_000);
+    });
+  });
+
   describe("responseFormat", () => {
     it("converts responseFormat to tool_use trick", async () => {
       const provider = createProvider();

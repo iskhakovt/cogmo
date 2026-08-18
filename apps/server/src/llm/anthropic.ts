@@ -207,7 +207,9 @@ export class AnthropicProvider implements LlmProvider {
 
     const span = startChatSpan(this.name, params.model);
     try {
-      const response = await this.#client.messages.create(buildCreateParams(params));
+      const response = await this.#client.messages.create(
+        buildCreateParams(clampForNonStreaming(params)),
+      );
 
       const usage: Usage = {
         inputTokens: response.usage.input_tokens,
@@ -254,6 +256,49 @@ export class AnthropicProvider implements LlmProvider {
 }
 
 // --- Params builder ---
+
+/**
+ * Ceiling on `max_tokens` for a non-streaming request.
+ *
+ * The SDK refuses a non-streaming call whose projected generation time
+ * exceeds its 10-minute default timeout, throwing `AnthropicError:
+ * Streaming is required…` client-side before the request leaves the
+ * process. The projection is `60min * max_tokens / 128_000`, so the
+ * ceiling is `600s * 128_000 / 3600s` — 21_333, verified empirically
+ * against 0.117.1 (21_333 passes, 21_334 throws). It applies only when
+ * no explicit timeout is set, which is our case.
+ *
+ * Streaming has no such limit, so `chatStream` passes the caller's cap
+ * through untouched. Callers hand us the model's full resolved
+ * `maxOutputTokens`, which is well above this for every current model,
+ * so the non-streaming paths — the stream-truncation replay and
+ * sub-agent delegation — would otherwise fail on every call.
+ */
+const MAX_NONSTREAMING_TOKENS = 21_333;
+
+const warnedNonStreamingClamp = new Set<string>();
+
+/**
+ * Return `params` with `maxTokens` brought under the non-streaming
+ * ceiling. Clamping keeps the SDK's reasoning intact — a 64k
+ * non-streaming generation really can outlive an HTTP timeout — where
+ * passing an explicit client timeout would just silence the guard and
+ * leave the connection held open.
+ */
+function clampForNonStreaming(params: ChatParams): ChatParams {
+  const requested = params.maxTokens;
+  if (requested === undefined || requested <= MAX_NONSTREAMING_TOKENS) return params;
+  if (!warnedNonStreamingClamp.has(params.model)) {
+    warnedNonStreamingClamp.add(params.model);
+    logger.warn(
+      { model: params.model, requested, clampedTo: MAX_NONSTREAMING_TOKENS },
+      `clamping max_tokens to ${MAX_NONSTREAMING_TOKENS} for a non-streaming request to ` +
+        `"${params.model}" — the SDK rejects a larger cap without streaming. Use chatStream to ` +
+        `use the model's full output budget.`,
+    );
+  }
+  return { ...params, maxTokens: MAX_NONSTREAMING_TOKENS };
+}
 
 const warnedSamplingModels = new Set<string>();
 
