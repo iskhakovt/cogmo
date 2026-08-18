@@ -16,10 +16,11 @@
  *      (slice 4.0d's per-task helper); `GIT_TERMINAL_PROMPT=0` ensures
  *      missing auth fails fast instead of hanging on a TTY prompt.
  *
- * Every invocation additionally carries {@link noBackgroundMaintenanceEnv}:
- * steps 2 and 3 are the two commands that spawn a detached `git maintenance
- * run --auto`, and on the bind-mount backend `worktreeDir` is the host
- * working tree that teardown deletes once the task settles.
+ * Every invocation additionally carries
+ * {@link NO_BACKGROUND_MAINTENANCE_FLAGS}: steps 2 and 3 are the two commands
+ * that spawn a detached `git maintenance run --auto`, and on the bind-mount
+ * backend `worktreeDir` is the host working tree that teardown deletes once
+ * the task settles.
  *
  * Discriminates outcomes so the orchestrator can render the right
  * Telegram message and persist the right `failure_reason`. `branch_conflict`
@@ -29,7 +30,7 @@
 
 import type { SandboxSession } from "../../sandbox/index.js";
 import type { GitHubIdentity } from "../../secrets/github.js";
-import { noBackgroundMaintenanceEnv } from "./git-maintenance.js";
+import { NO_BACKGROUND_MAINTENANCE_FLAGS } from "./git-maintenance.js";
 
 const REMOTE = "origin";
 
@@ -94,18 +95,10 @@ export async function runCommitAndPush(params: CommitAndPushParams): Promise<Com
   // remote ref; default sends the local <branch> under the same name
   // on origin.
   const pushRefspec = remoteBranch === undefined ? branch : `HEAD:refs/heads/${remoteBranch}`;
-  // The one env record every git call below runs with — askpass credentials
-  // plus the maintenance suppression, numbered after any config pairs the
-  // caller already threads through `askpassEnv`.
-  const gitEnv: Readonly<Record<string, string>> = {
-    ...askpassEnv,
-    ...noBackgroundMaintenanceEnv(askpassEnv),
-  };
-
   // 1. Working-tree status. Empty stdout = clean tree.
   const status = await runGit(container, ["status", "--porcelain"], {
     workingDir: worktreeDir,
-    env: gitEnv,
+    env: askpassEnv,
     timeoutMs: GIT_LOCAL_TOTAL_MS,
     idleTimeoutMs: GIT_IDLE_MS,
   });
@@ -121,7 +114,7 @@ export async function runCommitAndPush(params: CommitAndPushParams): Promise<Com
     // the full diff.
     const addResult = await runGit(container, ["add", "-A"], {
       workingDir: worktreeDir,
-      env: gitEnv,
+      env: askpassEnv,
       timeoutMs: GIT_LOCAL_TOTAL_MS,
       idleTimeoutMs: GIT_IDLE_MS,
     });
@@ -147,7 +140,7 @@ export async function runCommitAndPush(params: CommitAndPushParams): Promise<Com
       ],
       {
         workingDir: worktreeDir,
-        env: gitEnv,
+        env: askpassEnv,
         timeoutMs: GIT_LOCAL_TOTAL_MS,
         idleTimeoutMs: GIT_IDLE_MS,
       },
@@ -167,7 +160,7 @@ export async function runCommitAndPush(params: CommitAndPushParams): Promise<Com
   // retry should converge).
   const pushResult = await runGit(container, ["push", REMOTE, pushRefspec], {
     workingDir: worktreeDir,
-    env: gitEnv,
+    env: askpassEnv,
     timeoutMs: GIT_PUSH_TOTAL_MS,
     idleTimeoutMs: GIT_IDLE_MS,
   });
@@ -191,7 +184,7 @@ export async function runCommitAndPush(params: CommitAndPushParams): Promise<Com
   // the push but does mean we record the kind=pushed without a SHA.
   const sha = await runGit(container, ["rev-parse", "HEAD"], {
     workingDir: worktreeDir,
-    env: gitEnv,
+    env: askpassEnv,
     timeoutMs: GIT_LOCAL_TOTAL_MS,
     idleTimeoutMs: GIT_IDLE_MS,
   });
@@ -224,12 +217,18 @@ async function runGit(
     idleTimeoutMs: number;
   },
 ): Promise<ExecCapture> {
-  const handle = await container.execStreaming(["git", ...args], {
-    workingDir: opts.workingDir,
-    env: opts.env,
-    timeoutMs: opts.timeoutMs,
-    idleTimeoutMs: opts.idleTimeoutMs,
-  });
+  // Suppression rides on the argv rather than the env: the container's
+  // ambient `GIT_CONFIG_*` pairs aren't visible from here, and numbering
+  // blind would shadow index 0 of whatever it already declares.
+  const handle = await container.execStreaming(
+    ["git", ...NO_BACKGROUND_MAINTENANCE_FLAGS, ...args],
+    {
+      workingDir: opts.workingDir,
+      env: opts.env,
+      timeoutMs: opts.timeoutMs,
+      idleTimeoutMs: opts.idleTimeoutMs,
+    },
+  );
   const stdoutChunks: Buffer[] = [];
   const stderrChunks: Buffer[] = [];
 
