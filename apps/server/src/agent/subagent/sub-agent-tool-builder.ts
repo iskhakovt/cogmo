@@ -128,6 +128,17 @@ export function buildSubAgentTools(
             `sub-agent "${row.name}" (model ${row.model}) returned no text output`,
           );
         }
+        // Same reasoning one step further: text that stopped at the output
+        // cap is a partial answer wearing the shape of a complete one. The
+        // empty-text check above cannot see it, and the orchestrator has no
+        // way to tell — so refuse it here rather than let a sentence that
+        // stops mid-clause be reasoned over as the specialist's conclusion.
+        if (response.stopReason === "max_tokens") {
+          throw new NonRetriableError(
+            `sub-agent "${row.name}" (model ${row.model}) hit its output cap and returned a ` +
+              `truncated answer`,
+          );
+        }
         return text;
       },
     }),

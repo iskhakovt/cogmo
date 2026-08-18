@@ -274,7 +274,7 @@ export class AnthropicProvider implements LlmProvider {
  * so the non-streaming paths — the stream-truncation replay and
  * sub-agent delegation — would otherwise fail on every call.
  */
-const MAX_NONSTREAMING_TOKENS = 21_333;
+export const MAX_NONSTREAMING_TOKENS = 21_333;
 
 const warnedNonStreamingClamp = new Set<string>();
 

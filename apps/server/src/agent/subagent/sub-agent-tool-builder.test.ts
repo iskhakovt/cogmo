@@ -121,6 +121,22 @@ describe("buildSubAgentTools", () => {
     ).rejects.toThrow(/no text output/);
   });
 
+  it("throws on truncated specialist output rather than passing off a partial answer", async () => {
+    // Text plus `max_tokens` is the case the empty-text check cannot see:
+    // it looks like a complete answer, so the orchestrator would reason
+    // over a sentence that stops mid-clause.
+    const chat = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: "The three options are: first, the" }],
+      stopReason: "max_tokens",
+      model: "claude-test",
+      usage: { inputTokens: 1, outputTokens: 21_333 },
+    });
+    const tools = buildSubAgentTools([row()], mockResolver(mockProvider({ chat })));
+    await expect(
+      expectDefined(tools[0], "spec").handler({ task: "t" }, mock<Service>()),
+    ).rejects.toThrow(/truncated/);
+  });
+
   it("throws NonRetriableError on a permanent config error (loop makes an isError result, no retry)", async () => {
     const resolveProvider: LlmProviderResolver = () =>
       Promise.reject(new ProviderConfigError('No provider configured for model "ghost".'));
