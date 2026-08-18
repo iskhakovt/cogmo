@@ -4,6 +4,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
 import type { Database } from "../../db/index.js";
+import { createIsolatedUser } from "../../test/isolated-user.js";
 import { DrizzleAgentStore } from "../store/index.js";
 import {
   type ListMemoriesPage,
@@ -12,10 +13,10 @@ import {
   type RawBankMemory,
 } from "./migrate-untagged-memories.js";
 
-// `bankId == userId` is Cogmo's convention. Reuse the seeded
-// `defaultUserId` so `pending_memories.user_id` (typed `uuid` with FK
-// to `users.id`) accepts the staged rows — a synthetic
-// `test-migrate-<ts>` bank id would fail the FK check.
+// `bankId == userId` is Cogmo's convention, so a user private to this
+// file gives it a private bank too. `pending_memories.user_id` is an FK
+// to `users.id`, which is why this is a real row rather than a synthetic
+// `test-migrate-<ts>` string.
 let BANK_ID: string;
 let hindsight: HindsightClient;
 let sdkClient: ReturnType<typeof createClient>;
@@ -33,16 +34,12 @@ beforeAll(async () => {
   db = drizzle(pgClient);
   store = new DrizzleAgentStore();
 
-  userId = inject("defaultUserId");
+  userId = await createIsolatedUser(db);
   BANK_ID = userId;
-  // Bank should already exist for the seeded user, but createBank is
-  // idempotent — keeps this test self-contained against future seed
-  // changes.
   await hindsight.createBank(BANK_ID);
   // Clear before seeding so the strict `result.migrated === 2` assert
-  // below isn't sensitive to leftovers from a prior failed run, the
-  // seed step's own probe memories, or any future test that lands
-  // memories in the default user's bank.
+  // below isn't sensitive to leftovers from a prior failed run against
+  // this bank.
   const cleared = await sdk.clearBankMemories({ client: sdkClient, path: { bank_id: BANK_ID } });
   if (cleared.error) {
     throw new Error(`pre-test clearBankMemories failed: ${JSON.stringify(cleared.error)}`);
