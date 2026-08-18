@@ -40,6 +40,7 @@ import {
   resolveGitHubIdentity,
 } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { noBackgroundMaintenanceEnv } from "./git-maintenance.js";
 import type { CodingRepoRow } from "./store/index.js";
 import type { WorktreeAssignment } from "./types.js";
 import { removeWorktree } from "./worktree.js";
@@ -47,48 +48,15 @@ import { removeWorktree } from "./worktree.js";
 const execFileP = promisify(execFile);
 const log = logger.child({ component: "coding.teardown" });
 
-/** Config that switches off git's background maintenance. See {@link gitEnv}. */
-const NO_BACKGROUND_MAINTENANCE: ReadonlyArray<readonly [key: string, value: string]> = [
-  ["maintenance.auto", "false"],
-  ["gc.auto", "0"],
-];
-
 /**
  * Environment for every git invocation this module makes: the inherited
- * process environment plus config that switches off background maintenance.
- *
- * `git commit` and `git push` each spawn `git maintenance run --auto
- * --detach`, and that detached process goes on writing inside the
- * repository's `.git/` — new packs, `objects/info/packs`, `info/refs` —
- * after the foreground command has already exited. A task working tree is a
- * standalone clone, so its `.git` sits *inside* `worktreePath`, the very
- * tree `removeWorktree` deletes a few statements later: the writer
- * repopulates directories mid-delete and `fs.rm` fails with `ENOTEMPTY`.
- * `removeWorktree` only warns on that failure, so the visible damage is a
- * half-deleted clone left at a path that is stable per task, which then
- * blocks the next `allocateWorktree` there ("exists but is not a git
- * working tree").
- *
- * `GIT_CONFIG_COUNT` plus numbered key/value pairs is git's documented way
- * to inject config into a subprocess without writing a config file, and it
- * outranks repo-local config. Pairs already present in the environment are
- * preserved and ours appended after them, so an ambient injection (wrapper
- * script, test runner) keeps working.
+ * process environment plus the config that switches off background
+ * maintenance, whose detached writer would otherwise race the
+ * `removeWorktree` a few statements below. See
+ * {@link noBackgroundMaintenanceEnv} for the mechanism.
  */
 function gitEnv(): NodeJS.ProcessEnv {
-  const inherited = Number(process.env.GIT_CONFIG_COUNT);
-  const offset = Number.isInteger(inherited) && inherited > 0 ? inherited : 0;
-  const pairs = Object.fromEntries(
-    NO_BACKGROUND_MAINTENANCE.flatMap(([key, value], i) => [
-      [`GIT_CONFIG_KEY_${offset + i}`, key],
-      [`GIT_CONFIG_VALUE_${offset + i}`, value],
-    ]),
-  );
-  return {
-    ...process.env,
-    ...pairs,
-    GIT_CONFIG_COUNT: String(offset + NO_BACKGROUND_MAINTENANCE.length),
-  };
+  return { ...process.env, ...noBackgroundMaintenanceEnv(process.env) };
 }
 
 export interface TeardownWorktreeOpts {

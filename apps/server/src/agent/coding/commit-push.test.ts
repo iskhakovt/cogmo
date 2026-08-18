@@ -131,7 +131,16 @@ describe("runCommitAndPush", () => {
     expect(commitCall?.env).toBe(askpassEnv);
 
     const pushCall = calls.find((c) => c.args.includes("push"));
-    expect(pushCall?.args).toEqual(["git", "push", "origin", "cogmo/abc12345"]);
+    expect(pushCall?.args).toEqual([
+      "git",
+      "-c",
+      "maintenance.auto=false",
+      "-c",
+      "gc.auto=0",
+      "push",
+      "origin",
+      "cogmo/abc12345",
+    ]);
   });
 
   it("skips the commit when the working tree is clean and returns kind=nothing_to_commit", async () => {
@@ -247,6 +256,76 @@ describe("runCommitAndPush", () => {
     for (const call of calls) {
       expect(call.env).toBe(askpassEnv);
       expect(call.workingDir).toBe("/workspace");
+    }
+  });
+
+  it("runs every git invocation with git's background maintenance disabled", async () => {
+    // Steps 2 and 3 spawn a detached `git maintenance run --auto` that keeps
+    // writing into /workspace — the host worktree, through the bind mount —
+    // after the command returns, racing the delete teardown does later.
+    const { container, calls } = fakeContainer({
+      status: { stdout: "M src/foo.ts\n" },
+      add: { exitCode: 0 },
+      commit: { stdout: "[cogmo/abc 1234567] foo\n", exitCode: 0 },
+      push: { exitCode: 0 },
+      "rev-parse": { stdout: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n", exitCode: 0 },
+    });
+
+    await runCommitAndPush({
+      container,
+      worktreeDir: "/workspace",
+      branch: "cogmo/abc12345",
+      commitMessage: "test goal",
+      signingKeyPath: "/tmp/cogmo-askpass/signing-key",
+      askpassEnv,
+      author,
+    });
+
+    expect(calls.length).toBeGreaterThan(0);
+    for (const call of calls) {
+      expect(call.args.slice(0, 5)).toEqual([
+        "git",
+        "-c",
+        "maintenance.auto=false",
+        "-c",
+        "gc.auto=0",
+      ]);
+    }
+  });
+
+  it("leaves the caller's env untouched, so container config pairs survive", async () => {
+    // The container's ambient environment isn't visible from the host, so
+    // numbering our own GIT_CONFIG_* pairs would shadow index 0 of whatever it
+    // already declares — `safe.directory` being the one that matters, since
+    // losing it makes git refuse the bind-mounted worktree. Carrying the
+    // settings on the argv leaves the env exactly as the caller built it.
+    const envWithConfig = Object.freeze({
+      ...askpassEnv,
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "safe.directory",
+      GIT_CONFIG_VALUE_0: "/workspace",
+    });
+    const { container, calls } = fakeContainer({
+      status: { stdout: "M src/foo.ts\n" },
+      add: { exitCode: 0 },
+      commit: { stdout: "[cogmo/abc 1234567] foo\n", exitCode: 0 },
+      push: { exitCode: 0 },
+      "rev-parse": { stdout: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n", exitCode: 0 },
+    });
+
+    await runCommitAndPush({
+      container,
+      worktreeDir: "/workspace",
+      branch: "cogmo/abc12345",
+      commitMessage: "test goal",
+      signingKeyPath: "/tmp/cogmo-askpass/signing-key",
+      askpassEnv: envWithConfig,
+      author,
+    });
+
+    for (const call of calls) {
+      expect(call.env).toEqual(envWithConfig);
+      expect(call.args).toContain("maintenance.auto=false");
     }
   });
 
