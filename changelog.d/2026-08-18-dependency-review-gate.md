@@ -6,6 +6,6 @@ Auditing the whole tree on `pull_request` was rejected for the scheduled job bec
 
 Two details that make it work here rather than in principle. It reads GitHub's dependency graph rather than the lockfile, and that graph does cover this workspace — the repo's SBOM resolves about 1200 packages from `pnpm-lock.yaml`. And the graph is computed asynchronously after a push, so a freshly opened PR can be reviewed before its snapshot exists; the action retries on that warning instead of failing on something that resolves itself.
 
-No PR comment, deliberately. That needs `pull-requests: write`, which a `pull_request` run from a fork is not granted, so it would convert an outside contribution into a workflow failure. The job summary carries the same detail.
+No PR comment: `comment-summary-in-pr` is left unset and the action treats that as `never`, so this is its default rather than a mitigation. It stays unset because enabling it needs `pull-requests: write`, which a `pull_request` run from a fork is not granted — that would convert an outside contribution into a workflow failure. The job summary carries the same detail either way, and the job keeps `contents: read` only.
 
 With this, the three layers are complete: Dependabot's `npm-security` group opens PRs for advisories it can fix, this blocks a PR that adds one, and the weekly audit catches advisories that appear against code nobody touched.

@@ -52,7 +52,9 @@ jobs:
           retry-on-snapshot-warnings: true
           retry-on-snapshot-warnings-timeout: 120
 
-# No `comment-summary-in-pr`: that needs `pull-requests: write`, which a
-# `pull_request` run from a fork is not granted, so it would turn an external
-# contribution into a workflow failure. The action's job summary carries the
-# same detail.
+# `comment-summary-in-pr` is left unset, which the action already treats as
+# `never` — this is the default rather than a mitigation. Worth stating only
+# because turning it on is a bigger step than it looks: `always` or
+# `on-failure` require `pull-requests: write`, which a `pull_request` run from
+# a fork is not granted, so enabling it would turn an outside contribution
+# into a workflow failure. The job summary carries the same detail either way.
