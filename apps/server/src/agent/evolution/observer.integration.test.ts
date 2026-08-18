@@ -26,6 +26,7 @@ import type { LlmProvider } from "../../llm/provider.js";
 import type { ChatParams, ChatStreamResult, LlmResponse } from "../../llm/types.js";
 import type { MemoryProvider, RetainBatchItem } from "../../memory/provider.js";
 import { expectDefined } from "../../test/assertions.js";
+import { createIsolatedUser } from "../../test/isolated-user.js";
 import { DrizzleTransportStore } from "../../transport/store/index.js";
 import { channelSessions, channels } from "../../transport/store/schema.js";
 import { DrizzleAgentStore } from "../store/index.js";
@@ -44,9 +45,11 @@ beforeAll(async () => {
   db = drizzle(pgClient);
   store = new DrizzleAgentStore();
   transportStore = new DrizzleTransportStore();
-  // Reuse the seeded default user so FK-constrained inserts
-  // (custom_compartments, pending_memories) accept our writes.
-  userId = inject("defaultUserId");
+  // Private to this file: the cleanup and count assertions below are
+  // scoped by `user_id`, and the integration tier runs files in parallel
+  // against one Postgres. A real row because `custom_compartments` and
+  // `pending_memories` carry an FK to `users.id`.
+  userId = await createIsolatedUser(pgClient);
 });
 
 afterAll(async () => {
@@ -87,12 +90,10 @@ async function cleanupTestState(): Promise<void> {
   await pgClient.unsafe(`DELETE FROM steering_rules WHERE source IN ('correction', 'evolution')`);
   // Drop audit rows before conversations — FK from evolution_events →
   // conversations is `no action`, so a stale row would block deletion of
-  // its parent conversation in the cleanup below. Scoped to the seeded
-  // `userId` to match the pattern used by `pending_memories` /
-  // `custom_compartments` /  `profile_classes` below; tests in this file
-  // all share `inject("defaultUserId")` so the scope is effectively
-  // "everything this file has written" rather than a cross-user
-  // isolation claim.
+  // its parent conversation in the cleanup below. Scoping by `userId`
+  // matches `pending_memories` / `custom_compartments` / `profile_classes`
+  // below, and reaches exactly what this file wrote now that the user is
+  // its own.
   await pgClient.unsafe(`DELETE FROM evolution_events WHERE user_id = $1`, [userId]);
   await pgClient.unsafe(
     `DELETE FROM conversations
