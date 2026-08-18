@@ -288,6 +288,25 @@ export function degradedReplyText(subtype: DegradeSubtype | null): string {
 export const DEGRADED_SYNTHESIS_TIMEOUT_MS = 5000;
 
 /**
+ * Output cap for the synthesis call, which two opposing pressures decide.
+ *
+ * Models that think by default draw reasoning from the same allowance as
+ * the reply, so a cap sized for three sentences can be spent entirely on
+ * thinking and return no text — landing on the fixed fallback and
+ * reporting `ok: false`, the outcome this path exists to avoid.
+ *
+ * `context_overflow` pulls the other way. The API counts
+ * `input_tokens + max_tokens` against the context window, so on the one
+ * subtype whose failure *was* that the history didn't fit, every token
+ * reserved for output is one the history loses. Staying tight there is
+ * what gives the same history room to fit on the retry; a reply that
+ * stops short still beats a request the model refuses outright.
+ */
+function synthesisMaxTokens(subtype: DegradeSubtype | null): number {
+  return subtype === "context_overflow" ? 512 : 4096;
+}
+
+/**
  * Inputs to {@link synthesizeDegradedReply}. The `messages` slice is the
  * full conversation history at the point of degrade — the model needs
  * it to know what the user asked and what was attempted. `reason` and
@@ -342,10 +361,11 @@ export interface SynthesizeDegradedReplyResult {
  * events is an upstream symptom, not a synthesis-logic bug.
  *
  * The `context_overflow` subtype still attempts synthesis. The call is not
- * a re-run of the failed turn: it drops the tool definitions and caps
- * output tightly, which is often enough headroom for the same history to
- * fit. When it isn't, the provider answers with an overflow and no
- * content, which lands on the empty-text fallback below.
+ * a re-run of the failed turn: it drops the tool definitions and keeps the
+ * output cap tight (see {@link synthesisMaxTokens}), which is often enough
+ * headroom for the same history to fit. When it isn't, the provider answers
+ * with an overflow and no content, which lands on the empty-text fallback
+ * below.
  */
 export async function synthesizeDegradedReply(
   deps: SynthesizeDegradedReplyDeps,
@@ -373,13 +393,7 @@ export async function synthesizeDegradedReply(
         messages: [...messages],
         tools: [],
         temperature: 0,
-        // Sized for reasoning plus the reply, not the reply alone. The
-        // apology is a few sentences, but models that think by default
-        // draw from the same allowance, and a cap they exhaust while
-        // reasoning returns no text at all — which lands on the
-        // empty-text fallback below and reports `ok: false`, the outcome
-        // this whole path exists to avoid.
-        maxTokens: 4096,
+        maxTokens: synthesisMaxTokens(subtype),
       }),
       new Promise<never>((_resolve, reject) => {
         timeoutId = setTimeout(() => reject(new SynthesisTimeoutError(timeoutMs)), timeoutMs);

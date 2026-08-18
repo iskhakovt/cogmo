@@ -510,9 +510,28 @@ function fromAnthropicBlock(block: Anthropic.ContentBlock): ContentBlock[] {
     case "thinking":
       return [{ type: "thinking", thinking: block.thinking, signature: block.signature }];
     default:
-      // Skip block types we don't handle (server_tool_use, etc.)
+      // Block types we don't model (server_tool_use, redacted_thinking, …).
+      // Dropping is right for blocks the API doesn't want echoed back, and
+      // wrong for `redacted_thinking`, which has to make the round trip
+      // like any other thinking block — carrying it needs a canonical
+      // variant and its JSONB schema, tracked in todo.md. Log so a type
+      // that starts appearing is visible here rather than as an ordering
+      // error on the next request.
+      logUnmappedBlockOnce(block.type);
       return [];
   }
+}
+
+const loggedUnmappedBlocks = new Set<string>();
+
+function logUnmappedBlockOnce(type: string): void {
+  if (loggedUnmappedBlocks.has(type)) return;
+  loggedUnmappedBlocks.add(type);
+  logger.warn(
+    { blockType: type },
+    `dropping an Anthropic content block of type "${type}" — it has no canonical equivalent, ` +
+      `so it will not be sent back in history.`,
+  );
 }
 
 /**

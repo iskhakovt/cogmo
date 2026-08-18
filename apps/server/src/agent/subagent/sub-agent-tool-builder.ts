@@ -134,9 +134,14 @@ export function buildSubAgentTools(
         // way to tell — so refuse it here rather than let a sentence that
         // stops mid-clause be reasoned over as the specialist's conclusion.
         if (response.stopReason === "max_tokens") {
+          // Don't quote the cap the call asked for: delegation is
+          // non-streaming, and a provider may hold it below the model's own
+          // limit (the Anthropic adapter does), so the number above is not
+          // the one that bit. Say what happened and what to do instead.
           throw new NonRetriableError(
-            `sub-agent "${row.name}" (model ${row.model}) hit its output cap and returned a ` +
-              `truncated answer`,
+            `sub-agent "${row.name}" (model ${row.model}) ran out of output tokens and returned ` +
+              `a truncated answer. Delegation is non-streaming, so the effective cap can be ` +
+              `lower than the model's own limit — split the task or ask for a shorter answer.`,
           );
         }
         return text;

@@ -474,6 +474,21 @@ async function summarizePrefix(
 
   const summary = await summarize(system, prefix);
 
+  // An empty summary would otherwise be wrapped in the header below and
+  // returned in place of `prefix`, discarding that whole span of the
+  // conversation and leaving the header as the only trace. Report it as
+  // "summarized nothing" instead, which the caller already treats as
+  // leaving the messages alone, so emergency truncation still gets its
+  // turn. Reachable whenever the summarization model spends its output
+  // budget on reasoning and returns no text.
+  if (summary.trim().length === 0) {
+    logger.warn(
+      { prefixLength: prefix.length },
+      "summarization returned no text — keeping the prefix and falling through to truncation",
+    );
+    return { messages, summarizedCount: 0 };
+  }
+
   const summaryMessage: Message = {
     role: "user",
     content: `[Previous conversation summary]\n\n${summary}`,

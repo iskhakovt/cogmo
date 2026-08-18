@@ -904,7 +904,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
                 model: summarizationModel,
                 system,
                 messages: [...msgs, { role: "user", content: SUMMARIZATION_PROMPT }],
-                maxTokens: 4096,
+                // Covers reasoning as well as the summary itself, since the
+                // summarization model thinks by default on the 5 series and
+                // draws from the same allowance.
+                maxTokens: 16_000,
               });
               return response.content
                 .filter((b) => b.type === "text")

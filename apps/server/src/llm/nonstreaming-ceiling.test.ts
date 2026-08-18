@@ -23,8 +23,18 @@ import Anthropic from "@anthropic-ai/sdk";
 import { describe, expect, it } from "vitest";
 import { MAX_NONSTREAMING_TOKENS } from "./anthropic.js";
 
-/** Nothing listens here; anything past the guard fails to connect. */
-const client = new Anthropic({ apiKey: "not-a-real-key", baseURL: "http://127.0.0.1:1" });
+/**
+ * Nothing listens here; anything past the guard fails to connect.
+ * `maxRetries: 0` keeps that failure immediate — the SDK's default of 2
+ * would spend backoff on connection attempts that cannot succeed, and on
+ * a host that blackholes rather than refuses, hold the test to its
+ * timeout instead of failing fast.
+ */
+const client = new Anthropic({
+  apiKey: "not-a-real-key",
+  baseURL: "http://127.0.0.1:1",
+  maxRetries: 0,
+});
 
 const GUARD_MESSAGE = "Streaming is required";
 
