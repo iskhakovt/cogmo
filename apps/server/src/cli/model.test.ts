@@ -374,7 +374,46 @@ describe("cogmo model — flag parsing", () => {
       io,
     );
     expect(code).toBe(2);
-    expect(err.join("\n")).toMatch(/--context expects a non-negative integer/);
+    expect(err.join("\n")).toMatch(/--context expects an integer >= 1/);
+  });
+
+  it.each([["--context"], ["--max-output"]])(
+    "rejects %s 0 at parse, where the flag is still named",
+    async (flag) => {
+      // A zero limit describes no model: `addModelRouting` refuses it and
+      // the resolver ignores one already stored, so nothing downstream can
+      // apply it. Failing here beats an exit-1 from a layer that no longer
+      // knows which flag was wrong.
+      const store = makeStore({
+        providers: [{ id: "p1", name: "vllm", type: "openai_compatible" }],
+      });
+      const { io, err } = makeIo();
+      const code = await runModelCli(
+        ["add", "m", "--provider", "vllm", flag, "0"],
+        { runInTx: tx as never, agentStore: store },
+        io,
+      );
+      expect(code).toBe(2);
+      expect(err.join("\n")).toContain(`${flag} expects an integer >= 1`);
+      expect(store.addModelProvider).not.toHaveBeenCalled();
+    },
+  );
+
+  it("accepts --position 0, the primary routing slot", async () => {
+    const store = makeStore({
+      providers: [{ id: "p1", name: "vllm", type: "openai_compatible" }],
+    });
+    const { io } = makeIo();
+    const code = await runModelCli(
+      ["add", "m", "--provider", "vllm", "--position", "0"],
+      { runInTx: tx as never, agentStore: store },
+      io,
+    );
+    expect(code).toBe(0);
+    expect(store.addModelProvider).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ position: 0 }),
+    );
   });
 
   it("rejects a --context value with trailing garbage (parseInt would silently accept)", async () => {
@@ -390,7 +429,7 @@ describe("cogmo model — flag parsing", () => {
       io,
     );
     expect(code).toBe(2);
-    expect(err.join("\n")).toMatch(/--context expects a non-negative integer/);
+    expect(err.join("\n")).toMatch(/--context expects an integer >= 1/);
     expect(store.addModelProvider).not.toHaveBeenCalled();
   });
 });

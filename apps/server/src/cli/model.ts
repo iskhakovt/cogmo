@@ -71,7 +71,7 @@ export async function runModelCli(
         return 1;
     }
   } catch (err) {
-    // parseFlags + parseNonNegativeInt throw on operator error (missing
+    // parseFlags + parseIntAtLeast throw on operator error (missing
     // value, bad integer, flag-as-value). Surface as a clean exit-2 rather
     // than letting the dispatcher's await unwind with a stack trace.
     io.err(`Error: ${(err as Error).message}`);
@@ -257,15 +257,15 @@ function parseFlags(args: readonly string[]): ParsedFlags {
         i++;
         break;
       case "--context":
-        out.contextWindow = parseNonNegativeInt(value, "--context");
+        out.contextWindow = parseIntAtLeast(value, "--context", 1);
         i++;
         break;
       case "--max-output":
-        out.maxOutputTokens = parseNonNegativeInt(value, "--max-output");
+        out.maxOutputTokens = parseIntAtLeast(value, "--max-output", 1);
         i++;
         break;
       case "--position":
-        out.position = parseNonNegativeInt(value, "--position");
+        out.position = parseIntAtLeast(value, "--position", 0);
         i++;
         break;
       default:
@@ -296,14 +296,21 @@ function takeValue(args: readonly string[], i: number, flag: string | undefined)
   return next;
 }
 
-function parseNonNegativeInt(value: string, label: string): number {
+/**
+ * `min` differs per flag: a limit of zero describes no model, while
+ * position 0 is the primary route. Both are refused again downstream —
+ * `addModelRouting` for the limits, the `(model, position)` UNIQUE for
+ * position — but a bad value is worth naming here, where the flag it came
+ * from is still known.
+ */
+function parseIntAtLeast(value: string, label: string, min: number): number {
   // `Number.parseInt("200000abc", 10)` returns 200000 — silently accepting
   // trailing garbage. `Number(value)` rejects mixed-content strings with
   // NaN, which `Number.isInteger` then catches. The trim guards against
   // accidental whitespace from shell pipelines.
   const n = Number(value.trim());
-  if (!Number.isInteger(n) || n < 0) {
-    throw new Error(`${label} expects a non-negative integer, got "${value}"`);
+  if (!Number.isInteger(n) || n < min) {
+    throw new Error(`${label} expects an integer >= ${min}, got "${value}"`);
   }
   return n;
 }
