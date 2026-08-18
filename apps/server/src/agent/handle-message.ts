@@ -890,10 +890,17 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             // a `Map` lookup after the first hit per process. Stays
             // outside the `step.run` below because the provider instance
             // isn't JSON-serializable.
-            const summarizationProvider =
+            // Keep the resolved limits, not just the provider: the cap
+            // below has to respect this model's own output ceiling, and
+            // the main model's row overrides don't describe it.
+            const resolvedSummarization =
               summarizationModel === model
-                ? provider
-                : (await resolveOrFail(resolveProvider, summarizationModel)).provider;
+                ? null
+                : await resolveOrFail(resolveProvider, summarizationModel);
+            const summarizationProvider = resolvedSummarization?.provider ?? provider;
+            const summarizationLimits = resolvedSummarization
+              ? resolveLimits(summarizationModel, resolvedSummarization.limits)
+              : limits;
             // Step ID is hardcoded — relies on `compactMessages` calling
             // `summarize` at most once per invocation (contract on
             // ContextManagerDeps.summarize). If that ever changes, switch to
@@ -904,10 +911,13 @@ export function createHandleMessage(deps: HandleMessageDeps) {
                 model: summarizationModel,
                 system,
                 messages: [...msgs, { role: "user", content: SUMMARIZATION_PROMPT }],
-                // Covers reasoning as well as the summary itself, since the
-                // summarization model thinks by default on the 5 series and
-                // draws from the same allowance.
-                maxTokens: 16_000,
+                // Room for reasoning as well as the summary itself, since
+                // the summarization model thinks by default on the 5
+                // series and draws from the same allowance — bounded by
+                // what the model actually accepts, since asking above its
+                // ceiling is a 400 and compaction would quietly fall
+                // through to truncation on every turn.
+                maxTokens: Math.min(16_000, summarizationLimits.maxOutputTokens),
               });
               return response.content
                 .filter((b) => b.type === "text")

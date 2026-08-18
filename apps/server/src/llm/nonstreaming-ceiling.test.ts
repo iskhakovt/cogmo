@@ -14,49 +14,63 @@
  * production. Deliberately not part of `anthropic.test.ts`, which mocks
  * `@anthropic-ai/sdk` wholesale and so cannot see the guard at all.
  *
- * Offline: the guard runs client-side, and the requests that get past it
- * are aimed at a closed port, so they fail as connection errors without
- * leaving the machine.
+ * No sockets: the client is built with a `fetch` that throws instead of
+ * dialling. The guard runs before the SDK reaches `fetch`, so which of
+ * the two errors comes back says whether it fired — and the tier stays
+ * hermetic, with nothing to hang on a runner that blackholes traffic
+ * rather than refusing it.
  */
 
 import Anthropic from "@anthropic-ai/sdk";
 import { describe, expect, it } from "vitest";
 import { MAX_NONSTREAMING_TOKENS } from "./anthropic.js";
 
+const GUARD_MESSAGE = "Streaming is required";
+
+let reachedFetch = false;
+
 /**
- * Nothing listens here; anything past the guard fails to connect.
- * `maxRetries: 0` keeps that failure immediate — the SDK's default of 2
- * would spend backoff on connection attempts that cannot succeed, and on
- * a host that blackholes rather than refuses, hold the test to its
- * timeout instead of failing fast.
+ * Stands in for the network. Whether the SDK gets here is the signal —
+ * the guard runs first, so being called at all means it declined to fire.
+ * The rejection's own error is discarded: the SDK rewraps it as
+ * `APIConnectionError`, so the flag is the reliable observation, not the
+ * message.
  */
 const client = new Anthropic({
   apiKey: "not-a-real-key",
-  baseURL: "http://127.0.0.1:1",
+  fetch: () => {
+    reachedFetch = true;
+    return Promise.reject(new Error("no network in the unit tier"));
+  },
   maxRetries: 0,
 });
 
-const GUARD_MESSAGE = "Streaming is required";
-
-async function guardFiresAt(maxTokens: number): Promise<boolean> {
+async function probe(maxTokens: number): Promise<{ fired: boolean; sawGuardMessage: boolean }> {
+  reachedFetch = false;
+  let sawGuardMessage = false;
   try {
     await client.messages.create({
       model: "claude-sonnet-5",
       max_tokens: maxTokens,
       messages: [{ role: "user", content: "hi" }],
     });
-    return false;
   } catch (err) {
-    return err instanceof Error && err.message.includes(GUARD_MESSAGE);
+    sawGuardMessage = err instanceof Error && err.message.includes(GUARD_MESSAGE);
   }
+  return { fired: !reachedFetch, sawGuardMessage };
 }
 
 describe("SDK non-streaming max_tokens ceiling", () => {
   it("accepts a request exactly at our ceiling", async () => {
-    expect(await guardFiresAt(MAX_NONSTREAMING_TOKENS)).toBe(false);
+    const { fired } = await probe(MAX_NONSTREAMING_TOKENS);
+    expect(fired).toBe(false);
   });
 
   it("rejects a request one token above it", async () => {
-    expect(await guardFiresAt(MAX_NONSTREAMING_TOKENS + 1)).toBe(true);
+    const { fired, sawGuardMessage } = await probe(MAX_NONSTREAMING_TOKENS + 1);
+    expect(fired).toBe(true);
+    // Pin the reason too, so an unrelated client-side rejection can't pass
+    // for the ceiling moving.
+    expect(sawGuardMessage).toBe(true);
   });
 });

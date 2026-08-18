@@ -1780,6 +1780,78 @@ describe("createHandleMessage", () => {
       expect(turnProvider.chat).not.toHaveBeenCalled();
     });
 
+    it("caps the summarization request at the summarization model's own output limit", async () => {
+      // The cap has to come from this model's resolved limits, not the
+      // turn model's: asking above a model's ceiling is a 400, and
+      // compaction swallows that and falls through to truncation, so the
+      // failure is a silent loss of summarization on every turn.
+      const countTokens = vi
+        .fn()
+        .mockResolvedValueOnce(800_000)
+        .mockResolvedValueOnce(800_000)
+        .mockResolvedValueOnce(50_000);
+      const turnProvider = mockProvider({ countTokens });
+      const summaryChat = vi.fn().mockResolvedValue({
+        content: [{ type: "text", text: "summary" }],
+        stopReason: "end_turn",
+        model: "small-model",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      });
+      const summaryProvider = mockProvider({ chat: summaryChat });
+
+      const resolveProvider = vi.fn().mockImplementation(async (model: string) => {
+        if (model === "claude-sonnet-4-6") {
+          return { provider: turnProvider, limits: { contextWindow: null, maxOutputTokens: null } };
+        }
+        if (model === "small-model") {
+          // Row override well under the request's own preferred ceiling.
+          return {
+            provider: summaryProvider,
+            limits: { contextWindow: 100_000, maxOutputTokens: 4096 },
+          };
+        }
+        throw new Error(`unexpected model ${model}`);
+      });
+
+      const deps = mockDeps({
+        resolveProvider,
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({
+            id: "profile-1",
+            userId: null,
+            name: "assistant",
+            basePrompt: "test",
+            model: "claude-sonnet-4-6",
+            summarizationModel: "small-model",
+            extractionModel: null,
+            autoRecall: "heuristic" as const,
+            voiceMode: "auto" as const,
+            toolSet: [],
+            memoryScope: null,
+          }),
+          getLastTokens: vi.fn().mockResolvedValue(null),
+          getHistory: vi.fn().mockResolvedValue([
+            { role: "user", content: "m1" },
+            { role: "assistant", content: "r1" },
+            { role: "user", content: "m2" },
+            { role: "assistant", content: "r2" },
+            { role: "user", content: "m3" },
+            { role: "assistant", content: "r3" },
+            { role: "user", content: "m4" },
+            { role: "assistant", content: "r4" },
+          ]),
+        }),
+      });
+
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(summaryChat).toHaveBeenCalledWith(expect.objectContaining({ maxTokens: 4096 }));
+    });
+
     it("does not resolve summarization_model when summarization is skipped", async () => {
       // Regression guard for an earlier draft of this PR which resolved
       // the summarization provider eagerly at turn start. That meant a
