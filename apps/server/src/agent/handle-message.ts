@@ -911,12 +911,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
                 model: summarizationModel,
                 system,
                 messages: [...msgs, { role: "user", content: SUMMARIZATION_PROMPT }],
-                // Room for reasoning as well as the summary itself, since
-                // the summarization model thinks by default on the 5
-                // series and draws from the same allowance — bounded by
-                // what the model actually accepts, since asking above its
-                // ceiling is a 400 and compaction would quietly fall
-                // through to truncation on every turn.
+                // Room for reasoning as well as the summary, bounded by
+                // what this model accepts — asking above its ceiling is a
+                // 400, which compaction swallows into a fall-through to
+                // truncation.
                 maxTokens: Math.min(16_000, summarizationLimits.maxOutputTokens),
               });
               return response.content
@@ -950,17 +948,11 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           messages: historyMessages,
           tools: turnTools,
           service,
-          // Same number `computeBudget` reserved for output when it sized
-          // the input budget above, so the request can use the room the
-          // compaction pass set aside for it. Reasoning shares this
-          // allowance on models that think by default.
-          //
-          // The reservation covers one iteration, while the loop applies
-          // the cap to each of them and compaction only runs ahead of the
-          // turn. A long tool-using turn can therefore outgrow the window
-          // mid-loop; that surfaces as a `context_overflow` degrade and a
-          // fresh compaction pass on the next turn, which is the designed
-          // recovery rather than a case this cap is meant to prevent.
+          // The number `computeBudget` reserved for output when it sized
+          // the input budget above; reasoning shares it on models that
+          // think by default. That reservation covers one iteration while
+          // the loop caps every one, so a long tool-using turn can still
+          // outgrow the window and degrade to `context_overflow`.
           maxTokens: limits.maxOutputTokens,
           onEvent: (event: StreamEvent) => {
             if (event.type === "text_delta") streamed.text += event.text;

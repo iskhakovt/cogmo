@@ -258,32 +258,26 @@ export class AnthropicProvider implements LlmProvider {
 // --- Params builder ---
 
 /**
- * Ceiling on `max_tokens` for a non-streaming request.
+ * Ceiling on `max_tokens` for a non-streaming request, above which the
+ * SDK throws `AnthropicError: Streaming is required…` client-side rather
+ * than sending anything. It projects generation time as
+ * `60min * max_tokens / 128_000` and refuses anything past its 10-minute
+ * default timeout, so the ceiling is 21_333 — and only when no explicit
+ * timeout is set, which is our case. `nonstreaming-ceiling.test.ts` pins
+ * the boundary against the installed SDK.
  *
- * The SDK refuses a non-streaming call whose projected generation time
- * exceeds its 10-minute default timeout, throwing `AnthropicError:
- * Streaming is required…` client-side before the request leaves the
- * process. The projection is `60min * max_tokens / 128_000`, so the
- * ceiling is `600s * 128_000 / 3600s` — 21_333, verified empirically
- * against 0.117.1 (21_333 passes, 21_334 throws). It applies only when
- * no explicit timeout is set, which is our case.
- *
- * Streaming has no such limit, so `chatStream` passes the caller's cap
- * through untouched. Callers hand us the model's full resolved
- * `maxOutputTokens`, which is well above this for every current model,
- * so the non-streaming paths — the stream-truncation replay and
- * sub-agent delegation — would otherwise fail on every call.
+ * Streaming carries no such limit; `chatStream` passes the caller's cap
+ * through untouched.
  */
 export const MAX_NONSTREAMING_TOKENS = 21_333;
 
 const warnedNonStreamingClamp = new Set<string>();
 
 /**
- * Return `params` with `maxTokens` brought under the non-streaming
- * ceiling. Clamping keeps the SDK's reasoning intact — a 64k
- * non-streaming generation really can outlive an HTTP timeout — where
- * passing an explicit client timeout would just silence the guard and
- * leave the connection held open.
+ * Bring `maxTokens` under the non-streaming ceiling. Clamping over
+ * setting an explicit client timeout: the SDK's reasoning holds — a 64k
+ * non-streaming generation really can outlive an HTTP timeout — and a
+ * timeout would silence the guard while holding the connection open.
  */
 function clampForNonStreaming(params: ChatParams): ChatParams {
   const requested = params.maxTokens;
@@ -304,17 +298,14 @@ const warnedSamplingModels = new Set<string>();
 
 /**
  * The Messages API rejects sampling parameters (`temperature`, `top_p`,
- * `top_k`) with a 400 on Opus 4.7 and later and on the whole 5 series —
- * every model Anthropic currently fronts. Older ones (Sonnet 4.6, Opus
- * 4.6) still accept them, and the drop is unconditional anyway: keying it
- * on the model means a table of which ids accept what, which is the kind
- * of thing that goes stale silently and 400s the request when it does.
- * The one caller wants low variance on a three-sentence apology, so what
- * it costs on an older model is negligible.
+ * `top_k`) with a 400 on Opus 4.7 and later and across the 5 series.
+ * Sonnet 4.6 and Opus 4.6 still accept them, but the drop stays
+ * unconditional: keying it on the model means a table of which ids accept
+ * what, and that goes stale silently, 400ing the request when it does.
  *
  * `ChatParams.temperature` stays canonical because the OpenAI-compatible
- * adapter honours it. Warning once per model means a caller asking for
- * determinism can see it wasn't granted rather than assuming it landed.
+ * adapter honours it. The warning tells a caller asking for determinism
+ * that it wasn't granted.
  */
 function dropSamplingParams(params: ChatParams): void {
   if (params.temperature === undefined) return;

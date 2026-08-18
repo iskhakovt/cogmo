@@ -141,21 +141,15 @@ const TEST_RUN_ID = "skill-author";
 const TASK_BRANCH_GLOB = `cogmo/run/${TEST_RUN_ID}`;
 
 // Disabled: the skill this test authors cannot run. Its prompt asks for
-// `urllib.request` and no declared dependencies, which lands the skill in
-// tier 1 (Pyodide/WASM), where there are no raw sockets and no HTTP path
-// of any kind — `design/skills.md` promises a fetch shim that was never
-// wired. The recorded turns show the model discovering that at runtime and
-// falling back to `web_answer`, so the closing price assertion has always
-// been satisfied by a live Perplexity call rather than by the skill under
-// test. Re-recording therefore depends on an unmocked third-party answer
-// being confidently current, which is why it now fails.
+// `urllib.request` with no declared dependencies, which lands it in tier 1
+// (Pyodide/WASM), where there are no raw sockets and no HTTP path at all.
+// The closing price assertion is met by the `web_answer` fallback rather
+// than by the skill, so re-recording rides on a live third-party answer.
 //
-// Everything up to that point does work — authored, pushed, merged,
-// registered, and invoked as a tool on the next turn — so this is worth
-// restoring rather than deleting. Re-enable once `ctx.http` gives tier 1 a
-// real network path: point the skill at it, then re-record. See todo.md.
-// Restoring is dropping `!TIER1_HAS_NO_HTTP &&` from `RUNNABLE`; the
-// record/replay gating around it stays as-is.
+// Everything before that point works — authored, pushed, merged,
+// registered, invoked as a tool on the next turn — so this waits on a
+// tier-1 network path rather than being deleted. Re-enable by dropping
+// `!TIER1_HAS_NO_HTTP &&` from `RUNNABLE`, then re-record. See todo.md.
 describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () => {
   let mock: DaytonaMock;
   let daytonaClient: DaytonaSandboxClient;

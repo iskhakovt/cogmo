@@ -1110,11 +1110,10 @@ describe("AnthropicProvider", () => {
     });
   });
 
-  // The Messages API rejects sampling parameters with a 400 on every
-  // current model. `temperature` stays on ChatParams for the
-  // OpenAI-compatible adapter, so this adapter has to strip it — a
-  // forwarded value fails the whole request, and on the degraded-reply
-  // path that failure is swallowed into the fixed fallback string.
+  // Current models reject sampling parameters with a 400, and on the
+  // degraded-reply path that failure is swallowed into the fixed fallback
+  // string. `temperature` stays on ChatParams for the OpenAI-compatible
+  // adapter, so this adapter is what has to strip it.
   describe("sampling parameters", () => {
     it("drops temperature instead of forwarding it", async () => {
       const provider = createProvider();
@@ -1218,11 +1217,9 @@ describe("AnthropicProvider", () => {
     });
   });
 
-  // The SDK throws `AnthropicError: Streaming is required…` client-side,
-  // before any network call, for a non-streaming request whose max_tokens
-  // projects past its 10-minute default timeout — anything above 21_333.
-  // Callers pass the model's full resolved maxOutputTokens (64_000 on the
-  // 5 series), so without the clamp every non-streaming call fails.
+  // The SDK throws client-side, before any network call, for a
+  // non-streaming request above 21_333 max_tokens. Callers pass the
+  // model's full resolved maxOutputTokens — 64_000 on the 5 series.
   describe("non-streaming max_tokens ceiling", () => {
     it("clamps a caller's cap that would trip the SDK guard", async () => {
       const provider = createProvider();

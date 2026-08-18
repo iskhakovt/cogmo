@@ -288,19 +288,17 @@ export function degradedReplyText(subtype: DegradeSubtype | null): string {
 export const DEGRADED_SYNTHESIS_TIMEOUT_MS = 5000;
 
 /**
- * Output cap for the synthesis call, which two opposing pressures decide.
+ * Output cap for the synthesis call, set by two opposing pressures.
  *
  * Models that think by default draw reasoning from the same allowance as
  * the reply, so a cap sized for three sentences can be spent entirely on
- * thinking and return no text — landing on the fixed fallback and
- * reporting `ok: false`, the outcome this path exists to avoid.
+ * thinking and return no text — the fixed fallback and `ok: false`.
  *
- * `context_overflow` pulls the other way. The API counts
- * `input_tokens + max_tokens` against the context window, so on the one
- * subtype whose failure *was* that the history didn't fit, every token
- * reserved for output is one the history loses. Staying tight there is
- * what gives the same history room to fit on the retry; a reply that
- * stops short still beats a request the model refuses outright.
+ * `context_overflow` pulls the other way: the API counts
+ * `input_tokens + max_tokens` against the window, so on the one subtype
+ * whose failure *was* that the history didn't fit, every token reserved
+ * for output is one the history loses. A reply that stops short still
+ * beats a request the model refuses outright.
  */
 function synthesisMaxTokens(subtype: DegradeSubtype | null): number {
   return subtype === "context_overflow" ? 512 : 4096;

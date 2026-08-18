@@ -1,24 +1,15 @@
 /**
- * Canary for `MAX_NONSTREAMING_TOKENS` in `anthropic.ts`.
+ * Canary for `MAX_NONSTREAMING_TOKENS` in `anthropic.ts`, which mirrors a
+ * threshold the SDK computes internally and never exports. Nothing
+ * upstream promises that ratio, so a bump could move it with no signal
+ * beyond every non-streaming call starting to fail; probing the installed
+ * SDK from both sides turns that into a failure here with a number to
+ * update.
  *
- * That constant is a number the SDK computes internally and never
- * exports: it refuses a non-streaming request whose projected generation
- * time passes its default timeout, throwing before the request leaves the
- * process. The projection is `60min * max_tokens / 128_000` against a
- * 10-minute default, which puts the ceiling at 21_333 — but nothing
- * upstream promises that ratio, and a version bump could move it with no
- * signal other than every non-streaming call starting to fail.
- *
- * These assertions probe the installed SDK for the real boundary, so a
- * bump that moves it fails here with a number to update rather than in
- * production. Deliberately not part of `anthropic.test.ts`, which mocks
- * `@anthropic-ai/sdk` wholesale and so cannot see the guard at all.
- *
- * No sockets: the client is built with a `fetch` that throws instead of
- * dialling. The guard runs before the SDK reaches `fetch`, so which of
- * the two errors comes back says whether it fired — and the tier stays
- * hermetic, with nothing to hang on a runner that blackholes traffic
- * rather than refusing it.
+ * Separate from `anthropic.test.ts`, which mocks `@anthropic-ai/sdk`
+ * wholesale and so cannot see the guard. No sockets either: the injected
+ * `fetch` records being reached, which is the signal, and keeps the tier
+ * hermetic.
  */
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -30,11 +21,9 @@ const GUARD_MESSAGE = "Streaming is required";
 let reachedFetch = false;
 
 /**
- * Stands in for the network. Whether the SDK gets here is the signal —
- * the guard runs first, so being called at all means it declined to fire.
- * The rejection's own error is discarded: the SDK rewraps it as
- * `APIConnectionError`, so the flag is the reliable observation, not the
- * message.
+ * Stands in for the network. The guard runs first, so reaching here at
+ * all means it declined to fire. The rejection's message is not the
+ * signal — the SDK rewraps it as `APIConnectionError`.
  */
 const client = new Anthropic({
   apiKey: "not-a-real-key",

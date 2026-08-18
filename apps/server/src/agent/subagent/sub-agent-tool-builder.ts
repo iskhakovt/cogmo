@@ -128,16 +128,12 @@ export function buildSubAgentTools(
             `sub-agent "${row.name}" (model ${row.model}) returned no text output`,
           );
         }
-        // Same reasoning one step further: text that stopped at the output
-        // cap is a partial answer wearing the shape of a complete one. The
-        // empty-text check above cannot see it, and the orchestrator has no
-        // way to tell — so refuse it here rather than let a sentence that
-        // stops mid-clause be reasoned over as the specialist's conclusion.
+        // Same reasoning for a truncated answer, which the empty-text
+        // check above cannot see: it wears the shape of a complete one, so
+        // the orchestrator would reason over a sentence that stops
+        // mid-clause. The message avoids quoting the cap requested above —
+        // delegation is non-streaming, and a provider may hold it lower.
         if (response.stopReason === "max_tokens") {
-          // Don't quote the cap the call asked for: delegation is
-          // non-streaming, and a provider may hold it below the model's own
-          // limit (the Anthropic adapter does), so the number above is not
-          // the one that bit. Say what happened and what to do instead.
           throw new NonRetriableError(
             `sub-agent "${row.name}" (model ${row.model}) ran out of output tokens and returned ` +
               `a truncated answer. Delegation is non-streaming, so the effective cap can be ` +

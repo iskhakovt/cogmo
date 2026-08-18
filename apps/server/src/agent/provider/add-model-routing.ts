@@ -40,10 +40,9 @@ export interface AddModelRoutingDeps {
 }
 
 /**
- * Reject a limit that cannot describe a real model. Zero max-output makes
- * every request built from the row invalid, and zero context window drives
- * the turn budget negative — both are more usefully refused at the point
- * of entry than resolved around later.
+ * Reject a limit that cannot describe a real model — zero max-output makes
+ * every request from the row invalid. `resolveLimits` ignores one that is
+ * already stored; this keeps new ones out.
  */
 function assertPositiveLimit(label: string, value: number | null | undefined): void {
   if (value != null && value <= 0) {

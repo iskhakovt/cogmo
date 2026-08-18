@@ -474,13 +474,12 @@ async function summarizePrefix(
 
   const summary = await summarize(system, prefix);
 
-  // An empty summary would otherwise be wrapped in the header below and
-  // returned in place of `prefix`, discarding that whole span of the
-  // conversation and leaving the header as the only trace. Report it as
-  // "summarized nothing" instead, which the caller already treats as
-  // leaving the messages alone, so emergency truncation still gets its
-  // turn. Reachable whenever the summarization model spends its output
-  // budget on reasoning and returns no text.
+  // The summary replaces `prefix` entirely, so an empty one would leave
+  // the header below standing in for that whole span of the conversation.
+  // Reporting "summarized nothing" leaves the messages alone — the
+  // caller's own convention — and emergency truncation still gets its
+  // turn. Reachable when the summarization model spends its budget
+  // reasoning and returns no text.
   if (summary.trim().length === 0) {
     logger.warn(
       { prefixLength: prefix.length },

@@ -1305,12 +1305,10 @@ describe("tool durability (stepRun)", () => {
   });
 });
 
-// The output cap is per-model, resolved by the caller. Adaptive thinking
-// draws from the same allowance as the reply, so a cap sized for reply
-// text alone truncates the answer on a turn that reasons — and a
-// truncated turn carries `stop_reason: max_tokens` with non-empty
-// content, which `classifyPostStream` reports as `ok`, so it is
-// persisted and delivered as if finished.
+// The cap is per-model and set by the caller. Reasoning shares it, so a
+// cap sized for reply text alone truncates a turn that thinks — and
+// `classifyPostStream` reports a truncated turn as `ok`, so it is
+// delivered as if finished.
 describe("maxTokens", () => {
   it("forwards the caller's cap to the provider", async () => {
     const provider = mockProvider([textResponse("done")]);
@@ -1340,12 +1338,10 @@ describe("maxTokens", () => {
   });
 });
 
-// Thinking blocks must reach the provider exactly as the model emitted
-// them. The API rejects blocks whose content was modified — an edited or
-// reconstructed block fails with "each thinking block must contain
-// thinking" — so the loop forwards history verbatim and does no blanking,
-// trimming, or re-derivation of its own. Trimming stale thinking from a
-// long context is the server's job via context editing, not ours.
+// Thinking blocks must reach the provider exactly as emitted: the API
+// rejects modified ones ("each thinking block must contain thinking"),
+// so the loop forwards history verbatim. Trimming stale thinking from a
+// long context is the server's job via context editing.
 describe("thinking blocks in history", () => {
   it("forwards older thinking blocks to the provider unmodified", async () => {
     const provider = mockProvider([textResponse("done")]);
