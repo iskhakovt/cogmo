@@ -109,6 +109,46 @@ describe("stringifyWellFormedJson", () => {
     const encoded = stringifyWellFormedJson({ q: `tab\there${control}"quoted"\uD800` }, COLUMN);
     expect(JSON.parse(encoded)).toEqual({ q: `tab\there${control}"quoted"�` });
   });
+
+  // `JSON.stringify` unwraps a boxed primitive back to the primitive, so the
+  // surrogate it carries reaches the encoded text as an escape even though the
+  // value graph holds no string at all — `typeof new String("x")` is "object".
+  it("replaces a lone surrogate a boxed String carries", () => {
+    const encoded = stringifyWellFormedJson({ input: new String("bad\uD800end") }, COLUMN);
+    expect(encoded).not.toMatch(/\\ud[89a-f]/i);
+    expect(JSON.parse(encoded)).toEqual({ input: "bad�end" });
+  });
+
+  // `JSON.stringify` fills an array hole with `null`, so what gets sanitised is
+  // a two-element array whether or not index 0 was ever assigned.
+  it("replaces a lone surrogate in an array that has a hole", () => {
+    const sparse: string[] = [];
+    sparse[1] = "x\uD800";
+    const encoded = stringifyWellFormedJson({ input: sparse }, COLUMN);
+    expect(encoded).not.toMatch(/\\ud[89a-f]/i);
+    expect(JSON.parse(encoded)).toEqual({ input: [null, "x�"] });
+  });
+
+  // `JSON.stringify` emits its own escapes in lowercase, so uppercase in the
+  // encoded text can only have come from a source string spelling one out.
+  it("does not corrupt a string whose text spells an uppercase surrogate escape", () => {
+    const value = { pattern: "\\uD800 matches high surrogates" };
+    expect(stringifyWellFormedJson(value, COLUMN)).toBe(JSON.stringify(value));
+  });
+
+  it("replaces only the unpaired code unit sitting between valid pairs", () => {
+    const encoded = stringifyWellFormedJson({ q: "😀\uD800🎉" }, COLUMN);
+    expect(encoded).not.toMatch(/\\ud[89a-f]/i);
+    expect(JSON.parse(encoded)).toEqual({ q: "😀�🎉" });
+  });
+
+  // Distinct keys can well-form to the same key. The last value wins, which is
+  // the rule Postgres applies to any duplicate key in `jsonb`.
+  it("collapses keys differing only in their lone surrogates to the last value", () => {
+    const encoded = stringifyWellFormedJson({ "a\uD800": 1, "a\uDC00": 2 }, COLUMN);
+    expect(encoded).not.toMatch(/\\ud[89a-f]/i);
+    expect(JSON.parse(encoded)).toEqual({ "a�": 2 });
+  });
 });
 
 /**
@@ -179,6 +219,33 @@ describe("jsonbZod against a jsonb column", () => {
       .values({ payload: { input: { nested: ["ok", "x\uD800"] } } })
       .returning({ payload: probe.payload });
     expect(single(rows).payload).toEqual({ input: { nested: ["ok", "x�"] } });
+  });
+
+  // A walk over the value graph reaches no string here — the wrapper is an
+  // object and `JSON.stringify` unwraps it afterwards — so the escape survives
+  // to the wire and the column rejects it. Encoding first is what closes that.
+  it("stores a lone surrogate a boxed String carries", async () => {
+    const raw = JSON.stringify({ input: new String("bad\uD800end") });
+    expect(raw).toMatch(/\\ud800/i);
+    const rejection = await db.execute(sql`SELECT ${raw}::jsonb AS payload`).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(rejection).toBeInstanceOf(Error);
+
+    const rows = await db
+      .insert(probe)
+      .values({ payload: { input: new String("bad\uD800end") } })
+      .returning({ payload: probe.payload });
+    expect(single(rows).payload).toEqual({ input: "bad�end" });
+  });
+
+  it("stores keys colliding after replacement as the last value written", async () => {
+    const rows = await db
+      .insert(probe)
+      .values({ payload: { input: { "a\uD800": 1, "a\uDC00": 2 } } })
+      .returning({ payload: probe.payload });
+    expect(single(rows).payload).toEqual({ input: { "a�": 2 } });
   });
 
   it("stores text that merely spells a surrogate escape verbatim", async () => {

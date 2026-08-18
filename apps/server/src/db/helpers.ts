@@ -54,43 +54,37 @@ export function ts() {
  * every `\ud8`–`\udf` escape in its output came from a lone surrogate. The
  * reverse doesn't hold: a string whose *text* contains a backslash before
  * `ud800` encodes to `\\ud800` and matches too. That direction is a false
- * positive, which only costs one extra sanitising pass, so the test is sound
- * as a fast negative for the common case.
+ * positive costing one needless round trip through parse and re-encode, which
+ * returns the same text, so the test is sound as a fast negative for the
+ * common case.
  */
 const ESCAPED_LONE_SURROGATE = /\\ud[89a-f]/i;
 
 /**
- * One escape sequence of JSON text: `\uXXXX` or a single-character escape.
+ * Replace every lone surrogate in a parsed JSON value with U+FFFD.
  *
- * Scanning escape by escape is what keeps backslashes straight. `\\` is one
- * token, so a `ud800` following it reads as the plain text it is, while a
- * `\ud800` that opens a token of its own reads as the escape it is.
+ * The argument is `JSON.parse` output — strings, numbers, booleans, `null`,
+ * arrays and plain objects, and nothing else — which is what makes the walk
+ * total. Encoding first collapses every shape `JSON.stringify` serializes onto
+ * those six: a `toJSON` carrier has already produced its replacement value, a
+ * class instance is a plain object of the fields that got serialized, a boxed
+ * primitive is the primitive, an array hole is `null`. Each surviving string is
+ * a string `JSON.stringify` will re-encode, so `toWellFormed()` on it decides
+ * exactly what the output text says. Keys go through it too — a lone surrogate
+ * in a key escapes the same way a lone surrogate in a value does.
+ *
+ * Two keys differing only in their lone surrogates well-form to one key; the
+ * last value wins, the rule Postgres applies to any duplicate key in `jsonb`.
  */
-const JSON_ESCAPE = /\\(u[0-9a-f]{4}|.)/gi;
-
-/** The body of a `\uXXXX` escape naming a surrogate code point. */
-const SURROGATE_ESCAPE_BODY = /^ud[89a-f]/i;
-
-/**
- * Replace every lone surrogate in JSON text with U+FFFD.
- *
- * Works on the encoded text rather than on the source value, so the result
- * doesn't depend on how a string reached that text. A string field, an object
- * key, a field of a class instance, and a string returned from some value's own
- * `toJSON` all arrive here as the same `\udXXX` escape, and `JSON.stringify`
- * having produced the escape at all is what proves the code unit was unpaired.
- *
- * U+FFFD needs no escape of its own, so it goes in as a literal character —
- * what `JSON.stringify` emits for it.
- *
- * Two keys differing only in their lone surrogates become one key written
- * twice; `jsonb` keeps the last, the rule Postgres applies to any duplicate
- * key.
- */
-function wellFormJsonText(json: string): string {
-  return json.replace(JSON_ESCAPE, (match, body: string) =>
-    SURROGATE_ESCAPE_BODY.test(body) ? "�" : match,
-  );
+function wellFormJsonValue(value: unknown): unknown {
+  if (typeof value === "string") return value.toWellFormed();
+  if (Array.isArray(value)) return value.map(wellFormJsonValue);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, member]) => [key.toWellFormed(), wellFormJsonValue(member)]),
+    );
+  }
+  return value;
 }
 
 /**
@@ -107,15 +101,15 @@ function wellFormJsonText(json: string): string {
  * whichever way we turn, so substituting U+FFFD — exactly what UTF-8 encoding
  * does to them — is the option that lets the turn land.
  *
- * The common path pays one regex test over the encoded text; only a hit buys the
- * escape-by-escape pass. Sanitising is logged because it silently changes what
- * the row stores — and only when it actually replaced something, so text that
- * merely spells `\ud800` stays quiet.
+ * The common path pays one regex test over the encoded text; only a hit buys
+ * the round trip back through `JSON.parse`. Sanitising is logged because it
+ * silently changes what the row stores — and only when it actually replaced
+ * something, so text that merely spells `\ud800` stays quiet.
  */
 export function stringifyWellFormedJson(value: unknown, column: string): string {
   const encoded = JSON.stringify(value);
   if (!ESCAPED_LONE_SURROGATE.test(encoded)) return encoded;
-  const wellFormed = wellFormJsonText(encoded);
+  const wellFormed = JSON.stringify(wellFormJsonValue(JSON.parse(encoded)));
   if (wellFormed !== encoded) {
     logger.warn({ column }, "jsonb value contained lone surrogates — replaced with U+FFFD");
   }

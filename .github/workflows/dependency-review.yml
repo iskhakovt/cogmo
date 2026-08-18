@@ -1,0 +1,60 @@
+name: Dependency Review
+
+# Blocks a PR that *introduces* a vulnerable dependency, which is the piece the
+# scheduled audit can't be: auditing the whole tree on `pull_request` would let
+# a fresh advisory in any transitive dependency block every unrelated PR until
+# somebody fixed it. This action diffs the base ref against the head ref and
+# only fails on what the PR itself adds, so the gate stays proportional to the
+# change being reviewed.
+#
+# Together with the other two layers: Dependabot's `npm-security` group opens
+# PRs for advisories it can fix on its own, and `dependency-audit.yml` sweeps
+# the resolved production tree weekly for advisories that appear against code
+# nobody touched — which a diff-based gate structurally cannot see.
+#
+# Reads GitHub's dependency graph rather than the lockfile, which does cover
+# this workspace: the repo's SBOM lists ~1200 packages resolved from
+# pnpm-lock.yaml.
+
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  review:
+    name: Review dependency changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          # `runtime` mirrors the scheduled job's `pnpm audit --prod`: what
+          # ships is what blocks. A dev-only advisory is worth knowing about,
+          # not worth stopping a PR that has nothing to do with it.
+          fail-on-scopes: runtime
+          # Low-severity findings on a newly added dependency are usually
+          # noise, and this gate is only worth having if it stays credible.
+          fail-on-severity: moderate
+          # Licence policy is a separate decision from vulnerability policy and
+          # isn't one this repo has taken, so leave it off rather than have it
+          # arrive as a side effect of adding a security gate.
+          license-check: false
+          vulnerability-check: true
+          # The summary is more actionable with the fix in it.
+          show-patched-versions: true
+          # The dependency graph is computed asynchronously after a push, so a
+          # freshly opened PR can be reviewed before its snapshot exists. Retry
+          # rather than fail on a warning that resolves itself.
+          retry-on-snapshot-warnings: true
+          retry-on-snapshot-warnings-timeout: 120
+
+# `comment-summary-in-pr` is left unset, which the action already treats as
+# `never` — this is the default rather than a mitigation. Worth stating only
+# because turning it on is a bigger step than it looks: `always` or
+# `on-failure` require `pull-requests: write`, which a `pull_request` run from
+# a fork is not granted, so enabling it would turn an outside contribution
+# into a workflow failure. The job summary carries the same detail either way.
