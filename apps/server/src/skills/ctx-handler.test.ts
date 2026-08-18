@@ -164,6 +164,115 @@ describe("DefaultCtxHandler", () => {
       }
     });
 
+    it("returns the response headers, which callers need for content-type", async () => {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse("{}"));
+      try {
+        const h = makeHandler(manifest(""), deps());
+        const out = (await h.handle({
+          method: "http.request",
+          args: { method: "GET", url: "https://api.example.com/x" },
+        })) as { headers: Record<string, string> };
+        expect(out.headers["content-type"]).toBe("application/json");
+      } finally {
+        fetchMock.mockRestore();
+      }
+    });
+
+    it("classifies a request timeout apart from other transport failures", async () => {
+      // What `AbortSignal.timeout` raises — the distinction matters
+      // because a timeout is worth retrying and a refused connection
+      // usually is not.
+      const timeout = new Error("The operation was aborted due to timeout");
+      timeout.name = "TimeoutError";
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(timeout);
+      try {
+        const d = deps();
+        const h = makeHandler(manifest(""), d);
+        await expect(
+          h.handle({
+            method: "http.request",
+            args: { method: "GET", url: "https://api.example.com/slow" },
+          }),
+        ).rejects.toThrow(/failed/);
+        expect(d.recordContextCall).toHaveBeenCalledWith(
+          expect.objectContaining({ ok: false, error: "timeout" }),
+        );
+      } finally {
+        fetchMock.mockRestore();
+      }
+    });
+
+    it("keeps the timeout classification when the body stalls mid-read", async () => {
+      const timeout = new Error("The operation was aborted due to timeout");
+      timeout.name = "TimeoutError";
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([1, 2, 3]));
+          controller.error(timeout);
+        },
+      });
+      const fetchMock = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response(stream, { status: 200 }));
+      try {
+        const d = deps();
+        const h = makeHandler(manifest(""), d);
+        await expect(
+          h.handle({
+            method: "http.request",
+            args: { method: "GET", url: "https://api.example.com/stall" },
+          }),
+        ).rejects.toThrow(/mid-body/);
+        expect(d.recordContextCall).toHaveBeenCalledWith(
+          expect.objectContaining({ ok: false, error: "timeout" }),
+        );
+      } finally {
+        fetchMock.mockRestore();
+      }
+    });
+
+    it("audits where a redirect landed, not only where it was aimed", async () => {
+      // `fetch` resolves redirects itself, so without this the record
+      // would name a destination the bytes never reached.
+      const redirected = new Response("{}", { status: 200 });
+      Object.defineProperty(redirected, "url", {
+        value: "https://cdn.elsewhere.example/final",
+      });
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(redirected);
+      try {
+        const d = deps();
+        const h = makeHandler(manifest(""), d);
+        await h.handle({
+          method: "http.request",
+          args: { method: "GET", url: "https://api.example.com/start" },
+        });
+        expect(d.recordContextCall).toHaveBeenCalledWith(
+          expect.objectContaining({
+            target: "https://api.example.com/start -> https://cdn.elsewhere.example/final",
+            ok: true,
+          }),
+        );
+      } finally {
+        fetchMock.mockRestore();
+      }
+    });
+
+    it("returns an empty body for a 204 with no content", async () => {
+      const fetchMock = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response(null, { status: 204 }));
+      try {
+        const h = makeHandler(manifest(""), deps());
+        const out = await h.handle({
+          method: "http.request",
+          args: { method: "DELETE", url: "https://api.example.com/thing" },
+        });
+        expect(out).toMatchObject({ status: 204, body: "" });
+      } finally {
+        fetchMock.mockRestore();
+      }
+    });
+
     it("hands back a 4xx as a value rather than throwing", async () => {
       const fetchMock = vi
         .spyOn(globalThis, "fetch")

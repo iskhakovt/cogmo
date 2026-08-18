@@ -55,8 +55,13 @@ const RULES: readonly RulePattern[] = [
     // a rule here the skill deploys clean and breaks on invocation, which
     // is the outcome this lint exists to prevent.
     name: "stdlib_network",
+    // Only the modules that open a connection. `urllib.parse` is string
+    // manipulation and `urllib.error` is exception classes — both are
+    // fine here and common, so the rule names `urllib.request` rather
+    // than the package. A bare `import urllib` cannot reach the network
+    // either, since the submodule has to be imported to be used.
     pattern:
-      /^[ \t]*(?:import[ \t]+(?:urllib|http\.client|ftplib|smtplib|telnetlib|poplib|imaplib)|from[ \t]+(?:urllib|http\.client|ftplib|smtplib|telnetlib|poplib|imaplib)[ \t.\w]*[ \t]+import)\b/m,
+      /^[ \t]*(?:import[ \t]+(?:urllib\.request|http\.client|ftplib|smtplib|telnetlib|poplib|imaplib)\b|from[ \t]+(?:urllib\.request|http\.client|ftplib|smtplib|telnetlib|poplib|imaplib)[ \t]+import)/m,
     reason:
       "stdlib networking has no socket underneath it in tier-1 (WASM); use `await ctx.http.get(url)`, or declare tier: container to use httpx",
   },

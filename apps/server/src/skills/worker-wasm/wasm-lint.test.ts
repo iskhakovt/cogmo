@@ -47,6 +47,35 @@ def run(inputs, ctx):
     expect(r.error[0]?.rule).toBe("raw_socket");
   });
 
+  it.each([
+    ["import urllib.request\n"],
+    ["from urllib.request import urlopen\n"],
+    ["import http.client\n"],
+    ["from http.client import HTTPConnection\n"],
+    ["import smtplib\n"],
+  ])("rejects the stdlib network module in %j", (body) => {
+    const r = lintWasmCompat(body);
+    expect(r.isErr()).toBe(true);
+    if (!r.isErr()) return;
+    expect(r.error[0]?.rule).toBe("stdlib_network");
+  });
+
+  it.each([
+    // Pure string manipulation — building a query string is a normal
+    // thing for a skill that fetches through `ctx.http`.
+    ["import urllib.parse\n"],
+    ["from urllib.parse import urlparse, urlencode\n"],
+    // Exception classes only.
+    ["from urllib.error import HTTPError\n"],
+    // Namespace package; `http.client` is the one that connects.
+    ["import http\n"],
+    // Third-party, and not importable in tier 1 anyway — but the rule
+    // must not claim it is a stdlib networking module.
+    ["import urllib3\n"],
+  ])("allows the network-free import in %j", (body) => {
+    expect(lintWasmCompat(body).isOk()).toBe(true);
+  });
+
   it("allows variables named subprocess in comments or strings", () => {
     // Minor false positives are acceptable but a docstring mention shouldn't
     // trigger the pattern (regex anchored to start-of-line for `import`).
