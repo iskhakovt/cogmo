@@ -937,6 +937,11 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           messages: historyMessages,
           tools: turnTools,
           service,
+          // Same number `computeBudget` reserved for output when it sized
+          // the input budget above, so the request can use the room the
+          // compaction pass set aside for it. Reasoning shares this
+          // allowance on models that think by default.
+          maxTokens: limits.maxOutputTokens,
           onEvent: (event: StreamEvent) => {
             if (event.type === "text_delta") streamed.text += event.text;
             else if (event.type === "tool_start") streamed.toolUseIds.push(event.id);

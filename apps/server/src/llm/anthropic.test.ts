@@ -1183,7 +1183,7 @@ describe("AnthropicProvider", () => {
         }
 
         const dropWarnings = warnSpy.mock.calls.filter(
-          (call) => typeof call[1] === "string" && call[1].includes("temperature is not supported"),
+          (call) => typeof call[1] === "string" && call[1].includes("dropping temperature"),
         );
         expect(dropWarnings).toHaveLength(1);
       } finally {
@@ -1209,7 +1209,7 @@ describe("AnthropicProvider", () => {
         });
 
         const dropWarnings = warnSpy.mock.calls.filter(
-          (call) => typeof call[1] === "string" && call[1].includes("temperature is not supported"),
+          (call) => typeof call[1] === "string" && call[1].includes("dropping temperature"),
         );
         expect(dropWarnings).toHaveLength(0);
       } finally {

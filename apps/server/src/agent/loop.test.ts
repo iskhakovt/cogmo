@@ -1305,6 +1305,41 @@ describe("tool durability (stepRun)", () => {
   });
 });
 
+// The output cap is per-model, resolved by the caller. Adaptive thinking
+// draws from the same allowance as the reply, so a cap sized for reply
+// text alone truncates the answer on a turn that reasons — and a
+// truncated turn carries `stop_reason: max_tokens` with non-empty
+// content, which `classifyPostStream` reports as `ok`, so it is
+// persisted and delivered as if finished.
+describe("maxTokens", () => {
+  it("forwards the caller's cap to the provider", async () => {
+    const provider = mockProvider([textResponse("done")]);
+
+    await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+      maxTokens: 64_000,
+    });
+
+    const sent = expectDefined(vi.mocked(provider.chat).mock.calls[0])[0];
+    expect(sent.maxTokens).toBe(64_000);
+  });
+
+  it("leaves the cap unset when the caller passes none", async () => {
+    const provider = mockProvider([textResponse("done")]);
+
+    await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+    });
+
+    const sent = expectDefined(vi.mocked(provider.chat).mock.calls[0])[0];
+    expect(sent.maxTokens).toBeUndefined();
+  });
+});
+
 // Thinking blocks must reach the provider exactly as the model emitted
 // them. The API rejects blocks whose content was modified — an edited or
 // reconstructed block fails with "each thinking block must contain

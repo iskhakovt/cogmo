@@ -259,11 +259,17 @@ const warnedSamplingModels = new Set<string>();
 
 /**
  * The Messages API rejects sampling parameters (`temperature`, `top_p`,
- * `top_k`) on every current Anthropic model — Opus 4.7 and later, and the
- * whole 5 series — with a 400. `ChatParams.temperature` stays canonical
- * because the OpenAI-compatible adapter honours it; this adapter drops it
- * and says so once per model, so a caller asking for determinism can see
- * that Anthropic isn't giving it to them rather than assuming it landed.
+ * `top_k`) with a 400 on Opus 4.7 and later and on the whole 5 series —
+ * every model Anthropic currently fronts. Older ones (Sonnet 4.6, Opus
+ * 4.6) still accept them, and the drop is unconditional anyway: keying it
+ * on the model means a table of which ids accept what, which is the kind
+ * of thing that goes stale silently and 400s the request when it does.
+ * The one caller wants low variance on a three-sentence apology, so what
+ * it costs on an older model is negligible.
+ *
+ * `ChatParams.temperature` stays canonical because the OpenAI-compatible
+ * adapter honours it. Warning once per model means a caller asking for
+ * determinism can see it wasn't granted rather than assuming it landed.
  */
 function dropSamplingParams(params: ChatParams): void {
   if (params.temperature === undefined) return;
@@ -271,8 +277,9 @@ function dropSamplingParams(params: ChatParams): void {
   warnedSamplingModels.add(params.model);
   logger.warn(
     { model: params.model, temperature: params.temperature },
-    `temperature is not supported by the Anthropic Messages API — dropping it for "${params.model}". ` +
-      `Control response variance with the prompt, or route this call to an OpenAI-compatible provider.`,
+    `dropping temperature for "${params.model}" — the Anthropic adapter sends no sampling ` +
+      `parameters, because current models reject them. Control response variance with the ` +
+      `prompt, or route this call to an OpenAI-compatible provider.`,
   );
 }
 
