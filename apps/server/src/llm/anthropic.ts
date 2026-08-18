@@ -109,6 +109,16 @@ export class AnthropicProvider implements LlmProvider {
                 if (block) {
                   block.chunks.push(event.delta.thinking);
                 }
+              } else if (event.delta.type === "signature_delta") {
+                // The signature arrives here, just before the block's
+                // `content_block_stop` — `content_block_start` carries an
+                // empty one. Without it the block we rebuild is not the
+                // block the model sent, and replaying it into history is
+                // rejected as a modified thinking block.
+                const block = thinkingBlocks.get(event.index);
+                if (block) {
+                  block.signature = event.delta.signature;
+                }
               }
               break;
 
@@ -197,7 +207,9 @@ export class AnthropicProvider implements LlmProvider {
 
     const span = startChatSpan(this.name, params.model);
     try {
-      const response = await this.#client.messages.create(buildCreateParams(params));
+      const response = await this.#client.messages.create(
+        buildCreateParams(clampForNonStreaming(params)),
+      );
 
       const usage: Usage = {
         inputTokens: response.usage.input_tokens,
@@ -245,7 +257,71 @@ export class AnthropicProvider implements LlmProvider {
 
 // --- Params builder ---
 
+/**
+ * Ceiling on `max_tokens` for a non-streaming request, above which the
+ * SDK throws `AnthropicError: Streaming is required…` client-side rather
+ * than sending anything. It projects generation time as
+ * `60min * max_tokens / 128_000` and refuses anything past its 10-minute
+ * default timeout, so the ceiling is 21_333 — and only when no explicit
+ * timeout is set, which is our case. `nonstreaming-ceiling.test.ts` pins
+ * the boundary against the installed SDK.
+ *
+ * Streaming carries no such limit; `chatStream` passes the caller's cap
+ * through untouched.
+ */
+export const MAX_NONSTREAMING_TOKENS = 21_333;
+
+const warnedNonStreamingClamp = new Set<string>();
+
+/**
+ * Bring `maxTokens` under the non-streaming ceiling. Clamping over
+ * setting an explicit client timeout: the SDK's reasoning holds — a 64k
+ * non-streaming generation really can outlive an HTTP timeout — and a
+ * timeout would silence the guard while holding the connection open.
+ */
+function clampForNonStreaming(params: ChatParams): ChatParams {
+  const requested = params.maxTokens;
+  if (requested === undefined || requested <= MAX_NONSTREAMING_TOKENS) return params;
+  if (!warnedNonStreamingClamp.has(params.model)) {
+    warnedNonStreamingClamp.add(params.model);
+    logger.warn(
+      { model: params.model, requested, clampedTo: MAX_NONSTREAMING_TOKENS },
+      `clamping max_tokens to ${MAX_NONSTREAMING_TOKENS} for a non-streaming request to ` +
+        `"${params.model}" — the SDK rejects a larger cap without streaming. Use chatStream to ` +
+        `use the model's full output budget.`,
+    );
+  }
+  return { ...params, maxTokens: MAX_NONSTREAMING_TOKENS };
+}
+
+const warnedSamplingModels = new Set<string>();
+
+/**
+ * The Messages API rejects sampling parameters (`temperature`, `top_p`,
+ * `top_k`) with a 400 on Opus 4.7 and later and across the 5 series.
+ * Sonnet 4.6 and Opus 4.6 still accept them, but the drop stays
+ * unconditional: keying it on the model means a table of which ids accept
+ * what, and that goes stale silently, 400ing the request when it does.
+ *
+ * `ChatParams.temperature` stays canonical because the OpenAI-compatible
+ * adapter honours it. The warning tells a caller asking for determinism
+ * that it wasn't granted.
+ */
+function dropSamplingParams(params: ChatParams): void {
+  if (params.temperature === undefined) return;
+  if (warnedSamplingModels.has(params.model)) return;
+  warnedSamplingModels.add(params.model);
+  logger.warn(
+    { model: params.model, temperature: params.temperature },
+    `dropping temperature for "${params.model}" — the Anthropic adapter sends no sampling ` +
+      `parameters, because current models reject them. Control response variance with the ` +
+      `prompt, or route this call to an OpenAI-compatible provider.`,
+  );
+}
+
 function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNonStreaming {
+  dropSamplingParams(params);
+
   // System prompt as content block array with cache_control on the last block.
   // Tools + system are static per conversation — caching saves 90% on reads.
   // Omit the block when there's no prompt: Anthropic rejects an empty-text
@@ -273,7 +349,6 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
       messages: params.messages.map(toAnthropicMessage),
       tools: [syntheticTool],
       tool_choice: { type: "tool", name: params.responseFormat.name },
-      ...(params.temperature !== undefined && { temperature: params.temperature }),
     };
   }
 
@@ -286,20 +361,18 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
 
   const maxTokens = params.maxTokens ?? DEFAULT_MAX_TOKENS;
 
-  const result: Anthropic.MessageCreateParamsNonStreaming = {
+  // No `thinking` parameter: each model applies its own default, which is
+  // adaptive thinking on Sonnet 5 and the rest of the 5 series. Explicit
+  // depth control belongs in `output_config.effort`, which nothing needs
+  // yet. Thinking blocks that come back are translated by
+  // `toAnthropicMessage` / `toCanonicalBlock` either way.
+  return {
     model: params.model,
-    max_tokens: params.thinking ? params.thinking.budgetTokens + maxTokens : maxTokens,
+    max_tokens: maxTokens,
     ...(systemBlocks.length > 0 && { system: systemBlocks }),
     messages: params.messages.map(toAnthropicMessage),
     ...(tools && { tools }),
-    ...(params.temperature !== undefined && { temperature: params.temperature }),
   };
-
-  if (params.thinking) {
-    result.thinking = { type: "enabled", budget_tokens: params.thinking.budgetTokens };
-  }
-
-  return result;
 }
 
 // --- To Anthropic format ---
@@ -428,9 +501,28 @@ function fromAnthropicBlock(block: Anthropic.ContentBlock): ContentBlock[] {
     case "thinking":
       return [{ type: "thinking", thinking: block.thinking, signature: block.signature }];
     default:
-      // Skip block types we don't handle (server_tool_use, etc.)
+      // Block types we don't model (server_tool_use, redacted_thinking, …).
+      // Dropping is right for blocks the API doesn't want echoed back, and
+      // wrong for `redacted_thinking`, which has to make the round trip
+      // like any other thinking block — carrying it needs a canonical
+      // variant and its JSONB schema, tracked in todo.md. Log so a type
+      // that starts appearing is visible here rather than as an ordering
+      // error on the next request.
+      logUnmappedBlockOnce(block.type);
       return [];
   }
+}
+
+const loggedUnmappedBlocks = new Set<string>();
+
+function logUnmappedBlockOnce(type: string): void {
+  if (loggedUnmappedBlocks.has(type)) return;
+  loggedUnmappedBlocks.add(type);
+  logger.warn(
+    { blockType: type },
+    `dropping an Anthropic content block of type "${type}" — it has no canonical equivalent, ` +
+      `so it will not be sent back in history.`,
+  );
 }
 
 /**

@@ -14,6 +14,7 @@ import type {
   StreamEvent,
 } from "../llm/types.js";
 import { logger } from "../logger.js";
+import { expectDefined } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import type {
   AgentLoopParams,
@@ -21,7 +22,7 @@ import type {
   StepRunner,
   StreamingAgentLoopParams,
 } from "./loop.js";
-import { clearOldThinking, runAgentLoop, runStreamingAgentLoop } from "./loop.js";
+import { runAgentLoop, runStreamingAgentLoop } from "./loop.js";
 import type { Service } from "./service.js";
 import { defineTool, ToolRegistry } from "./tools.js";
 
@@ -1304,8 +1305,48 @@ describe("tool durability (stepRun)", () => {
   });
 });
 
-describe("clearOldThinking", () => {
-  it("clears thinking content in older assistant messages", () => {
+// The cap is per-model and set by the caller. Reasoning shares it, so a
+// cap sized for reply text alone truncates a turn that thinks — and
+// `classifyPostStream` reports a truncated turn as `ok`, so it is
+// delivered as if finished.
+describe("maxTokens", () => {
+  it("forwards the caller's cap to the provider", async () => {
+    const provider = mockProvider([textResponse("done")]);
+
+    await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+      maxTokens: 64_000,
+    });
+
+    const sent = expectDefined(vi.mocked(provider.chat).mock.calls[0])[0];
+    expect(sent.maxTokens).toBe(64_000);
+  });
+
+  it("leaves the cap unset when the caller passes none", async () => {
+    const provider = mockProvider([textResponse("done")]);
+
+    await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+    });
+
+    const sent = expectDefined(vi.mocked(provider.chat).mock.calls[0])[0];
+    expect(sent.maxTokens).toBeUndefined();
+  });
+});
+
+// Thinking blocks must reach the provider exactly as emitted: the API
+// rejects modified ones ("each thinking block must contain thinking"),
+// so the loop forwards history verbatim. Trimming stale thinking from a
+// long context is the server's job via context editing.
+describe("thinking blocks in history", () => {
+  it("forwards older thinking blocks to the provider unmodified", async () => {
+    const provider = mockProvider([textResponse("done")]);
+    // A later assistant turn makes the first one "old" — the case that
+    // used to have its thinking text blanked on the way out.
     const messages: Message[] = [
       {
         role: "assistant",
@@ -1315,81 +1356,43 @@ describe("clearOldThinking", () => {
         ],
       },
       { role: "user", content: "follow up" },
-      {
-        role: "assistant",
-        content: [
-          { type: "thinking", thinking: "current reasoning", signature: "sig2" },
-          { type: "text", text: "current answer" },
-        ],
-      },
+      { role: "assistant", content: [{ type: "text", text: "second answer" }] },
+      { role: "user", content: "again" },
     ];
 
-    const result = clearOldThinking(messages);
+    await testRunAgentLoop({ provider, messages, tools: new ToolRegistry() });
 
-    // First assistant: thinking cleared, signature preserved
-    expect(result[0]!.content).toEqual([
-      { type: "thinking", thinking: "", signature: "sig1" },
+    const sent = expectDefined(vi.mocked(provider.chat).mock.calls[0])[0];
+    expect(sent.messages[0]?.content).toEqual([
+      { type: "thinking", thinking: "old reasoning", signature: "sig1" },
       { type: "text", text: "old answer" },
     ]);
-
-    // Last assistant: thinking preserved
-    expect(result[2]!.content).toEqual([
-      { type: "thinking", thinking: "current reasoning", signature: "sig2" },
-      { type: "text", text: "current answer" },
-    ]);
   });
 
-  it("returns messages unchanged when no thinking blocks exist", () => {
+  it("forwards an empty-text thinking block rather than dropping it", async () => {
+    // `display: "omitted"` (the default on the 5 series) returns thinking
+    // blocks whose text is empty but whose signature is real. Dropping
+    // them can trigger ordering/signature errors, so they ride along
+    // untouched like any other block.
+    const provider = mockProvider([textResponse("done")]);
     const messages: Message[] = [
-      { role: "user", content: "hi" },
-      { role: "assistant", content: [{ type: "text", text: "hello" }] },
-    ];
-
-    const result = clearOldThinking(messages);
-    expect(result).toEqual(messages);
-  });
-
-  it("handles string content messages", () => {
-    const messages: Message[] = [
-      { role: "assistant", content: "plain text" },
-      { role: "user", content: "follow up" },
       {
         role: "assistant",
         content: [
-          { type: "thinking", thinking: "reasoning", signature: "sig" },
+          { type: "thinking", thinking: "", signature: "sig-omitted" },
           { type: "text", text: "answer" },
         ],
       },
+      { role: "user", content: "follow up" },
     ];
 
-    const result = clearOldThinking(messages);
-    // String content passes through unchanged
-    expect(result[0]!.content).toBe("plain text");
-    // Last assistant preserved
-    expect(result[2]!.content).toEqual([
-      { type: "thinking", thinking: "reasoning", signature: "sig" },
+    await testRunAgentLoop({ provider, messages, tools: new ToolRegistry() });
+
+    const sent = expectDefined(vi.mocked(provider.chat).mock.calls[0])[0];
+    expect(sent.messages[0]?.content).toEqual([
+      { type: "thinking", thinking: "", signature: "sig-omitted" },
       { type: "text", text: "answer" },
     ]);
-  });
-
-  it("does not mutate original messages", () => {
-    const original: Message[] = [
-      {
-        role: "assistant",
-        content: [
-          { type: "thinking", thinking: "old", signature: "sig" },
-          { type: "text", text: "answer" },
-        ],
-      },
-      { role: "user", content: "next" },
-      { role: "assistant", content: [{ type: "text", text: "latest" }] },
-    ];
-
-    clearOldThinking(original);
-
-    // Original thinking content unchanged
-    const blocks = original[0]!.content as Array<{ type: string; thinking?: string }>;
-    expect(blocks[0]!.thinking).toBe("old");
   });
 });
 

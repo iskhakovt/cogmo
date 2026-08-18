@@ -56,6 +56,15 @@ export interface AgentLoopParams {
   messages: Message[];
   tools: ToolRegistry;
   service: Service;
+  /**
+   * Output cap for each LLM call, in tokens. Pass the model's resolved
+   * `maxOutputTokens` so the ceiling matches what `computeBudget` already
+   * reserved for output when sizing the input budget. It also has to
+   * cover reasoning: adaptive thinking draws from the same allowance, so
+   * a cap tuned for reply text alone truncates the reply on a turn that
+   * thinks hard. Falls back to the provider's own default when unset.
+   */
+  maxTokens?: number;
   maxIterations?: number;
   /**
    * Optional durability wrapper for tool handlers. See `StepRunner`.
@@ -125,36 +134,6 @@ function sanitizeHistory(messages: ReadonlyArray<Message>, log: Logger): Message
 }
 
 /**
- * Clear thinking content from all assistant messages except the most recent.
- *
- * Anthropic requires thinking blocks in history but the content is only useful
- * for the model's immediate next response. Replacing with empty string preserves
- * the block structure while freeing tokens.
- */
-export function clearOldThinking(messages: ReadonlyArray<Message>): Message[] {
-  let lastAssistantIdx = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]?.role === "assistant") {
-      lastAssistantIdx = i;
-      break;
-    }
-  }
-
-  return messages.map((msg, idx) => {
-    if (msg.role !== "assistant" || idx === lastAssistantIdx) return msg;
-    if (typeof msg.content === "string") return msg;
-
-    const hasThinking = msg.content.some((b) => b.type === "thinking");
-    if (!hasThinking) return msg;
-
-    return {
-      ...msg,
-      content: msg.content.map((b) => (b.type === "thinking" ? { ...b, thinking: "" } : b)),
-    };
-  });
-}
-
-/**
  * Run the agentic loop: call LLM → execute tools → repeat until done.
  *
  * Each iteration calls the LLM. If the response contains tool_use blocks,
@@ -169,10 +148,11 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     tools,
     service,
     stepRun,
+    maxTokens,
     maxIterations = DEFAULT_MAX_ITERATIONS,
     turnLogger: log,
   } = params;
-  const messages = clearOldThinking(sanitizeHistory(params.messages, log));
+  const messages = sanitizeHistory(params.messages, log);
   const initialLength = messages.length;
   const toolDefs = tools.definitions();
   const totalUsage = { inputTokens: 0, outputTokens: 0 };
@@ -186,6 +166,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
       model,
       system: systemPrompt,
       messages,
+      ...(maxTokens !== undefined && { maxTokens }),
     };
     if (toolDefs.length > 0) {
       chatParams.tools = toolDefs;
@@ -641,10 +622,11 @@ export async function runStreamingAgentLoop(
     service,
     onEvent,
     stepRun,
+    maxTokens,
     maxIterations = DEFAULT_MAX_ITERATIONS,
     turnLogger: log,
   } = params;
-  const messages = clearOldThinking(sanitizeHistory(params.messages, log));
+  const messages = sanitizeHistory(params.messages, log);
   const initialLength = messages.length;
   const toolDefs = tools.definitions();
   const totalUsage = { inputTokens: 0, outputTokens: 0 };
@@ -677,6 +659,7 @@ export async function runStreamingAgentLoop(
       model,
       system: systemPrompt,
       messages,
+      ...(maxTokens !== undefined && { maxTokens }),
     };
     if (toolDefs.length > 0) {
       chatParams.tools = toolDefs;

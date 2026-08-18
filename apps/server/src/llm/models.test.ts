@@ -83,6 +83,59 @@ describe("resolveLimits — partial DB override (per-column source attribution)"
   });
 });
 
+// A stored zero reaches every consumer of the resolved limits: it makes
+// `max_tokens: 0` requests the API rejects, and drives `computeBudget`
+// negative. The write path can refuse new ones but cannot retract a row
+// already in the table, so the resolver treats it as no override at all.
+describe("resolveLimits — non-positive override", () => {
+  it("ignores a zero maxOutputTokens and falls through to LiteLLM", () => {
+    const result = resolveLimits("claude-sonnet-4-6", {
+      contextWindow: null,
+      maxOutputTokens: 0,
+    });
+    expect(result.maxOutputTokens).toBe(64_000);
+    expect(result.maxOutputTokensSource).toBe("litellm");
+  });
+
+  it("ignores a zero contextWindow and falls through to LiteLLM", () => {
+    const result = resolveLimits("claude-sonnet-4-6", {
+      contextWindow: 0,
+      maxOutputTokens: null,
+    });
+    expect(result.contextWindow).toBe(1_000_000);
+    expect(result.contextWindowSource).toBe("litellm");
+  });
+
+  it("ignores a negative override", () => {
+    const result = resolveLimits("claude-sonnet-4-6", {
+      contextWindow: null,
+      maxOutputTokens: -1,
+    });
+    expect(result.maxOutputTokens).toBe(64_000);
+    expect(result.maxOutputTokensSource).toBe("litellm");
+  });
+
+  it("falls all the way to the conservative default when LiteLLM misses too", () => {
+    const result = resolveLimits("totally-made-up-model-xyz-2099", {
+      contextWindow: 0,
+      maxOutputTokens: 0,
+    });
+    expect(result).toEqual({
+      contextWindow: DEFAULT_LIMITS.contextWindow,
+      maxOutputTokens: DEFAULT_LIMITS.maxOutputTokens,
+      contextWindowSource: "default",
+      maxOutputTokensSource: "default",
+    });
+  });
+
+  it("keeps computeBudget positive on a zeroed row", () => {
+    const budget = computeBudget(
+      resolveLimits("claude-sonnet-4-6", { contextWindow: 0, maxOutputTokens: 0 }),
+    );
+    expect(budget).toBeGreaterThan(0);
+  });
+});
+
 describe("resolveLimits — conservative default", () => {
   it("returns the conservative default when neither row nor LiteLLM has data", () => {
     const result = resolveLimits("totally-made-up-model-xyz-2099");

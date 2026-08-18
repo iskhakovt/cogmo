@@ -288,6 +288,23 @@ export function degradedReplyText(subtype: DegradeSubtype | null): string {
 export const DEGRADED_SYNTHESIS_TIMEOUT_MS = 5000;
 
 /**
+ * Output cap for the synthesis call, set by two opposing pressures.
+ *
+ * Models that think by default draw reasoning from the same allowance as
+ * the reply, so a cap sized for three sentences can be spent entirely on
+ * thinking and return no text — the fixed fallback and `ok: false`.
+ *
+ * `context_overflow` pulls the other way: the API counts
+ * `input_tokens + max_tokens` against the window, so on the one subtype
+ * whose failure *was* that the history didn't fit, every token reserved
+ * for output is one the history loses. A reply that stops short still
+ * beats a request the model refuses outright.
+ */
+function synthesisMaxTokens(subtype: DegradeSubtype | null): number {
+  return subtype === "context_overflow" ? 512 : 4096;
+}
+
+/**
  * Inputs to {@link synthesizeDegradedReply}. The `messages` slice is the
  * full conversation history at the point of degrade — the model needs
  * it to know what the user asked and what was attempted. `reason` and
@@ -323,7 +340,9 @@ export interface SynthesizeDegradedReplyResult {
  * - `tools: []` at the API level — defends against the model trying to
  *   call a tool from a stale system instruction.
  * - `temperature: 0` — predictability matters more than variety on a
- *   failure reply.
+ *   failure reply. Best-effort: honoured by OpenAI-compatible providers,
+ *   dropped by the Anthropic adapter (the Messages API rejects sampling
+ *   parameters). The reply is one to three sentences either way.
  * - Single attempt, no Class C repair — if it fails for any reason
  *   (timeout, refusal, provider outage), fall back to the fixed string
  *   and emit `agent.degrade.synthesis` with `ok: false`.
@@ -340,10 +359,11 @@ export interface SynthesizeDegradedReplyResult {
  * events is an upstream symptom, not a synthesis-logic bug.
  *
  * The `context_overflow` subtype still attempts synthesis. The call is not
- * a re-run of the failed turn: it drops the tool definitions and caps
- * output at 512 tokens, which is often enough headroom for the same
- * history to fit. When it isn't, the provider answers with an overflow and
- * no content, which lands on the empty-text fallback below.
+ * a re-run of the failed turn: it drops the tool definitions and keeps the
+ * output cap tight (see {@link synthesisMaxTokens}), which is often enough
+ * headroom for the same history to fit. When it isn't, the provider answers
+ * with an overflow and no content, which lands on the empty-text fallback
+ * below.
  */
 export async function synthesizeDegradedReply(
   deps: SynthesizeDegradedReplyDeps,
@@ -371,7 +391,7 @@ export async function synthesizeDegradedReply(
         messages: [...messages],
         tools: [],
         temperature: 0,
-        maxTokens: 512,
+        maxTokens: synthesisMaxTokens(subtype),
       }),
       new Promise<never>((_resolve, reject) => {
         timeoutId = setTimeout(() => reject(new SynthesisTimeoutError(timeoutMs)), timeoutMs);

@@ -128,6 +128,18 @@ export function buildSubAgentTools(
             `sub-agent "${row.name}" (model ${row.model}) returned no text output`,
           );
         }
+        // Same reasoning for a truncated answer, which the empty-text
+        // check above cannot see: it wears the shape of a complete one, so
+        // the orchestrator would reason over a sentence that stops
+        // mid-clause. The message avoids quoting the cap requested above —
+        // delegation is non-streaming, and a provider may hold it lower.
+        if (response.stopReason === "max_tokens") {
+          throw new NonRetriableError(
+            `sub-agent "${row.name}" (model ${row.model}) ran out of output tokens and returned ` +
+              `a truncated answer. Delegation is non-streaming, so the effective cap can be ` +
+              `lower than the model's own limit — split the task or ask for a shorter answer.`,
+          );
+        }
         return text;
       },
     }),

@@ -208,17 +208,18 @@ export interface ChatParams {
   messages: Message[];
   tools?: ToolDefinition[];
   maxTokens?: number;
-  /** Enable extended thinking. Provider support varies — Anthropic native, others ignore. */
-  thinking?: { budgetTokens: number };
   /** Request structured JSON output. Mutually exclusive with tools. */
   responseFormat?: ResponseFormat;
   /**
    * Sampling temperature. Provider default when unset (typically 1.0).
-   * Set to 0 for deterministic / low-variance output — the
-   * volume-cluster nudge synthesis and other failure-reply paths use
-   * this. Range is provider-specific: Anthropic accepts 0–1, OpenAI
-   * (and OpenAI-compat providers like xAI/OpenRouter) accepts 0–2.
-   * Stick to 0–1 for portability across the fallback chain.
+   * Set to 0 for deterministic / low-variance output — the degraded-reply
+   * synthesis in `src/agent/repair.ts` is the one caller today.
+   *
+   * Best-effort, not a guarantee: the Anthropic Messages API rejects
+   * sampling parameters outright, so `AnthropicProvider` drops this and
+   * logs once per model. OpenAI-compatible providers honour it — range
+   * is 0–2 there, so stick to 0–1 for portability across a fallback
+   * chain that may span both.
    */
   temperature?: number;
 }

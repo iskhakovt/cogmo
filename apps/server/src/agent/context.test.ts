@@ -271,6 +271,36 @@ describe("compactMessages", () => {
     expect(onStatus).toHaveBeenCalledWith("Summarizing conversation...");
   });
 
+  it("keeps the prefix when the summarizer returns no text", async () => {
+    // The summary is substituted for the whole prefix, so an empty one
+    // would leave a bare `[Previous conversation summary]` header standing
+    // in for that span of the conversation. Reachable whenever the
+    // summarization model spends its output budget on reasoning.
+    const messages: Message[] = [
+      msg("user", "m1"),
+      msg("assistant", "r1"),
+      msg("user", "m2"),
+      msg("assistant", "r2"),
+      msg("user", "m3"),
+      msg("assistant", "r3"),
+      msg("user", "m4"),
+      msg("assistant", "r4"),
+    ];
+
+    const countTokens = vi.fn().mockResolvedValue(850);
+
+    const result = await compactMessages("system", messages, undefined, {
+      countTokens,
+      budget: 1000,
+      summarize: vi.fn().mockResolvedValue("   "),
+    });
+
+    expect(
+      result.messages.some((m) => String(m.content).includes("Previous conversation summary")),
+    ).toBe(false);
+    expect(result.event?.messagesSummarized ?? 0).toBe(0);
+  });
+
   it("reports correct CompactionEvent stats", async () => {
     // Vary tool names so Strategy 0 doesn't trip and conflate the stats
     // assertion — Strategy 0 has its own coverage block.

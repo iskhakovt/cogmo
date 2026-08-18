@@ -71,7 +71,7 @@ export async function runModelCli(
         return 1;
     }
   } catch (err) {
-    // parseFlags + parsePositiveInt throw on operator error (missing
+    // parseFlags + parseIntAtLeast throw on operator error (missing
     // value, bad integer, flag-as-value). Surface as a clean exit-2 rather
     // than letting the dispatcher's await unwind with a stack trace.
     io.err(`Error: ${(err as Error).message}`);
@@ -257,21 +257,23 @@ function parseFlags(args: readonly string[]): ParsedFlags {
         i++;
         break;
       case "--context":
-        out.contextWindow = parsePositiveInt(value, "--context");
+        out.contextWindow = parseIntAtLeast(value, "--context", 1);
         i++;
         break;
       case "--max-output":
-        out.maxOutputTokens = parsePositiveInt(value, "--max-output");
+        out.maxOutputTokens = parseIntAtLeast(value, "--max-output", 1);
         i++;
         break;
       case "--position":
-        out.position = parsePositiveInt(value, "--position");
+        out.position = parseIntAtLeast(value, "--position", 0);
         i++;
         break;
       default:
-        // Unknown flag — ignore silently here; main switch will error on
-        // wrong commands. parseFlags is a generic helper.
-        break;
+        // Throw rather than swallow, matching `cogmo image-model`. A
+        // dropped `--max-outputs` registers the model with no limit at
+        // all, and the operator sees a success line reporting the
+        // resolver's own number as though the override had landed.
+        throw new Error(`Unknown flag "${flag}". Run \`cogmo model --help\` for accepted flags.`);
     }
   }
   return out;
@@ -296,14 +298,21 @@ function takeValue(args: readonly string[], i: number, flag: string | undefined)
   return next;
 }
 
-function parsePositiveInt(value: string, label: string): number {
+/**
+ * `min` differs per flag: a zero limit describes no model, while position
+ * 0 is the primary routing slot. Only the limits are checked twice —
+ * `addModelRouting` refuses them again — since a position's real
+ * constraint is the `(model, position)` UNIQUE, which parsing cannot see.
+ * Rejecting a limit here keeps the flag it came from in the message.
+ */
+function parseIntAtLeast(value: string, label: string, min: number): number {
   // `Number.parseInt("200000abc", 10)` returns 200000 — silently accepting
   // trailing garbage. `Number(value)` rejects mixed-content strings with
   // NaN, which `Number.isInteger` then catches. The trim guards against
   // accidental whitespace from shell pipelines.
   const n = Number(value.trim());
-  if (!Number.isInteger(n) || n < 0) {
-    throw new Error(`${label} expects a non-negative integer, got "${value}"`);
+  if (!Number.isInteger(n) || n < min) {
+    throw new Error(`${label} expects an integer >= ${min}, got "${value}"`);
   }
   return n;
 }

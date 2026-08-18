@@ -119,7 +119,9 @@ const HAS_RECORDING_INPUTS =
   !!process.env.COGMO_TEST_SKILLS_REMOTE;
 const RECORDABLE = IS_RECORD && HAS_RECORDING_INPUTS;
 const FIXTURE_EXISTS = existsSync(FIXTURE_PATH);
-const RUNNABLE = RECORDABLE || FIXTURE_EXISTS;
+/** Disables the suite outright — see the note above `describe` below. */
+const TIER1_HAS_NO_HTTP = true;
+const RUNNABLE = !TIER1_HAS_NO_HTTP && (RECORDABLE || FIXTURE_EXISTS);
 
 // --- Outbound capture (mirrors pipeline.integration.test.ts) ─────────
 
@@ -138,6 +140,16 @@ const capturedOutbound: CapturedOutbound[] = [];
 const TEST_RUN_ID = "skill-author";
 const TASK_BRANCH_GLOB = `cogmo/run/${TEST_RUN_ID}`;
 
+// Disabled: the skill this test authors cannot run. Its prompt asks for
+// `urllib.request` with no declared dependencies, which lands it in tier 1
+// (Pyodide/WASM), where there are no raw sockets and no HTTP path at all.
+// The closing price assertion is met by the `web_answer` fallback rather
+// than by the skill, so re-recording rides on a live third-party answer.
+//
+// Everything before that point works — authored, pushed, merged,
+// registered, invoked as a tool on the next turn — so this waits on a
+// tier-1 network path rather than being deleted. Re-enable by dropping
+// `!TIER1_HAS_NO_HTTP &&` from `RUNNABLE`, then re-record. See todo.md.
 describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () => {
   let mock: DaytonaMock;
   let daytonaClient: DaytonaSandboxClient;

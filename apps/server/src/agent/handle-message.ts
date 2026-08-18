@@ -890,10 +890,17 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             // a `Map` lookup after the first hit per process. Stays
             // outside the `step.run` below because the provider instance
             // isn't JSON-serializable.
-            const summarizationProvider =
+            // Keep the resolved limits, not just the provider: the cap
+            // below has to respect this model's own output ceiling, and
+            // the main model's row overrides don't describe it.
+            const resolvedSummarization =
               summarizationModel === model
-                ? provider
-                : (await resolveOrFail(resolveProvider, summarizationModel)).provider;
+                ? null
+                : await resolveOrFail(resolveProvider, summarizationModel);
+            const summarizationProvider = resolvedSummarization?.provider ?? provider;
+            const summarizationLimits = resolvedSummarization
+              ? resolveLimits(summarizationModel, resolvedSummarization.limits)
+              : limits;
             // Step ID is hardcoded — relies on `compactMessages` calling
             // `summarize` at most once per invocation (contract on
             // ContextManagerDeps.summarize). If that ever changes, switch to
@@ -904,7 +911,11 @@ export function createHandleMessage(deps: HandleMessageDeps) {
                 model: summarizationModel,
                 system,
                 messages: [...msgs, { role: "user", content: SUMMARIZATION_PROMPT }],
-                maxTokens: 4096,
+                // Room for reasoning as well as the summary, bounded by
+                // what this model accepts — asking above its ceiling is a
+                // 400, which compaction swallows into a fall-through to
+                // truncation.
+                maxTokens: Math.min(16_000, summarizationLimits.maxOutputTokens),
               });
               return response.content
                 .filter((b) => b.type === "text")
@@ -937,6 +948,12 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           messages: historyMessages,
           tools: turnTools,
           service,
+          // The number `computeBudget` reserved for output when it sized
+          // the input budget above; reasoning shares it on models that
+          // think by default. That reservation covers one iteration while
+          // the loop caps every one, so a long tool-using turn can still
+          // outgrow the window and degrade to `context_overflow`.
+          maxTokens: limits.maxOutputTokens,
           onEvent: (event: StreamEvent) => {
             if (event.type === "text_delta") streamed.text += event.text;
             else if (event.type === "tool_start") streamed.toolUseIds.push(event.id);
