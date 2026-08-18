@@ -17,7 +17,7 @@
  * on Cogmo's logic and removes a fixture-record step from the test loop.
  */
 
-import { eq } from "drizzle-orm";
+import { and, eq, inArray, like } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from "vitest";
@@ -30,7 +30,16 @@ import { createIsolatedUser } from "../../test/isolated-user.js";
 import { DrizzleTransportStore } from "../../transport/store/index.js";
 import { channelSessions, channels } from "../../transport/store/schema.js";
 import { DrizzleAgentStore } from "../store/index.js";
-import { conversations, messages, profiles, steeringRules } from "../store/schema.js";
+import {
+  conversations,
+  customCompartments,
+  evolutionEvents,
+  messages,
+  pendingMemories,
+  profileClasses,
+  profiles,
+  steeringRules,
+} from "../store/schema.js";
 import { type ObserverStepHarness, runObserver } from "./observer.js";
 
 let db: Database;
@@ -62,50 +71,45 @@ beforeEach(cleanupTestState);
 // matters for FKs: channel_sessions → messages → steering_rules →
 // conversations → test profiles → profile_classes. Channels are
 // seeded once by `test/integration-setup.ts` and outlive every test;
-// channel_sessions are per-test and cleared here. Test profiles are
-// matched by name to avoid touching seeded fixtures.
-// pending_memories and custom_compartments are independent.
+// channel_sessions are per-test and cleared here. Everything else is
+// scoped to this file's own user, and test profiles additionally by
+// name so seeded fixtures for that user stay put.
 async function cleanupTestState(): Promise<void> {
-  await pgClient.unsafe(
-    `DELETE FROM channel_sessions
-     WHERE conversation_id IN (
-       SELECT id FROM conversations WHERE user_id = $1 AND profile_id IN (
-         SELECT id FROM profiles WHERE name LIKE 'it-profile-%'
-       )
-     )`,
-    [userId],
-  );
-  await pgClient.unsafe(
-    `DELETE FROM messages
-     WHERE conversation_id IN (
-       SELECT id FROM conversations WHERE user_id = $1 AND profile_id IN (
-         SELECT id FROM profiles WHERE name LIKE 'it-profile-%'
-       )
-     )`,
-    [userId],
-  );
+  const testProfileIds = db
+    .select({ id: profiles.id })
+    .from(profiles)
+    .where(and(eq(profiles.userId, userId), like(profiles.name, "it-profile-%")));
+  const testConversationIds = db
+    .select({ id: conversations.id })
+    .from(conversations)
+    .where(and(eq(conversations.userId, userId), inArray(conversations.profileId, testProfileIds)));
+
+  await db
+    .delete(channelSessions)
+    .where(inArray(channelSessions.conversationId, testConversationIds));
+  await db.delete(messages).where(inArray(messages.conversationId, testConversationIds));
   // Correction/evolution steering rules accumulate across tests via
   // extractCorrections; manually-seeded rules (source='manual') stay
-  // untouched. Wide enough not to leak per-test state into the next.
-  await pgClient.unsafe(`DELETE FROM steering_rules WHERE source IN ('correction', 'evolution')`);
+  // untouched. Unscoped because these rows have no owner to scope by:
+  // `extract-corrections.ts` writes `profileId: null` deliberately, so a
+  // correction applies to every profile. This file is the only one that
+  // writes those sources, so the reach costs nothing today — but a second
+  // file exercising corrections would need a different answer, since
+  // there is no column to narrow on.
+  await db.delete(steeringRules).where(inArray(steeringRules.source, ["correction", "evolution"]));
   // Drop audit rows before conversations — FK from evolution_events →
   // conversations is `no action`, so a stale row would block deletion of
-  // its parent conversation in the cleanup below. Scoping by `userId`
-  // matches `pending_memories` / `custom_compartments` / `profile_classes`
-  // below, and reaches exactly what this file wrote now that the user is
-  // its own.
-  await pgClient.unsafe(`DELETE FROM evolution_events WHERE user_id = $1`, [userId]);
-  await pgClient.unsafe(
-    `DELETE FROM conversations
-     WHERE user_id = $1 AND profile_id IN (
-       SELECT id FROM profiles WHERE name LIKE 'it-profile-%'
-     )`,
-    [userId],
-  );
-  await pgClient.unsafe(`DELETE FROM profiles WHERE name LIKE 'it-profile-%'`);
-  await pgClient.unsafe(`DELETE FROM profile_classes WHERE user_id = $1`, [userId]);
-  await pgClient.unsafe(`DELETE FROM custom_compartments WHERE user_id = $1`, [userId]);
-  await pgClient.unsafe(`DELETE FROM pending_memories WHERE user_id = $1`, [userId]);
+  // its parent conversation below.
+  await db.delete(evolutionEvents).where(eq(evolutionEvents.userId, userId));
+  await db
+    .delete(conversations)
+    .where(and(eq(conversations.userId, userId), inArray(conversations.profileId, testProfileIds)));
+  await db
+    .delete(profiles)
+    .where(and(eq(profiles.userId, userId), like(profiles.name, "it-profile-%")));
+  await db.delete(profileClasses).where(eq(profileClasses.userId, userId));
+  await db.delete(customCompartments).where(eq(customCompartments.userId, userId));
+  await db.delete(pendingMemories).where(eq(pendingMemories.userId, userId));
 }
 
 // --- Test helpers ---

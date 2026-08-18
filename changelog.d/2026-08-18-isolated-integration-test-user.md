@@ -4,4 +4,8 @@ Both files write `pending_memories` for their user, and both scope assertions an
 
 Distinct users make the interference impossible rather than unlikely, which is the property worth having when the failure is a race — a green run proves little on its own. They are the only two files that touch `pending_memories`.
 
-The row is a real insert because these tables carry an FK to `users.id`. The helper documents the hazard so the next integration test reaches for it rather than the seeded user, which is what `.claude/rules/testing.md` describes under "Postgres rows that other tests query".
+The row is a real insert because these tables carry an FK to `users.id`, created through `AgentStore.createUser` rather than hand-written SQL. The helper documents the hazard so the next integration test reaches for it rather than the seeded user, which is what `.claude/rules/testing.md` describes under "Postgres rows that other tests query".
+
+Observer's per-test cleanup moves to Drizzle's typed operators, which express every one of its deletes — the two conversation-scoped ones now share a pair of subqueries instead of repeating inline SQL four times, and FK ordering is unchanged. Raw `sql` in tests is for adversarial setup, meaning states the typed API would refuse; a scoped delete is not that.
+
+Two of those deletes had no user scope. `profiles` was matched on a `LIKE 'it-profile-%'` name prefix alone and is now scoped by user as well. `steering_rules` stays broad because there is nothing to scope it by: `extract-corrections.ts` writes `profileId: null` deliberately, so a correction applies to every profile and the row has no owner. Observer is the only file writing those sources, so the reach is harmless today, and the comment now says so rather than implying the scope was considered and chosen.
