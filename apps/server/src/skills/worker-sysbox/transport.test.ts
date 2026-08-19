@@ -1,6 +1,6 @@
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { createNdjsonTransport } from "./transport.js";
+import { createNdjsonTransport, MAX_BUFFER_BYTES } from "./transport.js";
 
 function pair(): { stdin: PassThrough; stdout: PassThrough } {
   return { stdin: new PassThrough(), stdout: new PassThrough() };
@@ -110,7 +110,7 @@ describe("createNdjsonTransport", () => {
     expect(handler).toHaveBeenCalledTimes(1);
   });
 
-  it("fires onError and closes when buffer exceeds 4 MB without a newline", async () => {
+  it("fires onError and closes when the buffer exceeds the limit without a newline", async () => {
     const { stdin, stdout } = pair();
     const t = createNdjsonTransport(stdin, stdout);
     const messageHandler = vi.fn();
@@ -119,8 +119,10 @@ describe("createNdjsonTransport", () => {
       t.onError?.((err) => resolve(err));
     });
 
-    // 5 MB of content, no newline — simulates a worker flooding stdout.
-    stdout.write("x".repeat(5 * 1024 * 1024));
+    // Past the limit with no newline — a worker flooding stdout. Sized
+    // from the exported constant so raising the limit for `ctx.http`
+    // bodies cannot silently stop exercising this path.
+    stdout.write("x".repeat(MAX_BUFFER_BYTES + 1024));
 
     // split2's `error` lands on the next tick, so await the typed callback.
     const err = await errorSeen;

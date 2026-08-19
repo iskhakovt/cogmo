@@ -187,6 +187,10 @@ function isBlockedV4(a: number, b: number): boolean {
   if (a === 192 && b === 168) return true; // private
   if (a === 169 && b === 254) return true; // link-local, incl. cloud metadata
   if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+  if (a === 192 && b === 0) return true; // 192.0.0.0/24 IETF protocol assignments
+  if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 benchmarking
+  if (a === 192 && b === 88) return true; // 192.88.99.0/24 6to4 relay anycast
+  if (a >= 224) return true; // multicast, reserved, broadcast
   return false;
 }
 
@@ -201,6 +205,27 @@ function isBlockedAddress(address: string, family: number): boolean {
     const mapped =
       bytes.slice(0, 10).every((b) => b === 0) && bytes[10] === 0xff && bytes[11] === 0xff;
     if (mapped) return isBlockedV4(bytes[12] ?? 0, bytes[13] ?? 0);
+    // Other ways an IPv4 address arrives wearing a v6 shape. NAT64 is the
+    // live one: a DNS64 resolver synthesises an AAAA under 64:ff9b::/96
+    // from a private A record, so the guard would wave through an address
+    // the gateway then translates straight back to 10.x.
+    const nat64 =
+      bytes[0] === 0x00 &&
+      bytes[1] === 0x64 &&
+      bytes[2] === 0xff &&
+      bytes[3] === 0x9b &&
+      bytes.slice(4, 12).every((b) => b === 0);
+    if (nat64) return isBlockedV4(bytes[12] ?? 0, bytes[13] ?? 0);
+    // 2002::/16 6to4 carries the v4 address in the next four bytes.
+    if (bytes[0] === 0x20 && bytes[1] === 0x02) {
+      return isBlockedV4(bytes[2] ?? 0, bytes[3] ?? 0);
+    }
+    // ::a.b.c.d (IPv4-compatible, deprecated but still parsed).
+    if (bytes.slice(0, 12).every((b) => b === 0) && !(bytes[12] === 0 && bytes[13] === 0)) {
+      return isBlockedV4(bytes[12] ?? 0, bytes[13] ?? 0);
+    }
+    // fec0::/10 site-local, deprecated but still routed by some stacks.
+    if (bytes[0] === 0xfe && ((bytes[1] ?? 0) & 0xc0) === 0xc0) return true;
     // ::1 loopback and :: unspecified, in any notation that expands to them.
     if (bytes.slice(0, 15).every((b) => b === 0) && (bytes[15] === 1 || bytes[15] === 0)) {
       return true;
@@ -213,27 +238,6 @@ function isBlockedAddress(address: string, family: number): boolean {
   if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255))
     return true;
   return isBlockedV4(parts[0] ?? 0, parts[1] ?? 0);
-}
-
-/**
- * The destination to record. `fetch` resolves redirects internally, so
- * `response.url` is where the request finally landed; when that differs
- * from the one asked for, both belong in the audit — the requested host
- * is what the skill's code says, and the landed one is where the bytes
- * went. Query strings are dropped from both, since they carry
- * credentials. Intermediate hops are not visible through a followed
- * redirect; recording the endpoints is what this can honestly claim.
- */
-function redirectAwareTarget(requested: string, responseUrl: string): string {
-  if (!responseUrl) return requested;
-  let landed: string;
-  try {
-    const u = new URL(responseUrl);
-    landed = `${u.origin}${u.pathname}`;
-  } catch {
-    return requested;
-  }
-  return landed === requested ? requested : `${requested} -> ${landed}`;
 }
 
 /**
@@ -653,31 +657,26 @@ export class DefaultCtxHandler implements CtxHandler {
       throw new CtxError(kind, `http.request to ${target} failed: ${message}`);
     }
 
-    // `fetch` follows redirects itself, so the destination that answered
-    // can differ from the one asked for. Audit where the request actually
-    // landed — a 302 onward is the case the record most needs to show.
-    const landed = redirectAwareTarget(target, response.url);
-
     let text: string;
     try {
       text = await readCapped(response, MAX_HTTP_RESPONSE_BYTES);
     } catch (e) {
       if (e instanceof CtxError) {
-        await this.#audit("http.request", landed, false, e.kind);
+        await this.#audit("http.request", target, false, e.kind);
         throw e;
       }
       // The same signal covers the body, so a stall here aborts too —
       // and reads as a timeout rather than a generic transport failure.
       const kind = e instanceof Error && e.name === "TimeoutError" ? "timeout" : "network_error";
       const message = e instanceof Error ? e.message : String(e);
-      await this.#audit("http.request", landed, false, kind);
-      throw new CtxError(kind, `http.request to ${landed} failed mid-body: ${message}`);
+      await this.#audit("http.request", target, false, kind);
+      throw new CtxError(kind, `http.request to ${target} failed mid-body: ${message}`);
     }
 
     // A 4xx/5xx is a response the skill should get to inspect, not an
     // exception — the status is right there in the return value. Only a
     // failure to *obtain* a response throws.
-    await this.#audit("http.request", landed, true, null);
+    await this.#audit("http.request", target, true, null);
     return {
       status: response.status,
       headers: Object.fromEntries(response.headers),
