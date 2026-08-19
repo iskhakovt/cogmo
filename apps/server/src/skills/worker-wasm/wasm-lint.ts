@@ -60,8 +60,12 @@ const RULES: readonly RulePattern[] = [
     // fine here and common, so the rule names `urllib.request` rather
     // than the package. A bare `import urllib` cannot reach the network
     // either, since the submodule has to be imported to be used.
+    // Three shapes: `import http.client`, `from http.client import X`,
+    // and `from http import client` — the last is as idiomatic as the
+    // others, and missing it would let a skill deploy clean and fail on
+    // first invocation, which is what this rule exists to prevent.
     pattern:
-      /^[ \t]*(?:import[ \t]+(?:urllib\.request|http\.client|ftplib|smtplib|telnetlib|poplib|imaplib)\b|from[ \t]+(?:urllib\.request|http\.client|ftplib|smtplib|telnetlib|poplib|imaplib)[ \t]+import)/m,
+      /^[ \t]*(?:import[ \t]+(?:urllib\.request|http\.client|ftplib|smtplib|telnetlib|poplib|imaplib)\b|from[ \t]+(?:urllib\.request|http\.client|ftplib|smtplib|telnetlib|poplib|imaplib)[ \t]+import|from[ \t]+(?:urllib|http)[ \t]+import[ \t]+[\w, \t]*\b(?:request|client)\b)/m,
     reason:
       "stdlib networking has no socket underneath it in tier-1 (WASM); use `await ctx.http.get(url)`, or declare tier: container to use httpx",
   },

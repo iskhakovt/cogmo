@@ -66,6 +66,8 @@
 
 ### Skills, voice & transport
 
+- [ ] `p3` Give `ctx.http` a path for binary responses. `readCapped` decodes every body as UTF-8 and returns a string, so a skill fetching a PNG, PDF or gzip gets U+FFFD where the bytes were — silently mangled rather than a loud failure, and with no alternative call that returns bytes. Two shapes worth weighing: refuse non-text content types outright (clear, but guesses from a header the server controls), or return base64 with a flag on the response so the skill can decode. Base64 costs a third in size against the 5 MiB cap, which argues for making it opt-in per request rather than automatic. Low urgency while the documented use is REST APIs returning JSON; the trigger is the first skill that wants to fetch an image or a file.
+
 - [ ] `p2` CLI channel management commands — `main.ts channel add telegram --token=...`, `channel list`, `channel remove` (store layer covered by `p1` Channel CRUD; this is the CLI surface)
 - [ ] `p3` Per-adapter Transport ACL — wrap `Transport` per adapter with a permission policy (e.g., third-party adapters cannot mutate profiles, cannot create `receive: all` sessions). Returns `operation_not_permitted` (already in `TransportError` union). Deferred until first non-trusted adapter ships.
 - [ ] `p3` grammY native test primitives — use `bot.handleUpdate()` + `bot.api.config.use(transformer)` instead of `vi.mock("grammy")`

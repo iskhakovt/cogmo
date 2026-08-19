@@ -6,7 +6,13 @@ import type { RuntimeRusage, TaskInvoke, TaskResult } from "../protocol.js";
 const log = logger.child({ component: "skills.worker.wasm" });
 
 /** Default wall-clock cap for tier-1 skills (`design/skills.md` Resource budgets). */
-const DEFAULT_WALL_CLOCK_S = 30;
+/**
+ * Wall clock applied when a manifest declares no `resources.wall_clock_s`.
+ * Exported because `ctx.http` sizes its request timeout under it — a
+ * request that outlives the terminator can never surface as a catchable
+ * error, so the two constants have to be read together.
+ */
+export const DEFAULT_WALL_CLOCK_S = 30;
 
 /** Grace window after firing the SAB interrupt before hard-terminating the worker. */
 const TERMINATE_GRACE_MS = 1000;

@@ -1,3 +1,4 @@
+import { lookup } from "node:dns/promises";
 import { z } from "zod";
 import type { Service } from "../agent/service.js";
 import type { Transactor } from "../db/index.js";
@@ -6,6 +7,7 @@ import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { CtxError, type CtxHandler } from "./dispatcher.js";
 import type { SkillManifest } from "./types.js";
+import { DEFAULT_WALL_CLOCK_S } from "./worker-wasm/host.js";
 
 const log = logger.child({ component: "skills.ctx" });
 
@@ -63,6 +65,12 @@ export interface DefaultCtxHandlerOptions {
   }) => Promise<void>;
   /** Pluggable clock for deterministic tests. Returns ISO-8601 UTC timestamp. */
   now?: () => string;
+  /**
+   * Resolves a hostname for the `http.request` destination check.
+   * Injected so tests can pin an address without a real DNS round-trip,
+   * the same reason `now` is pluggable.
+   */
+  resolveHost?: (hostname: string) => Promise<Array<{ address: string; family: number }>>;
 }
 
 /**
@@ -75,8 +83,15 @@ export interface DefaultCtxHandlerOptions {
  * the skill free to continue.
  */
 const MAX_HTTP_RESPONSE_BYTES = 5 * 1024 * 1024;
-const DEFAULT_HTTP_TIMEOUT_MS = 30_000;
+const DEFAULT_HTTP_TIMEOUT_MS = 10_000;
 const MAX_HTTP_TIMEOUT_MS = 120_000;
+/**
+ * Headroom between a request timing out and the worker being terminated.
+ * The wall clock kills the task outright, so a request allowed to run
+ * right up to it never surfaces as the catchable `timeout` error this
+ * method promises — the skill just disappears mid-call.
+ */
+const HTTP_TIMEOUT_WALL_CLOCK_MARGIN_MS = 5_000;
 
 const SecretsGetArgsSchema = z.object({ name: z.string().min(1) });
 const MemoryRecallArgsSchema = z.object({
@@ -106,6 +121,48 @@ const HttpRequestArgsSchema = z.object({
   body: z.string().optional(),
   timeoutMs: z.number().int().positive().max(MAX_HTTP_TIMEOUT_MS).optional(),
 });
+
+/**
+ * Addresses a skill must not reach. `fetch` runs in the Cogmo server
+ * process, so `ctx.http` carries the host's network position — which
+ * includes every internal service the deployment can see. Hindsight sits
+ * on `HINDSIGHT_URL` (`http://hindsight:8888` in the shipped compose) and
+ * takes no auth, so an unchecked request reads or writes any memory bank,
+ * around both the `memoryBankId` scoping and the `reads_memory` /
+ * `writes_memory` gates this handler enforces for `ctx.memory`. Inngest,
+ * the web UI and cloud metadata at 169.254.169.254 are the same shape of
+ * target.
+ *
+ * This is the one place tier 1 is not at parity with tier 2: a tier-2
+ * skill has real sockets but runs in a remote Daytona sandbox with no
+ * route to the host's network, so without this check tier 1 would reach
+ * strictly more than the less-isolated tier.
+ *
+ * Checked against resolved addresses rather than the literal, because the
+ * interesting targets are names — `hindsight`, `localhost` — not dotted
+ * quads. A name that resolves to anything private is refused.
+ */
+function isBlockedAddress(address: string, family: number): boolean {
+  if (family === 6) {
+    const v6 = address.toLowerCase();
+    // v4-mapped (::ffff:127.0.0.1) is a v4 address wearing a v6 shape.
+    const mapped = v6.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    if (mapped?.[1]) return isBlockedAddress(mapped[1], 4);
+    if (v6 === "::1" || v6 === "::") return true;
+    // fc00::/7 unique-local, fe80::/10 link-local.
+    return /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6);
+  }
+  const parts = address.split(".").map(Number);
+  const [a, b] = parts;
+  if (a === undefined || b === undefined || parts.length !== 4) return true;
+  if (a === 0 || a === 127) return true; // this-host, loopback
+  if (a === 10) return true; // private
+  if (a === 172 && b >= 16 && b <= 31) return true; // private
+  if (a === 192 && b === 168) return true; // private
+  if (a === 169 && b === 254) return true; // link-local, incl. cloud metadata
+  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+  return false;
+}
 
 /**
  * The destination to record. `fetch` resolves redirects internally, so
@@ -177,6 +234,7 @@ export class DefaultCtxHandler implements CtxHandler {
   #files: Service["files"];
   #recordContextCall: DefaultCtxHandlerOptions["recordContextCall"];
   #now: () => string;
+  #resolveHost: NonNullable<DefaultCtxHandlerOptions["resolveHost"]>;
   #declaredSecrets: ReadonlySet<string>;
 
   constructor(opts: DefaultCtxHandlerOptions) {
@@ -190,6 +248,7 @@ export class DefaultCtxHandler implements CtxHandler {
     this.#files = opts.files;
     this.#recordContextCall = opts.recordContextCall;
     this.#now = opts.now ?? (() => new Date().toISOString());
+    this.#resolveHost = opts.resolveHost ?? ((hostname) => lookup(hostname, { all: true }));
     this.#declaredSecrets = new Set(
       opts.manifest.secrets.map((s) => (typeof s === "string" ? s : s.name)),
     );
@@ -394,6 +453,18 @@ export class DefaultCtxHandler implements CtxHandler {
   }
 
   /**
+   * Request timeout, held under the skill's own wall clock so a hung
+   * request fails as an error the skill can catch rather than as a
+   * terminated worker. A caller asking for longer than the task will
+   * live gets the shorter of the two.
+   */
+  #httpTimeoutMs(requested: number | undefined): number {
+    const wallClockMs = (this.#manifest.resources?.wall_clock_s ?? DEFAULT_WALL_CLOCK_S) * 1000;
+    const ceiling = Math.max(1_000, wallClockMs - HTTP_TIMEOUT_WALL_CLOCK_MARGIN_MS);
+    return Math.min(requested ?? DEFAULT_HTTP_TIMEOUT_MS, ceiling);
+  }
+
+  /**
    * Outbound HTTP on behalf of a tier-1 skill.
    *
    * Pyodide has no sockets, so `urllib` / `http.client` cannot work inside
@@ -440,13 +511,37 @@ export class DefaultCtxHandler implements CtxHandler {
     // persisting the credential that got it there.
     const target = `${parsedUrl.origin}${parsedUrl.pathname}`;
 
+    try {
+      const resolved = await this.#resolveHost(parsedUrl.hostname);
+      const blocked = resolved.find((r) => isBlockedAddress(r.address, r.family));
+      if (blocked) {
+        await this.#audit("http.request", target, false, "blocked_destination");
+        throw new CtxError(
+          "blocked_destination",
+          `http.request refused ${target}: ${parsedUrl.hostname} resolves to ${blocked.address}, ` +
+            `which is on the host's own network rather than the public internet`,
+        );
+      }
+    } catch (e) {
+      if (e instanceof CtxError) throw e;
+      const message = e instanceof Error ? e.message : String(e);
+      await this.#audit("http.request", target, false, "network_error");
+      throw new CtxError("network_error", `http.request could not resolve ${target}: ${message}`);
+    }
+
     let response: Response;
     try {
       response = await fetch(url, {
         method,
         ...(headers && { headers }),
         ...(body !== undefined && { body }),
-        signal: AbortSignal.timeout(timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS),
+        // Not followed: a redirect is a second destination, and following
+        // it here would skip the resolve check above — the standard way
+        // around an SSRF guard. The 3xx and its `location` come back to
+        // the skill, which reaches the next hop with another call that
+        // gets checked like any other.
+        redirect: "manual",
+        signal: AbortSignal.timeout(this.#httpTimeoutMs(timeoutMs)),
       });
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);

@@ -53,6 +53,9 @@ def run(inputs, ctx):
     ["import http.client\n"],
     ["from http.client import HTTPConnection\n"],
     ["import smtplib\n"],
+    ["from urllib import request\n"],
+    ["from http import client\n"],
+    ["from urllib import parse, request\n"],
   ])("rejects the stdlib network module in %j", (body) => {
     const r = lintWasmCompat(body);
     expect(r.isErr()).toBe(true);
@@ -72,6 +75,8 @@ def run(inputs, ctx):
     // Third-party, and not importable in tier 1 anyway — but the rule
     // must not claim it is a stdlib networking module.
     ["import urllib3\n"],
+    ["from urllib import parse\n"],
+    ["from http import HTTPStatus\n"],
   ])("allows the network-free import in %j", (body) => {
     expect(lintWasmCompat(body).isOk()).toBe(true);
   });

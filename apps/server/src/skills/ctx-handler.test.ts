@@ -49,8 +49,15 @@ function deps(overrides?: Partial<Deps>): Deps {
   };
 }
 
-function makeHandler(m: SkillManifest, d: Deps): DefaultCtxHandler {
+const PUBLIC_ADDRESS = [{ address: "104.18.32.7", family: 4 }];
+
+function makeHandler(
+  m: SkillManifest,
+  d: Deps,
+  resolveHost: DefaultCtxHandlerOptions["resolveHost"] = async () => PUBLIC_ADDRESS,
+): DefaultCtxHandler {
   return new DefaultCtxHandler({
+    resolveHost,
     manifest: m,
     runId: "run-1",
     user: { id: "user-1", timezone: "UTC" },
@@ -160,6 +167,98 @@ describe("DefaultCtxHandler", () => {
         const recorded = JSON.stringify(vi.mocked(d.recordContextCall).mock.calls);
         expect(recorded).not.toContain("hunter2");
       } finally {
+        fetchMock.mockRestore();
+      }
+    });
+
+    it.each([
+      ["127.0.0.1", 4],
+      ["10.1.2.3", 4],
+      ["172.20.0.5", 4],
+      ["192.168.1.10", 4],
+      ["169.254.169.254", 4],
+      ["::1", 6],
+      ["fd00::1", 6],
+    ])(
+      "refuses a host resolving to %s, which is the deployment's own network",
+      async (address, family) => {
+        // The host's `fetch` can see Hindsight, Inngest and cloud metadata;
+        // a tier-2 skill in its remote sandbox cannot. Without this the
+        // more-isolated tier would reach strictly further.
+        const fetchMock = vi.spyOn(globalThis, "fetch");
+        try {
+          const d = deps();
+          const h = makeHandler(manifest(""), d, async () => [{ address, family }]);
+          await expect(
+            h.handle({
+              method: "http.request",
+              args: { method: "GET", url: "http://hindsight:8888/v1/banks" },
+            }),
+          ).rejects.toThrow(/host's own network/);
+          expect(fetchMock).not.toHaveBeenCalled();
+          expect(d.recordContextCall).toHaveBeenCalledWith(
+            expect.objectContaining({ ok: false, error: "blocked_destination" }),
+          );
+        } finally {
+          fetchMock.mockRestore();
+        }
+      },
+    );
+
+    it("allows a host resolving to a public address", async () => {
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse("{}"));
+      try {
+        const h = makeHandler(manifest(""), deps());
+        const out = await h.handle({
+          method: "http.request",
+          args: { method: "GET", url: "https://api.example.com/x" },
+        });
+        expect(out).toMatchObject({ status: 200 });
+      } finally {
+        fetchMock.mockRestore();
+      }
+    });
+
+    it("does not follow redirects, so each destination is checked on its own call", async () => {
+      // Following here would reach the next host without passing the
+      // resolve check — the standard way around a guard like this.
+      const fetchMock = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(
+          new Response(null, { status: 302, headers: { location: "http://127.0.0.1:8888/" } }),
+        );
+      try {
+        const h = makeHandler(manifest(""), deps());
+        const out = (await h.handle({
+          method: "http.request",
+          args: { method: "GET", url: "https://api.example.com/start" },
+        })) as { status: number; headers: Record<string, string> };
+        expect(out.status).toBe(302);
+        expect(out.headers.location).toBe("http://127.0.0.1:8888/");
+        expect(fetchMock).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({ redirect: "manual" }),
+        );
+      } finally {
+        fetchMock.mockRestore();
+      }
+    });
+
+    it("holds the request timeout under the skill's wall clock", async () => {
+      // A request allowed to outlive the terminator never surfaces as the
+      // catchable error this method advertises — the worker just dies.
+      const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse("{}"));
+      try {
+        const h = makeHandler(manifest("resources:\n  wall_clock_s: 20"), deps());
+        await h.handle({
+          method: "http.request",
+          args: { method: "GET", url: "https://api.example.com/x", timeoutMs: 60_000 },
+        });
+        // 20s wall clock minus the 5s margin, not the 60s asked for.
+        expect(timeoutSpy).toHaveBeenCalledWith(15_000);
+      } finally {
+        timeoutSpy.mockRestore();
         fetchMock.mockRestore();
       }
     });

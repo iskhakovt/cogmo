@@ -143,6 +143,50 @@ class _Files:
         return result["entries"]
 
 
+class _Http:
+    """Outbound HTTP, performed by the host.
+
+    Present in both tiers so a skill does not break when adding a
+    dependency moves it here from tier 1. Tier 2 has real sockets and can
+    use `httpx` instead; going through the host keeps the request in
+    `skill_context_calls` and under the host's destination checks.
+    """
+
+    def __init__(self, bridge: _Bridge) -> None:
+        self._b = bridge
+
+    async def request(
+        self,
+        method: str,
+        url: str,
+        headers: dict[str, str] | None = None,
+        body: str | None = None,
+        timeout_ms: int | None = None,
+    ) -> Any:
+        args: dict[str, object] = {"method": method.upper(), "url": url}
+        if headers is not None:
+            args["headers"] = dict(headers)
+        if body is not None:
+            args["body"] = body
+        if timeout_ms is not None:
+            args["timeoutMs"] = timeout_ms
+        return await self._b.call("http.request", args)
+
+    async def get(
+        self, url: str, headers: dict[str, str] | None = None, timeout_ms: int | None = None
+    ) -> Any:
+        return await self.request("GET", url, headers=headers, timeout_ms=timeout_ms)
+
+    async def post(
+        self,
+        url: str,
+        body: str | None = None,
+        headers: dict[str, str] | None = None,
+        timeout_ms: int | None = None,
+    ) -> Any:
+        return await self.request("POST", url, headers=headers, body=body, timeout_ms=timeout_ms)
+
+
 class _Log:
     def __init__(self, bridge: _Bridge) -> None:
         self._b = bridge
@@ -159,6 +203,7 @@ class Ctx:
         self.secrets = _Secrets(bridge)
         self.memory = _Memory(bridge)
         self.files = _Files(bridge)
+        self.http = _Http(bridge)
         self.log = _Log(bridge)
 
     async def now(self) -> Any:
