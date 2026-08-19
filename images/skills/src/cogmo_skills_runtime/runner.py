@@ -213,12 +213,22 @@ class Ctx:
         return await self._b.call("user", {})
 
 
+# Host caps an `http.request` body at 5 MiB; the frame carrying it needs
+# room for that plus JSON escaping, which can inflate a body meaningfully.
+_MAX_FRAME_BYTES = 16 * 1024 * 1024
+
+
 async def _read_stdin_lines(bridge: _Bridge, stdin: BinaryIO, stderr: TextIO) -> None:
     """Drain stdin during a task's run — only `ctx_result` shapes are
     expected; everything else is logged to stderr and dropped.
     """
     loop = asyncio.get_running_loop()
-    reader = asyncio.StreamReader()
+    # `asyncio.StreamReader()` defaults to a 64 KiB line limit, and
+    # `readline` raises once a frame passes it. A `ctx_result` carrying an
+    # `http.request` body runs to the host's 5 MiB response cap, so the
+    # frame limit has to clear that plus JSON overhead or ordinary API
+    # responses break the transport rather than the skill.
+    reader = asyncio.StreamReader(limit=_MAX_FRAME_BYTES)
     protocol = asyncio.StreamReaderProtocol(reader)
     await loop.connect_read_pipe(lambda: protocol, stdin)
     while True:

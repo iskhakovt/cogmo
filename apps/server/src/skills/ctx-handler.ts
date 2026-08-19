@@ -71,6 +71,12 @@ export interface DefaultCtxHandlerOptions {
    * the same reason `now` is pluggable.
    */
   resolveHost?: (hostname: string) => Promise<Array<{ address: string; family: number }>>;
+  /**
+   * When the task's wall clock started, so `http.request` can size its
+   * deadline against what is left rather than the whole budget. Defaults
+   * to construction time, which is immediately before dispatch.
+   */
+  startedAtMs?: number;
 }
 
 /**
@@ -142,19 +148,39 @@ const HttpRequestArgsSchema = z.object({
  * interesting targets are names — `hindsight`, `localhost` — not dotted
  * quads. A name that resolves to anything private is refused.
  */
-function isBlockedAddress(address: string, family: number): boolean {
-  if (family === 6) {
-    const v6 = address.toLowerCase();
-    // v4-mapped (::ffff:127.0.0.1) is a v4 address wearing a v6 shape.
-    const mapped = v6.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    if (mapped?.[1]) return isBlockedAddress(mapped[1], 4);
-    if (v6 === "::1" || v6 === "::") return true;
-    // fc00::/7 unique-local, fe80::/10 link-local.
-    return /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6);
+function parseIpv6(input: string): Uint8Array | null {
+  let addr = input.split("%")[0] ?? ""; // drop any zone id
+  // A trailing dotted quad (::ffff:127.0.0.1) is two hex groups wearing
+  // another notation; fold it in so the rest of the parse is uniform.
+  const embedded = addr.match(/^(.*:)(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (embedded) {
+    const octets = (embedded[2] ?? "").split(".").map(Number);
+    if (octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) return null;
+    const hi = (((octets[0] ?? 0) << 8) | (octets[1] ?? 0)).toString(16);
+    const lo = (((octets[2] ?? 0) << 8) | (octets[3] ?? 0)).toString(16);
+    addr = `${embedded[1]}${hi}:${lo}`;
   }
-  const parts = address.split(".").map(Number);
-  const [a, b] = parts;
-  if (a === undefined || b === undefined || parts.length !== 4) return true;
+  const halves = addr.split("::");
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(":").filter((g) => g !== "") : [];
+  const right =
+    halves.length === 2 && halves[1] ? halves[1].split(":").filter((g) => g !== "") : [];
+  const fill = halves.length === 2 ? 8 - left.length - right.length : 0;
+  if (fill < 0) return null;
+  const groups = [...left, ...Array<string>(fill).fill("0"), ...right];
+  if (groups.length !== 8) return null;
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < 8; i++) {
+    const g = groups[i] ?? "";
+    if (!/^[0-9a-fA-F]{1,4}$/.test(g)) return null;
+    const v = Number.parseInt(g, 16);
+    bytes[i * 2] = v >> 8;
+    bytes[i * 2 + 1] = v & 0xff;
+  }
+  return bytes;
+}
+
+function isBlockedV4(a: number, b: number): boolean {
   if (a === 0 || a === 127) return true; // this-host, loopback
   if (a === 10) return true; // private
   if (a === 172 && b >= 16 && b <= 31) return true; // private
@@ -162,6 +188,31 @@ function isBlockedAddress(address: string, family: number): boolean {
   if (a === 169 && b === 254) return true; // link-local, incl. cloud metadata
   if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
   return false;
+}
+
+function isBlockedAddress(address: string, family: number): boolean {
+  if (family === 6) {
+    const bytes = parseIpv6(address);
+    // Unparseable is refused rather than allowed: an address shape this
+    // does not understand is not one it can vouch for.
+    if (!bytes) return true;
+    // v4-mapped (::ffff:7f00:1 and ::ffff:127.0.0.1 are the same address
+    // in different notations) is a v4 address, so judge it as one.
+    const mapped =
+      bytes.slice(0, 10).every((b) => b === 0) && bytes[10] === 0xff && bytes[11] === 0xff;
+    if (mapped) return isBlockedV4(bytes[12] ?? 0, bytes[13] ?? 0);
+    // ::1 loopback and :: unspecified, in any notation that expands to them.
+    if (bytes.slice(0, 15).every((b) => b === 0) && (bytes[15] === 1 || bytes[15] === 0)) {
+      return true;
+    }
+    if (((bytes[0] ?? 0) & 0xfe) === 0xfc) return true; // fc00::/7 unique-local
+    if (bytes[0] === 0xfe && ((bytes[1] ?? 0) & 0xc0) === 0x80) return true; // fe80::/10
+    return false;
+  }
+  const parts = address.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255))
+    return true;
+  return isBlockedV4(parts[0] ?? 0, parts[1] ?? 0);
 }
 
 /**
@@ -183,6 +234,31 @@ function redirectAwareTarget(requested: string, responseUrl: string): string {
     return requested;
   }
   return landed === requested ? requested : `${requested} -> ${landed}`;
+}
+
+/**
+ * Bound a promise that has no abort signal of its own. `dns.lookup` takes
+ * no `AbortSignal`, so without this a resolver that never answers holds
+ * the call open regardless of what the caller asked for. The underlying
+ * work is not cancelled — nothing here can cancel it — but the skill
+ * stops waiting on it.
+ */
+async function withDeadline<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          const e = new Error(`timed out after ${ms}ms ${what}`);
+          e.name = "TimeoutError";
+          reject(e);
+        }, ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /**
@@ -235,6 +311,7 @@ export class DefaultCtxHandler implements CtxHandler {
   #recordContextCall: DefaultCtxHandlerOptions["recordContextCall"];
   #now: () => string;
   #resolveHost: NonNullable<DefaultCtxHandlerOptions["resolveHost"]>;
+  #startedAtMs: number;
   #declaredSecrets: ReadonlySet<string>;
 
   constructor(opts: DefaultCtxHandlerOptions) {
@@ -249,6 +326,7 @@ export class DefaultCtxHandler implements CtxHandler {
     this.#recordContextCall = opts.recordContextCall;
     this.#now = opts.now ?? (() => new Date().toISOString());
     this.#resolveHost = opts.resolveHost ?? ((hostname) => lookup(hostname, { all: true }));
+    this.#startedAtMs = opts.startedAtMs ?? Date.now();
     this.#declaredSecrets = new Set(
       opts.manifest.secrets.map((s) => (typeof s === "string" ? s : s.name)),
     );
@@ -460,7 +538,11 @@ export class DefaultCtxHandler implements CtxHandler {
    */
   #httpTimeoutMs(requested: number | undefined): number {
     const wallClockMs = (this.#manifest.resources?.wall_clock_s ?? DEFAULT_WALL_CLOCK_S) * 1000;
-    const ceiling = Math.max(1_000, wallClockMs - HTTP_TIMEOUT_WALL_CLOCK_MARGIN_MS);
+    // What is left of the budget, not the whole of it: a skill that spent
+    // most of its wall clock before calling would otherwise get a deadline
+    // longer than the task itself has to live.
+    const remainingMs = wallClockMs - (Date.now() - this.#startedAtMs);
+    const ceiling = Math.max(1_000, remainingMs - HTTP_TIMEOUT_WALL_CLOCK_MARGIN_MS);
     return Math.min(requested ?? DEFAULT_HTTP_TIMEOUT_MS, ceiling);
   }
 
@@ -510,9 +592,20 @@ export class DefaultCtxHandler implements CtxHandler {
     // and path only — enough to see where a skill reached, without
     // persisting the credential that got it there.
     const target = `${parsedUrl.origin}${parsedUrl.pathname}`;
+    // One budget spans resolution and the request. Starting the clock at
+    // the fetch would let a slow resolver add unbounded time in front of
+    // it, so a caller asking for 5s could wait far longer.
+    const timeoutBudgetMs = this.#httpTimeoutMs(timeoutMs);
 
     try {
-      const resolved = await this.#resolveHost(parsedUrl.hostname);
+      // `URL.hostname` keeps the brackets on an IPv6 literal; no resolver
+      // takes those. The original `url` still goes to `fetch` untouched.
+      const hostname = parsedUrl.hostname.replace(/^\[|\]$/g, "");
+      const resolved = await withDeadline(
+        this.#resolveHost(hostname),
+        timeoutBudgetMs,
+        `resolving ${hostname}`,
+      );
       const blocked = resolved.find((r) => isBlockedAddress(r.address, r.family));
       if (blocked) {
         await this.#audit("http.request", target, false, "blocked_destination");
@@ -541,7 +634,7 @@ export class DefaultCtxHandler implements CtxHandler {
         // the skill, which reaches the next hop with another call that
         // gets checked like any other.
         redirect: "manual",
-        signal: AbortSignal.timeout(this.#httpTimeoutMs(timeoutMs)),
+        signal: AbortSignal.timeout(timeoutBudgetMs),
       });
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);

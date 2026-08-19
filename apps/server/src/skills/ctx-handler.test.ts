@@ -205,6 +205,111 @@ describe("DefaultCtxHandler", () => {
       },
     );
 
+    it.each([
+      // Same loopback, four notations. Prefix matching on the text catches
+      // only the first.
+      ["0:0:0:0:0:0:0:1"],
+      ["::0:0:1"],
+      // v4-mapped loopback, dotted and hex.
+      ["::ffff:127.0.0.1"],
+      ["::ffff:7f00:1"],
+      // Expanded unique-local and link-local.
+      ["fd00:0:0:0:0:0:0:1"],
+      ["fe80:0:0:0:0:0:0:1"],
+    ])("refuses %s, however it is written", async (address) => {
+      const fetchMock = vi.spyOn(globalThis, "fetch");
+      try {
+        const h = makeHandler(manifest(""), deps(), async () => [{ address, family: 6 }]);
+        await expect(
+          h.handle({
+            method: "http.request",
+            args: { method: "GET", url: "http://internal.example/x" },
+          }),
+        ).rejects.toThrow(/host's own network/);
+        expect(fetchMock).not.toHaveBeenCalled();
+      } finally {
+        fetchMock.mockRestore();
+      }
+    });
+
+    it.each([["2606:4700:4700::1111"], ["2001:db8::1"]])(
+      "allows the public v6 address %s",
+      async (address) => {
+        const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse("{}"));
+        try {
+          const h = makeHandler(manifest(""), deps(), async () => [{ address, family: 6 }]);
+          const out = await h.handle({
+            method: "http.request",
+            args: { method: "GET", url: "https://api.example.com/x" },
+          });
+          expect(out).toMatchObject({ status: 200 });
+        } finally {
+          fetchMock.mockRestore();
+        }
+      },
+    );
+
+    it("refuses an address it cannot parse rather than letting it through", async () => {
+      const fetchMock = vi.spyOn(globalThis, "fetch");
+      try {
+        const h = makeHandler(manifest(""), deps(), async () => [
+          { address: "not:an:address:at:all:::", family: 6 },
+        ]);
+        await expect(
+          h.handle({
+            method: "http.request",
+            args: { method: "GET", url: "http://weird.example/x" },
+          }),
+        ).rejects.toThrow(/host's own network/);
+        expect(fetchMock).not.toHaveBeenCalled();
+      } finally {
+        fetchMock.mockRestore();
+      }
+    });
+
+    it("strips the brackets off an IPv6-literal URL before resolving", async () => {
+      // `URL.hostname` keeps them, and no resolver accepts them — without
+      // this the call fails as a resolution error instead of being judged.
+      const seen: string[] = [];
+      const fetchMock = vi.spyOn(globalThis, "fetch");
+      try {
+        const h = makeHandler(manifest(""), deps(), async (hostname) => {
+          seen.push(hostname);
+          return [{ address: "::1", family: 6 }];
+        });
+        await expect(
+          h.handle({ method: "http.request", args: { method: "GET", url: "http://[::1]:8888/x" } }),
+        ).rejects.toThrow(/host's own network/);
+        expect(seen).toEqual(["::1"]);
+        expect(fetchMock).not.toHaveBeenCalled();
+      } finally {
+        fetchMock.mockRestore();
+      }
+    });
+
+    it("bounds hostname resolution by the same deadline as the request", async () => {
+      // `dns.lookup` takes no signal, so a resolver that never answers
+      // would otherwise hold the call open past whatever was asked for.
+      const fetchMock = vi.spyOn(globalThis, "fetch");
+      try {
+        const d = deps();
+        const h = makeHandler(
+          manifest(""),
+          d,
+          () => new Promise(() => {}), // never resolves
+        );
+        await expect(
+          h.handle({
+            method: "http.request",
+            args: { method: "GET", url: "https://slow-dns.example/x", timeoutMs: 20 },
+          }),
+        ).rejects.toThrow(/timed out/);
+        expect(fetchMock).not.toHaveBeenCalled();
+      } finally {
+        fetchMock.mockRestore();
+      }
+    });
+
     it("allows a host resolving to a public address", async () => {
       const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse("{}"));
       try {
@@ -257,6 +362,34 @@ describe("DefaultCtxHandler", () => {
         });
         // 20s wall clock minus the 5s margin, not the 60s asked for.
         expect(timeoutSpy).toHaveBeenCalledWith(15_000);
+      } finally {
+        timeoutSpy.mockRestore();
+        fetchMock.mockRestore();
+      }
+    });
+
+    it("sizes the deadline from what is left of the wall clock, not all of it", async () => {
+      // 20s budget, 12s already spent: 8s remain, less the 5s margin.
+      const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse("{}"));
+      try {
+        const h = new DefaultCtxHandler({
+          manifest: manifest("resources:\n  wall_clock_s: 20"),
+          runId: "run-1",
+          user: { id: "user-1", timezone: "UTC" },
+          memoryBankId: "bank-1",
+          ...deps(),
+          runInTx: fakeRunInTx,
+          resolveHost: async () => PUBLIC_ADDRESS,
+          startedAtMs: Date.now() - 12_000,
+        });
+        await h.handle({
+          method: "http.request",
+          args: { method: "GET", url: "https://api.example.com/x", timeoutMs: 60_000 },
+        });
+        const asked = timeoutSpy.mock.calls[0]?.[0] as number;
+        expect(asked).toBeGreaterThan(2_000);
+        expect(asked).toBeLessThanOrEqual(3_000);
       } finally {
         timeoutSpy.mockRestore();
         fetchMock.mockRestore();
