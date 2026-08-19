@@ -147,6 +147,12 @@ const HttpRequestArgsSchema = z.object({
  * Checked against resolved addresses rather than the literal, because the
  * interesting targets are names — `hindsight`, `localhost` — not dotted
  * quads. A name that resolves to anything private is refused.
+ *
+ * The check is not atomic with the connection: `fetch` resolves the name
+ * again, so a server answering public first and private second defeats
+ * this. Closing that needs a dispatcher that resolves, checks and
+ * connects as one step; tracked in todo.md, since it turns on adding
+ * undici as a runtime dependency.
  */
 function parseIpv6(input: string): Uint8Array | null {
   let addr = input.split("%")[0] ?? ""; // drop any zone id
