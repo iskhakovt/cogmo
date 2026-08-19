@@ -71,12 +71,6 @@ export interface DefaultCtxHandlerOptions {
    * the same reason `now` is pluggable.
    */
   resolveHost?: (hostname: string) => Promise<Array<{ address: string; family: number }>>;
-  /**
-   * When the task's wall clock started, so `http.request` can size its
-   * deadline against what is left rather than the whole budget. Defaults
-   * to construction time, which is immediately before dispatch.
-   */
-  startedAtMs?: number;
 }
 
 /**
@@ -317,7 +311,6 @@ export class DefaultCtxHandler implements CtxHandler {
   #recordContextCall: DefaultCtxHandlerOptions["recordContextCall"];
   #now: () => string;
   #resolveHost: NonNullable<DefaultCtxHandlerOptions["resolveHost"]>;
-  #startedAtMs: number;
   #declaredSecrets: ReadonlySet<string>;
 
   constructor(opts: DefaultCtxHandlerOptions) {
@@ -332,7 +325,6 @@ export class DefaultCtxHandler implements CtxHandler {
     this.#recordContextCall = opts.recordContextCall;
     this.#now = opts.now ?? (() => new Date().toISOString());
     this.#resolveHost = opts.resolveHost ?? ((hostname) => lookup(hostname, { all: true }));
-    this.#startedAtMs = opts.startedAtMs ?? Date.now();
     this.#declaredSecrets = new Set(
       opts.manifest.secrets.map((s) => (typeof s === "string" ? s : s.name)),
     );
@@ -544,11 +536,16 @@ export class DefaultCtxHandler implements CtxHandler {
    */
   #httpTimeoutMs(requested: number | undefined): number {
     const wallClockMs = (this.#manifest.resources?.wall_clock_s ?? DEFAULT_WALL_CLOCK_S) * 1000;
-    // What is left of the budget, not the whole of it: a skill that spent
-    // most of its wall clock before calling would otherwise get a deadline
-    // longer than the task itself has to live.
-    const remainingMs = wallClockMs - (Date.now() - this.#startedAtMs);
-    const ceiling = Math.max(1_000, remainingMs - HTTP_TIMEOUT_WALL_CLOCK_MARGIN_MS);
+    // Sized against the whole budget rather than what is left of it. The
+    // accurate elapsed figure needs the moment the task reached a runtime,
+    // and the only timestamps available here precede a tier-2 pool
+    // acquisition that can itself consume most of the budget — counting
+    // from one of those makes every request on a cold pool believe it has
+    // nothing left. Erring long instead means a request begun late can be
+    // killed with the worker rather than returning a timeout, which is
+    // what any long operation does today; erring short would break the
+    // common case outright. Tracked in todo.md.
+    const ceiling = Math.max(1, wallClockMs - HTTP_TIMEOUT_WALL_CLOCK_MARGIN_MS);
     return Math.min(requested ?? DEFAULT_HTTP_TIMEOUT_MS, ceiling);
   }
 
@@ -602,6 +599,7 @@ export class DefaultCtxHandler implements CtxHandler {
     // the fetch would let a slow resolver add unbounded time in front of
     // it, so a caller asking for 5s could wait far longer.
     const timeoutBudgetMs = this.#httpTimeoutMs(timeoutMs);
+    const budgetStartedMs = Date.now();
 
     try {
       // `URL.hostname` keeps the brackets on an IPv6 literal; no resolver
@@ -624,8 +622,12 @@ export class DefaultCtxHandler implements CtxHandler {
     } catch (e) {
       if (e instanceof CtxError) throw e;
       const message = e instanceof Error ? e.message : String(e);
-      await this.#audit("http.request", target, false, "network_error");
-      throw new CtxError("network_error", `http.request could not resolve ${target}: ${message}`);
+      // A resolver deadline is a timeout like any other — classifying it
+      // as a transport failure would tell a caller not to retry something
+      // that is worth retrying.
+      const kind = e instanceof Error && e.name === "TimeoutError" ? "timeout" : "network_error";
+      await this.#audit("http.request", target, false, kind);
+      throw new CtxError(kind, `http.request could not resolve ${target}: ${message}`);
     }
 
     let response: Response;
@@ -640,7 +642,9 @@ export class DefaultCtxHandler implements CtxHandler {
         // the skill, which reaches the next hop with another call that
         // gets checked like any other.
         redirect: "manual",
-        signal: AbortSignal.timeout(timeoutBudgetMs),
+        // What survived resolution. Reusing the whole budget here would
+        // let a call asking for 10s run for nearly 20.
+        signal: AbortSignal.timeout(Math.max(1, timeoutBudgetMs - (Date.now() - budgetStartedMs))),
       });
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);

@@ -232,7 +232,20 @@ async def _read_stdin_lines(bridge: _Bridge, stdin: BinaryIO, stderr: TextIO) ->
     protocol = asyncio.StreamReaderProtocol(reader)
     await loop.connect_read_pipe(lambda: protocol, stdin)
     while True:
-        line = await reader.readline()
+        try:
+            line = await reader.readline()
+        except Exception as exc:  # noqa: BLE001 - see below
+            # A frame past `_MAX_FRAME_BYTES` makes `readline` raise, and
+            # letting that escape kills this task silently: nothing calls
+            # `fail_pending`, so an awaiting `ctx.*` call never returns and
+            # the skill hangs until the supervisor's wall clock kills it.
+            # Surfacing it as a failed call turns a hang into an error the
+            # skill can catch. The read stream is unusable afterwards —
+            # the oversized frame is still buffered — so this returns
+            # rather than trying to resynchronise.
+            stderr.write(f"stdin read failed: {exc}\n")
+            bridge.fail_pending(RuntimeError(f"host frame unreadable: {exc}"))
+            return
         if not line:
             # EOF — host closed stdin. Reject any pending ctx calls so user
             # code unblocks and the task can shut down.

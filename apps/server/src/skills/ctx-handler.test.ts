@@ -305,6 +305,11 @@ describe("DefaultCtxHandler", () => {
           }),
         ).rejects.toThrow(/timed out/);
         expect(fetchMock).not.toHaveBeenCalled();
+        // A resolver deadline is a timeout, not a transport failure —
+        // one is worth retrying and the other usually is not.
+        expect(d.recordContextCall).toHaveBeenCalledWith(
+          expect.objectContaining({ ok: false, error: "timeout" }),
+        );
       } finally {
         fetchMock.mockRestore();
       }
@@ -362,34 +367,6 @@ describe("DefaultCtxHandler", () => {
         });
         // 20s wall clock minus the 5s margin, not the 60s asked for.
         expect(timeoutSpy).toHaveBeenCalledWith(15_000);
-      } finally {
-        timeoutSpy.mockRestore();
-        fetchMock.mockRestore();
-      }
-    });
-
-    it("sizes the deadline from what is left of the wall clock, not all of it", async () => {
-      // 20s budget, 12s already spent: 8s remain, less the 5s margin.
-      const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
-      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse("{}"));
-      try {
-        const h = new DefaultCtxHandler({
-          manifest: manifest("resources:\n  wall_clock_s: 20"),
-          runId: "run-1",
-          user: { id: "user-1", timezone: "UTC" },
-          memoryBankId: "bank-1",
-          ...deps(),
-          runInTx: fakeRunInTx,
-          resolveHost: async () => PUBLIC_ADDRESS,
-          startedAtMs: Date.now() - 12_000,
-        });
-        await h.handle({
-          method: "http.request",
-          args: { method: "GET", url: "https://api.example.com/x", timeoutMs: 60_000 },
-        });
-        const asked = timeoutSpy.mock.calls[0]?.[0] as number;
-        expect(asked).toBeGreaterThan(2_000);
-        expect(asked).toBeLessThanOrEqual(3_000);
       } finally {
         timeoutSpy.mockRestore();
         fetchMock.mockRestore();
