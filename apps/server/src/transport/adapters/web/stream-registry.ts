@@ -25,7 +25,15 @@ export interface SseFrame {
 
 /** A live SSE connection for one browser tab. Owned by the route; the registry only references it. */
 export interface SseConnection {
-  send(frame: SseFrame): void;
+  /**
+   * Write one frame. Returns whether it actually reached the socket —
+   * `false` when the underlying response is already gone. Registration
+   * outlives the socket by a tick (the route deregisters from the response's
+   * async `close` event), so "a connection is registered" is not the same
+   * claim as "the frame was delivered", and callers that dedup on delivery
+   * need the stronger one.
+   */
+  send(frame: SseFrame): boolean;
 }
 
 /**
@@ -51,12 +59,15 @@ export class WebStreamRegistry {
     };
   }
 
-  /** Send a frame to the tab's live connection. Returns false when no tab is connected. */
+  /**
+   * Send a frame to the tab's live connection. Returns whether it was
+   * written — false when no tab is registered, and equally false when the
+   * registered connection's socket is already gone.
+   */
   send(platformAddress: string, frame: SseFrame): boolean {
     const conn = this.#connections.get(platformAddress);
     if (!conn) return false;
-    conn.send(frame);
-    return true;
+    return conn.send(frame);
   }
 
   /** Number of live connections — for diagnostics and tests. */

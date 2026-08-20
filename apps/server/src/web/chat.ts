@@ -66,7 +66,12 @@ function sseConnection(res: ServerResponse): SseConnection {
     send(frame) {
       // `destroyed` is the precise "socket gone" signal — `writableEnded` only
       // flips on our own `end()`, which never happens for a long-lived stream.
-      if (!res.destroyed && !res.writableEnded) res.write(serializeFrame(frame));
+      // Reported back to the caller: this connection stays registered until
+      // the response's `close` handler runs a tick later, so a dropped frame
+      // here is invisible to the registry's "is anyone registered" check.
+      if (res.destroyed || res.writableEnded) return false;
+      res.write(serializeFrame(frame));
+      return true;
     },
   };
 }

@@ -9,10 +9,22 @@ function setup() {
   /** Connect a tab and return the list its frames land in. */
   const connect = (address: string): SseFrame[] => {
     const frames: SseFrame[] = [];
-    registry.register(address, { send: (f) => frames.push(f) });
+    registry.register(address, {
+      send: (f) => {
+        frames.push(f);
+        return true;
+      },
+    });
     return frames;
   };
-  return { registry, adapter, connect };
+  /**
+   * Register a connection whose socket is already gone — the window between
+   * a destroyed response and the route's async `close` deregistration.
+   */
+  const connectDead = (address: string): void => {
+    registry.register(address, { send: () => false });
+  };
+  return { registry, adapter, connect, connectDead };
 }
 
 describe("WebUiAdapter", () => {
@@ -90,6 +102,26 @@ describe("WebUiAdapter", () => {
     expect(frames).toEqual([{ event: "turn-end", data: "{}" }]);
 
     // Delivered once — the next phantom finish is suppressed.
+    await (await adapter.openStream("tab-1", "run-1")).finish();
+    expect(frames).toHaveLength(1);
+  });
+
+  it("retries turn-end when the registered connection's socket is already gone", async () => {
+    // A destroyed response stays registered until its async `close` handler
+    // runs, so "someone is registered" does not mean "the frame landed".
+    // The dedup key must follow the actual write, or a tab that reconnects
+    // during the run's trailing boundaries never gets its lifecycle frame.
+    const { adapter, connect, connectDead } = setup();
+    connectDead("tab-1");
+
+    await (await adapter.openStream("tab-1", "run-1")).finish();
+
+    // The tab reconnects (its dead connection is replaced) — a later
+    // boundary finish must still deliver.
+    const frames = connect("tab-1");
+    await (await adapter.openStream("tab-1", "run-1")).finish();
+    expect(frames).toEqual([{ event: "turn-end", data: "{}" }]);
+
     await (await adapter.openStream("tab-1", "run-1")).finish();
     expect(frames).toHaveLength(1);
   });
