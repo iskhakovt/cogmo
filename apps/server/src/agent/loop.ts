@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { SpanStatusCode, trace } from "@opentelemetry/api";
 import type { Logger } from "pino";
 import * as R from "remeda";
@@ -264,6 +265,32 @@ interface ToolStepKey {
   position: number;
 }
 
+/**
+ * Short stable digest of a tool call's identity — name plus arguments.
+ *
+ * Object keys are sorted before serialization so a provider that emits the
+ * same arguments in a different order still produces the same digest; a
+ * false mismatch would mint a duplicate side effect, which is the outcome
+ * the idempotency key exists to prevent.
+ */
+function digestCall(name: string, input: unknown): string {
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>)
+          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+          .map(([k, v]) => [k, canonical(v)]),
+      );
+    }
+    return value;
+  };
+  return createHash("sha256")
+    .update(`${name}\u0000${JSON.stringify(canonical(input)) ?? "null"}`)
+    .digest("hex")
+    .slice(0, 16);
+}
+
 interface PlannedCall {
   block: ToolUseBlock;
   spec: ToolSpec | null;
@@ -508,13 +535,31 @@ async function runOne(
         // design/crash-recovery.md → Per-tool durability.
         // Idempotency key from the same SDK-local coordinates as the step
         // id, prefixed with the turn token so two turns in one conversation
-        // don't collide at position 0. Undefined when the caller supplied
-        // no turn token (unit tests, loops outside Inngest), in which case
-        // no tool gets retry-dedup and none should assume it.
+        // don't collide at position 0, and suffixed with a digest of the
+        // call itself.
+        //
+        // The digest is what makes the key identify a *request* rather than
+        // a slot. Within one run the durable `llm-iter<N>` cache pins the
+        // tool_use blocks, so the coordinates alone would do — but a
+        // re-delivery starts a fresh run with an empty step cache, the model
+        // re-decides, and a different call can land at the same
+        // (turn, iteration, position). Without the digest the unique
+        // constraint would read that distinct request as already-submitted
+        // and hand back the earlier task. Keys are canonicalised so an
+        // argument reordering between runs still matches.
+        //
+        // Undefined when the caller supplied no turn token (unit tests,
+        // loops outside Inngest): no tool gets retry-dedup, and none should
+        // assume it.
         const callCtx: ToolCallContext | undefined =
           turnKey === undefined
             ? undefined
-            : { idempotencyKey: `${turnKey}:i${stepKey.iteration}:p${stepKey.position}` };
+            : {
+                idempotencyKey: `${turnKey}:i${stepKey.iteration}:p${stepKey.position}:${digestCall(
+                  block.name,
+                  block.input,
+                )}`,
+              };
         const runHandler = (): Promise<string> =>
           spec.handler(block.input as Record<string, unknown>, service, callCtx);
         const out =

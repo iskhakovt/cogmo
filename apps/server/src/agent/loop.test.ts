@@ -1106,8 +1106,55 @@ describe("tool durability (stepRun)", () => {
       turnKey: "inbound-42",
     });
 
-    // Turn token + iteration + position — the step id's coordinates.
-    expect(seen).toEqual(["inbound-42:i1:p0", "inbound-42:i1:p1"]);
+    // Turn token + iteration + position — the step id's coordinates — plus a
+    // digest of the call itself, so two calls in the same slot across
+    // different runs don't collide.
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toMatch(/^inbound-42:i1:p0:[0-9a-f]{16}$/);
+    expect(seen[1]).toMatch(/^inbound-42:i1:p1:[0-9a-f]{16}$/);
+  });
+
+  it("keys the same call identically and a different call differently", async () => {
+    // Two runs of the same turn: within one run the memoized `llm-iter<N>`
+    // pins the tool_use blocks, but a re-delivery re-decides with an empty
+    // step cache. The digest is what stops a *different* request landing in
+    // the same (turn, iteration, position) slot from being read as a retry
+    // of the earlier one.
+    const runWith = async (input: Record<string, unknown>): Promise<string | undefined> => {
+      let key: string | undefined;
+      const tools = new ToolRegistry();
+      tools.register({
+        name: "paid",
+        description: "expensive",
+        inputSchema: { type: "object" },
+        durable: true,
+        handler: async (_input, _service, ctx) => {
+          key = ctx?.idempotencyKey;
+          return "ok";
+        },
+      });
+      await testRunAgentLoop({
+        provider: mockProvider([toolUseResponse("paid", "toolu_X", input), textResponse("done")]),
+        messages: [{ role: "user", content: "go" }],
+        tools,
+        turnKey: "inbound-42",
+      });
+      return key;
+    };
+
+    const a = await runWith({ goal: "refactor A", repo: "cogmo" });
+    const b = await runWith({ goal: "refactor A", repo: "cogmo" });
+    // Same request, re-decided identically — one logical submission.
+    expect(a).toBe(b);
+
+    // Argument order must not matter: a false mismatch would mint a
+    // duplicate side effect, the exact outcome the key prevents.
+    const reordered = await runWith({ repo: "cogmo", goal: "refactor A" });
+    expect(reordered).toBe(a);
+
+    // A genuinely different request in the same slot is a different key.
+    const c = await runWith({ goal: "refactor B", repo: "cogmo" });
+    expect(c).not.toBe(a);
   });
 
   it("omits the call context when the caller supplies no turn key", async () => {

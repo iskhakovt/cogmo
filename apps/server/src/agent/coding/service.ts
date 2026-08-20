@@ -2,7 +2,7 @@ import type { Inngest } from "inngest";
 import type { Transactor } from "../../db/index.js";
 import { codingTaskStart } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
-import type { CodingStore } from "./store/index.js";
+import type { CodingStore, CodingTaskStatus } from "./store/index.js";
 
 const log = logger.child({ component: "coding.service" });
 
@@ -41,6 +41,14 @@ export interface DelegateInput {
 
 export type DelegateResult =
   | { taskId: string; status: "queued" }
+  /**
+   * A prior attempt at this exact submission already inserted the task —
+   * same idempotency key. `priorStatus` is where that task has got to, which
+   * the caller needs: a `queued` row has just been re-driven, a started one
+   * is already running, and a terminal one will never run again. Reporting
+   * all three as `queued` would tell the model a failed task is under way.
+   */
+  | { taskId: string; status: "recovered"; priorStatus: CodingTaskStatus }
   | { taskId: null; status: "rejected"; reason: string };
 
 /**
@@ -145,19 +153,34 @@ export function createCodingService(
           : { kind: "recovered" as const, task: insert.row };
       });
       if (admit.kind === "recovered") {
-        // A retry of a submission that already took. Fall through to the emit
-        // rather than returning here: the prior attempt may have died between
-        // the row committing and its `inngest.send`, and a recovery that
-        // skipped the emit would leave the task in `queued` forever with no
-        // orchestrator run — trading a duplicate for a permanent stall. The
-        // re-send is safe because it is absorbed twice over: the
-        // `task-start-<taskId>` id dedups it at the bus, and past that
-        // window the plan orchestrator's `queued -> planning` transition
-        // returns `skipped` for a task already under way.
+        const prior = admit.task;
         log.info(
-          { taskId: admit.task.id, idempotencyKey: input.idempotencyKey },
+          { taskId: prior.id, priorStatus: prior.status, idempotencyKey: input.idempotencyKey },
           "coding task submission recovered — prior attempt already inserted it",
         );
+        if (prior.status !== "queued") {
+          // The orchestrator already claimed this task (or it is terminal).
+          // Re-emitting could only race a live run, and the `queued ->
+          // planning` transition would skip it anyway. Report the real
+          // status so a task that will never run isn't announced as pending.
+          return { taskId: prior.id, status: "recovered", priorStatus: prior.status };
+        }
+        // Still `queued`: the prior attempt died between the row committing
+        // and its `inngest.send`, so nothing is driving this task. Re-emit —
+        // skipping it here would trade a duplicate for a permanent stall.
+        // The re-send is absorbed twice over: `task-start-<taskId>` dedups at
+        // the bus, and past that window the `queued -> planning` transition
+        // returns `skipped` for a task already under way.
+        //
+        // A send failure here deliberately does NOT mark the row failed (see
+        // the emit block below): the row stays recoverable for the next
+        // attempt, which is the whole point of having reached this branch.
+        await deps.inngest.send({
+          name: codingTaskStart.name,
+          data: { taskId: prior.id },
+          id: `task-start-${prior.id}`,
+        });
+        return { taskId: prior.id, status: "recovered", priorStatus: prior.status };
       }
       if (admit.kind === "rejected") {
         return {
@@ -180,6 +203,14 @@ export function createCodingService(
       // Mark it failed before propagating so the row is in a terminal
       // state and the slot frees up. The original send error is
       // re-thrown so the caller knows the submission didn't take.
+      //
+      // Reached only for a freshly admitted task — a task with no
+      // orchestrator run behind it. The recovery branch above returns
+      // before here precisely so this cleanup can stay unconditional: a
+      // recovered row may be mid-flight (`planning`, `executing`) or
+      // already `pr_open`, and `updateTaskStatus` is an unguarded
+      // `UPDATE ... WHERE id`, so running it there would fail a live
+      // orchestration or corrupt a finished one.
       try {
         await deps.inngest.send({
           name: codingTaskStart.name,

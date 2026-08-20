@@ -78,9 +78,12 @@ export interface StatefulCodingStore {
 }
 
 /**
- * `CodingStore` whose task-row reads reflect its own writes. Covers the
- * lifecycle methods the three orchestrators touch; every other method stays
- * the `mock<CodingStore>()` auto-mock.
+ * `CodingStore` whose task-row reads reflect its own writes — every
+ * lifecycle method the three orchestrators call, not just the ones a
+ * current assertion happens to read. A write the fake silently drops leaves
+ * `current()` reporting a stale null, so a future test asserting on that
+ * field would pass against an orchestrator that never wrote it. Everything
+ * outside the task lifecycle stays the `mock<CodingStore>()` auto-mock.
  */
 export function statefulCodingStore(
   initialTask: CodingTaskRow,
@@ -95,6 +98,7 @@ export function statefulCodingStore(
       ...task,
       status: params.status,
       ...(params.failureReason !== undefined && { failureReason: params.failureReason }),
+      ...(params.planApprovedAt !== undefined && { planApprovedAt: params.planApprovedAt }),
     };
   });
   store.transitionTaskStatus.mockImplementation(async (_tx, _id, from, to) => {
@@ -114,9 +118,23 @@ export function statefulCodingStore(
   store.setTaskPrMetadata.mockImplementation(async (_tx, _id, metadata) => {
     task = { ...task, prMetadata: metadata };
   });
-  store.setTaskContainerId.mockImplementation(async () => {});
-  store.setTaskResourceUsage.mockImplementation(async () => {});
-  store.setTaskSandboxDeletedAt.mockImplementation(async () => {});
+  store.setTaskContainerId.mockImplementation(async (_tx, _id, containerId) => {
+    task = { ...task, containerId };
+  });
+  store.setTaskResourceUsage.mockImplementation(async (_tx, _id, usage) => {
+    // The real store merges into the existing blob rather than replacing it.
+    task = { ...task, resourceUsage: { ...(task.resourceUsage ?? {}), ...usage } };
+  });
+  store.setTaskSandboxDeletedAt.mockImplementation(async (_tx, _id, deletedAt) => {
+    // Real store gates on a sandbox block already existing; mirroring that
+    // keeps "deleted_at without created_at" unrepresentable here too.
+    const sandbox = task.resourceUsage?.sandbox;
+    if (!sandbox) return;
+    task = {
+      ...task,
+      resourceUsage: { ...task.resourceUsage, sandbox: { ...sandbox, deleted_at: deletedAt } },
+    };
+  });
   store.getCodingAutoapproveModeForTask.mockResolvedValue("off");
   return { store, current: () => task };
 }

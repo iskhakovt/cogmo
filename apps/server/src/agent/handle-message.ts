@@ -1047,11 +1047,16 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           // across every re-invocation, every function retry, and any
           // re-delivery of this turn — which is exactly the scope a
           // side-effectful tool should dedup over. A run id would restart
-          // on a re-delivery and let the same request submit twice. Null
-          // for synthetic turns with no inbound row; those tools then run
-          // without retry-dedup, as they do today.
-          ...(event.data.triggerInboundId !== null && {
-            turnKey: event.data.triggerInboundId,
+          // on a re-delivery and let the same request submit twice.
+          //
+          // `flush` resume-policy turns carry a null trigger (the flush emit
+          // has no single triggering message) while still processing real
+          // input, so they fall back to the batch's high-water mark, which
+          // comes off the memoized `load-inbound` step and is equally stable.
+          // Both are empty only for a turn with no inbound rows at all, and
+          // that turn has nothing for a tool to duplicate.
+          ...((event.data.triggerInboundId ?? maxInboundId) !== "" && {
+            turnKey: event.data.triggerInboundId ?? maxInboundId,
           }),
           turnLogger,
         });

@@ -229,6 +229,7 @@ describe("createCodingService", () => {
     });
 
     expect(retry.taskId).toBe(first.taskId);
+    expect(retry.status).toBe("recovered");
     const tasks = await tx((trx) => store.listTasksForConversation(trx, conversationId));
     expect(tasks).toHaveLength(1);
     // The recovery re-emits rather than returning early. The prior attempt
@@ -311,8 +312,88 @@ describe("createCodingService", () => {
       idempotencyKey: "delegate_coding:inbound-2:i1:p0",
     });
 
-    expect(retry.status).toBe("queued");
+    expect(retry.status).toBe("recovered");
     expect(retry.taskId).toBe(first.taskId);
+  });
+
+  it("reports a recovered task's real status instead of claiming it is queued", async () => {
+    // A terminal task recovered by its key will never run again. Announcing
+    // it as freshly `queued` would have the model tell the user work is
+    // under way that is not.
+    await seedRepo("cogmo", 2);
+    const inngest = fakeInngest();
+    const service = createCodingService(
+      {
+        runInTx: tx,
+        codingStore: store,
+        inngest: inngest as unknown as Inngest,
+        sandboxAvailable: true,
+      },
+      conversationId,
+    );
+
+    const key = "delegate_coding:inbound-6:i1:p0";
+    const first = await service.delegate({
+      goal: "x".repeat(20),
+      repoName: "cogmo",
+      idempotencyKey: key,
+    });
+    const taskId = expectDefined(first.taskId, "first taskId");
+    await tx((trx) =>
+      store.updateTaskStatus(trx, { id: taskId, status: "failed", failureReason: "boom" }),
+    );
+    inngest.send.mockClear();
+
+    const retry = await service.delegate({
+      goal: "x".repeat(20),
+      repoName: "cogmo",
+      idempotencyKey: key,
+    });
+
+    expect(retry).toEqual({ taskId, status: "recovered", priorStatus: "failed" });
+    // Not re-emitted — the plan orchestrator only claims `queued` rows, so a
+    // re-send could only be skipped, and the row is terminal regardless.
+    expect(inngest.send).not.toHaveBeenCalled();
+  });
+
+  it("does not mark an in-flight recovered task failed when its re-emit throws", async () => {
+    // The send-failure cleanup is an unguarded `UPDATE ... WHERE id`. Running
+    // it on a recovered row would fail a live orchestration or corrupt a
+    // finished one, so it must belong to freshly admitted tasks only.
+    await seedRepo("cogmo", 2);
+    const inngest = { send: vi.fn().mockResolvedValue(undefined) };
+    const service = createCodingService(
+      {
+        runInTx: tx,
+        codingStore: store,
+        inngest: inngest as unknown as Inngest,
+        sandboxAvailable: true,
+      },
+      conversationId,
+    );
+
+    const key = "delegate_coding:inbound-7:i1:p0";
+    const first = await service.delegate({
+      goal: "x".repeat(20),
+      repoName: "cogmo",
+      idempotencyKey: key,
+    });
+    const taskId = expectDefined(first.taskId, "first taskId");
+    // The orchestrator picked it up and is mid-plan.
+    await tx((trx) => store.updateTaskStatus(trx, { id: taskId, status: "planning" }));
+    inngest.send.mockRejectedValue(new Error("bus down"));
+
+    const retry = await service.delegate({
+      goal: "x".repeat(20),
+      repoName: "cogmo",
+      idempotencyKey: key,
+    });
+
+    // A started task is reported, never re-emitted — so the failing send is
+    // never even reached, and the live run keeps its status.
+    expect(retry).toEqual({ taskId, status: "recovered", priorStatus: "planning" });
+    const reloaded = await tx((trx) => store.getTask(trx, taskId));
+    expect(reloaded?.status).toBe("planning");
   });
 
   it("keeps distinct submissions distinct — different keys, different tasks", async () => {
