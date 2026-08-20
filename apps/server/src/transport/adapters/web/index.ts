@@ -24,18 +24,18 @@ class WebStreamHandle implements StreamHandle {
   readonly #registry: WebStreamRegistry;
   readonly #platformAddress: string;
   readonly #onClose: () => void;
-  readonly #onFirstFinish: () => boolean;
+  readonly #finishTurn: () => void;
 
   constructor(
     registry: WebStreamRegistry,
     platformAddress: string,
     onClose: () => void,
-    onFirstFinish: () => boolean,
+    finishTurn: () => void,
   ) {
     this.#registry = registry;
     this.#platformAddress = platformAddress;
     this.#onClose = onClose;
-    this.#onFirstFinish = onFirstFinish;
+    this.#finishTurn = finishTurn;
   }
 
   async push(event: StreamEvent): Promise<void> {
@@ -43,21 +43,12 @@ class WebStreamHandle implements StreamHandle {
   }
 
   async finish(): Promise<void> {
-    // Inngest re-invokes handle-message at every step boundary and each
-    // invocation calls `delivery.finish()`, so after the first real finish
-    // frees the dedup slot, every later boundary opens a fresh handle and
-    // finishes it again. Only the run's FIRST finish per tab emits the
-    // turn-end lifecycle frame — a later one is a replay phantom by
-    // definition, and its frame would reset the tab's running indicator
-    // mid-queue (the client nulls its streaming id on every turn-end).
-    // Keying on first-finish rather than on whether this handle pushed
-    // keeps the frame for a turn that legitimately streamed nothing, and
-    // for a cross-process retry whose pushes all replayed from the step
-    // cache. `abort` stays unconditional: a failure must always reset the
-    // tab's UI.
-    if (this.#onFirstFinish()) {
-      this.#registry.send(this.#platformAddress, { event: TURN_END, data: "{}" });
-    }
+    // Turn-end emission is owned by the adapter (see #finishTurn): exactly
+    // one DELIVERED turn-end frame per (runId, tab), with the boundary
+    // re-invocations' phantom finishes doubling as retries while the tab
+    // is disconnected. `abort` stays unconditional: a failure must always
+    // reset the tab's UI.
+    this.#finishTurn();
     this.#onClose();
   }
 
@@ -88,11 +79,16 @@ class WebUiAdapter implements StreamingAdapter {
   readonly #registry: WebStreamRegistry;
   readonly #active = new Map<string, StreamHandle>();
   /**
-   * `(runId, address)` keys whose turn-end frame has been sent. Consulted by
-   * the handle's first-finish gate. Insertion-ordered with a hard cap so the
-   * per-turn entries can't grow without bound in a long-lived process —
-   * evicting the oldest is safe because a key only matters while its run's
-   * trailing boundary invocations are still finishing, i.e. seconds.
+   * `(runId, address)` keys whose turn-end frame has been DELIVERED to a live
+   * connection. Consulted by #finishTurn. Insertion-ordered with a hard cap
+   * so the per-turn entries can't grow without bound in a long-lived process.
+   * Evicting the oldest is safe at this scale: a key only matters while its
+   * run's trailing boundary invocations are still finishing (seconds), so a
+   * wrongly-evicted key needs 1,000+ other runs to finish inside that window
+   * — orders of magnitude beyond single-user reality — and the blast radius
+   * is one duplicate turn-end frame, the same cosmetic frame the client
+   * received on every boundary before emission was deduped at all. There is
+   * no in-process replay-completion signal to tie retention to instead.
    */
   readonly #finished = new Set<string>();
 
@@ -108,21 +104,36 @@ class WebUiAdapter implements StreamingAdapter {
       this.#registry,
       platformAddress,
       () => this.#active.delete(key),
-      () => this.#markFinished(key),
+      () => this.#finishTurn(key, platformAddress),
     );
     this.#active.set(key, handle);
     return handle;
   }
 
-  /** Record the run's finish for this tab; true only the first time. */
-  #markFinished(key: string): boolean {
-    if (this.#finished.has(key)) return false;
+  /**
+   * Emit the run's turn-end frame to this tab, exactly once — measured by
+   * DELIVERY, not by attempts. Inngest re-invokes handle-message at every
+   * step boundary and each invocation calls `delivery.finish()`, so after
+   * the first finish frees the dedup slot every later boundary opens a
+   * fresh handle and finishes it again. A frame from those phantom
+   * finishes would reset the tab's running indicator mid-queue (the client
+   * nulls its streaming id on every turn-end) — but while the tab is
+   * DISCONNECTED they are the retry budget: the key is recorded only after
+   * `registry.send` reports a live connection took the frame, so a tab
+   * that reconnects during the run's trailing boundaries still gets its
+   * lifecycle frame instead of a permanently stuck indicator. A tab that
+   * never reconnects records nothing (there is no one to unstick, and the
+   * SPA rebuilds state from history on its next load).
+   */
+  #finishTurn(key: string, platformAddress: string): void {
+    if (this.#finished.has(key)) return;
+    const delivered = this.#registry.send(platformAddress, { event: TURN_END, data: "{}" });
+    if (!delivered) return;
     this.#finished.add(key);
     if (this.#finished.size > FINISHED_RUNS_CAP) {
       const oldest = this.#finished.values().next().value;
       if (oldest !== undefined) this.#finished.delete(oldest);
     }
-    return true;
   }
 
   async stop(): Promise<void> {

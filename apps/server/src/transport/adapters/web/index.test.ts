@@ -73,6 +73,27 @@ describe("WebUiAdapter", () => {
     });
   });
 
+  it("retries turn-end on later finishes when the tab was disconnected for the first", async () => {
+    // The dedup key is recorded only after a DELIVERED send. A tab that is
+    // away when the real finish fires must not lose its lifecycle frame
+    // forever — the boundary re-invocations' phantom finishes serve as the
+    // retry budget until a live connection takes the frame, after which
+    // further finishes are suppressed as usual.
+    const { adapter, connect } = setup();
+
+    // First finish: nobody connected — nothing delivered, nothing recorded.
+    await (await adapter.openStream("tab-1", "run-1")).finish();
+
+    // Tab reconnects during the run's trailing boundaries.
+    const frames = connect("tab-1");
+    await (await adapter.openStream("tab-1", "run-1")).finish();
+    expect(frames).toEqual([{ event: "turn-end", data: "{}" }]);
+
+    // Delivered once — the next phantom finish is suppressed.
+    await (await adapter.openStream("tab-1", "run-1")).finish();
+    expect(frames).toHaveLength(1);
+  });
+
   it("emits turn-end for a run whose handle streamed nothing", async () => {
     // The first-finish gate keys on the run, not on whether this handle
     // pushed: a turn that legitimately delivered no stream events (or a
