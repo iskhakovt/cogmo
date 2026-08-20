@@ -156,9 +156,9 @@ The map lives in memory in the long-running Inngest connect-mode worker, so it s
 If the entire Node process dies (OOM, supervisor kill) and a different worker picks up the retry:
 
 - Durable steps still replay correctly — they live in Inngest's state store, not in process memory.
-- The streaming dedup map is lost. The new worker creates a fresh Telegram message; the old one is orphaned (its message ID is unrecoverable). The user sees a duplicate.
+- The streaming dedup map is lost, and with it everything the old handle held: buffered sub-500ms-throttle deltas that were never flushed to Telegram, and the knowledge of what was already delivered. The new worker's fresh handle receives only what the REMAINING live steps push — completed iterations replay from cache without re-emitting. The visible symptom is a truncated turn on the user's screen with a complete transcript in the DB: mid-turn, the tail of the reply streams into a new message while the head stays in the orphaned one; after all steps completed, nothing more is pushed at all. Pushes that happened inside now-cached step bodies (the `degraded-reply` retraction/apology, `emit-tool-results-iter<N>` cards) are likewise not re-issued — a retraction that was buffered but unflushed when the process died is permanently lost.
 
-This is documented as accepted in `transport/streaming.md`. Cross-process stream resumption would require persisting `(runId → platform message ID)` to the DB before any tokens are sent. Out of scope for v0; revisit if process deaths become common.
+This is documented as accepted (same trigger class as before durable iterations — process death — with the symptom flipped from "duplicate message" to "missing tail"). Cross-process stream resumption would require persisting `(runId → platform message ID)` plus a delivered-cursor to the DB before tokens are sent. Out of scope for v0; revisit if process deaths become common. Note the corollary: the streaming UX now assumes a single long-lived worker per run — routine multi-invocation turns spread pushes across invocations, and only the in-process handle stitches them into one message.
 
 ## Test coverage `[confirmed]`
 
@@ -192,6 +192,8 @@ For `ContentBlock[]`, the type contract guarantees JSON safety:
 - `ToolResultBlock.content` is `string`.
 
 If a future change introduces a binary field anywhere in `ContentBlock`, it must be encoded to a string before reaching any `step.run` return path. The type system will not catch this — `unknown` accepts anything — so the rule lives here.
+
+**Size.** `llm-iter<N>` is the only step whose output scales with model verbosity: one iteration's content — including full thinking blocks and their signatures — is bounded by `maxOutputTokens` (roughly a few hundred KB of JSON at a 64k-token cap, typically far less). That sits comfortably under Inngest's per-step output limits, but run state is cumulative across iterations and the executor re-ships memoized state on every invocation, so a long thinking-heavy turn pays O(boundaries × state) transfer to the local server. Acceptable at personal scale; if step-state size ever becomes a problem, note that stripping thinking blocks from the outcome is not an option (they must be replayed to the API on subsequent iterations) — the real levers are a lower thinking budget or a tighter iteration cap.
 
 ## Adding a new durable boundary `[confirmed]`
 

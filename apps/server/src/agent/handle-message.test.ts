@@ -3362,4 +3362,79 @@ describe("createHandleMessage", () => {
       expect.objectContaining({ name: "response/ready" }),
     );
   });
+
+  // Retry policy of the injected durable-step wrapper, per step kind. The
+  // wrapper is captured through the loop's `stepRun` param and probed
+  // directly: mockStep's passthrough runs the wrapper body, so the
+  // rejection type IS what Inngest would see.
+  describe("stepRun wrapper retry policy", () => {
+    async function captureStepRun(): Promise<<T>(id: string, fn: () => Promise<T>) => Promise<T>> {
+      let captured: (<T>(id: string, fn: () => Promise<T>) => Promise<T>) | undefined;
+      const deps = mockDeps({
+        runStreamingAgentLoop: vi.fn().mockImplementation(async (params) => {
+          captured = params.stepRun;
+          return {
+            text: "ok",
+            messages: [],
+            newMessages: [{ role: "assistant", content: [{ type: "text", text: "ok" }] }],
+            usage: { inputTokens: 1, outputTokens: 1 },
+            model: "mock-model",
+            iterations: 1,
+            streamed: { text: "", toolUseIds: [] },
+          };
+        }),
+      });
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+      return expectDefined(captured, "captured stepRun");
+    }
+
+    it("gives tool-iter steps no retries — every handler error becomes NonRetriableError", async () => {
+      // A failed tool handler is the model's feedback channel: the agent
+      // loop converts the rejection to an is_error tool_result and the
+      // model re-decides — THAT is the retry mechanism. Blind step retries
+      // would re-run the identical failure (Zod validation, edit_file
+      // mismatch, provider outage) through the backoff schedule before
+      // the model ever sees the error.
+      const stepRun = await captureStepRun();
+      const boom = new Error("old_string not found in notes/meeting.md");
+      let caught: unknown;
+      try {
+        await stepRun("tool-iter1-0", () => Promise.reject(boom));
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(NonRetriableError);
+      expect((caught as NonRetriableError).cause).toBe(boom);
+    });
+
+    it("keeps step retries for transient errors on llm-iter steps", async () => {
+      const stepRun = await captureStepRun();
+      const transient = new Error("socket hang up");
+      let caught: unknown;
+      try {
+        await stepRun("llm-iter1", () => Promise.reject(transient));
+      } catch (err) {
+        caught = err;
+      }
+      // Rethrown untranslated — Inngest's per-step retries own it.
+      expect(caught).toBe(transient);
+    });
+
+    it("translates deterministic provider 4xx on llm-iter steps to NonRetriableError", async () => {
+      const stepRun = await captureStepRun();
+      const badRequest = Object.assign(new Error("Bad Request"), { status: 400 });
+      let caught: unknown;
+      try {
+        await stepRun("llm-iter1", () => Promise.reject(badRequest));
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(NonRetriableError);
+      expect((caught as NonRetriableError).cause).toBe(badRequest);
+    });
+  });
 });

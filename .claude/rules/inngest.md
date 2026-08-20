@@ -28,7 +28,10 @@ contract**. Design every function for the per-boundary model.
   `Could not find step … timed out` — surfacing as a stalled turn plus a
   silent cooldown, not an obvious error. Conditional steps must gate on
   durable state (a step result or the event payload), never on `new Date()`
-  comparisons, non-durable DB reads, or LLM output.
+  comparisons or LLM output. A gate on a non-durable DB read is acceptable
+  only as a documented residual when the flip window is a concurrent
+  operator action (see `summarize-prefix` / `auto-recall` in
+  design/crash-recovery.md) — never for state the run itself mutates.
 - **Never gate the bare body on state your own steps mutate.** A guard like
   `if (task.status !== "pending") return "skipped"` above a step that sets
   `status = "running"` self-destructs on the next boundary: the re-invoked
@@ -53,7 +56,13 @@ contract**. Design every function for the per-boundary model.
   step re-throws its cached error in the body (`StepError`); a broad
   `try/catch` that converts it to a normal control-flow value silently
   swallows the failure. Catch inside the step body, or catch specific
-  expected error types.
+  expected error types. Carve-out: a broad catch is correct when the
+  conversion target IS the designed failure channel for everything the
+  step can throw — `compactMessages` degrading a failed summarization to
+  truncation, the agent loop converting a failed tool step to an
+  `is_error` tool_result. Rethrowing a `StepError` out of the function is
+  also special: never wrap it — the engine's non-retriable detection
+  needs its identity and serialized name intact.
 - **`ToolSpec.durable` policy: side-effectful or billable ⇒ durable.** A
   non-durable tool handler re-executes once per remaining step boundary of
   the turn — a DB-writing tool inserts duplicates, a paid API re-bills.

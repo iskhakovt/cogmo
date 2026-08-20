@@ -18,7 +18,7 @@ import {
   ProviderConfigError,
   type ResolvedLlm,
 } from "../llm/resolver.js";
-import type { ContentBlock, Message, StreamEvent } from "../llm/types.js";
+import type { ContentBlock, CountTokensParams, Message, StreamEvent } from "../llm/types.js";
 import { logger } from "../logger.js";
 import type { McpRegistry } from "../mcp/registry.js";
 import type { MemoryProvider } from "../memory/provider.js";
@@ -791,25 +791,44 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         pipelinesService,
       );
 
-      // Durable boundary wrapper shared by auto-recall below and the agent
-      // loop's in-loop steps (`llm-iter<N>`, `tool-iter<N>-<P>`). It injects
-      // Inngest's `step.run` without making the loop depend on Inngest, and
-      // translates deterministic provider failures (4xx that aren't
-      // 408/425/429) into NonRetriableError INSIDE the step body so Inngest
-      // doesn't burn per-step retries on a call that fails identically every
-      // time. The cast erases Inngest's `Jsonify<T>` return type: every
-      // payload passed through this wrapper is JSON-safe by construction
-      // (see design/crash-recovery.md → State serialization), so `Jsonify<T>`
-      // and `T` coincide at runtime but not for the compiler.
+      // Single conversion point for "this failure gains nothing from a
+      // blind retry" — shared by the durable-step wrapper below and the
+      // outer catch around the streaming section.
+      const asNonRetriable = (err: unknown): NonRetriableError => {
+        const message = err instanceof Error ? err.message : String(err);
+        return new NonRetriableError(message, { cause: err });
+      };
+
+      // Durable boundary wrapper shared by the in-turn steps (`llm-iter<N>`,
+      // `tool-iter<N>-<P>`, `auto-recall`, `summarize-prefix`,
+      // `load-last-tokens`, `count-tokens-<n>`, `emit-tool-results-iter<N>`).
+      // It injects Inngest's `step.run` without making the loop depend on
+      // Inngest, and applies the retry policy per step kind INSIDE the body:
+      //
+      // - `tool-iter*` gets NO step retries at all. A failed tool handler is
+      //   the model's feedback channel — the agent loop is the retry
+      //   mechanism (the model re-decides with the `is_error` tool_result in
+      //   context), and blind re-runs of the same handler only delay that
+      //   feedback by the backoff schedule. This covers deterministic
+      //   failures (Zod validation, edit_file mismatches) and outages alike:
+      //   a fresh tool_use from the model creates a fresh step, which IS the
+      //   retry.
+      // - Everything else keeps Inngest's per-step retries for transient
+      //   failures, with deterministic provider errors (4xx that aren't
+      //   408/425/429) translated to NonRetriableError so Inngest fails fast
+      //   instead of burning attempts on a call that fails identically.
+      //
+      // The cast erases Inngest's `Jsonify<T>` return type: every payload
+      // passed through this wrapper is JSON-safe by construction (see
+      // design/crash-recovery.md → State serialization), so `Jsonify<T>` and
+      // `T` coincide at runtime but not for the compiler.
       const stepRun = <T>(id: string, fn: () => Promise<T>): Promise<T> =>
         step.run(id, async () => {
           try {
             return await fn();
           } catch (err) {
-            if (!isRetriableProviderError(err)) {
-              const message = err instanceof Error ? err.message : String(err);
-              throw new NonRetriableError(message, { cause: err });
-            }
+            if (id.startsWith("tool-iter")) throw asNonRetriable(err);
+            if (!isRetriableProviderError(err)) throw asNonRetriable(err);
             throw err;
           }
         }) as Promise<T>;
@@ -866,16 +885,16 @@ export function createHandleMessage(deps: HandleMessageDeps) {
 
       // ──── Context window compaction ────
       //
-      // compactMessages runs on every invocation — token counting and the
-      // threshold decisions are cheap relative to what a step would cost
-      // to freeze, and `historyMessages` carries resolved image payloads
-      // that must not land in Inngest step state. Its inputs are stable
-      // across invocations (durable history + durable auto-recall + the
-      // deterministic image resolution above), so every replay reaches the
-      // same verdicts. Only the expensive summarization LLM call is
-      // wrapped in a `summarize-prefix` step (inside the `summarize`
-      // callback) so it's exactly-once across replays; the cached value is
-      // just the summary string. See design/crash-recovery.md.
+      // compactMessages orchestration runs on every invocation — the
+      // threshold decisions are pure functions, and `historyMessages`
+      // carries resolved image payloads that must not land in Inngest step
+      // state, so the pipeline itself can't be a step. Its expensive or
+      // decision-bearing inputs ARE steps: history, auto-recall,
+      // `load-last-tokens` (freezes the skip decision persist-new-messages
+      // would otherwise flip mid-run), each `count-tokens-<n>` round-trip,
+      // and the `summarize-prefix` LLM call. Every replay therefore walks
+      // the same decision tree over cached values. See
+      // design/crash-recovery.md.
 
       const model = snapshot.model;
 
@@ -898,7 +917,15 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const budget = computeBudget(limits);
       const summarizationModel = snapshot.summarizationModel;
 
-      const lastTokens = await deps.runInTx((tx) => agentStore.getLastTokens(tx, conversationId));
+      // Durable: persist-new-messages rewrites the row this reads MID-RUN,
+      // so a bare-body read would flip `skipBudgetStrategies` between
+      // invocations — and with it the compaction decisions and the
+      // existence of the conditional `summarize-prefix` / `count-tokens-*`
+      // steps. Freezing the read pins the whole compaction decision tree
+      // for the run.
+      const lastTokens = await stepRun("load-last-tokens", () =>
+        deps.runInTx((tx) => agentStore.getLastTokens(tx, conversationId)),
+      );
       const skipBudgetStrategies = shouldSkipCounting(
         lastTokens?.inputTokens ?? null,
         lastTokens?.outputTokens ?? null,
@@ -919,7 +946,21 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         historyMessages,
         toolDefs,
         {
-          countTokens: (params) => provider.countTokens({ ...params, model }),
+          // Each count is a full-payload POST (system + history + tool
+          // schemas + resolved images) — durable so re-invocations replay
+          // the integer instead of re-shipping megabytes per boundary. The
+          // call sequence is deterministic per run: compaction's inputs are
+          // frozen (durable history, auto-recall, load-last-tokens), so the
+          // counter-keyed ids line up on every replay.
+          countTokens: (() => {
+            let countCall = 0;
+            return (params: CountTokensParams) => {
+              countCall += 1;
+              return stepRun(`count-tokens-${countCall}`, () =>
+                provider.countTokens({ ...params, model }),
+              );
+            };
+          })(),
           budget,
           summarize: async (system, msgs) => {
             // Resolve the summarization provider lazily — only when
@@ -1080,9 +1121,14 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         // ~6 minutes on retries before the onFailure handler can notify the
         // user. See design/crash-recovery.md.
         if (!isRetriableProviderError(err)) {
-          const message = err instanceof Error ? err.message : String(err);
-          throw new NonRetriableError(message, { cause: err });
+          throw asNonRetriable(err);
         }
+        // Never wrap the error on this rethrow path. A permanently-failed
+        // step surfaces here as Inngest's StepError (no `status`, so it
+        // classifies as "retriable" above), and the engine's non-retriable
+        // detection relies on the rethrown object keeping its identity and
+        // serialized name — wrapping it would silently re-enable function
+        // retries that instantly replay the memoized rejection.
         throw err;
       }
 

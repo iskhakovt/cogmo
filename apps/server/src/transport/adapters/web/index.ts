@@ -22,6 +22,7 @@ class WebStreamHandle implements StreamHandle {
   readonly #registry: WebStreamRegistry;
   readonly #platformAddress: string;
   readonly #onClose: () => void;
+  #pushed = false;
 
   constructor(registry: WebStreamRegistry, platformAddress: string, onClose: () => void) {
     this.#registry = registry;
@@ -30,11 +31,23 @@ class WebStreamHandle implements StreamHandle {
   }
 
   async push(event: StreamEvent): Promise<void> {
+    this.#pushed = true;
     this.#registry.send(this.#platformAddress, { data: JSON.stringify(event) });
   }
 
   async finish(): Promise<void> {
-    this.#registry.send(this.#platformAddress, { event: TURN_END, data: "{}" });
+    // Inngest re-invokes handle-message at every step boundary and each
+    // invocation calls `delivery.finish()`, so after the first real finish
+    // frees the dedup slot, every later boundary opens a fresh handle that
+    // pushes nothing and finishes it. A turn-end frame from those phantom
+    // handles would reset the tab's running indicator mid-queue (the
+    // client nulls its streaming id on every turn-end), so a handle that
+    // never pushed closes silently — the same empty-buffer guard the
+    // Telegram handle applies. `abort` stays unconditional: a failure
+    // before the first delta still needs to reset the tab's UI.
+    if (this.#pushed) {
+      this.#registry.send(this.#platformAddress, { event: TURN_END, data: "{}" });
+    }
     this.#onClose();
   }
 
