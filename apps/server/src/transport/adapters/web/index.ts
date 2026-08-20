@@ -5,6 +5,8 @@ import type { WebStreamRegistry } from "./stream-registry.js";
 
 /** SSE `event:` names for the non-data lifecycle frames (stream events use the default event). */
 const TURN_END = "turn-end";
+/** Bound on remembered finished (runId, address) keys — see WebUiAdapter.#finished. */
+const FINISHED_RUNS_CAP = 1_000;
 const TURN_ABORT = "turn-abort";
 
 /**
@@ -22,30 +24,38 @@ class WebStreamHandle implements StreamHandle {
   readonly #registry: WebStreamRegistry;
   readonly #platformAddress: string;
   readonly #onClose: () => void;
-  #pushed = false;
+  readonly #onFirstFinish: () => boolean;
 
-  constructor(registry: WebStreamRegistry, platformAddress: string, onClose: () => void) {
+  constructor(
+    registry: WebStreamRegistry,
+    platformAddress: string,
+    onClose: () => void,
+    onFirstFinish: () => boolean,
+  ) {
     this.#registry = registry;
     this.#platformAddress = platformAddress;
     this.#onClose = onClose;
+    this.#onFirstFinish = onFirstFinish;
   }
 
   async push(event: StreamEvent): Promise<void> {
-    this.#pushed = true;
     this.#registry.send(this.#platformAddress, { data: JSON.stringify(event) });
   }
 
   async finish(): Promise<void> {
     // Inngest re-invokes handle-message at every step boundary and each
     // invocation calls `delivery.finish()`, so after the first real finish
-    // frees the dedup slot, every later boundary opens a fresh handle that
-    // pushes nothing and finishes it. A turn-end frame from those phantom
-    // handles would reset the tab's running indicator mid-queue (the
-    // client nulls its streaming id on every turn-end), so a handle that
-    // never pushed closes silently — the same empty-buffer guard the
-    // Telegram handle applies. `abort` stays unconditional: a failure
-    // before the first delta still needs to reset the tab's UI.
-    if (this.#pushed) {
+    // frees the dedup slot, every later boundary opens a fresh handle and
+    // finishes it again. Only the run's FIRST finish per tab emits the
+    // turn-end lifecycle frame — a later one is a replay phantom by
+    // definition, and its frame would reset the tab's running indicator
+    // mid-queue (the client nulls its streaming id on every turn-end).
+    // Keying on first-finish rather than on whether this handle pushed
+    // keeps the frame for a turn that legitimately streamed nothing, and
+    // for a cross-process retry whose pushes all replayed from the step
+    // cache. `abort` stays unconditional: a failure must always reset the
+    // tab's UI.
+    if (this.#onFirstFinish()) {
       this.#registry.send(this.#platformAddress, { event: TURN_END, data: "{}" });
     }
     this.#onClose();
@@ -77,6 +87,14 @@ class WebStreamHandle implements StreamHandle {
 class WebUiAdapter implements StreamingAdapter {
   readonly #registry: WebStreamRegistry;
   readonly #active = new Map<string, StreamHandle>();
+  /**
+   * `(runId, address)` keys whose turn-end frame has been sent. Consulted by
+   * the handle's first-finish gate. Insertion-ordered with a hard cap so the
+   * per-turn entries can't grow without bound in a long-lived process —
+   * evicting the oldest is safe because a key only matters while its run's
+   * trailing boundary invocations are still finishing, i.e. seconds.
+   */
+  readonly #finished = new Set<string>();
 
   constructor(registry: WebStreamRegistry) {
     this.#registry = registry;
@@ -86,15 +104,30 @@ class WebUiAdapter implements StreamingAdapter {
     const key = `${runId}:${platformAddress}`;
     const existing = this.#active.get(key);
     if (existing) return existing;
-    const handle = new WebStreamHandle(this.#registry, platformAddress, () =>
-      this.#active.delete(key),
+    const handle = new WebStreamHandle(
+      this.#registry,
+      platformAddress,
+      () => this.#active.delete(key),
+      () => this.#markFinished(key),
     );
     this.#active.set(key, handle);
     return handle;
   }
 
+  /** Record the run's finish for this tab; true only the first time. */
+  #markFinished(key: string): boolean {
+    if (this.#finished.has(key)) return false;
+    this.#finished.add(key);
+    if (this.#finished.size > FINISHED_RUNS_CAP) {
+      const oldest = this.#finished.values().next().value;
+      if (oldest !== undefined) this.#finished.delete(oldest);
+    }
+    return true;
+  }
+
   async stop(): Promise<void> {
     this.#active.clear();
+    this.#finished.clear();
   }
 }
 

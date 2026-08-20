@@ -42,19 +42,18 @@ describe("WebUiAdapter", () => {
     ]);
   });
 
-  it("suppresses turn-end from a handle that never pushed", async () => {
+  it("emits turn-end exactly once per run per tab across boundary re-finishes", async () => {
     // Inngest re-invokes handle-message at every step boundary and each
     // invocation calls delivery.finish(). After the first real finish
-    // releases the dedup slot, every later boundary opens a fresh handle,
-    // pushes nothing, and finishes it — a turn-end frame from those
-    // phantom handles would reset the tab's running indicator for the
-    // NEXT queued turn. Only a handle that actually delivered something
-    // closes the turn; abort stays unconditional (a failure before the
-    // first delta still must reset the tab's UI).
+    // releases the dedup slot, every later boundary opens a fresh handle
+    // and finishes it again — a turn-end frame from those phantom
+    // finishes would reset the tab's running indicator for the NEXT
+    // queued turn. The first finish per (runId, tab) closes the turn;
+    // the rest are silent. Abort stays unconditional (a failure must
+    // always reset the tab's UI).
     const { adapter, connect } = setup();
     const frames = connect("tab-1");
 
-    // The invocation that streams: pushes, then finishes → one turn-end.
     const live = await adapter.openStream("tab-1", "run-1");
     await live.push({ type: "text_delta", text: "hello" });
     await live.finish();
@@ -72,6 +71,24 @@ describe("WebUiAdapter", () => {
       event: "turn-abort",
       data: JSON.stringify({ message: "boom" }),
     });
+  });
+
+  it("emits turn-end for a run whose handle streamed nothing", async () => {
+    // The first-finish gate keys on the run, not on whether this handle
+    // pushed: a turn that legitimately delivered no stream events (or a
+    // cross-process retry whose pushes all replayed from the step cache)
+    // still needs its lifecycle frame, or the tab's running indicator
+    // stays stuck.
+    const { adapter, connect } = setup();
+    const frames = connect("tab-1");
+
+    await (await adapter.openStream("tab-1", "run-1")).finish();
+
+    expect(frames).toEqual([{ event: "turn-end", data: "{}" }]);
+
+    // A different run on the same tab gets its own frame.
+    await (await adapter.openStream("tab-1", "run-2")).finish();
+    expect(frames.filter((f) => f.event === "turn-end")).toHaveLength(2);
   });
 
   it("dedups by (runId, address) — a retry reopen returns the same handle", async () => {
