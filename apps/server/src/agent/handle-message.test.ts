@@ -82,6 +82,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
       usage: { inputTokens: 10, outputTokens: 5 },
       model: "mock-model",
       iterations: 1,
+      streamed: { text: "", toolUseIds: [] },
     }),
     userTimezone: "UTC",
     ...overrides,
@@ -331,6 +332,7 @@ describe("createHandleMessage", () => {
           usage: { inputTokens: 10, outputTokens: 5 },
           model: "mock",
           iterations: 1,
+          streamed: { text: "", toolUseIds: [] },
         };
       }),
     });
@@ -759,6 +761,7 @@ describe("createHandleMessage", () => {
         usage: { inputTokens: 10, outputTokens: 5 },
         model: "mock-model",
         iterations: 1,
+        streamed: { text: "", toolUseIds: [] },
       }),
     });
 
@@ -827,6 +830,7 @@ describe("createHandleMessage", () => {
         usage: { inputTokens: 1, outputTokens: 1 },
         model: "mock-model",
         iterations: 1,
+        streamed: { text: "", toolUseIds: [] },
       }),
     });
 
@@ -2780,6 +2784,7 @@ describe("createHandleMessage", () => {
         usage: { inputTokens: 10, outputTokens: 5 },
         model: "mock-model",
         iterations: 2,
+        streamed: { text: "", toolUseIds: [] },
         degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
       }),
     });
@@ -2859,6 +2864,7 @@ describe("createHandleMessage", () => {
           usage: { inputTokens: 10, outputTokens: 5 },
           model: "mock-model",
           iterations: 1,
+          streamed: { text: "The three key points are: (1) the dep", toolUseIds: [] },
           degraded: {
             reason: "request exceeded the model's context window",
             subtype: "context_overflow",
@@ -2951,6 +2957,10 @@ describe("createHandleMessage", () => {
           usage: { inputTokens: 10, outputTokens: 5 },
           model: "mock-model",
           iterations: 2,
+          streamed: {
+            text: "Let me check the weather. It's 18C in Paris and",
+            toolUseIds: ["t1", "t2"],
+          },
           degraded: {
             reason: "request exceeded the model's context window",
             subtype: "context_overflow",
@@ -3027,6 +3037,7 @@ describe("createHandleMessage", () => {
           usage: { inputTokens: 10, outputTokens: 5 },
           model: "mock-model",
           iterations: 20,
+          streamed: { text: "Still working on it.", toolUseIds: ["t1"] },
           degraded: { reason: "iteration_cap", subtype: null },
         };
       }),
@@ -3073,6 +3084,7 @@ describe("createHandleMessage", () => {
         usage: { inputTokens: 10, outputTokens: 5 },
         model: "mock-model",
         iterations: 2,
+        streamed: { text: "", toolUseIds: [] },
         degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
       }),
     });
@@ -3113,6 +3125,7 @@ describe("createHandleMessage", () => {
         usage: { inputTokens: 10, outputTokens: 5 },
         model: "mock-model",
         iterations: 1,
+        streamed: { text: "", toolUseIds: [] },
         degraded: { reason: "model refused the request", subtype: "refusal" },
       }),
     });
@@ -3142,6 +3155,7 @@ describe("createHandleMessage", () => {
         usage: { inputTokens: 10, outputTokens: 5 },
         model: "mock-model",
         iterations: 2,
+        streamed: { text: "", toolUseIds: [] },
         degraded: {
           reason: "streamed tool-call arguments could not be parsed",
           subtype: "stream_truncation",
@@ -3184,6 +3198,7 @@ describe("createHandleMessage", () => {
         usage: { inputTokens: 10, outputTokens: 5 },
         model: "mock-model",
         iterations: 3,
+        streamed: { text: "", toolUseIds: [] },
         degraded: { reason: "stuck_loop", subtype: "stuck_loop" },
       }),
     });
@@ -3219,6 +3234,7 @@ describe("createHandleMessage", () => {
         usage: { inputTokens: 10, outputTokens: 5 },
         model: "mock-model",
         iterations: 9,
+        streamed: { text: "", toolUseIds: [] },
         degraded: { reason: "stuck_loop", subtype: "stuck_loop_cumulative" },
       }),
     });
@@ -3285,6 +3301,7 @@ describe("createHandleMessage", () => {
         usage: { inputTokens: 10, outputTokens: 5 },
         model: "mock-model",
         iterations: 3,
+        streamed: { text: "", toolUseIds: [] },
         degraded: { reason: "model returned an empty turn", subtype: "empty_end_turn" },
       }),
     });
@@ -3325,6 +3342,7 @@ describe("createHandleMessage", () => {
         usage: { inputTokens: 10, outputTokens: 5 },
         model: "mock-model",
         iterations: 1,
+        streamed: { text: "", toolUseIds: [] },
         degraded: { reason: "model refused the request", subtype: "refusal" },
       }),
     });

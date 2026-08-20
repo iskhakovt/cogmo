@@ -8,6 +8,10 @@ export const coreMemoryUpdate = defineTool({
     "and is always visible in your instructions. Use for important, evolving context: " +
     "user profile (name, role, preferences), active projects, recurring topics. " +
     "Blocks are identified by key. Overwrites the entire block content.",
+  // Durable: a DB upsert. The overwrite is idempotent, but exactly-once
+  // keeps replays from racing a concurrent same-key update from another
+  // turn with stale content.
+  durable: true,
   schema: z.object({
     key: z
       .string()

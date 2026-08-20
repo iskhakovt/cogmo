@@ -33,21 +33,24 @@ import { DEFAULT_INVOCATION_BUDGET, type ToolRegistry, type ToolSpec } from "./t
 const tracer = trace.getTracer("cogmo.agent");
 
 /**
- * Wraps a single tool-handler execution in a durable boundary (Inngest
- * `step.run`). When provided to the agent loop, tools with `spec.durable ===
- * true` run inside this wrapper, so their result is cached exactly-once across
- * retries. Handler errors propagate (Inngest per-step retries fire first,
- * then the error bubbles up).
+ * Wraps one durable unit of work in a boundary backed by Inngest `step.run`.
+ * The agent loop creates two kinds of steps through it: each streaming LLM
+ * iteration (`llm-iter<N>`, returning an {@link LlmIterationOutcome}) and each
+ * durable tool handler (`tool-iter<N>-<P>`, returning the handler's string
+ * output). Results are cached exactly-once across Inngest re-invocations of
+ * the surrounding function; body errors propagate (Inngest per-step retries
+ * fire first, then the error bubbles up — a cached rejection re-throws).
  *
  * Injected rather than depending on Inngest's `step` directly — keeps the
- * loop testable without an Inngest context. When undefined, all tools run
- * directly regardless of their `durable` flag.
+ * loop testable without an Inngest context. When undefined, all work runs
+ * directly and nothing is memoized.
  *
- * Narrowed to `Promise<string>` to match `ToolHandler` (the only caller) — this
- * also matches Inngest's `step.run<Promise<string>>` exactly, since
- * `Jsonify<string> === string`.
+ * Contract: the resolved value of `fn` must survive a JSON round-trip
+ * unchanged (Inngest stores step results as JSON). Both payload shapes the
+ * loop passes satisfy this by construction — see design/crash-recovery.md →
+ * State serialization.
  */
-export type StepRunner = (id: string, fn: () => Promise<string>) => Promise<string>;
+export type StepRunner = <T>(id: string, fn: () => Promise<T>) => Promise<T>;
 
 export interface AgentLoopParams {
   provider: LlmProvider;
@@ -67,9 +70,12 @@ export interface AgentLoopParams {
   maxTokens?: number;
   maxIterations?: number;
   /**
-   * Optional durability wrapper for tool handlers. See `StepRunner`.
-   * When provided, tools with `spec.durable === true` run inside the wrapper
-   * with step id `tool-<name>-<toolUseId>` (unique per LLM-issued tool call).
+   * Optional durability wrapper. See `StepRunner`. When provided, the
+   * streaming loop wraps each LLM iteration in a `llm-iter<N>` step, and
+   * both loops wrap tools with `spec.durable === true` in a
+   * `tool-iter<N>-<P>` step (`<N>` = iteration counter, `<P>` = position in
+   * the iteration's tool_use sub-list — both SDK-local, stable across
+   * Inngest replays).
    */
   stepRun?: StepRunner;
   /**
@@ -95,6 +101,20 @@ export interface AgentLoopResult {
   model: string;
   /** Number of LLM calls made */
   iterations: number;
+  /**
+   * What the delivery layer was shown across the whole turn: every
+   * `text_delta` concatenated and every `tool_start` id, in emission order —
+   * including output from iterations whose content the loop dropped
+   * (degrades) and from iterations replayed out of the Inngest step cache
+   * (whose live emission happened in an earlier invocation of the same run).
+   * The orchestrator diffs this against `newMessages` to retract
+   * un-persisted output from the user's screen on a degraded turn. Derived
+   * from the durable iteration outcomes, so it is identical on every Inngest
+   * re-invocation — an orchestrator-side ledger of live emissions would come
+   * back empty on a replay. Always empty for the non-streaming loop (nothing
+   * was shown to anyone mid-turn).
+   */
+  streamed: { text: string; toolUseIds: ReadonlyArray<string> };
   /**
    * Class C / D degraded off-ramp. When present, the loop exited because a
    * repair budget exhausted, a subtype was immediate-degrade, or a
@@ -188,14 +208,17 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     // tool_result" — content presence is the only safe gate.
     const hasToolUse = response.content.some((b) => b.type === "tool_use");
     if (!hasToolUse) {
-      return buildResult(messages, initialLength, [], totalUsage, finalModel, iterations);
+      return buildResult(messages, initialLength, [], totalUsage, finalModel, iterations, {
+        text: "",
+        toolUseIds: [],
+      });
     }
 
     // Volume-cluster intercept (Class D) — same shape as the streaming
     // variant. See computeVolumeClusterInterceptions and
     // design/agent-resilience.md → Volume cluster trigger.
     const interceptions = computeVolumeClusterInterceptions(messages, initialLength, tools, log);
-    const toolResults = await executeToolCalls(
+    const executed = await executeToolCalls(
       response.content,
       tools,
       service,
@@ -203,13 +226,17 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
       iterations,
       interceptions,
     );
+    const toolResults = executed.map((e) => e.block);
     messages.push({ role: "user", content: toolResults });
 
     log.debug({ iteration: iterations, toolCalls: toolResults.length }, "tool round complete");
   }
 
   log.warn({ maxIterations }, "agent loop hit iteration limit");
-  return buildResult(messages, initialLength, [], totalUsage, finalModel, iterations);
+  return buildResult(messages, initialLength, [], totalUsage, finalModel, iterations, {
+    text: "",
+    toolUseIds: [],
+  });
 }
 
 // Stable identifier for one `tool_use` invocation: `iteration` is the
@@ -343,6 +370,22 @@ function isSafeCall(entry: PlannedCall): boolean {
   return entry.spec === null || entry.spec.parallelSafe === true;
 }
 
+/**
+ * One executed (or short-circuited) tool call.
+ *
+ * `ranLive` is false only when a durable tool's step was replayed from the
+ * Inngest cache — its handler (and any user-visible side effect its
+ * `tool_result` event drives, e.g. a `generate_image` photo card) already
+ * happened in an earlier invocation of the same run. The streaming loop uses
+ * it to skip re-emitting `tool_result` events for cached calls; everything
+ * synthesized in this invocation (non-durable runs, unknown tools,
+ * volume-cluster interceptions, validation errors) is `ranLive: true`.
+ */
+interface ExecutedToolCall {
+  block: ContentBlock;
+  ranLive: boolean;
+}
+
 async function executeToolCalls(
   content: ContentBlock[],
   tools: ToolRegistry,
@@ -350,7 +393,7 @@ async function executeToolCalls(
   stepRun: StepRunner | undefined,
   iteration: number,
   interceptions?: ReadonlyMap<string, ContentBlock>,
-): Promise<ContentBlock[]> {
+): Promise<ExecutedToolCall[]> {
   const toolUseBlocks = content.filter((b): b is ToolUseBlock => b.type === "tool_use");
   if (toolUseBlocks.length === 0) return [];
 
@@ -377,7 +420,7 @@ async function executeToolCalls(
     [] as PlannedCall[][],
   );
 
-  const results: ContentBlock[] = [];
+  const results: ExecutedToolCall[] = [];
   for (const group of groups) {
     const batch = await Promise.all(
       group.map(({ block, spec, stepKey }) =>
@@ -436,18 +479,21 @@ async function runOne(
   stepRun: StepRunner | undefined,
   stepKey: ToolStepKey,
   interceptions?: ReadonlyMap<string, ContentBlock>,
-): Promise<ContentBlock> {
+): Promise<ExecutedToolCall> {
   // Volume-cluster intercept short-circuits the handler — synthetic
   // tool_result already prepared by the caller, no span / step.run.
   const intercepted = interceptions?.get(block.id);
-  if (intercepted) return intercepted;
+  if (intercepted) return { block: intercepted, ranLive: true };
 
   if (!spec) {
     return {
-      type: "tool_result",
-      toolUseId: block.id,
-      content: `Error: unknown tool "${block.name}"`,
-      isError: true,
+      block: {
+        type: "tool_result",
+        toolUseId: block.id,
+        content: `Error: unknown tool "${block.name}"`,
+        isError: true,
+      },
+      ranLive: true,
     };
   }
 
@@ -455,19 +501,28 @@ async function runOne(
     "tool.execute",
     { attributes: { "cogmo.tool.name": block.name } },
     async (span) => {
+      // Set inside the durable body: stays false when Inngest replays the
+      // step from cache (the body never runs), which is exactly the signal
+      // `ExecutedToolCall.ranLive` reports.
+      let bodyRan = false;
       try {
         // Step id is SDK-local (iteration + filtered-tool-use position)
         // so the cache key is stable across Inngest replays even though
         // the provider's `tool_use_id` is not. Cached content may
         // semantically mismatch the current `tool_use` — see
         // design/crash-recovery.md → Per-tool durability.
-        const runHandler = (): Promise<string> =>
-          spec.handler(block.input as Record<string, unknown>, service);
+        const runHandler = (): Promise<string> => {
+          bodyRan = true;
+          return spec.handler(block.input as Record<string, unknown>, service);
+        };
         const out =
           spec.durable === true && stepRun
             ? await stepRun(`tool-iter${stepKey.iteration}-${stepKey.position}`, runHandler)
             : await runHandler();
-        return { type: "tool_result" as const, toolUseId: block.id, content: out };
+        return {
+          block: { type: "tool_result" as const, toolUseId: block.id, content: out },
+          ranLive: bodyRan,
+        };
       } catch (err) {
         // Also catches cached rejections from a durable `stepRun` — Inngest
         // replays a stored failure by re-throwing here. Converting to an
@@ -478,10 +533,13 @@ async function runOne(
         span.setStatus({ code: SpanStatusCode.ERROR, message });
         span.setAttribute("cogmo.tool.error", true);
         return {
-          type: "tool_result" as const,
-          toolUseId: block.id,
-          content: `Error: ${message}`,
-          isError: true,
+          block: {
+            type: "tool_result" as const,
+            toolUseId: block.id,
+            content: `Error: ${message}`,
+            isError: true,
+          },
+          ranLive: bodyRan,
         };
       } finally {
         span.end();
@@ -497,6 +555,7 @@ function buildResult(
   usage: { inputTokens: number; outputTokens: number },
   model: string,
   iterations: number,
+  streamed: EmittedLedger,
 ): AgentLoopResult {
   // Extract final text from the last assistant message
   const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
@@ -527,6 +586,7 @@ function buildResult(
     usage,
     model,
     iterations,
+    streamed: { text: streamed.text, toolUseIds: [...streamed.toolUseIds] },
   };
 }
 
@@ -548,6 +608,7 @@ function buildDegradedResult(
   iterations: number,
   reason: string,
   subtype: DegradeSubtype | null,
+  streamed: EmittedLedger,
 ): AgentLoopResult {
   agentIterations.record(iterations, { model });
 
@@ -563,6 +624,7 @@ function buildDegradedResult(
     usage,
     model,
     iterations,
+    streamed: { text: streamed.text, toolUseIds: [...streamed.toolUseIds] },
     degraded: { reason, subtype },
   };
 }
@@ -596,6 +658,123 @@ export interface StreamingAgentLoopParams extends AgentLoopParams {
   onEvent: (event: StreamEvent) => Promise<void>;
 }
 
+/** What one live execution forwarded to `onEvent`, in order. */
+interface EmittedLedger {
+  /** Every `text_delta` forwarded, concatenated. */
+  text: string;
+  /** Every `tool_start` id forwarded. */
+  toolUseIds: string[];
+}
+
+/**
+ * JSON-serializable outcome of one streaming LLM iteration — the return
+ * value of the `llm-iter<N>` durable step. It captures everything the rest
+ * of the loop needs so that a memoized replay reproduces the iteration
+ * bit-for-bit without calling the provider: the drained (possibly repaired)
+ * content, and the ledger of what the live execution emitted to the
+ * delivery layer (`emitted`), which rebuilds `AgentLoopResult.streamed`
+ * identically on every Inngest re-invocation.
+ */
+type LlmIterationOutcome =
+  | {
+      kind: "drained";
+      content: ContentBlock[];
+      stopReason: StopReason;
+      model: string;
+      usage: Usage;
+      /**
+       * Which repair budget this iteration consumed — non-null when the
+       * stream threw and the in-step non-streaming replay recovered it.
+       * The loop (not the step body) decrements the budget, so replayed
+       * invocations recompute identical budget state from the cache.
+       */
+      repaired: "stream_truncation" | null;
+      emitted: EmittedLedger;
+    }
+  | { kind: "degrade"; reason: string; subtype: DegradeSubtype; emitted: EmittedLedger };
+
+/**
+ * One LLM iteration: drain the stream and, on a stream error, run the
+ * Class C classifier and (budget permitting) the non-streaming replay —
+ * all inside the same durable boundary.
+ *
+ * The Class C path lives INSIDE this function on purpose. It executes as an
+ * Inngest `step.run` body: a `ProviderProtocolError` or `RefusalError` that
+ * escaped would fail the step, get blind-retried by Inngest (bypassing the
+ * repair budgets), and finally surface to the loop wrapped in Inngest's own
+ * step-failure error — `instanceof` classification outside the boundary
+ * would never see the original class. Returning the classification as data
+ * keeps the whole verdict replayable. Only Class A errors (network, 5xx —
+ * where a blind retry is the correct treatment) are allowed to throw.
+ *
+ * `budgets` is read, never written — see the decrement at the call site.
+ */
+async function runLlmIteration(
+  provider: LlmProvider,
+  chatParams: Parameters<LlmProvider["chat"]>[0],
+  onEvent: (event: StreamEvent) => Promise<void>,
+  budgets: Readonly<RepairBudgets>,
+  log: Logger,
+): Promise<LlmIterationOutcome> {
+  const emitted: EmittedLedger = { text: "", toolUseIds: [] };
+  const ledgered = async (event: StreamEvent): Promise<void> => {
+    if (event.type === "text_delta") emitted.text += event.text;
+    else if (event.type === "tool_start") emitted.toolUseIds.push(event.id);
+    await onEvent(event);
+  };
+  try {
+    const drained = await drainStream(provider, chatParams, ledgered);
+    return { kind: "drained", ...drained, repaired: null, emitted };
+  } catch (err) {
+    const outcome = classifyStreamError(err, budgets);
+    if (!outcome) throw err;
+    if (outcome.kind === "degrade") {
+      log.warn(
+        { event: "agent.degrade", reason: outcome.reason, subtype: outcome.subtype },
+        "agent loop degraded (stream error)",
+      );
+      return { kind: "degrade", reason: outcome.reason, subtype: outcome.subtype, emitted };
+    }
+    // repair: stream_replay — one non-streaming retry of this iteration.
+    // A Class A failure during the replay propagates as a step failure
+    // into Inngest's per-step retries; a Class C failure (provider
+    // protocol / refusal) maps to a degrade outcome with the matching
+    // subtype rather than bubbling out as an `errored` conversation. See
+    // design/agent-resilience.md → Per-subtype repair, stream-truncation
+    // row.
+    log.warn(
+      {
+        event: "agent.repair",
+        subtype: outcome.subtype,
+        instructions: { kind: outcome.instructions.kind },
+      },
+      "agent loop class C repair (stream replay)",
+    );
+    const replayResult = await applyStreamReplay(provider, chatParams, ledgered);
+    if (replayResult.kind === "degrade") {
+      log.warn(
+        { event: "agent.degrade", reason: replayResult.reason, subtype: replayResult.subtype },
+        "agent loop degraded (stream replay)",
+      );
+      return {
+        kind: "degrade",
+        reason: replayResult.reason,
+        subtype: replayResult.subtype,
+        emitted,
+      };
+    }
+    return {
+      kind: "drained",
+      content: replayResult.content,
+      stopReason: replayResult.stopReason,
+      model: replayResult.model,
+      usage: replayResult.usage,
+      repaired: "stream_truncation",
+      emitted,
+    };
+  }
+}
+
 /**
  * Streaming agent loop: same logic as runAgentLoop, but streams events
  * to the caller via onEvent as they arrive from the LLM.
@@ -604,11 +783,17 @@ export interface StreamingAgentLoopParams extends AgentLoopParams {
  * from the stream, executed, and emitted as tool_result events.
  * Loops until end_turn/max_tokens or iteration limit.
  *
- * In-loop Class C handling: after each iteration's stream drains (or
- * throws), the turn outcome is classified. Empty `end_turn` triggers a
- * single continuation-prompt retry; truncated tool-arg JSON
- * (`ProviderProtocolError`) triggers a single non-streaming replay;
- * refusal degrades immediately. See `repair.ts` and
+ * With `stepRun` provided, each iteration is a durable `llm-iter<N>`
+ * boundary (see `runLlmIteration`): the drain and the stream-error Class C
+ * path run inside the step body, and the loop's own control flow — budget
+ * decrements, post-stream classification, Class D counters, the emission
+ * ledger — is recomputed deterministically from the (possibly cached)
+ * outcomes on every invocation.
+ *
+ * In-loop Class C handling: stream errors are classified inside the
+ * iteration step (truncated tool-arg JSON → a single non-streaming replay;
+ * refusal → degrade). Empty `end_turn` is classified post-stream out here
+ * and triggers a single continuation-prompt retry. See `repair.ts` and
  * `design/agent-resilience.md` → Class C.
  */
 export async function runStreamingAgentLoop(
@@ -649,6 +834,9 @@ export async function runStreamingAgentLoop(
   let consecutiveFingerprint: string | null = null;
   let consecutiveCount = 0;
   const cumulativeCounts = new Map<string, number>();
+  // Turn-wide emission ledger, rebuilt every invocation from the durable
+  // iteration outcomes (cached or live) — see AgentLoopResult.streamed.
+  const streamed: EmittedLedger = { text: "", toolUseIds: [] };
   let iterations = 0;
   let finalModel = model;
 
@@ -665,78 +853,47 @@ export async function runStreamingAgentLoop(
       chatParams.tools = toolDefs;
     }
 
-    let iterationContent: ContentBlock[];
-    let iterationStopReason: StopReason;
-    try {
-      const drained = await drainStream(provider, chatParams, onEvent);
-      iterationContent = drained.content;
-      iterationStopReason = drained.stopReason;
-      finalModel = drained.model;
-      totalUsage.inputTokens += drained.usage.inputTokens;
-      totalUsage.outputTokens += drained.usage.outputTokens;
-    } catch (err) {
-      const outcome = classifyStreamError(err, budgets);
-      if (!outcome) throw err;
-      if (outcome.kind === "degrade") {
-        log.warn(
-          { event: "agent.degrade", reason: outcome.reason, subtype: outcome.subtype },
-          "agent loop degraded (stream error)",
-        );
-        return buildDegradedResult(
-          messages,
-          initialLength,
-          ephemeralIndices,
-          totalUsage,
-          finalModel,
-          iterations,
-          outcome.reason,
-          outcome.subtype,
-        );
-      }
-      // repair: stream_replay — one non-streaming retry of this iteration.
-      // Budget is consumed before the replay attempt, per design — a Class
-      // A failure during replay propagates to the orchestrator's outer
-      // Inngest retries; a Class C failure (Provider protocol /
-      // refusal) maps to a degrade with the matching subtype rather than
-      // bubbling out as an `errored` conversation. See
-      // design/agent-resilience.md → Per-subtype repair, stream-truncation
-      // row.
-      budgets.stream_truncation--;
-      log.warn(
-        {
-          event: "agent.repair",
-          subtype: outcome.subtype,
-          instructions: { kind: outcome.instructions.kind },
-        },
-        "agent loop class C repair (stream replay)",
+    // The whole iteration — stream drain plus the in-step Class C repair
+    // path — runs inside one durable `llm-iter<N>` boundary. On an Inngest
+    // re-invocation the cached outcome replays without calling the provider
+    // and without re-emitting stream events; only Class A errors escape the
+    // body and fail the step (Inngest's per-step retries own those). The
+    // step id derives from the SDK-local iteration counter, which replays
+    // deterministically because every input to the control flow below comes
+    // from cached outcomes.
+    const iterate = (): Promise<LlmIterationOutcome> =>
+      runLlmIteration(provider, chatParams, onEvent, budgets, log);
+    const iterOutcome = stepRun ? await stepRun(`llm-iter${iterations}`, iterate) : await iterate();
+
+    streamed.text += iterOutcome.emitted.text;
+    streamed.toolUseIds.push(...iterOutcome.emitted.toolUseIds);
+
+    if (iterOutcome.kind === "degrade") {
+      return buildDegradedResult(
+        messages,
+        initialLength,
+        ephemeralIndices,
+        totalUsage,
+        finalModel,
+        iterations,
+        iterOutcome.reason,
+        iterOutcome.subtype,
+        streamed,
       );
-      const replayResult = await applyStreamReplay(provider, chatParams, onEvent);
-      if (replayResult.kind === "degrade") {
-        log.warn(
-          {
-            event: "agent.degrade",
-            reason: replayResult.reason,
-            subtype: replayResult.subtype,
-          },
-          "agent loop degraded (stream replay)",
-        );
-        return buildDegradedResult(
-          messages,
-          initialLength,
-          ephemeralIndices,
-          totalUsage,
-          finalModel,
-          iterations,
-          replayResult.reason,
-          replayResult.subtype,
-        );
-      }
-      iterationContent = replayResult.content;
-      iterationStopReason = replayResult.stopReason;
-      finalModel = replayResult.model;
-      totalUsage.inputTokens += replayResult.usage.inputTokens;
-      totalUsage.outputTokens += replayResult.usage.outputTokens;
     }
+
+    // Budget decrement lives OUT here, driven by the cached outcome, so a
+    // replayed invocation recomputes the same budget state the live pass
+    // had — a decrement inside the step body would be lost on replay.
+    if (iterOutcome.repaired !== null) {
+      budgets[iterOutcome.repaired]--;
+    }
+
+    const iterationContent = iterOutcome.content;
+    const iterationStopReason = iterOutcome.stopReason;
+    finalModel = iterOutcome.model;
+    totalUsage.inputTokens += iterOutcome.usage.inputTokens;
+    totalUsage.outputTokens += iterOutcome.usage.outputTokens;
 
     // Append assistant response to messages
     messages.push({ role: "assistant", content: iterationContent });
@@ -765,6 +922,7 @@ export async function runStreamingAgentLoop(
         iterations,
         outcome.reason,
         outcome.subtype,
+        streamed,
       );
     }
     if (outcome.kind === "repair") {
@@ -802,6 +960,7 @@ export async function runStreamingAgentLoop(
         totalUsage,
         finalModel,
         iterations,
+        streamed,
       );
     }
 
@@ -820,7 +979,7 @@ export async function runStreamingAgentLoop(
     const interceptions = computeVolumeClusterInterceptions(messages, initialLength, tools, log);
 
     // Execute tool calls, emit results, append to messages
-    const toolResults = await executeToolCalls(
+    const executed = await executeToolCalls(
       iterationContent,
       tools,
       service,
@@ -829,8 +988,12 @@ export async function runStreamingAgentLoop(
       interceptions,
     );
 
-    for (const block of toolResults) {
-      if (block.type === "tool_result") {
+    for (const { block, ranLive } of executed) {
+      // A durable tool replayed from the Inngest step cache already emitted
+      // its tool_result event (and delivered any side effect it drives,
+      // e.g. a generate_image photo card) in the invocation where its body
+      // ran — re-emitting here would duplicate it on the user's screen.
+      if (block.type === "tool_result" && ranLive) {
         const toolUse = iterationContent.find(
           (b): b is ToolUseBlock => b.type === "tool_use" && b.id === block.toolUseId,
         );
@@ -844,6 +1007,7 @@ export async function runStreamingAgentLoop(
       }
     }
 
+    const toolResults = executed.map((e) => e.block);
     messages.push({ role: "user", content: toolResults });
 
     log.debug(
@@ -922,6 +1086,7 @@ export async function runStreamingAgentLoop(
         iterations,
         "stuck_loop",
         trip,
+        streamed,
       );
     }
   }
@@ -940,6 +1105,7 @@ export async function runStreamingAgentLoop(
     iterations,
     "iteration_cap",
     null,
+    streamed,
   );
 }
 

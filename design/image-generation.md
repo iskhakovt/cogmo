@@ -419,7 +419,7 @@ if (delivery.hasBatchTargets()) {
 }
 ```
 
-**Why step-wrap this one.** The streaming section of `handle-message` is explicitly non-durable (you can't stream out of `step.run`) — see [crash-recovery.md](crash-recovery.md). Batch delivery runs *after* the streaming section completes and *after* the assistant message is persisted, so it doesn't inherit the streaming constraint. Wrapping it in `step.run` gives us:
+**Why step-wrap this one.** Batch delivery runs *after* the streaming section completes and *after* the assistant message is persisted — a single self-contained side effect with a small JSON result, exactly what a step wants (see [crash-recovery.md](crash-recovery.md)). Wrapping it in `step.run` gives us:
 
 - **Exactly-once semantics** on Inngest retry — no double `sendMessage` / `sendPhoto` to batch adapters
 - **Observability** per delivery (timing, success/fail counts surface in the Inngest UI)

@@ -10,6 +10,12 @@ export const memoryRecall = defineTool({
     "Search long-term memory for facts, preferences, or context from past conversations. " +
     "Use at the start of conversations and when context would help. " +
     "Prefer this over asking the user something you might already know.",
+  // Durable: Hindsight recall embeds the query (a billable embedding
+  // round-trip) and runs a vector search. Inngest re-invokes the whole
+  // function at every step boundary, so a non-durable handler re-executes —
+  // and re-bills — once per boundary after it; caching also pins the
+  // persisted tool_result to the exact text the model saw.
+  durable: true,
   parallelSafe: true,
   sideEffectful: false,
   // Repeated recall on one turn usually means the model isn't finding what it
@@ -33,6 +39,11 @@ export const memoryRetain = defineTool({
     "Store an important fact, preference, or piece of information in long-term memory. " +
     "Use when the user tells you something worth remembering: preferences, decisions, commitments, " +
     "project context. Don't store trivial chat or information already saved in files.",
+  // Durable: stageRetain INSERTs a pending_memories row. Non-durable it
+  // re-inserts on every step boundary after the call — the Observer's
+  // downstream dedup absorbs the duplicates, but each one costs an LLM
+  // classification pass in the drain.
+  durable: true,
   schema: z.object({
     content: z.string().describe("The fact or information to remember"),
     context: z.string().optional().describe("Optional context about when/why this was learned"),

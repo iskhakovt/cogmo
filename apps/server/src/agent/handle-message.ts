@@ -150,7 +150,13 @@ async function resolveOrFail(
   }
 }
 
-/** What the streaming adapters were shown during one turn. */
+/**
+ * What the streaming adapters were shown during one turn. Sourced from
+ * `AgentLoopResult.streamed`, which the loop derives from its durable
+ * iteration outcomes — identical on every Inngest re-invocation, unlike a
+ * ledger of this invocation's live emissions (empty when the iterations
+ * replay from the step cache).
+ */
 interface StreamedOutput {
   /** Every `text_delta` forwarded this turn, concatenated in order. */
   text: string;
@@ -647,7 +653,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         });
       });
 
-      // ──── NON-DURABLE: resolve images + auto-recall + stream ────
+      // ──── Streaming section: bare-body glue + in-loop durable steps ────
 
       // Resolve image/document refs (S3 → base64). Voice substitution
       // already happened in `substitutedMessages` above, so re-flattening
@@ -785,6 +791,29 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         pipelinesService,
       );
 
+      // Durable boundary wrapper shared by auto-recall below and the agent
+      // loop's in-loop steps (`llm-iter<N>`, `tool-iter<N>-<P>`). It injects
+      // Inngest's `step.run` without making the loop depend on Inngest, and
+      // translates deterministic provider failures (4xx that aren't
+      // 408/425/429) into NonRetriableError INSIDE the step body so Inngest
+      // doesn't burn per-step retries on a call that fails identically every
+      // time. The cast erases Inngest's `Jsonify<T>` return type: every
+      // payload passed through this wrapper is JSON-safe by construction
+      // (see design/crash-recovery.md → State serialization), so `Jsonify<T>`
+      // and `T` coincide at runtime but not for the compiler.
+      const stepRun = <T>(id: string, fn: () => Promise<T>): Promise<T> =>
+        step.run(id, async () => {
+          try {
+            return await fn();
+          } catch (err) {
+            if (!isRetriableProviderError(err)) {
+              const message = err instanceof Error ? err.message : String(err);
+              throw new NonRetriableError(message, { cause: err });
+            }
+            throw err;
+          }
+        }) as Promise<T>;
+
       // Auto-recall: search memory for context relevant to this message, via
       // the scoped service so the profile's `memoryScope` filter applies.
       // Best-effort — a Hindsight failure (server down, malformed query, 4xx
@@ -793,14 +822,24 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // let the conversation proceed; the LLM-driven `memory_recall` tool
       // path still surfaces hard failures to the model.
       const autoRecallMode = profile?.autoRecall ?? "heuristic";
+      // Durable: recall costs an embedding round-trip plus a vector search
+      // per call, and its result feeds the system prompt — caching it keeps
+      // both the spend and the prompt identical across the ~one re-invocation
+      // per step boundary that a tool-calling turn produces. The `.catch`
+      // stays INSIDE the body so a Hindsight failure degrades to "no
+      // memories" instead of failing the step into Inngest retries. Known
+      // conditional-step caveat: the gate reads `profile.autoRecall` from a
+      // non-durable read, so a concurrent settings change mid-turn can flip
+      // the step's existence between invocations — same accepted hazard as
+      // `summarize-prefix`, see design/crash-recovery.md.
       const recallResult = shouldSkipRecall(autoRecallMode, userContentText)
         ? { memories: [] }
-        : await service.memory
-            .recall(userContentText, { maxTokens: 2000 })
-            .catch((err: unknown) => {
+        : await stepRun("auto-recall", async () =>
+            service.memory.recall(userContentText, { maxTokens: 2000 }).catch((err: unknown) => {
               turnLogger.warn({ err }, "auto-recall failed, proceeding without recalled context");
               return { memories: [] };
-            });
+            }),
+          );
       const recalledContext =
         recallResult.memories.length > 0
           ? recallResult.memories.map((m) => m.content).join("\n")
@@ -828,13 +867,15 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // ──── Context window compaction ────
       //
       // compactMessages runs on every invocation — token counting and the
-      // threshold decision are cheap and depend on `fullPrompt` /
-      // `historyMessages`, which are partially built from non-durable reads
-      // (memory.recall, image resolution). Only the expensive summarization
-      // LLM call is wrapped in a `summarize-prefix` step (inside the
-      // `summarize` callback) so it's exactly-once on Inngest retry. The
-      // cached value is just the summary string — no large image payloads
-      // in step state. See design/crash-recovery.md.
+      // threshold decisions are cheap relative to what a step would cost
+      // to freeze, and `historyMessages` carries resolved image payloads
+      // that must not land in Inngest step state. Its inputs are stable
+      // across invocations (durable history + durable auto-recall + the
+      // deterministic image resolution above), so every replay reaches the
+      // same verdicts. Only the expensive summarization LLM call is
+      // wrapped in a `summarize-prefix` step (inside the `summarize`
+      // callback) so it's exactly-once across replays; the cached value is
+      // just the summary string. See design/crash-recovery.md.
 
       const model = snapshot.model;
 
@@ -907,6 +948,12 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             // a counter-based ID like `summarize-prefix-${i}` to avoid
             // Inngest's duplicate-step-id error.
             return step.run("summarize-prefix", async () => {
+              // Status banner lives inside the step body so it reaches the
+              // user exactly once — compactMessages re-runs on every
+              // invocation, and a bare-body push would re-append the banner
+              // (or open a stray message on a post-finish replay handle)
+              // each time.
+              await delivery.push({ type: "status", message: "Summarizing conversation..." });
               const response = await summarizationProvider.chat({
                 model: summarizationModel,
                 system,
@@ -923,21 +970,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
                 .join("");
             });
           },
-          onStatus: (message) => {
-            delivery.push({ type: "status", message });
-          },
         },
         skipBudgetStrategies,
       );
       historyMessages = compactResult.messages;
-
-      // Ledger of what the streaming adapters were actually shown. The degraded
-      // off-ramp below diffs it against the messages the loop hands back to
-      // persistence, so the retraction names exactly the output that isn't
-      // going into the transcript. Non-durable by nature: on an Inngest retry
-      // the whole streaming section re-runs and the ledger refills with the
-      // replayed turn's own output.
-      const streamed: { text: string; toolUseIds: string[] } = { text: "", toolUseIds: [] };
 
       let result: AgentLoopResult;
       try {
@@ -954,19 +990,17 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           // the loop caps every one, so a long tool-using turn can still
           // outgrow the window and degrade to `context_overflow`.
           maxTokens: limits.maxOutputTokens,
-          onEvent: (event: StreamEvent) => {
-            if (event.type === "text_delta") streamed.text += event.text;
-            else if (event.type === "tool_start") streamed.toolUseIds.push(event.id);
-            return delivery.push(event);
-          },
-          // Opt-in per-tool durability. The streaming section itself is
-          // non-durable (can't stream out of `step.run`), but tool handlers
-          // run *between* stream events — wrapping an individual handler in
-          // `step.run` preserves event ordering while giving exactly-once
-          // semantics for expensive/billable tools (generate_image,
-          // web_answer). Step id = `tool-<name>-<toolUseId>`, unique per
-          // LLM-issued tool call. See design/crash-recovery.md.
-          stepRun: (id, fn) => step.run(id, fn),
+          onEvent: (event: StreamEvent) => delivery.push(event),
+          // Durable boundaries inside the loop: each streaming LLM
+          // iteration runs in a `llm-iter<N>` step (tokens reach the
+          // delivery layer live from inside the step body; a memoized
+          // replay returns the cached iteration outcome without calling
+          // the provider or re-emitting), and each `durable: true` tool
+          // handler runs in a `tool-iter<N>-<P>` step. Handlers execute
+          // *between* stream events, so wrapping preserves event
+          // ordering. See design/crash-recovery.md → Durable LLM
+          // iterations / Per-tool durability.
+          stepRun,
           turnLogger,
         });
         // Class C / D degraded off-ramp. The loop exited because a repair
@@ -975,34 +1009,54 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         // closes with a coherent message rather than silence. See
         // design/agent-resilience.md → Degraded reply.
         if (result.degraded) {
-          // One tools-free LLM call summarizes the failure in user-facing
-          // terms (what was attempted, what went wrong, one next step).
-          // Falls through to the fixed string on any synthesis failure
-          // (timeout, refusal, provider outage). See
-          // design/agent-resilience.md → Tools-free synthesis on degrade.
-          const { text: apology } = await synthesizeDegradedReply({
-            provider,
-            model: result.model,
-            messages: result.messages,
-            reason: result.degraded.reason,
-            subtype: result.degraded.subtype,
-            log: turnLogger,
+          const degraded = result.degraded;
+          // Retraction computed OUTSIDE the step from `result.streamed` —
+          // the loop derives that ledger from its durable iteration
+          // outcomes, so it is identical on every invocation (a ledger of
+          // live emissions would be empty on a replay whose iterations all
+          // came from the step cache).
+          const retraction = computeRetraction(result.streamed, result.newMessages, turnLogger);
+          // One step owns the whole user-visible off-ramp: the tools-free
+          // synthesis LLM call plus the retract/apology pushes. The
+          // synthesis is billable and the pushes append to the user's live
+          // message, so both must fire exactly once across the persist /
+          // delivery / notify boundaries that follow — in the bare body
+          // they would re-fire on every subsequent re-invocation. The
+          // step returns the apology text, so replays persist the same
+          // words the user saw.
+          const apology = await step.run("degraded-reply", async () => {
+            // One tools-free LLM call summarizes the failure in
+            // user-facing terms (what was attempted, what went wrong, one
+            // next step). Falls through to the fixed string on any
+            // synthesis failure (timeout, refusal, provider outage). See
+            // design/agent-resilience.md → Tools-free synthesis on
+            // degrade.
+            const { text } = await synthesizeDegradedReply({
+              provider,
+              model: result.model,
+              messages: result.messages,
+              reason: degraded.reason,
+              subtype: degraded.subtype,
+              log: turnLogger,
+            });
+            // Retract first. Output streamed before the degrade fired is
+            // already on the user's screen (Telegram edits the live
+            // message every ~500ms; the web adapter forwards every delta
+            // as an SSE frame), and the loop drops the triggering
+            // iteration from `newMessages` — so appending the apology to
+            // it would leave the user reading a truncated fragment welded
+            // to an apology that history doesn't contain. The retraction
+            // names that iteration's output and nothing else: text and
+            // tool calls from earlier iterations are persisted, so they
+            // stay. Nothing to retract (nothing streamed, or an
+            // iteration-cap degrade that persists every iteration) means
+            // no event at all.
+            if (retraction) {
+              await delivery.push({ type: "retract", ...retraction });
+            }
+            await delivery.push({ type: "text_delta", text });
+            return text;
           });
-          // Retract first. Output streamed before the degrade fired is already
-          // on the user's screen (Telegram edits the live message every ~500ms;
-          // the web adapter forwards every delta as an SSE frame), and the loop
-          // drops the triggering iteration from `newMessages` — so appending
-          // the apology to it would leave the user reading a truncated fragment
-          // welded to an apology that history doesn't contain. The retraction
-          // names that iteration's output and nothing else: text and tool calls
-          // from earlier iterations are persisted, so they stay. Nothing to
-          // retract (nothing streamed, or an iteration-cap degrade that
-          // persists every iteration) means no event at all.
-          const retraction = computeRetraction(streamed, result.newMessages, turnLogger);
-          if (retraction) {
-            await delivery.push({ type: "retract", ...retraction });
-          }
-          await delivery.push({ type: "text_delta", text: apology });
           result = {
             ...result,
             text: apology,

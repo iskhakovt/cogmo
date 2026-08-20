@@ -24,6 +24,11 @@ export const writeFile = defineTool({
     "otherwise overwrites it. To overwrite, read the file in this conversation first so the " +
     "new content reflects the current state. Prefer `edit_file` for changes that only touch " +
     "part of an existing file — overwriting is for fresh files or full rewrites.",
+  // Durable: a workspace mutation. Exactly-once matters less for an
+  // idempotent overwrite than for edit_file, but caching keeps the
+  // persisted tool_result identical to what the model saw instead of
+  // whatever a later boundary's re-execution returned.
+  durable: true,
   schema: z.object({
     path: z.string().describe("File path (e.g. 'notes/meeting.md')"),
     content: z.string().describe("Content to write"),
@@ -42,6 +47,10 @@ export const editFile = defineTool({
     "conversation first. By default `old_string` must occur exactly once — extend it with " +
     "surrounding context to disambiguate, or set `replace_all` to replace every occurrence. " +
     "Fails if the file has been modified since you read it.",
+  // Durable: a re-executed edit finds `old_string` already replaced and
+  // errors, so on any step boundary after the call a non-durable handler
+  // would flip the recorded tool_result from success to error.
+  durable: true,
   schema: z.object({
     path: z.string().describe("File path (e.g. 'notes/meeting.md')"),
     old_string: z

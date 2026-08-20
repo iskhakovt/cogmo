@@ -140,7 +140,7 @@ Each adapter decides how to render `StreamEvent`s. The interface delivers typed 
 
 ## Orchestrator Changes
 
-The LLM call moves outside `step.run()` to enable streaming. Durable steps handle everything before and after. Delivery is unified — the orchestrator calls the delivery router once, which handles both streaming and batch.
+Each LLM iteration runs inside `step.run("llm-iter<N>")` — streaming does not require leaving the durable boundary. Tokens are pushed to the delivery handle from inside the step body as they arrive; only the iteration's final content blocks are the step's return value. On an Inngest replay the cached outcome is returned without re-emitting, so the user never sees the turn re-streamed. Durable steps handle everything before and after; delivery is unified — the orchestrator calls the delivery router once, which handles both streaming and batch. (The sketch below predates the durable-iteration change and shows the loop invocation shape only; see [../crash-recovery.md](../crash-recovery.md) for the current durability map.)
 
 ```typescript
 inngest.createFunction({

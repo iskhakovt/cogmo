@@ -88,6 +88,10 @@ function createWebSearch(apiKey: string | undefined): ToolSpec {
     description:
       "Search the web for current information. Returns titles, URLs, and snippets. " +
       "Use this when you need to find facts, recent events, or multiple sources to compare.",
+    // Durable: a paid Tavily call. Inngest re-invokes the function at every
+    // step boundary, so a non-durable handler re-bills once per boundary
+    // after it — not just on retry.
+    durable: true,
     parallelSafe: true,
     sideEffectful: false,
     schema: z.object({
@@ -151,8 +155,6 @@ function createWebAnswer(apiKey: string | undefined): ToolSpec {
       "Returns a direct answer with citations. Use this for factual questions, " +
       "current events, or when you need a concise researched answer rather than raw search results.",
     // Durable: Perplexity Sonar via OpenRouter is a billable LLM round-trip.
-    // `web_search` (Tavily) and `fetch_url` are cheaper and stay non-durable —
-    // wasted retries there are acceptable.
     durable: true,
     parallelSafe: true,
     sideEffectful: false,
@@ -216,6 +218,10 @@ function createFetchUrl(tavilyApiKey: string | undefined): ToolSpec {
       "Fetch and extract the main content from a URL. " +
       "Returns cleaned article text for web pages, or raw text for non-HTML content. " +
       "Use this when you need to read a specific web page.",
+    // Durable: a paid Tavily Extract call, re-billed once per subsequent
+    // step boundary when non-durable. Output is capped at MAX_CONTENT_LENGTH,
+    // so the cached value stays within Inngest state limits.
+    durable: true,
     parallelSafe: true,
     sideEffectful: false,
     schema: z.object({

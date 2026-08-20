@@ -31,6 +31,10 @@ export const delegateCodingTool: ToolSpec = defineTool({
     "Submit a multi-step coding task to Claude Code in a sandboxed container. Returns immediately " +
     "with a taskId — the plan, approval prompt, and execution updates arrive as separate chat " +
     "messages. Use when the task spans many files or needs running tests.",
+  // Durable: creates a coding_tasks row and emits the start event. Non-
+  // durable it would spawn a duplicate coding task on every step boundary
+  // after the call.
+  durable: true,
   schema: DelegateCodingInput,
   handler: async ({ goal, repo }, service) => {
     if (!service.coding) {
