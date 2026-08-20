@@ -150,10 +150,23 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   // while a genuinely duplicate event — whose UPDATE matches no row —
   // still short-circuits.
   //
-  // Ahead of the try block on purpose: a run that lost the race must not
-  // reach the failure machinery below, or a duplicate event whose identity
+  // Ahead of the try block, and ahead of the remote-URL / identity / auth
+  // fail-fast checks, on purpose: a run that lost the race must not reach
+  // the failure machinery below, or a duplicate event whose identity
   // resolution happens to fail would flip an already-terminal task to
-  // `failed`. A throw from the step itself fails the function outright and
+  // `failed`. Claiming ownership has to come first, because every check
+  // after it can call `failAndTeardown`.
+  //
+  // The cost is that a run failing one of those checks passes through
+  // `verifying` on its way to `failed`, for the millisecond or two the
+  // decrypts take. Nothing polls status in that window — the progress UI
+  // renders from stream events, and `verifying` and `pending_verify` are
+  // both non-terminal so admission counting is unchanged — and the row
+  // lands on the same terminal status with the same reason either way.
+  // Moving the transition back below the checks to avoid that transient
+  // reinstates the flip-a-terminal-task bug.
+  //
+  // A throw from the step itself fails the function outright and
   // `coding-task-reconcile` marks the row off `inngest/function.failed`.
   const transition = await stepRun("set-status-verifying", () =>
     runInTx((tx) => store.transitionTaskStatus(tx, taskId, "pending_verify", "verifying")),

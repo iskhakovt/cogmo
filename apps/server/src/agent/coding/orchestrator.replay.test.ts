@@ -30,14 +30,14 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { InngestTestEngine } from "@inngest/test";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { mock } from "vitest-mock-extended";
 import { inngest } from "../../inngest/client.js";
 import {
-  type LocalDockerSessionState,
-  LocalDockerSessionStateSchema,
-  type SandboxClient,
-  type SandboxSession,
-} from "../../sandbox/index.js";
+  codingRepoRow,
+  codingTaskRow,
+  FIXTURE_TASK_ID,
+  fakeCodingSandbox,
+  statefulCodingStore,
+} from "../../test/coding-fixtures.js";
 import { fakeRunInTx, spyOnInngestSend } from "../../test/factories.js";
 import type { CodingBackend, CodingEvent } from "./backend.js";
 import {
@@ -47,12 +47,9 @@ import {
   type ExecuteStreamHandle,
   type PlanStreamHandle,
 } from "./orchestrator.js";
-import type { CodingRepoRow, CodingStore, CodingTaskRow } from "./store/index.js";
+import type { CodingTaskRow } from "./store/index.js";
 
 const execFileP = promisify(execFile);
-
-const TASK_ID = "01a02000-0000-7000-8000-00000000ta5c";
-const REPO_ID = "01a02000-0000-7000-8000-000000007e90";
 
 let baseDir: string;
 let repoPath: string;
@@ -87,140 +84,6 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
 });
-
-function repoRow(): CodingRepoRow {
-  return {
-    id: REPO_ID,
-    name: "cogmo",
-    localPath: repoPath,
-    defaultBranch: "main",
-    remoteUrl: "git@github.com:user/cogmo.git",
-    devcontainer: null,
-    allowedBackends: ["claude"],
-    verifyCommand: "true",
-    taskTokenBudget: 100_000,
-    taskWallTimeSeconds: 600,
-    maxConcurrentTasks: 1,
-    identityName: "default",
-    verifyTimeoutSeconds: 600,
-    createdAt: new Date("2026-08-20T00:00:00Z"),
-  };
-}
-
-function taskRow(overrides: Partial<CodingTaskRow>): CodingTaskRow {
-  return {
-    id: TASK_ID,
-    repoId: REPO_ID,
-    conversationId: null,
-    goal: "do a thing",
-    triggerSource: "user",
-    triggerRef: null,
-    backend: "claude",
-    worktreeAssignment: null,
-    sessionId: null,
-    containerId: null,
-    allowPrivilegedRunc: false,
-    plan: null,
-    planApprovedAt: null,
-    prMetadata: null,
-    status: "queued",
-    failureReason: null,
-    resourceUsage: null,
-    createdAt: new Date("2026-08-20T00:00:00Z"),
-    ...overrides,
-  };
-}
-
-/**
- * Store fake whose reads observe its own writes. That property is the whole
- * hazard under per-boundary replay: `getTask` at the top of the body sees
- * the status the run itself committed one boundary earlier, so any guard
- * built on it self-invalidates. A `mock<CodingStore>()` with stateless
- * `mockResolvedValue`s would hide exactly the bug these tests exist for.
- */
-function statefulStore(initial: CodingTaskRow): {
-  store: CodingStore;
-  current: () => CodingTaskRow;
-} {
-  let task = initial;
-  const repo = repoRow();
-  const store = mock<CodingStore>();
-  store.getTask.mockImplementation(async () => task);
-  store.getRepoById.mockImplementation(async () => repo);
-  store.updateTaskStatus.mockImplementation(async (_tx, params) => {
-    task = {
-      ...task,
-      status: params.status,
-      ...(params.failureReason !== undefined && { failureReason: params.failureReason }),
-    };
-  });
-  store.transitionTaskStatus.mockImplementation(async (_tx, _id, from, to) => {
-    if (task.status !== from) return { kind: "stale", status: task.status };
-    task = { ...task, status: to };
-    return { kind: "transitioned" };
-  });
-  store.setTaskWorktreeAssignment.mockImplementation(async (_tx, _id, assignment) => {
-    task = { ...task, worktreeAssignment: assignment };
-  });
-  store.setTaskSessionId.mockImplementation(async (_tx, _id, sessionId) => {
-    task = { ...task, sessionId };
-  });
-  store.setTaskPlan.mockImplementation(async (_tx, _id, plan) => {
-    task = { ...task, plan };
-  });
-  store.setTaskContainerId.mockImplementation(async () => {});
-  store.setTaskResourceUsage.mockImplementation(async () => {});
-  store.setTaskSandboxDeletedAt.mockImplementation(async () => {});
-  store.getCodingAutoapproveModeForTask.mockResolvedValue("off");
-  return { store, current: () => task };
-}
-
-function fakeSandbox(): SandboxClient<LocalDockerSessionState> {
-  const state: LocalDockerSessionState = {
-    type: "local-docker",
-    taskId: TASK_ID,
-    containerRowId: "row-1",
-    dockerId: "docker-1",
-  };
-  const session: SandboxSession<LocalDockerSessionState> = {
-    state,
-    execStreaming: vi.fn(async () => ({
-      stdout: process.stdin,
-      stderr: process.stdin,
-      wait: async () => ({ exitCode: 0 }),
-      dispose: async () => {},
-    })),
-    exec: vi.fn(async () => ({
-      stdout: "",
-      stderr: "",
-      exitCode: 0,
-      wallTimeSeconds: 0,
-      truncated: false,
-    })),
-  };
-  return {
-    backendId: "fake",
-    capabilities: {
-      siblingContainers: "host-proxy",
-      hostBindMount: true,
-      customImage: true,
-      volumes: "docker",
-      workingTreeTransport: "bind-mount",
-      depsCacheSharing: "shared-volume",
-    },
-    healthCheck: vi.fn(async () => ({ ok: true as const, runtime: "runc" })),
-    reconcileCrashedInstances: vi.fn(async () => ({ orphansReaped: 0 })),
-    ensureImagePresent: vi.fn(async () => {}),
-    create: vi.fn(async () => session),
-    resume: vi.fn(async () => session),
-    tryResumeByTaskId: vi.fn(async () => null),
-    delete: vi.fn(async () => {}),
-    deleteByTaskId: vi.fn(async () => {}),
-    serializeState: (s) => LocalDockerSessionStateSchema.parse(s),
-    deserializeState: (payload) => LocalDockerSessionStateSchema.parse(payload),
-    shutdown: vi.fn(async () => {}),
-  };
-}
 
 const PLAN_EVENTS: CodingEvent[] = [
   { kind: "session_started", sessionId: "sess-AAA" },
@@ -284,24 +147,20 @@ function recordingPlanStream(): { handle: PlanStreamHandle; text: string[]; fina
 
 function recordingExecuteStream(): {
   handle: ExecuteStreamHandle;
-  started: number;
-  text: string[];
+  started: () => number;
+  text: () => string[];
 } {
-  const rec = { started: 0, text: [] as string[] };
+  let started = 0;
+  const text: string[] = [];
   return {
-    ...rec,
-    get started() {
-      return rec.started;
-    },
-    get text() {
-      return rec.text;
-    },
+    started: () => started,
+    text: () => text,
     handle: {
       started: async () => {
-        rec.started++;
+        started++;
       },
       appendText: async (delta) => {
-        rec.text.push(delta);
+        text.push(delta);
       },
       toolCall: async () => {},
       toolResult: async () => {},
@@ -314,9 +173,9 @@ function recordingExecuteStream(): {
 function makeDeps(overrides: Partial<CodingOrchestratorDeps>): CodingOrchestratorDeps {
   return {
     runInTx: fakeRunInTx,
-    store: mock<CodingStore>(),
-    sandbox: fakeSandbox(),
-    backend: { plan: async function* () {}, execute: async function* () {} } as CodingBackend,
+    store: statefulCodingStore(codingTaskRow()).store,
+    sandbox: fakeCodingSandbox().sandbox,
+    backend: countingBackend({}).backend,
     devbaseImage: "cogmo/devbase:test",
     defaultResourceLimits: { cpus: 0.5, memory_bytes: 256 * 1024 * 1024, pids: 64 },
     taskTtlMs: 60_000,
@@ -326,9 +185,12 @@ function makeDeps(overrides: Partial<CodingOrchestratorDeps>): CodingOrchestrato
   };
 }
 
+/** The plan orchestrator clones `repo.localPath`, so point it at the fixture. */
+const localRepo = () => codingRepoRow({ localPath: repoPath, remoteUrl: "git@github.com:u/c.git" });
+
 describe("coding-task-start — Inngest replay", () => {
   it("runs the billable plan session once across the run's step boundaries", async () => {
-    const { store, current } = statefulStore(taskRow({ status: "queued" }));
+    const { store, current } = statefulCodingStore(codingTaskRow(), localRepo());
     const backend = countingBackend({ plan: PLAN_EVENTS });
     const planStream = recordingPlanStream();
     const fn = createCodingOrchestrator(
@@ -342,7 +204,7 @@ describe("coding-task-start — Inngest replay", () => {
 
     const engine = new InngestTestEngine({
       function: fn,
-      events: [{ name: "coding/task/start", data: { taskId: TASK_ID } }],
+      events: [{ name: "coding/task/start", data: { taskId: FIXTURE_TASK_ID } }],
     });
     const { result, error } = await engine.execute();
 
@@ -361,8 +223,8 @@ describe("coding-task-start — Inngest replay", () => {
 });
 
 describe("coding-task-execute — Inngest replay", () => {
-  const approvedTask = (): CodingTaskRow =>
-    taskRow({
+  const approvedTask = (overrides: Partial<CodingTaskRow> = {}): CodingTaskRow =>
+    codingTaskRow({
       status: "awaiting_approval",
       planApprovedAt: new Date("2026-08-20T00:01:00Z"),
       sessionId: "sess-AAA",
@@ -372,15 +234,16 @@ describe("coding-task-execute — Inngest replay", () => {
         branch: "cogmo/abc",
         worktreePath: join(baseDir, "worktrees", "cogmo", "abc"),
       },
+      ...overrides,
     });
 
   const approvedEvent = {
     name: "coding/task/plan-approved",
-    data: { taskId: TASK_ID, approvedAt: "2026-08-20T00:01:00.000Z" },
+    data: { taskId: FIXTURE_TASK_ID, approvedAt: "2026-08-20T00:01:00.000Z" },
   } as const;
 
   it("does not short-circuit on the `executing` status its own step wrote", async () => {
-    const { store, current } = statefulStore(approvedTask());
+    const { store, current } = statefulCodingStore(approvedTask(), localRepo());
     const backend = countingBackend({ execute: EXECUTE_EVENTS });
     const stream = recordingExecuteStream();
     const fn = createCodingExecuteOrchestrator(
@@ -403,18 +266,16 @@ describe("coding-task-execute — Inngest replay", () => {
     expect(result).toEqual({ status: "pending_verify" });
     expect(current().status).toBe("pending_verify");
     expect(backend.executeCalls()).toBe(1);
-    expect(stream.started).toBe(1);
-    expect(stream.text).toEqual(["Editing foo.ts\n"]);
+    expect(stream.started()).toBe(1);
+    expect(stream.text()).toEqual(["Editing foo.ts\n"]);
   });
 
   it("still skips a duplicate event, because the conditional UPDATE matches no row", async () => {
-    // Same shape as above except the row is already terminal — the shape a
+    // Same shape as above except the row is already terminal — what a
     // genuinely duplicate `plan-approved` event finds.
-    const { store, current } = statefulStore(
-      taskRow({
-        ...approvedTask(),
-        status: "pr_open",
-      }),
+    const { store, current } = statefulCodingStore(
+      approvedTask({ status: "pr_open" }),
+      localRepo(),
     );
     const backend = countingBackend({ execute: EXECUTE_EVENTS });
     const fn = createCodingExecuteOrchestrator(
