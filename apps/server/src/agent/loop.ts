@@ -218,7 +218,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     // variant. See computeVolumeClusterInterceptions and
     // design/agent-resilience.md → Volume cluster trigger.
     const interceptions = computeVolumeClusterInterceptions(messages, initialLength, tools, log);
-    const executed = await executeToolCalls(
+    const toolResults = await executeToolCalls(
       response.content,
       tools,
       service,
@@ -226,7 +226,6 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
       iterations,
       interceptions,
     );
-    const toolResults = executed.map((e) => e.block);
     messages.push({ role: "user", content: toolResults });
 
     log.debug({ iteration: iterations, toolCalls: toolResults.length }, "tool round complete");
@@ -370,26 +369,6 @@ function isSafeCall(entry: PlannedCall): boolean {
   return entry.spec === null || entry.spec.parallelSafe === true;
 }
 
-/**
- * One executed (or short-circuited) tool call.
- *
- * `ranLive` is false only when a durable tool's step was replayed from the
- * Inngest cache — its handler ran in an earlier invocation of the same run,
- * and that invocation normally also emitted its `tool_result` event (and
- * delivered any side effect it drives, e.g. a `generate_image` photo card).
- * The streaming loop uses it to skip re-emitting `tool_result` events for
- * cached calls; everything synthesized in this invocation (non-durable
- * runs, unknown tools, volume-cluster interceptions, validation errors) is
- * `ranLive: true`. Accepted residual: a process crash in the gap between
- * the step's completion being recorded and the emission right after it
- * loses that one emission for good — the cached replay suppresses it. See
- * design/crash-recovery.md → Durable LLM iterations.
- */
-interface ExecutedToolCall {
-  block: ContentBlock;
-  ranLive: boolean;
-}
-
 async function executeToolCalls(
   content: ContentBlock[],
   tools: ToolRegistry,
@@ -397,7 +376,7 @@ async function executeToolCalls(
   stepRun: StepRunner | undefined,
   iteration: number,
   interceptions?: ReadonlyMap<string, ContentBlock>,
-): Promise<ExecutedToolCall[]> {
+): Promise<ContentBlock[]> {
   const toolUseBlocks = content.filter((b): b is ToolUseBlock => b.type === "tool_use");
   if (toolUseBlocks.length === 0) return [];
 
@@ -424,7 +403,7 @@ async function executeToolCalls(
     [] as PlannedCall[][],
   );
 
-  const results: ExecutedToolCall[] = [];
+  const results: ContentBlock[] = [];
   for (const group of groups) {
     const batch = await Promise.all(
       group.map(({ block, spec, stepKey }) =>
@@ -483,21 +462,18 @@ async function runOne(
   stepRun: StepRunner | undefined,
   stepKey: ToolStepKey,
   interceptions?: ReadonlyMap<string, ContentBlock>,
-): Promise<ExecutedToolCall> {
+): Promise<ContentBlock> {
   // Volume-cluster intercept short-circuits the handler — synthetic
   // tool_result already prepared by the caller, no span / step.run.
   const intercepted = interceptions?.get(block.id);
-  if (intercepted) return { block: intercepted, ranLive: true };
+  if (intercepted) return intercepted;
 
   if (!spec) {
     return {
-      block: {
-        type: "tool_result",
-        toolUseId: block.id,
-        content: `Error: unknown tool "${block.name}"`,
-        isError: true,
-      },
-      ranLive: true,
+      type: "tool_result",
+      toolUseId: block.id,
+      content: `Error: unknown tool "${block.name}"`,
+      isError: true,
     };
   }
 
@@ -505,28 +481,19 @@ async function runOne(
     "tool.execute",
     { attributes: { "cogmo.tool.name": block.name } },
     async (span) => {
-      // Set inside the durable body: stays false when Inngest replays the
-      // step from cache (the body never runs), which is exactly the signal
-      // `ExecutedToolCall.ranLive` reports.
-      let bodyRan = false;
       try {
         // Step id is SDK-local (iteration + filtered-tool-use position)
         // so the cache key is stable across Inngest replays even though
         // the provider's `tool_use_id` is not. Cached content may
         // semantically mismatch the current `tool_use` — see
         // design/crash-recovery.md → Per-tool durability.
-        const runHandler = (): Promise<string> => {
-          bodyRan = true;
-          return spec.handler(block.input as Record<string, unknown>, service);
-        };
+        const runHandler = (): Promise<string> =>
+          spec.handler(block.input as Record<string, unknown>, service);
         const out =
           spec.durable === true && stepRun
             ? await stepRun(`tool-iter${stepKey.iteration}-${stepKey.position}`, runHandler)
             : await runHandler();
-        return {
-          block: { type: "tool_result" as const, toolUseId: block.id, content: out },
-          ranLive: bodyRan,
-        };
+        return { type: "tool_result" as const, toolUseId: block.id, content: out };
       } catch (err) {
         // Also catches cached rejections from a durable `stepRun` — Inngest
         // replays a stored failure by re-throwing here. Converting to an
@@ -537,13 +504,10 @@ async function runOne(
         span.setStatus({ code: SpanStatusCode.ERROR, message });
         span.setAttribute("cogmo.tool.error", true);
         return {
-          block: {
-            type: "tool_result" as const,
-            toolUseId: block.id,
-            content: `Error: ${message}`,
-            isError: true,
-          },
-          ranLive: bodyRan,
+          type: "tool_result" as const,
+          toolUseId: block.id,
+          content: `Error: ${message}`,
+          isError: true,
         };
       } finally {
         span.end();
@@ -983,7 +947,7 @@ export async function runStreamingAgentLoop(
     const interceptions = computeVolumeClusterInterceptions(messages, initialLength, tools, log);
 
     // Execute tool calls, emit results, append to messages
-    const executed = await executeToolCalls(
+    const toolResults = await executeToolCalls(
       iterationContent,
       tools,
       service,
@@ -992,26 +956,43 @@ export async function runStreamingAgentLoop(
       interceptions,
     );
 
-    for (const { block, ranLive } of executed) {
-      // A durable tool replayed from the Inngest step cache already emitted
-      // its tool_result event (and delivered any side effect it drives,
-      // e.g. a generate_image photo card) in the invocation where its body
-      // ran — re-emitting here would duplicate it on the user's screen.
-      if (block.type === "tool_result" && ranLive) {
-        const toolUse = iterationContent.find(
-          (b): b is ToolUseBlock => b.type === "tool_use" && b.id === block.toolUseId,
-        );
-        const event: StreamEvent = {
-          type: "tool_result",
-          name: toolUse?.name ?? "unknown",
-          output: block.content,
-        };
-        if (block.isError) event.isError = block.isError;
-        await onEvent(event);
+    // The iteration's tool_result events are emitted from their own durable
+    // boundary. The bare-body continuation is the wrong place: under
+    // Inngest's parallel-step orchestration (which any Promise.all of
+    // durable tools triggers, and which then pins the whole run via
+    // disableImmediateExecution), a targeted request executes only the
+    // step body — the continuation runs solely in later, fully-memoized
+    // invocations. A bare-body emission is therefore lost for durable
+    // tools (their bodies ran in requests that never reached it) and
+    // repeated once per re-invocation for non-durable tools (their
+    // handlers re-run every time). Wrapping the pushes in a step makes the
+    // emission itself exactly-once: live in the invocation that runs the
+    // body, suppressed on every replay. For non-durable tools the emitted
+    // content is the emitting invocation's execution — same accepted
+    // drift as persistence.
+    const emitToolResults = async (): Promise<null> => {
+      for (const block of toolResults) {
+        if (block.type === "tool_result") {
+          const toolUse = iterationContent.find(
+            (b): b is ToolUseBlock => b.type === "tool_use" && b.id === block.toolUseId,
+          );
+          const event: StreamEvent = {
+            type: "tool_result",
+            name: toolUse?.name ?? "unknown",
+            output: block.content,
+          };
+          if (block.isError) event.isError = block.isError;
+          await onEvent(event);
+        }
       }
+      return null;
+    };
+    if (stepRun) {
+      await stepRun(`emit-tool-results-iter${iterations}`, emitToolResults);
+    } else {
+      await emitToolResults();
     }
 
-    const toolResults = executed.map((e) => e.block);
     messages.push({ role: "user", content: toolResults });
 
     log.debug(

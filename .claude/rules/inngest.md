@@ -36,6 +36,15 @@ contract**. Design every function for the per-boundary model.
   guards belong *inside* a durable step (conditional UPDATE returning
   whether the transition happened), with the bare body branching on the
   memoized result.
+- **The continuation after a parallel step group runs only in
+  fully-memoized invocations.** When a `Promise.all` plans two or more
+  steps, Inngest executes each body in a targeted request that runs ONLY
+  that body (and `disableImmediateExecution` then pins the whole run to
+  this pattern, single steps included). Code after the `Promise.all`
+  executes in a later invocation where every step replays from cache — so
+  never infer "already done / already emitted" there from whether a step
+  body ran in the current invocation; that signal is always false. A side
+  effect that must follow the group goes in its own step.
 - **Deriving step ids from model output is a bug.** `tool_use_id` and
   anything else the LLM mints changes when a step body re-runs. Key on
   SDK-local state (iteration counter, array position, ids from a memoized

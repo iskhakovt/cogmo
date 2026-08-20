@@ -1198,9 +1198,15 @@ describe("tool durability (stepRun)", () => {
       stepRun,
     });
 
-    // Each LLM iteration is its own durable step alongside the durable
-    // tool handler — see design/crash-recovery.md → Durable LLM iterations.
-    expect(stepRunCalls).toEqual(["llm-iter1", "tool-iter1-0", "llm-iter2"]);
+    // Each LLM iteration is its own durable step, as is the iteration's
+    // tool_result emission, alongside the durable tool handler — see
+    // design/crash-recovery.md → Durable LLM iterations.
+    expect(stepRunCalls).toEqual([
+      "llm-iter1",
+      "tool-iter1-0",
+      "emit-tool-results-iter1",
+      "llm-iter2",
+    ]);
   });
 
   it("emits identical step ids across attempts even when the LLM mints different tool_use ids", async () => {
@@ -1448,11 +1454,12 @@ describe("durable LLM iterations (stepRun)", () => {
     expect(result.streamed).toEqual({ text: "Let me check. Done.", toolUseIds: ["t1"] });
   });
 
-  it("suppresses tool_result re-emission for a durable tool replayed from cache", async () => {
-    // Replay shape: iteration 1's drain AND its durable tool are both
-    // cached; iteration 2 runs live. The cached tool's tool_result event
-    // must not re-reach the delivery layer (a generate_image card would
-    // re-send its photo), while the live iteration streams normally.
+  it("suppresses tool_result re-emission when the iteration's emission step is cached", async () => {
+    // Replay shape: iteration 1's drain, its durable tool, AND the
+    // iteration's emission step are all cached; iteration 2 runs live. No
+    // tool_result event may re-reach the delivery layer (a generate_image
+    // card would re-send its photo), while the live iteration streams
+    // normally.
     const cache = new Map<string, unknown>([
       [
         "llm-iter1",
@@ -1467,6 +1474,7 @@ describe("durable LLM iterations (stepRun)", () => {
         },
       ],
       ["tool-iter1-0", "cached-tool-output"],
+      ["emit-tool-results-iter1", null],
     ]);
     const { stepRun } = cachingStepRun(cache);
     const handler = vi.fn().mockResolvedValue("fresh-tool-output");
@@ -1495,8 +1503,8 @@ describe("durable LLM iterations (stepRun)", () => {
     });
 
     expect(handler).not.toHaveBeenCalled();
-    // No tool_result event re-emitted for the cached durable tool; the
-    // live iteration's text still streams.
+    // No tool_result event re-emitted for the cached iteration; the live
+    // iteration's text still streams.
     expect(collected).toEqual([{ type: "text_delta", text: "done" }]);
     // The cached tool output still reaches the transcript.
     const toolTurn = expectDefined(result.newMessages[1], "tool_result turn");
@@ -1504,6 +1512,121 @@ describe("durable LLM iterations (stepRun)", () => {
       { type: "tool_result", toolUseId: "toolu_1", content: "cached-tool-output" },
     ]);
     expect(result.text).toBe("done");
+  });
+
+  it("delivers tool_result events for durable tools executed via parallel fan-out", async () => {
+    // Inngest refuses in-request execution when a Promise.all group plans
+    // two or more steps (engine getEarlyExecRunStep: exactly one
+    // unfulfilled step) — each body runs in a targeted request whose
+    // continuation never reaches the emission code, and the first
+    // invocation to get past the Promise.all has every tool step
+    // memoized. That invocation is the ONLY one that can deliver the
+    // events, so the emission step (not yet cached) must emit there — an
+    // emission gated on "did the handler body run in this invocation"
+    // would drop the events forever.
+    const cache = new Map<string, unknown>([
+      [
+        "llm-iter1",
+        {
+          kind: "drained",
+          content: [
+            { type: "tool_use", id: "toolu_a", name: "paid", input: { q: "a" } },
+            { type: "tool_use", id: "toolu_b", name: "paid", input: { q: "b" } },
+          ],
+          stopReason: "tool_use",
+          model: "mock-model",
+          usage: { inputTokens: 10, outputTokens: 5 },
+          repaired: null,
+          emitted: { text: "", toolUseIds: ["toolu_a", "toolu_b"] },
+        },
+      ],
+      ["tool-iter1-0", "result-a"],
+      ["tool-iter1-1", "result-b"],
+    ]);
+    const { stepRun } = cachingStepRun(cache);
+    const handler = vi.fn().mockResolvedValue("fresh");
+    const tools = new ToolRegistry();
+    tools.register({
+      name: "paid",
+      description: "expensive",
+      inputSchema: { type: "object" },
+      durable: true,
+      parallelSafe: true,
+      handler,
+    });
+    const provider = mockStreamProvider([
+      { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+    const collected: StreamEvent[] = [];
+
+    await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+      stepRun,
+    });
+
+    expect(handler).not.toHaveBeenCalled();
+    const toolResults = collected.filter((e) => e.type === "tool_result");
+    expect(toolResults).toEqual([
+      { type: "tool_result", name: "paid", output: "result-a" },
+      { type: "tool_result", name: "paid", output: "result-b" },
+    ]);
+  });
+
+  it("does not re-emit a non-durable tool_result when the emission step is cached", async () => {
+    // Non-durable handlers re-execute on every invocation by design, but
+    // their tool_result events must not re-reach the delivery layer — the
+    // web adapter forwards every frame, so a bare-body emission would
+    // duplicate the card once per re-invocation.
+    const cache = new Map<string, unknown>([
+      [
+        "llm-iter1",
+        {
+          kind: "drained",
+          content: [{ type: "tool_use", id: "toolu_1", name: "echo", input: { text: "hi" } }],
+          stopReason: "tool_use",
+          model: "mock-model",
+          usage: { inputTokens: 10, outputTokens: 5 },
+          repaired: null,
+          emitted: { text: "", toolUseIds: ["toolu_1"] },
+        },
+      ],
+      ["emit-tool-results-iter1", null],
+    ]);
+    const { stepRun } = cachingStepRun(cache);
+    const handler = vi.fn(async (input: { text: string }) => `pong from ${input.text}`);
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echo",
+        schema: z.object({ text: z.string() }),
+        handler,
+      }),
+    );
+    const provider = mockStreamProvider([
+      { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+    const collected: StreamEvent[] = [];
+
+    await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+      stepRun,
+    });
+
+    // The handler genuinely re-ran (at-least-once by design)...
+    expect(handler).toHaveBeenCalledTimes(1);
+    // ...but its event did not re-reach the delivery layer.
+    expect(collected).toEqual([{ type: "text_delta", text: "done" }]);
   });
 
   it("recomputes repair budgets deterministically from cached outcomes", async () => {
