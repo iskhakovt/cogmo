@@ -1157,6 +1157,43 @@ describe("tool durability (stepRun)", () => {
     expect(c).not.toBe(a);
   });
 
+  it("digests the normalized arguments, not the raw provider payload", async () => {
+    // `defineTool` coerces stringified nested args and drops fields the
+    // schema doesn't declare, so two deliveries can phrase one request
+    // differently and still reach the handler identically. Digesting the raw
+    // payload would read those as distinct calls and mint a second task.
+    const schema = z.object({ goal: z.string() });
+    const keyFor = async (input: Record<string, unknown>): Promise<string | undefined> => {
+      let key: string | undefined;
+      const tools = new ToolRegistry();
+      tools.register(
+        defineTool({
+          name: "paid",
+          description: "expensive",
+          schema,
+          durable: true,
+          handler: async (_input, _service, ctx) => {
+            key = ctx?.idempotencyKey;
+            return "ok";
+          },
+        }),
+      );
+      await testRunAgentLoop({
+        provider: mockProvider([toolUseResponse("paid", "toolu_X", input), textResponse("done")]),
+        messages: [{ role: "user", content: "go" }],
+        tools,
+        turnKey: "inbound-42",
+      });
+      return key;
+    };
+
+    const plain = await keyFor({ goal: "ship it" });
+    // Same request carrying a field the schema drops.
+    expect(await keyFor({ goal: "ship it", stray: 1 })).toBe(plain);
+    // Still discriminates on the arguments that survive normalization.
+    expect(await keyFor({ goal: "ship something else" })).not.toBe(plain);
+  });
+
   it("omits the call context when the caller supplies no turn key", async () => {
     // Outside a retrying context there is nothing stable to key on, and a
     // fabricated key would be worse than none: it would look like a

@@ -125,10 +125,12 @@ export function statefulCodingStore(
     task = { ...task, resourceUsage: { ...(task.resourceUsage ?? {}), ...usage } };
   });
   store.setTaskSandboxDeletedAt.mockImplementation(async (_tx, _id, deletedAt) => {
-    // Real store gates on a sandbox block already existing; mirroring that
-    // keeps "deleted_at without created_at" unrepresentable here too.
+    // Real store gates on a sandbox block existing AND `deleted_at` being
+    // unset, which makes the stamp idempotent under replay. Mirroring both
+    // keeps "deleted_at without created_at" unrepresentable and stops a
+    // double stamp passing here that the real store would ignore.
     const sandbox = task.resourceUsage?.sandbox;
-    if (!sandbox) return;
+    if (!sandbox || sandbox.deleted_at) return;
     task = {
       ...task,
       resourceUsage: { ...task.resourceUsage, sandbox: { ...sandbox, deleted_at: deletedAt } },

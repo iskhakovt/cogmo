@@ -69,6 +69,18 @@ export interface ToolSpec {
    */
   durable?: boolean;
   /**
+   * Canonicalize raw provider arguments into the value the handler will
+   * actually receive. The loop digests THIS into the call's idempotency
+   * key, so a re-delivery that phrases the same request differently — a
+   * nested object sent as a JSON string, a field the schema drops — still
+   * yields one key rather than minting a second side effect.
+   *
+   * Populated by {@link defineTool}. A hand-built spec that omits it has
+   * its raw arguments digested instead, which can only mint a duplicate,
+   * never collapse two distinct requests into one.
+   */
+  normalizeInput?: (raw: Record<string, unknown>) => unknown;
+  /**
    * Declares the handler has no ordering dependency on sibling tool calls in
    * the same turn. Consecutive parallelSafe entries in the LLM's tool_use
    * sequence run via `Promise.all`; unsafe entries run individually between
@@ -164,6 +176,9 @@ export function defineTool<T>(opts: {
       const parsed = opts.schema.parse(value);
       return opts.handler(parsed, service, ctx);
     },
+    // Same pipeline the handler wrapper above runs, exposed so the loop can
+    // key a call on its normalized arguments rather than the raw payload.
+    normalizeInput: (raw) => opts.schema.parse(coerceToolInput(raw, inputSchema).value),
     ...(opts.durable !== undefined && { durable: opts.durable }),
     ...(opts.parallelSafe !== undefined && { parallelSafe: opts.parallelSafe }),
     ...(opts.sideEffectful !== undefined && { sideEffectful: opts.sideEffectful }),

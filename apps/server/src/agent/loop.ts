@@ -265,6 +265,21 @@ interface ToolStepKey {
 }
 
 /**
+ * The arguments the handler will actually see, for digesting. Falls back to
+ * the raw payload when the spec publishes no normalizer, or when
+ * normalization rejects the input — a call whose arguments don't validate
+ * is about to fail, so no side effect lands and the key never matters.
+ */
+function normalizedInput(spec: ToolSpec, raw: unknown): unknown {
+  if (!spec.normalizeInput) return raw;
+  try {
+    return spec.normalizeInput(raw as Record<string, unknown>);
+  } catch {
+    return raw;
+  }
+}
+
+/**
  * Short stable digest of a tool call's identity — name plus arguments. Keys
  * are sorted before serialization so the same arguments in a different order
  * still match: a false mismatch would mint the duplicate side effect the
@@ -536,13 +551,18 @@ async function runOne(
         // the model re-decides, and a different call can land at the same
         // (turn, iteration, position). Undefined without a turn token (unit
         // tests, loops outside Inngest) — no tool may assume retry-dedup then.
+        //
+        // Digested over the NORMALIZED arguments, so two deliveries that
+        // phrase one request differently still agree. Costs a second parse
+        // (the handler wrapper runs the same pipeline) — cheap next to the
+        // duplicate side effect it prevents.
         const callCtx: ToolCallContext | undefined =
           turnKey === undefined
             ? undefined
             : {
                 idempotencyKey: `${turnKey}:i${stepKey.iteration}:p${stepKey.position}:${digestCall(
                   block.name,
-                  block.input,
+                  normalizedInput(spec, block.input),
                 )}`,
               };
         const runHandler = (): Promise<string> =>

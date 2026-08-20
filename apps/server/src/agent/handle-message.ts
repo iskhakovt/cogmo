@@ -428,6 +428,12 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const inboundBlocks = inboundMessages.flatMap((m) => contentToBlocks(m.content));
       // Safe — guarded by length check above
       const maxInboundId = inboundMessages.at(-1)?.id ?? "";
+      // Low-water mark, for the turn token below. Unlike the high-water mark
+      // this doesn't move when a re-delivered turn reloads a batch that has
+      // grown: the batch always starts after the last message the previous
+      // assistant turn consumed, so its first id is the same on every
+      // delivery of the same logical turn.
+      const firstInboundId = inboundMessages[0]?.id ?? "";
 
       // A batch is either all-user or all-scheduled — never mixed. The
       // debounce stages user inbounds; scheduled fires emit their own
@@ -1047,11 +1053,11 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           // re-deliveries alike — the scope a side-effectful tool should
           // dedup over, and one a run id would not give. `flush` turns carry
           // a null trigger while still processing real input, so they fall
-          // back to the batch's high-water mark off the memoized
-          // `load-inbound` step. Both are empty only for a turn with no
-          // inbound rows, which has nothing to duplicate.
-          ...((event.data.triggerInboundId ?? maxInboundId) !== "" && {
-            turnKey: event.data.triggerInboundId ?? maxInboundId,
+          // back to the batch's low-water mark, which is stable across
+          // deliveries for the same reason. Both are empty only for a turn
+          // with no inbound rows, which has nothing to duplicate.
+          ...((event.data.triggerInboundId ?? firstInboundId) !== "" && {
+            turnKey: event.data.triggerInboundId ?? firstInboundId,
           }),
           turnLogger,
         });
