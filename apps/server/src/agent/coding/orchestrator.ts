@@ -121,7 +121,8 @@ export interface CodingOrchestratorDeps {
 }
 
 export interface CodingOrchestratorResult {
-  status: "awaiting_approval" | "executing" | "failed";
+  /** `skipped` = a duplicate `coding/task/start`; the row was past `queued`. */
+  status: "awaiting_approval" | "executing" | "failed" | "skipped";
   plan?: string;
   failureReason?: string;
 }
@@ -203,6 +204,31 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
   const repo = await runInTx((tx) => store.getRepoById(tx, task.repoId));
   if (!repo) throw new Error(`coding repo not found: ${task.repoId}`);
 
+  // Re-entry guard, and the run's first durable act — the same contract the
+  // execute and verify orchestrators hold. A duplicate `coding/task/start`
+  // finds the row past `queued`, matches no row, and returns before
+  // `sandbox.create` mints a second container and `plan-cli` pays for a
+  // second claude session. `delegate`'s emit carries a `task-start-<id>`
+  // idempotency id that collapses a re-send inside the bus's dedup window;
+  // this transition is what holds outside it.
+  //
+  // Ahead of the try block for the same reason as the verify orchestrator:
+  // a run that loses the race must not reach the failure machinery, which
+  // would let it mark a task another run owns as `failed`. Branching on the
+  // memoized step result (never on a bare-body status read) is what keeps
+  // the run's own write to `planning` from short-circuiting the next
+  // boundary's re-invocation.
+  const claim = await stepRun("set-status-planning", () =>
+    runInTx((tx) => store.transitionTaskStatus(tx, taskId, "queued", "planning")),
+  );
+  if (claim.kind !== "transitioned") {
+    taskLog.info(
+      { claim },
+      "plan: status transition lost the race (already started or terminated)",
+    );
+    return { status: "skipped" };
+  }
+
   // Worktree assignment may be null on a fresh task — derived from the
   // (DB-generated) task id by the allocate-worktree step below. Local
   // mutable so the rest of the function reads it without re-loading the row.
@@ -216,10 +242,6 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
   // task transitions to executing).
   let askpassProvisioned = false;
   try {
-    await stepRun("set-status-planning", () =>
-      runInTx((tx) => store.updateTaskStatus(tx, { id: taskId, status: "planning" })),
-    );
-
     await stepRun("allocate-worktree", async () => {
       // 12 hex chars = 48-bit prefix of the UUIDv7 = the full unix-ms
       // timestamp portion. Two tasks created in the same millisecond would

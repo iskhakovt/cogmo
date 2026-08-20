@@ -220,6 +220,34 @@ describe("coding-task-start — Inngest replay", () => {
     expect(planStream.text).toEqual(["## Plan\n"]);
     expect(planStream.finalized).toEqual(["## Plan\n1. Do X\n"]);
   });
+
+  it("skips a duplicate start event instead of re-planning", async () => {
+    // What a re-delivered `coding/task/start` finds once the first run has
+    // moved the row past `queued`. Without the conditional transition this
+    // mints a second container and pays for a second plan session.
+    const { store, current } = statefulCodingStore(
+      codingTaskRow({ status: "awaiting_approval", plan: "## Plan\n1. Do X\n" }),
+      localRepo(),
+    );
+    const backend = countingBackend({ plan: PLAN_EVENTS });
+    const sandbox = fakeCodingSandbox();
+    const fn = createCodingOrchestrator(
+      makeDeps({ store, backend: backend.backend, sandbox: sandbox.sandbox }),
+      inngest,
+    );
+
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [{ name: "coding/task/start", data: { taskId: FIXTURE_TASK_ID } }],
+    });
+    const { result, error } = await engine.execute();
+
+    expect(error).toBeUndefined();
+    expect(result).toEqual({ status: "skipped" });
+    expect(backend.planCalls()).toBe(0);
+    expect(sandbox.sandbox.create).not.toHaveBeenCalled();
+    expect(current().status).toBe("awaiting_approval");
+  });
 });
 
 describe("coding-task-execute — Inngest replay", () => {

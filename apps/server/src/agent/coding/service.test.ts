@@ -97,6 +97,7 @@ describe("createCodingService", () => {
     expect(inngest.send).toHaveBeenCalledWith({
       name: "coding/task/start",
       data: { taskId: result.taskId },
+      id: `task-start-${result.taskId}`,
     });
   });
 

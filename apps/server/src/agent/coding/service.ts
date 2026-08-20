@@ -138,6 +138,15 @@ export function createCodingService(
         await deps.inngest.send({
           name: codingTaskStart.name,
           data: { taskId: task.id },
+          // Bus-level dedup, the same `<verb>-<taskId>` shape as the
+          // orchestrators' `task-failed-` / `plan-approved-` emits. Pairs
+          // with the plan orchestrator's `queued -> planning` transition:
+          // the id collapses a re-send inside the bus's dedup window, the
+          // transition holds outside it. Safe across the task's lifetime —
+          // the id is minted per submission, so it can only ever collapse
+          // a re-send of this exact submission, never two distinct
+          // requests that happen to share a goal.
+          id: `task-start-${task.id}`,
         });
       } catch (sendErr) {
         await deps

@@ -833,7 +833,6 @@ describe("runCodingTask", () => {
   it("catch path: emit fires BEFORE DB update; emit failure propagates leaving the row non-terminal", async () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
-    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "planning" }));
 
     const { sandbox } = fakeSandbox();
     // Backend that throws — drives the function into the catch.
@@ -874,7 +873,6 @@ describe("runCodingTask", () => {
   it("catch path: emit payload carries idempotency id 'task-failed-' + taskId for bus-level dedup", async () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
-    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "planning" }));
 
     const { sandbox } = fakeSandbox();
     const throwingBackend: CodingBackend = {
@@ -954,20 +952,19 @@ describe("runCodingTask", () => {
       },
       execute: () => throwingPlan("execute not used in this test"),
     };
-    // First UPDATE call (`set-status-planning` inside the try) succeeds;
-    // the SECOND call (the catch path's status="failed" write) throws.
-    // This isolates the test to the precise contract under exam: that
-    // the catch's UPDATE throw propagates instead of being swallowed.
+    // The task is claimed by `set-status-planning`'s conditional
+    // transition, which passes through; the catch path's status="failed"
+    // write is the only `updateTaskStatus` call, and it throws. This
+    // isolates the test to the precise contract under exam: that the
+    // catch's UPDATE throw propagates instead of being swallowed.
     let updateCalls = 0;
     const dbThrowingStore = {
       ...store,
       getTask: store.getTask.bind(store),
       getRepoById: store.getRepoById.bind(store),
-      updateTaskStatus: async (trx: unknown, params: { id: string; status: string }) => {
+      transitionTaskStatus: store.transitionTaskStatus.bind(store),
+      updateTaskStatus: async () => {
         updateCalls += 1;
-        if (updateCalls === 1) {
-          return store.updateTaskStatus(trx as never, params as never);
-        }
         throw new Error("db blip");
       },
     } as unknown as typeof store;
@@ -986,15 +983,14 @@ describe("runCodingTask", () => {
       }),
     ).rejects.toThrow(/db blip/);
 
-    // Two UPDATE attempts — set-status-planning (succeeded) + catch's
-    // set-status-failed (threw).
-    expect(updateCalls).toBe(2);
+    // One UPDATE attempt — the catch's set-status-failed, which threw.
+    expect(updateCalls).toBe(1);
     // Emit fired before the catch's UPDATE attempt — the bus has the
     // event already.
     expect(captured).toHaveLength(1);
-    // Row is in `planning` from the first successful UPDATE — the
-    // catch's status="failed" write was rejected, so the row stays
-    // non-terminal for the reconcile subscriber to pick up.
+    // Row is in `planning` from the claim transition — the catch's
+    // status="failed" write was rejected, so the row stays non-terminal
+    // for the reconcile subscriber to pick up.
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.status).toBe("planning");
   });

@@ -265,6 +265,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
     expect(inngestSend).toHaveBeenCalledWith({
       name: "coding/task/start",
       data: { taskId },
+      id: `task-start-${taskId}`,
     });
 
     // Subscribe the test observer to the registry so we can see what the
