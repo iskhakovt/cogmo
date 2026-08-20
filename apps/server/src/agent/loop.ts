@@ -374,12 +374,16 @@ function isSafeCall(entry: PlannedCall): boolean {
  * One executed (or short-circuited) tool call.
  *
  * `ranLive` is false only when a durable tool's step was replayed from the
- * Inngest cache — its handler (and any user-visible side effect its
- * `tool_result` event drives, e.g. a `generate_image` photo card) already
- * happened in an earlier invocation of the same run. The streaming loop uses
- * it to skip re-emitting `tool_result` events for cached calls; everything
- * synthesized in this invocation (non-durable runs, unknown tools,
- * volume-cluster interceptions, validation errors) is `ranLive: true`.
+ * Inngest cache — its handler ran in an earlier invocation of the same run,
+ * and that invocation normally also emitted its `tool_result` event (and
+ * delivered any side effect it drives, e.g. a `generate_image` photo card).
+ * The streaming loop uses it to skip re-emitting `tool_result` events for
+ * cached calls; everything synthesized in this invocation (non-durable
+ * runs, unknown tools, volume-cluster interceptions, validation errors) is
+ * `ranLive: true`. Accepted residual: a process crash in the gap between
+ * the step's completion being recorded and the emission right after it
+ * loses that one emission for good — the cached replay suppresses it. See
+ * design/crash-recovery.md → Durable LLM iterations.
  */
 interface ExecutedToolCall {
   block: ContentBlock;

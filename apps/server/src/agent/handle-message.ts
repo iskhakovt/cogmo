@@ -947,7 +947,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             // ContextManagerDeps.summarize). If that ever changes, switch to
             // a counter-based ID like `summarize-prefix-${i}` to avoid
             // Inngest's duplicate-step-id error.
-            return step.run("summarize-prefix", async () => {
+            return stepRun("summarize-prefix", async () => {
               // Status banner lives inside the step body so it reaches the
               // user exactly once — compactMessages re-runs on every
               // invocation, and a bare-body push would re-append the banner
@@ -1023,7 +1023,11 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           // delivery / notify boundaries that follow — in the bare body
           // they would re-fire on every subsequent re-invocation. The
           // step returns the apology text, so replays persist the same
-          // words the user saw.
+          // words the user saw. Plain `step.run`, not the `stepRun`
+          // wrapper: synthesizeDegradedReply swallows provider failures
+          // into the fixed fallback string internally, so no 4xx can
+          // escape this body — the only escapable errors are delivery
+          // pushes, which should keep normal step-retry semantics.
           const apology = await step.run("degraded-reply", async () => {
             // One tools-free LLM call summarizes the failure in
             // user-facing terms (what was attempted, what went wrong, one
