@@ -1042,6 +1042,17 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           // ordering. See design/crash-recovery.md → Durable LLM
           // iterations / Per-tool durability.
           stepRun,
+          // Turn token for per-tool-call idempotency keys. The triggering
+          // inbound id comes off the event payload, so it is identical
+          // across every re-invocation, every function retry, and any
+          // re-delivery of this turn — which is exactly the scope a
+          // side-effectful tool should dedup over. A run id would restart
+          // on a re-delivery and let the same request submit twice. Null
+          // for synthetic turns with no inbound row; those tools then run
+          // without retry-dedup, as they do today.
+          ...(event.data.triggerInboundId !== null && {
+            turnKey: event.data.triggerInboundId,
+          }),
           turnLogger,
         });
         // Class C / D degraded off-ramp. The loop exited because a repair

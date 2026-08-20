@@ -28,7 +28,12 @@ import {
   summarizeToolHistory,
 } from "./repair.js";
 import type { Service } from "./service.js";
-import { DEFAULT_INVOCATION_BUDGET, type ToolRegistry, type ToolSpec } from "./tools.js";
+import {
+  DEFAULT_INVOCATION_BUDGET,
+  type ToolCallContext,
+  type ToolRegistry,
+  type ToolSpec,
+} from "./tools.js";
 
 const tracer = trace.getTracer("cogmo.agent");
 
@@ -78,6 +83,16 @@ export interface AgentLoopParams {
    * Inngest replays).
    */
   stepRun?: StepRunner;
+  /**
+   * Opaque token identifying this turn, stable across every re-execution
+   * of it. The loop combines it with each tool call's SDK-local
+   * coordinates to derive the `ToolCallContext.idempotencyKey` a
+   * side-effectful tool uses for DB-level dedup — so it has to come from
+   * durable state (the triggering inbound id, an Inngest run id), never
+   * from a clock or a fresh uuid. Omit outside a retrying context: tools
+   * then receive no call context and none may assume retry-dedup.
+   */
+  turnKey?: string;
   /**
    * Per-invocation child logger with `runId` + `conversationId` bound. All
    * per-turn log emissions inside the loop route through it so downstream
@@ -168,6 +183,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     tools,
     service,
     stepRun,
+    turnKey,
     maxTokens,
     maxIterations = DEFAULT_MAX_ITERATIONS,
     turnLogger: log,
@@ -224,6 +240,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
       service,
       stepRun,
       iterations,
+      turnKey,
       interceptions,
     );
     messages.push({ role: "user", content: toolResults });
@@ -375,6 +392,7 @@ async function executeToolCalls(
   service: Service,
   stepRun: StepRunner | undefined,
   iteration: number,
+  turnKey: string | undefined,
   interceptions?: ReadonlyMap<string, ContentBlock>,
 ): Promise<ContentBlock[]> {
   const toolUseBlocks = content.filter((b): b is ToolUseBlock => b.type === "tool_use");
@@ -407,7 +425,7 @@ async function executeToolCalls(
   for (const group of groups) {
     const batch = await Promise.all(
       group.map(({ block, spec, stepKey }) =>
-        runOne(block, spec, service, stepRun, stepKey, interceptions),
+        runOne(block, spec, service, stepRun, stepKey, turnKey, interceptions),
       ),
     );
     results.push(...batch);
@@ -461,6 +479,7 @@ async function runOne(
   service: Service,
   stepRun: StepRunner | undefined,
   stepKey: ToolStepKey,
+  turnKey: string | undefined,
   interceptions?: ReadonlyMap<string, ContentBlock>,
 ): Promise<ContentBlock> {
   // Volume-cluster intercept short-circuits the handler — synthetic
@@ -487,8 +506,17 @@ async function runOne(
         // the provider's `tool_use_id` is not. Cached content may
         // semantically mismatch the current `tool_use` — see
         // design/crash-recovery.md → Per-tool durability.
+        // Idempotency key from the same SDK-local coordinates as the step
+        // id, prefixed with the turn token so two turns in one conversation
+        // don't collide at position 0. Undefined when the caller supplied
+        // no turn token (unit tests, loops outside Inngest), in which case
+        // no tool gets retry-dedup and none should assume it.
+        const callCtx: ToolCallContext | undefined =
+          turnKey === undefined
+            ? undefined
+            : { idempotencyKey: `${turnKey}:i${stepKey.iteration}:p${stepKey.position}` };
         const runHandler = (): Promise<string> =>
-          spec.handler(block.input as Record<string, unknown>, service);
+          spec.handler(block.input as Record<string, unknown>, service, callCtx);
         const out =
           spec.durable === true && stepRun
             ? await stepRun(`tool-iter${stepKey.iteration}-${stepKey.position}`, runHandler)
@@ -775,6 +803,7 @@ export async function runStreamingAgentLoop(
     service,
     onEvent,
     stepRun,
+    turnKey,
     maxTokens,
     maxIterations = DEFAULT_MAX_ITERATIONS,
     turnLogger: log,
@@ -953,6 +982,7 @@ export async function runStreamingAgentLoop(
       service,
       stepRun,
       iterations,
+      turnKey,
       interceptions,
     );
 

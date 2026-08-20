@@ -36,14 +36,22 @@ export const delegateCodingTool: ToolSpec = defineTool({
   // after the call.
   durable: true,
   schema: DelegateCodingInput,
-  handler: async ({ goal, repo }, service) => {
+  handler: async ({ goal, repo }, service, ctx) => {
     if (!service.coding) {
       throw new Error(
         "Coding delegation is unavailable — the sandbox module is not initialized. " +
           "Set SANDBOX_RUNTIME (sysbox in prod, runc for dev/CI) and restart Cogmo.",
       );
     }
-    const result = await service.coding.delegate({ goal, repoName: repo });
+    // The call context's key rides through to `coding_tasks.idempotency_key`.
+    // This tool is `durable: true`, so replays are already covered; the key
+    // closes the narrower window where the row commits and the process dies
+    // before Inngest records the step result.
+    const result = await service.coding.delegate({
+      goal,
+      repoName: repo,
+      ...(ctx !== undefined && { idempotencyKey: `delegate_coding:${ctx.idempotencyKey}` }),
+    });
     if (result.status === "rejected") {
       return JSON.stringify({ ok: false, reason: result.reason });
     }

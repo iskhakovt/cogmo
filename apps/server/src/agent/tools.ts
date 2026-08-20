@@ -10,7 +10,38 @@ import { coerceToolInput } from "./tool-input-coercion.js";
  * Returns a string result for the LLM. Errors should be thrown —
  * the agentic loop catches and reports them as tool_result with isError.
  */
-export type ToolHandler = (input: Record<string, unknown>, service: Service) => Promise<string>;
+/**
+ * Per-call context for one tool invocation. Distinct from {@link Service},
+ * which is the per-conversation capability bundle (and the ACL boundary):
+ * this carries facts about *this* call, so it can't be folded in there
+ * without making a shared object per-call.
+ *
+ * Optional on {@link ToolHandler} by design — a handler declared
+ * `(input, service)` is assignable to the three-parameter type, so tools
+ * that don't need a call context are unaffected.
+ */
+export interface ToolCallContext {
+  /**
+   * Deterministic token identifying this tool call, stable across every
+   * re-execution of it: Inngest step replays, and the step retry that
+   * follows a crash between a side effect committing and the step result
+   * being recorded. Derived from durable turn state plus the call's
+   * position in the turn — never from anything the model mints, which
+   * changes whenever an iteration re-runs.
+   *
+   * Side-effectful tools pass it to whatever DB-level idempotency their
+   * domain provides (`coding_tasks.idempotency_key`,
+   * `skill_runs.idempotency_key`). Absent when the loop runs outside a
+   * retrying context.
+   */
+  idempotencyKey: string;
+}
+
+export type ToolHandler = (
+  input: Record<string, unknown>,
+  service: Service,
+  ctx?: ToolCallContext,
+) => Promise<string>;
 
 /**
  * Full tool specification — execution-environment agnostic.
@@ -102,7 +133,7 @@ export function defineTool<T>(opts: {
   name: string;
   description: string;
   schema: ZodType<T>;
-  handler: (input: T, service: Service) => Promise<string>;
+  handler: (input: T, service: Service, ctx?: ToolCallContext) => Promise<string>;
   /** See `ToolSpec.durable`. */
   durable?: boolean;
   /** See `ToolSpec.parallelSafe`. */
@@ -125,7 +156,7 @@ export function defineTool<T>(opts: {
     name: opts.name,
     description: opts.description,
     inputSchema,
-    handler: async (raw, service) => {
+    handler: async (raw, service, ctx) => {
       // Some providers occasionally serialize a nested object argument as a
       // JSON string; unwrap once before Zod so the parse error the LLM sees
       // reflects a real schema violation, not a serialization quirk.
@@ -134,7 +165,7 @@ export function defineTool<T>(opts: {
         logger.debug({ tool: opts.name, paths: coercedPaths }, "coerced stringified tool input");
       }
       const parsed = opts.schema.parse(value);
-      return opts.handler(parsed, service);
+      return opts.handler(parsed, service, ctx);
     },
     ...(opts.durable !== undefined && { durable: opts.durable }),
     ...(opts.parallelSafe !== undefined && { parallelSafe: opts.parallelSafe }),

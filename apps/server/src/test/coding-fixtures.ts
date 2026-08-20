@@ -65,6 +65,7 @@ export function codingTaskRow(overrides: Partial<CodingTaskRow> = {}): CodingTas
     status: "queued",
     failureReason: null,
     resourceUsage: null,
+    idempotencyKey: null,
     createdAt: FIXTURE_EPOCH,
     ...overrides,
   };

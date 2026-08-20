@@ -28,6 +28,15 @@ export interface CodingServiceDeps {
 export interface DelegateInput {
   goal: string;
   repoName: string;
+  /**
+   * Deterministic-per-submission token from the tool call's
+   * `ToolCallContext`. Makes the insert + emit pair recoverable: the tool
+   * runs inside a durable `step.run`, so a crash between this row
+   * committing and Inngest recording the step result re-runs the body, and
+   * without a key that mints a second task and a second sandbox. Omitted by
+   * callers with no retry semantics (CLI, tests).
+   */
+  idempotencyKey?: string;
 }
 
 export type DelegateResult =
@@ -86,6 +95,11 @@ export function createCodingService(
         );
       }
 
+      // Recognise a retry before spending an admission check on it. Without
+      // this pre-check a re-run would count the task it is recovering
+      // against the repo's own limit and reject itself — `maxConcurrentTasks`
+      // of 1 makes that the common case, not an edge one.
+      //
       // Admission check + insert share one tx. The async submit +
       // durable orchestrator means multiple conversations (or repeated
       // taps from the same one) could each trigger a task concurrently;
@@ -99,20 +113,52 @@ export function createCodingService(
       // count over SERIALIZABLE — row-locking prevents the race
       // outright instead of detecting and retrying it.
       const admit = await deps.runInTx(async (tx) => {
+        if (input.idempotencyKey !== undefined) {
+          const prior = await deps.codingStore.getTaskByIdempotencyKey(tx, input.idempotencyKey);
+          if (prior) return { kind: "recovered" as const, task: prior };
+        }
         const active = await deps.codingStore.countActiveTasksForRepo(tx, repo.id);
         if (active >= repo.maxConcurrentTasks) {
           return { kind: "rejected" as const, active };
         }
-        const task = await deps.codingStore.insertTask(tx, {
+        const values = {
           repoId: repo.id,
           conversationId,
           goal: input.goal,
-          triggerSource: "user",
-          backend: "claude",
+          triggerSource: "user" as const,
+          backend: "claude" as const,
           allowPrivilegedRunc: false,
+        };
+        if (input.idempotencyKey === undefined) {
+          return { kind: "admitted" as const, task: await deps.codingStore.insertTask(tx, values) };
+        }
+        // `insertOrRecoverTask`'s ON CONFLICT DO NOTHING closes the window
+        // the pre-check above leaves open — two concurrent retries can both
+        // read no row under snapshot isolation, and the loser recovers the
+        // winner's row instead of raising a unique violation.
+        const insert = await deps.codingStore.insertOrRecoverTask(tx, {
+          ...values,
+          idempotencyKey: input.idempotencyKey,
         });
-        return { kind: "admitted" as const, task };
+        return insert.kind === "new"
+          ? { kind: "admitted" as const, task: insert.row }
+          : { kind: "recovered" as const, task: insert.row };
       });
+      if (admit.kind === "recovered") {
+        // A retry of a submission that already took. Fall through to the emit
+        // rather than returning here: the prior attempt may have died between
+        // the row committing and its `inngest.send`, and a recovery that
+        // skipped the emit would leave the task in `queued` forever with no
+        // orchestrator run — trading a duplicate for a permanent stall. The
+        // re-send is safe because it is absorbed twice over: the
+        // `task-start-<taskId>` id dedups it at the bus, and past that
+        // window the plan orchestrator's `queued -> planning` transition
+        // returns `skipped` for a task already under way.
+        log.info(
+          { taskId: admit.task.id, idempotencyKey: input.idempotencyKey },
+          "coding task submission recovered — prior attempt already inserted it",
+        );
+      }
       if (admit.kind === "rejected") {
         return {
           taskId: null,

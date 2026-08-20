@@ -1067,6 +1067,81 @@ describe("tool durability (stepRun)", () => {
     ]);
   });
 
+  it("hands each tool call an idempotency key keyed to the turn and its position", async () => {
+    // The key has to be derived from the same durable coordinates as the
+    // step id, so a step body that re-runs after a crash hands its domain
+    // the same key and recovers rather than duplicating. Anything the model
+    // mints (`tool_use_id`) would re-roll whenever an iteration re-runs.
+    const provider = mockProvider([
+      {
+        content: [
+          { type: "tool_use", id: "toolu_A", name: "paid", input: {} },
+          { type: "tool_use", id: "toolu_B", name: "paid", input: {} },
+        ],
+        stopReason: "tool_use",
+        model: "test",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+      textResponse("done"),
+    ]);
+
+    const seen: Array<string | undefined> = [];
+    const tools = new ToolRegistry();
+    tools.register({
+      name: "paid",
+      description: "expensive",
+      inputSchema: { type: "object" },
+      durable: true,
+      parallelSafe: true,
+      handler: async (_input, _service, ctx) => {
+        seen.push(ctx?.idempotencyKey);
+        return "ok";
+      },
+    });
+
+    await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      turnKey: "inbound-42",
+    });
+
+    // Turn token + iteration + position — the step id's coordinates.
+    expect(seen).toEqual(["inbound-42:i1:p0", "inbound-42:i1:p1"]);
+  });
+
+  it("omits the call context when the caller supplies no turn key", async () => {
+    // Outside a retrying context there is nothing stable to key on, and a
+    // fabricated key would be worse than none: it would look like a
+    // dedup guarantee while re-rolling on every run.
+    const provider = mockProvider([
+      toolUseResponse("paid", "toolu_01ABC", {}),
+      textResponse("done"),
+    ]);
+
+    const seen: Array<unknown> = [];
+    const tools = new ToolRegistry();
+    tools.register({
+      name: "paid",
+      description: "expensive",
+      inputSchema: { type: "object" },
+      durable: true,
+      handler: async (_input, _service, ctx) => {
+        seen.push(ctx);
+        return "ok";
+      },
+    });
+
+    await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      // no turnKey
+    });
+
+    expect(seen).toEqual([undefined]);
+  });
+
   it("runs a durable tool directly when no stepRun is provided", async () => {
     const provider = mockProvider([toolUseResponse("paid", "toolu_02", {}), textResponse("done")]);
 

@@ -60,6 +60,25 @@ export interface CodingRepoRow {
   createdAt: Date;
 }
 
+export interface InsertTaskParams {
+  repoId: string;
+  conversationId?: string | null;
+  goal: string;
+  triggerSource: CodingTriggerSource;
+  triggerRef?: string | null;
+  backend: CodingBackend;
+  allowPrivilegedRunc: boolean;
+}
+
+/**
+ * Outcome of an idempotent submission. `new` = this call minted the row;
+ * `recovered` = a prior call with the same key already did, so this one is
+ * a retry of the same submission.
+ */
+export type InsertTaskResult =
+  | { kind: "new"; row: CodingTaskRow }
+  | { kind: "recovered"; row: CodingTaskRow };
+
 export interface CodingTaskRow {
   id: string;
   repoId: string;
@@ -85,6 +104,12 @@ export interface CodingTaskRow {
   status: CodingTaskStatus;
   failureReason: string | null;
   resourceUsage: ResourceUsage | null;
+  /**
+   * Caller-supplied deterministic-per-submission token, or null when the
+   * caller has no retry semantics. Backed by a plain UNIQUE constraint;
+   * Postgres's NULL-not-equal semantics let null-key rows coexist.
+   */
+  idempotencyKey: string | null;
   createdAt: Date;
 }
 
@@ -153,18 +178,27 @@ export interface CodingStore {
    * accepted here — the orchestrator's `allocate-worktree` step derives them
    * from the (DB-generated) task id and persists via `setTaskWorktreeAssignment`.
    */
-  insertTask(
+  insertTask(tx: Transaction, params: InsertTaskParams): Promise<CodingTaskRow>;
+
+  /**
+   * Idempotent submission. Inserts with `ON CONFLICT DO NOTHING` against
+   * `uniq_coding_tasks_idempotency_key`, so a second call carrying the same
+   * key returns `kind: "recovered"` with the original row instead of
+   * minting a second task. Separate from {@link CodingStore.insertTask}
+   * because the contracts differ: this one can decline to insert. Mirrors
+   * `SkillStore.startOrRecoverRun`.
+   */
+  insertOrRecoverTask(
     tx: Transaction,
-    params: {
-      repoId: string;
-      conversationId?: string | null;
-      goal: string;
-      triggerSource: CodingTriggerSource;
-      triggerRef?: string | null;
-      backend: CodingBackend;
-      allowPrivilegedRunc: boolean;
-    },
-  ): Promise<CodingTaskRow>;
+    params: InsertTaskParams & { idempotencyKey: string },
+  ): Promise<InsertTaskResult>;
+
+  /**
+   * Look up a submission by its idempotency key. Read-only counterpart to
+   * `insertOrRecoverTask`'s conflict path — lets a caller recognise a retry
+   * before spending an admission check on it.
+   */
+  getTaskByIdempotencyKey(tx: Transaction, key: string): Promise<CodingTaskRow | undefined>;
 
   /** List tasks for a conversation, ordered by createdAt DESC (newest first). */
   listTasksForConversation(
@@ -327,6 +361,20 @@ export interface CodingStore {
   getCodingAutoapproveModeForTask(tx: Transaction, taskId: string): Promise<"off" | "on" | null>;
 }
 
+/** Column values shared by both insert paths. */
+function taskValues(params: InsertTaskParams) {
+  return {
+    repoId: params.repoId,
+    conversationId: params.conversationId ?? null,
+    goal: params.goal,
+    triggerSource: params.triggerSource,
+    triggerRef: params.triggerRef ?? null,
+    backend: params.backend,
+    allowPrivilegedRunc: params.allowPrivilegedRunc,
+    status: "queued" as const,
+  };
+}
+
 export class DrizzleCodingStore implements CodingStore {
   // --- Repos ---
 
@@ -420,34 +468,39 @@ export class DrizzleCodingStore implements CodingStore {
 
   // --- Tasks ---
 
-  async insertTask(
+  async insertTask(tx: Transaction, params: InsertTaskParams): Promise<CodingTaskRow> {
+    return single(await tx.insert(codingTasks).values(taskValues(params)).returning());
+  }
+
+  async insertOrRecoverTask(
     tx: Transaction,
-    params: {
-      repoId: string;
-      conversationId?: string | null;
-      goal: string;
-      triggerSource: CodingTriggerSource;
-      triggerRef?: string | null;
-      backend: CodingBackend;
-      allowPrivilegedRunc: boolean;
-    },
-  ): Promise<CodingTaskRow> {
-    const row = single(
-      await tx
-        .insert(codingTasks)
-        .values({
-          repoId: params.repoId,
-          conversationId: params.conversationId ?? null,
-          goal: params.goal,
-          triggerSource: params.triggerSource,
-          triggerRef: params.triggerRef ?? null,
-          backend: params.backend,
-          allowPrivilegedRunc: params.allowPrivilegedRunc,
-          status: "queued",
-        })
-        .returning(),
-    );
-    return row;
+    params: InsertTaskParams & { idempotencyKey: string },
+  ): Promise<InsertTaskResult> {
+    // ON CONFLICT DO NOTHING against `uniq_coding_tasks_idempotency_key`.
+    // RETURNING yields zero rows on collision, which is the retry signal;
+    // the caller's own pre-check handles the sequential case, this closes
+    // the concurrent one.
+    const inserted = await tx
+      .insert(codingTasks)
+      .values({ ...taskValues(params), idempotencyKey: params.idempotencyKey })
+      .onConflictDoNothing({ target: codingTasks.idempotencyKey })
+      .returning();
+    if (inserted.length > 0) return { kind: "new", row: single(inserted) };
+    const existing = await tx
+      .select()
+      .from(codingTasks)
+      .where(eq(codingTasks.idempotencyKey, params.idempotencyKey))
+      .limit(1);
+    return { kind: "recovered", row: single(existing) };
+  }
+
+  async getTaskByIdempotencyKey(tx: Transaction, key: string): Promise<CodingTaskRow | undefined> {
+    const rows = await tx
+      .select()
+      .from(codingTasks)
+      .where(eq(codingTasks.idempotencyKey, key))
+      .limit(1);
+    return rows[0];
   }
 
   async setTaskWorktreeAssignment(

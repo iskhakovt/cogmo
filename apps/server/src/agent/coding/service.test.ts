@@ -1,6 +1,7 @@
 import type { Inngest } from "inngest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
+import { expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleAgentStore } from "../store/index.js";
 import { createCodingService } from "./service.js";
@@ -197,6 +198,151 @@ describe("createCodingService", () => {
     expect(tasks).toHaveLength(1);
     expect(tasks[0]?.status).toBe("failed");
     expect(tasks[0]?.failureReason).toMatch(/inngest gateway unreachable/);
+  });
+
+  it("recovers the original task when a keyed submission is retried", async () => {
+    // The crash window the key exists for: `delegate` runs inside the
+    // tool's durable `step.run`, so a process death between this row
+    // committing and Inngest recording the step result re-runs the body.
+    // Without the key that mints a second task and a second sandbox.
+    await seedRepo("cogmo", 1);
+    const inngest = fakeInngest();
+    const service = createCodingService(
+      {
+        runInTx: tx,
+        codingStore: store,
+        inngest: inngest as unknown as Inngest,
+        sandboxAvailable: true,
+      },
+      conversationId,
+    );
+
+    const first = await service.delegate({
+      goal: "x".repeat(20),
+      repoName: "cogmo",
+      idempotencyKey: "delegate_coding:inbound-1:i1:p0",
+    });
+    const retry = await service.delegate({
+      goal: "x".repeat(20),
+      repoName: "cogmo",
+      idempotencyKey: "delegate_coding:inbound-1:i1:p0",
+    });
+
+    expect(retry.taskId).toBe(first.taskId);
+    const tasks = await tx((trx) => store.listTasksForConversation(trx, conversationId));
+    expect(tasks).toHaveLength(1);
+    // The recovery re-emits rather than returning early. The prior attempt
+    // may have died between the row committing and its send, and skipping
+    // the emit would leave the task in `queued` with no orchestrator run.
+    // Both emits carry the same idempotency id, so the bus collapses them —
+    // and past its dedup window the plan orchestrator's `queued -> planning`
+    // transition skips the second run.
+    expect(inngest.send).toHaveBeenCalledTimes(2);
+    const ids = inngest.send.mock.calls.map(([payload]) => (payload as { id: string }).id);
+    expect(ids).toEqual([`task-start-${first.taskId}`, `task-start-${first.taskId}`]);
+  });
+
+  it("re-emits on recovery so a submission that died before its send still starts", async () => {
+    // The narrow window the fall-through exists for: the row committed but
+    // `inngest.send` never ran. Without a re-emit the task would sit in
+    // `queued` forever — the key would have converted a duplicate into a
+    // permanent stall.
+    await seedRepo("cogmo", 1);
+    const failing = { send: vi.fn().mockRejectedValueOnce(new Error("bus down")) };
+    const service = createCodingService(
+      {
+        runInTx: tx,
+        codingStore: store,
+        inngest: failing as unknown as Inngest,
+        sandboxAvailable: true,
+      },
+      conversationId,
+    );
+
+    const key = "delegate_coding:inbound-5:i1:p0";
+    // Attempt 1: row commits, send throws. The catch marks it failed —
+    // stand in for the crash by re-queueing the row the retry will find.
+    await expect(
+      service.delegate({ goal: "x".repeat(20), repoName: "cogmo", idempotencyKey: key }),
+    ).rejects.toThrow(/bus down/);
+    const stranded = expectDefined(
+      await tx((trx) => store.getTaskByIdempotencyKey(trx, key)),
+      "stranded task",
+    );
+    await tx((trx) => store.updateTaskStatus(trx, { id: stranded.id, status: "queued" }));
+
+    failing.send.mockResolvedValue(undefined);
+    const retry = await service.delegate({
+      goal: "x".repeat(20),
+      repoName: "cogmo",
+      idempotencyKey: key,
+    });
+
+    expect(retry.taskId).toBe(stranded.id);
+    // Two sends: the failed one and the recovery's.
+    expect(failing.send).toHaveBeenCalledTimes(2);
+  });
+
+  it("recovers rather than tripping the concurrency cap on retry", async () => {
+    // The retry's own task counts against `maxConcurrentTasks`, so a
+    // recovery check placed after the admission count would reject the
+    // submission it is supposed to recover. With a cap of 1 that is the
+    // common case, not an edge one.
+    await seedRepo("cogmo", 1);
+    const inngest = fakeInngest();
+    const service = createCodingService(
+      {
+        runInTx: tx,
+        codingStore: store,
+        inngest: inngest as unknown as Inngest,
+        sandboxAvailable: true,
+      },
+      conversationId,
+    );
+
+    const first = await service.delegate({
+      goal: "x".repeat(20),
+      repoName: "cogmo",
+      idempotencyKey: "delegate_coding:inbound-2:i1:p0",
+    });
+    const retry = await service.delegate({
+      goal: "x".repeat(20),
+      repoName: "cogmo",
+      idempotencyKey: "delegate_coding:inbound-2:i1:p0",
+    });
+
+    expect(retry.status).toBe("queued");
+    expect(retry.taskId).toBe(first.taskId);
+  });
+
+  it("keeps distinct submissions distinct — different keys, different tasks", async () => {
+    await seedRepo("cogmo", 5);
+    const inngest = fakeInngest();
+    const service = createCodingService(
+      {
+        runInTx: tx,
+        codingStore: store,
+        inngest: inngest as unknown as Inngest,
+        sandboxAvailable: true,
+      },
+      conversationId,
+    );
+
+    const a = await service.delegate({
+      goal: "x".repeat(20),
+      repoName: "cogmo",
+      idempotencyKey: "delegate_coding:inbound-3:i1:p0",
+    });
+    // Same goal, same conversation, next turn — a genuinely new request.
+    const b = await service.delegate({
+      goal: "x".repeat(20),
+      repoName: "cogmo",
+      idempotencyKey: "delegate_coding:inbound-4:i1:p0",
+    });
+
+    expect(b.taskId).not.toBe(a.taskId);
+    const tasks = await tx((trx) => store.listTasksForConversation(trx, conversationId));
+    expect(tasks).toHaveLength(2);
   });
 
   it("admits a second task when the cap allows it", async () => {

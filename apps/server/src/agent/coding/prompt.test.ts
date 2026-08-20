@@ -45,6 +45,7 @@ function task(overrides: Partial<CodingTaskRow> = {}): CodingTaskRow {
     status: "queued",
     failureReason: null,
     resourceUsage: null,
+    idempotencyKey: null,
     createdAt: new Date(),
     ...overrides,
   };

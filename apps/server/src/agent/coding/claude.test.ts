@@ -117,6 +117,7 @@ const task: CodingTaskRow = {
   status: "queued",
   failureReason: null,
   resourceUsage: null,
+  idempotencyKey: null,
   createdAt: new Date(),
 };
 

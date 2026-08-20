@@ -1,4 +1,13 @@
-import { boolean, integer, pgEnum, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import {
+  boolean,
+  integer,
+  pgEnum,
+  pgTable,
+  text,
+  timestamp,
+  unique,
+  uuid,
+} from "drizzle-orm/pg-core";
 import { jsonbZod, pk, ts } from "../../../db/helpers.js";
 import { containers } from "../../../sandbox/store/schema.js";
 import { conversations } from "../../store/schema.js";
@@ -75,43 +84,55 @@ export const codingRepos = pgTable("coding_repos", {
  * slices fill in `pr_url`, `pending_verify`/`verifying`/`pushed`/`pr_open`
  * statuses, etc.
  */
-export const codingTasks = pgTable("coding_tasks", {
-  id: pk(),
-  repoId: uuid("repo_id")
-    .notNull()
-    .references(() => codingRepos.id),
-  // Conversation that triggered this task — null for non-conversation triggers
-  // (evolution, signal_pipeline). Drives `/repo list` scoping and Telegram
-  // delivery. Nullable FK: `conversations` lives in the same agent-store
-  // module, and a non-null value always points at a real conversation in
-  // production, so the constraint holds without coupling lifecycles. ON DELETE
-  // is the default no-action by design — `messages.conversation_id` is
-  // likewise no-action and conversations are not pruned; a future prune would
-  // pick an onDelete policy across all referencing tables together, not here.
-  conversationId: uuid("conversation_id").references(() => conversations.id),
-  goal: text("goal").notNull(),
-  triggerSource: codingTriggerSource("trigger_source").notNull(),
-  triggerRef: text("trigger_ref"), // pointer into the originating subsystem (evolution proposal id, etc.)
-  backend: codingBackend("backend").notNull(),
-  // Worktree assignment — branch + host path derived from the task id by the
-  // orchestrator's `allocate-worktree` step (per design/coding-delegation.md
-  // → Inngest step boundaries). Stored as one JSONB blob with a Zod-validated
-  // shape so the two fields are atomic by construction (no "half-allocated"
-  // state). Null until allocate-worktree runs — same lifecycle pattern as
-  // session_id, container_id, plan, etc. on this table.
-  worktreeAssignment: jsonbZod("worktree_assignment", WorktreeAssignmentSchema),
-  sessionId: text("session_id"), // CLI session id captured on first event
-  containerId: uuid("container_id").references(() => containers.id), // set after sandbox.createTaskContainer
-  allowPrivilegedRunc: boolean("allow_privileged_runc").notNull(), // explicit at insert (no default)
-  plan: text("plan"),
-  planApprovedAt: timestamp("plan_approved_at", { withTimezone: true }),
-  // Slice 4.0g: PrMetadataSchema = { url, number, branchSha, openedAt };
-  // null until the PR step populates it. Replaces the prior
-  // `pr_url TEXT` column (no in-flight data — slice 4 is the first to
-  // populate PR state).
-  prMetadata: jsonbZod("pr_metadata", PrMetadataSchema),
-  status: codingTaskStatus("status").notNull(),
-  failureReason: text("failure_reason"),
-  resourceUsage: jsonbZod("resource_usage", ResourceUsageSchema), // null = no stats poll yet
-  createdAt: ts(),
-});
+export const codingTasks = pgTable(
+  "coding_tasks",
+  {
+    id: pk(),
+    repoId: uuid("repo_id")
+      .notNull()
+      .references(() => codingRepos.id),
+    // Conversation that triggered this task — null for non-conversation triggers
+    // (evolution, signal_pipeline). Drives `/repo list` scoping and Telegram
+    // delivery. Nullable FK: `conversations` lives in the same agent-store
+    // module, and a non-null value always points at a real conversation in
+    // production, so the constraint holds without coupling lifecycles. ON DELETE
+    // is the default no-action by design — `messages.conversation_id` is
+    // likewise no-action and conversations are not pruned; a future prune would
+    // pick an onDelete policy across all referencing tables together, not here.
+    conversationId: uuid("conversation_id").references(() => conversations.id),
+    goal: text("goal").notNull(),
+    triggerSource: codingTriggerSource("trigger_source").notNull(),
+    triggerRef: text("trigger_ref"), // pointer into the originating subsystem (evolution proposal id, etc.)
+    backend: codingBackend("backend").notNull(),
+    // Worktree assignment — branch + host path derived from the task id by the
+    // orchestrator's `allocate-worktree` step (per design/coding-delegation.md
+    // → Inngest step boundaries). Stored as one JSONB blob with a Zod-validated
+    // shape so the two fields are atomic by construction (no "half-allocated"
+    // state). Null until allocate-worktree runs — same lifecycle pattern as
+    // session_id, container_id, plan, etc. on this table.
+    worktreeAssignment: jsonbZod("worktree_assignment", WorktreeAssignmentSchema),
+    sessionId: text("session_id"), // CLI session id captured on first event
+    containerId: uuid("container_id").references(() => containers.id), // set after sandbox.createTaskContainer
+    allowPrivilegedRunc: boolean("allow_privileged_runc").notNull(), // explicit at insert (no default)
+    plan: text("plan"),
+    planApprovedAt: timestamp("plan_approved_at", { withTimezone: true }),
+    // Slice 4.0g: PrMetadataSchema = { url, number, branchSha, openedAt };
+    // null until the PR step populates it. Replaces the prior
+    // `pr_url TEXT` column (no in-flight data — slice 4 is the first to
+    // populate PR state).
+    prMetadata: jsonbZod("pr_metadata", PrMetadataSchema),
+    status: codingTaskStatus("status").notNull(),
+    failureReason: text("failure_reason"),
+    resourceUsage: jsonbZod("resource_usage", ResourceUsageSchema), // null = no stats poll yet
+    // Caller-supplied deterministic-per-submission token. `delegate_coding`
+    // passes one derived from the agent turn plus the tool call's position, so
+    // a `step.run` body that crashes after this row commits but before Inngest
+    // records the step result inserts nothing on retry and recovers the
+    // original task. Null for submissions with no retrying caller (CLI,
+    // tests); Postgres's default NULL-not-equal unique semantics let those
+    // rows coexist freely. Same shape as `skill_runs.idempotency_key`.
+    idempotencyKey: text("idempotency_key"),
+    createdAt: ts(),
+  },
+  (t) => [unique("uniq_coding_tasks_idempotency_key").on(t.idempotencyKey)],
+);
