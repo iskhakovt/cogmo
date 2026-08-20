@@ -414,29 +414,41 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       });
     }
 
-    // Re-attach a session handle on this side of the step boundary —
-    // handles can't cross step.run because they aren't
-    // JSON-serializable, but the state is.
-    const container = await sandbox.resume(sessionState);
-
-    // ── Non-durable: stream the plan ──
     planStream = await openPlanStream(taskId);
-    // Re-load the task so the prompt template sees the row in its
-    // post-allocation state (worktreeAssignment populated, container_id
-    // stamped). buildPlanPrompt only reads goal + worktreeAssignment.branch
-    // today, so spreading `{...task, worktreeAssignment}` would be enough —
-    // but a future prompt change that reads any other lifecycle field
-    // (e.g. container metadata) would silently see stale nulls. The
-    // single point-read is cheap; the footgun isn't worth saving it.
-    const planTask = (await runInTx((tx) => store.getTask(tx, taskId))) ?? task;
-    const result = await runPlanStreaming({
-      task: planTask,
-      repo,
-      container,
-      backend,
-      planStream,
-      store,
-      runInTx,
+    // Capture the handle in a const so the step body below sees the
+    // non-null type — TS doesn't carry `let` narrowing across closures.
+    const stream = planStream;
+
+    // Durable: `backend.plan` is a billable claude session, and unlike
+    // execute it has no `--resume`, so a re-invocation replans from
+    // scratch and re-renders the whole plan into the user's message. In
+    // the bare body that happened once per remaining step boundary. The
+    // session-id write and the plan-text pushes both live inside the body:
+    // they fire live on the invocation that runs it and are suppressed on
+    // every replay. The result is small and JSON-safe (plan text plus an
+    // error flag), and it selects disjoint step sets below, so memoizing
+    // it also pins the step graph.
+    const result = await stepRun("plan-cli", async () => {
+      // Re-attach a session handle inside the step — handles can't cross
+      // step.run because they aren't JSON-serializable, but the state is.
+      const container = await sandbox.resume(sessionState);
+      // Re-load the task so the prompt template sees the row in its
+      // post-allocation state (worktreeAssignment populated, container_id
+      // stamped). buildPlanPrompt only reads goal + worktreeAssignment.branch
+      // today, so spreading `{...task, worktreeAssignment}` would be enough —
+      // but a future prompt change that reads any other lifecycle field
+      // (e.g. container metadata) would silently see stale nulls. The
+      // single point-read is cheap; the footgun isn't worth saving it.
+      const planTask = (await runInTx((tx) => store.getTask(tx, taskId))) ?? task;
+      return runPlanStreaming({
+        task: planTask,
+        repo,
+        container,
+        backend,
+        planStream: stream,
+        store,
+        runInTx,
+      });
     });
 
     if (result.isError || !result.plan) {
@@ -466,7 +478,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       // Stream notification post-commit — wrap so a subscriber error
       // doesn't escape into the outer catch and write a second failed
       // status that masks the original reason.
-      await planStream.fail(reason).catch((streamErr: unknown) => {
+      await stream.fail(reason).catch((streamErr: unknown) => {
         taskLog.warn({ err: streamErr }, "plan stream fail notification failed");
       });
       return { status: "failed", failureReason: reason };
@@ -499,15 +511,21 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     );
     // Same wrap as the failure-path notification above — once status is
     // committed, a subscriber error must not regress the task to failed.
+    // Durable because two more step boundaries follow it on the
+    // auto-approve path: in the bare body the finalize would re-render the
+    // plan message on each of them.
     const willAutoApprove = task.triggerSource === "user" && autoapproveMode === "on";
-    await planStream
-      .finalize(result.plan ?? "", { autoApproved: willAutoApprove })
-      .catch((streamErr: unknown) => {
-        taskLog.warn(
-          { err: streamErr },
-          `plan stream finalize notification failed (task already ${nextStatus})`,
-        );
-      });
+    await stepRun("notify-plan-finalized", async () => {
+      await stream
+        .finalize(result.plan ?? "", { autoApproved: willAutoApprove })
+        .catch((streamErr: unknown) => {
+          taskLog.warn(
+            { err: streamErr },
+            `plan stream finalize notification failed (task already ${nextStatus})`,
+          );
+        });
+      return null;
+    });
     // Auto-approve: same effect as the Telegram approve callback. Uses
     // `approvePlanIfPending` so the path is atomic with concurrent
     // cancels/manual approvals — if the user managed to tap Cancel in the
@@ -555,6 +573,13 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
   } catch (err) {
     const reason = (err as Error).message;
     taskLog.error({ err }, "coding task failed");
+    // Deliberately broad. Every failure this function can hit — a thrown
+    // step body re-raised here as a `StepError` once its retries are
+    // exhausted included — converts to the same designed channel:
+    // `status=failed` with the reason persisted, plus `coding/task/failed`
+    // for the cleanup subscribers. There is no failure mode this should
+    // let escape unconverted.
+    //
     // Emit BEFORE the DB status update. If `step.sendEvent` ultimately
     // fails (SDK exhausts its retry budget on a real bus outage), the
     // catch throws, the function fails, and `inngest/function.failed`
@@ -808,13 +833,14 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   if (!task.planApprovedAt) {
     throw new Error(`coding task ${taskId} has no plan_approved_at — execute fired prematurely`);
   }
-  if (task.status !== "awaiting_approval") {
-    taskLog.info(
-      { status: task.status },
-      "execute: task not in awaiting_approval — already started or terminated, skipping",
-    );
-    return { status: "skipped" };
-  }
+  // No bare-body status guard here: `set-status-executing` below writes
+  // `executing`, and Inngest re-invokes this body at every step boundary,
+  // so a `task.status !== "awaiting_approval"` read at this point would
+  // see the run's own write and abandon the rest of the sequence. The
+  // conditional UPDATE inside that step is the durable form of the same
+  // check — see the guard on `transition.kind`. The three checks that
+  // remain read fields the PLAN phase owns and this function never
+  // touches, so they are stable across replays.
   if (!task.sessionId) {
     throw new Error(`coding task ${taskId} has no session_id — plan phase didn't capture it`);
   }
@@ -991,17 +1017,40 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       }
     }
 
-    const container = await sandbox.resume(sessionState);
+    // Const-capture so the closures below see the post-branch non-null
+    // type, then resume lazily and at most once per invocation. Handles
+    // can't cross a step boundary, `sandbox.resume` is a live provider
+    // call, and the bare body runs once per boundary — deferring it to the
+    // step bodies that actually need a handle keeps the round-trips
+    // proportional to container work rather than to the replay count.
+    const state = sessionState;
+    let resumed: SandboxSession | null = null;
+    const container = async (): Promise<SandboxSession> => {
+      resumed ??= await sandbox.resume(state);
+      return resumed;
+    };
 
     executeStream = await openExecuteStream(taskId);
-    await executeStream.started?.();
-    const result = await runExecuteStreaming({
-      task,
-      repo,
-      container,
-      backend,
-      executeStream,
-      sessionId,
+    const stream = executeStream;
+
+    // Durable: `backend.execute` is a billable claude session. Left in the
+    // bare body it re-ran once per remaining step boundary — a fresh paid
+    // CLI invocation and a fresh flood of progress edits each time — and
+    // `isError` selects disjoint step sets below, so a verdict that
+    // differed between replays would plan a step graph the executor never
+    // asked for. The `started` banner and the token/tool pushes fire live
+    // from inside the body and are suppressed on replay, which is exactly
+    // what the progress UI wants.
+    const result = await stepRun("execute-cli", async () => {
+      await stream.started?.();
+      return runExecuteStreaming({
+        task,
+        repo,
+        container: await container(),
+        backend,
+        executeStream: stream,
+        sessionId,
+      });
     });
 
     if (result.isError) {
@@ -1031,10 +1080,10 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       // Stream notifications post-commit — wrap so a subscriber failure
       // doesn't bubble into the outer catch, which would write a second
       // (less informative) failed-status overwriting the original reason.
-      await executeStream.complete(false).catch((streamErr: unknown) => {
+      await stream.complete(false).catch((streamErr: unknown) => {
         taskLog.warn({ err: streamErr }, "execute stream complete(false) notification failed");
       });
-      await executeStream.fail(reason).catch((streamErr: unknown) => {
+      await stream.fail(reason).catch((streamErr: unknown) => {
         taskLog.warn({ err: streamErr }, "execute stream fail notification failed");
       });
       return { status: "failed", failureReason: reason };
@@ -1077,13 +1126,12 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       const pushCtx = executePushCtx;
       const runBranch = runBranchFor(taskId);
       const featureBranch = worktreeAssignment.branch;
-      const pushResult = await stepRun("commit-and-push-execute-changes", () =>
-        // Reuse the already-resumed `container` rather than a fresh
-        // `sandbox.resume(sessionState)` — on Daytona that's an API
-        // round-trip; `step.run` only requires the result be replay-safe,
-        // not the session handle.
+      const pushResult = await stepRun("commit-and-push-execute-changes", async () =>
+        // `container()` hands back the handle the execute step already
+        // resumed when both run in the same invocation, and resumes one
+        // on demand when this step body runs alone in a targeted replay.
         runCommitAndPush({
-          container,
+          container: await container(),
           worktreeDir: WORKTREE_DIR_IN_CONTAINER,
           branch: featureBranch,
           remoteBranch: runBranch,
@@ -1117,13 +1165,13 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
         await stepRun("persist-sandbox-deleted-after-push-failure", () =>
           runInTx((tx) => store.setTaskSandboxDeletedAt(tx, taskId, new Date().toISOString())),
         );
-        await executeStream.complete(false).catch((streamErr: unknown) => {
+        await stream.complete(false).catch((streamErr: unknown) => {
           taskLog.warn(
             { err: streamErr },
             "execute stream complete(false) notification failed (push failure)",
           );
         });
-        await executeStream.fail(reason).catch((streamErr: unknown) => {
+        await stream.fail(reason).catch((streamErr: unknown) => {
           taskLog.warn({ err: streamErr }, "execute stream fail notification failed");
         });
         return { status: "failed", failureReason: reason };
@@ -1157,7 +1205,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     // `failed`. The DB / sandbox state is correct; the user just won't
     // see the final progress message edit, which is recoverable on next
     // interaction.
-    await executeStream.complete(true, completionTokens).catch((streamErr: unknown) => {
+    await stream.complete(true, completionTokens).catch((streamErr: unknown) => {
       taskLog.warn(
         { err: streamErr },
         "execute stream complete notification failed (task already pending_verify)",
@@ -1167,6 +1215,10 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   } catch (err) {
     const reason = (err as Error).message;
     taskLog.error({ err }, "coding execute failed");
+    // Deliberately broad — same designed failure channel as the matching
+    // catch in `runCodingTask`, `StepError` from a permanently-failed step
+    // included.
+    //
     // Emit BEFORE the DB status update — see the rationale on the
     // matching catch in `runCodingTask`.
     await stepSendEvent("emit-task-failed", {

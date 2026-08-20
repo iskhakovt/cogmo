@@ -135,17 +135,36 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   const repo = await runInTx((tx) => store.getRepoById(tx, task.repoId));
   if (!repo) throw new Error(`coding repo not found: ${task.repoId}`);
 
-  if (task.status !== "pending_verify") {
-    taskLog.info(
-      { status: task.status },
-      "verify: task not in pending_verify — already started or terminated, skipping",
-    );
-    return { status: "skipped" };
-  }
   if (!task.worktreeAssignment) {
     throw new Error(`coding task ${taskId} has no worktree_assignment`);
   }
   const worktreeAssignment = task.worktreeAssignment;
+
+  // Re-entry guard, and the run's first durable act. The conditional
+  // UPDATE is the only thing that decides whether this invocation owns the
+  // task. Inngest re-invokes the bare body at every step boundary, so a
+  // plain `task.status !== "pending_verify"` read up here would see the
+  // `verifying` this very run wrote one boundary ago, abandon the rest of
+  // the sequence, and strand the task mid-flight. Branching on the
+  // memoized step result instead lets a replay resume where it left off
+  // while a genuinely duplicate event — whose UPDATE matches no row —
+  // still short-circuits.
+  //
+  // Ahead of the try block on purpose: a run that lost the race must not
+  // reach the failure machinery below, or a duplicate event whose identity
+  // resolution happens to fail would flip an already-terminal task to
+  // `failed`. A throw from the step itself fails the function outright and
+  // `coding-task-reconcile` marks the row off `inngest/function.failed`.
+  const transition = await stepRun("set-status-verifying", () =>
+    runInTx((tx) => store.transitionTaskStatus(tx, taskId, "pending_verify", "verifying")),
+  );
+  if (transition.kind !== "transitioned") {
+    taskLog.info(
+      { transition },
+      "verify: status transition lost the race (already verifying or terminal)",
+    );
+    return { status: "skipped" };
+  }
 
   /**
    * Local helper bundling status=failed + worktree teardown + stream
@@ -206,20 +225,6 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   let askpassProvisioned = false;
 
   try {
-    // Conditional UPDATE pending_verify → verifying so a duplicate
-    // event (Inngest replay or operator nudge) finds the row already
-    // verifying and returns kind=skipped.
-    const transition = await stepRun("set-status-verifying", () =>
-      runInTx((tx) => store.transitionTaskStatus(tx, taskId, "pending_verify", "verifying")),
-    );
-    if (transition.kind !== "transitioned") {
-      taskLog.info(
-        { transition },
-        "verify: status transition lost the race (already verifying or terminal)",
-      );
-      return { status: "skipped" };
-    }
-
     // Provision askpass material — host-side, per-task. Mark before the
     // step body executes so a partial provision (mkdir succeeded but a
     // writeFileSync threw) still triggers cleanup in the finally block.
@@ -271,17 +276,37 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
         await checkoutFeatureBranchInSandbox(session, worktreeAssignment.branch);
       });
     }
-    const container: SandboxSession = await sandbox.resume(sessionState);
+    // Session handles aren't JSON-serializable, so each step body that
+    // needs one re-attaches. `sandbox.resume` is a live provider call
+    // (it verifies the sandbox is still reachable) and the bare body runs
+    // once per step boundary — resolving it lazily, memoized within the
+    // invocation, keeps the round-trips proportional to the container work
+    // actually performed rather than to the replay count.
+    let resumed: SandboxSession | null = null;
+    const container = async (): Promise<SandboxSession> => {
+      resumed ??= await sandbox.resume(sessionState);
+      return resumed;
+    };
 
     executeStream = await openExecuteStream(taskId);
+    const stream = executeStream;
 
     // 1. Verify ───────────────────────────────────────────────────────
-    const verifyResult = await runVerifyStreaming({
-      container,
-      verifyCommand: repo.verifyCommand,
-      timeoutSeconds: repo.verifyTimeoutSeconds,
-      executeStream,
-    });
+    // Durable: this runs the repo's entire test suite. Left in the bare
+    // body it re-ran once per remaining step boundary — minutes of compute
+    // apiece — and `ok` selects disjoint step sets downstream, so a
+    // verdict that differed between replays would plan a step graph the
+    // executor never asked for. The runner caps `output` at 8 KiB, so the
+    // step return stays small; the live `appendText` pushes fire from
+    // inside the body and are suppressed on replay.
+    const verifyResult = await stepRun("run-verify", async () =>
+      runVerifyStreaming({
+        container: await container(),
+        verifyCommand: repo.verifyCommand,
+        timeoutSeconds: repo.verifyTimeoutSeconds,
+        executeStream: stream,
+      }),
+    );
     await stepRun("emit-verify-complete", () =>
       inngest
         .send({
@@ -302,15 +327,22 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
 
     // 2. Commit + push ────────────────────────────────────────────────
     const branch = worktreeAssignment.branch;
-    const commitResult = await runCommitAndPush({
-      container,
-      worktreeDir: WORKTREE_DIR_IN_CONTAINER,
-      branch,
-      commitMessage: task.goal,
-      signingKeyPath: askpass.signingKeyPath,
-      askpassEnv: askpass.env,
-      author: commitAuthorFor(identity),
-    });
+    // Durable for the same reason as the execute orchestrator's
+    // `commit-and-push-execute-changes`: it writes a commit and pushes it
+    // to origin. The identity's PAT reaches the runner through the
+    // askpass env and the closure, never as a step argument or return, so
+    // it stays out of Inngest's state store.
+    const commitResult = await stepRun("commit-and-push", async () =>
+      runCommitAndPush({
+        container: await container(),
+        worktreeDir: WORKTREE_DIR_IN_CONTAINER,
+        branch,
+        commitMessage: task.goal,
+        signingKeyPath: askpass.signingKeyPath,
+        askpassEnv: askpass.env,
+        author: commitAuthorFor(identity),
+      }),
+    );
 
     if (commitResult.kind === "branch_conflict") {
       return await failAndTeardown(
@@ -335,8 +367,13 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     let branchSha = commitResult.kind === "pushed" ? commitResult.commitSha : "";
     if (!branchSha) {
       // Re-derive HEAD via the container — the verify-only path didn't
-      // run rev-parse. Cheap exec.
-      branchSha = await readHeadSha(container);
+      // run rev-parse. Durable so the PR head is pinned to one value: a
+      // bare-body re-read costs a container round-trip per boundary and
+      // would report a different sha if anything else moved the branch in
+      // between, after `pr_metadata` had already recorded the first.
+      // Conditional on `commitResult.kind`, which is itself memoized, so
+      // the step plan is identical on every replay.
+      branchSha = await stepRun("read-head-sha", async () => readHeadSha(await container()));
     }
 
     await stepRun("set-status-pushed", () =>
@@ -350,18 +387,28 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
 
     // 3. Open PR ─────────────────────────────────────────────────────
     const planText = task.plan ?? "";
-    const prResult = await runOpenPr({
-      pat: identity.pat,
-      owner: remote.owner,
-      repo: remote.repo,
-      head: branch,
-      base: repo.defaultBranch,
-      goal: task.goal,
-      plan: planText,
-      verifyOutput: verifyResult.output,
-      branchSha,
-      ...(deps.octokitFactory && { octokit: deps.octokitFactory(identity.pat) }),
-    });
+    // Durable: opening a pull request is irreversible and not idempotent
+    // upstream. In the bare body every step boundary after this point
+    // re-POSTed to GitHub, and the second call comes back 422
+    // `validation_failed` ("A pull request already exists") — which this
+    // function reads as a failure, so the run that had just opened the PR
+    // would go on to mark its own task `failed`. The PAT is a closure
+    // argument rather than a step argument, and `OpenPrResult` carries
+    // only the PR's public metadata, so nothing secret is persisted.
+    const prResult = await stepRun("open-pr", () =>
+      runOpenPr({
+        pat: identity.pat,
+        owner: remote.owner,
+        repo: remote.repo,
+        head: branch,
+        base: repo.defaultBranch,
+        goal: task.goal,
+        plan: planText,
+        verifyOutput: verifyResult.output,
+        branchSha,
+        ...(deps.octokitFactory && { octokit: deps.octokitFactory(identity.pat) }),
+      }),
+    );
 
     if (prResult.kind === "auth_failed") {
       return await failAndTeardown(`PR open failed (auth): ${prResult.message}`, executeStream);
@@ -427,6 +474,13 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   } catch (err) {
     const reason = (err as Error).message;
     taskLog.error({ err }, "coding verify failed");
+    // Deliberately broad. Every failure this function can hit — a thrown
+    // step body re-raised here as a `StepError` once its retries are
+    // exhausted included — converts to the same designed channel:
+    // `status=failed` with the reason persisted, plus `coding/task/failed`
+    // for the cleanup subscribers. There is no failure mode this should
+    // let escape unconverted.
+    //
     // Emit BEFORE the DB status update — see the rationale on the
     // matching catch in `runCodingTask`.
     await stepSendEvent("emit-task-failed", {

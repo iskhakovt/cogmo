@@ -38,7 +38,10 @@ contract**. Design every function for the per-boundary model.
   body reads the mutated status and skips the rest of the run. Re-entry
   guards belong *inside* a durable step (conditional UPDATE returning
   whether the transition happened), with the bare body branching on the
-  memoized result.
+  memoized result. Put that step where a lost race returns *before* the
+  function's failure/teardown machinery — otherwise a duplicate event
+  that trips any error on the way in (a rotated secret, an unreachable
+  dependency) marks an already-terminal row `failed`.
 - **The continuation after a parallel step group runs only in
   fully-memoized invocations.** When a `Promise.all` plans two or more
   steps, Inngest executes each body in a targeted request that runs ONLY
