@@ -75,6 +75,9 @@ export const activatePipelineTool: ToolSpec = defineTool({
   description:
     "Activate a compiled pipeline definition after the user has confirmed its preview. " +
     "Activating a new version deactivates the previous one.",
+  // Durable: flips pipeline activation state. Exactly-once per turn, not
+  // once per step boundary after the call.
+  durable: true,
   schema: activateSchema,
   handler: async (input, service) => {
     const pipelines = requirePipelines(service);

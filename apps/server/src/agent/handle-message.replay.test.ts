@@ -12,10 +12,11 @@
  *      cached on resume — i.e., user/assistant messages are inserted exactly
  *      once across an Inngest retry.
  *   2. The expensive summarization LLM call inside `compact-context` is cached.
- *   3. The non-durable streaming section IS re-invoked on every replay (this
- *      is by design — you can't stream out of a `step.run`). The test exists
- *      to make this tradeoff explicit and to catch regressions where someone
- *      moves a side effect out of a step.
+ *   3. The streaming section's bare-body glue IS re-invoked on every replay,
+ *      while the expensive work inside it — each `llm-iter<N>` model call,
+ *      each durable tool handler, the `degraded-reply` off-ramp, and
+ *      `auto-recall` — replays from the step cache without re-executing or
+ *      re-emitting.
  *
  * See design/crash-recovery.md for the full contract.
  */
@@ -38,6 +39,7 @@ import {
 } from "../test/factories.js";
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
+import { runStreamingAgentLoop } from "./loop.js";
 
 // Stub the singleton Inngest client's private `_send` so step.sendEvent calls
 // inside the function under test don't try to reach a real Inngest dev server.
@@ -95,6 +97,7 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
       usage: { inputTokens: 10, outputTokens: 5 },
       model: "mock-model",
       iterations: 1,
+      streamed: { text: "", toolUseIds: [] },
     }),
     userTimezone: "UTC",
     ...overrides,
@@ -243,6 +246,7 @@ describe("handle-message — crash recovery / step replay", () => {
           usage: { inputTokens: 10, outputTokens: 5 },
           model: "mock-model",
           iterations: 1,
+          streamed: { text: "", toolUseIds: [] },
         };
       }),
     });
@@ -326,5 +330,140 @@ describe("handle-message — crash recovery / step replay", () => {
     // No DB writes happened — every persist step was cached.
     expect(deps.agentStore.insertMessage).not.toHaveBeenCalled();
     expect(deps.agentStore.insertMessages).not.toHaveBeenCalled();
+  });
+
+  it("does not call the provider when the llm-iter1 step is cached", async () => {
+    // Wire test for the durable-iteration contract with the REAL streaming
+    // loop: a cached `llm-iter1` outcome must reproduce the turn without a
+    // chatStream call (no re-billing) and without pushing any text to the
+    // delivery layer (no duplicate preambles) — the exact replay that the
+    // executor performs at every step boundary of a clean run.
+    const chatStream = vi.fn(() => {
+      throw new Error("provider must not be streamed on a cached iteration");
+    });
+    const provider = mockProvider({ chatStream });
+    const handle = mockDeliveryHandle();
+    const deps = mockDeps({
+      resolveProvider: mockResolver(provider),
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      runStreamingAgentLoop,
+    });
+    const fn = createHandleMessage(deps);
+
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [event],
+      steps: [
+        {
+          id: "llm-iter1",
+          handler: () => ({
+            kind: "drained",
+            content: [{ type: "text", text: "cached reply" }],
+            stopReason: "end_turn",
+            model: "mock-model",
+            usage: { inputTokens: 10, outputTokens: 5 },
+            repaired: null,
+            emitted: { text: "cached reply", toolUseIds: [] },
+          }),
+        },
+      ],
+    });
+
+    await engine.execute();
+
+    expect(chatStream).not.toHaveBeenCalled();
+    const textPushes = vi
+      .mocked(handle.push)
+      .mock.calls.flat()
+      .filter((e) => (e as { type: string }).type === "text_delta");
+    expect(textPushes).toHaveLength(0);
+    // The cached iteration's content still reaches persistence.
+    const insertArgs = (deps.agentStore.insertMessages as ReturnType<typeof vi.fn>).mock
+      .calls[0]?.[1] as { messages: Array<{ content: unknown }> } | undefined;
+    expect(insertArgs?.messages?.[0]?.content).toEqual([{ type: "text", text: "cached reply" }]);
+  });
+
+  it("does not re-run synthesis or the apology pushes when degraded-reply is cached", async () => {
+    // The degraded off-ramp (billable synthesis + retract/apology pushes)
+    // runs inside the `degraded-reply` step. On replay the cached apology
+    // must be persisted verbatim with no second LLM call and no duplicate
+    // pushes onto the user's live message.
+    const chat = vi.fn();
+    const provider = mockProvider({ chat });
+    const handle = mockDeliveryHandle();
+    const deps = mockDeps({
+      resolveProvider: mockResolver(provider),
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      runStreamingAgentLoop: vi.fn().mockResolvedValue({
+        text: "",
+        messages: [],
+        newMessages: [],
+        usage: { inputTokens: 10, outputTokens: 5 },
+        model: "mock-model",
+        iterations: 1,
+        streamed: { text: "dangling fragment", toolUseIds: [] },
+        degraded: { reason: "model refused the request", subtype: "refusal" },
+      }),
+    });
+    const fn = createHandleMessage(deps);
+
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [event],
+      steps: [{ id: "degraded-reply", handler: () => "cached apology from prior attempt" }],
+    });
+
+    await engine.execute();
+
+    // No synthesis round trip, no retraction, no apology delta — all of it
+    // lives inside the cached step.
+    expect(chat).not.toHaveBeenCalled();
+    const pushes = vi.mocked(handle.push).mock.calls.flat() as Array<{ type: string }>;
+    expect(pushes.filter((e) => e.type === "retract")).toHaveLength(0);
+    expect(pushes.filter((e) => e.type === "text_delta")).toHaveLength(0);
+    // The cached apology is what gets persisted.
+    const insertArgs = (deps.agentStore.insertMessages as ReturnType<typeof vi.fn>).mock
+      .calls[0]?.[1] as { messages: Array<{ content: unknown }> } | undefined;
+    expect(insertArgs?.messages?.at(-1)?.content).toEqual([
+      { type: "text", text: "cached apology from prior attempt" },
+    ]);
+  });
+
+  it("does not re-run the recall round trip when auto-recall is cached", async () => {
+    // Auto-recall costs an embedding round trip per execution and feeds the
+    // system prompt; the cached result must be reused on replay so the
+    // prompt stays identical across invocations and Hindsight isn't
+    // re-queried at every boundary.
+    const recall = vi.fn();
+    const deps = mockDeps({
+      memory: mockMemoryProvider({ recall }),
+      transportStore: mockTransportStore({
+        getUnbatchedInbound: vi
+          .fn()
+          .mockResolvedValue([
+            { id: "inbound-1", content: "tell me about my homelab setup", source: "user" },
+          ]),
+      }),
+    });
+    const fn = createHandleMessage(deps);
+
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [event],
+      steps: [
+        {
+          id: "auto-recall",
+          handler: () => ({ memories: [{ type: "world", content: "cached homelab memory" }] }),
+        },
+      ],
+    });
+
+    await engine.execute();
+
+    expect(recall).not.toHaveBeenCalled();
+    // Non-vacuity: the cached memories reached the agent loop's prompt.
+    const loopCalls = (deps.runStreamingAgentLoop as ReturnType<typeof vi.fn>).mock.calls;
+    const systemPrompt = loopCalls[0]?.[0]?.systemPrompt as string;
+    expect(systemPrompt).toContain("cached homelab memory");
   });
 });

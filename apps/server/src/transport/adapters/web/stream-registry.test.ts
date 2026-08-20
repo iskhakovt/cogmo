@@ -2,9 +2,15 @@ import { describe, expect, it } from "vitest";
 import type { SseFrame } from "./stream-registry.js";
 import { WebStreamRegistry } from "./stream-registry.js";
 
-function recorder(): { send: (f: SseFrame) => void; frames: SseFrame[] } {
+function recorder(): { send: (f: SseFrame) => boolean; frames: SseFrame[] } {
   const frames: SseFrame[] = [];
-  return { send: (f) => frames.push(f), frames };
+  return {
+    send: (f) => {
+      frames.push(f);
+      return true;
+    },
+    frames,
+  };
 }
 
 describe("WebStreamRegistry", () => {

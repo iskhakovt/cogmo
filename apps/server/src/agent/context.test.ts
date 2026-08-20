@@ -246,31 +246,6 @@ describe("compactMessages", () => {
     }
   });
 
-  it("calls onStatus for summarization", async () => {
-    const messages = [
-      msg("user", "m1"),
-      msg("assistant", "r1"),
-      msg("user", "m2"),
-      msg("assistant", "r2"),
-      msg("user", "m3"),
-      msg("assistant", "r3"),
-      msg("user", "m4"),
-      msg("assistant", "r4"),
-    ];
-
-    const countTokens = vi.fn().mockResolvedValueOnce(850).mockResolvedValueOnce(300);
-    const onStatus = vi.fn();
-
-    await compactMessages("system", messages, undefined, {
-      countTokens,
-      budget: 1000,
-      summarize: vi.fn().mockResolvedValue("summary"),
-      onStatus,
-    });
-
-    expect(onStatus).toHaveBeenCalledWith("Summarizing conversation...");
-  });
-
   it("keeps the prefix when the summarizer returns no text", async () => {
     // The summary is substituted for the whole prefix, so an empty one
     // would leave a bare `[Previous conversation summary]` header standing

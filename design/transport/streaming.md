@@ -140,7 +140,7 @@ Each adapter decides how to render `StreamEvent`s. The interface delivers typed 
 
 ## Orchestrator Changes
 
-The LLM call moves outside `step.run()` to enable streaming. Durable steps handle everything before and after. Delivery is unified — the orchestrator calls the delivery router once, which handles both streaming and batch.
+Each LLM iteration runs inside `step.run("llm-iter<N>")` — streaming does not require leaving the durable boundary. Tokens are pushed to the delivery handle from inside the step body as they arrive; only the iteration's final content blocks are the step's return value. On an Inngest replay the cached outcome is returned without re-emitting, so the user never sees the turn re-streamed. Durable steps handle everything before and after; delivery is unified — the orchestrator calls the delivery router once, which handles both streaming and batch. (The sketch below predates the durable-iteration change and shows the loop invocation shape only; see [../crash-recovery.md](../crash-recovery.md) for the current durability map.)
 
 ```typescript
 inngest.createFunction({
@@ -212,7 +212,7 @@ inngest.createFunction({
   }
 ```
 
-**Crash behavior:** If the function crashes during streaming, Inngest retries. Durable steps (prepare) replay instantly from cache. The non-durable section (prepare + stream) re-executes. The adapter deduplicates via `runId` — see Retry Deduplication below.
+**Crash behavior:** If the process crashes mid-stream, the `llm-iter<N>` step never completed, so the retry re-runs that iteration's body and re-streams it from the top; completed iterations replay from cache without re-emitting. The adapter deduplicates the handle via `runId` — see Retry Deduplication below.
 
 ## Delivery Router
 
@@ -288,9 +288,9 @@ function createDeliveryRouter(deps: {
 
 ## Retry Deduplication
 
-On Inngest retry, the durable steps replay from cache but `deliveryRouter.prepare()` re-executes — calling `openStream()` again. Without dedup, the adapter sends a second initial message.
+Inngest re-invokes the function at every step boundary (and on retries), and `deliveryRouter.prepare()` re-executes each time — calling `openStream()` again. Without dedup, each re-invocation that pushes anything would open a second message.
 
-**Solution:** `openStream()` receives `runId` (Inngest's run ID, stable across retries). Adapters deduplicate in-memory:
+**Solution:** `openStream()` receives `runId` (Inngest's run ID, stable across all invocations of the same run). Adapters deduplicate in-memory:
 
 ```typescript
 // Inside TelegramAdapter

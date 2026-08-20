@@ -167,3 +167,9 @@ After making changes, run: `pnpm typecheck && pnpm lint && pnpm test`
 Transactions, UUIDv7 PKs, NOT NULL by default, JSONB+Zod, migrations from `pnpm db:generate`, secrets handling. See [.claude/rules/architecture-rules.md](.claude/rules/architecture-rules.md).
 
 @.claude/rules/architecture-rules.md
+
+## Inngest
+
+Replay model (per-boundary re-invocation on success), what belongs in a step, step-id determinism, tool durability policy. See [.claude/rules/inngest.md](.claude/rules/inngest.md).
+
+@.claude/rules/inngest.md

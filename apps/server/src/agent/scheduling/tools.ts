@@ -109,6 +109,10 @@ export const scheduleTask = defineTool({
     "for this profile. If the user is offline at fire time, the fire is logged " +
     "but NOT delivered — there's no retry and no catch-up on next sign-in. " +
     "Tell the user this if a reminder time is at risk of being offline.",
+  // Durable: INSERTs a scheduled_tasks row. Non-durable it re-inserts a
+  // duplicate task on every step boundary after the call — the user would
+  // get N reminders for one request.
+  durable: true,
   schema: scheduleTaskSchema,
   handler: async (input, service) => {
     if (!service.scheduling) {
@@ -181,6 +185,10 @@ export const removeTask = defineTool({
     "Cancel a scheduled task by id. Permanent — there's no undo. Get the id from " +
     "`list_tasks`. Returns success or a clear error if the task didn't exist or " +
     "belongs to another user.",
+  // Durable: a destructive DB write; exactly-once keeps the recorded
+  // tool_result stable ("removed" on the boundary where it ran, instead of
+  // "not found" from a later boundary's re-execution).
+  durable: true,
   schema: removeTaskSchema,
   handler: async (input, service) => {
     if (!service.scheduling) {

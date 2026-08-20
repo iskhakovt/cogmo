@@ -43,6 +43,9 @@ describe("buildSkillToolSpec", () => {
     expect(spec.name).toBe("echo");
     expect(spec.description).toBe("Echo a number, plus one.");
     expect(spec.inputSchema).toEqual(ECHO_DEF.inputs);
+    // Skill runs are side-effectful — the loop must give them a durable
+    // boundary so Inngest replays don't re-invoke them per step boundary.
+    expect(spec.durable).toBe(true);
   });
 
   it("handler invokes the runner and returns success JSON", async () => {

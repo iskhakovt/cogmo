@@ -31,8 +31,6 @@ export interface ContextManagerDeps {
    * the call site — must change in lockstep.
    */
   summarize?: (system: string, messages: Message[]) => Promise<string>;
-  /** Called when summarization starts (for user feedback via stream events). */
-  onStatus?: (message: string) => void;
 }
 
 export interface CompactionEvent {
@@ -96,7 +94,7 @@ export async function compactMessages(
   deps: ContextManagerDeps,
   skipBudgetStrategies = false,
 ): Promise<CompactResult> {
-  const { countTokens, budget, summarize, onStatus } = deps;
+  const { countTokens, budget, summarize } = deps;
   const strategies: CompactionEvent["strategies"] = [];
   let result = [...messages];
   let toolResultsCleared = 0;
@@ -162,7 +160,6 @@ export async function compactMessages(
 
   // Strategy 2: Summarize conversation prefix at 80%
   if (tokens > budget * SUMMARIZE_THRESHOLD && summarize) {
-    onStatus?.("Summarizing conversation...");
     try {
       const summarized = await summarizePrefix(result, system, summarize, DEFAULT_KEEP_TURNS);
       if (summarized.summarizedCount > 0) {
