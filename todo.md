@@ -131,7 +131,6 @@
 
 ### Tools & web
 
-- [ ] `p3` Investigate `generate_image` model mapping — the 2026-08-19 replay report observed a request for `flux-pro-v1.1` answered by a response reporting `fal/recraft-v3`. Check the image-catalog → fal model-id mapping for a mislabel or a silent fallback. (Same report: production `web_search` fails with `TAVILY_API_KEY missing` — deployment config, fix on the host.)
 - [ ] `p3` fetch_url SSRF hardening — dns.resolve() + IP check before fetch (current check is string-level only)
 - [ ] `p3` Verify Perplexity Sonar citations structure via real OpenRouter API response — may need to adjust parsing
 
