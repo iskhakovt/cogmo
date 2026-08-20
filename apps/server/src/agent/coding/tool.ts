@@ -43,10 +43,9 @@ export const delegateCodingTool: ToolSpec = defineTool({
           "Set SANDBOX_RUNTIME (sysbox in prod, runc for dev/CI) and restart Cogmo.",
       );
     }
-    // The call context's key rides through to `coding_tasks.idempotency_key`.
-    // This tool is `durable: true`, so replays are already covered; the key
-    // closes the narrower window where the row commits and the process dies
-    // before Inngest records the step result.
+    // `durable: true` already covers replays; the key closes the narrower
+    // window where the row commits and the process dies before Inngest
+    // records the step result.
     const result = await service.coding.delegate({
       goal,
       repoName: repo,
@@ -56,9 +55,9 @@ export const delegateCodingTool: ToolSpec = defineTool({
       return JSON.stringify({ ok: false, reason: result.reason });
     }
     if (result.status === "recovered") {
-      // This exact submission already took on a prior attempt. Report where
-      // that task actually is — announcing a `failed` one as freshly queued
-      // would have the model tell the user work is under way that is not.
+      // Already submitted on a prior attempt. Report where that task
+      // actually is — announcing a `failed` one as freshly queued would have
+      // the model tell the user work is under way that is not.
       return JSON.stringify({
         ok: true,
         taskId: result.taskId,

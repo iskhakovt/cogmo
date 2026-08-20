@@ -23,16 +23,13 @@ import { coerceToolInput } from "./tool-input-coercion.js";
 export interface ToolCallContext {
   /**
    * Deterministic token identifying this tool call, stable across every
-   * re-execution of it: Inngest step replays, and the step retry that
-   * follows a crash between a side effect committing and the step result
-   * being recorded. Derived from durable turn state plus the call's
-   * position in the turn — never from anything the model mints, which
-   * changes whenever an iteration re-runs.
+   * re-execution of it — step replays, and the retry that follows a crash
+   * between a side effect committing and the step result being recorded.
+   * Derived from durable turn state, never from anything the model mints.
    *
    * Side-effectful tools pass it to whatever DB-level idempotency their
    * domain provides (`coding_tasks.idempotency_key`,
-   * `skill_runs.idempotency_key`). Absent when the loop runs outside a
-   * retrying context.
+   * `skill_runs.idempotency_key`). Absent outside a retrying context.
    */
   idempotencyKey: string;
 }

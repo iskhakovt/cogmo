@@ -1,12 +1,11 @@
 /**
  * Fixtures for the coding-orchestrator replay tests.
  *
- * The store fake is the interesting piece: its reads observe its own
- * writes. That property is what lets these tests see the hazard they exist
- * for — Inngest re-invokes a function's whole body at every step boundary,
- * so `getTask` at the top of the body returns the status the run itself
- * committed one boundary earlier, and any guard built on that read
- * self-invalidates. A stateless `mockResolvedValue` would hide it.
+ * The store fake is the interesting piece: its reads observe its own writes.
+ * That is what lets these tests see the hazard they exist for — a re-invoked
+ * body's `getTask` returns the status the run itself committed one boundary
+ * earlier, so a guard built on it self-invalidates. A stateless
+ * `mockResolvedValue` would hide that entirely.
  */
 
 import { PassThrough } from "node:stream";
@@ -78,12 +77,12 @@ export interface StatefulCodingStore {
 }
 
 /**
- * `CodingStore` whose task-row reads reflect its own writes — every
- * lifecycle method the three orchestrators call, not just the ones a
- * current assertion happens to read. A write the fake silently drops leaves
- * `current()` reporting a stale null, so a future test asserting on that
- * field would pass against an orchestrator that never wrote it. Everything
- * outside the task lifecycle stays the `mock<CodingStore>()` auto-mock.
+ * `CodingStore` whose task-row reads reflect its own writes — every lifecycle
+ * method the three orchestrators call, not just the ones a current assertion
+ * reads. A silently dropped write leaves `current()` reporting a stale null,
+ * so a later test asserting on that field would pass against an orchestrator
+ * that never wrote it. Everything else stays the `mock<CodingStore>()`
+ * auto-mock.
  */
 export function statefulCodingStore(
   initialTask: CodingTaskRow,

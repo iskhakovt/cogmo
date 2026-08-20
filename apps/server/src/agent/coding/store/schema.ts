@@ -124,13 +124,12 @@ export const codingTasks = pgTable(
     status: codingTaskStatus("status").notNull(),
     failureReason: text("failure_reason"),
     resourceUsage: jsonbZod("resource_usage", ResourceUsageSchema), // null = no stats poll yet
-    // Caller-supplied deterministic-per-submission token. `delegate_coding`
-    // passes one derived from the agent turn plus the tool call's position, so
-    // a `step.run` body that crashes after this row commits but before Inngest
-    // records the step result inserts nothing on retry and recovers the
-    // original task. Null for submissions with no retrying caller (CLI,
-    // tests); Postgres's default NULL-not-equal unique semantics let those
-    // rows coexist freely. Same shape as `skill_runs.idempotency_key`.
+    // Caller-supplied deterministic-per-submission token, so a `step.run`
+    // body that crashes after this row commits but before Inngest records the
+    // step result recovers the original task instead of minting a second.
+    // Null for callers with no retry semantics (CLI, tests) — Postgres's
+    // NULL-not-equal unique semantics let those coexist. Same shape as
+    // `skill_runs.idempotency_key`.
     idempotencyKey: text("idempotency_key"),
     createdAt: ts(),
   },

@@ -181,12 +181,11 @@ export interface CodingStore {
   insertTask(tx: Transaction, params: InsertTaskParams): Promise<CodingTaskRow>;
 
   /**
-   * Idempotent submission. Inserts with `ON CONFLICT DO NOTHING` against
-   * `uniq_coding_tasks_idempotency_key`, so a second call carrying the same
-   * key returns `kind: "recovered"` with the original row instead of
-   * minting a second task. Separate from {@link CodingStore.insertTask}
-   * because the contracts differ: this one can decline to insert. Mirrors
-   * `SkillStore.startOrRecoverRun`.
+   * Idempotent submission: `ON CONFLICT DO NOTHING` against
+   * `uniq_coding_tasks_idempotency_key`, so a second call with the same key
+   * returns `kind: "recovered"` and the original row. Separate from
+   * {@link CodingStore.insertTask} because this one can decline to insert.
+   * Mirrors `SkillStore.startOrRecoverRun`.
    */
   insertOrRecoverTask(
     tx: Transaction,

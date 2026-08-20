@@ -85,13 +85,12 @@ export interface AgentLoopParams {
    */
   stepRun?: StepRunner;
   /**
-   * Opaque token identifying this turn, stable across every re-execution
-   * of it. The loop combines it with each tool call's SDK-local
-   * coordinates to derive the `ToolCallContext.idempotencyKey` a
-   * side-effectful tool uses for DB-level dedup — so it has to come from
-   * durable state (the triggering inbound id, an Inngest run id), never
-   * from a clock or a fresh uuid. Omit outside a retrying context: tools
-   * then receive no call context and none may assume retry-dedup.
+   * Opaque token identifying this turn, stable across every re-execution of
+   * it. Combined with each tool call's coordinates into the
+   * `ToolCallContext.idempotencyKey` side-effectful tools dedup on, so it
+   * must come from durable state (a triggering inbound id, a run id) — never
+   * a clock or a fresh uuid. Omit outside a retrying context; tools then get
+   * no call context, and none may assume retry-dedup.
    */
   turnKey?: string;
   /**
@@ -266,12 +265,10 @@ interface ToolStepKey {
 }
 
 /**
- * Short stable digest of a tool call's identity — name plus arguments.
- *
- * Object keys are sorted before serialization so a provider that emits the
- * same arguments in a different order still produces the same digest; a
- * false mismatch would mint a duplicate side effect, which is the outcome
- * the idempotency key exists to prevent.
+ * Short stable digest of a tool call's identity — name plus arguments. Keys
+ * are sorted before serialization so the same arguments in a different order
+ * still match: a false mismatch would mint the duplicate side effect the
+ * idempotency key exists to prevent.
  */
 function digestCall(name: string, input: unknown): string {
   const canonical = (value: unknown): unknown => {
@@ -533,24 +530,12 @@ async function runOne(
         // the provider's `tool_use_id` is not. Cached content may
         // semantically mismatch the current `tool_use` — see
         // design/crash-recovery.md → Per-tool durability.
-        // Idempotency key from the same SDK-local coordinates as the step
-        // id, prefixed with the turn token so two turns in one conversation
-        // don't collide at position 0, and suffixed with a digest of the
-        // call itself.
-        //
-        // The digest is what makes the key identify a *request* rather than
-        // a slot. Within one run the durable `llm-iter<N>` cache pins the
-        // tool_use blocks, so the coordinates alone would do — but a
-        // re-delivery starts a fresh run with an empty step cache, the model
-        // re-decides, and a different call can land at the same
-        // (turn, iteration, position). Without the digest the unique
-        // constraint would read that distinct request as already-submitted
-        // and hand back the earlier task. Keys are canonicalised so an
-        // argument reordering between runs still matches.
-        //
-        // Undefined when the caller supplied no turn token (unit tests,
-        // loops outside Inngest): no tool gets retry-dedup, and none should
-        // assume it.
+        // Turn token + the step id's own coordinates + a digest of the call.
+        // The digest is what makes this identify a request rather than a
+        // slot: a re-delivery starts a fresh run with an empty step cache,
+        // the model re-decides, and a different call can land at the same
+        // (turn, iteration, position). Undefined without a turn token (unit
+        // tests, loops outside Inngest) — no tool may assume retry-dedup then.
         const callCtx: ToolCallContext | undefined =
           turnKey === undefined
             ? undefined

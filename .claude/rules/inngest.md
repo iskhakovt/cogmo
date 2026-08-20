@@ -73,24 +73,30 @@ contract**. Design every function for the per-boundary model.
   `list_*`) stay non-durable; accept that their persisted `tool_result` is
   whatever the last invocation returned. Justify both sides of the flag in
   the PR.
-- **`durable: true` buys replay-safety, not exactly-once.** The step body
-  still runs at least once: a crash after the side effect commits but
-  before Inngest records the step result leaves no evidence the step ran,
-  so the retry re-runs it. Postgres and Inngest's state store have no
-  transaction between them and never will. A non-idempotent side effect
-  inside a step therefore needs a caller-supplied idempotency key on top —
-  derived from durable coordinates (the turn token plus the call's
-  iteration/position, i.e. the step id's own inputs), never from anything
-  the model mints, and never from a clock or a fresh uuid in the bare
-  body. Store it under a plain `UNIQUE` and write through
-  `ON CONFLICT DO NOTHING` + re-select; nulls-distinct semantics leave
-  callers with no retry semantics unaffected. **A recovery must resume the
-  request's remaining phases, not assume it finished** — the first attempt
-  may have died between two side effects, and returning early on "the row
-  already exists" trades a duplicate for a permanent stall. Either track a
-  recovery point or make the later phases independently idempotent.
-  Reference: `skill_runs.idempotency_key` + `SkillStore.startOrRecoverRun`,
-  `coding_tasks.idempotency_key` + `insertOrRecoverTask`.
+- **`durable: true` buys replay-safety, not exactly-once.** A crash after
+  the side effect commits but before Inngest records the step result
+  leaves no evidence the step ran, so the retry re-runs it — and no
+  transaction spans Postgres and Inngest's state store. A non-idempotent
+  side effect inside a step therefore needs a caller-supplied idempotency
+  key on top. Three constraints on it:
+  - **Derive it from durable state** — the step id's own inputs (turn
+    token, iteration, position). Never from what the model mints, a clock,
+    or a fresh uuid in the bare body.
+  - **Key the request, not the slot.** Include a canonical digest of the
+    call's name and arguments: a re-delivery replays with an empty step
+    cache, the model re-decides, and a different call can land at the same
+    coordinates — which a coordinates-only key reads as a retry.
+  - **A recovery resumes the remaining phases; it does not assume the
+    request finished.** The first attempt may have died between two side
+    effects, so returning early on "the row already exists" trades a
+    duplicate for a permanent stall. Track a recovery point, or make the
+    later phases independently idempotent.
+
+  Store under a plain `UNIQUE`, write through `ON CONFLICT DO NOTHING` +
+  re-select; nulls-distinct leaves callers without retry semantics
+  unaffected. Reference: `skill_runs.idempotency_key` +
+  `SkillStore.startOrRecoverRun`, `coding_tasks.idempotency_key` +
+  `insertOrRecoverTask`.
 - **A step boundary abandons the function; it does not unwind it.** An
   unexecuted step hands the body a promise the SDK never settles, so the
   invocation ends with the async function pending mid-`await`. `finally`

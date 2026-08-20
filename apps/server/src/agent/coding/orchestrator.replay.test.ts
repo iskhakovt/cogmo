@@ -2,23 +2,14 @@
  * Inngest replay tests for the plan (`coding-task-start`) and execute
  * (`coding-task-execute`) orchestrators.
  *
- * These drive the real functions through `@inngest/test`, whose engine
- * reproduces Inngest's per-boundary model faithfully: it re-invokes the
- * whole function body once per step boundary, feeding earlier steps back
- * from cache. That is what production does on every clean run — it is not
- * a retry simulation — so anything left in the bare body runs N+1 times
- * for N steps.
+ * Driven through `@inngest/test`, whose engine re-invokes the whole function
+ * body once per step boundary with earlier steps served from cache — what
+ * production does on every clean run, not a retry simulation. Anything left
+ * in the bare body therefore runs N+1 times for N steps.
  *
- * What these tests pin:
- *   1. The billable CLI session runs exactly once per task, even though the
- *      body around it is re-entered a dozen times.
- *   2. Progress pushes for that session are emitted once, not once per
- *      re-invocation.
- *   3. The execute orchestrator does not short-circuit on a status its own
- *      `set-status-executing` step wrote — the re-entry guard is the
- *      conditional UPDATE's memoized result, not a bare-body read.
- *   4. A genuinely duplicate event still skips, because the conditional
- *      UPDATE matches no row.
+ * Pinned here: the billable CLI session runs once per task and emits its
+ * progress once; neither orchestrator short-circuits on a status its own
+ * step wrote; a genuinely duplicate event still skips.
  *
  * See .claude/rules/inngest.md and design/crash-recovery.md.
  */

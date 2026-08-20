@@ -204,20 +204,13 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
   const repo = await runInTx((tx) => store.getRepoById(tx, task.repoId));
   if (!repo) throw new Error(`coding repo not found: ${task.repoId}`);
 
-  // Re-entry guard, and the run's first durable act — the same contract the
-  // execute and verify orchestrators hold. A duplicate `coding/task/start`
-  // finds the row past `queued`, matches no row, and returns before
-  // `sandbox.create` mints a second container and `plan-cli` pays for a
-  // second claude session. `delegate`'s emit carries a `task-start-<id>`
-  // idempotency id that collapses a re-send inside the bus's dedup window;
-  // this transition is what holds outside it.
-  //
-  // Ahead of the try block for the same reason as the verify orchestrator:
-  // a run that loses the race must not reach the failure machinery, which
-  // would let it mark a task another run owns as `failed`. Branching on the
-  // memoized step result (never on a bare-body status read) is what keeps
-  // the run's own write to `planning` from short-circuiting the next
-  // boundary's re-invocation.
+  // The run's ownership claim — same contract as the execute and verify
+  // orchestrators, and ahead of the try block for the same reason (a run
+  // that loses the race must not reach the failure machinery). A duplicate
+  // `coding/task/start` matches no row and returns before `sandbox.create`
+  // mints a second container and `plan-cli` pays for a second claude
+  // session. `delegate`'s `task-start-<id>` emit id collapses a re-send
+  // inside the bus's 24h dedup window; this transition holds outside it.
   const claim = await stepRun("set-status-planning", () =>
     runInTx((tx) => store.transitionTaskStatus(tx, taskId, "queued", "planning")),
   );
@@ -441,15 +434,12 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     // non-null type — TS doesn't carry `let` narrowing across closures.
     const stream = planStream;
 
-    // Durable: `backend.plan` is a billable claude session, and unlike
-    // execute it has no `--resume`, so a re-invocation replans from
-    // scratch and re-renders the whole plan into the user's message. In
-    // the bare body that happened once per remaining step boundary. The
-    // session-id write and the plan-text pushes both live inside the body:
-    // they fire live on the invocation that runs it and are suppressed on
-    // every replay. The result is small and JSON-safe (plan text plus an
-    // error flag), and it selects disjoint step sets below, so memoizing
-    // it also pins the step graph.
+    // Durable: a billable claude session with no `--resume` on the plan
+    // flags, so a re-invocation replans from scratch and re-renders the
+    // whole plan into the user's message. The session-id write and the
+    // text pushes live inside the body — live on the invocation that runs
+    // it, suppressed on replay. The result also pins the step graph that
+    // branches on it below.
     const result = await stepRun("plan-cli", async () => {
       // Re-attach a session handle inside the step — handles can't cross
       // step.run because they aren't JSON-serializable, but the state is.
@@ -533,9 +523,8 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     );
     // Same wrap as the failure-path notification above — once status is
     // committed, a subscriber error must not regress the task to failed.
-    // Durable because two more step boundaries follow it on the
-    // auto-approve path: in the bare body the finalize would re-render the
-    // plan message on each of them.
+    // Durable because two more boundaries follow on the auto-approve path,
+    // and a bare-body finalize would re-render the plan message on each.
     const willAutoApprove = task.triggerSource === "user" && autoapproveMode === "on";
     await stepRun("notify-plan-finalized", async () => {
       await stream
@@ -595,12 +584,9 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
   } catch (err) {
     const reason = (err as Error).message;
     taskLog.error({ err }, "coding task failed");
-    // Deliberately broad. Every failure this function can hit — a thrown
-    // step body re-raised here as a `StepError` once its retries are
-    // exhausted included — converts to the same designed channel:
-    // `status=failed` with the reason persisted, plus `coding/task/failed`
-    // for the cleanup subscribers. There is no failure mode this should
-    // let escape unconverted.
+    // Deliberately broad: every failure here, `StepError` from a
+    // permanently-failed step included, belongs in the same designed channel
+    // — `status=failed` plus `coding/task/failed` for the subscribers.
     //
     // Emit BEFORE the DB status update. If `step.sendEvent` ultimately
     // fails (SDK exhausts its retry budget on a real bus outage), the
@@ -855,14 +841,10 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   if (!task.planApprovedAt) {
     throw new Error(`coding task ${taskId} has no plan_approved_at — execute fired prematurely`);
   }
-  // No bare-body status guard here: `set-status-executing` below writes
-  // `executing`, and Inngest re-invokes this body at every step boundary,
-  // so a `task.status !== "awaiting_approval"` read at this point would
-  // see the run's own write and abandon the rest of the sequence. The
-  // conditional UPDATE inside that step is the durable form of the same
-  // check — see the guard on `transition.kind`. The three checks that
-  // remain read fields the PLAN phase owns and this function never
-  // touches, so they are stable across replays.
+  // No bare-body status guard here — `set-status-executing`'s conditional
+  // UPDATE is the durable form of that check (see the `transition.kind`
+  // branch). The three checks that remain read fields the PLAN phase owns
+  // and this function never writes, so they are stable across replays.
   if (!task.sessionId) {
     throw new Error(`coding task ${taskId} has no session_id — plan phase didn't capture it`);
   }
@@ -1039,12 +1021,9 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       }
     }
 
-    // Const-capture so the closures below see the post-branch non-null
-    // type, then resume lazily and at most once per invocation. Handles
-    // can't cross a step boundary, `sandbox.resume` is a live provider
-    // call, and the bare body runs once per boundary — deferring it to the
-    // step bodies that actually need a handle keeps the round-trips
-    // proportional to container work rather than to the replay count.
+    // Const-capture so the closures below see the post-branch non-null type,
+    // then resume lazily and at most once per invocation: handles can't cross
+    // a step boundary, and `sandbox.resume` is a live provider call.
     const state = sessionState;
     let resumed: SandboxSession | null = null;
     const container = async (): Promise<SandboxSession> => {
@@ -1055,14 +1034,10 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     executeStream = await openExecuteStream(taskId);
     const stream = executeStream;
 
-    // Durable: `backend.execute` is a billable claude session. Left in the
-    // bare body it re-ran once per remaining step boundary — a fresh paid
-    // CLI invocation and a fresh flood of progress edits each time — and
-    // `isError` selects disjoint step sets below, so a verdict that
-    // differed between replays would plan a step graph the executor never
-    // asked for. The `started` banner and the token/tool pushes fire live
-    // from inside the body and are suppressed on replay, which is exactly
-    // what the progress UI wants.
+    // Durable: a billable claude session, and `isError` selects disjoint
+    // step sets below. The `started` banner and the token/tool pushes fire
+    // live from inside the body and are suppressed on replay — one run's
+    // worth of progress, which is what the UI wants.
     const result = await stepRun("execute-cli", async () => {
       await stream.started?.();
       return runExecuteStreaming({
@@ -1149,9 +1124,6 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       const runBranch = runBranchFor(taskId);
       const featureBranch = worktreeAssignment.branch;
       const pushResult = await stepRun("commit-and-push-execute-changes", async () =>
-        // `container()` hands back the handle the execute step already
-        // resumed when both run in the same invocation, and resumes one
-        // on demand when this step body runs alone in a targeted replay.
         runCommitAndPush({
           container: await container(),
           worktreeDir: WORKTREE_DIR_IN_CONTAINER,

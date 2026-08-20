@@ -103,10 +103,9 @@ export function createCodingService(
         );
       }
 
-      // Recognise a retry before spending an admission check on it. Without
-      // this pre-check a re-run would count the task it is recovering
-      // against the repo's own limit and reject itself — `maxConcurrentTasks`
-      // of 1 makes that the common case, not an edge one.
+      // Recognise a retry before spending an admission check on it: the row
+      // a retry is recovering counts against the repo's own limit, so with
+      // the default `maxConcurrentTasks` of 1 it would reject itself.
       //
       // Admission check + insert share one tx. The async submit +
       // durable orchestrator means multiple conversations (or repeated
@@ -167,14 +166,11 @@ export function createCodingService(
         }
         // Still `queued`: the prior attempt died between the row committing
         // and its `inngest.send`, so nothing is driving this task. Re-emit —
-        // skipping it here would trade a duplicate for a permanent stall.
-        // The re-send is absorbed twice over: `task-start-<taskId>` dedups at
-        // the bus, and past that window the `queued -> planning` transition
-        // returns `skipped` for a task already under way.
-        //
-        // A send failure here deliberately does NOT mark the row failed (see
-        // the emit block below): the row stays recoverable for the next
-        // attempt, which is the whole point of having reached this branch.
+        // skipping would trade a duplicate for a permanent stall — and let a
+        // send failure propagate without marking the row failed, so the next
+        // attempt can still recover it. The re-send is absorbed twice over:
+        // `task-start-<taskId>` at the bus, and the `queued -> planning`
+        // transition past that window.
         await deps.inngest.send({
           name: codingTaskStart.name,
           data: { taskId: prior.id },
@@ -204,25 +200,19 @@ export function createCodingService(
       // state and the slot frees up. The original send error is
       // re-thrown so the caller knows the submission didn't take.
       //
-      // Reached only for a freshly admitted task — a task with no
-      // orchestrator run behind it. The recovery branch above returns
-      // before here precisely so this cleanup can stay unconditional: a
-      // recovered row may be mid-flight (`planning`, `executing`) or
-      // already `pr_open`, and `updateTaskStatus` is an unguarded
-      // `UPDATE ... WHERE id`, so running it there would fail a live
-      // orchestration or corrupt a finished one.
+      // Freshly admitted tasks only. The recovery branch returns before here
+      // precisely so this can stay unconditional: `updateTaskStatus` is an
+      // unguarded `UPDATE ... WHERE id`, and a recovered row may be mid-flight
+      // or already `pr_open`.
       try {
         await deps.inngest.send({
           name: codingTaskStart.name,
           data: { taskId: task.id },
-          // Bus-level dedup, the same `<verb>-<taskId>` shape as the
-          // orchestrators' `task-failed-` / `plan-approved-` emits. Pairs
-          // with the plan orchestrator's `queued -> planning` transition:
-          // the id collapses a re-send inside the bus's dedup window, the
-          // transition holds outside it. Safe across the task's lifetime —
-          // the id is minted per submission, so it can only ever collapse
-          // a re-send of this exact submission, never two distinct
-          // requests that happen to share a goal.
+          // Bus-level dedup, same `<verb>-<taskId>` shape as the
+          // orchestrators' `task-failed-` / `plan-approved-` emits. Minted
+          // per submission, so it can only collapse a re-send of this exact
+          // one. Pairs with the `queued -> planning` transition, which holds
+          // outside the bus's 24h dedup window.
           id: `task-start-${task.id}`,
         });
       } catch (sendErr) {

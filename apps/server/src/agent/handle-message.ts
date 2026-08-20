@@ -1042,19 +1042,14 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           // ordering. See design/crash-recovery.md → Durable LLM
           // iterations / Per-tool durability.
           stepRun,
-          // Turn token for per-tool-call idempotency keys. The triggering
-          // inbound id comes off the event payload, so it is identical
-          // across every re-invocation, every function retry, and any
-          // re-delivery of this turn — which is exactly the scope a
-          // side-effectful tool should dedup over. A run id would restart
-          // on a re-delivery and let the same request submit twice.
-          //
-          // `flush` resume-policy turns carry a null trigger (the flush emit
-          // has no single triggering message) while still processing real
-          // input, so they fall back to the batch's high-water mark, which
-          // comes off the memoized `load-inbound` step and is equally stable.
-          // Both are empty only for a turn with no inbound rows at all, and
-          // that turn has nothing for a tool to duplicate.
+          // Turn token for per-tool-call idempotency keys. Off the event
+          // payload, so it survives re-invocations, function retries and
+          // re-deliveries alike — the scope a side-effectful tool should
+          // dedup over, and one a run id would not give. `flush` turns carry
+          // a null trigger while still processing real input, so they fall
+          // back to the batch's high-water mark off the memoized
+          // `load-inbound` step. Both are empty only for a turn with no
+          // inbound rows, which has nothing to duplicate.
           ...((event.data.triggerInboundId ?? maxInboundId) !== "" && {
             turnKey: event.data.triggerInboundId ?? maxInboundId,
           }),

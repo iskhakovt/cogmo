@@ -2,23 +2,17 @@
  * Inngest replay tests for the verify → push → PR orchestrator
  * (`coding-task-verify`).
  *
- * Driven through `@inngest/test`, whose engine reproduces Inngest's
- * per-boundary model: the whole function body is re-invoked once per step
- * boundary with earlier steps served from cache. That is the shape of a
- * clean production run, not a retry simulation.
+ * Driven through `@inngest/test`, whose engine re-invokes the whole function
+ * body once per step boundary with earlier steps served from cache — the
+ * shape of a clean production run, not a retry simulation.
  *
- * What these tests pin:
- *   1. The verify command — the repo's entire test suite — runs once per
- *      task, not once per remaining boundary.
- *   2. `git push` happens once, and `pulls.create` happens once. A second
- *      PR POST comes back 422 `validation_failed`, which this function
- *      reads as a failure, so re-running it would let the run that had just
- *      opened the PR mark its own task `failed`.
- *   3. The run does not short-circuit on the `verifying` status its own
- *      `set-status-verifying` step wrote.
- *   4. A genuinely duplicate event still skips, and skips before touching
- *      the failure machinery.
- *   5. The `finally` block runs once, at the end of the run.
+ * Pinned here: the test suite runs once per task, `git push` once, and
+ * `pulls.create` once (a second POST returns 422 `validation_failed`, which
+ * this function reads as a failure, so a re-POST would have the run that
+ * just opened the PR mark its own task `failed`); the run doesn't
+ * short-circuit on the `verifying` its own step wrote; a duplicate event
+ * skips before reaching the failure machinery; and the `finally` fires once,
+ * at the end.
  *
  * See .claude/rules/inngest.md and design/crash-recovery.md.
  */
