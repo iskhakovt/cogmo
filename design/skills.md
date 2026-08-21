@@ -336,12 +336,18 @@ effects:
   - sends_message
 secrets:
   - name: telegram_bot_token
-    binding:                       # egress-proxy binding, future [research]
+    binding:                       # host-side substitution, stage 2
       destination: "https://api.telegram.org/*"
       substitute: "header:Authorization: Bot {{value}}"
   - name: gmail_oauth
     binding:
       destination: "https://gmail.googleapis.com/*"
+
+# Egress allowlist — absent means no network. See [[Secret exposure and egress control]].
+network:
+  allow:
+    - api.telegram.org
+    - gmail.googleapis.com
 
 # Resource caps — optional; defaults apply if absent
 resources:
@@ -477,9 +483,11 @@ Not every skill creation or edit needs human approval. Review-everything is fric
 
 | Tier | Matches when | Action |
 |-|-|-|
-| **Auto** | WASM tier, no secrets (or only read-only public-API secrets), no `writes_*` / `sends_*` / `deletes_*` / `financial` effects, cost-capped | `register` fast-forwards `main` to the branch tip immediately on classification. Skill is live. No notification. |
-| **Notify** | Container tier, OR reads user data, OR idempotent external writes (`writes_memory`, creating drafts, upserts), OR any secrets with scoped destinations | `register` fast-forwards `main` to the branch tip immediately on classification. Cogmo sends a one-line notification: *"added skill `X` — [summary]. /disable X if wrong."* |
-| **Approve** | Any destructive effect (`deletes_external`, overwrite), external messaging (`sends_email`, `sends_message`, `posts_public`), `financial`, `spawns_subprocess`, broad permissions (3+ secrets, filesystem writes) | `register` leaves `main` untouched; the branch stays as-is. Cogmo sends a Telegram approval prompt with diff + effect summary + approve/deny buttons. `main` is fast-forwarded only when `approveDeploy` fires. |
+| **Auto** | WASM tier, no secrets (or only read-only public-API secrets), no network, no `writes_*` / `sends_*` / `deletes_*` / `financial` effects, cost-capped | `register` fast-forwards `main` to the branch tip immediately on classification. Skill is live. No notification. |
+| **Notify** | Container tier, OR reads user data, OR idempotent external writes (`writes_memory`, creating drafts, upserts), OR any secrets with scoped destinations, OR a `network:` allowlist without secrets | `register` fast-forwards `main` to the branch tip immediately on classification. Cogmo sends a one-line notification: *"added skill `X` — [summary]. /disable X if wrong."* |
+| **Approve** | Any destructive effect (`deletes_external`, overwrite), external messaging (`sends_email`, `sends_message`, `posts_public`), `financial`, `spawns_subprocess`, broad permissions (3+ secrets, filesystem writes), **or any secret combined with network access at any count** | `register` leaves `main` untouched; the branch stays as-is. Cogmo sends a Telegram approval prompt with diff + effect summary + approve/deny buttons. `main` is fast-forwarded only when `approveDeploy` fires. |
+
+Secrets-plus-network is its own `approve` trigger rather than a count, because the count answers "how broad are this skill's permissions" while the pairing answers "can this skill read a credential and also reach somewhere to send it". `APPROVE_SECRETS_THRESHOLD` stays as the breadth signal for skills with no egress.
 
 ### Classifier
 
@@ -1000,46 +1008,45 @@ Accepted at personal scale because skills are Cogmo-authored and reviewed. Upgra
 - **Recycle every task** — pays full import cost per invocation.
 - **microVM per task** — full cleanup, highest overhead.
 
-### Egress-proxy substitution `[research]` (future)
+### Secret exposure and egress control `[confirmed]`
 
-Pull model lets the skill see real secret values. A malicious skill can exfil its own declared secrets to an attacker endpoint — human review at merge is the defense, not runtime isolation.
+The pull model hands a skill the real secret. `ctx.secrets.get(name)` returns plaintext, gated only by the manifest's own `secrets:` list — the skill declares its own permissions — and skill bodies are LLM-authored. `computeRiskTier` returns `auto` for a tier-1 skill with no effects and fewer than `APPROVE_SECRETS_THRESHOLD` (3) declared secrets, so a skill naming one or two deploys with nobody reading it.
 
-Future upgrade: the skill only ever sees an opaque placeholder (UUID); Cogmo runs an egress HTTP proxy that intercepts outbound calls, validates the destination matches the secret's declared binding, and substitutes the placeholder for the real token on the way out.
+Reading a secret is half of an exfiltration; the other half is a route off the machine, which is what `ctx.http` supplies. Neither half is wrong alone, and both are wanted. This section is the plan for holding them together safely, and its first stage is the release gate on `ctx.http`.
 
-```yaml
-# SKILL.md
-secrets:
-  - name: slack_webhook
-    binding:
-      destination: "https://hooks.slack.com/services/*"
-      substitute: url         # token is embedded in the URL path
-  - name: github_token
-    binding:
-      destination: "https://api.github.com/*"
-      substitute: "header:Authorization: Bearer {{value}}"
-```
+**What the field does.** Credential injection at an egress boundary: the workload holds an opaque placeholder and a component outside it substitutes the real value on requests to destinations the credential is bound to. [Modal](https://github.com/modal-labs/credential-injection) vends a short-lived JWT rather than the key; [Cloudflare Sandbox](https://blog.cloudflare.com/sandbox-auth/) keeps secrets in the Workers runtime the sandbox cannot read; [LangSmith's Auth Proxy](https://www.langchain.com/blog/how-auth-proxy-secures-network-access-for-langsmith-agent-sandboxes) and [Nous's iron-proxy](https://hermes-agent.nousresearch.com/docs/user-guide/egress/iron-proxy) front the sandbox with a proxy that injects. Anthropic's [Managed Agents vaults](https://platform.claude.com/docs/en/managed-agents/vaults) do this and are explicit about the boundary condition: environment-variable credentials are unsupported with self-hosted sandboxes, because substitution requires egress the platform controls.
 
-```python
-webhook = ctx.secrets.get("slack_webhook")
-# returns "cogmo-secret://abc-123-uuid" — an opaque placeholder
-httpx.post(webhook, json={"text": "hi"})
-# egress proxy sees the placeholder, validates destination matches
-# slack.com, substitutes the real URL, forwards upstream
-```
+The second, independent consensus is default-deny egress with a per-workload allowlist enforced below the application, and resolve-then-connect validation so the vetted address is the connected one. OWASP's Agentic Top 10 puts unexpected code execution (ASI05) in the top tier and names allowlisting as a precondition for running model-authored code at all.
 
-**What this buys:**
+**Why the proxy's open questions stopped binding.** The substitution designs above all exist to reach inside a socket the platform does not own. Tier 1 has no socket: Pyodide cannot open one, so `ctx.http` performs the request with `fetch` in the host process. Header substitution there is an assignment before the call — no TLS interception, no CA to distribute, no sidecar, no `iptables`. Non-HTTP protocols and long-lived connections, the other two deferrals, are not reachable from tier 1 at all. Both tiers route `ctx.secrets.get` through the same host bridge (`runner.py` calls `secrets.get` over the same RPC tier 1 uses), so placeholder minting has one implementation site for both.
 
-- Skill never has access to the real secret value, even in memory.
-- Binding enforces "this secret can only reach `*.slack.com`" — skill can't redirect it to `attacker.com`.
-- Every substitution audited at egress.
+Tier 2 keeps raw sockets via `httpx`, and that is acceptable rather than a gap: a placeholder sent over a raw socket reaches the destination as an opaque UUID, earns a 401 and discloses nothing. Bound secrets simply do not function outside the host path, which turns `ctx.http` into the route of least resistance instead of a rule to enforce. Controlling Daytona's egress is therefore not on the critical path — and per [sandbox.md](sandbox.md), policy lives where it can be enforced, which on managed backends is the provider's boundary, not ours.
 
-**Open implementation questions:**
+**Stages.**
 
-- **URL-based vs header-based substitution** — URL-based (Slack webhooks, PATs in URL) is plaintext-substitutable, no TLS termination needed. Header-based (`Authorization: Bearer ...`) needs either MITM (skill worker trusts a Cogmo-issued CA) or a reverse-proxy model (skill calls `https://cogmo-proxy/bindings/github` and the proxy forwards upstream with real auth).
-- **Non-HTTP protocols** (raw sockets, DB drivers, gRPC with bespoke auth) — fall back to pull model for those bindings.
-- **Long-lived connections** (WebSockets, SSE) — substitution on connection setup only; can't modify payloads in flight without full termination.
+| Stage | What | Status |
+|-|-|-|
+| 1 | Declared egress, default deny | `[confirmed]` — release gate for `ctx.http` |
+| 2 | Sandbox-invisible secrets | `[confirmed]` |
+| 3 | Connection pinning | `[confirmed]` |
+| 4 | Short-lived credentials | `[proposed]` |
+| 5 | Egress proxy for raw sockets | `[research]` |
 
-Deferred until (a) trust boundary widens (third-party or remote-triggered skills), or (b) a skill handles a credential class that should be sandbox-invisible by policy (user financial tokens, PII-bearing credentials).
+**Stage 1 — declared egress, default deny.** A `network:` block in `SKILL.md` names the hosts a skill may reach; absent the block, `ctx.http` refuses every destination. Matching is on hostname before resolution, and the existing address guard still runs after it, so a declared host that resolves inward is refused twice. `computeRiskTier` stops returning `auto` for any skill combining network access with declared secrets, regardless of count — the threshold governs how many secrets are unremarkable, not whether secrets plus egress deserve a human.
+
+This is the load-bearing control, because exfiltration requires reaching a destination the attacker chose. An allowlist bounds where a credential can travel even while the skill still holds it in plaintext, which is why it gates the release and stage 2 does not.
+
+**Stage 2 — sandbox-invisible secrets.** `SkillSecretSchema.binding` already parses (`destination` plus an optional `url` or `header:` substitution) and is ignored at runtime. Honouring it: `secrets.get` returns `cogmo-secret://<uuid>` for a bound secret, `#httpRequest` matches the request destination against the binding and substitutes the real value at the `fetch`, and every substitution is audited to `skill_context_calls`. Unbound secrets keep the pull model — the fallback for non-HTTP credentials — and keep classifying as sensitive.
+
+What stage 2 adds over stage 1 is defence against a compromised *allowed* destination, and against a secret escaping through logs, error strings, memory writes or the return value. Those are real, and they are the residue after the allowlist rather than the main event.
+
+**Stage 3 — connection pinning.** `#httpRequest` resolves, validates, then hands the original URL to `fetch`, which resolves again; a name answering public then private defeats the guard on the second answer. Closing it needs resolve-check-connect as one step, via an undici `Agent` with a `connect.lookup` pinned to the vetted address. `undici` is not importable today, so this is a runtime-dependency decision under CLAUDE.md.
+
+**Stage 4 — short-lived credentials `[proposed]`.** Injection protects a long-lived secret; minting avoids having one to protect. Where the underlying credential supports exchange — the `gmail_oauth` case in the manifest example is exactly this — the binding can vend a task-scoped access token with a minutes-long lifetime instead of the refresh token, per [RFC 8693](https://curity.io/resources/learn/api-security-best-practice-for-ai-agents/) token exchange. Bot tokens and plain API keys have nothing to exchange, so this narrows rather than replaces stage 2.
+
+**Stage 5 — egress proxy `[research]`.** The mitmproxy-sidecar shape ([agent-sandbox](https://github.com/mattolson/agent-sandbox), [Onyx](https://onyx.app/insights/secure-agent-access-control)) covers what stages 1–4 leave: a tier-2 skill using a bound secret over raw `httpx`. It costs a CA lifecycle, a run-correlation channel so the proxy knows whose bindings apply, a Python sidecar in the deployment, and `iptables` to stop the workload routing around `HTTP_PROXY` — which is unenforceable inside a sandbox we do not own, so it would work on the local-Docker backend and nowhere else. Note it is additive: the placeholder minting in stage 2 is a precondition, not an alternative, since a proxy can only substitute for a placeholder the host issued. [smokescreen](https://github.com/stripe/smokescreen) is the adjacent option and solves a different axis — connect-time validation that a destination is publicly routable, which is stage 3's problem, not stage 2's.
+
+The trigger is a skill that needs a bound credential over a protocol `ctx.http` does not carry. Until one exists, the proxy buys coverage for a case worth refusing.
 
 ## Data model `[proposed]`
 
@@ -1227,9 +1234,10 @@ interface SkillRunner {
 | Output delivery | JSON via tool result; binaries via `AttachmentStore` | Same pattern as `generate_image`. |
 | Skill metadata | `SKILL.md` frontmatter | Matches Anthropic's progressive-disclosure standard, already referenced in [integrations.md](integrations.md). |
 | Host access | `ctx` object projected over JSON-RPC | Mirrors TS `Service` pattern for tools — same shape, over a pipe. Covers secrets, memory, attachments uniformly. |
-| Secrets access | Pull model — `ctx.secrets.get(name)` gated by manifest allowlist | Materializes secrets only at point of use; per-access audit; zero-touch rotation. Reads naturally in Python. |
+| Secrets access | Pull model — `ctx.secrets.get(name)` gated by manifest allowlist; bound secrets move to placeholders at stage 2 | Materializes secrets only at point of use; per-access audit; zero-touch rotation. Reads naturally in Python. The manifest gating its own access is the skill declaring its own permissions, which is why risk tiering and the egress allowlist carry the weight rather than the allowlist alone. |
 | Secrets storage | Existing encrypted `secrets` table (per [infrastructure.md](infrastructure.md)) | Cogmo already has a minimal self-hosted vault. No external service at personal scale. |
-| Egress-proxy substitution | Deferred (`[research]`) | Adds sandbox-invisible secrets via placeholder + egress proxy that validates destination and substitutes. Earns complexity only when trust boundary widens. |
+| Egress substitution | Host-side at `ctx.http`, not a proxy (stage 2) | Tier 1 has no socket to intercept — the host makes the request, so substitution is an assignment before `fetch` rather than a CA, a sidecar and `iptables`. A placeholder over tier 2's raw sockets fails closed at the destination, so proxying them buys coverage for a case worth refusing. |
+| Egress allowlist | Manifest `network:` block, default deny (stage 1) | Bounds where a credential can travel even while the skill holds it in plaintext, which is what makes it the release gate rather than substitution. Matches the default-deny-plus-allowlist consensus for running model-authored code. |
 | Dep declaration | `dependencies: ["pkg==version", ...]` in `SKILL.md`; Zod regex rejects ranges/extras/URLs/paths | One Zod schema, five consumers — same drift-prevention as the rest of the manifest. Strict pinning prevents resolution drift between register and re-resolve. |
 | Lockfile | `requirements.lock` next to `skill.py`, hash-pinned via `uv pip compile --generate-hashes`, author-committed | Transitive graph pinned; register byte-compares to catch staleness. Atomic with the rest of the skill from the operator's POV. |
 | Resolver | `uv` (compile + sync) baked into `cogmo-skills:<version>` runtime image | Sub-100ms venv creation; hash pinning is first-class; resolver at register matches resolver at populate byte-for-byte. Already standardised across the codebase. |
