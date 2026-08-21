@@ -8,4 +8,6 @@ The proxy is last, and is recorded as additive to stage 2 rather than an alterna
 
 The stage markers reflect that: 1 through 3 are `[confirmed]`, 4 `[proposed]`, 5 `[research]`.
 
-The risk-tier table carries secrets-plus-network as its own `approve` trigger, distinct from the 3-secret breadth threshold — the count answers how broad a skill's permissions are, the pairing answers whether a skill can read a credential and also reach somewhere to send it. `ctx.http` is listed as deferred against stage 1 as its release gate.
+The risk-tier table carries secrets-plus-network as its own `approve` trigger, distinct from the 3-secret breadth threshold — the count answers how broad a skill's permissions are, the pairing answers whether a skill can read a credential and also reach somewhere to send it.
+
+Stage 1 ships in the same change as `ctx.http` itself, so the feature arrives with the control that bounds it rather than ahead of it.

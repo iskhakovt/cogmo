@@ -148,6 +148,20 @@ const HttpRequestArgsSchema = z.object({
  * connects as one step; tracked in todo.md, since it turns on adding
  * undici as a runtime dependency.
  */
+/**
+ * Whether a hostname is covered by a manifest's `network.allow` list. An entry
+ * matches either exactly or, when written `*.example.com`, as a proper
+ * subdomain — the apex is not implied, so a skill that wants both lists both.
+ * An empty list matches nothing, which is what makes "no `network:` block" mean
+ * "no network" rather than "no restriction".
+ */
+function hostAllowed(hostname: string, allow: ReadonlyArray<string>): boolean {
+  const host = hostname.toLowerCase();
+  return allow.some((entry) =>
+    entry.startsWith("*.") ? host.endsWith(entry.slice(1)) : host === entry,
+  );
+}
+
 function parseIpv6(input: string): Uint8Array | null {
   let addr = input.split("%")[0] ?? ""; // drop any zone id
   // A trailing dotted quad (::ffff:127.0.0.1) is two hex groups wearing
@@ -316,6 +330,7 @@ export class DefaultCtxHandler implements CtxHandler {
   #now: () => string;
   #resolveHost: NonNullable<DefaultCtxHandlerOptions["resolveHost"]>;
   #declaredSecrets: ReadonlySet<string>;
+  #allowedHosts: ReadonlyArray<string>;
 
   constructor(opts: DefaultCtxHandlerOptions) {
     this.#manifest = opts.manifest;
@@ -332,6 +347,7 @@ export class DefaultCtxHandler implements CtxHandler {
     this.#declaredSecrets = new Set(
       opts.manifest.secrets.map((s) => (typeof s === "string" ? s : s.name)),
     );
+    this.#allowedHosts = opts.manifest.network?.allow.map((h) => h.toLowerCase()) ?? [];
   }
 
   async handle(call: { method: string; args: unknown }): Promise<unknown> {
@@ -599,6 +615,19 @@ export class DefaultCtxHandler implements CtxHandler {
     // and path only — enough to see where a skill reached, without
     // persisting the credential that got it there.
     const target = `${parsedUrl.origin}${parsedUrl.pathname}`;
+    // Ahead of resolution: a host the manifest never declared should not even
+    // produce a DNS query, and this is the check that bounds where a secret
+    // the skill is holding can travel. The address guard below answers a
+    // different question — whether a permitted name points somewhere internal.
+    if (!hostAllowed(parsedUrl.hostname, this.#allowedHosts)) {
+      await this.#audit("http.request", target, false, "not_in_allowlist");
+      throw new CtxError(
+        "blocked_destination",
+        this.#allowedHosts.length === 0
+          ? `http.request refused ${target}: this skill declares no 'network:' block, so it has no network access`
+          : `http.request refused ${target}: '${parsedUrl.hostname}' is not in this skill's network.allow list`,
+      );
+    }
     // One budget spans resolution and the request. Starting the clock at
     // the fetch would let a slow resolver add unbounded time in front of
     // it, so a caller asking for 5s could wait far longer.
@@ -606,9 +635,10 @@ export class DefaultCtxHandler implements CtxHandler {
     const budgetStartedMs = Date.now();
 
     try {
-      // `URL.hostname` keeps the brackets on an IPv6 literal; no resolver
-      // takes those. The original `url` still goes to `fetch` untouched.
-      const hostname = parsedUrl.hostname.replace(/^\[|\]$/g, "");
+      // An IPv6 literal reaches `URL.hostname` wrapped in brackets, which no
+      // allowlist entry can match, so anything arriving here is a name or an
+      // IPv4 literal — either of which the resolver takes as written.
+      const hostname = parsedUrl.hostname;
       const resolved = await withDeadline(
         this.#resolveHost(hostname),
         timeoutBudgetMs,

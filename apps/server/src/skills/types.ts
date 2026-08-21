@@ -105,6 +105,30 @@ const SkillSecretSchema = z.union([
   }),
 ]);
 
+/**
+ * Egress allowlist. Absent means the skill has no network at all — `ctx.http`
+ * refuses every destination — so reaching the internet is opted into per host
+ * rather than out of. Entries are bare hostnames, optionally prefixed `*.` to
+ * admit subdomains; `*.example.com` covers `api.example.com` but not
+ * `example.com` itself, the rule TLS certificates use, so an apex needs its own
+ * entry. A lone `*` does not parse: "anywhere" is the shape this block exists
+ * to make unavailable. At least one label separator is required, which keeps
+ * single-label internal names (`localhost`, a container alias) out — those
+ * resolve onto the host's own network, which `ctx.http` refuses anyway.
+ */
+const SkillNetworkHostSchema = z
+  .string()
+  .min(1)
+  .max(253)
+  .regex(
+    /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i,
+    "must be a hostname, optionally prefixed '*.' — no scheme, port or path",
+  );
+
+export const SkillNetworkSchema = z.object({
+  allow: z.array(SkillNetworkHostSchema).min(1),
+});
+
 const SkillResourcesSchema = z.object({
   memory_mb: z.number().int().positive().max(2048).optional(),
   wall_clock_s: z.number().int().positive().max(600).optional(),
@@ -168,6 +192,8 @@ export const SkillManifestSchema = z
     secrets: z.array(SkillSecretSchema).default([]),
 
     dependencies: z.array(SkillDependencySchema).default([]),
+
+    network: SkillNetworkSchema.optional(),
 
     resources: SkillResourcesSchema.optional(),
 

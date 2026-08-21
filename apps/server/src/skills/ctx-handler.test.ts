@@ -30,6 +30,27 @@ ${overrides}
   return r.value.manifest;
 }
 
+/**
+ * Allowlist covering every destination the `http.request` tests reach. A skill
+ * with no `network:` block has no network at all, which the default-deny cases
+ * below assert directly rather than inheriting from this fixture.
+ */
+const HTTP_ALLOW = `network:
+  allow:
+    - api.example.com
+    - example.com
+    - x.com
+    - slow-dns.example
+    - internal.example
+    - weird.example
+    - hindsight.internal
+    - 127.0.0.1
+`;
+
+function httpManifest(overrides: string = ""): SkillManifest {
+  return manifest(`${HTTP_ALLOW}${overrides}`);
+}
+
 interface Deps {
   secretsStore: MockProxy<SecretsStore>;
   memory: MockProxy<MemoryProvider>;
@@ -137,7 +158,7 @@ describe("DefaultCtxHandler", () => {
     it("returns status, headers and body for a successful request", async () => {
       const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse('{"ok":1}'));
       try {
-        const h = makeHandler(manifest(""), deps());
+        const h = makeHandler(httpManifest(), deps());
         const out = await h.handle({
           method: "http.request",
           args: { method: "GET", url: "https://api.example.com/v1/things" },
@@ -152,7 +173,7 @@ describe("DefaultCtxHandler", () => {
       const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse("{}"));
       try {
         const d = deps();
-        const h = makeHandler(manifest(""), d);
+        const h = makeHandler(httpManifest(), d);
         await h.handle({
           method: "http.request",
           args: { method: "GET", url: "https://api.example.com/v1/things?api_key=hunter2" },
@@ -188,11 +209,11 @@ describe("DefaultCtxHandler", () => {
         const fetchMock = vi.spyOn(globalThis, "fetch");
         try {
           const d = deps();
-          const h = makeHandler(manifest(""), d, async () => [{ address, family }]);
+          const h = makeHandler(httpManifest(), d, async () => [{ address, family }]);
           await expect(
             h.handle({
               method: "http.request",
-              args: { method: "GET", url: "http://hindsight:8888/v1/banks" },
+              args: { method: "GET", url: "http://hindsight.internal:8888/v1/banks" },
             }),
           ).rejects.toThrow(/host's own network/);
           expect(fetchMock).not.toHaveBeenCalled();
@@ -230,7 +251,7 @@ describe("DefaultCtxHandler", () => {
     ])("refuses %s, however it is written", async (address) => {
       const fetchMock = vi.spyOn(globalThis, "fetch");
       try {
-        const h = makeHandler(manifest(""), deps(), async () => [{ address, family: 6 }]);
+        const h = makeHandler(httpManifest(), deps(), async () => [{ address, family: 6 }]);
         await expect(
           h.handle({
             method: "http.request",
@@ -248,7 +269,7 @@ describe("DefaultCtxHandler", () => {
       async (address) => {
         const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse("{}"));
         try {
-          const h = makeHandler(manifest(""), deps(), async () => [{ address, family: 6 }]);
+          const h = makeHandler(httpManifest(), deps(), async () => [{ address, family: 6 }]);
           const out = await h.handle({
             method: "http.request",
             args: { method: "GET", url: "https://api.example.com/x" },
@@ -263,7 +284,7 @@ describe("DefaultCtxHandler", () => {
     it("refuses an address it cannot parse rather than letting it through", async () => {
       const fetchMock = vi.spyOn(globalThis, "fetch");
       try {
-        const h = makeHandler(manifest(""), deps(), async () => [
+        const h = makeHandler(httpManifest(), deps(), async () => [
           { address: "not:an:address:at:all:::", family: 6 },
         ]);
         await expect(
@@ -278,20 +299,22 @@ describe("DefaultCtxHandler", () => {
       }
     });
 
-    it("strips the brackets off an IPv6-literal URL before resolving", async () => {
-      // `URL.hostname` keeps them, and no resolver accepts them — without
-      // this the call fails as a resolution error instead of being judged.
+    it("refuses an IPv6-literal URL, which no allowlist entry can name", async () => {
+      // `URL.hostname` keeps the brackets, and the allowlist grammar admits
+      // names and IPv4 literals only, so the destination is unreachable by
+      // construction rather than by address judgement.
       const seen: string[] = [];
       const fetchMock = vi.spyOn(globalThis, "fetch");
       try {
-        const h = makeHandler(manifest(""), deps(), async (hostname) => {
+        const h = makeHandler(httpManifest(), deps(), async (hostname) => {
           seen.push(hostname);
           return [{ address: "::1", family: 6 }];
         });
         await expect(
           h.handle({ method: "http.request", args: { method: "GET", url: "http://[::1]:8888/x" } }),
-        ).rejects.toThrow(/host's own network/);
-        expect(seen).toEqual(["::1"]);
+        ).rejects.toThrow(/not in this skill's network\.allow list/);
+        // Refused ahead of resolution, so it never became a DNS query.
+        expect(seen).toEqual([]);
         expect(fetchMock).not.toHaveBeenCalled();
       } finally {
         fetchMock.mockRestore();
@@ -305,7 +328,7 @@ describe("DefaultCtxHandler", () => {
       try {
         const d = deps();
         const h = makeHandler(
-          manifest(""),
+          httpManifest(),
           d,
           () => new Promise(() => {}), // never resolves
         );
@@ -329,7 +352,7 @@ describe("DefaultCtxHandler", () => {
     it("allows a host resolving to a public address", async () => {
       const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse("{}"));
       try {
-        const h = makeHandler(manifest(""), deps());
+        const h = makeHandler(httpManifest(), deps());
         const out = await h.handle({
           method: "http.request",
           args: { method: "GET", url: "https://api.example.com/x" },
@@ -349,7 +372,7 @@ describe("DefaultCtxHandler", () => {
           new Response(null, { status: 302, headers: { location: "http://127.0.0.1:8888/" } }),
         );
       try {
-        const h = makeHandler(manifest(""), deps());
+        const h = makeHandler(httpManifest(), deps());
         const out = (await h.handle({
           method: "http.request",
           args: { method: "GET", url: "https://api.example.com/start" },
@@ -371,7 +394,7 @@ describe("DefaultCtxHandler", () => {
       const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
       const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse("{}"));
       try {
-        const h = makeHandler(manifest("resources:\n  wall_clock_s: 20"), deps());
+        const h = makeHandler(httpManifest("resources:\n  wall_clock_s: 20"), deps());
         await h.handle({
           method: "http.request",
           args: { method: "GET", url: "https://api.example.com/x", timeoutMs: 60_000 },
@@ -391,7 +414,7 @@ describe("DefaultCtxHandler", () => {
     it("returns the response headers, which callers need for content-type", async () => {
       const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse("{}"));
       try {
-        const h = makeHandler(manifest(""), deps());
+        const h = makeHandler(httpManifest(), deps());
         const out = (await h.handle({
           method: "http.request",
           args: { method: "GET", url: "https://api.example.com/x" },
@@ -411,7 +434,7 @@ describe("DefaultCtxHandler", () => {
       const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(timeout);
       try {
         const d = deps();
-        const h = makeHandler(manifest(""), d);
+        const h = makeHandler(httpManifest(), d);
         await expect(
           h.handle({
             method: "http.request",
@@ -440,7 +463,7 @@ describe("DefaultCtxHandler", () => {
         .mockResolvedValue(new Response(stream, { status: 200 }));
       try {
         const d = deps();
-        const h = makeHandler(manifest(""), d);
+        const h = makeHandler(httpManifest(), d);
         await expect(
           h.handle({
             method: "http.request",
@@ -460,7 +483,7 @@ describe("DefaultCtxHandler", () => {
         .spyOn(globalThis, "fetch")
         .mockResolvedValue(new Response(null, { status: 204 }));
       try {
-        const h = makeHandler(manifest(""), deps());
+        const h = makeHandler(httpManifest(), deps());
         const out = await h.handle({
           method: "http.request",
           args: { method: "DELETE", url: "https://api.example.com/thing" },
@@ -476,7 +499,7 @@ describe("DefaultCtxHandler", () => {
         .spyOn(globalThis, "fetch")
         .mockResolvedValue(okResponse("not found", 404));
       try {
-        const h = makeHandler(manifest(""), deps());
+        const h = makeHandler(httpManifest(), deps());
         const out = await h.handle({
           method: "http.request",
           args: { method: "GET", url: "https://api.example.com/missing" },
@@ -492,7 +515,7 @@ describe("DefaultCtxHandler", () => {
       async (url) => {
         const fetchMock = vi.spyOn(globalThis, "fetch");
         try {
-          const h = makeHandler(manifest(""), deps());
+          const h = makeHandler(httpManifest(), deps());
           await expect(
             h.handle({ method: "http.request", args: { method: "GET", url } }),
           ).rejects.toThrow(/supports http and https/);
@@ -515,7 +538,7 @@ describe("DefaultCtxHandler", () => {
         .spyOn(globalThis, "fetch")
         .mockResolvedValue(new Response(stream, { status: 200 }));
       try {
-        const h = makeHandler(manifest(""), deps());
+        const h = makeHandler(httpManifest(), deps());
         await expect(
           h.handle({
             method: "http.request",
@@ -531,7 +554,7 @@ describe("DefaultCtxHandler", () => {
       const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
       try {
         const d = deps();
-        const h = makeHandler(manifest(""), d);
+        const h = makeHandler(httpManifest(), d);
         await expect(
           h.handle({
             method: "http.request",
@@ -547,10 +570,163 @@ describe("DefaultCtxHandler", () => {
     });
 
     it("rejects a malformed request shape", async () => {
-      const h = makeHandler(manifest(""), deps());
+      const h = makeHandler(httpManifest(), deps());
       await expect(
         h.handle({ method: "http.request", args: { url: "https://example.com" } }),
       ).rejects.toThrow(/expects/);
+    });
+
+    describe("network allowlist", () => {
+      const publicAddress = async () => [{ address: "93.184.216.34", family: 4 }];
+
+      it("refuses every destination when the manifest declares no network block", async () => {
+        const seen: string[] = [];
+        const fetchMock = vi.spyOn(globalThis, "fetch");
+        try {
+          const h = makeHandler(manifest(""), deps(), async (hostname) => {
+            seen.push(hostname);
+            return [{ address: "93.184.216.34", family: 4 }];
+          });
+          await expect(
+            h.handle({
+              method: "http.request",
+              args: { method: "GET", url: "https://api.example.com/v1" },
+            }),
+          ).rejects.toThrow(/declares no 'network:' block/);
+          // Ahead of resolution, so a destination the skill never declared
+          // does not even leak as a DNS query.
+          expect(seen).toEqual([]);
+          expect(fetchMock).not.toHaveBeenCalled();
+        } finally {
+          fetchMock.mockRestore();
+        }
+      });
+
+      it("records a refused destination in the audit as not_in_allowlist", async () => {
+        const d = deps();
+        const h = makeHandler(manifest(""), d, publicAddress);
+        await expect(
+          h.handle({
+            method: "http.request",
+            args: { method: "GET", url: "https://api.example.com/v1" },
+          }),
+        ).rejects.toThrow();
+        expect(d.recordContextCall).toHaveBeenCalledWith(
+          expect.objectContaining({
+            method: "http.request",
+            target: "https://api.example.com/v1",
+            ok: false,
+            error: "not_in_allowlist",
+          }),
+        );
+      });
+
+      it("refuses a host the allowlist does not name", async () => {
+        const fetchMock = vi.spyOn(globalThis, "fetch");
+        try {
+          const h = makeHandler(httpManifest(), deps(), publicAddress);
+          await expect(
+            h.handle({
+              method: "http.request",
+              args: { method: "GET", url: "https://evil.example.net/collect" },
+            }),
+          ).rejects.toThrow(/'evil\.example\.net' is not in this skill's network\.allow list/);
+          expect(fetchMock).not.toHaveBeenCalled();
+        } finally {
+          fetchMock.mockRestore();
+        }
+      });
+
+      it("admits a subdomain under a '*.' entry", async () => {
+        const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse("{}"));
+        try {
+          const h = makeHandler(
+            manifest("network:\n  allow:\n    - '*.example.com'"),
+            deps(),
+            publicAddress,
+          );
+          const out = await h.handle({
+            method: "http.request",
+            args: { method: "GET", url: "https://api.example.com/v1" },
+          });
+          expect(out).toMatchObject({ status: 200 });
+        } finally {
+          fetchMock.mockRestore();
+        }
+      });
+
+      it("does not read a '*.' entry as covering the apex", async () => {
+        const fetchMock = vi.spyOn(globalThis, "fetch");
+        try {
+          const h = makeHandler(
+            manifest("network:\n  allow:\n    - '*.example.com'"),
+            deps(),
+            publicAddress,
+          );
+          await expect(
+            h.handle({
+              method: "http.request",
+              args: { method: "GET", url: "https://example.com/v1" },
+            }),
+          ).rejects.toThrow(/not in this skill's network\.allow list/);
+          expect(fetchMock).not.toHaveBeenCalled();
+        } finally {
+          fetchMock.mockRestore();
+        }
+      });
+
+      it("does not let a '*.' entry match a host that merely ends in the same text", async () => {
+        const fetchMock = vi.spyOn(globalThis, "fetch");
+        try {
+          const h = makeHandler(
+            manifest("network:\n  allow:\n    - '*.example.com'"),
+            deps(),
+            publicAddress,
+          );
+          await expect(
+            h.handle({
+              method: "http.request",
+              args: { method: "GET", url: "https://notexample.com/v1" },
+            }),
+          ).rejects.toThrow(/not in this skill's network\.allow list/);
+          expect(fetchMock).not.toHaveBeenCalled();
+        } finally {
+          fetchMock.mockRestore();
+        }
+      });
+
+      it("matches case-insensitively, since hostnames are", async () => {
+        const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse("{}"));
+        try {
+          const h = makeHandler(
+            manifest("network:\n  allow:\n    - API.Example.COM"),
+            deps(),
+            publicAddress,
+          );
+          const out = await h.handle({
+            method: "http.request",
+            args: { method: "GET", url: "https://api.example.com/v1" },
+          });
+          expect(out).toMatchObject({ status: 200 });
+        } finally {
+          fetchMock.mockRestore();
+        }
+      });
+
+      it("still refuses a declared host that resolves onto the host's own network", async () => {
+        // The two checks answer different questions: the allowlist bounds
+        // where a skill may reach, the address guard bounds what a permitted
+        // name may point at. Declaring a host does not buy past the second.
+        const h = makeHandler(httpManifest(), deps(), async () => [
+          { address: "127.0.0.1", family: 4 },
+        ]);
+        await expect(
+          h.handle({
+            method: "http.request",
+            args: { method: "GET", url: "https://api.example.com/v1" },
+          }),
+        ).rejects.toThrow(/host's own network/);
+      });
     });
   });
 

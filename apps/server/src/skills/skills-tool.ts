@@ -15,7 +15,7 @@ export const SKILLS_PROMPT_GUIDANCE = `You can author Python skills — small pr
 
 1. Use \`delegate_coding\` against the skills repo — it's registered as \`skills\` automatically on every boot, no \`/repo add\` needed. The goal should describe both the SKILL.md (manifest: name, description, tier, inputs, effects) and the skill.py (a single \`async def run(inputs, ctx) -> dict\`). Wait for the user to approve and the task to finish.
 
-   If the skill needs the network, say so in the goal and have it use \`await ctx.http.get(url)\` — tier 1 has no sockets, so \`urllib\`/\`httpx\`/\`requests\` are rejected at register time. It returns \`{"status", "headers", "body"}\` and needs no dependency.
+   If the skill needs the network, say so in the goal and have it use \`await ctx.http.get(url)\` — tier 1 has no sockets, so \`urllib\`/\`httpx\`/\`requests\` are rejected at register time. It returns \`{"status", "headers", "body"}\` and needs no dependency. The manifest must also list every host it contacts under \`network.allow\`, or the request is refused; a skill declaring both a secret and a network allowlist always needs the user's approval before it goes live.
 2. Once Claude Code finishes and pushes the feature branch, call \`register_skill\` with the branch name. The classifier (currently stub) tags every skill 'notify'-tier — registration goes through immediately and the user receives a one-line notification that the skill is now live.
 3. The new skill appears as its own LLM tool from your *next turn onwards* (the tool list is rebuilt each turn from the live-skill rows). You can then call it like any built-in tool.
 

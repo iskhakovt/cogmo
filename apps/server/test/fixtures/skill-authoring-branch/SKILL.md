@@ -6,6 +6,9 @@ inputs:
   type: object
   properties: {}
 effects: []
+network:
+  allow:
+    - api.coingecko.com
 ---
 
 # Bitcoin Spot Price

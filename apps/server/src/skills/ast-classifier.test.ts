@@ -397,3 +397,70 @@ async def run(inputs, ctx):
     expect(log.risk_tier).toBe("auto");
   });
 });
+
+describe("classifyWithAst — network and secrets", () => {
+  const BODY = `
+async def run(inputs, ctx):
+    resp = await ctx.http.get("https://api.example.com/v1")
+    return {"body": resp["body"]}
+`;
+
+  it("network with no secrets → notify", async () => {
+    // Egress reaches only what the allowlist named and carries no
+    // credential, so it is worth a note rather than a gate.
+    const log = await classifyWithAst(
+      manifestWith({ network: { allow: ["api.example.com"] } }),
+      BODY,
+    );
+    expect(log.risk_tier).toBe("notify");
+  });
+
+  it("one secret alongside network → approve, below the count threshold", async () => {
+    // APPROVE_SECRETS_THRESHOLD is 3; the pairing gates regardless, because
+    // reading a credential and having somewhere to send it is the shape that
+    // matters rather than how many credentials there are.
+    const log = await classifyWithAst(
+      manifestWith({
+        secrets: ["api_key"],
+        network: { allow: ["api.example.com"] },
+      }),
+      BODY,
+    );
+    expect(log.risk_tier).toBe("approve");
+  });
+
+  it("two secrets alongside network → approve", async () => {
+    const log = await classifyWithAst(
+      manifestWith({
+        secrets: ["api_key", "other_key"],
+        network: { allow: ["api.example.com"] },
+      }),
+      BODY,
+    );
+    expect(log.risk_tier).toBe("approve");
+  });
+
+  it("one secret with no network stays auto", async () => {
+    // The pairing is what gates. A secret a skill cannot send anywhere is
+    // still only as broad as the count threshold says.
+    const log = await classifyWithAst(
+      manifestWith({ secrets: ["api_key"] }),
+      `
+async def run(inputs, ctx):
+    return {"ok": True}
+`,
+    );
+    expect(log.risk_tier).toBe("auto");
+  });
+
+  it("a bound secret alongside network → approve, same as a bare one", async () => {
+    const log = await classifyWithAst(
+      manifestWith({
+        secrets: [{ name: "api_key", binding: { destination: "https://api.example.com/*" } }],
+        network: { allow: ["api.example.com"] },
+      }),
+      BODY,
+    );
+    expect(log.risk_tier).toBe("approve");
+  });
+});
