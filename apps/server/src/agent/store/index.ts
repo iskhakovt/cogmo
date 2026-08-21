@@ -1157,6 +1157,16 @@ export interface AgentStore {
   getScheduledTask(tx: Transaction, id: string): Promise<ScheduledTask | undefined>;
 
   /**
+   * Load a scheduled task by its idempotency key. Lets a caller recognise a
+   * retry before spending a cap check on it — the row a retry is recovering
+   * counts toward that cap.
+   */
+  getScheduledTaskByIdempotencyKey(
+    tx: Transaction,
+    key: string,
+  ): Promise<ScheduledTask | undefined>;
+
+  /**
    * List scheduled tasks for a user, newest-first. Used by `/schedules`
    * and `list_tasks`. `includeDisabled` defaults to `true` — `/schedules`
    * wants to show disabled rows; `list_tasks` callers that only want
@@ -2822,7 +2832,14 @@ export class DrizzleAgentStore implements AgentStore {
       idempotencyKey?: string;
     },
   ): Promise<ScheduledTask> {
-    const inserted = await tx
+    // DO UPDATE with a no-op SET, not DO NOTHING. Both dedup, but only DO
+    // UPDATE returns the conflicting row: under the project's REPEATABLE READ
+    // default, a concurrent loser's snapshot cannot see the winner's row, so
+    // DO NOTHING plus a re-SELECT finds nothing and has to fail. The update
+    // touches the winner's tuple, so RETURNING yields it regardless of
+    // snapshot visibility. Unkeyed callers never conflict — Postgres treats
+    // nulls as not-equal under a unique constraint — so they always insert.
+    const rows = await tx
       .insert(scheduledTasks)
       .values({
         userId: params.userId,
@@ -2837,29 +2854,25 @@ export class DrizzleAgentStore implements AgentStore {
         source: params.source,
         ...(params.idempotencyKey !== undefined && { idempotencyKey: params.idempotencyKey }),
       })
-      // Unkeyed callers never collide — Postgres treats nulls as not-equal
-      // under a unique constraint — so they always take the insert.
-      .onConflictDoNothing({ target: scheduledTasks.idempotencyKey })
+      .onConflictDoUpdate({
+        target: scheduledTasks.idempotencyKey,
+        set: { idempotencyKey: params.idempotencyKey ?? null },
+      })
       .returning();
-    const first = inserted[0];
-    if (first) return rowToScheduledTask(first);
-    const key = params.idempotencyKey;
-    if (key === undefined) throw new Error("createScheduledTask: insert returned no row");
-    const existing = await tx
+    return rowToScheduledTask(single(rows));
+  }
+
+  async getScheduledTaskByIdempotencyKey(
+    tx: Transaction,
+    key: string,
+  ): Promise<ScheduledTask | undefined> {
+    const rows = await tx
       .select()
       .from(scheduledTasks)
       .where(eq(scheduledTasks.idempotencyKey, key))
       .limit(1);
-    const row = existing[0];
-    if (!row) {
-      // Same REPEATABLE READ residual as `insertOrRecoverTask` — the winner
-      // committed after this transaction's snapshot, so it is invisible here.
-      throw new Error(
-        `createScheduledTask: idempotency key ${key} conflicted against a row outside this ` +
-          "transaction's snapshot — concurrent submission of the same key",
-      );
-    }
-    return rowToScheduledTask(row);
+    const row = rows[0];
+    return row ? rowToScheduledTask(row) : undefined;
   }
 
   async getScheduledTask(tx: Transaction, id: string): Promise<ScheduledTask | undefined> {

@@ -530,6 +530,26 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     );
     if (awaiting.kind !== "transitioned") {
       taskLog.info({ awaiting }, "plan: task left `planning` mid-session (cancelled?) — stopping");
+      // Returning from inside the try skips the catch, which is what does the
+      // cleanup — so do it here. The plan phase has by now allocated a
+      // worktree, created a container and (on git-remote) provisioned
+      // askpass; abandoning them would leak a sandbox and leave the PAT on
+      // disk. The status is left exactly as the canceller wrote it: this run
+      // no longer owns the task, and `safeTeardownWorktree` only reads it.
+      await stepRun("teardown-worktree-cancelled", () =>
+        safeTeardownWorktree({
+          runInTx,
+          ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
+          repo,
+          taskId,
+          worktreeAssignment: wt,
+        }).then(() => null),
+      );
+      await stepRun("teardown-cancelled", () => sandbox.deleteByTaskId(taskId).then(() => null));
+      if (askpassProvisioned) {
+        cleanupAskpass({ baseDir: deps.askpassBaseDir, rootTaskId: taskId });
+      }
+      await stream.fail("Task cancelled while planning.").catch(() => {});
       return { status: "skipped" };
     }
     // Same wrap as the failure-path notification above — once status is

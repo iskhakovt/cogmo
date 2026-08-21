@@ -287,11 +287,14 @@ describe("createCodingService", () => {
     expect(tasks).toHaveLength(1);
   });
 
-  it("releases the idempotency key when a send failure fails the row", async () => {
-    // The cleanup marks the row terminal to free the admission slot. Leaving
-    // the key on it would make the retry recover a dead task and report it
-    // back as "already submitted, don't resubmit" — trading the duplicate the
-    // key prevents for a silent no-op. Releasing it lets the retry submit.
+  it("keeps the idempotency key when a send failure fails the row", async () => {
+    // A throw from `inngest.send` is ambiguous — the bus may have accepted the
+    // event and failed only on the response. Releasing the key would let a
+    // retry mint a second task while the accepted event still drives the
+    // first, which is the duplicate sandbox this key exists to prevent. So the
+    // key stays, the retry recovers the failed row, and the model is told
+    // honestly. One task either way, and the slot frees because the row is
+    // terminal.
     await seedRepo("cogmo", 2);
     const inngest = { send: vi.fn().mockRejectedValueOnce(new Error("bus down")) };
     const service = createCodingService(
@@ -308,7 +311,11 @@ describe("createCodingService", () => {
     await expect(
       service.delegate({ goal: "x".repeat(20), repoName: "cogmo", idempotencyKey: key }),
     ).rejects.toThrow(/bus down/);
-    expect(await tx((trx) => store.getTaskByIdempotencyKey(trx, key))).toBeUndefined();
+    const failed = expectDefined(
+      await tx((trx) => store.getTaskByIdempotencyKey(trx, key)),
+      "failed task",
+    );
+    expect(failed.status).toBe("failed");
 
     inngest.send.mockResolvedValue(undefined);
     const retry = await service.delegate({
@@ -317,11 +324,12 @@ describe("createCodingService", () => {
       idempotencyKey: key,
     });
 
-    // A fresh submission, not a recovery of the dead row.
-    expect(retry.status).toBe("queued");
+    expect(retry).toEqual({ taskId: failed.id, status: "recovered", priorStatus: "failed" });
     const tasks = await tx((trx) => store.listTasksForConversation(trx, conversationId));
-    expect(tasks).toHaveLength(2);
-    expect(tasks.filter((t) => t.status === "failed")).toHaveLength(1);
+    expect(tasks).toHaveLength(1);
+    // Not re-emitted: a terminal row can't be driven, and the accepted-event
+    // case is already covered by the orchestrator's `queued -> planning` claim.
+    expect(inngest.send).toHaveBeenCalledTimes(1);
   });
 
   it("recovers rather than tripping the concurrency cap on retry", async () => {

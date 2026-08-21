@@ -216,23 +216,23 @@ export function createCodingService(
           id: `task-start-${task.id}`,
         });
       } catch (sendErr) {
+        // The key stays on the row. A throw from `inngest.send` is
+        // ambiguous — the bus may have accepted the event and failed only on
+        // the response — so releasing the key would let a retry mint a second
+        // task while the accepted event still drives the first, which is the
+        // duplicate sandbox and duplicate PR this key exists to prevent.
+        // Keeping it means a retry recovers this row and reports it failed:
+        // honest, and one task either way. The row is terminal, so the
+        // admission slot frees regardless, and the orchestrator's
+        // `queued -> planning` claim skips a task it finds already failed.
         await deps
-          .runInTx(async (tx) => {
-            await deps.codingStore.updateTaskStatus(tx, {
+          .runInTx((tx) =>
+            deps.codingStore.updateTaskStatus(tx, {
               id: task.id,
               status: "failed",
               failureReason: `inngest.send failed: ${(sendErr as Error).message}`,
-            });
-            // Release the key along with the row. It identifies a submission
-            // that is about to be retried, and a retry that recovered this
-            // terminal row would report a dead task back to the model rather
-            // than re-submitting — trading the duplicate this key exists to
-            // prevent for a silent no-op. The row stays terminal so the
-            // admission slot is freed either way.
-            if (input.idempotencyKey !== undefined) {
-              await deps.codingStore.clearTaskIdempotencyKey(tx, task.id);
-            }
-          })
+            }),
+          )
           .catch((cleanupErr) => {
             log.error(
               { err: cleanupErr, taskId: task.id, sendErr },

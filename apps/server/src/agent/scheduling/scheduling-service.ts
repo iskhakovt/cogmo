@@ -130,6 +130,16 @@ export function createSchedulingService(deps: SchedulingServiceDeps): Scheduling
 
   return {
     async create(args, idempotencyKey) {
+      // Recover a retry before the cap can reject it: the row a retry is
+      // recovering counts toward `taskCap`, so a replay at the limit would
+      // report failure for a schedule that already exists. Same ordering as
+      // `CodingService.delegate`.
+      if (idempotencyKey !== undefined) {
+        const prior = await deps.runInTx((tx) =>
+          deps.agentStore.getScheduledTaskByIdempotencyKey(tx, idempotencyKey),
+        );
+        if (prior) return ok({ id: prior.id, nextRunAt: prior.nextRunAt });
+      }
       // Prompt-length cap — defence in depth (the tool schema enforces
       // the same limit, but the service is the contract for non-tool
       // callers like the wizard).

@@ -75,9 +75,11 @@ export interface ToolSpec {
    * nested object sent as a JSON string, a field the schema drops — still
    * yields one key rather than minting a second side effect.
    *
-   * Populated by {@link defineTool}. A hand-built spec that omits it has
-   * its raw arguments digested instead, which can only mint a duplicate,
-   * never collapse two distinct requests into one.
+   * Must return the same value the handler is given for the same payload,
+   * or the key stops identifying the request. {@link defineTool} guarantees
+   * that by parsing once and sharing the result. A hand-built spec that
+   * omits it has its raw arguments digested instead, which can only mint a
+   * duplicate, never collapse two distinct requests into one.
    */
   normalizeInput?: (raw: Record<string, unknown>) => unknown;
   /**
@@ -161,24 +163,36 @@ export function defineTool<T>(opts: {
     );
   }
   const inputSchema = toObjectJsonSchema(opts.schema);
+  // One parse per raw payload, shared by `normalizeInput` (which the loop
+  // digests into the call's idempotency key) and the handler wrapper. Parsing
+  // twice would let a schema with a non-deterministic `.default(() => ...)`
+  // or `.transform()` hand the key a different value than the handler sees —
+  // and hand a retry a different key again, which is the dedup gone. Keyed on
+  // the raw object's identity, which is stable for the lifetime of one
+  // `runOne`; entries fall out with the payload.
+  const parsed = new WeakMap<object, T>();
+  const parseOnce = (raw: Record<string, unknown>): T => {
+    const hit = parsed.get(raw);
+    if (hit !== undefined) return hit;
+    // Some providers occasionally serialize a nested object argument as a
+    // JSON string; unwrap once before Zod so the parse error the LLM sees
+    // reflects a real schema violation, not a serialization quirk.
+    const { value, coercedPaths } = coerceToolInput(raw, inputSchema);
+    if (coercedPaths.length > 0) {
+      logger.debug({ tool: opts.name, paths: coercedPaths }, "coerced stringified tool input");
+    }
+    const out = opts.schema.parse(value);
+    if (out !== null && typeof out === "object") parsed.set(raw, out);
+    return out;
+  };
   return {
     name: opts.name,
     description: opts.description,
     inputSchema,
-    handler: async (raw, service, ctx) => {
-      // Some providers occasionally serialize a nested object argument as a
-      // JSON string; unwrap once before Zod so the parse error the LLM sees
-      // reflects a real schema violation, not a serialization quirk.
-      const { value, coercedPaths } = coerceToolInput(raw, inputSchema);
-      if (coercedPaths.length > 0) {
-        logger.debug({ tool: opts.name, paths: coercedPaths }, "coerced stringified tool input");
-      }
-      const parsed = opts.schema.parse(value);
-      return opts.handler(parsed, service, ctx);
-    },
-    // Same pipeline the handler wrapper above runs, exposed so the loop can
-    // key a call on its normalized arguments rather than the raw payload.
-    normalizeInput: (raw) => opts.schema.parse(coerceToolInput(raw, inputSchema).value),
+    handler: async (raw, service, ctx) => opts.handler(parseOnce(raw), service, ctx),
+    // The value the handler will receive, exposed so the loop keys a call on
+    // its normalized arguments rather than the raw payload.
+    normalizeInput: parseOnce,
     ...(opts.durable !== undefined && { durable: opts.durable }),
     ...(opts.parallelSafe !== undefined && { parallelSafe: opts.parallelSafe }),
     ...(opts.sideEffectful !== undefined && { sideEffectful: opts.sideEffectful }),

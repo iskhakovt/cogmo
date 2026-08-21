@@ -1,4 +1,15 @@
-import { and, asc, count, desc, eq, inArray, ne, notInArray, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  getTableColumns,
+  inArray,
+  ne,
+  notInArray,
+  sql,
+} from "drizzle-orm";
 import { single } from "../../../db/helpers.js";
 import type { Transaction } from "../../../db/index.js";
 import { conversations, profiles } from "../../store/schema.js";
@@ -198,15 +209,6 @@ export interface CodingStore {
    * before spending an admission check on it.
    */
   getTaskByIdempotencyKey(tx: Transaction, key: string): Promise<CodingTaskRow | undefined>;
-
-  /**
-   * Drop a task's idempotency key, so a retry of the same submission mints a
-   * fresh task instead of recovering this one. For the caller that fails a
-   * row it just inserted: the key identifies a submission that is going to be
-   * retried, and leaving it on a terminal row turns the retry into a report
-   * of the dead task rather than a new attempt.
-   */
-  clearTaskIdempotencyKey(tx: Transaction, id: string): Promise<void>;
 
   /** List tasks for a conversation, ordered by createdAt DESC (newest first). */
   listTasksForConversation(
@@ -484,39 +486,26 @@ export class DrizzleCodingStore implements CodingStore {
     tx: Transaction,
     params: InsertTaskParams & { idempotencyKey: string },
   ): Promise<InsertTaskResult> {
-    // ON CONFLICT DO NOTHING against `uniq_coding_tasks_idempotency_key`;
-    // RETURNING yields zero rows on collision. That resolves the sequential
-    // retry — the winner's row is visible and the re-SELECT recovers it.
-    const inserted = await tx
+    // DO UPDATE with a no-op SET, not DO NOTHING. Both dedup, but only DO
+    // UPDATE returns the conflicting row: under the project's REPEATABLE READ
+    // default a concurrent loser's snapshot cannot see the winner's row, so
+    // DO NOTHING plus a re-SELECT finds nothing and has to fail — and `FOR
+    // UPDATE` wouldn't rescue it, since a row absent from the snapshot is
+    // absent from a locking read too. The update touches the winner's tuple,
+    // so RETURNING yields it regardless of visibility.
+    //
+    // `xmax = 0` distinguishes the two: zero on a tuple this statement
+    // inserted, the locking xid on one it updated through the conflict arm.
+    const rows = await tx
       .insert(codingTasks)
       .values({ ...taskValues(params), idempotencyKey: params.idempotencyKey })
-      .onConflictDoNothing({ target: codingTasks.idempotencyKey })
-      .returning();
-    if (inserted.length > 0) return { kind: "new", row: single(inserted) };
-    const existing = await tx
-      .select()
-      .from(codingTasks)
-      .where(eq(codingTasks.idempotencyKey, params.idempotencyKey))
-      .limit(1);
-    const row = existing[0];
-    if (!row) {
-      // Conflicted against a row committed after this transaction's snapshot,
-      // so REPEATABLE READ cannot show it to us. `FOR UPDATE` would not help —
-      // a row absent from the snapshot is absent from a locking read too — and
-      // DO NOTHING skips the tuple without raising `40001`, so the transactor
-      // has nothing to retry on. Unreachable while Inngest serializes a run's
-      // step executions and distinct runs carry distinct keys; named rather
-      // than left as `single()`'s row-count message so it reads as what it is.
-      throw new Error(
-        `insertOrRecoverTask: idempotency key ${params.idempotencyKey} conflicted against a row ` +
-          "outside this transaction's snapshot — concurrent submission of the same key",
-      );
-    }
-    return { kind: "recovered", row };
-  }
-
-  async clearTaskIdempotencyKey(tx: Transaction, id: string): Promise<void> {
-    await tx.update(codingTasks).set({ idempotencyKey: null }).where(eq(codingTasks.id, id));
+      .onConflictDoUpdate({
+        target: codingTasks.idempotencyKey,
+        set: { idempotencyKey: params.idempotencyKey },
+      })
+      .returning({ ...getTableColumns(codingTasks), inserted: sql<boolean>`(xmax = 0)` });
+    const { inserted, ...row } = single(rows);
+    return { kind: inserted ? "new" : "recovered", row };
   }
 
   async getTaskByIdempotencyKey(tx: Transaction, key: string): Promise<CodingTaskRow | undefined> {
