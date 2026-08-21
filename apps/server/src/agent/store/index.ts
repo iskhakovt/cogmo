@@ -1144,6 +1144,12 @@ export interface AgentStore {
       enabled: boolean;
       catchupMissed: boolean;
       source: ScheduleSource;
+      /**
+       * When set, the insert is idempotent against
+       * `uniq_scheduled_tasks_idempotency_key`: a second call with the same
+       * key returns the original row instead of scheduling a second fire.
+       */
+      idempotencyKey?: string;
     },
   ): Promise<ScheduledTask>;
 
@@ -2813,25 +2819,46 @@ export class DrizzleAgentStore implements AgentStore {
       enabled: boolean;
       catchupMissed: boolean;
       source: ScheduleSource;
+      idempotencyKey?: string;
     },
   ): Promise<ScheduledTask> {
-    const row = single(
-      await tx
-        .insert(scheduledTasks)
-        .values({
-          userId: params.userId,
-          profileId: params.profileId,
-          kind: params.kind,
-          cron: params.cron,
-          timezone: params.timezone,
-          prompt: params.prompt,
-          nextRunAt: params.nextRunAt,
-          enabled: params.enabled,
-          catchupMissed: params.catchupMissed,
-          source: params.source,
-        })
-        .returning(),
-    );
+    const inserted = await tx
+      .insert(scheduledTasks)
+      .values({
+        userId: params.userId,
+        profileId: params.profileId,
+        kind: params.kind,
+        cron: params.cron,
+        timezone: params.timezone,
+        prompt: params.prompt,
+        nextRunAt: params.nextRunAt,
+        enabled: params.enabled,
+        catchupMissed: params.catchupMissed,
+        source: params.source,
+        ...(params.idempotencyKey !== undefined && { idempotencyKey: params.idempotencyKey }),
+      })
+      // Unkeyed callers never collide — Postgres treats nulls as not-equal
+      // under a unique constraint — so they always take the insert.
+      .onConflictDoNothing({ target: scheduledTasks.idempotencyKey })
+      .returning();
+    const first = inserted[0];
+    if (first) return rowToScheduledTask(first);
+    const key = params.idempotencyKey;
+    if (key === undefined) throw new Error("createScheduledTask: insert returned no row");
+    const existing = await tx
+      .select()
+      .from(scheduledTasks)
+      .where(eq(scheduledTasks.idempotencyKey, key))
+      .limit(1);
+    const row = existing[0];
+    if (!row) {
+      // Same REPEATABLE READ residual as `insertOrRecoverTask` — the winner
+      // committed after this transaction's snapshot, so it is invisible here.
+      throw new Error(
+        `createScheduledTask: idempotency key ${key} conflicted against a row outside this ` +
+          "transaction's snapshot — concurrent submission of the same key",
+      );
+    }
     return rowToScheduledTask(row);
   }
 

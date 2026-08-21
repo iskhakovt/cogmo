@@ -112,6 +112,28 @@ Tool handlers run in the loop, in the bare body unless marked durable — so a n
 
 Marking a tool `durable: true` is a cost decision with two sides: it buys exactly-once for the handler and pins the recorded `tool_result` to what the model actually saw, and it charges one extra step boundary — which, with LLM iterations durable, costs a cheap cached replay rather than a fresh model call. Justify both sides in the PR that flips a flag.
 
+#### The crash window each durable tool still carries
+
+`durable: true` buys replay-safety, not exactly-once: the body still runs at least once, and a crash between its side effect committing and Inngest recording the step result re-runs it. Closing that needs a caller-supplied idempotency key with somewhere to attach it. The loop mints one per call (`ToolCallContext.idempotencyKey`, see [Per-tool durability](#per-tool-durability)); whether a tool can use it depends on whether its side effect has a dedup point.
+
+| Tool | Crash-window disposition |
+|-|-|
+| `delegate_coding` | **Keyed** — `coding_tasks.idempotency_key`, plain `UNIQUE` + `ON CONFLICT DO NOTHING`. A duplicate would mint a second sandbox, a second billable claude session and a second PR. |
+| `schedule_task` | **Keyed** — `scheduled_tasks.idempotency_key`. The worst duplicate on this list: it fires on every tick from then on, and only an explicit `remove_task` stops it. |
+| skill tools (`buildSkillToolSpec`) | **Keyed** — forwarded to `runner.invoke`, which drives the `skill_runs` `recovery_point` state machine. |
+| `register_skill` | Self-deduping — a register against an unchanged branch tip resolves as `no_op` rather than a second deploy. |
+| `activate_pipeline` | Naturally idempotent — activation is a state, not an event; re-activating the same version converges. |
+| `define_pipeline` | Residual: a retry compiles again (re-billed) and saves a second definition version. Versions are immutable and inert until activated, so the cost is a stray row plus one compile. |
+| `write_file`, `core_memory_update` | Naturally idempotent — last-writer-wins on identical content. |
+| `edit_file` | Self-protecting — the second apply finds its match already replaced and errors rather than double-applying. |
+| `memory_retain` | Absorbed — memory writes are additive by design and `reflect()` dedups asynchronously. |
+| `remove_task` | Naturally idempotent — deleting an already-deleted row is `not_found`. |
+| `web_search`, `web_answer`, `fetch_url`, `memory_recall`, `memory_reflect`, `subagent__*` | Reads and generations with no persistent duplicate state. Durable because billable; a crash retry costs one extra call. No upstream idempotency slot to key on. |
+| `generate_image`, `send_document` | Residual: a retry re-bills the generation and can deliver a second copy. The delivery layer's `#activeStreams` dedup covers the streamed path, not a batch send. |
+| MCP tools | Residual, unclosable here: the MCP tool contract has no idempotency-token slot. `ToolCallContext` is available to forward the day a server accepts one. |
+
+The residuals are accepted at single-user scale, and all of them fail in the safe direction — a duplicate the user can see, never a silently-dropped request.
+
 ### Per-tool durability
 
 Individual tool handlers may opt into durability via `ToolSpec.durable = true`. When set, the agent loop wraps that specific handler invocation in `step.run("tool-iter<N>-<P>", fn)`, where `<N>` is the agent-loop iteration counter and `<P>` is the position of the block within that iteration's `tool_use` sub-list — i.e. the index after filtering out text/thinking blocks. Both indices are derived purely from SDK-local state — the loop counter increments by one per iteration of the same function invocation, and the position is a simple array index over the filtered list the SDK produced. They are byte-identical on every attempt regardless of what the LLM emits.

@@ -75,6 +75,31 @@ describe("scheduleTask tool", () => {
     expect(result).toContain("2026-06-01T09:00:00.000Z");
   });
 
+  it("forwards the call context's idempotency key, and omits it when absent", async () => {
+    // A duplicate schedule fires on every tick from then on, so this is the
+    // durable tool whose crash window matters most.
+    const create = vi
+      .fn()
+      .mockResolvedValue(ok({ id: "task-1", nextRunAt: new Date("2026-06-01T09:00:00Z") }));
+    const args = {
+      schedule: { kind: "recurring" as const, cron: "0 9 * * *" },
+      prompt: "morning briefing",
+    };
+
+    await scheduleTask.handler(args, buildService({ create }), {
+      idempotencyKey: "inbound-42:deadbeefdeadbeef",
+    });
+    expect(create).toHaveBeenLastCalledWith(
+      expect.anything(),
+      "schedule_task:inbound-42:deadbeefdeadbeef",
+    );
+
+    // No context (CLI, wizard, loops outside Inngest): the service sees a
+    // one-argument call, so an unkeyed row is inserted as before.
+    await scheduleTask.handler(args, buildService({ create }));
+    expect(create).toHaveBeenLastCalledWith(expect.anything());
+  });
+
   it("dispatches one-off create with runAt + threading optional fields", async () => {
     const create = vi
       .fn()

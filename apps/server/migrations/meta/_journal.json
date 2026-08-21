@@ -372,6 +372,13 @@
       "when": 1787265323040,
       "tag": "0052_coding_tasks_idempotency_key",
       "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1787304294295,
+      "tag": "0053_scheduled_tasks_idempotency_key",
+      "breakpoints": true
     }
   ]
 }

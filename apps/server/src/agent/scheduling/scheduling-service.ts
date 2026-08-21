@@ -93,6 +93,13 @@ export interface SchedulingService {
    */
   create(
     args: CreateScheduleArgs,
+    /**
+     * Deterministic-per-request token from the tool call's
+     * `ToolCallContext`. A duplicate schedule is worse than most duplicate
+     * side effects — it fires on every tick, forever — so the tool path
+     * always supplies one. Omitted by callers with no retry semantics.
+     */
+    idempotencyKey?: string,
   ): Promise<Result<{ id: string; nextRunAt: Date }, SchedulingError>>;
 
   /** List all scheduled tasks for the scoped user, newest-first. Includes disabled rows. */
@@ -122,7 +129,7 @@ export function createSchedulingService(deps: SchedulingServiceDeps): Scheduling
   const taskCap = deps.taskCap ?? DEFAULT_SCHEDULED_TASK_CAP;
 
   return {
-    async create(args) {
+    async create(args, idempotencyKey) {
       // Prompt-length cap — defence in depth (the tool schema enforces
       // the same limit, but the service is the contract for non-tool
       // callers like the wizard).
@@ -203,6 +210,7 @@ export function createSchedulingService(deps: SchedulingServiceDeps): Scheduling
           enabled: true,
           catchupMissed: args.kind === "recurring" ? (args.catchupMissed ?? false) : false,
           source: "agent",
+          ...(idempotencyKey !== undefined && { idempotencyKey }),
         });
         return ok({ id: row.id, nextRunAt: row.nextRunAt });
       });

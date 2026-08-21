@@ -865,9 +865,17 @@ export const scheduledTasks = pgTable(
     enabled: boolean("enabled").notNull(),
     catchupMissed: boolean("catchup_missed").notNull(),
     source: scheduleSource("source").notNull(),
+    // Caller-supplied deterministic-per-request token. `schedule_task` runs
+    // inside a durable step, so a crash between this row committing and
+    // Inngest recording the step result re-runs the body — and a duplicate
+    // schedule fires forever, unlike most tool duplicates. Null for callers
+    // with no retry semantics (wizard, CLI, tests); Postgres's
+    // NULL-not-equal unique semantics let those coexist.
+    idempotencyKey: text("idempotency_key"),
     createdAt: ts(),
   },
   (t) => [
+    unique("uniq_scheduled_tasks_idempotency_key").on(t.idempotencyKey),
     // Hot path: ticker `WHERE enabled AND next_run_at <= now() ORDER BY next_run_at`.
     index("idx_scheduled_tasks_due").on(t.enabled, t.nextRunAt),
     // List path: `/schedules` and `list_tasks` filter by user.
