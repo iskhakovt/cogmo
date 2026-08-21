@@ -244,44 +244,84 @@ describe("createCodingService", () => {
   });
 
   it("re-emits on recovery so a submission that died before its send still starts", async () => {
-    // The narrow window the fall-through exists for: the row committed but
-    // `inngest.send` never ran. Without a re-emit the task would sit in
-    // `queued` forever — the key would have converted a duplicate into a
-    // permanent stall.
+    // The window the re-emit exists for: the row committed and the process
+    // died before `inngest.send` ran, so the row is still `queued` and
+    // nothing is driving it. Staged directly, because a crash leaves no
+    // catch behind to simulate.
     await seedRepo("cogmo", 1);
-    const failing = { send: vi.fn().mockRejectedValueOnce(new Error("bus down")) };
+    const repoId = await tx((trx) => store.getRepoByName(trx, "cogmo")).then(
+      (r) => expectDefined(r, "repo").id,
+    );
+    const key = "delegate_coding:inbound-5:deadbeefdeadbeef";
+    const stranded = await tx((trx) =>
+      store.insertOrRecoverTask(trx, {
+        repoId,
+        conversationId,
+        goal: "x".repeat(20),
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+        idempotencyKey: key,
+      }),
+    );
+
+    const inngest = fakeInngest();
     const service = createCodingService(
       {
         runInTx: tx,
         codingStore: store,
-        inngest: failing as unknown as Inngest,
+        inngest: inngest as unknown as Inngest,
         sandboxAvailable: true,
       },
       conversationId,
     );
-
-    const key = "delegate_coding:inbound-5:i1:p0";
-    // Attempt 1: row commits, send throws. The catch marks it failed —
-    // stand in for the crash by re-queueing the row the retry will find.
-    await expect(
-      service.delegate({ goal: "x".repeat(20), repoName: "cogmo", idempotencyKey: key }),
-    ).rejects.toThrow(/bus down/);
-    const stranded = expectDefined(
-      await tx((trx) => store.getTaskByIdempotencyKey(trx, key)),
-      "stranded task",
-    );
-    await tx((trx) => store.updateTaskStatus(trx, { id: stranded.id, status: "queued" }));
-
-    failing.send.mockResolvedValue(undefined);
     const retry = await service.delegate({
       goal: "x".repeat(20),
       repoName: "cogmo",
       idempotencyKey: key,
     });
 
-    expect(retry.taskId).toBe(stranded.id);
-    // Two sends: the failed one and the recovery's.
-    expect(failing.send).toHaveBeenCalledTimes(2);
+    expect(retry).toEqual({ taskId: stranded.row.id, status: "recovered", priorStatus: "queued" });
+    expect(inngest.send).toHaveBeenCalledTimes(1);
+    const tasks = await tx((trx) => store.listTasksForConversation(trx, conversationId));
+    expect(tasks).toHaveLength(1);
+  });
+
+  it("releases the idempotency key when a send failure fails the row", async () => {
+    // The cleanup marks the row terminal to free the admission slot. Leaving
+    // the key on it would make the retry recover a dead task and report it
+    // back as "already submitted, don't resubmit" — trading the duplicate the
+    // key prevents for a silent no-op. Releasing it lets the retry submit.
+    await seedRepo("cogmo", 2);
+    const inngest = { send: vi.fn().mockRejectedValueOnce(new Error("bus down")) };
+    const service = createCodingService(
+      {
+        runInTx: tx,
+        codingStore: store,
+        inngest: inngest as unknown as Inngest,
+        sandboxAvailable: true,
+      },
+      conversationId,
+    );
+
+    const key = "delegate_coding:inbound-8:cafecafecafecafe";
+    await expect(
+      service.delegate({ goal: "x".repeat(20), repoName: "cogmo", idempotencyKey: key }),
+    ).rejects.toThrow(/bus down/);
+    expect(await tx((trx) => store.getTaskByIdempotencyKey(trx, key))).toBeUndefined();
+
+    inngest.send.mockResolvedValue(undefined);
+    const retry = await service.delegate({
+      goal: "x".repeat(20),
+      repoName: "cogmo",
+      idempotencyKey: key,
+    });
+
+    // A fresh submission, not a recovery of the dead row.
+    expect(retry.status).toBe("queued");
+    const tasks = await tx((trx) => store.listTasksForConversation(trx, conversationId));
+    expect(tasks).toHaveLength(2);
+    expect(tasks.filter((t) => t.status === "failed")).toHaveLength(1);
   });
 
   it("recovers rather than tripping the concurrency cap on retry", async () => {

@@ -518,9 +518,20 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
         : "off";
     const nextStatus: CodingOrchestratorResult["status"] =
       task.triggerSource === "user" ? "awaiting_approval" : "executing";
-    await stepRun("set-status-awaiting", () =>
-      runInTx((tx) => store.updateTaskStatus(tx, { id: taskId, status: nextStatus })),
+    // Conditional on `planning`, not an unguarded write: `plan-cli` is a
+    // durable step that runs for minutes, and a Cancel landing inside it
+    // takes the `FOR UPDATE` path in `cancelTaskIfActive` and writes
+    // `cancelled`. An unconditional UPDATE here resurrects that task,
+    // renders an approval keyboard for work the user already cancelled, and
+    // puts the row back into `countActiveTasksForRepo`. Same race the
+    // `approvePlanIfPending` call below already defends against.
+    const awaiting = await stepRun("set-status-awaiting", () =>
+      runInTx((tx) => store.transitionTaskStatus(tx, taskId, "planning", nextStatus)),
     );
+    if (awaiting.kind !== "transitioned") {
+      taskLog.info({ awaiting }, "plan: task left `planning` mid-session (cancelled?) — stopping");
+      return { status: "skipped" };
+    }
     // Same wrap as the failure-path notification above — once status is
     // committed, a subscriber error must not regress the task to failed.
     // Durable because two more boundaries follow on the auto-approve path,
@@ -861,24 +872,24 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   let executePushCtx: { identity: GitHubIdentity; askpass: AskpassMaterials } | undefined;
   const needsExecutePush = sandbox.capabilities.workingTreeTransport === "git-remote";
 
-  try {
-    // Conditional UPDATE: the transition only fires when the row is
-    // still `awaiting_approval`, so a concurrent cancel callback that
-    // already wrote `cancelled` is preserved. With retries=0 +
-    // per-task concurrency=1 the race window is narrow today; the
-    // conditional UPDATE pre-empts the bug for slice 3+'s
-    // cancel-during-execute path at zero cost.
-    const transition = await stepRun("set-status-executing", () =>
-      runInTx((tx) => store.transitionTaskStatus(tx, taskId, "awaiting_approval", "executing")),
+  // The run's ownership claim, ahead of the try for the same reason as the
+  // plan and verify orchestrators: a run that loses the race — or one whose
+  // claim step fails outright — must not reach the catch below, which emits
+  // `coding/task/failed`, writes an unguarded `status='failed'`, tears down
+  // the worktree and reaps the sandbox out from under whichever run does own
+  // the task.
+  const transition = await stepRun("set-status-executing", () =>
+    runInTx((tx) => store.transitionTaskStatus(tx, taskId, "awaiting_approval", "executing")),
+  );
+  if (transition.kind !== "transitioned") {
+    taskLog.info(
+      { transition },
+      "execute: status transition lost the race (already cancelled or transitioned)",
     );
-    if (transition.kind !== "transitioned") {
-      taskLog.info(
-        { transition },
-        "execute: status transition lost the race (already cancelled or transitioned)",
-      );
-      return { status: "skipped" };
-    }
+    return { status: "skipped" };
+  }
 
+  try {
     // PAT-bearing identity stays out of `step.run` so it never reaches
     // Inngest's state store. Safe to skip the step boundary only
     // because this function is `retries: 0` — loosen retries and the
@@ -1025,9 +1036,12 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     // then resume lazily and at most once per invocation: handles can't cross
     // a step boundary, and `sandbox.resume` is a live provider call.
     const state = sessionState;
-    let resumed: SandboxSession | null = null;
-    const container = async (): Promise<SandboxSession> => {
-      resumed ??= await sandbox.resume(state);
+    // Memoizes the PROMISE, not the resolved handle: `??=` on an awaited
+    // value leaves the read and the write either side of a suspension point,
+    // so two concurrent callers would both see null and both resume.
+    let resumed: Promise<SandboxSession> | null = null;
+    const container = (): Promise<SandboxSession> => {
+      resumed ??= sandbox.resume(state);
       return resumed;
     };
 

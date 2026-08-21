@@ -1106,12 +1106,64 @@ describe("tool durability (stepRun)", () => {
       turnKey: "inbound-42",
     });
 
-    // Turn token + iteration + position — the step id's coordinates — plus a
-    // digest of the call itself, so two calls in the same slot across
-    // different runs don't collide.
+    // Turn token + a digest of the call — no iteration or position, which
+    // would key the slot rather than the request. Both calls here ask for
+    // the same thing, so they deliberately share a key: two identical
+    // side-effectful requests in one turn are one submission.
     expect(seen).toHaveLength(2);
-    expect(seen[0]).toMatch(/^inbound-42:i1:p0:[0-9a-f]{16}$/);
-    expect(seen[1]).toMatch(/^inbound-42:i1:p1:[0-9a-f]{16}$/);
+    expect(seen[0]).toMatch(/^inbound-42:[0-9a-f]{16}$/);
+    expect(seen[1]).toBe(seen[0]);
+  });
+
+  it("keys a request the same wherever the model puts it in the turn", async () => {
+    // The scenario the slot-free key exists for: a re-delivery replays with
+    // an empty step cache, the model re-decides, and the same request lands
+    // at a different coordinate. Keying on position would read that as new
+    // work and mint a second side effect.
+    const keysFor = async (blocks: Array<{ name: string; id: string }>): Promise<string[]> => {
+      const seen: string[] = [];
+      const tools = new ToolRegistry();
+      for (const name of ["cheap", "paid"]) {
+        tools.register({
+          name,
+          description: name,
+          inputSchema: { type: "object" },
+          durable: true,
+          handler: async (_input, _service, ctx) => {
+            if (ctx?.idempotencyKey && name === "paid") seen.push(ctx.idempotencyKey);
+            return "ok";
+          },
+        });
+      }
+      await testRunAgentLoop({
+        provider: mockProvider([
+          {
+            content: blocks.map((b) => ({
+              type: "tool_use" as const,
+              id: b.id,
+              name: b.name,
+              input: { q: "same" },
+            })),
+            stopReason: "tool_use",
+            model: "test",
+            usage: { inputTokens: 1, outputTokens: 1 },
+          },
+          textResponse("done"),
+        ]),
+        messages: [{ role: "user", content: "go" }],
+        tools,
+        turnKey: "inbound-42",
+      });
+      return seen;
+    };
+
+    // Delivery 1 puts `paid` at position 1; delivery 2 goes straight to it.
+    const first = await keysFor([
+      { name: "cheap", id: "toolu_A" },
+      { name: "paid", id: "toolu_B" },
+    ]);
+    const second = await keysFor([{ name: "paid", id: "toolu_C" }]);
+    expect(second).toEqual(first);
   });
 
   it("keys the same call identically and a different call differently", async () => {

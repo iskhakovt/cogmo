@@ -276,9 +276,12 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     // Handles can't cross a step boundary, and `sandbox.resume` is a live
     // provider call. Resolving it lazily, memoized per invocation, keeps the
     // round-trips proportional to container work rather than to replay count.
-    let resumed: SandboxSession | null = null;
-    const container = async (): Promise<SandboxSession> => {
-      resumed ??= await sandbox.resume(sessionState);
+    // Memoizes the PROMISE, not the resolved handle: `??=` on an awaited
+    // value leaves the read and the write either side of a suspension point,
+    // so two concurrent callers would both see null and both resume.
+    let resumed: Promise<SandboxSession> | null = null;
+    const container = (): Promise<SandboxSession> => {
+      resumed ??= sandbox.resume(sessionState);
       return resumed;
     };
 
@@ -519,7 +522,14 @@ async function readHeadSha(container: Pick<SandboxSession, "execStreaming">): Pr
       // discard
     }
   })();
-  await handle.wait();
+  const { exitCode } = await handle.wait();
   await drain;
-  return Buffer.concat(chunks).toString("utf8").trim();
+  const sha = Buffer.concat(chunks).toString("utf8").trim();
+  if (exitCode !== 0 || sha === "") {
+    // Throw rather than return "": this runs inside a durable step, so an
+    // empty sha would be memoized and then written verbatim into the
+    // `coding/task/pushed` event, the PR body and `pr_metadata.branchSha`.
+    throw new Error(`git rev-parse HEAD failed (exit ${exitCode}) in ${WORKTREE_DIR_IN_CONTAINER}`);
+  }
+  return sha;
 }

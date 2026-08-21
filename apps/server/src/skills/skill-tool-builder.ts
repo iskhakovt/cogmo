@@ -32,11 +32,16 @@ export function buildSkillToolSpec(def: SkillToolDef, runner: SkillRunner): Tool
     // signature. SkillManifestSchema enforces this at register time, so the
     // assignment needs no cast.
     inputSchema: def.inputs,
-    handler: async (input) => {
+    handler: async (input, _service, ctx) => {
       const result = await runner.invoke({
         name: def.name,
         inputs: input,
         trigger: "manual",
+        // Durability covers replay; the key covers the crash between the
+        // skill's side effects committing and Inngest recording the step
+        // result. `runner.invoke` routes it to the `recovery_point` state
+        // machine, which replays or finalizes instead of re-executing.
+        ...(ctx !== undefined && { idempotencyKey: `skill-tool:${ctx.idempotencyKey}` }),
       });
       if (result.status === "error") {
         // Surface errors as tool_result text (the loop wraps thrown errors

@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { SpanStatusCode, trace } from "@opentelemetry/api";
 import type { Logger } from "pino";
 import * as R from "remeda";
@@ -17,6 +16,7 @@ import type {
 import { agentIterations } from "../metrics.js";
 import { validateHistory } from "./history-invariants.js";
 import {
+  canonicalJson,
   classifyClassDTrip,
   classifyPostStream,
   classifyStreamError,
@@ -26,6 +26,7 @@ import {
   formatVolumeClusterContent,
   freshBudgets,
   type RepairBudgets,
+  sha256,
   summarizeToolHistory,
 } from "./repair.js";
 import type { Service } from "./service.js";
@@ -265,42 +266,38 @@ interface ToolStepKey {
 }
 
 /**
- * The arguments the handler will actually see, for digesting. Falls back to
- * the raw payload when the spec publishes no normalizer, or when
- * normalization rejects the input — a call whose arguments don't validate
- * is about to fail, so no side effect lands and the key never matters.
+ * Idempotency key for one tool call: the turn it belongs to plus a digest of
+ * what it asked for.
+ *
+ * Deliberately NOT keyed on the call's iteration/position. Those identify the
+ * *slot*, and a re-delivery replays with an empty step cache — the model
+ * re-decides, the same request lands at a different coordinate, and a
+ * slot-bearing key reads it as new work. Two identical requests in one turn
+ * collapsing to one submission is the correct reading of that input anyway.
+ *
+ * Digested over the arguments the handler will actually see: `normalizeInput`
+ * runs the spec's own coerce-then-parse pipeline, so a stringified nested
+ * argument or a field the schema drops doesn't fork the key. A spec without
+ * one (skills, MCP) digests its raw payload, which can only mint a duplicate,
+ * never collapse two distinct requests.
+ *
+ * `canonicalJson` is RFC 8785 and total — it absorbs cycles, non-finite
+ * numbers, ill-formed strings and a throwing `toJSON` rather than propagating
+ * out of the bare body and turning a valid call into an `is_error` result.
+ * Same encoder the Class D iteration fingerprint hashes tool args with.
  */
-function normalizedInput(spec: ToolSpec, raw: unknown): unknown {
-  if (!spec.normalizeInput) return raw;
-  try {
-    return spec.normalizeInput(raw as Record<string, unknown>);
-  } catch {
-    return raw;
-  }
-}
-
-/**
- * Short stable digest of a tool call's identity — name plus arguments. Keys
- * are sorted before serialization so the same arguments in a different order
- * still match: a false mismatch would mint the duplicate side effect the
- * idempotency key exists to prevent.
- */
-function digestCall(name: string, input: unknown): string {
-  const canonical = (value: unknown): unknown => {
-    if (Array.isArray(value)) return value.map(canonical);
-    if (value !== null && typeof value === "object") {
-      return Object.fromEntries(
-        Object.entries(value as Record<string, unknown>)
-          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-          .map(([k, v]) => [k, canonical(v)]),
-      );
+function toolCallKey(turnKey: string, spec: ToolSpec, block: ToolUseBlock): string {
+  let input: unknown = block.input;
+  if (spec.normalizeInput) {
+    try {
+      input = spec.normalizeInput(block.input as Record<string, unknown>);
+    } catch {
+      // Arguments that don't validate: the handler is about to reject them,
+      // so no side effect lands and the key is never consulted.
+      input = block.input;
     }
-    return value;
-  };
-  return createHash("sha256")
-    .update(`${name}\u0000${JSON.stringify(canonical(input)) ?? "null"}`)
-    .digest("hex")
-    .slice(0, 16);
+  }
+  return `${turnKey}:${sha256(`${block.name}\u0000${canonicalJson(input)}`).slice(0, 16)}`;
 }
 
 interface PlannedCall {
@@ -545,26 +542,15 @@ async function runOne(
         // the provider's `tool_use_id` is not. Cached content may
         // semantically mismatch the current `tool_use` — see
         // design/crash-recovery.md → Per-tool durability.
-        // Turn token + the step id's own coordinates + a digest of the call.
-        // The digest is what makes this identify a request rather than a
-        // slot: a re-delivery starts a fresh run with an empty step cache,
-        // the model re-decides, and a different call can land at the same
-        // (turn, iteration, position). Undefined without a turn token (unit
-        // tests, loops outside Inngest) — no tool may assume retry-dedup then.
-        //
-        // Digested over the NORMALIZED arguments, so two deliveries that
-        // phrase one request differently still agree. Costs a second parse
-        // (the handler wrapper runs the same pipeline) — cheap next to the
-        // duplicate side effect it prevents.
+        // Only durable tools can use a key — a non-durable handler re-runs
+        // per boundary by design, and building one for it would re-parse and
+        // re-hash every argument payload on every re-invocation of the bare
+        // body, for a value nothing reads. Undefined without a turn token
+        // (unit tests, loops outside Inngest) — no tool may assume dedup then.
         const callCtx: ToolCallContext | undefined =
-          turnKey === undefined
-            ? undefined
-            : {
-                idempotencyKey: `${turnKey}:i${stepKey.iteration}:p${stepKey.position}:${digestCall(
-                  block.name,
-                  normalizedInput(spec, block.input),
-                )}`,
-              };
+          turnKey !== undefined && spec.durable === true
+            ? { idempotencyKey: toolCallKey(turnKey, spec, block) }
+            : undefined;
         const runHandler = (): Promise<string> =>
           spec.handler(block.input as Record<string, unknown>, service, callCtx);
         const out =

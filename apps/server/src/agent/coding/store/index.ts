@@ -199,6 +199,15 @@ export interface CodingStore {
    */
   getTaskByIdempotencyKey(tx: Transaction, key: string): Promise<CodingTaskRow | undefined>;
 
+  /**
+   * Drop a task's idempotency key, so a retry of the same submission mints a
+   * fresh task instead of recovering this one. For the caller that fails a
+   * row it just inserted: the key identifies a submission that is going to be
+   * retried, and leaving it on a terminal row turns the retry into a report
+   * of the dead task rather than a new attempt.
+   */
+  clearTaskIdempotencyKey(tx: Transaction, id: string): Promise<void>;
+
   /** List tasks for a conversation, ordered by createdAt DESC (newest first). */
   listTasksForConversation(
     tx: Transaction,
@@ -475,10 +484,9 @@ export class DrizzleCodingStore implements CodingStore {
     tx: Transaction,
     params: InsertTaskParams & { idempotencyKey: string },
   ): Promise<InsertTaskResult> {
-    // ON CONFLICT DO NOTHING against `uniq_coding_tasks_idempotency_key`.
-    // RETURNING yields zero rows on collision, which is the retry signal;
-    // the caller's own pre-check handles the sequential case, this closes
-    // the concurrent one.
+    // ON CONFLICT DO NOTHING against `uniq_coding_tasks_idempotency_key`;
+    // RETURNING yields zero rows on collision. That resolves the sequential
+    // retry — the winner's row is visible and the re-SELECT recovers it.
     const inserted = await tx
       .insert(codingTasks)
       .values({ ...taskValues(params), idempotencyKey: params.idempotencyKey })
@@ -490,7 +498,25 @@ export class DrizzleCodingStore implements CodingStore {
       .from(codingTasks)
       .where(eq(codingTasks.idempotencyKey, params.idempotencyKey))
       .limit(1);
-    return { kind: "recovered", row: single(existing) };
+    const row = existing[0];
+    if (!row) {
+      // Conflicted against a row committed after this transaction's snapshot,
+      // so REPEATABLE READ cannot show it to us. `FOR UPDATE` would not help —
+      // a row absent from the snapshot is absent from a locking read too — and
+      // DO NOTHING skips the tuple without raising `40001`, so the transactor
+      // has nothing to retry on. Unreachable while Inngest serializes a run's
+      // step executions and distinct runs carry distinct keys; named rather
+      // than left as `single()`'s row-count message so it reads as what it is.
+      throw new Error(
+        `insertOrRecoverTask: idempotency key ${params.idempotencyKey} conflicted against a row ` +
+          "outside this transaction's snapshot — concurrent submission of the same key",
+      );
+    }
+    return { kind: "recovered", row };
+  }
+
+  async clearTaskIdempotencyKey(tx: Transaction, id: string): Promise<void> {
+    await tx.update(codingTasks).set({ idempotencyKey: null }).where(eq(codingTasks.id, id));
   }
 
   async getTaskByIdempotencyKey(tx: Transaction, key: string): Promise<CodingTaskRow | undefined> {

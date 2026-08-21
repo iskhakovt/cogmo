@@ -137,6 +137,15 @@ export function statefulCodingStore(
     };
   });
   store.getCodingAutoapproveModeForTask.mockResolvedValue("off");
+  store.approvePlanIfPending.mockImplementation(async (_tx, _id, approvedAt) => {
+    // Left as an auto-mock this returns undefined, and the orchestrator's
+    // `approveResult.kind` read then falls silently into its skipped branch —
+    // an auto-approve test would assert nothing.
+    if (task.status !== "awaiting_approval") return { kind: "not_pending", status: task.status };
+    if (task.planApprovedAt) return { kind: "already_approved", approvedAt: task.planApprovedAt };
+    task = { ...task, planApprovedAt: approvedAt };
+    return { kind: "approved", conversationId: task.conversationId };
+  });
   return { store, current: () => task };
 }
 
@@ -162,6 +171,16 @@ export interface FakeCodingSandbox {
   sandbox: SandboxClient<LocalDockerSessionState>;
   /** `deleteByTaskId` call count — the teardown-runs-once invariant reads this. */
   teardownCalls: () => number;
+  /** `resume` call count — pins the lazy handle's at-most-once contract. */
+  resumeCalls: () => number;
+  /**
+   * Make `tryResumeByTaskId` report a live container, so the execute
+   * orchestrator takes its resume-hit branch. That branch skips
+   * `persist-container-id`, `checkout-feature-branch` and the sandbox usage
+   * stamp, i.e. plans a visibly different step graph, and is the branch a
+   * re-delivered `plan-approved` most often takes.
+   */
+  setResumable: (resumable: boolean) => void;
 }
 
 /**
@@ -174,6 +193,8 @@ export function fakeCodingSandbox(
     fakeExecHandle({}),
 ): FakeCodingSandbox {
   let teardowns = 0;
+  let resumes = 0;
+  let resumable = false;
   const state: LocalDockerSessionState = {
     type: "local-docker",
     taskId: FIXTURE_TASK_ID,
@@ -205,8 +226,11 @@ export function fakeCodingSandbox(
     reconcileCrashedInstances: vi.fn(async () => ({ orphansReaped: 0 })),
     ensureImagePresent: vi.fn(async () => {}),
     create: vi.fn(async () => session),
-    resume: vi.fn(async () => session),
-    tryResumeByTaskId: vi.fn(async () => null),
+    resume: vi.fn(async () => {
+      resumes++;
+      return session;
+    }),
+    tryResumeByTaskId: vi.fn(async () => (resumable ? session : null)),
     delete: vi.fn(async () => {}),
     deleteByTaskId: vi.fn(async () => {
       teardowns++;
@@ -215,5 +239,12 @@ export function fakeCodingSandbox(
     deserializeState: (payload) => LocalDockerSessionStateSchema.parse(payload),
     shutdown: vi.fn(async () => {}),
   };
-  return { sandbox, teardownCalls: () => teardowns };
+  return {
+    sandbox,
+    teardownCalls: () => teardowns,
+    resumeCalls: () => resumes,
+    setResumable: (next: boolean) => {
+      resumable = next;
+    },
+  };
 }

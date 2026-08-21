@@ -217,13 +217,22 @@ export function createCodingService(
         });
       } catch (sendErr) {
         await deps
-          .runInTx((tx) =>
-            deps.codingStore.updateTaskStatus(tx, {
+          .runInTx(async (tx) => {
+            await deps.codingStore.updateTaskStatus(tx, {
               id: task.id,
               status: "failed",
               failureReason: `inngest.send failed: ${(sendErr as Error).message}`,
-            }),
-          )
+            });
+            // Release the key along with the row. It identifies a submission
+            // that is about to be retried, and a retry that recovered this
+            // terminal row would report a dead task back to the model rather
+            // than re-submitting — trading the duplicate this key exists to
+            // prevent for a silent no-op. The row stays terminal so the
+            // admission slot is freed either way.
+            if (input.idempotencyKey !== undefined) {
+              await deps.codingStore.clearTaskIdempotencyKey(tx, task.id);
+            }
+          })
           .catch((cleanupErr) => {
             log.error(
               { err: cleanupErr, taskId: task.id, sendErr },

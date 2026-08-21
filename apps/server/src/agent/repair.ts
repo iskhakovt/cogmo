@@ -671,7 +671,7 @@ const UNENCODABLE_ARGS = `${ESCAPE}unencodable`;
  * the pre-pass doesn't anticipate (a `BigInt`, a throwing `toJSON`). Both land
  * on {@link UNENCODABLE_ARGS}.
  */
-function canonicalJson(value: unknown): string {
+export function canonicalJson(value: unknown): string {
   try {
     return canonicalize(toCanonicalizable(value, new Set())) ?? UNENCODABLE_ARGS;
   } catch {
@@ -679,7 +679,7 @@ function canonicalJson(value: unknown): string {
   }
 }
 
-function sha256(s: string): string {
+export function sha256(s: string): string {
   return createHash("sha256").update(s).digest("hex");
 }
 
