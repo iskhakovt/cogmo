@@ -7,7 +7,7 @@ import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { CtxError, type CtxHandler } from "./dispatcher.js";
 import type { SkillManifest } from "./types.js";
-import { DEFAULT_WALL_CLOCK_S } from "./worker-wasm/host.js";
+import { DEFAULT_WALL_CLOCK_S } from "./wall-clock.js";
 
 const log = logger.child({ component: "skills.ctx" });
 
@@ -77,10 +77,10 @@ export interface DefaultCtxHandlerOptions {
  * Caps on a single `http.request`. The response is decoded into the WASM
  * heap, so an unbounded read is an OOM the skill cannot catch; the byte
  * cap is enforced while streaming rather than after, so an oversized body
- * is abandoned mid-flight instead of buffered first. The timeout is
- * independent of the skill's own `wall_clock_s` — that one kills the whole
- * task, where a hung request should fail as a catchable error and leave
- * the skill free to continue.
+ * is abandoned mid-flight instead of buffered first. The timeout is held
+ * under the skill's own `wall_clock_s`, less a margin: the wall clock
+ * kills the whole task, where a hung request should fail as a catchable
+ * error and leave the skill free to continue.
  */
 const MAX_HTTP_RESPONSE_BYTES = 5 * 1024 * 1024;
 const DEFAULT_HTTP_TIMEOUT_MS = 10_000;
@@ -92,6 +92,28 @@ const MAX_HTTP_TIMEOUT_MS = 120_000;
  * method promises — the skill just disappears mid-call.
  */
 const HTTP_TIMEOUT_WALL_CLOCK_MARGIN_MS = 5_000;
+
+/**
+ * Whether a hostname is covered by a manifest's `network.allow` list. An entry
+ * matches exactly, or — written `*.example.com` — matches any host under that
+ * zone at any depth, so `a.b.example.com` is admitted alongside
+ * `api.example.com`. The apex is not implied: a skill wanting `example.com`
+ * itself lists it. An empty list matches nothing, which is what makes "no
+ * `network:` block" mean "no network" rather than "no restriction".
+ *
+ * Depth is deliberate rather than incidental — a CDN or bucket host is
+ * routinely several labels deep, and a single-label rule would push authors
+ * toward listing a bare apex, which is broader. It does mean a wildcard over a
+ * zone with third-party sub-labels admits those too; that property belongs to
+ * the zone, not the depth, and is a reason to name hosts exactly where the
+ * zone is shared.
+ */
+function hostAllowed(hostname: string, allow: ReadonlyArray<string>): boolean {
+  const host = hostname.toLowerCase();
+  return allow.some((entry) =>
+    entry.startsWith("*.") ? host.endsWith(entry.slice(1)) : host === entry,
+  );
+}
 
 const SecretsGetArgsSchema = z.object({ name: z.string().min(1) });
 const MemoryRecallArgsSchema = z.object({
@@ -148,20 +170,6 @@ const HttpRequestArgsSchema = z.object({
  * connects as one step; tracked in todo.md, since it turns on adding
  * undici as a runtime dependency.
  */
-/**
- * Whether a hostname is covered by a manifest's `network.allow` list. An entry
- * matches either exactly or, when written `*.example.com`, as a proper
- * subdomain — the apex is not implied, so a skill that wants both lists both.
- * An empty list matches nothing, which is what makes "no `network:` block" mean
- * "no network" rather than "no restriction".
- */
-function hostAllowed(hostname: string, allow: ReadonlyArray<string>): boolean {
-  const host = hostname.toLowerCase();
-  return allow.some((entry) =>
-    entry.startsWith("*.") ? host.endsWith(entry.slice(1)) : host === entry,
-  );
-}
-
 function parseIpv6(input: string): Uint8Array | null {
   let addr = input.split("%")[0] ?? ""; // drop any zone id
   // A trailing dotted quad (::ffff:127.0.0.1) is two hex groups wearing
@@ -555,7 +563,8 @@ export class DefaultCtxHandler implements CtxHandler {
    * live gets the shorter of the two.
    */
   #httpTimeoutMs(requested: number | undefined): number {
-    const wallClockMs = (this.#manifest.resources?.wall_clock_s ?? DEFAULT_WALL_CLOCK_S) * 1000;
+    const wallClockMs =
+      (this.#manifest.resources?.wall_clock_s ?? DEFAULT_WALL_CLOCK_S[this.#manifest.tier]) * 1000;
     // Sized against the whole budget rather than what is left of it. The
     // accurate elapsed figure needs the moment the task reached a runtime,
     // and the only timestamps available here precede a tier-2 pool
@@ -565,7 +574,13 @@ export class DefaultCtxHandler implements CtxHandler {
     // killed with the worker rather than returning a timeout, which is
     // what any long operation does today; erring short would break the
     // common case outright. Tracked in todo.md.
-    const ceiling = Math.max(1, wallClockMs - HTTP_TIMEOUT_WALL_CLOCK_MARGIN_MS);
+    // Proportional below a 25s budget, so a manifest asking for a short
+    // wall clock keeps a usable share of it. A flat margin subtracts the
+    // whole budget once the two are close, and every request in such a
+    // skill then fails at resolution reporting a timeout that reads like
+    // a network fault.
+    const margin = Math.min(HTTP_TIMEOUT_WALL_CLOCK_MARGIN_MS, Math.floor(wallClockMs / 5));
+    const ceiling = Math.max(1, wallClockMs - margin);
     return Math.min(requested ?? DEFAULT_HTTP_TIMEOUT_MS, ceiling);
   }
 
@@ -575,10 +590,12 @@ export class DefaultCtxHandler implements CtxHandler {
    * Pyodide has no sockets, so `urllib` / `http.client` cannot work inside
    * the WASM sandbox at all. Routing through the host is what gives tier 1
    * a network path, and it puts every request at a point the skill cannot
-   * reach around: the URL is audited here, and any future egress policy
-   * has one place to sit. Tier-2 skills talk to the network directly with
-   * real sockets, so nothing here is a permission boundary today — it is
-   * the mechanism that makes one possible.
+   * reach around: the destination is matched against the manifest's
+   * `network.allow` list here, judged again by resolved address, and
+   * audited. Tier-2 skills also have real sockets, so a tier-2 body can
+   * still reach the network without passing through this method — what
+   * the allowlist bounds absolutely is where a *bound* credential can
+   * travel, since substitution happens on this path alone.
    */
   async #httpRequest(args: unknown): Promise<{
     status: number;

@@ -50,7 +50,7 @@ const SKILLS_REPO_CONVENTION = [
   "    network:",
   "      allow:",
   "        - api.example.com",
-  "        - '*.cdn.example.com'   # subdomains only; the apex needs its own entry",
+  "        - '*.cdn.example.com'   # any depth under the zone; the apex needs its own entry",
   "  List only the hosts actually contacted. A skill that declares both a secret",
   "  and a network allowlist always needs human approval before it deploys, so",
   "  keep the allowlist to what the skill uses.",

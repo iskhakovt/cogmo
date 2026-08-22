@@ -248,3 +248,25 @@ describe("classifyManifest — fallback when AST parser is unloadable", () => {
     expect(log.risk_tier).toBe("notify");
   });
 });
+
+describe("classifyManifestStub — secrets alongside network", () => {
+  it("forces approve for one secret alongside a network allowlist", () => {
+    // The stub is the degraded path, and `notify` deploys live — so the
+    // fallback must not be the looser of the two classifiers on the one
+    // combination the AST path refuses outright.
+    const log = classifyManifestStub(
+      makeManifest({ secrets: ["api_key"], network: { allow: ["api.example.com"] } }),
+    );
+    expect(log.risk_tier).toBe("approve");
+  });
+
+  it("leaves a network allowlist with no secrets at notify", () => {
+    const log = classifyManifestStub(makeManifest({ network: { allow: ["api.example.com"] } }));
+    expect(log.risk_tier).toBe("notify");
+  });
+
+  it("leaves a secret with no network at notify", () => {
+    const log = classifyManifestStub(makeManifest({ secrets: ["api_key"] }));
+    expect(log.risk_tier).toBe("notify");
+  });
+});

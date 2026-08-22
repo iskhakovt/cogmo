@@ -8,6 +8,7 @@ import type {
 import { ensureVenvPopulated } from "../deps.js";
 import { type CtxHandler, Dispatcher } from "../dispatcher.js";
 import type { RuntimeRusage, TaskInvoke, TaskResult } from "../protocol.js";
+import { DEFAULT_WALL_CLOCK_S } from "../wall-clock.js";
 import { DEFAULT_RESOURCE_LIMITS } from "./host.js";
 import { createNdjsonTransport } from "./transport.js";
 
@@ -57,9 +58,6 @@ export interface SysboxSkillWorkerOptions {
  * a stuck syscall, etc.).
  */
 const SUPERVISOR_GRACE_S = 5;
-
-/** Default if a task doesn't declare `wallClockS`. Mirrors the supervisor's. */
-const DEFAULT_WALL_CLOCK_S = 60;
 
 export interface InvokeParams {
   taskId: string;
@@ -267,7 +265,7 @@ export class SysboxSkillWorker {
         `SysboxSkillWorker.invoke called in state '${this.#state}' — pool must mark busy first`,
       );
     }
-    const wallClockS = params.wallClockS ?? DEFAULT_WALL_CLOCK_S;
+    const wallClockS = params.wallClockS ?? DEFAULT_WALL_CLOCK_S.container;
 
     // Ensure the skill's venv is populated before sending the task. The
     // populator is idempotent — second-and-later calls with the same

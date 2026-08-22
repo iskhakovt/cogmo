@@ -388,6 +388,48 @@ describe("DefaultCtxHandler", () => {
       }
     });
 
+    it("leaves a usable budget on a short wall clock", async () => {
+      // A flat margin subtracts the whole budget once the two are close,
+      // and every request in the skill then fails at resolution reporting
+      // a timeout that reads like a network fault.
+      const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse("{}"));
+      try {
+        const h = makeHandler(httpManifest("resources:\n  wall_clock_s: 5"), deps());
+        await h.handle({
+          method: "http.request",
+          args: { method: "GET", url: "https://api.example.com/x" },
+        });
+        const asked = timeoutSpy.mock.calls.at(-1)?.[0] as number;
+        expect(asked).toBeGreaterThan(3_000);
+        expect(asked).toBeLessThanOrEqual(4_000);
+      } finally {
+        timeoutSpy.mockRestore();
+        fetchMock.mockRestore();
+      }
+    });
+
+    it("sizes a container skill against the container wall clock", async () => {
+      // The two tiers have different defaults; reading tier 1's for a
+      // tier-2 skill clamps a request to well under what the supervisor
+      // would actually allow it.
+      const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(okResponse("{}"));
+      try {
+        const h = makeHandler({ ...httpManifest(), tier: "container" }, deps());
+        await h.handle({
+          method: "http.request",
+          args: { method: "GET", url: "https://api.example.com/x", timeoutMs: 120_000 },
+        });
+        const asked = timeoutSpy.mock.calls.at(-1)?.[0] as number;
+        expect(asked).toBeGreaterThan(54_000);
+        expect(asked).toBeLessThanOrEqual(55_000);
+      } finally {
+        timeoutSpy.mockRestore();
+        fetchMock.mockRestore();
+      }
+    });
+
     it("holds the request timeout under the skill's wall clock", async () => {
       // A request allowed to outlive the terminator never surfaces as the
       // catchable error this method advertises — the worker just dies.
@@ -399,12 +441,12 @@ describe("DefaultCtxHandler", () => {
           method: "http.request",
           args: { method: "GET", url: "https://api.example.com/x", timeoutMs: 60_000 },
         });
-        // 20s wall clock minus the 5s margin, not the 60s asked for. A
+        // 20s wall clock less a 20% margin, not the 60s asked for. A
         // range, not an equality: the fetch deadline is the budget less
         // whatever resolution consumed, so an exact figure would flake.
         const asked = timeoutSpy.mock.calls.at(-1)?.[0] as number;
-        expect(asked).toBeGreaterThan(14_000);
-        expect(asked).toBeLessThanOrEqual(15_000);
+        expect(asked).toBeGreaterThan(15_000);
+        expect(asked).toBeLessThanOrEqual(16_000);
       } finally {
         timeoutSpy.mockRestore();
         fetchMock.mockRestore();

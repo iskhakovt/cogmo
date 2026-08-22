@@ -2,17 +2,13 @@ import { MessageChannel, Worker } from "node:worker_threads";
 import { logger } from "../../logger.js";
 import { CtxError, type CtxHandler, Dispatcher, type RpcTransport } from "../dispatcher.js";
 import type { RuntimeRusage, TaskInvoke, TaskResult } from "../protocol.js";
+import { DEFAULT_WALL_CLOCK_S } from "../wall-clock.js";
 
 const log = logger.child({ component: "skills.worker.wasm" });
 
 /** Default wall-clock cap for tier-1 skills (`design/skills.md` Resource budgets). */
 /**
- * Wall clock applied when a manifest declares no `resources.wall_clock_s`.
- * Exported because `ctx.http` sizes its request timeout under it — a
- * request that outlives the terminator can never surface as a catchable
- * error, so the two constants have to be read together.
- */
-export const DEFAULT_WALL_CLOCK_S = 30;
+
 
 /** Grace window after firing the SAB interrupt before hard-terminating the worker. */
 const TERMINATE_GRACE_MS = 1000;
@@ -78,7 +74,7 @@ export interface RunOnWorkerResult {
  * known-limit path for tight CPU loops).
  */
 export async function runOnWorker(params: RunOnWorkerParams): Promise<RunOnWorkerResult> {
-  const wallClockS = params.wallClockS ?? DEFAULT_WALL_CLOCK_S;
+  const wallClockS = params.wallClockS ?? DEFAULT_WALL_CLOCK_S.wasm;
   const readyTimeoutMs = params.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
   const interruptBuffer = new SharedArrayBuffer(1);
 
