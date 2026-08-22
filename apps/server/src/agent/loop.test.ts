@@ -1067,24 +1067,11 @@ describe("tool durability (stepRun)", () => {
     ]);
   });
 
-  it("hands each tool call an idempotency key keyed to the turn and its position", async () => {
-    // The key has to be derived from the same durable coordinates as the
-    // step id, so a step body that re-runs after a crash hands its domain
-    // the same key and recovers rather than duplicating. Anything the model
-    // mints (`tool_use_id`) would re-roll whenever an iteration re-runs.
-    const provider = mockProvider([
-      {
-        content: [
-          { type: "tool_use", id: "toolu_A", name: "paid", input: {} },
-          { type: "tool_use", id: "toolu_B", name: "paid", input: {} },
-        ],
-        stopReason: "tool_use",
-        model: "test",
-        usage: { inputTokens: 1, outputTokens: 1 },
-      },
-      textResponse("done"),
-    ]);
-
+  it("hands each tool call a key scoped to the turn, its slot and its arguments", async () => {
+    // Turn token + the step id's own coordinates + a digest of the call. The
+    // coordinates are what make an infrastructure re-execution — which by
+    // construction reuses the step id — distinguishable from the model asking
+    // again at a later iteration.
     const seen: Array<string | undefined> = [];
     const tools = new ToolRegistry();
     tools.register({
@@ -1100,70 +1087,96 @@ describe("tool durability (stepRun)", () => {
     });
 
     await testRunAgentLoop({
-      provider,
+      provider: mockProvider([
+        {
+          content: [
+            { type: "tool_use", id: "toolu_A", name: "paid", input: {} },
+            { type: "tool_use", id: "toolu_B", name: "paid", input: { q: 1 } },
+          ],
+          stopReason: "tool_use",
+          model: "test",
+          usage: { inputTokens: 1, outputTokens: 1 },
+        },
+        textResponse("done"),
+      ]),
       messages: [{ role: "user", content: "go" }],
       tools,
       turnKey: "inbound-42",
     });
 
-    // Turn token + a digest of the call — no iteration or position, which
-    // would key the slot rather than the request. Both calls here ask for
-    // the same thing, so they deliberately share a key: two identical
-    // side-effectful requests in one turn are one submission.
     expect(seen).toHaveLength(2);
-    expect(seen[0]).toMatch(/^inbound-42:[0-9a-f]{16}$/);
-    expect(seen[1]).toBe(seen[0]);
+    expect(seen[0]).toMatch(/^inbound-42:i1:p0:[0-9a-f]{16}$/);
+    expect(seen[1]).toMatch(/^inbound-42:i1:p1:[0-9a-f]{16}$/);
   });
 
-  it("keys a request the same wherever the model puts it in the turn", async () => {
-    // The scenario the slot-free key exists for: a re-delivery replays with
-    // an empty step cache, the model re-decides, and the same request lands
-    // at a different coordinate. Keying on position would read that as new
-    // work and mint a second side effect.
-    const keysFor = async (blocks: Array<{ name: string; id: string }>): Promise<string[]> => {
-      const seen: string[] = [];
+  it("gives the model's retry of a failed call a fresh key", async () => {
+    // `tool-iter*` steps take no Inngest retries by design — a fresh tool_use
+    // from the model IS the retry channel. A key that ignored the call's
+    // coordinates would collapse that retry into the first attempt, and a
+    // domain that had recorded the failure would replay it instead of
+    // running. This is the scenario that decides the coordinates stay in.
+    const seenKeys: string[] = [];
+    const tools = new ToolRegistry();
+    tools.register({
+      name: "paid",
+      description: "expensive",
+      inputSchema: { type: "object" },
+      durable: true,
+      handler: async (_input, _service, ctx) => {
+        if (ctx) seenKeys.push(ctx.idempotencyKey);
+        return "ok";
+      },
+    });
+
+    await testRunAgentLoop({
+      provider: mockProvider([
+        toolUseResponse("paid", "toolu_A", { q: "same" }),
+        // The model tries the identical call again a turn later.
+        toolUseResponse("paid", "toolu_B", { q: "same" }),
+        textResponse("done"),
+      ]),
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      turnKey: "inbound-42",
+    });
+
+    expect(seenKeys).toHaveLength(2);
+    expect(seenKeys[1]).not.toBe(seenKeys[0]);
+    expect(seenKeys[0]).toContain(":i1:p0:");
+    expect(seenKeys[1]).toContain(":i2:p0:");
+  });
+
+  it("keys a call on its arguments, not just its slot", async () => {
+    // The digest covers what the coordinates cannot: a re-delivery replays
+    // with an empty step cache and the model re-decides, so a *different*
+    // call can land at the same coordinate.
+    const keyFor = async (input: Record<string, unknown>): Promise<string | undefined> => {
+      let key: string | undefined;
       const tools = new ToolRegistry();
-      for (const name of ["cheap", "paid"]) {
-        tools.register({
-          name,
-          description: name,
-          inputSchema: { type: "object" },
-          durable: true,
-          handler: async (_input, _service, ctx) => {
-            if (ctx?.idempotencyKey && name === "paid") seen.push(ctx.idempotencyKey);
-            return "ok";
-          },
-        });
-      }
+      tools.register({
+        name: "paid",
+        description: "expensive",
+        inputSchema: { type: "object" },
+        durable: true,
+        handler: async (_input, _service, ctx) => {
+          key = ctx?.idempotencyKey;
+          return "ok";
+        },
+      });
       await testRunAgentLoop({
-        provider: mockProvider([
-          {
-            content: blocks.map((b) => ({
-              type: "tool_use" as const,
-              id: b.id,
-              name: b.name,
-              input: { q: "same" },
-            })),
-            stopReason: "tool_use",
-            model: "test",
-            usage: { inputTokens: 1, outputTokens: 1 },
-          },
-          textResponse("done"),
-        ]),
+        provider: mockProvider([toolUseResponse("paid", "toolu_X", input), textResponse("done")]),
         messages: [{ role: "user", content: "go" }],
         tools,
         turnKey: "inbound-42",
       });
-      return seen;
+      return key;
     };
 
-    // Delivery 1 puts `paid` at position 1; delivery 2 goes straight to it.
-    const first = await keysFor([
-      { name: "cheap", id: "toolu_A" },
-      { name: "paid", id: "toolu_B" },
-    ]);
-    const second = await keysFor([{ name: "paid", id: "toolu_C" }]);
-    expect(second).toEqual(first);
+    const a = await keyFor({ goal: "refactor A", repo: "cogmo" });
+    expect(await keyFor({ goal: "refactor A", repo: "cogmo" })).toBe(a);
+    // Argument order must not matter — a false mismatch mints a duplicate.
+    expect(await keyFor({ repo: "cogmo", goal: "refactor A" })).toBe(a);
+    expect(await keyFor({ goal: "refactor B", repo: "cogmo" })).not.toBe(a);
   });
 
   it("keys the same call identically and a different call differently", async () => {

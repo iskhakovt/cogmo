@@ -152,10 +152,19 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   // and both statuses are non-terminal so admission counting is unchanged),
   // and moving the claim back below the checks to avoid it reinstates the
   // flip-a-terminal-task bug.
+  // `stale` at the transition's own target is this run's earlier attempt,
+  // not a rival: the UPDATE committed and the step result was lost before
+  // Inngest recorded it, so the re-run finds its own write. Reading that as
+  // a lost race returns `skipped` with no failure event — the stranded task
+  // this whole change exists to prevent. Per-task `concurrency: 1` means no
+  // rival run can be live to have written it.
   const transition = await stepRun("set-status-verifying", () =>
     runInTx((tx) => store.transitionTaskStatus(tx, taskId, "pending_verify", "verifying")),
   );
-  if (transition.kind !== "transitioned") {
+  if (
+    transition.kind !== "transitioned" &&
+    !(transition.kind === "stale" && transition.status === "verifying")
+  ) {
     taskLog.info(
       { transition },
       "verify: status transition lost the race (already verifying or terminal)",
@@ -509,8 +518,14 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
 }
 
 async function readHeadSha(container: Pick<SandboxSession, "execStreaming">): Promise<string> {
+  // Same caps `runGit` puts on the identical command in `commit-push.ts`.
+  // design/coding-delegation.md → Per-callsite exec timeouts requires every
+  // orchestrator exec to carry both, and this one now runs inside a durable
+  // step where a half-closed transport would hang the run past its lease.
   const handle = await container.execStreaming(["git", "rev-parse", "HEAD"], {
     workingDir: WORKTREE_DIR_IN_CONTAINER,
+    timeoutMs: 60_000,
+    idleTimeoutMs: 30_000,
   });
   const chunks: Buffer[] = [];
   for await (const chunk of handle.stdout) {

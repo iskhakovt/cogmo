@@ -266,14 +266,26 @@ interface ToolStepKey {
 }
 
 /**
- * Idempotency key for one tool call: the turn it belongs to plus a digest of
- * what it asked for.
+ * Idempotency key for one tool call: the turn, the call's coordinates within
+ * it, and a digest of what it asked for.
  *
- * Deliberately NOT keyed on the call's iteration/position. Those identify the
- * *slot*, and a re-delivery replays with an empty step cache — the model
- * re-decides, the same request lands at a different coordinate, and a
- * slot-bearing key reads it as new work. Two identical requests in one turn
- * collapsing to one submission is the correct reading of that input anyway.
+ * The coordinates are load-bearing, and the reason is asymmetric. An
+ * *infrastructure* re-execution — a lost step result, a replayed body — is by
+ * construction the same `(iteration, position)`, because that pair is the step
+ * id. A *model* retry is not: `tool-iter*` steps take no Inngest retries
+ * precisely so that "a fresh tool_use from the model creates a fresh step,
+ * which IS the retry" (see `handle-message`). Dropping the coordinates
+ * collapses those two into one key, and the model's retry of a failed call
+ * then replays the cached failure instead of running — silently disabling the
+ * turn's only retry channel.
+ *
+ * The digest covers what the coordinates cannot: a re-delivery replays with an
+ * empty step cache, the model re-decides, and a *different* call can land at
+ * the same coordinate. Residual, accepted: a re-delivery that re-decides to a
+ * different layout gives the same request a new key and can mint a duplicate.
+ * That is the safe direction — a duplicate is visible, a swallowed retry is
+ * not — and it needs a duplicate `inbound/ready`, where the swallowed retry
+ * needs only a tool error.
  *
  * Digested over the arguments the handler will actually see: `normalizeInput`
  * runs the spec's own coerce-then-parse pipeline, so a stringified nested
@@ -286,7 +298,12 @@ interface ToolStepKey {
  * out of the bare body and turning a valid call into an `is_error` result.
  * Same encoder the Class D iteration fingerprint hashes tool args with.
  */
-function toolCallKey(turnKey: string, spec: ToolSpec, block: ToolUseBlock): string {
+function toolCallKey(
+  turnKey: string,
+  stepKey: ToolStepKey,
+  spec: ToolSpec,
+  block: ToolUseBlock,
+): string {
   let input: unknown = block.input;
   if (spec.normalizeInput) {
     try {
@@ -297,7 +314,8 @@ function toolCallKey(turnKey: string, spec: ToolSpec, block: ToolUseBlock): stri
       input = block.input;
     }
   }
-  return `${turnKey}:${sha256(`${block.name}\u0000${canonicalJson(input)}`).slice(0, 16)}`;
+  const digest = sha256(`${block.name}\u0000${canonicalJson(input)}`).slice(0, 16);
+  return `${turnKey}:i${stepKey.iteration}:p${stepKey.position}:${digest}`;
 }
 
 interface PlannedCall {
@@ -542,17 +560,21 @@ async function runOne(
         // the provider's `tool_use_id` is not. Cached content may
         // semantically mismatch the current `tool_use` — see
         // design/crash-recovery.md → Per-tool durability.
-        // Only durable tools can use a key — a non-durable handler re-runs
-        // per boundary by design, and building one for it would re-parse and
-        // re-hash every argument payload on every re-invocation of the bare
-        // body, for a value nothing reads. Undefined without a turn token
-        // (unit tests, loops outside Inngest) — no tool may assume dedup then.
-        const callCtx: ToolCallContext | undefined =
-          turnKey !== undefined && spec.durable === true
-            ? { idempotencyKey: toolCallKey(turnKey, spec, block) }
-            : undefined;
-        const runHandler = (): Promise<string> =>
-          spec.handler(block.input as Record<string, unknown>, service, callCtx);
+        // Built inside the handler thunk, not in the bare body: the bare
+        // body re-runs once per step boundary, and keying costs a coercion
+        // walk, a Zod parse, a canonical clone and a hash over payloads that
+        // reach hundreds of KB for `write_file`. Inside the thunk it runs
+        // exactly when the handler does — never on a memoized replay. Only
+        // durable tools get one; a non-durable handler re-runs per boundary by
+        // design and has nothing to dedup against. Undefined without a turn
+        // token (unit tests, loops outside Inngest) — no tool may assume dedup.
+        const runHandler = (): Promise<string> => {
+          const callCtx: ToolCallContext | undefined =
+            turnKey !== undefined && spec.durable === true
+              ? { idempotencyKey: toolCallKey(turnKey, stepKey, spec, block) }
+              : undefined;
+          return spec.handler(block.input as Record<string, unknown>, service, callCtx);
+        };
         const out =
           spec.durable === true && stepRun
             ? await stepRun(`tool-iter${stepKey.iteration}-${stepKey.position}`, runHandler)

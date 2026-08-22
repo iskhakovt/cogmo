@@ -486,15 +486,18 @@ export class DrizzleCodingStore implements CodingStore {
     tx: Transaction,
     params: InsertTaskParams & { idempotencyKey: string },
   ): Promise<InsertTaskResult> {
-    // DO UPDATE with a no-op SET, not DO NOTHING. Both dedup, but only DO
-    // UPDATE returns the conflicting row: under the project's REPEATABLE READ
-    // default a concurrent loser's snapshot cannot see the winner's row, so
-    // DO NOTHING plus a re-SELECT finds nothing and has to fail — and `FOR
-    // UPDATE` wouldn't rescue it, since a row absent from the snapshot is
-    // absent from a locking read too. The update touches the winner's tuple,
-    // so RETURNING yields it regardless of visibility.
+    // DO UPDATE with a no-op SET, not DO NOTHING. The sequential retry is the
+    // same either way; the concurrent one is not. Under the project's
+    // REPEATABLE READ default, a loser conflicting with a row committed after
+    // its snapshot cannot see that row: DO NOTHING skips the tuple, the
+    // re-SELECT finds nothing, and the call fails deterministically with
+    // nothing for the transactor to retry. DO UPDATE must write the tuple, so
+    // Postgres raises `40001 serialization_failure` instead — which the
+    // transactor retries against a fresh snapshot that does contain the
+    // winner. (`FOR UPDATE` on the re-SELECT would not help: a row absent from
+    // the snapshot is absent from a locking read too.)
     //
-    // `xmax = 0` distinguishes the two: zero on a tuple this statement
+    // `xmax = 0` distinguishes the outcomes: zero on a tuple this statement
     // inserted, the locking xid on one it updated through the conflict arm.
     const rows = await tx
       .insert(codingTasks)

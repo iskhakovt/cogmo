@@ -1302,16 +1302,20 @@ describe("runCodingExecute", () => {
     });
   });
 
-  it("idempotent: second event for already-executing task returns skipped without re-running", async () => {
+  it("resumes a task left in `executing`, and skips one that moved past it", async () => {
+    // `executing` is this transition's own target, so a `stale` reading it
+    // cannot be told apart from this run's earlier attempt committing the
+    // UPDATE and losing the step result. Per-task `concurrency: 1` means no
+    // rival run can be live to have written it, so the safe reading is
+    // "resume" — treating it as a lost race is what strands the task in
+    // `executing` with no failure event for reconcile to see.
     const repo = await seedRepo();
     const { task } = await seedExecutableTask(repo);
-    // Simulate first event already advanced status to executing.
     await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "executing" }));
 
     const { sandbox } = fakeSandbox();
     const backend = executeBackendYielding([{ kind: "complete", exitCode: 0, isError: false }]);
-
-    const result = await runCodingExecute({
+    const resumed = await runCodingExecute({
       taskId: task.id,
       deps: makeDeps({ sandbox, backend }),
       stepRun,
@@ -1319,9 +1323,58 @@ describe("runCodingExecute", () => {
       inngest: fakeInngest,
     });
 
+    expect(resumed.status).toBe("pending_verify");
+
+    // A task that moved PAST the target is a genuine duplicate — the run that
+    // owned it finished — so this one skips and leaves the row alone.
+    const { task: other } = await seedExecutableTask(repo);
+    await tx((trx) => store.updateTaskStatus(trx, { id: other.id, status: "pr_open" }));
+    const skipped = await runCodingExecute({
+      taskId: other.id,
+      deps: makeDeps({ sandbox: fakeSandbox().sandbox, backend }),
+      stepRun,
+      stepSendEvent,
+      inngest: fakeInngest,
+    });
+
+    expect(skipped.status).toBe("skipped");
+    expect((await tx((trx) => store.getTask(trx, other.id)))?.status).toBe("pr_open");
+  });
+
+  it("cancelled during plan-cli: tears down, keeps `cancelled`, survives a teardown blip", async () => {
+    // Returning from inside the try skips the catch that owns cleanup, so this
+    // branch does it itself — and must not let a teardown failure reach the
+    // outer catch, which would overwrite the user's `cancelled` with `failed`.
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox, stopCalls } = fakeSandbox();
+    const backend: CodingBackend = {
+      plan: async function* () {
+        yield { kind: "session_started", sessionId: "sess-A" };
+        // Cancel lands while the plan session is streaming.
+        await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user cancelled"));
+        yield { kind: "plan_ready", plan: "## Plan" };
+        yield { kind: "complete", exitCode: 0, isError: false };
+      },
+      execute: () => throwingPlan("execute not used in this test"),
+    };
+    // ...and the teardown itself fails, on a restarting Docker daemon.
+    sandbox.deleteByTaskId = vi.fn(async () => {
+      stopCalls.push(task.id);
+      throw new Error("docker daemon restarting");
+    });
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      deps: makeDeps({ sandbox, backend }),
+      stepRun,
+      stepSendEvent,
+    });
+
     expect(result.status).toBe("skipped");
-    // Status unchanged — second run didn't touch the DB.
-    expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("executing");
+    // The user's cancel stands.
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("cancelled");
+    expect(stopCalls).toContain(task.id);
   });
 
   it("throws when plan_approved_at is missing (event fired before approve handler stamped it)", async () => {

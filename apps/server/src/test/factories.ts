@@ -178,6 +178,7 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     }),
     getScheduledTask: vi.fn().mockResolvedValue(undefined),
     getScheduledTaskByIdempotencyKey: vi.fn().mockResolvedValue(undefined),
+    createOrRecoverScheduledTask: vi.fn().mockResolvedValue({ kind: "new", row: {} }),
     listScheduledTasks: vi.fn().mockResolvedValue([]),
     countScheduledTasks: vi.fn().mockResolvedValue(0),
     lockDueScheduledTasks: vi.fn().mockResolvedValue([]),

@@ -14,7 +14,10 @@ const log = logger.child({ component: "skills.tool-builder" });
  * a crashed attempt from a concurrently-executing one, so it declines rather
  * than re-firing the skill's side effects. Surfacing that as a raw throw
  * reaches the model as an opaque `is_error` tool_result; naming it lets the
- * model tell the user the skill may have partially run.
+ * model surface an honest verdict instead. The `started` marker is written
+ * *before* execution, so how far the earlier attempt got is genuinely unknown
+ * — the message says so rather than claiming partial completion. Reason
+ * string matches `skill-cron-fire`'s `"inflight"`.
  */
 async function runInflight<T>(
   name: string,
@@ -29,11 +32,13 @@ async function runInflight<T>(
       kind: "inflight",
       body: JSON.stringify({
         ok: false,
-        reason: "in_flight",
+        reason: "inflight",
         detail:
-          `A previous attempt at this exact call is still recorded as running, so ${name} was ` +
-          "not started again. Do not retry it. Tell the user it may have partially completed " +
-          "and ask them to check before re-running.",
+          `A previous attempt at this exact call is recorded as still running, so ${name} was ` +
+          "not started again. Whether it did any work is unknown — the row is marked in-flight " +
+          "before execution begins, so the earlier attempt may have done everything, nothing, " +
+          "or stopped partway. Do not silently re-run it: tell the user what was attempted and " +
+          "ask them to check the result before deciding.",
       }),
     };
   }

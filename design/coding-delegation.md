@@ -215,7 +215,7 @@ coding_tasks (
   status                  coding_task_status NOT NULL,
   failure_reason          TEXT,
   resource_usage          JSONB,                                  -- ResourceUsageSchema; nullable = no stats poll yet; populated by sandbox aggregator from turn.completed events
-  idempotency_key         TEXT UNIQUE,                            -- caller-supplied deterministic-per-submission token (`delegate_coding:<turnKey>:<digest of tool name + normalized args>`); null for callers with no retry semantics, and Postgres's NULL-not-equal unique semantics let those coexist. See Flow → Inngest step boundaries.
+  idempotency_key         TEXT UNIQUE,                            -- caller-supplied deterministic-per-submission token (`delegate_coding:<turnKey>:i<N>:p<P>:<digest of tool name + normalized args>`); null for callers with no retry semantics, and Postgres's NULL-not-equal unique semantics let those coexist. See Flow → Inngest step boundaries.
   created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 

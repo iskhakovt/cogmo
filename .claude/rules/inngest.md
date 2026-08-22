@@ -92,11 +92,18 @@ contract**. Design every function for the per-boundary model.
     duplicate for a permanent stall. Track a recovery point, or make the
     later phases independently idempotent.
 
-  Store under a plain `UNIQUE`, write through `ON CONFLICT DO NOTHING` +
-  re-select; nulls-distinct leaves callers without retry semantics
-  unaffected. Reference: `skill_runs.idempotency_key` +
-  `SkillStore.startOrRecoverRun`, `coding_tasks.idempotency_key` +
-  `insertOrRecoverTask`.
+  Store under a plain `UNIQUE` and write through `ON CONFLICT DO UPDATE`
+  with a no-op SET — not `DO NOTHING`. Under REPEATABLE READ a concurrent
+  loser cannot see a row committed after its snapshot: `DO NOTHING` skips
+  the tuple and the re-select finds nothing, failing deterministically with
+  nothing to retry, while `DO UPDATE` must write it and so raises `40001`,
+  which the transactor retries against a snapshot that does contain the
+  winner. `RETURNING … (xmax = 0)` separates insert from conflict-update.
+  Nulls-distinct leaves callers without retry semantics unaffected.
+  Reference: `coding_tasks.idempotency_key` + `insertOrRecoverTask`,
+  `scheduled_tasks.idempotency_key` + `createOrRecoverScheduledTask`.
+  (`SkillStore.startOrRecoverRun` predates this and still uses the
+  `DO NOTHING` shape — tracked in `todo.md`.)
 - **A step boundary abandons the function; it does not unwind it.** An
   unexecuted step hands the body a promise the SDK never settles, so the
   invocation ends with the async function pending mid-`await`. `finally`

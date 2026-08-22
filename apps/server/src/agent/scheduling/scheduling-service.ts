@@ -130,16 +130,6 @@ export function createSchedulingService(deps: SchedulingServiceDeps): Scheduling
 
   return {
     async create(args, idempotencyKey) {
-      // Recover a retry before the cap can reject it: the row a retry is
-      // recovering counts toward `taskCap`, so a replay at the limit would
-      // report failure for a schedule that already exists. Same ordering as
-      // `CodingService.delegate`.
-      if (idempotencyKey !== undefined) {
-        const prior = await deps.runInTx((tx) =>
-          deps.agentStore.getScheduledTaskByIdempotencyKey(tx, idempotencyKey),
-        );
-        if (prior) return ok({ id: prior.id, nextRunAt: prior.nextRunAt });
-      }
       // Prompt-length cap — defence in depth (the tool schema enforces
       // the same limit, but the service is the contract for non-tool
       // callers like the wizard).
@@ -201,6 +191,15 @@ export function createSchedulingService(deps: SchedulingServiceDeps): Scheduling
       // rather than `listScheduledTasks` so we don't pull every
       // column just to read `.length`.
       const result = await deps.runInTx(async (tx) => {
+        // Recover a retry before the cap can reject it. The row a retry is
+        // recovering counts toward `taskCap`, so checking the cap first makes
+        // a replay at the limit report failure for a schedule that already
+        // exists. Same ordering as `CodingService.delegate`, and in the same
+        // transaction as the count so check and insert stay one unit of work.
+        if (idempotencyKey !== undefined) {
+          const prior = await deps.agentStore.getScheduledTaskByIdempotencyKey(tx, idempotencyKey);
+          if (prior) return ok({ id: prior.id, nextRunAt: prior.nextRunAt });
+        }
         const current = await deps.agentStore.countScheduledTasks(tx, deps.userId);
         if (current >= taskCap) {
           return err({
@@ -209,7 +208,7 @@ export function createSchedulingService(deps: SchedulingServiceDeps): Scheduling
             current,
           });
         }
-        const row = await deps.agentStore.createScheduledTask(tx, {
+        const values = {
           userId: deps.userId,
           profileId: deps.profileId,
           kind,
@@ -219,9 +218,17 @@ export function createSchedulingService(deps: SchedulingServiceDeps): Scheduling
           nextRunAt,
           enabled: true,
           catchupMissed: args.kind === "recurring" ? (args.catchupMissed ?? false) : false,
-          source: "agent",
-          ...(idempotencyKey !== undefined && { idempotencyKey }),
-        });
+          source: "agent" as const,
+        };
+        const row =
+          idempotencyKey === undefined
+            ? await deps.agentStore.createScheduledTask(tx, values)
+            : (
+                await deps.agentStore.createOrRecoverScheduledTask(tx, {
+                  ...values,
+                  idempotencyKey,
+                })
+              ).row;
         return ok({ id: row.id, nextRunAt: row.nextRunAt });
       });
 

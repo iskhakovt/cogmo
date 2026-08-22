@@ -211,10 +211,22 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
   // mints a second container and `plan-cli` pays for a second claude
   // session. `delegate`'s `task-start-<id>` emit id collapses a re-send
   // inside the bus's 24h dedup window; this transition holds outside it.
-  const claim = await stepRun("set-status-planning", () =>
+  // Step id deliberately differs from the `set-status-planning` this
+  // replaces: that id memoized a `void` return, and a run in flight across the
+  // deploy would replay `null` into `claim.kind` and TypeError inside the try,
+  // where the catch would destroy an already-good plan. A new id makes the
+  // stale entry unreachable and reduces the worst case to the rollout note's
+  // `Could not find step`, which reconcile handles.
+  // `stale` at the transition's own target is this run's earlier attempt,
+  // not a rival: the UPDATE committed and the step result was lost before
+  // Inngest recorded it, so the re-run finds its own write. Reading that as
+  // a lost race returns `skipped` with no failure event — the stranded task
+  // this whole change exists to prevent. Per-task `concurrency: 1` means no
+  // rival run can be live to have written it.
+  const claim = await stepRun("claim-task-planning", () =>
     runInTx((tx) => store.transitionTaskStatus(tx, taskId, "queued", "planning")),
   );
-  if (claim.kind !== "transitioned") {
+  if (claim.kind !== "transitioned" && !(claim.kind === "stale" && claim.status === "planning")) {
     taskLog.info(
       { claim },
       "plan: status transition lost the race (already started or terminated)",
@@ -525,10 +537,17 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     // renders an approval keyboard for work the user already cancelled, and
     // puts the row back into `countActiveTasksForRepo`. Same race the
     // `approvePlanIfPending` call below already defends against.
-    const awaiting = await stepRun("set-status-awaiting", () =>
+    // New step id for the same reason as `claim-task-planning` above — the
+    // old `set-status-awaiting` memoized `void`, and replaying that `null`
+    // here would TypeError inside the try and take the catch's destructive
+    // path over a plan that had already completed.
+    const awaiting = await stepRun("set-status-plan-ready", () =>
       runInTx((tx) => store.transitionTaskStatus(tx, taskId, "planning", nextStatus)),
     );
-    if (awaiting.kind !== "transitioned") {
+    if (
+      awaiting.kind !== "transitioned" &&
+      !(awaiting.kind === "stale" && awaiting.status === nextStatus)
+    ) {
       taskLog.info({ awaiting }, "plan: task left `planning` mid-session (cancelled?) — stopping");
       // Returning from inside the try skips the catch, which is what does the
       // cleanup — so do it here. The plan phase has by now allocated a
@@ -545,7 +564,15 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
           worktreeAssignment: wt,
         }).then(() => null),
       );
-      await stepRun("teardown-cancelled", () => sandbox.deleteByTaskId(taskId).then(() => null));
+      // `.catch` like every sibling teardown: a Docker blip here would
+      // otherwise reach the outer catch and overwrite the user's `cancelled`
+      // with `failed`, which is exactly what this branch promises not to do.
+      await stepRun("teardown-cancelled", () =>
+        sandbox
+          .deleteByTaskId(taskId)
+          .then(() => null)
+          .catch(() => null),
+      );
       if (askpassProvisioned) {
         cleanupAskpass({ baseDir: deps.askpassBaseDir, rootTaskId: taskId });
       }
@@ -876,13 +903,6 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   // UPDATE is the durable form of that check (see the `transition.kind`
   // branch). The three checks that remain read fields the PLAN phase owns
   // and this function never writes, so they are stable across replays.
-  if (!task.sessionId) {
-    throw new Error(`coding task ${taskId} has no session_id — plan phase didn't capture it`);
-  }
-  if (!task.worktreeAssignment) {
-    throw new Error(`coding task ${taskId} has no worktree_assignment`);
-  }
-
   const sessionId = task.sessionId;
   const worktreeAssignment = task.worktreeAssignment;
   let executeStream: ExecuteStreamHandle | null = null;
@@ -898,15 +918,34 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   // `coding/task/failed`, writes an unguarded `status='failed'`, tears down
   // the worktree and reaps the sandbox out from under whichever run does own
   // the task.
+  // `stale` at the transition's own target is this run's earlier attempt,
+  // not a rival: the UPDATE committed and the step result was lost before
+  // Inngest recorded it, so the re-run finds its own write. Reading that as
+  // a lost race returns `skipped` with no failure event — the stranded task
+  // this whole change exists to prevent. Per-task `concurrency: 1` means no
+  // rival run can be live to have written it.
   const transition = await stepRun("set-status-executing", () =>
     runInTx((tx) => store.transitionTaskStatus(tx, taskId, "awaiting_approval", "executing")),
   );
-  if (transition.kind !== "transitioned") {
+  if (
+    transition.kind !== "transitioned" &&
+    !(transition.kind === "stale" && transition.status === "executing")
+  ) {
     taskLog.info(
       { transition },
       "execute: status transition lost the race (already cancelled or transitioned)",
     );
     return { status: "skipped" };
+  }
+
+  // Below the claim on purpose: these read fields the PLAN phase owns, and a
+  // throw here fails the function, which sends `coding-task-reconcile` at a
+  // row that — before the claim — this run has no title to.
+  if (!sessionId) {
+    throw new Error(`coding task ${taskId} has no session_id — plan phase didn't capture it`);
+  }
+  if (!worktreeAssignment) {
+    throw new Error(`coding task ${taskId} has no worktree_assignment`);
   }
 
   try {

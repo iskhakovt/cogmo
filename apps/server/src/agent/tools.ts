@@ -170,10 +170,17 @@ export function defineTool<T>(opts: {
   // and hand a retry a different key again, which is the dedup gone. Keyed on
   // the raw object's identity, which is stable for the lifetime of one
   // `runOne`; entries fall out with the payload.
-  const parsed = new WeakMap<object, T>();
+  // Boxed so a schema whose output is a primitive (`.transform()` to a
+  // string, say) still caches — an unboxed `undefined` miss would re-parse and
+  // reopen the double-parse gap this exists to close. Keyed weakly on the raw
+  // payload, which `coerceToolInput` accepts as a root-level JSON *string*
+  // when a provider double-encodes the arguments; a string is not a legal
+  // WeakMap key, so a non-object payload skips the cache rather than throwing.
+  const parsed = new WeakMap<object, { value: T }>();
   const parseOnce = (raw: Record<string, unknown>): T => {
-    const hit = parsed.get(raw);
-    if (hit !== undefined) return hit;
+    const cacheable = typeof raw === "object" && raw !== null;
+    const hit = cacheable ? parsed.get(raw) : undefined;
+    if (hit) return hit.value;
     // Some providers occasionally serialize a nested object argument as a
     // JSON string; unwrap once before Zod so the parse error the LLM sees
     // reflects a real schema violation, not a serialization quirk.
@@ -182,7 +189,7 @@ export function defineTool<T>(opts: {
       logger.debug({ tool: opts.name, paths: coercedPaths }, "coerced stringified tool input");
     }
     const out = opts.schema.parse(value);
-    if (out !== null && typeof out === "object") parsed.set(raw, out);
+    if (cacheable) parsed.set(raw, { value: out });
     return out;
   };
   return {
