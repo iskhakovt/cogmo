@@ -234,7 +234,7 @@ async def _read_stdin_lines(bridge: _Bridge, stdin: BinaryIO, stderr: TextIO) ->
     while True:
         try:
             line = await reader.readline()
-        except Exception as exc:  # noqa: BLE001 - see below
+        except Exception as exc:
             # A frame past `_MAX_FRAME_BYTES` makes `readline` raise, and
             # letting that escape kills this task silently: nothing calls
             # `fail_pending`, so an awaiting `ctx.*` call never returns and
