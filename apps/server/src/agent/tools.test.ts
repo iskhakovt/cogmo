@@ -347,4 +347,65 @@ describe("durability policy invariant", () => {
       .map((spec) => spec.name);
     expect(violations).toEqual([]);
   });
+
+  // `ToolCallContext.idempotencyKey` is digested from `normalizeInput`'s
+  // output and recomputed from scratch in every invocation that runs the
+  // handler — no in-process memo survives a replay. A schema with a dynamic
+  // `.default(() => …)` or a clock-reading `.transform()` would therefore
+  // mint a different key each time and silently defeat the dedup, which is
+  // invisible until a duplicate task or a double-fired schedule shows up in
+  // production. Sweep the registry so the next such schema fails here.
+  it("every built-in tool normalizes its input deterministically", async () => {
+    const { memoryTools } = await import("./memory-tools.js");
+    const { fileTools } = await import("./file-tools.js");
+    const { coreMemoryTools } = await import("./core-memory-tools.js");
+    const { schedulingTools } = await import("./scheduling/tools.js");
+    const { pipelineTools } = await import("./pipeline/tools.js");
+    const { delegateCodingTool } = await import("./coding/tool.js");
+    const { registerSkillTool } = await import("../skills/skills-tool.js");
+    const specs = [
+      ...memoryTools,
+      ...fileTools,
+      ...coreMemoryTools,
+      ...schedulingTools,
+      ...pipelineTools,
+      delegateCodingTool,
+      registerSkillTool,
+    ].filter((spec) => spec.normalizeInput !== undefined);
+    expect(specs.length).toBeGreaterThan(8);
+
+    // A payload no schema accepts still exercises the pipeline: a rejecting
+    // parse must reject identically both times, and an accepting one must
+    // produce an identical value. Distinct object identities on each call so
+    // `defineTool`'s per-payload memo can't mask a non-deterministic schema.
+    const probe = (): Record<string, unknown> => ({
+      name: "x",
+      goal: "x".repeat(20),
+      repo: "cogmo",
+      path: "a.txt",
+      content: "c",
+      prompt: "p",
+      description: "d",
+      text: "t",
+      query: "q",
+      schedule: { kind: "recurring", cron: "0 9 * * *" },
+    });
+    const outcome = (spec: (typeof specs)[number]): string => {
+      try {
+        return `ok:${JSON.stringify(spec.normalizeInput?.(probe()) ?? null)}`;
+      } catch (err) {
+        return `err:${err instanceof Error ? err.name : "unknown"}`;
+      }
+    };
+    const drift = specs
+      .filter((spec) => {
+        // Two separate normalizations of equivalent payloads — the point is
+        // that the schema, not the memo, is what makes them agree.
+        const first = outcome(spec);
+        const second = outcome(spec);
+        return first !== second;
+      })
+      .map((spec) => spec.name);
+    expect(drift).toEqual([]);
+  });
 });

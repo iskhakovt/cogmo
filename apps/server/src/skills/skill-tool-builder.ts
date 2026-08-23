@@ -27,12 +27,16 @@ async function runInflight<T>(
     return { kind: "ok", value: await invoke() };
   } catch (err) {
     if (!(err instanceof SkillInflightError)) throw err;
-    log.warn({ skillName: name, err }, "skill tool invocation refused — prior run still in flight");
+    log.warn(
+      { skillName: name, runId: err.runId, err },
+      "skill tool invocation refused — prior run still in flight",
+    );
     return {
       kind: "inflight",
       body: JSON.stringify({
         ok: false,
         reason: "inflight",
+        runId: err.runId,
         detail:
           `A previous attempt at this exact call is recorded as still running, so ${name} was ` +
           "not started again. Whether it did any work is unknown — the row is marked in-flight " +

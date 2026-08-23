@@ -335,6 +335,7 @@ describe("runCodingTask", () => {
 
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps,
       stepRun,
       stepSendEvent,
@@ -397,6 +398,7 @@ describe("runCodingTask", () => {
 
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps,
       stepRun,
       stepSendEvent,
@@ -416,6 +418,7 @@ describe("runCodingTask", () => {
 
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps,
       stepRun,
       stepSendEvent,
@@ -485,6 +488,7 @@ describe("runCodingTask", () => {
 
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend }),
       stepRun,
       stepSendEvent: recordingStepSendEvent,
@@ -520,6 +524,7 @@ describe("runCodingTask", () => {
 
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend }),
       stepRun,
       stepSendEvent: recordingStepSendEvent,
@@ -565,6 +570,7 @@ describe("runCodingTask", () => {
 
     await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend }),
       stepRun: interceptingStepRun,
       stepSendEvent: recordingStepSendEvent,
@@ -631,6 +637,7 @@ describe("runCodingTask", () => {
 
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend }),
       stepRun,
       stepSendEvent: recordingStepSendEvent,
@@ -665,6 +672,7 @@ describe("runCodingTask", () => {
     // text_delta into the stream, so plan_ready's plan is what matters.
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend }),
       stepRun,
       stepSendEvent,
@@ -685,6 +693,7 @@ describe("runCodingTask", () => {
     ]);
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend, openPlanStream: async () => planStream.handle }),
       stepRun,
       stepSendEvent,
@@ -709,6 +718,7 @@ describe("runCodingTask", () => {
     ]);
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend }),
       stepRun,
       stepSendEvent,
@@ -735,6 +745,7 @@ describe("runCodingTask", () => {
     );
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend: backendYielding([]) }),
       stepRun,
       stepSendEvent,
@@ -762,6 +773,7 @@ describe("runCodingTask", () => {
     );
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend: backendYielding([]) }),
       stepRun,
       stepSendEvent,
@@ -801,6 +813,7 @@ describe("runCodingTask", () => {
     const { sandbox } = fakeSandbox();
     const result = await runCodingTask({
       taskId: badTask.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend: backendYielding([]) }),
       stepRun,
       stepSendEvent,
@@ -814,6 +827,7 @@ describe("runCodingTask", () => {
     await expect(
       runCodingTask({
         taskId: "019d0000-0000-7000-8000-0000000000ff",
+        runId: "run-test",
         deps: makeDeps({ sandbox, backend: backendYielding([]) }),
         stepRun,
         stepSendEvent,
@@ -855,6 +869,7 @@ describe("runCodingTask", () => {
     await expect(
       runCodingTask({
         taskId: task.id,
+        runId: "run-test",
         deps: makeDeps({ sandbox, backend: throwingBackend }),
         stepRun,
         stepSendEvent: stepSendEventThrowing,
@@ -889,6 +904,7 @@ describe("runCodingTask", () => {
 
     await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend: throwingBackend }),
       stepRun,
       stepSendEvent: capturingStepSendEvent,
@@ -923,6 +939,7 @@ describe("runCodingTask", () => {
 
     await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend }),
       stepRun,
       stepSendEvent: capturingStepSendEvent,
@@ -977,6 +994,7 @@ describe("runCodingTask", () => {
     await expect(
       runCodingTask({
         taskId: task.id,
+        runId: "run-test",
         deps: makeDeps({ sandbox, backend: throwingBackend, store: dbThrowingStore }),
         stepRun,
         stepSendEvent: capturingStepSendEvent,
@@ -1008,6 +1026,7 @@ describe("runCodingTask", () => {
     await expect(
       runCodingTask({
         taskId: task.id,
+        runId: "run-test",
         deps: makeDeps({ sandbox, backend: backendYielding([]), store: ghostStore }),
         stepRun,
         stepSendEvent,
@@ -1165,6 +1184,7 @@ describe("runCodingExecute", () => {
 
     const result = await runCodingExecute({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
       stepRun,
       stepSendEvent,
@@ -1209,6 +1229,7 @@ describe("runCodingExecute", () => {
 
     const result = await runCodingExecute({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
       stepRun,
       stepSendEvent,
@@ -1253,6 +1274,7 @@ describe("runCodingExecute", () => {
 
     const result = await runCodingExecute({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
       stepRun,
       stepSendEvent,
@@ -1288,6 +1310,7 @@ describe("runCodingExecute", () => {
 
     await runCodingExecute({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
       stepRun,
       stepSendEvent: capturingStepSendEvent,
@@ -1302,43 +1325,53 @@ describe("runCodingExecute", () => {
     });
   });
 
-  it("resumes a task left in `executing`, and skips one that moved past it", async () => {
-    // `executing` is this transition's own target, so a `stale` reading it
-    // cannot be told apart from this run's earlier attempt committing the
-    // UPDATE and losing the step result. Per-task `concurrency: 1` means no
-    // rival run can be live to have written it, so the safe reading is
-    // "resume" — treating it as a lost race is what strands the task in
-    // `executing` with no failure event for reconcile to see.
+  it("resumes its own claim, and skips a row another run left in `executing`", async () => {
+    // `executing` is this transition's own target, so status alone cannot say
+    // whether this run's earlier attempt committed the UPDATE and lost the
+    // step result, or a dead run left the row here and this is a duplicate
+    // delivery. The two want opposite handling — resume, versus don't mint a
+    // second sandbox and a second paid CLI session — so the claimant decides.
     const repo = await seedRepo();
-    const { task } = await seedExecutableTask(repo);
-    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "executing" }));
 
-    const { sandbox } = fakeSandbox();
+    // Ours: the row records this run as the claimant.
+    const mine = await seedExecutableTask(repo);
+    await tx((trx) =>
+      store.transitionTaskStatus(trx, mine.task.id, "awaiting_approval", "executing", "run-test"),
+    );
     const backend = executeBackendYielding([{ kind: "complete", exitCode: 0, isError: false }]);
     const resumed = await runCodingExecute({
-      taskId: task.id,
-      deps: makeDeps({ sandbox, backend }),
-      stepRun,
-      stepSendEvent,
-      inngest: fakeInngest,
-    });
-
-    expect(resumed.status).toBe("pending_verify");
-
-    // A task that moved PAST the target is a genuine duplicate — the run that
-    // owned it finished — so this one skips and leaves the row alone.
-    const { task: other } = await seedExecutableTask(repo);
-    await tx((trx) => store.updateTaskStatus(trx, { id: other.id, status: "pr_open" }));
-    const skipped = await runCodingExecute({
-      taskId: other.id,
+      taskId: mine.task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox: fakeSandbox().sandbox, backend }),
       stepRun,
       stepSendEvent,
       inngest: fakeInngest,
     });
+    expect(resumed.status).toBe("pending_verify");
 
+    // Someone else's: a different run claimed it, so this delivery stands down.
+    const theirs = await seedExecutableTask(repo);
+    await tx((trx) =>
+      store.transitionTaskStatus(
+        trx,
+        theirs.task.id,
+        "awaiting_approval",
+        "executing",
+        "run-other",
+      ),
+    );
+    const other = fakeSandbox();
+    const skipped = await runCodingExecute({
+      taskId: theirs.task.id,
+      runId: "run-test",
+      deps: makeDeps({ sandbox: other.sandbox, backend }),
+      stepRun,
+      stepSendEvent,
+      inngest: fakeInngest,
+    });
     expect(skipped.status).toBe("skipped");
-    expect((await tx((trx) => store.getTask(trx, other.id)))?.status).toBe("pr_open");
+    expect(other.createCalls).toHaveLength(0);
+    expect((await tx((trx) => store.getTask(trx, theirs.task.id)))?.status).toBe("executing");
   });
 
   it("cancelled during plan-cli: tears down, keeps `cancelled`, survives a teardown blip", async () => {
@@ -1366,6 +1399,7 @@ describe("runCodingExecute", () => {
 
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend }),
       stepRun,
       stepSendEvent,
@@ -1393,6 +1427,7 @@ describe("runCodingExecute", () => {
     await expect(
       runCodingExecute({
         taskId: task.id,
+        runId: "run-test",
         deps: makeDeps({
           sandbox,
           backend: executeBackendYielding([]),
@@ -1421,6 +1456,7 @@ describe("runCodingExecute", () => {
     await expect(
       runCodingExecute({
         taskId: task.id,
+        runId: "run-test",
         deps: makeDeps({ sandbox, backend: executeBackendYielding([]) }),
         stepRun,
         stepSendEvent,
@@ -1434,6 +1470,7 @@ describe("runCodingExecute", () => {
     await expect(
       runCodingExecute({
         taskId: "019d0000-0000-7000-8000-000000000099",
+        runId: "run-test",
         deps: makeDeps({ sandbox, backend: executeBackendYielding([]) }),
         stepRun,
         stepSendEvent,
@@ -1469,6 +1506,7 @@ describe("runCodingExecute", () => {
 
     const result = await runCodingExecute({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({
         sandbox,
         backend,
@@ -1506,6 +1544,7 @@ describe("runCodingExecute", () => {
 
     const result = await runCodingExecute({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({
         sandbox,
         backend: executeBackendYielding([]),
@@ -1555,6 +1594,7 @@ describe("runCodingExecute", () => {
     await expect(
       runCodingExecute({
         taskId: task.id,
+        runId: "run-test",
         deps: makeDeps({ sandbox, backend: throwingBackend }),
         stepRun,
         stepSendEvent: stepSendEventThrowing,

@@ -193,6 +193,7 @@ function makeTask(taskId: string): CodingTaskRow {
     failureReason: null,
     resourceUsage: null,
     idempotencyKey: null,
+    claimedByRunId: null,
     createdAt: new Date(),
   };
 }

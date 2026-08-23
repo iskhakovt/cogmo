@@ -1179,49 +1179,6 @@ describe("tool durability (stepRun)", () => {
     expect(await keyFor({ goal: "refactor B", repo: "cogmo" })).not.toBe(a);
   });
 
-  it("keys the same call identically and a different call differently", async () => {
-    // Two runs of the same turn: within one run the memoized `llm-iter<N>`
-    // pins the tool_use blocks, but a re-delivery re-decides with an empty
-    // step cache. The digest is what stops a *different* request landing in
-    // the same (turn, iteration, position) slot from being read as a retry
-    // of the earlier one.
-    const runWith = async (input: Record<string, unknown>): Promise<string | undefined> => {
-      let key: string | undefined;
-      const tools = new ToolRegistry();
-      tools.register({
-        name: "paid",
-        description: "expensive",
-        inputSchema: { type: "object" },
-        durable: true,
-        handler: async (_input, _service, ctx) => {
-          key = ctx?.idempotencyKey;
-          return "ok";
-        },
-      });
-      await testRunAgentLoop({
-        provider: mockProvider([toolUseResponse("paid", "toolu_X", input), textResponse("done")]),
-        messages: [{ role: "user", content: "go" }],
-        tools,
-        turnKey: "inbound-42",
-      });
-      return key;
-    };
-
-    const a = await runWith({ goal: "refactor A", repo: "cogmo" });
-    const b = await runWith({ goal: "refactor A", repo: "cogmo" });
-    // Same request, re-decided identically — one logical submission.
-    expect(a).toBe(b);
-
-    // Argument order must not matter: a false mismatch would mint a
-    // duplicate side effect, the exact outcome the key prevents.
-    const reordered = await runWith({ repo: "cogmo", goal: "refactor A" });
-    expect(reordered).toBe(a);
-
-    // A genuinely different request in the same slot is a different key.
-    const c = await runWith({ goal: "refactor B", repo: "cogmo" });
-    expect(c).not.toBe(a);
-  });
-
   it("digests the normalized arguments, not the raw provider payload", async () => {
     // `defineTool` coerces stringified nested args and drops fields the
     // schema doesn't declare, so two deliveries can phrase one request

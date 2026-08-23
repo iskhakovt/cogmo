@@ -539,6 +539,7 @@ describe("verify orchestrator integration — gitea + scoped octokit", () => {
 
     const result = await runCodingVerify({
       taskId,
+      runId: "run-test",
       deps,
       stepRun,
       stepSendEvent: makeStepSendEvent({ send: inngestSend }),
@@ -598,6 +599,7 @@ describe("verify orchestrator integration — gitea + scoped octokit", () => {
 
     const result = await runCodingVerify({
       taskId,
+      runId: "run-test",
       deps,
       stepRun,
       stepSendEvent: makeStepSendEvent({ send: inngestSend }),
@@ -758,6 +760,7 @@ describe("verify orchestrator integration — git-remote transport (fake daytona
 
     const result = await runCodingVerify({
       taskId,
+      runId: "run-test",
       deps,
       stepRun,
       stepSendEvent: makeStepSendEvent({ send: inngestSend }),

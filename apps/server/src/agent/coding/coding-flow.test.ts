@@ -305,6 +305,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
 
     const planResult = await runCodingTask({
       taskId,
+      runId: "run-test",
       deps: {
         runInTx: tx,
         store,
@@ -398,6 +399,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
 
     const executeResult = await runCodingExecute({
       taskId,
+      runId: "run-test",
       deps: {
         runInTx: tx,
         store,

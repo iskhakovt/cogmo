@@ -130,6 +130,17 @@ export function createSchedulingService(deps: SchedulingServiceDeps): Scheduling
 
   return {
     async create(args, idempotencyKey) {
+      // Ahead of validation, not just ahead of the cap. A one-off retried
+      // after its own `runAt` fails `parseRunAt` ("must be in the future")
+      // and would never reach the recovery below — the crash retry the key
+      // exists for is exactly the one that arrives late. The in-transaction
+      // recovery further down still handles the concurrent case.
+      if (idempotencyKey !== undefined) {
+        const prior = await deps.runInTx((tx) =>
+          deps.agentStore.getScheduledTaskByIdempotencyKey(tx, idempotencyKey),
+        );
+        if (prior) return ok({ id: prior.id, nextRunAt: prior.nextRunAt });
+      }
       // Prompt-length cap — defence in depth (the tool schema enforces
       // the same limit, but the service is the contract for non-tool
       // callers like the wizard).

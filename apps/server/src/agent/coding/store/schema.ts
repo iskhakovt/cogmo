@@ -131,6 +131,13 @@ export const codingTasks = pgTable(
     // NULL-not-equal unique semantics let those coexist. Same shape as
     // `skill_runs.idempotency_key`.
     idempotencyKey: text("idempotency_key"),
+    // Inngest run that most recently claimed this task through a status
+    // transition. A claim step whose result is lost re-runs and reads its own
+    // committed write as `stale` — indistinguishable from a duplicate
+    // delivery by status alone, and the two want opposite handling: resume,
+    // versus don't mint a second sandbox and paid CLI session. Recording the
+    // claimant makes them distinguishable.
+    claimedByRunId: text("claimed_by_run_id"),
     createdAt: ts(),
   },
   (t) => [unique("uniq_coding_tasks_idempotency_key").on(t.idempotencyKey)],

@@ -379,6 +379,13 @@
       "when": 1787304294295,
       "tag": "0053_scheduled_tasks_idempotency_key",
       "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1787470877777,
+      "tag": "0054_coding_tasks_claimed_by_run_id",
+      "breakpoints": true
     }
   ]
 }

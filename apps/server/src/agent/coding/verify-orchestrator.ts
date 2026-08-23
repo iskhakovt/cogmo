@@ -95,9 +95,10 @@ export function createCodingVerifyOrchestrator(deps: VerifyOrchestratorDeps, inn
       // execute orchestrator's retry path. Matches the slice 1/2 pattern.
       concurrency: { limit: 1, key: "event.data.taskId" },
     },
-    async ({ event, step }) => {
+    async ({ event, step, runId }) => {
       return runCodingVerify({
         taskId: event.data.taskId,
+        runId,
         deps,
         stepRun: step.run,
         stepSendEvent: step.sendEvent,
@@ -109,6 +110,12 @@ export function createCodingVerifyOrchestrator(deps: VerifyOrchestratorDeps, inn
 
 interface RunParams {
   taskId: string;
+  /**
+   * Inngest run id, stamped on the ownership claim so a re-executed claim can
+   * tell its own committed write from a duplicate delivery's. Tests pass any
+   * stable string.
+   */
+  runId: string;
   deps: VerifyOrchestratorDeps;
   stepRun: StepRun;
   /**
@@ -125,8 +132,8 @@ interface RunParams {
  * and an inline shim in tests.
  */
 export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestratorResult> {
-  const { taskId, deps, stepRun, stepSendEvent, inngest } = params;
-  const taskLog = log.child({ taskId });
+  const { taskId, runId, deps, stepRun, stepSendEvent, inngest } = params;
+  const taskLog = log.child({ taskId, runId });
   const { runInTx, store, sandbox, secretsStore, askpassBaseDir } = deps;
   const openExecuteStream = deps.openExecuteStream ?? (async () => NULL_EXECUTE_STREAM);
 
@@ -158,12 +165,22 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   // a lost race returns `skipped` with no failure event — the stranded task
   // this whole change exists to prevent. Per-task `concurrency: 1` means no
   // rival run can be live to have written it.
+  // `stale` naming this transition's own target is ambiguous by status alone:
+  // it is either this run's earlier attempt (the UPDATE committed, the step
+  // result was lost) or a duplicate delivery arriving after a dead run left
+  // the row here. The first must resume; the second must not mint a second
+  // sandbox and a second paid CLI session. `claimedByRunId` is what separates
+  // them — a fresh delivery is a fresh Inngest run.
   const transition = await stepRun("set-status-verifying", () =>
-    runInTx((tx) => store.transitionTaskStatus(tx, taskId, "pending_verify", "verifying")),
+    runInTx((tx) => store.transitionTaskStatus(tx, taskId, "pending_verify", "verifying", runId)),
   );
   if (
     transition.kind !== "transitioned" &&
-    !(transition.kind === "stale" && transition.status === "verifying")
+    !(
+      transition.kind === "stale" &&
+      transition.status === "verifying" &&
+      transition.claimedByRunId === runId
+    )
   ) {
     taskLog.info(
       { transition },

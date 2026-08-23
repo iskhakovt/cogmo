@@ -139,10 +139,10 @@ export function createCodingService(
         if (input.idempotencyKey === undefined) {
           return { kind: "admitted" as const, task: await deps.codingStore.insertTask(tx, values) };
         }
-        // `insertOrRecoverTask`'s ON CONFLICT DO NOTHING closes the window
-        // the pre-check above leaves open — two concurrent retries can both
-        // read no row under snapshot isolation, and the loser recovers the
-        // winner's row instead of raising a unique violation.
+        // `insertOrRecoverTask`'s conflict arm closes the window the
+        // pre-check above leaves open — two concurrent retries can both read
+        // no row under snapshot isolation, and the loser recovers the
+        // winner's row rather than raising a unique violation.
         const insert = await deps.codingStore.insertOrRecoverTask(tx, {
           ...values,
           idempotencyKey: input.idempotencyKey,

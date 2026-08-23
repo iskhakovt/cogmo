@@ -65,6 +65,7 @@ export function codingTaskRow(overrides: Partial<CodingTaskRow> = {}): CodingTas
     failureReason: null,
     resourceUsage: null,
     idempotencyKey: null,
+    claimedByRunId: null,
     createdAt: FIXTURE_EPOCH,
     ...overrides,
   };
@@ -100,9 +101,13 @@ export function statefulCodingStore(
       ...(params.planApprovedAt !== undefined && { planApprovedAt: params.planApprovedAt }),
     };
   });
-  store.transitionTaskStatus.mockImplementation(async (_tx, _id, from, to) => {
-    if (task.status !== from) return { kind: "stale", status: task.status };
-    task = { ...task, status: to };
+  store.transitionTaskStatus.mockImplementation(async (_tx, _id, from, to, claimedByRunId) => {
+    // Records the claimant like the real store, so a test can exercise the
+    // claim steps' own-write tolerance rather than only the happy path.
+    if (task.status !== from) {
+      return { kind: "stale", status: task.status, claimedByRunId: task.claimedByRunId };
+    }
+    task = { ...task, status: to, ...(claimedByRunId !== undefined && { claimedByRunId }) };
     return { kind: "transitioned" };
   });
   store.setTaskWorktreeAssignment.mockImplementation(async (_tx, _id, assignment) => {

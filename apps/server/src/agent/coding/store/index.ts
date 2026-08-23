@@ -121,6 +121,8 @@ export interface CodingTaskRow {
    * Postgres's NULL-not-equal semantics let null-key rows coexist.
    */
   idempotencyKey: string | null;
+  /** Inngest run that most recently claimed this task via a status transition. */
+  claimedByRunId: string | null;
   createdAt: Date;
 }
 
@@ -192,11 +194,12 @@ export interface CodingStore {
   insertTask(tx: Transaction, params: InsertTaskParams): Promise<CodingTaskRow>;
 
   /**
-   * Idempotent submission: `ON CONFLICT DO NOTHING` against
-   * `uniq_coding_tasks_idempotency_key`, so a second call with the same key
-   * returns `kind: "recovered"` and the original row. Separate from
+   * Idempotent submission against `uniq_coding_tasks_idempotency_key`: a
+   * second call with the same key returns `kind: "recovered"` and the
+   * original row. Uses `ON CONFLICT DO UPDATE` with a no-op SET and an
+   * `xmax = 0` discriminator — see the implementation for why `DO NOTHING`
+   * cannot resolve a concurrent loser under REPEATABLE READ. Separate from
    * {@link CodingStore.insertTask} because this one can decline to insert.
-   * Mirrors `SkillStore.startOrRecoverRun`.
    */
   insertOrRecoverTask(
     tx: Transaction,
@@ -323,8 +326,17 @@ export interface CodingStore {
     id: string,
     from: CodingTaskStatus,
     to: CodingTaskStatus,
+    /**
+     * Inngest run making the claim. Stamped on success and echoed back on
+     * `stale`, so a caller can tell its own re-executed claim (resume) from a
+     * duplicate delivery (skip) — a distinction `status` alone cannot make.
+     * Omit for transitions that aren't ownership claims.
+     */
+    claimedByRunId?: string,
   ): Promise<
-    { kind: "transitioned" } | { kind: "stale"; status: CodingTaskStatus } | { kind: "not_found" }
+    | { kind: "transitioned" }
+    | { kind: "stale"; status: CodingTaskStatus; claimedByRunId: string | null }
+    | { kind: "not_found" }
   >;
 
   /**
@@ -684,27 +696,30 @@ export class DrizzleCodingStore implements CodingStore {
     id: string,
     from: CodingTaskStatus,
     to: CodingTaskStatus,
+    claimedByRunId?: string,
   ): Promise<
-    { kind: "transitioned" } | { kind: "stale"; status: CodingTaskStatus } | { kind: "not_found" }
+    | { kind: "transitioned" }
+    | { kind: "stale"; status: CodingTaskStatus; claimedByRunId: string | null }
+    | { kind: "not_found" }
   > {
     // Single conditional UPDATE — atomic at the SQL level. If RETURNING
     // comes back empty, either the row doesn't exist or status didn't
     // match `from`; do a follow-up SELECT to disambiguate.
     const updated = await tx
       .update(codingTasks)
-      .set({ status: to })
+      .set({ status: to, ...(claimedByRunId !== undefined && { claimedByRunId }) })
       .where(and(eq(codingTasks.id, id), eq(codingTasks.status, from)))
       .returning({ id: codingTasks.id });
     if (updated.length > 0) return { kind: "transitioned" as const };
 
     const rows = await tx
-      .select({ status: codingTasks.status })
+      .select({ status: codingTasks.status, claimedByRunId: codingTasks.claimedByRunId })
       .from(codingTasks)
       .where(eq(codingTasks.id, id))
       .limit(1);
     const row = rows[0];
     if (!row) return { kind: "not_found" as const };
-    return { kind: "stale" as const, status: row.status };
+    return { kind: "stale" as const, status: row.status, claimedByRunId: row.claimedByRunId };
   }
 
   async approvePlanIfPending(

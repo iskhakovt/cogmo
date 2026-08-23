@@ -148,9 +148,10 @@ export function createCodingOrchestrator(deps: CodingOrchestratorDeps, inngest: 
       // Sequentialize per task — guards against duplicate fires.
       concurrency: { limit: 1, key: "event.data.taskId" },
     },
-    async ({ event, step }) => {
+    async ({ event, step, runId }) => {
       return runCodingTask({
         taskId: event.data.taskId,
+        runId,
         deps,
         stepRun: step.run,
         stepSendEvent: step.sendEvent,
@@ -161,6 +162,12 @@ export function createCodingOrchestrator(deps: CodingOrchestratorDeps, inngest: 
 
 interface RunParams {
   taskId: string;
+  /**
+   * Inngest run id, stamped on the ownership claim so a re-executed claim can
+   * tell its own committed write from a duplicate delivery's. Tests pass any
+   * stable string.
+   */
+  runId: string;
   deps: CodingOrchestratorDeps;
   stepRun: StepRun;
   /**
@@ -185,8 +192,8 @@ interface RunParams {
  * retry.
  */
 export async function runCodingTask(params: RunParams): Promise<CodingOrchestratorResult> {
-  const { taskId, deps, stepRun, stepSendEvent } = params;
-  const taskLog = log.child({ taskId });
+  const { taskId, runId, deps, stepRun, stepSendEvent } = params;
+  const taskLog = log.child({ taskId, runId });
   const {
     runInTx,
     store,
@@ -223,10 +230,19 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
   // a lost race returns `skipped` with no failure event — the stranded task
   // this whole change exists to prevent. Per-task `concurrency: 1` means no
   // rival run can be live to have written it.
+  // `stale` naming this transition's own target is ambiguous by status alone:
+  // it is either this run's earlier attempt (the UPDATE committed, the step
+  // result was lost) or a duplicate delivery arriving after a dead run left
+  // the row here. The first must resume; the second must not mint a second
+  // sandbox and a second paid CLI session. `claimedByRunId` is what separates
+  // them — a fresh delivery is a fresh Inngest run.
   const claim = await stepRun("claim-task-planning", () =>
-    runInTx((tx) => store.transitionTaskStatus(tx, taskId, "queued", "planning")),
+    runInTx((tx) => store.transitionTaskStatus(tx, taskId, "queued", "planning", runId)),
   );
-  if (claim.kind !== "transitioned" && !(claim.kind === "stale" && claim.status === "planning")) {
+  if (
+    claim.kind !== "transitioned" &&
+    !(claim.kind === "stale" && claim.status === "planning" && claim.claimedByRunId === runId)
+  ) {
     taskLog.info(
       { claim },
       "plan: status transition lost the race (already started or terminated)",
@@ -541,8 +557,12 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     // old `set-status-awaiting` memoized `void`, and replaying that `null`
     // here would TypeError inside the try and take the catch's destructive
     // path over a plan that had already completed.
+    // Not an ownership claim — the run already holds the task — so a `stale`
+    // at the target here can only be this step re-executing after a lost
+    // result. Anything else means the task left `planning` under us (a
+    // cancel), which the branch below handles.
     const awaiting = await stepRun("set-status-plan-ready", () =>
-      runInTx((tx) => store.transitionTaskStatus(tx, taskId, "planning", nextStatus)),
+      runInTx((tx) => store.transitionTaskStatus(tx, taskId, "planning", nextStatus, runId)),
     );
     if (
       awaiting.kind !== "transitioned" &&
@@ -564,14 +584,20 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
           worktreeAssignment: wt,
         }).then(() => null),
       );
-      // `.catch` like every sibling teardown: a Docker blip here would
+      // Swallowed like every sibling teardown: a Docker blip here would
       // otherwise reach the outer catch and overwrite the user's `cancelled`
-      // with `failed`, which is exactly what this branch promises not to do.
+      // with `failed`, which is what this branch promises not to do. Logged
+      // rather than silent, because the cost of swallowing is a sandbox that
+      // lives until its TTL — the periodic reaper is the backstop, and this
+      // line is how you find out it was needed.
       await stepRun("teardown-cancelled", () =>
         sandbox
           .deleteByTaskId(taskId)
           .then(() => null)
-          .catch(() => null),
+          .catch((err: unknown) => {
+            taskLog.warn({ err }, "cancelled-path teardown failed — sandbox left to the reaper");
+            return null;
+          }),
       );
       if (askpassProvisioned) {
         cleanupAskpass({ baseDir: deps.askpassBaseDir, rootTaskId: taskId });
@@ -779,9 +805,10 @@ export function createCodingExecuteOrchestrator(deps: CodingOrchestratorDeps, in
       retries: 0,
       concurrency: { limit: 1, key: "event.data.taskId" },
     },
-    async ({ event, step }) => {
+    async ({ event, step, runId }) => {
       return runCodingExecute({
         taskId: event.data.taskId,
+        runId,
         deps,
         stepRun: step.run,
         stepSendEvent: step.sendEvent,
@@ -860,6 +887,12 @@ export async function checkoutFeatureBranchInSandbox(
 
 interface ExecuteRunParams {
   taskId: string;
+  /**
+   * Inngest run id, stamped on the ownership claim so a re-executed claim can
+   * tell its own committed write from a duplicate delivery's. Tests pass any
+   * stable string.
+   */
+  runId: string;
   deps: CodingOrchestratorDeps;
   stepRun: StepRun;
   /**
@@ -886,8 +919,8 @@ interface ExecuteRunParams {
  * - `worktree_assignment` must be present (the plan phase allocated it).
  */
 export async function runCodingExecute(params: ExecuteRunParams): Promise<CodingExecuteResult> {
-  const { taskId, deps, stepRun, stepSendEvent, inngest } = params;
-  const taskLog = log.child({ taskId });
+  const { taskId, runId, deps, stepRun, stepSendEvent, inngest } = params;
+  const taskLog = log.child({ taskId, runId });
   const { runInTx, store, sandbox, backend, devbaseImage, defaultResourceLimits, taskTtlMs } = deps;
   const openExecuteStream = deps.openExecuteStream ?? (async () => NULL_EXECUTE_STREAM);
 
@@ -924,12 +957,24 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   // a lost race returns `skipped` with no failure event — the stranded task
   // this whole change exists to prevent. Per-task `concurrency: 1` means no
   // rival run can be live to have written it.
+  // `stale` naming this transition's own target is ambiguous by status alone:
+  // it is either this run's earlier attempt (the UPDATE committed, the step
+  // result was lost) or a duplicate delivery arriving after a dead run left
+  // the row here. The first must resume; the second must not mint a second
+  // sandbox and a second paid CLI session. `claimedByRunId` is what separates
+  // them — a fresh delivery is a fresh Inngest run.
   const transition = await stepRun("set-status-executing", () =>
-    runInTx((tx) => store.transitionTaskStatus(tx, taskId, "awaiting_approval", "executing")),
+    runInTx((tx) =>
+      store.transitionTaskStatus(tx, taskId, "awaiting_approval", "executing", runId),
+    ),
   );
   if (
     transition.kind !== "transitioned" &&
-    !(transition.kind === "stale" && transition.status === "executing")
+    !(
+      transition.kind === "stale" &&
+      transition.status === "executing" &&
+      transition.claimedByRunId === runId
+    )
   ) {
     taskLog.info(
       { transition },

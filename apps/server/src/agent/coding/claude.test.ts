@@ -118,6 +118,7 @@ const task: CodingTaskRow = {
   failureReason: null,
   resourceUsage: null,
   idempotencyKey: null,
+  claimedByRunId: null,
   createdAt: new Date(),
 };
 

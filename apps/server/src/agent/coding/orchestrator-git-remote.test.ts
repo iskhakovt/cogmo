@@ -304,6 +304,7 @@ describe("runCodingTask — git-remote transport", () => {
 
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({
         sandbox,
         backend: backendYielding([
@@ -377,6 +378,7 @@ describe("runCodingTask — git-remote transport", () => {
 
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({
         sandbox,
         backend: backendYielding([]),
@@ -417,6 +419,7 @@ describe("runCodingTask — git-remote transport", () => {
 
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({
         sandbox,
         backend: backendYielding([
@@ -473,6 +476,7 @@ describe("runCodingExecute — git-remote transport", () => {
 
     const result = await runCodingExecute({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({
         sandbox,
         backend: backendYielding([
@@ -544,6 +548,7 @@ describe("runCodingExecute — git-remote transport", () => {
 
     const result = await runCodingExecute({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({
         sandbox,
         backend: backendYielding([
@@ -628,6 +633,7 @@ describe("runCodingExecute — git-remote transport", () => {
 
     const result = await runCodingExecute({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({
         sandbox,
         backend: backendYielding([

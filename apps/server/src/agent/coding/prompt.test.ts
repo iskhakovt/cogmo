@@ -46,6 +46,7 @@ function task(overrides: Partial<CodingTaskRow> = {}): CodingTaskRow {
     failureReason: null,
     resourceUsage: null,
     idempotencyKey: null,
+    claimedByRunId: null,
     createdAt: new Date(),
     ...overrides,
   };

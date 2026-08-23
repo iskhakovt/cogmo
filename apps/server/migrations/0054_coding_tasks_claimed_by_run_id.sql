@@ -1,0 +1,1 @@
+ALTER TABLE "coding_tasks" ADD COLUMN "claimed_by_run_id" text;

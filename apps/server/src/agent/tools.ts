@@ -75,11 +75,18 @@ export interface ToolSpec {
    * nested object sent as a JSON string, a field the schema drops — still
    * yields one key rather than minting a second side effect.
    *
-   * Must return the same value the handler is given for the same payload,
-   * or the key stops identifying the request. {@link defineTool} guarantees
-   * that by parsing once and sharing the result. A hand-built spec that
-   * omits it has its raw arguments digested instead, which can only mint a
-   * duplicate, never collapse two distinct requests into one.
+   * **Must be deterministic.** The key is recomputed from scratch in every
+   * Inngest invocation that runs the handler, and no in-process cache can
+   * survive that — a schema with a dynamic `.default(() => …)` or a
+   * `.transform()` reading the clock would mint a different key each time and
+   * silently defeat the dedup. {@link defineTool}'s per-invocation memo keeps
+   * the key aligned with the value the handler sees *within* one invocation;
+   * determinism is what makes it hold *across* them, and `tools.test.ts`
+   * asserts it over the whole registry.
+   *
+   * A hand-built spec that omits this has its raw arguments digested
+   * instead, which can only mint a duplicate, never collapse two distinct
+   * requests into one.
    */
   normalizeInput?: (raw: Record<string, unknown>) => unknown;
   /**
