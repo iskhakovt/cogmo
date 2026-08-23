@@ -175,19 +175,16 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     runInTx((tx) => store.transitionTaskStatus(tx, taskId, "pending_verify", "verifying", runId)),
   );
   //
-  // A NULL claimant means the row was claimed before migration 0054 added the
-  // column, so there is no id to match and the strict check would strand it —
-  // `skipped`, no failure event, nothing for reconcile. Treated as ours: every
-  // claim after the deploy stamps an id, and this transition's target status is
-  // only ever written by this step, so NULL-at-target is unambiguously a
-  // pre-deploy row. The population is the in-flight tasks the rollout note
-  // already covers, and it self-clears.
+  // A row already at the target with no claimant — every row predating
+  // migration 0054 — is adopted by the transition itself, which stamps this
+  // run and returns `transitioned`. It never reaches this branch, and the
+  // next delivery finds a claimant that isn't its own.
   if (
     transition.kind !== "transitioned" &&
     !(
       transition.kind === "stale" &&
       transition.status === "verifying" &&
-      (transition.claimedByRunId === runId || transition.claimedByRunId === null)
+      transition.claimedByRunId === runId
     )
   ) {
     taskLog.info(

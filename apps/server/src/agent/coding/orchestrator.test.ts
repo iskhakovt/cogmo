@@ -1325,32 +1325,48 @@ describe("runCodingExecute", () => {
     });
   });
 
-  it("resumes a legacy row that predates the claimant column", async () => {
+  it("adopts a legacy row once, then skips the next delivery for it", async () => {
     // Migration 0054 left every existing row with a NULL claimant. Matching
-    // strictly on run id would strand those: `skipped`, no failure event,
-    // nothing for reconcile. NULL-at-target is unambiguously pre-deploy —
-    // every claim since stamps an id, and only this step writes `executing` —
-    // so it is treated as ours, and the population self-clears.
+    // strictly on run id would strand those — `skipped`, no failure event,
+    // nothing for reconcile. But merely waving NULL through is worse than it
+    // looks: nothing writes the claimant, so NULL never clears and *every*
+    // later delivery resumes the task, each minting its own sandbox and paid
+    // CLI session. The claim's UPDATE adopts the row instead, which binds it
+    // to exactly one run.
     const repo = await seedRepo();
     const { task } = await seedExecutableTask(repo);
-    // `updateTaskStatus` writes no claimant, which is what a pre-0054 row
-    // looks like after its own claim step ran on the old code.
+    // `updateTaskStatus` writes no claimant — what a pre-0054 row looks like
+    // after its claim step ran on the old code.
     await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "executing" }));
     expect((await tx((trx) => store.getTask(trx, task.id)))?.claimedByRunId).toBeNull();
 
-    const result = await runCodingExecute({
+    const backend = executeBackendYielding([{ kind: "complete", exitCode: 0, isError: false }]);
+    const adopted = await runCodingExecute({
       taskId: task.id,
-      runId: "run-test",
-      deps: makeDeps({
-        sandbox: fakeSandbox().sandbox,
-        backend: executeBackendYielding([{ kind: "complete", exitCode: 0, isError: false }]),
-      }),
+      runId: "run-first",
+      deps: makeDeps({ sandbox: fakeSandbox().sandbox, backend }),
       stepRun,
       stepSendEvent,
       inngest: fakeInngest,
     });
+    expect(adopted.status).toBe("pending_verify");
 
-    expect(result.status).toBe("pending_verify");
+    // Put it back to `executing` to model a second delivery arriving while
+    // the row still carries the first run's claim.
+    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "executing" }));
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.claimedByRunId).toBe("run-first");
+
+    const second = fakeSandbox();
+    const skipped = await runCodingExecute({
+      taskId: task.id,
+      runId: "run-second",
+      deps: makeDeps({ sandbox: second.sandbox, backend }),
+      stepRun,
+      stepSendEvent,
+      inngest: fakeInngest,
+    });
+    expect(skipped.status).toBe("skipped");
+    expect(second.createCalls).toHaveLength(0);
   });
 
   it("resumes its own claim, and skips a row another run left in `executing`", async () => {

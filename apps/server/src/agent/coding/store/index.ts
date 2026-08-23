@@ -6,8 +6,10 @@ import {
   eq,
   getTableColumns,
   inArray,
+  isNull,
   ne,
   notInArray,
+  or,
   sql,
 } from "drizzle-orm";
 import { single } from "../../../db/helpers.js";
@@ -330,7 +332,11 @@ export interface CodingStore {
      * Inngest run making the claim. Stamped on success and echoed back on
      * `stale`, so a caller can tell its own re-executed claim (resume) from a
      * duplicate delivery (skip) — a distinction `status` alone cannot make.
-     * Omit for transitions that aren't ownership claims.
+     *
+     * Supplying it also widens what counts as claimable: a row already at
+     * `to` with a NULL claimant is adopted, which is how rows predating
+     * migration 0054 get bound to exactly one run instead of being resumed by
+     * every delivery. Omit for transitions that aren't ownership claims.
      */
     claimedByRunId?: string,
   ): Promise<
@@ -705,10 +711,25 @@ export class DrizzleCodingStore implements CodingStore {
     // Single conditional UPDATE — atomic at the SQL level. If RETURNING
     // comes back empty, either the row doesn't exist or status didn't
     // match `from`; do a follow-up SELECT to disambiguate.
+    //
+    // A claim (one that supplies `claimedByRunId`) also matches a row already
+    // sitting at `to` with no claimant — the shape every row had before
+    // migration 0054 added the column. Adopting it here rather than waving it
+    // through at the caller is what makes the legacy path one-shot: the
+    // adoption stamps this run, so the next duplicate delivery finds a
+    // claimant that isn't its own and stands down. Without it, NULL never
+    // clears and every delivery resumes the task afresh.
+    const claimable =
+      claimedByRunId === undefined
+        ? eq(codingTasks.status, from)
+        : or(
+            eq(codingTasks.status, from),
+            and(eq(codingTasks.status, to), isNull(codingTasks.claimedByRunId)),
+          );
     const updated = await tx
       .update(codingTasks)
       .set({ status: to, ...(claimedByRunId !== undefined && { claimedByRunId }) })
-      .where(and(eq(codingTasks.id, id), eq(codingTasks.status, from)))
+      .where(and(eq(codingTasks.id, id), claimable))
       .returning({ id: codingTasks.id });
     if (updated.length > 0) return { kind: "transitioned" as const };
 

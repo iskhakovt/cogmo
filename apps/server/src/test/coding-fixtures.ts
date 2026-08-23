@@ -102,9 +102,13 @@ export function statefulCodingStore(
     };
   });
   store.transitionTaskStatus.mockImplementation(async (_tx, _id, from, to, claimedByRunId) => {
-    // Records the claimant like the real store, so a test can exercise the
-    // claim steps' own-write tolerance rather than only the happy path.
-    if (task.status !== from) {
+    // Mirrors the real store, including the claim's adoption arm: a row
+    // already at the target with no claimant is bound to this run. Without
+    // that here, a replay test would see the caller's tolerance path rather
+    // than the transition's, which is where production resolves it.
+    const adoptable =
+      claimedByRunId !== undefined && task.status === to && task.claimedByRunId === null;
+    if (task.status !== from && !adoptable) {
       return { kind: "stale", status: task.status, claimedByRunId: task.claimedByRunId };
     }
     task = { ...task, status: to, ...(claimedByRunId !== undefined && { claimedByRunId }) };

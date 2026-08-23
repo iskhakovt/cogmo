@@ -316,7 +316,12 @@ describe("durability policy invariant", () => {
   // comment discipline. (Factory-built sets — image tools, skill tools,
   // sub-agent tools, MCP tools — carry the flag in their builders, asserted
   // in their own test files.)
-  it("every side-effectful built-in tool is durable", async () => {
+  /**
+   * Every statically-constructible built-in spec. Shared by both sweeps below
+   * — building it twice invites the two lists to drift, and a tool missing
+   * from one sweep silently loses the coverage that sweep exists to give it.
+   */
+  async function builtInSpecs(): Promise<ToolSpec[]> {
     const { memoryTools } = await import("./memory-tools.js");
     const { fileTools } = await import("./file-tools.js");
     const { coreMemoryTools } = await import("./core-memory-tools.js");
@@ -326,7 +331,7 @@ describe("durability policy invariant", () => {
     const { registerSkillTool } = await import("../skills/skills-tool.js");
     const { createWebTools } = await import("./web-tools.js");
     const { createDocumentTools } = await import("./document-tools.js");
-    const specs = [
+    return [
       ...memoryTools,
       ...fileTools,
       ...coreMemoryTools,
@@ -341,6 +346,10 @@ describe("durability policy invariant", () => {
       }),
       ...createDefaultTools().snapshot(),
     ];
+  }
+
+  it("every side-effectful built-in tool is durable", async () => {
+    const specs = await builtInSpecs();
     expect(specs.length).toBeGreaterThan(15);
     const violations = specs
       .filter((spec) => (spec.sideEffectful ?? true) && spec.durable !== true)
@@ -356,33 +365,7 @@ describe("durability policy invariant", () => {
   // invisible until a duplicate task or a double-fired schedule shows up in
   // production. Sweep the registry so the next such schema fails here.
   it("every built-in tool normalizes its input deterministically", async () => {
-    const { memoryTools } = await import("./memory-tools.js");
-    const { fileTools } = await import("./file-tools.js");
-    const { coreMemoryTools } = await import("./core-memory-tools.js");
-    const { schedulingTools } = await import("./scheduling/tools.js");
-    const { pipelineTools } = await import("./pipeline/tools.js");
-    const { delegateCodingTool } = await import("./coding/tool.js");
-    const { registerSkillTool } = await import("../skills/skills-tool.js");
-    const { createWebTools } = await import("./web-tools.js");
-    const { createDocumentTools } = await import("./document-tools.js");
-    // Same set as the durability sweep above — the factory-built tools go
-    // through `defineTool` too, so they carry a `normalizeInput` that a
-    // non-deterministic schema would break just as quietly.
-    const specs = [
-      ...memoryTools,
-      ...fileTools,
-      ...coreMemoryTools,
-      ...schedulingTools,
-      ...pipelineTools,
-      delegateCodingTool,
-      registerSkillTool,
-      ...createWebTools("tavily-key", "openrouter-key"),
-      ...createDocumentTools({
-        upload: async () => "path",
-        download: async () => Buffer.from(""),
-      }),
-      ...createDefaultTools().snapshot(),
-    ].filter((spec) => spec.normalizeInput !== undefined);
+    const specs = (await builtInSpecs()).filter((spec) => spec.normalizeInput !== undefined);
     expect(specs.length).toBeGreaterThan(12);
 
     // Two probes: an empty object, which every all-optional schema accepts
