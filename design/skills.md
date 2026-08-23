@@ -429,7 +429,7 @@ export const SkillManifestSchema = z.object({
   effects: z.array(z.enum(SKILL_EFFECTS)).default([]),
   secrets: z.array(z.union([
     z.string(),                        // v1: by name only
-    z.object({                         // future: egress-proxy binding
+    z.object({                         // stage 2: host-side substitution
       name: z.string(),
       binding: z.object({
         destination: z.string(),
@@ -437,6 +437,15 @@ export const SkillManifestSchema = z.object({
       }).optional(),
     }),
   ])).default([]),
+
+  // Egress allowlist. Absent means no network: `ctx.http` refuses every
+  // destination. Labels are bounded at 63 chars; `*.` admits subdomains at any
+  // depth but not the apex; a lone `*` does not parse.
+  network: z.object({
+    allow: z.array(z.string().max(253).regex(
+      /^(\*\.)?[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i,
+    )).min(1),
+  }).optional(),
 
   // Resource caps
   resources: z.object({
@@ -1229,7 +1238,7 @@ interface SkillRunner {
 | Cost tracking | Wall-clock + peak memory + LLM tokens via `ctx.llm` + declared `cost_per_call_usd` | Measured per `skill_run`. Dispatcher enforces daily/monthly budget from SKILL.md. `auto` tier requires zero paid surface. |
 | Cron failure handling | Inngest retries → final-failure notify → auto-disable after 3 consecutive | Standard Temporal/Airflow pattern. Agent-led repair deferred to evolution stage 3+. |
 | Inter-skill composition | Not in v1; future via `ctx.skills.invoke()` through orchestrator | Agent composes at LLM level. Direct skill imports rejected — break permission scoping. |
-| `ctx` v1 surface | secrets, memory, attachments, llm, now, user, notify, log | Eight methods cover what skills actually need. HTTP wrapping, metrics, composition, scheduling deferred. |
+| `ctx` v1 surface | secrets, memory, files, http, now, user, log (attachments, llm, notify pending) | Covers what skills actually need. `http` is tier 1's only network path and is gated on the manifest's `network.allow`; metrics, composition and scheduling stay deferred. |
 | Invocation | Inngest events | Durable execution, retry, scheduling — all free. Matches existing orchestration pattern. |
 | Output delivery | JSON via tool result; binaries via `AttachmentStore` | Same pattern as `generate_image`. |
 | Skill metadata | `SKILL.md` frontmatter | Matches Anthropic's progressive-disclosure standard, already referenced in [integrations.md](integrations.md). |

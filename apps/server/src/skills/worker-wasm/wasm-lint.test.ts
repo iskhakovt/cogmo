@@ -65,6 +65,10 @@ def run(inputs, ctx):
     ["import os as o, smtplib\n"],
     // Parenthesised name list — what a formatter emits once it grows.
     ["from urllib import (\n    request,\n)\n"],
+    // A comment inside the list must not read as commenting out the name.
+    ["from urllib import (\n    # the fetcher\n    request,\n)\n"],
+    ["from urllib import (  # noqa\n    request,\n)\n"],
+    ["from http import (\n    HTTPStatus,  # status codes\n    client,\n)\n"],
     ["from http import (\n    client,\n    HTTPStatus,\n)\n"],
   ])("rejects the stdlib network module in %j", (body) => {
     const r = lintWasmCompat(body);

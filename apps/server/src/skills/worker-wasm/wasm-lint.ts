@@ -133,8 +133,17 @@ export function lintWasmCompat(body: string): LintResult {
 function collapseParenthesisedImports(source: string): string {
   return source.replace(
     /^([ \t]*from[ \t]+[\w.]+[ \t]+import[ \t]*)\(([^)]*)\)/gm,
-    (whole: string, head: string, names: string) =>
-      `${head}${names.replace(/\s+/g, " ").trim()}${"\n".repeat((whole.match(/\n/g) ?? []).length)}`,
+    (whole: string, head: string, names: string) => {
+      // Comments go first. Flattening a list that carries one would leave
+      // `# note` sitting between `import` and the name it annotates, and the
+      // rules match names at a position — so the name would read as
+      // commented-out and the import would pass.
+      const flattened = names
+        .replace(/#[^\n]*/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      return `${head}${flattened}${"\n".repeat((whole.match(/\n/g) ?? []).length)}`;
+    },
   );
 }
 

@@ -122,8 +122,11 @@ const SkillNetworkHostSchema = z
   .min(1)
   .max(253)
   .regex(
-    /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i,
-    "must be a hostname, optionally prefixed '*.' — no scheme, port or path",
+    // Each label is bounded at 63 octets per RFC 1035; a longer one parses
+    // as a hostname but cannot resolve, so accepting it would defer a
+    // manifest error to a request failure.
+    /^(\*\.)?[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i,
+    "must be a hostname with labels of 63 characters or fewer, optionally prefixed '*.' — no scheme, port or path",
   );
 
 export const SkillNetworkSchema = z.object({

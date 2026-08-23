@@ -295,6 +295,11 @@ network:
       ]);
     });
 
+    it("accepts a label at the 63-character boundary", () => {
+      const yaml = `${MIN_FIELDS}\nnetwork:\n  allow:\n    - "${"a".repeat(63)}.example.com"`;
+      expect(parseManifest(frontmatter(yaml)).isOk()).toBe(true);
+    });
+
     it.each([
       ["bare wildcard", "*"],
       ["wildcard without a dot", "*example.com"],
@@ -308,6 +313,9 @@ network:
       ["trailing dot", "api.example.com."],
       ["leading dot", ".example.com"],
       ["empty", ""],
+      // DNS labels are 63 octets; a longer one parses as a hostname but
+      // cannot resolve, so it belongs in the manifest error, not a request.
+      ["64-character label", `${"a".repeat(64)}.example.com`],
     ])("rejects %s", (_label, host) => {
       const yaml = `${MIN_FIELDS}\nnetwork:\n  allow:\n    - "${host}"`;
       const result = parseManifest(frontmatter(yaml));
