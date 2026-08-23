@@ -363,6 +363,11 @@ describe("durability policy invariant", () => {
     const { pipelineTools } = await import("./pipeline/tools.js");
     const { delegateCodingTool } = await import("./coding/tool.js");
     const { registerSkillTool } = await import("../skills/skills-tool.js");
+    const { createWebTools } = await import("./web-tools.js");
+    const { createDocumentTools } = await import("./document-tools.js");
+    // Same set as the durability sweep above — the factory-built tools go
+    // through `defineTool` too, so they carry a `normalizeInput` that a
+    // non-deterministic schema would break just as quietly.
     const specs = [
       ...memoryTools,
       ...fileTools,
@@ -371,14 +376,22 @@ describe("durability policy invariant", () => {
       ...pipelineTools,
       delegateCodingTool,
       registerSkillTool,
+      ...createWebTools("tavily-key", "openrouter-key"),
+      ...createDocumentTools({
+        upload: async () => "path",
+        download: async () => Buffer.from(""),
+      }),
+      ...createDefaultTools().snapshot(),
     ].filter((spec) => spec.normalizeInput !== undefined);
-    expect(specs.length).toBeGreaterThan(8);
+    expect(specs.length).toBeGreaterThan(12);
 
-    // A payload no schema accepts still exercises the pipeline: a rejecting
-    // parse must reject identically both times, and an accepting one must
-    // produce an identical value. Distinct object identities on each call so
-    // `defineTool`'s per-payload memo can't mask a non-deterministic schema.
-    const probe = (): Record<string, unknown> => ({
+    // Two probes: an empty object, which every all-optional schema accepts
+    // and is where a dynamic `.default(() => …)` would surface, and a rich one
+    // that satisfies most required fields. A rejecting parse must reject
+    // identically both times; an accepting one must produce an identical
+    // value. Distinct object identities on each call, so `defineTool`'s
+    // per-payload memo can't mask a non-deterministic schema.
+    const rich = (): Record<string, unknown> => ({
       name: "x",
       goal: "x".repeat(20),
       repo: "cogmo",
@@ -390,21 +403,23 @@ describe("durability policy invariant", () => {
       query: "q",
       schedule: { kind: "recurring", cron: "0 9 * * *" },
     });
-    const outcome = (spec: (typeof specs)[number]): string => {
+    const outcome = (spec: (typeof specs)[number], payload: Record<string, unknown>): string => {
       try {
-        return `ok:${JSON.stringify(spec.normalizeInput?.(probe()) ?? null)}`;
+        return `ok:${JSON.stringify(spec.normalizeInput?.(payload) ?? null)}`;
       } catch (err) {
         return `err:${err instanceof Error ? err.name : "unknown"}`;
       }
     };
     const drift = specs
-      .filter((spec) => {
+      .filter((spec) =>
         // Two separate normalizations of equivalent payloads — the point is
         // that the schema, not the memo, is what makes them agree.
-        const first = outcome(spec);
-        const second = outcome(spec);
-        return first !== second;
-      })
+        [() => ({}) as Record<string, unknown>, rich].some((build) => {
+          const first = outcome(spec, build());
+          const second = outcome(spec, build());
+          return first !== second;
+        }),
+      )
       .map((spec) => spec.name);
     expect(drift).toEqual([]);
   });

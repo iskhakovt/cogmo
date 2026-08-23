@@ -1325,6 +1325,34 @@ describe("runCodingExecute", () => {
     });
   });
 
+  it("resumes a legacy row that predates the claimant column", async () => {
+    // Migration 0054 left every existing row with a NULL claimant. Matching
+    // strictly on run id would strand those: `skipped`, no failure event,
+    // nothing for reconcile. NULL-at-target is unambiguously pre-deploy —
+    // every claim since stamps an id, and only this step writes `executing` —
+    // so it is treated as ours, and the population self-clears.
+    const repo = await seedRepo();
+    const { task } = await seedExecutableTask(repo);
+    // `updateTaskStatus` writes no claimant, which is what a pre-0054 row
+    // looks like after its own claim step ran on the old code.
+    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "executing" }));
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.claimedByRunId).toBeNull();
+
+    const result = await runCodingExecute({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({
+        sandbox: fakeSandbox().sandbox,
+        backend: executeBackendYielding([{ kind: "complete", exitCode: 0, isError: false }]),
+      }),
+      stepRun,
+      stepSendEvent,
+      inngest: fakeInngest,
+    });
+
+    expect(result.status).toBe("pending_verify");
+  });
+
   it("resumes its own claim, and skips a row another run left in `executing`", async () => {
     // `executing` is this transition's own target, so status alone cannot say
     // whether this run's earlier attempt committed the UPDATE and lost the
