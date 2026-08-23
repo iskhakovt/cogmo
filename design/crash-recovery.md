@@ -118,7 +118,7 @@ Marking a tool `durable: true` is a cost decision with two sides: it buys exactl
 
 | Tool | Crash-window disposition |
 |-|-|
-| `delegate_coding` | **Keyed** — `coding_tasks.idempotency_key`, plain `UNIQUE` + `ON CONFLICT DO NOTHING`. A duplicate would mint a second sandbox, a second billable claude session and a second PR. |
+| `delegate_coding` | **Keyed** — `coding_tasks.idempotency_key`, plain `UNIQUE` + `ON CONFLICT DO UPDATE` with a no-op SET and an `xmax = 0` discriminator (see `.claude/rules/inngest.md` for why `DO NOTHING` can't resolve a concurrent loser under REPEATABLE READ). A duplicate would mint a second sandbox, a second billable claude session and a second PR. |
 | `schedule_task` | **Keyed** — `scheduled_tasks.idempotency_key`. The worst duplicate on this list: it fires on every tick from then on, and only an explicit `remove_task` stops it. |
 | skill tools (`buildSkillToolSpec`) | **Keyed** — forwarded to `runner.invoke`, which drives the `skill_runs` `recovery_point` state machine. |
 | `register_skill` | Self-deduping — a register against an unchanged branch tip resolves as `no_op` rather than a second deploy. |

@@ -85,6 +85,61 @@ export function createCodingService(
         );
       }
 
+      /**
+       * Emit `coding/task/start`, and make sure a failure to emit doesn't
+       * strand the row.
+       *
+       * A `queued` row is owned by nobody — no orchestrator run has claimed
+       * it — whether this call just inserted it or just recovered it. If the
+       * send throws, that row would otherwise sit `queued` forever: it counts
+       * against `maxConcurrentTasks` (the default is 1, so the repo is
+       * blocked), no `inngest/function.failed` fires, and reconcile only
+       * watches for that. Nothing retries it either — `handle-message`
+       * converts every `tool-iter*` throw to `NonRetriableError`, so the only
+       * re-execution that would reuse this idempotency key never happens, and
+       * the model's own retry gets fresh coordinates and a fresh key. So mark
+       * it failed and free the slot, then rethrow so the caller knows the
+       * submission didn't take.
+       *
+       * The idempotency key stays on the row. A throw from `inngest.send` is
+       * ambiguous — the bus may have accepted the event and failed only on
+       * the response — so releasing the key would let a retry mint a second
+       * task while the accepted event still drives the first. Keeping it
+       * means a retry recovers this row and reports it failed: honest, and
+       * one task either way. The `queued -> planning` claim skips a task it
+       * finds already failed.
+       */
+      const startOrRelease = async (taskId: string): Promise<void> => {
+        try {
+          await deps.inngest.send({
+            name: codingTaskStart.name,
+            data: { taskId },
+            // Bus-level dedup, same `<verb>-<taskId>` shape as the
+            // orchestrators' `task-failed-` / `plan-approved-` emits. Minted
+            // per submission, so it can only collapse a re-send of this exact
+            // one. Pairs with the `queued -> planning` claim, which holds
+            // outside the bus's 24h dedup window.
+            id: `task-start-${taskId}`,
+          });
+        } catch (sendErr) {
+          await deps
+            .runInTx((tx) =>
+              deps.codingStore.updateTaskStatus(tx, {
+                id: taskId,
+                status: "failed",
+                failureReason: `inngest.send failed: ${(sendErr as Error).message}`,
+              }),
+            )
+            .catch((cleanupErr) => {
+              log.error(
+                { err: cleanupErr, taskId, sendErr },
+                "failed to mark task failed after inngest.send error — task is now orphaned",
+              );
+            });
+          throw sendErr;
+        }
+      };
+
       const repo = await deps.runInTx((tx) => deps.codingStore.getRepoByName(tx, input.repoName));
       if (!repo) {
         // The `skills` row is auto-managed (inserted by `ensureSkillsCodingRepo`
@@ -166,16 +221,10 @@ export function createCodingService(
         }
         // Still `queued`: the prior attempt died between the row committing
         // and its `inngest.send`, so nothing is driving this task. Re-emit —
-        // skipping would trade a duplicate for a permanent stall — and let a
-        // send failure propagate without marking the row failed, so the next
-        // attempt can still recover it. The re-send is absorbed twice over:
-        // `task-start-<taskId>` at the bus, and the `queued -> planning`
-        // transition past that window.
-        await deps.inngest.send({
-          name: codingTaskStart.name,
-          data: { taskId: prior.id },
-          id: `task-start-${prior.id}`,
-        });
+        // skipping would trade a duplicate for a permanent stall. The re-send
+        // is absorbed twice over: `task-start-<taskId>` at the bus, and the
+        // `queued -> planning` claim past that window.
+        await startOrRelease(prior.id);
         return { taskId: prior.id, status: "recovered", priorStatus: prior.status };
       }
       if (admit.kind === "rejected") {
@@ -192,55 +241,7 @@ export function createCodingService(
       // Hand off to the durable orchestrator. Once this event lands the
       // service has no further role — plan rendering, approval, execute,
       // and progress all happen out-of-band.
-      //
-      // If `inngest.send` fails after the row is in `queued`, the task
-      // would be orphaned: it permanently counts against
-      // `maxConcurrentTasks` (admission slot leak) and never progresses.
-      // Mark it failed before propagating so the row is in a terminal
-      // state and the slot frees up. The original send error is
-      // re-thrown so the caller knows the submission didn't take.
-      //
-      // Freshly admitted tasks only. The recovery branch returns before here
-      // precisely so this can stay unconditional: `updateTaskStatus` is an
-      // unguarded `UPDATE ... WHERE id`, and a recovered row may be mid-flight
-      // or already `pr_open`.
-      try {
-        await deps.inngest.send({
-          name: codingTaskStart.name,
-          data: { taskId: task.id },
-          // Bus-level dedup, same `<verb>-<taskId>` shape as the
-          // orchestrators' `task-failed-` / `plan-approved-` emits. Minted
-          // per submission, so it can only collapse a re-send of this exact
-          // one. Pairs with the `queued -> planning` transition, which holds
-          // outside the bus's 24h dedup window.
-          id: `task-start-${task.id}`,
-        });
-      } catch (sendErr) {
-        // The key stays on the row. A throw from `inngest.send` is
-        // ambiguous — the bus may have accepted the event and failed only on
-        // the response — so releasing the key would let a retry mint a second
-        // task while the accepted event still drives the first, which is the
-        // duplicate sandbox and duplicate PR this key exists to prevent.
-        // Keeping it means a retry recovers this row and reports it failed:
-        // honest, and one task either way. The row is terminal, so the
-        // admission slot frees regardless, and the orchestrator's
-        // `queued -> planning` claim skips a task it finds already failed.
-        await deps
-          .runInTx((tx) =>
-            deps.codingStore.updateTaskStatus(tx, {
-              id: task.id,
-              status: "failed",
-              failureReason: `inngest.send failed: ${(sendErr as Error).message}`,
-            }),
-          )
-          .catch((cleanupErr) => {
-            log.error(
-              { err: cleanupErr, taskId: task.id, sendErr },
-              "failed to mark task failed after inngest.send error — task is now orphaned",
-            );
-          });
-        throw sendErr;
-      }
+      await startOrRelease(task.id);
 
       log.info(
         { taskId: task.id, repo: repo.name, conversationId, goal: input.goal },

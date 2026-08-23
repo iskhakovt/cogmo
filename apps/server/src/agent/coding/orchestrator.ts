@@ -121,7 +121,12 @@ export interface CodingOrchestratorDeps {
 }
 
 export interface CodingOrchestratorResult {
-  /** `skipped` = a duplicate `coding/task/start`; the row was past `queued`. */
+  /**
+   * `skipped` covers two different outcomes, distinguishable in the logs:
+   * a duplicate `coding/task/start` that another run already claimed (nothing
+   * happened), and a task cancelled while `plan-cli` was streaming (the
+   * worktree, sandbox and askpass were reclaimed on the way out).
+   */
   status: "awaiting_approval" | "executing" | "failed" | "skipped";
   plan?: string;
   failureReason?: string;

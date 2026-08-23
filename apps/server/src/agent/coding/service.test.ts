@@ -287,6 +287,55 @@ describe("createCodingService", () => {
     expect(tasks).toHaveLength(1);
   });
 
+  it("frees the slot when the re-emit for a recovered `queued` row fails", async () => {
+    // The recovery path re-emits for a row nothing is driving. If that send
+    // throws, the row must not be left `queued`: it counts against
+    // `maxConcurrentTasks` (default 1, so the repo is blocked), no
+    // `inngest/function.failed` fires so reconcile never looks at it, and
+    // nothing retries with this key — `handle-message` converts every
+    // `tool-iter*` throw to `NonRetriableError`, and the model's own retry
+    // gets fresh coordinates and therefore a fresh key.
+    await seedRepo("cogmo", 1);
+    const repoId = await tx((trx) => store.getRepoByName(trx, "cogmo")).then(
+      (r) => expectDefined(r, "repo").id,
+    );
+    const key = "delegate_coding:inbound-9:beefbeefbeefbeef";
+    const stranded = await tx((trx) =>
+      store.insertOrRecoverTask(trx, {
+        repoId,
+        conversationId,
+        goal: "x".repeat(20),
+        triggerSource: "user",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+        idempotencyKey: key,
+      }),
+    );
+
+    const inngest = { send: vi.fn().mockRejectedValue(new Error("bus down")) };
+    const service = createCodingService(
+      {
+        runInTx: tx,
+        codingStore: store,
+        inngest: inngest as unknown as Inngest,
+        sandboxAvailable: true,
+      },
+      conversationId,
+    );
+
+    await expect(
+      service.delegate({ goal: "x".repeat(20), repoName: "cogmo", idempotencyKey: key }),
+    ).rejects.toThrow(/bus down/);
+
+    const reloaded = expectDefined(
+      await tx((trx) => store.getTask(trx, stranded.row.id)),
+      "recovered task",
+    );
+    expect(reloaded.status).toBe("failed");
+    // Terminal, so the repo's single admission slot is free again.
+    expect(await tx((trx) => store.countActiveTasksForRepo(trx, repoId))).toBe(0);
+  });
+
   it("keeps the idempotency key when a send failure fails the row", async () => {
     // A throw from `inngest.send` is ambiguous — the bus may have accepted the
     // event and failed only on the response. Releasing the key would let a
