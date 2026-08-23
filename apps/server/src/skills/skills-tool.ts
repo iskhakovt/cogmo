@@ -28,6 +28,10 @@ export const registerSkillTool: ToolSpec = defineTool({
     "must contain SKILL.md (manifest) + skill.py (entrypoint). On success the skill is live and " +
     "appears as its own tool on your next turn. Use after delegate_coding finishes a skill " +
     "authoring task.",
+  // Durable: registration compiles and deploys the skill (sandbox work +
+  // git state). Exactly-once per turn, not once per step boundary after
+  // the call.
+  durable: true,
   schema: RegisterSkillInput,
   handler: async ({ branch }, service) => {
     if (!service.skills) {

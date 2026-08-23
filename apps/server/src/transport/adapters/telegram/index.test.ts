@@ -679,6 +679,44 @@ describe("telegram adapter", () => {
       expect(mockBotApi.sendMessage).toHaveBeenCalledWith(42, "Hello");
     });
 
+    it("reuses the open handle when the same runId opens the stream again", async () => {
+      // Inngest re-invokes handle-message at every step boundary, and each
+      // re-invocation calls `deliveryRouter.prepare()` → `openStream()`
+      // again with the same runId. The #activeStreams map must hand back
+      // the SAME handle so replay pushes land in the one live Telegram
+      // message instead of opening a second bubble.
+      const adapter = await createStreamingAdapter();
+      const first = await adapter.openStream("42", "run-1");
+      await first.push({ type: "text_delta", text: "Hello" });
+
+      const second = await adapter.openStream("42", "run-1");
+      expect(second).toBe(first);
+
+      // Pushes through the re-opened reference keep editing the original
+      // message — exactly one sendMessage across both references.
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 600);
+      await second.push({ type: "text_delta", text: " again" });
+      expect(mockBotApi.sendMessage).toHaveBeenCalledTimes(1);
+      expect(mockBotApi.editMessageText).toHaveBeenCalledWith(42, 100, "Hello again");
+    });
+
+    it("opens a fresh handle for the same runId only after finish", async () => {
+      // finish() removes the runId from #activeStreams — a later open for
+      // the same id (a replay invocation after the stream closed) starts a
+      // new handle. Its buffer is empty, so unless something actually
+      // pushes, no new Telegram message is created.
+      const adapter = await createStreamingAdapter();
+      const first = await adapter.openStream("42", "run-1");
+      await first.push({ type: "text_delta", text: "done" });
+      await first.finish();
+
+      const second = await adapter.openStream("42", "run-1");
+      expect(second).not.toBe(first);
+      mockBotApi.sendMessage.mockClear();
+      await second.finish();
+      expect(mockBotApi.sendMessage).not.toHaveBeenCalled();
+    });
+
     it("subsequent pushes edit the message", async () => {
       const adapter = await createStreamingAdapter();
       const handle = await adapter.openStream("42", "run-1");

@@ -1108,7 +1108,13 @@ describe("tool durability (stepRun)", () => {
       handler: async () => "cheap-result",
     });
 
-    const stepRun = vi.fn<StepRunner>(async (_id, fn) => fn());
+    // `vi.fn<StepRunner>` can't carry StepRunner's generic signature, so
+    // record invocations by hand.
+    const stepRunIds: string[] = [];
+    const stepRun: StepRunner = async (id, fn) => {
+      stepRunIds.push(id);
+      return fn();
+    };
 
     await testRunAgentLoop({
       provider,
@@ -1117,7 +1123,7 @@ describe("tool durability (stepRun)", () => {
       stepRun,
     });
 
-    expect(stepRun).not.toHaveBeenCalled();
+    expect(stepRunIds).toEqual([]);
   });
 
   it("uses distinct step ids when the same durable tool is called twice", async () => {
@@ -1192,16 +1198,23 @@ describe("tool durability (stepRun)", () => {
       stepRun,
     });
 
-    expect(stepRunCalls).toEqual(["tool-iter1-0"]);
+    // Each LLM iteration is its own durable step, as is the iteration's
+    // tool_result emission, alongside the durable tool handler — see
+    // design/crash-recovery.md → Durable LLM iterations.
+    expect(stepRunCalls).toEqual([
+      "llm-iter1",
+      "tool-iter1-0",
+      "emit-tool-results-iter1",
+      "llm-iter2",
+    ]);
   });
 
   it("emits identical step ids across attempts even when the LLM mints different tool_use ids", async () => {
-    // Inngest replays the function from the top on retry; the streaming
-    // LLM call is non-durable, so each replay calls the provider fresh and
-    // gets fresh `tool_use_id`s. The durable step id must therefore not
-    // depend on the LLM-minted id — otherwise the planner can't match the
-    // cached step on attempt N+1 and the run fails with
-    // "Could not find step <hash> to run; timed out".
+    // A step id must never derive from model output. Fresh `tool_use_id`s
+    // appear whenever an LLM call re-runs — a crash mid-`llm-iter<N>` step,
+    // or this non-streaming loop, which has no iteration steps at all. An
+    // id keyed on them would miss the planner's pinned hash and fail the
+    // run with "Could not find step <hash> to run; timed out".
     function makeProvider(toolUseId: string) {
       return mockProvider([toolUseResponse("paid", toolUseId, { q: "hi" }), textResponse("done")]);
     }
@@ -1273,10 +1286,12 @@ describe("tool durability (stepRun)", () => {
 
     // Simulate Inngest's cache: stepRun returns a prior attempt's value
     // when the id matches, regardless of what the handler body would do.
-    const cache = new Map<string, string>([["tool-iter1-0", "contents-of-A"]]);
-    const stepRun: StepRunner = async (id, fn) => {
+    // The cache is untyped the way Inngest's own state store is — the
+    // cast to T mirrors the SDK handing back whatever JSON it stored.
+    const cache = new Map<string, unknown>([["tool-iter1-0", "contents-of-A"]]);
+    const stepRun: StepRunner = async <T>(id: string, fn: () => Promise<T>): Promise<T> => {
       const cached = cache.get(id);
-      if (cached !== undefined) return cached;
+      if (cached !== undefined) return cached as T;
       const fresh = await fn();
       cache.set(id, fresh);
       return fresh;
@@ -1302,6 +1317,369 @@ describe("tool durability (stepRun)", () => {
       // Cached content from attempt 0's read_a — the documented mismatch.
       content: "contents-of-A",
     });
+  });
+});
+
+describe("durable LLM iterations (stepRun)", () => {
+  /** Inngest-cache stand-in: cached ids resolve without running the body. */
+  function cachingStepRun(cache: Map<string, unknown>): {
+    stepRun: StepRunner;
+    calls: string[];
+  } {
+    const calls: string[] = [];
+    const stepRun: StepRunner = async <T>(id: string, fn: () => Promise<T>): Promise<T> => {
+      calls.push(id);
+      if (cache.has(id)) return cache.get(id) as T;
+      const fresh = await fn();
+      cache.set(id, fresh);
+      return fresh;
+    };
+    return { stepRun, calls };
+  }
+
+  it("serves a cached iteration without calling the provider or re-emitting", async () => {
+    // The core of the durable-iteration contract: on an Inngest replay the
+    // cached `llm-iter<N>` outcome must reproduce the iteration without a
+    // provider call (no re-billing) and without re-emitting stream events
+    // (no duplicate preambles on the user's screen).
+    const cache = new Map<string, unknown>([
+      [
+        "llm-iter1",
+        {
+          kind: "drained",
+          content: [{ type: "text", text: "Hello world" }],
+          stopReason: "end_turn",
+          model: "mock-model",
+          usage: { inputTokens: 10, outputTokens: 5 },
+          repaired: null,
+          emitted: { text: "Hello world", toolUseIds: [] },
+        },
+      ],
+    ]);
+    const { stepRun } = cachingStepRun(cache);
+    const chatStream = vi.fn(() => {
+      throw new Error("provider must not be called for a cached iteration");
+    });
+    const provider: LlmProvider = {
+      name: "mock",
+      chat: vi.fn(),
+      chatStream,
+      countTokens: vi.fn(),
+    };
+    const collected: StreamEvent[] = [];
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+      stepRun,
+    });
+
+    expect(chatStream).not.toHaveBeenCalled();
+    expect(collected).toEqual([]);
+    expect(result.text).toBe("Hello world");
+    // The ledger comes from the cached outcome, not from live emission.
+    expect(result.streamed).toEqual({ text: "Hello world", toolUseIds: [] });
+  });
+
+  it("returns a cached degrade outcome without calling the provider", async () => {
+    const cache = new Map<string, unknown>([
+      [
+        "llm-iter1",
+        {
+          kind: "degrade",
+          reason: "model refused the request",
+          subtype: "refusal",
+          emitted: { text: "partial", toolUseIds: [] },
+        },
+      ],
+    ]);
+    const { stepRun } = cachingStepRun(cache);
+    const chatStream = vi.fn(() => {
+      throw new Error("provider must not be called for a cached iteration");
+    });
+    const provider: LlmProvider = {
+      name: "mock",
+      chat: vi.fn(),
+      chatStream,
+      countTokens: vi.fn(),
+    };
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+      onEvent: async () => {},
+      stepRun,
+    });
+
+    expect(chatStream).not.toHaveBeenCalled();
+    expect(result.degraded).toEqual({ reason: "model refused the request", subtype: "refusal" });
+    // The degrade's pre-throw emission feeds the ledger so the
+    // orchestrator's retraction still names it on a replay.
+    expect(result.streamed).toEqual({ text: "partial", toolUseIds: [] });
+  });
+
+  it("reports the streamed ledger from live iterations", async () => {
+    const provider = mockStreamProvider([
+      {
+        events: [
+          { type: "text_delta", text: "Let me check. " },
+          { type: "tool_start", id: "t1", name: "echo", input: { text: "hi" } },
+        ],
+        stopReason: "tool_use",
+      },
+      { events: [{ type: "text_delta", text: "Done." }], stopReason: "end_turn" },
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echo",
+        schema: z.object({ text: z.string() }),
+        handler: async (input) => `pong from ${input.text}`,
+      }),
+    );
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      onEvent: async () => {},
+    });
+
+    expect(result.streamed).toEqual({ text: "Let me check. Done.", toolUseIds: ["t1"] });
+  });
+
+  it("suppresses tool_result re-emission when the iteration's emission step is cached", async () => {
+    // Replay shape: iteration 1's drain, its durable tool, AND the
+    // iteration's emission step are all cached; iteration 2 runs live. No
+    // tool_result event may re-reach the delivery layer (a generate_image
+    // card would re-send its photo), while the live iteration streams
+    // normally.
+    const cache = new Map<string, unknown>([
+      [
+        "llm-iter1",
+        {
+          kind: "drained",
+          content: [{ type: "tool_use", id: "toolu_1", name: "paid", input: {} }],
+          stopReason: "tool_use",
+          model: "mock-model",
+          usage: { inputTokens: 10, outputTokens: 5 },
+          repaired: null,
+          emitted: { text: "", toolUseIds: ["toolu_1"] },
+        },
+      ],
+      ["tool-iter1-0", "cached-tool-output"],
+      ["emit-tool-results-iter1", null],
+    ]);
+    const { stepRun } = cachingStepRun(cache);
+    const handler = vi.fn().mockResolvedValue("fresh-tool-output");
+    const tools = new ToolRegistry();
+    tools.register({
+      name: "paid",
+      description: "expensive",
+      inputSchema: { type: "object" },
+      durable: true,
+      handler,
+    });
+    // Only iteration 2 streams live.
+    const provider = mockStreamProvider([
+      { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+    const collected: StreamEvent[] = [];
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+      stepRun,
+    });
+
+    expect(handler).not.toHaveBeenCalled();
+    // No tool_result event re-emitted for the cached iteration; the live
+    // iteration's text still streams.
+    expect(collected).toEqual([{ type: "text_delta", text: "done" }]);
+    // The cached tool output still reaches the transcript.
+    const toolTurn = expectDefined(result.newMessages[1], "tool_result turn");
+    expect(toolTurn.content).toEqual([
+      { type: "tool_result", toolUseId: "toolu_1", content: "cached-tool-output" },
+    ]);
+    expect(result.text).toBe("done");
+  });
+
+  it("delivers tool_result events for durable tools executed via parallel fan-out", async () => {
+    // Inngest refuses in-request execution when a Promise.all group plans
+    // two or more steps (engine getEarlyExecRunStep: exactly one
+    // unfulfilled step) — each body runs in a targeted request whose
+    // continuation never reaches the emission code, and the first
+    // invocation to get past the Promise.all has every tool step
+    // memoized. That invocation is the ONLY one that can deliver the
+    // events, so the emission step (not yet cached) must emit there — an
+    // emission gated on "did the handler body run in this invocation"
+    // would drop the events forever.
+    const cache = new Map<string, unknown>([
+      [
+        "llm-iter1",
+        {
+          kind: "drained",
+          content: [
+            { type: "tool_use", id: "toolu_a", name: "paid", input: { q: "a" } },
+            { type: "tool_use", id: "toolu_b", name: "paid", input: { q: "b" } },
+          ],
+          stopReason: "tool_use",
+          model: "mock-model",
+          usage: { inputTokens: 10, outputTokens: 5 },
+          repaired: null,
+          emitted: { text: "", toolUseIds: ["toolu_a", "toolu_b"] },
+        },
+      ],
+      ["tool-iter1-0", "result-a"],
+      ["tool-iter1-1", "result-b"],
+    ]);
+    const { stepRun } = cachingStepRun(cache);
+    const handler = vi.fn().mockResolvedValue("fresh");
+    const tools = new ToolRegistry();
+    tools.register({
+      name: "paid",
+      description: "expensive",
+      inputSchema: { type: "object" },
+      durable: true,
+      parallelSafe: true,
+      handler,
+    });
+    const provider = mockStreamProvider([
+      { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+    const collected: StreamEvent[] = [];
+
+    await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+      stepRun,
+    });
+
+    expect(handler).not.toHaveBeenCalled();
+    const toolResults = collected.filter((e) => e.type === "tool_result");
+    expect(toolResults).toEqual([
+      { type: "tool_result", name: "paid", output: "result-a" },
+      { type: "tool_result", name: "paid", output: "result-b" },
+    ]);
+  });
+
+  it("does not re-emit a non-durable tool_result when the emission step is cached", async () => {
+    // Non-durable handlers re-execute on every invocation by design, but
+    // their tool_result events must not re-reach the delivery layer — the
+    // web adapter forwards every frame, so a bare-body emission would
+    // duplicate the card once per re-invocation.
+    const cache = new Map<string, unknown>([
+      [
+        "llm-iter1",
+        {
+          kind: "drained",
+          content: [{ type: "tool_use", id: "toolu_1", name: "echo", input: { text: "hi" } }],
+          stopReason: "tool_use",
+          model: "mock-model",
+          usage: { inputTokens: 10, outputTokens: 5 },
+          repaired: null,
+          emitted: { text: "", toolUseIds: ["toolu_1"] },
+        },
+      ],
+      ["emit-tool-results-iter1", null],
+    ]);
+    const { stepRun } = cachingStepRun(cache);
+    const handler = vi.fn(async (input: { text: string }) => `pong from ${input.text}`);
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echo",
+        schema: z.object({ text: z.string() }),
+        handler,
+      }),
+    );
+    const provider = mockStreamProvider([
+      { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+    const collected: StreamEvent[] = [];
+
+    await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+      stepRun,
+    });
+
+    // The handler genuinely re-ran (at-least-once by design)...
+    expect(handler).toHaveBeenCalledTimes(1);
+    // ...but its event did not re-reach the delivery layer.
+    expect(collected).toEqual([{ type: "text_delta", text: "done" }]);
+  });
+
+  it("recomputes repair budgets deterministically from cached outcomes", async () => {
+    // Attempt 0 consumed the single stream_truncation budget inside
+    // llm-iter1 (cached outcome says `repaired`). On replay the loop must
+    // decrement the budget from the cache so a live iteration 2 hitting
+    // another ProviderProtocolError degrades instead of repairing again —
+    // budget state diverging between attempts would change the step graph
+    // and kill the run with step-not-found.
+    const cache = new Map<string, unknown>([
+      [
+        "llm-iter1",
+        {
+          kind: "drained",
+          content: [{ type: "tool_use", id: "toolu_1", name: "echo", input: { text: "hi" } }],
+          stopReason: "tool_use",
+          model: "mock-model",
+          usage: { inputTokens: 10, outputTokens: 5 },
+          repaired: "stream_truncation",
+          emitted: { text: "", toolUseIds: ["toolu_1"] },
+        },
+      ],
+    ]);
+    const { stepRun } = cachingStepRun(cache);
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echo",
+        schema: z.object({ text: z.string() }),
+        handler: async (input) => `pong from ${input.text}`,
+      }),
+    );
+    const protocolErr = new ProviderProtocolError(
+      "tool args failed to parse",
+      new SyntaxError("bad json"),
+    );
+    const { provider, chatCalls } = repairStreamProvider([{ kind: "throw", error: protocolErr }]);
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      onEvent: async () => {},
+      stepRun,
+    });
+
+    expect(result.degraded).toEqual({
+      reason: "streamed tool-call arguments could not be parsed",
+      subtype: "stream_truncation",
+    });
+    // No non-streaming replay attempted — the budget was already spent.
+    expect(chatCalls).toHaveLength(0);
   });
 });
 

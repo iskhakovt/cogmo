@@ -22,18 +22,22 @@ export interface ToolSpec {
   inputSchema: JsonSchema;
   handler: ToolHandler;
   /**
-   * Opt-in durability for this tool's handler execution.
+   * Durability for this tool's handler execution.
    *
    * When `true` AND a `StepRunner` is provided to the agent loop, the handler
-   * runs inside `step.run()` so the result is cached exactly-once across
-   * Inngest retries. Intended for expensive or billable side effects
-   * (image generation, paid web search, etc.) where re-execution on retry
-   * would re-bill or re-upload. Cheap/idempotent tools (memory reads, time,
-   * file I/O) should leave this unset — retrying them is free and avoids
-   * the overhead of a step state entry.
+   * runs inside `step.run()` so it executes exactly once per turn and the
+   * result replays from the Inngest step cache. Policy: **side-effectful or
+   * billable ⇒ `true`.** Inngest re-invokes the whole function at every step
+   * boundary on success, so a non-durable handler re-executes once per
+   * remaining boundary of the turn — a DB-writing tool inserts duplicates, a
+   * paid API re-bills, a non-idempotent mutation flips its recorded result.
+   * Leave unset ONLY for cheap idempotent reads whose output may be large or
+   * is trivially recomputed (`read_file`, `list_*`, `current_time`); their
+   * persisted tool_result is whatever the last invocation returned.
    *
    * No effect when `StepRunner` is not provided (e.g. unit tests, agent loops
-   * running outside Inngest). See `design/crash-recovery.md`.
+   * running outside Inngest). See `design/crash-recovery.md` → Tool
+   * durability policy.
    */
   durable?: boolean;
   /**

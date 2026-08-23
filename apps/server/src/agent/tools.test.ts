@@ -305,3 +305,46 @@ describe("createDefaultTools", () => {
     expect(registry.definitions()).toHaveLength(4);
   });
 });
+
+describe("durability policy invariant", () => {
+  // Side-effectful or billable ⇒ durable. Inngest re-invokes the whole
+  // function at every step boundary, so a non-durable side-effectful
+  // handler re-executes once per remaining boundary of the turn — the bug
+  // class design/crash-recovery.md → Tool durability policy exists to
+  // prevent. This sweeps every statically-constructible built-in spec so a
+  // forgotten flag on a new tool fails loudly instead of shipping on
+  // comment discipline. (Factory-built sets — image tools, skill tools,
+  // sub-agent tools, MCP tools — carry the flag in their builders, asserted
+  // in their own test files.)
+  it("every side-effectful built-in tool is durable", async () => {
+    const { memoryTools } = await import("./memory-tools.js");
+    const { fileTools } = await import("./file-tools.js");
+    const { coreMemoryTools } = await import("./core-memory-tools.js");
+    const { schedulingTools } = await import("./scheduling/tools.js");
+    const { pipelineTools } = await import("./pipeline/tools.js");
+    const { delegateCodingTool } = await import("./coding/tool.js");
+    const { registerSkillTool } = await import("../skills/skills-tool.js");
+    const { createWebTools } = await import("./web-tools.js");
+    const { createDocumentTools } = await import("./document-tools.js");
+    const specs = [
+      ...memoryTools,
+      ...fileTools,
+      ...coreMemoryTools,
+      ...schedulingTools,
+      ...pipelineTools,
+      delegateCodingTool,
+      registerSkillTool,
+      ...createWebTools("tavily-key", "openrouter-key"),
+      ...createDocumentTools({
+        upload: async () => "path",
+        download: async () => Buffer.from(""),
+      }),
+      ...createDefaultTools().snapshot(),
+    ];
+    expect(specs.length).toBeGreaterThan(15);
+    const violations = specs
+      .filter((spec) => (spec.sideEffectful ?? true) && spec.durable !== true)
+      .map((spec) => spec.name);
+    expect(violations).toEqual([]);
+  });
+});

@@ -185,9 +185,9 @@ Future: if per-observation precision matters (rule graduated from mixed channels
 
 ## Crash Recovery `[confirmed]`
 
-Inngest durable steps checkpoint between boundaries; on retry, cached steps replay from state without re-executing their bodies. The streaming section of `handle-message` is intentionally non-durable (you can't stream out of `step.run`) and re-executes on every retry — this is a deliberate tradeoff.
+Inngest re-invokes the whole function at every step boundary (on success, not just retry); cached steps replay from state without re-executing their bodies. In `handle-message`, every expensive or user-visible unit inside the streaming section is itself a durable step — each LLM iteration (`llm-iter<N>`, which streams tokens live from inside its body and is suppressed on replay), each durable tool handler (`tool-iter<N>-<P>`), the degraded-reply off-ramp, and auto-recall. Only cheap deterministic glue re-executes per invocation.
 
-See [crash-recovery.md](crash-recovery.md) for the full durability map of `handle-message`, the per-tool re-execution table, the streaming dedup story, and the test contract.
+See [crash-recovery.md](crash-recovery.md) for the full durability map of `handle-message`, the tool durability policy, the streaming dedup story, and the test contract.
 
 ## Activity-Based Timeouts `[proposed]`
 
