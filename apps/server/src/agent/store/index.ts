@@ -1156,11 +1156,6 @@ export interface AgentStore {
       enabled: boolean;
       catchupMissed: boolean;
       source: ScheduleSource;
-      /**
-       * When set, the insert is idempotent against
-       * `uniq_scheduled_tasks_idempotency_key`: a second call with the same
-       * key returns the original row instead of scheduling a second fire.
-       */
     },
   ): Promise<ScheduledTask>;
 

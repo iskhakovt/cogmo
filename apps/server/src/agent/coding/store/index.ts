@@ -215,6 +215,17 @@ export interface CodingStore {
    */
   getTaskByIdempotencyKey(tx: Transaction, key: string): Promise<CodingTaskRow | undefined>;
 
+  /**
+   * Fail a task that is still `queued`, reporting whether it fired.
+   *
+   * For the submitter cleaning up after its own `inngest.send` threw. That
+   * throw is ambiguous — the bus may have accepted the event and failed only
+   * on the response — so by the time the cleanup runs an orchestrator may
+   * already have claimed the row and started work. Gating on `queued` means
+   * the cleanup can only ever fail a task nobody owns.
+   */
+  failQueuedTask(tx: Transaction, id: string, failureReason: string): Promise<boolean>;
+
   /** List tasks for a conversation, ordered by createdAt DESC (newest first). */
   listTasksForConversation(
     tx: Transaction,
@@ -527,6 +538,15 @@ export class DrizzleCodingStore implements CodingStore {
       .returning({ ...getTableColumns(codingTasks), inserted: sql<boolean>`(xmax = 0)` });
     const { inserted, ...row } = single(rows);
     return { kind: inserted ? "new" : "recovered", row };
+  }
+
+  async failQueuedTask(tx: Transaction, id: string, failureReason: string): Promise<boolean> {
+    const updated = await tx
+      .update(codingTasks)
+      .set({ status: "failed", failureReason })
+      .where(and(eq(codingTasks.id, id), eq(codingTasks.status, "queued")))
+      .returning({ id: codingTasks.id });
+    return updated.length > 0;
   }
 
   async getTaskByIdempotencyKey(tx: Transaction, key: string): Promise<CodingTaskRow | undefined> {

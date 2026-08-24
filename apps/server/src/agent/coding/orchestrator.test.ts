@@ -536,7 +536,7 @@ describe("runCodingTask", () => {
     expect(sentEvents.find((e) => e.name === "coding/task/plan-approved")).toBeUndefined();
   });
 
-  it("autoapprove=on race: concurrent cancel between set-status-awaiting and auto-approve wins, no plan-approved emit", async () => {
+  it("autoapprove=on race: concurrent cancel between set-status-plan-ready and auto-approve wins, no plan-approved emit", async () => {
     // Pins the race-safe contract from the design doc: if the user taps
     // Cancel after the plan finalizes but before the auto-approve step
     // commits, `approvePlanIfPending` observes `status != awaiting_approval`
@@ -1416,6 +1416,41 @@ describe("runCodingExecute", () => {
     expect(skipped.status).toBe("skipped");
     expect(other.createCalls).toHaveLength(0);
     expect((await tx((trx) => store.getTask(trx, theirs.task.id)))?.status).toBe("executing");
+  });
+
+  it("moved forward during plan-cli: stops without touching another run's resources", async () => {
+    // The plan-ready branch fires for any status that isn't its target, and
+    // it is destructive. A task that ENDED has no owner, so reclaiming its
+    // worktree and container is right. A task that moved FORWARD does — the
+    // auto-approve path hands off to execute, which claims `executing` and
+    // works on those very resources — and tearing them down kills it
+    // mid-CLI. Only the first may release anything.
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox, stopCalls } = fakeSandbox();
+    const backend: CodingBackend = {
+      plan: async function* () {
+        yield { kind: "session_started", sessionId: "sess-A" };
+        // Execute claims the task while the plan session is still streaming.
+        await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "executing" }));
+        yield { kind: "plan_ready", plan: "## Plan" };
+        yield { kind: "complete", exitCode: 0, isError: false };
+      },
+      execute: () => throwingPlan("execute not used in this test"),
+    };
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({ sandbox, backend }),
+      stepRun,
+      stepSendEvent,
+    });
+
+    expect(result.status).toBe("skipped");
+    // The live run's container is untouched.
+    expect(stopCalls).toEqual([]);
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("executing");
   });
 
   it("cancelled during plan-cli: tears down, keeps `cancelled`, survives a teardown blip", async () => {

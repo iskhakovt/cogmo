@@ -567,18 +567,36 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     // old `set-status-awaiting` memoized `void`, and replaying that `null`
     // here would TypeError inside the try and take the catch's destructive
     // path over a plan that had already completed.
-    // Not an ownership claim — the run already holds the task — so a `stale`
-    // at the target here can only be this step re-executing after a lost
-    // result. Anything else means the task left `planning` under us (a
-    // cancel), which the branch below handles.
+    //
+    // No `runId`: this is not an ownership claim (the run already holds the
+    // task), and supplying one is what widens the store's predicate to adopt
+    // an unclaimed row at the target — semantics this step doesn't want.
     const awaiting = await stepRun("set-status-plan-ready", () =>
-      runInTx((tx) => store.transitionTaskStatus(tx, taskId, "planning", nextStatus, runId)),
+      runInTx((tx) => store.transitionTaskStatus(tx, taskId, "planning", nextStatus)),
     );
+    // `stale` at the target is this step re-executing after a lost result —
+    // carry on. Anything else means the task left `planning` under us, and
+    // what to do next depends on where it went, not merely that it moved:
+    // a task that ENDED (cancelled, or failed by the catch of a sibling run)
+    // has no owner, so this run reclaims the worktree and container it
+    // allocated. A task that moved FORWARD — the auto-approve path hands off
+    // to execute, which claims `executing` — is being actively worked by
+    // another run on those very resources, and tearing them down would kill
+    // it mid-CLI.
+    const ended =
+      awaiting.kind === "stale" &&
+      (awaiting.status === "cancelled" || awaiting.status === "failed");
     if (
       awaiting.kind !== "transitioned" &&
       !(awaiting.kind === "stale" && awaiting.status === nextStatus)
     ) {
-      taskLog.info({ awaiting }, "plan: task left `planning` mid-session (cancelled?) — stopping");
+      taskLog.info({ awaiting, ended }, "plan: task left `planning` mid-session — stopping");
+      if (!ended) {
+        // Moved on under another run's ownership (or the row is gone). Its
+        // resources are not ours to reclaim; the sandbox reaper is the
+        // backstop if nobody ends up owning them.
+        return { status: "skipped" };
+      }
       // Returning from inside the try skips the catch, which is what does the
       // cleanup — so do it here. The plan phase has by now allocated a
       // worktree, created a container and (on git-remote) provisioned
@@ -634,7 +652,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     // Auto-approve: same effect as the Telegram approve callback. Uses
     // `approvePlanIfPending` so the path is atomic with concurrent
     // cancels/manual approvals — if the user managed to tap Cancel in the
-    // microseconds between `set-status-awaiting` and this step, the
+    // microseconds between `set-status-plan-ready` and this step, the
     // approve becomes a no-op and the task stays cancelled.
     if (willAutoApprove) {
       // Generate `approvedAt` INSIDE the step so the cached return on a
@@ -939,9 +957,6 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   const repo = await runInTx((tx) => store.getRepoById(tx, task.repoId));
   if (!repo) throw new Error(`coding repo not found: ${task.repoId}`);
 
-  if (!task.planApprovedAt) {
-    throw new Error(`coding task ${taskId} has no plan_approved_at — execute fired prematurely`);
-  }
   // No bare-body status guard here — `set-status-executing`'s conditional
   // UPDATE is the durable form of that check (see the `transition.kind`
   // branch). The three checks that remain read fields the PLAN phase owns
@@ -1001,6 +1016,9 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   // Below the claim on purpose: these read fields the PLAN phase owns, and a
   // throw here fails the function, which sends `coding-task-reconcile` at a
   // row that — before the claim — this run has no title to.
+  if (!task.planApprovedAt) {
+    throw new Error(`coding task ${taskId} has no plan_approved_at — execute fired prematurely`);
+  }
   if (!sessionId) {
     throw new Error(`coding task ${taskId} has no session_id — plan phase didn't capture it`);
   }

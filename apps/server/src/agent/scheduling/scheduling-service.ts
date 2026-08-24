@@ -139,6 +139,16 @@ export function createSchedulingService(deps: SchedulingServiceDeps): Scheduling
         const prior = await deps.runInTx((tx) =>
           deps.agentStore.getScheduledTaskByIdempotencyKey(tx, idempotencyKey),
         );
+        // Scoped like every other read in this service. The key embeds a
+        // conversation-scoped inbound id so a cross-user collision would mean
+        // the key space is broken, but resting the invariant on how callers
+        // build keys is how it stops holding later.
+        if (prior && prior.userId !== deps.userId) {
+          throw new Error(
+            `idempotency key ${idempotencyKey} resolves to another user's schedule — ` +
+              "key space collision",
+          );
+        }
         if (prior) return ok({ id: prior.id, nextRunAt: prior.nextRunAt });
       }
       // Prompt-length cap — defence in depth (the tool schema enforces

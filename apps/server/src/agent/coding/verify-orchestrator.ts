@@ -540,10 +540,13 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
 }
 
 async function readHeadSha(container: Pick<SandboxSession, "execStreaming">): Promise<string> {
-  // Same caps `runGit` puts on the identical command in `commit-push.ts`.
-  // design/coding-delegation.md → Per-callsite exec timeouts requires every
-  // orchestrator exec to carry both, and this one now runs inside a durable
-  // step where a half-closed transport would hang the run past its lease.
+  // Same caps `runGit` puts on the identical command in `commit-push.ts`,
+  // per design/coding-delegation.md → Per-callsite exec timeouts. It matters
+  // more here than it did: the call now runs inside a durable step, where a
+  // half-closed transport hangs the run past its lease. (`run-verify` is the
+  // one exec without them, a documented carve-out — it races its own
+  // `verify_timeout_seconds` cap instead, and an idle cap there is tracked
+  // as a `p3`.)
   const handle = await container.execStreaming(["git", "rev-parse", "HEAD"], {
     workingDir: WORKTREE_DIR_IN_CONTAINER,
     timeoutMs: 60_000,

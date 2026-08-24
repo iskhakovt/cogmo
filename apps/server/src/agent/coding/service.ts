@@ -122,14 +122,27 @@ export function createCodingService(
             id: `task-start-${taskId}`,
           });
         } catch (sendErr) {
+          // Gated on `queued`, because the throw is ambiguous: the bus may
+          // have accepted the event and failed only on the response, in which
+          // case an orchestrator has already claimed this row and is working
+          // on it. An unguarded write would fail a live run — or corrupt a
+          // finished one — over a transport blip.
           await deps
             .runInTx((tx) =>
-              deps.codingStore.updateTaskStatus(tx, {
-                id: taskId,
-                status: "failed",
-                failureReason: `inngest.send failed: ${(sendErr as Error).message}`,
-              }),
+              deps.codingStore.failQueuedTask(
+                tx,
+                taskId,
+                `inngest.send failed: ${(sendErr as Error).message}`,
+              ),
             )
+            .then((freed) => {
+              if (!freed) {
+                log.info(
+                  { taskId, sendErr },
+                  "send reported failure but the task had already been claimed — left alone",
+                );
+              }
+            })
             .catch((cleanupErr) => {
               log.error(
                 { err: cleanupErr, taskId, sendErr },
@@ -177,7 +190,20 @@ export function createCodingService(
       const admit = await deps.runInTx(async (tx) => {
         if (input.idempotencyKey !== undefined) {
           const prior = await deps.codingStore.getTaskByIdempotencyKey(tx, input.idempotencyKey);
-          if (prior) return { kind: "recovered" as const, task: prior };
+          if (prior) {
+            // Scope check, not a guard against a case we expect: the key
+            // embeds a conversation-scoped inbound id, so a cross-repo
+            // collision would mean the key space itself is broken. Every
+            // other read here is scoped; resting this one on key
+            // construction alone is how that stops being true later.
+            if (prior.repoId !== repo.id) {
+              throw new Error(
+                `idempotency key ${input.idempotencyKey} resolves to a task on a different repo ` +
+                  `(${prior.repoId} vs ${repo.id}) — key space collision`,
+              );
+            }
+            return { kind: "recovered" as const, task: prior };
+          }
         }
         const active = await deps.codingStore.countActiveTasksForRepo(tx, repo.id);
         if (active >= repo.maxConcurrentTasks) {
