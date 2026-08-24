@@ -65,7 +65,7 @@ const RULES: readonly RulePattern[] = [
     // `parse as request`) is left alone: `import a, http.client`, `from
     // http.client import X`, and `from http import client`.
     pattern:
-      /^[ \t]*(?:import[ \t]+(?:[\w. \t]+,[ \t]*)*(?:urllib\.request|http\.client|ftplib|smtplib|telnetlib|poplib|imaplib)\b|from[ \t]+(?:urllib\.request|http\.client|ftplib|smtplib|telnetlib|poplib|imaplib)[ \t]+import\b|from[ \t]+(?:urllib|http)[ \t]+import[ \t]+(?:[\w. \t]*,[ \t]*)?(?:request|client)\b)/m,
+      /^[ \t]*(?:import[ \t]+(?:[\w. \t]+,[ \t]*)*(?:urllib\.request|http\.client|ftplib|smtplib|telnetlib|poplib|imaplib)\b|from[ \t]+(?:urllib\.request|http\.client|ftplib|smtplib|telnetlib|poplib|imaplib)[ \t]+import\b|from[ \t]+(?:urllib|http)[ \t]+import[ \t]+(?:[\w. \t]+,[ \t]*)*(?:request|client)\b)/m,
     reason:
       "stdlib networking has no socket underneath it in tier-1 (WASM); use `await ctx.http.get(url)`, or declare tier: container to use httpx",
   },
@@ -77,7 +77,7 @@ const RULES: readonly RulePattern[] = [
     // dependencies and runs them for real — the lint only sees wasm.
     name: "third_party_http",
     pattern:
-      /^[ \t]*(?:import[ \t]+(?:[\w. \t]+,[ \t]*)*(?:httpx|requests|urllib3|aiohttp|websockets)\b|from[ \t]+(?:httpx|requests|urllib3|aiohttp|websockets)[ \t]+import\b)/m,
+      /^[ \t]*(?:import[ \t]+(?:[\w. \t]+,[ \t]*)*(?:httpx|requests|urllib3|aiohttp|websockets)\b|from[ \t]+(?:httpx|requests|urllib3|aiohttp|websockets)(?:\.[\w.]+)?[ \t]+import\b)/m,
     reason:
       "httpx / requests need sockets, which tier-1 (WASM) does not have; use `await ctx.http.get(url)`, or declare tier: container",
   },

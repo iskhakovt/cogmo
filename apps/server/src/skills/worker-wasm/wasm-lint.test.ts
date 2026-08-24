@@ -70,6 +70,11 @@ def run(inputs, ctx):
     ["from urllib import (  # noqa\n    request,\n)\n"],
     ["from http import (\n    HTTPStatus,  # status codes\n    client,\n)\n"],
     ["from http import (\n    client,\n    HTTPStatus,\n)\n"],
+    // More than one ordinary name ahead of the networking one — the shape a
+    // skill takes when it parses URLs as well as fetching them.
+    ["from urllib import parse, error, request\n"],
+    ["from urllib import a, b, c, request\n"],
+    ["from http import HTTPStatus, cookies, client\n"],
   ])("rejects the stdlib network module in %j", (body) => {
     const r = lintWasmCompat(body);
     expect(r.isErr()).toBe(true);
@@ -246,6 +251,10 @@ def run(inputs, ctx):
       ["import json, requests\n"],
       ["import urllib3\n"],
       ["import aiohttp\n"],
+      // Submodule form; the package is what needs the socket either way.
+      ["from requests.sessions import Session\n"],
+      ["from httpx._client import Client\n"],
+      ["import requests.sessions\n"],
     ])("rejects %j, which needs sockets tier 1 lacks", (body) => {
       const r = lintWasmCompat(body);
       expect(r.isErr()).toBe(true);

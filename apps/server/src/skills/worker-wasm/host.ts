@@ -6,10 +6,6 @@ import { DEFAULT_WALL_CLOCK_S } from "../wall-clock.js";
 
 const log = logger.child({ component: "skills.worker.wasm" });
 
-/** Default wall-clock cap for tier-1 skills (`design/skills.md` Resource budgets). */
-/**
-
-
 /** Grace window after firing the SAB interrupt before hard-terminating the worker. */
 const TERMINATE_GRACE_MS = 1000;
 
