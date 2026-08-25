@@ -1,0 +1,36 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Create a skill called btc-spot that fetches the current bitcoin USD price from coingecko (https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd) and returns { price: <number> }. Fetch it with `await ctx.http.get(url)`, which returns a dict with 'status' and 'body' — parse the body with json.loads. Do NOT use urllib or any third-party HTTP library, do NOT declare dependencies in SKILL.md, do NOT create a requirements.lock file.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 2,
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "Hi! I'm your AI assistant — I handle scheduling, research, memory, files, and now I can also build small custom tools (\"skills\") for you.\n\nI've submitted the **btc-spot** skill task to Claude Code — it'll fetch BTC/USD from CoinGecko via `ctx.http.get`, no third-party deps, no requirements.lock. The plan and approval prompt will show up as a separate message shortly; I'll let you know once it's ready to review, and I'll register it live once you approve and it's built.\n\nWhile that's cooking — since this is our first conversation, I'd like to get to know you a bit: what's your name, what do you do, what timezone are you in, and do you prefer quick/concise replies or more detailed ones?"
+      },
+      "recordedTimings": {
+        "ttftMs": 1541,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          549,
+          543,
+          542,
+          545,
+          501,
+          0,
+          8,
+          1
+        ],
+        "totalDurationMs": 4230
+      },
+      "metadata": {
+        "systemHash": "838c11ad",
+        "toolsHash": "f0e908fd"
+      }
+    }
+  ]
+}

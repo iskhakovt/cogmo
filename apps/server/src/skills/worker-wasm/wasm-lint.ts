@@ -46,7 +46,46 @@ const RULES: readonly RulePattern[] = [
   {
     name: "raw_socket",
     pattern: /^[ \t]*(?:import[ \t]+socket|from[ \t]+socket[ \t]+import)\b/m,
-    reason: "raw sockets are not available in tier-1 (WASM); use HTTP via httpx/requests",
+    reason: "raw sockets are not available in tier-1 (WASM); use `await ctx.http.get(url)`",
+  },
+  {
+    // The stdlib HTTP clients are the ones a dependency-free skill
+    // actually reaches for, and they fail at first use rather than at
+    // import: they load fine and then find no socket underneath. Without
+    // a rule here the skill deploys clean and breaks on invocation, which
+    // is the outcome this lint exists to prevent.
+    name: "stdlib_network",
+    // Only the modules that open a connection. `urllib.parse` is string
+    // manipulation and `urllib.error` is exception classes — both are
+    // fine here and common, so the rule names `urllib.request` rather
+    // than the package. A bare `import urllib` cannot reach the network
+    // either, since the submodule has to be imported to be used.
+    // Three shapes, each matching only at a name position so a longer
+    // name that merely ends in one of these (`mypkg.smtplib`, an alias
+    // `parse as request`) is left alone: `import a, http.client`, `from
+    // http.client import X`, and `from http import client`.
+    //
+    // The pre-name group spells the alias form out rather than folding
+    // spaces into the name class. A class matching whitespace next to a
+    // trailing `[ \t]*` lets the engine split one run of tabs between the
+    // two in exponentially many ways, and a body of `\t\t,` repeats then
+    // stalls the register call it is supposed to guard.
+    pattern:
+      /^[ \t]*(?:import[ \t]+(?:[\w.]+(?:[ \t]+as[ \t]+[\w.]+)?[ \t]*,[ \t]*)*(?:urllib\.request|http\.client|ftplib|smtplib|telnetlib|poplib|imaplib)\b|from[ \t]+(?:urllib\.request|http\.client|ftplib|smtplib|telnetlib|poplib|imaplib)[ \t]+import\b|from[ \t]+(?:urllib|http)[ \t]+import[ \t]+(?:[\w.]+(?:[ \t]+as[ \t]+[\w.]+)?[ \t]*,[ \t]*)*(?:request|client)\b)/m,
+    reason:
+      "stdlib networking has no socket underneath it in tier-1 (WASM); use `await ctx.http.get(url)`, or declare tier: container to use httpx",
+  },
+  {
+    // The third-party HTTP clients sit on sockets exactly as the stdlib
+    // ones do, and they are what an author reaches for first. Both
+    // authoring prompts tell the model these are rejected at register
+    // time; this rule is what makes that true. Tier 2 declares them as
+    // dependencies and runs them for real — the lint only sees wasm.
+    name: "third_party_http",
+    pattern:
+      /^[ \t]*(?:import[ \t]+(?:[\w.]+(?:[ \t]+as[ \t]+[\w.]+)?[ \t]*,[ \t]*)*(?:httpx|requests|urllib3|aiohttp|websockets)\b|from[ \t]+(?:httpx|requests|urllib3|aiohttp|websockets)(?:\.[\w.]+)?[ \t]+import\b)/m,
+    reason:
+      "httpx / requests need sockets, which tier-1 (WASM) does not have; use `await ctx.http.get(url)`, or declare tier: container",
   },
   {
     name: "multiprocessing",
@@ -75,17 +114,43 @@ export type LintResult = Result<void, readonly LintError[]>;
  */
 export function lintWasmCompat(body: string): LintResult {
   const errors: LintError[] = [];
+  const source = collapseParenthesisedImports(body);
   for (const rule of RULES) {
-    const match = rule.pattern.exec(body);
+    const match = rule.pattern.exec(source);
     if (match) {
       errors.push({
         rule: rule.name,
         reason: rule.reason,
-        line: lineNumberAt(body, match.index),
+        line: lineNumberAt(source, match.index),
       });
     }
   }
   return errors.length === 0 ? ok(undefined) : err(errors);
+}
+
+/**
+ * Collapse a parenthesised `from X import (...)` onto its opening line.
+ * Python lets the name list span lines, and a formatter produces exactly
+ * that once the list grows, so a line-oriented rule would otherwise see
+ * `from urllib import (` and none of the names under it. The newlines the
+ * statement occupied are re-emitted after it, so every later line keeps
+ * the number `lineNumberAt` would have given it.
+ */
+function collapseParenthesisedImports(source: string): string {
+  return source.replace(
+    /^([ \t]*from[ \t]+[\w.]+[ \t]+import[ \t]*)\(([^)]*)\)/gm,
+    (whole: string, head: string, names: string) => {
+      // Comments go first. Flattening a list that carries one would leave
+      // `# note` sitting between `import` and the name it annotates, and the
+      // rules match names at a position — so the name would read as
+      // commented-out and the import would pass.
+      const flattened = names
+        .replace(/#[^\n]*/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      return `${head}${flattened}${"\n".repeat((whole.match(/\n/g) ?? []).length)}`;
+    },
+  );
 }
 
 function lineNumberAt(text: string, index: number): number {

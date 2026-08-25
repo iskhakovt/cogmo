@@ -51,6 +51,7 @@ import {
 } from "./worker-sysbox/pool.js";
 import type { InvokeResult } from "./worker-sysbox/worker.js";
 import { type RunOnWorkerResult, runOnWorker } from "./worker-wasm/host.js";
+import { lintWasmCompat } from "./worker-wasm/wasm-lint.js";
 
 /**
  * Default tier-2 container image when the constructor doesn't override it.
@@ -702,6 +703,20 @@ export class SkillRunnerImpl implements SkillRunner {
         gitSha: branchSha,
         errors: schemaErrors,
       };
+    }
+
+    // Tier-1 bodies get the Pyodide-compatibility scan before anything is
+    // written. Its whole purpose is turning "imports fine, dies on first
+    // invoke" into a rejection here, which only holds if it actually runs
+    // on the register path.
+    if (manifest.tier === "wasm") {
+      const lint = lintWasmCompat(body);
+      if (lint.isErr()) {
+        return rejectedResult(
+          branchSha,
+          lint.error.map((e) => `line ${e.line}: ${e.reason}`).join("; "),
+        );
+      }
     }
 
     const classifierLog = await classifyManifest(manifest, body);

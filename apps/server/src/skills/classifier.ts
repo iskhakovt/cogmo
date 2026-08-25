@@ -75,12 +75,20 @@ export function classifyManifestStub(manifest: SkillManifest): ClassifierLog {
   const isContainerTier = manifest.tier === "container";
   const hasManySecrets = declaredSecrets.length >= APPROVE_SECRETS_THRESHOLD;
   const hasApproveDep = manifest.dependencies.some((d) => categoriseDependency(d) === "approve");
+  // Mirrors the AST path's rule. `notify` deploys live, so leaving this
+  // out would let a degraded classifier ship the one combination the
+  // stricter path refuses — a credential the body can read next to a
+  // route off the machine. Reading a manifest field needs no parser, so
+  // there is nothing about the fallback that makes the check unavailable.
+  const hasSecretsWithNetwork = manifest.network !== undefined && declaredSecrets.length > 0;
 
   // Stub can't reach `auto` (only the AST path can prove a body is
   // read-only), so the dep-allowlist case still lands at `notify` here —
   // see classifier.ts header. Approve-tier deps still force `approve`.
   const riskTier =
-    hasApproveEffect || isContainerTier || hasManySecrets || hasApproveDep ? "approve" : "notify";
+    hasApproveEffect || isContainerTier || hasManySecrets || hasApproveDep || hasSecretsWithNetwork
+      ? "approve"
+      : "notify";
 
   return {
     classifier_version: STUB_CLASSIFIER_VERSION,

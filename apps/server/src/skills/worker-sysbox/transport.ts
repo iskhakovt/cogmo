@@ -5,8 +5,10 @@ import type { RpcTransport } from "../dispatcher.js";
 /**
  * Maximum unframed buffer size before the transport gives up. Real protocol
  * messages are small (tens of KB at most — `task_invoke.inputs` is bounded
- * by tool-call arg sizes, `task_result.output` by skill output schemas).
- * 4 MB is the safety hatch for a misbehaving worker that floods stdout
+ * by tool-call arg sizes, `task_result.output` by skill output schemas —
+ * though a `ctx.http` response body travels here too, up to the host's
+ * 5 MiB cap plus JSON escaping).
+ * The limit is the safety hatch for a misbehaving worker that floods stdout
  * without newlines (e.g. a stray `print()` of a giant blob, or a wheel
  * leaking binary data into stdout instead of stderr) so the host doesn't
  * grow memory unbounded waiting for a `\n` that may never arrive. Enforced
@@ -14,7 +16,12 @@ import type { RpcTransport } from "../dispatcher.js";
  * this; we surface that via `onError` so the dispatcher rejects the
  * pending task immediately instead of sitting on the wall-clock timer).
  */
-const MAX_BUFFER_BYTES = 4 * 1024 * 1024;
+// Sized against the host's 5 MiB `http.request` response cap, not against
+// "protocol messages are small": a `ctx.http` body travels this pipe in
+// both directions, and JSON escaping can inflate it well past its raw
+// size. Matches the worker's own frame limit so neither direction is the
+// narrower one.
+export const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 
 /**
  * NDJSON-over-streams adapter. Frames messages as one JSON object per line

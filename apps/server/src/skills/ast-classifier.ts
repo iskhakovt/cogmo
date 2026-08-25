@@ -340,9 +340,11 @@ function stringLiteralValue(node: Node): string | null {
  *      the audit log.
  *   2. Detected effects that map into `APPROVE_GATING_EFFECTS` or
  *      declared effects in the same set → `approve`.
- *   3. tier=container or secrets >= threshold → `approve`.
+ *   3. tier=container, secrets alongside network, or secrets >=
+ *      threshold → `approve`.
  *   4. Anything else with declared OR detected effects → `notify`.
- *   5. Empty effects + tier=wasm + few secrets → `auto`.
+ *   5. Network with no secrets and no effects → `notify`.
+ *   6. Empty effects + tier=wasm + few secrets + no network → `auto`.
  */
 function computeRiskTier(opts: {
   declared: ReadonlyArray<SkillEffect>;
@@ -350,6 +352,8 @@ function computeRiskTier(opts: {
   validationErrors: ReadonlyArray<string>;
   tier: SkillManifest["tier"];
   secretsCount: number;
+  /** Whether the manifest declares a `network:` allowlist at all. */
+  hasNetwork: boolean;
   /**
    * Highest-severity dep category across `manifest.dependencies`. A
    * single `approve`-listed dep forces `approve`; otherwise any dep
@@ -366,9 +370,17 @@ function computeRiskTier(opts: {
     if (APPROVE_GATING_EFFECTS.has(e)) return "approve";
   }
   if (opts.tier === "container") return "approve";
+  // A credential the body can read plus a route off the machine is the
+  // exfiltration pair, and no count of secrets makes it safe — the threshold
+  // answers how broad a skill's permissions are, which is a different
+  // question from whether it can send one somewhere.
+  if (opts.hasNetwork && opts.secretsCount > 0) return "approve";
   if (opts.secretsCount >= APPROVE_SECRETS_THRESHOLD) return "approve";
   if (opts.depCategory === "notify") return "notify";
   if (all.size > 0) return "notify";
+  // Egress on its own reaches only what the allowlist named and carries no
+  // credential, so it earns a note rather than a gate.
+  if (opts.hasNetwork) return "notify";
   return "auto";
 }
 
@@ -445,6 +457,7 @@ export async function classifyWithAst(
     validationErrors: validation_errors,
     tier: manifest.tier,
     secretsCount: declaredSecrets.length,
+    hasNetwork: manifest.network !== undefined,
     depCategory: highestDepCategory(manifest.dependencies),
   });
 
@@ -473,6 +486,7 @@ function classifyFromDeclarationsOnly(manifest: SkillManifest): ClassifierLog {
     validationErrors: [],
     tier: manifest.tier,
     secretsCount: declaredSecrets.length,
+    hasNetwork: manifest.network !== undefined,
     depCategory: highestDepCategory(manifest.dependencies),
   });
   return {

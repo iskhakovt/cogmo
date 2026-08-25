@@ -1077,13 +1077,15 @@ effects:
   });
 
   describe("safety: AST classifier rejects manifest-vs-code drift", () => {
-    it("body imports smtplib + manifest declares no effects → register rejected with validation error", async () => {
+    it("body imports stripe + manifest declares no effects → register rejected with validation error", async () => {
       const runner = await makeRunner();
-      // Body uses smtplib without `sends_email` declared → the AST
+      // Body uses stripe without `financial` declared → the AST
       // classifier's UX gate fires. Deploy should be rejected before
-      // main is advanced or any skills row is written.
+      // main is advanced or any skills row is written. The vehicle is a
+      // third-party import rather than a stdlib one so the wasm lint,
+      // which runs first, has nothing to say about it.
       const offendingBody = `
-import smtplib
+import stripe
 async def run(inputs, ctx):
     return {"echo": inputs["x"] + 1}
 `;
@@ -1097,23 +1099,23 @@ async def run(inputs, ctx):
       const result = await runner.register({ branch: "skill/echo" });
 
       expect(result.status).toBe("rejected");
-      expect(result.errors?.[0]).toMatch(/undeclared effect 'sends_email'/);
-      expect(result.errors?.[0]).toMatch(/smtplib/);
+      expect(result.errors?.[0]).toMatch(/undeclared effect 'financial'/);
+      expect(result.errors?.[0]).toMatch(/stripe/);
       // No advance, no skills row.
       expect(await getMainSha(repo.bare)).toBe(before);
       expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
     });
 
-    it("body declares + uses sends_email → lands as pending_approval (no validation error, approve-tier)", async () => {
+    it("body declares + uses financial → lands as pending_approval (no validation error, approve-tier)", async () => {
       const runner = await makeRunner();
       const okManifest = ECHO_MANIFEST.replace(
         "name: echo\n",
-        "name: echo\neffects:\n  - sends_email\n",
+        "name: echo\neffects:\n  - financial\n",
       );
       const okBody = `
-import smtplib
+import stripe
 async def run(inputs, ctx):
-    smtplib.SMTP("localhost").sendmail("a", "b", "c")
+    stripe.Charge.create(amount=1)
     return {"echo": inputs["x"] + 1}
 `;
       await pushFeatureBranch({
@@ -1125,6 +1127,52 @@ async def run(inputs, ctx):
       const result = await runner.register({ branch: "skill/echo" });
       expect(result.status).toBe("pending_approval");
       expect(result.riskTier).toBe("approve");
+    });
+  });
+
+  describe("safety: wasm lint rejects bodies tier 1 cannot run", () => {
+    it("rejects a tier-1 body importing a stdlib networking module", async () => {
+      const runner = await makeRunner();
+      // Pyodide has no sockets, so this body would fail on first invoke
+      // whatever the classifier made of it. The lint runs ahead of the
+      // classifier and turns that into a rejection at deploy time.
+      const networkBody = `
+import smtplib
+async def run(inputs, ctx):
+    return {"echo": inputs["x"] + 1}
+`;
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo",
+        manifest: ECHO_MANIFEST,
+        body: networkBody,
+      });
+      const before = await getMainSha(repo.bare);
+      const result = await runner.register({ branch: "skill/echo" });
+
+      expect(result.status).toBe("rejected");
+      expect(result.errors?.[0]).toMatch(/stdlib networking/);
+      expect(result.errors?.[0]).toMatch(/line 2/);
+      expect(await getMainSha(repo.bare)).toBe(before);
+      expect(await tx((trx) => store.getSkillByName(trx, "echo"))).toBeUndefined();
+    });
+
+    it("rejects a tier-1 body importing subprocess", async () => {
+      const runner = await makeRunner();
+      const subprocessBody = `
+import subprocess
+async def run(inputs, ctx):
+    return {"echo": inputs["x"] + 1}
+`;
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/echo",
+        manifest: ECHO_MANIFEST,
+        body: subprocessBody,
+      });
+      const result = await runner.register({ branch: "skill/echo" });
+      expect(result.status).toBe("rejected");
+      expect(result.errors?.[0]).toMatch(/subprocess/);
     });
   });
 

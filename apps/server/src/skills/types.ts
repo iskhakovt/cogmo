@@ -87,9 +87,10 @@ export type SkillInputs = z.infer<typeof SkillInputsSchema>;
 
 /**
  * Manifest-declared secret entry. v1 supports a string (secret name only); the
- * binding object form is reserved for the future egress-proxy substitution
- * design (`design/skills.md` → Egress-proxy substitution `[research]`). The
- * binding fields are accepted at parse time so a future skill author can write
+ * binding object form belongs to stage 2 of `design/skills.md` → Secret
+ * exposure and egress control, where a bound secret reaches the skill as an
+ * opaque placeholder and `ctx.http` substitutes the real value at the request.
+ * The binding fields are accepted at parse time so a skill author can write
  * them without re-versioning the manifest, but v1 ignores them at runtime.
  */
 const SkillSecretSchema = z.union([
@@ -104,6 +105,33 @@ const SkillSecretSchema = z.union([
       .optional(),
   }),
 ]);
+
+/**
+ * Egress allowlist. Absent means the skill has no network at all — `ctx.http`
+ * refuses every destination — so reaching the internet is opted into per host
+ * rather than out of. Entries are bare hostnames, optionally prefixed `*.` to
+ * admit subdomains at any depth: `*.example.com` covers `api.example.com` and
+ * `a.b.example.com`, but not `example.com` itself, which needs its own entry.
+ * A lone `*` does not parse — "anywhere" is the shape this block exists
+ * to make unavailable. At least one label separator is required, which keeps
+ * single-label internal names (`localhost`, a container alias) out — those
+ * resolve onto the host's own network, which `ctx.http` refuses anyway.
+ */
+const SkillNetworkHostSchema = z
+  .string()
+  .min(1)
+  .max(253)
+  .regex(
+    // Each label is bounded at 63 octets per RFC 1035; a longer one parses
+    // as a hostname but cannot resolve, so accepting it would defer a
+    // manifest error to a request failure.
+    /^(\*\.)?[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i,
+    "must be a hostname with labels of 63 characters or fewer, optionally prefixed '*.' — no scheme, port or path",
+  );
+
+export const SkillNetworkSchema = z.object({
+  allow: z.array(SkillNetworkHostSchema).min(1),
+});
 
 const SkillResourcesSchema = z.object({
   memory_mb: z.number().int().positive().max(2048).optional(),
@@ -168,6 +196,8 @@ export const SkillManifestSchema = z
     secrets: z.array(SkillSecretSchema).default([]),
 
     dependencies: z.array(SkillDependencySchema).default([]),
+
+    network: SkillNetworkSchema.optional(),
 
     resources: SkillResourcesSchema.optional(),
 

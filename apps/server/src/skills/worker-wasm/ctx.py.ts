@@ -60,6 +60,37 @@ class _Files:
         return result["entries"]
 
 
+class _Http:
+    """Outbound HTTP, performed by the host.
+
+    Pyodide has no sockets, so \`urllib\` and \`http.client\` cannot reach the
+    network from inside the sandbox — these methods are the way a tier-1
+    skill makes a request. Responses come back as a dict with \`status\`,
+    \`headers\` and \`body\`; a 4xx or 5xx arrives as a normal return value
+    with that status, and only a failure to obtain a response at all
+    raises.
+    """
+
+    def __init__(self, ctx):
+        self._ctx = ctx
+
+    async def request(self, method, url, headers=None, body=None, timeout_ms=None):
+        args = {"method": method.upper(), "url": url}
+        if headers is not None:
+            args["headers"] = dict(headers)
+        if body is not None:
+            args["body"] = body
+        if timeout_ms is not None:
+            args["timeoutMs"] = timeout_ms
+        return await self._ctx._call("http.request", args)
+
+    async def get(self, url, headers=None, timeout_ms=None):
+        return await self.request("GET", url, headers=headers, timeout_ms=timeout_ms)
+
+    async def post(self, url, body=None, headers=None, timeout_ms=None):
+        return await self.request("POST", url, headers=headers, body=body, timeout_ms=timeout_ms)
+
+
 class _Log:
     def __init__(self, ctx):
         self._ctx = ctx
@@ -75,6 +106,7 @@ class Ctx:
         self.secrets = _Secrets(self)
         self.memory = _Memory(self)
         self.files = _Files(self)
+        self.http = _Http(self)
         self.log = _Log(self)
 
     async def _call(self, method, args):

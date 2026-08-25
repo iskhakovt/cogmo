@@ -143,6 +143,50 @@ class _Files:
         return result["entries"]
 
 
+class _Http:
+    """Outbound HTTP, performed by the host.
+
+    Present in both tiers so a skill does not break when adding a
+    dependency moves it here from tier 1. Tier 2 has real sockets and can
+    use `httpx` instead; going through the host keeps the request in
+    `skill_context_calls` and under the host's destination checks.
+    """
+
+    def __init__(self, bridge: _Bridge) -> None:
+        self._b = bridge
+
+    async def request(
+        self,
+        method: str,
+        url: str,
+        headers: dict[str, str] | None = None,
+        body: str | None = None,
+        timeout_ms: int | None = None,
+    ) -> Any:
+        args: dict[str, object] = {"method": method.upper(), "url": url}
+        if headers is not None:
+            args["headers"] = dict(headers)
+        if body is not None:
+            args["body"] = body
+        if timeout_ms is not None:
+            args["timeoutMs"] = timeout_ms
+        return await self._b.call("http.request", args)
+
+    async def get(
+        self, url: str, headers: dict[str, str] | None = None, timeout_ms: int | None = None
+    ) -> Any:
+        return await self.request("GET", url, headers=headers, timeout_ms=timeout_ms)
+
+    async def post(
+        self,
+        url: str,
+        body: str | None = None,
+        headers: dict[str, str] | None = None,
+        timeout_ms: int | None = None,
+    ) -> Any:
+        return await self.request("POST", url, headers=headers, body=body, timeout_ms=timeout_ms)
+
+
 class _Log:
     def __init__(self, bridge: _Bridge) -> None:
         self._b = bridge
@@ -159,6 +203,7 @@ class Ctx:
         self.secrets = _Secrets(bridge)
         self.memory = _Memory(bridge)
         self.files = _Files(bridge)
+        self.http = _Http(bridge)
         self.log = _Log(bridge)
 
     async def now(self) -> Any:
@@ -168,16 +213,39 @@ class Ctx:
         return await self._b.call("user", {})
 
 
+# Host caps an `http.request` body at 5 MiB; the frame carrying it needs
+# room for that plus JSON escaping, which can inflate a body meaningfully.
+_MAX_FRAME_BYTES = 16 * 1024 * 1024
+
+
 async def _read_stdin_lines(bridge: _Bridge, stdin: BinaryIO, stderr: TextIO) -> None:
     """Drain stdin during a task's run — only `ctx_result` shapes are
     expected; everything else is logged to stderr and dropped.
     """
     loop = asyncio.get_running_loop()
-    reader = asyncio.StreamReader()
+    # `asyncio.StreamReader()` defaults to a 64 KiB line limit, and
+    # `readline` raises once a frame passes it. A `ctx_result` carrying an
+    # `http.request` body runs to the host's 5 MiB response cap, so the
+    # frame limit has to clear that plus JSON overhead or ordinary API
+    # responses break the transport rather than the skill.
+    reader = asyncio.StreamReader(limit=_MAX_FRAME_BYTES)
     protocol = asyncio.StreamReaderProtocol(reader)
     await loop.connect_read_pipe(lambda: protocol, stdin)
     while True:
-        line = await reader.readline()
+        try:
+            line = await reader.readline()
+        except Exception as exc:
+            # A frame past `_MAX_FRAME_BYTES` makes `readline` raise, and
+            # letting that escape kills this task silently: nothing calls
+            # `fail_pending`, so an awaiting `ctx.*` call never returns and
+            # the skill hangs until the supervisor's wall clock kills it.
+            # Surfacing it as a failed call turns a hang into an error the
+            # skill can catch. The read stream is unusable afterwards —
+            # the oversized frame is still buffered — so this returns
+            # rather than trying to resynchronise.
+            stderr.write(f"stdin read failed: {exc}\n")
+            bridge.fail_pending(RuntimeError(f"host frame unreadable: {exc}"))
+            return
         if not line:
             # EOF — host closed stdin. Reject any pending ctx calls so user
             # code unblocks and the task can shut down.

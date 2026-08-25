@@ -269,4 +269,71 @@ dependencies:
       expect(result.value.manifest.dependencies).toEqual(["reset-scheme==1!2.0.0"]);
     });
   });
+
+  describe("network", () => {
+    it("is absent by default, which means the skill has no network", () => {
+      const result = parseManifest(frontmatter(MIN_FIELDS));
+      expect(result.isOk()).toBe(true);
+      if (!result.isOk()) return;
+      expect(result.value.manifest.network).toBeUndefined();
+    });
+
+    it("accepts hostnames and a '*.' subdomain prefix", () => {
+      const yaml = `${MIN_FIELDS}
+network:
+  allow:
+    - api.example.com
+    - "*.cdn.example.com"
+    - 93.184.216.34`;
+      const result = parseManifest(frontmatter(yaml));
+      expect(result.isOk()).toBe(true);
+      if (!result.isOk()) return;
+      expect(result.value.manifest.network?.allow).toEqual([
+        "api.example.com",
+        "*.cdn.example.com",
+        "93.184.216.34",
+      ]);
+    });
+
+    it("accepts a label at the 63-character boundary", () => {
+      const yaml = `${MIN_FIELDS}\nnetwork:\n  allow:\n    - "${"a".repeat(63)}.example.com"`;
+      expect(parseManifest(frontmatter(yaml)).isOk()).toBe(true);
+    });
+
+    it.each([
+      ["bare wildcard", "*"],
+      ["wildcard without a dot", "*example.com"],
+      ["interior wildcard", "api.*.example.com"],
+      ["scheme", "https://api.example.com"],
+      ["port", "api.example.com:443"],
+      ["path", "api.example.com/v1"],
+      ["single label", "localhost"],
+      ["IPv6 literal", "::1"],
+      ["bracketed IPv6 literal", "[::1]"],
+      ["trailing dot", "api.example.com."],
+      ["leading dot", ".example.com"],
+      ["empty", ""],
+      // DNS labels are 63 octets; a longer one parses as a hostname but
+      // cannot resolve, so it belongs in the manifest error, not a request.
+      ["64-character label", `${"a".repeat(64)}.example.com`],
+    ])("rejects %s", (_label, host) => {
+      const yaml = `${MIN_FIELDS}\nnetwork:\n  allow:\n    - "${host}"`;
+      const result = parseManifest(frontmatter(yaml));
+      expect(result.isErr()).toBe(true);
+      if (!result.isErr()) return;
+      expect(result.error.kind).toBe("invalid_manifest");
+    });
+
+    it("rejects an empty allow list, which would read as 'declared but nothing'", () => {
+      const yaml = `${MIN_FIELDS}\nnetwork:\n  allow: []`;
+      const result = parseManifest(frontmatter(yaml));
+      expect(result.isErr()).toBe(true);
+    });
+
+    it("rejects a network block with no allow key", () => {
+      const yaml = `${MIN_FIELDS}\nnetwork:\n  deny:\n    - api.example.com`;
+      const result = parseManifest(frontmatter(yaml));
+      expect(result.isErr()).toBe(true);
+    });
+  });
 });
