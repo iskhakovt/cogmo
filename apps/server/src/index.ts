@@ -3,10 +3,7 @@ import { hostname } from "node:os";
 import { S3Client } from "@aws-sdk/client-s3";
 import type { Octokit } from "@octokit/rest";
 import Docker from "dockerode";
-import {
-  type AutoRegisterSkillDeps,
-  createAutoRegisterSkillSubscriber,
-} from "./agent/coding/auto-register-skill.js";
+import { createAutoRegisterSkillSubscriber } from "./agent/coding/auto-register-skill.js";
 import { ClaudeCodeBackend } from "./agent/coding/claude.js";
 import { createOrphanRunBranchSweepFunctions } from "./agent/coding/cleanup-orphan-run-branches.js";
 import { createRunBranchCleanupSubscriber } from "./agent/coding/cleanup-run-branch.js";
@@ -168,8 +165,6 @@ export interface BootstrapOptions {
   codingAuthOverride?: CodingOrchestratorDeps["loadCodingSandboxEnv"];
   /** Test seam — stub injected by replay tests in lieu of real GitHub. */
   octokitFactory?: (pat: string) => Octokit;
-  /** Test seam — see `AutoRegisterSkillDeps.gitFetchOverride`. */
-  gitFetchOverride?: AutoRegisterSkillDeps["gitFetchOverride"];
 }
 
 /**
@@ -885,7 +880,6 @@ export async function bootstrapRuntime(
           secretsStore: core.secretsStore,
           skillRunner,
           skillsRepoPath: env.COGMO_SKILLS_PATH,
-          ...(opts.gitFetchOverride && { gitFetchOverride: opts.gitFetchOverride }),
         },
         inngest,
       ),

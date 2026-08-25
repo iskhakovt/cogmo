@@ -41,19 +41,6 @@ export interface AutoRegisterSkillDeps {
    * `env.COGMO_SKILLS_PATH`; tests inject a tmpdir.
    */
   skillsRepoPath: string;
-  /**
-   * Test seam for the host-side `git fetch` of the PR branch.
-   * Replay tests stub this to write fixture content into the bare
-   * repo (the orchestrator's push never reached the real remote
-   * since Daytona was cassette-mocked). Production omits and the
-   * default uses `execFileP("git", …)` + `withGitAskpass`.
-   */
-  gitFetchOverride?: (params: {
-    remoteUrl: string;
-    branch: string;
-    skillsRepoPath: string;
-    pat: string;
-  }) => Promise<void>;
 }
 
 export type AutoRegisterResult =
@@ -101,22 +88,13 @@ export async function autoRegisterSkill(
     return { kind: "skipped", reason: `unsafe branch name: ${branch}` };
   }
   // Address remote by URL, not name — see pushTaskBranchToRemote.
-  if (deps.gitFetchOverride) {
-    await deps.gitFetchOverride({
-      remoteUrl: repo.remoteUrl,
-      branch,
-      skillsRepoPath: deps.skillsRepoPath,
-      pat: identity.pat,
-    });
-  } else {
-    await withGitAskpass(identity.pat, async (env) => {
-      await execFileP(
-        "git",
-        ["-C", deps.skillsRepoPath, "fetch", repo.remoteUrl, `+${branch}:${branch}`],
-        { env: { ...process.env, ...env } },
-      );
-    });
-  }
+  await withGitAskpass(identity.pat, async (env) => {
+    await execFileP(
+      "git",
+      ["-C", deps.skillsRepoPath, "fetch", repo.remoteUrl, `+${branch}:${branch}`],
+      { env: { ...process.env, ...env } },
+    );
+  });
 
   // KNOWN LEAK: register() has no AbortSignal — underlying call keeps running past this cap. See AbortSignal-threading p3 in todo.md.
   // Budget covers the compile sandbox's `DEFAULT_COMPILE_TIMEOUT_MS` (240s) plus boot + classifier overhead.

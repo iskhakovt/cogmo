@@ -17,6 +17,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, type Readable } from "node:stream";
+import type { Octokit } from "@octokit/rest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database, Transactor } from "../../db/index.js";
@@ -28,9 +29,13 @@ import type {
   SessionSpec,
 } from "../../sandbox/index.js";
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
-import type { GitHubIdentity } from "../../secrets/github.js";
+import {
+  type GitHubIdentity,
+  gitHubIdentitySecretName,
+  serializeGitHubIdentity,
+} from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
-import { makeStepRun, nullStepSendEvent } from "../../test/factories.js";
+import { makeStepRun, makeStepSendEvent, nullStepSendEvent } from "../../test/factories.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { CLAUDE_CODE_OAUTH_TOKEN_SECRET } from "./auth.js";
 import type { CodingBackend, CodingEvent } from "./backend.js";
@@ -77,6 +82,7 @@ import {
   runCodingTask,
 } from "./orchestrator.js";
 import { type CodingRepoRow, type CodingTaskRow, DrizzleCodingStore } from "./store/index.js";
+import { runCodingVerify, type VerifyOrchestratorDeps } from "./verify-orchestrator.js";
 
 // --- Test scaffolding -----------------------------------------------------
 
@@ -704,5 +710,144 @@ describe("runCodingExecute — git-remote transport", () => {
       (c) => (c[0] as { name?: string })?.name === "coding/task/cli-done",
     );
     expect(cliDoneSends).toHaveLength(0);
+  });
+});
+
+// --- Verify phase ---------------------------------------------------------
+
+/** 40 hex chars — what `git rev-parse HEAD` hands back to the PR step. */
+const HEAD_SHA = "deadbeef".repeat(5);
+
+/**
+ * Drives the verify sequence to a clean pass: the suite exits 0, the tree
+ * has a change to commit, and `rev-parse` resolves a pushable head.
+ */
+const verifyExecScript: ExecScript = (cmd) => {
+  if (cmd[0] === "bash") return { exitCode: 0, stdout: "PASS\n" };
+  switch (gitSubcommand(cmd)) {
+    case "status":
+      return { exitCode: 0, stdout: "M src/foo.ts\n" };
+    case "rev-parse":
+      return { exitCode: 0, stdout: `${HEAD_SHA}\n` };
+    default:
+      return undefined;
+  }
+};
+
+function makeVerifyDeps(overrides: {
+  sandbox: SandboxClient;
+  octokitFactory: (pat: string) => Octokit;
+}): VerifyOrchestratorDeps {
+  const secretsStore = mock<SecretsStore>();
+  secretsStore.getSecret.mockImplementation(async (_tx, name) => {
+    if (name === CLAUDE_CODE_OAUTH_TOKEN_SECRET) return "test-oauth-token";
+    if (name === gitHubIdentitySecretName("default")) {
+      return serializeGitHubIdentity({
+        pat: "ghp_test",
+        sshPrivateKey:
+          "-----BEGIN OPENSSH PRIVATE KEY-----\nABC\n-----END OPENSSH PRIVATE KEY-----",
+        sshPublicKey: "ssh-ed25519 AAAA cogmo-bot",
+        login: "cogmo-bot",
+        id: "12345",
+      });
+    }
+    return undefined;
+  });
+  return {
+    runInTx: tx,
+    store,
+    secretsStore,
+    askpassBaseDir: join(baseDir, "askpass"),
+    devbaseImage: "ghcr.io/iskhakovt/cogmo-devbase:test",
+    defaultResourceLimits: RESOURCE_LIMITS,
+    taskTtlMs: 60_000,
+    ...overrides,
+  };
+}
+
+async function seedTaskReadyForVerify(): Promise<{ task: CodingTaskRow; branch: string }> {
+  const repo = await seedRepo();
+  const task = await seedTask(repo);
+  const branch = `cogmo/${task.id.replaceAll("-", "").slice(0, 12)}`;
+  await tx((trx) => store.setTaskWorktreeAssignment(trx, task.id, { type: "git-remote", branch }));
+  await tx((trx) => store.setTaskPlan(trx, task.id, "1. step\n2. step"));
+  await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "pending_verify" }));
+  return { task, branch };
+}
+
+describe("runCodingVerify — git-remote transport", () => {
+  it("stays pr_open when the post-PR fetch-back fails", async () => {
+    // The fetch-back exists to stop the host mirror lagging origin. By the
+    // time it runs the branch is pushed and the PR is open, so the task has
+    // succeeded — a throw escaping it would reach the orchestrator's
+    // failure channel and report a shipped task as `failed`.
+    const { task, branch } = await seedTaskReadyForVerify();
+    transportMocks.fetchFeatureBranch.mockRejectedValue(
+      new Error(`fatal: couldn't find remote ref ${branch}`),
+    );
+
+    const { sandbox } = fakeGitRemoteSandbox(verifyExecScript);
+    const create = vi.fn(async () => ({
+      data: { html_url: "https://github.com/owner/cogmo/pull/7", number: 7 },
+    }));
+    const inngestSend = vi.fn().mockResolvedValue(undefined);
+    const inngest = { send: inngestSend };
+
+    const result = await runCodingVerify({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeVerifyDeps({
+        sandbox,
+        octokitFactory: () => ({ pulls: { create } }) as unknown as Octokit,
+      }),
+      stepRun,
+      stepSendEvent: makeStepSendEvent(inngest),
+      inngest,
+    });
+
+    expect(transportMocks.fetchFeatureBranch).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe("pr_open");
+
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.status).toBe("pr_open");
+    expect(reloaded?.failureReason).toBeNull();
+    expect(reloaded?.prMetadata?.number).toBe(7);
+
+    // Nothing downstream hears about a failure either — `coding/task/failed`
+    // is what notifies the user and flips the conversation out of the task.
+    const emitted = inngestSend.mock.calls.map((c) => (c[0] as { name: string }).name);
+    expect(emitted).toContain("coding/task/pr-opened");
+    expect(emitted).not.toContain("coding/task/failed");
+  });
+
+  it("reaches pr_open through a fetch-back that succeeds", async () => {
+    // Companion to the tolerated-failure case above: pins that the step is
+    // wired at all, so the catch can't be mistaken for a skipped call.
+    const { task, branch } = await seedTaskReadyForVerify();
+    transportMocks.fetchFeatureBranch.mockResolvedValue(undefined);
+
+    const { sandbox } = fakeGitRemoteSandbox(verifyExecScript);
+    const create = vi.fn(async () => ({
+      data: { html_url: "https://github.com/owner/cogmo/pull/8", number: 8 },
+    }));
+    const inngestSend = vi.fn().mockResolvedValue(undefined);
+    const inngest = { send: inngestSend };
+
+    const result = await runCodingVerify({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeVerifyDeps({
+        sandbox,
+        octokitFactory: () => ({ pulls: { create } }) as unknown as Octokit,
+      }),
+      stepRun,
+      stepSendEvent: makeStepSendEvent(inngest),
+      inngest,
+    });
+
+    expect(result.status).toBe("pr_open");
+    expect(transportMocks.fetchFeatureBranch).toHaveBeenCalledWith(
+      expect.objectContaining({ branch, remoteUrl: "https://github.com/owner/cogmo.git" }),
+    );
   });
 });
