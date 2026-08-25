@@ -482,6 +482,14 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     // push. Fetch it back so a future host-side merge or `git log`
     // reflects the actual PR head. Best-effort — origin is the source
     // of truth and any later op can fetch on demand.
+    //
+    // The catch is what makes that best-effort real. The branch is
+    // pushed and the PR is open, so the task has succeeded; a throw
+    // escaping here lands in the catch below, which is this function's
+    // failure channel — it would overwrite `pr_open` with `failed` and
+    // fire `coding/task/failed` for a task that shipped. Caught inside
+    // the step body so the step records success and a lagging mirror
+    // stays a warning.
     if (sandbox.capabilities.workingTreeTransport === "git-remote") {
       await stepRun("fetch-feature-branch", () =>
         fetchFeatureBranch({
@@ -489,6 +497,11 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
           remoteUrl: repo.remoteUrl,
           branch: worktreeAssignment.branch,
           identity,
+        }).catch((err: unknown) => {
+          taskLog.warn(
+            { err, branch: worktreeAssignment.branch },
+            "verify: feature-branch fetch-back failed — origin holds the branch, mirror lags",
+          );
         }),
       );
     }
