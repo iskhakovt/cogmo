@@ -122,11 +122,29 @@ export function createCodingService(
             id: `task-start-${taskId}`,
           });
         } catch (sendErr) {
-          // Gated on `queued`, because the throw is ambiguous: the bus may
-          // have accepted the event and failed only on the response, in which
-          // case an orchestrator has already claimed this row and is working
-          // on it. An unguarded write would fail a live run — or corrupt a
-          // finished one — over a transport blip.
+          // The throw is ambiguous — the bus may have accepted the event and
+          // failed only on the response — and this cleanup has to pick a side.
+          // It picks: terminalize, gated on the row still being `queued`.
+          //
+          // The gate handles the case where the orchestrator already claimed
+          // the row: an unguarded write would fail a live run, or corrupt a
+          // finished one, over a transport blip.
+          //
+          // Terminalizing the rest is the deliberate half, and it is chosen
+          // for consistency with what the caller is about to be told. The
+          // rethrow below reaches the model as an `is_error` tool_result, so
+          // the user hears "the submission didn't take". Leaving the row
+          // `queued` instead would mean an accepted event goes on to plan the
+          // task and post an approval keyboard for work the user was just
+          // told had failed — and, when the event was genuinely lost, the row
+          // sits `queued` forever holding an admission slot that
+          // `maxConcurrentTasks` defaults to 1 of. Both are worse than
+          // "reported failed, and genuinely didn't run".
+          //
+          // Removing the ambiguity rather than choosing a side wants a
+          // transactional outbox — row and intent committed together, a relay
+          // publishing after. Tracked in `todo.md`; it is the right answer and
+          // a much larger change than this catch.
           await deps
             .runInTx((tx) =>
               deps.codingStore.failQueuedTask(
