@@ -90,7 +90,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       # Per-platform: override platforms + cache scope to the matrix arch
       # and push by digest only — the merge job applies tags afterwards.
@@ -164,7 +164,7 @@ jobs:
             type=raw,value=latest
           bake-target: skills-meta
 
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       # VERSION env passed for symmetry with the cogmo job + defense-in-depth.
       # metadata-action's bake-files override the in-file `*-meta` fallback
@@ -212,7 +212,7 @@ jobs:
             type=raw,value=${{ needs.setup.outputs.version }}
             type=raw,value=latest
 
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Create multi-arch manifest
         working-directory: /tmp/digests
@@ -283,7 +283,7 @@ jobs:
           # hits anyway, so caching only buys log noise.
           cache: false
 
-      - uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+      - uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
         # Run even if Trivy itself errored (e.g. DB download flake) so we
         # don't lose partial results. The upload action no-ops on a missing
         # file but logs a clear message.
