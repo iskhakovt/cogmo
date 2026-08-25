@@ -528,13 +528,20 @@ function makeStubOctokitFactory(opts: {
       const [, owner, repo] = pullsMatch;
       const bodyText = typeof init?.body === "string" ? init.body : "";
       const body = bodyText ? (JSON.parse(bodyText) as { head?: string }) : {};
-      if (body.head) {
-        await materializeBranchFromFixture({
-          branch: body.head,
-          repoPath: opts.remotePath,
-          fixtureDir: opts.fixtureDir,
-        });
+      // Fail loud, like the unsupported-call branch below. Skipping here
+      // would strand the branch and surface much later as the register
+      // fetch's `couldn't find remote ref`, pointing at neither the missing
+      // head nor this stub. `owner:branch` is a valid head for a cross-repo
+      // PR that this seam does not model, so it is refused rather than
+      // materialized under a mangled ref name.
+      if (!body.head || body.head.includes(":")) {
+        throw new Error(`stub octokit: PR create needs a bare head branch, got ${bodyText}`);
       }
+      await materializeBranchFromFixture({
+        branch: body.head,
+        repoPath: opts.remotePath,
+        fixtureDir: opts.fixtureDir,
+      });
       return new Response(
         JSON.stringify({
           number: 1,
@@ -564,20 +571,19 @@ function makeStubOctokitFactory(opts: {
  * Commit the fixture files onto `branch` in `repoPath` — the sandbox push
  * the cassette swallows, replayed against the bare remote.
  *
- * Sole writer of that branch, deliberately. Both host-side consumers (the
- * verify orchestrator's fetch-back and the skill-register fetch) pull it
- * from the remote, so they agree on one commit. A second writer minting its
- * own commit for the same branch would put two siblings in play, and the
- * skills repo's pre-receive hook (`bootstrapSkillsRepo`) declines the
- * non-fast-forward that whichever arrives second becomes.
+ * Sole writer of that branch, and re-entrant: an existing ref is left alone
+ * rather than replaced. Each call mints a fresh commit off the remote's
+ * `main`, so a second call for one branch offers a sibling of the first,
+ * which `git push` refuses as a non-fast-forward. That refusal escapes
+ * through the PR stub and `runOpenPr` reports it as `kind: "failed"`, so the
+ * task lands in `failAndTeardown` carrying a git error that reads nothing
+ * like its cause. Returning early also keeps whatever the verify
+ * orchestrator's fetch-back has already pulled into the skills repo
+ * authoritative.
  *
- * Re-entrant for the same reason: an existing ref is left alone rather than
- * replaced. Each call mints a fresh commit off the remote's `main`, so a
- * second call for one branch is a sibling of the first — a non-fast-forward
- * the push rejects, surfacing through `runOpenPr` as a PR-open failure that
- * reads nothing like its cause. Returning early also keeps the commit the
- * fetch-back has already propagated authoritative, which overwriting would
- * desync.
+ * Both host-side readers — that fetch-back and the skill-register fetch —
+ * take this branch from the remote, so one commit here is one commit
+ * everywhere.
  */
 async function materializeBranchFromFixture(opts: {
   branch: string;
