@@ -108,9 +108,9 @@ function repoRoot(): string {
 const SCENARIO = "skill-authoring";
 const FIXTURE_DIR = "./test/fixtures/daytona";
 const FIXTURE_PATH = `${FIXTURE_DIR}/${SCENARIO}.json`;
-// Recorded SKILL.md + skill.py; `gitFetchOverride` writes these into
-// the bare repo on the requested branch in replay. Refresh together
-// with the cassette.
+// Recorded SKILL.md + skill.py — in replay these are what the cassette's
+// sandbox is taken to have pushed, committed to the bare remote by the PR
+// stub. Refresh together with the cassette.
 const BRANCH_FIXTURE_DIR = "./test/fixtures/skill-authoring-branch";
 const IS_RECORD = process.env.RECORD === "1";
 const HAS_RECORDING_INPUTS =
@@ -273,11 +273,15 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
           ANTHROPIC_MODEL: "claude-haiku-4-5-20251001",
           MAX_THINKING_TOKENS: "0",
         }),
-      // Replay-only: stub the GitHub bits the cassette can't reach.
+      // Replay-only: stub the GitHub bits the cassette can't reach. The
+      // git bits need no stub — seeding the branch into the bare remote
+      // (see `makeStubOctokitFactory`) leaves every host-side fetch, the
+      // skill-register one included, running its production path.
       ...(!RECORDABLE && {
-        octokitFactory: makeStubOctokitFactory(),
-        gitFetchOverride: ({ branch, skillsRepoPath }) =>
-          materializeBranchFromFixture({ branch, skillsRepoPath, fixtureDir: BRANCH_FIXTURE_DIR }),
+        octokitFactory: makeStubOctokitFactory({
+          remotePath: expectDefined(bareRemotePath),
+          fixtureDir: BRANCH_FIXTURE_DIR,
+        }),
       }),
     });
 
@@ -500,8 +504,22 @@ async function createLocalBareRemote(): Promise<{ url: string; path: string }> {
   return { url: `file://${bareDir}`, path: bareDir };
 }
 
-/** Real Octokit + stub fetch — synthesizes the GitHub calls replay can't reach. */
-function makeStubOctokitFactory(): (pat: string) => Octokit {
+/**
+ * Real Octokit + stub fetch — synthesizes the GitHub calls replay can't reach.
+ *
+ * `POST /pulls` also materializes the head branch in the bare remote. In
+ * production the sandbox pushes `cogmo/<idShort>` to origin and the PR is
+ * opened against it; on replay the sandbox is a cassette, so that push never
+ * reaches the remote and every host-side consumer of the branch — the verify
+ * orchestrator's fetch-back first — would look for a ref nobody wrote. PR
+ * creation is the moment origin is supposed to know the branch, and it is
+ * ordered strictly before the fetch-back, so the seam belongs here rather
+ * than in a background poller racing the orchestrator.
+ */
+function makeStubOctokitFactory(opts: {
+  remotePath: string;
+  fixtureDir: string;
+}): (pat: string) => Octokit {
   const stubFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const method = init?.method ?? "GET";
@@ -510,6 +528,13 @@ function makeStubOctokitFactory(): (pat: string) => Octokit {
       const [, owner, repo] = pullsMatch;
       const bodyText = typeof init?.body === "string" ? init.body : "";
       const body = bodyText ? (JSON.parse(bodyText) as { head?: string }) : {};
+      if (body.head) {
+        await materializeBranchFromFixture({
+          branch: body.head,
+          repoPath: opts.remotePath,
+          fixtureDir: opts.fixtureDir,
+        });
+      }
       return new Response(
         JSON.stringify({
           number: 1,
@@ -536,19 +561,25 @@ function makeStubOctokitFactory(): (pat: string) => Octokit {
 }
 
 /**
- * Replay's gitFetchOverride: writes fixture files into the bare repo
- * on branch. `pat` is ignored — file:// remote needs no auth — but
- * the param stays for parity with the AutoRegisterSkillDeps signature.
+ * Commit the fixture files onto `branch` in `repoPath` — the sandbox push
+ * the cassette swallows, replayed against the bare remote.
+ *
+ * Sole writer of that branch, deliberately. Both host-side consumers (the
+ * verify orchestrator's fetch-back and the skill-register fetch) pull it
+ * from the remote, so they agree on one commit. A second writer minting its
+ * own commit for the same branch would put two siblings in play, and the
+ * skills repo's pre-receive hook (`bootstrapSkillsRepo`) declines the
+ * non-fast-forward that whichever arrives second becomes.
  */
 async function materializeBranchFromFixture(opts: {
   branch: string;
-  skillsRepoPath: string;
+  repoPath: string;
   fixtureDir: string;
 }): Promise<void> {
-  const { branch, skillsRepoPath, fixtureDir } = opts;
+  const { branch, repoPath, fixtureDir } = opts;
   const tmpRoot = await mkdtemp(join(tmpdir(), "skill-auth-fixture-"));
   try {
-    await execFileP("git", ["clone", skillsRepoPath, tmpRoot]);
+    await execFileP("git", ["clone", repoPath, tmpRoot]);
     await execFileP("git", ["-C", tmpRoot, "checkout", "-b", "fixture-staging"]);
     const entries = await readdir(fixtureDir);
     if (entries.length === 0) {
@@ -575,7 +606,7 @@ async function materializeBranchFromFixture(opts: {
       ],
       { env: { ...process.env, GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z" } },
     );
-    await execFileP("git", ["-C", tmpRoot, "push", skillsRepoPath, `HEAD:refs/heads/${branch}`]);
+    await execFileP("git", ["-C", tmpRoot, "push", repoPath, `HEAD:refs/heads/${branch}`]);
   } finally {
     await rm(tmpRoot, { recursive: true, force: true });
   }
