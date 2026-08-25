@@ -1,4 +1,16 @@
-import { and, asc, count, desc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  getTableColumns,
+  inArray,
+  isNull,
+  lte,
+  or,
+  sql,
+} from "drizzle-orm";
 import * as R from "remeda";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
@@ -1147,8 +1159,42 @@ export interface AgentStore {
     },
   ): Promise<ScheduledTask>;
 
+  /**
+   * Idempotent schedule creation. A second call carrying the same key returns
+   * `kind: "recovered"` and the original row rather than scheduling a second
+   * fire — the one duplicate on the durable-tool list that repeats forever.
+   * Separate from {@link AgentStore.createScheduledTask} because this one can
+   * decline to insert. Mirrors `CodingStore.insertOrRecoverTask`.
+   */
+  createOrRecoverScheduledTask(
+    tx: Transaction,
+    params: {
+      userId: string;
+      profileId: string;
+      kind: ScheduleKind;
+      cron: string | null;
+      timezone: string;
+      prompt: string;
+      nextRunAt: Date;
+      enabled: boolean;
+      catchupMissed: boolean;
+      source: ScheduleSource;
+      idempotencyKey: string;
+    },
+  ): Promise<{ kind: "new" | "recovered"; row: ScheduledTask }>;
+
   /** Load a single scheduled task by id. Returns undefined when not found. */
   getScheduledTask(tx: Transaction, id: string): Promise<ScheduledTask | undefined>;
+
+  /**
+   * Load a scheduled task by its idempotency key. Lets a caller recognise a
+   * retry before spending a cap check on it — the row a retry is recovering
+   * counts toward that cap.
+   */
+  getScheduledTaskByIdempotencyKey(
+    tx: Transaction,
+    key: string,
+  ): Promise<ScheduledTask | undefined>;
 
   /**
    * List scheduled tasks for a user, newest-first. Used by `/schedules`
@@ -1272,6 +1318,33 @@ export interface EvolutionEventRow {
   triggeredBy: EvolutionTriggerValue;
   payload: EvolutionEventPayload;
   createdAt: Date;
+}
+
+/** Column values shared by both scheduled-task insert paths. */
+function scheduleValues(params: {
+  userId: string;
+  profileId: string;
+  kind: ScheduleKind;
+  cron: string | null;
+  timezone: string;
+  prompt: string;
+  nextRunAt: Date;
+  enabled: boolean;
+  catchupMissed: boolean;
+  source: ScheduleSource;
+}) {
+  return {
+    userId: params.userId,
+    profileId: params.profileId,
+    kind: params.kind,
+    cron: params.cron,
+    timezone: params.timezone,
+    prompt: params.prompt,
+    nextRunAt: params.nextRunAt,
+    enabled: params.enabled,
+    catchupMissed: params.catchupMissed,
+    source: params.source,
+  };
 }
 
 export class DrizzleAgentStore implements AgentStore {
@@ -2815,24 +2888,65 @@ export class DrizzleAgentStore implements AgentStore {
       source: ScheduleSource;
     },
   ): Promise<ScheduledTask> {
-    const row = single(
-      await tx
-        .insert(scheduledTasks)
-        .values({
-          userId: params.userId,
-          profileId: params.profileId,
-          kind: params.kind,
-          cron: params.cron,
-          timezone: params.timezone,
-          prompt: params.prompt,
-          nextRunAt: params.nextRunAt,
-          enabled: params.enabled,
-          catchupMissed: params.catchupMissed,
-          source: params.source,
-        })
-        .returning(),
+    return rowToScheduledTask(
+      single(await tx.insert(scheduledTasks).values(scheduleValues(params)).returning()),
     );
-    return rowToScheduledTask(row);
+  }
+
+  async createOrRecoverScheduledTask(
+    tx: Transaction,
+    params: {
+      userId: string;
+      profileId: string;
+      kind: ScheduleKind;
+      cron: string | null;
+      timezone: string;
+      prompt: string;
+      nextRunAt: Date;
+      enabled: boolean;
+      catchupMissed: boolean;
+      source: ScheduleSource;
+      idempotencyKey: string;
+    },
+  ): Promise<{ kind: "new" | "recovered"; row: ScheduledTask }> {
+    const key = params.idempotencyKey;
+    // DO UPDATE with a no-op SET, not DO NOTHING. The sequential retry is the
+    // same either way; the concurrent one is not. Under the project's
+    // REPEATABLE READ default, a loser conflicting with a row committed after
+    // its snapshot cannot see that row: DO NOTHING skips the tuple, the
+    // re-SELECT finds nothing, and the call fails deterministically with
+    // nothing for the transactor to retry. DO UPDATE must write the tuple, so
+    // Postgres raises `40001 serialization_failure` instead — which the
+    // transactor retries against a fresh snapshot that does contain the
+    // winner. (`FOR UPDATE` on the re-SELECT would not help: a row absent from
+    // the snapshot is absent from a locking read too.)
+    //
+    // `xmax = 0` distinguishes the outcomes, so the caller can recover a retry
+    // inside the same transaction as its cap check rather than pre-reading in
+    // one of its own.
+    const rows = await tx
+      .insert(scheduledTasks)
+      .values({ ...scheduleValues(params), idempotencyKey: key })
+      .onConflictDoUpdate({
+        target: scheduledTasks.idempotencyKey,
+        set: { idempotencyKey: key },
+      })
+      .returning({ ...getTableColumns(scheduledTasks), inserted: sql<boolean>`(xmax = 0)` });
+    const { inserted, ...row } = single(rows);
+    return { kind: inserted ? "new" : "recovered", row: rowToScheduledTask(row) };
+  }
+
+  async getScheduledTaskByIdempotencyKey(
+    tx: Transaction,
+    key: string,
+  ): Promise<ScheduledTask | undefined> {
+    const rows = await tx
+      .select()
+      .from(scheduledTasks)
+      .where(eq(scheduledTasks.idempotencyKey, key))
+      .limit(1);
+    const row = rows[0];
+    return row ? rowToScheduledTask(row) : undefined;
   }
 
   async getScheduledTask(tx: Transaction, id: string): Promise<ScheduledTask | undefined> {

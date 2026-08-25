@@ -10,7 +10,35 @@ import { coerceToolInput } from "./tool-input-coercion.js";
  * Returns a string result for the LLM. Errors should be thrown —
  * the agentic loop catches and reports them as tool_result with isError.
  */
-export type ToolHandler = (input: Record<string, unknown>, service: Service) => Promise<string>;
+/**
+ * Per-call context for one tool invocation. Distinct from {@link Service},
+ * which is the per-conversation capability bundle (and the ACL boundary):
+ * this carries facts about *this* call, so it can't be folded in there
+ * without making a shared object per-call.
+ *
+ * Optional on {@link ToolHandler} by design — a handler declared
+ * `(input, service)` is assignable to the three-parameter type, so tools
+ * that don't need a call context are unaffected.
+ */
+export interface ToolCallContext {
+  /**
+   * Deterministic token identifying this tool call, stable across every
+   * re-execution of it — step replays, and the retry that follows a crash
+   * between a side effect committing and the step result being recorded.
+   * Derived from durable turn state, never from anything the model mints.
+   *
+   * Side-effectful tools pass it to whatever DB-level idempotency their
+   * domain provides (`coding_tasks.idempotency_key`,
+   * `skill_runs.idempotency_key`). Absent outside a retrying context.
+   */
+  idempotencyKey: string;
+}
+
+export type ToolHandler = (
+  input: Record<string, unknown>,
+  service: Service,
+  ctx?: ToolCallContext,
+) => Promise<string>;
 
 /**
  * Full tool specification — execution-environment agnostic.
@@ -40,6 +68,27 @@ export interface ToolSpec {
    * durability policy.
    */
   durable?: boolean;
+  /**
+   * Canonicalize raw provider arguments into the value the handler will
+   * actually receive. The loop digests THIS into the call's idempotency
+   * key, so a re-delivery that phrases the same request differently — a
+   * nested object sent as a JSON string, a field the schema drops — still
+   * yields one key rather than minting a second side effect.
+   *
+   * **Must be deterministic.** The key is recomputed from scratch in every
+   * Inngest invocation that runs the handler, and no in-process cache can
+   * survive that — a schema with a dynamic `.default(() => …)` or a
+   * `.transform()` reading the clock would mint a different key each time and
+   * silently defeat the dedup. {@link defineTool}'s per-invocation memo keeps
+   * the key aligned with the value the handler sees *within* one invocation;
+   * determinism is what makes it hold *across* them, and `tools.test.ts`
+   * asserts it over the whole registry.
+   *
+   * A hand-built spec that omits this has its raw arguments digested
+   * instead, which can only mint a duplicate, never collapse two distinct
+   * requests into one.
+   */
+  normalizeInput?: (raw: Record<string, unknown>) => unknown;
   /**
    * Declares the handler has no ordering dependency on sibling tool calls in
    * the same turn. Consecutive parallelSafe entries in the LLM's tool_use
@@ -102,7 +151,7 @@ export function defineTool<T>(opts: {
   name: string;
   description: string;
   schema: ZodType<T>;
-  handler: (input: T, service: Service) => Promise<string>;
+  handler: (input: T, service: Service, ctx?: ToolCallContext) => Promise<string>;
   /** See `ToolSpec.durable`. */
   durable?: boolean;
   /** See `ToolSpec.parallelSafe`. */
@@ -121,21 +170,43 @@ export function defineTool<T>(opts: {
     );
   }
   const inputSchema = toObjectJsonSchema(opts.schema);
+  // One parse per raw payload, shared by `normalizeInput` (which the loop
+  // digests into the call's idempotency key) and the handler wrapper. Parsing
+  // twice would let a schema with a non-deterministic `.default(() => ...)`
+  // or `.transform()` hand the key a different value than the handler sees —
+  // and hand a retry a different key again, which is the dedup gone. Keyed on
+  // the raw object's identity, which is stable for the lifetime of one
+  // `runOne`; entries fall out with the payload.
+  // Boxed so a schema whose output is a primitive (`.transform()` to a
+  // string, say) still caches — an unboxed `undefined` miss would re-parse and
+  // reopen the double-parse gap this exists to close. Keyed weakly on the raw
+  // payload, which `coerceToolInput` accepts as a root-level JSON *string*
+  // when a provider double-encodes the arguments; a string is not a legal
+  // WeakMap key, so a non-object payload skips the cache rather than throwing.
+  const parsed = new WeakMap<object, { value: T }>();
+  const parseOnce = (raw: Record<string, unknown>): T => {
+    const cacheable = typeof raw === "object" && raw !== null;
+    const hit = cacheable ? parsed.get(raw) : undefined;
+    if (hit) return hit.value;
+    // Some providers occasionally serialize a nested object argument as a
+    // JSON string; unwrap once before Zod so the parse error the LLM sees
+    // reflects a real schema violation, not a serialization quirk.
+    const { value, coercedPaths } = coerceToolInput(raw, inputSchema);
+    if (coercedPaths.length > 0) {
+      logger.debug({ tool: opts.name, paths: coercedPaths }, "coerced stringified tool input");
+    }
+    const out = opts.schema.parse(value);
+    if (cacheable) parsed.set(raw, { value: out });
+    return out;
+  };
   return {
     name: opts.name,
     description: opts.description,
     inputSchema,
-    handler: async (raw, service) => {
-      // Some providers occasionally serialize a nested object argument as a
-      // JSON string; unwrap once before Zod so the parse error the LLM sees
-      // reflects a real schema violation, not a serialization quirk.
-      const { value, coercedPaths } = coerceToolInput(raw, inputSchema);
-      if (coercedPaths.length > 0) {
-        logger.debug({ tool: opts.name, paths: coercedPaths }, "coerced stringified tool input");
-      }
-      const parsed = opts.schema.parse(value);
-      return opts.handler(parsed, service);
-    },
+    handler: async (raw, service, ctx) => opts.handler(parseOnce(raw), service, ctx),
+    // The value the handler will receive, exposed so the loop keys a call on
+    // its normalized arguments rather than the raw payload.
+    normalizeInput: parseOnce,
     ...(opts.durable !== undefined && { durable: opts.durable }),
     ...(opts.parallelSafe !== undefined && { parallelSafe: opts.parallelSafe }),
     ...(opts.sideEffectful !== undefined && { sideEffectful: opts.sideEffectful }),

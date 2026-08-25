@@ -335,6 +335,7 @@ describe("runCodingTask", () => {
 
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps,
       stepRun,
       stepSendEvent,
@@ -397,6 +398,7 @@ describe("runCodingTask", () => {
 
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps,
       stepRun,
       stepSendEvent,
@@ -416,6 +418,7 @@ describe("runCodingTask", () => {
 
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps,
       stepRun,
       stepSendEvent,
@@ -485,6 +488,7 @@ describe("runCodingTask", () => {
 
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend }),
       stepRun,
       stepSendEvent: recordingStepSendEvent,
@@ -520,6 +524,7 @@ describe("runCodingTask", () => {
 
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend }),
       stepRun,
       stepSendEvent: recordingStepSendEvent,
@@ -531,7 +536,7 @@ describe("runCodingTask", () => {
     expect(sentEvents.find((e) => e.name === "coding/task/plan-approved")).toBeUndefined();
   });
 
-  it("autoapprove=on race: concurrent cancel between set-status-awaiting and auto-approve wins, no plan-approved emit", async () => {
+  it("autoapprove=on race: concurrent cancel between set-status-plan-ready and auto-approve wins, no plan-approved emit", async () => {
     // Pins the race-safe contract from the design doc: if the user taps
     // Cancel after the plan finalizes but before the auto-approve step
     // commits, `approvePlanIfPending` observes `status != awaiting_approval`
@@ -565,6 +570,7 @@ describe("runCodingTask", () => {
 
     await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend }),
       stepRun: interceptingStepRun,
       stepSendEvent: recordingStepSendEvent,
@@ -631,6 +637,7 @@ describe("runCodingTask", () => {
 
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend }),
       stepRun,
       stepSendEvent: recordingStepSendEvent,
@@ -665,6 +672,7 @@ describe("runCodingTask", () => {
     // text_delta into the stream, so plan_ready's plan is what matters.
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend }),
       stepRun,
       stepSendEvent,
@@ -685,6 +693,7 @@ describe("runCodingTask", () => {
     ]);
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend, openPlanStream: async () => planStream.handle }),
       stepRun,
       stepSendEvent,
@@ -709,6 +718,7 @@ describe("runCodingTask", () => {
     ]);
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend }),
       stepRun,
       stepSendEvent,
@@ -735,6 +745,7 @@ describe("runCodingTask", () => {
     );
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend: backendYielding([]) }),
       stepRun,
       stepSendEvent,
@@ -762,6 +773,7 @@ describe("runCodingTask", () => {
     );
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend: backendYielding([]) }),
       stepRun,
       stepSendEvent,
@@ -801,6 +813,7 @@ describe("runCodingTask", () => {
     const { sandbox } = fakeSandbox();
     const result = await runCodingTask({
       taskId: badTask.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend: backendYielding([]) }),
       stepRun,
       stepSendEvent,
@@ -814,6 +827,7 @@ describe("runCodingTask", () => {
     await expect(
       runCodingTask({
         taskId: "019d0000-0000-7000-8000-0000000000ff",
+        runId: "run-test",
         deps: makeDeps({ sandbox, backend: backendYielding([]) }),
         stepRun,
         stepSendEvent,
@@ -833,7 +847,6 @@ describe("runCodingTask", () => {
   it("catch path: emit fires BEFORE DB update; emit failure propagates leaving the row non-terminal", async () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
-    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "planning" }));
 
     const { sandbox } = fakeSandbox();
     // Backend that throws — drives the function into the catch.
@@ -856,6 +869,7 @@ describe("runCodingTask", () => {
     await expect(
       runCodingTask({
         taskId: task.id,
+        runId: "run-test",
         deps: makeDeps({ sandbox, backend: throwingBackend }),
         stepRun,
         stepSendEvent: stepSendEventThrowing,
@@ -874,7 +888,6 @@ describe("runCodingTask", () => {
   it("catch path: emit payload carries idempotency id 'task-failed-' + taskId for bus-level dedup", async () => {
     const repo = await seedRepo();
     const task = await seedTask(repo);
-    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "planning" }));
 
     const { sandbox } = fakeSandbox();
     const throwingBackend: CodingBackend = {
@@ -891,6 +904,7 @@ describe("runCodingTask", () => {
 
     await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend: throwingBackend }),
       stepRun,
       stepSendEvent: capturingStepSendEvent,
@@ -925,6 +939,7 @@ describe("runCodingTask", () => {
 
     await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend }),
       stepRun,
       stepSendEvent: capturingStepSendEvent,
@@ -954,20 +969,19 @@ describe("runCodingTask", () => {
       },
       execute: () => throwingPlan("execute not used in this test"),
     };
-    // First UPDATE call (`set-status-planning` inside the try) succeeds;
-    // the SECOND call (the catch path's status="failed" write) throws.
-    // This isolates the test to the precise contract under exam: that
-    // the catch's UPDATE throw propagates instead of being swallowed.
+    // The task is claimed by `set-status-planning`'s conditional
+    // transition, which passes through; the catch path's status="failed"
+    // write is the only `updateTaskStatus` call, and it throws. This
+    // isolates the test to the precise contract under exam: that the
+    // catch's UPDATE throw propagates instead of being swallowed.
     let updateCalls = 0;
     const dbThrowingStore = {
       ...store,
       getTask: store.getTask.bind(store),
       getRepoById: store.getRepoById.bind(store),
-      updateTaskStatus: async (trx: unknown, params: { id: string; status: string }) => {
+      transitionTaskStatus: store.transitionTaskStatus.bind(store),
+      updateTaskStatus: async () => {
         updateCalls += 1;
-        if (updateCalls === 1) {
-          return store.updateTaskStatus(trx as never, params as never);
-        }
         throw new Error("db blip");
       },
     } as unknown as typeof store;
@@ -980,21 +994,21 @@ describe("runCodingTask", () => {
     await expect(
       runCodingTask({
         taskId: task.id,
+        runId: "run-test",
         deps: makeDeps({ sandbox, backend: throwingBackend, store: dbThrowingStore }),
         stepRun,
         stepSendEvent: capturingStepSendEvent,
       }),
     ).rejects.toThrow(/db blip/);
 
-    // Two UPDATE attempts — set-status-planning (succeeded) + catch's
-    // set-status-failed (threw).
-    expect(updateCalls).toBe(2);
+    // One UPDATE attempt — the catch's set-status-failed, which threw.
+    expect(updateCalls).toBe(1);
     // Emit fired before the catch's UPDATE attempt — the bus has the
     // event already.
     expect(captured).toHaveLength(1);
-    // Row is in `planning` from the first successful UPDATE — the
-    // catch's status="failed" write was rejected, so the row stays
-    // non-terminal for the reconcile subscriber to pick up.
+    // Row is in `planning` from the claim transition — the catch's
+    // status="failed" write was rejected, so the row stays non-terminal
+    // for the reconcile subscriber to pick up.
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.status).toBe("planning");
   });
@@ -1012,6 +1026,7 @@ describe("runCodingTask", () => {
     await expect(
       runCodingTask({
         taskId: task.id,
+        runId: "run-test",
         deps: makeDeps({ sandbox, backend: backendYielding([]), store: ghostStore }),
         stepRun,
         stepSendEvent,
@@ -1169,6 +1184,7 @@ describe("runCodingExecute", () => {
 
     const result = await runCodingExecute({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
       stepRun,
       stepSendEvent,
@@ -1213,6 +1229,7 @@ describe("runCodingExecute", () => {
 
     const result = await runCodingExecute({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
       stepRun,
       stepSendEvent,
@@ -1257,6 +1274,7 @@ describe("runCodingExecute", () => {
 
     const result = await runCodingExecute({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
       stepRun,
       stepSendEvent,
@@ -1292,6 +1310,7 @@ describe("runCodingExecute", () => {
 
     await runCodingExecute({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({ sandbox, backend, openExecuteStream: async () => stream.handle }),
       stepRun,
       stepSendEvent: capturingStepSendEvent,
@@ -1306,26 +1325,169 @@ describe("runCodingExecute", () => {
     });
   });
 
-  it("idempotent: second event for already-executing task returns skipped without re-running", async () => {
+  it("adopts a legacy row once, then skips the next delivery for it", async () => {
+    // Migration 0054 left every existing row with a NULL claimant. Matching
+    // strictly on run id would strand those — `skipped`, no failure event,
+    // nothing for reconcile. But merely waving NULL through is worse than it
+    // looks: nothing writes the claimant, so NULL never clears and *every*
+    // later delivery resumes the task, each minting its own sandbox and paid
+    // CLI session. The claim's UPDATE adopts the row instead, which binds it
+    // to exactly one run.
     const repo = await seedRepo();
     const { task } = await seedExecutableTask(repo);
-    // Simulate first event already advanced status to executing.
+    // `updateTaskStatus` writes no claimant — what a pre-0054 row looks like
+    // after its claim step ran on the old code.
     await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "executing" }));
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.claimedByRunId).toBeNull();
 
-    const { sandbox } = fakeSandbox();
     const backend = executeBackendYielding([{ kind: "complete", exitCode: 0, isError: false }]);
-
-    const result = await runCodingExecute({
+    const adopted = await runCodingExecute({
       taskId: task.id,
-      deps: makeDeps({ sandbox, backend }),
+      runId: "run-first",
+      deps: makeDeps({ sandbox: fakeSandbox().sandbox, backend }),
       stepRun,
       stepSendEvent,
       inngest: fakeInngest,
     });
+    expect(adopted.status).toBe("pending_verify");
+
+    // Put it back to `executing` to model a second delivery arriving while
+    // the row still carries the first run's claim.
+    await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "executing" }));
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.claimedByRunId).toBe("run-first");
+
+    const second = fakeSandbox();
+    const skipped = await runCodingExecute({
+      taskId: task.id,
+      runId: "run-second",
+      deps: makeDeps({ sandbox: second.sandbox, backend }),
+      stepRun,
+      stepSendEvent,
+      inngest: fakeInngest,
+    });
+    expect(skipped.status).toBe("skipped");
+    expect(second.createCalls).toHaveLength(0);
+  });
+
+  it("resumes its own claim, and skips a row another run left in `executing`", async () => {
+    // `executing` is this transition's own target, so status alone cannot say
+    // whether this run's earlier attempt committed the UPDATE and lost the
+    // step result, or a dead run left the row here and this is a duplicate
+    // delivery. The two want opposite handling — resume, versus don't mint a
+    // second sandbox and a second paid CLI session — so the claimant decides.
+    const repo = await seedRepo();
+
+    // Ours: the row records this run as the claimant.
+    const mine = await seedExecutableTask(repo);
+    await tx((trx) =>
+      store.transitionTaskStatus(trx, mine.task.id, "awaiting_approval", "executing", "run-test"),
+    );
+    const backend = executeBackendYielding([{ kind: "complete", exitCode: 0, isError: false }]);
+    const resumed = await runCodingExecute({
+      taskId: mine.task.id,
+      runId: "run-test",
+      deps: makeDeps({ sandbox: fakeSandbox().sandbox, backend }),
+      stepRun,
+      stepSendEvent,
+      inngest: fakeInngest,
+    });
+    expect(resumed.status).toBe("pending_verify");
+
+    // Someone else's: a different run claimed it, so this delivery stands down.
+    const theirs = await seedExecutableTask(repo);
+    await tx((trx) =>
+      store.transitionTaskStatus(
+        trx,
+        theirs.task.id,
+        "awaiting_approval",
+        "executing",
+        "run-other",
+      ),
+    );
+    const other = fakeSandbox();
+    const skipped = await runCodingExecute({
+      taskId: theirs.task.id,
+      runId: "run-test",
+      deps: makeDeps({ sandbox: other.sandbox, backend }),
+      stepRun,
+      stepSendEvent,
+      inngest: fakeInngest,
+    });
+    expect(skipped.status).toBe("skipped");
+    expect(other.createCalls).toHaveLength(0);
+    expect((await tx((trx) => store.getTask(trx, theirs.task.id)))?.status).toBe("executing");
+  });
+
+  it("moved forward during plan-cli: stops without touching another run's resources", async () => {
+    // The plan-ready branch fires for any status that isn't its target, and
+    // it is destructive. A task that ENDED has no owner, so reclaiming its
+    // worktree and container is right. A task that moved FORWARD does — the
+    // auto-approve path hands off to execute, which claims `executing` and
+    // works on those very resources — and tearing them down kills it
+    // mid-CLI. Only the first may release anything.
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox, stopCalls } = fakeSandbox();
+    const backend: CodingBackend = {
+      plan: async function* () {
+        yield { kind: "session_started", sessionId: "sess-A" };
+        // Execute claims the task while the plan session is still streaming.
+        await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: "executing" }));
+        yield { kind: "plan_ready", plan: "## Plan" };
+        yield { kind: "complete", exitCode: 0, isError: false };
+      },
+      execute: () => throwingPlan("execute not used in this test"),
+    };
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({ sandbox, backend }),
+      stepRun,
+      stepSendEvent,
+    });
 
     expect(result.status).toBe("skipped");
-    // Status unchanged — second run didn't touch the DB.
+    // The live run's container is untouched.
+    expect(stopCalls).toEqual([]);
     expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("executing");
+  });
+
+  it("cancelled during plan-cli: tears down, keeps `cancelled`, survives a teardown blip", async () => {
+    // Returning from inside the try skips the catch that owns cleanup, so this
+    // branch does it itself — and must not let a teardown failure reach the
+    // outer catch, which would overwrite the user's `cancelled` with `failed`.
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox, stopCalls } = fakeSandbox();
+    const backend: CodingBackend = {
+      plan: async function* () {
+        yield { kind: "session_started", sessionId: "sess-A" };
+        // Cancel lands while the plan session is streaming.
+        await tx((trx) => store.cancelTaskIfActive(trx, task.id, "user cancelled"));
+        yield { kind: "plan_ready", plan: "## Plan" };
+        yield { kind: "complete", exitCode: 0, isError: false };
+      },
+      execute: () => throwingPlan("execute not used in this test"),
+    };
+    // ...and the teardown itself fails, on a restarting Docker daemon.
+    sandbox.deleteByTaskId = vi.fn(async () => {
+      stopCalls.push(task.id);
+      throw new Error("docker daemon restarting");
+    });
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({ sandbox, backend }),
+      stepRun,
+      stepSendEvent,
+    });
+
+    expect(result.status).toBe("skipped");
+    // The user's cancel stands.
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("cancelled");
+    expect(stopCalls).toContain(task.id);
   });
 
   it("throws when plan_approved_at is missing (event fired before approve handler stamped it)", async () => {
@@ -1344,6 +1506,7 @@ describe("runCodingExecute", () => {
     await expect(
       runCodingExecute({
         taskId: task.id,
+        runId: "run-test",
         deps: makeDeps({
           sandbox,
           backend: executeBackendYielding([]),
@@ -1372,6 +1535,7 @@ describe("runCodingExecute", () => {
     await expect(
       runCodingExecute({
         taskId: task.id,
+        runId: "run-test",
         deps: makeDeps({ sandbox, backend: executeBackendYielding([]) }),
         stepRun,
         stepSendEvent,
@@ -1385,6 +1549,7 @@ describe("runCodingExecute", () => {
     await expect(
       runCodingExecute({
         taskId: "019d0000-0000-7000-8000-000000000099",
+        runId: "run-test",
         deps: makeDeps({ sandbox, backend: executeBackendYielding([]) }),
         stepRun,
         stepSendEvent,
@@ -1420,6 +1585,7 @@ describe("runCodingExecute", () => {
 
     const result = await runCodingExecute({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({
         sandbox,
         backend,
@@ -1457,6 +1623,7 @@ describe("runCodingExecute", () => {
 
     const result = await runCodingExecute({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({
         sandbox,
         backend: executeBackendYielding([]),
@@ -1506,6 +1673,7 @@ describe("runCodingExecute", () => {
     await expect(
       runCodingExecute({
         taskId: task.id,
+        runId: "run-test",
         deps: makeDeps({ sandbox, backend: throwingBackend }),
         stepRun,
         stepSendEvent: stepSendEventThrowing,

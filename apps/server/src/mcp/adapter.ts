@@ -22,6 +22,13 @@ export function mcpDescriptorToToolSpec(opts: McpToolAdapterOptions): ToolSpec {
     name: composeMcpToolName(opts.server.name, opts.descriptor.name),
     description: opts.descriptor.description,
     inputSchema: descriptorToJsonSchema(opts.descriptor),
+    // Durable: an MCP tool call reaches an external system we don't control.
+    // That buys replay-safety, not exactly-once — the body still runs at least
+    // once, and a crash between the upstream mutation and Inngest recording the
+    // step result re-runs it. Closing that would need the server to accept an
+    // idempotency token, which the MCP tool contract has no slot for; the
+    // `ToolCallContext` this handler could forward is available if one ever
+    // does. See .claude/rules/inngest.md.
     durable: true,
     handler: async (input) => {
       const conn = await opts.pool.getConnection(opts.server.id);

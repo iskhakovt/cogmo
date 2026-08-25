@@ -38,7 +38,10 @@ contract**. Design every function for the per-boundary model.
   body reads the mutated status and skips the rest of the run. Re-entry
   guards belong *inside* a durable step (conditional UPDATE returning
   whether the transition happened), with the bare body branching on the
-  memoized result.
+  memoized result. Put that step where a lost race returns *before* the
+  function's failure/teardown machinery — otherwise a duplicate event
+  that trips any error on the way in (a rotated secret, an unreachable
+  dependency) marks an already-terminal row `failed`.
 - **The continuation after a parallel step group runs only in
   fully-memoized invocations.** When a `Promise.all` plans two or more
   steps, Inngest executes each body in a targeted request that runs ONLY
@@ -70,6 +73,45 @@ contract**. Design every function for the per-boundary model.
   `list_*`) stay non-durable; accept that their persisted `tool_result` is
   whatever the last invocation returned. Justify both sides of the flag in
   the PR.
+- **`durable: true` buys replay-safety, not exactly-once.** A crash after
+  the side effect commits but before Inngest records the step result
+  leaves no evidence the step ran, so the retry re-runs it — and no
+  transaction spans Postgres and Inngest's state store. A non-idempotent
+  side effect inside a step therefore needs a caller-supplied idempotency
+  key on top. Three constraints on it:
+  - **Derive it from durable state** — the step id's own inputs (turn
+    token, iteration, position). Never from what the model mints, a clock,
+    or a fresh uuid in the bare body.
+  - **Key the request, not the slot.** Include a canonical digest of the
+    call's name and arguments: a re-delivery replays with an empty step
+    cache, the model re-decides, and a different call can land at the same
+    coordinates — which a coordinates-only key reads as a retry.
+  - **A recovery resumes the remaining phases; it does not assume the
+    request finished.** The first attempt may have died between two side
+    effects, so returning early on "the row already exists" trades a
+    duplicate for a permanent stall. Track a recovery point, or make the
+    later phases independently idempotent.
+
+  Store under a plain `UNIQUE` and write through `ON CONFLICT DO UPDATE`
+  with a no-op SET — not `DO NOTHING`. Under REPEATABLE READ a concurrent
+  loser cannot see a row committed after its snapshot: `DO NOTHING` skips
+  the tuple and the re-select finds nothing, failing deterministically with
+  nothing to retry, while `DO UPDATE` must write it and so raises `40001`,
+  which the transactor retries against a snapshot that does contain the
+  winner. `RETURNING … (xmax = 0)` separates insert from conflict-update.
+  Nulls-distinct leaves callers without retry semantics unaffected.
+  Reference: `coding_tasks.idempotency_key` + `insertOrRecoverTask`,
+  `scheduled_tasks.idempotency_key` + `createOrRecoverScheduledTask`.
+  (`SkillStore.startOrRecoverRun` predates this and still uses the
+  `DO NOTHING` shape — tracked in `todo.md`.)
+- **A step boundary abandons the function; it does not unwind it.** An
+  unexecuted step hands the body a promise the SDK never settles, so the
+  invocation ends with the async function pending mid-`await`. `finally`
+  and `catch` do NOT fire on a boundary — only on real completion. Cleanup
+  in a `finally` runs once, at the end of the run, which is what makes
+  "create a container in step 2, use it in step 7" safe. Don't "fix" a
+  `finally` that looks like it would tear down mid-run, and don't move
+  cleanup into a step to defend against a boundary that never reaches it.
 - **Bare-body wall-clocks and metrics are per-invocation.** `Date.now()`
   captured at the top of the function restarts on every boundary — a
   "duration" computed from it in a late step measures the final replay,

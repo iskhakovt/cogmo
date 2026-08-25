@@ -1,4 +1,17 @@
-import { and, asc, count, desc, eq, inArray, ne, notInArray, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  getTableColumns,
+  inArray,
+  isNull,
+  ne,
+  notInArray,
+  or,
+  sql,
+} from "drizzle-orm";
 import { single } from "../../../db/helpers.js";
 import type { Transaction } from "../../../db/index.js";
 import { conversations, profiles } from "../../store/schema.js";
@@ -60,6 +73,25 @@ export interface CodingRepoRow {
   createdAt: Date;
 }
 
+export interface InsertTaskParams {
+  repoId: string;
+  conversationId?: string | null;
+  goal: string;
+  triggerSource: CodingTriggerSource;
+  triggerRef?: string | null;
+  backend: CodingBackend;
+  allowPrivilegedRunc: boolean;
+}
+
+/**
+ * Outcome of an idempotent submission. `new` = this call minted the row;
+ * `recovered` = a prior call with the same key already did, so this one is
+ * a retry of the same submission.
+ */
+export type InsertTaskResult =
+  | { kind: "new"; row: CodingTaskRow }
+  | { kind: "recovered"; row: CodingTaskRow };
+
 export interface CodingTaskRow {
   id: string;
   repoId: string;
@@ -85,6 +117,14 @@ export interface CodingTaskRow {
   status: CodingTaskStatus;
   failureReason: string | null;
   resourceUsage: ResourceUsage | null;
+  /**
+   * Caller-supplied deterministic-per-submission token, or null when the
+   * caller has no retry semantics. Backed by a plain UNIQUE constraint;
+   * Postgres's NULL-not-equal semantics let null-key rows coexist.
+   */
+  idempotencyKey: string | null;
+  /** Inngest run that most recently claimed this task via a status transition. */
+  claimedByRunId: string | null;
   createdAt: Date;
 }
 
@@ -153,18 +193,38 @@ export interface CodingStore {
    * accepted here — the orchestrator's `allocate-worktree` step derives them
    * from the (DB-generated) task id and persists via `setTaskWorktreeAssignment`.
    */
-  insertTask(
+  insertTask(tx: Transaction, params: InsertTaskParams): Promise<CodingTaskRow>;
+
+  /**
+   * Idempotent submission against `uniq_coding_tasks_idempotency_key`: a
+   * second call with the same key returns `kind: "recovered"` and the
+   * original row. Uses `ON CONFLICT DO UPDATE` with a no-op SET and an
+   * `xmax = 0` discriminator — see the implementation for why `DO NOTHING`
+   * cannot resolve a concurrent loser under REPEATABLE READ. Separate from
+   * {@link CodingStore.insertTask} because this one can decline to insert.
+   */
+  insertOrRecoverTask(
     tx: Transaction,
-    params: {
-      repoId: string;
-      conversationId?: string | null;
-      goal: string;
-      triggerSource: CodingTriggerSource;
-      triggerRef?: string | null;
-      backend: CodingBackend;
-      allowPrivilegedRunc: boolean;
-    },
-  ): Promise<CodingTaskRow>;
+    params: InsertTaskParams & { idempotencyKey: string },
+  ): Promise<InsertTaskResult>;
+
+  /**
+   * Look up a submission by its idempotency key. Read-only counterpart to
+   * `insertOrRecoverTask`'s conflict path — lets a caller recognise a retry
+   * before spending an admission check on it.
+   */
+  getTaskByIdempotencyKey(tx: Transaction, key: string): Promise<CodingTaskRow | undefined>;
+
+  /**
+   * Fail a task that is still `queued`, reporting whether it fired.
+   *
+   * For the submitter cleaning up after its own `inngest.send` threw. That
+   * throw is ambiguous — the bus may have accepted the event and failed only
+   * on the response — so by the time the cleanup runs an orchestrator may
+   * already have claimed the row and started work. Gating on `queued` means
+   * the cleanup can only ever fail a task nobody owns.
+   */
+  failQueuedTask(tx: Transaction, id: string, failureReason: string): Promise<boolean>;
 
   /** List tasks for a conversation, ordered by createdAt DESC (newest first). */
   listTasksForConversation(
@@ -279,8 +339,21 @@ export interface CodingStore {
     id: string,
     from: CodingTaskStatus,
     to: CodingTaskStatus,
+    /**
+     * Inngest run making the claim. Stamped on success and echoed back on
+     * `stale`, so a caller can tell its own re-executed claim (resume) from a
+     * duplicate delivery (skip) — a distinction `status` alone cannot make.
+     *
+     * Supplying it also widens what counts as claimable: a row already at
+     * `to` with a NULL claimant is adopted, which is how rows predating
+     * migration 0054 get bound to exactly one run instead of being resumed by
+     * every delivery. Omit for transitions that aren't ownership claims.
+     */
+    claimedByRunId?: string,
   ): Promise<
-    { kind: "transitioned" } | { kind: "stale"; status: CodingTaskStatus } | { kind: "not_found" }
+    | { kind: "transitioned" }
+    | { kind: "stale"; status: CodingTaskStatus; claimedByRunId: string | null }
+    | { kind: "not_found" }
   >;
 
   /**
@@ -325,6 +398,20 @@ export interface CodingStore {
    * the plan text is persisted.
    */
   getCodingAutoapproveModeForTask(tx: Transaction, taskId: string): Promise<"off" | "on" | null>;
+}
+
+/** Column values shared by both insert paths. */
+function taskValues(params: InsertTaskParams) {
+  return {
+    repoId: params.repoId,
+    conversationId: params.conversationId ?? null,
+    goal: params.goal,
+    triggerSource: params.triggerSource,
+    triggerRef: params.triggerRef ?? null,
+    backend: params.backend,
+    allowPrivilegedRunc: params.allowPrivilegedRunc,
+    status: "queued" as const,
+  };
 }
 
 export class DrizzleCodingStore implements CodingStore {
@@ -420,34 +507,55 @@ export class DrizzleCodingStore implements CodingStore {
 
   // --- Tasks ---
 
-  async insertTask(
+  async insertTask(tx: Transaction, params: InsertTaskParams): Promise<CodingTaskRow> {
+    return single(await tx.insert(codingTasks).values(taskValues(params)).returning());
+  }
+
+  async insertOrRecoverTask(
     tx: Transaction,
-    params: {
-      repoId: string;
-      conversationId?: string | null;
-      goal: string;
-      triggerSource: CodingTriggerSource;
-      triggerRef?: string | null;
-      backend: CodingBackend;
-      allowPrivilegedRunc: boolean;
-    },
-  ): Promise<CodingTaskRow> {
-    const row = single(
-      await tx
-        .insert(codingTasks)
-        .values({
-          repoId: params.repoId,
-          conversationId: params.conversationId ?? null,
-          goal: params.goal,
-          triggerSource: params.triggerSource,
-          triggerRef: params.triggerRef ?? null,
-          backend: params.backend,
-          allowPrivilegedRunc: params.allowPrivilegedRunc,
-          status: "queued",
-        })
-        .returning(),
-    );
-    return row;
+    params: InsertTaskParams & { idempotencyKey: string },
+  ): Promise<InsertTaskResult> {
+    // DO UPDATE with a no-op SET, not DO NOTHING. The sequential retry is the
+    // same either way; the concurrent one is not. Under the project's
+    // REPEATABLE READ default, a loser conflicting with a row committed after
+    // its snapshot cannot see that row: DO NOTHING skips the tuple, the
+    // re-SELECT finds nothing, and the call fails deterministically with
+    // nothing for the transactor to retry. DO UPDATE must write the tuple, so
+    // Postgres raises `40001 serialization_failure` instead — which the
+    // transactor retries against a fresh snapshot that does contain the
+    // winner. (`FOR UPDATE` on the re-SELECT would not help: a row absent from
+    // the snapshot is absent from a locking read too.)
+    //
+    // `xmax = 0` distinguishes the outcomes: zero on a tuple this statement
+    // inserted, the locking xid on one it updated through the conflict arm.
+    const rows = await tx
+      .insert(codingTasks)
+      .values({ ...taskValues(params), idempotencyKey: params.idempotencyKey })
+      .onConflictDoUpdate({
+        target: codingTasks.idempotencyKey,
+        set: { idempotencyKey: params.idempotencyKey },
+      })
+      .returning({ ...getTableColumns(codingTasks), inserted: sql<boolean>`(xmax = 0)` });
+    const { inserted, ...row } = single(rows);
+    return { kind: inserted ? "new" : "recovered", row };
+  }
+
+  async failQueuedTask(tx: Transaction, id: string, failureReason: string): Promise<boolean> {
+    const updated = await tx
+      .update(codingTasks)
+      .set({ status: "failed", failureReason })
+      .where(and(eq(codingTasks.id, id), eq(codingTasks.status, "queued")))
+      .returning({ id: codingTasks.id });
+    return updated.length > 0;
+  }
+
+  async getTaskByIdempotencyKey(tx: Transaction, key: string): Promise<CodingTaskRow | undefined> {
+    const rows = await tx
+      .select()
+      .from(codingTasks)
+      .where(eq(codingTasks.idempotencyKey, key))
+      .limit(1);
+    return rows[0];
   }
 
   async setTaskWorktreeAssignment(
@@ -614,27 +722,45 @@ export class DrizzleCodingStore implements CodingStore {
     id: string,
     from: CodingTaskStatus,
     to: CodingTaskStatus,
+    claimedByRunId?: string,
   ): Promise<
-    { kind: "transitioned" } | { kind: "stale"; status: CodingTaskStatus } | { kind: "not_found" }
+    | { kind: "transitioned" }
+    | { kind: "stale"; status: CodingTaskStatus; claimedByRunId: string | null }
+    | { kind: "not_found" }
   > {
     // Single conditional UPDATE — atomic at the SQL level. If RETURNING
     // comes back empty, either the row doesn't exist or status didn't
     // match `from`; do a follow-up SELECT to disambiguate.
+    //
+    // A claim (one that supplies `claimedByRunId`) also matches a row already
+    // sitting at `to` with no claimant — the shape every row had before
+    // migration 0054 added the column. Adopting it here rather than waving it
+    // through at the caller is what makes the legacy path one-shot: the
+    // adoption stamps this run, so the next duplicate delivery finds a
+    // claimant that isn't its own and stands down. Without it, NULL never
+    // clears and every delivery resumes the task afresh.
+    const claimable =
+      claimedByRunId === undefined
+        ? eq(codingTasks.status, from)
+        : or(
+            eq(codingTasks.status, from),
+            and(eq(codingTasks.status, to), isNull(codingTasks.claimedByRunId)),
+          );
     const updated = await tx
       .update(codingTasks)
-      .set({ status: to })
-      .where(and(eq(codingTasks.id, id), eq(codingTasks.status, from)))
+      .set({ status: to, ...(claimedByRunId !== undefined && { claimedByRunId }) })
+      .where(and(eq(codingTasks.id, id), claimable))
       .returning({ id: codingTasks.id });
     if (updated.length > 0) return { kind: "transitioned" as const };
 
     const rows = await tx
-      .select({ status: codingTasks.status })
+      .select({ status: codingTasks.status, claimedByRunId: codingTasks.claimedByRunId })
       .from(codingTasks)
       .where(eq(codingTasks.id, id))
       .limit(1);
     const row = rows[0];
     if (!row) return { kind: "not_found" as const };
-    return { kind: "stale" as const, status: row.status };
+    return { kind: "stale" as const, status: row.status, claimedByRunId: row.claimedByRunId };
   }
 
   async approvePlanIfPending(

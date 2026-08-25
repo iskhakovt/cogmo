@@ -114,7 +114,7 @@ export const scheduleTask = defineTool({
   // get N reminders for one request.
   durable: true,
   schema: scheduleTaskSchema,
-  handler: async (input, service) => {
+  handler: async (input, service, ctx) => {
     if (!service.scheduling) {
       return "Scheduling is not available in this conversation.";
     }
@@ -136,7 +136,14 @@ export const scheduleTask = defineTool({
             ...(input.timezone !== undefined && { timezone: input.timezone }),
           } as const);
 
-    const result = await service.scheduling.create(args);
+    // Durability covers replay; the key covers the crash between the row
+    // committing and Inngest recording the step result. A duplicate schedule
+    // is the worst kind of duplicate side effect — it fires on every tick
+    // from then on, and only an explicit `remove_task` stops it.
+    const result = await service.scheduling.create(
+      args,
+      ...(ctx !== undefined ? ([`schedule_task:${ctx.idempotencyKey}`] as const) : []),
+    );
     if (result.isErr()) {
       return formatSchedulingError(result.error);
     }

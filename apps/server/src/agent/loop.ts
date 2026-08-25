@@ -16,6 +16,7 @@ import type {
 import { agentIterations } from "../metrics.js";
 import { validateHistory } from "./history-invariants.js";
 import {
+  canonicalJson,
   classifyClassDTrip,
   classifyPostStream,
   classifyStreamError,
@@ -25,10 +26,16 @@ import {
   formatVolumeClusterContent,
   freshBudgets,
   type RepairBudgets,
+  sha256,
   summarizeToolHistory,
 } from "./repair.js";
 import type { Service } from "./service.js";
-import { DEFAULT_INVOCATION_BUDGET, type ToolRegistry, type ToolSpec } from "./tools.js";
+import {
+  DEFAULT_INVOCATION_BUDGET,
+  type ToolCallContext,
+  type ToolRegistry,
+  type ToolSpec,
+} from "./tools.js";
 
 const tracer = trace.getTracer("cogmo.agent");
 
@@ -78,6 +85,15 @@ export interface AgentLoopParams {
    * Inngest replays).
    */
   stepRun?: StepRunner;
+  /**
+   * Opaque token identifying this turn, stable across every re-execution of
+   * it. Combined with each tool call's coordinates into the
+   * `ToolCallContext.idempotencyKey` side-effectful tools dedup on, so it
+   * must come from durable state (a triggering inbound id, a run id) — never
+   * a clock or a fresh uuid. Omit outside a retrying context; tools then get
+   * no call context, and none may assume retry-dedup.
+   */
+  turnKey?: string;
   /**
    * Per-invocation child logger with `runId` + `conversationId` bound. All
    * per-turn log emissions inside the loop route through it so downstream
@@ -168,6 +184,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     tools,
     service,
     stepRun,
+    turnKey,
     maxTokens,
     maxIterations = DEFAULT_MAX_ITERATIONS,
     turnLogger: log,
@@ -224,6 +241,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
       service,
       stepRun,
       iterations,
+      turnKey,
       interceptions,
     );
     messages.push({ role: "user", content: toolResults });
@@ -245,6 +263,59 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
 interface ToolStepKey {
   iteration: number;
   position: number;
+}
+
+/**
+ * Idempotency key for one tool call: the turn, the call's coordinates within
+ * it, and a digest of what it asked for.
+ *
+ * The coordinates are load-bearing, and the reason is asymmetric. An
+ * *infrastructure* re-execution — a lost step result, a replayed body — is by
+ * construction the same `(iteration, position)`, because that pair is the step
+ * id. A *model* retry is not: `tool-iter*` steps take no Inngest retries
+ * precisely so that "a fresh tool_use from the model creates a fresh step,
+ * which IS the retry" (see `handle-message`). Dropping the coordinates
+ * collapses those two into one key, and the model's retry of a failed call
+ * then replays the cached failure instead of running — silently disabling the
+ * turn's only retry channel.
+ *
+ * The digest covers what the coordinates cannot: a re-delivery replays with an
+ * empty step cache, the model re-decides, and a *different* call can land at
+ * the same coordinate. Residual, accepted: a re-delivery that re-decides to a
+ * different layout gives the same request a new key and can mint a duplicate.
+ * That is the safe direction — a duplicate is visible, a swallowed retry is
+ * not — and it needs a duplicate `inbound/ready`, where the swallowed retry
+ * needs only a tool error.
+ *
+ * Digested over the arguments the handler will actually see: `normalizeInput`
+ * runs the spec's own coerce-then-parse pipeline, so a stringified nested
+ * argument or a field the schema drops doesn't fork the key. A spec without
+ * one (skills, MCP) digests its raw payload, which can only mint a duplicate,
+ * never collapse two distinct requests.
+ *
+ * `canonicalJson` is RFC 8785 and total — it absorbs cycles, non-finite
+ * numbers, ill-formed strings and a throwing `toJSON` rather than propagating
+ * out of the bare body and turning a valid call into an `is_error` result.
+ * Same encoder the Class D iteration fingerprint hashes tool args with.
+ */
+function toolCallKey(
+  turnKey: string,
+  stepKey: ToolStepKey,
+  spec: ToolSpec,
+  block: ToolUseBlock,
+): string {
+  let input: unknown = block.input;
+  if (spec.normalizeInput) {
+    try {
+      input = spec.normalizeInput(block.input as Record<string, unknown>);
+    } catch {
+      // Arguments that don't validate: the handler is about to reject them,
+      // so no side effect lands and the key is never consulted.
+      input = block.input;
+    }
+  }
+  const digest = sha256(`${block.name}\u0000${canonicalJson(input)}`).slice(0, 16);
+  return `${turnKey}:i${stepKey.iteration}:p${stepKey.position}:${digest}`;
 }
 
 interface PlannedCall {
@@ -375,6 +446,7 @@ async function executeToolCalls(
   service: Service,
   stepRun: StepRunner | undefined,
   iteration: number,
+  turnKey: string | undefined,
   interceptions?: ReadonlyMap<string, ContentBlock>,
 ): Promise<ContentBlock[]> {
   const toolUseBlocks = content.filter((b): b is ToolUseBlock => b.type === "tool_use");
@@ -407,7 +479,7 @@ async function executeToolCalls(
   for (const group of groups) {
     const batch = await Promise.all(
       group.map(({ block, spec, stepKey }) =>
-        runOne(block, spec, service, stepRun, stepKey, interceptions),
+        runOne(block, spec, service, stepRun, stepKey, turnKey, interceptions),
       ),
     );
     results.push(...batch);
@@ -461,6 +533,7 @@ async function runOne(
   service: Service,
   stepRun: StepRunner | undefined,
   stepKey: ToolStepKey,
+  turnKey: string | undefined,
   interceptions?: ReadonlyMap<string, ContentBlock>,
 ): Promise<ContentBlock> {
   // Volume-cluster intercept short-circuits the handler — synthetic
@@ -487,8 +560,21 @@ async function runOne(
         // the provider's `tool_use_id` is not. Cached content may
         // semantically mismatch the current `tool_use` — see
         // design/crash-recovery.md → Per-tool durability.
-        const runHandler = (): Promise<string> =>
-          spec.handler(block.input as Record<string, unknown>, service);
+        // Built inside the handler thunk, not in the bare body: the bare
+        // body re-runs once per step boundary, and keying costs a coercion
+        // walk, a Zod parse, a canonical clone and a hash over payloads that
+        // reach hundreds of KB for `write_file`. Inside the thunk it runs
+        // exactly when the handler does — never on a memoized replay. Only
+        // durable tools get one; a non-durable handler re-runs per boundary by
+        // design and has nothing to dedup against. Undefined without a turn
+        // token (unit tests, loops outside Inngest) — no tool may assume dedup.
+        const runHandler = (): Promise<string> => {
+          const callCtx: ToolCallContext | undefined =
+            turnKey !== undefined && spec.durable === true
+              ? { idempotencyKey: toolCallKey(turnKey, stepKey, spec, block) }
+              : undefined;
+          return spec.handler(block.input as Record<string, unknown>, service, callCtx);
+        };
         const out =
           spec.durable === true && stepRun
             ? await stepRun(`tool-iter${stepKey.iteration}-${stepKey.position}`, runHandler)
@@ -775,6 +861,7 @@ export async function runStreamingAgentLoop(
     service,
     onEvent,
     stepRun,
+    turnKey,
     maxTokens,
     maxIterations = DEFAULT_MAX_ITERATIONS,
     turnLogger: log,
@@ -953,6 +1040,7 @@ export async function runStreamingAgentLoop(
       service,
       stepRun,
       iterations,
+      turnKey,
       interceptions,
     );
 

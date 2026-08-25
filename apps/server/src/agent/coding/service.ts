@@ -2,7 +2,7 @@ import type { Inngest } from "inngest";
 import type { Transactor } from "../../db/index.js";
 import { codingTaskStart } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
-import type { CodingStore } from "./store/index.js";
+import type { CodingStore, CodingTaskStatus } from "./store/index.js";
 
 const log = logger.child({ component: "coding.service" });
 
@@ -28,10 +28,27 @@ export interface CodingServiceDeps {
 export interface DelegateInput {
   goal: string;
   repoName: string;
+  /**
+   * Deterministic-per-submission token from the tool call's
+   * `ToolCallContext`. Makes the insert + emit pair recoverable: the tool
+   * runs inside a durable `step.run`, so a crash between this row
+   * committing and Inngest recording the step result re-runs the body, and
+   * without a key that mints a second task and a second sandbox. Omitted by
+   * callers with no retry semantics (CLI, tests).
+   */
+  idempotencyKey?: string;
 }
 
 export type DelegateResult =
   | { taskId: string; status: "queued" }
+  /**
+   * A prior attempt at this exact submission already inserted the task —
+   * same idempotency key. `priorStatus` is where that task has got to, which
+   * the caller needs: a `queued` row has just been re-driven, a started one
+   * is already running, and a terminal one will never run again. Reporting
+   * all three as `queued` would tell the model a failed task is under way.
+   */
+  | { taskId: string; status: "recovered"; priorStatus: CodingTaskStatus }
   | { taskId: null; status: "rejected"; reason: string };
 
 /**
@@ -68,6 +85,92 @@ export function createCodingService(
         );
       }
 
+      /**
+       * Emit `coding/task/start`, and make sure a failure to emit doesn't
+       * strand the row.
+       *
+       * A `queued` row is owned by nobody — no orchestrator run has claimed
+       * it — whether this call just inserted it or just recovered it. If the
+       * send throws, that row would otherwise sit `queued` forever: it counts
+       * against `maxConcurrentTasks` (the default is 1, so the repo is
+       * blocked), no `inngest/function.failed` fires, and reconcile only
+       * watches for that. Nothing retries it either — `handle-message`
+       * converts every `tool-iter*` throw to `NonRetriableError`, so the only
+       * re-execution that would reuse this idempotency key never happens, and
+       * the model's own retry gets fresh coordinates and a fresh key. So mark
+       * it failed and free the slot, then rethrow so the caller knows the
+       * submission didn't take.
+       *
+       * The idempotency key stays on the row. A throw from `inngest.send` is
+       * ambiguous — the bus may have accepted the event and failed only on
+       * the response — so releasing the key would let a retry mint a second
+       * task while the accepted event still drives the first. Keeping it
+       * means a retry recovers this row and reports it failed: honest, and
+       * one task either way. The `queued -> planning` claim skips a task it
+       * finds already failed.
+       */
+      const startOrRelease = async (taskId: string): Promise<void> => {
+        try {
+          await deps.inngest.send({
+            name: codingTaskStart.name,
+            data: { taskId },
+            // Bus-level dedup, same `<verb>-<taskId>` shape as the
+            // orchestrators' `task-failed-` / `plan-approved-` emits. Minted
+            // per submission, so it can only collapse a re-send of this exact
+            // one. Pairs with the `queued -> planning` claim, which holds
+            // outside the bus's 24h dedup window.
+            id: `task-start-${taskId}`,
+          });
+        } catch (sendErr) {
+          // The throw is ambiguous — the bus may have accepted the event and
+          // failed only on the response — and this cleanup has to pick a side.
+          // It picks: terminalize, gated on the row still being `queued`.
+          //
+          // The gate handles the case where the orchestrator already claimed
+          // the row: an unguarded write would fail a live run, or corrupt a
+          // finished one, over a transport blip.
+          //
+          // Terminalizing the rest is the deliberate half, and it is chosen
+          // for consistency with what the caller is about to be told. The
+          // rethrow below reaches the model as an `is_error` tool_result, so
+          // the user hears "the submission didn't take". Leaving the row
+          // `queued` instead would mean an accepted event goes on to plan the
+          // task and post an approval keyboard for work the user was just
+          // told had failed — and, when the event was genuinely lost, the row
+          // sits `queued` forever holding an admission slot that
+          // `maxConcurrentTasks` defaults to 1 of. Both are worse than
+          // "reported failed, and genuinely didn't run".
+          //
+          // Removing the ambiguity rather than choosing a side wants a
+          // transactional outbox — row and intent committed together, a relay
+          // publishing after. Tracked in `todo.md`; it is the right answer and
+          // a much larger change than this catch.
+          await deps
+            .runInTx((tx) =>
+              deps.codingStore.failQueuedTask(
+                tx,
+                taskId,
+                `inngest.send failed: ${(sendErr as Error).message}`,
+              ),
+            )
+            .then((freed) => {
+              if (!freed) {
+                log.info(
+                  { taskId, sendErr },
+                  "send reported failure but the task had already been claimed — left alone",
+                );
+              }
+            })
+            .catch((cleanupErr) => {
+              log.error(
+                { err: cleanupErr, taskId, sendErr },
+                "failed to mark task failed after inngest.send error — task is now orphaned",
+              );
+            });
+          throw sendErr;
+        }
+      };
+
       const repo = await deps.runInTx((tx) => deps.codingStore.getRepoByName(tx, input.repoName));
       if (!repo) {
         // The `skills` row is auto-managed (inserted by `ensureSkillsCodingRepo`
@@ -86,6 +189,10 @@ export function createCodingService(
         );
       }
 
+      // Recognise a retry before spending an admission check on it: the row
+      // a retry is recovering counts against the repo's own limit, so with
+      // the default `maxConcurrentTasks` of 1 it would reject itself.
+      //
       // Admission check + insert share one tx. The async submit +
       // durable orchestrator means multiple conversations (or repeated
       // taps from the same one) could each trigger a task concurrently;
@@ -99,20 +206,80 @@ export function createCodingService(
       // count over SERIALIZABLE — row-locking prevents the race
       // outright instead of detecting and retrying it.
       const admit = await deps.runInTx(async (tx) => {
+        if (input.idempotencyKey !== undefined) {
+          const prior = await deps.codingStore.getTaskByIdempotencyKey(tx, input.idempotencyKey);
+          if (prior) {
+            // Scope check, not a guard against a case we expect: the key
+            // embeds a conversation-scoped inbound id, so a cross-repo
+            // collision would mean the key space itself is broken. Every
+            // other read here is scoped; resting this one on key
+            // construction alone is how that stops being true later.
+            if (prior.repoId !== repo.id) {
+              throw new Error(
+                `idempotency key ${input.idempotencyKey} resolves to a task on a different repo ` +
+                  `(${prior.repoId} vs ${repo.id}) — key space collision`,
+              );
+            }
+            return { kind: "recovered" as const, task: prior };
+          }
+        }
         const active = await deps.codingStore.countActiveTasksForRepo(tx, repo.id);
         if (active >= repo.maxConcurrentTasks) {
           return { kind: "rejected" as const, active };
         }
-        const task = await deps.codingStore.insertTask(tx, {
+        const values = {
           repoId: repo.id,
           conversationId,
           goal: input.goal,
-          triggerSource: "user",
-          backend: "claude",
+          triggerSource: "user" as const,
+          backend: "claude" as const,
           allowPrivilegedRunc: false,
+        };
+        if (input.idempotencyKey === undefined) {
+          return { kind: "admitted" as const, task: await deps.codingStore.insertTask(tx, values) };
+        }
+        // `insertOrRecoverTask`'s conflict arm closes the window the
+        // pre-check above leaves open — two concurrent retries can both read
+        // no row under snapshot isolation, and the loser recovers the
+        // winner's row rather than raising a unique violation.
+        const insert = await deps.codingStore.insertOrRecoverTask(tx, {
+          ...values,
+          idempotencyKey: input.idempotencyKey,
         });
-        return { kind: "admitted" as const, task };
+        // Scoped like the pre-check above — and this is the path that can
+        // actually surface a foreign row, since the conflict arm resolves
+        // against a row the pre-check's snapshot could not see.
+        if (insert.row.repoId !== repo.id) {
+          throw new Error(
+            `idempotency key ${input.idempotencyKey} resolves to a task on a different repo ` +
+              `(${insert.row.repoId} vs ${repo.id}) — key space collision`,
+          );
+        }
+        return insert.kind === "new"
+          ? { kind: "admitted" as const, task: insert.row }
+          : { kind: "recovered" as const, task: insert.row };
       });
+      if (admit.kind === "recovered") {
+        const prior = admit.task;
+        log.info(
+          { taskId: prior.id, priorStatus: prior.status, idempotencyKey: input.idempotencyKey },
+          "coding task submission recovered — prior attempt already inserted it",
+        );
+        if (prior.status !== "queued") {
+          // The orchestrator already claimed this task (or it is terminal).
+          // Re-emitting could only race a live run, and the `queued ->
+          // planning` transition would skip it anyway. Report the real
+          // status so a task that will never run isn't announced as pending.
+          return { taskId: prior.id, status: "recovered", priorStatus: prior.status };
+        }
+        // Still `queued`: the prior attempt died between the row committing
+        // and its `inngest.send`, so nothing is driving this task. Re-emit —
+        // skipping would trade a duplicate for a permanent stall. The re-send
+        // is absorbed twice over: `task-start-<taskId>` at the bus, and the
+        // `queued -> planning` claim past that window.
+        await startOrRelease(prior.id);
+        return { taskId: prior.id, status: "recovered", priorStatus: prior.status };
+      }
       if (admit.kind === "rejected") {
         return {
           taskId: null,
@@ -127,35 +294,7 @@ export function createCodingService(
       // Hand off to the durable orchestrator. Once this event lands the
       // service has no further role — plan rendering, approval, execute,
       // and progress all happen out-of-band.
-      //
-      // If `inngest.send` fails after the row is in `queued`, the task
-      // would be orphaned: it permanently counts against
-      // `maxConcurrentTasks` (admission slot leak) and never progresses.
-      // Mark it failed before propagating so the row is in a terminal
-      // state and the slot frees up. The original send error is
-      // re-thrown so the caller knows the submission didn't take.
-      try {
-        await deps.inngest.send({
-          name: codingTaskStart.name,
-          data: { taskId: task.id },
-        });
-      } catch (sendErr) {
-        await deps
-          .runInTx((tx) =>
-            deps.codingStore.updateTaskStatus(tx, {
-              id: task.id,
-              status: "failed",
-              failureReason: `inngest.send failed: ${(sendErr as Error).message}`,
-            }),
-          )
-          .catch((cleanupErr) => {
-            log.error(
-              { err: cleanupErr, taskId: task.id, sendErr },
-              "failed to mark task failed after inngest.send error — task is now orphaned",
-            );
-          });
-        throw sendErr;
-      }
+      await startOrRelease(task.id);
 
       log.info(
         { taskId: task.id, repo: repo.name, conversationId, goal: input.goal },

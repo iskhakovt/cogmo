@@ -95,9 +95,10 @@ export function createCodingVerifyOrchestrator(deps: VerifyOrchestratorDeps, inn
       // execute orchestrator's retry path. Matches the slice 1/2 pattern.
       concurrency: { limit: 1, key: "event.data.taskId" },
     },
-    async ({ event, step }) => {
+    async ({ event, step, runId }) => {
       return runCodingVerify({
         taskId: event.data.taskId,
+        runId,
         deps,
         stepRun: step.run,
         stepSendEvent: step.sendEvent,
@@ -109,6 +110,12 @@ export function createCodingVerifyOrchestrator(deps: VerifyOrchestratorDeps, inn
 
 interface RunParams {
   taskId: string;
+  /**
+   * Inngest run id, stamped on the ownership claim so a re-executed claim can
+   * tell its own committed write from a duplicate delivery's. Tests pass any
+   * stable string.
+   */
+  runId: string;
   deps: VerifyOrchestratorDeps;
   stepRun: StepRun;
   /**
@@ -125,8 +132,8 @@ interface RunParams {
  * and an inline shim in tests.
  */
 export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestratorResult> {
-  const { taskId, deps, stepRun, stepSendEvent, inngest } = params;
-  const taskLog = log.child({ taskId });
+  const { taskId, runId, deps, stepRun, stepSendEvent, inngest } = params;
+  const taskLog = log.child({ taskId, runId });
   const { runInTx, store, sandbox, secretsStore, askpassBaseDir } = deps;
   const openExecuteStream = deps.openExecuteStream ?? (async () => NULL_EXECUTE_STREAM);
 
@@ -135,17 +142,57 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   const repo = await runInTx((tx) => store.getRepoById(tx, task.repoId));
   if (!repo) throw new Error(`coding repo not found: ${task.repoId}`);
 
-  if (task.status !== "pending_verify") {
-    taskLog.info(
-      { status: task.status },
-      "verify: task not in pending_verify — already started or terminated, skipping",
-    );
-    return { status: "skipped" };
-  }
   if (!task.worktreeAssignment) {
     throw new Error(`coding task ${taskId} has no worktree_assignment`);
   }
   const worktreeAssignment = task.worktreeAssignment;
+
+  // The run's ownership claim (see .claude/rules/inngest.md — a bare-body
+  // status read would see this run's own write and abandon the sequence).
+  //
+  // Ahead of the try block and of the fail-fast checks below, because every
+  // one of those can call `failAndTeardown`: a duplicate event that trips,
+  // say, a rotated secret would otherwise flip a task another run owns to
+  // `failed`. The cost is that a run failing one of those checks passes
+  // through `verifying` on its way to `failed` for the millisecond the
+  // decrypts take — invisible (the progress UI renders from stream events,
+  // and both statuses are non-terminal so admission counting is unchanged),
+  // and moving the claim back below the checks to avoid it reinstates the
+  // flip-a-terminal-task bug.
+  // `stale` at the transition's own target is this run's earlier attempt,
+  // not a rival: the UPDATE committed and the step result was lost before
+  // Inngest recorded it, so the re-run finds its own write. Reading that as
+  // a lost race returns `skipped` with no failure event — the stranded task
+  // this whole change exists to prevent. Per-task `concurrency: 1` means no
+  // rival run can be live to have written it.
+  // `stale` naming this transition's own target is ambiguous by status alone:
+  // it is either this run's earlier attempt (the UPDATE committed, the step
+  // result was lost) or a duplicate delivery arriving after a dead run left
+  // the row here. The first must resume; the second must not mint a second
+  // sandbox and a second paid CLI session. `claimedByRunId` is what separates
+  // them — a fresh delivery is a fresh Inngest run.
+  const transition = await stepRun("set-status-verifying", () =>
+    runInTx((tx) => store.transitionTaskStatus(tx, taskId, "pending_verify", "verifying", runId)),
+  );
+  //
+  // A row already at the target with no claimant — every row predating
+  // migration 0054 — is adopted by the transition itself, which stamps this
+  // run and returns `transitioned`. It never reaches this branch, and the
+  // next delivery finds a claimant that isn't its own.
+  if (
+    transition.kind !== "transitioned" &&
+    !(
+      transition.kind === "stale" &&
+      transition.status === "verifying" &&
+      transition.claimedByRunId === runId
+    )
+  ) {
+    taskLog.info(
+      { transition },
+      "verify: status transition lost the race (already verifying or terminal)",
+    );
+    return { status: "skipped" };
+  }
 
   /**
    * Local helper bundling status=failed + worktree teardown + stream
@@ -206,20 +253,6 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   let askpassProvisioned = false;
 
   try {
-    // Conditional UPDATE pending_verify → verifying so a duplicate
-    // event (Inngest replay or operator nudge) finds the row already
-    // verifying and returns kind=skipped.
-    const transition = await stepRun("set-status-verifying", () =>
-      runInTx((tx) => store.transitionTaskStatus(tx, taskId, "pending_verify", "verifying")),
-    );
-    if (transition.kind !== "transitioned") {
-      taskLog.info(
-        { transition },
-        "verify: status transition lost the race (already verifying or terminal)",
-      );
-      return { status: "skipped" };
-    }
-
     // Provision askpass material — host-side, per-task. Mark before the
     // step body executes so a partial provision (mkdir succeeded but a
     // writeFileSync threw) still triggers cleanup in the finally block.
@@ -271,17 +304,34 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
         await checkoutFeatureBranchInSandbox(session, worktreeAssignment.branch);
       });
     }
-    const container: SandboxSession = await sandbox.resume(sessionState);
+    // Handles can't cross a step boundary, and `sandbox.resume` is a live
+    // provider call. Resolving it lazily, memoized per invocation, keeps the
+    // round-trips proportional to container work rather than to replay count.
+    // Memoizes the PROMISE, not the resolved handle: `??=` on an awaited
+    // value leaves the read and the write either side of a suspension point,
+    // so two concurrent callers would both see null and both resume.
+    let resumed: Promise<SandboxSession> | null = null;
+    const container = (): Promise<SandboxSession> => {
+      resumed ??= sandbox.resume(sessionState);
+      return resumed;
+    };
 
     executeStream = await openExecuteStream(taskId);
+    const stream = executeStream;
 
     // 1. Verify ───────────────────────────────────────────────────────
-    const verifyResult = await runVerifyStreaming({
-      container,
-      verifyCommand: repo.verifyCommand,
-      timeoutSeconds: repo.verifyTimeoutSeconds,
-      executeStream,
-    });
+    // Durable: the repo's entire test suite, and `ok` selects disjoint step
+    // sets downstream, so a verdict that drifted between replays would plan a
+    // step graph the executor never asked for. The runner caps `output` at
+    // 8 KiB, so the step return stays small.
+    const verifyResult = await stepRun("run-verify", async () =>
+      runVerifyStreaming({
+        container: await container(),
+        verifyCommand: repo.verifyCommand,
+        timeoutSeconds: repo.verifyTimeoutSeconds,
+        executeStream: stream,
+      }),
+    );
     await stepRun("emit-verify-complete", () =>
       inngest
         .send({
@@ -292,6 +342,10 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
             exitCode: verifyResult.exitCode,
             durationMs: verifyResult.durationMs,
           },
+          // Same `<verb>-<taskId>` bus dedup as every other hand-off emit: the
+          // step boundary covers replay, the id covers the crash window it
+          // can't. One verify verdict per task, so the id is unambiguous.
+          id: `verify-complete-${taskId}`,
         })
         .then(() => undefined),
     );
@@ -302,15 +356,20 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
 
     // 2. Commit + push ────────────────────────────────────────────────
     const branch = worktreeAssignment.branch;
-    const commitResult = await runCommitAndPush({
-      container,
-      worktreeDir: WORKTREE_DIR_IN_CONTAINER,
-      branch,
-      commitMessage: task.goal,
-      signingKeyPath: askpass.signingKeyPath,
-      askpassEnv: askpass.env,
-      author: commitAuthorFor(identity),
-    });
+    // Durable: writes a commit and pushes it. The PAT reaches the runner
+    // through the askpass env and the closure, never as a step argument or
+    // return, so it stays out of Inngest's state store.
+    const commitResult = await stepRun("commit-and-push", async () =>
+      runCommitAndPush({
+        container: await container(),
+        worktreeDir: WORKTREE_DIR_IN_CONTAINER,
+        branch,
+        commitMessage: task.goal,
+        signingKeyPath: askpass.signingKeyPath,
+        askpassEnv: askpass.env,
+        author: commitAuthorFor(identity),
+      }),
+    );
 
     if (commitResult.kind === "branch_conflict") {
       return await failAndTeardown(
@@ -334,9 +393,10 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     // exists), surface it as a failure with that reason.
     let branchSha = commitResult.kind === "pushed" ? commitResult.commitSha : "";
     if (!branchSha) {
-      // Re-derive HEAD via the container — the verify-only path didn't
-      // run rev-parse. Cheap exec.
-      branchSha = await readHeadSha(container);
+      // Re-derive HEAD — the verify-only path didn't run rev-parse. Durable
+      // so the PR head is pinned to one value. Conditional on the memoized
+      // `commitResult.kind`, so the step plan is identical on every replay.
+      branchSha = await stepRun("read-head-sha", async () => readHeadSha(await container()));
     }
 
     await stepRun("set-status-pushed", () =>
@@ -344,24 +404,35 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     );
     await stepRun("emit-pushed", () =>
       inngest
-        .send({ name: "coding/task/pushed", data: { taskId, branchSha } })
+        .send({
+          name: "coding/task/pushed",
+          data: { taskId, branchSha },
+          id: `pushed-${taskId}`,
+        })
         .then(() => undefined),
     );
 
     // 3. Open PR ─────────────────────────────────────────────────────
     const planText = task.plan ?? "";
-    const prResult = await runOpenPr({
-      pat: identity.pat,
-      owner: remote.owner,
-      repo: remote.repo,
-      head: branch,
-      base: repo.defaultBranch,
-      goal: task.goal,
-      plan: planText,
-      verifyOutput: verifyResult.output,
-      branchSha,
-      ...(deps.octokitFactory && { octokit: deps.octokitFactory(identity.pat) }),
-    });
+    // Durable: opening a PR is irreversible and not idempotent upstream. A
+    // second `pulls.create` returns 422 `validation_failed`, which this
+    // function reads as a failure — so a re-POST would have the run that
+    // just opened the PR mark its own task `failed`. The PAT is a closure
+    // argument, and `OpenPrResult` carries only public metadata.
+    const prResult = await stepRun("open-pr", () =>
+      runOpenPr({
+        pat: identity.pat,
+        owner: remote.owner,
+        repo: remote.repo,
+        head: branch,
+        base: repo.defaultBranch,
+        goal: task.goal,
+        plan: planText,
+        verifyOutput: verifyResult.output,
+        branchSha,
+        ...(deps.octokitFactory && { octokit: deps.octokitFactory(identity.pat) }),
+      }),
+    );
 
     if (prResult.kind === "auth_failed") {
       return await failAndTeardown(`PR open failed (auth): ${prResult.message}`, executeStream);
@@ -397,6 +468,11 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
         .send({
           name: "coding/task/pr-opened",
           data: { taskId, prUrl: prResult.url, prNumber: prResult.number },
+          // Matters more than its siblings: `auto-register-skill` subscribes
+          // to this one, and a re-send re-enters the register flow (mostly
+          // absorbed by its `no_op` tip resolution) alongside any user-facing
+          // notification firing twice.
+          id: `pr-opened-${taskId}`,
         })
         .then(() => undefined),
     );
@@ -427,6 +503,10 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
   } catch (err) {
     const reason = (err as Error).message;
     taskLog.error({ err }, "coding verify failed");
+    // Deliberately broad: every failure here, `StepError` from a
+    // permanently-failed step included, belongs in the same designed channel
+    // — `status=failed` plus `coding/task/failed` for the subscribers.
+    //
     // Emit BEFORE the DB status update — see the rationale on the
     // matching catch in `runCodingTask`.
     await stepSendEvent("emit-task-failed", {
@@ -473,8 +553,17 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
 }
 
 async function readHeadSha(container: Pick<SandboxSession, "execStreaming">): Promise<string> {
+  // Same caps `runGit` puts on the identical command in `commit-push.ts`,
+  // per design/coding-delegation.md → Per-callsite exec timeouts. It matters
+  // more here than it did: the call now runs inside a durable step, where a
+  // half-closed transport hangs the run past its lease. (`run-verify` is the
+  // one exec without them, a documented carve-out — it races its own
+  // `verify_timeout_seconds` cap instead, and an idle cap there is tracked
+  // as a `p3`.)
   const handle = await container.execStreaming(["git", "rev-parse", "HEAD"], {
     workingDir: WORKTREE_DIR_IN_CONTAINER,
+    timeoutMs: 60_000,
+    idleTimeoutMs: 30_000,
   });
   const chunks: Buffer[] = [];
   for await (const chunk of handle.stdout) {
@@ -486,7 +575,14 @@ async function readHeadSha(container: Pick<SandboxSession, "execStreaming">): Pr
       // discard
     }
   })();
-  await handle.wait();
+  const { exitCode } = await handle.wait();
   await drain;
-  return Buffer.concat(chunks).toString("utf8").trim();
+  const sha = Buffer.concat(chunks).toString("utf8").trim();
+  if (exitCode !== 0 || sha === "") {
+    // Throw rather than return "": this runs inside a durable step, so an
+    // empty sha would be memoized and then written verbatim into the
+    // `coding/task/pushed` event, the PR body and `pr_metadata.branchSha`.
+    throw new Error(`git rev-parse HEAD failed (exit ${exitCode}) in ${WORKTREE_DIR_IN_CONTAINER}`);
+  }
+  return sha;
 }

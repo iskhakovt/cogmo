@@ -110,6 +110,60 @@ async function seedContainer(): Promise<string> {
 }
 
 describe("DrizzleCodingStore", () => {
+  describe("idempotent submission", () => {
+    it("recovers the original row for a repeated key, and keeps unkeyed inserts distinct", async () => {
+      const repoId = await seedRepo();
+      const params = {
+        repoId,
+        goal: "g",
+        triggerSource: "user" as const,
+        backend: "claude" as const,
+        allowPrivilegedRunc: false,
+      };
+
+      const first = await tx((trx) =>
+        store.insertOrRecoverTask(trx, { ...params, idempotencyKey: "k1" }),
+      );
+      const second = await tx((trx) =>
+        store.insertOrRecoverTask(trx, { ...params, idempotencyKey: "k1" }),
+      );
+      expect(first.kind).toBe("new");
+      expect(second.kind).toBe("recovered");
+      expect(second.row.id).toBe(first.row.id);
+
+      const other = await tx((trx) =>
+        store.insertOrRecoverTask(trx, { ...params, idempotencyKey: "k2" }),
+      );
+      expect(other.kind).toBe("new");
+      expect(other.row.id).not.toBe(first.row.id);
+
+      // Postgres treats nulls as not-equal under a plain UNIQUE, so
+      // unkeyed callers (CLI, evolution triggers) never collide.
+      const a = await tx((trx) => store.insertTask(trx, params));
+      const b = await tx((trx) => store.insertTask(trx, params));
+      expect(a.id).not.toBe(b.id);
+      expect(a.idempotencyKey).toBeNull();
+    });
+
+    it("looks a submission up by key", async () => {
+      const repoId = await seedRepo();
+      const inserted = await tx((trx) =>
+        store.insertOrRecoverTask(trx, {
+          repoId,
+          goal: "g",
+          triggerSource: "user",
+          backend: "claude",
+          allowPrivilegedRunc: false,
+          idempotencyKey: "k3",
+        }),
+      );
+      expect(await tx((trx) => store.getTaskByIdempotencyKey(trx, "k3"))).toMatchObject({
+        id: inserted.row.id,
+      });
+      expect(await tx((trx) => store.getTaskByIdempotencyKey(trx, "nope"))).toBeUndefined();
+    });
+  });
+
   describe("repos", () => {
     it("inserts and retrieves a repo with parsed JSONB defaults", async () => {
       const row = await tx((trx) =>

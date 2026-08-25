@@ -1067,6 +1067,187 @@ describe("tool durability (stepRun)", () => {
     ]);
   });
 
+  it("hands each tool call a key scoped to the turn, its slot and its arguments", async () => {
+    // Turn token + the step id's own coordinates + a digest of the call. The
+    // coordinates are what make an infrastructure re-execution — which by
+    // construction reuses the step id — distinguishable from the model asking
+    // again at a later iteration.
+    const seen: Array<string | undefined> = [];
+    const tools = new ToolRegistry();
+    tools.register({
+      name: "paid",
+      description: "expensive",
+      inputSchema: { type: "object" },
+      durable: true,
+      parallelSafe: true,
+      handler: async (_input, _service, ctx) => {
+        seen.push(ctx?.idempotencyKey);
+        return "ok";
+      },
+    });
+
+    await testRunAgentLoop({
+      provider: mockProvider([
+        {
+          content: [
+            { type: "tool_use", id: "toolu_A", name: "paid", input: {} },
+            { type: "tool_use", id: "toolu_B", name: "paid", input: { q: 1 } },
+          ],
+          stopReason: "tool_use",
+          model: "test",
+          usage: { inputTokens: 1, outputTokens: 1 },
+        },
+        textResponse("done"),
+      ]),
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      turnKey: "inbound-42",
+    });
+
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toMatch(/^inbound-42:i1:p0:[0-9a-f]{16}$/);
+    expect(seen[1]).toMatch(/^inbound-42:i1:p1:[0-9a-f]{16}$/);
+  });
+
+  it("gives the model's retry of a failed call a fresh key", async () => {
+    // `tool-iter*` steps take no Inngest retries by design — a fresh tool_use
+    // from the model IS the retry channel. A key that ignored the call's
+    // coordinates would collapse that retry into the first attempt, and a
+    // domain that had recorded the failure would replay it instead of
+    // running. This is the scenario that decides the coordinates stay in.
+    const seenKeys: string[] = [];
+    const tools = new ToolRegistry();
+    tools.register({
+      name: "paid",
+      description: "expensive",
+      inputSchema: { type: "object" },
+      durable: true,
+      handler: async (_input, _service, ctx) => {
+        if (ctx) seenKeys.push(ctx.idempotencyKey);
+        return "ok";
+      },
+    });
+
+    await testRunAgentLoop({
+      provider: mockProvider([
+        toolUseResponse("paid", "toolu_A", { q: "same" }),
+        // The model tries the identical call again a turn later.
+        toolUseResponse("paid", "toolu_B", { q: "same" }),
+        textResponse("done"),
+      ]),
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      turnKey: "inbound-42",
+    });
+
+    expect(seenKeys).toHaveLength(2);
+    expect(seenKeys[1]).not.toBe(seenKeys[0]);
+    expect(seenKeys[0]).toContain(":i1:p0:");
+    expect(seenKeys[1]).toContain(":i2:p0:");
+  });
+
+  it("keys a call on its arguments, not just its slot", async () => {
+    // The digest covers what the coordinates cannot: a re-delivery replays
+    // with an empty step cache and the model re-decides, so a *different*
+    // call can land at the same coordinate.
+    const keyFor = async (input: Record<string, unknown>): Promise<string | undefined> => {
+      let key: string | undefined;
+      const tools = new ToolRegistry();
+      tools.register({
+        name: "paid",
+        description: "expensive",
+        inputSchema: { type: "object" },
+        durable: true,
+        handler: async (_input, _service, ctx) => {
+          key = ctx?.idempotencyKey;
+          return "ok";
+        },
+      });
+      await testRunAgentLoop({
+        provider: mockProvider([toolUseResponse("paid", "toolu_X", input), textResponse("done")]),
+        messages: [{ role: "user", content: "go" }],
+        tools,
+        turnKey: "inbound-42",
+      });
+      return key;
+    };
+
+    const a = await keyFor({ goal: "refactor A", repo: "cogmo" });
+    expect(await keyFor({ goal: "refactor A", repo: "cogmo" })).toBe(a);
+    // Argument order must not matter — a false mismatch mints a duplicate.
+    expect(await keyFor({ repo: "cogmo", goal: "refactor A" })).toBe(a);
+    expect(await keyFor({ goal: "refactor B", repo: "cogmo" })).not.toBe(a);
+  });
+
+  it("digests the normalized arguments, not the raw provider payload", async () => {
+    // `defineTool` coerces stringified nested args and drops fields the
+    // schema doesn't declare, so two deliveries can phrase one request
+    // differently and still reach the handler identically. Digesting the raw
+    // payload would read those as distinct calls and mint a second task.
+    const schema = z.object({ goal: z.string() });
+    const keyFor = async (input: Record<string, unknown>): Promise<string | undefined> => {
+      let key: string | undefined;
+      const tools = new ToolRegistry();
+      tools.register(
+        defineTool({
+          name: "paid",
+          description: "expensive",
+          schema,
+          durable: true,
+          handler: async (_input, _service, ctx) => {
+            key = ctx?.idempotencyKey;
+            return "ok";
+          },
+        }),
+      );
+      await testRunAgentLoop({
+        provider: mockProvider([toolUseResponse("paid", "toolu_X", input), textResponse("done")]),
+        messages: [{ role: "user", content: "go" }],
+        tools,
+        turnKey: "inbound-42",
+      });
+      return key;
+    };
+
+    const plain = await keyFor({ goal: "ship it" });
+    // Same request carrying a field the schema drops.
+    expect(await keyFor({ goal: "ship it", stray: 1 })).toBe(plain);
+    // Still discriminates on the arguments that survive normalization.
+    expect(await keyFor({ goal: "ship something else" })).not.toBe(plain);
+  });
+
+  it("omits the call context when the caller supplies no turn key", async () => {
+    // Outside a retrying context there is nothing stable to key on, and a
+    // fabricated key would be worse than none: it would look like a
+    // dedup guarantee while re-rolling on every run.
+    const provider = mockProvider([
+      toolUseResponse("paid", "toolu_01ABC", {}),
+      textResponse("done"),
+    ]);
+
+    const seen: Array<unknown> = [];
+    const tools = new ToolRegistry();
+    tools.register({
+      name: "paid",
+      description: "expensive",
+      inputSchema: { type: "object" },
+      durable: true,
+      handler: async (_input, _service, ctx) => {
+        seen.push(ctx);
+        return "ok";
+      },
+    });
+
+    await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      // no turnKey
+    });
+
+    expect(seen).toEqual([undefined]);
+  });
+
   it("runs a durable tool directly when no stepRun is provided", async () => {
     const provider = mockProvider([toolUseResponse("paid", "toolu_02", {}), textResponse("done")]);
 

@@ -230,6 +230,7 @@ scheduled_tasks (
   enabled         BOOLEAN NOT NULL,
   catchup_missed  BOOLEAN NOT NULL,              -- false = fire-latest-only, true = backfill
   source          schedule_source NOT NULL,      -- pgEnum: 'agent' | 'wizard' | 'manual'
+  idempotency_key TEXT UNIQUE,                   -- caller-supplied deterministic-per-request token from the tool call's ToolCallContext; null for callers with no retry semantics (wizard, CLI), which Postgres's NULL-not-equal unique semantics let coexist. A duplicate schedule fires on every tick from then on, so this is the durable tool whose crash window matters most — see design/crash-recovery.md → Tool durability policy.
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```

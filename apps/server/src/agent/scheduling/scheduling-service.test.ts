@@ -26,7 +26,9 @@ afterAll(async () => {
   await close();
 });
 
-async function seed(): Promise<{ userId: string; profileId: string; service: SchedulingService }> {
+async function seed(
+  taskCap?: number,
+): Promise<{ userId: string; profileId: string; service: SchedulingService }> {
   const userId = (await tx((trx) => store.createUser(trx))).id;
   const profileId = (
     await tx((trx) =>
@@ -45,6 +47,7 @@ async function seed(): Promise<{ userId: string; profileId: string; service: Sch
     userId,
     profileId,
     defaultTimezone: "UTC",
+    ...(taskCap !== undefined && { taskCap }),
   });
   return { userId, profileId, service };
 }
@@ -339,5 +342,47 @@ describe("SchedulingService.remove", () => {
 
     // Sanity: the row still exists for user A.
     expect(await a.service.list()).toHaveLength(1);
+  });
+});
+
+describe("SchedulingService.create — idempotency key", () => {
+  const ONE_OFF = { kind: "one_off" as const, runAt: "2099-06-01T15:00:00Z", prompt: "p" };
+
+  it("recovers the original schedule on a keyed retry instead of scheduling twice", async () => {
+    // A duplicate schedule is the worst duplicate on the durable-tool list:
+    // it fires on every tick from then on, and only `remove_task` stops it.
+    const { userId, service } = await seed();
+    const key = "schedule_task:inbound-1:i1:p0:deadbeefdeadbeef";
+    const first = await service.create(ONE_OFF, key);
+    const retry = await service.create(ONE_OFF, key);
+
+    if (!first.isOk() || !retry.isOk()) throw new Error("expected both to succeed");
+    expect(retry.value.id).toBe(first.value.id);
+    expect(
+      await tx((trx) => store.listScheduledTasks(trx, userId, { includeDisabled: true })),
+    ).toHaveLength(1);
+  });
+
+  it("recovers rather than tripping the cap on a keyed retry", async () => {
+    // The row a retry recovers counts toward `taskCap`, so a cap check ahead
+    // of the recovery reports failure for a schedule that already exists.
+    const { service } = await seed(1);
+    const key = "schedule_task:inbound-2:i1:p0:cafecafecafecafe";
+    const first = await service.create(ONE_OFF, key);
+    const retry = await service.create(ONE_OFF, key);
+
+    if (!first.isOk()) throw new Error("expected the first create to succeed");
+    if (!retry.isOk()) throw new Error("expected the keyed retry to recover, not hit the cap");
+    expect(retry.value.id).toBe(first.value.id);
+  });
+
+  it("keeps unkeyed creates distinct", async () => {
+    // Postgres treats nulls as not-equal under the unique constraint, so the
+    // wizard and CLI paths are unaffected by the column existing.
+    const { service } = await seed(5);
+    const a = await service.create(ONE_OFF);
+    const b = await service.create(ONE_OFF);
+    if (!a.isOk() || !b.isOk()) throw new Error("expected both to succeed");
+    expect(b.value.id).not.toBe(a.value.id);
   });
 });

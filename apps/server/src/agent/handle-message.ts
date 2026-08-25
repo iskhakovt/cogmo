@@ -428,6 +428,14 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const inboundBlocks = inboundMessages.flatMap((m) => contentToBlocks(m.content));
       // Safe — guarded by length check above
       const maxInboundId = inboundMessages.at(-1)?.id ?? "";
+      // Low-water mark, for the turn token below. It doesn't move when a
+      // re-delivered turn reloads a batch that has grown: the batch always
+      // starts after the last message the previous assistant turn consumed,
+      // so its first id is the same on every delivery of the same logical
+      // turn. `triggerInboundId` is not — Inngest hands debounce the LAST
+      // event of a burst, so another message arriving before the turn
+      // succeeds re-fires it with a different trigger over a grown batch.
+      const firstInboundId = inboundMessages[0]?.id ?? "";
 
       // A batch is either all-user or all-scheduled — never mixed. The
       // debounce stages user inbounds; scheduled fires emit their own
@@ -1042,6 +1050,13 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           // ordering. See design/crash-recovery.md → Durable LLM
           // iterations / Per-tool durability.
           stepRun,
+          // Turn token for per-tool-call idempotency keys: the batch's
+          // low-water mark, which identifies this turn's input and survives
+          // re-invocations, function retries and re-deliveries alike. Empty
+          // only for a turn with no inbound rows, which has nothing for a
+          // tool to duplicate. (Not `triggerInboundId`, which a debounce
+          // re-fire moves — see `firstInboundId` above.)
+          ...(firstInboundId !== "" && { turnKey: firstInboundId }),
           turnLogger,
         });
         // Class C / D degraded off-ramp. The loop exited because a repair

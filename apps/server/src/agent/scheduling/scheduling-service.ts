@@ -93,6 +93,13 @@ export interface SchedulingService {
    */
   create(
     args: CreateScheduleArgs,
+    /**
+     * Deterministic-per-request token from the tool call's
+     * `ToolCallContext`. A duplicate schedule is worse than most duplicate
+     * side effects — it fires on every tick, forever — so the tool path
+     * always supplies one. Omitted by callers with no retry semantics.
+     */
+    idempotencyKey?: string,
   ): Promise<Result<{ id: string; nextRunAt: Date }, SchedulingError>>;
 
   /** List all scheduled tasks for the scoped user, newest-first. Includes disabled rows. */
@@ -121,8 +128,44 @@ export interface SchedulingServiceDeps {
 export function createSchedulingService(deps: SchedulingServiceDeps): SchedulingService {
   const taskCap = deps.taskCap ?? DEFAULT_SCHEDULED_TASK_CAP;
 
+  /**
+   * Every other read in this service is user-scoped; the idempotency-key
+   * lookups are not, because the key is unique on its own. The key embeds a
+   * conversation-scoped inbound id, so a cross-user hit would mean the key
+   * space itself is broken — but resting the invariant on how callers happen
+   * to build keys is how it stops holding later.
+   */
+  const assertOwnedByCaller = (row: ScheduledTask, key: string): void => {
+    if (row.userId !== deps.userId) {
+      throw new Error(
+        `idempotency key ${key} resolves to another user's schedule — key space collision`,
+      );
+    }
+  };
+
   return {
-    async create(args) {
+    async create(args, idempotencyKey) {
+      // Ahead of validation, not just ahead of the cap. A one-off retried
+      // after its own `runAt` fails `parseRunAt` ("must be in the future")
+      // and would never reach the recovery below — the crash retry the key
+      // exists for is exactly the one that arrives late. The in-transaction
+      // recovery further down still handles the concurrent case.
+      if (idempotencyKey !== undefined) {
+        const prior = await deps.runInTx((tx) =>
+          deps.agentStore.getScheduledTaskByIdempotencyKey(tx, idempotencyKey),
+        );
+        // Scoped like every other read in this service. The key embeds a
+        // conversation-scoped inbound id so a cross-user collision would mean
+        // the key space is broken, but resting the invariant on how callers
+        // build keys is how it stops holding later.
+        if (prior && prior.userId !== deps.userId) {
+          throw new Error(
+            `idempotency key ${idempotencyKey} resolves to another user's schedule — ` +
+              "key space collision",
+          );
+        }
+        if (prior) return ok({ id: prior.id, nextRunAt: prior.nextRunAt });
+      }
       // Prompt-length cap — defence in depth (the tool schema enforces
       // the same limit, but the service is the contract for non-tool
       // callers like the wizard).
@@ -184,6 +227,18 @@ export function createSchedulingService(deps: SchedulingServiceDeps): Scheduling
       // rather than `listScheduledTasks` so we don't pull every
       // column just to read `.length`.
       const result = await deps.runInTx(async (tx) => {
+        // Recover a retry before the cap can reject it. The row a retry is
+        // recovering counts toward `taskCap`, so checking the cap first makes
+        // a replay at the limit report failure for a schedule that already
+        // exists. Same ordering as `CodingService.delegate`, and in the same
+        // transaction as the count so check and insert stay one unit of work.
+        if (idempotencyKey !== undefined) {
+          const prior = await deps.agentStore.getScheduledTaskByIdempotencyKey(tx, idempotencyKey);
+          if (prior) {
+            assertOwnedByCaller(prior, idempotencyKey);
+            return ok({ id: prior.id, nextRunAt: prior.nextRunAt });
+          }
+        }
         const current = await deps.agentStore.countScheduledTasks(tx, deps.userId);
         if (current >= taskCap) {
           return err({
@@ -192,7 +247,7 @@ export function createSchedulingService(deps: SchedulingServiceDeps): Scheduling
             current,
           });
         }
-        const row = await deps.agentStore.createScheduledTask(tx, {
+        const values = {
           userId: deps.userId,
           profileId: deps.profileId,
           kind,
@@ -202,8 +257,22 @@ export function createSchedulingService(deps: SchedulingServiceDeps): Scheduling
           nextRunAt,
           enabled: true,
           catchupMissed: args.kind === "recurring" ? (args.catchupMissed ?? false) : false,
-          source: "agent",
-        });
+          source: "agent" as const,
+        };
+        let row: ScheduledTask;
+        if (idempotencyKey === undefined) {
+          row = await deps.agentStore.createScheduledTask(tx, values);
+        } else {
+          const created = await deps.agentStore.createOrRecoverScheduledTask(tx, {
+            ...values,
+            idempotencyKey,
+          });
+          // The conflict arm resolves against a row this transaction's
+          // snapshot could not see — the one place a foreign row can actually
+          // reach us, which the pre-check by construction cannot catch.
+          if (created.kind === "recovered") assertOwnedByCaller(created.row, idempotencyKey);
+          row = created.row;
+        }
         return ok({ id: row.id, nextRunAt: row.nextRunAt });
       });
 

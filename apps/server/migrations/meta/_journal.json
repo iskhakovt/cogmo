@@ -365,6 +365,27 @@
       "when": 1781458702441,
       "tag": "0051_pipeline_runs_and_conversation_fks",
       "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1787265323040,
+      "tag": "0052_coding_tasks_idempotency_key",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1787304294295,
+      "tag": "0053_scheduled_tasks_idempotency_key",
+      "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1787470877777,
+      "tag": "0054_coding_tasks_claimed_by_run_id",
+      "breakpoints": true
     }
   ]
 }

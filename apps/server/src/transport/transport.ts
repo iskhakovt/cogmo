@@ -2031,6 +2031,13 @@ export function createTransport(deps: {
             await inngest.send({
               name: "coding/task/plan-approved",
               data: { taskId, approvedAt: approvedAt.toISOString() },
+              // Bus-level dedup, same `<verb>-<taskId>` shape as the
+              // orchestrators' emits. `approvePlanIfPending` above already
+              // makes a double tap a no-op at the DB, but a callback
+              // redelivery past that point would otherwise start a second
+              // execute run — which the `awaiting_approval -> executing`
+              // claim then skips, though collapsing it here is cheaper.
+              id: `plan-approved-${taskId}`,
             });
             return ok({ taskId });
           case "already_approved":

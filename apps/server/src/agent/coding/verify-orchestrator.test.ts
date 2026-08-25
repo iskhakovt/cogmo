@@ -255,6 +255,7 @@ describe("runCodingVerify", () => {
     const { taskId } = await seedTask();
     const result = await runCodingVerify({
       taskId,
+      runId: "run-test",
       deps,
       stepRun,
       stepSendEvent: makeStepSendEvent(inngest),
@@ -318,6 +319,7 @@ describe("runCodingVerify", () => {
     const { taskId } = await seedTask();
     const result = await runCodingVerify({
       taskId,
+      runId: "run-test",
       deps,
       stepRun,
       stepSendEvent: makeStepSendEvent(inngest),
@@ -363,6 +365,7 @@ describe("runCodingVerify", () => {
     const { taskId } = await seedTask();
     await runCodingVerify({
       taskId,
+      runId: "run-test",
       deps,
       stepRun,
       stepSendEvent: capturingStepSendEvent,
@@ -396,6 +399,7 @@ describe("runCodingVerify", () => {
     const { taskId } = await seedTask();
     const result = await runCodingVerify({
       taskId,
+      runId: "run-test",
       deps,
       stepRun,
       stepSendEvent: makeStepSendEvent(inngest),
@@ -429,6 +433,7 @@ describe("runCodingVerify", () => {
     const { taskId } = await seedTask();
     await runCodingVerify({
       taskId,
+      runId: "run-test",
       deps,
       stepRun,
       stepSendEvent: makeStepSendEvent(inngest),
@@ -459,6 +464,7 @@ describe("runCodingVerify", () => {
     const { taskId } = await seedTask();
     const result = await runCodingVerify({
       taskId,
+      runId: "run-test",
       deps,
       stepRun,
       stepSendEvent: makeStepSendEvent(inngest),
@@ -486,6 +492,7 @@ describe("runCodingVerify", () => {
     const { taskId } = await seedTask({ remoteUrl: "not-a-url" });
     const result = await runCodingVerify({
       taskId,
+      runId: "run-test",
       deps,
       stepRun,
       stepSendEvent: makeStepSendEvent(inngest),
@@ -510,6 +517,7 @@ describe("runCodingVerify", () => {
     const { taskId } = await seedTask({ status: "queued" });
     const result = await runCodingVerify({
       taskId,
+      runId: "run-test",
       deps,
       stepRun,
       stepSendEvent: makeStepSendEvent(inngest),
@@ -537,6 +545,7 @@ describe("runCodingVerify", () => {
     const { taskId } = await seedTask();
     await runCodingVerify({
       taskId,
+      runId: "run-test",
       deps,
       stepRun,
       stepSendEvent: makeStepSendEvent(inngest),
@@ -581,6 +590,7 @@ describe("runCodingVerify", () => {
     await expect(
       runCodingVerify({
         taskId,
+        runId: "run-test",
         deps,
         stepRun,
         stepSendEvent: stepSendEventThrowing,

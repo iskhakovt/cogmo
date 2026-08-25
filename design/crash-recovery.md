@@ -89,6 +89,8 @@ What this buys, per failure mode:
 - *Duplicated in-body pushes on step retry.* If a step body fails after some of its pushes (the `summarize-prefix` status banner, the `degraded-reply` apology, a partially-emitted `emit-tool-results-iter<N>`), the per-step retry re-runs the body and pushes again. Media dedups by path at the handle; text banners and non-media cards may append twice. Cosmetic, and bounded by the step's retry budget.
 - *File-freshness cache after process death.* `createFileService`'s read-before-mutate gate lives in a process-lifetime map. A cross-process replay re-populates it via non-durable `read_file` re-execution, except for a file first *created* by a cached `write_file` in the same turn — a follow-up `edit_file` then errors with "read the file first", which is itself the recovery instruction: the model re-reads and retries. Self-healing; not worth persisting the cache.
 
+**Bare-body cost scales with the boundary count.** Durable iterations and durable tools took a turn from roughly 4 bare-body executions to roughly `3×iterations + tools + 4`, and everything left in the streaming glue pays that multiplier. The one that is not merely cheap is inbound attachment resolution: `attachments.download()` is an S3 GET plus a base64 encode per image, so a 5-iteration turn carrying a photo does ~15 of each. It is an idempotent read, so it is correct — but "idempotent" is a correctness claim, not a cost one. Tracked as a `p2` in `todo.md` (per-run LRU keyed by attachment path; deliberately not step state, since the payloads are exactly what must stay out of Inngest's store).
+
 **Residual non-determinism (accepted).** Non-durable tool results still re-execute per invocation, and a result that *changes* between invocations (an error flipping to success) feeds Class D's side-effect gate — in the worst case a replay could reach a different degrade verdict than the live pass and diverge the step graph. This needs a non-durable tool to flip its error status between two invocations seconds apart *at* a Class D boundary; side-effectful and billable tools are durable (below), which removes the likely flippers. Documented, not defended.
 
 ### When the streaming section crashes
@@ -111,6 +113,28 @@ Tool handlers run in the loop, in the bare body unless marked durable — so a n
 **Non-durable (cheap idempotent reads whose output may be large or is trivially recomputed):** `read_file`, `list_files`, `list_tasks`, `list_pipelines`, `core_memory_read`, `current_time`. Re-execution costs a local read; keeping their possibly-large outputs out of Inngest state matters more. Accepted drift: the *persisted* `tool_result` for these is whatever the **last** invocation's re-execution returned, which can differ from what the model saw live (e.g. a file changed mid-turn).
 
 Marking a tool `durable: true` is a cost decision with two sides: it buys exactly-once for the handler and pins the recorded `tool_result` to what the model actually saw, and it charges one extra step boundary — which, with LLM iterations durable, costs a cheap cached replay rather than a fresh model call. Justify both sides in the PR that flips a flag.
+
+#### The crash window each durable tool still carries
+
+`durable: true` buys replay-safety, not exactly-once: the body still runs at least once, and a crash between its side effect committing and Inngest recording the step result re-runs it. Closing that needs a caller-supplied idempotency key with somewhere to attach it. The loop mints one per call (`ToolCallContext.idempotencyKey`, see [Per-tool durability](#per-tool-durability)); whether a tool can use it depends on whether its side effect has a dedup point.
+
+| Tool | Crash-window disposition |
+|-|-|
+| `delegate_coding` | **Keyed** — `coding_tasks.idempotency_key`, plain `UNIQUE` + `ON CONFLICT DO UPDATE` with a no-op SET and an `xmax = 0` discriminator (see `.claude/rules/inngest.md` for why `DO NOTHING` can't resolve a concurrent loser under REPEATABLE READ). A duplicate would mint a second sandbox, a second billable claude session and a second PR. |
+| `schedule_task` | **Keyed** — `scheduled_tasks.idempotency_key`. The worst duplicate on this list: it fires on every tick from then on, and only an explicit `remove_task` stops it. |
+| skill tools (`buildSkillToolSpec`) | **Keyed** — forwarded to `runner.invoke`, which drives the `skill_runs` `recovery_point` state machine. |
+| `register_skill` | Self-deduping — a register against an unchanged branch tip resolves as `no_op` rather than a second deploy. |
+| `activate_pipeline` | Naturally idempotent — activation is a state, not an event; re-activating the same version converges. |
+| `define_pipeline` | Residual: a retry compiles again (re-billed) and saves a second definition version. Versions are immutable and inert until activated, so the cost is a stray row plus one compile. |
+| `write_file`, `core_memory_update` | Naturally idempotent — last-writer-wins on identical content. |
+| `edit_file` | Self-protecting — the second apply finds its match already replaced and errors rather than double-applying. |
+| `memory_retain` | Absorbed — memory writes are additive by design and `reflect()` dedups asynchronously. |
+| `remove_task` | Naturally idempotent — deleting an already-deleted row is `not_found`. |
+| `web_search`, `web_answer`, `fetch_url`, `memory_recall`, `memory_reflect`, `subagent__*` | Reads and generations with no persistent duplicate state. Durable because billable; a crash retry costs one extra call. No upstream idempotency slot to key on. |
+| `generate_image`, `send_document` | Residual: a retry re-bills the generation and can deliver a second copy. The delivery layer's `#activeStreams` dedup covers the streamed path, not a batch send. |
+| MCP tools | Residual, unclosable here: the MCP tool contract has no idempotency-token slot. `ToolCallContext` is available to forward the day a server accepts one. |
+
+The residuals are accepted at single-user scale, and all of them fail in the safe direction — a duplicate the user can see, never a silently-dropped request.
 
 ### Per-tool durability
 

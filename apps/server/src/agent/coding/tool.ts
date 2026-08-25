@@ -36,16 +36,37 @@ export const delegateCodingTool: ToolSpec = defineTool({
   // after the call.
   durable: true,
   schema: DelegateCodingInput,
-  handler: async ({ goal, repo }, service) => {
+  handler: async ({ goal, repo }, service, ctx) => {
     if (!service.coding) {
       throw new Error(
         "Coding delegation is unavailable — the sandbox module is not initialized. " +
           "Set SANDBOX_RUNTIME (sysbox in prod, runc for dev/CI) and restart Cogmo.",
       );
     }
-    const result = await service.coding.delegate({ goal, repoName: repo });
+    // `durable: true` already covers replays; the key closes the narrower
+    // window where the row commits and the process dies before Inngest
+    // records the step result.
+    const result = await service.coding.delegate({
+      goal,
+      repoName: repo,
+      ...(ctx !== undefined && { idempotencyKey: `delegate_coding:${ctx.idempotencyKey}` }),
+    });
     if (result.status === "rejected") {
       return JSON.stringify({ ok: false, reason: result.reason });
+    }
+    if (result.status === "recovered") {
+      // Already submitted on a prior attempt. Report where that task
+      // actually is — announcing a `failed` one as freshly queued would have
+      // the model tell the user work is under way that is not.
+      return JSON.stringify({
+        ok: true,
+        taskId: result.taskId,
+        status: result.priorStatus,
+        nextStep:
+          "This request was already submitted and its task is in the status above. " +
+          "Do not submit it again. Tell the user the current state; if it is `failed` " +
+          "or `cancelled`, ask whether they want it re-run.",
+      });
     }
     return JSON.stringify({
       ok: true,

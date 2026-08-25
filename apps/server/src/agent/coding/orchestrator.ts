@@ -121,7 +121,13 @@ export interface CodingOrchestratorDeps {
 }
 
 export interface CodingOrchestratorResult {
-  status: "awaiting_approval" | "executing" | "failed";
+  /**
+   * `skipped` covers two different outcomes, distinguishable in the logs:
+   * a duplicate `coding/task/start` that another run already claimed (nothing
+   * happened), and a task cancelled while `plan-cli` was streaming (the
+   * worktree, sandbox and askpass were reclaimed on the way out).
+   */
+  status: "awaiting_approval" | "executing" | "failed" | "skipped";
   plan?: string;
   failureReason?: string;
 }
@@ -147,9 +153,10 @@ export function createCodingOrchestrator(deps: CodingOrchestratorDeps, inngest: 
       // Sequentialize per task — guards against duplicate fires.
       concurrency: { limit: 1, key: "event.data.taskId" },
     },
-    async ({ event, step }) => {
+    async ({ event, step, runId }) => {
       return runCodingTask({
         taskId: event.data.taskId,
+        runId,
         deps,
         stepRun: step.run,
         stepSendEvent: step.sendEvent,
@@ -160,6 +167,12 @@ export function createCodingOrchestrator(deps: CodingOrchestratorDeps, inngest: 
 
 interface RunParams {
   taskId: string;
+  /**
+   * Inngest run id, stamped on the ownership claim so a re-executed claim can
+   * tell its own committed write from a duplicate delivery's. Tests pass any
+   * stable string.
+   */
+  runId: string;
   deps: CodingOrchestratorDeps;
   stepRun: StepRun;
   /**
@@ -184,8 +197,8 @@ interface RunParams {
  * retry.
  */
 export async function runCodingTask(params: RunParams): Promise<CodingOrchestratorResult> {
-  const { taskId, deps, stepRun, stepSendEvent } = params;
-  const taskLog = log.child({ taskId });
+  const { taskId, runId, deps, stepRun, stepSendEvent } = params;
+  const taskLog = log.child({ taskId, runId });
   const {
     runInTx,
     store,
@@ -203,6 +216,50 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
   const repo = await runInTx((tx) => store.getRepoById(tx, task.repoId));
   if (!repo) throw new Error(`coding repo not found: ${task.repoId}`);
 
+  // The run's ownership claim — same contract as the execute and verify
+  // orchestrators, and ahead of the try block for the same reason (a run
+  // that loses the race must not reach the failure machinery). A duplicate
+  // `coding/task/start` matches no row and returns before `sandbox.create`
+  // mints a second container and `plan-cli` pays for a second claude
+  // session. `delegate`'s `task-start-<id>` emit id collapses a re-send
+  // inside the bus's 24h dedup window; this transition holds outside it.
+  // Step id deliberately differs from the `set-status-planning` this
+  // replaces: that id memoized a `void` return, and a run in flight across the
+  // deploy would replay `null` into `claim.kind` and TypeError inside the try,
+  // where the catch would destroy an already-good plan. A new id makes the
+  // stale entry unreachable and reduces the worst case to the rollout note's
+  // `Could not find step`, which reconcile handles.
+  // `stale` at the transition's own target is this run's earlier attempt,
+  // not a rival: the UPDATE committed and the step result was lost before
+  // Inngest recorded it, so the re-run finds its own write. Reading that as
+  // a lost race returns `skipped` with no failure event — the stranded task
+  // this whole change exists to prevent. Per-task `concurrency: 1` means no
+  // rival run can be live to have written it.
+  // `stale` naming this transition's own target is ambiguous by status alone:
+  // it is either this run's earlier attempt (the UPDATE committed, the step
+  // result was lost) or a duplicate delivery arriving after a dead run left
+  // the row here. The first must resume; the second must not mint a second
+  // sandbox and a second paid CLI session. `claimedByRunId` is what separates
+  // them — a fresh delivery is a fresh Inngest run.
+  //
+  // A row already at the target with no claimant — every row predating
+  // migration 0054 — is adopted by the transition itself, which stamps this
+  // run and returns `transitioned`. It never reaches this branch, and the
+  // next delivery finds a claimant that isn't its own.
+  const claim = await stepRun("claim-task-planning", () =>
+    runInTx((tx) => store.transitionTaskStatus(tx, taskId, "queued", "planning", runId)),
+  );
+  if (
+    claim.kind !== "transitioned" &&
+    !(claim.kind === "stale" && claim.status === "planning" && claim.claimedByRunId === runId)
+  ) {
+    taskLog.info(
+      { claim },
+      "plan: status transition lost the race (already started or terminated)",
+    );
+    return { status: "skipped" };
+  }
+
   // Worktree assignment may be null on a fresh task — derived from the
   // (DB-generated) task id by the allocate-worktree step below. Local
   // mutable so the rest of the function reads it without re-loading the row.
@@ -216,10 +273,6 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
   // task transitions to executing).
   let askpassProvisioned = false;
   try {
-    await stepRun("set-status-planning", () =>
-      runInTx((tx) => store.updateTaskStatus(tx, { id: taskId, status: "planning" })),
-    );
-
     await stepRun("allocate-worktree", async () => {
       // 12 hex chars = 48-bit prefix of the UUIDv7 = the full unix-ms
       // timestamp portion. Two tasks created in the same millisecond would
@@ -414,29 +467,38 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       });
     }
 
-    // Re-attach a session handle on this side of the step boundary —
-    // handles can't cross step.run because they aren't
-    // JSON-serializable, but the state is.
-    const container = await sandbox.resume(sessionState);
-
-    // ── Non-durable: stream the plan ──
     planStream = await openPlanStream(taskId);
-    // Re-load the task so the prompt template sees the row in its
-    // post-allocation state (worktreeAssignment populated, container_id
-    // stamped). buildPlanPrompt only reads goal + worktreeAssignment.branch
-    // today, so spreading `{...task, worktreeAssignment}` would be enough —
-    // but a future prompt change that reads any other lifecycle field
-    // (e.g. container metadata) would silently see stale nulls. The
-    // single point-read is cheap; the footgun isn't worth saving it.
-    const planTask = (await runInTx((tx) => store.getTask(tx, taskId))) ?? task;
-    const result = await runPlanStreaming({
-      task: planTask,
-      repo,
-      container,
-      backend,
-      planStream,
-      store,
-      runInTx,
+    // Capture the handle in a const so the step body below sees the
+    // non-null type — TS doesn't carry `let` narrowing across closures.
+    const stream = planStream;
+
+    // Durable: a billable claude session with no `--resume` on the plan
+    // flags, so a re-invocation replans from scratch and re-renders the
+    // whole plan into the user's message. The session-id write and the
+    // text pushes live inside the body — live on the invocation that runs
+    // it, suppressed on replay. The result also pins the step graph that
+    // branches on it below.
+    const result = await stepRun("plan-cli", async () => {
+      // Re-attach a session handle inside the step — handles can't cross
+      // step.run because they aren't JSON-serializable, but the state is.
+      const container = await sandbox.resume(sessionState);
+      // Re-load the task so the prompt template sees the row in its
+      // post-allocation state (worktreeAssignment populated, container_id
+      // stamped). buildPlanPrompt only reads goal + worktreeAssignment.branch
+      // today, so spreading `{...task, worktreeAssignment}` would be enough —
+      // but a future prompt change that reads any other lifecycle field
+      // (e.g. container metadata) would silently see stale nulls. The
+      // single point-read is cheap; the footgun isn't worth saving it.
+      const planTask = (await runInTx((tx) => store.getTask(tx, taskId))) ?? task;
+      return runPlanStreaming({
+        task: planTask,
+        repo,
+        container,
+        backend,
+        planStream: stream,
+        store,
+        runInTx,
+      });
     });
 
     if (result.isError || !result.plan) {
@@ -466,7 +528,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       // Stream notification post-commit — wrap so a subscriber error
       // doesn't escape into the outer catch and write a second failed
       // status that masks the original reason.
-      await planStream.fail(reason).catch((streamErr: unknown) => {
+      await stream.fail(reason).catch((streamErr: unknown) => {
         taskLog.warn({ err: streamErr }, "plan stream fail notification failed");
       });
       return { status: "failed", failureReason: reason };
@@ -494,24 +556,100 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
         : "off";
     const nextStatus: CodingOrchestratorResult["status"] =
       task.triggerSource === "user" ? "awaiting_approval" : "executing";
-    await stepRun("set-status-awaiting", () =>
-      runInTx((tx) => store.updateTaskStatus(tx, { id: taskId, status: nextStatus })),
+    // Conditional on `planning`, not an unguarded write: `plan-cli` is a
+    // durable step that runs for minutes, and a Cancel landing inside it
+    // takes the `FOR UPDATE` path in `cancelTaskIfActive` and writes
+    // `cancelled`. An unconditional UPDATE here resurrects that task,
+    // renders an approval keyboard for work the user already cancelled, and
+    // puts the row back into `countActiveTasksForRepo`. Same race the
+    // `approvePlanIfPending` call below already defends against.
+    // New step id for the same reason as `claim-task-planning` above — the
+    // old `set-status-awaiting` memoized `void`, and replaying that `null`
+    // here would TypeError inside the try and take the catch's destructive
+    // path over a plan that had already completed.
+    //
+    // No `runId`: this is not an ownership claim (the run already holds the
+    // task), and supplying one is what widens the store's predicate to adopt
+    // an unclaimed row at the target — semantics this step doesn't want.
+    const awaiting = await stepRun("set-status-plan-ready", () =>
+      runInTx((tx) => store.transitionTaskStatus(tx, taskId, "planning", nextStatus)),
     );
+    // `stale` at the target is this step re-executing after a lost result —
+    // carry on. Anything else means the task left `planning` under us, and
+    // what to do next depends on where it went, not merely that it moved:
+    // a task that ENDED (cancelled, or failed by the catch of a sibling run)
+    // has no owner, so this run reclaims the worktree and container it
+    // allocated. A task that moved FORWARD — the auto-approve path hands off
+    // to execute, which claims `executing` — is being actively worked by
+    // another run on those very resources, and tearing them down would kill
+    // it mid-CLI.
+    const ended =
+      awaiting.kind === "stale" &&
+      (awaiting.status === "cancelled" || awaiting.status === "failed");
+    if (
+      awaiting.kind !== "transitioned" &&
+      !(awaiting.kind === "stale" && awaiting.status === nextStatus)
+    ) {
+      taskLog.info({ awaiting, ended }, "plan: task left `planning` mid-session — stopping");
+      if (!ended) {
+        // Moved on under another run's ownership (or the row is gone). Its
+        // resources are not ours to reclaim; the sandbox reaper is the
+        // backstop if nobody ends up owning them.
+        return { status: "skipped" };
+      }
+      // Returning from inside the try skips the catch, which is what does the
+      // cleanup — so do it here. The plan phase has by now allocated a
+      // worktree, created a container and (on git-remote) provisioned
+      // askpass; abandoning them would leak a sandbox and leave the PAT on
+      // disk. The status is left exactly as the canceller wrote it: this run
+      // no longer owns the task, and `safeTeardownWorktree` only reads it.
+      await stepRun("teardown-worktree-cancelled", () =>
+        safeTeardownWorktree({
+          runInTx,
+          ...(deps.secretsStore !== undefined && { secretsStore: deps.secretsStore }),
+          repo,
+          taskId,
+          worktreeAssignment: wt,
+        }).then(() => null),
+      );
+      // Swallowed like every sibling teardown: a Docker blip here would
+      // otherwise reach the outer catch and overwrite the user's `cancelled`
+      // with `failed`, which is what this branch promises not to do. Logged
+      // rather than silent, because the cost of swallowing is a sandbox that
+      // lives until its TTL — the periodic reaper is the backstop, and this
+      // line is how you find out it was needed.
+      await stepRun("teardown-cancelled", () =>
+        sandbox
+          .deleteByTaskId(taskId)
+          .then(() => null)
+          .catch((err: unknown) => {
+            taskLog.warn({ err }, "cancelled-path teardown failed — sandbox left to the reaper");
+            return null;
+          }),
+      );
+      await stream.fail("Task cancelled while planning.").catch(() => {});
+      return { status: "skipped" };
+    }
     // Same wrap as the failure-path notification above — once status is
     // committed, a subscriber error must not regress the task to failed.
+    // Durable because two more boundaries follow on the auto-approve path,
+    // and a bare-body finalize would re-render the plan message on each.
     const willAutoApprove = task.triggerSource === "user" && autoapproveMode === "on";
-    await planStream
-      .finalize(result.plan ?? "", { autoApproved: willAutoApprove })
-      .catch((streamErr: unknown) => {
-        taskLog.warn(
-          { err: streamErr },
-          `plan stream finalize notification failed (task already ${nextStatus})`,
-        );
-      });
+    await stepRun("notify-plan-finalized", async () => {
+      await stream
+        .finalize(result.plan ?? "", { autoApproved: willAutoApprove })
+        .catch((streamErr: unknown) => {
+          taskLog.warn(
+            { err: streamErr },
+            `plan stream finalize notification failed (task already ${nextStatus})`,
+          );
+        });
+      return null;
+    });
     // Auto-approve: same effect as the Telegram approve callback. Uses
     // `approvePlanIfPending` so the path is atomic with concurrent
     // cancels/manual approvals — if the user managed to tap Cancel in the
-    // microseconds between `set-status-awaiting` and this step, the
+    // microseconds between `set-status-plan-ready` and this step, the
     // approve becomes a no-op and the task stays cancelled.
     if (willAutoApprove) {
       // Generate `approvedAt` INSIDE the step so the cached return on a
@@ -555,6 +693,10 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
   } catch (err) {
     const reason = (err as Error).message;
     taskLog.error({ err }, "coding task failed");
+    // Deliberately broad: every failure here, `StepError` from a
+    // permanently-failed step included, belongs in the same designed channel
+    // — `status=failed` plus `coding/task/failed` for the subscribers.
+    //
     // Emit BEFORE the DB status update. If `step.sendEvent` ultimately
     // fails (SDK exhausts its retry budget on a real bus outage), the
     // catch throws, the function fails, and `inngest/function.failed`
@@ -588,13 +730,24 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     // `create-container` step. Idempotent at the label-index layer:
     // a sandbox that never made it server-side is a no-op sweep.
     await sandbox.deleteByTaskId(taskId).catch(() => {});
-    if (askpassProvisioned) {
-      cleanupAskpass({ baseDir: deps.askpassBaseDir, rootTaskId: taskId });
-    }
     // Notify the plan stream if it was opened. Best-effort — we're already
     // in the catch path, don't let a delivery failure mask the original error.
     await planStream?.fail(reason).catch(() => {});
     return { status: "failed", failureReason: reason };
+  } finally {
+    // Every exit, not just the throwing one. The plan phase has several early
+    // returns inside the try — CLI failure, cancelled mid-session — and each
+    // skips the catch, which is where this used to live; on git-remote that
+    // left the host askpass dir, holding the PAT in plaintext and the SSH
+    // signing key, on disk after every failed plan. `sandbox.deleteByTaskId`
+    // does not cover it: Local-Docker's supervisor wipes the bind-mount as a
+    // side effect, but a managed backend only clears its own sandbox-side
+    // copy. Safe as a `finally` because a step boundary abandons the function
+    // rather than unwinding it (see .claude/rules/inngest.md), so this runs
+    // once, at the end of the run — never between steps.
+    if (askpassProvisioned) {
+      cleanupAskpass({ baseDir: deps.askpassBaseDir, rootTaskId: taskId });
+    }
   }
 }
 
@@ -688,9 +841,10 @@ export function createCodingExecuteOrchestrator(deps: CodingOrchestratorDeps, in
       retries: 0,
       concurrency: { limit: 1, key: "event.data.taskId" },
     },
-    async ({ event, step }) => {
+    async ({ event, step, runId }) => {
       return runCodingExecute({
         taskId: event.data.taskId,
+        runId,
         deps,
         stepRun: step.run,
         stepSendEvent: step.sendEvent,
@@ -769,6 +923,12 @@ export async function checkoutFeatureBranchInSandbox(
 
 interface ExecuteRunParams {
   taskId: string;
+  /**
+   * Inngest run id, stamped on the ownership claim so a re-executed claim can
+   * tell its own committed write from a duplicate delivery's. Tests pass any
+   * stable string.
+   */
+  runId: string;
   deps: CodingOrchestratorDeps;
   stepRun: StepRun;
   /**
@@ -795,8 +955,8 @@ interface ExecuteRunParams {
  * - `worktree_assignment` must be present (the plan phase allocated it).
  */
 export async function runCodingExecute(params: ExecuteRunParams): Promise<CodingExecuteResult> {
-  const { taskId, deps, stepRun, stepSendEvent, inngest } = params;
-  const taskLog = log.child({ taskId });
+  const { taskId, runId, deps, stepRun, stepSendEvent, inngest } = params;
+  const taskLog = log.child({ taskId, runId });
   const { runInTx, store, sandbox, backend, devbaseImage, defaultResourceLimits, taskTtlMs } = deps;
   const openExecuteStream = deps.openExecuteStream ?? (async () => NULL_EXECUTE_STREAM);
 
@@ -805,23 +965,10 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   const repo = await runInTx((tx) => store.getRepoById(tx, task.repoId));
   if (!repo) throw new Error(`coding repo not found: ${task.repoId}`);
 
-  if (!task.planApprovedAt) {
-    throw new Error(`coding task ${taskId} has no plan_approved_at — execute fired prematurely`);
-  }
-  if (task.status !== "awaiting_approval") {
-    taskLog.info(
-      { status: task.status },
-      "execute: task not in awaiting_approval — already started or terminated, skipping",
-    );
-    return { status: "skipped" };
-  }
-  if (!task.sessionId) {
-    throw new Error(`coding task ${taskId} has no session_id — plan phase didn't capture it`);
-  }
-  if (!task.worktreeAssignment) {
-    throw new Error(`coding task ${taskId} has no worktree_assignment`);
-  }
-
+  // No bare-body status guard here — `set-status-executing`'s conditional
+  // UPDATE is the durable form of that check (see the `transition.kind`
+  // branch). The three checks that remain read fields the PLAN phase owns
+  // and this function never writes, so they are stable across replays.
   const sessionId = task.sessionId;
   const worktreeAssignment = task.worktreeAssignment;
   let executeStream: ExecuteStreamHandle | null = null;
@@ -831,24 +978,63 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   let executePushCtx: { identity: GitHubIdentity; askpass: AskpassMaterials } | undefined;
   const needsExecutePush = sandbox.capabilities.workingTreeTransport === "git-remote";
 
-  try {
-    // Conditional UPDATE: the transition only fires when the row is
-    // still `awaiting_approval`, so a concurrent cancel callback that
-    // already wrote `cancelled` is preserved. With retries=0 +
-    // per-task concurrency=1 the race window is narrow today; the
-    // conditional UPDATE pre-empts the bug for slice 3+'s
-    // cancel-during-execute path at zero cost.
-    const transition = await stepRun("set-status-executing", () =>
-      runInTx((tx) => store.transitionTaskStatus(tx, taskId, "awaiting_approval", "executing")),
+  // The run's ownership claim, ahead of the try for the same reason as the
+  // plan and verify orchestrators: a run that loses the race — or one whose
+  // claim step fails outright — must not reach the catch below, which emits
+  // `coding/task/failed`, writes an unguarded `status='failed'`, tears down
+  // the worktree and reaps the sandbox out from under whichever run does own
+  // the task.
+  // `stale` at the transition's own target is this run's earlier attempt,
+  // not a rival: the UPDATE committed and the step result was lost before
+  // Inngest recorded it, so the re-run finds its own write. Reading that as
+  // a lost race returns `skipped` with no failure event — the stranded task
+  // this whole change exists to prevent. Per-task `concurrency: 1` means no
+  // rival run can be live to have written it.
+  // `stale` naming this transition's own target is ambiguous by status alone:
+  // it is either this run's earlier attempt (the UPDATE committed, the step
+  // result was lost) or a duplicate delivery arriving after a dead run left
+  // the row here. The first must resume; the second must not mint a second
+  // sandbox and a second paid CLI session. `claimedByRunId` is what separates
+  // them — a fresh delivery is a fresh Inngest run.
+  const transition = await stepRun("set-status-executing", () =>
+    runInTx((tx) =>
+      store.transitionTaskStatus(tx, taskId, "awaiting_approval", "executing", runId),
+    ),
+  );
+  //
+  // A row already at the target with no claimant — every row predating
+  // migration 0054 — is adopted by the transition itself, which stamps this
+  // run and returns `transitioned`. It never reaches this branch, and the
+  // next delivery finds a claimant that isn't its own.
+  if (
+    transition.kind !== "transitioned" &&
+    !(
+      transition.kind === "stale" &&
+      transition.status === "executing" &&
+      transition.claimedByRunId === runId
+    )
+  ) {
+    taskLog.info(
+      { transition },
+      "execute: status transition lost the race (already cancelled or transitioned)",
     );
-    if (transition.kind !== "transitioned") {
-      taskLog.info(
-        { transition },
-        "execute: status transition lost the race (already cancelled or transitioned)",
-      );
-      return { status: "skipped" };
-    }
+    return { status: "skipped" };
+  }
 
+  // Below the claim on purpose: these read fields the PLAN phase owns, and a
+  // throw here fails the function, which sends `coding-task-reconcile` at a
+  // row that — before the claim — this run has no title to.
+  if (!task.planApprovedAt) {
+    throw new Error(`coding task ${taskId} has no plan_approved_at — execute fired prematurely`);
+  }
+  if (!sessionId) {
+    throw new Error(`coding task ${taskId} has no session_id — plan phase didn't capture it`);
+  }
+  if (!worktreeAssignment) {
+    throw new Error(`coding task ${taskId} has no worktree_assignment`);
+  }
+
+  try {
     // PAT-bearing identity stays out of `step.run` so it never reaches
     // Inngest's state store. Safe to skip the step boundary only
     // because this function is `retries: 0` — loosen retries and the
@@ -991,17 +1177,36 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       }
     }
 
-    const container = await sandbox.resume(sessionState);
+    // Const-capture so the closures below see the post-branch non-null type,
+    // then resume lazily and at most once per invocation: handles can't cross
+    // a step boundary, and `sandbox.resume` is a live provider call.
+    const state = sessionState;
+    // Memoizes the PROMISE, not the resolved handle: `??=` on an awaited
+    // value leaves the read and the write either side of a suspension point,
+    // so two concurrent callers would both see null and both resume.
+    let resumed: Promise<SandboxSession> | null = null;
+    const container = (): Promise<SandboxSession> => {
+      resumed ??= sandbox.resume(state);
+      return resumed;
+    };
 
     executeStream = await openExecuteStream(taskId);
-    await executeStream.started?.();
-    const result = await runExecuteStreaming({
-      task,
-      repo,
-      container,
-      backend,
-      executeStream,
-      sessionId,
+    const stream = executeStream;
+
+    // Durable: a billable claude session, and `isError` selects disjoint
+    // step sets below. The `started` banner and the token/tool pushes fire
+    // live from inside the body and are suppressed on replay — one run's
+    // worth of progress, which is what the UI wants.
+    const result = await stepRun("execute-cli", async () => {
+      await stream.started?.();
+      return runExecuteStreaming({
+        task,
+        repo,
+        container: await container(),
+        backend,
+        executeStream: stream,
+        sessionId,
+      });
     });
 
     if (result.isError) {
@@ -1031,10 +1236,10 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       // Stream notifications post-commit — wrap so a subscriber failure
       // doesn't bubble into the outer catch, which would write a second
       // (less informative) failed-status overwriting the original reason.
-      await executeStream.complete(false).catch((streamErr: unknown) => {
+      await stream.complete(false).catch((streamErr: unknown) => {
         taskLog.warn({ err: streamErr }, "execute stream complete(false) notification failed");
       });
-      await executeStream.fail(reason).catch((streamErr: unknown) => {
+      await stream.fail(reason).catch((streamErr: unknown) => {
         taskLog.warn({ err: streamErr }, "execute stream fail notification failed");
       });
       return { status: "failed", failureReason: reason };
@@ -1077,13 +1282,9 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
       const pushCtx = executePushCtx;
       const runBranch = runBranchFor(taskId);
       const featureBranch = worktreeAssignment.branch;
-      const pushResult = await stepRun("commit-and-push-execute-changes", () =>
-        // Reuse the already-resumed `container` rather than a fresh
-        // `sandbox.resume(sessionState)` — on Daytona that's an API
-        // round-trip; `step.run` only requires the result be replay-safe,
-        // not the session handle.
+      const pushResult = await stepRun("commit-and-push-execute-changes", async () =>
         runCommitAndPush({
-          container,
+          container: await container(),
           worktreeDir: WORKTREE_DIR_IN_CONTAINER,
           branch: featureBranch,
           remoteBranch: runBranch,
@@ -1117,13 +1318,13 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
         await stepRun("persist-sandbox-deleted-after-push-failure", () =>
           runInTx((tx) => store.setTaskSandboxDeletedAt(tx, taskId, new Date().toISOString())),
         );
-        await executeStream.complete(false).catch((streamErr: unknown) => {
+        await stream.complete(false).catch((streamErr: unknown) => {
           taskLog.warn(
             { err: streamErr },
             "execute stream complete(false) notification failed (push failure)",
           );
         });
-        await executeStream.fail(reason).catch((streamErr: unknown) => {
+        await stream.fail(reason).catch((streamErr: unknown) => {
           taskLog.warn({ err: streamErr }, "execute stream fail notification failed");
         });
         return { status: "failed", failureReason: reason };
@@ -1141,10 +1342,15 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     // re-creates a container with the askpass mount, runs verify → push → PR,
     // and tears down on its own. Emitting after the teardown means a concurrent
     // verify run can't reuse this container, which is good — it gets a fresh
-    // one with the right secrets bound. `step.run` boundary ensures the event
-    // is sent exactly once even if Inngest replays the post-pending-verify path.
+    // one with the right secrets bound. The step boundary covers replay; the
+    // `cli-done-<taskId>` id covers the crash window it can't (durable buys
+    // replay-safety, not exactly-once — see .claude/rules/inngest.md), and
+    // past the bus's 24h window the verify orchestrator's
+    // `pending_verify -> verifying` claim is what skips a duplicate.
     await stepRun("emit-cli-done", () =>
-      inngest.send({ name: "coding/task/cli-done", data: { taskId } }).then(() => undefined),
+      inngest
+        .send({ name: "coding/task/cli-done", data: { taskId }, id: `cli-done-${taskId}` })
+        .then(() => undefined),
     );
     const completionTokens =
       result.usage?.inputTokens != null && result.usage?.outputTokens != null
@@ -1157,7 +1363,7 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     // `failed`. The DB / sandbox state is correct; the user just won't
     // see the final progress message edit, which is recoverable on next
     // interaction.
-    await executeStream.complete(true, completionTokens).catch((streamErr: unknown) => {
+    await stream.complete(true, completionTokens).catch((streamErr: unknown) => {
       taskLog.warn(
         { err: streamErr },
         "execute stream complete notification failed (task already pending_verify)",
@@ -1167,6 +1373,10 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
   } catch (err) {
     const reason = (err as Error).message;
     taskLog.error({ err }, "coding execute failed");
+    // Deliberately broad — same designed failure channel as the matching
+    // catch in `runCodingTask`, `StepError` from a permanently-failed step
+    // included.
+    //
     // Emit BEFORE the DB status update — see the rationale on the
     // matching catch in `runCodingTask`.
     await stepSendEvent("emit-task-failed", {

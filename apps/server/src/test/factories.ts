@@ -177,6 +177,14 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
       createdAt: new Date(0),
     }),
     getScheduledTask: vi.fn().mockResolvedValue(undefined),
+    getScheduledTaskByIdempotencyKey: vi.fn().mockResolvedValue(undefined),
+    createOrRecoverScheduledTask: vi.fn().mockResolvedValue({
+      kind: "new",
+      // Same shape as `createScheduledTask` above: the caller reads `id` and
+      // `nextRunAt` straight off `.row`, so an empty object would hand a test
+      // `undefined` for both without failing.
+      row: { id: "sched-1", nextRunAt: new Date("2099-01-01T00:00:00Z") },
+    }),
     listScheduledTasks: vi.fn().mockResolvedValue([]),
     countScheduledTasks: vi.fn().mockResolvedValue(0),
     lockDueScheduledTasks: vi.fn().mockResolvedValue([]),

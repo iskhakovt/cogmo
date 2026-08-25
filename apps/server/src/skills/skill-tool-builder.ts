@@ -1,9 +1,52 @@
 import { compileToolMatchers } from "../agent/tool-matchers.js";
 import { ToolRegistry, type ToolSpec } from "../agent/tools.js";
 import { logger } from "../logger.js";
-import type { SkillRunner, SkillToolDef } from "./runner.js";
+import { SkillInflightError, type SkillRunner, type SkillToolDef } from "./runner.js";
 
 const log = logger.child({ component: "skills.tool-builder" });
+
+/**
+ * Run an invocation, converting the runner's conservative in-flight refusal
+ * into a result the model can act on.
+ *
+ * `SkillInflightError` means a prior attempt under this idempotency key left
+ * its `skill_runs` row at `recovery_point='started'` — the runner can't tell
+ * a crashed attempt from a concurrently-executing one, so it declines rather
+ * than re-firing the skill's side effects. Surfacing that as a raw throw
+ * reaches the model as an opaque `is_error` tool_result; naming it lets the
+ * model surface an honest verdict instead. The `started` marker is written
+ * *before* execution, so how far the earlier attempt got is genuinely unknown
+ * — the message says so rather than claiming partial completion. Reason
+ * string matches `skill-cron-fire`'s `"inflight"`.
+ */
+async function runInflight<T>(
+  name: string,
+  invoke: () => Promise<T>,
+): Promise<{ kind: "ok"; value: T } | { kind: "inflight"; body: string }> {
+  try {
+    return { kind: "ok", value: await invoke() };
+  } catch (err) {
+    if (!(err instanceof SkillInflightError)) throw err;
+    log.warn(
+      { skillName: name, runId: err.runId, err },
+      "skill tool invocation refused — prior run still in flight",
+    );
+    return {
+      kind: "inflight",
+      body: JSON.stringify({
+        ok: false,
+        reason: "inflight",
+        runId: err.runId,
+        detail:
+          `A previous attempt at this exact call is recorded as still running, so ${name} was ` +
+          "not started again. Whether it did any work is unknown — the row is marked in-flight " +
+          "before execution begins, so the earlier attempt may have done everything, nothing, " +
+          "or stopped partway. Do not silently re-run it: tell the user what was attempted and " +
+          "ask them to check the result before deciding.",
+      }),
+    };
+  }
+}
 
 /**
  * Convert a registered skill into a per-turn LLM tool. The tool's name + JSON
@@ -32,26 +75,43 @@ export function buildSkillToolSpec(def: SkillToolDef, runner: SkillRunner): Tool
     // signature. SkillManifestSchema enforces this at register time, so the
     // assignment needs no cast.
     inputSchema: def.inputs,
-    handler: async (input) => {
-      const result = await runner.invoke({
-        name: def.name,
-        inputs: input,
-        trigger: "manual",
-      });
-      if (result.status === "error") {
+    handler: async (input, _service, ctx) => {
+      // A keyed retry whose prior attempt died mid-execute finds its
+      // `skill_runs` row at `recovery_point='started'`, and the runner
+      // refuses it rather than re-running arbitrary Python with outbound
+      // writes. That refusal is the point of the recovery-point machine —
+      // the alternative is double-firing the skill's side effects — but it
+      // reaches the model as an exception unless translated. Give it the
+      // same shape `skill-cron-fire` gives it: a verdict the caller can act
+      // on, naming the run so the user can check what actually landed.
+      const result = await runInflight(def.name, () =>
+        runner.invoke({
+          name: def.name,
+          inputs: input,
+          trigger: "manual",
+          // Durability covers replay; the key covers the crash between the
+          // skill's side effects committing and Inngest recording the step
+          // result. `runner.invoke` routes it to the `recovery_point` state
+          // machine, which replays or finalizes instead of re-executing.
+          ...(ctx !== undefined && { idempotencyKey: `skill-tool:${ctx.idempotencyKey}` }),
+        }),
+      );
+      if (result.kind === "inflight") return result.body;
+      const run = result.value;
+      if (run.status === "error") {
         // Surface errors as tool_result text (the loop wraps thrown errors
         // as isError tool_results too — symmetric, but we already have the
         // structured result so prefer the explicit JSON shape).
         return JSON.stringify({
           ok: false,
-          error: result.error ?? "unknown_error",
-          runId: result.runId,
+          error: run.error ?? "unknown_error",
+          runId: run.runId,
         });
       }
       return JSON.stringify({
         ok: true,
-        runId: result.runId,
-        output: result.output ?? null,
+        runId: run.runId,
+        output: run.output ?? null,
       });
     },
   };

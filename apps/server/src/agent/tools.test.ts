@@ -316,7 +316,12 @@ describe("durability policy invariant", () => {
   // comment discipline. (Factory-built sets — image tools, skill tools,
   // sub-agent tools, MCP tools — carry the flag in their builders, asserted
   // in their own test files.)
-  it("every side-effectful built-in tool is durable", async () => {
+  /**
+   * Every statically-constructible built-in spec. Shared by both sweeps below
+   * — building it twice invites the two lists to drift, and a tool missing
+   * from one sweep silently loses the coverage that sweep exists to give it.
+   */
+  async function builtInSpecs(): Promise<ToolSpec[]> {
     const { memoryTools } = await import("./memory-tools.js");
     const { fileTools } = await import("./file-tools.js");
     const { coreMemoryTools } = await import("./core-memory-tools.js");
@@ -326,7 +331,7 @@ describe("durability policy invariant", () => {
     const { registerSkillTool } = await import("../skills/skills-tool.js");
     const { createWebTools } = await import("./web-tools.js");
     const { createDocumentTools } = await import("./document-tools.js");
-    const specs = [
+    return [
       ...memoryTools,
       ...fileTools,
       ...coreMemoryTools,
@@ -341,10 +346,64 @@ describe("durability policy invariant", () => {
       }),
       ...createDefaultTools().snapshot(),
     ];
+  }
+
+  it("every side-effectful built-in tool is durable", async () => {
+    const specs = await builtInSpecs();
     expect(specs.length).toBeGreaterThan(15);
     const violations = specs
       .filter((spec) => (spec.sideEffectful ?? true) && spec.durable !== true)
       .map((spec) => spec.name);
     expect(violations).toEqual([]);
+  });
+
+  // `ToolCallContext.idempotencyKey` is digested from `normalizeInput`'s
+  // output and recomputed from scratch in every invocation that runs the
+  // handler — no in-process memo survives a replay. A schema with a dynamic
+  // `.default(() => …)` or a clock-reading `.transform()` would therefore
+  // mint a different key each time and silently defeat the dedup, which is
+  // invisible until a duplicate task or a double-fired schedule shows up in
+  // production. Sweep the registry so the next such schema fails here.
+  it("every built-in tool normalizes its input deterministically", async () => {
+    const specs = (await builtInSpecs()).filter((spec) => spec.normalizeInput !== undefined);
+    expect(specs.length).toBeGreaterThan(12);
+
+    // Two probes: an empty object, which every all-optional schema accepts
+    // and is where a dynamic `.default(() => …)` would surface, and a rich one
+    // that satisfies most required fields. A rejecting parse must reject
+    // identically both times; an accepting one must produce an identical
+    // value. Distinct object identities on each call, so `defineTool`'s
+    // per-payload memo can't mask a non-deterministic schema.
+    const rich = (): Record<string, unknown> => ({
+      name: "x",
+      goal: "x".repeat(20),
+      repo: "cogmo",
+      path: "a.txt",
+      content: "c",
+      prompt: "p",
+      description: "d",
+      text: "t",
+      query: "q",
+      schedule: { kind: "recurring", cron: "0 9 * * *" },
+    });
+    const outcome = (spec: (typeof specs)[number], payload: Record<string, unknown>): string => {
+      try {
+        return `ok:${JSON.stringify(spec.normalizeInput?.(payload) ?? null)}`;
+      } catch (err) {
+        return `err:${err instanceof Error ? err.name : "unknown"}`;
+      }
+    };
+    const drift = specs
+      .filter((spec) =>
+        // Two separate normalizations of equivalent payloads — the point is
+        // that the schema, not the memo, is what makes them agree.
+        [() => ({}) as Record<string, unknown>, rich].some((build) => {
+          const first = outcome(spec, build());
+          const second = outcome(spec, build());
+          return first !== second;
+        }),
+      )
+      .map((spec) => spec.name);
+    expect(drift).toEqual([]);
   });
 });

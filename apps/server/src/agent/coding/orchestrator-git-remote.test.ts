@@ -13,7 +13,7 @@
  * is NEVER called on the git-remote path (no host worktree exists).
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, type Readable } from "node:stream";
@@ -304,6 +304,7 @@ describe("runCodingTask — git-remote transport", () => {
 
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({
         sandbox,
         backend: backendYielding([
@@ -377,6 +378,7 @@ describe("runCodingTask — git-remote transport", () => {
 
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({
         sandbox,
         backend: backendYielding([]),
@@ -417,6 +419,7 @@ describe("runCodingTask — git-remote transport", () => {
 
     const result = await runCodingTask({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({
         sandbox,
         backend: backendYielding([
@@ -473,6 +476,7 @@ describe("runCodingExecute — git-remote transport", () => {
 
     const result = await runCodingExecute({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({
         sandbox,
         backend: backendYielding([
@@ -506,6 +510,41 @@ describe("runCodingExecute — git-remote transport", () => {
     // load-bearing assertion against a regression that skips this step.
     const pushCall = execCalls.find((c) => gitSubcommand(c.cmd) === "push");
     expect(pushCall?.cmd).toContain(`HEAD:refs/heads/cogmo/run/${task.id}`);
+  });
+
+  it("wipes the host askpass dir when the plan CLI fails, not just when it throws", async () => {
+    // The askpass dir holds the PAT in plaintext and the SSH signing key.
+    // `sandbox.deleteByTaskId` does not remove it on a managed backend — only
+    // Local-Docker's supervisor does, as a side effect of dropping the bind
+    // mount — so the orchestrator has to. The plan-CLI failure path returns
+    // from inside the `try`, which skips the catch that used to own this,
+    // hence the `finally`.
+    const repo = await seedRepo();
+    const task = await seedTask(repo);
+    const { sandbox } = fakeGitRemoteSandbox();
+    const secretsStore = mock<SecretsStore>();
+    secretsStore.getSecret.mockImplementation(async (_tx, name) =>
+      name === CLAUDE_CODE_OAUTH_TOKEN_SECRET ? "test-oauth-token" : undefined,
+    );
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({
+        sandbox,
+        // Clean failure — `isError`, not a throw, so the catch never runs.
+        backend: backendYielding([
+          { kind: "session_started", sessionId: "sess-1" },
+          { kind: "complete", exitCode: 1, isError: true },
+        ]),
+        secretsStore,
+      }),
+      stepRun,
+      stepSendEvent,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(existsSync(join(baseDir, "askpass", task.id))).toBe(false);
   });
 
   it("fresh-create: provisions askpass, mounts it on the sandbox, and pushes the run-branch", async () => {
@@ -544,6 +583,7 @@ describe("runCodingExecute — git-remote transport", () => {
 
     const result = await runCodingExecute({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({
         sandbox,
         backend: backendYielding([
@@ -628,6 +668,7 @@ describe("runCodingExecute — git-remote transport", () => {
 
     const result = await runCodingExecute({
       taskId: task.id,
+      runId: "run-test",
       deps: makeDeps({
         sandbox,
         backend: backendYielding([
