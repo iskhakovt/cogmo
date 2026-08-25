@@ -570,6 +570,14 @@ function makeStubOctokitFactory(opts: {
  * own commit for the same branch would put two siblings in play, and the
  * skills repo's pre-receive hook (`bootstrapSkillsRepo`) declines the
  * non-fast-forward that whichever arrives second becomes.
+ *
+ * Re-entrant for the same reason: an existing ref is left alone rather than
+ * replaced. Each call mints a fresh commit off the remote's `main`, so a
+ * second call for one branch is a sibling of the first — a non-fast-forward
+ * the push rejects, surfacing through `runOpenPr` as a PR-open failure that
+ * reads nothing like its cause. Returning early also keeps the commit the
+ * fetch-back has already propagated authoritative, which overwriting would
+ * desync.
  */
 async function materializeBranchFromFixture(opts: {
   branch: string;
@@ -577,6 +585,18 @@ async function materializeBranchFromFixture(opts: {
   fixtureDir: string;
 }): Promise<void> {
   const { branch, repoPath, fixtureDir } = opts;
+  const alreadyPresent = await execFileP("git", [
+    "-C",
+    repoPath,
+    "show-ref",
+    "--verify",
+    "--quiet",
+    `refs/heads/${branch}`,
+  ]).then(
+    () => true,
+    () => false,
+  );
+  if (alreadyPresent) return;
   const tmpRoot = await mkdtemp(join(tmpdir(), "skill-auth-fixture-"));
   try {
     await execFileP("git", ["clone", repoPath, tmpRoot]);
