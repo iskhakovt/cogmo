@@ -271,4 +271,21 @@ def run(inputs, ctx):
       expect(lintWasmCompat(body).isOk()).toBe(true);
     });
   });
+
+  describe("pathological input", () => {
+    it.each([
+      ["from\thttp\timport", "\t\t,"],
+      ["import", "\t\t,"],
+    ])("returns promptly for %j followed by many %j", (head, repeat) => {
+      // A name class that matches whitespace beside a trailing `[ \t]*` lets
+      // the engine split one run of tabs between the two in exponentially
+      // many ways. At 40 repetitions that is hours of backtracking, so a
+      // wall-clock budget is the assertion — the lint guards `register`, and
+      // stalling it is the failure this shape causes.
+      const body = `${head}${repeat.repeat(40)}\n`;
+      const startedMs = Date.now();
+      lintWasmCompat(body);
+      expect(Date.now() - startedMs).toBeLessThan(1_000);
+    });
+  });
 });
