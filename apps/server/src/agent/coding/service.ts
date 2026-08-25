@@ -228,6 +228,15 @@ export function createCodingService(
           ...values,
           idempotencyKey: input.idempotencyKey,
         });
+        // Scoped like the pre-check above — and this is the path that can
+        // actually surface a foreign row, since the conflict arm resolves
+        // against a row the pre-check's snapshot could not see.
+        if (insert.row.repoId !== repo.id) {
+          throw new Error(
+            `idempotency key ${input.idempotencyKey} resolves to a task on a different repo ` +
+              `(${insert.row.repoId} vs ${repo.id}) — key space collision`,
+          );
+        }
         return insert.kind === "new"
           ? { kind: "admitted" as const, task: insert.row }
           : { kind: "recovered" as const, task: insert.row };

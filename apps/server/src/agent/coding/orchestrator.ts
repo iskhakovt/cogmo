@@ -627,9 +627,6 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
             return null;
           }),
       );
-      if (askpassProvisioned) {
-        cleanupAskpass({ baseDir: deps.askpassBaseDir, rootTaskId: taskId });
-      }
       await stream.fail("Task cancelled while planning.").catch(() => {});
       return { status: "skipped" };
     }
@@ -733,13 +730,24 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     // `create-container` step. Idempotent at the label-index layer:
     // a sandbox that never made it server-side is a no-op sweep.
     await sandbox.deleteByTaskId(taskId).catch(() => {});
-    if (askpassProvisioned) {
-      cleanupAskpass({ baseDir: deps.askpassBaseDir, rootTaskId: taskId });
-    }
     // Notify the plan stream if it was opened. Best-effort — we're already
     // in the catch path, don't let a delivery failure mask the original error.
     await planStream?.fail(reason).catch(() => {});
     return { status: "failed", failureReason: reason };
+  } finally {
+    // Every exit, not just the throwing one. The plan phase has several early
+    // returns inside the try — CLI failure, cancelled mid-session — and each
+    // skips the catch, which is where this used to live; on git-remote that
+    // left the host askpass dir, holding the PAT in plaintext and the SSH
+    // signing key, on disk after every failed plan. `sandbox.deleteByTaskId`
+    // does not cover it: Local-Docker's supervisor wipes the bind-mount as a
+    // side effect, but a managed backend only clears its own sandbox-side
+    // copy. Safe as a `finally` because a step boundary abandons the function
+    // rather than unwinding it (see .claude/rules/inngest.md), so this runs
+    // once, at the end of the run — never between steps.
+    if (askpassProvisioned) {
+      cleanupAskpass({ baseDir: deps.askpassBaseDir, rootTaskId: taskId });
+    }
   }
 }
 
@@ -1334,10 +1342,15 @@ export async function runCodingExecute(params: ExecuteRunParams): Promise<Coding
     // re-creates a container with the askpass mount, runs verify → push → PR,
     // and tears down on its own. Emitting after the teardown means a concurrent
     // verify run can't reuse this container, which is good — it gets a fresh
-    // one with the right secrets bound. `step.run` boundary ensures the event
-    // is sent exactly once even if Inngest replays the post-pending-verify path.
+    // one with the right secrets bound. The step boundary covers replay; the
+    // `cli-done-<taskId>` id covers the crash window it can't (durable buys
+    // replay-safety, not exactly-once — see .claude/rules/inngest.md), and
+    // past the bus's 24h window the verify orchestrator's
+    // `pending_verify -> verifying` claim is what skips a duplicate.
     await stepRun("emit-cli-done", () =>
-      inngest.send({ name: "coding/task/cli-done", data: { taskId } }).then(() => undefined),
+      inngest
+        .send({ name: "coding/task/cli-done", data: { taskId }, id: `cli-done-${taskId}` })
+        .then(() => undefined),
     );
     const completionTokens =
       result.usage?.inputTokens != null && result.usage?.outputTokens != null

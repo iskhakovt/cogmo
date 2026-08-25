@@ -342,6 +342,10 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
             exitCode: verifyResult.exitCode,
             durationMs: verifyResult.durationMs,
           },
+          // Same `<verb>-<taskId>` bus dedup as every other hand-off emit: the
+          // step boundary covers replay, the id covers the crash window it
+          // can't. One verify verdict per task, so the id is unambiguous.
+          id: `verify-complete-${taskId}`,
         })
         .then(() => undefined),
     );
@@ -400,7 +404,11 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
     );
     await stepRun("emit-pushed", () =>
       inngest
-        .send({ name: "coding/task/pushed", data: { taskId, branchSha } })
+        .send({
+          name: "coding/task/pushed",
+          data: { taskId, branchSha },
+          id: `pushed-${taskId}`,
+        })
         .then(() => undefined),
     );
 
@@ -460,6 +468,11 @@ export async function runCodingVerify(params: RunParams): Promise<VerifyOrchestr
         .send({
           name: "coding/task/pr-opened",
           data: { taskId, prUrl: prResult.url, prNumber: prResult.number },
+          // Matters more than its siblings: `auto-register-skill` subscribes
+          // to this one, and a re-send re-enters the register flow (mostly
+          // absorbed by its `no_op` tip resolution) alongside any user-facing
+          // notification firing twice.
+          id: `pr-opened-${taskId}`,
         })
         .then(() => undefined),
     );
