@@ -15,20 +15,17 @@
  * provenance, not as an approval step.
  */
 
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import type { Inngest } from "inngest";
 import type { Transactor } from "../../db/index.js";
 import { codingTaskPrOpened } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
-import { withGitAskpass } from "../../secrets/git-askpass.js";
+import { runGit, withGitAskpass } from "../../secrets/git-askpass.js";
 import { describeResolveIdentityError, resolveGitHubIdentity } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { SKILLS_CODING_REPO_NAME } from "../../skills/repo.js";
 import type { RegisterResult, SkillRunner } from "../../skills/runner.js";
 import type { CodingStore } from "./store/index.js";
 
-const execFileP = promisify(execFile);
 const log = logger.child({ component: "coding.auto-register-skill" });
 
 export interface AutoRegisterSkillDeps {
@@ -89,11 +86,7 @@ export async function autoRegisterSkill(
   }
   // Address remote by URL, not name — see pushTaskBranchToRemote.
   await withGitAskpass(identity.pat, async (env) => {
-    await execFileP(
-      "git",
-      ["-C", deps.skillsRepoPath, "fetch", repo.remoteUrl, `+${branch}:${branch}`],
-      { env: { ...process.env, ...env } },
-    );
+    await runGit(["-C", deps.skillsRepoPath, "fetch", repo.remoteUrl, `+${branch}:${branch}`], env);
   });
 
   // KNOWN LEAK: register() has no AbortSignal — underlying call keeps running past this cap. See AbortSignal-threading p3 in todo.md.
