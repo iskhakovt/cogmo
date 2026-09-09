@@ -5,6 +5,7 @@ import {
   desc,
   eq,
   getTableColumns,
+  gt,
   inArray,
   isNull,
   lte,
@@ -35,6 +36,7 @@ import {
 import {
   aliases,
   type CooldownState,
+  conversationSummaries,
   conversations,
   coreMemoryBlocks,
   customCompartments,
@@ -55,6 +57,7 @@ import {
   profileClasses,
   profiles,
   type SttProviderTypeValue,
+  type SummarySourceValue,
   scheduledTasks,
   steeringRules,
   subAgents,
@@ -234,6 +237,22 @@ export interface ConversationSummary {
   alias: string | null;
   lastMessagePreview: string;
   lastMessageAt: Date;
+}
+
+/**
+ * A row from `conversation_summaries` — the persisted output of the summarize
+ * compaction strategy. Distinct from `ConversationSummary`, which is the
+ * `/sessions` listing row.
+ */
+export interface CompactionSummary {
+  id: string;
+  conversationId: string;
+  summary: string;
+  throughMessageId: string;
+  messagesSummarized: number;
+  model: string;
+  source: SummarySourceValue;
+  createdAt: Date;
 }
 
 /**
@@ -512,6 +531,47 @@ export interface AgentStore {
   listMessages(
     tx: Transaction,
     conversationId: string,
+  ): Promise<ReadonlyArray<Message & { id: string }>>;
+
+  /**
+   * Newest durable summary for a conversation, or undefined when it has never
+   * been compacted. The turn loader replaces every message up to and including
+   * `throughMessageId` with this text; the Observer deliberately does not read
+   * it, so fact extraction still sees the complete transcript.
+   */
+  getLatestSummary(tx: Transaction, conversationId: string): Promise<CompactionSummary | undefined>;
+
+  /**
+   * Append a summary, or recover the existing row when this
+   * (conversationId, throughMessageId) pair was already written.
+   *
+   * The pair is the idempotency key for the Inngest step that writes it: a
+   * retry that re-runs a committed insert lands on the conflict arm rather
+   * than appending a second row for the same span. `kind` reports which arm
+   * ran, so a caller can tell a fresh compaction from a replayed one.
+   */
+  insertOrRecoverSummary(
+    tx: Transaction,
+    params: {
+      conversationId: string;
+      summary: string;
+      throughMessageId: string;
+      messagesSummarized: number;
+      model: string;
+      source: SummarySourceValue;
+    },
+  ): Promise<{ kind: "new" | "recovered"; row: CompactionSummary }>;
+
+  /**
+   * Messages of a conversation newer than `afterMessageId`, ordered by id.
+   * Backs the compacted turn view — the summary stands in for everything at or
+   * before the cutoff. UUIDv7 ids are time-ordered, so the `>` comparison is
+   * an ordering predicate, not just an identity one.
+   */
+  getHistoryAfter(
+    tx: Transaction,
+    conversationId: string,
+    afterMessageId: string,
   ): Promise<ReadonlyArray<Message & { id: string }>>;
 
   /** Load a profile by ID. */
@@ -1575,6 +1635,63 @@ export class DrizzleAgentStore implements AgentStore {
       .select({ id: messages.id, role: messages.role, content: messages.content })
       .from(messages)
       .where(eq(messages.conversationId, conversationId))
+      .orderBy(asc(messages.id));
+    return rows as ReadonlyArray<Message & { id: string }>;
+  }
+
+  async getLatestSummary(
+    tx: Transaction,
+    conversationId: string,
+  ): Promise<CompactionSummary | undefined> {
+    const rows = await tx
+      .select()
+      .from(conversationSummaries)
+      .where(eq(conversationSummaries.conversationId, conversationId))
+      .orderBy(desc(conversationSummaries.id))
+      .limit(1);
+    return rows[0];
+  }
+
+  async insertOrRecoverSummary(
+    tx: Transaction,
+    params: {
+      conversationId: string;
+      summary: string;
+      throughMessageId: string;
+      messagesSummarized: number;
+      model: string;
+      source: SummarySourceValue;
+    },
+  ): Promise<{ kind: "new" | "recovered"; row: CompactionSummary }> {
+    // DO UPDATE with a no-op SET rather than DO NOTHING — see
+    // `insertOrRecoverTask` for why the concurrent loser needs a write to
+    // raise 40001 instead of silently skipping the tuple. `xmax = 0` is zero
+    // on a tuple this statement inserted and the locking xid on one it
+    // reached through the conflict arm.
+    const rows = await tx
+      .insert(conversationSummaries)
+      .values(params)
+      .onConflictDoUpdate({
+        target: [conversationSummaries.conversationId, conversationSummaries.throughMessageId],
+        set: { throughMessageId: params.throughMessageId },
+      })
+      .returning({
+        ...getTableColumns(conversationSummaries),
+        inserted: sql<boolean>`(xmax = 0)`,
+      });
+    const { inserted, ...row } = single(rows);
+    return { kind: inserted ? "new" : "recovered", row };
+  }
+
+  async getHistoryAfter(
+    tx: Transaction,
+    conversationId: string,
+    afterMessageId: string,
+  ): Promise<ReadonlyArray<Message & { id: string }>> {
+    const rows = await tx
+      .select({ id: messages.id, role: messages.role, content: messages.content })
+      .from(messages)
+      .where(and(eq(messages.conversationId, conversationId), gt(messages.id, afterMessageId)))
       .orderBy(asc(messages.id));
     return rows as ReadonlyArray<Message & { id: string }>;
   }

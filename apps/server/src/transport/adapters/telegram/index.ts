@@ -30,6 +30,7 @@ import type { Adapter, StreamHandle, StreamingAdapter, StreamOpts } from "../../
 import { editResolvedBoundaryPrompt } from "./boundary-prompt-editor.js";
 import {
   handleClasses,
+  handleCompact,
   handleCompartments,
   handleDisable,
   handleEnable,
@@ -804,6 +805,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
         "  /resume <alias> — switch to a named conversation",
         "  /name <alias> — name the current conversation",
         "  /end — close the current conversation",
+        "  /compact — summarize the conversation now, so the next turn starts small",
         "",
         "Profile & model:",
         "  /profile [list|switch <name>|new <name>|edit <name>|delete <name>]",
@@ -840,6 +842,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   bot.command("resume", (ctx) => handleResume(transport, toCmdCtx(ctx)));
   bot.command("name", (ctx) => handleName(transport, toCmdCtx(ctx)));
   bot.command("end", (ctx) => handleEnd(transport, toCmdCtx(ctx)));
+  bot.command("compact", (ctx) => handleCompact(transport, toCmdCtx(ctx)));
   bot.command("profile", (ctx) => handleProfile(transport, toCmdCtx(ctx), profileDialogs));
   bot.command("classes", (ctx) => handleClasses(transport, toCmdCtx(ctx)));
   bot.command("compartments", (ctx) => handleCompartments(transport, toCmdCtx(ctx)));

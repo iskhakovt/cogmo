@@ -116,6 +116,15 @@ export const evolutionTrigger = pgEnum("evolution_trigger", ["idle", "manual"]);
 export type EvolutionTriggerValue = (typeof evolutionTrigger.enumValues)[number];
 
 /**
+ * `conversation_summaries.source` — which path produced the row. `turn` is the
+ * 80%-budget summarize strategy firing inside `handle-message`; `manual` is an
+ * explicit `/compact`. Both write the same shape; the split exists so
+ * `/status` can distinguish "the system compacted for you" from "you asked".
+ */
+export const summarySource = pgEnum("summary_source", ["turn", "manual"]);
+export type SummarySourceValue = (typeof summarySource.enumValues)[number];
+
+/**
  * TTS provider adapter discriminator. Maps to which `TtsProvider` class the
  * voice resolver builds (`src/voice/resolver.ts`). `openai` and
  * `openai_compatible` both use `OpenAIVoiceProvider`; the enum split keeps
@@ -924,5 +933,51 @@ export const evolutionEvents = pgTable(
   (t) => [
     // Digest path: `/learned` lists newest-first per user.
     index("idx_evolution_events_user").on(t.userId, desc(t.createdAt)),
+  ],
+);
+
+/**
+ * Durable conversation summaries — the persisted output of the summarize
+ * compaction strategy.
+ *
+ * Compaction itself stays ephemeral for Strategies 0, 1 and 3 (they rewrite
+ * or drop blocks in memory at turn time). Summarization is different: it
+ * costs an LLM call, so its result is written here and replayed on every
+ * subsequent turn instead of being recomputed. `through_message_id` names the
+ * last message the summary stands in for — the turn loader drops every
+ * message up to and including it and prepends the summary as a single user
+ * message. See design/context-management.md → Durable summaries.
+ *
+ * Append-only. Re-compaction inserts a new row summarizing the previous
+ * summary plus everything that arrived since; the loader reads the newest row
+ * per conversation. The unique on (conversation_id, through_message_id) is the
+ * idempotency key for the write step — an Inngest retry that re-runs a
+ * committed insert lands on the existing row rather than duplicating it.
+ */
+export const conversationSummaries = pgTable(
+  "conversation_summaries",
+  {
+    id: pk(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id),
+    summary: text("summary").notNull(),
+    /** Last message covered by this summary. Snapped to a tool_use/tool_result pair boundary at write time. */
+    throughMessageId: uuid("through_message_id")
+      .notNull()
+      .references(() => messages.id),
+    /** How many entries of the compaction input array this summary replaced — telemetry, not a cursor. */
+    messagesSummarized: integer("messages_summarized").notNull(),
+    /** Summarization model that produced the text. */
+    model: text("model").notNull(),
+    /** `manual` = `/compact`; `turn` = the 80% budget strategy firing mid-turn. */
+    source: summarySource("source").notNull(),
+    createdAt: ts(),
+  },
+  (t) => [
+    // Serves the latest-per-conversation read: filter on conversation_id,
+    // take the highest id. UUIDv7 makes `id DESC` a proxy for recency.
+    index("idx_conversation_summaries_conv_id").on(t.conversationId, desc(t.id)),
+    unique("uq_conversation_summaries_conv_through").on(t.conversationId, t.throughMessageId),
   ],
 );

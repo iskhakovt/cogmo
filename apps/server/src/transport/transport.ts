@@ -3,6 +3,7 @@ import { isAbsolute, join } from "node:path";
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import type { CodingStore } from "../agent/coding/store/index.js";
+import type { CompactConversationResult } from "../agent/conversation/compact-conversation.js";
 import { isCoreCompartment } from "../agent/evolution/memory-extraction-schema.js";
 import type { TriggerReflectionResult } from "../agent/evolution/trigger-reflection.js";
 import type { AutoRecallMode } from "../agent/recall-gate.js";
@@ -264,6 +265,15 @@ export type TriggerReflectionOutcome =
       drained: number;
     };
 
+/**
+ * What `/compact` did. `no_session` mirrors `getCurrent`'s "you have nothing
+ * here" affordance rather than surfacing an error code.
+ */
+export type CompactConversationOutcome =
+  | { status: "no_session" }
+  | { status: "skipped"; reason: "too_short" | "nothing_new" | "empty_summary" }
+  | { status: "compacted"; messagesSummarized: number; messagesKept: number; model: string };
+
 export type TransportError =
   | { code: "session_not_found"; sessionId: string }
   | { code: "identity_rejected" }
@@ -327,7 +337,13 @@ export type TransportError =
    * disable evolution). The read methods on the same namespace stay
    * available — only the trigger surfaces this code.
    */
-  | { code: "evolution_unavailable" };
+  | { code: "evolution_unavailable" }
+  /**
+   * `conversations.compact` was called on a deployment that didn't wire a
+   * compaction driver. Every other method on the namespace stays available —
+   * only the manual trigger surfaces this code.
+   */
+  | { code: "compaction_unavailable" };
 
 /**
  * Transport — the adapter-facing contract for session management and inbound emission.
@@ -486,6 +502,20 @@ export interface Transport {
       platformUserHandle: string,
       conversationId: string,
     ): Promise<Result<{ wasCoolingDown: boolean }, TransportError>>;
+    /**
+     * Summarize the current session's conversation now and store the result,
+     * so the next turn replays the summary instead of paying for it under
+     * budget pressure. Backs the `/compact` control command.
+     *
+     * Runs the summarization LLM call inline — the caller is waiting on the
+     * reply. Identity-checked; returns `ok({status: "no_session"})` when the
+     * address has no active conversation, and `compaction_unavailable` on a
+     * deployment that didn't wire the driver.
+     */
+    compact(
+      platformUserHandle: string,
+      platformAddress: string,
+    ): Promise<Result<CompactConversationOutcome, TransportError>>;
     /**
      * Set or clear the per-conversation voice mode override. `null` clears
      * the override (the conversation falls back to the profile default).
@@ -898,6 +928,13 @@ export function createTransport(deps: {
    * read-side methods on the same namespace stay available.
    */
   triggerReflection?: (conversationId: string) => Promise<TriggerReflectionResult>;
+  /**
+   * Synchronous compaction driver for the `/compact` manual trigger. Optional
+   * for the same reason as `triggerReflection` — test setups that never call
+   * `conversations.compact` can omit it, and the method returns
+   * `compaction_unavailable`.
+   */
+  compactConversation?: (conversationId: string) => Promise<CompactConversationResult>;
   inngest: Inngest;
   inboundArrived: typeof InboundArrivedEvent;
   attachments: AttachmentStore;
@@ -924,6 +961,7 @@ export function createTransport(deps: {
     skillStore,
     mcpRegistry,
     triggerReflection,
+    compactConversation,
     inngest,
     inboundArrived,
     attachments,
@@ -1430,6 +1468,26 @@ export function createTransport(deps: {
           "user_repair",
         );
         return ok({ wasCoolingDown: txResult.value.wasCoolingDown });
+      },
+
+      async compact(platformUserHandle, platformAddress) {
+        if (!compactConversation) {
+          return err({ code: "compaction_unavailable" as const });
+        }
+        const resolved = await resolveOwnedConversation(platformUserHandle, platformAddress);
+        if (resolved.kind === "identity_rejected") {
+          return err({ code: "identity_rejected" as const });
+        }
+        if (resolved.kind === "no_session") {
+          return ok({ status: "no_session" as const });
+        }
+        const result = await compactConversation(resolved.conversationId);
+        // The driver's `not_found` means the conversation or its profile
+        // vanished between the resolve above and the load — the same
+        // mid-call disappearance `/reflect` reports as a skip, rendered
+        // here as "nothing here" for the same reason.
+        if (result.status === "not_found") return ok({ status: "no_session" as const });
+        return ok(result);
       },
 
       async setVoiceMode(platformUserHandle, conversationId, mode) {
@@ -2377,28 +2435,14 @@ export function createTransport(deps: {
         if (!triggerReflection) {
           return err({ code: "evolution_unavailable" as const });
         }
-        // Resolve session + identity in one tx — same shape as `/repair` and
-        // `/voice`. `ok({status: "no_session"})` lets the adapter render
-        // "no active conversation" without a separate error code (matches
-        // `getCurrent`'s "you have nothing here" affordance).
-        const conversationId = await runInTx(async (tx) => {
-          const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
-          if (!identity) return { kind: "identity_rejected" as const };
-          const session = await transportStore.resolveSession(tx, channelId, platformAddress);
-          if (!session) return { kind: "no_session" as const };
-          const conv = await agentStore.getConversation(tx, session.conversationId);
-          if (!conv || conv.userId !== identity.userId) {
-            return { kind: "no_session" as const };
-          }
-          return { kind: "ok" as const, conversationId: conv.id };
-        });
-        if (conversationId.kind === "identity_rejected") {
+        const resolved = await resolveOwnedConversation(platformUserHandle, platformAddress);
+        if (resolved.kind === "identity_rejected") {
           return err({ code: "identity_rejected" as const });
         }
-        if (conversationId.kind === "no_session") {
+        if (resolved.kind === "no_session") {
           return ok({ status: "no_session" as const });
         }
-        const result = await triggerReflection(conversationId.conversationId);
+        const result = await triggerReflection(resolved.conversationId);
         if (result.status === "skipped") {
           return ok({ status: "skipped" as const, reason: result.reason });
         }
@@ -2417,6 +2461,35 @@ export function createTransport(deps: {
       },
     },
   };
+
+  /**
+   * Resolve the conversation behind a platform address, checked for caller
+   * ownership. Shared by the manual triggers (`/compact`, `/reflect`), which
+   * act on "whatever conversation this chat is currently in" rather than on an
+   * id the caller names.
+   *
+   * Identity, session and ownership resolve in one tx so all three see the
+   * same snapshot. A conversation owned by someone else reports as
+   * `no_session` rather than `access_denied`: from the caller's side the two
+   * are indistinguishable, and mirroring `getCurrent`'s "you have nothing
+   * here" affordance keeps a probing client from learning the address is live.
+   */
+  async function resolveOwnedConversation(
+    platformUserHandle: string,
+    platformAddress: string,
+  ): Promise<
+    { kind: "identity_rejected" } | { kind: "no_session" } | { kind: "ok"; conversationId: string }
+  > {
+    return runInTx(async (tx) => {
+      const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
+      if (!identity) return { kind: "identity_rejected" as const };
+      const session = await transportStore.resolveSession(tx, channelId, platformAddress);
+      if (!session) return { kind: "no_session" as const };
+      const conv = await agentStore.getConversation(tx, session.conversationId);
+      if (!conv || conv.userId !== identity.userId) return { kind: "no_session" as const };
+      return { kind: "ok" as const, conversationId: conv.id };
+    });
+  }
 
   /**
    * Strict identity check for task callbacks: the user who tapped the

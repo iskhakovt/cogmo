@@ -6,7 +6,7 @@ import { DrizzleSecretsStore } from "../../secrets/store/index.js";
 import { expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleAgentStore } from "./index.js";
-import { messages } from "./schema.js";
+import { conversationSummaries, messages } from "./schema.js";
 
 let db: Database;
 let tx: Transactor;
@@ -3581,5 +3581,192 @@ describe("DrizzleAgentStore", () => {
         ),
       ).rejects.toThrow();
     });
+  });
+});
+
+describe("conversation summaries", () => {
+  const INBOUND = "019d0000-0000-7000-8000-0000000000ff";
+
+  async function seedMessages(
+    conversationId: string,
+    stamp: { profileId: string; model: string },
+    count: number,
+  ): Promise<string[]> {
+    const ids: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const row = await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId,
+          role: i % 2 === 0 ? "user" : "assistant",
+          content: `m${i}`,
+          lastInboundMessageId: INBOUND,
+          ...stamp,
+        }),
+      );
+      ids.push(row.id);
+    }
+    return ids;
+  }
+
+  it("returns undefined before a conversation has ever been compacted", async () => {
+    const { conversationId } = await seedConversation();
+    await expect(tx((trx) => store.getLatestSummary(trx, conversationId))).resolves.toBeUndefined();
+  });
+
+  it("returns the newest summary when several have been appended", async () => {
+    const { conversationId, stamp } = await seedConversation();
+    const ids = await seedMessages(conversationId, stamp, 4);
+
+    await tx((trx) =>
+      store.insertOrRecoverSummary(trx, {
+        conversationId,
+        summary: "first pass",
+        throughMessageId: expectDefined(ids[0]),
+        messagesSummarized: 1,
+        model: "claude-haiku-4-5",
+        source: "turn",
+      }),
+    );
+    await tx((trx) =>
+      store.insertOrRecoverSummary(trx, {
+        conversationId,
+        summary: "second pass",
+        throughMessageId: expectDefined(ids[2]),
+        messagesSummarized: 3,
+        model: "claude-haiku-4-5",
+        source: "manual",
+      }),
+    );
+
+    const latest = expectDefined(await tx((trx) => store.getLatestSummary(trx, conversationId)));
+    expect(latest.summary).toBe("second pass");
+    expect(latest.throughMessageId).toBe(ids[2]);
+    expect(latest.messagesSummarized).toBe(3);
+    expect(latest.source).toBe("manual");
+  });
+
+  it("scopes the latest-summary read to its own conversation", async () => {
+    const { userId, profileId, conversationId, stamp } = await seedConversation();
+    const other = (
+      await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: true }))
+    ).id;
+    const ids = await seedMessages(conversationId, stamp, 2);
+
+    await tx((trx) =>
+      store.insertOrRecoverSummary(trx, {
+        conversationId,
+        summary: "belongs to the first",
+        throughMessageId: expectDefined(ids[0]),
+        messagesSummarized: 1,
+        model: "claude-haiku-4-5",
+        source: "turn",
+      }),
+    );
+
+    await expect(tx((trx) => store.getLatestSummary(trx, other))).resolves.toBeUndefined();
+  });
+
+  it("recovers the existing row when the same cutoff is written twice", async () => {
+    const { conversationId, stamp } = await seedConversation();
+    const ids = await seedMessages(conversationId, stamp, 2);
+    const params = {
+      conversationId,
+      summary: "written once",
+      throughMessageId: expectDefined(ids[0]),
+      messagesSummarized: 1,
+      model: "claude-haiku-4-5",
+      source: "turn" as const,
+    };
+
+    const first = await tx((trx) => store.insertOrRecoverSummary(trx, params));
+    const second = await tx((trx) =>
+      store.insertOrRecoverSummary(trx, { ...params, summary: "a retry's text" }),
+    );
+
+    expect(first.kind).toBe("new");
+    expect(second.kind).toBe("recovered");
+    expect(second.row.id).toBe(first.row.id);
+    // The conflict arm is a no-op SET, so a retry can't rewrite a committed
+    // summary — the stored text stays whatever the winning insert wrote.
+    expect(second.row.summary).toBe("written once");
+
+    const rows = await tx((trx) =>
+      trx
+        .select()
+        .from(conversationSummaries)
+        .where(eq(conversationSummaries.conversationId, conversationId)),
+    );
+    expect(rows).toHaveLength(1);
+  });
+
+  it("lets the same cutoff be reused across different conversations", async () => {
+    const { userId, profileId, conversationId, stamp } = await seedConversation();
+    const other = (
+      await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: true }))
+    ).id;
+    const ids = await seedMessages(conversationId, stamp, 1);
+    const otherIds = await seedMessages(other, stamp, 1);
+
+    const first = await tx((trx) =>
+      store.insertOrRecoverSummary(trx, {
+        conversationId,
+        summary: "a",
+        throughMessageId: expectDefined(ids[0]),
+        messagesSummarized: 1,
+        model: "claude-haiku-4-5",
+        source: "turn",
+      }),
+    );
+    const second = await tx((trx) =>
+      store.insertOrRecoverSummary(trx, {
+        conversationId: other,
+        summary: "b",
+        throughMessageId: expectDefined(otherIds[0]),
+        messagesSummarized: 1,
+        model: "claude-haiku-4-5",
+        source: "turn",
+      }),
+    );
+
+    expect(first.kind).toBe("new");
+    expect(second.kind).toBe("new");
+  });
+
+  it("returns only messages after the cutoff, in order, with their ids", async () => {
+    const { conversationId, stamp } = await seedConversation();
+    const ids = await seedMessages(conversationId, stamp, 5);
+
+    const after = await tx((trx) =>
+      store.getHistoryAfter(trx, conversationId, expectDefined(ids[1])),
+    );
+
+    expect(after.map((m) => m.id)).toEqual(ids.slice(2));
+    expect(after.map((m) => m.content)).toEqual(["m2", "m3", "m4"]);
+  });
+
+  it("returns nothing when the cutoff is the newest message", async () => {
+    const { conversationId, stamp } = await seedConversation();
+    const ids = await seedMessages(conversationId, stamp, 3);
+
+    const after = await tx((trx) =>
+      store.getHistoryAfter(trx, conversationId, expectDefined(ids[2])),
+    );
+
+    expect(after).toEqual([]);
+  });
+
+  it("excludes another conversation's messages from the after-cutoff read", async () => {
+    const { userId, profileId, conversationId, stamp } = await seedConversation();
+    const other = (
+      await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: true }))
+    ).id;
+    const ids = await seedMessages(conversationId, stamp, 2);
+    await seedMessages(other, stamp, 2);
+
+    const after = await tx((trx) =>
+      store.getHistoryAfter(trx, conversationId, expectDefined(ids[0])),
+    );
+
+    expect(after.map((m) => m.id)).toEqual([ids[1]]);
   });
 });

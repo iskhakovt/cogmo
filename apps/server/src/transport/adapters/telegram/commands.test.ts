@@ -8,6 +8,7 @@ import {
   formatRelativeTime,
   formatScope,
   handleClasses,
+  handleCompact,
   handleCompartments,
   handleDisable,
   handleEnable,
@@ -4321,6 +4322,61 @@ describe("handleLearned", () => {
     const ctx = mkCtx("not-a-uuid");
     await handleLearned(transport, ctx);
     expect(ctx.reply.mock.calls[0]?.[0]).toContain("Usage: /learned");
+  });
+});
+
+describe("handleCompact", () => {
+  function compactWith(value: unknown) {
+    return transportWith({ conversations: { compact: vi.fn().mockResolvedValue(value) } });
+  }
+
+  it("acknowledges before the summarization round trip, then reports the result", async () => {
+    const transport = compactWith(
+      ok({
+        status: "compacted",
+        messagesSummarized: 24,
+        messagesKept: 6,
+        model: "claude-haiku-4-5",
+      }),
+    );
+    const ctx = mkCtx();
+    await handleCompact(transport, ctx);
+
+    expect(ctx.reply.mock.calls[0]?.[0]).toMatch(/Compacting/);
+    const result = (ctx.reply.mock.calls[1]?.[0] ?? "") as string;
+    expect(result).toContain("24 message(s)");
+    expect(result).toContain("6 kept verbatim");
+    expect(result).toContain("claude-haiku-4-5");
+  });
+
+  it("reports a conversation that still fits in full", async () => {
+    const ctx = mkCtx();
+    await handleCompact(compactWith(ok({ status: "skipped", reason: "too_short" })), ctx);
+    expect(ctx.reply.mock.calls[1]?.[0]).toMatch(/still fits/i);
+  });
+
+  it("reports that nothing has arrived since the last summary", async () => {
+    const ctx = mkCtx();
+    await handleCompact(compactWith(ok({ status: "skipped", reason: "nothing_new" })), ctx);
+    expect(ctx.reply.mock.calls[1]?.[0]).toMatch(/nothing new/i);
+  });
+
+  it("says nothing was stored when the model returned no text", async () => {
+    const ctx = mkCtx();
+    await handleCompact(compactWith(ok({ status: "skipped", reason: "empty_summary" })), ctx);
+    expect(ctx.reply.mock.calls[1]?.[0]).toMatch(/nothing stored/i);
+  });
+
+  it("reports no-session when there's no active conversation", async () => {
+    const ctx = mkCtx();
+    await handleCompact(compactWith(ok({ status: "no_session" })), ctx);
+    expect(ctx.reply.mock.calls[1]?.[0]).toMatch(/No active conversation/i);
+  });
+
+  it("renders a transport error rather than throwing", async () => {
+    const ctx = mkCtx();
+    await handleCompact(compactWith(err({ code: "compaction_unavailable" })), ctx);
+    expect(ctx.reply.mock.calls[1]?.[0]).toMatch(/isn't wired/i);
   });
 });
 

@@ -4,6 +4,7 @@ import { mock } from "vitest-mock-extended";
 import type { z } from "zod";
 import type { inboundReady } from "../inngest/events.js";
 import { ProviderConfigError } from "../llm/resolver.js";
+import type { Message } from "../llm/types.js";
 import { logger } from "../logger.js";
 import type { McpRegistry } from "../mcp/registry.js";
 import type { SkillRunner } from "../skills/runner.js";
@@ -624,7 +625,7 @@ describe("createHandleMessage", () => {
       // History must contain at least one user message — handle-message
       // overrides the trailing user message with resolved blocks.
       agentStore: mockAgentStore({
-        getHistory: vi
+        listMessages: vi
           .fn()
           .mockResolvedValue([{ role: "user", content: "summarize this document" }]),
       }),
@@ -678,7 +679,7 @@ describe("createHandleMessage", () => {
   it("omits name on resolved DocumentBlock when inbound block had no name", async () => {
     const deps = mockDeps({
       agentStore: mockAgentStore({
-        getHistory: vi.fn().mockResolvedValue([{ role: "user", content: "see attached" }]),
+        listMessages: vi.fn().mockResolvedValue([{ role: "user", content: "see attached" }]),
       }),
       transportStore: mockTransportStore({
         getUnbatchedInbound: vi.fn().mockResolvedValue([
@@ -1256,7 +1257,7 @@ describe("createHandleMessage", () => {
       agentStore: mockAgentStore({
         getLastTokens: vi.fn().mockResolvedValue(null),
         // Need history with enough messages to trigger summarization (> keepTurns=6)
-        getHistory: vi.fn().mockResolvedValue([
+        listMessages: vi.fn().mockResolvedValue([
           { role: "user", content: "m1" },
           { role: "assistant", content: "r1" },
           { role: "user", content: "m2" },
@@ -1684,7 +1685,7 @@ describe("createHandleMessage", () => {
         agentStore: mockAgentStore({
           getLastTokens: vi.fn().mockResolvedValue(null),
           // Need ≥ keepTurns history to actually trigger summarization
-          getHistory: vi.fn().mockResolvedValue([
+          listMessages: vi.fn().mockResolvedValue([
             { role: "user", content: "m1" },
             { role: "assistant", content: "r1" },
             { role: "user", content: "m2" },
@@ -1751,7 +1752,7 @@ describe("createHandleMessage", () => {
             memoryScope: null,
           }),
           getLastTokens: vi.fn().mockResolvedValue(null),
-          getHistory: vi.fn().mockResolvedValue([
+          listMessages: vi.fn().mockResolvedValue([
             { role: "user", content: "m1" },
             { role: "assistant", content: "r1" },
             { role: "user", content: "m2" },
@@ -1834,7 +1835,7 @@ describe("createHandleMessage", () => {
             memoryScope: null,
           }),
           getLastTokens: vi.fn().mockResolvedValue(null),
-          getHistory: vi.fn().mockResolvedValue([
+          listMessages: vi.fn().mockResolvedValue([
             { role: "user", content: "m1" },
             { role: "assistant", content: "r1" },
             { role: "user", content: "m2" },
@@ -2000,7 +2001,7 @@ describe("createHandleMessage", () => {
         voiceResolver: mockVoiceResolver(mockVoiceBundle({ stt: sttProvider })),
         agentStore: mockAgentStore({
           insertMessage,
-          getHistory: vi.fn().mockResolvedValue([{ role: "user", content: "hello there" }]),
+          listMessages: vi.fn().mockResolvedValue([{ role: "user", content: "hello there" }]),
         }),
         attachments: {
           upload: vi.fn().mockResolvedValue("inbound/x"),
@@ -2040,7 +2041,7 @@ describe("createHandleMessage", () => {
       const deps = mockDeps({
         voiceResolver: mockVoiceResolver(mockVoiceBundle({ stt: sttProvider })),
         agentStore: mockAgentStore({
-          getHistory: vi.fn().mockResolvedValue([{ role: "user", content: "speak" }]),
+          listMessages: vi.fn().mockResolvedValue([{ role: "user", content: "speak" }]),
         }),
         attachments: {
           upload: vi.fn().mockResolvedValue("inbound/x"),
@@ -2068,7 +2069,7 @@ describe("createHandleMessage", () => {
       )[0];
       // History was rewritten with the resolved trailing user message
       // because `hasAttachments` is false for voice — but the transcript
-      // already lives in the persisted text via getHistory's mock.
+      // already lives in the persisted text via listMessages' mock.
       expect(callArgs.messages.at(-1)).toEqual({ role: "user", content: "speak" });
     });
 
@@ -2237,7 +2238,7 @@ describe("createHandleMessage", () => {
         voiceResolver: mockVoiceResolver(mockVoiceBundle({ stt: sttProvider })),
         agentStore: mockAgentStore({
           insertMessage,
-          getHistory: vi
+          listMessages: vi
             .fn()
             .mockResolvedValue([
               { role: "user", content: "check this out\nthe meeting was rescheduled" },
@@ -2316,7 +2317,9 @@ describe("createHandleMessage", () => {
             voiceMode: "auto",
             toolSet: [],
           }),
-          getHistory: vi.fn().mockResolvedValue([{ role: "user", content: "what's the weather" }]),
+          listMessages: vi
+            .fn()
+            .mockResolvedValue([{ role: "user", content: "what's the weather" }]),
         }),
         attachments: {
           upload: vi.fn().mockResolvedValue("inbound/x"),
@@ -3436,5 +3439,155 @@ describe("createHandleMessage", () => {
       expect(caught).toBeInstanceOf(NonRetriableError);
       expect((caught as NonRetriableError).cause).toBe(badRequest);
     });
+  });
+});
+
+describe("durable conversation summaries", () => {
+  /** `n` alternating messages carrying the ids the loader aligns against. */
+  function rows(n: number): (Message & { id: string })[] {
+    return Array.from({ length: n }, (_, i) => ({
+      id: `m${i + 1}`,
+      role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
+      content: `turn ${i + 1}`,
+    }));
+  }
+
+  /**
+   * Deps whose compaction pipeline reaches Strategy 2: the fast path is off
+   * (`getLastTokens` past the threshold), the count reports above 80% of the
+   * claude-sonnet-4-6 budget (926_000), and the history is longer than the
+   * retain window.
+   */
+  function summarizingDeps(overrides: { messages?: ReturnType<typeof rows>; text?: string } = {}) {
+    const chat = vi.fn().mockResolvedValue({
+      content: [{ type: "text", text: overrides.text ?? "the earlier discussion" }],
+      stopReason: "end_turn",
+      model: "mock-model",
+      usage: { inputTokens: 10, outputTokens: 5 },
+    });
+    const deps = mockDeps({
+      resolveProvider: mockResolver(
+        mockProvider({ countTokens: vi.fn().mockResolvedValue(800_000), chat }),
+      ),
+      agentStore: mockAgentStore({
+        getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 800_000, outputTokens: 2_000 }),
+        listMessages: vi.fn().mockResolvedValue(overrides.messages ?? rows(8)),
+      }),
+    });
+    return { deps, chat };
+  }
+
+  it("stores the summary Strategy 2 produced, keyed to the last covered message", async () => {
+    const { deps } = summarizingDeps();
+
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    // 8 messages, 6 retained → the first 2 collapse, so the cutoff is m2.
+    expect(deps.agentStore.insertOrRecoverSummary).toHaveBeenCalledWith(expect.anything(), {
+      conversationId: "conv-1",
+      summary: "the earlier discussion",
+      throughMessageId: "m2",
+      messagesSummarized: 2,
+      model: "claude-sonnet-4-6",
+      source: "turn",
+    });
+  });
+
+  it("stores nothing when the turn stays under the summarization threshold", async () => {
+    const deps = mockDeps({
+      resolveProvider: mockResolver(
+        mockProvider({ countTokens: vi.fn().mockResolvedValue(1_000) }),
+      ),
+      agentStore: mockAgentStore({
+        getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 1_000, outputTokens: 100 }),
+        listMessages: vi.fn().mockResolvedValue(rows(8)),
+      }),
+    });
+
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(deps.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
+  });
+
+  it("stores nothing when the summarization model returns no text", async () => {
+    // `summarizePrefix` reports 0 summarized for an empty summary and leaves
+    // the messages alone; the persist step reads the same signal, so an empty
+    // summary never reaches the table.
+    const { deps } = summarizingDeps({ text: "   " });
+
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(deps.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
+  });
+
+  it("sends the stored summary to the loop in place of the span it covers", async () => {
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        getLatestSummary: vi.fn().mockResolvedValue({
+          id: "sum-1",
+          conversationId: "conv-1",
+          summary: "everything before this",
+          throughMessageId: "m4",
+          messagesSummarized: 4,
+          model: "claude-haiku-4-5",
+          source: "turn",
+          createdAt: new Date(),
+        }),
+        getHistoryAfter: vi
+          .fn()
+          .mockResolvedValue([{ id: "m5", role: "user", content: "and then" }]),
+      }),
+    });
+
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(deps.agentStore.getHistoryAfter).toHaveBeenCalledWith(expect.anything(), "conv-1", "m4");
+    const loopCalls = (deps.runStreamingAgentLoop as ReturnType<typeof vi.fn>).mock.calls;
+    const messages = loopCalls[0]?.[0]?.messages as Array<{ content: unknown }>;
+    expect(messages[0]?.content).toContain("everything before this");
+    // The covered span is gone — only the summary and what followed remain.
+    expect(deps.agentStore.listMessages).not.toHaveBeenCalled();
+  });
+
+  it("stores nothing when the summarized span holds only the previous summary", async () => {
+    // Six rows since the last compaction: with the summary prepended the
+    // array is 7 long, so the split covers the synthetic entry alone. There
+    // is no durable cutoff to advance to, so the write is skipped.
+    const { deps } = summarizingDeps();
+    vi.mocked(deps.agentStore.getLatestSummary).mockResolvedValue({
+      id: "sum-1",
+      conversationId: "conv-1",
+      summary: "earlier",
+      throughMessageId: "m0",
+      messagesSummarized: 3,
+      model: "claude-haiku-4-5",
+      source: "turn",
+      createdAt: new Date(),
+    });
+    vi.mocked(deps.agentStore.getHistoryAfter).mockResolvedValue(rows(6));
+
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(deps.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
   });
 });

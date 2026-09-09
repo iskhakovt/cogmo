@@ -183,7 +183,7 @@ describe("handle-message — crash recovery / step replay", () => {
       resolveProvider: mockResolver(mockProvider({ countTokens, chat })),
       agentStore: mockAgentStore({
         getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 800_000, outputTokens: 2_000 }),
-        getHistory: vi.fn().mockResolvedValue([
+        listMessages: vi.fn().mockResolvedValue([
           { role: "user", content: "m1" },
           { role: "assistant", content: "r1" },
           { role: "user", content: "m2" },
@@ -228,6 +228,56 @@ describe("handle-message — crash recovery / step replay", () => {
         typeof m.content === "string" && m.content.includes("[cached summary from prior attempt]"),
     );
     expect(summaryMessage).toBeDefined();
+  });
+
+  it("does not re-insert the summary when persist-summary is cached", async () => {
+    // Same setup as the summarize-prefix replay above, plus the ids the
+    // persist step needs to name a durable cutoff. Caching `persist-summary`
+    // stands in for the crash-after-commit case: the row is already there, and
+    // the replay must not write a second one.
+    const deps = mockDeps({
+      resolveProvider: mockResolver(
+        mockProvider({
+          countTokens: vi.fn().mockResolvedValue(800_000),
+          chat: vi.fn().mockResolvedValue({
+            content: [{ type: "text", text: "fresh summary" }],
+            stopReason: "end_turn",
+            model: "mock-model",
+            usage: { inputTokens: 10, outputTokens: 5 },
+          }),
+        }),
+      ),
+      agentStore: mockAgentStore({
+        getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 800_000, outputTokens: 2_000 }),
+        listMessages: vi.fn().mockResolvedValue(
+          Array.from({ length: 8 }, (_, i) => ({
+            id: `m${i + 1}`,
+            role: i % 2 === 0 ? "user" : "assistant",
+            content: `turn ${i + 1}`,
+          })),
+        ),
+      }),
+    });
+    const fn = createHandleMessage(deps);
+
+    await new InngestTestEngine({
+      function: fn,
+      events: [event],
+      steps: [
+        {
+          id: "persist-summary",
+          handler: () => ({ kind: "recovered", row: { id: "cached-summary-id" } }),
+        },
+      ],
+    }).execute();
+
+    expect(deps.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
+
+    // Non-vacuity: the identical run without the cached step does reach the
+    // store, so the assertion above is about the cache and not about the
+    // pipeline having skipped summarization altogether.
+    await new InngestTestEngine({ function: fn, events: [event] }).execute();
+    expect(deps.agentStore.insertOrRecoverSummary).toHaveBeenCalledTimes(1);
   });
 
   it("does not re-execute a durable tool step body when the iteration-keyed step is cached", async () => {
@@ -303,7 +353,7 @@ describe("handle-message — crash recovery / step replay", () => {
         { id: "last-assistant", handler: () => null },
         { id: "load-inbound", handler: () => [{ id: "inbound-1", content: "hi" }] },
         { id: "create-user-message", handler: () => undefined },
-        { id: "load-history", handler: () => [] },
+        { id: "load-history", handler: () => ({ messages: [], messageIds: [] }) },
         { id: "assemble-prompt", handler: () => "system prompt" },
         // `summarize-prefix` is conditional — only created when compaction
         // decides to summarize. The default mock countTokens stays under

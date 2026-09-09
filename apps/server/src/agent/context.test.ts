@@ -933,3 +933,70 @@ describe("compactMessages — Strategy 0 wiring", () => {
     expect(countTokens).not.toHaveBeenCalled();
   });
 });
+
+describe("pre-summarize strategies preserve the array's length", () => {
+  // Load-bearing for durable summaries: `handle-message` treats
+  // `messagesSummarized` as an index into the history it loaded, mapping it to
+  // a `through_message_id`. That only holds because Strategies 0 and 1 rewrite
+  // block content in place. If either ever drops or inserts a message, the
+  // cutoff would name the wrong row and the next turn would replay a span the
+  // summary already covers.
+  const cluster = (n: number): Message[] =>
+    Array.from({ length: n }, (_, i) => [
+      toolCallMsg(`t${i}`, "read_file"),
+      toolResultMsg([{ id: `t${i}`, content: `contents of file ${i} `.repeat(40) }]),
+    ]).flat();
+
+  it("Strategy 0 returns as many messages as it was given", () => {
+    const messages = cluster(6);
+    const result = compactSameToolClusters(messages, {
+      retainRecent: 2,
+      retainFirst: 1,
+      triggerCount: 5,
+    });
+
+    expect(result.resultsCompacted).toBeGreaterThan(0);
+    expect(result.messages).toHaveLength(messages.length);
+  });
+
+  it("Strategy 1 returns as many messages as it was given", async () => {
+    const messages = cluster(8);
+    // Over the 60% clear threshold, under the 80% summarize one, so the run
+    // exercises tool-result clearing and stops there.
+    const result = await compactMessages(
+      "system",
+      messages,
+      undefined,
+      { countTokens: vi.fn().mockResolvedValue(700), budget: 1000 },
+      false,
+    );
+
+    expect(result.event?.strategies).toContain("clear_tool_results");
+    expect(result.event?.strategies).not.toContain("summarize");
+    expect(result.messages).toHaveLength(messages.length);
+  });
+
+  it("reports a summarized count that indexes the input array", async () => {
+    const messages = [
+      ...cluster(3),
+      ...Array.from({ length: 6 }, (_, i) => msg(i % 2 === 0 ? "user" : "assistant", `tail ${i}`)),
+    ];
+    const summarize = vi.fn().mockResolvedValue("a summary");
+
+    const result = await compactMessages(
+      "system",
+      messages,
+      undefined,
+      { countTokens: vi.fn().mockResolvedValue(900), budget: 1000, summarize },
+      false,
+    );
+
+    const summarized = result.event?.messagesSummarized ?? 0;
+    expect(summarized).toBeGreaterThan(0);
+    // The prefix handed to the summarizer is exactly `input.slice(0, count)`,
+    // message-for-message — same positions, only block content rewritten.
+    const prefix = summarize.mock.calls[0]?.[1] as Message[];
+    expect(prefix).toHaveLength(summarized);
+    expect(prefix.map((m) => m.role)).toEqual(messages.slice(0, summarized).map((m) => m.role));
+  });
+});

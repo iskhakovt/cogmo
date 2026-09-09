@@ -2559,6 +2559,120 @@ describe("createTransport", () => {
     });
   });
 
+  describe("conversations.compact", () => {
+    function buildCompactTransport(
+      opts: {
+        identity?: { userId: string } | null;
+        session?: { conversationId: string } | null;
+        conv?: { id: string; userId: string } | null;
+        compactConversation?: (id: string) => Promise<never>;
+      } = {},
+    ) {
+      const agentStore = mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue(opts.conv ?? null),
+      });
+      const transportStore = mockTransportStore({
+        resolveUser: vi
+          .fn()
+          .mockResolvedValue(opts.identity === undefined ? { userId: "user-1" } : opts.identity),
+        resolveSession: vi.fn().mockResolvedValue(opts.session ?? null),
+      });
+      const transport = createTransport({
+        channelId: "ch-1",
+        defaultUserId: "user-1",
+        defaultProfileId: "profile-1",
+        runInTx: fakeRunInTx,
+        transportStore,
+        agentStore,
+        inngest: { send: vi.fn().mockResolvedValue(undefined) } as never,
+        inboundArrived: {
+          create: vi.fn((data: unknown) => ({ name: "inbound/arrived", data })),
+        } as unknown as typeof inboundArrived,
+        attachments: { upload: vi.fn(), download: vi.fn() } as never,
+        idleTimeoutMs: 0,
+        ...(opts.compactConversation && { compactConversation: opts.compactConversation }),
+      });
+      return { transport };
+    }
+
+    const OWNED = {
+      identity: { userId: "user-1" },
+      session: { conversationId: "c1" },
+      conv: { id: "c1", userId: "user-1" },
+    };
+
+    it("compaction_unavailable when the driver isn't wired", async () => {
+      const { transport } = buildCompactTransport({});
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "compaction_unavailable" });
+    });
+
+    it("identity_rejected without invoking the driver", async () => {
+      const driver = vi.fn();
+      const { transport } = buildCompactTransport({ identity: null, compactConversation: driver });
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+      expect(driver).not.toHaveBeenCalled();
+    });
+
+    it("no_session when the address has no active conversation", async () => {
+      const driver = vi.fn();
+      const { transport } = buildCompactTransport({
+        identity: { userId: "user-1" },
+        session: null,
+        compactConversation: driver,
+      });
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrap()).toEqual({ status: "no_session" });
+      expect(driver).not.toHaveBeenCalled();
+    });
+
+    it("no_session when the conversation belongs to someone else", async () => {
+      const driver = vi.fn();
+      const { transport } = buildCompactTransport({
+        identity: { userId: "user-1" },
+        session: { conversationId: "c1" },
+        conv: { id: "c1", userId: "other-user" },
+        compactConversation: driver,
+      });
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrap()).toEqual({ status: "no_session" });
+      expect(driver).not.toHaveBeenCalled();
+    });
+
+    it("passes the compacted outcome through", async () => {
+      const driver = vi.fn().mockResolvedValue({
+        status: "compacted",
+        messagesSummarized: 12,
+        messagesKept: 6,
+        model: "claude-haiku-4-5",
+      });
+      const { transport } = buildCompactTransport({ ...OWNED, compactConversation: driver });
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrap()).toEqual({
+        status: "compacted",
+        messagesSummarized: 12,
+        messagesKept: 6,
+        model: "claude-haiku-4-5",
+      });
+      expect(driver).toHaveBeenCalledWith("c1");
+    });
+
+    it("passes a skip reason through", async () => {
+      const driver = vi.fn().mockResolvedValue({ status: "skipped", reason: "too_short" });
+      const { transport } = buildCompactTransport({ ...OWNED, compactConversation: driver });
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrap()).toEqual({ status: "skipped", reason: "too_short" });
+    });
+
+    it("renders a mid-call disappearance as no_session", async () => {
+      const driver = vi.fn().mockResolvedValue({ status: "not_found" });
+      const { transport } = buildCompactTransport({ ...OWNED, compactConversation: driver });
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrap()).toEqual({ status: "no_session" });
+    });
+  });
+
   describe("evolution namespace", () => {
     function buildEvolutionTransport(
       opts: {

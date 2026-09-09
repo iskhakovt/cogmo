@@ -20,6 +20,7 @@ Tables are documented in the design doc that owns their domain:
 | `inbound_messages` | [transport/debounce.md](transport/debounce.md) | Raw input staging buffer for debounce batching |
 | `steering_rules` | [agents.md](agents.md) | Dynamic behavioral rules injected into system prompts. Written by manual insertion and automated correction extraction (Stage 1 evolution). |
 | `core_memory_blocks` | [agents.md](agents.md) | Structured persistent notes (user profile, projects). Upsert by (user_id, key). Always in system prompt. |
+| `conversation_summaries` | [context-management.md](context-management.md) | Durable output of the summarize compaction strategy. Append-only overlay on `messages` — `through_message_id` names the last row the summary stands in for, and the turn loader drops that prefix in favour of one synthetic user message. `source` distinguishes the 80%-budget path from `/compact`. UNIQUE(conversation_id, through_message_id) is the idempotency key for the Inngest write step. |
 | `aliases` | [transport/sessions.md](transport/sessions.md) | Human-friendly conversation names ('work', 'shopping'). Scoped per user (`UNIQUE(user_id, alias)`). Set via `transport.conversations.setAlias` (`/name <alias>` in Telegram). |
 
 ## New Tables (Setup Infrastructure) `[confirmed]`

@@ -54,7 +54,14 @@ const SUMMARIZE_THRESHOLD = 0.8;
 const TRUNCATE_THRESHOLD = 0.95;
 
 const DEFAULT_KEEP_TOOL_RESULTS = 5;
-const DEFAULT_KEEP_TURNS = 6;
+
+/**
+ * Messages kept verbatim after the summarized prefix. Exported because the
+ * manual `/compact` driver forces the same split the 80%-budget strategy would
+ * have chosen, and a divergence there would make a manual compaction and an
+ * automatic one cover different spans of the same conversation.
+ */
+export const DEFAULT_KEEP_TURNS = 6;
 
 // Strategy 0 defaults — see design/context-management.md → Strategy 0.
 // triggerCount = retainRecent + retainFirst + 2 → first fire compacts
@@ -73,6 +80,16 @@ export const SUMMARIZATION_PROMPT = `Summarize the conversation below. You MUST 
 
 Focus on what the assistant needs to continue the conversation.
 Be specific — preserve names, paths, and values, not abstractions.`;
+
+/**
+ * Render a summary as the single user message that stands in for the span it
+ * replaces. One definition serves both the in-memory pipeline and the durable
+ * replay of a persisted summary, so a stored summary re-enters the context in
+ * exactly the shape the model saw when it was produced.
+ */
+export function formatSummaryMessage(summary: string): Message {
+  return { role: "user", content: `[Previous conversation summary]\n\n${summary}` };
+}
 
 /**
  * Run the compaction pipeline on conversation messages. Returns the
@@ -485,10 +502,7 @@ async function summarizePrefix(
     return { messages, summarizedCount: 0 };
   }
 
-  const summaryMessage: Message = {
-    role: "user",
-    content: `[Previous conversation summary]\n\n${summary}`,
-  };
+  const summaryMessage = formatSummaryMessage(summary);
 
   return {
     messages: [summaryMessage, ...suffix],

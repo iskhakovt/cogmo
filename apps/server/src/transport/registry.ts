@@ -2,6 +2,7 @@ import type { Inngest } from "inngest";
 import type { JsonValue } from "type-fest";
 import type { CodingStore } from "../agent/coding/store/index.js";
 import type { CodingStreamingRegistry } from "../agent/coding/streaming-registry.js";
+import type { CompactConversationResult } from "../agent/conversation/compact-conversation.js";
 import type { TriggerReflectionResult } from "../agent/evolution/trigger-reflection.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { Transactor } from "../db/index.js";
@@ -64,6 +65,12 @@ export interface RegistryDeps {
    */
   triggerReflection?: (conversationId: string) => Promise<TriggerReflectionResult>;
   /**
+   * Sync compaction driver for `/compact`. Optional on the same terms as
+   * `triggerReflection` — absent, `transport.conversations.compact` returns
+   * `compaction_unavailable` and every other method on the namespace works.
+   */
+  compactConversation?: (conversationId: string) => Promise<CompactConversationResult>;
+  /**
    * SSE stream registry — threaded to the web adapter's setup. Production
    * bootstrap supplies it; setups without a web channel omit it.
    */
@@ -116,6 +123,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
       ...(deps.skillStore && { skillStore: deps.skillStore }),
       ...(deps.mcpRegistry && { mcpRegistry: deps.mcpRegistry }),
       ...(deps.triggerReflection && { triggerReflection: deps.triggerReflection }),
+      ...(deps.compactConversation && { compactConversation: deps.compactConversation }),
       inngest: deps.inngest,
       inboundArrived: deps.inboundArrived,
       attachments: deps.attachments,

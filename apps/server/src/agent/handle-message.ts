@@ -34,6 +34,7 @@ import type { VoiceProviderResolver } from "../voice/resolver.js";
 import type { CodingService } from "./coding/service.js";
 import { compactMessages, SUMMARIZATION_PROMPT, shouldSkipCounting } from "./context.js";
 import { loadConversationContext } from "./conversation/load-conversation-context.js";
+import { loadTurnHistory, summaryCutoffFor } from "./conversation/load-turn-history.js";
 import { buildInCooldownReply, isInCooldown } from "./cooldown.js";
 import type { DebounceConfig } from "./debounce.js";
 import { extractGeneratedDocuments, extractGeneratedImages } from "./extract-images.js";
@@ -543,9 +544,16 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         );
       });
 
-      const history = await step.run("load-history", async () => {
-        return deps.runInTx((tx) => agentStore.getHistory(tx, conversationId));
+      // The compacted view, not the raw transcript: when the conversation
+      // carries a durable summary, the span it covers arrives as one synthetic
+      // message and the rest of the rows follow. `messageIds` rides along so
+      // the persist step below can map a compaction split point back to a
+      // durable cutoff. Inside the step, so a `/compact` landing mid-run can't
+      // shift the history between invocations.
+      const turnHistory = await step.run("load-history", async () => {
+        return loadTurnHistory({ runInTx: deps.runInTx, agentStore }, { conversationId });
       });
+      const history = turnHistory.messages;
 
       // Load profile up front — its streaming knobs ride into `prepare` so
       // open streams honor the per-profile chunk target and edit mode, and
@@ -949,6 +957,12 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // which gates Strategies 1–3 inside compactMessages so the
       // expensive provider.countTokens round-trip is only paid when
       // budget pressure could matter.
+      // Set by the `summarize` callback below when Strategy 2 fires. Assigned
+      // on every invocation that reaches the strategy — `summarize-prefix`
+      // hands back the memoized text on a replay just as it does on the first
+      // pass — so the persist step downstream is planned identically each time.
+      let summaryText: string | null = null;
+
       const compactResult = await compactMessages(
         fullPrompt,
         historyMessages,
@@ -996,7 +1010,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             // ContextManagerDeps.summarize). If that ever changes, switch to
             // a counter-based ID like `summarize-prefix-${i}` to avoid
             // Inngest's duplicate-step-id error.
-            return stepRun("summarize-prefix", async () => {
+            summaryText = await stepRun("summarize-prefix", async () => {
               // Status banner lives inside the step body so it reaches the
               // user exactly once — compactMessages re-runs on every
               // invocation, and a bare-body push would re-append the banner
@@ -1018,11 +1032,46 @@ export function createHandleMessage(deps: HandleMessageDeps) {
                 .map((b) => (b as { text: string }).text)
                 .join("");
             });
+            return summaryText;
           },
         },
         skipBudgetStrategies,
       );
       historyMessages = compactResult.messages;
+
+      // Persist what Strategy 2 produced so the next turn replays the summary
+      // instead of paying for it again. `messagesSummarized` is the split
+      // index into the compaction input — Strategies 0 and 1 rewrite block
+      // content in place and never change the array's length, so it indexes
+      // `turnHistory.messageIds` directly. It is 0 whenever the strategy
+      // no-opped (under budget, or the model returned no text), which is also
+      // the guard against storing an empty summary.
+      //
+      // Every input here is durable or memoized, so this step is planned the
+      // same way on every invocation. The (conversation, cutoff) unique makes
+      // the write idempotent under the retry that `durable` alone doesn't
+      // prevent — a crash between the commit and Inngest recording the step
+      // recovers the existing row rather than appending a second one.
+      const messagesSummarized = compactResult.event?.messagesSummarized ?? 0;
+      const summaryCutoff =
+        messagesSummarized > 0
+          ? summaryCutoffFor(turnHistory.messageIds, messagesSummarized)
+          : null;
+      if (summaryText !== null && summaryCutoff !== null) {
+        const text = summaryText;
+        await stepRun("persist-summary", () =>
+          deps.runInTx((tx) =>
+            agentStore.insertOrRecoverSummary(tx, {
+              conversationId,
+              summary: text,
+              throughMessageId: summaryCutoff,
+              messagesSummarized,
+              model: summarizationModel,
+              source: "turn",
+            }),
+          ),
+        );
+      }
 
       let result: AgentLoopResult;
       try {

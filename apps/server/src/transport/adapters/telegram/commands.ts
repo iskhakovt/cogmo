@@ -6,6 +6,7 @@
  * `index.ts` so the dispatcher logic is covered by unit tests.
  */
 
+import { match } from "ts-pattern";
 import { MIN_MESSAGES_FOR_EXTRACTION } from "../../../agent/evolution/index.js";
 import {
   CORE_COMPARTMENTS,
@@ -2123,6 +2124,8 @@ function errorMessage(err: TransportError): string {
       return `"${err.id}" doesn't look like a valid task id. Use /schedules to list and copy an id.`;
     case "evolution_unavailable":
       return "Evolution isn't wired in this deployment.";
+    case "compaction_unavailable":
+      return "Compaction isn't wired in this deployment.";
   }
 }
 
@@ -2404,6 +2407,55 @@ export async function handleReflect(
       );
       return;
     }
+  }
+}
+
+/**
+ * `/compact` — summarize the conversation now and store the result.
+ *
+ * The pre-ack matters more here than on most commands: the summarization
+ * round trip is the whole latency of the command, and it runs against the
+ * profile's summarization model rather than returning from cache.
+ */
+export async function handleCompact(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+): Promise<void> {
+  const handle = String(ctx.from.id);
+  const addr = String(ctx.chat.id);
+
+  await ctx.reply("Compacting conversation…");
+
+  const res = await transport.conversations.compact(handle, addr);
+  if (res.isErr()) {
+    await ctx.reply(errorMessage(res.error));
+    return;
+  }
+
+  const outcome = res.value;
+  switch (outcome.status) {
+    case "no_session":
+      await ctx.reply("No active conversation here — send a message first.");
+      return;
+    case "skipped": {
+      const message = match(outcome.reason)
+        .with("too_short", () => "Nothing to compact — the conversation still fits in full.")
+        .with("nothing_new", () => "Already compacted — nothing new since the last summary.")
+        .with(
+          "empty_summary",
+          () => "The summarization model returned no text — nothing stored. Try again.",
+        )
+        .exhaustive();
+      await ctx.reply(message);
+      return;
+    }
+    case "compacted":
+      await ctx.reply(
+        `Compacted ${outcome.messagesSummarized} message(s) into a summary via ${outcome.model}; ` +
+          `${outcome.messagesKept} kept verbatim.\n` +
+          "Your next turn starts from the summary — no compaction wait.",
+      );
+      return;
   }
 }
 
