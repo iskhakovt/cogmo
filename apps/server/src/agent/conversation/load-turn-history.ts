@@ -9,9 +9,10 @@ import type { AgentStore } from "../store/index.js";
  * summary standing in for everything up to its cutoff, followed by the
  * messages that arrived after.
  *
- * This is the compacted view, and it is deliberately not what `getHistory`
- * returns. The Observer reads the raw transcript so fact extraction still sees
- * every turn; only the LLM-facing path collapses the prefix.
+ * This is the compacted view, and it is deliberately not what `listMessages`
+ * returns. The Observer and the web history read take the raw transcript, so
+ * fact extraction still sees every turn; only the LLM-facing path collapses the
+ * prefix.
  *
  * `messageIds` is positionally aligned with `messages` — `messageIds[i]` is the
  * `messages` row backing `messages[i]`, or `null` for the synthetic summary

@@ -949,8 +949,11 @@ export const evolutionEvents = pgTable(
  * message. See design/context-management.md → Durable summaries.
  *
  * Append-only. Re-compaction inserts a new row summarizing the previous
- * summary plus everything that arrived since; the loader reads the newest row
- * per conversation. The unique on (conversation_id, through_message_id) is the
+ * summary plus everything that arrived since; the loader reads the row with the
+ * greatest `through_message_id` — widest coverage wins, not last-inserted. The
+ * two orders agree in normal operation (each compaction covers strictly more
+ * than the last) and diverge only when a slow `/compact` commits a narrower
+ * summary after a turn already stored a wider one. The unique on (conversation_id, through_message_id) is the
  * idempotency key for the write step — an Inngest retry that re-runs a
  * committed insert lands on the existing row rather than duplicating it.
  */
@@ -974,10 +977,10 @@ export const conversationSummaries = pgTable(
     source: summarySource("source").notNull(),
     createdAt: ts(),
   },
+  // The unique doubles as the read path: `(conversation_id, through_message_id)`
+  // scanned backwards serves "widest summary for this conversation", which is
+  // how the latest-summary lookup is ordered. No second index needed.
   (t) => [
-    // Serves the latest-per-conversation read: filter on conversation_id,
-    // take the highest id. UUIDv7 makes `id DESC` a proxy for recency.
-    index("idx_conversation_summaries_conv_id").on(t.conversationId, desc(t.id)),
     unique("uq_conversation_summaries_conv_through").on(t.conversationId, t.throughMessageId),
   ],
 );

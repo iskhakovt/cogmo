@@ -1303,6 +1303,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       { command: "resume", description: "Switch to a named conversation" },
       { command: "name", description: "Name the current conversation" },
       { command: "end", description: "Close the current conversation" },
+      { command: "compact", description: "Summarize the conversation now to shrink context" },
       { command: "profile", description: "Manage profiles" },
       { command: "model", description: "Show or set the model" },
       { command: "repo", description: "Manage repos for coding delegation" },

@@ -961,18 +961,21 @@ describe("pre-summarize strategies preserve the array's length", () => {
 
   it("Strategy 1 returns as many messages as it was given", async () => {
     const messages = cluster(8);
-    // Over the 60% clear threshold, under the 80% summarize one, so the run
-    // exercises tool-result clearing and stops there.
+    // Over the 60% clear threshold, under the 80% summarize one. `summarize` is
+    // supplied so the threshold is what stops the ladder — omitting it would
+    // gate Strategy 2 off outright and make the assertion below vacuous.
+    const summarize = vi.fn().mockResolvedValue("unused");
     const result = await compactMessages(
       "system",
       messages,
       undefined,
-      { countTokens: vi.fn().mockResolvedValue(700), budget: 1000 },
+      { countTokens: vi.fn().mockResolvedValue(700), budget: 1000, summarize },
       false,
     );
 
     expect(result.event?.strategies).toContain("clear_tool_results");
     expect(result.event?.strategies).not.toContain("summarize");
+    expect(summarize).not.toHaveBeenCalled();
     expect(result.messages).toHaveLength(messages.length);
   });
 

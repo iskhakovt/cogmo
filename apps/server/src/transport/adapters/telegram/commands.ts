@@ -2126,6 +2126,8 @@ function errorMessage(err: TransportError): string {
       return "Evolution isn't wired in this deployment.";
     case "compaction_unavailable":
       return "Compaction isn't wired in this deployment.";
+    case "compaction_failed":
+      return `Couldn't compact this conversation: ${err.reason}`;
   }
 }
 

@@ -4378,6 +4378,15 @@ describe("handleCompact", () => {
     await handleCompact(compactWith(err({ code: "compaction_unavailable" })), ctx);
     expect(ctx.reply.mock.calls[1]?.[0]).toMatch(/isn't wired/i);
   });
+
+  it("surfaces the reason when compaction failed", async () => {
+    const ctx = mkCtx();
+    await handleCompact(
+      compactWith(err({ code: "compaction_failed", reason: "429 rate limited" })),
+      ctx,
+    );
+    expect(ctx.reply.mock.calls[1]?.[0]).toContain("429 rate limited");
+  });
 });
 
 describe("handleReflect", () => {

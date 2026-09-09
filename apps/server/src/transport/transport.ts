@@ -343,7 +343,15 @@ export type TransportError =
    * compaction driver. Every other method on the namespace stays available —
    * only the manual trigger surfaces this code.
    */
-  | { code: "compaction_unavailable" };
+  | { code: "compaction_unavailable" }
+  /**
+   * The compaction driver threw — a misrouted summarization model, a provider
+   * error, a DB failure. The driver runs inline with no Inngest retry budget
+   * behind it, so the throw has to become a value here or it escapes the
+   * `Result` contract and leaves the caller's pre-ack as the last thing the
+   * user sees.
+   */
+  | { code: "compaction_failed"; reason: string };
 
 /**
  * Transport — the adapter-facing contract for session management and inbound emission.
@@ -1481,7 +1489,24 @@ export function createTransport(deps: {
         if (resolved.kind === "no_session") {
           return ok({ status: "no_session" as const });
         }
-        const result = await compactConversation(resolved.conversationId);
+        // Broad by design: everything the driver can throw — provider
+        // resolution, the summarization call, the store write — is a failure
+        // this one code is the designed channel for. Without it the rejected
+        // promise escapes a `Result`-returning method and the adapter's
+        // `isErr()` branch never runs.
+        let result: CompactConversationResult;
+        try {
+          result = await compactConversation(resolved.conversationId);
+        } catch (error) {
+          logger.error(
+            { err: error, conversationId: resolved.conversationId },
+            "compaction failed",
+          );
+          return err({
+            code: "compaction_failed" as const,
+            reason: error instanceof Error ? error.message : String(error),
+          });
+        }
         // The driver's `not_found` means the conversation or its profile
         // vanished between the resolve above and the load — the same
         // mid-call disappearance `/reflect` reports as a skip, rendered

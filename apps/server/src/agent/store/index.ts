@@ -520,13 +520,12 @@ export interface AgentStore {
     conversationId: string,
   ): Promise<{ id: string; lastInboundMessageId: string } | undefined>;
 
-  /** Load full message history for a conversation, ordered by id. */
-  getHistory(tx: Transaction, conversationId: string): Promise<ReadonlyArray<Message>>;
-
   /**
-   * List a conversation's messages with their ids, ordered by id — for the web
-   * UI history read, which needs a stable per-message key. (`getHistory` projects
-   * only role + content for the agent loop.)
+   * A conversation's complete message history with row ids, ordered by id.
+   *
+   * The raw transcript, not the compacted turn view — `loadTurnHistory` layers
+   * durable summaries on top of this for the LLM-facing path, while the
+   * Observer and the web history read take it as-is.
    */
   listMessages(
     tx: Transaction,
@@ -534,7 +533,7 @@ export interface AgentStore {
   ): Promise<ReadonlyArray<Message & { id: string }>>;
 
   /**
-   * Newest durable summary for a conversation, or undefined when it has never
+   * Widest durable summary for a conversation, or undefined when it has never
    * been compacted. The turn loader replaces every message up to and including
    * `throughMessageId` with this text; the Observer deliberately does not read
    * it, so fact extraction still sees the complete transcript.
@@ -1618,15 +1617,6 @@ export class DrizzleAgentStore implements AgentStore {
     return rows[0];
   }
 
-  async getHistory(tx: Transaction, conversationId: string): Promise<ReadonlyArray<Message>> {
-    const rows = await tx
-      .select({ role: messages.role, content: messages.content })
-      .from(messages)
-      .where(eq(messages.conversationId, conversationId))
-      .orderBy(asc(messages.id));
-    return rows as ReadonlyArray<Message>;
-  }
-
   async listMessages(
     tx: Transaction,
     conversationId: string,
@@ -1647,7 +1637,8 @@ export class DrizzleAgentStore implements AgentStore {
       .select()
       .from(conversationSummaries)
       .where(eq(conversationSummaries.conversationId, conversationId))
-      .orderBy(desc(conversationSummaries.id))
+      // Widest coverage, not last inserted — see the table's schema comment.
+      .orderBy(desc(conversationSummaries.throughMessageId))
       .limit(1);
     return rows[0];
   }

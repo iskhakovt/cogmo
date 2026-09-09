@@ -626,10 +626,12 @@ describe("DrizzleAgentStore", () => {
         }),
       );
 
-      const history = await tx((trx) => store.getHistory(trx, conversationId));
+      const history = await tx((trx) => store.listMessages(trx, conversationId));
       expect(history).toHaveLength(2);
-      expect(history[0]).toEqual({ role: "user", content: "Hello" });
-      expect(history[1]).toEqual({ role: "assistant", content: "Hi there" });
+      expect(history.map(({ role, content }) => ({ role, content }))).toEqual([
+        { role: "user", content: "Hello" },
+        { role: "assistant", content: "Hi there" },
+      ]);
     });
 
     it("listMessages returns messages with ids in order", async () => {
@@ -718,10 +720,10 @@ describe("DrizzleAgentStore", () => {
       expect(result.id).toBeDefined();
       expect(result.id).not.toBe("");
 
-      const history = await tx((trx) => store.getHistory(trx, conversationId));
+      const history = await tx((trx) => store.listMessages(trx, conversationId));
       expect(history).toHaveLength(3);
       // Asserts on content presence rather than position — the subject here is
-      // what `insertMessages` wrote, not the order `getHistory` returns it in.
+      // what `insertMessages` wrote, not the order `listMessages` returns it in.
       const contents = history.map((m) => m.content);
       expect(contents).toContainEqual([
         { type: "tool_use", id: "t1", name: "search", input: { q: "test" } },
@@ -763,7 +765,7 @@ describe("DrizzleAgentStore", () => {
         }),
       );
 
-      const history = await tx((trx) => store.getHistory(trx, conversationId));
+      const history = await tx((trx) => store.listMessages(trx, conversationId));
       const contents = history.map((m) => m.content);
       expect(contents).toContainEqual([
         { type: "tool_use", id: "t1", name: "search", input: { q: "bad�end", "k�": "v" } },
@@ -806,7 +808,7 @@ describe("DrizzleAgentStore", () => {
       );
 
       // Read the raw table: the token columns this asserts on aren't part of
-      // what `getHistory` projects, so the store can't answer the question.
+      // what `listMessages` projects, so the store can't answer the question.
       const rows = await db
         .select({
           role: messages.role,
@@ -862,9 +864,9 @@ describe("DrizzleAgentStore", () => {
       expect(last?.lastInboundMessageId).toBe(inboundId);
     });
 
-    it("getHistory returns empty array for no messages", async () => {
+    it("listMessages returns empty array for no messages", async () => {
       const { conversationId } = await seedConversation();
-      expect(await tx((trx) => store.getHistory(trx, conversationId))).toEqual([]);
+      expect(await tx((trx) => store.listMessages(trx, conversationId))).toEqual([]);
     });
 
     it("insertMessages persists both token counts and getLastTokens returns them", async () => {

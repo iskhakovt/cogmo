@@ -11,7 +11,13 @@
  */
 
 import * as R from "remeda";
-import type { ContentBlock, CountTokensParams, Message, ToolDefinition } from "../llm/types.js";
+import type {
+  ChatParams,
+  ContentBlock,
+  CountTokensParams,
+  Message,
+  ToolDefinition,
+} from "../llm/types.js";
 import { logger } from "../logger.js";
 
 // --- Public interface ---
@@ -80,6 +86,41 @@ export const SUMMARIZATION_PROMPT = `Summarize the conversation below. You MUST 
 
 Focus on what the assistant needs to continue the conversation.
 Be specific — preserve names, paths, and values, not abstractions.`;
+
+/**
+ * The summarization request both compaction paths send. Shared so the prompt,
+ * the output cap and the message layout cannot drift between the turn-time
+ * strategy and the manual `/compact` driver.
+ *
+ * The cap leaves room for reasoning as well as the summary, bounded by what
+ * this model accepts — asking above its ceiling is a 400, which the turn-time
+ * path swallows into a fall-through to truncation.
+ */
+export function summarizationRequest(params: {
+  model: string;
+  system: string;
+  messages: ReadonlyArray<Message>;
+  maxOutputTokens: number;
+}): ChatParams {
+  return {
+    model: params.model,
+    system: params.system,
+    messages: [...params.messages, { role: "user", content: SUMMARIZATION_PROMPT }],
+    maxTokens: Math.min(16_000, params.maxOutputTokens),
+  };
+}
+
+/**
+ * Concatenate the text blocks of a summarization response. Non-text blocks
+ * (thinking, and anything a future model emits alongside prose) are dropped —
+ * only the prose stands in for the conversation.
+ */
+export function extractSummaryText(content: ReadonlyArray<ContentBlock>): string {
+  return content
+    .filter((b) => b.type === "text")
+    .map((b) => b.text)
+    .join("");
+}
 
 /**
  * Render a summary as the single user message that stands in for the span it

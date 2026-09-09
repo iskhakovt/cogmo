@@ -71,7 +71,8 @@ export type TransportError =
   | { code: "schedule_not_found"; id: string }
   | { code: "schedule_id_malformed"; id: string }
   | { code: "evolution_unavailable" }
-  | { code: "compaction_unavailable" };
+  | { code: "compaction_unavailable" }
+  | { code: "compaction_failed"; reason: string };
 
 export interface ProfileInput {
   name: string;

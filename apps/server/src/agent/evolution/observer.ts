@@ -141,8 +141,12 @@ export async function runObserver(
   }
   const model = profile.extractionModel ?? profile.model;
 
+  // The complete transcript, deliberately not the compacted turn view — fact
+  // extraction sees every message even on a conversation that has been
+  // summarized. The row ids come along unused; `listMessages` is the only
+  // full-history read.
   const history = await step.run("load-history", async () => {
-    return deps.runInTx((tx) => agentStore.getHistory(tx, conversationId));
+    return deps.runInTx((tx) => agentStore.listMessages(tx, conversationId));
   });
 
   if (history.length < MIN_MESSAGES_FOR_EXTRACTION) {

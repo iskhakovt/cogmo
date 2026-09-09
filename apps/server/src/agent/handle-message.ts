@@ -32,7 +32,12 @@ import type { TransportStore } from "../transport/store/index.js";
 import { resolveVoiceMode } from "../voice/mode.js";
 import type { VoiceProviderResolver } from "../voice/resolver.js";
 import type { CodingService } from "./coding/service.js";
-import { compactMessages, SUMMARIZATION_PROMPT, shouldSkipCounting } from "./context.js";
+import {
+  compactMessages,
+  extractSummaryText,
+  shouldSkipCounting,
+  summarizationRequest,
+} from "./context.js";
 import { loadConversationContext } from "./conversation/load-conversation-context.js";
 import { loadTurnHistory, summaryCutoffFor } from "./conversation/load-turn-history.js";
 import { buildInCooldownReply, isInCooldown } from "./cooldown.js";
@@ -886,8 +891,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         : systemPrompt;
 
       // Build message history, replacing the last user message with resolved content.
-      // Safe because: getHistory runs after create-user-message (durable step ordering),
-      // and concurrency lock on conversationId prevents concurrent writes.
+      // Safe because: `load-history` runs after create-user-message (durable step
+      // ordering), and concurrency lock on conversationId prevents concurrent writes.
       let historyMessages: Message[] = [...history];
       const hasAttachments = resolvedBlocks.some(
         (b) => b.type === "image" || b.type === "document",
@@ -1017,20 +1022,15 @@ export function createHandleMessage(deps: HandleMessageDeps) {
               // (or open a stray message on a post-finish replay handle)
               // each time.
               await delivery.push({ type: "status", message: "Summarizing conversation..." });
-              const response = await summarizationProvider.chat({
-                model: summarizationModel,
-                system,
-                messages: [...msgs, { role: "user", content: SUMMARIZATION_PROMPT }],
-                // Room for reasoning as well as the summary, bounded by
-                // what this model accepts — asking above its ceiling is a
-                // 400, which compaction swallows into a fall-through to
-                // truncation.
-                maxTokens: Math.min(16_000, summarizationLimits.maxOutputTokens),
-              });
-              return response.content
-                .filter((b) => b.type === "text")
-                .map((b) => (b as { text: string }).text)
-                .join("");
+              const response = await summarizationProvider.chat(
+                summarizationRequest({
+                  model: summarizationModel,
+                  system,
+                  messages: msgs,
+                  maxOutputTokens: summarizationLimits.maxOutputTokens,
+                }),
+              );
+              return extractSummaryText(response.content);
             });
             return summaryText;
           },
@@ -1059,8 +1059,11 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           : null;
       if (summaryText !== null && summaryCutoff !== null) {
         const text = summaryText;
-        await stepRun("persist-summary", () =>
-          deps.runInTx((tx) =>
+        // Projected down to the id: the full row would push the summary text
+        // into Inngest step state a second time, and its `createdAt` would
+        // come back from the cache as a string rather than a Date.
+        await stepRun("persist-summary", async () => {
+          const { row } = await deps.runInTx((tx) =>
             agentStore.insertOrRecoverSummary(tx, {
               conversationId,
               summary: text,
@@ -1069,8 +1072,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
               model: summarizationModel,
               source: "turn",
             }),
-          ),
-        );
+          );
+          return { id: row.id };
+        });
       }
 
       let result: AgentLoopResult;

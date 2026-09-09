@@ -12,5 +12,4 @@ CREATE TABLE "conversation_summaries" (
 );
 --> statement-breakpoint
 ALTER TABLE "conversation_summaries" ADD CONSTRAINT "conversation_summaries_conversation_id_conversations_id_fk" FOREIGN KEY ("conversation_id") REFERENCES "public"."conversations"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "conversation_summaries" ADD CONSTRAINT "conversation_summaries_through_message_id_messages_id_fk" FOREIGN KEY ("through_message_id") REFERENCES "public"."messages"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-CREATE INDEX "idx_conversation_summaries_conv_id" ON "conversation_summaries" USING btree ("conversation_id","id" desc);
+ALTER TABLE "conversation_summaries" ADD CONSTRAINT "conversation_summaries_through_message_id_messages_id_fk" FOREIGN KEY ("through_message_id") REFERENCES "public"."messages"("id") ON DELETE no action ON UPDATE no action;

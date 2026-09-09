@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { CodingStore } from "../agent/coding/store/index.js";
+import type { CompactConversationResult } from "../agent/conversation/compact-conversation.js";
 import type { Transactor } from "../db/index.js";
 import type { inboundArrived } from "../inngest/events.js";
 import { mockAgentStore, mockTransportStore } from "../test/factories.js";
@@ -2565,7 +2566,7 @@ describe("createTransport", () => {
         identity?: { userId: string } | null;
         session?: { conversationId: string } | null;
         conv?: { id: string; userId: string } | null;
-        compactConversation?: (id: string) => Promise<never>;
+        compactConversation?: (id: string) => Promise<CompactConversationResult>;
       } = {},
     ) {
       const agentStore = mockAgentStore({
@@ -2663,6 +2664,19 @@ describe("createTransport", () => {
       const { transport } = buildCompactTransport({ ...OWNED, compactConversation: driver });
       const res = await transport.conversations.compact("h", "addr");
       expect(res._unsafeUnwrap()).toEqual({ status: "skipped", reason: "too_short" });
+    });
+
+    it("converts a driver throw into compaction_failed rather than rejecting", async () => {
+      // The method returns a Result, and the driver runs inline with no retry
+      // budget behind it. An escaping rejection would skip the adapter's
+      // isErr() branch and leave the user's pre-ack as the last thing they see.
+      const driver = vi.fn().mockRejectedValue(new Error("no routing row for small-model"));
+      const { transport } = buildCompactTransport({ ...OWNED, compactConversation: driver });
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrapErr()).toEqual({
+        code: "compaction_failed",
+        reason: "no routing row for small-model",
+      });
     });
 
     it("renders a mid-call disappearance as no_session", async () => {

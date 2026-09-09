@@ -1,5 +1,5 @@
 {
-  "id": "3a852611-4f6f-4e68-ada5-e6eee97bf081",
+  "id": "71b38e62-114e-4e0e-b920-59e8b813298d",
   "prevId": "71a740bf-25ca-4e3b-a057-24fe163bb08b",
   "version": "7",
   "dialect": "postgresql",
@@ -627,29 +627,7 @@
           "default": "now()"
         }
       },
-      "indexes": {
-        "idx_conversation_summaries_conv_id": {
-          "name": "idx_conversation_summaries_conv_id",
-          "columns": [
-            {
-              "expression": "conversation_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "\"id\" desc",
-              "asc": true,
-              "isExpression": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
+      "indexes": {},
       "foreignKeys": {
         "conversation_summaries_conversation_id_conversations_id_fk": {
           "name": "conversation_summaries_conversation_id_conversations_id_fk",

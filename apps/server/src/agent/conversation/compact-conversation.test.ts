@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { LlmProvider } from "../../llm/provider.js";
+import type { Message } from "../../llm/types.js";
 import {
   fakeRunInTx,
   mockAgentStore,
@@ -35,8 +36,10 @@ function profile(overrides: Partial<Profile> = {}): Profile {
   };
 }
 
+type Row = Message & { id: string };
+
 /** `n` alternating user/assistant messages with sequential ids. */
-function transcript(n: number): { id: string; role: "user" | "assistant"; content: string }[] {
+function transcript(n: number): Row[] {
   return Array.from({ length: n }, (_, i) => ({
     id: `m${i + 1}`,
     role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
@@ -61,10 +64,21 @@ function deps(
   };
 }
 
-function storeWith(
-  messages: ReturnType<typeof transcript>,
-  summary?: CompactionSummary,
-): AgentStore {
+function summaryRow(overrides: Partial<CompactionSummary> = {}): CompactionSummary {
+  return {
+    id: "sum-1",
+    conversationId: CONVERSATION_ID,
+    summary: "earlier",
+    throughMessageId: "m0",
+    messagesSummarized: 3,
+    model: "claude-haiku-4-5",
+    source: "turn",
+    createdAt: new Date("2026-01-01T00:00:00Z"),
+    ...overrides,
+  };
+}
+
+function storeWith(messages: ReadonlyArray<Row>, summary?: CompactionSummary): AgentStore {
   return mockAgentStore({
     getConversation: vi.fn().mockResolvedValue({
       id: CONVERSATION_ID,
@@ -79,6 +93,7 @@ function storeWith(
     listMessages: vi.fn().mockResolvedValue(messages),
     getHistoryAfter: vi.fn().mockResolvedValue(messages),
     getActiveRules: vi.fn().mockResolvedValue([]),
+    insertOrRecoverSummary: vi.fn().mockResolvedValue({ kind: "new", row: summaryRow() }),
   });
 }
 
@@ -153,40 +168,77 @@ describe("compactConversation", () => {
     expect(agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
   });
 
-  it("skips when the span outside the retain window is only the stored summary", async () => {
+  it("skips when only the stored summary sits outside the retain window", async () => {
     // Six messages arrived since the last compaction: with the summary
-    // prepended the array is 7 long, so the split lands at 1 — covering the
-    // synthetic entry alone, which advances nothing.
-    const summary: CompactionSummary = {
-      id: "sum-1",
-      conversationId: CONVERSATION_ID,
-      summary: "earlier",
-      throughMessageId: "m0",
-      messagesSummarized: 3,
-      model: "claude-haiku-4-5",
-      source: "turn",
-      createdAt: new Date(),
-    };
-    const agentStore = storeWith(transcript(6), summary);
+    // prepended the array is 7 long, so the split lands at 1 — too little to be
+    // worth a call, and it would advance no cutoff either way.
+    const agentStore = storeWith(transcript(6), summaryRow());
+
+    const result = await compactConversation(CONVERSATION_ID, deps({ agentStore }));
+
+    expect(result).toEqual({ status: "skipped", reason: "too_short" });
+    expect(agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
+  });
+
+  it("skips when too few messages sit outside the retain window to be worth a call", async () => {
+    // 8 messages, 6 retained → only 2 would collapse. A summary standing in for
+    // two turns saves nothing and paraphrases away detail they still carry.
+    const agentStore = storeWith(transcript(8));
+    const provider = mockProvider();
+
+    const result = await compactConversation(CONVERSATION_ID, deps({ agentStore, provider }));
+
+    expect(result).toEqual({ status: "skipped", reason: "too_short" });
+    expect(provider.chat).not.toHaveBeenCalled();
+  });
+
+  it("reports nothing_new when a concurrent turn stored the same span first", async () => {
+    // The conflict arm keeps the winner's text, so this call's output was
+    // thrown away — reporting success would describe a summary that is gone.
+    const agentStore = storeWith(transcript(10));
+    vi.mocked(agentStore.insertOrRecoverSummary).mockResolvedValue({
+      kind: "recovered",
+      row: { ...summaryRow(), summary: "the turn's text" },
+    });
 
     const result = await compactConversation(CONVERSATION_ID, deps({ agentStore }));
 
     expect(result).toEqual({ status: "skipped", reason: "nothing_new" });
-    expect(agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
+  });
+
+  it("collapses repeated same-tool results in the prefix before summarizing", async () => {
+    // Strategy 0's rung of the turn-time ladder, run unconditionally here: it is
+    // count-based, so it needs no token count, and it keeps a tool-heavy prefix
+    // from reaching the summarization model verbatim.
+    const toolTurns = Array.from({ length: 6 }, (_, i) => [
+      {
+        id: `c${i}`,
+        role: "assistant" as const,
+        content: [{ type: "tool_use" as const, id: `t${i}`, name: "read_file", input: { p: "f" } }],
+      },
+      {
+        id: `r${i}`,
+        role: "user" as const,
+        content: [
+          {
+            type: "tool_result" as const,
+            toolUseId: `t${i}`,
+            content: `contents of file ${i} `.repeat(40),
+          },
+        ],
+      },
+    ]).flat();
+    const agentStore = storeWith([...toolTurns, ...transcript(6)]);
+    const provider = mockProvider();
+
+    await compactConversation(CONVERSATION_ID, deps({ agentStore, provider }));
+
+    const sent = JSON.stringify(vi.mocked(provider.chat).mock.calls[0]?.[0].messages);
+    expect(sent).toContain("[Same-tool cluster:");
   });
 
   it("re-summarizes the stored summary together with what followed it", async () => {
-    const summary: CompactionSummary = {
-      id: "sum-1",
-      conversationId: CONVERSATION_ID,
-      summary: "earlier",
-      throughMessageId: "m0",
-      messagesSummarized: 3,
-      model: "claude-haiku-4-5",
-      source: "turn",
-      createdAt: new Date(),
-    };
-    const agentStore = storeWith(transcript(9), summary);
+    const agentStore = storeWith(transcript(9), summaryRow());
     const provider = mockProvider();
 
     const result = await compactConversation(CONVERSATION_ID, deps({ agentStore, provider }));
