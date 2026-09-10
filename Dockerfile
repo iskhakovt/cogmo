@@ -4,7 +4,7 @@ FROM base AS build
 WORKDIR /app
 # Root workspace manifest + every member package.json must be present before
 # the frozen install so pnpm can resolve the workspace lockfile.
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .pnpmfile.mjs ./
 COPY apps/server/package.json apps/server/
 COPY apps/web/package.json apps/web/
 COPY packages/contracts/package.json packages/contracts/

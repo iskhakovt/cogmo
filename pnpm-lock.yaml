@@ -10,6 +10,8 @@ overrides:
   hono@<4.13.5: '>=4.13.5'
   qs@<6.16.0: '>=6.16.0'
 
+pnpmfileChecksum: sha256-nSSedtfvVZx/fg6+5q+0H14bGKisvaX1yW4tUdY2Ceg=
+
 importers:
 
   .:
@@ -103,7 +105,7 @@ importers:
         version: 1.15.0(@opentelemetry/api@1.9.1)(ws@8.21.3)
       '@t3-oss/env-core':
         specifier: ^0.13.11
-        version: 0.13.11(typescript@7.0.2)(zod@4.5.4)
+        version: 0.13.11(zod@4.5.4)
       '@vectorize-io/hindsight-client':
         specifier: ^0.9.2
         version: 0.9.2
@@ -133,7 +135,7 @@ importers:
         version: 1.46.0(supports-color@7.2.0)
       inngest:
         specifier: ^4.18.1
-        version: 4.18.1(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.7)(react@19.2.8)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.5.4)
+        version: 4.18.1(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.7)(react@19.2.8)(supports-color@7.2.0)(zod@4.5.4)
       js-tiktoken:
         specifier: ^1.0.21
         version: 1.0.21
@@ -203,7 +205,7 @@ importers:
         version: 0.5.8
       '@inngest/test':
         specifier: ^1.0.0
-        version: 1.0.0(inngest@4.18.1(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.7)(react@19.2.8)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.5.4))
+        version: 1.0.0(inngest@4.18.1(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.7)(react@19.2.8)(supports-color@7.2.0)(zod@4.5.4))
       '@modelcontextprotocol/server-everything':
         specifier: ^2026.8.31
         version: 2026.8.31(supports-color@7.2.0)
@@ -254,7 +256,7 @@ importers:
         version: 12.1.0(supports-color@7.2.0)
       tsup:
         specifier: ^8.5.1
-        version: 8.5.1(jiti@2.7.0)(postcss@8.5.26)(supports-color@7.2.0)(tsx@4.23.13)(typescript@7.0.2)(yaml@2.9.0)
+        version: 8.5.1(jiti@2.7.0)(postcss@8.5.26)(supports-color@7.2.0)(tsx@4.23.13)(yaml@2.9.0)
       tsx:
         specifier: ^4.23.13
         version: 4.23.13
@@ -1374,8 +1376,8 @@ packages:
   '@iarna/toml@2.2.5':
     resolution: {integrity: sha512-trnsAYxU3xnS1gPHPyU961coFyLkh4gAD/0zQ5mymY4yOZ+CYvsPqUbOFSw0aDM4y0tV7tiFxL/1XfXPNC6IPg==}
 
-  '@inngest/ai@0.1.7':
-    resolution: {integrity: sha512-5xWatW441jacGf9czKEZdgAmkvoy7GS2tp7X8GSbdGeRXzjisHR6vM+q8DQbv6rqRsmQoCQ5iShh34MguELvUQ==}
+  '@inngest/ai@0.1.8':
+    resolution: {integrity: sha512-DiZ6r3R5FiS0h2p4pzoUIHdjukEDZpDXuG9Z+4s1beOcUn0pBAEovBdlokFCzMLVECXfrkqWWxZEQvgiY6a2ew==}
 
   '@inngest/test@1.0.0':
     resolution: {integrity: sha512-T3K6w0o/AHk34zzYhh1lC183ziQUCTEmY+G7ZOFwR5q4vXkbmZpXzbRecuG+Om/mixJnJCjZbt43e6OMR3QAnQ==}
@@ -3255,13 +3257,10 @@ packages:
     resolution: {integrity: sha512-sM7GYY+KL7H/Hl0BE0inWfk3nRHZOLhmVn7sHGxaZt9FAR6KqREXAE+6TqKfiavfXmpRxO/OZ2QgKRd+oiBYRQ==}
     peerDependencies:
       arktype: ^2.1.0
-      typescript: '>=5.0.0'
       valibot: ^1.0.0-beta.7 || ^1.0.0
       zod: ^3.24.0 || ^4.0.0
     peerDependenciesMeta:
       arktype:
-        optional: true
-      typescript:
         optional: true
       valibot:
         optional: true
@@ -3444,9 +3443,6 @@ packages:
 
   '@types/node@18.19.130':
     resolution: {integrity: sha512-GRaXQx6jGfL8sKfaIDD6OupbIHBr9jv7Jnaml9tB7l4v068PAOXqfcujMMo5PhbIs6ggR1XODELqahT2R8v0fg==}
-
-  '@types/node@22.20.1':
-    resolution: {integrity: sha512-EANqOCF9QFyra+4pfxUcX9STKJpCLjMbObVzljIJomAWSnuSIEAvyzEU53GaajbXJEgdh0iEcPL+DGvpUd4k1Q==}
 
   '@types/node@24.13.3':
     resolution: {integrity: sha512-Dh8vAsV36ig5wa9OX4pXvMc9D3Veibfw2wix0CUwYODLD8nkj9UsLjASr49nPg+2eKzxhBV+v7L8pXvT4e639Q==}
@@ -4625,7 +4621,6 @@ packages:
       koa: '>=2.14.2'
       next: '>=12.0.0'
       react: '>=18.0.0'
-      typescript: '>=5.8.0'
       zod: ^3.25.0 || ^4.0.0
     peerDependenciesMeta:
       '@sveltejs/kit':
@@ -4647,8 +4642,6 @@ packages:
       next:
         optional: true
       react:
-        optional: true
-      typescript:
         optional: true
 
   ip-address@10.5.0:
@@ -5840,11 +5833,6 @@ packages:
 
   ts-essentials@10.2.1:
     resolution: {integrity: sha512-+Id1fRkuir+CsgK2x04/icS2b4V1hQmq7ObzIrDjhN0ozfRYivnP7aaKMVJfLApQm0trjR39A6NIMVchiB9Erw==}
-    peerDependencies:
-      typescript: '>=4.5.0'
-    peerDependenciesMeta:
-      typescript:
-        optional: true
 
   ts-interface-checker@0.1.13:
     resolution: {integrity: sha512-Y/arvbn+rrz3JCKl9C4kVNfTfSm2/mEp5FSz5EsZSANGPSlQrpRI5M4PKF+mJnE52jOO90PnPSc3Ur3bTQw0gA==}
@@ -5863,15 +5851,12 @@ packages:
       '@microsoft/api-extractor': ^7.36.0
       '@swc/core': ^1
       postcss: ^8.4.12
-      typescript: '>=4.5.0'
     peerDependenciesMeta:
       '@microsoft/api-extractor':
         optional: true
       '@swc/core':
         optional: true
       postcss:
-        optional: true
-      typescript:
         optional: true
 
   tsx@4.23.13:
@@ -5890,11 +5875,6 @@ packages:
     resolution: {integrity: sha512-faYHw0anBbc/kWF3zFTEnxSFOAGUX9GFbOBthvDdLsIlEoWOFOtS0zgCiQYwIskL9iGXZL3kAXD8OoZ4GmMATA==}
     engines: {node: '>= 18'}
 
-  typescript@5.9.3:
-    resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
-    engines: {node: '>=14.17'}
-    hasBin: true
-
   typescript@7.0.2:
     resolution: {integrity: sha512-8FYau96o3NKOhbjKi/qNvG/W5jhzxkbdm5sj9AbZ/5T5sWqn3hJgLfGx27sRKZWTvyzCP8dLRBTf5tBTSRVUNA==}
     engines: {node: '>=16.20.0'}
@@ -5909,9 +5889,6 @@ packages:
 
   undici-types@5.26.5:
     resolution: {integrity: sha512-JlCMO+ehdEIKqlFxk6IfVoAUVmgz7cU7zD/h9XZ0qzeosSHmUJVOzSQvvYSYWXkFXC+IfLKSIffhv0sVZup6pA==}
-
-  undici-types@6.21.0:
-    resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
 
   undici-types@7.18.2:
     resolution: {integrity: sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w==}
@@ -7042,14 +7019,11 @@ snapshots:
 
   '@iarna/toml@2.2.5': {}
 
-  '@inngest/ai@0.1.7':
-    dependencies:
-      '@types/node': 22.20.1
-      typescript: 5.9.3
+  '@inngest/ai@0.1.8': {}
 
-  '@inngest/test@1.0.0(inngest@4.18.1(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.7)(react@19.2.8)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.5.4))':
+  '@inngest/test@1.0.0(inngest@4.18.1(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.7)(react@19.2.8)(supports-color@7.2.0)(zod@4.5.4))':
     dependencies:
-      inngest: 4.18.1(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.7)(react@19.2.8)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.5.4)
+      inngest: 4.18.1(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.7)(react@19.2.8)(supports-color@7.2.0)(zod@4.5.4)
       tinyspy: 3.0.2
       ulid: 2.4.0
 
@@ -9105,9 +9079,8 @@ snapshots:
 
   '@standard-schema/spec@1.1.0': {}
 
-  '@t3-oss/env-core@0.13.11(typescript@7.0.2)(zod@4.5.4)':
+  '@t3-oss/env-core@0.13.11(zod@4.5.4)':
     optionalDependencies:
-      typescript: 7.0.2
       zod: 4.5.4
 
   '@tailwindcss/node@4.3.3':
@@ -9280,10 +9253,6 @@ snapshots:
   '@types/node@18.19.130':
     dependencies:
       undici-types: 5.26.5
-
-  '@types/node@22.20.1':
-    dependencies:
-      undici-types: 6.21.0
 
   '@types/node@24.13.3':
     dependencies:
@@ -10507,10 +10476,10 @@ snapshots:
 
   inherits@2.0.4: {}
 
-  inngest@4.18.1(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.7)(react@19.2.8)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.5.4):
+  inngest@4.18.1(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.7)(react@19.2.8)(supports-color@7.2.0)(zod@4.5.4):
     dependencies:
       '@bufbuild/protobuf': 2.14.0
-      '@inngest/ai': 0.1.7
+      '@inngest/ai': 0.1.8
       '@jpwilliams/waitgroup': 2.1.1
       '@opentelemetry/api': 1.9.1
       '@opentelemetry/auto-instrumentations-node': 0.79.0(@opentelemetry/api@1.9.1)(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(supports-color@7.2.0)
@@ -10536,7 +10505,6 @@ snapshots:
       express: 5.2.1(supports-color@7.2.0)
       hono: 4.13.7
       react: 19.2.8
-      typescript: 7.0.2
     transitivePeerDependencies:
       - '@opentelemetry/core'
       - encoding
@@ -11797,9 +11765,7 @@ snapshots:
 
   ts-algebra@2.0.0: {}
 
-  ts-essentials@10.2.1(typescript@7.0.2):
-    optionalDependencies:
-      typescript: 7.0.2
+  ts-essentials@10.2.1: {}
 
   ts-interface-checker@0.1.13: {}
 
@@ -11807,7 +11773,7 @@ snapshots:
 
   tslib@2.8.1: {}
 
-  tsup@8.5.1(jiti@2.7.0)(postcss@8.5.26)(supports-color@7.2.0)(tsx@4.23.13)(typescript@7.0.2)(yaml@2.9.0):
+  tsup@8.5.1(jiti@2.7.0)(postcss@8.5.26)(supports-color@7.2.0)(tsx@4.23.13)(yaml@2.9.0):
     dependencies:
       bundle-require: 5.1.0(esbuild@0.27.4)
       cac: 6.7.14
@@ -11828,7 +11794,6 @@ snapshots:
       tree-kill: 1.2.2
     optionalDependencies:
       postcss: 8.5.26
-      typescript: 7.0.2
     transitivePeerDependencies:
       - jiti
       - supports-color
@@ -11852,8 +11817,6 @@ snapshots:
       content-type: 2.1.0
       media-typer: 1.1.1
       mime-types: 3.0.2
-
-  typescript@5.9.3: {}
 
   typescript@7.0.2:
     optionalDependencies:
@@ -11883,8 +11846,6 @@ snapshots:
   ulid@2.4.0: {}
 
   undici-types@5.26.5: {}
-
-  undici-types@6.21.0: {}
 
   undici-types@7.18.2: {}
 
@@ -11983,7 +11944,7 @@ snapshots:
 
   vitest-mock-extended@5.1.1(typescript@7.0.2)(vitest@4.1.11):
     dependencies:
-      ts-essentials: 10.2.1(typescript@7.0.2)
+      ts-essentials: 10.2.1
       typescript: 7.0.2
       vitest: 4.1.11(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(@vitest/browser-playwright@4.1.11)(@vitest/coverage-v8@4.1.11)(jsdom@30.0.1(@noble/hashes@2.3.0))(vite@8.2.2(@types/node@24.13.3)(esbuild@0.27.4)(jiti@2.7.0)(tsx@4.23.13)(yaml@2.9.0))
 

@@ -10,6 +10,10 @@
 !package.json
 !pnpm-lock.yaml
 !pnpm-workspace.yaml
+# The lockfile records a `pnpmfileChecksum`, so a frozen install without the
+# hook file fails rather than resolving differently — same loud-failure
+# property the patches note above relies on.
+!.pnpmfile.mjs
 
 # Descend into apps/ + packages/ to reach the specific COPYed inputs. A
 # nested path can only be re-included after its parents are, so each level
