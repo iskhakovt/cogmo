@@ -33,10 +33,13 @@ RUN pnpm --filter cogmo build
 # (pnpm/pnpm#11155). That is what keeps `typescript` — including the Go-built
 # `tsc` native binary — plus PGlite and react out of the runtime image; each
 # arrives only as an optional peer of inngest, drizzle-orm or @t3-oss/env-core.
-# Anything genuinely needed at runtime is a direct dependency and survives on
-# that edge: express, hono, postgres and @opentelemetry/api all remain. Inngest
-# is served through `inngest/node`, so its optional express and hono adapters
-# are not a path this app takes.
+# What survives is whatever some package needs non-optionally. `postgres` and
+# `@opentelemetry/api` are our own direct dependencies — note drizzle-orm lists
+# `postgres`, the production driver, among its optional peers, so that direct
+# edge is the whole reason it stays. `express` and `hono` are nobody's direct
+# dependency and survive instead on @modelcontextprotocol/sdk requiring them
+# outright; inngest declares both optionally and is served here through
+# `inngest/node`, so its adapters are not a path this app takes.
 RUN pnpm --filter cogmo deploy --prod --no-optional /deploy
 
 # Build the SPA last. Docker invalidates layers forward, so this keeps an
