@@ -28,7 +28,16 @@ RUN test -s apps/server/data/litellm-models.json
 # `build` proxy script, so the image build can't break if that script later
 # fans out to workspace members (e.g. apps/web) whose source isn't COPYed here.
 RUN pnpm --filter cogmo build
-RUN pnpm --filter cogmo deploy --prod /deploy
+# `--no-optional` also drops optional *peers*, which pnpm materialises into a
+# snapshot's `optionalDependencies` regardless of `peerDependenciesMeta.optional`
+# (pnpm/pnpm#11155). That is what keeps `typescript` — including the Go-built
+# `tsc` native binary — plus PGlite and react out of the runtime image; each
+# arrives only as an optional peer of inngest, drizzle-orm or @t3-oss/env-core.
+# Anything genuinely needed at runtime is a direct dependency and survives on
+# that edge: express, hono, postgres and @opentelemetry/api all remain. Inngest
+# is served through `inngest/node`, so its optional express and hono adapters
+# are not a path this app takes.
+RUN pnpm --filter cogmo deploy --prod --no-optional /deploy
 
 # Build the SPA last. Docker invalidates layers forward, so this keeps an
 # SPA-source edit from busting the expensive server build above. A server-source
