@@ -14,20 +14,13 @@ updates:
     # Applies to version-updates only — security updates are exempt.
     cooldown:
       default-days: 7
-    # `@types/node` tracks the LOWEST Node major we support, not the newest.
-    # The types say what the code may call, and calling anything absent from
-    # the oldest runtime we advertise is a runtime crash the type checker
-    # would have blessed. `engines` is `^24.15.0 || >=26.0.0`, so the floor is
-    # 24 and the types belong on 24.x — note Node 25 isn't merely un-tested
-    # here, it's excluded, being an odd release that never becomes LTS.
-    #
-    # Nothing else catches this: `@types/node` ships no `engines` field, so
-    # `engine-ranges.test.ts` — which compares declared `engines` via
-    # `semver.subset` — cannot see it, and a major bump type-checks clean
-    # until something actually reaches for a newer API.
-    #
-    # Lift this when the floor moves, in the same change that raises
-    # `engines.node` in both manifests.
+    # `@types/node` tracks the LOWEST Node major we support, not the newest:
+    # the types say what the code may call, and the floor is what it runs on.
+    # `engines` is `^24.15.0 || >=26.0.0`, so 24.x is right and 25 is excluded
+    # outright, odd releases never becoming LTS. Nothing else catches a bump
+    # past the floor — `@types/node` declares no `engines` for
+    # `engine-ranges.test.ts` to check. Lift with the change that raises
+    # `engines.node`.
     ignore:
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]

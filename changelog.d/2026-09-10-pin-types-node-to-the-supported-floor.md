@@ -1,3 +1,0 @@
-**Dependabot leaves `@types/node` majors alone.** The types say what the code may call, so they belong on the *lowest* Node major we support — `engines` is `^24.15.0 || >=26.0.0`, making 24 the floor and 24.x the right types. Node 25 is excluded outright rather than merely untested, being an odd release that never becomes LTS.
-
-Nothing else catches a bump past the floor. `@types/node` ships no `engines` field, so `engine-ranges.test.ts` — which compares declared `engines` via `semver.subset` — cannot see it, and a major type-checks clean right up until something reaches for an API the floor doesn't have. The `@types/*` group still takes minor and patch; only majors are ignored, and the rule lifts in whatever change raises `engines.node` in both manifests.
