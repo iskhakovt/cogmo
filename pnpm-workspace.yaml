@@ -10,6 +10,20 @@ allowBuilds:
   protobufjs: false
   ssh2: false
 
+# Advisory floors for transitive deps nothing in the workspace pins, so
+# Dependabot has no manifest entry to bump. Drop each once every parent's
+# minimum range is patched.
+#
+# Both bounds are load-bearing: unbounded, `fast-uri >=3.1.6` resolves to 4.1.4
+# against ajv's `^3.0.1`, and a bare `<4.13.5` selector would drag a hono 3.x
+# across a major. One major per entry — which does leave a sub-6 qs unpatched
+# against GHSA-4mjr-xmp4-gh2g (spans >=2.2.5); none is in the tree, and one
+# arriving wants investigating rather than a silent major bump.
+overrides:
+  "fast-uri@>=3 <3.1.6": ">=3.1.6 <4" # GHSA-5jgf-p345-68v8, -f65p-4m7j-42xc, -fph4-wmhf-6fwf, -jqff-g426-hqxp (high) via ajv
+  "hono@>=4 <4.13.5": ">=4.13.5 <5" # GHSA-gqvv-2mrq-wpjv, -g6gw-c38x-mqfc, -crvj-82cr-hjcx (moderate) via @modelcontextprotocol/sdk, inngest
+  "qs@>=6 <6.16.0": ">=6.16.0 <7" # GHSA-x5fp-wj9c-mxmx, GHSA-4mjr-xmp4-gh2g (moderate) via express, body-parser
+
 # The Hindsight client is a first-party dependency (we contribute upstream and
 # pin the server to the matching image), so the supply-chain soak that guards
 # against unknown third-party same-day releases doesn't apply — track its
