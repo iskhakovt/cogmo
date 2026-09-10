@@ -5,6 +5,7 @@ import {
   type ContextManagerDeps,
   compactMessages,
   compactSameToolClusters,
+  extractSummaryText,
   SUMMARIZATION_PROMPT,
   shouldSkipCounting,
   snapToPairBoundary,
@@ -1090,6 +1091,27 @@ describe("summarizationRequest", () => {
       role: "user",
       content: [{ type: "tool_result", toolUseId: "t1" }],
     });
+  });
+
+  it("joins several text blocks on a paragraph break rather than fusing them", () => {
+    // Blocks in a non-streaming response are discrete units. Joining with
+    // nothing would run the last sentence of one into the first of the next,
+    // and the result is stored rather than recomputed on the next turn.
+    expect(
+      extractSummaryText([
+        { type: "text", text: "They settled the schema." },
+        { type: "text", text: "Then they moved on." },
+      ]),
+    ).toBe("They settled the schema.\n\nThen they moved on.");
+  });
+
+  it("drops non-text blocks", () => {
+    expect(
+      extractSummaryText([
+        { type: "thinking", thinking: "hmm", signature: "sig" },
+        { type: "text", text: "the summary" },
+      ]),
+    ).toBe("the summary");
   });
 
   it("appends the instruction as the final user message", () => {

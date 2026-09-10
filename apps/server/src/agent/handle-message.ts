@@ -1001,8 +1001,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           // one-message prefix carrying a real message still summarizes: that
           // is the case Strategy 2 exists for, and refusing it would hand the
           // turn to truncation.
-          canSummarizePrefix: (splitIdx) =>
-            summarizedSpan(turnHistory.messageIds, splitIdx) !== null,
+          canSummarizePrefix: (candidate) =>
+            summarizedSpan(turnHistory.messageIds, candidate) !== null,
           summarize: async (system, msgs) => {
             // Resolve the summarization provider lazily — only when
             // compaction actually picks the SUMMARIZE strategy. Resolving
@@ -1029,7 +1029,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             // ContextManagerDeps.summarize). If that ever changes, switch to
             // a counter-based ID like `summarize-prefix-${i}` to avoid
             // Inngest's duplicate-step-id error.
-            const summarized = await stepRun("summarize-prefix", async () => {
+            const summarized = await stepRun("summarize-prefix-outcome", async () => {
               // Status banner lives inside the step body so it reaches the
               // user exactly once — compactMessages re-runs on every
               // invocation, and a bare-body push would re-append the banner
@@ -1044,10 +1044,17 @@ export function createHandleMessage(deps: HandleMessageDeps) {
                   maxOutputTokens: summarizationLimits.maxOutputTokens,
                 }),
               );
-              return {
-                text: extractSummaryText(response.content),
-                stopReason: response.stopReason,
-              };
+              const text = extractSummaryText(response.content);
+              if (response.stopReason === "max_tokens") {
+                // Logged from the step body so replay suppresses it. In the
+                // bare body this would re-emit once per remaining boundary of
+                // the turn, over-reporting by the turn's step count.
+                turnLogger.warn(
+                  { summaryChars: text.length },
+                  "summarization hit its output cap; using the text for this turn but not storing it",
+                );
+              }
+              return { text, stopReason: response.stopReason };
             });
             summaryText = summarized.text;
             summaryTruncated = summarized.stopReason === "max_tokens";
@@ -1071,15 +1078,11 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // the write idempotent under the retry that `durable` alone doesn't
       // prevent — a crash between the commit and Inngest recording the step
       // recovers the existing row rather than appending a second one.
-      const messagesSummarized = compactResult.event?.messagesSummarized ?? 0;
-      const span =
-        messagesSummarized > 0 ? summarizedSpan(turnHistory.messageIds, messagesSummarized) : null;
-      if (summaryTruncated) {
-        turnLogger.warn(
-          { messagesSummarized },
-          "summarization hit its output cap; using the text for this turn but not storing it",
-        );
-      }
+      // The compaction view's split index, not the count the row records:
+      // `event.messagesSummarized` counts entries, a folded-in previous summary
+      // among them, while the column stores `span.messageCount`.
+      const splitIdx = compactResult.event?.messagesSummarized ?? 0;
+      const span = splitIdx > 0 ? summarizedSpan(turnHistory.messageIds, splitIdx) : null;
       if (summaryText !== null && span !== null && !summaryTruncated) {
         // `text` needs the local because `summaryText` is a `let` whose
         // narrowing TypeScript discards inside the callback below; `span` is a

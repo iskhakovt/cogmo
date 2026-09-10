@@ -2440,7 +2440,7 @@ describe("/profile stream subcommand", () => {
     const ctx = mkCtx("stream personal chunk=200");
     await handleProfile(transport, ctx, mkDialogs());
     const reply = ctx.reply.mock.calls[0]?.[0];
-    expect(reply).toBe("Profile not found.");
+    expect(reply).toBe("Profile not found. Use /profile list to see what's available.");
     expect(reply).not.toContain("Stream prefs");
   });
 });

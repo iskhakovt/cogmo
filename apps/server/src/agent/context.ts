@@ -48,6 +48,11 @@ export interface ContextManagerDeps {
    * summary of a summary that advances no cutoff and gets discarded. Only a
    * caller holding the message ids can tell those apart, so `handle-message`
    * gates on whether the span has a durable cutoff. Omitted means no veto.
+   *
+   * `splitIdx` indexes the array the caller passed in, which holds only because
+   * every strategy running before summarization rewrites block content in place
+   * and preserves length. `context.test.ts` pins that; a future pre-summarize
+   * strategy that drops or merges entries has to hand the split back instead.
    */
   canSummarizePrefix?: (splitIdx: number) => boolean;
 }
@@ -123,7 +128,14 @@ export function summarizationRequest(params: {
   messages: ReadonlyArray<Message>;
   maxOutputTokens: number;
 }): ChatParams {
-  const { messages: repaired } = validateHistory(params.messages);
+  const { messages: repaired, repairs } = validateHistory(params.messages);
+  if (repairs.length > 0) {
+    // `validateHistory` leaves telemetry to the caller, and `sanitizeHistory`
+    // is the only other one. `/compact` never reaches the agent loop, so
+    // without this a manually-compacted conversation repairs its orphans
+    // silently — and folds them into a summary that is never re-derived.
+    logger.warn({ repairCount: repairs.length, repairs }, "repaired summarization prefix");
+  }
   return {
     model: params.model,
     system: params.system,
@@ -147,16 +159,18 @@ export function summarizationRequest(params: {
 export function extractSummaryText(content: ReadonlyArray<ContentBlock>): string {
   const text = content.filter((b) => b.type === "text");
   if (text.length > 1) {
-    // The join assumes at most one block. If a provider ever returns prose in
-    // several — Anthropic does so around `tool_use`, and citations would do it
-    // without one — the seam lands mid-sentence, and durability means that
-    // text is stored and replayed rather than recomputed next turn.
+    // Blocks in a non-streaming response are discrete units, not fragments of
+    // one, so a paragraph break is the safe seam — joining with nothing would
+    // fuse the last sentence of one into the first of the next, and durability
+    // means that text is stored and replayed rather than recomputed. Still
+    // worth a line: the summarization request carries no tools, so a response
+    // in several blocks means an assumption here has moved.
     logger.warn(
       { blocks: text.length },
-      "summarization returned multiple text blocks; joined without a separator",
+      "summarization returned multiple text blocks; joined on a paragraph break",
     );
   }
-  return text.map((b) => b.text).join("");
+  return text.map((b) => b.text).join("\n\n");
 }
 
 /**

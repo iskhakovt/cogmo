@@ -2691,6 +2691,23 @@ describe("createTransport", () => {
       expect(JSON.stringify(res._unsafeUnwrapErr())).not.toContain("secret");
     });
 
+    it("surfaces a provider failure's status without its body", async () => {
+      // 429 and 5xx are the likeliest way `/compact` fails and the only detail
+      // that tells the user whether waiting helps; the body is not ours to relay.
+      const overloaded = Object.assign(new Error("Overloaded: <long provider body>"), {
+        status: 529,
+      });
+      const driver = vi.fn().mockRejectedValue(overloaded);
+      const { transport } = buildCompactTransport({ ...OWNED, compactConversation: driver });
+      const res = await transport.conversations.compact("h", "addr");
+      const error = res._unsafeUnwrapErr();
+      expect(error).toEqual({
+        code: "compaction_failed",
+        reason: "the summarization model returned HTTP 529",
+      });
+      expect(JSON.stringify(error)).not.toContain("long provider body");
+    });
+
     it("surfaces a provider-config message, which names only the model", async () => {
       const driver = vi
         .fn()

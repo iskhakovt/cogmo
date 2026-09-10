@@ -26,7 +26,7 @@ The bug class to catch is #2 — and to catch it you have to **count boundaries,
 | Load | `load-turn-history` | `loadTurnHistory` (`getLatestSummary` + `listMessages` / `getHistoryAfter`) — returns the compacted view plus positionally-aligned message ids | DB read | ✓ |
 | Load | `assemble-prompt` | `promptSource.assemble` | DB read + assembly | ✓ |
 | **Compact** | *(none — runs on every invocation)* | `compactMessages` (token count, clear, summarize, truncate) | token counting + decision | ✗ |
-| Compact | `summarize-prefix` (conditional) | status push + `provider.chat` for prefix summarization | **LLM call + stream push** | ✓ |
+| Compact | `summarize-prefix-outcome` (conditional) | status push + `provider.chat` for prefix summarization; returns `{ text, stopReason }` | **LLM call + stream push** | ✓ |
 | Compact | `persist-summary` (conditional) | `agentStore.insertOrRecoverSummary` — stores what `summarize-prefix` produced; failures degrade inside the body | **DB write** | ✓ |
 | Recall | `auto-recall` (conditional) | `service.memory.recall` (failure degraded to no-memories inside the body) | **embedding + vector search** | ✓ |
 | **Streaming glue** | *(none — runs on every invocation)* | image resolution, `getProfile`, `deliveryRouter.prepare`, tool-registry assembly, `compactMessages` orchestration, the loop's control flow, `delivery.finish` | cheap reads + deterministic assembly | ✗ |
@@ -87,7 +87,7 @@ What this buys, per failure mode:
 
 **What a mid-step crash still costs.** If the process dies mid-stream the step never completed, so the retry re-runs the body and re-streams from the top of that iteration (and re-bills it — inherent to any retry of a failed attempt). The runId-keyed `#activeStreams` dedup turns the re-stream into edits of the same message. Durable steps cover the boundary-replay path; the dedup map covers the crash path. Keep both. Three narrower crash-window residuals, all accepted:
 
-- *Duplicated in-body pushes on step retry.* If a step body fails after some of its pushes (the `summarize-prefix` status banner, the `degraded-reply` apology, a partially-emitted `emit-tool-results-iter<N>`), the per-step retry re-runs the body and pushes again. Media dedups by path at the handle; text banners and non-media cards may append twice. Cosmetic, and bounded by the step's retry budget.
+- *Duplicated in-body pushes on step retry.* If a step body fails after some of its pushes (the `summarize-prefix-outcome` status banner, the `degraded-reply` apology, a partially-emitted `emit-tool-results-iter<N>`), the per-step retry re-runs the body and pushes again. Media dedups by path at the handle; text banners and non-media cards may append twice. Cosmetic, and bounded by the step's retry budget.
 - *File-freshness cache after process death.* `createFileService`'s read-before-mutate gate lives in a process-lifetime map. A cross-process replay re-populates it via non-durable `read_file` re-execution, except for a file first *created* by a cached `write_file` in the same turn — a follow-up `edit_file` then errors with "read the file first", which is itself the recovery instruction: the model re-reads and retries. Self-healing; not worth persisting the cache.
 
 **Bare-body cost scales with the boundary count.** Durable iterations and durable tools took a turn from roughly 4 bare-body executions to roughly `3×iterations + tools + 4`, and everything left in the streaming glue pays that multiplier. The one that is not merely cheap is inbound attachment resolution: `attachments.download()` is an S3 GET plus a base64 encode per image, so a 5-iteration turn carrying a photo does ~15 of each. It is an idempotent read, so it is correct — but "idempotent" is a correctness claim, not a cost one. Tracked as a `p2` in `todo.md` (per-run LRU keyed by attachment path; deliberately not step state, since the payloads are exactly what must stay out of Inngest's store).
@@ -193,7 +193,7 @@ The cases:
 
 1. `create-user-message` cached → no user-role `insertMessage` call.
 2. `persist-new-messages` cached → no `insertMessages` call (no persistence of any new messages: tool turns + assistant).
-3. `summarize-prefix` cached → no `provider.chat` call for summarization, and the cached summary text appears in the history passed to the agent loop (non-vacuity check).
+3. `summarize-prefix-outcome` cached → no `provider.chat` call for summarization, and the cached summary text appears in the history passed to the agent loop (non-vacuity check).
 4. All listed durable steps cached → `runStreamingAgentLoop` is still called (canary: the loop's bare-body glue re-runs per invocation by design).
 5. `llm-iter1` cached (real loop wired in) → `provider.chatStream` never called, no `text_delta` reaches the delivery handle, cached content persists — the no-re-billing / no-duplicate-preamble contract at the wire.
 6. `degraded-reply` cached → no synthesis `chat` call, no retract/apology pushes, cached apology persists.
@@ -209,7 +209,7 @@ For **wire-level** crash recovery (real Inngest server, real retries, side-effec
 
 ## State serialization `[confirmed]`
 
-Inngest stores step return values via JSON, so anything returned from a `step.run` body must round-trip through `JSON.stringify` / `JSON.parse` losslessly. `load-turn-history` returns `{ messages, messageIds }`, where `messageIds` carries `null` for the synthetic summary entry — `null` survives JSON, `undefined` would not, which is why the loader emits the former. It carries a new step id rather than reusing `load-history` because its cached payload is an object where the old step's was an array: a run that checkpointed under the previous build would otherwise replay an array into a reader that destructures it. Steps returning user-supplied or model-supplied data: `summarize-prefix` and `degraded-reply` (strings), `auto-recall` (Hindsight memories — plain string/metadata records), `tool-iter<N>-<P>` (the handler's string output), and `llm-iter<N>` (`LlmIterationOutcome`, whose `content: ContentBlock[]` is the interesting payload).
+Inngest stores step return values via JSON, so anything returned from a `step.run` body must round-trip through `JSON.stringify` / `JSON.parse` losslessly. `load-turn-history` returns `{ messages, messageIds }`, where `messageIds` carries `null` for the synthetic summary entry — `null` survives JSON, `undefined` would not, which is why the loader emits the former. It carries a new step id rather than reusing `load-history` because its cached payload is an object where the old step's was an array: a run that checkpointed under the previous build would otherwise replay an array into a reader that destructures it. `summarize-prefix-outcome` carries a new id for the same reason — its payload became `{ text, stopReason }` where the old `summarize-prefix` returned a bare string, and the old value replayed into the new reader would have reached `summary.trim()` as `undefined` and degraded the turn to truncation through `compactMessages`' catch. Steps returning user-supplied or model-supplied data: `summarize-prefix-outcome` (text + stop reason) and `degraded-reply` (a string), `auto-recall` (Hindsight memories — plain string/metadata records), `tool-iter<N>-<P>` (the handler's string output), and `llm-iter<N>` (`LlmIterationOutcome`, whose `content: ContentBlock[]` is the interesting payload).
 
 For `ContentBlock[]`, the type contract guarantees JSON safety:
 
@@ -230,7 +230,7 @@ Wrap work in `step.run` when **all** of these are true:
 - The RETURN VALUE is small and JSON-serializable (so Inngest can store and replay it). The work itself may stream, emit to a transport, or take minutes — side effects fired from inside the body happen live and are suppressed on replay, which is usually exactly what's wanted (see `llm-iter<N>`).
 - Re-executing it would be expensive, billable, wrong, or visible to the user.
 - The step's inputs are themselves durable, OR the cached output remains valid even if the inputs drift slightly between attempts. Otherwise the cache freezes against stale inputs.
-- If the step is conditional, the condition derives from durable state — a gate on a non-durable read can flip between invocations and diverge the step graph (`summarize-prefix` and `auto-recall` carry a documented residual of this against concurrent profile edits).
+- If the step is conditional, the condition derives from durable state — a gate on a non-durable read can flip between invocations and diverge the step graph (`summarize-prefix-outcome` and `auto-recall` carry a documented residual of this against concurrent profile edits).
 
 Do **not** wrap:
 

@@ -38,6 +38,7 @@ import {
   calculateElapsedCooldown,
   type inboundArrived as InboundArrivedEvent,
 } from "../inngest/events.js";
+import { extractStatus } from "../llm/fallback.js";
 import { computeBudget, resolveLimits } from "../llm/models.js";
 import { ProviderConfigError } from "../llm/resolver.js";
 import { logger } from "../logger.js";
@@ -352,11 +353,12 @@ export type TransportError =
    * `Result` contract and leaves the caller's pre-ack as the last thing the
    * user sees.
    *
-   * `reason` reaches the user, so it is non-null only for error types whose
-   * messages are known safe and short — today `ProviderConfigError` alone,
-   * whose four throw sites name a model or a provider row. `null` means the
-   * detail is in the log, and being null rather than a sentinel string keeps
-   * the two rendering arms checkable by the compiler. Everything else reports
+   * `reason` reaches the user, so it is non-null only for what is known safe
+   * and short: `ProviderConfigError`'s message, whose four throw sites name a
+   * model or a provider row, and the bare HTTP status of a provider failure —
+   * the status alone, never the body, since it is what tells the user whether
+   * to wait and retry. `null` means the detail is in the log, and being null
+   * rather than a sentinel string keeps the arms checkable by the compiler. Everything else reports
    * `unknown` and lives in the log: a Drizzle failure stringifies as
    * `Failed query: <sql>` plus its bound params, which for this table is the
    * whole INSERT and the entire summary text, and a provider failure can embed
@@ -1515,11 +1517,7 @@ export function createTransport(deps: {
           );
           return err({
             code: "compaction_failed" as const,
-            // A misconfigured summarization model is the likeliest failure and
-            // the one worth naming. Its messages carry a model or a provider
-            // row name plus an instruction to re-run `cogmo setup` — operator-
-            // chosen identifiers, never credentials or query text.
-            reason: error instanceof ProviderConfigError ? error.message : null,
+            reason: compactionFailureReason(error),
           });
         }
         if (result.status === "not_found") {
@@ -2506,6 +2504,24 @@ export function createTransport(deps: {
       },
     },
   };
+
+  /**
+   * What of a compaction failure is safe to put in front of the user.
+   *
+   * A misconfigured summarization model names a model or a provider row plus
+   * an instruction to re-run `cogmo setup` — operator-chosen identifiers, never
+   * credentials. A provider failure contributes only its status: 429 and 5xx
+   * are the likeliest way `/compact` fails and the only detail that tells the
+   * user whether waiting helps, while the response body is not ours to relay.
+   * Everything else is withheld — a Drizzle failure stringifies as its whole
+   * INSERT plus bound params, which for this table is the summary text itself.
+   */
+  function compactionFailureReason(error: unknown): string | null {
+    if (error instanceof ProviderConfigError) return error.message;
+    if (!(error instanceof Error)) return null;
+    const status = extractStatus(error);
+    return status === undefined ? null : `the summarization model returned HTTP ${status}`;
+  }
 
   /**
    * Resolve the conversation behind a platform address, checked for caller

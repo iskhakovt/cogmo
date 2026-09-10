@@ -163,7 +163,7 @@ describe("handle-message — crash recovery / step replay", () => {
     expect(deps.agentStore.insertMessages).not.toHaveBeenCalled();
   });
 
-  it("does not re-run the summarization LLM call when summarize-prefix is cached", async () => {
+  it("does not re-run the summarization LLM call when summarize-prefix-outcome is cached", async () => {
     // To exercise the summarize step, we need the compaction pipeline to
     // actually call its `summarize` callback. That requires:
     //   - getLastTokens past the fast-path threshold so countTokens runs
@@ -202,7 +202,7 @@ describe("handle-message — crash recovery / step replay", () => {
       events: [event],
       steps: [
         {
-          id: "summarize-prefix",
+          id: "summarize-prefix-outcome",
           // Cached value: the summary text from a prior attempt.
           handler: () => ({
             text: "[cached summary from prior attempt]",

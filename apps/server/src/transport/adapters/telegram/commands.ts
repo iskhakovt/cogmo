@@ -2033,7 +2033,10 @@ function errorMessage(err: TransportError): string {
     case "conversation_not_found":
       return "Conversation not found.";
     case "profile_not_found":
-      return "Profile not found.";
+      // Reached by name from `/profile`, and by a conversation whose profile
+      // row is gone — the same mid-call disappearance `/reflect` reports as a
+      // skip. Point at the same next step either way rather than dead-ending.
+      return "Profile not found. Use /profile list to see what's available.";
     case "profile_in_use":
       return "Profile has active conversations. Switch them first.";
     case "profile_name_taken":
