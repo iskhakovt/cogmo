@@ -58,10 +58,13 @@ export type CompactConversationResult =
   | {
       status: "skipped";
       /**
-       * `too_short` — too little outside the retain window to be worth a
-       * call. `nothing_new` — everything outside it is already covered, or a
-       * concurrent turn stored the same span first. `empty_summary` — the model
-       * spent its budget reasoning and returned no text.
+       * `too_short` — fewer than `MIN_MESSAGES_TO_COMPACT` real messages sit
+       * outside the retain window, which also covers a span holding nothing but
+       * the previously-stored summary. `nothing_new` — a concurrent turn won
+       * the race, either by taking this same cutoff (the conflict arm kept its
+       * text) or a wider one (this row was written but coverage-ordered reads
+       * will never return it). `empty_summary` — the model spent its budget
+       * reasoning and returned no text.
        */
       reason: "too_short" | "nothing_new" | "empty_summary";
     }
@@ -147,26 +150,33 @@ export async function compactConversation(
   const summary = extractSummaryText(response.content);
   if (summary.trim().length === 0) return { status: "skipped", reason: "empty_summary" };
 
-  // Write and re-read in one tx. A turn that compacted while the summarization
-  // was in flight supersedes this row two ways: it can take the same cutoff, in
-  // which case the conflict arm keeps its text and `kind` is `recovered`; or it
-  // can take a wider one, in which case this insert succeeds but
-  // `getLatestSummary` — which orders by coverage — will never return it.
-  // Either way the summary the user paid for is not the one that will be used,
-  // and reporting success would promise an effect that never happens.
-  const superseded = await deps.runInTx(async (tx) => {
-    const { kind } = await deps.agentStore.insertOrRecoverSummary(tx, {
+  // A turn that compacted while the summarization was in flight supersedes this
+  // row two ways: it can take the same cutoff, where the conflict arm keeps its
+  // text and `kind` is `recovered`; or a wider one, where this insert succeeds
+  // but `getLatestSummary` — which orders by coverage — will never return it.
+  // Either way the summary the user paid for is not the one that gets used, and
+  // reporting success would promise an effect that never happens.
+  const { kind } = await deps.runInTx((tx) =>
+    deps.agentStore.insertOrRecoverSummary(tx, {
       conversationId,
       summary,
       throughMessageId: span.cutoff,
-      messagesSummarized: splitIdx,
+      messagesSummarized: span.messageCount,
       model,
       source: "manual",
-    });
-    if (kind === "recovered") return true;
-    const latest = await deps.agentStore.getLatestSummary(tx, conversationId);
-    return latest?.throughMessageId !== span.cutoff;
-  });
+    }),
+  );
+  // The wider-cutoff check reads in its own transaction, deliberately. Under
+  // the project's REPEATABLE READ default a snapshot is taken at a
+  // transaction's first statement, so a read sharing the insert's transaction
+  // would be blind to anything committed after it — including, in the gap
+  // between the two statements, the very row it is looking for.
+  const superseded =
+    kind === "recovered" ||
+    (await deps.runInTx(async (tx) => {
+      const latest = await deps.agentStore.getLatestSummary(tx, conversationId);
+      return latest?.throughMessageId !== span.cutoff;
+    }));
   if (superseded) return { status: "skipped", reason: "nothing_new" };
 
   return {

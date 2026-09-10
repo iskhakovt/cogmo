@@ -353,7 +353,8 @@ export type TransportError =
    * user sees.
    *
    * `reason` reaches the user, so it carries a raw error message only for
-   * types whose messages are known safe and short. Everything else reports
+   * types whose messages are known safe and short — today `ProviderConfigError`
+   * alone, whose four throw sites name a model or a provider row. Everything else reports
    * `unknown` and lives in the log: a Drizzle failure stringifies as
    * `Failed query: <sql>` plus its bound params, which for this table is the
    * whole INSERT and the entire summary text, and a provider failure can embed
@@ -1512,9 +1513,10 @@ export function createTransport(deps: {
           );
           return err({
             code: "compaction_failed" as const,
-            // A misconfigured summarization model is both the likeliest failure
-            // and the only one whose message is worth showing: it names the
-            // model and nothing else.
+            // A misconfigured summarization model is the likeliest failure and
+            // the one worth naming. Its messages carry a model or a provider
+            // row name plus an instruction to re-run `cogmo setup` — operator-
+            // chosen identifiers, never credentials or query text.
             reason: error instanceof ProviderConfigError ? error.message : "unknown",
           });
         }

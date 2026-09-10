@@ -93,7 +93,7 @@ Because there is no budget gate, the manual path carries a floor the automatic o
 
 Outcomes: `too_short`, `nothing_new`, `empty_summary` (the model returned no text — nothing is stored), or the message counts. `nothing_new` covers both ways a concurrent turn can win the race: taking the same cutoff, where the conflict arm keeps its text, or a wider one, where this row is written but coverage-ordered reads will never return it. The driver writes and re-reads in one transaction to tell the difference, because reporting success in either case promises the user an effect that never happens. Failures become a `compaction_failed` Transport error rather than an escaping rejection: the driver runs inline with no retry budget behind it, so a throw would otherwise leave the user's "Compacting…" ack as the last thing they see.
 
-A `/compact` racing an in-flight turn is safe by construction: the turn froze its history inside the durable `load-history` step, and a manual compaction only ever covers a prefix of what that turn already read.
+A `/compact` racing an in-flight turn is safe by construction: the turn froze its history inside the durable `load-turn-history` step, and a manual compaction only ever covers a prefix of what that turn already read.
 
 ## Strategy Pipeline
 

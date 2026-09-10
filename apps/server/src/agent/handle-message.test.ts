@@ -3565,11 +3565,31 @@ describe("durable conversation summaries", () => {
     expect(deps.agentStore.listMessages).not.toHaveBeenCalled();
   });
 
-  it("stores nothing when the summarized span holds only the previous summary", async () => {
-    // Six rows since the last compaction: with the summary prepended the
-    // array is 7 long, so the split covers the synthetic entry alone. There
-    // is no durable cutoff to advance to, so the write is skipped.
+  it("delivers the turn when the summary write fails", async () => {
+    // The write is a cache fill sitting between compaction and the loop. CLAUDE.md
+    // requires a test for any catch that degrades into a return value; this is it.
     const { deps } = summarizingDeps();
+    vi.mocked(deps.agentStore.insertOrRecoverSummary).mockRejectedValue(
+      new Error("conversation_summaries insert failed"),
+    );
+
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(deps.agentStore.insertOrRecoverSummary).toHaveBeenCalled();
+    // The reply still happens — the failure cost the cache, not the turn.
+    expect(deps.runStreamingAgentLoop).toHaveBeenCalled();
+  });
+
+  it("never bills a summarization call for a span holding only the previous summary", async () => {
+    // Six rows since the last compaction: with the summary prepended the array
+    // is 7 long, so the split covers the synthetic entry alone. Summarizing that
+    // buys a summary of a summary and advances no cutoff, so the pipeline
+    // refuses it before the model call rather than discarding the result after.
+    const { deps, chat } = summarizingDeps();
     vi.mocked(deps.agentStore.getLatestSummary).mockResolvedValue({
       id: "sum-1",
       conversationId: "conv-1",
@@ -3588,6 +3608,35 @@ describe("durable conversation summaries", () => {
       runId: testRunId,
     });
 
+    expect(chat).not.toHaveBeenCalled();
     expect(deps.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
+  });
+
+  it("records the real messages replaced, not the compaction-view entries", async () => {
+    // A stored summary plus 8 rows: the split lands at 3, covering the synthetic
+    // entry and two real messages. The row must say two.
+    const { deps } = summarizingDeps();
+    vi.mocked(deps.agentStore.getLatestSummary).mockResolvedValue({
+      id: "sum-1",
+      conversationId: "conv-1",
+      summary: "earlier",
+      throughMessageId: "m0",
+      messagesSummarized: 3,
+      model: "claude-haiku-4-5",
+      source: "turn",
+      createdAt: new Date(),
+    });
+    vi.mocked(deps.agentStore.getHistoryAfter).mockResolvedValue(rows(8));
+
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(deps.agentStore.insertOrRecoverSummary).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ messagesSummarized: 2, throughMessageId: "m2" }),
+    );
   });
 });

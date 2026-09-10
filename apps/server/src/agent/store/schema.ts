@@ -952,7 +952,7 @@ export const evolutionEvents = pgTable(
  * The two foreign keys are independent, so the schema alone permits a row
  * pairing conversation A with a message from conversation B — a cutoff that
  * would make `getHistoryAfter` drop an arbitrary span of A. No writer can
- * produce one: both derive the cutoff from `summaryCutoffFor` over the message
+ * produce one: both derive the cutoff from `summarizedSpan` over the message
  * ids of the conversation being compacted. Enforcing it in DDL would mean a
  * composite unique on `messages (id, conversation_id)` purely to serve a
  * composite FK, which is an index on the hottest table in the schema to
@@ -980,7 +980,7 @@ export const conversationSummaries = pgTable(
     throughMessageId: uuid("through_message_id")
       .notNull()
       .references(() => messages.id),
-    /** How many entries of the compaction input array this summary replaced — telemetry, not a cursor. */
+    /** Real messages this summary replaced — audit trail, not a cursor. Excludes a previous summary folded in. */
     messagesSummarized: integer("messages_summarized").notNull(),
     /** Summarization model that produced the text. */
     model: text("model").notNull(),

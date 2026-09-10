@@ -1,7 +1,7 @@
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import type { Profile } from "../../../agent/store/index.js";
-import { assertKind } from "../../../test/assertions.js";
+import { assertKind, expectDefined } from "../../../test/assertions.js";
 import { type DeepPartial, mockTransportDeep } from "../../../test/factories.js";
 import type { Transport } from "../../transport.js";
 import {
@@ -4354,7 +4354,7 @@ describe("handleCompact", () => {
     // the conversation fits in the context window, so the reply must not either.
     const ctx = mkCtx();
     await handleCompact(compactWith(ok({ status: "skipped", reason: "too_short" })), ctx);
-    const reply = (ctx.reply.mock.calls[1]?.[0] ?? "") as string;
+    const reply = expectDefined(ctx.reply.mock.calls[1], "second reply")[0];
     expect(reply).toMatch(/outside the retained window/i);
     expect(reply).not.toMatch(/fits/i);
   });

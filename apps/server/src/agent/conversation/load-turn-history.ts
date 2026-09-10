@@ -18,7 +18,7 @@ import type { AgentStore } from "../store/index.js";
  * `messages` row backing `messages[i]`, or `null` for the synthetic summary
  * entry. Callers that need to map a compaction split point back to a durable
  * cutoff (to persist a summary of their own) walk this array; see
- * `summaryCutoffFor`.
+ * `summarizedSpan`.
  */
 export interface LoadTurnHistoryDeps {
   runInTx: Transactor;

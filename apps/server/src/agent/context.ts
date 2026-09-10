@@ -70,8 +70,16 @@ const DEFAULT_KEEP_TOOL_RESULTS = 5;
 export const DEFAULT_KEEP_TURNS = 6;
 
 /**
- * Fewest prefix entries worth an LLM call. Below this the summary is no
- * smaller than the messages it stands in for.
+ * Fewest prefix entries worth an LLM call. At one entry the summary is no
+ * smaller than what it replaces, and when that entry is a previously-stored
+ * summary the call buys a summary of a summary that advances no cutoff.
+ *
+ * Counts entries, not real messages — this module sees `Message[]` with no way
+ * to tell a stored summary from a turn. So a prefix of `[storedSummary, m1]`
+ * clears the floor and folds one message in. That call is marginal rather than
+ * wasted: unlike the one-entry case it does advance the cutoff and produce a
+ * summary that gets used. `/compact`, which has the message ids, applies a real
+ * floor of its own on top.
  */
 const MIN_SUMMARIZABLE_PREFIX = 2;
 

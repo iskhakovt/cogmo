@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ContentBlock, Message, ToolResultBlock, ToolUseBlock } from "../llm/types.js";
 import {
+  type ContextManagerDeps,
   compactMessages,
   compactSameToolClusters,
   shouldSkipCounting,
@@ -1001,5 +1002,42 @@ describe("pre-summarize strategies preserve the array's length", () => {
     const prefix = summarize.mock.calls[0]?.[1] as Message[];
     expect(prefix).toHaveLength(summarized);
     expect(prefix.map((m) => m.role)).toEqual(messages.slice(0, summarized).map((m) => m.role));
+  });
+});
+
+describe("minimum summarizable prefix", () => {
+  function summarizeDeps(
+    summarize: NonNullable<ContextManagerDeps["summarize"]>,
+  ): ContextManagerDeps {
+    return { countTokens: vi.fn().mockResolvedValue(900), budget: 1000, summarize };
+  }
+
+  it("refuses a one-message prefix instead of paying for a summary of it", async () => {
+    // 7 messages at keepTurns 6 splits at 1. The summary would be no smaller
+    // than the message it replaces, and on a re-compaction that lone entry is
+    // the previously-stored summary, which advances no cutoff.
+    const summarize = vi.fn().mockResolvedValue("a summary");
+    const messages = Array.from({ length: 7 }, (_, i) =>
+      msg(i % 2 === 0 ? "user" : "assistant", `turn ${i}`),
+    );
+
+    const result = await compactMessages("system", messages, undefined, summarizeDeps(summarize));
+
+    expect(summarize).not.toHaveBeenCalled();
+    expect(result.event?.strategies ?? []).not.toContain("summarize");
+  });
+
+  it("summarizes a two-message prefix", async () => {
+    // The boundary the case above sits one below — proves the refusal is the
+    // floor talking and not summarization being unreachable in this setup.
+    const summarize = vi.fn().mockResolvedValue("a summary");
+    const messages = Array.from({ length: 8 }, (_, i) =>
+      msg(i % 2 === 0 ? "user" : "assistant", `turn ${i}`),
+    );
+
+    const result = await compactMessages("system", messages, undefined, summarizeDeps(summarize));
+
+    expect(summarize).toHaveBeenCalledOnce();
+    expect(result.event?.messagesSummarized).toBe(2);
   });
 });

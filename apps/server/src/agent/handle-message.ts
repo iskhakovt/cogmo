@@ -891,8 +891,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         : systemPrompt;
 
       // Build message history, replacing the last user message with resolved content.
-      // Safe because: `load-history` runs after create-user-message (durable step
-      // ordering), and concurrency lock on conversationId prevents concurrent writes.
+      // Safe because: `load-turn-history` runs after create-user-message (durable
+      // step ordering), and concurrency lock on conversationId prevents concurrent writes.
       let historyMessages: Message[] = [...history];
       const hasAttachments = resolvedBlocks.some(
         (b) => b.type === "image" || b.type === "document",
@@ -1056,8 +1056,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const span =
         messagesSummarized > 0 ? summarizedSpan(turnHistory.messageIds, messagesSummarized) : null;
       if (summaryText !== null && span !== null) {
+        // `text` needs the local because `summaryText` is a `let` whose
+        // narrowing TypeScript discards inside the callback below; `span` is a
+        // `const` and needs no such help.
         const text = summaryText;
-        const cutoff = span.cutoff;
         // Caching a summary is not worth the turn. The write sits between
         // compaction and the agent loop, so an unhandled failure here costs the
         // user their reply over a span that would simply be re-summarized next
@@ -1073,8 +1075,12 @@ export function createHandleMessage(deps: HandleMessageDeps) {
               agentStore.insertOrRecoverSummary(tx, {
                 conversationId,
                 summary: text,
-                throughMessageId: cutoff,
-                messagesSummarized,
+                throughMessageId: span.cutoff,
+                // The real messages replaced, not the compaction-view entries:
+                // the column is an audit trail, and counting a folded-in
+                // previous summary as content would overstate every
+                // re-compaction by one.
+                messagesSummarized: span.messageCount,
                 model: summarizationModel,
                 source: "turn",
               }),
