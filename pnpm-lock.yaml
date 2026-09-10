@@ -5,6 +5,11 @@ settings:
   excludeLinksFromLockfile: false
   injectWorkspacePackages: true
 
+overrides:
+  fast-uri@<3.1.6: '>=3.1.6 <4'
+  hono@<4.13.5: '>=4.13.5'
+  qs@<6.16.0: '>=6.16.0'
+
 importers:
 
   .:
@@ -128,7 +133,7 @@ importers:
         version: 1.46.0(supports-color@7.2.0)
       inngest:
         specifier: ^4.18.1
-        version: 4.18.1(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.2)(react@19.2.8)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.5.4)
+        version: 4.18.1(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.7)(react@19.2.8)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.5.4)
       js-tiktoken:
         specifier: ^1.0.21
         version: 1.0.21
@@ -198,7 +203,7 @@ importers:
         version: 0.5.8
       '@inngest/test':
         specifier: ^1.0.0
-        version: 1.0.0(inngest@4.18.1(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.2)(react@19.2.8)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.5.4))
+        version: 1.0.0(inngest@4.18.1(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.7)(react@19.2.8)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.5.4))
       '@modelcontextprotocol/server-everything':
         specifier: ^2026.8.31
         version: 2026.8.31(supports-color@7.2.0)
@@ -1364,7 +1369,7 @@ packages:
     resolution: {integrity: sha512-XovyyCCnBzW+zKu+z/zq8hwNs4KOR5rEMAOxo2f40Q5xoOI37IMm6MIg2COOUtUApo0i6850MTBKH2u4QLGIqg==}
     engines: {node: '>=20'}
     peerDependencies:
-      hono: ^4
+      hono: '>=4.13.5'
 
   '@iarna/toml@2.2.5':
     resolution: {integrity: sha512-trnsAYxU3xnS1gPHPyU961coFyLkh4gAD/0zQ5mymY4yOZ+CYvsPqUbOFSw0aDM4y0tV7tiFxL/1XfXPNC6IPg==}
@@ -4396,8 +4401,8 @@ packages:
   fast-string-width@3.0.2:
     resolution: {integrity: sha512-gX8LrtNEI5hq8DVUfRQMbr5lpaS4nMIWV+7XEbXk2b8kiQIizgnlr12B4dA3ZEx3308ze0O4Q1R+cHts8kyUJg==}
 
-  fast-uri@3.1.5:
-    resolution: {integrity: sha512-gHwA1O9LDIcKunMKhObS/HimwtehO1nPUECKAu5TpKgaO19fcWEl4bliWe1jWxVFvIXztJjjQ4L8XQ1EU9f7Jw==}
+  fast-uri@3.1.7:
+    resolution: {integrity: sha512-dOvZVzjdZdz7phd9v6jCbwxrBW3fK6n8Rc0CtdmM4bumzMnxywBYhuph6J819RRw/ku+rLbelwfMunktuzVVHg==}
 
   fast-wrap-ansi@0.2.2:
     resolution: {integrity: sha512-7F2Fl+TjRSenLqlU3UjSH0iyqopqoZIu7eZVpEirP2g1GtWa2G/ecEmBdgz31+Mxr+ELclgg6sokpSFIQiZ02Q==}
@@ -4558,8 +4563,8 @@ packages:
     resolution: {integrity: sha512-eSmmWE5bZTK2Nou4g0AI3zZ9rswp7GRKoKXS1BLUkvPviOqs4YTN1djQIqrXy9k5gEtdLPy86JjRwsNM9tnDcA==}
     engines: {node: '>=0.10.0'}
 
-  hono@4.13.2:
-    resolution: {integrity: sha512-JydRilDRkYBQMt9qR9U92mXxmbGqsqSn/IKOrh4e7/gEbn+0zSr8igTu0obwJoNGN4sez28DIql7FBHWydoJpA==}
+  hono@4.13.7:
+    resolution: {integrity: sha512-c8/gF9ac8Y78/agExVocyLevgR+JlpNB444Py0FSX8pJoPdYUfUzRcXtYEYGwt6l19qIlVZPN5Mfsw9jFShmQQ==}
     engines: {node: '>=16.9.0'}
 
   html-encoding-sniffer@6.0.0:
@@ -4616,7 +4621,7 @@ packages:
       express: '>=4.19.2'
       fastify: '>=4.21.0'
       h3: '>=1.8.1'
-      hono: '>=4.2.7'
+      hono: '>=4.13.5'
       koa: '>=2.14.2'
       next: '>=12.0.0'
       react: '>=18.0.0'
@@ -5337,8 +5342,8 @@ packages:
     resolution: {integrity: sha512-BKDTJyIqFxC4BExLqeRS3f5xvXZIjOt8C3zGLN/Cc7tFxSwvKVhVkchQQ2AGLOtR4YrVOIFxbV8poyDOOmWwxQ==}
     engines: {node: '>=18.0.0'}
 
-  qs@6.15.3:
-    resolution: {integrity: sha512-O9gl3zCl5h5blw1KGUzQKhA5oUXSl8rwUIM5o0S3nCXMliSvy5Dzx7/DJcI+SwgICv+IneSZwhBh1oSyEHA71A==}
+  qs@6.16.0:
+    resolution: {integrity: sha512-h6fhOIaRrID2CbEY2fqs+7t+UXZo+MLAnU5gRIq85uFtdiUPCdsApMlHhXogKVM4HM2DVbIjGNTTYH2OcmP1vA==}
     engines: {node: '>=0.6'}
 
   queue-microtask@1.2.3:
@@ -7031,9 +7036,9 @@ snapshots:
       protobufjs: 7.6.5
       yargs: 17.7.3
 
-  '@hono/node-server@2.1.0(hono@4.13.2)':
+  '@hono/node-server@2.1.0(hono@4.13.7)':
     dependencies:
-      hono: 4.13.2
+      hono: 4.13.7
 
   '@iarna/toml@2.2.5': {}
 
@@ -7042,9 +7047,9 @@ snapshots:
       '@types/node': 22.20.1
       typescript: 5.9.3
 
-  '@inngest/test@1.0.0(inngest@4.18.1(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.2)(react@19.2.8)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.5.4))':
+  '@inngest/test@1.0.0(inngest@4.18.1(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.7)(react@19.2.8)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.5.4))':
     dependencies:
-      inngest: 4.18.1(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.2)(react@19.2.8)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.5.4)
+      inngest: 4.18.1(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.7)(react@19.2.8)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.5.4)
       tinyspy: 3.0.2
       ulid: 2.4.0
 
@@ -7092,7 +7097,7 @@ snapshots:
 
   '@modelcontextprotocol/sdk@1.30.0(supports-color@7.2.0)(zod@4.5.4)':
     dependencies:
-      '@hono/node-server': 2.1.0(hono@4.13.2)
+      '@hono/node-server': 2.1.0(hono@4.13.7)
       ajv: 8.20.0
       ajv-formats: 3.0.1(ajv@8.20.0)
       content-type: 1.0.5
@@ -7102,7 +7107,7 @@ snapshots:
       eventsource-parser: 3.1.1
       express: 5.2.1(supports-color@7.2.0)
       express-rate-limit: 8.6.2(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)
-      hono: 4.13.2
+      hono: 4.13.7
       jose: 6.2.8
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
@@ -9578,7 +9583,7 @@ snapshots:
   ajv@8.20.0:
     dependencies:
       fast-deep-equal: 3.1.3
-      fast-uri: 3.1.5
+      fast-uri: 3.1.7
       json-schema-traverse: 1.0.0
       require-from-string: 2.0.2
 
@@ -9726,7 +9731,7 @@ snapshots:
       http-errors: 2.0.1
       iconv-lite: 0.7.3
       on-finished: 2.4.1
-      qs: 6.15.3
+      qs: 6.16.0
       raw-body: 3.0.2
       type-is: 2.1.0
     transitivePeerDependencies:
@@ -10225,7 +10230,7 @@ snapshots:
       once: 1.4.0
       parseurl: 1.3.3
       proxy-addr: 2.0.7
-      qs: 6.15.3
+      qs: 6.16.0
       range-parser: 1.3.0
       router: 2.2.0(supports-color@7.2.0)
       send: 1.2.1(supports-color@7.2.0)
@@ -10264,7 +10269,7 @@ snapshots:
     dependencies:
       fast-string-truncated-width: 3.0.3
 
-  fast-uri@3.1.5: {}
+  fast-uri@3.1.7: {}
 
   fast-wrap-ansi@0.2.2:
     dependencies:
@@ -10438,7 +10443,7 @@ snapshots:
     dependencies:
       parse-passwd: 1.0.0
 
-  hono@4.13.2: {}
+  hono@4.13.7: {}
 
   html-encoding-sniffer@6.0.0(@noble/hashes@2.3.0):
     dependencies:
@@ -10502,7 +10507,7 @@ snapshots:
 
   inherits@2.0.4: {}
 
-  inngest@4.18.1(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.2)(react@19.2.8)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.5.4):
+  inngest@4.18.1(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(express@5.2.1(supports-color@7.2.0))(hono@4.13.7)(react@19.2.8)(supports-color@7.2.0)(typescript@7.0.2)(zod@4.5.4):
     dependencies:
       '@bufbuild/protobuf': 2.14.0
       '@inngest/ai': 0.1.7
@@ -10529,7 +10534,7 @@ snapshots:
       zod: 4.5.4
     optionalDependencies:
       express: 5.2.1(supports-color@7.2.0)
-      hono: 4.13.2
+      hono: 4.13.7
       react: 19.2.8
       typescript: 7.0.2
     transitivePeerDependencies:
@@ -11141,7 +11146,7 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  qs@6.15.3:
+  qs@6.16.0:
     dependencies:
       es-define-property: 1.0.1
       side-channel: 1.1.1
