@@ -6,9 +6,9 @@ settings:
   injectWorkspacePackages: true
 
 overrides:
-  fast-uri@<3.1.6: '>=3.1.6 <4'
-  hono@<4.13.5: '>=4.13.5'
-  qs@<6.16.0: '>=6.16.0'
+  fast-uri@>=3 <3.1.6: '>=3.1.6 <4'
+  hono@>=4 <4.13.5: '>=4.13.5 <5'
+  qs@>=6 <6.16.0: '>=6.16.0 <7'
 
 importers:
 
@@ -1369,7 +1369,7 @@ packages:
     resolution: {integrity: sha512-XovyyCCnBzW+zKu+z/zq8hwNs4KOR5rEMAOxo2f40Q5xoOI37IMm6MIg2COOUtUApo0i6850MTBKH2u4QLGIqg==}
     engines: {node: '>=20'}
     peerDependencies:
-      hono: '>=4.13.5'
+      hono: '>=4.13.5 <5'
 
   '@iarna/toml@2.2.5':
     resolution: {integrity: sha512-trnsAYxU3xnS1gPHPyU961coFyLkh4gAD/0zQ5mymY4yOZ+CYvsPqUbOFSw0aDM4y0tV7tiFxL/1XfXPNC6IPg==}
@@ -4621,7 +4621,7 @@ packages:
       express: '>=4.19.2'
       fastify: '>=4.21.0'
       h3: '>=1.8.1'
-      hono: '>=4.13.5'
+      hono: '>=4.13.5 <5'
       koa: '>=2.14.2'
       next: '>=12.0.0'
       react: '>=18.0.0'

@@ -15,12 +15,23 @@ allowBuilds:
 # stop a stale lockfile resolution from drifting back below it, since nothing in
 # any manifest pins these packages and Dependabot only bumps manifest entries.
 # Drop each once every parent's *minimum* supported range is patched.
+#
+# Every entry is bounded on both sides, and both bounds earn their place. An
+# unbounded value re-resolves to the newest release on the next lockfile pass and
+# will cross a major the parent never declared: `fast-uri@<3.1.6` -> `>=3.1.6`
+# resolves to 4.1.4 against ajv's `^3.0.1`. An unbounded selector reaches below
+# the line too — a bare `<4.13.5` matches hono 3.x, so a 3.x arrival would be
+# force-marched across a major to satisfy a floor written for the 4.x line.
+#
+# Scoping each selector to one major is therefore deliberate, and it does narrow
+# advisory coverage where an advisory spans further back: GHSA-4mjr-xmp4-gh2g
+# reaches qs `>=2.2.5`, so a hypothetical qs 5.x would sit unpatched here. That
+# is the better failure — a sub-6 qs entering this tree wants a look at what
+# pulled it, not a silent major bump, and no such dependency exists today.
 overrides:
-  # Capped below 4 because ajv declares fast-uri ^3.0.1 — an unbounded floor
-  # would force a major the parent never declared support for.
-  "fast-uri@<3.1.6": ">=3.1.6 <4" # GHSA-5jgf-p345-68v8, -f65p-4m7j-42xc, -fph4-wmhf-6fwf, -jqff-g426-hqxp (high) via ajv
-  "hono@<4.13.5": ">=4.13.5" # GHSA-gqvv-2mrq-wpjv, -g6gw-c38x-mqfc, -crvj-82cr-hjcx (moderate) via @modelcontextprotocol/sdk, inngest
-  "qs@<6.16.0": ">=6.16.0" # GHSA-x5fp-wj9c-mxmx, GHSA-4mjr-xmp4-gh2g (moderate) via express, body-parser
+  "fast-uri@>=3 <3.1.6": ">=3.1.6 <4" # GHSA-5jgf-p345-68v8, -f65p-4m7j-42xc, -fph4-wmhf-6fwf, -jqff-g426-hqxp (high) via ajv
+  "hono@>=4 <4.13.5": ">=4.13.5 <5" # GHSA-gqvv-2mrq-wpjv, -g6gw-c38x-mqfc, -crvj-82cr-hjcx (moderate) via @modelcontextprotocol/sdk, inngest
+  "qs@>=6 <6.16.0": ">=6.16.0 <7" # GHSA-x5fp-wj9c-mxmx, GHSA-4mjr-xmp4-gh2g (moderate) via express, body-parser
 
 # The Hindsight client is a first-party dependency (we contribute upstream and
 # pin the server to the matching image), so the supply-chain soak that guards
