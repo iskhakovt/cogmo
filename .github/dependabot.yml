@@ -14,6 +14,23 @@ updates:
     # Applies to version-updates only — security updates are exempt.
     cooldown:
       default-days: 7
+    # `@types/node` tracks the LOWEST Node major we support, not the newest.
+    # The types say what the code may call, and calling anything absent from
+    # the oldest runtime we advertise is a runtime crash the type checker
+    # would have blessed. `engines` is `^24.15.0 || >=26.0.0`, so the floor is
+    # 24 and the types belong on 24.x — note Node 25 isn't merely un-tested
+    # here, it's excluded, being an odd release that never becomes LTS.
+    #
+    # Nothing else catches this: `@types/node` ships no `engines` field, so
+    # `engine-ranges.test.ts` — which compares declared `engines` via
+    # `semver.subset` — cannot see it, and a major bump type-checks clean
+    # until something actually reaches for a newer API.
+    #
+    # Lift this when the floor moves, in the same change that raises
+    # `engines.node` in both manifests.
+    ignore:
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
     # Group updates so the lockfile only has one merge state to validate
     # at a time. Multiple overlapping PRs touching pnpm-lock.yaml can
     # produce a corrupted lockfile because GitHub's textual auto-rebase
