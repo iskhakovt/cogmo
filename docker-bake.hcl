@@ -51,9 +51,11 @@ variable "PNPM_VERSION" {
 variable "NPM_VERSION" {
   default = "12.0.2"
 }
-// Coupled to the claude.ts stream-json parser — bump with it.
+// Coupled to the claude.ts stream-json parser — bump with it. Tracks the
+// `stable` dist-tag, not `latest`: `latest` and `next` are the same build,
+// so following it puts the sandbox CLI ahead of the stable rollout.
 variable "CLAUDE_CODE_VERSION" {
-  default = "2.1.267"
+  default = "2.1.236"
 }
 
 // Default group builds every image — used by publish.yml on release.

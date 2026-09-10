@@ -36,7 +36,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # Toolchain versions — defaults mirror docker-bake.hcl (see the uv note above).
 ARG NPM_VERSION=12.0.2
 ARG PNPM_VERSION=11.21.0
-ARG CLAUDE_CODE_VERSION=2.1.267
+ARG CLAUDE_CODE_VERSION=2.1.236
 
 # devcontainers/base already ships git, gh, curl, jq, ripgrep — but `fd-find`
 # is missing on Ubuntu and the binary is named `fdfind` rather than `fd`.

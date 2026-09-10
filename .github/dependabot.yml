@@ -84,7 +84,10 @@ updates:
       # being removed from the distribution) that need human review.
       # Bump Node majors by hand once a year when the next even-numbered
       # LTS ships.
-      - dependency-name: library/node
+      # Glob because the name follows the image path: `library/node` for the
+      # `mirror.gcr.io/library/...` spelling, bare `node` without it. Matching
+      # both keeps the rule from going inert on a registry change.
+      - dependency-name: "*node"
         update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
