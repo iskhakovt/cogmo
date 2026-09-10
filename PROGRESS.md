@@ -41,7 +41,7 @@ The minimum useful system: talk to it, it remembers things.
 - [x] ~~Internal tag stripping~~ — removed; native thinking blocks + tool calls cover the use cases
 - [x] Crash recovery — handled by Inngest durable steps (automatic resume from last checkpoint); summarization LLM call wrapped in `step.run`, replay test via `@inngest/test`, contract documented in `design/crash-recovery.md`
 - [x] Session lifecycle — Inngest idle timer, resolveSession staleness, `/new` command, debounce wiring
-- [x] Context window management — countTokens() on LlmProvider, model registry, three-layer compaction pipeline, pair-aware compaction
+- [x] Context window management — countTokens() on LlmProvider, model registry, three-layer compaction pipeline, pair-aware compaction, durable summaries (`conversation_summaries`) written by the 80%-budget strategy and by `/compact`
 - [x] Full tool invocation history — messages.content stores ContentBlock[] (text, tool_use, tool_result, image, thinking), not just final text
 - [x] Message batching — debounce-router, debounce-idle, debounce-maxwait with entry guards and resume policy
 - [x] Response routing — source routing via DeliveryRouter, getSourceSessions + getReceiveAllSessions

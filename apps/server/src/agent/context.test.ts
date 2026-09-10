@@ -1,10 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ContentBlock, Message, ToolResultBlock, ToolUseBlock } from "../llm/types.js";
+import { expectDefined } from "../test/assertions.js";
 import {
+  type ContextManagerDeps,
   compactMessages,
   compactSameToolClusters,
+  extractSummaryText,
+  SUMMARIZATION_PROMPT,
   shouldSkipCounting,
   snapToPairBoundary,
+  summarizationRequest,
 } from "./context.js";
 
 /** Helper: create a simple text message. */
@@ -143,7 +148,7 @@ describe("compactMessages", () => {
   });
 
   // Locks the contract documented on `ContextManagerDeps.summarize`. The
-  // hardcoded `summarize-prefix` step ID in `handle-message.ts` depends on
+  // hardcoded `summarize-prefix-outcome` step ID in `handle-message.ts` depends on
   // this — Inngest throws on duplicate step IDs, so a future change that
   // calls `summarize` twice (e.g., segmented summarization) would surface
   // only at runtime under specific conversation lengths. This test catches
@@ -931,5 +936,204 @@ describe("compactMessages — Strategy 0 wiring", () => {
     );
     expect(result.didCompact).toBe(false);
     expect(countTokens).not.toHaveBeenCalled();
+  });
+});
+
+describe("pre-summarize strategies preserve the array's length", () => {
+  // Load-bearing for durable summaries: `handle-message` treats
+  // `messagesSummarized` as an index into the history it loaded, mapping it to
+  // a `through_message_id`. That only holds because Strategies 0 and 1 rewrite
+  // block content in place. If either ever drops or inserts a message, the
+  // cutoff would name the wrong row and the next turn would replay a span the
+  // summary already covers.
+  const cluster = (n: number): Message[] =>
+    Array.from({ length: n }, (_, i) => [
+      toolCallMsg(`t${i}`, "read_file"),
+      toolResultMsg([{ id: `t${i}`, content: `contents of file ${i} `.repeat(40) }]),
+    ]).flat();
+
+  it("Strategy 0 returns as many messages as it was given", () => {
+    const messages = cluster(6);
+    const result = compactSameToolClusters(messages, {
+      retainRecent: 2,
+      retainFirst: 1,
+      triggerCount: 5,
+    });
+
+    expect(result.resultsCompacted).toBeGreaterThan(0);
+    expect(result.messages).toHaveLength(messages.length);
+  });
+
+  it("Strategy 1 returns as many messages as it was given", async () => {
+    const messages = cluster(8);
+    // Over the 60% clear threshold, under the 80% summarize one. `summarize` is
+    // supplied so the threshold is what stops the ladder — omitting it would
+    // gate Strategy 2 off outright and make the assertion below vacuous.
+    const summarize = vi.fn().mockResolvedValue("unused");
+    const result = await compactMessages(
+      "system",
+      messages,
+      undefined,
+      { countTokens: vi.fn().mockResolvedValue(700), budget: 1000, summarize },
+      false,
+    );
+
+    expect(result.event?.strategies).toContain("clear_tool_results");
+    expect(result.event?.strategies).not.toContain("summarize");
+    expect(summarize).not.toHaveBeenCalled();
+    expect(result.messages).toHaveLength(messages.length);
+  });
+
+  it("reports a summarized count that indexes the input array", async () => {
+    const messages = [
+      ...cluster(3),
+      ...Array.from({ length: 6 }, (_, i) => msg(i % 2 === 0 ? "user" : "assistant", `tail ${i}`)),
+    ];
+    const summarize = vi.fn().mockResolvedValue("a summary");
+
+    const result = await compactMessages(
+      "system",
+      messages,
+      undefined,
+      { countTokens: vi.fn().mockResolvedValue(900), budget: 1000, summarize },
+      false,
+    );
+
+    const summarized = result.event?.messagesSummarized ?? 0;
+    expect(summarized).toBeGreaterThan(0);
+    // The prefix handed to the summarizer is exactly `input.slice(0, count)`,
+    // message-for-message — same positions, only block content rewritten.
+    const prefix: Message[] = expectDefined(summarize.mock.calls[0], "summarize call")[1];
+    expect(prefix).toHaveLength(summarized);
+    expect(prefix.map((m) => m.role)).toEqual(messages.slice(0, summarized).map((m) => m.role));
+  });
+});
+
+describe("prefix veto", () => {
+  function summarizeDeps(
+    summarize: NonNullable<ContextManagerDeps["summarize"]>,
+  ): ContextManagerDeps {
+    return { countTokens: vi.fn().mockResolvedValue(900), budget: 1000, summarize };
+  }
+
+  const sevenMessages = () =>
+    Array.from({ length: 7 }, (_, i) => msg(i % 2 === 0 ? "user" : "assistant", `turn ${i}`));
+
+  it("summarizes a one-message prefix when no veto is supplied", async () => {
+    // 7 messages at keepTurns 6 splits at 1. Size is not what makes a prefix
+    // worth summarizing: one enormous message is the best case for Strategy 2,
+    // and refusing it would hand the turn to lossy truncation.
+    const summarize = vi.fn().mockResolvedValue("a summary");
+
+    const result = await compactMessages(
+      "system",
+      sevenMessages(),
+      undefined,
+      summarizeDeps(summarize),
+    );
+
+    expect(summarize).toHaveBeenCalledOnce();
+    expect(result.event?.messagesSummarized).toBe(1);
+  });
+
+  it("skips the LLM call when the caller vetoes the split", async () => {
+    const summarize = vi.fn().mockResolvedValue("a summary");
+    const canSummarizePrefix = vi.fn().mockReturnValue(false);
+
+    const result = await compactMessages("system", sevenMessages(), undefined, {
+      ...summarizeDeps(summarize),
+      canSummarizePrefix,
+    });
+
+    expect(canSummarizePrefix).toHaveBeenCalledWith(1);
+    expect(summarize).not.toHaveBeenCalled();
+    expect(result.event?.strategies ?? []).not.toContain("summarize");
+  });
+
+  it("consults the veto with the chosen split, after pair-snapping", async () => {
+    // The veto has to see the index the summary would actually cover, not the
+    // raw `length - keepTurns` — the caller maps it back to a message id.
+    const canSummarizePrefix = vi.fn().mockReturnValue(true);
+    const messages = [
+      msg("user", "t0"),
+      msg("assistant", "t1"),
+      toolCallMsg("t9", "read_file"),
+      toolResultMsg([{ id: "t9", content: "x" }]),
+      ...Array.from({ length: 5 }, (_, i) => msg(i % 2 === 0 ? "assistant" : "user", `u${i}`)),
+    ];
+
+    await compactMessages("system", messages, undefined, {
+      ...summarizeDeps(vi.fn().mockResolvedValue("a summary")),
+      canSummarizePrefix,
+    });
+
+    // 9 entries, keepTurns 6 → raw split 3, which lands on the user-role
+    // tool_result and snaps back to 2 so the pair stays intact.
+    expect(canSummarizePrefix).toHaveBeenCalledWith(2);
+  });
+});
+
+describe("summarizationRequest", () => {
+  it("repairs an orphan tool_use at the prefix tail", () => {
+    // A split can land right after an assistant `tool_use` that history never
+    // answered — a shape `validateHistory` exists for. Compaction runs upstream
+    // of the agent loop's sanitizer, so this is the one LLM call in a turn that
+    // would otherwise be built from raw history, and Anthropic rejects it.
+    const params = summarizationRequest({
+      model: "m",
+      system: "s",
+      messages: [msg("user", "do it"), toolCallMsg("t1", "read_file")],
+      maxOutputTokens: 8192,
+    });
+
+    // The synthesized answer sits between the orphan call and the instruction.
+    expect(expectDefined(params.messages.at(-2), "answering message")).toMatchObject({
+      role: "user",
+      content: [{ type: "tool_result", toolUseId: "t1" }],
+    });
+  });
+
+  it("joins several text blocks on a paragraph break rather than fusing them", () => {
+    // Blocks in a non-streaming response are discrete units. Joining with
+    // nothing would run the last sentence of one into the first of the next,
+    // and the result is stored rather than recomputed on the next turn.
+    expect(
+      extractSummaryText([
+        { type: "text", text: "They settled the schema." },
+        { type: "text", text: "Then they moved on." },
+      ]),
+    ).toBe("They settled the schema.\n\nThen they moved on.");
+  });
+
+  it("drops non-text blocks", () => {
+    expect(
+      extractSummaryText([
+        { type: "thinking", thinking: "hmm", signature: "sig" },
+        { type: "text", text: "the summary" },
+      ]),
+    ).toBe("the summary");
+  });
+
+  it("appends the instruction as the final user message", () => {
+    const params = summarizationRequest({
+      model: "m",
+      system: "s",
+      messages: [msg("user", "hello"), msg("assistant", "hi")],
+      maxOutputTokens: 8192,
+    });
+
+    expect(params.messages.at(-1)).toEqual({ role: "user", content: SUMMARIZATION_PROMPT });
+    expect(params.messages).toHaveLength(3);
+  });
+
+  it("caps output at the model's own ceiling when it is below the default", () => {
+    expect(
+      summarizationRequest({ model: "m", system: "s", messages: [], maxOutputTokens: 4096 })
+        .maxTokens,
+    ).toBe(4096);
+    expect(
+      summarizationRequest({ model: "m", system: "s", messages: [], maxOutputTokens: 64_000 })
+        .maxTokens,
+    ).toBe(16_000);
   });
 });

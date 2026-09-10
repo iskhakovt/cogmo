@@ -1,13 +1,14 @@
 import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import type { Profile } from "../../../agent/store/index.js";
-import { assertKind } from "../../../test/assertions.js";
+import { assertKind, expectDefined } from "../../../test/assertions.js";
 import { type DeepPartial, mockTransportDeep } from "../../../test/factories.js";
 import type { Transport } from "../../transport.js";
 import {
   formatRelativeTime,
   formatScope,
   handleClasses,
+  handleCompact,
   handleCompartments,
   handleDisable,
   handleEnable,
@@ -2439,7 +2440,7 @@ describe("/profile stream subcommand", () => {
     const ctx = mkCtx("stream personal chunk=200");
     await handleProfile(transport, ctx, mkDialogs());
     const reply = ctx.reply.mock.calls[0]?.[0];
-    expect(reply).toBe("Profile not found.");
+    expect(reply).toBe("Profile not found. Use /profile list to see what's available.");
     expect(reply).not.toContain("Stream prefs");
   });
 });
@@ -4321,6 +4322,96 @@ describe("handleLearned", () => {
     const ctx = mkCtx("not-a-uuid");
     await handleLearned(transport, ctx);
     expect(ctx.reply.mock.calls[0]?.[0]).toContain("Usage: /learned");
+  });
+});
+
+describe("handleCompact", () => {
+  function compactWith(value: unknown) {
+    return transportWith({ conversations: { compact: vi.fn().mockResolvedValue(value) } });
+  }
+
+  it("acknowledges before the summarization round trip, then reports the result", async () => {
+    const transport = compactWith(
+      ok({
+        status: "compacted",
+        messagesSummarized: 24,
+        messagesKept: 6,
+        model: "claude-haiku-4-5",
+      }),
+    );
+    const ctx = mkCtx();
+    await handleCompact(transport, ctx);
+
+    expect(ctx.reply.mock.calls[0]?.[0]).toMatch(/Compacting/);
+    const result = (ctx.reply.mock.calls[1]?.[0] ?? "") as string;
+    expect(result).toContain("24 message(s)");
+    expect(result).toContain("6 kept verbatim");
+    expect(result).toContain("claude-haiku-4-5");
+  });
+
+  it("reports too little outside the retained window without claiming token safety", async () => {
+    // `too_short` counts messages, not tokens — it says nothing about whether
+    // the conversation fits in the context window, so the reply must not either.
+    const ctx = mkCtx();
+    await handleCompact(compactWith(ok({ status: "skipped", reason: "too_short" })), ctx);
+    const reply = expectDefined(ctx.reply.mock.calls[1], "second reply")[0];
+    expect(reply).toMatch(/outside the retained window/i);
+    expect(reply).not.toMatch(/fits/i);
+  });
+
+  it("reports that a turn already stored a summary for the span", async () => {
+    const ctx = mkCtx();
+    await handleCompact(compactWith(ok({ status: "skipped", reason: "nothing_new" })), ctx);
+    expect(ctx.reply.mock.calls[1]?.[0]).toMatch(/already compacted/i);
+  });
+
+  it("says nothing was stored when the model returned no text", async () => {
+    const ctx = mkCtx();
+    await handleCompact(compactWith(ok({ status: "skipped", reason: "empty_summary" })), ctx);
+    expect(ctx.reply.mock.calls[1]?.[0]).toMatch(/nothing stored/i);
+  });
+
+  it("says a capped summary was not stored and that re-running won't help", async () => {
+    // The one skip reason that is a dead end rather than a retry: the prefix is
+    // unchanged and the output cap is fixed, so the reply must not imply
+    // otherwise. Both claims it makes are behavioural.
+    const ctx = mkCtx();
+    await handleCompact(compactWith(ok({ status: "skipped", reason: "truncated" })), ctx);
+    const reply = expectDefined(ctx.reply.mock.calls[1], "second reply")[0];
+    expect(reply).toMatch(/nothing was stored/i);
+    expect(reply).toMatch(/won't help/i);
+    expect(reply).not.toMatch(/try again/i);
+  });
+
+  it("reports no-session when there's no active conversation", async () => {
+    const ctx = mkCtx();
+    await handleCompact(compactWith(ok({ status: "no_session" })), ctx);
+    expect(ctx.reply.mock.calls[1]?.[0]).toMatch(/No active conversation/i);
+  });
+
+  it("renders a transport error rather than throwing", async () => {
+    const ctx = mkCtx();
+    await handleCompact(compactWith(err({ code: "compaction_unavailable" })), ctx);
+    expect(ctx.reply.mock.calls[1]?.[0]).toMatch(/isn't wired/i);
+  });
+
+  it("surfaces the reason when compaction failed", async () => {
+    const ctx = mkCtx();
+    await handleCompact(
+      compactWith(err({ code: "compaction_failed", reason: "429 rate limited" })),
+      ctx,
+    );
+    expect(ctx.reply.mock.calls[1]?.[0]).toContain("429 rate limited");
+  });
+
+  it("points at the log when the reason is withheld", async () => {
+    // `null` is what the transport substitutes for any error whose message
+    // isn't on the allowlist — the user gets a pointer, not a redaction marker.
+    const ctx = mkCtx();
+    await handleCompact(compactWith(err({ code: "compaction_failed", reason: null })), ctx);
+    const reply = expectDefined(ctx.reply.mock.calls[1], "second reply")[0];
+    expect(reply).toMatch(/server log/i);
+    expect(reply).not.toMatch(/null/i);
   });
 });
 

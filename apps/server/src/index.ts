@@ -20,6 +20,7 @@ import { DrizzleCodingStore } from "./agent/coding/store/index.js";
 import { CodingStreamingRegistry } from "./agent/coding/streaming-registry.js";
 import { DELEGATE_CODING_GUIDANCE, delegateCodingTool } from "./agent/coding/tool.js";
 import { createCodingVerifyOrchestrator } from "./agent/coding/verify-orchestrator.js";
+import { compactConversation } from "./agent/conversation/compact-conversation.js";
 import { coreMemoryTools } from "./agent/core-memory-tools.js";
 import { createDebounceFunctions, type DebounceConfig } from "./agent/debounce.js";
 import { createDocumentTools } from "./agent/document-tools.js";
@@ -1028,6 +1029,18 @@ export async function bootstrapRuntime(
       memory: core.memory,
     });
 
+  // Sync compaction driver injected into every Transport so `/compact` can
+  // summarize and store in-process, ahead of the budget pressure that would
+  // otherwise trigger it at the front of the user's next turn.
+  const compactionTrigger = (conversationId: string) =>
+    compactConversation(conversationId, {
+      runInTx: core.runInTx,
+      agentStore: core.agentStore,
+      transportStore: core.transportStore,
+      resolveProvider: core.resolveProvider,
+      promptSource,
+    });
+
   // Provision the web channel before startChannels so its placeholder adapter
   // is matched (no "unknown channel type" warning). Idempotent + boot-time:
   // seedDefaults runs only under `cogmo setup`, so this gives existing
@@ -1055,6 +1068,7 @@ export async function bootstrapRuntime(
     skillStore: core.skillStore,
     mcpRegistry,
     triggerReflection: reflectionTrigger,
+    compactConversation: compactionTrigger,
     inngest,
     inboundArrived,
     attachments: core.attachmentStore,
@@ -1092,6 +1106,7 @@ export async function bootstrapRuntime(
         skillStore: core.skillStore,
         mcpRegistry,
         triggerReflection: reflectionTrigger,
+        compactConversation: compactionTrigger,
         inngest,
         inboundArrived,
         attachments: core.attachmentStore,

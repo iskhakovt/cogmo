@@ -63,8 +63,22 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     insertMessage: vi.fn().mockResolvedValue({ id: "msg-1" }),
     insertMessages: vi.fn().mockResolvedValue({ id: "msg-1" }),
     getLastAssistantMessage: vi.fn().mockResolvedValue(null),
-    getHistory: vi.fn().mockResolvedValue([]),
     listMessages: vi.fn().mockResolvedValue([]),
+    getLatestSummary: vi.fn().mockResolvedValue(undefined),
+    insertOrRecoverSummary: vi.fn().mockResolvedValue({
+      kind: "new",
+      row: {
+        id: "summary-1",
+        conversationId: "conv-1",
+        summary: "summary",
+        throughMessageId: "msg-1",
+        messagesSummarized: 2,
+        model: "claude-haiku-4-5",
+        source: "turn",
+        createdAt: new Date(),
+      },
+    }),
+    getHistoryAfter: vi.fn().mockResolvedValue([]),
     getProfile: vi.fn().mockResolvedValue({
       id: "profile-1",
       userId: null,
@@ -357,6 +371,14 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
       setAlias: vi.fn().mockResolvedValue(ok(undefined)),
       setProfile: vi.fn().mockResolvedValue(ok(undefined)),
       repair: vi.fn().mockResolvedValue(ok({ wasCoolingDown: false })),
+      compact: vi.fn().mockResolvedValue(
+        ok({
+          status: "compacted",
+          messagesSummarized: 12,
+          messagesKept: 6,
+          model: "claude-haiku-4-5",
+        }),
+      ),
       setVoiceMode: vi.fn().mockResolvedValue(ok(undefined)),
     },
     chats: {

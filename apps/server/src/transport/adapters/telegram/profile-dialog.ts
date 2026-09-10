@@ -311,12 +311,13 @@ function ellipsize(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }
 
-function friendlyError(err: { code: string; model?: string; reason?: string }): string {
+function friendlyError(err: { code: string; model?: string; reason?: string | null }): string {
   if (err.code === "model_unavailable")
     return `Model "${err.model}" isn't available. Use /model to see options.`;
   if (err.code === "profile_name_taken") return "A profile with that name already exists.";
   if (err.code === "access_denied") return `Access denied — ${err.reason ?? ""}.`;
-  if (err.code === "profile_not_found") return "Profile not found.";
+  if (err.code === "profile_not_found")
+    return "Profile not found. Use /profile list to see what's available.";
   if (err.code === "identity_rejected") return "You're not authorized on this bot.";
   return "Something went wrong.";
 }

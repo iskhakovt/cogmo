@@ -11,8 +11,15 @@
  */
 
 import * as R from "remeda";
-import type { ContentBlock, CountTokensParams, Message, ToolDefinition } from "../llm/types.js";
+import type {
+  ChatParams,
+  ContentBlock,
+  CountTokensParams,
+  Message,
+  ToolDefinition,
+} from "../llm/types.js";
 import { logger } from "../logger.js";
+import { validateHistory } from "./history-invariants.js";
 
 // --- Public interface ---
 
@@ -26,11 +33,28 @@ export interface ContextManagerDeps {
    *
    * Contract: called **at most once** per `compactMessages` invocation. Callers
    * (notably `handle-message`) rely on this to wrap the call in a single Inngest
-   * step with a fixed step ID (`summarize-prefix`). If a future strategy ever
+   * step with a fixed step ID (`summarize-prefix-outcome`). If a future strategy ever
    * needs segmented summarization, this contract — and the hardcoded step ID at
    * the call site — must change in lockstep.
    */
   summarize?: (system: string, messages: Message[]) => Promise<string>;
+  /**
+   * Veto on summarizing a prefix of `splitIdx` entries, consulted after the
+   * split is chosen and before the LLM call.
+   *
+   * Exists because worth is not a property of the prefix's shape. A one-entry
+   * prefix holding a 500K-token message is the best case for Strategy 2; a
+   * one-entry prefix holding a previously-stored summary is the worst, buying a
+   * summary of a summary that advances no cutoff and gets discarded. Only a
+   * caller holding the message ids can tell those apart, so `handle-message`
+   * gates on whether the span has a durable cutoff. Omitted means no veto.
+   *
+   * `splitIdx` indexes the array the caller passed in, which holds only because
+   * every strategy running before summarization rewrites block content in place
+   * and preserves length. `context.test.ts` pins that; a future pre-summarize
+   * strategy that drops or merges entries has to hand the split back instead.
+   */
+  canSummarizePrefix?: (splitIdx: number) => boolean;
 }
 
 export interface CompactionEvent {
@@ -54,14 +78,24 @@ const SUMMARIZE_THRESHOLD = 0.8;
 const TRUNCATE_THRESHOLD = 0.95;
 
 const DEFAULT_KEEP_TOOL_RESULTS = 5;
-const DEFAULT_KEEP_TURNS = 6;
+
+/**
+ * Messages kept verbatim after the summarized prefix. Exported because the
+ * manual `/compact` driver forces the same split the 80%-budget strategy would
+ * have chosen, and a divergence there would make a manual compaction and an
+ * automatic one cover different spans of the same conversation.
+ */
+export const DEFAULT_KEEP_TURNS = 6;
 
 // Strategy 0 defaults — see design/context-management.md → Strategy 0.
 // triggerCount = retainRecent + retainFirst + 2 → first fire compacts
 // 2 results, making the cache-invalidation cost worthwhile.
-const DEFAULT_RETAIN_RECENT = 2;
-const DEFAULT_RETAIN_FIRST = 1;
-const DEFAULT_TRIGGER_COUNT = 5;
+// Exported for the same reason as DEFAULT_KEEP_TURNS: `/compact` runs
+// Strategy 0 itself, and a divergence here would have a manual compaction and
+// an automatic one summarize different prefixes for the same span.
+export const DEFAULT_RETAIN_RECENT = 2;
+export const DEFAULT_RETAIN_FIRST = 1;
+export const DEFAULT_TRIGGER_COUNT = 5;
 
 export const SUMMARIZATION_PROMPT = `Summarize the conversation below. You MUST preserve:
 1. All user decisions and stated preferences
@@ -73,6 +107,86 @@ export const SUMMARIZATION_PROMPT = `Summarize the conversation below. You MUST 
 
 Focus on what the assistant needs to continue the conversation.
 Be specific — preserve names, paths, and values, not abstractions.`;
+
+/**
+ * The summarization request both compaction paths send. Shared so the prompt,
+ * the output cap and the message layout cannot drift between the turn-time
+ * strategy and the manual `/compact` driver.
+ *
+ * The prefix is repaired first, through the same `validateHistory` the agent
+ * loop applies to every request — so the summarizer reads the shape the model
+ * reads. That is also why a repair here cannot lose anything: a stray
+ * `tool_result` dropped from the prefix was already dropped from every LLM
+ * payload by `sanitizeHistory`, and the row itself stays in `messages` for the
+ * Observer. `sanitizeHistory` runs inside the agent loop,
+ * which is downstream of compaction, so a summarization request is the one
+ * LLM call in a turn built from raw history — and a split can land right after
+ * an assistant `tool_use` that history never answered, which Anthropic rejects
+ * outright. Unrepaired, that 400 is permanent for the conversation: the manual
+ * path surfaces it as `compaction_failed` on every attempt, and the turn-time
+ * path swallows it into a wasted billable call plus a silent drop to
+ * truncation on every turn above the threshold.
+ *
+ * The cap leaves room for reasoning as well as the summary, bounded by what
+ * this model accepts — asking above its ceiling is a 400 of a different kind.
+ */
+export function summarizationRequest(params: {
+  model: string;
+  system: string;
+  messages: ReadonlyArray<Message>;
+  maxOutputTokens: number;
+}): ChatParams {
+  const { messages: repaired, repairs } = validateHistory(params.messages);
+  if (repairs.length > 0) {
+    // `validateHistory` leaves telemetry to the caller, and `sanitizeHistory`
+    // is the only other one. `/compact` never reaches the agent loop, so
+    // without this a manually-compacted conversation repairs its orphans
+    // silently — and folds them into a summary that is never re-derived.
+    logger.warn({ repairCount: repairs.length, repairs }, "repaired summarization prefix");
+  }
+  return {
+    model: params.model,
+    system: params.system,
+    messages: [...repaired, { role: "user", content: SUMMARIZATION_PROMPT }],
+    maxTokens: Math.min(16_000, params.maxOutputTokens),
+  };
+}
+
+/**
+ * Concatenate the text blocks of a summarization response. Non-text blocks
+ * (thinking, and anything a future model emits alongside prose) are dropped —
+ * only the prose stands in for the conversation.
+ *
+ * Joined on a paragraph break. Blocks in a non-streaming response are discrete
+ * units rather than fragments of one, so that is the seam that cannot corrupt
+ * the text — and this text is stored and replayed rather than recomputed, so a
+ * fused sentence would be permanent. One block is the expected case
+ * (`fromOpenAIMessage` emits at most one; Anthropic returns several only when
+ * they are interleaved with `tool_use`, which a summarization request never
+ * carries), which is why more than one is worth a log line.
+ */
+export function extractSummaryText(content: ReadonlyArray<ContentBlock>): string {
+  const text = content.filter((b) => b.type === "text");
+  if (text.length > 1) {
+    // The request carries no tools, so more than one block means an assumption
+    // in the docblock above has moved.
+    logger.warn(
+      { blocks: text.length },
+      "summarization returned multiple text blocks; joined on a paragraph break",
+    );
+  }
+  return text.map((b) => b.text).join("\n\n");
+}
+
+/**
+ * Render a summary as the single user message that stands in for the span it
+ * replaces. One definition serves both the in-memory pipeline and the durable
+ * replay of a persisted summary, so a stored summary re-enters the context in
+ * exactly the shape the model saw when it was produced.
+ */
+export function formatSummaryMessage(summary: string): Message {
+  return { role: "user", content: `[Previous conversation summary]\n\n${summary}` };
+}
 
 /**
  * Run the compaction pipeline on conversation messages. Returns the
@@ -161,7 +275,13 @@ export async function compactMessages(
   // Strategy 2: Summarize conversation prefix at 80%
   if (tokens > budget * SUMMARIZE_THRESHOLD && summarize) {
     try {
-      const summarized = await summarizePrefix(result, system, summarize, DEFAULT_KEEP_TURNS);
+      const summarized = await summarizePrefix(
+        result,
+        system,
+        summarize,
+        DEFAULT_KEEP_TURNS,
+        deps.canSummarizePrefix,
+      );
       if (summarized.summarizedCount > 0) {
         result = summarized.messages;
         messagesSummarized = summarized.summarizedCount;
@@ -458,6 +578,7 @@ async function summarizePrefix(
   system: string,
   summarize: (system: string, messages: Message[]) => Promise<string>,
   keepTurns: number,
+  canSummarize: ContextManagerDeps["canSummarizePrefix"],
 ): Promise<{ messages: Message[]; summarizedCount: number }> {
   // Keep the last keepTurns messages (user/assistant pairs)
   const rawSplit = Math.max(0, messages.length - keepTurns);
@@ -465,6 +586,8 @@ async function summarizePrefix(
 
   const splitIdx = snapToPairBoundary(messages, rawSplit);
   if (splitIdx <= 0) return { messages, summarizedCount: 0 };
+  // See `ContextManagerDeps.canSummarizePrefix` for why the caller decides.
+  if (canSummarize && !canSummarize(splitIdx)) return { messages, summarizedCount: 0 };
 
   const prefix = messages.slice(0, splitIdx);
   const suffix = messages.slice(splitIdx);
@@ -485,10 +608,7 @@ async function summarizePrefix(
     return { messages, summarizedCount: 0 };
   }
 
-  const summaryMessage: Message = {
-    role: "user",
-    content: `[Previous conversation summary]\n\n${summary}`,
-  };
+  const summaryMessage = formatSummaryMessage(summary);
 
   return {
     messages: [summaryMessage, ...suffix],

@@ -47,7 +47,7 @@ budget = contextWindow - maxOutputTokens - safetyBuffer
 
 ## Persistence Model
 
-Compaction is **ephemeral** — applied in-memory when loading messages for the LLM call. The database retains the full, unmodified conversation history.
+Compaction is **ephemeral** for Strategies 0, 1 and 3 — applied in-memory when loading messages for the LLM call. The database retains the full, unmodified conversation history.
 
 - The Observer can extract facts from the complete conversation, not just the compacted view.
 - Debounce cursors and message IDs are unaffected — they reference DB rows, not the compacted array.
@@ -55,6 +55,49 @@ Compaction is **ephemeral** — applied in-memory when loading messages for the 
 - No destructive operations — the full history can always be re-derived.
 
 The fast-path optimization (persisting `inputTokens` on assistant messages) avoids re-computing compaction on every turn without modifying the message content itself.
+
+### Durable summaries `[confirmed]`
+
+Strategy 2 is the exception, because it is the only strategy that costs an LLM call. Recomputing it every turn would re-bill the same span of conversation indefinitely, so its output is written to `conversation_summaries` and replayed on subsequent turns.
+
+| Column | Meaning |
+|-|-|
+| `conversation_id` | Owning conversation. |
+| `summary` | The text, exactly as it re-enters the context. |
+| `through_message_id` | Last `messages` row the summary stands in for. Snapped to a tool_use/tool_result pair boundary at write time. |
+| `messages_summarized` | Real messages the summary replaced — audit trail, not a cursor. Excludes a previous summary folded in, so a re-compaction's count matches what the user was told. |
+| `model` | Summarization model that produced the text. |
+| `source` | `turn` (Strategy 2 fired under budget pressure) or `manual` (`/compact`). |
+
+The table is **append-only**. Re-compaction inserts a new row summarizing the previous summary plus everything that arrived since; the loader reads the newest row per conversation. This preserves the "prefer immutable rows" rule and leaves an audit trail of how often a conversation has been compacted and by which path.
+
+**The raw transcript is never rewritten.** `conversation_summaries` is an overlay: `loadTurnHistory` (`src/agent/conversation/load-turn-history.ts`) reads the widest summary, drops every message at or before its cutoff, and prepends the summary as one user message. The Observer and the web history read keep taking the complete transcript through `listMessages`, so fact extraction is unaffected — the collapse is LLM-facing only. Dropping the table restores full-history behavior with no migration.
+
+**One bullet above no longer holds**, and it is the real cost of durability: *"strategy changes take effect immediately without data migration"* is now false for the summarization prompt and model. A stored summary is never re-derived — the raw prefix behind it is never revisited — so improving `SUMMARIZATION_PROMPT` or switching `summarizationModel` can only produce a summary *of the old summary* on spans already compacted, while the old text keeps re-entering the context verbatim. Accepted: re-deriving would mean re-billing every historical span on every prompt tweak, which is the cost the table exists to remove. If a prompt change ever needs to reach old spans, the mechanism is deleting the affected rows so the next turn re-summarizes from the transcript, which is still intact.
+
+**Reading order is by coverage, not insertion.** `getLatestSummary` orders by `through_message_id DESC`, so the widest summary wins. The two orders agree in normal operation, since each compaction covers strictly more than the last, and diverge only when a slow `/compact` commits a narrower summary after a turn has already stored a wider one — ordering by `id` there would orphan the wider summary and silently re-include messages it already covers. The `(conversation_id, through_message_id)` unique index serves this sort scanned backwards, so it needs no second index.
+
+**Idempotency.** `(conversation_id, through_message_id)` is UNIQUE and the write goes through `ON CONFLICT DO UPDATE` with a no-op SET. `durable: true` buys replay-safety, not exactly-once — a crash between the commit and Inngest recording the step re-runs the write — so the constraint is what keeps a retry from appending a second row for the same span. The `DO UPDATE` shape (rather than `DO NOTHING`) is required by the project's REPEATABLE READ default; see [.claude/rules/inngest.md](../.claude/rules/inngest.md).
+
+**Cutoff derivation.** `loadTurnHistory` returns `messageIds` positionally aligned with the messages it hands back, `null` for the synthetic summary entry. Strategies 0 and 1 rewrite block content in place and never change the array's length, so `messagesSummarized` indexes that array directly and the cutoff is the last real id inside the summarized span. When that span holds only the previous summary, there is no cutoff to advance to and the write is skipped — re-summarizing a summary while covering nothing new is pure loss.
+
+### Manual compaction `[confirmed]`
+
+`/compact` forces Strategy 2 immediately, regardless of budget pressure, and stores the result. The next turn then starts from a summary it did not have to wait for. `src/agent/conversation/compact-conversation.ts` drives it synchronously — the same trade-off `/reflect` makes: the user is waiting on the reply, single-user scale means no concurrent fire to race, and errors surface to the caller instead of a retry log.
+
+It picks the same split the budget-triggered path would (`DEFAULT_KEEP_TURNS`) and runs Strategy 0 over the prefix first, matching that ladder's first rung — count-based and structural, so it needs no token count. It does **not** run Strategy 1: clearing tool results would have the summarizer read placeholders instead of the output it is meant to compress, and unlike the turn-time path there is no budget pressure to justify that loss.
+
+Because there is no budget gate, the manual path carries a floor the automatic one does not need: below `MIN_MESSAGES_TO_COMPACT` **real messages** outside the retain window it returns `too_short` rather than paying for a call. Reaching 80% of the window on that few messages means they are individually enormous and worth summarizing; asking by hand on a short conversation is not. The floor counts messages rather than compaction-view entries, so a re-compaction can't clear it on the strength of the previous summary occupying a slot.
+
+**Strategy 2's input differs between the paths, and the turn-time one is the weaker.** Strategy 1 fires at 60% and Strategy 2 at 80%, so by the time the turn-time summarizer runs, every tool result outside the most recent five is already a `[Cleared — call tool again if needed]` placeholder — and that is now what gets frozen into a durable summary. `/compact` skips Strategy 1 for exactly this reason and reads the real output. Correcting it means summarizing from the pre-clear array (the strategies are length-preserving, so the indices still line up), which raises the summarization request size and is therefore coupled to the prefix-vs-window gap tracked in `todo.md`; the two want fixing together.
+
+Outcomes: `too_short` (nothing outside the retain window, or too little to be worth a call), `nothing_new`, `empty_summary` (the model returned no text — nothing is stored), `truncated`, or the message counts. `nothing_new` also covers an already-compacted conversation, where the only thing outside the window is the stored summary — reporting that as `too_short` would tell someone their 500-message conversation is short. `truncated` is a dead end rather than a retry: the response hit its output cap, re-running feeds the same prefix into the same cap, and the input cap tracked in `todo.md` is what would let that span be compacted at all. `nothing_new` covers both ways a concurrent turn can win the race: taking the same cutoff, where the conflict arm keeps its text, or a wider one, where this row is written but coverage-ordered reads will never return it. The driver re-reads after the write, in a **separate** transaction — under REPEATABLE READ a snapshot is taken at a transaction's first statement, so a read sharing the insert's transaction would be blind to anything committed after it.
+
+What that catches is a turn that committed before the re-read, which covers the whole summarization round trip — the window that actually matters, since it is seconds long. A turn committing *after* the re-read still supersedes the manual row, and `/compact` will have reported success. That is not a lie about the past: the row was the widest when it was checked, and the later summary is legitimately the better one. Closing it would mean holding a lock across the read, the LLM call and the write, blocking every turn in that conversation for the duration — a worse trade than a stale success message.
+
+An empty read-back is neither outcome. The insert committed and this snapshot is taken after that commit, so seeing nothing contradicts it — `nothing_new` would say the summary was discarded and `compacted` would promise a durability the check just failed to confirm. The driver raises instead, which `/compact` surfaces as a failure the user can act on by running it again. Failures become a `compaction_failed` Transport error rather than an escaping rejection: the driver runs inline with no retry budget behind it, so a throw would otherwise leave the user's "Compacting…" ack as the last thing they see.
+
+A `/compact` racing an in-flight turn is safe by construction: the turn froze its history inside the durable `load-turn-history` step, and a manual compaction only ever covers a prefix of what that turn already read.
 
 ## Strategy Pipeline
 
@@ -174,7 +217,9 @@ The summarization call receives the system prompt (or at minimum the core memory
 
 **Images:** `ImageBlock`s in the summarized prefix are lost — images can't be meaningfully summarized into text. If the model needs to reference an earlier image, it would need to be re-sent. This is an accepted tradeoff; images in old turns are rarely referenced again, and the alternative (carrying all images forward) defeats the purpose of compaction.
 
-**Failure handling:** If the summarization LLM call fails (timeout, rate limit, malformed output), fall through to strategy 3 (truncation). Summarization failure should not block the conversation.
+**Failure handling:** If the summarization LLM call fails (timeout, rate limit, malformed output), fall through to strategy 3 (truncation). Summarization failure should not block the conversation. Nothing is stored on that path, so the next turn re-attempts rather than inheriting a partial result.
+
+**Durability:** the summary is persisted — see [Durable summaries](#durable-summaries-confirmed). Iterative compaction reads the stored summary back as the head of the prefix it re-summarizes, which is the same shape the in-memory path produced before the table existed.
 
 ### Strategy 3: Truncate `[trigger: 95%]`
 

@@ -6,6 +6,7 @@
  * `index.ts` so the dispatcher logic is covered by unit tests.
  */
 
+import { match } from "ts-pattern";
 import { MIN_MESSAGES_FOR_EXTRACTION } from "../../../agent/evolution/index.js";
 import {
   CORE_COMPARTMENTS,
@@ -2032,7 +2033,11 @@ function errorMessage(err: TransportError): string {
     case "conversation_not_found":
       return "Conversation not found.";
     case "profile_not_found":
-      return "Profile not found.";
+      // Rendered for every command that can raise the code — delete, rename,
+      // voice, and a conversation whose own profile row is gone. Listing is the
+      // next step for all of them; naming a specific repair here would be wrong
+      // for most of the callers.
+      return "Profile not found. Use /profile list to see what's available.";
     case "profile_in_use":
       return "Profile has active conversations. Switch them first.";
     case "profile_name_taken":
@@ -2123,6 +2128,12 @@ function errorMessage(err: TransportError): string {
       return `"${err.id}" doesn't look like a valid task id. Use /schedules to list and copy an id.`;
     case "evolution_unavailable":
       return "Evolution isn't wired in this deployment.";
+    case "compaction_unavailable":
+      return "Compaction isn't wired in this deployment.";
+    case "compaction_failed":
+      return err.reason === null
+        ? "Couldn't compact this conversation. The error is in the server log."
+        : `Couldn't compact this conversation: ${err.reason}`;
   }
 }
 
@@ -2405,6 +2416,63 @@ export async function handleReflect(
       return;
     }
   }
+}
+
+/**
+ * `/compact` — summarize the conversation now and store the result.
+ *
+ * The pre-ack matters more here than on most commands: the summarization
+ * round trip is the whole latency of the command, and it runs against the
+ * profile's summarization model rather than returning from cache.
+ */
+export async function handleCompact(
+  transport: Transport,
+  ctx: TelegramCommandContext,
+): Promise<void> {
+  const handle = String(ctx.from.id);
+  const addr = String(ctx.chat.id);
+
+  await ctx.reply("Compacting conversation…");
+
+  const res = await transport.conversations.compact(handle, addr);
+  if (res.isErr()) {
+    await ctx.reply(errorMessage(res.error));
+    return;
+  }
+
+  // Exhaustive on the outcome, not just on the skip reason: a new status that
+  // fell through would leave the user's pre-ack as the last thing they saw,
+  // which is the dead end `compaction_failed` exists to prevent.
+  const message = match(res.value)
+    .with({ status: "no_session" }, () => "No active conversation here — send a message first.")
+    .with(
+      { status: "skipped", reason: "too_short" },
+      () => "Nothing to compact — too little sits outside the retained window to be worth it.",
+    )
+    .with(
+      { status: "skipped", reason: "nothing_new" },
+      () => "Already compacted — a turn stored a summary for this span.",
+    )
+    .with(
+      { status: "skipped", reason: "empty_summary" },
+      () => "The summarization model returned no text — nothing stored. Try again.",
+    )
+    .with(
+      { status: "skipped", reason: "truncated" },
+      () =>
+        "This conversation is too large to summarize in one pass — the summary hit the model's " +
+        "output limit, so nothing was stored rather than freezing a half-written one. Re-running " +
+        "won't help; /new starts a fresh conversation.",
+    )
+    .with(
+      { status: "compacted" },
+      (o) =>
+        `Compacted ${o.messagesSummarized} message(s) into a summary via ${o.model}; ` +
+        `${o.messagesKept} kept verbatim.\n` +
+        "Your next turn starts from the summary — no compaction wait.",
+    )
+    .exhaustive();
+  await ctx.reply(message);
 }
 
 /**

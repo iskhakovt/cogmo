@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { CodingStore } from "../agent/coding/store/index.js";
+import type { CompactConversationResult } from "../agent/conversation/compact-conversation.js";
 import type { Transactor } from "../db/index.js";
 import type { inboundArrived } from "../inngest/events.js";
+import { AllProvidersFailedError } from "../llm/fallback.js";
+import { ProviderConfigError } from "../llm/resolver.js";
 import { mockAgentStore, mockTransportStore } from "../test/factories.js";
 import { createTransport } from "./transport.js";
 
@@ -2556,6 +2559,198 @@ describe("createTransport", () => {
       expect(a._unsafeUnwrapErr()).toEqual({ code: "sandbox_disabled" });
       const c = await transport.coding.cancelTask(taskId, "x", "y");
       expect(c._unsafeUnwrapErr()).toEqual({ code: "sandbox_disabled" });
+    });
+  });
+
+  describe("conversations.compact", () => {
+    function buildCompactTransport(
+      opts: {
+        identity?: { userId: string } | null;
+        session?: { conversationId: string } | null;
+        conv?: { id: string; userId: string } | null;
+        compactConversation?: (id: string) => Promise<CompactConversationResult>;
+      } = {},
+    ) {
+      const agentStore = mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue(opts.conv ?? null),
+      });
+      const transportStore = mockTransportStore({
+        resolveUser: vi
+          .fn()
+          .mockResolvedValue(opts.identity === undefined ? { userId: "user-1" } : opts.identity),
+        resolveSession: vi.fn().mockResolvedValue(opts.session ?? null),
+      });
+      const transport = createTransport({
+        channelId: "ch-1",
+        defaultUserId: "user-1",
+        defaultProfileId: "profile-1",
+        runInTx: fakeRunInTx,
+        transportStore,
+        agentStore,
+        inngest: { send: vi.fn().mockResolvedValue(undefined) } as never,
+        inboundArrived: {
+          create: vi.fn((data: unknown) => ({ name: "inbound/arrived", data })),
+        } as unknown as typeof inboundArrived,
+        attachments: { upload: vi.fn(), download: vi.fn() } as never,
+        idleTimeoutMs: 0,
+        ...(opts.compactConversation && { compactConversation: opts.compactConversation }),
+      });
+      return { transport };
+    }
+
+    const OWNED = {
+      identity: { userId: "user-1" },
+      session: { conversationId: "c1" },
+      conv: { id: "c1", userId: "user-1" },
+    };
+
+    it("compaction_unavailable when the driver isn't wired", async () => {
+      const { transport } = buildCompactTransport({});
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "compaction_unavailable" });
+    });
+
+    it("identity_rejected without invoking the driver", async () => {
+      const driver = vi.fn();
+      const { transport } = buildCompactTransport({ identity: null, compactConversation: driver });
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+      expect(driver).not.toHaveBeenCalled();
+    });
+
+    it("no_session when the address has no active conversation", async () => {
+      const driver = vi.fn();
+      const { transport } = buildCompactTransport({
+        identity: { userId: "user-1" },
+        session: null,
+        compactConversation: driver,
+      });
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrap()).toEqual({ status: "no_session" });
+      expect(driver).not.toHaveBeenCalled();
+    });
+
+    it("no_session when the conversation belongs to someone else", async () => {
+      const driver = vi.fn();
+      const { transport } = buildCompactTransport({
+        identity: { userId: "user-1" },
+        session: { conversationId: "c1" },
+        conv: { id: "c1", userId: "other-user" },
+        compactConversation: driver,
+      });
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrap()).toEqual({ status: "no_session" });
+      expect(driver).not.toHaveBeenCalled();
+    });
+
+    it("passes the compacted outcome through", async () => {
+      const driver = vi.fn().mockResolvedValue({
+        status: "compacted",
+        messagesSummarized: 12,
+        messagesKept: 6,
+        model: "claude-haiku-4-5",
+      });
+      const { transport } = buildCompactTransport({ ...OWNED, compactConversation: driver });
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrap()).toEqual({
+        status: "compacted",
+        messagesSummarized: 12,
+        messagesKept: 6,
+        model: "claude-haiku-4-5",
+      });
+      expect(driver).toHaveBeenCalledWith("c1");
+    });
+
+    it("passes a skip reason through", async () => {
+      const driver = vi.fn().mockResolvedValue({ status: "skipped", reason: "too_short" });
+      const { transport } = buildCompactTransport({ ...OWNED, compactConversation: driver });
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrap()).toEqual({ status: "skipped", reason: "too_short" });
+    });
+
+    it("converts a driver throw into compaction_failed rather than rejecting", async () => {
+      // The method returns a Result, and the driver runs inline with no retry
+      // budget behind it. An escaping rejection would skip the adapter's
+      // isErr() branch and leave the user's pre-ack as the last thing they see.
+      const driver = vi.fn().mockRejectedValue(new Error("boom"));
+      const { transport } = buildCompactTransport({ ...OWNED, compactConversation: driver });
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "compaction_failed", reason: null });
+    });
+
+    it("withholds an arbitrary error's message from the reason", async () => {
+      // A Drizzle failure stringifies as the whole INSERT plus its bound
+      // params, which for this table is the entire summary text.
+      const driver = vi
+        .fn()
+        .mockRejectedValue(
+          new Error('Failed query: insert into "conversation_summaries" ...\nparams: secret'),
+        );
+      const { transport } = buildCompactTransport({ ...OWNED, compactConversation: driver });
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "compaction_failed", reason: null });
+      expect(JSON.stringify(res._unsafeUnwrapErr())).not.toContain("secret");
+    });
+
+    it("surfaces a provider failure's status without its body", async () => {
+      // 429 and 5xx are the likeliest way `/compact` fails and the only detail
+      // that tells the user whether waiting helps; the body is not ours to relay.
+      const overloaded = Object.assign(new Error("Overloaded: <long provider body>"), {
+        status: 529,
+      });
+      const driver = vi.fn().mockRejectedValue(overloaded);
+      const { transport } = buildCompactTransport({ ...OWNED, compactConversation: driver });
+      const res = await transport.conversations.compact("h", "addr");
+      const error = res._unsafeUnwrapErr();
+      expect(error).toEqual({
+        code: "compaction_failed",
+        reason: "the request failed with HTTP 529",
+      });
+      expect(JSON.stringify(error)).not.toContain("long provider body");
+    });
+
+    it("reads the status out of the fallback chain's aggregate error", async () => {
+      // `FallbackLlmProvider` converts a final *retriable* failure into
+      // `AllProvidersFailedError`, so 429 and 5xx — the statuses worth telling
+      // the user about — never arrive as a bare error carrying `status`.
+      const aggregate = new AllProvidersFailedError([
+        { provider: "primary", error: Object.assign(new Error("overloaded"), { status: 529 }) },
+      ]);
+      const driver = vi.fn().mockRejectedValue(aggregate);
+      const { transport } = buildCompactTransport({ ...OWNED, compactConversation: driver });
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrapErr()).toEqual({
+        code: "compaction_failed",
+        reason: "the request failed with HTTP 529",
+      });
+    });
+
+    it("surfaces a provider-config message, which names only the model", async () => {
+      const driver = vi
+        .fn()
+        .mockRejectedValue(new ProviderConfigError("no routing row for small-model"));
+      const { transport } = buildCompactTransport({ ...OWNED, compactConversation: driver });
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrapErr()).toEqual({
+        code: "compaction_failed",
+        reason: "no routing row for small-model",
+      });
+    });
+
+    it("renders a vanished conversation as no_session", async () => {
+      const driver = vi.fn().mockResolvedValue({ status: "not_found", missing: "conversation" });
+      const { transport } = buildCompactTransport({ ...OWNED, compactConversation: driver });
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrap()).toEqual({ status: "no_session" });
+    });
+
+    it("reports a vanished profile as profile_not_found, not no_session", async () => {
+      // The session resolved moments earlier, so "send a message first" would
+      // be advice that cannot fix anything.
+      const driver = vi.fn().mockResolvedValue({ status: "not_found", missing: "profile" });
+      const { transport } = buildCompactTransport({ ...OWNED, compactConversation: driver });
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "profile_not_found" });
     });
   });
 

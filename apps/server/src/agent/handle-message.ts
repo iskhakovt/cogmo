@@ -32,8 +32,14 @@ import type { TransportStore } from "../transport/store/index.js";
 import { resolveVoiceMode } from "../voice/mode.js";
 import type { VoiceProviderResolver } from "../voice/resolver.js";
 import type { CodingService } from "./coding/service.js";
-import { compactMessages, SUMMARIZATION_PROMPT, shouldSkipCounting } from "./context.js";
+import {
+  compactMessages,
+  extractSummaryText,
+  shouldSkipCounting,
+  summarizationRequest,
+} from "./context.js";
 import { loadConversationContext } from "./conversation/load-conversation-context.js";
+import { loadTurnHistory, summarizedSpan } from "./conversation/load-turn-history.js";
 import { buildInCooldownReply, isInCooldown } from "./cooldown.js";
 import type { DebounceConfig } from "./debounce.js";
 import { extractGeneratedDocuments, extractGeneratedImages } from "./extract-images.js";
@@ -543,9 +549,16 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         );
       });
 
-      const history = await step.run("load-history", async () => {
-        return deps.runInTx((tx) => agentStore.getHistory(tx, conversationId));
+      // The compacted view, not the raw transcript: when the conversation
+      // carries a durable summary, the span it covers arrives as one synthetic
+      // message and the rest of the rows follow. `messageIds` rides along so
+      // the persist step below can map a compaction split point back to a
+      // durable cutoff. Inside the step, so a `/compact` landing mid-run can't
+      // shift the history between invocations.
+      const turnHistory = await step.run("load-turn-history", async () => {
+        return loadTurnHistory({ runInTx: deps.runInTx, agentStore }, { conversationId });
       });
+      const history = turnHistory.messages;
 
       // Load profile up front — its streaming knobs ride into `prepare` so
       // open streams honor the per-profile chunk target and edit mode, and
@@ -808,7 +821,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       };
 
       // Durable boundary wrapper shared by the in-turn steps (`llm-iter<N>`,
-      // `tool-iter<N>-<P>`, `auto-recall`, `summarize-prefix`,
+      // `tool-iter<N>-<P>`, `auto-recall`, `summarize-prefix-outcome`,
       // `load-last-tokens`, `count-tokens-<n>`, `emit-tool-results-iter<N>`).
       // It injects Inngest's `step.run` without making the loop depend on
       // Inngest, and applies the retry policy per step kind INSIDE the body:
@@ -858,7 +871,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // conditional-step caveat: the gate reads `profile.autoRecall` from a
       // non-durable read, so a concurrent settings change mid-turn can flip
       // the step's existence between invocations — same accepted hazard as
-      // `summarize-prefix`, see design/crash-recovery.md.
+      // `summarize-prefix-outcome`, see design/crash-recovery.md.
       const recallResult = shouldSkipRecall(autoRecallMode, userContentText)
         ? { memories: [] }
         : await stepRun("auto-recall", async () =>
@@ -878,8 +891,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         : systemPrompt;
 
       // Build message history, replacing the last user message with resolved content.
-      // Safe because: getHistory runs after create-user-message (durable step ordering),
-      // and concurrency lock on conversationId prevents concurrent writes.
+      // Safe because: `load-turn-history` runs after create-user-message (durable
+      // step ordering), and concurrency lock on conversationId prevents concurrent writes.
       let historyMessages: Message[] = [...history];
       const hasAttachments = resolvedBlocks.some(
         (b) => b.type === "image" || b.type === "document",
@@ -900,7 +913,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // decision-bearing inputs ARE steps: history, auto-recall,
       // `load-last-tokens` (freezes the skip decision persist-new-messages
       // would otherwise flip mid-run), each `count-tokens-<n>` round-trip,
-      // and the `summarize-prefix` LLM call. Every replay therefore walks
+      // and the `summarize-prefix-outcome` LLM call. Every replay therefore walks
       // the same decision tree over cached values. See
       // design/crash-recovery.md.
 
@@ -928,7 +941,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // Durable: persist-new-messages rewrites the row this reads MID-RUN,
       // so a bare-body read would flip `skipBudgetStrategies` between
       // invocations — and with it the compaction decisions and the
-      // existence of the conditional `summarize-prefix` / `count-tokens-*`
+      // existence of the conditional `summarize-prefix-outcome` / `count-tokens-*`
       // steps. Freezing the read pins the whole compaction decision tree
       // for the run.
       const lastTokens = await stepRun("load-last-tokens", () =>
@@ -949,6 +962,19 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // which gates Strategies 1–3 inside compactMessages so the
       // expensive provider.countTokens round-trip is only paid when
       // budget pressure could matter.
+      // Set by the `summarize` callback below when Strategy 2 fires. Assigned
+      // on every invocation that reaches the strategy — `summarize-prefix-outcome`
+      // hands back the memoized text on a replay just as it does on the first
+      // pass — so the persist step downstream is planned identically each time.
+      let summaryText: string | null = null;
+      /**
+       * Set when the summarization response stopped at its output cap. The
+       * text is still worth using for this turn, but a summary cut mid-sentence
+       * must not become the permanent stand-in for a span whose raw messages
+       * later turns no longer load — nothing ever re-derives it.
+       */
+      let summaryTruncated = false;
+
       const compactResult = await compactMessages(
         fullPrompt,
         historyMessages,
@@ -970,6 +996,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             };
           })(),
           budget,
+          // Refuse a split that buys nothing durable — the shape where the
+          // prefix is the previously-stored summary and nothing else.
+          canSummarizePrefix: (candidate) =>
+            summarizedSpan(turnHistory.messageIds, candidate) !== null,
           summarize: async (system, msgs) => {
             // Resolve the summarization provider lazily — only when
             // compaction actually picks the SUMMARIZE strategy. Resolving
@@ -996,33 +1026,117 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             // ContextManagerDeps.summarize). If that ever changes, switch to
             // a counter-based ID like `summarize-prefix-${i}` to avoid
             // Inngest's duplicate-step-id error.
-            return stepRun("summarize-prefix", async () => {
+            const summarized = await stepRun("summarize-prefix-outcome", async () => {
               // Status banner lives inside the step body so it reaches the
               // user exactly once — compactMessages re-runs on every
               // invocation, and a bare-body push would re-append the banner
               // (or open a stray message on a post-finish replay handle)
               // each time.
               await delivery.push({ type: "status", message: "Summarizing conversation..." });
-              const response = await summarizationProvider.chat({
-                model: summarizationModel,
-                system,
-                messages: [...msgs, { role: "user", content: SUMMARIZATION_PROMPT }],
-                // Room for reasoning as well as the summary, bounded by
-                // what this model accepts — asking above its ceiling is a
-                // 400, which compaction swallows into a fall-through to
-                // truncation.
-                maxTokens: Math.min(16_000, summarizationLimits.maxOutputTokens),
-              });
-              return response.content
-                .filter((b) => b.type === "text")
-                .map((b) => (b as { text: string }).text)
-                .join("");
+              const response = await summarizationProvider.chat(
+                summarizationRequest({
+                  model: summarizationModel,
+                  system,
+                  messages: msgs,
+                  maxOutputTokens: summarizationLimits.maxOutputTokens,
+                }),
+              );
+              const text = extractSummaryText(response.content);
+              if (response.stopReason === "max_tokens") {
+                // Logged from the step body so replay suppresses it. In the
+                // bare body this would re-emit once per remaining boundary of
+                // the turn, over-reporting by the turn's step count.
+                turnLogger.warn(
+                  { summaryChars: text.length },
+                  "summarization hit its output cap; using the text for this turn but not storing it",
+                );
+              }
+              return { text, stopReason: response.stopReason };
             });
+            summaryText = summarized.text;
+            summaryTruncated = summarized.stopReason === "max_tokens";
+            return summarized.text;
           },
         },
         skipBudgetStrategies,
       );
       historyMessages = compactResult.messages;
+
+      // Persist what Strategy 2 produced so the next turn replays the summary
+      // instead of paying for it again. `messagesSummarized` is the split
+      // index into the compaction input — Strategies 0 and 1 rewrite block
+      // content in place and never change the array's length, so it indexes
+      // `turnHistory.messageIds` directly. It is 0 whenever the strategy
+      // no-opped (under budget, or the model returned no text), which is also
+      // the guard against storing an empty summary.
+      //
+      // Every input here is durable or memoized, so this step is planned the
+      // same way on every invocation. The (conversation, cutoff) unique makes
+      // the write idempotent under the retry that `durable` alone doesn't
+      // prevent — a crash between the commit and Inngest recording the step
+      // recovers the existing row rather than appending a second one.
+      // The compaction view's split index, not the count the row records:
+      // `event.messagesSummarized` counts entries, a folded-in previous summary
+      // among them, while the column stores `span.messageCount`.
+      const splitIdx = compactResult.event?.messagesSummarized ?? 0;
+      const span = splitIdx > 0 ? summarizedSpan(turnHistory.messageIds, splitIdx) : null;
+      if (summaryText !== null && span !== null && !summaryTruncated) {
+        // `text` needs the local because `summaryText` is a `let` whose
+        // narrowing TypeScript discards inside the callback below; `span` is a
+        // `const` and needs no such help.
+        const text = summaryText;
+        // Caching a summary is not worth the turn. The write sits between
+        // compaction and the agent loop, so an unhandled failure here costs the
+        // user their reply over a span that would simply be re-summarized next
+        // turn — the same reasoning that has `auto-recall` degrade inside its
+        // own step body rather than propagate.
+        //
+        // Projected down to the id: the full row would push the summary text
+        // into Inngest step state a second time, and its `createdAt` would come
+        // back from the cache as a string rather than a Date.
+        // Caught around the step, not inside it. Inside, `stepRun` never sees
+        // the error, so Inngest cannot retry and one connection blip discards a
+        // summary already paid for. Out here the step keeps its retry budget
+        // and only a permanently-failed one reaches this catch — where
+        // degrading is the designed channel, since caching a summary is not
+        // worth costing the user their reply over a span the next turn would
+        // re-summarize anyway.
+        try {
+          await stepRun("persist-summary", async () => {
+            const { kind, row } = await deps.runInTx((tx) =>
+              agentStore.insertOrRecoverSummary(tx, {
+                conversationId,
+                summary: text,
+                throughMessageId: span.cutoff,
+                // The real messages replaced, not the compaction-view entries:
+                // the column is an audit trail, and counting a folded-in
+                // previous summary as content would overstate every
+                // re-compaction by one.
+                messagesSummarized: span.messageCount,
+                model: summarizationModel,
+                source: "turn",
+              }),
+            );
+            if (kind === "recovered") {
+              // A concurrent `/compact` stored this span first and the conflict
+              // arm kept its text. This turn answers from the summary it just
+              // computed while every later turn replays the other one — the
+              // same signal `compactConversation` reports as `nothing_new`,
+              // which here is only worth a log.
+              turnLogger.info(
+                { summaryId: row.id },
+                "summary for this span was already stored; keeping the stored text",
+              );
+            }
+            // The id is not read by any caller — it is here to show up in the
+            // Inngest run view, where it is the only handle on which row a
+            // summarizing turn wrote.
+            return { id: row.id };
+          });
+        } catch (err) {
+          turnLogger.warn({ err }, "failed to persist conversation summary, continuing the turn");
+        }
+      }
 
       let result: AgentLoopResult;
       try {

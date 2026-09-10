@@ -163,14 +163,14 @@ describe("handle-message — crash recovery / step replay", () => {
     expect(deps.agentStore.insertMessages).not.toHaveBeenCalled();
   });
 
-  it("does not re-run the summarization LLM call when summarize-prefix is cached", async () => {
+  it("does not re-run the summarization LLM call when summarize-prefix-outcome is cached", async () => {
     // To exercise the summarize step, we need the compaction pipeline to
     // actually call its `summarize` callback. That requires:
     //   - getLastTokens past the fast-path threshold so countTokens runs
     //   - countTokens reporting > 80% of budget so the SUMMARIZE strategy fires
     //   - history with more than DEFAULT_KEEP_TURNS messages (6) so there's
     //     a prefix to summarize
-    // Then we cache `summarize-prefix` and assert provider.chat is never
+    // Then we cache `summarize-prefix-outcome` and assert provider.chat is never
     // called for the summarization round trip.
     const countTokens = vi.fn().mockResolvedValue(800_000); // claude-sonnet-4-6 budget is 926_000; 800_000 > 80%
     const chat = vi.fn().mockResolvedValue({
@@ -183,15 +183,15 @@ describe("handle-message — crash recovery / step replay", () => {
       resolveProvider: mockResolver(mockProvider({ countTokens, chat })),
       agentStore: mockAgentStore({
         getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 800_000, outputTokens: 2_000 }),
-        getHistory: vi.fn().mockResolvedValue([
-          { role: "user", content: "m1" },
-          { role: "assistant", content: "r1" },
-          { role: "user", content: "m2" },
-          { role: "assistant", content: "r2" },
-          { role: "user", content: "m3" },
-          { role: "assistant", content: "r3" },
-          { role: "user", content: "m4" },
-          { role: "assistant", content: "r4" },
+        listMessages: vi.fn().mockResolvedValue([
+          { id: "m1", role: "user", content: "m1" },
+          { id: "m2", role: "assistant", content: "r1" },
+          { id: "m3", role: "user", content: "m2" },
+          { id: "m4", role: "assistant", content: "r2" },
+          { id: "m5", role: "user", content: "m3" },
+          { id: "m6", role: "assistant", content: "r3" },
+          { id: "m7", role: "user", content: "m4" },
+          { id: "m8", role: "assistant", content: "r4" },
         ]),
       }),
     });
@@ -202,9 +202,12 @@ describe("handle-message — crash recovery / step replay", () => {
       events: [event],
       steps: [
         {
-          id: "summarize-prefix",
+          id: "summarize-prefix-outcome",
           // Cached value: the summary text from a prior attempt.
-          handler: () => "[cached summary from prior attempt]",
+          handler: () => ({
+            text: "[cached summary from prior attempt]",
+            stopReason: "end_turn",
+          }),
         },
       ],
     });
@@ -228,6 +231,55 @@ describe("handle-message — crash recovery / step replay", () => {
         typeof m.content === "string" && m.content.includes("[cached summary from prior attempt]"),
     );
     expect(summaryMessage).toBeDefined();
+  });
+
+  it("does not re-insert the summary when persist-summary is cached", async () => {
+    // Same setup as the summarize-prefix-outcome replay above, plus the ids the
+    // persist step needs to name a durable cutoff. Caching `persist-summary`
+    // stands in for the crash-after-commit case: the row is already there, and
+    // the replay must not write a second one.
+    const deps = mockDeps({
+      resolveProvider: mockResolver(
+        mockProvider({
+          countTokens: vi.fn().mockResolvedValue(800_000),
+          chat: vi.fn().mockResolvedValue({
+            content: [{ type: "text", text: "fresh summary" }],
+            stopReason: "end_turn",
+            model: "mock-model",
+            usage: { inputTokens: 10, outputTokens: 5 },
+          }),
+        }),
+      ),
+      agentStore: mockAgentStore({
+        getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 800_000, outputTokens: 2_000 }),
+        listMessages: vi.fn().mockResolvedValue(
+          Array.from({ length: 8 }, (_, i) => ({
+            id: `m${i + 1}`,
+            role: i % 2 === 0 ? "user" : "assistant",
+            content: `turn ${i + 1}`,
+          })),
+        ),
+      }),
+    });
+    const fn = createHandleMessage(deps);
+
+    await new InngestTestEngine({
+      function: fn,
+      events: [event],
+      steps: [
+        // Mirrors what the step actually returns — the row is projected down to
+        // its id so the summary text doesn't land in Inngest state twice.
+        { id: "persist-summary", handler: () => ({ id: "cached-summary-id" }) },
+      ],
+    }).execute();
+
+    expect(deps.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
+
+    // Non-vacuity: the identical run without the cached step does reach the
+    // store, so the assertion above is about the cache and not about the
+    // pipeline having skipped summarization altogether.
+    await new InngestTestEngine({ function: fn, events: [event] }).execute();
+    expect(deps.agentStore.insertOrRecoverSummary).toHaveBeenCalledTimes(1);
   });
 
   it("does not re-execute a durable tool step body when the iteration-keyed step is cached", async () => {
@@ -303,9 +355,9 @@ describe("handle-message — crash recovery / step replay", () => {
         { id: "last-assistant", handler: () => null },
         { id: "load-inbound", handler: () => [{ id: "inbound-1", content: "hi" }] },
         { id: "create-user-message", handler: () => undefined },
-        { id: "load-history", handler: () => [] },
+        { id: "load-turn-history", handler: () => ({ messages: [], messageIds: [] }) },
         { id: "assemble-prompt", handler: () => "system prompt" },
-        // `summarize-prefix` is conditional — only created when compaction
+        // `summarize-prefix-outcome` is conditional — only created when compaction
         // decides to summarize. The default mock countTokens stays under
         // threshold, so the step is never invoked here and we don't list it.
         { id: "persist-new-messages", handler: () => ({ id: "asst-1" }) },

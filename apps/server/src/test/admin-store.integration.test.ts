@@ -1,11 +1,15 @@
 /// <reference path="../../test/vitest.d.ts" />
 
 /**
- * Integration coverage for AgentStore admin methods against real Postgres (postgres-js),
- * complementing PGlite unit tests. The high-value check is `listConversationsForUser` —
- * PGlite and postgres-js differ on correlated-subquery TIMESTAMPTZ marshaling, so we pin
- * that behavior with the real driver here. NULLS-NOT-DISTINCT uniqueness on `profiles` and
- * the real alias index are along for the ride.
+ * Integration coverage for AgentStore against real Postgres (postgres-js),
+ * complementing PGlite unit tests. The high-value checks are the ones where the
+ * two can diverge, or where the assertion is about DDL the unit tier never runs:
+ * `listConversationsForUser` (PGlite and postgres-js differ on
+ * correlated-subquery TIMESTAMPTZ marshaling) and the `conversation_summaries`
+ * read/write path, whose ordering, `xmax`-based conflict discrimination and
+ * composite unique all come from the real migration rather than `pushSchema`.
+ * NULLS-NOT-DISTINCT uniqueness on `profiles` and the real alias index are along
+ * for the ride.
  *
  * Uses the shared integration Postgres (via `DATABASE_URL` from `test/integration-setup.ts`).
  * Every row uses a test-scoped random suffix so we never touch seeded data or other suites.
@@ -19,6 +23,7 @@ import { UniqueViolationError } from "../agent/store/errors.js";
 import { DrizzleAgentStore } from "../agent/store/index.js";
 import { transactor } from "../db/index.js";
 import * as schema from "../db/schemas.js";
+import { expectDefined } from "./assertions.js";
 
 const SUITE = randomBytes(4).toString("hex"); // unique per test run — no collision with seed data
 const name = (tag: string) => `it-${SUITE}-${tag}`;
@@ -203,5 +208,106 @@ describe("AgentStore admin (real Postgres)", () => {
     await expect(tx((trx) => store.setAlias(trx, userId, c2, name("dayjob")))).rejects.toThrow(
       UniqueViolationError,
     );
+  });
+});
+
+describe("conversation summaries (real Postgres)", () => {
+  const INBOUND = "019d0000-0000-7000-8000-0000000000ff";
+
+  async function seed(messageCount: number) {
+    const { id: userId } = await tx((trx) => store.createUser(trx));
+    const { id: profileId } = await tx((trx) =>
+      store.createProfile(trx, {
+        userId,
+        name: name(`summaries-${randomBytes(3).toString("hex")}`),
+        basePrompt: "p",
+        model: TEST_MODEL,
+        toolSet: [],
+      }),
+    );
+    const conversationId = (
+      await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: true }))
+    ).id;
+    const ids: string[] = [];
+    for (let i = 0; i < messageCount; i++) {
+      const row = await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId,
+          role: i % 2 === 0 ? "user" : "assistant",
+          content: `m${i}`,
+          lastInboundMessageId: INBOUND,
+          profileId,
+          model: TEST_MODEL,
+        }),
+      );
+      ids.push(row.id);
+    }
+    return { conversationId, ids };
+  }
+
+  const write = (conversationId: string, throughMessageId: string, summary: string) =>
+    tx((trx) =>
+      store.insertOrRecoverSummary(trx, {
+        conversationId,
+        summary,
+        throughMessageId,
+        messagesSummarized: 1,
+        model: "claude-haiku-4-5",
+        source: "turn",
+      }),
+    );
+
+  it("reads back the widest summary, not the last written", async () => {
+    // The ordering is served by scanning the composite unique backwards, which
+    // is DDL from the migration rather than anything `pushSchema` infers, and
+    // it compares real `uuid` values rather than PGlite's.
+    const { conversationId, ids } = await seed(4);
+    await write(conversationId, expectDefined(ids[2]), "wider, written first");
+    await write(conversationId, expectDefined(ids[0]), "narrower, written second");
+
+    const latest = await tx((trx) => store.getLatestSummary(trx, conversationId));
+    expect(latest?.summary).toBe("wider, written first");
+  });
+
+  it("discriminates insert from conflict-update via xmax on the real driver", async () => {
+    // `(xmax = 0)` is a system-column read that has to survive postgres-js's
+    // result marshaling as a boolean; the `kind` contract the whole
+    // idempotency story rests on is exactly this value.
+    const { conversationId, ids } = await seed(2);
+
+    const first = await write(conversationId, expectDefined(ids[0]), "written once");
+    const second = await write(conversationId, expectDefined(ids[0]), "a retry's text");
+
+    expect(first.kind).toBe("new");
+    expect(second.kind).toBe("recovered");
+    expect(second.row.id).toBe(first.row.id);
+    expect(second.row.summary).toBe("written once");
+  });
+
+  it("cuts history at the summary's message using real uuidv7 ordering", async () => {
+    // `gt(messages.id, cutoff)` is an ordering predicate over time-ordered
+    // uuids, and the column mapper runs on the production binder here.
+    const { conversationId, ids } = await seed(5);
+
+    const after = await tx((trx) =>
+      store.getHistoryAfter(trx, conversationId, expectDefined(ids[1])),
+    );
+
+    expect(after.map((m) => m.id)).toEqual(ids.slice(2));
+    expect(after.map((m) => m.content)).toEqual(["m2", "m3", "m4"]);
+  });
+
+  it("carries the composite unique that makes the idempotency key work", async () => {
+    // Read the catalog rather than provoking a violation: Drizzle wraps query
+    // errors as `Failed query: <sql>` and puts the constraint name on the
+    // `cause`, so asserting on a thrown message couples the test to that
+    // wrapping instead of to the DDL it means to check. The `ON CONFLICT`
+    // target is only an idempotency key if the migration actually created it.
+    const rows = await sql<{ contype: string }[]>`
+      SELECT contype::text FROM pg_constraint
+      WHERE conname = 'uq_conversation_summaries_conv_through'
+        AND conrelid = 'conversation_summaries'::regclass
+    `;
+    expect(rows.map((r) => r.contype)).toEqual(["u"]);
   });
 });

@@ -116,6 +116,16 @@ export const evolutionTrigger = pgEnum("evolution_trigger", ["idle", "manual"]);
 export type EvolutionTriggerValue = (typeof evolutionTrigger.enumValues)[number];
 
 /**
+ * `conversation_summaries.source` — which path produced the row. `turn` is the
+ * 80%-budget summarize strategy firing inside `handle-message`; `manual` is an
+ * explicit `/compact`. Both write the same shape. Nothing reads the column:
+ * it, and `messages_summarized` beside it, are an audit trail for reasoning
+ * about a conversation's compaction history from the table itself.
+ */
+export const summarySource = pgEnum("summary_source", ["turn", "manual"]);
+export type SummarySourceValue = (typeof summarySource.enumValues)[number];
+
+/**
  * TTS provider adapter discriminator. Maps to which `TtsProvider` class the
  * voice resolver builds (`src/voice/resolver.ts`). `openai` and
  * `openai_compatible` both use `OpenAIVoiceProvider`; the enum split keeps
@@ -924,5 +934,64 @@ export const evolutionEvents = pgTable(
   (t) => [
     // Digest path: `/learned` lists newest-first per user.
     index("idx_evolution_events_user").on(t.userId, desc(t.createdAt)),
+  ],
+);
+
+/**
+ * Durable conversation summaries — the persisted output of the summarize
+ * compaction strategy.
+ *
+ * Compaction itself stays ephemeral for Strategies 0, 1 and 3 (they rewrite
+ * or drop blocks in memory at turn time). Summarization is different: it
+ * costs an LLM call, so its result is written here and replayed on every
+ * subsequent turn instead of being recomputed. `through_message_id` names the
+ * last message the summary stands in for — the turn loader drops every
+ * message up to and including it and prepends the summary as a single user
+ * message. See design/context-management.md → Durable summaries.
+ *
+ * The two foreign keys are independent, so the schema alone permits a row
+ * pairing conversation A with a message from conversation B — a cutoff that
+ * would make `getHistoryAfter` drop an arbitrary span of A. No writer can
+ * produce one: both derive the cutoff from `summarizedSpan` over the message
+ * ids of the conversation being compacted. Enforcing it in DDL would mean a
+ * composite unique on `messages (id, conversation_id)` purely to serve a
+ * composite FK, which is an index on the hottest table in the schema to
+ * prevent a state no code path reaches. The invariant lives at the two call
+ * sites instead.
+ *
+ * Append-only. Re-compaction inserts a new row summarizing the previous
+ * summary plus everything that arrived since; the loader reads the row with the
+ * greatest `through_message_id` — widest coverage wins, not last-inserted. The
+ * two orders agree in normal operation (each compaction covers strictly more
+ * than the last) and diverge only when a slow `/compact` commits a narrower
+ * summary after a turn already stored a wider one. The unique on (conversation_id, through_message_id) is the
+ * idempotency key for the write step — an Inngest retry that re-runs a
+ * committed insert lands on the existing row rather than duplicating it.
+ */
+export const conversationSummaries = pgTable(
+  "conversation_summaries",
+  {
+    id: pk(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id),
+    summary: text("summary").notNull(),
+    /** Last message covered by this summary. Snapped to a tool_use/tool_result pair boundary at write time. */
+    throughMessageId: uuid("through_message_id")
+      .notNull()
+      .references(() => messages.id),
+    /** Real messages this summary replaced — audit trail, not a cursor. Excludes a previous summary folded in. */
+    messagesSummarized: integer("messages_summarized").notNull(),
+    /** Summarization model that produced the text. */
+    model: text("model").notNull(),
+    /** `manual` = `/compact`; `turn` = the 80% budget strategy firing mid-turn. */
+    source: summarySource("source").notNull(),
+    createdAt: ts(),
+  },
+  // The unique doubles as the read path: `(conversation_id, through_message_id)`
+  // scanned backwards serves "widest summary for this conversation", which is
+  // how the latest-summary lookup is ordered. No second index needed.
+  (t) => [
+    unique("uq_conversation_summaries_conv_through").on(t.conversationId, t.throughMessageId),
   ],
 );
