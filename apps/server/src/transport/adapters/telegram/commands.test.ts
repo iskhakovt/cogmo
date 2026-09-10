@@ -4391,6 +4391,16 @@ describe("handleCompact", () => {
     );
     expect(ctx.reply.mock.calls[1]?.[0]).toContain("429 rate limited");
   });
+
+  it("points at the log rather than echoing a withheld reason", async () => {
+    // `unknown` is what the transport substitutes for any error whose message
+    // isn't on the allowlist; rendering it verbatim would read as a bug.
+    const ctx = mkCtx();
+    await handleCompact(compactWith(err({ code: "compaction_failed", reason: "unknown" })), ctx);
+    const reply = expectDefined(ctx.reply.mock.calls[1], "second reply")[0];
+    expect(reply).toMatch(/server log/i);
+    expect(reply).not.toMatch(/unknown/i);
+  });
 });
 
 describe("handleReflect", () => {

@@ -3647,6 +3647,39 @@ describe("conversation summaries", () => {
     expect(latest.source).toBe("manual");
   });
 
+  it("returns the widest summary even when a narrower one was inserted later", async () => {
+    // The discriminating case: insertion order and coverage order disagree.
+    // Ordering by `id` would return the narrower row here and orphan the wider
+    // one, silently re-including messages it already covers.
+    const { conversationId, stamp } = await seedConversation();
+    const ids = await seedMessages(conversationId, stamp, 4);
+
+    await tx((trx) =>
+      store.insertOrRecoverSummary(trx, {
+        conversationId,
+        summary: "wider, written first",
+        throughMessageId: expectDefined(ids[2]),
+        messagesSummarized: 3,
+        model: "claude-haiku-4-5",
+        source: "turn",
+      }),
+    );
+    await tx((trx) =>
+      store.insertOrRecoverSummary(trx, {
+        conversationId,
+        summary: "narrower, written second",
+        throughMessageId: expectDefined(ids[0]),
+        messagesSummarized: 1,
+        model: "claude-haiku-4-5",
+        source: "manual",
+      }),
+    );
+
+    const latest = expectDefined(await tx((trx) => store.getLatestSummary(trx, conversationId)));
+    expect(latest.summary).toBe("wider, written first");
+    expect(latest.throughMessageId).toBe(ids[2]);
+  });
+
   it("scopes the latest-summary read to its own conversation", async () => {
     const { userId, profileId, conversationId, stamp } = await seedConversation();
     const other = (
