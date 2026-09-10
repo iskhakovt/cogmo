@@ -3462,10 +3462,12 @@ describe("durable conversation summaries", () => {
    * claude-sonnet-4-6 budget (926_000), and the history is longer than the
    * retain window.
    */
-  function summarizingDeps(overrides: { messages?: ReturnType<typeof rows>; text?: string } = {}) {
+  function summarizingDeps(
+    overrides: { messages?: ReturnType<typeof rows>; text?: string; stopReason?: string } = {},
+  ) {
     const chat = vi.fn().mockResolvedValue({
       content: [{ type: "text", text: overrides.text ?? "the earlier discussion" }],
-      stopReason: "end_turn",
+      stopReason: overrides.stopReason ?? "end_turn",
       model: "mock-model",
       usage: { inputTokens: 10, outputTokens: 5 },
     });
@@ -3519,6 +3521,24 @@ describe("durable conversation summaries", () => {
     });
 
     expect(deps.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
+  });
+
+  it("uses a capped summary for the turn but does not store it", async () => {
+    // The text is still the best context available for this turn; what must not
+    // happen is it becoming the permanent stand-in for a span later turns stop
+    // loading, since nothing ever re-derives a stored summary.
+    const { deps } = summarizingDeps({ stopReason: "max_tokens" });
+
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(deps.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
+    const loopCalls = (deps.runStreamingAgentLoop as ReturnType<typeof vi.fn>).mock.calls;
+    const messages = loopCalls[0]?.[0]?.messages as Array<{ content: unknown }>;
+    expect(messages[0]?.content).toContain("the earlier discussion");
   });
 
   it("stores nothing when the summarization model returns no text", async () => {

@@ -311,7 +311,7 @@ function ellipsize(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }
 
-function friendlyError(err: { code: string; model?: string; reason?: string }): string {
+function friendlyError(err: { code: string; model?: string; reason?: string | null }): string {
   if (err.code === "model_unavailable")
     return `Model "${err.model}" isn't available. Use /model to see options.`;
   if (err.code === "profile_name_taken") return "A profile with that name already exists.";

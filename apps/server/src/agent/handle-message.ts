@@ -967,6 +967,13 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // hands back the memoized text on a replay just as it does on the first
       // pass — so the persist step downstream is planned identically each time.
       let summaryText: string | null = null;
+      /**
+       * Set when the summarization response stopped at its output cap. The
+       * text is still worth using for this turn, but a summary cut mid-sentence
+       * must not become the permanent stand-in for a span whose raw messages
+       * later turns no longer load — nothing ever re-derives it.
+       */
+      let summaryTruncated = false;
 
       const compactResult = await compactMessages(
         fullPrompt,
@@ -1022,7 +1029,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             // ContextManagerDeps.summarize). If that ever changes, switch to
             // a counter-based ID like `summarize-prefix-${i}` to avoid
             // Inngest's duplicate-step-id error.
-            summaryText = await stepRun("summarize-prefix", async () => {
+            const summarized = await stepRun("summarize-prefix", async () => {
               // Status banner lives inside the step body so it reaches the
               // user exactly once — compactMessages re-runs on every
               // invocation, and a bare-body push would re-append the banner
@@ -1037,9 +1044,14 @@ export function createHandleMessage(deps: HandleMessageDeps) {
                   maxOutputTokens: summarizationLimits.maxOutputTokens,
                 }),
               );
-              return extractSummaryText(response.content);
+              return {
+                text: extractSummaryText(response.content),
+                stopReason: response.stopReason,
+              };
             });
-            return summaryText;
+            summaryText = summarized.text;
+            summaryTruncated = summarized.stopReason === "max_tokens";
+            return summarized.text;
           },
         },
         skipBudgetStrategies,
@@ -1062,7 +1074,13 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const messagesSummarized = compactResult.event?.messagesSummarized ?? 0;
       const span =
         messagesSummarized > 0 ? summarizedSpan(turnHistory.messageIds, messagesSummarized) : null;
-      if (summaryText !== null && span !== null) {
+      if (summaryTruncated) {
+        turnLogger.warn(
+          { messagesSummarized },
+          "summarization hit its output cap; using the text for this turn but not storing it",
+        );
+      }
+      if (summaryText !== null && span !== null && !summaryTruncated) {
         // `text` needs the local because `summaryText` is a `let` whose
         // narrowing TypeScript discards inside the callback below; `span` is a
         // `const` and needs no such help.
@@ -1078,7 +1096,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         // back from the cache as a string rather than a Date.
         await stepRun("persist-summary", async () => {
           try {
-            const { row } = await deps.runInTx((tx) =>
+            const { kind, row } = await deps.runInTx((tx) =>
               agentStore.insertOrRecoverSummary(tx, {
                 conversationId,
                 summary: text,
@@ -1092,6 +1110,20 @@ export function createHandleMessage(deps: HandleMessageDeps) {
                 source: "turn",
               }),
             );
+            if (kind === "recovered") {
+              // A concurrent `/compact` stored this span first and the conflict
+              // arm kept its text. This turn answers from the summary it just
+              // computed while every later turn replays the other one — the
+              // same signal `compactConversation` reports as `nothing_new`,
+              // which here is only worth a log.
+              turnLogger.info(
+                { summaryId: row.id },
+                "summary for this span was already stored; keeping the stored text",
+              );
+            }
+            // The id is not read by any caller — it is here to show up in the
+            // Inngest run view, where it is the only handle on which row a
+            // summarizing turn wrote.
             return { id: row.id };
           } catch (err) {
             turnLogger.warn({ err }, "failed to persist conversation summary, continuing the turn");

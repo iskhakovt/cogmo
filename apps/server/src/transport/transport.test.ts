@@ -2674,7 +2674,7 @@ describe("createTransport", () => {
       const driver = vi.fn().mockRejectedValue(new Error("boom"));
       const { transport } = buildCompactTransport({ ...OWNED, compactConversation: driver });
       const res = await transport.conversations.compact("h", "addr");
-      expect(res._unsafeUnwrapErr()).toEqual({ code: "compaction_failed", reason: "unknown" });
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "compaction_failed", reason: null });
     });
 
     it("withholds an arbitrary error's message from the reason", async () => {
@@ -2687,7 +2687,7 @@ describe("createTransport", () => {
         );
       const { transport } = buildCompactTransport({ ...OWNED, compactConversation: driver });
       const res = await transport.conversations.compact("h", "addr");
-      expect(res._unsafeUnwrapErr()).toEqual({ code: "compaction_failed", reason: "unknown" });
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "compaction_failed", reason: null });
       expect(JSON.stringify(res._unsafeUnwrapErr())).not.toContain("secret");
     });
 

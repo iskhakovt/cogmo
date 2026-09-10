@@ -14,21 +14,7 @@ import type { AgentStore } from "../store/index.js";
 import { loadConversationContext } from "./load-conversation-context.js";
 import { loadTurnHistory, summarizedSpan } from "./load-turn-history.js";
 
-/**
- * Synchronous driver for the `/compact` manual trigger.
- *
- * The turn-time path only summarizes under budget pressure (Strategy 2 at 80%)
- * and pays the latency at the front of the user's next turn. This forces the
- * same split immediately, on demand, and stores the result — so the next turn
- * starts from a summary it did not have to wait for.
- *
- * Sidesteps Inngest for the same reasons `triggerReflection` does: the user is
- * waiting on the reply, single-user scale means there is no concurrent fire to
- * race, and an LLM or DB error surfaces to the caller rather than disappearing
- * into a retry log. A `/compact` racing an in-flight turn is safe by
- * construction — the turn froze its history inside `load-turn-history`, and this
- * only ever covers a prefix of what that turn already read.
- */
+/** Stores and services `compactConversation` needs; see that function's doc. */
 export interface CompactConversationDeps {
   runInTx: Transactor;
   agentStore: AgentStore;
@@ -44,7 +30,7 @@ export interface CompactConversationDeps {
  * budget-triggered path has no such floor because reaching 80% of the window on
  * that few messages means they are individually enormous.
  */
-export const MIN_MESSAGES_TO_COMPACT = 4;
+const MIN_MESSAGES_TO_COMPACT = 4;
 
 export type CompactConversationResult =
   | {
@@ -64,9 +50,11 @@ export type CompactConversationResult =
        * the race, either by taking this same cutoff (the conflict arm kept its
        * text) or a wider one (this row was written but coverage-ordered reads
        * will never return it). `empty_summary` — the model spent its budget
-       * reasoning and returned no text.
+       * reasoning and returned no text. `truncated` — it hit its output cap, so
+       * the text is cut mid-sentence and must not become the permanent stand-in
+       * for a span nothing re-derives.
        */
-      reason: "too_short" | "nothing_new" | "empty_summary";
+      reason: "too_short" | "nothing_new" | "empty_summary" | "truncated";
     }
   /**
    * `conversation` — the row vanished between the caller resolving it and this
@@ -75,6 +63,21 @@ export type CompactConversationResult =
    */
   | { status: "not_found"; missing: "conversation" | "profile" };
 
+/**
+ * Synchronous driver for the `/compact` manual trigger.
+ *
+ * The turn-time path only summarizes under budget pressure (Strategy 2 at 80%)
+ * and pays the latency at the front of the user's next turn. This forces the
+ * same split immediately, on demand, and stores the result — so the next turn
+ * starts from a summary it did not have to wait for.
+ *
+ * Sidesteps Inngest for the same reasons `triggerReflection` does: the user is
+ * waiting on the reply, single-user scale means there is no concurrent fire to
+ * race, and an LLM or DB error surfaces to the caller rather than disappearing
+ * into a retry log. A `/compact` racing an in-flight turn is safe by
+ * construction — the turn froze its history inside `load-turn-history`, and this
+ * only ever covers a prefix of what that turn already read.
+ */
 export async function compactConversation(
   conversationId: string,
   deps: CompactConversationDeps,
@@ -82,9 +85,15 @@ export async function compactConversation(
   // Conversation and profile share a tx: a `/profile switch` landing between
   // the two reads would otherwise pair a conversation with a profile that is no
   // longer its own, and the profile supplies both the summarization model and
-  // the base prompt. The history read below deliberately takes its own
-  // snapshot — it wants the newest transcript, and a turn committing in between
-  // only appends, so the summary describes a prefix either way.
+  // the base prompt.
+  //
+  // The reads that follow each take their own snapshot, deliberately. The
+  // history read wants the newest transcript, and a turn committing in between
+  // only appends, so the summary describes a prefix either way. The steering
+  // rules could in principle resolve under a snapshot a `/profile switch` has
+  // moved past — that flavours the summarization prompt with the outgoing
+  // profile's rules, a cosmetic loss set against reshaping a shared use case
+  // to take a `tx`.
   const loaded = await deps.runInTx(async (tx) => {
     const conversation = await deps.agentStore.getConversation(tx, conversationId);
     if (!conversation) return { missing: "conversation" as const };
@@ -149,6 +158,10 @@ export async function compactConversation(
   );
   const summary = extractSummaryText(response.content);
   if (summary.trim().length === 0) return { status: "skipped", reason: "empty_summary" };
+  // Storing a summary cut off at its output cap would freeze a half-written
+  // stand-in for a span later turns stop loading. The empty case is guarded
+  // just above; this is the same budget running out one step later.
+  if (response.stopReason === "max_tokens") return { status: "skipped", reason: "truncated" };
 
   // A turn that compacted while the summarization was in flight supersedes this
   // row two ways: it can take the same cutoff, where the conflict arm keeps its

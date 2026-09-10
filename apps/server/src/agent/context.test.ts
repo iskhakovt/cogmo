@@ -1,11 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ContentBlock, Message, ToolResultBlock, ToolUseBlock } from "../llm/types.js";
+import { expectDefined } from "../test/assertions.js";
 import {
   type ContextManagerDeps,
   compactMessages,
   compactSameToolClusters,
+  SUMMARIZATION_PROMPT,
   shouldSkipCounting,
   snapToPairBoundary,
+  summarizationRequest,
 } from "./context.js";
 
 /** Helper: create a simple text message. */
@@ -999,7 +1002,7 @@ describe("pre-summarize strategies preserve the array's length", () => {
     expect(summarized).toBeGreaterThan(0);
     // The prefix handed to the summarizer is exactly `input.slice(0, count)`,
     // message-for-message — same positions, only block content rewritten.
-    const prefix = summarize.mock.calls[0]?.[1] as Message[];
+    const prefix: Message[] = expectDefined(summarize.mock.calls[0], "summarize call")[1];
     expect(prefix).toHaveLength(summarized);
     expect(prefix.map((m) => m.role)).toEqual(messages.slice(0, summarized).map((m) => m.role));
   });
@@ -1066,5 +1069,49 @@ describe("prefix veto", () => {
     // 9 entries, keepTurns 6 → raw split 3, which lands on the user-role
     // tool_result and snaps back to 2 so the pair stays intact.
     expect(canSummarizePrefix).toHaveBeenCalledWith(2);
+  });
+});
+
+describe("summarizationRequest", () => {
+  it("repairs an orphan tool_use at the prefix tail", () => {
+    // A split can land right after an assistant `tool_use` that history never
+    // answered — a shape `validateHistory` exists for. Compaction runs upstream
+    // of the agent loop's sanitizer, so this is the one LLM call in a turn that
+    // would otherwise be built from raw history, and Anthropic rejects it.
+    const params = summarizationRequest({
+      model: "m",
+      system: "s",
+      messages: [msg("user", "do it"), toolCallMsg("t1", "read_file")],
+      maxOutputTokens: 8192,
+    });
+
+    // The synthesized answer sits between the orphan call and the instruction.
+    expect(expectDefined(params.messages.at(-2), "answering message")).toMatchObject({
+      role: "user",
+      content: [{ type: "tool_result", toolUseId: "t1" }],
+    });
+  });
+
+  it("appends the instruction as the final user message", () => {
+    const params = summarizationRequest({
+      model: "m",
+      system: "s",
+      messages: [msg("user", "hello"), msg("assistant", "hi")],
+      maxOutputTokens: 8192,
+    });
+
+    expect(params.messages.at(-1)).toEqual({ role: "user", content: SUMMARIZATION_PROMPT });
+    expect(params.messages).toHaveLength(3);
+  });
+
+  it("caps output at the model's own ceiling when it is below the default", () => {
+    expect(
+      summarizationRequest({ model: "m", system: "s", messages: [], maxOutputTokens: 4096 })
+        .maxTokens,
+    ).toBe(4096);
+    expect(
+      summarizationRequest({ model: "m", system: "s", messages: [], maxOutputTokens: 64_000 })
+        .maxTokens,
+    ).toBe(16_000);
   });
 });

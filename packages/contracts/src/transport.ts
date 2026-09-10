@@ -72,7 +72,7 @@ export type TransportError =
   | { code: "schedule_id_malformed"; id: string }
   | { code: "evolution_unavailable" }
   | { code: "compaction_unavailable" }
-  | { code: "compaction_failed"; reason: string };
+  | { code: "compaction_failed"; reason: string | null };
 
 export interface ProfileInput {
   name: string;

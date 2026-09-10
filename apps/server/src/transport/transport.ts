@@ -272,7 +272,7 @@ export type TriggerReflectionOutcome =
  */
 export type CompactConversationOutcome =
   | { status: "no_session" }
-  | { status: "skipped"; reason: "too_short" | "nothing_new" | "empty_summary" }
+  | { status: "skipped"; reason: "too_short" | "nothing_new" | "empty_summary" | "truncated" }
   | { status: "compacted"; messagesSummarized: number; messagesKept: number; model: string };
 
 export type TransportError =
@@ -352,15 +352,17 @@ export type TransportError =
    * `Result` contract and leaves the caller's pre-ack as the last thing the
    * user sees.
    *
-   * `reason` reaches the user, so it carries a raw error message only for
-   * types whose messages are known safe and short — today `ProviderConfigError`
-   * alone, whose four throw sites name a model or a provider row. Everything else reports
+   * `reason` reaches the user, so it is non-null only for error types whose
+   * messages are known safe and short — today `ProviderConfigError` alone,
+   * whose four throw sites name a model or a provider row. `null` means the
+   * detail is in the log, and being null rather than a sentinel string keeps
+   * the two rendering arms checkable by the compiler. Everything else reports
    * `unknown` and lives in the log: a Drizzle failure stringifies as
    * `Failed query: <sql>` plus its bound params, which for this table is the
    * whole INSERT and the entire summary text, and a provider failure can embed
    * a request URL.
    */
-  | { code: "compaction_failed"; reason: string };
+  | { code: "compaction_failed"; reason: string | null };
 
 /**
  * Transport — the adapter-facing contract for session management and inbound emission.
@@ -1517,7 +1519,7 @@ export function createTransport(deps: {
             // the one worth naming. Its messages carry a model or a provider
             // row name plus an instruction to re-run `cogmo setup` — operator-
             // chosen identifiers, never credentials or query text.
-            reason: error instanceof ProviderConfigError ? error.message : "unknown",
+            reason: error instanceof ProviderConfigError ? error.message : null,
           });
         }
         if (result.status === "not_found") {

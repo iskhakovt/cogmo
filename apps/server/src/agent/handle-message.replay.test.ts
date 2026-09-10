@@ -204,7 +204,10 @@ describe("handle-message — crash recovery / step replay", () => {
         {
           id: "summarize-prefix",
           // Cached value: the summary text from a prior attempt.
-          handler: () => "[cached summary from prior attempt]",
+          handler: () => ({
+            text: "[cached summary from prior attempt]",
+            stopReason: "end_turn",
+          }),
         },
       ],
     });

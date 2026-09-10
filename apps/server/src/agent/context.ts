@@ -19,6 +19,7 @@ import type {
   ToolDefinition,
 } from "../llm/types.js";
 import { logger } from "../logger.js";
+import { validateHistory } from "./history-invariants.js";
 
 // --- Public interface ---
 
@@ -104,9 +105,17 @@ Be specific — preserve names, paths, and values, not abstractions.`;
  * the output cap and the message layout cannot drift between the turn-time
  * strategy and the manual `/compact` driver.
  *
+ * The prefix is repaired first. `sanitizeHistory` runs inside the agent loop,
+ * which is downstream of compaction, so a summarization request is the one
+ * LLM call in a turn built from raw history — and a split can land right after
+ * an assistant `tool_use` that history never answered, which Anthropic rejects
+ * outright. Unrepaired, that 400 is permanent for the conversation: the manual
+ * path surfaces it as `compaction_failed` on every attempt, and the turn-time
+ * path swallows it into a wasted billable call plus a silent drop to
+ * truncation on every turn above the threshold.
+ *
  * The cap leaves room for reasoning as well as the summary, bounded by what
- * this model accepts — asking above its ceiling is a 400, which the turn-time
- * path swallows into a fall-through to truncation.
+ * this model accepts — asking above its ceiling is a 400 of a different kind.
  */
 export function summarizationRequest(params: {
   model: string;
@@ -114,10 +123,11 @@ export function summarizationRequest(params: {
   messages: ReadonlyArray<Message>;
   maxOutputTokens: number;
 }): ChatParams {
+  const { messages: repaired } = validateHistory(params.messages);
   return {
     model: params.model,
     system: params.system,
-    messages: [...params.messages, { role: "user", content: SUMMARIZATION_PROMPT }],
+    messages: [...repaired, { role: "user", content: SUMMARIZATION_PROMPT }],
     maxTokens: Math.min(16_000, params.maxOutputTokens),
   };
 }
@@ -135,10 +145,18 @@ export function summarizationRequest(params: {
  * summarization request never carries.
  */
 export function extractSummaryText(content: ReadonlyArray<ContentBlock>): string {
-  return content
-    .filter((b) => b.type === "text")
-    .map((b) => b.text)
-    .join("");
+  const text = content.filter((b) => b.type === "text");
+  if (text.length > 1) {
+    // The join assumes at most one block. If a provider ever returns prose in
+    // several — Anthropic does so around `tool_use`, and citations would do it
+    // without one — the seam lands mid-sentence, and durability means that
+    // text is stored and replayed rather than recomputed next turn.
+    logger.warn(
+      { blocks: text.length },
+      "summarization returned multiple text blocks; joined without a separator",
+    );
+  }
+  return text.map((b) => b.text).join("");
 }
 
 /**

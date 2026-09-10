@@ -297,6 +297,25 @@ describe("compactConversation", () => {
     expect(agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
   });
 
+  it("stores nothing when the summary was cut off at the output cap", async () => {
+    // Durability makes a truncated summary permanent: later turns stop loading
+    // the raw messages, so a half-written stand-in never gets re-derived.
+    const agentStore = storeWith(transcript(10));
+    const provider = mockProvider({
+      chat: vi.fn().mockResolvedValue({
+        content: [{ type: "text", text: "they discussed the sch" }],
+        stopReason: "max_tokens",
+        model: "claude-haiku-4-5",
+        usage: { inputTokens: 10, outputTokens: 16_000 },
+      }),
+    });
+
+    const result = await compactConversation(CONVERSATION_ID, deps({ agentStore, provider }));
+
+    expect(result).toEqual({ status: "skipped", reason: "truncated" });
+    expect(agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
+  });
+
   it("reports which row was missing when the conversation vanished", async () => {
     const agentStore = mockAgentStore({ getConversation: vi.fn().mockResolvedValue(undefined) });
 

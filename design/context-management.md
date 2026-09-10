@@ -65,7 +65,7 @@ Strategy 2 is the exception, because it is the only strategy that costs an LLM c
 | `conversation_id` | Owning conversation. |
 | `summary` | The text, exactly as it re-enters the context. |
 | `through_message_id` | Last `messages` row the summary stands in for. Snapped to a tool_use/tool_result pair boundary at write time. |
-| `messages_summarized` | Entries of the compaction input the summary replaced — telemetry, not a cursor. |
+| `messages_summarized` | Real messages the summary replaced — audit trail, not a cursor. Excludes a previous summary folded in, so a re-compaction's count matches what the user was told. |
 | `model` | Summarization model that produced the text. |
 | `source` | `turn` (Strategy 2 fired under budget pressure) or `manual` (`/compact`). |
 

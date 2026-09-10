@@ -2127,7 +2127,7 @@ function errorMessage(err: TransportError): string {
     case "compaction_unavailable":
       return "Compaction isn't wired in this deployment.";
     case "compaction_failed":
-      return err.reason === "unknown"
+      return err.reason === null
         ? "Couldn't compact this conversation. The error is in the server log."
         : `Couldn't compact this conversation: ${err.reason}`;
   }
@@ -2452,6 +2452,11 @@ export async function handleCompact(
     .with(
       { status: "skipped", reason: "empty_summary" },
       () => "The summarization model returned no text — nothing stored. Try again.",
+    )
+    .with(
+      { status: "skipped", reason: "truncated" },
+      () =>
+        "The summary hit the model's output limit — nothing stored, so no half-written summary sticks.",
     )
     .with(
       { status: "compacted" },
