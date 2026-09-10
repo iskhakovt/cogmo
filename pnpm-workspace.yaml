@@ -10,24 +10,15 @@ allowBuilds:
   protobufjs: false
   ssh2: false
 
-# Force patched versions of transitive deps carrying open security advisories.
-# Each parent's declared range already admits the patched version — these floors
-# stop a stale lockfile resolution from drifting back below it, since nothing in
-# any manifest pins these packages and Dependabot only bumps manifest entries.
-# Drop each once every parent's *minimum* supported range is patched.
+# Advisory floors for transitive deps nothing in the workspace pins, so
+# Dependabot has no manifest entry to bump. Drop each once every parent's
+# minimum range is patched.
 #
-# Every entry is bounded on both sides, and both bounds earn their place. An
-# unbounded value re-resolves to the newest release on the next lockfile pass and
-# will cross a major the parent never declared: `fast-uri@<3.1.6` -> `>=3.1.6`
-# resolves to 4.1.4 against ajv's `^3.0.1`. An unbounded selector reaches below
-# the line too — a bare `<4.13.5` matches hono 3.x, so a 3.x arrival would be
-# force-marched across a major to satisfy a floor written for the 4.x line.
-#
-# Scoping each selector to one major is therefore deliberate, and it does narrow
-# advisory coverage where an advisory spans further back: GHSA-4mjr-xmp4-gh2g
-# reaches qs `>=2.2.5`, so a hypothetical qs 5.x would sit unpatched here. That
-# is the better failure — a sub-6 qs entering this tree wants a look at what
-# pulled it, not a silent major bump, and no such dependency exists today.
+# Both bounds are load-bearing: unbounded, `fast-uri >=3.1.6` resolves to 4.1.4
+# against ajv's `^3.0.1`, and a bare `<4.13.5` selector would drag a hono 3.x
+# across a major. One major per entry — which does leave a sub-6 qs unpatched
+# against GHSA-4mjr-xmp4-gh2g (spans >=2.2.5); none is in the tree, and one
+# arriving wants investigating rather than a silent major bump.
 overrides:
   "fast-uri@>=3 <3.1.6": ">=3.1.6 <4" # GHSA-5jgf-p345-68v8, -f65p-4m7j-42xc, -fph4-wmhf-6fwf, -jqff-g426-hqxp (high) via ajv
   "hono@>=4 <4.13.5": ">=4.13.5 <5" # GHSA-gqvv-2mrq-wpjv, -g6gw-c38x-mqfc, -crvj-82cr-hjcx (moderate) via @modelcontextprotocol/sdk, inngest
