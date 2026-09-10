@@ -84,7 +84,7 @@ updates:
       # being removed from the distribution) that need human review.
       # Bump Node majors by hand once a year when the next even-numbered
       # LTS ships.
-      - dependency-name: node
+      - dependency-name: library/node
         update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /

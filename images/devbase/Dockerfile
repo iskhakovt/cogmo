@@ -22,8 +22,8 @@
 # uv as a stage, shared with cogmo-skills. Defaults are the standalone-build
 # fallback; docker-bake.hcl overrides them for published builds and
 # version-pins.test.ts enforces the match. ARG-in-FROM needs global scope.
-ARG UV_VERSION=0.12.5
-ARG UV_DIGEST=sha256:e85be844203885286c60ffad8a858d48afb6c5a5c237ca0e67f12e74b8f174b1
+ARG UV_VERSION=0.12.12
+ARG UV_DIGEST=sha256:73d2665b478d8fa2de1cf105c6841f8e9cb6b09e568fc7700440c09f8fcd7ac4
 FROM ghcr.io/astral-sh/uv:${UV_VERSION}@${UV_DIGEST} AS uv
 
 FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04@sha256:d94c97dd9cacf183d0a6fd12a8e87b526e9e928307674ae9c94139139c0c6eae
@@ -36,7 +36,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # Toolchain versions — defaults mirror docker-bake.hcl (see the uv note above).
 ARG NPM_VERSION=12.0.2
 ARG PNPM_VERSION=11.21.0
-ARG CLAUDE_CODE_VERSION=2.1.233
+ARG CLAUDE_CODE_VERSION=2.1.267
 
 # devcontainers/base already ships git, gh, curl, jq, ripgrep — but `fd-find`
 # is missing on Ubuntu and the binary is named `fdfind` rather than `fd`.
