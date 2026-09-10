@@ -37,6 +37,18 @@ export interface ContextManagerDeps {
    * the call site — must change in lockstep.
    */
   summarize?: (system: string, messages: Message[]) => Promise<string>;
+  /**
+   * Veto on summarizing a prefix of `splitIdx` entries, consulted after the
+   * split is chosen and before the LLM call.
+   *
+   * Exists because worth is not a property of the prefix's shape. A one-entry
+   * prefix holding a 500K-token message is the best case for Strategy 2; a
+   * one-entry prefix holding a previously-stored summary is the worst, buying a
+   * summary of a summary that advances no cutoff and gets discarded. Only a
+   * caller holding the message ids can tell those apart, so `handle-message`
+   * gates on whether the span has a durable cutoff. Omitted means no veto.
+   */
+  canSummarizePrefix?: (splitIdx: number) => boolean;
 }
 
 export interface CompactionEvent {
@@ -68,20 +80,6 @@ const DEFAULT_KEEP_TOOL_RESULTS = 5;
  * automatic one cover different spans of the same conversation.
  */
 export const DEFAULT_KEEP_TURNS = 6;
-
-/**
- * Fewest prefix entries worth an LLM call. At one entry the summary is no
- * smaller than what it replaces, and when that entry is a previously-stored
- * summary the call buys a summary of a summary that advances no cutoff.
- *
- * Counts entries, not real messages — this module sees `Message[]` with no way
- * to tell a stored summary from a turn. So a prefix of `[storedSummary, m1]`
- * clears the floor and folds one message in. That call is marginal rather than
- * wasted: unlike the one-entry case it does advance the cutoff and produce a
- * summary that gets used. `/compact`, which has the message ids, applies a real
- * floor of its own on top.
- */
-const MIN_SUMMARIZABLE_PREFIX = 2;
 
 // Strategy 0 defaults — see design/context-management.md → Strategy 0.
 // triggerCount = retainRecent + retainFirst + 2 → first fire compacts
@@ -240,7 +238,13 @@ export async function compactMessages(
   // Strategy 2: Summarize conversation prefix at 80%
   if (tokens > budget * SUMMARIZE_THRESHOLD && summarize) {
     try {
-      const summarized = await summarizePrefix(result, system, summarize, DEFAULT_KEEP_TURNS);
+      const summarized = await summarizePrefix(
+        result,
+        system,
+        summarize,
+        DEFAULT_KEEP_TURNS,
+        deps.canSummarizePrefix,
+      );
       if (summarized.summarizedCount > 0) {
         result = summarized.messages;
         messagesSummarized = summarized.summarizedCount;
@@ -537,18 +541,19 @@ async function summarizePrefix(
   system: string,
   summarize: (system: string, messages: Message[]) => Promise<string>,
   keepTurns: number,
+  canSummarize: ContextManagerDeps["canSummarizePrefix"],
 ): Promise<{ messages: Message[]; summarizedCount: number }> {
   // Keep the last keepTurns messages (user/assistant pairs)
   const rawSplit = Math.max(0, messages.length - keepTurns);
   if (rawSplit <= 0) return { messages, summarizedCount: 0 };
 
   const splitIdx = snapToPairBoundary(messages, rawSplit);
-  // A one-message prefix is never worth a summarization call: the summary is
-  // no shorter than what it replaces. It is also the shape a re-compaction
-  // takes when only the previously-stored summary sits outside the retain
-  // window, where the call would buy a summary of a summary and advance
-  // nothing — the caller has no cutoff to store and discards the result.
-  if (splitIdx < MIN_SUMMARIZABLE_PREFIX) return { messages, summarizedCount: 0 };
+  if (splitIdx <= 0) return { messages, summarizedCount: 0 };
+  // Size is not what makes a prefix worth summarizing — a single enormous
+  // message is exactly the shape Strategy 2 exists for, and refusing it here
+  // would hand the turn to lossy truncation instead. Only the caller knows
+  // whether a given split buys anything durable, so it decides.
+  if (canSummarize && !canSummarize(splitIdx)) return { messages, summarizedCount: 0 };
 
   const prefix = messages.slice(0, splitIdx);
   const suffix = messages.slice(splitIdx);

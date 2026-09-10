@@ -1005,39 +1005,66 @@ describe("pre-summarize strategies preserve the array's length", () => {
   });
 });
 
-describe("minimum summarizable prefix", () => {
+describe("prefix veto", () => {
   function summarizeDeps(
     summarize: NonNullable<ContextManagerDeps["summarize"]>,
   ): ContextManagerDeps {
     return { countTokens: vi.fn().mockResolvedValue(900), budget: 1000, summarize };
   }
 
-  it("refuses a one-message prefix instead of paying for a summary of it", async () => {
-    // 7 messages at keepTurns 6 splits at 1. The summary would be no smaller
-    // than the message it replaces, and on a re-compaction that lone entry is
-    // the previously-stored summary, which advances no cutoff.
+  const sevenMessages = () =>
+    Array.from({ length: 7 }, (_, i) => msg(i % 2 === 0 ? "user" : "assistant", `turn ${i}`));
+
+  it("summarizes a one-message prefix when no veto is supplied", async () => {
+    // 7 messages at keepTurns 6 splits at 1. Size is not what makes a prefix
+    // worth summarizing: one enormous message is the best case for Strategy 2,
+    // and refusing it would hand the turn to lossy truncation.
     const summarize = vi.fn().mockResolvedValue("a summary");
-    const messages = Array.from({ length: 7 }, (_, i) =>
-      msg(i % 2 === 0 ? "user" : "assistant", `turn ${i}`),
+
+    const result = await compactMessages(
+      "system",
+      sevenMessages(),
+      undefined,
+      summarizeDeps(summarize),
     );
 
-    const result = await compactMessages("system", messages, undefined, summarizeDeps(summarize));
+    expect(summarize).toHaveBeenCalledOnce();
+    expect(result.event?.messagesSummarized).toBe(1);
+  });
 
+  it("skips the LLM call when the caller vetoes the split", async () => {
+    const summarize = vi.fn().mockResolvedValue("a summary");
+    const canSummarizePrefix = vi.fn().mockReturnValue(false);
+
+    const result = await compactMessages("system", sevenMessages(), undefined, {
+      ...summarizeDeps(summarize),
+      canSummarizePrefix,
+    });
+
+    expect(canSummarizePrefix).toHaveBeenCalledWith(1);
     expect(summarize).not.toHaveBeenCalled();
     expect(result.event?.strategies ?? []).not.toContain("summarize");
   });
 
-  it("summarizes a two-message prefix", async () => {
-    // The boundary the case above sits one below — proves the refusal is the
-    // floor talking and not summarization being unreachable in this setup.
-    const summarize = vi.fn().mockResolvedValue("a summary");
-    const messages = Array.from({ length: 8 }, (_, i) =>
-      msg(i % 2 === 0 ? "user" : "assistant", `turn ${i}`),
-    );
+  it("consults the veto with the chosen split, after pair-snapping", async () => {
+    // The veto has to see the index the summary would actually cover, not the
+    // raw `length - keepTurns` — the caller maps it back to a message id.
+    const canSummarizePrefix = vi.fn().mockReturnValue(true);
+    const messages = [
+      msg("user", "t0"),
+      msg("assistant", "t1"),
+      toolCallMsg("t9", "read_file"),
+      toolResultMsg([{ id: "t9", content: "x" }]),
+      ...Array.from({ length: 5 }, (_, i) => msg(i % 2 === 0 ? "assistant" : "user", `u${i}`)),
+    ];
 
-    const result = await compactMessages("system", messages, undefined, summarizeDeps(summarize));
+    await compactMessages("system", messages, undefined, {
+      ...summarizeDeps(vi.fn().mockResolvedValue("a summary")),
+      canSummarizePrefix,
+    });
 
-    expect(summarize).toHaveBeenCalledOnce();
-    expect(result.event?.messagesSummarized).toBe(2);
+    // 9 entries, keepTurns 6 → raw split 3, which lands on the user-role
+    // tool_result and snaps back to 2 so the pair stays intact.
+    expect(canSummarizePrefix).toHaveBeenCalledWith(2);
   });
 });

@@ -989,6 +989,13 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             };
           })(),
           budget,
+          // Refuse a split that buys nothing durable — the shape where the
+          // prefix is the previously-stored summary and nothing else. A
+          // one-message prefix carrying a real message still summarizes: that
+          // is the case Strategy 2 exists for, and refusing it would hand the
+          // turn to truncation.
+          canSummarizePrefix: (splitIdx) =>
+            summarizedSpan(turnHistory.messageIds, splitIdx) !== null,
           summarize: async (system, msgs) => {
             // Resolve the summarization provider lazily — only when
             // compaction actually picks the SUMMARIZE strategy. Resolving

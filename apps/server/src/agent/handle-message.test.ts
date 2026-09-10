@@ -627,7 +627,7 @@ describe("createHandleMessage", () => {
       agentStore: mockAgentStore({
         listMessages: vi
           .fn()
-          .mockResolvedValue([{ role: "user", content: "summarize this document" }]),
+          .mockResolvedValue([{ id: "m1", role: "user", content: "summarize this document" }]),
       }),
       transportStore: mockTransportStore({
         getUnbatchedInbound: vi.fn().mockResolvedValue([
@@ -679,7 +679,9 @@ describe("createHandleMessage", () => {
   it("omits name on resolved DocumentBlock when inbound block had no name", async () => {
     const deps = mockDeps({
       agentStore: mockAgentStore({
-        listMessages: vi.fn().mockResolvedValue([{ role: "user", content: "see attached" }]),
+        listMessages: vi
+          .fn()
+          .mockResolvedValue([{ id: "m1", role: "user", content: "see attached" }]),
       }),
       transportStore: mockTransportStore({
         getUnbatchedInbound: vi.fn().mockResolvedValue([
@@ -1258,14 +1260,14 @@ describe("createHandleMessage", () => {
         getLastTokens: vi.fn().mockResolvedValue(null),
         // Need history with enough messages to trigger summarization (> keepTurns=6)
         listMessages: vi.fn().mockResolvedValue([
-          { role: "user", content: "m1" },
-          { role: "assistant", content: "r1" },
-          { role: "user", content: "m2" },
-          { role: "assistant", content: "r2" },
-          { role: "user", content: "m3" },
-          { role: "assistant", content: "r3" },
-          { role: "user", content: "m4" },
-          { role: "assistant", content: "r4" },
+          { id: "m1", role: "user", content: "m1" },
+          { id: "m2", role: "assistant", content: "r1" },
+          { id: "m3", role: "user", content: "m2" },
+          { id: "m4", role: "assistant", content: "r2" },
+          { id: "m5", role: "user", content: "m3" },
+          { id: "m6", role: "assistant", content: "r3" },
+          { id: "m7", role: "user", content: "m4" },
+          { id: "m8", role: "assistant", content: "r4" },
         ]),
       }),
     });
@@ -1686,14 +1688,14 @@ describe("createHandleMessage", () => {
           getLastTokens: vi.fn().mockResolvedValue(null),
           // Need ≥ keepTurns history to actually trigger summarization
           listMessages: vi.fn().mockResolvedValue([
-            { role: "user", content: "m1" },
-            { role: "assistant", content: "r1" },
-            { role: "user", content: "m2" },
-            { role: "assistant", content: "r2" },
-            { role: "user", content: "m3" },
-            { role: "assistant", content: "r3" },
-            { role: "user", content: "m4" },
-            { role: "assistant", content: "r4" },
+            { id: "m1", role: "user", content: "m1" },
+            { id: "m2", role: "assistant", content: "r1" },
+            { id: "m3", role: "user", content: "m2" },
+            { id: "m4", role: "assistant", content: "r2" },
+            { id: "m5", role: "user", content: "m3" },
+            { id: "m6", role: "assistant", content: "r3" },
+            { id: "m7", role: "user", content: "m4" },
+            { id: "m8", role: "assistant", content: "r4" },
           ]),
         }),
       });
@@ -1753,14 +1755,14 @@ describe("createHandleMessage", () => {
           }),
           getLastTokens: vi.fn().mockResolvedValue(null),
           listMessages: vi.fn().mockResolvedValue([
-            { role: "user", content: "m1" },
-            { role: "assistant", content: "r1" },
-            { role: "user", content: "m2" },
-            { role: "assistant", content: "r2" },
-            { role: "user", content: "m3" },
-            { role: "assistant", content: "r3" },
-            { role: "user", content: "m4" },
-            { role: "assistant", content: "r4" },
+            { id: "m1", role: "user", content: "m1" },
+            { id: "m2", role: "assistant", content: "r1" },
+            { id: "m3", role: "user", content: "m2" },
+            { id: "m4", role: "assistant", content: "r2" },
+            { id: "m5", role: "user", content: "m3" },
+            { id: "m6", role: "assistant", content: "r3" },
+            { id: "m7", role: "user", content: "m4" },
+            { id: "m8", role: "assistant", content: "r4" },
           ]),
         }),
       });
@@ -1836,14 +1838,14 @@ describe("createHandleMessage", () => {
           }),
           getLastTokens: vi.fn().mockResolvedValue(null),
           listMessages: vi.fn().mockResolvedValue([
-            { role: "user", content: "m1" },
-            { role: "assistant", content: "r1" },
-            { role: "user", content: "m2" },
-            { role: "assistant", content: "r2" },
-            { role: "user", content: "m3" },
-            { role: "assistant", content: "r3" },
-            { role: "user", content: "m4" },
-            { role: "assistant", content: "r4" },
+            { id: "m1", role: "user", content: "m1" },
+            { id: "m2", role: "assistant", content: "r1" },
+            { id: "m3", role: "user", content: "m2" },
+            { id: "m4", role: "assistant", content: "r2" },
+            { id: "m5", role: "user", content: "m3" },
+            { id: "m6", role: "assistant", content: "r3" },
+            { id: "m7", role: "user", content: "m4" },
+            { id: "m8", role: "assistant", content: "r4" },
           ]),
         }),
       });
@@ -2001,7 +2003,9 @@ describe("createHandleMessage", () => {
         voiceResolver: mockVoiceResolver(mockVoiceBundle({ stt: sttProvider })),
         agentStore: mockAgentStore({
           insertMessage,
-          listMessages: vi.fn().mockResolvedValue([{ role: "user", content: "hello there" }]),
+          listMessages: vi
+            .fn()
+            .mockResolvedValue([{ id: "m1", role: "user", content: "hello there" }]),
         }),
         attachments: {
           upload: vi.fn().mockResolvedValue("inbound/x"),
@@ -2041,7 +2045,7 @@ describe("createHandleMessage", () => {
       const deps = mockDeps({
         voiceResolver: mockVoiceResolver(mockVoiceBundle({ stt: sttProvider })),
         agentStore: mockAgentStore({
-          listMessages: vi.fn().mockResolvedValue([{ role: "user", content: "speak" }]),
+          listMessages: vi.fn().mockResolvedValue([{ id: "m1", role: "user", content: "speak" }]),
         }),
         attachments: {
           upload: vi.fn().mockResolvedValue("inbound/x"),
@@ -2241,7 +2245,7 @@ describe("createHandleMessage", () => {
           listMessages: vi
             .fn()
             .mockResolvedValue([
-              { role: "user", content: "check this out\nthe meeting was rescheduled" },
+              { id: "m1", role: "user", content: "check this out\nthe meeting was rescheduled" },
             ]),
         }),
         attachments: {
@@ -2319,7 +2323,7 @@ describe("createHandleMessage", () => {
           }),
           listMessages: vi
             .fn()
-            .mockResolvedValue([{ role: "user", content: "what's the weather" }]),
+            .mockResolvedValue([{ id: "m1", role: "user", content: "what's the weather" }]),
         }),
         attachments: {
           upload: vi.fn().mockResolvedValue("inbound/x"),
@@ -3610,6 +3614,26 @@ describe("durable conversation summaries", () => {
 
     expect(chat).not.toHaveBeenCalled();
     expect(deps.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
+  });
+
+  it("still summarizes a single oversized message outside the retain window", async () => {
+    // 7 rows with no stored summary splits at 1. That lone entry is a real
+    // message — the case Strategy 2 exists for, since it is only reachable at
+    // 80% of budget when the message is enormous. Refusing it would hand the
+    // turn to lossy truncation instead.
+    const { deps, chat } = summarizingDeps({ messages: rows(7) });
+
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(chat).toHaveBeenCalled();
+    expect(deps.agentStore.insertOrRecoverSummary).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ messagesSummarized: 1, throughMessageId: "m1" }),
+    );
   });
 
   it("records the real messages replaced, not the compaction-view entries", async () => {
