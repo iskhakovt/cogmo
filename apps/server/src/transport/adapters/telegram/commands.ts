@@ -2033,11 +2033,11 @@ function errorMessage(err: TransportError): string {
     case "conversation_not_found":
       return "Conversation not found.";
     case "profile_not_found":
-      // Reached two ways: a name that does not resolve, and a conversation whose
-      // own profile row is gone. Switching repairs both — listing alone repairs
-      // only the first — so the message names the pair. `friendlyError` in
-      // profile-dialog.ts renders the same code and is kept in step by hand.
-      return "Profile not found. Use /profile list, then /profile switch to pick one.";
+      // Rendered for every command that can raise the code — delete, rename,
+      // voice, and a conversation whose own profile row is gone. Listing is the
+      // next step for all of them; naming a specific repair here would be wrong
+      // for most of the callers.
+      return "Profile not found. Use /profile list to see what's available.";
     case "profile_in_use":
       return "Profile has active conversations. Switch them first.";
     case "profile_name_taken":
@@ -2460,7 +2460,9 @@ export async function handleCompact(
     .with(
       { status: "skipped", reason: "truncated" },
       () =>
-        "The summary hit the model's output limit — nothing stored, so no half-written summary sticks.",
+        "This conversation is too large to summarize in one pass — the summary hit the model's " +
+        "output limit, so nothing was stored rather than freezing a half-written one. Re-running " +
+        "won't help; /new starts a fresh conversation.",
     )
     .with(
       { status: "compacted" },

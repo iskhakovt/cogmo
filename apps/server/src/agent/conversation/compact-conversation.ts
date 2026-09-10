@@ -52,10 +52,13 @@ export type CompactConversationResult =
        * the previously-stored summary. `nothing_new` — a concurrent turn won
        * the race, either by taking this same cutoff (the conflict arm kept its
        * text) or a wider one (this row was written but coverage-ordered reads
-       * will never return it). `empty_summary` — the model spent its budget
-       * reasoning and returned no text. `truncated` — it hit its output cap, so
-       * the text is cut mid-sentence and must not become the permanent stand-in
-       * for a span nothing re-derives.
+       * will never return it), or the span held nothing but the previous
+       * summary. `empty_summary` — the model spent its budget reasoning and
+       * returned no text. `truncated` — it hit its output cap, so the text is
+       * cut mid-sentence and must not become the permanent stand-in for a span
+       * nothing re-derives. Re-running cannot change that: the prefix is the
+       * same and the cap is fixed, so the span needs the input cap tracked in
+       * `todo.md` before it can be compacted at all.
        */
       reason: "too_short" | "nothing_new" | "empty_summary" | "truncated";
     }
@@ -114,11 +117,19 @@ export async function compactConversation(
   // Same split the budget-triggered strategy would pick, so a manual
   // compaction and an automatic one cover comparable spans.
   const splitIdx = snapToPairBoundary(messages, Math.max(0, messages.length - DEFAULT_KEEP_TURNS));
-  // The floor counts real messages, so a span that is mostly the previously
-  // stored summary doesn't clear it on the strength of an entry that is already
-  // a summary. A span with no real messages at all fails the same check.
   const span = summarizedSpan(messageIds, splitIdx);
-  if (span === null || span.messageCount < MIN_MESSAGES_TO_COMPACT) {
+  // Two ways to have no real messages to summarize, and they are different
+  // things to tell the user: an empty span means nothing sits outside the
+  // retain window at all, while a non-empty span with no real messages in it
+  // holds the previously-stored summary and nothing else — an
+  // already-compacted conversation, not a short one.
+  if (span === null) {
+    return { status: "skipped", reason: splitIdx === 0 ? "too_short" : "nothing_new" };
+  }
+  // The floor counts real messages, so a span that is mostly the previously
+  // stored summary doesn't clear it on the strength of an entry that is
+  // already a summary.
+  if (span.messageCount < MIN_MESSAGES_TO_COMPACT) {
     return { status: "skipped", reason: "too_short" };
   }
 

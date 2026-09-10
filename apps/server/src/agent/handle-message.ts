@@ -997,10 +997,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           })(),
           budget,
           // Refuse a split that buys nothing durable — the shape where the
-          // prefix is the previously-stored summary and nothing else. A
-          // one-message prefix carrying a real message still summarizes: that
-          // is the case Strategy 2 exists for, and refusing it would hand the
-          // turn to truncation.
+          // prefix is the previously-stored summary and nothing else.
           canSummarizePrefix: (candidate) =>
             summarizedSpan(turnHistory.messageIds, candidate) !== null,
           summarize: async (system, msgs) => {
@@ -1097,8 +1094,15 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         // Projected down to the id: the full row would push the summary text
         // into Inngest step state a second time, and its `createdAt` would come
         // back from the cache as a string rather than a Date.
-        await stepRun("persist-summary", async () => {
-          try {
+        // Caught around the step, not inside it. Inside, `stepRun` never sees
+        // the error, so Inngest cannot retry and one connection blip discards a
+        // summary already paid for. Out here the step keeps its retry budget
+        // and only a permanently-failed one reaches this catch — where
+        // degrading is the designed channel, since caching a summary is not
+        // worth costing the user their reply over a span the next turn would
+        // re-summarize anyway.
+        try {
+          await stepRun("persist-summary", async () => {
             const { kind, row } = await deps.runInTx((tx) =>
               agentStore.insertOrRecoverSummary(tx, {
                 conversationId,
@@ -1128,11 +1132,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             // Inngest run view, where it is the only handle on which row a
             // summarizing turn wrote.
             return { id: row.id };
-          } catch (err) {
-            turnLogger.warn({ err }, "failed to persist conversation summary, continuing the turn");
-            return { id: null };
-          }
-        });
+          });
+        } catch (err) {
+          turnLogger.warn({ err }, "failed to persist conversation summary, continuing the turn");
+        }
       }
 
       let result: AgentLoopResult;

@@ -180,16 +180,27 @@ describe("compactConversation", () => {
     expect(agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
   });
 
-  it("skips when only the stored summary sits outside the retain window", async () => {
-    // Six messages arrived since the last compaction: with the summary
-    // prepended the array is 7 long, so the split lands at 1 — too little to be
-    // worth a call, and it would advance no cutoff either way.
+  it("reports an already-compacted conversation as nothing_new, not too_short", async () => {
+    // Six messages since the last compaction: with the summary prepended the
+    // array is 7 long, so the split covers the synthetic entry alone. Telling
+    // the user their 500-message conversation is "too short" would be absurd.
     const agentStore = storeWith(transcript(6), summaryRow());
 
     const result = await compactConversation(CONVERSATION_ID, deps({ agentStore }));
 
-    expect(result).toEqual({ status: "skipped", reason: "too_short" });
+    expect(result).toEqual({ status: "skipped", reason: "nothing_new" });
     expect(agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
+  });
+
+  it("reports a genuinely short conversation as too_short, not already-compacted", async () => {
+    // The sibling of the already-compacted case: an empty span, because nothing
+    // sits outside the retain window at all. Both yield no real messages to
+    // summarize; only one of them means "you already did this".
+    const agentStore = storeWith(transcript(4));
+
+    const result = await compactConversation(CONVERSATION_ID, deps({ agentStore }));
+
+    expect(result).toEqual({ status: "skipped", reason: "too_short" });
   });
 
   it("skips when too few messages sit outside the retain window to be worth a call", async () => {

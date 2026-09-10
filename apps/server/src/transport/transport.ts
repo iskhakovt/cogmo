@@ -2528,9 +2528,15 @@ export function createTransport(deps: {
     // — 429 and 5xx, the ones where waiting helps — arrive inside the
     // aggregate, and reading only the top-level error would surface a status
     // for exactly the failures where waiting does not help.
-    const source = error instanceof AllProvidersFailedError ? error.attempts.at(-1)?.error : error;
-    if (!(source instanceof Error)) return null;
-    const status = extractStatus(source);
+    const candidates =
+      error instanceof AllProvidersFailedError ? error.attempts.map((a) => a.error) : [error];
+    // Newest first, and skip the ones carrying no status: a chain can end on a
+    // DNS or TLS failure after an earlier candidate returned the 429 that is
+    // the reason to surface a status at all.
+    const status = candidates
+      .reverse()
+      .flatMap((c) => (c instanceof Error ? (extractStatus(c) ?? []) : []))
+      .at(0);
     return status === undefined ? null : `the request failed with HTTP ${status}`;
   }
 

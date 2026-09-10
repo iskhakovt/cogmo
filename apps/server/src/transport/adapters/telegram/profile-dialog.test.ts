@@ -480,7 +480,7 @@ describe("ProfileDialogs - friendlyError mapping", () => {
 
   it("profile_not_found → names both repairs, matching the shared renderer", async () => {
     const reply = await driveSaveError({ code: "profile_not_found" });
-    expect(reply).toBe("Profile not found. Use /profile list, then /profile switch to pick one.");
+    expect(reply).toBe("Profile not found. Use /profile list to see what's available.");
   });
 
   it("identity_rejected → 'You're not authorized on this bot.'", async () => {

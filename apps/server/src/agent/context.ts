@@ -168,12 +168,8 @@ export function summarizationRequest(params: {
 export function extractSummaryText(content: ReadonlyArray<ContentBlock>): string {
   const text = content.filter((b) => b.type === "text");
   if (text.length > 1) {
-    // Blocks in a non-streaming response are discrete units, not fragments of
-    // one, so a paragraph break is the safe seam — joining with nothing would
-    // fuse the last sentence of one into the first of the next, and durability
-    // means that text is stored and replayed rather than recomputed. Still
-    // worth a line: the summarization request carries no tools, so a response
-    // in several blocks means an assumption here has moved.
+    // The request carries no tools, so more than one block means an assumption
+    // in the docblock above has moved.
     logger.warn(
       { blocks: text.length },
       "summarization returned multiple text blocks; joined on a paragraph break",
@@ -590,10 +586,7 @@ async function summarizePrefix(
 
   const splitIdx = snapToPairBoundary(messages, rawSplit);
   if (splitIdx <= 0) return { messages, summarizedCount: 0 };
-  // Size is not what makes a prefix worth summarizing — a single enormous
-  // message is exactly the shape Strategy 2 exists for, and refusing it here
-  // would hand the turn to lossy truncation instead. Only the caller knows
-  // whether a given split buys anything durable, so it decides.
+  // See `ContextManagerDeps.canSummarizePrefix` for why the caller decides.
   if (canSummarize && !canSummarize(splitIdx)) return { messages, summarizedCount: 0 };
 
   const prefix = messages.slice(0, splitIdx);
