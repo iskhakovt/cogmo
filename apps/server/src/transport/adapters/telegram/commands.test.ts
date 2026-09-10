@@ -4371,6 +4371,18 @@ describe("handleCompact", () => {
     expect(ctx.reply.mock.calls[1]?.[0]).toMatch(/nothing stored/i);
   });
 
+  it("says a capped summary was not stored and that re-running won't help", async () => {
+    // The one skip reason that is a dead end rather than a retry: the prefix is
+    // unchanged and the output cap is fixed, so the reply must not imply
+    // otherwise. Both claims it makes are behavioural.
+    const ctx = mkCtx();
+    await handleCompact(compactWith(ok({ status: "skipped", reason: "truncated" })), ctx);
+    const reply = expectDefined(ctx.reply.mock.calls[1], "second reply")[0];
+    expect(reply).toMatch(/nothing was stored/i);
+    expect(reply).toMatch(/won't help/i);
+    expect(reply).not.toMatch(/try again/i);
+  });
+
   it("reports no-session when there's no active conversation", async () => {
     const ctx = mkCtx();
     await handleCompact(compactWith(ok({ status: "no_session" })), ctx);
