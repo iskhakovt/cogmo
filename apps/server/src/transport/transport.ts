@@ -38,7 +38,7 @@ import {
   calculateElapsedCooldown,
   type inboundArrived as InboundArrivedEvent,
 } from "../inngest/events.js";
-import { extractStatus } from "../llm/fallback.js";
+import { AllProvidersFailedError, extractStatus } from "../llm/fallback.js";
 import { computeBudget, resolveLimits } from "../llm/models.js";
 import { ProviderConfigError } from "../llm/resolver.js";
 import { logger } from "../logger.js";
@@ -2511,7 +2511,9 @@ export function createTransport(deps: {
    * an instruction to re-run `cogmo setup` — operator-chosen identifiers, never
    * credentials. An HTTP failure contributes only its status: 429 and 5xx are
    * the likeliest way `/compact` fails and the only detail that tells the user
-   * whether waiting helps, while the response body is not ours to relay. The
+   * whether waiting helps, while the response body is not ours to relay. That
+   * status is read out of `AllProvidersFailedError` when the chain wrapped it,
+   * which is the shape every retriable failure arrives in. The
    * wording stops at the status because `extractStatus` sees everything the
    * driver can throw — stores, prompt assembly, the secrets decrypt — and
    * naming the summarization model would be an attribution this cannot make.
@@ -2520,8 +2522,15 @@ export function createTransport(deps: {
    */
   function compactionFailureReason(error: unknown): string | null {
     if (error instanceof ProviderConfigError) return error.message;
-    if (!(error instanceof Error)) return null;
-    const status = extractStatus(error);
+    // Every chain is wrapped in `FallbackLlmProvider`, which converts a final
+    // *retriable* failure into `AllProvidersFailedError` and lets permanent
+    // ones through bare. So the statuses actually worth telling the user about
+    // — 429 and 5xx, the ones where waiting helps — arrive inside the
+    // aggregate, and reading only the top-level error would surface a status
+    // for exactly the failures where waiting does not help.
+    const source = error instanceof AllProvidersFailedError ? error.attempts.at(-1)?.error : error;
+    if (!(source instanceof Error)) return null;
+    const status = extractStatus(source);
     return status === undefined ? null : `the request failed with HTTP ${status}`;
   }
 

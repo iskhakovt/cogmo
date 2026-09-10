@@ -1,7 +1,6 @@
 import type { Transactor } from "../../db/index.js";
 import { resolveLimits } from "../../llm/models.js";
 import type { LlmProviderResolver } from "../../llm/resolver.js";
-import { logger } from "../../logger.js";
 import type { TransportStore } from "../../transport/store/index.js";
 import {
   compactSameToolClusters,
@@ -192,13 +191,16 @@ export async function compactConversation(
     kind === "recovered" ||
     (await deps.runInTx(async (tx) => {
       const latest = await deps.agentStore.getLatestSummary(tx, conversationId);
-      // A missing row is not a turn winning the race — the insert above
-      // committed, so something else is wrong. Reporting `nothing_new` there
-      // would tell the user their summary was discarded when it is the one
-      // that will be used; treat it as not-superseded and let the log say so.
+      // A missing row is not a turn winning the race: the insert above
+      // committed, and this read takes a snapshot after that commit, so an
+      // empty result contradicts it. `nothing_new` would say the summary was
+      // discarded and `compacted` would promise a durability nothing here can
+      // confirm — so raise instead, and let `/compact` report a failure the
+      // user can act on by running it again.
       if (!latest) {
-        logger.warn({ conversationId }, "summary read back empty right after a committed insert");
-        return false;
+        throw new Error(
+          `conversation_summaries row for ${conversationId} was not readable after a committed insert`,
+        );
       }
       return latest.throughMessageId !== span.cutoff;
     }));

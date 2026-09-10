@@ -4,6 +4,7 @@ import type { CodingStore } from "../agent/coding/store/index.js";
 import type { CompactConversationResult } from "../agent/conversation/compact-conversation.js";
 import type { Transactor } from "../db/index.js";
 import type { inboundArrived } from "../inngest/events.js";
+import { AllProvidersFailedError } from "../llm/fallback.js";
 import { ProviderConfigError } from "../llm/resolver.js";
 import { mockAgentStore, mockTransportStore } from "../test/factories.js";
 import { createTransport } from "./transport.js";
@@ -2706,6 +2707,22 @@ describe("createTransport", () => {
         reason: "the request failed with HTTP 529",
       });
       expect(JSON.stringify(error)).not.toContain("long provider body");
+    });
+
+    it("reads the status out of the fallback chain's aggregate error", async () => {
+      // `FallbackLlmProvider` converts a final *retriable* failure into
+      // `AllProvidersFailedError`, so 429 and 5xx — the statuses worth telling
+      // the user about — never arrive as a bare error carrying `status`.
+      const aggregate = new AllProvidersFailedError([
+        { provider: "primary", error: Object.assign(new Error("overloaded"), { status: 529 }) },
+      ]);
+      const driver = vi.fn().mockRejectedValue(aggregate);
+      const { transport } = buildCompactTransport({ ...OWNED, compactConversation: driver });
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrapErr()).toEqual({
+        code: "compaction_failed",
+        reason: "the request failed with HTTP 529",
+      });
     });
 
     it("surfaces a provider-config message, which names only the model", async () => {

@@ -335,19 +335,19 @@ describe("compactConversation", () => {
     expect(result).toEqual({ status: "not_found", missing: "profile" });
   });
 
-  it("reports success when the read-back comes back empty after a committed insert", async () => {
-    // An absent row is an anomaly, not a turn winning the race. Treating it as
-    // supersession would tell the user their summary was discarded when it is
-    // the one that will be used.
+  it("raises when the read-back is empty after a committed insert", async () => {
+    // The insert committed and this read snapshots after it, so an empty result
+    // contradicts it. `nothing_new` would claim the summary was discarded and
+    // `compacted` would promise a durability nothing here can confirm.
     const agentStore = storeWith(transcript(10));
     vi.mocked(agentStore.insertOrRecoverSummary).mockImplementation(async () => {
       vi.mocked(agentStore.getLatestSummary).mockResolvedValue(undefined);
       return { kind: "new", row: summaryRow({ throughMessageId: "m4" }) };
     });
 
-    const result = await compactConversation(CONVERSATION_ID, deps({ agentStore }));
-
-    expect(result).toMatchObject({ status: "compacted" });
+    await expect(compactConversation(CONVERSATION_ID, deps({ agentStore }))).rejects.toThrow(
+      /not readable after a committed insert/,
+    );
   });
 
   it("reports nothing_new when a concurrent turn stored a wider summary", async () => {
