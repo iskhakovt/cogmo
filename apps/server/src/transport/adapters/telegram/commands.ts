@@ -2441,8 +2441,11 @@ export async function handleCompact(
       return;
     case "skipped": {
       const message = match(outcome.reason)
-        .with("too_short", () => "Nothing to compact — the conversation still fits in full.")
-        .with("nothing_new", () => "Already compacted — nothing new since the last summary.")
+        .with(
+          "too_short",
+          () => "Nothing to compact — too little sits outside the retained window to be worth it.",
+        )
+        .with("nothing_new", () => "Already compacted — a turn stored a summary for this span.")
         .with(
           "empty_summary",
           () => "The summarization model returned no text — nothing stored. Try again.",

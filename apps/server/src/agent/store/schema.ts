@@ -948,6 +948,16 @@ export const evolutionEvents = pgTable(
  * message up to and including it and prepends the summary as a single user
  * message. See design/context-management.md → Durable summaries.
  *
+ * The two foreign keys are independent, so the schema alone permits a row
+ * pairing conversation A with a message from conversation B — a cutoff that
+ * would make `getHistoryAfter` drop an arbitrary span of A. No writer can
+ * produce one: both derive the cutoff from `summaryCutoffFor` over the message
+ * ids of the conversation being compacted. Enforcing it in DDL would mean a
+ * composite unique on `messages (id, conversation_id)` purely to serve a
+ * composite FK, which is an index on the hottest table in the schema to
+ * prevent a state no code path reaches. The invariant lives at the two call
+ * sites instead.
+ *
  * Append-only. Re-compaction inserts a new row summarizing the previous
  * summary plus everything that arrived since; the loader reads the row with the
  * greatest `through_message_id` — widest coverage wins, not last-inserted. The

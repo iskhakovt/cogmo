@@ -4349,16 +4349,20 @@ describe("handleCompact", () => {
     expect(result).toContain("claude-haiku-4-5");
   });
 
-  it("reports a conversation that still fits in full", async () => {
+  it("reports too little outside the retained window without claiming token safety", async () => {
+    // `too_short` counts messages, not tokens — it says nothing about whether
+    // the conversation fits in the context window, so the reply must not either.
     const ctx = mkCtx();
     await handleCompact(compactWith(ok({ status: "skipped", reason: "too_short" })), ctx);
-    expect(ctx.reply.mock.calls[1]?.[0]).toMatch(/still fits/i);
+    const reply = (ctx.reply.mock.calls[1]?.[0] ?? "") as string;
+    expect(reply).toMatch(/outside the retained window/i);
+    expect(reply).not.toMatch(/fits/i);
   });
 
-  it("reports that nothing has arrived since the last summary", async () => {
+  it("reports that a turn already stored a summary for the span", async () => {
     const ctx = mkCtx();
     await handleCompact(compactWith(ok({ status: "skipped", reason: "nothing_new" })), ctx);
-    expect(ctx.reply.mock.calls[1]?.[0]).toMatch(/nothing new/i);
+    expect(ctx.reply.mock.calls[1]?.[0]).toMatch(/already compacted/i);
   });
 
   it("says nothing was stored when the model returned no text", async () => {
