@@ -120,6 +120,13 @@ export function summarizationRequest(params: {
  * Concatenate the text blocks of a summarization response. Non-text blocks
  * (thinking, and anything a future model emits alongside prose) are dropped —
  * only the prose stands in for the conversation.
+ *
+ * Joined with no separator, which is the faithful reconstruction of a text
+ * sequence: an adapter that ever splits one paragraph across blocks would have
+ * a newline inserted mid-sentence by any other choice. Today the question is
+ * moot — `fromOpenAIMessage` emits at most one text block, and Anthropic only
+ * returns several when they are interleaved with `tool_use`, which a
+ * summarization request never carries.
  */
 export function extractSummaryText(content: ReadonlyArray<ContentBlock>): string {
   return content
