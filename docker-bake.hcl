@@ -39,10 +39,10 @@ variable "VERSION" {
 // literal in each Dockerfile for Dependabot; these are bumped here.
 // uv is shared by devbase + skills.
 variable "UV_VERSION" {
-  default = "0.12.5"
+  default = "0.12.12"
 }
 variable "UV_DIGEST" {
-  default = "sha256:e85be844203885286c60ffad8a858d48afb6c5a5c237ca0e67f12e74b8f174b1"
+  default = "sha256:73d2665b478d8fa2de1cf105c6841f8e9cb6b09e568fc7700440c09f8fcd7ac4"
 }
 // Match package.json packageManager.
 variable "PNPM_VERSION" {
@@ -51,9 +51,11 @@ variable "PNPM_VERSION" {
 variable "NPM_VERSION" {
   default = "12.0.2"
 }
-// Coupled to the claude.ts stream-json parser — bump with it.
+// Coupled to the claude.ts stream-json parser — bump with it. Tracks the
+// `stable` dist-tag, not `latest`: `latest` and `next` are the same build,
+// so following it puts the sandbox CLI ahead of the stable rollout.
 variable "CLAUDE_CODE_VERSION" {
-  default = "2.1.233"
+  default = "2.1.236"
 }
 
 // Default group builds every image — used by publish.yml on release.

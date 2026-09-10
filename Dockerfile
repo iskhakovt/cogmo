@@ -1,4 +1,4 @@
-FROM mirror.gcr.io/library/node:24-trixie-slim@sha256:0711b541c1c33a8a530ac4f0d391baa9a15b3d804695b1b24a47daa5fb60e74d AS base
+FROM mirror.gcr.io/library/node:24-trixie-slim@sha256:6950b66b4c0cb0151ce89fa75074673850763d096b044f422c6729b588dd4956 AS base
 
 FROM base AS build
 WORKDIR /app
