@@ -4,7 +4,7 @@ import { mock } from "vitest-mock-extended";
 import type { z } from "zod";
 import type { inboundReady } from "../inngest/events.js";
 import { ProviderConfigError } from "../llm/resolver.js";
-import type { Message } from "../llm/types.js";
+import type { Message, StopReason } from "../llm/types.js";
 import { logger } from "../logger.js";
 import type { McpRegistry } from "../mcp/registry.js";
 import type { SkillRunner } from "../skills/runner.js";
@@ -3463,7 +3463,7 @@ describe("durable conversation summaries", () => {
    * retain window.
    */
   function summarizingDeps(
-    overrides: { messages?: ReturnType<typeof rows>; text?: string; stopReason?: string } = {},
+    overrides: { messages?: ReturnType<typeof rows>; text?: string; stopReason?: StopReason } = {},
   ) {
     const chat = vi.fn().mockResolvedValue({
       content: [{ type: "text", text: overrides.text ?? "the earlier discussion" }],
@@ -3537,8 +3537,11 @@ describe("durable conversation summaries", () => {
 
     expect(deps.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
     const loopCalls = (deps.runStreamingAgentLoop as ReturnType<typeof vi.fn>).mock.calls;
-    const messages = loopCalls[0]?.[0]?.messages as Array<{ content: unknown }>;
-    expect(messages[0]?.content).toContain("the earlier discussion");
+    const loopMessages: Array<{ content: unknown }> = expectDefined(
+      loopCalls[0],
+      "agent loop call",
+    )[0].messages;
+    expect(loopMessages[0]?.content).toContain("the earlier discussion");
   });
 
   it("stores nothing when the summarization model returns no text", async () => {

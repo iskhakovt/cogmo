@@ -358,11 +358,10 @@ export type TransportError =
    * model or a provider row, and the bare HTTP status of a provider failure —
    * the status alone, never the body, since it is what tells the user whether
    * to wait and retry. `null` means the detail is in the log, and being null
-   * rather than a sentinel string keeps the arms checkable by the compiler. Everything else reports
-   * `unknown` and lives in the log: a Drizzle failure stringifies as
+   * rather than a sentinel string keeps the arms checkable by the compiler.
+   * Everything else is withheld: a Drizzle failure stringifies as
    * `Failed query: <sql>` plus its bound params, which for this table is the
-   * whole INSERT and the entire summary text, and a provider failure can embed
-   * a request URL.
+   * whole INSERT and the entire summary text.
    */
   | { code: "compaction_failed"; reason: string | null };
 
@@ -2510,9 +2509,12 @@ export function createTransport(deps: {
    *
    * A misconfigured summarization model names a model or a provider row plus
    * an instruction to re-run `cogmo setup` — operator-chosen identifiers, never
-   * credentials. A provider failure contributes only its status: 429 and 5xx
-   * are the likeliest way `/compact` fails and the only detail that tells the
-   * user whether waiting helps, while the response body is not ours to relay.
+   * credentials. An HTTP failure contributes only its status: 429 and 5xx are
+   * the likeliest way `/compact` fails and the only detail that tells the user
+   * whether waiting helps, while the response body is not ours to relay. The
+   * wording stops at the status because `extractStatus` sees everything the
+   * driver can throw — stores, prompt assembly, the secrets decrypt — and
+   * naming the summarization model would be an attribution this cannot make.
    * Everything else is withheld — a Drizzle failure stringifies as its whole
    * INSERT plus bound params, which for this table is the summary text itself.
    */
@@ -2520,7 +2522,7 @@ export function createTransport(deps: {
     if (error instanceof ProviderConfigError) return error.message;
     if (!(error instanceof Error)) return null;
     const status = extractStatus(error);
-    return status === undefined ? null : `the summarization model returned HTTP ${status}`;
+    return status === undefined ? null : `the request failed with HTTP ${status}`;
   }
 
   /**

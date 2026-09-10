@@ -316,7 +316,8 @@ function friendlyError(err: { code: string; model?: string; reason?: string | nu
     return `Model "${err.model}" isn't available. Use /model to see options.`;
   if (err.code === "profile_name_taken") return "A profile with that name already exists.";
   if (err.code === "access_denied") return `Access denied — ${err.reason ?? ""}.`;
-  if (err.code === "profile_not_found") return "Profile not found.";
+  if (err.code === "profile_not_found")
+    return "Profile not found. Use /profile list, then /profile switch to pick one.";
   if (err.code === "identity_rejected") return "You're not authorized on this bot.";
   return "Something went wrong.";
 }

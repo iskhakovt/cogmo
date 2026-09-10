@@ -170,7 +170,7 @@ describe("handle-message — crash recovery / step replay", () => {
     //   - countTokens reporting > 80% of budget so the SUMMARIZE strategy fires
     //   - history with more than DEFAULT_KEEP_TURNS messages (6) so there's
     //     a prefix to summarize
-    // Then we cache `summarize-prefix` and assert provider.chat is never
+    // Then we cache `summarize-prefix-outcome` and assert provider.chat is never
     // called for the summarization round trip.
     const countTokens = vi.fn().mockResolvedValue(800_000); // claude-sonnet-4-6 budget is 926_000; 800_000 > 80%
     const chat = vi.fn().mockResolvedValue({
@@ -234,7 +234,7 @@ describe("handle-message — crash recovery / step replay", () => {
   });
 
   it("does not re-insert the summary when persist-summary is cached", async () => {
-    // Same setup as the summarize-prefix replay above, plus the ids the
+    // Same setup as the summarize-prefix-outcome replay above, plus the ids the
     // persist step needs to name a durable cutoff. Caching `persist-summary`
     // stands in for the crash-after-commit case: the row is already there, and
     // the replay must not write a second one.
@@ -357,7 +357,7 @@ describe("handle-message — crash recovery / step replay", () => {
         { id: "create-user-message", handler: () => undefined },
         { id: "load-turn-history", handler: () => ({ messages: [], messageIds: [] }) },
         { id: "assemble-prompt", handler: () => "system prompt" },
-        // `summarize-prefix` is conditional — only created when compaction
+        // `summarize-prefix-outcome` is conditional — only created when compaction
         // decides to summarize. The default mock countTokens stays under
         // threshold, so the step is never invoked here and we don't list it.
         { id: "persist-new-messages", handler: () => ({ id: "asst-1" }) },

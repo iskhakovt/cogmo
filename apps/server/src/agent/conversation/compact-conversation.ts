@@ -6,6 +6,9 @@ import type { TransportStore } from "../../transport/store/index.js";
 import {
   compactSameToolClusters,
   DEFAULT_KEEP_TURNS,
+  DEFAULT_RETAIN_FIRST,
+  DEFAULT_RETAIN_RECENT,
+  DEFAULT_TRIGGER_COUNT,
   extractSummaryText,
   snapToPairBoundary,
   summarizationRequest,
@@ -126,9 +129,9 @@ export async function compactConversation(
   // before it reaches the model. Structural and count-based — no token count
   // needed, which is what lets the manual path run it unconditionally.
   const prefix = compactSameToolClusters(messages.slice(0, splitIdx), {
-    retainRecent: 2,
-    retainFirst: 1,
-    triggerCount: 5,
+    retainRecent: DEFAULT_RETAIN_RECENT,
+    retainFirst: DEFAULT_RETAIN_FIRST,
+    triggerCount: DEFAULT_TRIGGER_COUNT,
   }).messages;
 
   // Tool definitions are omitted: resolving the per-turn catalog means

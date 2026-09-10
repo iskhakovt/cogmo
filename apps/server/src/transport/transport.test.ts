@@ -2703,7 +2703,7 @@ describe("createTransport", () => {
       const error = res._unsafeUnwrapErr();
       expect(error).toEqual({
         code: "compaction_failed",
-        reason: "the summarization model returned HTTP 529",
+        reason: "the request failed with HTTP 529",
       });
       expect(JSON.stringify(error)).not.toContain("long provider body");
     });

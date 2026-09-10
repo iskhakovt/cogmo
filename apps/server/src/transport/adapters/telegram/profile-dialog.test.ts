@@ -478,9 +478,9 @@ describe("ProfileDialogs - friendlyError mapping", () => {
     expect(reply).toBe("Access denied — .");
   });
 
-  it("profile_not_found → 'Profile not found.'", async () => {
+  it("profile_not_found → names both repairs, matching the shared renderer", async () => {
     const reply = await driveSaveError({ code: "profile_not_found" });
-    expect(reply).toBe("Profile not found.");
+    expect(reply).toBe("Profile not found. Use /profile list, then /profile switch to pick one.");
   });
 
   it("identity_rejected → 'You're not authorized on this bot.'", async () => {

@@ -148,7 +148,7 @@ describe("compactMessages", () => {
   });
 
   // Locks the contract documented on `ContextManagerDeps.summarize`. The
-  // hardcoded `summarize-prefix` step ID in `handle-message.ts` depends on
+  // hardcoded `summarize-prefix-outcome` step ID in `handle-message.ts` depends on
   // this — Inngest throws on duplicate step IDs, so a future change that
   // calls `summarize` twice (e.g., segmented summarization) would surface
   // only at runtime under specific conversation lengths. This test catches

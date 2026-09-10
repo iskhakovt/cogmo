@@ -33,7 +33,7 @@ export interface ContextManagerDeps {
    *
    * Contract: called **at most once** per `compactMessages` invocation. Callers
    * (notably `handle-message`) rely on this to wrap the call in a single Inngest
-   * step with a fixed step ID (`summarize-prefix`). If a future strategy ever
+   * step with a fixed step ID (`summarize-prefix-outcome`). If a future strategy ever
    * needs segmented summarization, this contract — and the hardcoded step ID at
    * the call site — must change in lockstep.
    */
@@ -90,9 +90,12 @@ export const DEFAULT_KEEP_TURNS = 6;
 // Strategy 0 defaults — see design/context-management.md → Strategy 0.
 // triggerCount = retainRecent + retainFirst + 2 → first fire compacts
 // 2 results, making the cache-invalidation cost worthwhile.
-const DEFAULT_RETAIN_RECENT = 2;
-const DEFAULT_RETAIN_FIRST = 1;
-const DEFAULT_TRIGGER_COUNT = 5;
+// Exported for the same reason as DEFAULT_KEEP_TURNS: `/compact` runs
+// Strategy 0 itself, and a divergence here would have a manual compaction and
+// an automatic one summarize different prefixes for the same span.
+export const DEFAULT_RETAIN_RECENT = 2;
+export const DEFAULT_RETAIN_FIRST = 1;
+export const DEFAULT_TRIGGER_COUNT = 5;
 
 export const SUMMARIZATION_PROMPT = `Summarize the conversation below. You MUST preserve:
 1. All user decisions and stated preferences
@@ -110,7 +113,12 @@ Be specific — preserve names, paths, and values, not abstractions.`;
  * the output cap and the message layout cannot drift between the turn-time
  * strategy and the manual `/compact` driver.
  *
- * The prefix is repaired first. `sanitizeHistory` runs inside the agent loop,
+ * The prefix is repaired first, through the same `validateHistory` the agent
+ * loop applies to every request — so the summarizer reads the shape the model
+ * reads. That is also why a repair here cannot lose anything: a stray
+ * `tool_result` dropped from the prefix was already dropped from every LLM
+ * payload by `sanitizeHistory`, and the row itself stays in `messages` for the
+ * Observer. `sanitizeHistory` runs inside the agent loop,
  * which is downstream of compaction, so a summarization request is the one
  * LLM call in a turn built from raw history — and a split can land right after
  * an assistant `tool_use` that history never answered, which Anthropic rejects
@@ -149,12 +157,13 @@ export function summarizationRequest(params: {
  * (thinking, and anything a future model emits alongside prose) are dropped —
  * only the prose stands in for the conversation.
  *
- * Joined with no separator, which is the faithful reconstruction of a text
- * sequence: an adapter that ever splits one paragraph across blocks would have
- * a newline inserted mid-sentence by any other choice. Today the question is
- * moot — `fromOpenAIMessage` emits at most one text block, and Anthropic only
- * returns several when they are interleaved with `tool_use`, which a
- * summarization request never carries.
+ * Joined on a paragraph break. Blocks in a non-streaming response are discrete
+ * units rather than fragments of one, so that is the seam that cannot corrupt
+ * the text — and this text is stored and replayed rather than recomputed, so a
+ * fused sentence would be permanent. One block is the expected case
+ * (`fromOpenAIMessage` emits at most one; Anthropic returns several only when
+ * they are interleaved with `tool_use`, which a summarization request never
+ * carries), which is why more than one is worth a log line.
  */
 export function extractSummaryText(content: ReadonlyArray<ContentBlock>): string {
   const text = content.filter((b) => b.type === "text");

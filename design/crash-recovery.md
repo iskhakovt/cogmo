@@ -27,7 +27,7 @@ The bug class to catch is #2 — and to catch it you have to **count boundaries,
 | Load | `assemble-prompt` | `promptSource.assemble` | DB read + assembly | ✓ |
 | **Compact** | *(none — runs on every invocation)* | `compactMessages` (token count, clear, summarize, truncate) | token counting + decision | ✗ |
 | Compact | `summarize-prefix-outcome` (conditional) | status push + `provider.chat` for prefix summarization; returns `{ text, stopReason }` | **LLM call + stream push** | ✓ |
-| Compact | `persist-summary` (conditional) | `agentStore.insertOrRecoverSummary` — stores what `summarize-prefix` produced; failures degrade inside the body | **DB write** | ✓ |
+| Compact | `persist-summary` (conditional) | `agentStore.insertOrRecoverSummary` — stores what `summarize-prefix-outcome` produced; failures degrade inside the body | **DB write** | ✓ |
 | Recall | `auto-recall` (conditional) | `service.memory.recall` (failure degraded to no-memories inside the body) | **embedding + vector search** | ✓ |
 | **Streaming glue** | *(none — runs on every invocation)* | image resolution, `getProfile`, `deliveryRouter.prepare`, tool-registry assembly, `compactMessages` orchestration, the loop's control flow, `delivery.finish` | cheap reads + deterministic assembly | ✗ |
 | Loop | `llm-iter<N>` (one per iteration) | stream drain + in-step Class C repair; tokens stream to the delivery layer live from inside the body | **LLM stream + emission** | ✓ |
