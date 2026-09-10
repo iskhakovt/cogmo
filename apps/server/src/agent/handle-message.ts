@@ -39,7 +39,7 @@ import {
   summarizationRequest,
 } from "./context.js";
 import { loadConversationContext } from "./conversation/load-conversation-context.js";
-import { loadTurnHistory, summaryCutoffFor } from "./conversation/load-turn-history.js";
+import { loadTurnHistory, summarizedSpan } from "./conversation/load-turn-history.js";
 import { buildInCooldownReply, isInCooldown } from "./cooldown.js";
 import type { DebounceConfig } from "./debounce.js";
 import { extractGeneratedDocuments, extractGeneratedImages } from "./extract-images.js";
@@ -555,7 +555,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // the persist step below can map a compaction split point back to a
       // durable cutoff. Inside the step, so a `/compact` landing mid-run can't
       // shift the history between invocations.
-      const turnHistory = await step.run("load-history", async () => {
+      const turnHistory = await step.run("load-turn-history", async () => {
         return loadTurnHistory({ runInTx: deps.runInTx, agentStore }, { conversationId });
       });
       const history = turnHistory.messages;
@@ -1053,27 +1053,37 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // prevent — a crash between the commit and Inngest recording the step
       // recovers the existing row rather than appending a second one.
       const messagesSummarized = compactResult.event?.messagesSummarized ?? 0;
-      const summaryCutoff =
-        messagesSummarized > 0
-          ? summaryCutoffFor(turnHistory.messageIds, messagesSummarized)
-          : null;
-      if (summaryText !== null && summaryCutoff !== null) {
+      const span =
+        messagesSummarized > 0 ? summarizedSpan(turnHistory.messageIds, messagesSummarized) : null;
+      if (summaryText !== null && span !== null) {
         const text = summaryText;
+        const cutoff = span.cutoff;
+        // Caching a summary is not worth the turn. The write sits between
+        // compaction and the agent loop, so an unhandled failure here costs the
+        // user their reply over a span that would simply be re-summarized next
+        // turn — the same reasoning that has `auto-recall` degrade inside its
+        // own step body rather than propagate.
+        //
         // Projected down to the id: the full row would push the summary text
-        // into Inngest step state a second time, and its `createdAt` would
-        // come back from the cache as a string rather than a Date.
+        // into Inngest step state a second time, and its `createdAt` would come
+        // back from the cache as a string rather than a Date.
         await stepRun("persist-summary", async () => {
-          const { row } = await deps.runInTx((tx) =>
-            agentStore.insertOrRecoverSummary(tx, {
-              conversationId,
-              summary: text,
-              throughMessageId: summaryCutoff,
-              messagesSummarized,
-              model: summarizationModel,
-              source: "turn",
-            }),
-          );
-          return { id: row.id };
+          try {
+            const { row } = await deps.runInTx((tx) =>
+              agentStore.insertOrRecoverSummary(tx, {
+                conversationId,
+                summary: text,
+                throughMessageId: cutoff,
+                messagesSummarized,
+                model: summarizationModel,
+                source: "turn",
+              }),
+            );
+            return { id: row.id };
+          } catch (err) {
+            turnLogger.warn({ err }, "failed to persist conversation summary, continuing the turn");
+            return { id: null };
+          }
         });
       }
 

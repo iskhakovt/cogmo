@@ -23,11 +23,11 @@ The bug class to catch is #2 — and to catch it you have to **count boundaries,
 | Load | `last-assistant` | `agentStore.getLastAssistantMessage` | DB read | ✓ |
 | Load | `load-inbound` | `transportStore.getUnbatchedInbound` | DB read | ✓ |
 | Persist | `create-user-message` | `agentStore.insertMessage` (user) | **DB write** | ✓ |
-| Load | `load-history` | `loadTurnHistory` (`getLatestSummary` + `listMessages` / `getHistoryAfter`) — returns the compacted view plus positionally-aligned message ids | DB read | ✓ |
+| Load | `load-turn-history` | `loadTurnHistory` (`getLatestSummary` + `listMessages` / `getHistoryAfter`) — returns the compacted view plus positionally-aligned message ids | DB read | ✓ |
 | Load | `assemble-prompt` | `promptSource.assemble` | DB read + assembly | ✓ |
 | **Compact** | *(none — runs on every invocation)* | `compactMessages` (token count, clear, summarize, truncate) | token counting + decision | ✗ |
 | Compact | `summarize-prefix` (conditional) | status push + `provider.chat` for prefix summarization | **LLM call + stream push** | ✓ |
-| Compact | `persist-summary` (conditional) | `agentStore.insertOrRecoverSummary` — stores what `summarize-prefix` produced | **DB write** | ✓ |
+| Compact | `persist-summary` (conditional) | `agentStore.insertOrRecoverSummary` — stores what `summarize-prefix` produced; failures degrade inside the body | **DB write** | ✓ |
 | Recall | `auto-recall` (conditional) | `service.memory.recall` (failure degraded to no-memories inside the body) | **embedding + vector search** | ✓ |
 | **Streaming glue** | *(none — runs on every invocation)* | image resolution, `getProfile`, `deliveryRouter.prepare`, tool-registry assembly, `compactMessages` orchestration, the loop's control flow, `delivery.finish` | cheap reads + deterministic assembly | ✗ |
 | Loop | `llm-iter<N>` (one per iteration) | stream drain + in-step Class C repair; tokens stream to the delivery layer live from inside the body | **LLM stream + emission** | ✓ |
@@ -203,13 +203,13 @@ The cases:
 
 The loop-level companions live in `src/agent/loop.test.ts` → "durable LLM iterations (stepRun)": cached iterations don't call the provider or re-emit, the `streamed` ledger rebuilds from cached outcomes, cached durable tools don't re-emit their `tool_result` events, and repair budgets recompute deterministically from cached outcomes.
 
-**Why only side-effectful steps get individual tests.** Tests 1-3 and 9 cover the steps where re-execution would cause concrete harm (duplicate DB writes, duplicate LLM round trips). The pure-read steps (`load-conversation`, `last-assistant`, `load-inbound`, `load-history`, `assemble-prompt`) are exercised collectively by test 4 and aren't worth individual coverage: if one of them accidentally moved out of `step.run`, the only consequence on retry would be a wasted DB query, not corruption. The cost-of-bug is too low to justify a test per read.
+**Why only side-effectful steps get individual tests.** Tests 1-3 and 9 cover the steps where re-execution would cause concrete harm (duplicate DB writes, duplicate LLM round trips). The pure-read steps (`load-conversation`, `last-assistant`, `load-inbound`, `load-turn-history`, `assemble-prompt`) are exercised collectively by test 4 and aren't worth individual coverage: if one of them accidentally moved out of `step.run`, the only consequence on retry would be a wasted DB query, not corruption. The cost-of-bug is too low to justify a test per read.
 
 For **wire-level** crash recovery (real Inngest server, real retries, side-effect counters across actual HTTP re-invocations) we rely on Inngest itself — that path is library-tested upstream and our integration test in `pipeline.integration.test.ts` proves the full end-to-end works against a real dev server. We do not currently simulate a forced crash there; if recovery bugs surface in practice, the right escalation is an integration test that throws on first attempt and asserts the second attempt completes.
 
 ## State serialization `[confirmed]`
 
-Inngest stores step return values via JSON, so anything returned from a `step.run` body must round-trip through `JSON.stringify` / `JSON.parse` losslessly. `load-history` returns `{ messages, messageIds }`, where `messageIds` carries `null` for the synthetic summary entry — `null` survives JSON, `undefined` would not, which is why the loader emits the former. Steps returning user-supplied or model-supplied data: `summarize-prefix` and `degraded-reply` (strings), `auto-recall` (Hindsight memories — plain string/metadata records), `tool-iter<N>-<P>` (the handler's string output), and `llm-iter<N>` (`LlmIterationOutcome`, whose `content: ContentBlock[]` is the interesting payload).
+Inngest stores step return values via JSON, so anything returned from a `step.run` body must round-trip through `JSON.stringify` / `JSON.parse` losslessly. `load-turn-history` returns `{ messages, messageIds }`, where `messageIds` carries `null` for the synthetic summary entry — `null` survives JSON, `undefined` would not, which is why the loader emits the former. It carries a new step id rather than reusing `load-history` because its cached payload is an object where the old step's was an array: a run that checkpointed under the previous build would otherwise replay an array into a reader that destructures it. Steps returning user-supplied or model-supplied data: `summarize-prefix` and `degraded-reply` (strings), `auto-recall` (Hindsight memories — plain string/metadata records), `tool-iter<N>-<P>` (the handler's string output), and `llm-iter<N>` (`LlmIterationOutcome`, whose `content: ContentBlock[]` is the interesting payload).
 
 For `ContentBlock[]`, the type contract guarantees JSON safety:
 

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { fakeRunInTx, mockAgentStore } from "../../test/factories.js";
 import type { CompactionSummary } from "../store/index.js";
-import { loadTurnHistory, summaryCutoffFor } from "./load-turn-history.js";
+import { loadTurnHistory, summarizedSpan } from "./load-turn-history.js";
 
 function summaryRow(overrides: Partial<CompactionSummary> = {}): CompactionSummary {
   return {
@@ -97,24 +97,34 @@ describe("loadTurnHistory", () => {
   });
 });
 
-describe("summaryCutoffFor", () => {
+describe("summarizedSpan", () => {
   it("returns the last real id inside the summarized span", () => {
-    expect(summaryCutoffFor([null, "m4", "m5", "m6"], 3)).toBe("m5");
+    expect(summarizedSpan([null, "m4", "m5", "m6"], 3)?.cutoff).toBe("m5");
+  });
+
+  it("counts only real messages, not the synthetic summary entry", () => {
+    // The span is three entries wide but stands in for two messages — a floor
+    // expressed in messages must not count the summary as one of them.
+    expect(summarizedSpan([null, "m4", "m5"], 3)).toEqual({ cutoff: "m5", messageCount: 2 });
+  });
+
+  it("counts every entry when no summary is folded in", () => {
+    expect(summarizedSpan(["m1", "m2", "m3"], 3)).toEqual({ cutoff: "m3", messageCount: 3 });
   });
 
   it("ignores ids past the split point", () => {
-    expect(summaryCutoffFor(["m1", "m2", "m3"], 1)).toBe("m1");
+    expect(summarizedSpan(["m1", "m2", "m3"], 1)).toEqual({ cutoff: "m1", messageCount: 1 });
   });
 
   it("returns null when the span holds only the previous summary", () => {
-    expect(summaryCutoffFor([null, "m4"], 1)).toBeNull();
+    expect(summarizedSpan([null, "m4"], 1)).toBeNull();
   });
 
   it("returns null for an empty span", () => {
-    expect(summaryCutoffFor(["m1", "m2"], 0)).toBeNull();
+    expect(summarizedSpan(["m1", "m2"], 0)).toBeNull();
   });
 
   it("clamps a split index past the end rather than reading off the array", () => {
-    expect(summaryCutoffFor(["m1", "m2"], 99)).toBe("m2");
+    expect(summarizedSpan(["m1", "m2"], 99)).toEqual({ cutoff: "m2", messageCount: 2 });
   });
 });

@@ -4,6 +4,7 @@ import type { CodingStore } from "../agent/coding/store/index.js";
 import type { CompactConversationResult } from "../agent/conversation/compact-conversation.js";
 import type { Transactor } from "../db/index.js";
 import type { inboundArrived } from "../inngest/events.js";
+import { ProviderConfigError } from "../llm/resolver.js";
 import { mockAgentStore, mockTransportStore } from "../test/factories.js";
 import { createTransport } from "./transport.js";
 
@@ -2670,7 +2671,30 @@ describe("createTransport", () => {
       // The method returns a Result, and the driver runs inline with no retry
       // budget behind it. An escaping rejection would skip the adapter's
       // isErr() branch and leave the user's pre-ack as the last thing they see.
-      const driver = vi.fn().mockRejectedValue(new Error("no routing row for small-model"));
+      const driver = vi.fn().mockRejectedValue(new Error("boom"));
+      const { transport } = buildCompactTransport({ ...OWNED, compactConversation: driver });
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "compaction_failed", reason: "unknown" });
+    });
+
+    it("withholds an arbitrary error's message from the reason", async () => {
+      // A Drizzle failure stringifies as the whole INSERT plus its bound
+      // params, which for this table is the entire summary text.
+      const driver = vi
+        .fn()
+        .mockRejectedValue(
+          new Error('Failed query: insert into "conversation_summaries" ...\nparams: secret'),
+        );
+      const { transport } = buildCompactTransport({ ...OWNED, compactConversation: driver });
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "compaction_failed", reason: "unknown" });
+      expect(JSON.stringify(res._unsafeUnwrapErr())).not.toContain("secret");
+    });
+
+    it("surfaces a provider-config message, which names only the model", async () => {
+      const driver = vi
+        .fn()
+        .mockRejectedValue(new ProviderConfigError("no routing row for small-model"));
       const { transport } = buildCompactTransport({ ...OWNED, compactConversation: driver });
       const res = await transport.conversations.compact("h", "addr");
       expect(res._unsafeUnwrapErr()).toEqual({
@@ -2679,11 +2703,20 @@ describe("createTransport", () => {
       });
     });
 
-    it("renders a mid-call disappearance as no_session", async () => {
-      const driver = vi.fn().mockResolvedValue({ status: "not_found" });
+    it("renders a vanished conversation as no_session", async () => {
+      const driver = vi.fn().mockResolvedValue({ status: "not_found", missing: "conversation" });
       const { transport } = buildCompactTransport({ ...OWNED, compactConversation: driver });
       const res = await transport.conversations.compact("h", "addr");
       expect(res._unsafeUnwrap()).toEqual({ status: "no_session" });
+    });
+
+    it("reports a vanished profile as profile_not_found, not no_session", async () => {
+      // The session resolved moments earlier, so "send a message first" would
+      // be advice that cannot fix anything.
+      const driver = vi.fn().mockResolvedValue({ status: "not_found", missing: "profile" });
+      const { transport } = buildCompactTransport({ ...OWNED, compactConversation: driver });
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "profile_not_found" });
     });
   });
 

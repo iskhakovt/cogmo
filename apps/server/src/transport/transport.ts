@@ -39,6 +39,7 @@ import {
   type inboundArrived as InboundArrivedEvent,
 } from "../inngest/events.js";
 import { computeBudget, resolveLimits } from "../llm/models.js";
+import { ProviderConfigError } from "../llm/resolver.js";
 import { logger } from "../logger.js";
 import {
   type McpServer,
@@ -350,6 +351,13 @@ export type TransportError =
    * behind it, so the throw has to become a value here or it escapes the
    * `Result` contract and leaves the caller's pre-ack as the last thing the
    * user sees.
+   *
+   * `reason` reaches the user, so it carries a raw error message only for
+   * types whose messages are known safe and short. Everything else reports
+   * `unknown` and lives in the log: a Drizzle failure stringifies as
+   * `Failed query: <sql>` plus its bound params, which for this table is the
+   * whole INSERT and the entire summary text, and a provider failure can embed
+   * a request URL.
    */
   | { code: "compaction_failed"; reason: string };
 
@@ -1504,14 +1512,22 @@ export function createTransport(deps: {
           );
           return err({
             code: "compaction_failed" as const,
-            reason: error instanceof Error ? error.message : String(error),
+            // A misconfigured summarization model is both the likeliest failure
+            // and the only one whose message is worth showing: it names the
+            // model and nothing else.
+            reason: error instanceof ProviderConfigError ? error.message : "unknown",
           });
         }
-        // The driver's `not_found` means the conversation or its profile
-        // vanished between the resolve above and the load — the same
-        // mid-call disappearance `/reflect` reports as a skip, rendered
-        // here as "nothing here" for the same reason.
-        if (result.status === "not_found") return ok({ status: "no_session" as const });
+        if (result.status === "not_found") {
+          // A vanished conversation is the mid-call disappearance `/reflect`
+          // reports as a skip, rendered as "nothing here" for the same reason.
+          // A vanished profile is different: `resolveOwnedConversation` just
+          // succeeded on this conversation, so telling the user to send a
+          // message would be advice that cannot work.
+          return result.missing === "conversation"
+            ? ok({ status: "no_session" as const })
+            : err({ code: "profile_not_found" as const });
+        }
         return ok(result);
       },
 

@@ -264,10 +264,9 @@ describe("handle-message — crash recovery / step replay", () => {
       function: fn,
       events: [event],
       steps: [
-        {
-          id: "persist-summary",
-          handler: () => ({ kind: "recovered", row: { id: "cached-summary-id" } }),
-        },
+        // Mirrors what the step actually returns — the row is projected down to
+        // its id so the summary text doesn't land in Inngest state twice.
+        { id: "persist-summary", handler: () => ({ id: "cached-summary-id" }) },
       ],
     }).execute();
 
@@ -353,7 +352,7 @@ describe("handle-message — crash recovery / step replay", () => {
         { id: "last-assistant", handler: () => null },
         { id: "load-inbound", handler: () => [{ id: "inbound-1", content: "hi" }] },
         { id: "create-user-message", handler: () => undefined },
-        { id: "load-history", handler: () => ({ messages: [], messageIds: [] }) },
+        { id: "load-turn-history", handler: () => ({ messages: [], messageIds: [] }) },
         { id: "assemble-prompt", handler: () => "system prompt" },
         // `summarize-prefix` is conditional — only created when compaction
         // decides to summarize. The default mock countTokens stays under

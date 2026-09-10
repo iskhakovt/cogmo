@@ -118,8 +118,9 @@ export type EvolutionTriggerValue = (typeof evolutionTrigger.enumValues)[number]
 /**
  * `conversation_summaries.source` — which path produced the row. `turn` is the
  * 80%-budget summarize strategy firing inside `handle-message`; `manual` is an
- * explicit `/compact`. Both write the same shape; the split exists so
- * `/status` can distinguish "the system compacted for you" from "you asked".
+ * explicit `/compact`. Both write the same shape. Nothing reads the column:
+ * it, and `messages_summarized` beside it, are an audit trail for reasoning
+ * about a conversation's compaction history from the table itself.
  */
 export const summarySource = pgEnum("summary_source", ["turn", "manual"]);
 export type SummarySourceValue = (typeof summarySource.enumValues)[number];

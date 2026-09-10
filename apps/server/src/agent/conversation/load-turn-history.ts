@@ -52,19 +52,23 @@ export async function loadTurnHistory(
 }
 
 /**
- * The durable cutoff a summary covering `messages[0 … splitIdx)` should record.
+ * What a summary covering `messages[0 … splitIdx)` actually replaces.
  *
- * Returns the last real message id inside the summarized span, or `null` when
- * the span holds no persisted messages at all — which happens only when the
- * span is the previously-stored summary and nothing else. Persisting that
- * would re-summarize a summary while advancing nothing, so callers treat
- * `null` as "there is nothing new to compact".
+ * `cutoff` is the last persisted message id inside the span — the durable
+ * position the summary advances to. `messageCount` counts only real messages,
+ * excluding the synthetic entry a previous summary occupies: a span of
+ * `[storedSummary, m1, m2]` replaces two messages, not three, and any floor
+ * expressed in messages has to say so.
+ *
+ * `null` when the span holds no persisted messages at all, which happens only
+ * when it is the previously-stored summary and nothing else — summarizing that
+ * re-summarizes a summary while advancing nothing.
  */
-export function summaryCutoffFor(
+export function summarizedSpan(
   messageIds: ReadonlyArray<string | null>,
   splitIdx: number,
-): string | null {
-  return (
-    R.pipe(messageIds.slice(0, Math.max(0, splitIdx)), R.filter(R.isNonNullish), R.last()) ?? null
-  );
+): { cutoff: string; messageCount: number } | null {
+  const real = R.pipe(messageIds.slice(0, Math.max(0, splitIdx)), R.filter(R.isNonNullish));
+  const cutoff = R.last(real);
+  return cutoff === undefined ? null : { cutoff, messageCount: real.length };
 }

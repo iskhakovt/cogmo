@@ -2127,7 +2127,9 @@ function errorMessage(err: TransportError): string {
     case "compaction_unavailable":
       return "Compaction isn't wired in this deployment.";
     case "compaction_failed":
-      return `Couldn't compact this conversation: ${err.reason}`;
+      return err.reason === "unknown"
+        ? "Couldn't compact this conversation. The error is in the server log."
+        : `Couldn't compact this conversation: ${err.reason}`;
   }
 }
 
@@ -2434,34 +2436,32 @@ export async function handleCompact(
     return;
   }
 
-  const outcome = res.value;
-  switch (outcome.status) {
-    case "no_session":
-      await ctx.reply("No active conversation here — send a message first.");
-      return;
-    case "skipped": {
-      const message = match(outcome.reason)
-        .with(
-          "too_short",
-          () => "Nothing to compact — too little sits outside the retained window to be worth it.",
-        )
-        .with("nothing_new", () => "Already compacted — a turn stored a summary for this span.")
-        .with(
-          "empty_summary",
-          () => "The summarization model returned no text — nothing stored. Try again.",
-        )
-        .exhaustive();
-      await ctx.reply(message);
-      return;
-    }
-    case "compacted":
-      await ctx.reply(
-        `Compacted ${outcome.messagesSummarized} message(s) into a summary via ${outcome.model}; ` +
-          `${outcome.messagesKept} kept verbatim.\n` +
-          "Your next turn starts from the summary — no compaction wait.",
-      );
-      return;
-  }
+  // Exhaustive on the outcome, not just on the skip reason: a new status that
+  // fell through would leave the user's pre-ack as the last thing they saw,
+  // which is the dead end `compaction_failed` exists to prevent.
+  const message = match(res.value)
+    .with({ status: "no_session" }, () => "No active conversation here — send a message first.")
+    .with(
+      { status: "skipped", reason: "too_short" },
+      () => "Nothing to compact — too little sits outside the retained window to be worth it.",
+    )
+    .with(
+      { status: "skipped", reason: "nothing_new" },
+      () => "Already compacted — a turn stored a summary for this span.",
+    )
+    .with(
+      { status: "skipped", reason: "empty_summary" },
+      () => "The summarization model returned no text — nothing stored. Try again.",
+    )
+    .with(
+      { status: "compacted" },
+      (o) =>
+        `Compacted ${o.messagesSummarized} message(s) into a summary via ${o.model}; ` +
+        `${o.messagesKept} kept verbatim.\n` +
+        "Your next turn starts from the summary — no compaction wait.",
+    )
+    .exhaustive();
+  await ctx.reply(message);
 }
 
 /**

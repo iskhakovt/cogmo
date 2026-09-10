@@ -69,6 +69,12 @@ const DEFAULT_KEEP_TOOL_RESULTS = 5;
  */
 export const DEFAULT_KEEP_TURNS = 6;
 
+/**
+ * Fewest prefix entries worth an LLM call. Below this the summary is no
+ * smaller than the messages it stands in for.
+ */
+const MIN_SUMMARIZABLE_PREFIX = 2;
+
 // Strategy 0 defaults — see design/context-management.md → Strategy 0.
 // triggerCount = retainRecent + retainFirst + 2 → first fire compacts
 // 2 results, making the cache-invalidation cost worthwhile.
@@ -522,7 +528,12 @@ async function summarizePrefix(
   if (rawSplit <= 0) return { messages, summarizedCount: 0 };
 
   const splitIdx = snapToPairBoundary(messages, rawSplit);
-  if (splitIdx <= 0) return { messages, summarizedCount: 0 };
+  // A one-message prefix is never worth a summarization call: the summary is
+  // no shorter than what it replaces. It is also the shape a re-compaction
+  // takes when only the previously-stored summary sits outside the retain
+  // window, where the call would buy a summary of a summary and advance
+  // nothing — the caller has no cutoff to store and discards the result.
+  if (splitIdx < MIN_SUMMARIZABLE_PREFIX) return { messages, summarizedCount: 0 };
 
   const prefix = messages.slice(0, splitIdx);
   const suffix = messages.slice(splitIdx);

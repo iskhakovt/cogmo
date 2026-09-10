@@ -78,7 +78,15 @@ function summaryRow(overrides: Partial<CompactionSummary> = {}): CompactionSumma
   };
 }
 
+/**
+ * `getLatestSummary` is read twice — once by `loadTurnHistory` before the
+ * summarization, once after the insert to see whether this row is the one that
+ * will actually be used. The stub tracks the write so the second read reflects
+ * it, which is what makes the supersession check testable rather than
+ * tautological.
+ */
 function storeWith(messages: ReadonlyArray<Row>, summary?: CompactionSummary): AgentStore {
+  let stored = summary;
   return mockAgentStore({
     getConversation: vi.fn().mockResolvedValue({
       id: CONVERSATION_ID,
@@ -89,11 +97,15 @@ function storeWith(messages: ReadonlyArray<Row>, summary?: CompactionSummary): A
       voiceMode: null,
     }),
     getProfile: vi.fn().mockResolvedValue(profile()),
-    getLatestSummary: vi.fn().mockResolvedValue(summary),
+    getLatestSummary: vi.fn().mockImplementation(async () => stored),
     listMessages: vi.fn().mockResolvedValue(messages),
     getHistoryAfter: vi.fn().mockResolvedValue(messages),
     getActiveRules: vi.fn().mockResolvedValue([]),
-    insertOrRecoverSummary: vi.fn().mockResolvedValue({ kind: "new", row: summaryRow() }),
+    insertOrRecoverSummary: vi.fn().mockImplementation(async (_tx, params) => {
+      const row = summaryRow({ throughMessageId: params.throughMessageId });
+      stored = row;
+      return { kind: "new", row };
+    }),
   });
 }
 
@@ -238,20 +250,34 @@ describe("compactConversation", () => {
   });
 
   it("re-summarizes the stored summary together with what followed it", async () => {
+    const agentStore = storeWith(transcript(10), summaryRow());
+    const provider = mockProvider();
+
+    const result = await compactConversation(CONVERSATION_ID, deps({ agentStore, provider }));
+
+    // 1 synthetic + 10 rows = 11 entries, 6 retained → the split lands at 5,
+    // covering the stored summary plus four real messages. The count reports
+    // the four; the folded-in summary is not a message.
+    expect(result).toMatchObject({ status: "compacted", messagesSummarized: 4, messagesKept: 6 });
+    expect(agentStore.insertOrRecoverSummary).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ throughMessageId: "m4" }),
+    );
+    const sent = vi.mocked(provider.chat).mock.calls[0]?.[0].messages ?? [];
+    expect(sent[0]?.content).toContain("[Previous conversation summary]");
+  });
+
+  it("counts real messages against the floor, not the folded-in summary", async () => {
+    // 9 rows after a stored summary: the split covers the summary plus three
+    // real messages. Counting the summary as a fourth would clear the floor on
+    // the strength of an entry that is already a summary.
     const agentStore = storeWith(transcript(9), summaryRow());
     const provider = mockProvider();
 
     const result = await compactConversation(CONVERSATION_ID, deps({ agentStore, provider }));
 
-    // 1 synthetic + 9 rows = 10 entries, 6 retained → the first 4 collapse,
-    // and the cutoff is the last real message inside them.
-    expect(result).toMatchObject({ status: "compacted", messagesSummarized: 4, messagesKept: 6 });
-    expect(agentStore.insertOrRecoverSummary).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ throughMessageId: "m3" }),
-    );
-    const sent = vi.mocked(provider.chat).mock.calls[0]?.[0].messages ?? [];
-    expect(sent[0]?.content).toContain("[Previous conversation summary]");
+    expect(result).toEqual({ status: "skipped", reason: "too_short" });
+    expect(provider.chat).not.toHaveBeenCalled();
   });
 
   it("stores nothing when the model returns no text", async () => {
@@ -271,21 +297,40 @@ describe("compactConversation", () => {
     expect(agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
   });
 
-  it("reports not_found when the conversation vanished", async () => {
+  it("reports which row was missing when the conversation vanished", async () => {
     const agentStore = mockAgentStore({ getConversation: vi.fn().mockResolvedValue(undefined) });
 
     const result = await compactConversation(CONVERSATION_ID, deps({ agentStore }));
 
-    expect(result).toEqual({ status: "not_found" });
+    expect(result).toEqual({ status: "not_found", missing: "conversation" });
   });
 
-  it("reports not_found when the profile vanished", async () => {
+  it("distinguishes a vanished profile from a vanished conversation", async () => {
+    // The conversation is right there; only its profile is gone. Collapsing the
+    // two would tell the user to send a message into a session that exists.
     const agentStore = storeWith(transcript(10));
     vi.mocked(agentStore.getProfile).mockResolvedValue(undefined);
 
     const result = await compactConversation(CONVERSATION_ID, deps({ agentStore }));
 
-    expect(result).toEqual({ status: "not_found" });
+    expect(result).toEqual({ status: "not_found", missing: "profile" });
+  });
+
+  it("reports nothing_new when a concurrent turn stored a wider summary", async () => {
+    // No conflict — the turn's cutoff differs, so the insert succeeds. But
+    // `getLatestSummary` orders by coverage and will always return the wider
+    // row, so the summary the user paid for is never used.
+    const agentStore = storeWith(transcript(10));
+    vi.mocked(agentStore.insertOrRecoverSummary).mockImplementation(async () => {
+      vi.mocked(agentStore.getLatestSummary).mockResolvedValue(
+        summaryRow({ throughMessageId: "m9" }),
+      );
+      return { kind: "new", row: summaryRow({ throughMessageId: "m4" }) };
+    });
+
+    const result = await compactConversation(CONVERSATION_ID, deps({ agentStore }));
+
+    expect(result).toEqual({ status: "skipped", reason: "nothing_new" });
   });
 
   it("assembles the prompt from the conversation's own steering rules", async () => {
