@@ -249,18 +249,25 @@ Used by `recall()` for semantic search. API is standardized (`POST /v1/embedding
 
 ### Reranking
 
-Used by `recall()` to reorder retrieved results. Quality affects recall precision.
+A cross-encoder pass over the candidates RRF fusion produces — **not an alternative to RRF**. Hindsight always fuses its four retrieval arms (semantic, BM25, graph, temporal) with reciprocal rank fusion, caps the result at `HINDSIGHT_API_RERANKER_MAX_CANDIDATES` (default 300), then reranks what survives. `HINDSIGHT_API_RERANKER_PROVIDER=rrf` therefore means "skip the cross-encoder and keep the fusion order", the same thing `HINDSIGHT_API_ENABLE_RERANKING=false` does. Reranking sets which memories reach the context window, so its quality decides what the agent knows, not merely what order it reads.
 
 | Provider | Model | Agentset ELO | Cost | Hindsight provider | Notes |
 |-|-|-|-|-|-|
-| ZeroEntropy | zerank-2 | 1638 (highest) | $0.025/M tokens | `zeroentropy` (native) | Seed-stage startup, alpha SDK |
-| Voyage AI | rerank-2.5 | 1544 | $0.05/M tokens | `litellm-sdk` | MongoDB-backed, 200M free tokens |
-| Voyage AI | rerank-2.5-lite | 1520 | $0.02/M tokens | `litellm-sdk` | Same free pool as rerank-2.5 |
-| Cohere | rerank-3.5 | 1451 | $2.00/1K searches | `cohere` (native) | Expensive at scale |
+| OpenRouter | `voyageai/rerank-2.5` | 1544 | $0.05/M tokens | `openrouter` (native) | Reuses the OpenRouter key already set for LLM + embeddings |
+| OpenRouter | `voyageai/rerank-2.5-lite` | 1520 | $0.02/M tokens | `openrouter` (native) | Same gateway, 40% of the cost |
+| OpenRouter | `cohere/rerank-v3.5` | 1451 | $0.001/search | `openrouter` (native) | Hindsight's default model for this provider |
+| OpenRouter | `cohere/rerank-4-pro` | not rated | $0.0025/search | `openrouter` (native) | Postdates the Agentset table |
+| Cohere | rerank-3.5 | 1451 | $2.00/1K searches | `cohere` (native) | Direct key; no cheaper than the same model via OpenRouter |
 | Local (Hindsight default) | ms-marco-MiniLM-L-6-v2 | ~1327 | Free | `local` | Needs full image (PyTorch) |
-| RRF | Math only | ~3-4% below cross-encoders | Free | `rrf` | No model, no API, no dependencies |
+| None — keep fusion order | n/a | ~3-4% below cross-encoders | Free | `rrf` | No model, no API, no dependencies |
 
-**Chosen:** zerank-2 for production — highest quality, native Hindsight provider. RRF for tests — zero dependencies, sufficient for "did recall find the fact" assertions.
+ZeroEntropy's zerank-2 led this table at ELO 1638 and was the original choice. ZeroEntropy was acquired by Notion and sunset all hosted products on 2026-09-04; the weights are Apache-2.0 on HuggingFace but only as H100-class self-hosting, which personal scale does not justify. No gateway resells them.
+
+**Chosen:** `voyageai/rerank-2.5` through Hindsight's native `openrouter` provider, with `rrf` as a failover member so an unreachable reranker degrades to fusion order instead of taking recall down. Hindsight is *not* fail-open by default — "a reranker that is unreachable takes recall down with it" — and `recall` sits on the interactive path, so the chain is load-bearing rather than belt-and-braces. Keep the primary's timeout well under the 5s recall budget `HindsightMemoryProvider` enforces: members are tried in order with no circuit breaker, so a dead primary spends its full timeout on every request before the fallback runs.
+
+RRF alone for tests — zero dependencies, deterministic, sufficient for "did recall find the fact" assertions.
+
+**On the next Hindsight bump, re-check the timeout budget.** 0.9.1 gives a remote reranker one attempt per chain member, so a timeout is the whole cost of a dead primary. Hindsight after 0.9.1 adds retries — `HINDSIGHT_API_RERANKER_MAX_RETRIES` (default 3) with exponential backoff, under a `HINDSIGHT_API_RERANKER_RETRY_BUDGET` of 10s *per member*, spent before the chain advances. Against the 5s ceiling `HindsightMemoryProvider` puts on recall, those defaults mean the client gives up long before the `rrf` member is ever reached, and the fail-open becomes decorative. Lower the retry budget alongside the timeout when the pin moves.
 
 ### Production Config
 
@@ -277,9 +284,15 @@ HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL=https://openrouter.ai/api/v1
 HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY=$OPENROUTER_API_KEY
 HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL=qwen/qwen3-embedding-8b
 
-# Reranker — zerank-2
-HINDSIGHT_API_RERANKER_PROVIDER=zeroentropy
-HINDSIGHT_API_RERANKER_ZEROENTROPY_API_KEY=$ZEROENTROPY_API_KEY
+# Reranker — voyageai/rerank-2.5 via OpenRouter, falling back to fusion order.
+# The API key falls back to HINDSIGHT_API_LLM_API_KEY, so no extra credential.
+HINDSIGHT_API_RERANKER_PROVIDER=openrouter
+HINDSIGHT_API_RERANKER_OPENROUTER_MODEL=voyageai/rerank-2.5
+HINDSIGHT_API_RERANKER_OPENROUTER_TIMEOUT=2
+
+# Failover member 1 — indexed members inherit nothing, so spell out every
+# setting they need with their own index.
+HINDSIGHT_API_RERANKER_1_PROVIDER=rrf
 ```
 
 ### Test Config (slim image + llmock)
@@ -323,10 +336,10 @@ Tracked in `todo.md`. Re-evaluate when Hindsight ships GPT-5 support.
 |-|-|-|
 | LLM (extraction) | OpenRouter gpt-4o-mini | ~$6 |
 | Embeddings | OpenRouter qwen3-embedding-8b | ~$0.15 |
-| Reranker | ZeroEntropy zerank-2 | ~$4 |
-| **Total** | | **~$10** |
+| Reranker | OpenRouter voyageai/rerank-2.5 | ~$8 |
+| **Total** | | **~$14** |
 
-Cost will drop to ~$6/mo when Hindsight ships GPT-5 support — see "Known Gaps".
+Cost will drop to ~$10/mo when Hindsight ships GPT-5 support — see "Known Gaps". Switching the reranker to `voyageai/rerank-2.5-lite` puts that line at ~$3.20/mo — $4.80 less, and below the ~$4 zerank-2 was budgeted at — for 24 points of Agentset ELO.
 
 ## Retrieval Strategy `[proposed]`
 

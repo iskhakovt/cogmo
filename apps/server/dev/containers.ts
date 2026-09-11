@@ -113,9 +113,15 @@ export function hindsight(
 }
 
 /**
- * Slim Hindsight — API-only, no local ML models, external LLM + embeddings + reranker.
+ * Slim Hindsight — API-only, no local ML models, external LLM + embeddings.
  * ~400MB image, ~5s startup. No Control Plane UI (Cogmo doesn't use it).
- * Patched config/cross_encoder for zerank base URL support.
+ *
+ * Reranking defaults to `rrf` — the RRF-fused retrieval order with no
+ * cross-encoder, so no model, no network call, no API key, and an ordering that
+ * depends only on the recorded fixtures. That is what every test caller wants.
+ * `openrouter` is the escape hatch for checking a production-shaped reranker by
+ * hand; it makes live calls, so nothing hermetic may pass it.
+ * See design/memory.md → Reranking.
  */
 export function hindsightSlim(
   network: StartedNetwork,
@@ -127,8 +133,9 @@ export function hindsightSlim(
     embeddingsBaseUrl: string;
     embeddingsApiKey: string;
     embeddingsModel: string;
-    rerankerProvider?: "rrf" | "zeroentropy";
+    rerankerProvider?: "rrf" | "openrouter";
     rerankerApiKey?: string;
+    rerankerModel?: string;
     rerankerBaseUrl?: string;
   },
 ) {
@@ -148,10 +155,10 @@ export function hindsightSlim(
     HINDSIGHT_API_SKIP_LLM_VERIFICATION: "true",
   };
 
-  if (rerankerProvider === "zeroentropy") {
-    if (opts.rerankerApiKey) env.HINDSIGHT_API_RERANKER_ZEROENTROPY_API_KEY = opts.rerankerApiKey;
-    if (opts.rerankerBaseUrl)
-      env.HINDSIGHT_API_RERANKER_ZEROENTROPY_BASE_URL = opts.rerankerBaseUrl;
+  if (rerankerProvider === "openrouter") {
+    if (opts.rerankerApiKey) env.HINDSIGHT_API_RERANKER_OPENROUTER_API_KEY = opts.rerankerApiKey;
+    if (opts.rerankerModel) env.HINDSIGHT_API_RERANKER_OPENROUTER_MODEL = opts.rerankerModel;
+    if (opts.rerankerBaseUrl) env.HINDSIGHT_API_RERANKER_OPENROUTER_BASE_URL = opts.rerankerBaseUrl;
   }
 
   // Pin version — floating `latest-slim` breaks llmock fixtures when Hindsight
