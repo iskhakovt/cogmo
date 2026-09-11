@@ -116,10 +116,12 @@ export function hindsight(
  * Slim Hindsight — API-only, no local ML models, external LLM + embeddings.
  * ~400MB image, ~5s startup. No Control Plane UI (Cogmo doesn't use it).
  *
- * Reranking is pinned to `rrf`, which keeps the RRF-fused retrieval order and
- * runs no cross-encoder: no model, no network call, no API key, and an ordering
- * that depends only on the recorded fixtures. Production picks a real reranker
- * through Hindsight's own env (see design/memory.md → Reranking).
+ * Reranking defaults to `rrf` — the RRF-fused retrieval order with no
+ * cross-encoder, so no model, no network call, no API key, and an ordering that
+ * depends only on the recorded fixtures. That is what every test caller wants.
+ * `openrouter` is the escape hatch for checking a production-shaped reranker by
+ * hand; it makes live calls, so nothing hermetic may pass it.
+ * See design/memory.md → Reranking.
  */
 export function hindsightSlim(
   network: StartedNetwork,
@@ -131,9 +133,14 @@ export function hindsightSlim(
     embeddingsBaseUrl: string;
     embeddingsApiKey: string;
     embeddingsModel: string;
+    rerankerProvider?: "rrf" | "openrouter";
+    rerankerApiKey?: string;
+    rerankerModel?: string;
+    rerankerBaseUrl?: string;
   },
 ) {
   const llmProvider = opts.llmProvider ?? "openai";
+  const rerankerProvider = opts.rerankerProvider ?? "rrf";
 
   const env: Record<string, string> = {
     HINDSIGHT_API_LLM_PROVIDER: llmProvider,
@@ -144,9 +151,15 @@ export function hindsightSlim(
     HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL: opts.embeddingsBaseUrl,
     HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY: opts.embeddingsApiKey,
     HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL: opts.embeddingsModel,
-    HINDSIGHT_API_RERANKER_PROVIDER: "rrf",
+    HINDSIGHT_API_RERANKER_PROVIDER: rerankerProvider,
     HINDSIGHT_API_SKIP_LLM_VERIFICATION: "true",
   };
+
+  if (rerankerProvider === "openrouter") {
+    if (opts.rerankerApiKey) env.HINDSIGHT_API_RERANKER_OPENROUTER_API_KEY = opts.rerankerApiKey;
+    if (opts.rerankerModel) env.HINDSIGHT_API_RERANKER_OPENROUTER_MODEL = opts.rerankerModel;
+    if (opts.rerankerBaseUrl) env.HINDSIGHT_API_RERANKER_OPENROUTER_BASE_URL = opts.rerankerBaseUrl;
+  }
 
   // Pin version — floating `latest-slim` breaks llmock fixtures when Hindsight
   // changes its LLM request format. Update version + re-record fixtures together.

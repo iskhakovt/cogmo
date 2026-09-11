@@ -267,6 +267,8 @@ ZeroEntropy's zerank-2 led this table at ELO 1638 and was the original choice. Z
 
 RRF alone for tests — zero dependencies, deterministic, sufficient for "did recall find the fact" assertions.
 
+**On the next Hindsight bump, re-check the timeout budget.** 0.9.1 gives a remote reranker one attempt per chain member, so a timeout is the whole cost of a dead primary. Hindsight after 0.9.1 adds retries — `HINDSIGHT_API_RERANKER_MAX_RETRIES` (default 3) with exponential backoff, under a `HINDSIGHT_API_RERANKER_RETRY_BUDGET` of 10s *per member*, spent before the chain advances. Against the 5s ceiling `HindsightMemoryProvider` puts on recall, those defaults mean the client gives up long before the `rrf` member is ever reached, and the fail-open becomes decorative. Lower the retry budget alongside the timeout when the pin moves.
+
 ### Production Config
 
 ```bash
