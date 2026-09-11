@@ -113,9 +113,13 @@ export function hindsight(
 }
 
 /**
- * Slim Hindsight — API-only, no local ML models, external LLM + embeddings + reranker.
+ * Slim Hindsight — API-only, no local ML models, external LLM + embeddings.
  * ~400MB image, ~5s startup. No Control Plane UI (Cogmo doesn't use it).
- * Patched config/cross_encoder for zerank base URL support.
+ *
+ * Reranking is pinned to `rrf`, which keeps the RRF-fused retrieval order and
+ * runs no cross-encoder: no model, no network call, no API key, and an ordering
+ * that depends only on the recorded fixtures. Production picks a real reranker
+ * through Hindsight's own env (see design/memory.md → Reranking).
  */
 export function hindsightSlim(
   network: StartedNetwork,
@@ -127,13 +131,9 @@ export function hindsightSlim(
     embeddingsBaseUrl: string;
     embeddingsApiKey: string;
     embeddingsModel: string;
-    rerankerProvider?: "rrf" | "zeroentropy";
-    rerankerApiKey?: string;
-    rerankerBaseUrl?: string;
   },
 ) {
   const llmProvider = opts.llmProvider ?? "openai";
-  const rerankerProvider = opts.rerankerProvider ?? "rrf";
 
   const env: Record<string, string> = {
     HINDSIGHT_API_LLM_PROVIDER: llmProvider,
@@ -144,15 +144,9 @@ export function hindsightSlim(
     HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL: opts.embeddingsBaseUrl,
     HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY: opts.embeddingsApiKey,
     HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL: opts.embeddingsModel,
-    HINDSIGHT_API_RERANKER_PROVIDER: rerankerProvider,
+    HINDSIGHT_API_RERANKER_PROVIDER: "rrf",
     HINDSIGHT_API_SKIP_LLM_VERIFICATION: "true",
   };
-
-  if (rerankerProvider === "zeroentropy") {
-    if (opts.rerankerApiKey) env.HINDSIGHT_API_RERANKER_ZEROENTROPY_API_KEY = opts.rerankerApiKey;
-    if (opts.rerankerBaseUrl)
-      env.HINDSIGHT_API_RERANKER_ZEROENTROPY_BASE_URL = opts.rerankerBaseUrl;
-  }
 
   // Pin version — floating `latest-slim` breaks llmock fixtures when Hindsight
   // changes its LLM request format. Update version + re-record fixtures together.
