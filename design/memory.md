@@ -254,7 +254,7 @@ A cross-encoder pass over the candidates RRF fusion produces — **not an altern
 | Provider | Model | Agentset ELO | Cost | Hindsight provider | Notes |
 |-|-|-|-|-|-|
 | OpenRouter | `voyageai/rerank-2.5` | 1544 | $0.05/M tokens | `openrouter` (native) | Reuses the OpenRouter key already set for LLM + embeddings |
-| OpenRouter | `voyageai/rerank-2.5-lite` | 1520 | $0.02/M tokens | `openrouter` (native) | Same gateway, roughly half the cost |
+| OpenRouter | `voyageai/rerank-2.5-lite` | 1520 | $0.02/M tokens | `openrouter` (native) | Same gateway, 40% of the cost |
 | OpenRouter | `cohere/rerank-v3.5` | 1451 | $0.001/search | `openrouter` (native) | Hindsight's default model for this provider |
 | OpenRouter | `cohere/rerank-4-pro` | not rated | $0.0025/search | `openrouter` (native) | Postdates the Agentset table |
 | Cohere | rerank-3.5 | 1451 | $2.00/1K searches | `cohere` (native) | Direct key; no cheaper than the same model via OpenRouter |
@@ -339,7 +339,7 @@ Tracked in `todo.md`. Re-evaluate when Hindsight ships GPT-5 support.
 | Reranker | OpenRouter voyageai/rerank-2.5 | ~$8 |
 | **Total** | | **~$14** |
 
-Cost will drop to ~$10/mo when Hindsight ships GPT-5 support — see "Known Gaps". Switching the reranker to `voyageai/rerank-2.5-lite` takes roughly $4 off the reranker line for 24 points of Agentset ELO.
+Cost will drop to ~$10/mo when Hindsight ships GPT-5 support — see "Known Gaps". Switching the reranker to `voyageai/rerank-2.5-lite` puts that line at ~$3.20/mo — $4.80 less, and below the ~$4 zerank-2 was budgeted at — for 24 points of Agentset ELO.
 
 ## Retrieval Strategy `[proposed]`
 
