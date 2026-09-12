@@ -11,29 +11,15 @@ import { GenericContainer, type StartedNetwork, TestContainers, Wait } from "tes
  * Publish a host port to every container created afterwards, and return the
  * base URL they reach it on.
  *
- * Deliberately not `--add-host host.docker.internal:host-gateway`: under
- * rootless Docker `host-gateway` resolves to the bridge gateway *inside*
- * RootlessKit's network namespace, which is not the host, so the connection is
- * refused. Testcontainers tunnels through an sshd sidecar instead — no host
- * address is involved, so one code path covers rootful, rootless and CI, and it
- * reaches loopback-bound listeners too.
+ * Not `--add-host host.docker.internal:host-gateway`: under rootless Docker that
+ * gateway sits inside RootlessKit's namespace, not on the host. The sshd sidecar
+ * tunnels instead, so no host address is involved and loopback-bound listeners
+ * work too.
  *
- * Ordering matters: `GenericContainer` consults the forwarder at *create* time
- * to inject the host mapping, so containers needing the port must be created
- * after this resolves. `PortForwarderInstance.isRunning()` is a plain static
- * check with no warning, so a container created too early just silently has no
- * mapping. That check is also per-process: containers started from a worker
- * fork rather than `globalSetup` get nothing either way.
- *
- * The sidecar image is pinned in `vitest.config.ts`, not here —
- * `SSHD_CONTAINER_IMAGE` is read into a module-level const when the
- * `testcontainers` barrel above is imported, which is long before this runs.
- * Callers outside Vitest (`scripts/record-fixtures.ts`) pull it from Docker Hub
- * unless they set that variable in the environment themselves.
- *
- * The forwarder container is not one of the tiers' tracked containers, so
- * teardown does not stop it; Ryuk reaps it. A run with
- * `TESTCONTAINERS_RYUK_DISABLED=true` leaves it behind on purpose.
+ * Call before creating any container that needs the port — the mapping is
+ * injected at create time, and one created too early silently gets none. The
+ * check is per-process, so worker-fork containers get none either. Sidecar image
+ * is pinned in `vitest.config.ts`; Ryuk reaps the forwarder, teardown doesn't.
  */
 export async function exposeHostPort(port: number): Promise<string> {
   await TestContainers.exposeHostPorts(port);
