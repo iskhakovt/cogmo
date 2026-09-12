@@ -196,8 +196,8 @@ async function sendEvent(name: string, data: Record<string, unknown>) {
 }
 
 /**
- * Wait until every name in `requiredNames` has been seen, accumulating across
- * polls, then return the collected metrics.
+ * Wait until every name in `requiredNames` has been seen, merging the data
+ * points collected across polls, then return them.
  *
  * DELTA temporality drains the accumulator on every `collect()`, so a metric
  * reported in one poll is gone from the next. Requiring all names in a single
@@ -205,7 +205,15 @@ async function sendEvent(name: string, data: Record<string, unknown>) {
  * polling windows: the first collect takes one and consumes it, the second
  * takes the other, and no snapshot ever holds both — which reads as "nothing
  * recorded" once every delta has been drained. Retrying cannot converge on
- * that, so the names are accumulated and the first sighting of each is kept.
+ * that, so the polls are accumulated.
+ *
+ * Merged rather than first-sighting-wins, because a drained delta is gone:
+ * keeping only the first would discard every later data point for a name that
+ * has already appeared, so in-process work unrelated to this turn could
+ * satisfy the requirement while the turn's own measurements were collected and
+ * thrown away — assertions passing on someone else's telemetry. Merging also
+ * keeps a multi-iteration turn whole, since its points arrive across several
+ * collects.
  *
  * The retry itself is for the cross-process race: when a peer fork subscribes
  * to the same trigger under its own app id, the gateway broadcasts to both
@@ -215,26 +223,43 @@ async function sendEvent(name: string, data: Record<string, unknown>) {
  * `cogmo.llm.tokens` lands) but never reaches `persist-new-messages` records
  * no iteration count at all, and no timeout saves that. See `todo.md`.
  */
+type CollectedMetric = ResourceMetrics["scopeMetrics"][number]["metrics"][number];
+
+type CollectedPoint = CollectedMetric["dataPoints"][number];
+
+/**
+ * Every data point collected for `name`, across all of the polls.
+ *
+ * Built by hand rather than with `flatMap`: `dataPoints` is a union of arrays
+ * across the metric variants, and `flatMap` over that collapses to whichever
+ * element type it picks first instead of the union.
+ */
+function pointsFor(collected: ReadonlyArray<CollectedMetric>, name: string): CollectedPoint[] {
+  const points: CollectedPoint[] = [];
+  for (const metric of collected) {
+    if (metric.descriptor.name === name) points.push(...metric.dataPoints);
+  }
+  return points;
+}
+
 async function collectMetricsWhen(otel: OtelHarness, requiredNames: ReadonlyArray<string>) {
-  const seen = new Map<string, ResourceMetrics["scopeMetrics"][number]["metrics"][number]>();
+  const collected: CollectedMetric[] = [];
   return vi.waitFor(
     async () => {
-      const result = await otel.collectMetrics();
-      for (const metric of result.scopeMetrics.flatMap((s) => s.metrics)) {
-        if (metric.dataPoints.length > 0 && !seen.has(metric.descriptor.name)) {
-          seen.set(metric.descriptor.name, metric);
-        }
+      for (const metric of (await otel.collectMetrics()).scopeMetrics.flatMap((s) => s.metrics)) {
+        if (metric.dataPoints.length > 0) collected.push(metric);
       }
+      const seen = new Set(collected.map((metric) => metric.descriptor.name));
       const missing = requiredNames.filter((name) => !seen.has(name));
       if (missing.length > 0) {
-        const found = [...seen.keys()].sort();
+        const found = [...seen].sort();
         throw new Error(
           `metrics not yet recorded: ${missing.join(", ")} — seen so far: ${
             found.length > 0 ? found.join(", ") : "(nothing)"
           }`,
         );
       }
-      return [...seen.values()];
+      return collected;
     },
     { timeout: 5_000, interval: 100 },
   );
@@ -564,16 +589,13 @@ describe("message pipeline", () => {
     // usage `{0, 0}`, so values land at zero. The contract we care about is
     // "tokens are being recorded with proper labels"; re-record fixtures to
     // verify magnitudes.
-    const tokenMetric = allMetrics.find((m) => m.descriptor.name === "cogmo.llm.tokens");
-    expect(tokenMetric).toBeDefined();
-    const types = new Set((tokenMetric?.dataPoints ?? []).map((p) => p.attributes.type));
+    const tokenPoints = pointsFor(allMetrics, "cogmo.llm.tokens");
+    const types = new Set(tokenPoints.map((p) => p.attributes.type));
     expect(types).toContain("input");
     expect(types).toContain("output");
-    const inputPoint = tokenMetric?.dataPoints.find((p) => p.attributes.type === "input");
+    const inputPoint = tokenPoints.find((p) => p.attributes.type === "input");
     expect(inputPoint?.attributes.provider).toBe("anthropic");
 
-    const iterationsMetric = allMetrics.find((m) => m.descriptor.name === "cogmo.agent.iterations");
-    expect(iterationsMetric).toBeDefined();
-    expect(iterationsMetric?.dataPoints.length).toBeGreaterThanOrEqual(1);
+    expect(pointsFor(allMetrics, "cogmo.agent.iterations").length).toBeGreaterThanOrEqual(1);
   });
 });
