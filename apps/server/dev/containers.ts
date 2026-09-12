@@ -27,6 +27,61 @@ export async function exposeHostPort(port: number): Promise<string> {
   return `http://host.testcontainers.internal:${port}`;
 }
 
+/**
+ * Remove a test network, detaching whatever is still attached to it first.
+ *
+ * Docker refuses to remove a network that still has endpoints, and the 403
+ * surfaces from `globalSetup`'s teardown — where a throw is indistinguishable
+ * from a failing suite in the job's exit code, so a fully green run reports
+ * red. A tier stops the containers it tracks, but attachments outlasting that
+ * pass have been observed (three of them, on one local run), and this detaches
+ * whatever is there rather than naming a culprit: the set is not currently
+ * identified, so a fix keyed to one kind of container would be a guess.
+ *
+ * Note it is *not* the Testcontainers port forwarder, despite the shape of the
+ * coincidence. That container is created without `withNetwork`, and
+ * `connectContainerToPortForwarder` joins our containers to *its* network, not
+ * the reverse — so it never holds a user-defined network open.
+ *
+ * Disconnect rather than stop: whatever is attached may belong to a
+ * concurrently-running tier, and the only claim being made here is that it has
+ * no business holding this network open.
+ *
+ * Cleanup is best-effort to the end, removal included — see the warning there
+ * for what a failure costs.
+ */
+export async function stopNetwork(network: StartedNetwork): Promise<void> {
+  const { default: Docker } = await import("dockerode");
+  const handle = new Docker().getNetwork(network.getId());
+  let attached: string[] = [];
+  try {
+    const inspected: { Containers?: Record<string, { Name?: string }> } = await handle.inspect();
+    attached = Object.entries(inspected.Containers ?? {}).map(
+      ([id, c]) => `${c.Name ?? "?"}(${id.slice(0, 12)})`,
+    );
+    for (const containerId of Object.keys(inspected.Containers ?? {})) {
+      await handle.disconnect({ Container: containerId, Force: true }).catch(() => {});
+    }
+  } catch {
+    // Network already gone, or the daemon will not describe it. Fall through:
+    // the removal below is guarded too, so there is nothing to decide here.
+  }
+  await network.stop().catch((err) => {
+    // Deliberately not rethrown: teardown must not redden a green suite. The
+    // cost is that a recurrence is a warning rather than a failure, and the
+    // network leaks — on a long-lived dev box enough of those exhaust Docker's
+    // address pool and later runs fail at `new Network().start()`. So log what
+    // was attached: that list is the thing needed to identify the holder, and
+    // it is not recoverable after the fact.
+    console.warn(
+      `stopNetwork: removing the test network failed; endpoints seen before the disconnect pass: ${
+        attached.length > 0 ? attached.join(", ") : "(none)"
+      }`,
+      err,
+    );
+  });
+}
+
 export function postgres(network: StartedNetwork) {
   return new GenericContainer("mirror.gcr.io/pgvector/pgvector:pg18")
     .withNetwork(network)
