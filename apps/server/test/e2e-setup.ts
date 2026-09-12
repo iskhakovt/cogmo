@@ -201,7 +201,12 @@ export async function teardown() {
 
   console.log("Stopping containers...");
   for (const container of containers.reverse()) {
-    await container.stop();
+    // Guarded for the same reason as the network removal below: a container
+    // already reaped answers 404/409, and an exception here escapes teardown,
+    // reddening a green suite and skipping the rest of the cleanup.
+    await container.stop().catch((err) => {
+      console.warn("teardown: stopping a test container failed", err);
+    });
   }
   if (network) await c.stopNetwork(network);
   console.log("Containers stopped.");

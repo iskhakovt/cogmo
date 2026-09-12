@@ -1,9 +1,9 @@
 ### Test networks detach their endpoints before they are removed
 
-`stopNetwork()` in `dev/containers.ts` inspects the network, force-disconnects whatever is still attached, and then stops it. The integration and e2e teardowns both go through it.
+`stopNetwork()` in `dev/containers.ts` inspects the network, force-disconnects whatever is still attached, and then removes it. The integration and e2e teardowns both go through it, and the container-stop loop that precedes it is guarded the same way.
 
-A tier stops the containers it tracks, but not everything on the network is its own: Testcontainers starts the port forwarder itself and joins it to each user-defined network, and sandbox containers are created by the supervisor through dockerode. Docker refuses to remove a network whose endpoints are still attached, so they are detached first.
+Docker refuses to remove a network that still has endpoints. Teardown runs inside `globalSetup`, where a throw is indistinguishable from a failing suite in the job's exit code, so an attachment surviving the tier's own stop pass turns a green run red. Which attachments those are is not currently identified — three were present on one local run — so the detach covers whatever is there rather than targeting a particular kind of container.
 
-Disconnecting is deliberately not stopping. The forwarder is a singleton that a concurrently-running tier may still need; it simply has no business holding this network open.
+Disconnecting is deliberately not stopping: whatever holds the network may belong to a concurrently-running tier, and the only claim being made is that it should not hold this network open.
 
-Every step is best-effort, the removal included — a failure there warns rather than throws. Teardown runs inside `globalSetup`, where an exception is indistinguishable from a failing suite in the job's exit code, so cleanup must not be able to redden a green run.
+Cleanup is best-effort throughout, removal included — a failure warns rather than throws, and names the endpoints seen, since that list is what identifies the holder and is not recoverable afterwards. The trade is deliberate: a recurrence is a warning rather than a red job, and a leaked network costs an address-pool slot on a long-lived machine.
