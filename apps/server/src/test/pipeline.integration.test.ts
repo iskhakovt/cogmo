@@ -2,6 +2,7 @@
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import type { ResourceMetrics } from "@opentelemetry/sdk-metrics";
 import { sql as drizzleSql, eq } from "drizzle-orm";
 import { connect } from "inngest/connect";
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from "vitest";
@@ -195,29 +196,45 @@ async function sendEvent(name: string, data: Record<string, unknown>) {
 }
 
 /**
- * Poll the OTel reader until every name in `requiredNames` is present in a
- * single `collectMetrics()` snapshot, then return that snapshot.
+ * Wait until every name in `requiredNames` has been seen, accumulating across
+ * polls, then return the collected metrics.
  *
- * DELTA temporality drains the accumulator on each `collect()`, so splitting
- * the wait from the assertion would consume the very metrics the assertion
- * needs to read. Asserting inside the poll body keeps both observations on
- * one snapshot. The retry handles cross-process races: when a peer fork
- * subscribes to the same trigger under its own app id, the gateway
- * broadcasts to both apps and waitForAssistantMessage may return on the
- * peer's DB write before this fork's handle-message finishes recording.
+ * DELTA temporality drains the accumulator on every `collect()`, so a metric
+ * reported in one poll is gone from the next. Requiring all names in a single
+ * snapshot is therefore unsatisfiable whenever two of them land in different
+ * polling windows: the first collect takes one and consumes it, the second
+ * takes the other, and no snapshot ever holds both — which reads as "nothing
+ * recorded" once every delta has been drained. Retrying cannot converge on
+ * that, so the names are accumulated and the first sighting of each is kept.
+ *
+ * The retry itself is for the cross-process race: when a peer fork subscribes
+ * to the same trigger under its own app id, the gateway broadcasts to both
+ * apps and `waitForAssistantMessage` may return on the peer's DB write before
+ * this fork's handle-message has recorded. Retrying only converges while this
+ * fork also completes its own turn — a fork that reaches `llm-iter<N>` (so
+ * `cogmo.llm.tokens` lands) but never reaches `persist-new-messages` records
+ * no iteration count at all, and no timeout saves that. See `todo.md`.
  */
 async function collectMetricsWhen(otel: OtelHarness, requiredNames: ReadonlyArray<string>) {
+  const seen = new Map<string, ResourceMetrics["scopeMetrics"][number]["metrics"][number]>();
   return vi.waitFor(
     async () => {
       const result = await otel.collectMetrics();
-      const allMetrics = result.scopeMetrics.flatMap((s) => s.metrics);
-      for (const name of requiredNames) {
-        const found = allMetrics.find((m) => m.descriptor.name === name);
-        if (!found || found.dataPoints.length === 0) {
-          throw new Error(`metric "${name}" not yet recorded`);
+      for (const metric of result.scopeMetrics.flatMap((s) => s.metrics)) {
+        if (metric.dataPoints.length > 0 && !seen.has(metric.descriptor.name)) {
+          seen.set(metric.descriptor.name, metric);
         }
       }
-      return allMetrics;
+      const missing = requiredNames.filter((name) => !seen.has(name));
+      if (missing.length > 0) {
+        const found = [...seen.keys()].sort();
+        throw new Error(
+          `metrics not yet recorded: ${missing.join(", ")} — seen so far: ${
+            found.length > 0 ? found.join(", ") : "(nothing)"
+          }`,
+        );
+      }
+      return [...seen.values()];
     },
     { timeout: 5_000, interval: 100 },
   );
