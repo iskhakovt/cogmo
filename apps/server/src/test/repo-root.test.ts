@@ -20,13 +20,17 @@ describe("repoRoot", () => {
 
   it("is the directory the cwd is not — which is why callers name it", () => {
     // The unit tier runs with the cwd at `apps/server`, the package that owns
-    // the Vitest config. A build context or `.env` path resolved against that
-    // instead of the root lands in a directory holding neither.
+    // the Vitest config. A bake invocation or `.env` path resolved against
+    // that instead of the root lands in a directory holding neither.
     expect(root).not.toBe(process.cwd());
     expect(existsSync(join(process.cwd(), "Dockerfile"))).toBe(false);
   });
 
-  it("carries the Dockerfile and .dockerignore the e2e build passes as its context", () => {
+  it("carries the bake file the e2e build runs, and the inputs that target names", () => {
+    // `repoRoot()` is the cwd `docker buildx bake --file docker-bake.hcl`
+    // runs in, and the target's `context = "."` resolves against the bake
+    // file's own directory — so both land here.
+    expect(existsSync(join(root, "docker-bake.hcl"))).toBe(true);
     expect(existsSync(join(root, "Dockerfile"))).toBe(true);
     expect(existsSync(join(root, ".dockerignore"))).toBe(true);
   });

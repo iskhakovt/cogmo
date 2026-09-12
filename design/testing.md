@@ -62,9 +62,11 @@ Full deployment-like stack — cogmo runs from its release image, in connect mod
 - Testcontainers (PostgreSQL, Redis, Inngest, Hindsight, MinIO) — started in vitest `globalSetup`
 - llmock in-process — replaces both mock-anthropic container and Ollama
 - App image: `E2E_IMAGE` when set, which is how CI hands over the tag its bake step
-  produced; otherwise `globalSetup` builds the root `Dockerfile` itself, with the repo
-  root as the build context. The built image outlives the run, so a repeat run can skip
-  the rebuild with `E2E_IMAGE=cogmo-e2e`
+  produced; otherwise `globalSetup` runs `docker buildx bake --load cogmo-e2e`, the same
+  bake file CI builds from. That target is `cogmo` minus the GHA cache, pinned to
+  `BAKE_LOCAL_PLATFORM` because `--load` imports one platform per tag. Needs the docker
+  CLI with buildx. The image stays after the run, so a repeat run can skip the rebuild
+  with `E2E_IMAGE=cogmo-e2e`
 - Seed and app both run as containers off that image — `withCommand(["seed"])`, then
   `withCommand(["serve"])` in connect mode (WebSocket to the Inngest dev server)
 - Hindsight and the app container both reach llmock over `host.docker.internal`, so the

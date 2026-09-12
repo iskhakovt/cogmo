@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import type { LLMock } from "@copilotkit/aimock";
 import type { StartedTestContainer } from "testcontainers";
 import { GenericContainer, Network, Wait } from "testcontainers";
@@ -14,6 +15,52 @@ loadRootEnv();
 const containers: StartedTestContainer[] = [];
 let network: Awaited<ReturnType<InstanceType<typeof Network>["start"]>> | null = null;
 let mock: LLMock | null = null;
+
+/**
+ * Tag the local build produces, mirrored from the `cogmo-e2e` bake target.
+ * Also the image name `skills.e2e.test.ts` filters containers by.
+ */
+const E2E_IMAGE_FALLBACK = "cogmo-e2e";
+
+/**
+ * Build the app image through the same bake file CI uses, so both tiers build
+ * from one definition of what goes into it. `--load` imports the result into
+ * the daemon, which is where `GenericContainer` then looks for it.
+ *
+ * Bake rather than `GenericContainer.fromDockerfile`: testcontainers builds
+ * its tar client-side, and to honour a `.dockerignore` whose allowlist
+ * re-includes nested paths — which the repo's is — it has to enumerate every
+ * file under the context before filtering, `node_modules` and `.git`
+ * included. BuildKit does that walk itself, with the ignore rules applied as
+ * it goes.
+ *
+ * stdio is inherited so a cold build (several minutes) shows progress rather
+ * than hanging silently behind `globalSetup`.
+ */
+async function bakeAppImage(): Promise<void> {
+  console.log("Baking app image (target cogmo-e2e)...");
+  await new Promise<void>((resolve, reject) => {
+    const bake = spawn(
+      "docker",
+      ["buildx", "bake", "--file", "docker-bake.hcl", "--load", "cogmo-e2e"],
+      { cwd: repoRoot(), stdio: "inherit" },
+    );
+    bake.on("error", (err) =>
+      reject(
+        new Error(
+          `could not run \`docker buildx bake\` — is the docker CLI on PATH? (${err.message})`,
+        ),
+      ),
+    );
+    bake.on("close", (code, signal) =>
+      code === 0
+        ? resolve()
+        : reject(
+            new Error(`\`docker buildx bake cogmo-e2e\` failed (code ${code}, signal ${signal})`),
+          ),
+    );
+  });
+}
 
 export async function setup({ provide }: GlobalSetupContext) {
   network = await new Network().start();
@@ -56,24 +103,16 @@ export async function setup({ provide }: GlobalSetupContext) {
 
   await c.ensureFilesBucket(s3Endpoint);
 
-  // Use pre-built Docker image if available (CI builds it), otherwise build from Dockerfile.
-  const imageName = process.env.E2E_IMAGE ?? "cogmo-e2e";
-  let appImage: GenericContainer;
-  if (process.env.E2E_IMAGE) {
-    console.log(`Using pre-built image: ${imageName}`);
-    appImage = new GenericContainer(imageName);
+  // CI bakes the image and passes the tag; a local run bakes it here.
+  // `E2E_IMAGE_FALLBACK` mirrors the `cogmo-e2e` bake target's tag —
+  // version-pins.test.ts holds the two together.
+  const imageName = process.env.E2E_IMAGE ?? E2E_IMAGE_FALLBACK;
+  if (process.env.E2E_IMAGE === undefined) {
+    await bakeAppImage();
   } else {
-    console.log("Building app Docker image...");
-    // Build context is the repo root: the Dockerfile's first COPY reaches for
-    // the workspace manifests and then descends into `apps/`, and
-    // `.dockerignore`'s allowlist is written against the same root.
-    appImage = await GenericContainer.fromDockerfile(repoRoot(), "Dockerfile")
-      .withBuildkit()
-      // Survive the run, so a second `pnpm test:e2e` can skip the rebuild with
-      // `E2E_IMAGE=cogmo-e2e`. Testcontainers otherwise labels the image with
-      // the session id and has Ryuk reap it on exit.
-      .build(imageName, { deleteOnExit: false });
+    console.log(`Using pre-built image: ${imageName}`);
   }
+  const appImage = new GenericContainer(imageName);
 
   // Same DB URL is used by both the seed container and the long-running app container,
   // both reaching Postgres via the testcontainers network alias.
