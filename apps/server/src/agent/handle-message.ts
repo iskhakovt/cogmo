@@ -22,6 +22,7 @@ import type { ContentBlock, CountTokensParams, Message, StreamEvent } from "../l
 import { logger } from "../logger.js";
 import type { McpRegistry } from "../mcp/registry.js";
 import type { MemoryProvider } from "../memory/provider.js";
+import { agentIterations } from "../metrics.js";
 import type { SkillRunner } from "../skills/runner.js";
 import { buildSkillTools, composeTurnTools } from "../skills/skill-tool-builder.js";
 import { createSkillsService } from "../skills/skills-service.js";
@@ -1279,6 +1280,14 @@ export function createHandleMessage(deps: HandleMessageDeps) {
 
       const wasCoolingDown = conv.cooldownState !== null;
       const assistantMsg = await step.run("persist-new-messages", async () => {
+        // Inside the step, and ahead of the write. Inside, because the bare
+        // body re-executes once per remaining boundary and would record the
+        // same turn 3-6 times; a step body fires once and is suppressed on
+        // replay. Ahead of the write, so the sample exists by the time the
+        // assistant row is visible to anything watching the conversation —
+        // which is what makes the metric assertion in
+        // `pipeline.integration.test.ts` a fact rather than a race.
+        agentIterations.record(result.iterations, { model: result.model });
         return await deps.runInTx(async (tx) => {
           const inserted = await agentStore.insertMessages(tx, {
             conversationId,
