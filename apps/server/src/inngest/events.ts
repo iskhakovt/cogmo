@@ -649,6 +649,109 @@ export const skillCronFire = eventType("skills/cron.fire", {
   }),
 });
 
+// --- User-defined pipelines (design/pipelines.md → Execution Model) ---
+
+/**
+ * One stage of a pipeline run is due. Consumed by `pipeline-stage-runner`,
+ * which executes exactly the named stage against the run row and then either
+ * emits the next `pipeline/stage.due`, parks on a gate, or terminates the run.
+ *
+ * `iteration` is the loop counter the run sat at when the stage was
+ * scheduled — invariantly 0 until back-edges land, carried now so the
+ * dedup id and the stage runner's stale-delivery check already key on the
+ * full cursor.
+ */
+export const pipelineStageDue = eventType("pipeline/stage.due", {
+  schema: z.object({
+    runId: z.string(),
+    stageId: z.string(),
+    iteration: z.number().int().nonnegative(),
+  }),
+});
+
+export type PipelineStageDueData = z.infer<typeof pipelineStageDue.schema>;
+
+/** Bus-dedup id keyed on the full run cursor — one stage execution per (run, stage, iteration). */
+export function buildPipelineStageDueEvent(data: PipelineStageDueData) {
+  return {
+    ...pipelineStageDue.create(data),
+    id: `pipeline-stage-due-${data.runId}-${data.stageId}-${data.iteration}`,
+  };
+}
+
+/**
+ * Identifies one gate checkpoint: `${runId}:${stageId}:${iteration}`. The
+ * waiter's `cancelOn` and idempotency both match on it, so a resolution
+ * for one gate can never cancel the waiter of a later gate in the same run.
+ */
+export function pipelineGateKey(runId: string, stageId: string, iteration: number): string {
+  return `${runId}:${stageId}:${iteration}`;
+}
+
+/**
+ * A run has parked on a `gate` stage (`status = waiting_gate`). Two
+ * independent consumers: the channel adapter posts the Approve / Cancel
+ * keyboard, and `pipeline-gate-waiter` sleeps out the timeout (re-arming
+ * for reminders) and resolves with the declared `onTimeout` action.
+ */
+export const pipelineGatePending = eventType("pipeline/gate.pending", {
+  schema: z.object({
+    runId: z.string(),
+    gateKey: z.string(),
+    conversationId: z.string(),
+    pipelineName: z.string(),
+    stageId: z.string(),
+    /** The gate's prose instructions — rendered above the keyboard. */
+    prompt: z.string(),
+    timeoutMs: z.number().int().positive(),
+    onTimeout: z.discriminatedUnion("kind", [
+      z.object({ kind: z.literal("proceed") }),
+      z.object({ kind: z.literal("abort") }),
+      z.object({
+        kind: z.literal("remind"),
+        maxReminders: z.number().int().min(1),
+        finalAction: z.enum(["proceed", "abort"]),
+      }),
+    ]),
+  }),
+});
+
+export type PipelineGatePendingData = z.infer<typeof pipelineGatePending.schema>;
+
+export function buildPipelineGatePendingEvent(data: PipelineGatePendingData) {
+  return { ...pipelineGatePending.create(data), id: `pipeline-gate-pending-${data.gateKey}` };
+}
+
+export const pipelineGateDecisions = [
+  "approved",
+  "cancelled",
+  "timeout_proceed",
+  "timeout_abort",
+] as const;
+export type PipelineGateDecision = (typeof pipelineGateDecisions)[number];
+
+/**
+ * A gate checkpoint was resolved — by a keyboard tap (`approved` /
+ * `cancelled`) or by the waiter's timeout action. Consumed by
+ * `pipeline-gate-resolver`, which moves the run out of `waiting_gate` and
+ * advances or cancels it, and cancels the waiter via `cancelOn`.
+ *
+ * Deliberately NOT bus-deduped on the gate key: a tap and a timeout racing
+ * for the same gate carry different decisions, and the resolver's
+ * conditional `waiting_gate → running` transition is what picks the winner.
+ * A dedup id would silently drop whichever landed second before the resolver
+ * could tell the user their tap came too late.
+ */
+export const pipelineGateResolved = eventType("pipeline/gate.resolved", {
+  schema: z.object({
+    runId: z.string(),
+    gateKey: z.string(),
+    decision: z.enum(pipelineGateDecisions),
+  }),
+});
+
+export type PipelineGateResolvedData = z.infer<typeof pipelineGateResolved.schema>;
+
 /**
  * Direct channel — external clients emit this to send messages.
  * The direct-inbound Inngest function translates to inbound/arrived.

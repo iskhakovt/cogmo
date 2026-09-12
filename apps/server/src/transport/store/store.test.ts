@@ -359,6 +359,42 @@ describe("DrizzleTransportStore", () => {
         }),
       ).rejects.toThrow();
     });
+
+    it("persists a pipeline-stage inbound keyed on the stage cursor", async () => {
+      const { conversationId } = await seedConversation();
+      const key = "pipeline:019d0000-0000-7000-8000-0000000000aa:gather-context:0";
+
+      const { id } = await tx((trx) =>
+        store.persistInbound(trx, {
+          source: "pipeline",
+          scheduledFireKey: key,
+          conversationId,
+          content: "stage prompt",
+          platformTs: new Date("2026-09-12T09:00:00.000Z"),
+        }),
+      );
+
+      expect(await tx((trx) => store.findInboundByScheduledFireKey(trx, key))).toEqual({
+        id,
+        conversationId,
+      });
+      const [row] = await tx((trx) => store.getUnbatchedInbound(trx, conversationId, null));
+      expect(row).toMatchObject({ id, source: "pipeline", content: "stage prompt" });
+    });
+
+    it("rejects a pipeline inbound without a key at the DB constraint", async () => {
+      const { conversationId } = await seedConversation();
+      await expect(
+        tx(async (trx) => {
+          await trx.insert(inboundMessagesTable).values({
+            source: "pipeline",
+            conversationId,
+            content: "stage prompt",
+            platformTs: new Date(),
+          });
+        }),
+      ).rejects.toThrow();
+    });
   });
 
   describe("getSourceSessions", () => {

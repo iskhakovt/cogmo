@@ -38,7 +38,11 @@ export type ChannelSessionReceive = (typeof channelSessionReceive.enumValues)[nu
  * (originating session FK populated), `scheduled` for synthetic inbounds
  * with no originating session. A check constraint enforces the link.
  */
-export const inboundMessageSource = pgEnum("inbound_message_source", ["user", "scheduled"]);
+export const inboundMessageSource = pgEnum("inbound_message_source", [
+  "user",
+  "scheduled",
+  "pipeline",
+]);
 export type InboundMessageSource = (typeof inboundMessageSource.enumValues)[number];
 
 export const channels = pgTable("channels", {
@@ -89,7 +93,8 @@ export const inboundMessages = pgTable(
   "inbound_messages",
   {
     id: pk(),
-    // Nullable: `source='scheduled'` rows have no originating session.
+    // Nullable: `source='scheduled'` and `source='pipeline'` rows have no
+    // originating session.
     // The check constraint below ties nullability to `source`.
     channelSessionId: uuid("channel_session_id").references(() => channelSessions.id),
     conversationId: uuid("conversation_id")
@@ -104,6 +109,9 @@ export const inboundMessages = pgTable(
      * The fire-handler pre-checks this on every dispatch so a retry that
      * lands after a successful commit (worker died between tx commit and
      * Inngest ack) reuses the existing row instead of rotating again.
+     * `source='pipeline'` rows carry `pipeline:${runId}:${stageId}:${iteration}`
+     * here — one synthetic inbound per stage turn, namespaced so the two key
+     * spaces share the unique index without colliding.
      * NULL for `source='user'`; the check constraint enforces the link.
      */
     scheduledFireKey: text("scheduled_fire_key"),
@@ -116,7 +124,8 @@ export const inboundMessages = pgTable(
     check(
       "chk_inbound_source_session",
       sql`(${t.source} = 'user' AND ${t.channelSessionId} IS NOT NULL AND ${t.scheduledFireKey} IS NULL)
-        OR (${t.source} = 'scheduled' AND ${t.channelSessionId} IS NULL AND ${t.scheduledFireKey} IS NOT NULL)`,
+        OR (${t.source} = 'scheduled' AND ${t.channelSessionId} IS NULL AND ${t.scheduledFireKey} IS NOT NULL)
+        OR (${t.source} = 'pipeline' AND ${t.channelSessionId} IS NULL AND ${t.scheduledFireKey} IS NOT NULL)`,
     ),
   ],
 );

@@ -5,8 +5,13 @@ import { startCodingProgressSubscriber } from "../../../agent/coding/progress-su
 import { parseGeneratedDocumentPayload } from "../../../agent/document-tools.js";
 import { parseGeneratedImagePayload } from "../../../agent/image-tools.js";
 import {
+  PIPELINE_GATE_CALLBACK_REGEX,
+  parsePipelineGateCallback,
+} from "../../../agent/pipeline/gate-keyboard.js";
+import {
   boundaryResolvedEvent,
   codingTaskStart,
+  pipelineGatePending,
   skillsDeployApprovalRequested,
 } from "../../../inngest/events.js";
 import type { StreamEvent } from "../../../llm/types.js";
@@ -40,6 +45,7 @@ import {
   handleModel,
   handleName,
   handleNew,
+  handlePipelineGateCallback,
   handlePlanCallback,
   handleProfile,
   handleReflect,
@@ -55,6 +61,7 @@ import {
   handleVoice,
   type TelegramCommandContext,
 } from "./commands.js";
+import { postPipelineGateKeyboard } from "./pipeline-gate-poster.js";
 import { ProfileDialogs } from "./profile-dialog.js";
 import { renderTelegramHtml, stripHtmlTags } from "./render.js";
 import { RepoDialogs } from "./repo-dialog.js";
@@ -953,6 +960,26 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     await ctx.answerCallbackQuery({ text: outcome.toast });
   });
 
+  // Pipeline gate keyboard: Approve / Cancel — callback_data = "pipe:<runId>:<action>"
+  bot.callbackQuery(PIPELINE_GATE_CALLBACK_REGEX, async (ctx) => {
+    const data = ctx.callbackQuery?.data;
+    const fromId = ctx.from?.id;
+    if (!data || fromId === undefined) return;
+    const parsed = parsePipelineGateCallback(data);
+    if (!parsed) return;
+
+    const outcome = await handlePipelineGateCallback(transport, parsed, String(fromId));
+    try {
+      await ctx.editMessageText(outcome.editText, { reply_markup: { inline_keyboard: [] } });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "";
+      if (!msg.includes("message is not modified")) {
+        logger.warn({ err }, "telegram: failed to edit pipeline gate message");
+      }
+    }
+    await ctx.answerCallbackQuery({ text: outcome.toast });
+  });
+
   // Skills approval keyboard: Approve / Deny — callback_data =
   // "skill:<pendingId>:<approve|deny>"
   bot.callbackQuery(SKILLS_APPROVAL_CALLBACK_REGEX, async (ctx) => {
@@ -1395,6 +1422,31 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
             channelId,
             runInTx,
             skillStore,
+            transportStore,
+            sendMessage: (chatId, text, opts) => bot.api.sendMessage(chatId, text, opts),
+          }),
+      ),
+    );
+  }
+
+  // Pipeline gate checkpoint — post the Approve / Cancel keyboard to this
+  // channel's session on the run conversation when a run parks on a gate.
+  // The gate's waiter owns the timeout, so a post that fails or never
+  // happens cannot wedge the run.
+  if (deps.pipelineGate) {
+    const { runInTx, transportStore } = deps.pipelineGate;
+    functions.push(
+      inngest.createFunction(
+        {
+          id: `telegram-pipeline-gate-${channelId}`,
+          triggers: [pipelineGatePending],
+          retries: 0,
+        },
+        async ({ event }) =>
+          postPipelineGateKeyboard({
+            event: event.data,
+            channelId,
+            runInTx,
             transportStore,
             sendMessage: (chatId, text, opts) => bot.api.sendMessage(chatId, text, opts),
           }),

@@ -18,6 +18,7 @@ import {
   handleModel,
   handleName,
   handleNew,
+  handlePipelineGateCallback,
   handlePlanCallback,
   handleProfile,
   handleReflect,
@@ -4673,5 +4674,80 @@ describe("handleLearned detail rendering", () => {
     await handleLearned(transport, ctx);
     const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
     expect(reply).not.toContain("Took:");
+  });
+});
+
+describe("handlePipelineGateCallback", () => {
+  const runId = "019d0000-0000-7000-8000-0000000000aa";
+
+  it("Approve resolves the gate and says the pipeline continues past the stage", async () => {
+    const resolveGate = vi
+      .fn()
+      .mockResolvedValue(ok({ runId, pipelineName: "issue-to-pr", stageId: "approve" }));
+    const transport = mockTransportDeep({ pipelines: { resolveGate } });
+
+    const outcome = await handlePipelineGateCallback(
+      transport,
+      { runId, action: "approve" },
+      "tg-1",
+    );
+
+    expect(resolveGate).toHaveBeenCalledWith(runId, "approve", "tg-1");
+    expect(outcome).toEqual({
+      editText: '✅ Approved — pipeline "issue-to-pr" continues past "approve".',
+      toast: "Approved",
+    });
+  });
+
+  it("Cancel resolves the gate as cancelled and says where the run stopped", async () => {
+    const resolveGate = vi
+      .fn()
+      .mockResolvedValue(ok({ runId, pipelineName: "issue-to-pr", stageId: "approve" }));
+    const transport = mockTransportDeep({ pipelines: { resolveGate } });
+
+    const outcome = await handlePipelineGateCallback(
+      transport,
+      { runId, action: "cancel" },
+      "tg-1",
+    );
+
+    expect(resolveGate).toHaveBeenCalledWith(runId, "cancel", "tg-1");
+    expect(outcome).toEqual({
+      editText: '❌ Pipeline "issue-to-pr" cancelled at "approve".',
+      toast: "Cancelled",
+    });
+  });
+
+  it("a tap on an already-resolved checkpoint renders the not-pending error", async () => {
+    const transport = mockTransportDeep({
+      pipelines: {
+        resolveGate: vi
+          .fn()
+          .mockResolvedValue(err({ code: "pipeline_gate_not_pending", runId, status: "running" })),
+      },
+    });
+
+    const outcome = await handlePipelineGateCallback(
+      transport,
+      { runId, action: "approve" },
+      "tg-1",
+    );
+
+    expect(outcome.editText).toBe("This checkpoint was already resolved — the run is running.");
+    expect(outcome.toast).toBe(outcome.editText);
+  });
+
+  it("an unauthorized tapper gets the identity rejection", async () => {
+    const transport = mockTransportDeep({
+      pipelines: { resolveGate: vi.fn().mockResolvedValue(err({ code: "identity_rejected" })) },
+    });
+
+    const outcome = await handlePipelineGateCallback(
+      transport,
+      { runId, action: "cancel" },
+      "tg-9",
+    );
+
+    expect(outcome.editText).toBe("You're not authorized on this bot.");
   });
 });

@@ -46,7 +46,7 @@ import { extractGeneratedDocuments, extractGeneratedImages } from "./extract-ima
 import type { ImageToolsLoader } from "./image-tools-loader.js";
 import type { AgentLoopResult, StreamingAgentLoopParams } from "./loop.js";
 import { createPipelinesService } from "./pipeline/pipelines-service.js";
-import type { PipelineStore } from "./pipeline/store/index.js";
+import type { PipelineRunStore, PipelineStore } from "./pipeline/store/index.js";
 import { PIPELINE_TOOL_NAMES } from "./pipeline/tools.js";
 import type { PromptSource } from "./prompt.js";
 import { shouldSkipRecall } from "./recall-gate.js";
@@ -133,6 +133,11 @@ export interface HandleMessageDeps {
    * it. See design/pipelines.md.
    */
   pipelineStore?: PipelineStore;
+  /**
+   * Run store behind `start_pipeline`. Optional for the same reason as
+   * `pipelineStore`; without it `start` returns `runs_unavailable`.
+   */
+  pipelineRunStore?: PipelineRunStore;
 }
 
 /**
@@ -779,6 +784,19 @@ export function createHandleMessage(deps: HandleMessageDeps) {
                 .filter((name) => !PIPELINE_TOOL_NAMES.includes(name)),
               knownEventSources: [],
             },
+            ...(deps.pipelineRunStore !== undefined && {
+              run: {
+                deps: {
+                  runInTx: deps.runInTx,
+                  pipelineStore: deps.pipelineStore,
+                  runStore: deps.pipelineRunStore,
+                  agentStore,
+                  transportStore,
+                  inngest,
+                },
+                profileId,
+              },
+            }),
           })
         : undefined;
       const service = createService(

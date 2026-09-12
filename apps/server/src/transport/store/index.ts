@@ -48,6 +48,19 @@ export type PersistInboundParams =
       conversationId: string;
       content: InboundContent;
       platformTs: Date;
+    }
+  | {
+      /**
+       * A pipeline stage's prompt. `scheduledFireKey` carries the stage
+       * cursor `pipeline:<runId>:<stageId>:<iteration>` — the same unique
+       * idempotency column scheduled fires use, namespaced so the two key
+       * spaces cannot collide.
+       */
+      source: "pipeline";
+      scheduledFireKey: string;
+      conversationId: string;
+      content: InboundContent;
+      platformTs: Date;
     };
 
 /** `(channelId, platformAddress, receive)` tuple from `findReachableChannelsForUserProfile`. */
@@ -157,6 +170,8 @@ export interface TransportStore {
    *   - `'user'` → `channelSessionId` (originating session).
    *   - `'scheduled'` → `scheduledFireKey` (idempotency key
    *     `${taskId}:${scheduledFor}`; UNIQUE WHERE NOT NULL).
+   *   - `'pipeline'` → `scheduledFireKey` (idempotency key
+   *     `pipeline:${runId}:${stageId}:${iteration}`; same UNIQUE).
    * The DB check constraint enforces this; the type narrows it at the
    * call site.
    */
@@ -532,7 +547,7 @@ export class DrizzleTransportStore implements TransportStore {
             platformTs: params.platformTs,
           }
         : {
-            source: "scheduled" as const,
+            source: params.source,
             scheduledFireKey: params.scheduledFireKey,
             conversationId: params.conversationId,
             content: params.content,

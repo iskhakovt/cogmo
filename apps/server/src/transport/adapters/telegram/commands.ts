@@ -528,6 +528,39 @@ export async function handlePlanCallback(
   return { editText: "❌ Plan cancelled.", toast: "Cancelled" };
 }
 
+export interface PipelineGateCallbackOutcome {
+  editText: string;
+  toast: string;
+}
+
+/**
+ * Pure handler for Approve / Cancel taps on a pipeline gate keyboard.
+ * Identity and the parked-gate check live in `transport.pipelines`; this
+ * only renders the outcome the adapter writes back over the keyboard.
+ */
+export async function handlePipelineGateCallback(
+  transport: Transport,
+  parsed: { runId: string; action: "approve" | "cancel" },
+  tapperPlatformHandle: string,
+): Promise<PipelineGateCallbackOutcome> {
+  const res = await transport.pipelines.resolveGate(
+    parsed.runId,
+    parsed.action,
+    tapperPlatformHandle,
+  );
+  if (res.isErr()) return { editText: errorMessage(res.error), toast: errorMessage(res.error) };
+  const { pipelineName, stageId } = res.value;
+  return parsed.action === "approve"
+    ? {
+        editText: `✅ Approved — pipeline "${pipelineName}" continues past "${stageId}".`,
+        toast: "Approved",
+      }
+    : {
+        editText: `❌ Pipeline "${pipelineName}" cancelled at "${stageId}".`,
+        toast: "Cancelled",
+      };
+}
+
 export interface SkillsApprovalCallbackOutcome {
   editText: string;
   toast: string;
@@ -2086,6 +2119,12 @@ function errorMessage(err: TransportError): string {
       return `Skill deploy ${shortenId(err.pendingId)} not found.`;
     case "skill_deploy_not_pending":
       return `This deploy can't be acted on (status: ${err.status}).`;
+    case "pipelines_disabled":
+      return "Pipelines aren't wired in this deployment.";
+    case "pipeline_run_not_found":
+      return `No pipeline run with id "${shortenId(err.runId)}".`;
+    case "pipeline_gate_not_pending":
+      return `This checkpoint was already resolved — the run is ${err.status}.`;
     case "skill_deploy_register_failed":
       return `Approve failed: ${err.reason}`;
     case "mcp_disabled":

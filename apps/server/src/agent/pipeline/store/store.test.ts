@@ -74,6 +74,26 @@ describe("DrizzlePipelineStore", () => {
     expect(pinned?.version).toBe(1);
   });
 
+  it("getActiveDefinition returns only the active version", async () => {
+    const userId = await createUser();
+    const v1 = await insertDefinition(userId);
+    await insertDefinition(userId);
+
+    expect(
+      await tx((trx) => store.getActiveDefinition(trx, userId, "issue-to-pr")),
+    ).toBeUndefined();
+
+    await tx((trx) => store.activateDefinition(trx, userId, v1.id));
+    const active = await tx((trx) => store.getActiveDefinition(trx, userId, "issue-to-pr"));
+    // The older version is the active one — "active" is not "latest".
+    expect(active?.id).toBe(v1.id);
+
+    const otherUser = await createUser();
+    expect(
+      await tx((trx) => store.getActiveDefinition(trx, otherUser, "issue-to-pr")),
+    ).toBeUndefined();
+  });
+
   it("activateDefinition flips the old version off and the new one on in one tx", async () => {
     const userId = await createUser();
     const v1 = await insertDefinition(userId);
