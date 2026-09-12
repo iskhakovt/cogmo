@@ -12,7 +12,11 @@ import { HindsightClient } from "@vectorize-io/hindsight-client";
  * dimensions are hardcoded in Hindsight — no probe call needed).
  *
  * Usage:
- *   pnpm tsx scripts/record-fixtures.ts
+ *   SSHD_CONTAINER_IMAGE=mirror.gcr.io/testcontainers/sshd:1.4.0 \
+ *     pnpm tsx scripts/record-fixtures.ts
+ *
+ * (the override mirrors the port-forwarder sidecar; Vitest runs get it from
+ * vitest.config.ts, this script does not)
  *
  * Requires: Docker, .env with OPENAI_API_KEY.
  * Output: test/fixtures/recorded/*.json (llmock fixture format)

@@ -20,12 +20,22 @@ import { GenericContainer, type StartedNetwork, TestContainers, Wait } from "tes
  *
  * Ordering matters: `GenericContainer` consults the forwarder at *create* time
  * to inject the host mapping, so containers needing the port must be created
- * after this resolves.
+ * after this resolves. `PortForwarderInstance.isRunning()` is a plain static
+ * check with no warning, so a container created too early just silently has no
+ * mapping. That check is also per-process: containers started from a worker
+ * fork rather than `globalSetup` get nothing either way.
+ *
+ * The sidecar image is pinned in `vitest.config.ts`, not here —
+ * `SSHD_CONTAINER_IMAGE` is read into a module-level const when the
+ * `testcontainers` barrel above is imported, which is long before this runs.
+ * Callers outside Vitest (`scripts/record-fixtures.ts`) pull it from Docker Hub
+ * unless they set that variable in the environment themselves.
+ *
+ * The forwarder container is not one of the tiers' tracked containers, so
+ * teardown does not stop it; Ryuk reaps it. A run with
+ * `TESTCONTAINERS_RYUK_DISABLED=true` leaves it behind on purpose.
  */
 export async function exposeHostPort(port: number): Promise<string> {
-  // Mirror + pin the forwarder's sidecar like every other image in this file;
-  // upstream defaults to an unmirrored Docker Hub pull. An explicit override wins.
-  process.env.SSHD_CONTAINER_IMAGE ??= "mirror.gcr.io/testcontainers/sshd:1.3.0";
   await TestContainers.exposeHostPorts(port);
   return `http://host.testcontainers.internal:${port}`;
 }
