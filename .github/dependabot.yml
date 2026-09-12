@@ -31,38 +31,49 @@ updates:
     # collapses that scenario into a single PR with one semantically-
     # resolved lockfile.
     #
-    # Majors stay ungrouped — they deserve individual review.
     # Security and version updates can't share a group (Dependabot rule),
     # hence the security group.
     #
     # Family-specific groups precede the catch-alls so peer-dep-coupled
     # packages (OTel, Vitest, Drizzle, etc.) merge into a single PR even
-    # when Dependabot's broad grouping splits them.
+    # when Dependabot's broad grouping splits them. They carry no
+    # `update-types`, so they cover majors as well: a family whose members
+    # peer-pin each other has no mergeable single-package major. Vitest is
+    # the sharp case — `@vitest/coverage-v8@5` declares `vitest: 5.0.0`
+    # exactly, so the four one-package major PRs Dependabot opens for a
+    # Vitest release each fail peer resolution on their own and only
+    # install as a set. Grouping keeps "majors get individual review" —
+    # one PR per family per major, which is the unit a reviewer can
+    # actually reason about.
+    #
+    # The catch-alls stay minor/patch-only, so a major of anything outside
+    # a family still arrives as its own PR.
     groups:
       opentelemetry:
         applies-to: version-updates
         patterns: ["@opentelemetry/*"]
-        update-types: ["minor", "patch"]
       vitest:
         applies-to: version-updates
-        patterns: ["vitest", "@vitest/*"]
-        update-types: ["minor", "patch"]
+        # `vitest-*` pulls in the third-party ecosystem packages
+        # (`vitest-browser-react`, `vitest-mock-extended`) — they peer-depend
+        # on vitest and have to widen their range before the core major can
+        # land, so they belong in the same PR.
+        patterns: ["vitest", "vitest-*", "@vitest/*"]
       drizzle:
         applies-to: version-updates
         patterns: ["drizzle-orm", "drizzle-kit"]
-        update-types: ["minor", "patch"]
       inngest:
         applies-to: version-updates
         patterns: ["inngest", "@inngest/*"]
-        update-types: ["minor", "patch"]
       octokit:
         applies-to: version-updates
         patterns: ["@octokit/*"]
-        update-types: ["minor", "patch"]
       noble:
         applies-to: version-updates
         patterns: ["@noble/*"]
-        update-types: ["minor", "patch"]
+      # `@types/*` share a group for noise reduction, not coupling — a
+      # major there is independent of its siblings, so it keeps the
+      # minor/patch bound and majors arrive individually.
       types:
         applies-to: version-updates
         patterns: ["@types/*"]

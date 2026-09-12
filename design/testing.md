@@ -24,6 +24,8 @@ Use Vitest (fast, native TS, ESM). Test what's deterministic:
 
 Shared test factories in `src/test/factories.ts` — `mockAgentStore()`, `mockTransportStore()`, `mockTransport()`, `mockAdapter()`, `mockStep()`, etc.
 
+**Mock lifecycle:** `clearMocks` is on — Vitest calls `.mockClear()` on every spy before each test. Call history (`mock.calls`, `mock.results`, `mock.instances`) resets; implementations and queued `*Once` values set outside the test do not. So a `beforeAll` that installs a `mockResolvedValue` keeps working, while an assertion that counts calls accumulated by an earlier test in the same file will not — count within the test that makes the calls. Dropping an implementation still needs an explicit `mockReset()`.
+
 **PGlite setup:** `src/test/pglite.ts` — `createTestDatabase()` boots PGlite (PG18, so the schema's `uuidv7()` PK default resolves against core), applies schema via `pushSchema`, returns driver-agnostic `Database` type. `truncateAll()` clears tables between tests.
 
 **Naming:** `.test.ts` suffix. `pnpm test`.
