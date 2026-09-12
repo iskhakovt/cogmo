@@ -186,7 +186,7 @@ LLM provider keys, Telegram bot tokens, Tavily/fal.ai keys, and similar credenti
 
 Hindsight and Inngest answer anything that can reach them unless they are keyed. For Hindsight that means reading and writing every memory bank. For Inngest it means driving the agent: an `adapter/direct/inbound` event is a user turn, and `coding/task/plan-approved` approves a plan. A private network is not enough on its own, because skills make HTTP requests from inside Cogmo's process and so share its network position.
 
-`cogmo serve` therefore probes both at boot. It refuses to start if either server answers an unauthenticated request, or rejects the key Cogmo holds. A server that cannot be reached only logs a warning, matching the version check.
+`cogmo serve` therefore probes both at boot. It refuses to start if either server answers an unauthenticated request, or rejects the key Cogmo holds. A server that cannot be reached, or answers with a status that proves neither (a 404 from a wrong base path, a 502 from a proxy in front of a restarting server), only logs a warning, matching the version check. The Hindsight check also runs for the memory CLIs; the Inngest check runs only for `cogmo serve`.
 
 ### Hindsight
 

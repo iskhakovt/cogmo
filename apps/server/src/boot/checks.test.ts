@@ -72,6 +72,34 @@ describe("checkHindsightAuth", () => {
 
     await expect(checkHindsightAuth(fetchFn, url, "k")).resolves.toBeUndefined();
   });
+
+  it("keeps a path prefix on the base URL", async () => {
+    const fetchFn = probeFetch((_, init) => (bearer(init) === "Bearer k" ? 200 : 401));
+
+    await checkHindsightAuth(fetchFn, "https://gateway.internal/hindsight/", "k");
+
+    expect(fetchFn.mock.calls.map(([u]) => u)).toEqual([
+      "https://gateway.internal/hindsight/v1/default/banks",
+      "https://gateway.internal/hindsight/v1/default/banks",
+    ]);
+  });
+
+  it.each([404, 502, 503])(
+    "soft-fails without the keyed probe when the anonymous request gets HTTP %i",
+    async (status) => {
+      const fetchFn = probeFetch(() => status);
+
+      await expect(checkHindsightAuth(fetchFn, url, "k")).resolves.toBeUndefined();
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("soft-fails when the keyed request gets neither a 2xx nor a rejection", async () => {
+    const fetchFn = probeFetch((_, init) => (bearer(init) === null ? 401 : 500));
+
+    await expect(checkHindsightAuth(fetchFn, url, "k")).resolves.toBeUndefined();
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("checkInngestAuth", () => {
@@ -143,6 +171,47 @@ describe("checkInngestAuth", () => {
     const fetchFn = probeFetch(() => new Error("ECONNREFUSED"));
 
     await expect(checkInngestAuth(fetchFn, keyed)).resolves.toBeUndefined();
+  });
+
+  it("keeps a path prefix on the base URL for both the API and event probes", async () => {
+    const fetchFn = keyedServer("abcd", "evt");
+
+    await checkInngestAuth(fetchFn, { ...keyed, baseUrl: "https://gateway.internal/inngest" });
+
+    expect(fetchFn.mock.calls.map(([u]) => u)).toEqual([
+      "https://gateway.internal/inngest/v1/events",
+      "https://gateway.internal/inngest/v1/events",
+      "https://gateway.internal/inngest/e/evt",
+    ]);
+  });
+
+  it.each([404, 502, 503])(
+    "soft-fails without further probes when the anonymous request gets HTTP %i",
+    async (status) => {
+      const fetchFn = probeFetch(() => status);
+
+      await expect(checkInngestAuth(fetchFn, keyed)).resolves.toBeUndefined();
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("does not send the event probe when the signed probe is unreachable", async () => {
+    const fetchFn = probeFetch((_, init) =>
+      bearer(init) === null ? 401 : new Error("socket hang up"),
+    );
+
+    await expect(checkInngestAuth(fetchFn, keyed)).resolves.toBeUndefined();
+    expect(fetchFn.mock.calls.some(([u]) => u.includes("/e/"))).toBe(false);
+  });
+
+  it("soft-fails when the event probe gets neither a 2xx nor a rejection", async () => {
+    const fetchFn = probeFetch((u, init) => {
+      if (u.includes("/e/")) return 404;
+      return bearer(init) === "Bearer abcd" ? 200 : 401;
+    });
+
+    await expect(checkInngestAuth(fetchFn, keyed)).resolves.toBeUndefined();
+    expect(fetchFn).toHaveBeenCalledTimes(3);
   });
 });
 

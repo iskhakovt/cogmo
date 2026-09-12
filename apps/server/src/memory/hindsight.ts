@@ -3,15 +3,14 @@ import { SpanStatusCode, trace } from "@opentelemetry/api";
 import {
   CLIENT_VERSION,
   type Client,
-  createClient,
-  createConfig,
-  HindsightClient,
+  type HindsightClient,
   type MemoryItemInput,
   sdk,
 } from "@vectorize-io/hindsight-client";
 import { getEncoding, type Tiktoken } from "js-tiktoken";
 import { logger } from "../logger.js";
 import { AbortError, withRetry } from "../util/with-retry.js";
+import { createHindsightClients } from "./hindsight-clients.js";
 import type {
   Memory,
   MemoryProvider,
@@ -65,25 +64,6 @@ function truncateQuery(query: string, maxTokens: number): { query: string; trunc
   const tokens = enc.encode(query);
   if (tokens.length <= maxTokens) return { query, truncated: false };
   return { query: enc.decode(tokens.slice(0, maxTokens)), truncated: true };
-}
-
-/**
- * Build the class wrapper and the raw sdk client against one server with one
- * credential. `HindsightClient` adds the `Authorization` header from `apiKey`
- * itself; the raw client only sends the headers its config carries, so it
- * gets the same header explicitly — a raw client built without it is a 401
- * on every recall and reflect.
- */
-function createHindsightClients(
-  baseUrl: string,
-  apiKey: string,
-): { client: HindsightClient; sdkClient: Client } {
-  return {
-    client: new HindsightClient({ baseUrl, apiKey }),
-    sdkClient: createClient(
-      createConfig({ baseUrl, headers: { Authorization: `Bearer ${apiKey}` } }),
-    ),
-  };
 }
 
 function isClientError(statusCode: number | undefined): boolean {

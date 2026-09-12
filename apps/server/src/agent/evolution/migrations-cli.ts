@@ -29,9 +29,10 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createClient, createConfig, HindsightClient, sdk } from "@vectorize-io/hindsight-client";
+import { type Client, type HindsightClient, sdk } from "@vectorize-io/hindsight-client";
 import type { Transactor } from "../../db/index.js";
 import { logger } from "../../logger.js";
+import { createHindsightClients } from "../../memory/hindsight-clients.js";
 import type { AgentStore } from "../store/index.js";
 import {
   type BackfillDeps,
@@ -79,19 +80,10 @@ function writeBackupFn<T>(backupPath: string): (rows: ReadonlyArray<T>) => Promi
 
 function makeHindsightShared(deps: MigrationCliDeps): {
   hindsight: HindsightClient;
-  sdkClient: ReturnType<typeof createClient>;
+  sdkClient: Client;
 } {
-  // The raw client sends only the headers its config carries, so it needs
-  // the bearer token spelled out; `HindsightClient` derives it from `apiKey`.
-  return {
-    hindsight: new HindsightClient({ baseUrl: deps.hindsightUrl, apiKey: deps.hindsightApiKey }),
-    sdkClient: createClient(
-      createConfig({
-        baseUrl: deps.hindsightUrl,
-        headers: { Authorization: `Bearer ${deps.hindsightApiKey}` },
-      }),
-    ),
-  };
+  const { client, sdkClient } = createHindsightClients(deps.hindsightUrl, deps.hindsightApiKey);
+  return { hindsight: client, sdkClient };
 }
 
 /** `cogmo migrate-memories <bankId>` */

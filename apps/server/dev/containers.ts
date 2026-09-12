@@ -124,11 +124,7 @@ export function inngest(network: StartedNetwork, opts?: { appUrl?: string }) {
     .withStartupTimeout(60_000);
 }
 
-/**
- * Bearer token dev and test Hindsight containers enforce. Not a secret: the
- * point is that every dev and test run exercises the keyed code path the
- * production server requires, not that the key protects anything local.
- */
+/** Bearer token dev and test Hindsight containers enforce. */
 export const HINDSIGHT_TEST_API_KEY = "cogmo-test-hindsight-key";
 
 /** Server env that makes Hindsight reject any request not carrying `apiKey`. */

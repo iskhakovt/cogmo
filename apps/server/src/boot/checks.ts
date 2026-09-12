@@ -233,13 +233,22 @@ export async function checkDirWritable(path: string, envVarName: string): Promis
 export type ProbeFetch = (url: string, init?: RequestInit) => Promise<Response>;
 
 /**
+ * Append `path` to a service base URL, keeping any path prefix the base
+ * carries (`https://gateway/hindsight`). `new URL("/v1/…", base)` would
+ * replace the prefix with the absolute path.
+ */
+function serviceUrl(baseUrl: string, path: string): string {
+  return `${baseUrl.replace(/\/+$/, "")}${path}`;
+}
+
+/**
  * Status code of one probe request, or `null` when the server could not be
  * reached. The body is discarded unread: only the status is evidence.
  */
 async function probeStatus(
   fetchFn: ProbeFetch,
   url: string,
-  init: RequestInit = {},
+  init: RequestInit,
 ): Promise<number | null> {
   try {
     const res = await fetchFn(url, { ...init, signal: AbortSignal.timeout(5_000) });
@@ -255,34 +264,56 @@ function isAuthRejection(status: number): boolean {
   return status === 401 || status === 403;
 }
 
+function isSuccess(status: number): boolean {
+  return status >= 200 && status < 300;
+}
+
+/**
+ * A status that proves neither enforcement nor its absence — a 404 from a
+ * wrong base path, a 502 from a proxy in front of a restarting server.
+ * Soft-fail: warn and stop checking, since later probes would build on an
+ * unestablished premise.
+ */
+function warnInconclusive(service: string, url: string, status: number): void {
+  logger.warn(
+    { service, url, status },
+    "auth probe got a status that neither accepts nor rejects credentials — skipping the rest of the auth check",
+  );
+}
+
 /**
  * Verify Hindsight enforces its API key, and that ours is the one it holds.
  *
  * Two requests against the bank list, which runs through the tenant
  * extension's `authenticate` (`/health` and `/version` do not):
- * - **Without a token** it must be refused. A server that answers is running
- *   the default no-auth tenant extension, where the key Cogmo sends is
- *   ignored — a credential believed to protect memory that protects nothing.
- * - **With the token** it must be accepted, otherwise every memory call
- *   fails at request time on a mismatched key.
+ * - **Without a token** it must be refused. A 2xx means the server runs the
+ *   default no-auth tenant extension, where the key Cogmo sends is ignored —
+ *   a credential believed to protect memory that protects nothing.
+ * - **With the token** it must succeed, otherwise every memory call fails at
+ *   request time on a mismatched key.
  *
- * Both are deterministic deployment errors, so both hard-fail. An
- * unreachable server soft-fails, matching `checkHindsightVersion`.
+ * Those two outcomes are deterministic deployment errors and hard-fail. An
+ * unreachable server, or a status that is neither a 2xx nor 401/403,
+ * soft-fails, matching `checkHindsightVersion`.
  */
 export async function checkHindsightAuth(
   fetchFn: ProbeFetch,
   baseUrl: string,
   apiKey: string,
 ): Promise<void> {
-  const url = new URL("/v1/default/banks", baseUrl).toString();
-  const anonymous = await probeStatus(fetchFn, url);
+  const url = serviceUrl(baseUrl, "/v1/default/banks");
+  const anonymous = await probeStatus(fetchFn, url, {});
   if (anonymous === null) return;
-  if (!isAuthRejection(anonymous)) {
+  if (isSuccess(anonymous)) {
     throw new BootCheckError(
       `Hindsight at ${baseUrl} answered an unauthenticated request (HTTP ${anonymous}). ` +
         `Start it with HINDSIGHT_API_TENANT_EXTENSION=hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension ` +
         `and HINDSIGHT_API_TENANT_API_KEY set to the value of HINDSIGHT_API_KEY.`,
     );
+  }
+  if (!isAuthRejection(anonymous)) {
+    warnInconclusive("hindsight", url, anonymous);
+    return;
   }
   const authenticated = await probeStatus(fetchFn, url, {
     headers: { Authorization: `Bearer ${apiKey}` },
@@ -293,6 +324,10 @@ export async function checkHindsightAuth(
       `Hindsight at ${baseUrl} rejected HINDSIGHT_API_KEY (HTTP ${authenticated}). ` +
         `It must equal the server's HINDSIGHT_API_TENANT_API_KEY.`,
     );
+  }
+  if (!isSuccess(authenticated)) {
+    warnInconclusive("hindsight", url, authenticated);
+    return;
   }
   logger.info("hindsight auth check passed");
 }
@@ -312,19 +347,21 @@ export interface InngestAuthConfig {
  * Anything that can post an event to an unkeyed server drives the agent:
  * `adapter/direct/inbound` injects a user turn, `coding/task/plan-approved`
  * approves a plan. `inngest start` refuses to run without keys, but
- * `inngest dev` accepts every request, so a deployment that points
- * production at a dev server — or sets `INNGEST_DEV` against a real one —
- * is the failure mode this check exists for.
+ * `inngest dev` accepts every request, so a production deployment pointed
+ * at a dev server is the failure mode this check exists for.
  *
  * - Both keys must be set.
- * - `GET /v1/events` without a signing key must be refused; a server that
- *   answers is not enforcing keys at all.
- * - The same request with our signing key must be accepted.
- * - An empty event batch posted under our event key must be accepted. It
+ * - `GET /v1/events` without a signing key must be refused; a 2xx means the
+ *   server is not enforcing keys at all.
+ * - The same request with our signing key must succeed.
+ * - An empty event batch posted under our event key must succeed. It
  *   creates no event, so the probe has no side effect.
  *
- * Skipped under `INNGEST_DEV`, where no key is meaningful. Keys do not cover
- * the dashboard or its GraphQL API, which can invoke functions — see
+ * An unreachable server, or a status that is neither a 2xx nor 401/403,
+ * soft-fails. The whole check is skipped under `INNGEST_DEV`, which is taken
+ * at its word: setting it in production disables this check along with the
+ * SDK's signature verification, and DEPLOYMENT.md says never to. Keys do not
+ * cover the dashboard or its GraphQL API, which can invoke functions — see
  * DEPLOYMENT.md → Securing internal services.
  */
 export async function checkInngestAuth(
@@ -342,35 +379,50 @@ export async function checkInngestAuth(
         "Use the values the server was started with (`inngest start --event-key … --signing-key …`).",
     );
   }
-  const eventsUrl = new URL("/v1/events", baseUrl).toString();
-  const anonymous = await probeStatus(fetchFn, eventsUrl);
+  const eventsUrl = serviceUrl(baseUrl, "/v1/events");
+  const anonymous = await probeStatus(fetchFn, eventsUrl, {});
   if (anonymous === null) return;
-  if (!isAuthRejection(anonymous)) {
+  if (isSuccess(anonymous)) {
     throw new BootCheckError(
       `Inngest at ${baseUrl} answered an unauthenticated API request (HTTP ${anonymous}), ` +
         "so it is not enforcing keys — likely `inngest dev`. Run `inngest start` with " +
         "--event-key and --signing-key, or set INNGEST_DEV for local development.",
     );
   }
+  if (!isAuthRejection(anonymous)) {
+    warnInconclusive("inngest", eventsUrl, anonymous);
+    return;
+  }
   const signed = await probeStatus(fetchFn, eventsUrl, {
     headers: { Authorization: `Bearer ${signingKey}` },
   });
-  if (signed !== null && isAuthRejection(signed)) {
+  if (signed === null) return;
+  if (isAuthRejection(signed)) {
     throw new BootCheckError(
       `Inngest at ${baseUrl} rejected INNGEST_SIGNING_KEY (HTTP ${signed}). ` +
         "It must equal the server's --signing-key.",
     );
   }
-  const event = await probeStatus(
-    fetchFn,
-    new URL(`/e/${encodeURIComponent(eventKey)}`, baseUrl).toString(),
-    { method: "POST", headers: { "Content-Type": "application/json" }, body: "[]" },
-  );
-  if (event !== null && isAuthRejection(event)) {
+  if (!isSuccess(signed)) {
+    warnInconclusive("inngest", eventsUrl, signed);
+    return;
+  }
+  const eventUrl = serviceUrl(baseUrl, `/e/${encodeURIComponent(eventKey)}`);
+  const event = await probeStatus(fetchFn, eventUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "[]",
+  });
+  if (event === null) return;
+  if (isAuthRejection(event)) {
     throw new BootCheckError(
       `Inngest at ${baseUrl} rejected INNGEST_EVENT_KEY (HTTP ${event}). ` +
         "It must be one of the server's --event-key values.",
     );
+  }
+  if (!isSuccess(event)) {
+    warnInconclusive("inngest", eventUrl, event);
+    return;
   }
   logger.info("inngest auth check passed");
 }

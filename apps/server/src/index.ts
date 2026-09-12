@@ -426,16 +426,11 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
     apiKey: env.HINDSIGHT_API_KEY,
     maxQueryTokens: env.HINDSIGHT_RECALL_MAX_QUERY_TOKENS,
   });
-  // Both internal services are reachable by anything on their network, and
-  // an unkeyed one answers all of it. Refuse to boot against a server that
-  // does not enforce its key, or one whose key we do not hold.
+  // Hindsight is reachable by anything on its network, and an unkeyed one
+  // answers all of it. Refuse a server that does not enforce its key, or one
+  // whose key we do not hold. Runs here, not in `bootstrap`, because the
+  // memory CLIs talk to Hindsight too.
   await checkHindsightAuth(fetch, env.HINDSIGHT_URL, env.HINDSIGHT_API_KEY);
-  await checkInngestAuth(fetch, {
-    baseUrl: env.INNGEST_BASE_URL,
-    dev: env.INNGEST_DEV,
-    eventKey: env.INNGEST_EVENT_KEY,
-    signingKey: env.INNGEST_SIGNING_KEY,
-  });
   // Hard-fail when the running server reports a version outside the
   // compat range pinned in `package.json` → `cogmo.hindsightCompat`.
   // Soft-fail (warn) when /version itself can't be reached — memory
@@ -1285,6 +1280,15 @@ export async function bootstrapRuntime(
  */
 export async function bootstrap(opts: BootstrapOptions = {}) {
   const core = await bootstrapCore(opts);
+  // Only the long-running process consumes and emits Inngest events, so the
+  // key check lives here: one-shot admin CLIs stay usable while an operator
+  // is still re-keying Inngest.
+  await checkInngestAuth(fetch, {
+    baseUrl: env.INNGEST_BASE_URL,
+    dev: env.INNGEST_DEV,
+    eventKey: env.INNGEST_EVENT_KEY,
+    signingKey: env.INNGEST_SIGNING_KEY,
+  });
   const sandbox = await bootstrapSandbox(core, opts);
   const { skillRunner } = await bootstrapSkillRunner(core, sandbox);
   const runtime = await bootstrapRuntime(core, sandbox, skillRunner, opts);
