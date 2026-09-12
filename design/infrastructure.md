@@ -111,7 +111,7 @@ Keys do not close every route. Inngest's dashboard and GraphQL API, and Hindsigh
 - DB migrations (`migrate(db, ...)`)
 - Master-key presence (`COGMO_MASTER_KEY` check)
 - User + profile load
-- Fast health probes (`checkUuidv7`, `checkS3Bucket`, `checkHindsightVersion`) — keep blocking because they fail loudly at deploy time and run in <200 ms total; the operator-visibility win beats the latency cost
+- Dependency probes (`checkUuidv7`, `checkS3Bucket`, `checkHindsightAuth`, `checkHindsightVersion`, and `checkInngestAuth` in `bootstrap`) — keep blocking because they fail loudly at deploy time and, against healthy dependencies, finish in well under a second; the operator-visibility win beats the latency cost. A deterministic verdict (missing bucket, rejected key, unkeyed server, version out of range) fails at once. An unreachable dependency or an inconclusive status is retried with backoff for up to `BOOT_PROBE_DEADLINE_MS` (60 s), then boot fails closed — a restart loop with the reason logged beats a process that runs with a check it never completed. `checkUuidv7` is not retried: migrations have just used the same connection.
 - Channel adapter startup (`startChannels`) — without channels open we can't receive anything
 
 **Fire-and-forget at boot**:

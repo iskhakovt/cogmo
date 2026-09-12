@@ -186,7 +186,7 @@ LLM provider keys, Telegram bot tokens, Tavily/fal.ai keys, and similar credenti
 
 Hindsight and Inngest answer anything that can reach them unless they are keyed. For Hindsight that means reading and writing every memory bank. For Inngest it means driving the agent: an `adapter/direct/inbound` event is a user turn, and `coding/task/plan-approved` approves a plan. A private network is not enough on its own, because skills make HTTP requests from inside Cogmo's process and so share its network position.
 
-`cogmo serve` therefore probes both at boot. It refuses to start if either server answers an unauthenticated request, or rejects the key Cogmo holds. A server that cannot be reached, or answers with a status that proves neither (a 404 from a wrong base path, a 502 from a proxy in front of a restarting server), only logs a warning, matching the version check. The Hindsight check also runs for the memory CLIs; the Inngest check runs only for `cogmo serve`.
+`cogmo serve` therefore probes both at boot. It refuses to start if either server answers an unauthenticated request, or rejects the key Cogmo holds. A server that cannot be reached, or answers with a status that proves neither (a 404 from a wrong base path, a 502 from a proxy in front of a restarting server), is retried for up to 60 seconds; if it is still inconclusive, boot fails rather than running unverified. The same deadline applies to the Hindsight version check and the S3 bucket check, so dependencies that start a little after Cogmo are fine, and ones that stay down show up as a restart loop with the reason in the log. The Hindsight check also runs for the memory CLIs; the Inngest check runs only for `cogmo serve`.
 
 ### Hindsight
 
@@ -206,16 +206,25 @@ The key does not cover everything:
 
 Run `inngest start`, not `inngest dev`. The dev server accepts any key, so the boot check refuses it unless `INNGEST_DEV` is set.
 
+Generate the keys once and store them in your secret manager:
+
+```bash
+openssl rand -hex 32   # → INNGEST_EVENT_KEY
+openssl rand -hex 32   # → INNGEST_SIGNING_KEY
+```
+
+Start Inngest with those stored values, and give Cogmo the same ones:
+
 ```bash
 inngest start \
-  --event-key "$(openssl rand -hex 32)" \
-  --signing-key "$(openssl rand -hex 32)" \
+  --event-key "$INNGEST_EVENT_KEY" \
+  --signing-key "$INNGEST_SIGNING_KEY" \
   --redis-uri redis://:<password>@redis:6379 \
   --postgres-uri postgres://inngest:<password>@postgres:5432/inngest \
   --no-ui
 ```
 
-Generate the keys once and give Cogmo the same values as `INNGEST_EVENT_KEY` and `INNGEST_SIGNING_KEY`. `inngest start` itself refuses to run without both keys, and the signing key must be hex.
+`inngest start` itself refuses to run without both keys, and the signing key must be hex. Regenerating them on a restart breaks Cogmo's boot until its values are updated to match.
 
 Keys cover events, the REST API and app sync. They do **not** cover everything on the server (verified on v1.41.1):
 

@@ -6,27 +6,29 @@
  * under an unknown event key, that `inngest dev` refuses neither, and that
  * Hindsight's `ApiKeyTenantExtension` guards the bank list. An image bump
  * that moves any of those breaks here rather than silently turning the boot
- * check into a no-op.
+ * check into a no-op. `version-pins.test.ts` keeps `INNGEST_IMAGE` equal to
+ * the dev server's image in `dev/containers.ts`.
  */
 import { randomBytes } from "node:crypto";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
-import { BootCheckError, checkHindsightAuth, checkInngestAuth } from "./checks.js";
+import { BootCheckError, checkHindsightAuth, checkInngestAuth, systemBootClock } from "./checks.js";
 
-/** Same image as the dev server in `dev/containers.ts` → `inngest()`. */
 const INNGEST_IMAGE = "mirror.gcr.io/inngest/inngest:v1.41.1";
+
+const probeDeps = { fetch, clock: systemBootClock };
 
 describe("checkHindsightAuth — real Hindsight with ApiKeyTenantExtension", () => {
   it("passes with the configured key", async () => {
     await expect(
-      checkHindsightAuth(fetch, inject("hindsightUrl"), inject("hindsightApiKey")),
+      checkHindsightAuth(probeDeps, inject("hindsightUrl"), inject("hindsightApiKey")),
     ).resolves.toBeUndefined();
   });
 
   it("rejects a key the server does not hold", async () => {
-    await expect(checkHindsightAuth(fetch, inject("hindsightUrl"), "wrong-key")).rejects.toThrow(
-      BootCheckError,
-    );
+    await expect(
+      checkHindsightAuth(probeDeps, inject("hindsightUrl"), "wrong-key"),
+    ).rejects.toThrow(BootCheckError);
   });
 });
 
@@ -61,13 +63,13 @@ describe("checkInngestAuth — real Inngest", () => {
 
   it("passes against `inngest start` with the keys it was started with", async () => {
     await expect(
-      checkInngestAuth(fetch, { baseUrl, dev: false, eventKey, signingKey }),
+      checkInngestAuth(probeDeps, { baseUrl, dev: false, eventKey, signingKey }),
     ).resolves.toBeUndefined();
   });
 
   it("rejects a signing key the server does not hold", async () => {
     await expect(
-      checkInngestAuth(fetch, {
+      checkInngestAuth(probeDeps, {
         baseUrl,
         dev: false,
         eventKey,
@@ -78,13 +80,13 @@ describe("checkInngestAuth — real Inngest", () => {
 
   it("rejects an event key the server does not hold", async () => {
     await expect(
-      checkInngestAuth(fetch, { baseUrl, dev: false, eventKey: "not-a-key", signingKey }),
+      checkInngestAuth(probeDeps, { baseUrl, dev: false, eventKey: "not-a-key", signingKey }),
     ).rejects.toThrow(/rejected INNGEST_EVENT_KEY/);
   });
 
   it("refuses `inngest dev`, which accepts any key", async () => {
     await expect(
-      checkInngestAuth(fetch, {
+      checkInngestAuth(probeDeps, {
         baseUrl: inject("inngestBaseUrl"),
         dev: false,
         eventKey,

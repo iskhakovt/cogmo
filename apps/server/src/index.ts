@@ -55,6 +55,7 @@ import {
   checkS3Bucket,
   checkUuidv7,
   loadHindsightCompat,
+  systemBootClock,
 } from "./boot/checks.js";
 import { type Database, db, type Transactor, transactor } from "./db/index.js";
 import { migratePerFile } from "./db/migrate-per-file.js";
@@ -390,7 +391,7 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
   // Confirm the bucket is reachable + credentials work before tools that
   // depend on it (image generation, file workspace, attachment delivery)
   // start handling traffic. HeadBucket is the cheapest probe.
-  await checkS3Bucket(s3Client, env.S3_BUCKET);
+  await checkS3Bucket(s3Client, env.S3_BUCKET, systemBootClock);
   // Optional client-side encryption — when enabled, attachment bodies AND
   // workspace file bodies are AES-256-GCM-encrypted before upload using
   // a key derived from `COGMO_MASTER_KEY` (already validated above).
@@ -430,16 +431,19 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
   // answers all of it. Refuse a server that does not enforce its key, or one
   // whose key we do not hold. Runs here, not in `bootstrap`, because the
   // memory CLIs talk to Hindsight too.
-  await checkHindsightAuth(fetch, env.HINDSIGHT_URL, env.HINDSIGHT_API_KEY);
+  await checkHindsightAuth(
+    { fetch, clock: systemBootClock },
+    env.HINDSIGHT_URL,
+    env.HINDSIGHT_API_KEY,
+  );
   // Hard-fail when the running server reports a version outside the
-  // compat range pinned in `package.json` → `cogmo.hindsightCompat`.
-  // Soft-fail (warn) when /version itself can't be reached — memory
-  // tools surface their own errors at request time. See `src/boot/checks.ts`.
-  // The client check is instant (no I/O) and catches dependency↔pin drift
-  // before the network probe, so run it first.
+  // compat range pinned in `package.json` → `cogmo.hindsightCompat`, or
+  // when /version stays unreadable past the boot probe deadline. See
+  // `src/boot/checks.ts`. The client check is instant (no I/O) and catches
+  // dependency↔pin drift before the network probe, so run it first.
   const hindsightCompat = loadHindsightCompat();
   checkHindsightClientVersion(hindsightCompat, HINDSIGHT_CLIENT_VERSION);
-  await checkHindsightVersion(memory, hindsightCompat);
+  await checkHindsightVersion(memory, hindsightCompat, systemBootClock);
 
   return {
     db,
@@ -1283,12 +1287,15 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   // Only the long-running process consumes and emits Inngest events, so the
   // key check lives here: one-shot admin CLIs stay usable while an operator
   // is still re-keying Inngest.
-  await checkInngestAuth(fetch, {
-    baseUrl: env.INNGEST_BASE_URL,
-    dev: env.INNGEST_DEV,
-    eventKey: env.INNGEST_EVENT_KEY,
-    signingKey: env.INNGEST_SIGNING_KEY,
-  });
+  await checkInngestAuth(
+    { fetch, clock: systemBootClock },
+    {
+      baseUrl: env.INNGEST_BASE_URL,
+      dev: env.INNGEST_DEV,
+      eventKey: env.INNGEST_EVENT_KEY,
+      signingKey: env.INNGEST_SIGNING_KEY,
+    },
+  );
   const sandbox = await bootstrapSandbox(core, opts);
   const { skillRunner } = await bootstrapSkillRunner(core, sandbox);
   const runtime = await bootstrapRuntime(core, sandbox, skillRunner, opts);

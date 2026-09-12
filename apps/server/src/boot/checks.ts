@@ -8,13 +8,16 @@
  * the user has already sent a message.
  *
  * Policy:
- * - **Hard fail (throw `BootCheckError`):** deterministic, deployment-shaped
- *   problems that won't self-heal — missing extension, missing bucket,
- *   server version outside the supported range. Operator action required.
- * - **Soft fail (`logger.warn`, return):** transient network blips. The
- *   relevant tools surface their own errors at request time; aborting
- *   `serve` over a one-off Hindsight blip is worse UX than logging loud
- *   and degrading gracefully on the affected surface.
+ * - **Hard fail at once (throw `BootCheckError`):** deterministic,
+ *   deployment-shaped problems that won't self-heal — missing extension,
+ *   missing bucket, rejected credentials, a server that answers without
+ *   auth, a version outside the supported range. Operator action required.
+ * - **Retry, then hard fail:** a dependency that can't be reached, or
+ *   answers with a status that proves nothing either way. It gets
+ *   `BOOT_PROBE_DEADLINE_MS` to become conclusive — long enough to ride out
+ *   a restart during a deploy. Past the deadline boot fails closed: a
+ *   supervisor restart loop is visible, a check that silently never ran is
+ *   not.
  */
 
 import { constants as fsConstants, readFileSync } from "node:fs";
@@ -30,6 +33,60 @@ import type { HindsightMemoryProvider } from "../memory/hindsight.js";
 
 export class BootCheckError extends Error {
   override readonly name = "BootCheckError";
+}
+
+/** How long a boot probe retries an inconclusive answer before failing closed. */
+export const BOOT_PROBE_DEADLINE_MS = 60_000;
+const BOOT_PROBE_MIN_DELAY_MS = 1_000;
+const BOOT_PROBE_MAX_DELAY_MS = 10_000;
+
+/** Time source for boot probes — injected so retry tests do not wait. */
+export interface BootClock {
+  now(): number;
+  sleep(ms: number): Promise<void>;
+}
+
+export const systemBootClock: BootClock = {
+  now: () => Date.now(),
+  sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
+};
+
+type ProbeAttempt<T> = { conclusive: true; value: T } | { conclusive: false; reason: string };
+
+function conclusive<T>(value: T): ProbeAttempt<T> {
+  return { conclusive: true, value };
+}
+
+/**
+ * Run `attempt` until it is conclusive, backing off between tries, and fail
+ * closed at the deadline. A `BootCheckError` thrown by `attempt` is a
+ * deterministic verdict and propagates at once.
+ */
+async function retryUntilConclusive<T>(
+  label: string,
+  clock: BootClock,
+  attempt: () => Promise<ProbeAttempt<T>>,
+): Promise<T> {
+  const deadline = clock.now() + BOOT_PROBE_DEADLINE_MS;
+  let delay = BOOT_PROBE_MIN_DELAY_MS;
+  for (;;) {
+    const result = await attempt();
+    if (result.conclusive) return result.value;
+    const remaining = deadline - clock.now();
+    if (remaining <= 0) {
+      throw new BootCheckError(
+        `${label} could not reach a conclusive answer within ${BOOT_PROBE_DEADLINE_MS / 1000}s ` +
+          `(last: ${result.reason}). Refusing to start unverified.`,
+      );
+    }
+    const wait = Math.min(delay, remaining);
+    logger.warn(
+      { label, reason: result.reason, retryInMs: wait },
+      `${label} inconclusive — retrying`,
+    );
+    await clock.sleep(wait);
+    delay = Math.min(delay * 2, BOOT_PROBE_MAX_DELAY_MS);
+  }
 }
 
 /**
@@ -88,6 +145,9 @@ export function loadHindsightCompat(): HindsightCompat {
  * `function uuidv7() does not exist` mid-turn. `scripts/init-db.sql`
  * installs it (native on PG18+, plpgsql fallback for older versions);
  * this check is the safety net for deployments that skipped that step.
+ *
+ * Not retried: migrations run against the same database immediately before,
+ * so a failure here is the function, not the connection.
  */
 export async function checkUuidv7(db: Database): Promise<void> {
   try {
@@ -101,20 +161,43 @@ export async function checkUuidv7(db: Database): Promise<void> {
   }
 }
 
+const AwsHttpStatusSchema = z.object({
+  $metadata: z.object({ httpStatusCode: z.number() }),
+});
+
+/** HTTP status an AWS SDK service error carries; absent for network failures. */
+function awsHttpStatus(err: unknown): number | undefined {
+  const parsed = AwsHttpStatusSchema.safeParse(err);
+  return parsed.success ? parsed.data.$metadata.httpStatusCode : undefined;
+}
+
 /**
  * Verify the configured S3 bucket exists and credentials are valid.
  * `HeadBucket` is the cheapest probe — no list, no read, no write.
+ *
+ * A 4xx (other than 429) is the store's verdict — missing bucket, bad
+ * credentials, wrong region — and fails at once. A network error or 5xx is
+ * retried up to the boot probe deadline.
  */
-export async function checkS3Bucket(s3: S3Client, bucket: string): Promise<void> {
-  try {
-    await s3.send(new HeadBucketCommand({ Bucket: bucket }));
-  } catch (err) {
-    throw new BootCheckError(
+export async function checkS3Bucket(s3: S3Client, bucket: string, clock: BootClock): Promise<void> {
+  const failure = (err: unknown) =>
+    new BootCheckError(
       `S3 bucket "${bucket}" not reachable. Check S3_ENDPOINT, ` +
         `S3_ACCESS_KEY/S3_SECRET_KEY, S3_REGION, and that the bucket exists. ` +
         `Underlying error: ${stringifyError(err)}`,
     );
-  }
+  await retryUntilConclusive(`S3 bucket "${bucket}" check`, clock, async () => {
+    try {
+      await s3.send(new HeadBucketCommand({ Bucket: bucket }));
+      return conclusive(undefined);
+    } catch (err) {
+      const status = awsHttpStatus(err);
+      if (status !== undefined && status >= 400 && status < 500 && status !== 429) {
+        throw failure(err);
+      }
+      return { conclusive: false, reason: stringifyError(err) };
+    }
+  });
 }
 
 /**
@@ -126,24 +209,21 @@ export async function checkS3Bucket(s3: S3Client, bucket: string): Promise<void>
  * path silently drops items past the first), and the operator needs to
  * fix the deployment, not retry.
  *
- * Soft fail when `/version` itself can't be reached — Hindsight could
- * be restarting during a deploy, and killing `serve` over that is
- * worse than letting memory tools fail individually at request time.
+ * When `/version` can't be read, retry up to the boot probe deadline, then
+ * fail closed.
  */
 export async function checkHindsightVersion(
   memory: HindsightMemoryProvider,
   range: HindsightCompat,
+  clock: BootClock,
 ): Promise<void> {
-  let actual: string;
-  try {
-    actual = await memory.getServerVersion();
-  } catch (err) {
-    logger.warn(
-      { err: stringifyError(err), range },
-      "hindsight /version probe failed at boot — skipping version check; memory tools will surface errors at request time if the server stays unreachable",
-    );
-    return;
-  }
+  const actual = await retryUntilConclusive("hindsight version check", clock, async () => {
+    try {
+      return conclusive(await memory.getServerVersion());
+    } catch (err) {
+      return { conclusive: false, reason: stringifyError(err) };
+    }
+  });
   // Always coerce — strips prerelease (`0.6.0-rc.1`) and build (`0.6.0+sha`)
   // suffixes down to the stable triple. node-semver's range matching is
   // famously strict about prereleases (a prerelease only satisfies a
@@ -232,53 +312,53 @@ export async function checkDirWritable(path: string, envVarName: string): Promis
 /** The slice of `fetch` the auth probes use — injected so tests need no server. */
 export type ProbeFetch = (url: string, init?: RequestInit) => Promise<Response>;
 
-/**
- * Append `path` to a service base URL, keeping any path prefix the base
- * carries (`https://gateway/hindsight`). `new URL("/v1/…", base)` would
- * replace the prefix with the absolute path.
- */
-function serviceUrl(baseUrl: string, path: string): string {
-  return `${baseUrl.replace(/\/+$/, "")}${path}`;
+export interface BootProbeDeps {
+  fetch: ProbeFetch;
+  clock: BootClock;
 }
 
 /**
- * Status code of one probe request, or `null` when the server could not be
- * reached. The body is discarded unread: only the status is evidence.
+ * Append `path` to a service base URL, keeping any path prefix the base
+ * carries (`https://gateway/hindsight`) and any query or fragment in place.
  */
-async function probeStatus(
-  fetchFn: ProbeFetch,
-  url: string,
-  init: RequestInit,
-): Promise<number | null> {
+function serviceUrl(baseUrl: string, path: string): string {
+  const url = new URL(baseUrl);
+  url.pathname = `${url.pathname.replace(/\/+$/, "")}${path}`;
+  return url.toString();
+}
+
+type ProbeResult = { kind: "status"; status: number } | { kind: "unreachable"; error: string };
+
+/** One probe request. The body is discarded unread: only the status is evidence. */
+async function probe(fetchFn: ProbeFetch, url: string, init: RequestInit): Promise<ProbeResult> {
   try {
     const res = await fetchFn(url, { ...init, signal: AbortSignal.timeout(5_000) });
     await res.body?.cancel();
-    return res.status;
+    return { kind: "status", status: res.status };
   } catch (err) {
-    logger.warn({ url, err: stringifyError(err) }, "auth probe could not reach the server");
-    return null;
+    return { kind: "unreachable", error: stringifyError(err) };
   }
 }
 
-function isAuthRejection(status: number): boolean {
-  return status === 401 || status === 403;
+function isAuthRejection(result: ProbeResult): boolean {
+  return result.kind === "status" && (result.status === 401 || result.status === 403);
 }
 
-function isSuccess(status: number): boolean {
-  return status >= 200 && status < 300;
+function isSuccess(result: ProbeResult): boolean {
+  return result.kind === "status" && result.status >= 200 && result.status < 300;
+}
+
+function statusText(result: ProbeResult): string {
+  return result.kind === "status" ? `HTTP ${result.status}` : result.error;
 }
 
 /**
- * A status that proves neither enforcement nor its absence — a 404 from a
- * wrong base path, a 502 from a proxy in front of a restarting server.
- * Soft-fail: warn and stop checking, since later probes would build on an
- * unestablished premise.
+ * Unreachable, or a status that proves neither enforcement nor its absence —
+ * a 404 from a wrong base path, a 502 from a proxy in front of a restarting
+ * server. Retried until the deadline.
  */
-function warnInconclusive(service: string, url: string, status: number): void {
-  logger.warn(
-    { service, url, status },
-    "auth probe got a status that neither accepts nor rejects credentials — skipping the rest of the auth check",
-  );
+function inconclusive(url: string, result: ProbeResult): ProbeAttempt<void> {
+  return { conclusive: false, reason: `${url} → ${statusText(result)}` };
 }
 
 /**
@@ -292,43 +372,37 @@ function warnInconclusive(service: string, url: string, status: number): void {
  * - **With the token** it must succeed, otherwise every memory call fails at
  *   request time on a mismatched key.
  *
- * Those two outcomes are deterministic deployment errors and hard-fail. An
- * unreachable server, or a status that is neither a 2xx nor 401/403,
- * soft-fails, matching `checkHindsightVersion`.
+ * Those two outcomes hard-fail at once. Anything else is retried until
+ * conclusive, then fails closed.
  */
 export async function checkHindsightAuth(
-  fetchFn: ProbeFetch,
+  deps: BootProbeDeps,
   baseUrl: string,
   apiKey: string,
 ): Promise<void> {
   const url = serviceUrl(baseUrl, "/v1/default/banks");
-  const anonymous = await probeStatus(fetchFn, url, {});
-  if (anonymous === null) return;
-  if (isSuccess(anonymous)) {
-    throw new BootCheckError(
-      `Hindsight at ${baseUrl} answered an unauthenticated request (HTTP ${anonymous}). ` +
-        `Start it with HINDSIGHT_API_TENANT_EXTENSION=hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension ` +
-        `and HINDSIGHT_API_TENANT_API_KEY set to the value of HINDSIGHT_API_KEY.`,
-    );
-  }
-  if (!isAuthRejection(anonymous)) {
-    warnInconclusive("hindsight", url, anonymous);
-    return;
-  }
-  const authenticated = await probeStatus(fetchFn, url, {
-    headers: { Authorization: `Bearer ${apiKey}` },
+  await retryUntilConclusive("hindsight auth check", deps.clock, async () => {
+    const anonymous = await probe(deps.fetch, url, {});
+    if (isSuccess(anonymous)) {
+      throw new BootCheckError(
+        `Hindsight at ${baseUrl} answered an unauthenticated request (${statusText(anonymous)}). ` +
+          `Start it with HINDSIGHT_API_TENANT_EXTENSION=hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension ` +
+          `and HINDSIGHT_API_TENANT_API_KEY set to the value of HINDSIGHT_API_KEY.`,
+      );
+    }
+    if (!isAuthRejection(anonymous)) return inconclusive(url, anonymous);
+    const authenticated = await probe(deps.fetch, url, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    if (isAuthRejection(authenticated)) {
+      throw new BootCheckError(
+        `Hindsight at ${baseUrl} rejected HINDSIGHT_API_KEY (${statusText(authenticated)}). ` +
+          `It must equal the server's HINDSIGHT_API_TENANT_API_KEY.`,
+      );
+    }
+    if (!isSuccess(authenticated)) return inconclusive(url, authenticated);
+    return conclusive(undefined);
   });
-  if (authenticated === null) return;
-  if (isAuthRejection(authenticated)) {
-    throw new BootCheckError(
-      `Hindsight at ${baseUrl} rejected HINDSIGHT_API_KEY (HTTP ${authenticated}). ` +
-        `It must equal the server's HINDSIGHT_API_TENANT_API_KEY.`,
-    );
-  }
-  if (!isSuccess(authenticated)) {
-    warnInconclusive("hindsight", url, authenticated);
-    return;
-  }
   logger.info("hindsight auth check passed");
 }
 
@@ -357,15 +431,15 @@ export interface InngestAuthConfig {
  * - An empty event batch posted under our event key must succeed. It
  *   creates no event, so the probe has no side effect.
  *
- * An unreachable server, or a status that is neither a 2xx nor 401/403,
- * soft-fails. The whole check is skipped under `INNGEST_DEV`, which is taken
- * at its word: setting it in production disables this check along with the
- * SDK's signature verification, and DEPLOYMENT.md says never to. Keys do not
- * cover the dashboard or its GraphQL API, which can invoke functions — see
+ * Any other outcome is retried until conclusive, then fails closed. The
+ * whole check is skipped under `INNGEST_DEV`, which is taken at its word:
+ * setting it in production disables this check along with the SDK's
+ * signature verification, and DEPLOYMENT.md says never to. Keys do not cover
+ * the dashboard or its GraphQL API, which can invoke functions — see
  * DEPLOYMENT.md → Securing internal services.
  */
 export async function checkInngestAuth(
-  fetchFn: ProbeFetch,
+  deps: BootProbeDeps,
   config: InngestAuthConfig,
 ): Promise<void> {
   if (config.dev) {
@@ -380,50 +454,41 @@ export async function checkInngestAuth(
     );
   }
   const eventsUrl = serviceUrl(baseUrl, "/v1/events");
-  const anonymous = await probeStatus(fetchFn, eventsUrl, {});
-  if (anonymous === null) return;
-  if (isSuccess(anonymous)) {
-    throw new BootCheckError(
-      `Inngest at ${baseUrl} answered an unauthenticated API request (HTTP ${anonymous}), ` +
-        "so it is not enforcing keys — likely `inngest dev`. Run `inngest start` with " +
-        "--event-key and --signing-key, or set INNGEST_DEV for local development.",
-    );
-  }
-  if (!isAuthRejection(anonymous)) {
-    warnInconclusive("inngest", eventsUrl, anonymous);
-    return;
-  }
-  const signed = await probeStatus(fetchFn, eventsUrl, {
-    headers: { Authorization: `Bearer ${signingKey}` },
-  });
-  if (signed === null) return;
-  if (isAuthRejection(signed)) {
-    throw new BootCheckError(
-      `Inngest at ${baseUrl} rejected INNGEST_SIGNING_KEY (HTTP ${signed}). ` +
-        "It must equal the server's --signing-key.",
-    );
-  }
-  if (!isSuccess(signed)) {
-    warnInconclusive("inngest", eventsUrl, signed);
-    return;
-  }
   const eventUrl = serviceUrl(baseUrl, `/e/${encodeURIComponent(eventKey)}`);
-  const event = await probeStatus(fetchFn, eventUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: "[]",
+  await retryUntilConclusive("inngest auth check", deps.clock, async () => {
+    const anonymous = await probe(deps.fetch, eventsUrl, {});
+    if (isSuccess(anonymous)) {
+      throw new BootCheckError(
+        `Inngest at ${baseUrl} answered an unauthenticated API request (${statusText(anonymous)}), ` +
+          "so it is not enforcing keys — likely `inngest dev`. Run `inngest start` with " +
+          "--event-key and --signing-key, or set INNGEST_DEV for local development.",
+      );
+    }
+    if (!isAuthRejection(anonymous)) return inconclusive(eventsUrl, anonymous);
+    const signed = await probe(deps.fetch, eventsUrl, {
+      headers: { Authorization: `Bearer ${signingKey}` },
+    });
+    if (isAuthRejection(signed)) {
+      throw new BootCheckError(
+        `Inngest at ${baseUrl} rejected INNGEST_SIGNING_KEY (${statusText(signed)}). ` +
+          "It must equal the server's --signing-key.",
+      );
+    }
+    if (!isSuccess(signed)) return inconclusive(eventsUrl, signed);
+    const event = await probe(deps.fetch, eventUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "[]",
+    });
+    if (isAuthRejection(event)) {
+      throw new BootCheckError(
+        `Inngest at ${baseUrl} rejected INNGEST_EVENT_KEY (${statusText(event)}). ` +
+          "It must be one of the server's --event-key values.",
+      );
+    }
+    if (!isSuccess(event)) return inconclusive(eventUrl, event);
+    return conclusive(undefined);
   });
-  if (event === null) return;
-  if (isAuthRejection(event)) {
-    throw new BootCheckError(
-      `Inngest at ${baseUrl} rejected INNGEST_EVENT_KEY (HTTP ${event}). ` +
-        "It must be one of the server's --event-key values.",
-    );
-  }
-  if (!isSuccess(event)) {
-    warnInconclusive("inngest", eventUrl, event);
-    return;
-  }
   logger.info("inngest auth check passed");
 }
 
