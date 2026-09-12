@@ -72,7 +72,26 @@ The `v1` tag enables future re-derivation without rotating the master key. If a 
 
 ### `_FILE` convention for Docker secrets
 
-Standard Docker pattern (Postgres, MariaDB, Redis, Keycloak). For any env var `FOO`, if `FOO_FILE` is set, read the file contents and use as the value. Applied to `COGMO_MASTER_KEY` and `DATABASE_URL` in `src/env.ts`. Extensible to any env var.
+Standard Docker pattern (Postgres, MariaDB, Redis, Keycloak). For any env var `FOO`, if `FOO_FILE` is set, read the file contents and use as the value. Applied to `COGMO_MASTER_KEY`, `DATABASE_URL`, `HINDSIGHT_API_KEY`, `INNGEST_EVENT_KEY` and `INNGEST_SIGNING_KEY` in `src/env.ts`. Extensible to any env var.
+
+### Internal service credentials `[confirmed]`
+
+Hindsight and Inngest credentials are **env vars, not `secrets` rows**. They are deployment configuration that has to match what the server was started with, like `DATABASE_URL`. A DB row would put them behind the master key and the wizard, for a value the operator sets on both sides at deploy time anyway.
+
+| Service | Cogmo side | Server side | Boot check |
+|-|-|-|-|
+| Hindsight | `HINDSIGHT_API_KEY` (required) | `ApiKeyTenantExtension` + `HINDSIGHT_API_TENANT_API_KEY` | `checkHindsightAuth` |
+| Inngest | `INNGEST_EVENT_KEY`, `INNGEST_SIGNING_KEY` (required unless `INNGEST_DEV`) | `inngest start --event-key --signing-key` | `checkInngestAuth` |
+
+Each check hard-fails on two conditions. If the server answers an unauthenticated request, a key Cogmo sends would be ignored — believed to protect something, while protecting nothing. If the server rejects Cogmo's key, every call would fail at request time. Both probes leave no trace:
+- **Hindsight:** a bank list, a route that goes through the tenant extension (`/health` and `/version` do not).
+- **Inngest:** `GET /v1/events`, plus an empty event batch posted to `/e/<key>`.
+
+`src/boot/checks.integration.test.ts` pins these premises against the pinned images.
+
+Dev and test Hindsight containers enforce a fixed key (`HINDSIGHT_TEST_API_KEY` in `dev/containers.ts`), so every integration and e2e run exercises the authenticated client path. Inngest stays on `inngest dev` with `INNGEST_DEV=true` there.
+
+Keys do not close every route. Inngest's dashboard and GraphQL API, and Hindsight's health, version and metrics routes, answer without them. The deploy-side mitigations (`--no-ui`, private ports) are in `DEPLOYMENT.md` → Securing internal services.
 
 ### Env lifecycle
 

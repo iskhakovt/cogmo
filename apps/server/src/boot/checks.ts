@@ -229,6 +229,152 @@ export async function checkDirWritable(path: string, envVarName: string): Promis
   }
 }
 
+/** The slice of `fetch` the auth probes use — injected so tests need no server. */
+export type ProbeFetch = (url: string, init?: RequestInit) => Promise<Response>;
+
+/**
+ * Status code of one probe request, or `null` when the server could not be
+ * reached. The body is discarded unread: only the status is evidence.
+ */
+async function probeStatus(
+  fetchFn: ProbeFetch,
+  url: string,
+  init: RequestInit = {},
+): Promise<number | null> {
+  try {
+    const res = await fetchFn(url, { ...init, signal: AbortSignal.timeout(5_000) });
+    await res.body?.cancel();
+    return res.status;
+  } catch (err) {
+    logger.warn({ url, err: stringifyError(err) }, "auth probe could not reach the server");
+    return null;
+  }
+}
+
+function isAuthRejection(status: number): boolean {
+  return status === 401 || status === 403;
+}
+
+/**
+ * Verify Hindsight enforces its API key, and that ours is the one it holds.
+ *
+ * Two requests against the bank list, which runs through the tenant
+ * extension's `authenticate` (`/health` and `/version` do not):
+ * - **Without a token** it must be refused. A server that answers is running
+ *   the default no-auth tenant extension, where the key Cogmo sends is
+ *   ignored — a credential believed to protect memory that protects nothing.
+ * - **With the token** it must be accepted, otherwise every memory call
+ *   fails at request time on a mismatched key.
+ *
+ * Both are deterministic deployment errors, so both hard-fail. An
+ * unreachable server soft-fails, matching `checkHindsightVersion`.
+ */
+export async function checkHindsightAuth(
+  fetchFn: ProbeFetch,
+  baseUrl: string,
+  apiKey: string,
+): Promise<void> {
+  const url = new URL("/v1/default/banks", baseUrl).toString();
+  const anonymous = await probeStatus(fetchFn, url);
+  if (anonymous === null) return;
+  if (!isAuthRejection(anonymous)) {
+    throw new BootCheckError(
+      `Hindsight at ${baseUrl} answered an unauthenticated request (HTTP ${anonymous}). ` +
+        `Start it with HINDSIGHT_API_TENANT_EXTENSION=hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension ` +
+        `and HINDSIGHT_API_TENANT_API_KEY set to the value of HINDSIGHT_API_KEY.`,
+    );
+  }
+  const authenticated = await probeStatus(fetchFn, url, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  if (authenticated === null) return;
+  if (isAuthRejection(authenticated)) {
+    throw new BootCheckError(
+      `Hindsight at ${baseUrl} rejected HINDSIGHT_API_KEY (HTTP ${authenticated}). ` +
+        `It must equal the server's HINDSIGHT_API_TENANT_API_KEY.`,
+    );
+  }
+  logger.info("hindsight auth check passed");
+}
+
+export interface InngestAuthConfig {
+  baseUrl: string;
+  /** `INNGEST_DEV` — the dev server has no keys, so there is nothing to check. */
+  dev: boolean;
+  eventKey: string | undefined;
+  signingKey: string | undefined;
+}
+
+/**
+ * Verify the self-hosted Inngest server enforces its keys, and that Cogmo
+ * holds the right ones.
+ *
+ * Anything that can post an event to an unkeyed server drives the agent:
+ * `adapter/direct/inbound` injects a user turn, `coding/task/plan-approved`
+ * approves a plan. `inngest start` refuses to run without keys, but
+ * `inngest dev` accepts every request, so a deployment that points
+ * production at a dev server — or sets `INNGEST_DEV` against a real one —
+ * is the failure mode this check exists for.
+ *
+ * - Both keys must be set.
+ * - `GET /v1/events` without a signing key must be refused; a server that
+ *   answers is not enforcing keys at all.
+ * - The same request with our signing key must be accepted.
+ * - An empty event batch posted under our event key must be accepted. It
+ *   creates no event, so the probe has no side effect.
+ *
+ * Skipped under `INNGEST_DEV`, where no key is meaningful. Keys do not cover
+ * the dashboard or its GraphQL API, which can invoke functions — see
+ * DEPLOYMENT.md → Securing internal services.
+ */
+export async function checkInngestAuth(
+  fetchFn: ProbeFetch,
+  config: InngestAuthConfig,
+): Promise<void> {
+  if (config.dev) {
+    logger.info("INNGEST_DEV set — skipping inngest key check");
+    return;
+  }
+  const { baseUrl, eventKey, signingKey } = config;
+  if (eventKey === undefined || signingKey === undefined) {
+    throw new BootCheckError(
+      "INNGEST_EVENT_KEY and INNGEST_SIGNING_KEY are required unless INNGEST_DEV is set. " +
+        "Use the values the server was started with (`inngest start --event-key … --signing-key …`).",
+    );
+  }
+  const eventsUrl = new URL("/v1/events", baseUrl).toString();
+  const anonymous = await probeStatus(fetchFn, eventsUrl);
+  if (anonymous === null) return;
+  if (!isAuthRejection(anonymous)) {
+    throw new BootCheckError(
+      `Inngest at ${baseUrl} answered an unauthenticated API request (HTTP ${anonymous}), ` +
+        "so it is not enforcing keys — likely `inngest dev`. Run `inngest start` with " +
+        "--event-key and --signing-key, or set INNGEST_DEV for local development.",
+    );
+  }
+  const signed = await probeStatus(fetchFn, eventsUrl, {
+    headers: { Authorization: `Bearer ${signingKey}` },
+  });
+  if (signed !== null && isAuthRejection(signed)) {
+    throw new BootCheckError(
+      `Inngest at ${baseUrl} rejected INNGEST_SIGNING_KEY (HTTP ${signed}). ` +
+        "It must equal the server's --signing-key.",
+    );
+  }
+  const event = await probeStatus(
+    fetchFn,
+    new URL(`/e/${encodeURIComponent(eventKey)}`, baseUrl).toString(),
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: "[]" },
+  );
+  if (event !== null && isAuthRejection(event)) {
+    throw new BootCheckError(
+      `Inngest at ${baseUrl} rejected INNGEST_EVENT_KEY (HTTP ${event}). ` +
+        "It must be one of the server's --event-key values.",
+    );
+  }
+  logger.info("inngest auth check passed");
+}
+
 function stringifyError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }

@@ -245,6 +245,7 @@ export async function setup({ provide }: GlobalSetupContext) {
       INNGEST_BASE_URL: "http://inngest:8288",
       INNGEST_CONNECT_GATEWAY_URL: "ws://inngest:8289/v0/connect",
       HINDSIGHT_URL: "http://hindsight:8888",
+      HINDSIGHT_API_KEY: c.HINDSIGHT_TEST_API_KEY,
       S3_ENDPOINT: "http://minio:9000",
       S3_ACCESS_KEY: "minioadmin",
       S3_SECRET_KEY: "minioadmin",
@@ -271,6 +272,7 @@ export async function setup({ provide }: GlobalSetupContext) {
   provide("inngestBaseUrl", urls.inngestBaseUrl);
   provide("inngestEventKey", "test");
   provide("hindsightUrl", hindsightUrl);
+  provide("hindsightApiKey", c.HINDSIGHT_TEST_API_KEY);
   provide("defaultUserId", defaultUserId);
   // Exposed so tests can `docker exec` against the bundled binary — used
   // by the LiteLLM-snapshot smoke check that proves the resolver can find

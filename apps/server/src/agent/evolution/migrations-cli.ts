@@ -47,6 +47,7 @@ import {
 
 export interface MigrationCliDeps {
   hindsightUrl: string;
+  hindsightApiKey: string;
   agentStore: AgentStore;
   runInTx: Transactor;
   /**
@@ -76,13 +77,20 @@ function writeBackupFn<T>(backupPath: string): (rows: ReadonlyArray<T>) => Promi
   };
 }
 
-function makeHindsightShared(hindsightUrl: string): {
+function makeHindsightShared(deps: MigrationCliDeps): {
   hindsight: HindsightClient;
   sdkClient: ReturnType<typeof createClient>;
 } {
+  // The raw client sends only the headers its config carries, so it needs
+  // the bearer token spelled out; `HindsightClient` derives it from `apiKey`.
   return {
-    hindsight: new HindsightClient({ baseUrl: hindsightUrl }),
-    sdkClient: createClient(createConfig({ baseUrl: hindsightUrl })),
+    hindsight: new HindsightClient({ baseUrl: deps.hindsightUrl, apiKey: deps.hindsightApiKey }),
+    sdkClient: createClient(
+      createConfig({
+        baseUrl: deps.hindsightUrl,
+        headers: { Authorization: `Bearer ${deps.hindsightApiKey}` },
+      }),
+    ),
   };
 }
 
@@ -100,7 +108,7 @@ export async function runMigrateMemoriesCli(
     return 1;
   }
 
-  const { hindsight, sdkClient } = makeHindsightShared(deps.hindsightUrl);
+  const { hindsight, sdkClient } = makeHindsightShared(deps);
   const backupPath = makeBackupPath(bankId);
   console.log(`Migrating bank "${bankId}" — Hindsight ${deps.hindsightUrl}`);
   console.log(`Backup will be written to ${backupPath}`);
@@ -186,7 +194,7 @@ export async function runBackfillProfileClassCli(
     );
     return 1;
   }
-  const { hindsight, sdkClient } = makeHindsightShared(deps.hindsightUrl);
+  const { hindsight, sdkClient } = makeHindsightShared(deps);
   const backupPath = makeBackupPath(bankId);
   console.log(`Backfilling bank "${bankId}" with classes [${parsed.classTags.join(", ")}]`);
   console.log(`Hindsight ${deps.hindsightUrl}`);

@@ -46,14 +46,15 @@ const GIT_NO_BACKGROUND_MAINTENANCE = {
   GIT_CONFIG_VALUE_1: "0",
 } as const;
 
-/** Shared by both unit projects. `HINDSIGHT_URL` + `INNGEST_BASE_URL` are
- * required by the runtime schema in `src/env.ts` — any test that touches
- * code importing the full `env` (e.g. `db/index.ts`, `health.ts`) needs
- * them populated. Unit tests mock the actual stores so the URLs are never
- * hit. */
+/** Shared by both unit projects. `HINDSIGHT_URL`, `HINDSIGHT_API_KEY` and
+ * `INNGEST_BASE_URL` are required by the runtime schema in `src/env.ts` —
+ * any test that touches code importing the full `env` (e.g. `db/index.ts`,
+ * `health.ts`) needs them populated. Unit tests mock the actual stores so
+ * the URLs are never hit. */
 const UNIT_ENV = {
   NODE_ENV: "test",
   HINDSIGHT_URL: "http://localhost:8080",
+  HINDSIGHT_API_KEY: "unit-test-hindsight-key",
   INNGEST_BASE_URL: "http://localhost:8288",
   ...GIT_NO_BACKGROUND_MAINTENANCE,
 } as const;

@@ -62,6 +62,7 @@ const { parseBackfillArgs, runMigrateMemoriesCli, runBackfillProfileClassCli } =
 function buildDeps(opts: { defaultBankId?: string | null } = {}) {
   return {
     hindsightUrl: "http://hindsight:8080",
+    hindsightApiKey: "test-key",
     agentStore: mock<AgentStore>(),
     runInTx: fakeRunInTx,
     resolveDefaultBankId: vi.fn(async () => opts.defaultBankId ?? null),
@@ -154,13 +155,16 @@ describe("runMigrateMemoriesCli", () => {
     expect(migrateUntaggedMemoriesSpy).toHaveBeenCalledWith("explicit-bank", expect.any(Object));
   });
 
-  it("wires HindsightClient with the configured base URL", async () => {
+  it("wires HindsightClient with the configured base URL and API key", async () => {
     const deps = buildDeps({ defaultBankId: "u" });
     migrateUntaggedMemoriesSpy.mockResolvedValueOnce({ migrated: 0 });
 
     await runMigrateMemoriesCli([], deps);
 
-    expect(hindsightCtor).toHaveBeenCalledWith({ baseUrl: "http://hindsight:8080" });
+    expect(hindsightCtor).toHaveBeenCalledWith({
+      baseUrl: "http://hindsight:8080",
+      apiKey: "test-key",
+    });
   });
 
   // The four tests below assert *both* that the CLI dispatch completes

@@ -112,6 +112,7 @@ async function dispatch(cmd: string): Promise<number> {
       };
       const cliDeps = {
         hindsightUrl: env.HINDSIGHT_URL,
+        hindsightApiKey: env.HINDSIGHT_API_KEY,
         agentStore,
         runInTx,
         resolveDefaultBankId,

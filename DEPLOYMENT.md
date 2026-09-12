@@ -9,7 +9,7 @@ This is the canonical install guide. Cogmo is a single Node.js process distribut
 | PostgreSQL | **18 recommended** (14+ accepted via SQL polyfill, but dev-only) | One instance shared by Cogmo and Hindsight. CI tests against PG 18 (`pgvector/pgvector:pg18`). PG 18 ships native, monotonic `uuidv7()`; older versions get a `plpgsql` fallback from `scripts/init-db.sql` that is non-monotonic and lower quality — fine for local experiments, avoid in production. |
 | pgvector | latest | Postgres extension for vector storage. The `pgvector/pgvector:pg18` image bundles it. |
 | Redis | 7+ | Inngest queue and state store. |
-| Inngest | latest | Self-hosted dev server (`inngest dev`) or production deployment. |
+| Inngest | latest | Self-hosted `inngest start` with an event key and signing key. `inngest dev` is for local development only — see [Securing internal services](#securing-internal-services). |
 | [Hindsight](https://github.com/vectorize-io/hindsight) | latest-slim recommended | Memory server, HTTP API on port 8888. See [Hindsight image variant](#hindsight-image-variant) for which tag to pick. |
 | Docker | latest | For pulling and running the image. |
 
@@ -89,6 +89,7 @@ All configuration is via environment variables. The schema is in [`src/env.ts`](
 | `DATABASE_URL` | Postgres connection string (e.g. `postgresql://cogmo:pw@host/cogmo`). Also accepts `DATABASE_URL_FILE` for Docker secrets. |
 | `COGMO_MASTER_KEY` | 32-byte base64 master key. Encrypts every credential at rest (AES-256-GCM, HKDF-derived per purpose). Generate with `cogmo gen-key`. Also accepts `COGMO_MASTER_KEY_FILE` for Docker secrets. **Losing it means re-entering every credential.** |
 | `HINDSIGHT_URL` | Hindsight server URL (e.g. `http://hindsight.internal:8888`). |
+| `HINDSIGHT_API_KEY` | Bearer token for the Hindsight API; must equal the server's `HINDSIGHT_API_TENANT_API_KEY`. Boot refuses a Hindsight that answers without it — see [Securing internal services](#securing-internal-services). Also accepts `HINDSIGHT_API_KEY_FILE`. |
 | `INNGEST_BASE_URL` | Inngest server URL (e.g. `http://inngest.internal:8288`). |
 
 ### Optional
@@ -101,8 +102,9 @@ Defaults below match the in-image expectations: every host-state path sits under
 |-|-|-|
 | `INNGEST_MODE` | `connect` | `connect` (long-poll, recommended) or `serve` (HTTP). |
 | `INNGEST_SERVE_PORT` | `3000` | HTTP port the SDK listens on when `INNGEST_MODE=serve`. Ignored in `connect` mode. |
-| `INNGEST_EVENT_KEY` | — | Required if your Inngest deployment is keyed. |
-| `INNGEST_SIGNING_KEY` | — | Required if your Inngest deployment is keyed. |
+| `INNGEST_EVENT_KEY` | — | **Required unless `INNGEST_DEV` is set.** An event key the server was started with (`inngest start --event-key`). Also accepts `INNGEST_EVENT_KEY_FILE`. |
+| `INNGEST_SIGNING_KEY` | — | **Required unless `INNGEST_DEV` is set.** The server's `--signing-key` (hex). Also accepts `INNGEST_SIGNING_KEY_FILE`. |
+| `INNGEST_DEV` | — | `true` / `1` for local development against `inngest dev`, which has no keys. Skips the key check and puts the SDK in dev mode — never set it in production. |
 
 #### Logging & locale
 
@@ -178,7 +180,54 @@ See [`design/skills.md`](design/skills.md) for two-tier (Pyodide + sysbox) execu
 | `MCP_IDLE_EVICTION_MS` | `600000` (10 min) | Idle threshold after which a live MCP connection is closed. |
 | `MCP_EVICTION_INTERVAL_MS` | `60000` | How often the idle-eviction sweep runs. Set `0` to disable. |
 
-LLM provider keys, Telegram bot tokens, Tavily/fal.ai keys, and similar credentials are **not** env vars — they live encrypted in the DB after `cogmo setup`. Putting secrets in env files is explicitly discouraged; use host secret management ([sops-nix](https://github.com/Mic92/sops-nix), [Vault](https://www.vaultproject.io/), systemd `LoadCredential`, Docker secrets via `_FILE`, etc.) for `COGMO_MASTER_KEY` and `DATABASE_URL`.
+LLM provider keys, Telegram bot tokens, Tavily/fal.ai keys, and similar credentials are **not** env vars — they live encrypted in the DB after `cogmo setup`. Putting secrets in env files is explicitly discouraged; use host secret management ([sops-nix](https://github.com/Mic92/sops-nix), [Vault](https://www.vaultproject.io/), systemd `LoadCredential`, Docker secrets via `_FILE`, etc.) for `COGMO_MASTER_KEY`, `DATABASE_URL`, `HINDSIGHT_API_KEY`, `INNGEST_EVENT_KEY` and `INNGEST_SIGNING_KEY` — each accepts a `_FILE` variant.
+
+## Securing internal services
+
+Hindsight and Inngest answer anything that can reach them unless they are keyed. For Hindsight that means reading and writing every memory bank. For Inngest it means driving the agent: an `adapter/direct/inbound` event is a user turn, and `coding/task/plan-approved` approves a plan. A private network is not enough on its own, because skills make HTTP requests from inside Cogmo's process and so share its network position.
+
+`cogmo serve` therefore probes both at boot. It refuses to start if either server answers an unauthenticated request, or rejects the key Cogmo holds. A server that cannot be reached only logs a warning, matching the version check.
+
+### Hindsight
+
+Start the server with the built-in API-key tenant extension, using the same value as Cogmo's `HINDSIGHT_API_KEY`:
+
+```bash
+HINDSIGHT_API_TENANT_EXTENSION=hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension
+HINDSIGHT_API_TENANT_API_KEY=<same value as HINDSIGHT_API_KEY>
+```
+
+The key does not cover everything:
+- **Open routes:** `/health`, `/version`, `/metrics`, `/docs` and `/openapi.json` still answer without it (verified on 0.9.1).
+- **MCP endpoint:** uses the same key unless `HINDSIGHT_API_TENANT_MCP_AUTH_DISABLED` is set.
+- **Control Plane UI:** a separate app with its own `HINDSIGHT_CP_ACCESS_KEY`. Cogmo does not use it — use the API-only image.
+
+### Inngest
+
+Run `inngest start`, not `inngest dev`. The dev server accepts any key, so the boot check refuses it unless `INNGEST_DEV` is set.
+
+```bash
+inngest start \
+  --event-key "$(openssl rand -hex 32)" \
+  --signing-key "$(openssl rand -hex 32)" \
+  --redis-uri redis://:<password>@redis:6379 \
+  --postgres-uri postgres://inngest:<password>@postgres:5432/inngest \
+  --no-ui
+```
+
+Generate the keys once and give Cogmo the same values as `INNGEST_EVENT_KEY` and `INNGEST_SIGNING_KEY`. `inngest start` itself refuses to run without both keys, and the signing key must be hex.
+
+Keys cover events, the REST API and app sync. They do **not** cover everything on the server (verified on v1.41.1):
+
+- **Dashboard and GraphQL API (port 8288).** Both are served with no auth, and GraphQL can `invokeFunction` and `rerun`. Pass `--no-ui`, which removes both; you lose the Inngest dashboard. If you need the dashboard, keep port 8288 reachable only from Cogmo and an authenticating proxy.
+- **`/metrics` and `/debug/pprof`.** Also open.
+- **Connect gateway (port 8289).** Worker session tokens are signed with a fixed secret in the open-source build. Never expose 8289 beyond the network Cogmo is on.
+
+### Redis and Postgres
+
+Neither is probed by Cogmo, so key them yourself:
+- **Redis:** enable `requirepass` on the Redis that Inngest uses, and pass the password in `--redis-uri` as above.
+- **Postgres:** use password authentication for Cogmo's `DATABASE_URL`, Hindsight's `HINDSIGHT_API_DATABASE_URL` and Inngest's `--postgres-uri`. Never use `trust` outside local development.
 
 ## Bootstrap sequence
 
@@ -198,7 +247,10 @@ LLM provider keys, Telegram bot tokens, Tavily/fal.ai keys, and similar credenti
      -e DATABASE_URL=postgresql://... \
      -e COGMO_MASTER_KEY=... \
      -e HINDSIGHT_URL=http://hindsight:8888 \
+     -e HINDSIGHT_API_KEY=... \
      -e INNGEST_BASE_URL=http://inngest:8288 \
+     -e INNGEST_EVENT_KEY=... \
+     -e INNGEST_SIGNING_KEY=... \
      ghcr.io/iskhakovt/cogmo:<version> setup
    ```
 
@@ -212,7 +264,10 @@ LLM provider keys, Telegram bot tokens, Tavily/fal.ai keys, and similar credenti
      -e DATABASE_URL=postgresql://... \
      -e COGMO_MASTER_KEY=... \
      -e HINDSIGHT_URL=http://hindsight:8888 \
+     -e HINDSIGHT_API_KEY=... \
      -e INNGEST_BASE_URL=http://inngest:8288 \
+     -e INNGEST_EVENT_KEY=... \
+     -e INNGEST_SIGNING_KEY=... \
      -p 9090:9090 \
      ghcr.io/iskhakovt/cogmo:<version>
    ```
@@ -282,7 +337,10 @@ docker run -d --name cogmo \
   -e DATABASE_URL=postgresql://... \
   -e COGMO_MASTER_KEY=... \
   -e HINDSIGHT_URL=http://hindsight:8888 \
+  -e HINDSIGHT_API_KEY=... \
   -e INNGEST_BASE_URL=http://inngest:8288 \
+  -e INNGEST_EVENT_KEY=... \
+  -e INNGEST_SIGNING_KEY=... \
   -e OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm:4318 \
   -e OTEL_SERVICE_NAME=cogmo \
   -p 9090:9090 \
@@ -305,7 +363,10 @@ docker run -d --name cogmo \
   -e DATABASE_URL=postgresql://... \
   -e COGMO_MASTER_KEY=... \
   -e HINDSIGHT_URL=http://hindsight:8888 \
+  -e HINDSIGHT_API_KEY=... \
   -e INNGEST_BASE_URL=http://inngest:8288 \
+  -e INNGEST_EVENT_KEY=... \
+  -e INNGEST_SIGNING_KEY=... \
   -e OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp-gateway-prod-eu-west-2.grafana.net/otlp \
   -e OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic $(printf '%s' '<instance-id>:<token>' | base64)" \
   -e OTEL_SERVICE_NAME=cogmo \

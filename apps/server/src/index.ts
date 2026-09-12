@@ -48,8 +48,10 @@ import { createDefaultTools } from "./agent/tools.js";
 import { createWebTools } from "./agent/web-tools.js";
 import {
   checkDirWritable,
+  checkHindsightAuth,
   checkHindsightClientVersion,
   checkHindsightVersion,
+  checkInngestAuth,
   checkS3Bucket,
   checkUuidv7,
   loadHindsightCompat,
@@ -421,7 +423,18 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
     (await tx((trx) => secretsStore.getSecret(trx, "openrouter_api_key"))) ??
     env.OPENROUTER_API_KEY;
   const memory = new HindsightMemoryProvider(env.HINDSIGHT_URL, {
+    apiKey: env.HINDSIGHT_API_KEY,
     maxQueryTokens: env.HINDSIGHT_RECALL_MAX_QUERY_TOKENS,
+  });
+  // Both internal services are reachable by anything on their network, and
+  // an unkeyed one answers all of it. Refuse to boot against a server that
+  // does not enforce its key, or one whose key we do not hold.
+  await checkHindsightAuth(fetch, env.HINDSIGHT_URL, env.HINDSIGHT_API_KEY);
+  await checkInngestAuth(fetch, {
+    baseUrl: env.INNGEST_BASE_URL,
+    dev: env.INNGEST_DEV,
+    eventKey: env.INNGEST_EVENT_KEY,
+    signingKey: env.INNGEST_SIGNING_KEY,
   });
   // Hard-fail when the running server reports a version outside the
   // compat range pinned in `package.json` → `cogmo.hindsightCompat`.

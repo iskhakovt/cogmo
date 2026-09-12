@@ -14,6 +14,8 @@ const mockRetainBatch = vi
 const mockRecallMemories = vi.fn();
 const mockReflect = vi.fn();
 const fakeSdkClient = { __sdkClient: true };
+const mockClientConstructor = vi.fn();
+const mockCreateConfig = vi.fn();
 
 vi.mock("@vectorize-io/hindsight-client", () => {
   return {
@@ -21,9 +23,15 @@ vi.mock("@vectorize-io/hindsight-client", () => {
     HindsightClient: class {
       retain = mockRetain;
       retainBatch = mockRetainBatch;
+      constructor(options: unknown) {
+        mockClientConstructor(options);
+      }
     },
     createClient: () => fakeSdkClient,
-    createConfig: () => ({}),
+    createConfig: (config: unknown) => {
+      mockCreateConfig(config);
+      return {};
+    },
     sdk: {
       recallMemories: (...args: unknown[]) => mockRecallMemories(...args),
       reflect: (...args: unknown[]) => mockReflect(...args),
@@ -36,7 +44,7 @@ function createProvider(opts?: { maxQueryTokens?: number }): HindsightMemoryProv
   mockRetainBatch.mockClear();
   mockRecallMemories.mockClear();
   mockReflect.mockClear();
-  return new HindsightMemoryProvider("http://localhost:8888", opts);
+  return new HindsightMemoryProvider("http://localhost:8888", { apiKey: "test-api-key", ...opts });
 }
 
 function okRecall(results: Array<Record<string, unknown>>) {
@@ -50,6 +58,20 @@ function errResp(status: number, detail = "boom") {
 }
 
 describe("HindsightMemoryProvider", () => {
+  it("authenticates both the class client and the raw sdk client with the API key", () => {
+    createProvider();
+
+    expect(mockClientConstructor).toHaveBeenCalledWith(
+      expect.objectContaining({ baseUrl: "http://localhost:8888", apiKey: "test-api-key" }),
+    );
+    // The raw client carries no apiKey option — recall and reflect go through
+    // it, so a missing header here is a 401 on every read.
+    expect(mockCreateConfig).toHaveBeenCalledWith({
+      baseUrl: "http://localhost:8888",
+      headers: { Authorization: "Bearer test-api-key" },
+    });
+  });
+
   it("retain passes content and options to client", async () => {
     const provider = createProvider();
 

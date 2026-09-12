@@ -7,16 +7,144 @@ import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database } from "../db/index.js";
 import type { HindsightMemoryProvider } from "../memory/hindsight.js";
+import { expectDefined } from "../test/assertions.js";
 import {
   BootCheckError,
   checkDirWritable,
+  checkHindsightAuth,
   checkHindsightClientVersion,
   checkHindsightVersion,
+  checkInngestAuth,
   checkS3Bucket,
   checkUuidv7,
   HindsightCompatSchema,
   loadHindsightCompat,
+  type ProbeFetch,
 } from "./checks.js";
+
+/** A fetch whose status is chosen per request; `Error` makes it reject. */
+function probeFetch(respond: (url: string, init: RequestInit | undefined) => number | Error) {
+  return vi.fn<ProbeFetch>(async (url, init) => {
+    const outcome = respond(url, init);
+    if (outcome instanceof Error) throw outcome;
+    return new Response(null, { status: outcome });
+  });
+}
+
+function bearer(init: RequestInit | undefined): string | null {
+  return new Headers(init?.headers).get("authorization");
+}
+
+describe("checkHindsightAuth", () => {
+  const url = "http://hindsight:8888";
+
+  it("passes when anonymous requests are refused and the key is accepted", async () => {
+    const fetchFn = probeFetch((_, init) => (bearer(init) === "Bearer k" ? 200 : 401));
+
+    await expect(checkHindsightAuth(fetchFn, url, "k")).resolves.toBeUndefined();
+
+    expect(fetchFn.mock.calls.map(([u]) => u)).toEqual([
+      "http://hindsight:8888/v1/default/banks",
+      "http://hindsight:8888/v1/default/banks",
+    ]);
+  });
+
+  it("hard-fails when the server answers without a token", async () => {
+    const fetchFn = probeFetch(() => 200);
+
+    await expect(checkHindsightAuth(fetchFn, url, "k")).rejects.toThrow(
+      /answered an unauthenticated request.*ApiKeyTenantExtension/,
+    );
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("hard-fails when the server rejects our key", async () => {
+    const fetchFn = probeFetch(() => 401);
+
+    const err = await checkHindsightAuth(fetchFn, url, "wrong").catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(BootCheckError);
+    expect(String(err)).toMatch(/rejected HINDSIGHT_API_KEY/);
+  });
+
+  it("soft-fails when the server is unreachable", async () => {
+    const fetchFn = probeFetch(() => new Error("ECONNREFUSED"));
+
+    await expect(checkHindsightAuth(fetchFn, url, "k")).resolves.toBeUndefined();
+  });
+});
+
+describe("checkInngestAuth", () => {
+  const keyed = {
+    baseUrl: "http://inngest:8288",
+    dev: false,
+    eventKey: "evt",
+    signingKey: "abcd",
+  };
+
+  /** A keyed server: API needs the signing key, `/e/<key>` needs the event key. */
+  function keyedServer(signingKey: string, eventKey: string) {
+    return probeFetch((u, init) => {
+      if (u.includes("/e/")) return u.endsWith(`/e/${eventKey}`) ? 200 : 401;
+      return bearer(init) === `Bearer ${signingKey}` ? 200 : 401;
+    });
+  }
+
+  it("passes against a server enforcing the keys we hold, probing with an empty batch", async () => {
+    const fetchFn = keyedServer("abcd", "evt");
+
+    await expect(checkInngestAuth(fetchFn, keyed)).resolves.toBeUndefined();
+
+    const eventCall = expectDefined(
+      fetchFn.mock.calls.find(([u]) => u.includes("/e/")),
+      "event probe",
+    );
+    expect(eventCall[0]).toBe("http://inngest:8288/e/evt");
+    // An empty batch is accepted without creating an event.
+    expect(eventCall[1]).toMatchObject({ method: "POST", body: "[]" });
+  });
+
+  it("skips every probe under INNGEST_DEV", async () => {
+    const fetchFn = probeFetch(() => 200);
+
+    await checkInngestAuth(fetchFn, { ...keyed, dev: true, eventKey: undefined });
+
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("hard-fails before any request when a key is missing outside dev mode", async () => {
+    const fetchFn = probeFetch(() => 200);
+
+    await expect(checkInngestAuth(fetchFn, { ...keyed, signingKey: undefined })).rejects.toThrow(
+      /INNGEST_EVENT_KEY and INNGEST_SIGNING_KEY are required/,
+    );
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("hard-fails against a server that answers without a signing key", async () => {
+    const fetchFn = probeFetch(() => 200);
+
+    await expect(checkInngestAuth(fetchFn, keyed)).rejects.toThrow(/not enforcing keys/);
+  });
+
+  it("hard-fails when the signing key is wrong", async () => {
+    const fetchFn = keyedServer("other", "evt");
+
+    await expect(checkInngestAuth(fetchFn, keyed)).rejects.toThrow(/rejected INNGEST_SIGNING_KEY/);
+  });
+
+  it("hard-fails when the event key is wrong", async () => {
+    const fetchFn = keyedServer("abcd", "other");
+
+    await expect(checkInngestAuth(fetchFn, keyed)).rejects.toThrow(/rejected INNGEST_EVENT_KEY/);
+  });
+
+  it("soft-fails when the server is unreachable", async () => {
+    const fetchFn = probeFetch(() => new Error("ECONNREFUSED"));
+
+    await expect(checkInngestAuth(fetchFn, keyed)).resolves.toBeUndefined();
+  });
+});
 
 describe("loadHindsightCompat", () => {
   it("reads cogmo.hindsightCompat from the project package.json as a valid semver range", () => {

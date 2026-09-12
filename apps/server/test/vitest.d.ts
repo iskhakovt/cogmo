@@ -12,6 +12,8 @@ declare module "vitest" {
     inngestBaseUrl: string;
     inngestEventKey: string;
     hindsightUrl: string;
+    /** Bearer token the integration/e2e Hindsight container enforces. */
+    hindsightApiKey: string;
     defaultUserId: string;
     llmockBaseUrl: string;
     /**

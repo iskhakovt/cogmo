@@ -67,6 +67,25 @@ function truncateQuery(query: string, maxTokens: number): { query: string; trunc
   return { query: enc.decode(tokens.slice(0, maxTokens)), truncated: true };
 }
 
+/**
+ * Build the class wrapper and the raw sdk client against one server with one
+ * credential. `HindsightClient` adds the `Authorization` header from `apiKey`
+ * itself; the raw client only sends the headers its config carries, so it
+ * gets the same header explicitly — a raw client built without it is a 401
+ * on every recall and reflect.
+ */
+function createHindsightClients(
+  baseUrl: string,
+  apiKey: string,
+): { client: HindsightClient; sdkClient: Client } {
+  return {
+    client: new HindsightClient({ baseUrl, apiKey }),
+    sdkClient: createClient(
+      createConfig({ baseUrl, headers: { Authorization: `Bearer ${apiKey}` } }),
+    ),
+  };
+}
+
 function isClientError(statusCode: number | undefined): boolean {
   // 429 is transient (rate limiting) — let withRetry's backoff handle it
   // rather than treating it as a deterministic 4xx that aborts immediately.
@@ -74,6 +93,11 @@ function isClientError(statusCode: number | undefined): boolean {
 }
 
 export interface HindsightMemoryProviderOptions {
+  /**
+   * Bearer token for a server running `ApiKeyTenantExtension`. Sent on every
+   * request, including the version probe.
+   */
+  apiKey: string;
   /**
    * Truncation budget for recall queries, in tokens. Must match the server's
    * `HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS`. Defaults to the upstream default
@@ -102,10 +126,11 @@ export class HindsightMemoryProvider implements MemoryProvider {
   #sdkClient: Client;
   #maxQueryTokens: number;
 
-  constructor(baseUrl: string, options?: HindsightMemoryProviderOptions) {
-    this.#client = new HindsightClient({ baseUrl });
-    this.#sdkClient = createClient(createConfig({ baseUrl }));
-    this.#maxQueryTokens = options?.maxQueryTokens ?? DEFAULT_MAX_QUERY_TOKENS;
+  constructor(baseUrl: string, options: HindsightMemoryProviderOptions) {
+    const { client, sdkClient } = createHindsightClients(baseUrl, options.apiKey);
+    this.#client = client;
+    this.#sdkClient = sdkClient;
+    this.#maxQueryTokens = options.maxQueryTokens ?? DEFAULT_MAX_QUERY_TOKENS;
   }
 
   /**
