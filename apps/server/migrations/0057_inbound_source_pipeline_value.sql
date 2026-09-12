@@ -1,1 +1,0 @@
-ALTER TYPE "public"."inbound_message_source" ADD VALUE 'pipeline';

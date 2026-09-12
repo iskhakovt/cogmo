@@ -121,11 +121,16 @@ export const inboundMessages = pgTable(
     uniqueIndex("uq_inbound_scheduled_fire_key")
       .on(t.scheduledFireKey)
       .where(sql`scheduled_fire_key IS NOT NULL`),
+    // A user inbound arrives on a session and carries no key; every
+    // system-originated source (`scheduled`, `pipeline`) has no session and
+    // carries its idempotency key. Written as `<> 'user'` rather than listing
+    // those sources, so adding one needs no constraint rewrite — and so the
+    // migration that adds an enum value never has to use that value in the
+    // same transaction.
     check(
       "chk_inbound_source_session",
       sql`(${t.source} = 'user' AND ${t.channelSessionId} IS NOT NULL AND ${t.scheduledFireKey} IS NULL)
-        OR (${t.source} = 'scheduled' AND ${t.channelSessionId} IS NULL AND ${t.scheduledFireKey} IS NOT NULL)
-        OR (${t.source} = 'pipeline' AND ${t.channelSessionId} IS NULL AND ${t.scheduledFireKey} IS NOT NULL)`,
+        OR (${t.source} <> 'user' AND ${t.channelSessionId} IS NULL AND ${t.scheduledFireKey} IS NOT NULL)`,
     ),
   ],
 );

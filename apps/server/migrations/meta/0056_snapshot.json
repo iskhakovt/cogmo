@@ -1,5 +1,5 @@
 {
-  "id": "eaed1fc0-1ad3-40ad-bf9e-72805ced01fc",
+  "id": "2a6ceb2e-0d52-414b-8168-e2eafa45be22",
   "prevId": "71b38e62-114e-4e0e-b920-59e8b813298d",
   "version": "7",
   "dialect": "postgresql",
@@ -3905,7 +3905,7 @@
       "checkConstraints": {
         "chk_inbound_source_session": {
           "name": "chk_inbound_source_session",
-          "value": "(\"inbound_messages\".\"source\" = 'user' AND \"inbound_messages\".\"channel_session_id\" IS NOT NULL AND \"inbound_messages\".\"scheduled_fire_key\" IS NULL)\n        OR (\"inbound_messages\".\"source\" = 'scheduled' AND \"inbound_messages\".\"channel_session_id\" IS NULL AND \"inbound_messages\".\"scheduled_fire_key\" IS NOT NULL)"
+          "value": "(\"inbound_messages\".\"source\" = 'user' AND \"inbound_messages\".\"channel_session_id\" IS NOT NULL AND \"inbound_messages\".\"scheduled_fire_key\" IS NULL)\n        OR (\"inbound_messages\".\"source\" <> 'user' AND \"inbound_messages\".\"channel_session_id\" IS NULL AND \"inbound_messages\".\"scheduled_fire_key\" IS NOT NULL)"
         }
       },
       "isRLSEnabled": false
@@ -4270,7 +4270,7 @@
     "public.inbound_message_source": {
       "name": "inbound_message_source",
       "schema": "public",
-      "values": ["user", "scheduled"]
+      "values": ["user", "scheduled", "pipeline"]
     }
   },
   "schemas": {},
