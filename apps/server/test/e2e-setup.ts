@@ -22,6 +22,9 @@ let mock: LLMock | null = null;
  */
 const E2E_IMAGE_FALLBACK = "cogmo-e2e";
 
+/** Ceiling on the local image build. See `bakeAppImage`. */
+const BAKE_TIMEOUT_MS = 20 * 60_000;
+
 /**
  * Build the app image through the same bake file CI uses, so both tiers build
  * from one definition of what goes into it. `--load` imports the result into
@@ -45,19 +48,41 @@ async function bakeAppImage(): Promise<void> {
       ["buildx", "bake", "--file", "docker-bake.hcl", "--load", "cogmo-e2e"],
       { cwd: repoRoot(), stdio: "inherit" },
     );
+
+    // Nothing else bounds this: `globalSetup` has no timeout of its own, and a
+    // BuildKit stall or a registry that accepts the connection and then goes
+    // quiet leaves the child alive with no output. Without a deadline that is
+    // an indefinitely hung `pnpm test:e2e`. Generous enough for a cold build of
+    // every stage on a slow link; the point is to fail loudly, not to be tight.
+    const deadline = setTimeout(() => {
+      bake.kill("SIGTERM");
+      reject(new Error(`\`docker buildx bake cogmo-e2e\` exceeded ${BAKE_TIMEOUT_MS}ms`));
+    }, BAKE_TIMEOUT_MS);
+    // The kill above makes `close` fire with SIGTERM; the promise has already
+    // settled by then, so that rejection is dropped and the deadline message
+    // is the one the caller sees.
+    const settle = (finish: () => void) => {
+      clearTimeout(deadline);
+      finish();
+    };
+
     bake.on("error", (err) =>
-      reject(
-        new Error(
-          `could not run \`docker buildx bake\` — is the docker CLI on PATH? (${err.message})`,
+      settle(() =>
+        reject(
+          new Error(
+            `could not run \`docker buildx bake\` — is the docker CLI on PATH? (${err.message})`,
+          ),
         ),
       ),
     );
     bake.on("close", (code, signal) =>
-      code === 0
-        ? resolve()
-        : reject(
-            new Error(`\`docker buildx bake cogmo-e2e\` failed (code ${code}, signal ${signal})`),
-          ),
+      settle(() =>
+        code === 0
+          ? resolve()
+          : reject(
+              new Error(`\`docker buildx bake cogmo-e2e\` failed (code ${code}, signal ${signal})`),
+            ),
+      ),
     );
   });
 }
