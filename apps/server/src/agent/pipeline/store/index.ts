@@ -47,7 +47,6 @@ export interface PipelineStore {
     version?: number,
   ): Promise<PipelineDefinitionRow | undefined>;
 
-  /** All definition rows for a user, name ASC then version DESC. */
   /**
    * The active version for `(userId, name)`, or undefined when no version of
    * that name is active. Runs start from this row and pin its id.
@@ -58,6 +57,7 @@ export interface PipelineStore {
     name: string,
   ): Promise<PipelineDefinitionRow | undefined>;
 
+  /** All definition rows for a user, name ASC then version DESC. */
   listDefinitions(tx: Transaction, userId: string): Promise<readonly PipelineDefinitionRow[]>;
 
   /**

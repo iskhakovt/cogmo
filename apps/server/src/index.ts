@@ -89,6 +89,7 @@ import { SkillRunnerImpl } from "./skills/runner.js";
 import { registerSkillTool, SKILLS_PROMPT_GUIDANCE } from "./skills/skills-tool.js";
 import { DrizzleSkillStore } from "./skills/store/index.js";
 import { DEFAULT_RESOURCE_LIMITS as SKILLS_DEFAULT_RESOURCE_LIMITS } from "./skills/worker-sysbox/host.js";
+import { adapterModules } from "./transport/adapters/index.js";
 import { WebStreamRegistry } from "./transport/adapters/web/stream-registry.js";
 import type { AttachmentStore } from "./transport/attachment-store.js";
 import { createAttachmentStore } from "./transport/attachment-store.js";
@@ -1175,6 +1176,9 @@ export async function bootstrapRuntime(
     voiceResolver,
     pipelineStore: core.pipelineStore,
     pipelineRunStore: core.pipelineRunStore,
+    pipelineGateChannelTypes: new Set(
+      adapterModules.flatMap((module) => (module.pipelineGates ? [module.channelType] : [])),
+    ),
   });
 
   // User-defined pipeline runs (design/pipelines.md → Execution Model): one

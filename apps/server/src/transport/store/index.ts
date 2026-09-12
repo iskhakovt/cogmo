@@ -63,9 +63,11 @@ export type PersistInboundParams =
       platformTs: Date;
     };
 
-/** `(channelId, platformAddress, receive)` tuple from `findReachableChannelsForUserProfile`. */
+/** `(channelId, channelType, platformAddress, receive)` tuple from `findReachableChannelsForUserProfile`. */
 export interface ReachableChannel {
   channelId: string;
+  /** `channels.type` — lets callers require a channel with a given capability. */
+  channelType: string;
   platformAddress: string;
   receive: ChannelSessionReceive;
 }
@@ -575,7 +577,12 @@ export class DrizzleTransportStore implements TransportStore {
     conversationId: string,
     afterId: string | null,
   ): Promise<ReadonlyArray<{ id: string; content: InboundContent; source: InboundMessageSource }>> {
-    const conditions = [eq(inboundMessages.conversationId, conversationId)];
+    // Pipeline-stage prompts are consumed by the stage runner, never by a
+    // chat turn — batching one would replay the stage as chat input.
+    const conditions = [
+      eq(inboundMessages.conversationId, conversationId),
+      ne(inboundMessages.source, "pipeline"),
+    ];
     if (afterId) {
       conditions.push(gt(inboundMessages.id, afterId));
     }
@@ -1043,11 +1050,13 @@ export class DrizzleTransportStore implements TransportStore {
     return tx
       .selectDistinctOn([channelSessions.channelId, channelSessions.platformAddress], {
         channelId: channelSessions.channelId,
+        channelType: channels.type,
         platformAddress: channelSessions.platformAddress,
         receive: channelSessions.receive,
       })
       .from(channelSessions)
       .innerJoin(conversations, eq(conversations.id, channelSessions.conversationId))
+      .innerJoin(channels, eq(channels.id, channelSessions.channelId))
       .where(
         and(
           eq(conversations.userId, userId),

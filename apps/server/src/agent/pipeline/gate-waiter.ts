@@ -1,7 +1,9 @@
 /**
  * Inngest function: sleeps out a gate checkpoint's timeout and resolves it
- * with the envelope's `onTimeout` action. Cancelled by `pipeline/gate.resolved`
- * on the same `gateKey` — a keyboard tap that lands first wakes nothing.
+ * with the envelope's `onTimeout` action. Cancelled by
+ * `pipeline/gate.settled` on the same `gateKey` — emitted only once a
+ * resolution has committed, so a tap whose resolution fails leaves this
+ * timeout armed.
  *
  * `remind` sleeps one full timeout per reminder, nudges the run's
  * conversation, and after the last reminder sleeps once more before applying
@@ -20,6 +22,7 @@ import {
   type PipelineGatePendingData,
   pipelineGatePending,
   pipelineGateResolved,
+  pipelineGateSettled,
 } from "../../inngest/events.js";
 import type { DeliveryRouter } from "../../transport/delivery-router.js";
 
@@ -44,7 +47,7 @@ export function createPipelineGateWaiter(deps: PipelineGateWaiterDeps) {
       id: "pipeline-gate-waiter",
       triggers: [pipelineGatePending],
       idempotency: "event.data.gateKey",
-      cancelOn: [{ event: pipelineGateResolved, match: "data.gateKey" }],
+      cancelOn: [{ event: pipelineGateSettled, match: "data.gateKey" }],
     },
     async ({ event, step }) => {
       const { runId, gateKey, conversationId, pipelineName, stageId, timeoutMs, onTimeout } =
@@ -65,7 +68,7 @@ export function createPipelineGateWaiter(deps: PipelineGateWaiterDeps) {
       const decision = timeoutDecision(onTimeout);
       await step.sendEvent(
         "emit-timeout-resolution",
-        pipelineGateResolved.create({ runId, gateKey, decision }),
+        pipelineGateResolved.create({ runId, gateKey, conversationId, decision }),
       );
       return { gateKey, decision };
     },

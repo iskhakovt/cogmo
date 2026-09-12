@@ -2,8 +2,8 @@ import { InngestTestEngine } from "@inngest/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { inngest } from "../../inngest/client.js";
-import { pipelineStageDue } from "../../inngest/events.js";
-import { fakeRunInTx, spyOnInngestSend } from "../../test/factories.js";
+import { pipelineStageDue, responseReady } from "../../inngest/events.js";
+import { fakeRunInTx, invokeInngestOnFailure, spyOnInngestSend } from "../../test/factories.js";
 import type { AgenticStageOutcome } from "./run-agentic-stage.js";
 import { createPipelineStageRunner } from "./stage-runner.js";
 import type { PipelineRunStore } from "./store/index.js";
@@ -51,9 +51,23 @@ function snapshot(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function stageDue(stageId: string, iteration = 0) {
-  return { name: "pipeline/stage.due" as const, data: { runId: RUN_ID, stageId, iteration } };
+function stageDue(stageId: string, iteration = 0, originConversationId?: string) {
+  return {
+    name: "pipeline/stage.due" as const,
+    data: {
+      runId: RUN_ID,
+      stageId,
+      iteration,
+      ...(originConversationId !== undefined && { originConversationId }),
+    },
+  };
 }
+
+type FailureCtx = {
+  event: { data: { event: { data: { runId: string; stageId: string; iteration: number } } } };
+  error: Error;
+  step: { run: (id: string, fn: () => unknown) => unknown };
+};
 
 function harness(outcome?: AgenticStageOutcome) {
   const runStore = mock<PipelineRunStore>();
@@ -264,5 +278,76 @@ describe("createPipelineStageRunner", () => {
     });
 
     expect(result).toEqual({ status: "failed", reason: "wait stages are not supported yet" });
+  });
+
+  it("parks a run's first stage on the starting chat turn before running it", async () => {
+    // `executeStep` stops at the wait, which is never resolved here: the stage
+    // must not start while the turn that launched the run is still streaming
+    // its reply. (Memoizing the wait doesn't work under InngestTestEngine —
+    // the SDK rejects the mocked event against the trigger schema — and the
+    // resumed path is the same code the no-origin test below runs.)
+    const { fn, executeAgenticStage } = harness();
+    const t = new InngestTestEngine({
+      function: fn,
+      events: [stageDue("draft", 0, "conv-chat")],
+    });
+
+    const { ctx } = await t.executeStep("wait-for-origin-turn", {
+      steps: [{ id: "load-run", handler: () => snapshot() }],
+    });
+
+    expect(ctx.step.waitForEvent).toHaveBeenCalledWith("wait-for-origin-turn", {
+      event: responseReady,
+      timeout: "30s",
+      if: 'async.data.conversationId == "conv-chat"',
+    });
+    expect(executeAgenticStage).not.toHaveBeenCalled();
+  });
+
+  it("does not wait for a turn on later stages or runs started without one", async () => {
+    const { fn, runStore } = harness();
+    runStore.completeRun.mockResolvedValue({ kind: "advanced" });
+    const t = new InngestTestEngine({ function: fn, events: [stageDue("build", 0, "conv-chat")] });
+
+    const { ctx } = await t.execute({
+      steps: [{ id: "load-run", handler: () => snapshot({ currentStage: "build" }) }],
+    });
+
+    expect(ctx.step.waitForEvent).not.toHaveBeenCalled();
+  });
+
+  it("onFailure fails the run with the error class and tells the conversation", async () => {
+    const { fn, runStore, notifyConversation } = harness();
+    runStore.failRun.mockResolvedValue({ kind: "failed", conversationId: "conv-1" });
+
+    await invokeInngestOnFailure<FailureCtx>(fn, {
+      event: { data: { event: { data: { runId: RUN_ID, stageId: "draft", iteration: 0 } } } },
+      error: new TypeError("Failed query: insert into messages ..."),
+      step: { run: (_id, body) => body() },
+    });
+
+    // The class only: messages can carry query text or payloads.
+    expect(runStore.failRun).toHaveBeenCalledWith(
+      expect.anything(),
+      RUN_ID,
+      'stage "draft" failed (TypeError)',
+    );
+    expect(notifyConversation).toHaveBeenCalledWith(
+      "conv-1",
+      '❌ The pipeline run failed at stage "draft" and has stopped.',
+    );
+  });
+
+  it("onFailure stays quiet for a run that was already terminal", async () => {
+    const { fn, runStore, notifyConversation } = harness();
+    runStore.failRun.mockResolvedValue({ kind: "already_terminal", status: "cancelled" });
+
+    await invokeInngestOnFailure<FailureCtx>(fn, {
+      event: { data: { event: { data: { runId: RUN_ID, stageId: "draft", iteration: 0 } } } },
+      error: new Error("boom"),
+      step: { run: (_id, body) => body() },
+    });
+
+    expect(notifyConversation).not.toHaveBeenCalled();
   });
 });

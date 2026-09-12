@@ -40,6 +40,7 @@ export type PipelinesError =
   | { kind: "not_active"; name: string }
   | { kind: "unsupported_features"; name: string; features: ReadonlyArray<string> }
   | { kind: "no_reachable_channel" }
+  | { kind: "no_gate_channel" }
   | { kind: "runs_unavailable" };
 
 export interface DefinePipelineResult {
@@ -100,7 +101,12 @@ export interface PipelinesServiceDeps {
    * setups that exercise only definitions); `start` then returns
    * `runs_unavailable`.
    */
-  run?: { deps: StartPipelineRunDeps; profileId: string };
+  run?: {
+    deps: StartPipelineRunDeps;
+    profileId: string;
+    /** The conversation this service's turn belongs to — the run's origin. */
+    originConversationId?: string;
+  };
 }
 
 export function createPipelinesService(deps: PipelinesServiceDeps): PipelinesService {
@@ -215,6 +221,9 @@ export function createPipelinesService(deps: PipelinesServiceDeps): PipelinesSer
         profileId: deps.run.profileId,
         name: args.name,
         idempotencyKey: args.idempotencyKey,
+        ...(deps.run.originConversationId !== undefined && {
+          originConversationId: deps.run.originConversationId,
+        }),
       });
       if (started.isErr()) return err(started.error);
       log.info(

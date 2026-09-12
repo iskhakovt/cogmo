@@ -174,4 +174,9 @@ export interface AdapterModule {
   setup: (deps: AdapterDeps) => Promise<AdapterSetupResult>;
   /** Convert canonical markdown to channel-specific format. Undefined = identity (raw markdown). */
   renderOutput?: (markdown: string) => RenderedMessage;
+  /**
+   * The adapter posts pipeline gate keyboards (`pipeline/gate.pending`), so a
+   * run with checkpoints can reach the user through a channel of this type.
+   */
+  pipelineGates?: true;
 }

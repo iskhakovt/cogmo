@@ -24,10 +24,16 @@ const UNITS: ReadonlyArray<readonly [ms: number, suffix: string]> = [
   [60_000, "m"],
 ];
 
-/** Largest whole unit of the timeout, the same grammar the definition was written in. */
+/**
+ * The timeout in the definition's own grammar: the largest unit it divides
+ * evenly, otherwise the largest unit it reaches with one decimal place
+ * (minutes for anything shorter), so "4.1m" and "0.5m" read back as written.
+ */
 export function formatGateTimeout(ms: number): string {
-  const unit = UNITS.find(([size]) => ms % size === 0) ?? [60_000, "m"];
-  return `${Math.round(ms / unit[0])}${unit[1]}`;
+  const whole = UNITS.find(([size]) => ms >= size && ms % size === 0);
+  if (whole) return `${ms / whole[0]}${whole[1]}`;
+  const [size, suffix] = UNITS.find(([unit]) => ms >= unit) ?? [60_000, "m"];
+  return `${Number((ms / size).toFixed(1))}${suffix}`;
 }
 
 export function buildPipelineGateText(event: PipelineGatePendingData): string {
@@ -63,7 +69,7 @@ export async function postPipelineGateKeyboard(args: {
 
   try {
     await sendMessage(Number(session.platformAddress), buildPipelineGateText(event), {
-      reply_markup: buildPipelineGateKeyboard(event.runId),
+      reply_markup: buildPipelineGateKeyboard(event.runId, event.gateKey),
     });
     return { posted: true };
   } catch (err) {

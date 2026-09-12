@@ -1,13 +1,14 @@
 /**
  * `Transport.pipelines.resolveGate` — the pipeline gate keyboard's entry
- * point. Identity against the pinned definition's owner, the parked-gate
- * check, the gate key built from the run row, and the emitted decision are
- * the contracts; the run store and Inngest client are mocked.
+ * point. Identity before existence, the gate token against the gate the run
+ * is actually parked on, and the emitted decision are the contracts; the run
+ * store and Inngest client are mocked.
  */
 
 import type { Inngest } from "inngest";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { gateToken } from "../agent/pipeline/gate-keyboard.js";
 import type {
   PipelineRunRow,
   PipelineRunStore,
@@ -15,7 +16,7 @@ import type {
 } from "../agent/pipeline/store/index.js";
 import { validPipelineDefinition } from "../agent/pipeline/test-fixtures.js";
 import type { Transactor } from "../db/index.js";
-import { inboundArrived } from "../inngest/events.js";
+import { inboundArrived, pipelineGateKey } from "../inngest/events.js";
 import { expectDefined } from "../test/assertions.js";
 import { mockAgentStore, mockTransportStore } from "../test/factories.js";
 import type { AttachmentStore } from "./attachment-store.js";
@@ -29,6 +30,7 @@ const OTHER_HANDLE = "tg-other";
 const OWNER_ID = "019d0000-0000-7000-8000-000000000001";
 const OTHER_ID = "019d0000-0000-7000-8000-000000000002";
 const RUN_ID = "019d0000-0000-7000-8000-0000000000aa";
+const PLAN_GATE_TOKEN = gateToken(pipelineGateKey(RUN_ID, "plan-gate", 0));
 
 function loaded(overrides: Partial<PipelineRunRow> = {}): PipelineRunWithDefinition {
   return {
@@ -96,7 +98,12 @@ describe("Transport.pipelines.resolveGate", () => {
       runStore.getRunWithDefinition.mockResolvedValue(loaded());
       const { transport, send } = makeTransport({ runStore });
 
-      const result = await transport.pipelines.resolveGate(RUN_ID, action, OWNER_HANDLE);
+      const result = await transport.pipelines.resolveGate(
+        RUN_ID,
+        PLAN_GATE_TOKEN,
+        action,
+        OWNER_HANDLE,
+      );
 
       expect(result._unsafeUnwrap()).toEqual({
         runId: RUN_ID,
@@ -107,7 +114,12 @@ describe("Transport.pipelines.resolveGate", () => {
       const sent = expectDefined(send.mock.calls[0], "send call")[0];
       expect(sent).toMatchObject({
         name: "pipeline/gate.resolved",
-        data: { runId: RUN_ID, gateKey: `${RUN_ID}:plan-gate:0`, decision },
+        data: {
+          runId: RUN_ID,
+          gateKey: `${RUN_ID}:plan-gate:0`,
+          conversationId: "conv-1",
+          decision,
+        },
       });
       // Not bus-deduped: a tap racing the gate's timeout must reach the
       // resolver so its conditional transition can pick the winner.
@@ -115,18 +127,26 @@ describe("Transport.pipelines.resolveGate", () => {
     },
   );
 
-  it("builds the gate key from the run's current stage and iteration, not the tap", async () => {
+  it("refuses a keyboard from an earlier gate of the same run, without emitting", async () => {
+    // The run is parked at a later gate; the tap comes from the plan gate's
+    // leftover buttons.
     const runStore = mock<PipelineRunStore>();
-    runStore.getRunWithDefinition.mockResolvedValue(
-      loaded({ currentStage: "sign-off", iteration: 2 }),
-    );
+    runStore.getRunWithDefinition.mockResolvedValue(loaded({ currentStage: "sign-off" }));
     const { transport, send } = makeTransport({ runStore });
 
-    await transport.pipelines.resolveGate(RUN_ID, "approve", OWNER_HANDLE);
+    const result = await transport.pipelines.resolveGate(
+      RUN_ID,
+      PLAN_GATE_TOKEN,
+      "approve",
+      OWNER_HANDLE,
+    );
 
-    expect(expectDefined(send.mock.calls[0], "send call")[0]).toMatchObject({
-      data: { gateKey: `${RUN_ID}:sign-off:2` },
+    expect(result._unsafeUnwrapErr()).toEqual({
+      code: "pipeline_gate_not_pending",
+      runId: RUN_ID,
+      status: "waiting_gate",
     });
+    expect(send).not.toHaveBeenCalled();
   });
 
   it("rejects a tapper who does not own the pipeline, without emitting", async () => {
@@ -134,11 +154,31 @@ describe("Transport.pipelines.resolveGate", () => {
     runStore.getRunWithDefinition.mockResolvedValue(loaded());
     const { transport, send } = makeTransport({ runStore });
 
-    for (const handle of [OTHER_HANDLE, "tg-unknown"]) {
-      const result = await transport.pipelines.resolveGate(RUN_ID, "approve", handle);
-      expect(result._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
-    }
+    const result = await transport.pipelines.resolveGate(
+      RUN_ID,
+      PLAN_GATE_TOKEN,
+      "approve",
+      OTHER_HANDLE,
+    );
+
+    expect(result._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unknown tapper before revealing whether the run exists", async () => {
+    const runStore = mock<PipelineRunStore>();
+    runStore.getRunWithDefinition.mockResolvedValue(undefined);
+    const { transport } = makeTransport({ runStore });
+
+    const result = await transport.pipelines.resolveGate(
+      RUN_ID,
+      PLAN_GATE_TOKEN,
+      "approve",
+      "tg-unknown",
+    );
+
+    expect(result._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
+    expect(runStore.getRunWithDefinition).not.toHaveBeenCalled();
   });
 
   it("answers a late tap with the run's actual status, without emitting", async () => {
@@ -146,7 +186,12 @@ describe("Transport.pipelines.resolveGate", () => {
     runStore.getRunWithDefinition.mockResolvedValue(loaded({ status: "cancelled" }));
     const { transport, send } = makeTransport({ runStore });
 
-    const result = await transport.pipelines.resolveGate(RUN_ID, "approve", OWNER_HANDLE);
+    const result = await transport.pipelines.resolveGate(
+      RUN_ID,
+      PLAN_GATE_TOKEN,
+      "approve",
+      OWNER_HANDLE,
+    );
 
     expect(result._unsafeUnwrapErr()).toEqual({
       code: "pipeline_gate_not_pending",
@@ -156,12 +201,17 @@ describe("Transport.pipelines.resolveGate", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
-  it("reports an unknown run", async () => {
+  it("reports an unknown run to a known user", async () => {
     const runStore = mock<PipelineRunStore>();
     runStore.getRunWithDefinition.mockResolvedValue(undefined);
     const { transport } = makeTransport({ runStore });
 
-    const result = await transport.pipelines.resolveGate(RUN_ID, "cancel", OWNER_HANDLE);
+    const result = await transport.pipelines.resolveGate(
+      RUN_ID,
+      PLAN_GATE_TOKEN,
+      "cancel",
+      OWNER_HANDLE,
+    );
 
     expect(result._unsafeUnwrapErr()).toEqual({ code: "pipeline_run_not_found", runId: RUN_ID });
   });
@@ -169,7 +219,12 @@ describe("Transport.pipelines.resolveGate", () => {
   it("returns pipelines_disabled when no run store is wired", async () => {
     const { transport, send } = makeTransport();
 
-    const result = await transport.pipelines.resolveGate(RUN_ID, "approve", OWNER_HANDLE);
+    const result = await transport.pipelines.resolveGate(
+      RUN_ID,
+      PLAN_GATE_TOKEN,
+      "approve",
+      OWNER_HANDLE,
+    );
 
     expect(result._unsafeUnwrapErr()).toEqual({ code: "pipelines_disabled" });
     expect(send).not.toHaveBeenCalled();

@@ -1628,16 +1628,21 @@ describe("telegram adapter", () => {
       expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Denied" });
     });
 
-    it("pipeline gate: approve → pipelines.resolveGate, edit clears keyboard, answers toast", async () => {
+    it("pipeline gate: approve → pipelines.resolveGate with the token, edit clears keyboard, answers toast", async () => {
       const { transport } = await createAdapter();
-      const ctx = makeCallbackCtx(`pipe:${TASK_ID}:approve`);
+      const ctx = makeCallbackCtx(`pipe:${TASK_ID}:approve:0a1b2c3d`);
 
       const handler = handlers.get(`callbackQuery:${PIPELINE_GATE_CALLBACK_REGEX.source}`);
       await handler(ctx);
 
-      expect(transport.pipelines.resolveGate).toHaveBeenCalledWith(TASK_ID, "approve", "111");
+      expect(transport.pipelines.resolveGate).toHaveBeenCalledWith(
+        TASK_ID,
+        "0a1b2c3d",
+        "approve",
+        "111",
+      );
       expect(ctx.editMessageText).toHaveBeenCalledWith(
-        '✅ Approved — pipeline "issue-to-pr" continues past "approve".',
+        '✅ Approval sent for checkpoint "approve" of pipeline "issue-to-pr".',
         { reply_markup: { inline_keyboard: [] } },
       );
       expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Approved" });
@@ -1645,13 +1650,18 @@ describe("telegram adapter", () => {
 
     it("pipeline gate: cancel → pipelines.resolveGate with cancel", async () => {
       const { transport } = await createAdapter();
-      const ctx = makeCallbackCtx(`pipe:${TASK_ID}:cancel`);
+      const ctx = makeCallbackCtx(`pipe:${TASK_ID}:cancel:0a1b2c3d`);
 
       const handler = handlers.get(`callbackQuery:${PIPELINE_GATE_CALLBACK_REGEX.source}`);
       await handler(ctx);
 
-      expect(transport.pipelines.resolveGate).toHaveBeenCalledWith(TASK_ID, "cancel", "111");
-      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Cancelled" });
+      expect(transport.pipelines.resolveGate).toHaveBeenCalledWith(
+        TASK_ID,
+        "0a1b2c3d",
+        "cancel",
+        "111",
+      );
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Cancelling" });
     });
 
     it("registers the pipeline gate poster on pipeline/gate.pending when gate deps are supplied", async () => {

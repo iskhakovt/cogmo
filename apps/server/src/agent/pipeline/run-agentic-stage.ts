@@ -3,13 +3,13 @@
  * run's own conversation.
  *
  * Built from the same primitives `handle-message` composes — `loadTurnHistory`,
- * `composeTurnTools`, `createService`, `compactMessages`,
+ * `composeTurnTools`, `buildTurnService`, `compactMessages`,
  * `runStreamingAgentLoop`, `insertMessages` — under stage policy instead of
  * chat policy: no debounce, batching, cooldown or voice; the stage's prose
  * and earlier artifacts as the user message; the stage allowlist narrowing
  * the profile's tools; a degraded loop failing the stage rather than
- * apologising in chat. Service assembly below mirrors `handle-message`'s; the
- * scope and ACL decisions themselves live in `createService`.
+ * apologising in chat. Service assembly and the in-turn retry policy are the
+ * shared `buildTurnService` / `createTurnStepRunner`.
  *
  * Replay contract: every read the turn depends on and every side effect runs
  * in a step keyed on SDK-local state, so a re-invocation plans the same steps
@@ -17,12 +17,13 @@
  * `source='pipeline'` inbound keyed `pipeline:<runId>:<stageId>:<iteration>`;
  * its id is the messages' cursor and the loop's `turnKey`.
  *
- * Known residual: `handle-message` serializes on conversation id within its
- * own function only, so a message the user sends into the run conversation
+ * The stage's rows stay out of the chat pipeline's cursor: chat reads skip
+ * `source='pipeline'` inbounds and the assistant rows cursored on them. Known
+ * residual: `handle-message` serializes on conversation id within its own
+ * function only, so a message the user sends into the run conversation
  * mid-stage runs a chat turn concurrently with this one.
  */
 
-import { NonRetriableError } from "inngest";
 import type { Logger } from "pino";
 import type { Transactor } from "../../db/index.js";
 import { inngest } from "../../inngest/client.js";
@@ -54,10 +55,12 @@ import type { ImageToolsLoader } from "../image-tools-loader.js";
 import type { AgentLoopResult, StepRunner, StreamingAgentLoopParams } from "../loop.js";
 import type { PromptSource } from "../prompt.js";
 import { createSchedulingService } from "../scheduling/scheduling-service.js";
-import { createService, type Service } from "../service.js";
+import type { Service } from "../service.js";
 import type { AgentStore } from "../store/index.js";
 import { buildSubAgentTools } from "../subagent/sub-agent-tool-builder.js";
 import type { ToolRegistry } from "../tools.js";
+import { buildTurnService } from "../turn-service.js";
+import { asNonRetriable } from "../turn-step-runner.js";
 import { extractStageArtifact } from "./extract-artifact.js";
 import type { StageArtifact, StageOutputs } from "./run-types.js";
 import { buildStagePrompt } from "./stage-prompt.js";
@@ -110,11 +113,6 @@ export type AgenticStageOutcome =
 
 export function stageInboundKey(runId: string, stageId: string, iteration: number): string {
   return `pipeline:${runId}:${stageId}:${iteration}`;
-}
-
-export function asNonRetriable(err: unknown): NonRetriableError {
-  const message = err instanceof Error ? err.message : String(err);
-  return new NonRetriableError(message, { cause: err });
 }
 
 async function resolveOrFail(
@@ -207,47 +205,30 @@ export async function runAgenticStage(
   );
   const toolDefs = stageTools.definitions();
 
-  const restrictedClassNames = await deps
-    .runInTx((tx) => deps.agentStore.listProfileClasses(tx, ctx.userId))
-    .then((classes) => classes.filter((c) => c.restricted).map((c) => c.name));
-  const service = createService(
-    deps.memory,
-    ctx.userId,
-    profile?.memoryScope ?? null,
-    profile?.profileClass ?? null,
-    restrictedClassNames,
-    deps.fileService,
+  const service = await buildTurnService(
     {
-      get: () => deps.runInTx((tx) => deps.agentStore.getCoreMemoryBlocks(tx, ctx.userId)),
-      update: (key, content) =>
-        deps.runInTx((tx) =>
-          deps.agentStore.upsertCoreMemoryBlock(tx, { userId: ctx.userId, key, content }),
-        ),
-    },
-    async (content, opts) => {
-      await deps.runInTx((tx) =>
-        deps.agentStore.stagePendingMemory(tx, {
-          userId: ctx.userId,
-          profileId: profile?.id ?? null,
-          content,
-          ...(opts?.context !== undefined && { context: opts.context }),
-          source: "live_retain",
-        }),
-      );
-    },
-    deps.codingServiceFactory?.(conversationId),
-    deps.skillRunner
-      ? createSkillsService({ runner: deps.skillRunner, inngest, conversationId })
-      : undefined,
-    createSchedulingService({
       runInTx: deps.runInTx,
       agentStore: deps.agentStore,
+      memory: deps.memory,
+      fileService: deps.fileService,
+    },
+    {
       userId: ctx.userId,
-      profileId: ctx.profileId,
-      defaultTimezone: deps.userTimezone,
-    }),
-    // No pipelines namespace: a stage cannot define, activate or start runs.
-    undefined,
+      profile,
+      coding: deps.codingServiceFactory?.(conversationId),
+      skills: deps.skillRunner
+        ? createSkillsService({ runner: deps.skillRunner, inngest, conversationId })
+        : undefined,
+      scheduling: createSchedulingService({
+        runInTx: deps.runInTx,
+        agentStore: deps.agentStore,
+        userId: ctx.userId,
+        profileId: ctx.profileId,
+        defaultTimezone: deps.userTimezone,
+      }),
+      // No pipelines namespace: a stage cannot define, activate or start runs.
+      pipelines: undefined,
+    },
   );
 
   const systemPrompt = await steps.run("assemble-prompt", async () => {

@@ -666,6 +666,13 @@ export const pipelineStageDue = eventType("pipeline/stage.due", {
     runId: z.string(),
     stageId: z.string(),
     iteration: z.number().int().nonnegative(),
+    /**
+     * The chat conversation whose turn started the run — set on the first
+     * stage only. The runner waits (bounded) for that turn's
+     * `response/ready` so the stage's output doesn't stream into the same
+     * chat while the starting reply is still streaming.
+     */
+    originConversationId: z.string().optional(),
   }),
 });
 
@@ -734,7 +741,7 @@ export type PipelineGateDecision = (typeof pipelineGateDecisions)[number];
  * A gate checkpoint was resolved — by a keyboard tap (`approved` /
  * `cancelled`) or by the waiter's timeout action. Consumed by
  * `pipeline-gate-resolver`, which moves the run out of `waiting_gate` and
- * advances or cancels it, and cancels the waiter via `cancelOn`.
+ * advances or cancels it, then emits `pipeline/gate.settled`.
  *
  * Deliberately NOT bus-deduped on the gate key: a tap and a timeout racing
  * for the same gate carry different decisions, and the resolver's
@@ -746,11 +753,26 @@ export const pipelineGateResolved = eventType("pipeline/gate.resolved", {
   schema: z.object({
     runId: z.string(),
     gateKey: z.string(),
+    /** The run's conversation — where the resolver reports a failure or a late tap. */
+    conversationId: z.string(),
     decision: z.enum(pipelineGateDecisions),
   }),
 });
 
 export type PipelineGateResolvedData = z.infer<typeof pipelineGateResolved.schema>;
+
+/**
+ * A gate resolution has been applied (or found already applied) by
+ * `pipeline-gate-resolver`. Cancels the gate's waiter via `cancelOn`. Keyed
+ * on commit rather than on `pipeline/gate.resolved`, so a resolution whose
+ * step fails leaves the waiter — and with it the gate's timeout — alive.
+ */
+export const pipelineGateSettled = eventType("pipeline/gate.settled", {
+  schema: z.object({
+    runId: z.string(),
+    gateKey: z.string(),
+  }),
+});
 
 /**
  * Direct channel — external clients emit this to send messages.

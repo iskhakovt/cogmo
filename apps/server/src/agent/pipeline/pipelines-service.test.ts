@@ -192,7 +192,7 @@ describe("PipelinesService.start", () => {
     runStore.getRunByIdempotencyKey.mockResolvedValue(undefined);
     agentStore.createConversation.mockResolvedValue({ id: "conv-run" });
     transportStore.findReachableChannelsForUserProfile.mockResolvedValue([
-      { channelId: "tg", platformAddress: "42", receive: "routed" },
+      { channelId: "tg", channelType: "telegram", platformAddress: "42", receive: "routed" },
     ]);
     runStore.insertOrRecoverRun.mockResolvedValue({
       kind: "new",
@@ -218,6 +218,7 @@ describe("PipelinesService.start", () => {
         agentStore,
         transportStore,
         inngest: { send },
+        gateChannelTypes: new Set(["telegram"]),
       },
       pipelineStore,
       send,
@@ -226,10 +227,17 @@ describe("PipelinesService.start", () => {
 
   it("starts the active version under the service's user and profile", async () => {
     const run = runDeps();
-    const service = createPipelinesService(makeDeps({ run: { deps: run.deps, profileId: "p-1" } }));
+    const service = createPipelinesService(
+      makeDeps({ run: { deps: run.deps, profileId: "p-1", originConversationId: "conv-chat" } }),
+    );
 
     const result = await service.start({ name: "issue-to-pr", idempotencyKey: "k1" });
 
+    expect(run.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ originConversationId: "conv-chat" }),
+      }),
+    );
     expect(result._unsafeUnwrap()).toMatchObject({
       runId: "run-1",
       conversationId: "conv-run",

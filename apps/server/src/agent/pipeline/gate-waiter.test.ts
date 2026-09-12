@@ -4,7 +4,7 @@ import { inngest } from "../../inngest/client.js";
 import {
   type PipelineGatePendingData,
   pipelineGatePending,
-  pipelineGateResolved,
+  pipelineGateSettled,
 } from "../../inngest/events.js";
 import { spyOnInngestSend } from "../../test/factories.js";
 import { createPipelineGateWaiter, reminderCount, timeoutDecision } from "./gate-waiter.js";
@@ -40,9 +40,10 @@ describe("pipeline gate waiter", () => {
     expect(fn.opts.id).toBe("pipeline-gate-waiter");
     expect(fn.opts.triggers).toEqual([pipelineGatePending]);
     expect(fn.opts.idempotency).toBe("event.data.gateKey");
-    // Keyed on the gate, not the run — resolving one gate must not cancel the
-    // waiter of a later gate in the same run.
-    expect(fn.opts.cancelOn).toEqual([{ event: pipelineGateResolved, match: "data.gateKey" }]);
+    // Keyed on the gate, not the run — settling one gate must not cancel the
+    // waiter of a later gate. And on settlement, not on the tap: a resolution
+    // that fails to apply must leave the timeout armed.
+    expect(fn.opts.cancelOn).toEqual([{ event: pipelineGateSettled, match: "data.gateKey" }]);
   });
 
   it.each([
@@ -79,7 +80,12 @@ describe("pipeline gate waiter", () => {
       "emit-timeout-resolution",
       expect.objectContaining({
         name: "pipeline/gate.resolved",
-        data: { runId: "run-1", gateKey: "run-1:plan-gate:0", decision: "timeout_abort" },
+        data: {
+          runId: "run-1",
+          gateKey: "run-1:plan-gate:0",
+          conversationId: "conv-1",
+          decision: "timeout_abort",
+        },
       }),
     );
   });

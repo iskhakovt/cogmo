@@ -173,6 +173,7 @@ describe("start_pipeline", () => {
       'loop on stage "implement", cron trigger',
     ],
     [{ kind: "no_reachable_channel" } as const, "No channel can reach the user"],
+    [{ kind: "no_gate_channel" } as const, "none of the user's reachable channels can show them"],
     [{ kind: "runs_unavailable" } as const, "aren't available"],
   ])("renders %o for the model", async (error, expected) => {
     const pipelines = mock<PipelinesService>();

@@ -1486,4 +1486,5 @@ export const telegramModule = {
   channelType,
   setup,
   renderOutput: renderTelegramHtml,
+  pipelineGates: true,
 } satisfies AdapterModule;

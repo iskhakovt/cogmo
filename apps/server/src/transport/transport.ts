@@ -6,6 +6,7 @@ import type { CodingStore } from "../agent/coding/store/index.js";
 import type { CompactConversationResult } from "../agent/conversation/compact-conversation.js";
 import { isCoreCompartment } from "../agent/evolution/memory-extraction-schema.js";
 import type { TriggerReflectionResult } from "../agent/evolution/trigger-reflection.js";
+import { gateToken } from "../agent/pipeline/gate-keyboard.js";
 import type { PipelineRunStore } from "../agent/pipeline/store/index.js";
 import type { AutoRecallMode } from "../agent/recall-gate.js";
 import type { ScheduledTaskSummary } from "../agent/scheduling/scheduling-service.js";
@@ -724,13 +725,17 @@ export interface Transport {
    */
   pipelines: {
     /**
-     * Emit `pipeline/gate.resolved` for the gate the run is parked on. The
-     * status check here is advisory — it gives a late tap a precise answer —
+     * Emit `pipeline/gate.resolved` for the gate the run is parked on, if
+     * `gateToken` names that gate — a button left over from an earlier gate
+     * of the same run is refused. The tapper is identified before the run is
+     * looked up, so an unknown tapper learns nothing about which runs exist.
+     * The status check here is advisory — it gives a late tap a precise answer —
      * while `pipeline-gate-resolver`'s conditional transition decides a tap
      * racing the gate's own timeout.
      */
     resolveGate(
       runId: string,
+      gateToken: string,
       action: "approve" | "cancel",
       tapperPlatformHandle: string,
     ): Promise<Result<{ runId: string; pipelineName: string; stageId: string }, TransportError>>;
@@ -2204,31 +2209,35 @@ export function createTransport(deps: {
     },
 
     pipelines: {
-      async resolveGate(runId, action, tapperPlatformHandle) {
+      async resolveGate(runId, token, action, tapperPlatformHandle) {
         if (!pipelineRunStore) return err({ code: "pipelines_disabled" as const });
         const checked = await runInTx(async (tx) => {
+          const tapper = await transportStore.resolveUser(tx, channelId, tapperPlatformHandle);
+          if (!tapper) return err({ code: "identity_rejected" as const });
           const loaded = await pipelineRunStore.getRunWithDefinition(tx, runId);
           if (!loaded) return err({ code: "pipeline_run_not_found" as const, runId });
-          const tapper = await transportStore.resolveUser(tx, channelId, tapperPlatformHandle);
-          if (!tapper || tapper.userId !== loaded.definition.userId) {
+          const { run, definition } = loaded;
+          if (tapper.userId !== definition.userId) {
             return err({ code: "identity_rejected" as const });
           }
-          const { run, definition } = loaded;
-          if (run.status !== "waiting_gate") {
+          const gateKey = pipelineGateKey(run.id, run.currentStage, run.iteration);
+          if (run.status !== "waiting_gate" || gateToken(gateKey) !== token) {
             return err({ code: "pipeline_gate_not_pending" as const, runId, status: run.status });
           }
           return ok({
-            gateKey: pipelineGateKey(run.id, run.currentStage, run.iteration),
+            gateKey,
+            conversationId: run.conversationId,
             pipelineName: definition.name,
             stageId: run.currentStage,
           });
         });
         if (checked.isErr()) return err(checked.error);
-        const { gateKey, pipelineName, stageId } = checked.value;
+        const { gateKey, conversationId, pipelineName, stageId } = checked.value;
         await inngest.send(
           pipelineGateResolved.create({
             runId,
             gateKey,
+            conversationId,
             decision: action === "approve" ? "approved" : "cancelled",
           }),
         );

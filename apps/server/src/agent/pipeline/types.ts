@@ -56,7 +56,9 @@ export function parseDurationMs(duration: string): number {
   if (multiplier === undefined) {
     throw new Error(`parseDurationMs: unknown unit in "${duration}"`);
   }
-  return Number.parseFloat(duration) * multiplier;
+  // Rounded: a decimal such as "4.1m" is not exact in floating point, and
+  // every consumer (event schemas, sleeps) wants whole milliseconds.
+  return Math.round(Number.parseFloat(duration) * multiplier);
 }
 
 /**

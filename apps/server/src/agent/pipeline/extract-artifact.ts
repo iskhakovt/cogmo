@@ -1,14 +1,18 @@
 /**
  * Convert an agentic stage's final reply into the typed artifact its
  * envelope declares. `text` is the reply itself. `json` is one tools-free
- * structured-output call against the compiler-emitted JSON Schema, checked
- * with ajv, retried once with the validation errors fed back — the same
- * repair shape as `chatTyped`, which can't be used directly because the
- * schema here is user-shaped JSON Schema, not a Zod type.
+ * call that restates the result as JSON matching the compiler-emitted JSON
+ * Schema, checked with ajv and retried once with the validation errors fed
+ * back — the same repair shape as `chatTyped`, which can't be used directly
+ * because the schema here is user-shaped JSON Schema, not a Zod type.
  *
- * The agent loop itself can't produce the JSON: `responseFormat` is mutually
- * exclusive with tools, and a stage that uses tools needs them until its
- * last iteration.
+ * The schema travels in the prompt, not as provider structured output:
+ * providers that enforce strict mode reject ordinary schemas (optional
+ * properties, open objects), and a user's definition is under no obligation
+ * to be strict-compatible. ajv is the authority on the result either way.
+ *
+ * The agent loop itself can't produce the JSON: a stage that uses tools
+ * needs them until its last iteration.
  */
 
 import { Ajv } from "ajv";
@@ -17,8 +21,6 @@ import type { LlmProvider } from "../../llm/provider.js";
 import type { Message } from "../../llm/types.js";
 import type { StageArtifact } from "./run-types.js";
 import type { StageOutput } from "./types.js";
-
-const ajv = new Ajv({ allErrors: true, strict: false });
 
 /** One initial attempt plus this many feedback retries. */
 const JSON_ARTIFACT_RETRIES = 1;
@@ -44,22 +46,23 @@ export async function extractStageArtifact(args: {
     return err({ kind: "artifact_invalid", detail: `unsupported output kind "${output.kind}"` });
   }
 
-  // Structured output takes an object schema at the top level. The compiler
-  // accepts any meta-schema-valid schema, so a non-object one is a definition
-  // this stage can never satisfy — fail it with the reason rather than send a
-  // request the provider rejects.
+  // The artifact is stored as an object map, so the schema must describe one.
   if (output.schema.type !== "object") {
     return err({
       kind: "artifact_invalid",
       detail: `output schema must have top-level "type": "object", got ${JSON.stringify(output.schema.type)}`,
     });
   }
-  const schema = { ...output.schema, type: "object" as const };
-  const validate = ajv.compile(schema);
+  // One Ajv per extraction: a shared instance caches every compiled schema by
+  // object identity and refuses a second schema registering the same `$id`.
+  const validate = new Ajv({ allErrors: true, strict: false }).compile(output.schema);
   const messages: Message[] = [
     {
       role: "user",
-      content: `Convert this pipeline stage result into JSON matching the required schema. Use only information present in the result.\n\n<result>\n${finalText}\n</result>`,
+      content:
+        "Convert this pipeline stage result into a JSON object matching the JSON Schema below. " +
+        "Use only information present in the result. Reply with the JSON object only.\n\n" +
+        `<schema>\n${JSON.stringify(output.schema)}\n</schema>\n\n<result>\n${finalText}\n</result>`,
     },
   ];
 
@@ -67,13 +70,8 @@ export async function extractStageArtifact(args: {
   for (let attempt = 0; attempt <= JSON_ARTIFACT_RETRIES; attempt++) {
     const response = await args.provider.chat({
       model: args.model,
-      system: "You extract structured data from text. Reply with the JSON object only.",
+      system: "You extract structured data from text. Reply with a single JSON object only.",
       messages,
-      responseFormat: {
-        type: "json_schema",
-        name: `stage_${args.stageId.replaceAll("-", "_")}`,
-        schema,
-      },
     });
     const text = response.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("");
 
@@ -91,16 +89,18 @@ export async function extractStageArtifact(args: {
       { role: "assistant", content: text },
       {
         role: "user",
-        content: `That JSON does not match the schema: ${lastDetail}. Reply with a corrected JSON object only.`,
+        content: `That does not match the schema: ${lastDetail}. Reply with a corrected JSON object only.`,
       },
     );
   }
   return err({ kind: "artifact_invalid", detail: lastDetail });
 }
 
+/** Parse a reply that may wrap its JSON object in a Markdown code fence. */
 function parseObject(text: string): Record<string, unknown> | null {
+  const fenced = /^\s*```(?:json)?\s*\n([\s\S]*?)\n?```\s*$/.exec(text);
   try {
-    const value: unknown = JSON.parse(text);
+    const value: unknown = JSON.parse(fenced?.[1] ?? text);
     if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
     return Object.fromEntries(Object.entries(value));
   } catch {

@@ -4679,8 +4679,9 @@ describe("handleLearned detail rendering", () => {
 
 describe("handlePipelineGateCallback", () => {
   const runId = "019d0000-0000-7000-8000-0000000000aa";
+  const token = "0a1b2c3d";
 
-  it("Approve resolves the gate and says the pipeline continues past the stage", async () => {
+  it("Approve resolves the gate with its token and says the approval was sent", async () => {
     const resolveGate = vi
       .fn()
       .mockResolvedValue(ok({ runId, pipelineName: "issue-to-pr", stageId: "approve" }));
@@ -4688,18 +4689,18 @@ describe("handlePipelineGateCallback", () => {
 
     const outcome = await handlePipelineGateCallback(
       transport,
-      { runId, action: "approve" },
+      { runId, action: "approve", token },
       "tg-1",
     );
 
-    expect(resolveGate).toHaveBeenCalledWith(runId, "approve", "tg-1");
+    expect(resolveGate).toHaveBeenCalledWith(runId, token, "approve", "tg-1");
     expect(outcome).toEqual({
-      editText: '✅ Approved — pipeline "issue-to-pr" continues past "approve".',
+      editText: '✅ Approval sent for checkpoint "approve" of pipeline "issue-to-pr".',
       toast: "Approved",
     });
   });
 
-  it("Cancel resolves the gate as cancelled and says where the run stopped", async () => {
+  it("Cancel resolves the gate as cancelled and says the cancellation was sent", async () => {
     const resolveGate = vi
       .fn()
       .mockResolvedValue(ok({ runId, pipelineName: "issue-to-pr", stageId: "approve" }));
@@ -4707,18 +4708,18 @@ describe("handlePipelineGateCallback", () => {
 
     const outcome = await handlePipelineGateCallback(
       transport,
-      { runId, action: "cancel" },
+      { runId, action: "cancel", token },
       "tg-1",
     );
 
-    expect(resolveGate).toHaveBeenCalledWith(runId, "cancel", "tg-1");
+    expect(resolveGate).toHaveBeenCalledWith(runId, token, "cancel", "tg-1");
     expect(outcome).toEqual({
-      editText: '❌ Pipeline "issue-to-pr" cancelled at "approve".',
-      toast: "Cancelled",
+      editText: '❌ Cancellation sent for checkpoint "approve" of pipeline "issue-to-pr".',
+      toast: "Cancelling",
     });
   });
 
-  it("a tap on an already-resolved checkpoint renders the not-pending error", async () => {
+  it("a tap on a resolved or superseded checkpoint renders the not-pending error", async () => {
     const transport = mockTransportDeep({
       pipelines: {
         resolveGate: vi
@@ -4729,7 +4730,7 @@ describe("handlePipelineGateCallback", () => {
 
     const outcome = await handlePipelineGateCallback(
       transport,
-      { runId, action: "approve" },
+      { runId, action: "approve", token },
       "tg-1",
     );
 
@@ -4744,7 +4745,7 @@ describe("handlePipelineGateCallback", () => {
 
     const outcome = await handlePipelineGateCallback(
       transport,
-      { runId, action: "cancel" },
+      { runId, action: "cancel", token },
       "tg-9",
     );
 

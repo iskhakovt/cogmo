@@ -43,8 +43,10 @@ describe("extractStageArtifact", () => {
     expect(provider.chat).not.toHaveBeenCalled();
   });
 
-  it("extracts a schema-valid json artifact via structured output", async () => {
-    const provider = providerReplying('{"title":"Fix login","hours":3}');
+  it("extracts a schema-valid json artifact from a prompted reply, without provider structured output", async () => {
+    // User-shaped schemas are not strict-mode compatible, so the schema rides
+    // in the prompt and ajv does the checking.
+    const provider = providerReplying('```json\n{"title":"Fix login","hours":3}\n```');
     const result = await extractStageArtifact({
       ...base,
       output: { kind: "json", schema: SCHEMA },
@@ -55,12 +57,22 @@ describe("extractStageArtifact", () => {
       value: { title: "Fix login", hours: 3 },
     });
     const params = expectDefined(provider.chat.mock.calls[0], "chat call")[0];
-    expect(params.responseFormat).toEqual({
-      type: "json_schema",
-      name: "stage_gather_context",
-      schema: SCHEMA,
-    });
+    expect(params.responseFormat).toBeUndefined();
     expect(params.tools).toBeUndefined();
+    expect(JSON.stringify(params.messages)).toContain('\\"required\\":[\\"title\\",\\"hours\\"]');
+  });
+
+  it("compiles a schema carrying an $id on every extraction", async () => {
+    const schema = { ...SCHEMA, $id: "issue-summary" };
+    for (let i = 0; i < 2; i++) {
+      const provider = providerReplying('{"title":"Fix login","hours":3}');
+      const result = await extractStageArtifact({
+        ...base,
+        output: { kind: "json", schema },
+        provider,
+      });
+      expect(result.isOk()).toBe(true);
+    }
   });
 
   it("retries once with the validation errors fed back", async () => {

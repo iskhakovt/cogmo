@@ -53,10 +53,11 @@ import { shouldSkipRecall } from "./recall-gate.js";
 import { synthesizeDegradedReply } from "./repair.js";
 import { createSchedulingService } from "./scheduling/scheduling-service.js";
 import type { Service } from "./service.js";
-import { createService } from "./service.js";
 import type { AgentStore } from "./store/index.js";
 import { buildSubAgentTools } from "./subagent/sub-agent-tool-builder.js";
 import type { ToolRegistry } from "./tools.js";
+import { buildTurnService } from "./turn-service.js";
+import { asNonRetriable, createTurnStepRunner } from "./turn-step-runner.js";
 
 export interface HandleMessageDeps {
   runInTx: Transactor;
@@ -138,6 +139,12 @@ export interface HandleMessageDeps {
    * `pipelineStore`; without it `start` returns `runs_unavailable`.
    */
   pipelineRunStore?: PipelineRunStore;
+  /**
+   * Channel types whose adapter posts pipeline gate keyboards. A pipeline
+   * with checkpoints only starts when one of the user's reachable channels
+   * is of such a type.
+   */
+  pipelineGateChannelTypes?: ReadonlySet<string>;
 }
 
 /**
@@ -719,33 +726,6 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         }),
       );
 
-      // Load the user's restricted profile-class set so the scoped service
-      // can fold in the fail-closed NOT leaf. Keyed on the conversation
-      // user (the bank owner), not `profile.userId` — an org profile
-      // (`profile.userId === null`) speaks for the conversation user, and
-      // restricted-class semantics follow the user's own registry. One
-      // extra round-trip per turn; table is small and indexed on user_id.
-      //
-      // FUTURE: deployments that have never used class restriction pay
-      // for this round-trip every turn for nothing. A per-user cache
-      // (invalidated by `setProfileClassRestricted` /
-      // `createProfileClass` / `deleteProfileClass`) would close that
-      // gap, but it's strictly more code than the round-trip costs at
-      // single-user scale — revisit when telemetry shows the read taking
-      // a meaningful slice of turn latency.
-      const restrictedClassNames = await deps
-        .runInTx((tx) => agentStore.listProfileClasses(tx, userId))
-        .then((classes) => classes.filter((c) => c.restricted).map((c) => c.name));
-
-      // Build scoped service for this turn — must precede auto-recall so the
-      // recall call goes through the same `memoryScope` ACL filter every other
-      // memory operation does.
-      const coreMemoryService: Service["coreMemory"] = {
-        get: () => deps.runInTx((tx) => agentStore.getCoreMemoryBlocks(tx, userId)),
-        update: (key, content) =>
-          deps.runInTx((tx) => agentStore.upsertCoreMemoryBlock(tx, { userId, key, content })),
-      };
-
       const codingService = deps.codingServiceFactory?.(conversationId);
       const skillsService = deps.skillRunner
         ? createSkillsService({
@@ -793,84 +773,32 @@ export function createHandleMessage(deps: HandleMessageDeps) {
                   agentStore,
                   transportStore,
                   inngest,
+                  gateChannelTypes: deps.pipelineGateChannelTypes ?? new Set<string>(),
                 },
                 profileId,
+                originConversationId: conversationId,
               },
             }),
           })
         : undefined;
-      const service = createService(
-        memory,
-        userId,
-        profile?.memoryScope ?? null,
-        profile?.profileClass ?? null,
-        restrictedClassNames,
-        fileService,
-        coreMemoryService,
-        async (content, opts) => {
-          await deps.runInTx((tx) =>
-            agentStore.stagePendingMemory(tx, {
-              userId,
-              // Snapshot the staging profile so the Observer drain stamps
-              // the right `profile_class:<class>` tag at retain time —
-              // without this, a row staged by an `intimate`-class profile
-              // could be drained by an idle on a `general`-class
-              // conversation and end up tagged as `general`, leaking
-              // across speaker isolation.
-              profileId: profile?.id ?? null,
-              content,
-              ...(opts?.context !== undefined && { context: opts.context }),
-              source: "live_retain",
-            }),
-          );
+      // Scoped service for this turn — must precede auto-recall so the recall
+      // goes through the same `memoryScope` ACL filter every other memory
+      // operation does.
+      const service = await buildTurnService(
+        { runInTx: deps.runInTx, agentStore, memory, fileService },
+        {
+          userId,
+          profile,
+          coding: codingService,
+          skills: skillsService,
+          scheduling: schedulingService,
+          pipelines: pipelinesService,
         },
-        codingService,
-        skillsService,
-        schedulingService,
-        pipelinesService,
       );
 
-      // Single conversion point for "this failure gains nothing from a
-      // blind retry" — shared by the durable-step wrapper below and the
-      // outer catch around the streaming section.
-      const asNonRetriable = (err: unknown): NonRetriableError => {
-        const message = err instanceof Error ? err.message : String(err);
-        return new NonRetriableError(message, { cause: err });
-      };
-
-      // Durable boundary wrapper shared by the in-turn steps (`llm-iter<N>`,
-      // `tool-iter<N>-<P>`, `auto-recall`, `summarize-prefix-outcome`,
-      // `load-last-tokens`, `count-tokens-<n>`, `emit-tool-results-iter<N>`).
-      // It injects Inngest's `step.run` without making the loop depend on
-      // Inngest, and applies the retry policy per step kind INSIDE the body:
-      //
-      // - `tool-iter*` gets NO step retries at all. A failed tool handler is
-      //   the model's feedback channel — the agent loop is the retry
-      //   mechanism (the model re-decides with the `is_error` tool_result in
-      //   context), and blind re-runs of the same handler only delay that
-      //   feedback by the backoff schedule. This covers deterministic
-      //   failures (Zod validation, edit_file mismatches) and outages alike:
-      //   a fresh tool_use from the model creates a fresh step, which IS the
-      //   retry.
-      // - Everything else keeps Inngest's per-step retries for transient
-      //   failures, with deterministic provider errors (4xx that aren't
-      //   408/425/429) translated to NonRetriableError so Inngest fails fast
-      //   instead of burning attempts on a call that fails identically.
-      //
-      // The cast erases Inngest's `Jsonify<T>` return type: every payload
-      // passed through this wrapper is JSON-safe by construction (see
-      // design/crash-recovery.md → State serialization), so `Jsonify<T>` and
-      // `T` coincide at runtime but not for the compiler.
-      const stepRun = <T>(id: string, fn: () => Promise<T>): Promise<T> =>
-        step.run(id, async () => {
-          try {
-            return await fn();
-          } catch (err) {
-            if (id.startsWith("tool-iter")) throw asNonRetriable(err);
-            if (!isRetriableProviderError(err)) throw asNonRetriable(err);
-            throw err;
-          }
-        }) as Promise<T>;
+      // In-turn durable boundary wrapper — per-step-kind retry policy lives in
+      // `createTurnStepRunner`.
+      const stepRun = createTurnStepRunner((id, fn) => step.run(id, fn));
 
       // Auto-recall: search memory for context relevant to this message, via
       // the scoped service so the profile's `memoryScope` filter applies.

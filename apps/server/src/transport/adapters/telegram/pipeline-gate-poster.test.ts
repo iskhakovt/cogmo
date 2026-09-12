@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { gateToken } from "../../../agent/pipeline/gate-keyboard.js";
 import type { PipelineGatePendingData } from "../../../inngest/events.js";
 import { fakeRunInTx, mockTransportStore } from "../../../test/factories.js";
 import {
@@ -8,6 +9,7 @@ import {
 } from "./pipeline-gate-poster.js";
 
 const RUN_ID = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
+const TOKEN = gateToken(`${RUN_ID}:approve:0`);
 
 const EVENT: PipelineGatePendingData = {
   runId: RUN_ID,
@@ -34,6 +36,9 @@ describe("formatGateTimeout", () => {
     [3 * 86_400_000, "3d"],
     [36 * 3_600_000, "36h"],
     [90 * 60_000, "90m"],
+    [30_000, "0.5m"],
+    [12_000, "0.2m"],
+    [246_000, "4.1m"],
   ])("%i ms → %s", (ms, expected) => {
     expect(formatGateTimeout(ms)).toBe(expected);
   });
@@ -56,8 +61,8 @@ describe("postPipelineGateKeyboard", () => {
       reply_markup: {
         inline_keyboard: [
           [
-            { text: "✅ Approve", callback_data: `pipe:${RUN_ID}:approve` },
-            { text: "❌ Cancel run", callback_data: `pipe:${RUN_ID}:cancel` },
+            { text: "✅ Approve", callback_data: `pipe:${RUN_ID}:approve:${TOKEN}` },
+            { text: "❌ Cancel run", callback_data: `pipe:${RUN_ID}:cancel:${TOKEN}` },
           ],
         ],
       },

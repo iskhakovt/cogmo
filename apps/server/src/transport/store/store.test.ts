@@ -378,8 +378,35 @@ describe("DrizzleTransportStore", () => {
         id,
         conversationId,
       });
-      const [row] = await tx((trx) => store.getUnbatchedInbound(trx, conversationId, null));
-      expect(row).toMatchObject({ id, source: "pipeline", content: "stage prompt" });
+    });
+
+    it("leaves pipeline-stage inbounds out of the chat turn's unbatched read", async () => {
+      // A stage prompt is consumed by the stage runner, never by
+      // handle-message — batching it would replay the stage as chat input.
+      const channelId = await seedChannel();
+      const { conversationId } = await seedConversation();
+      const sessionId = await seedSession(channelId, conversationId, "addr-1");
+      const user = await tx((trx) =>
+        store.persistInbound(trx, {
+          source: "user",
+          channelSessionId: sessionId,
+          conversationId,
+          content: "hello",
+          platformTs: new Date(),
+        }),
+      );
+      await tx((trx) =>
+        store.persistInbound(trx, {
+          source: "pipeline",
+          scheduledFireKey: "pipeline:run-1:draft:0",
+          conversationId,
+          content: "stage prompt",
+          platformTs: new Date(),
+        }),
+      );
+
+      const unbatched = await tx((trx) => store.getUnbatchedInbound(trx, conversationId, null));
+      expect(unbatched.map((r) => r.id)).toEqual([user.id]);
     });
 
     it("rejects a pipeline inbound without a key at the DB constraint", async () => {
@@ -937,7 +964,9 @@ describe("DrizzleTransportStore", () => {
       const result = await tx((trx) =>
         store.findReachableChannelsForUserProfile(trx, userId, profileId),
       );
-      expect(result).toEqual([{ channelId, platformAddress: "addr-1", receive: "routed" }]);
+      expect(result).toEqual([
+        { channelId, channelType: "direct", platformAddress: "addr-1", receive: "routed" },
+      ]);
     });
 
     it("returns an empty array when the user has no prior session for the profile", async () => {
@@ -1010,7 +1039,9 @@ describe("DrizzleTransportStore", () => {
       const result = await tx((trx) =>
         store.findReachableChannelsForUserProfile(trx, userId, profileId),
       );
-      expect(result).toEqual([{ channelId, platformAddress: "shared-addr", receive: "routed" }]);
+      expect(result).toEqual([
+        { channelId, channelType: "direct", platformAddress: "shared-addr", receive: "routed" },
+      ]);
     });
 
     it("scopes by both userId AND profileId — does not leak across users", async () => {

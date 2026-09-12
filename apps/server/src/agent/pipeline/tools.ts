@@ -205,6 +205,8 @@ function renderError(error: PipelinesError): string {
       return `Pipeline "${error.name}" can't run yet — it uses features the run engine doesn't support: ${error.features.join(", ")}. Tell the user; they can redefine it without those features.`;
     case "no_reachable_channel":
       return "No channel can reach the user for this run's checkpoints, so it was not started.";
+    case "no_gate_channel":
+      return "This pipeline has approval checkpoints, and none of the user's reachable channels can show them (approval buttons appear on Telegram), so it was not started.";
     case "runs_unavailable":
       return "Pipeline runs aren't available in this context.";
   }

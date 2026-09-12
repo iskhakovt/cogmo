@@ -67,10 +67,11 @@ function makeDeps() {
 
   pipelineStore.getActiveDefinition.mockResolvedValue(definitionRow());
   runStore.getRunByIdempotencyKey.mockResolvedValue(undefined);
+  runStore.getRunWithDefinition.mockResolvedValue(undefined);
   runStore.insertOrRecoverRun.mockResolvedValue({ kind: "new", row: runRow() });
   agentStore.createConversation.mockResolvedValue({ id: "conv-new" });
   transportStore.findReachableChannelsForUserProfile.mockResolvedValue([
-    { channelId: "tg", platformAddress: "42", receive: "routed" },
+    { channelId: "tg", channelType: "telegram", platformAddress: "42", receive: "routed" },
   ]);
 
   const deps: StartPipelineRunDeps = {
@@ -80,6 +81,7 @@ function makeDeps() {
     agentStore,
     transportStore,
     inngest: { send },
+    gateChannelTypes: new Set(["telegram"]),
   };
   return { deps, pipelineStore, runStore, agentStore, transportStore, send };
 }
@@ -125,9 +127,9 @@ describe("startPipelineRun", () => {
 
   it("recovers a retried call without creating a second conversation, and re-sends the stage", async () => {
     const { deps, runStore, agentStore, transportStore, send } = makeDeps();
-    runStore.getRunByIdempotencyKey.mockResolvedValue(
-      runRow({ conversationId: "conv-original", currentStage: "plan-gate" }),
-    );
+    const existing = runRow({ conversationId: "conv-original", currentStage: "plan-gate" });
+    runStore.getRunByIdempotencyKey.mockResolvedValue(existing);
+    runStore.getRunWithDefinition.mockResolvedValue({ run: existing, definition: definitionRow() });
 
     const result = await startPipelineRun(deps, ARGS);
 
@@ -144,6 +146,58 @@ describe("startPipelineRun", () => {
     // already landed, and the stage runner skips it if the run moved on.
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({ id: "pipeline-stage-due-run-1-gather-context-0" }),
+    );
+  });
+
+  it("recovers against the run's pinned definition even after the active version changed", async () => {
+    const { deps, pipelineStore, runStore, send } = makeDeps();
+    // The pinned v1 starts at "gather-context"; the pipeline has since been
+    // deactivated, so the active-version lookup finds nothing.
+    pipelineStore.getActiveDefinition.mockResolvedValue(undefined);
+    const pinned = runRow({ conversationId: "conv-original" });
+    runStore.getRunByIdempotencyKey.mockResolvedValue(pinned);
+    runStore.getRunWithDefinition.mockResolvedValue({ run: pinned, definition: definitionRow() });
+
+    const result = await startPipelineRun(deps, ARGS);
+
+    expect(result._unsafeUnwrap()).toMatchObject({
+      runId: "run-1",
+      conversationId: "conv-original",
+      firstStage: "gather-context",
+      recovered: true,
+    });
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "pipeline-stage-due-run-1-gather-context-0" }),
+    );
+  });
+
+  it("refuses a gated pipeline when no reachable channel can show a checkpoint", async () => {
+    const { deps, transportStore, agentStore, send } = makeDeps();
+    transportStore.findReachableChannelsForUserProfile.mockResolvedValue([
+      { channelId: "web-1", channelType: "web", platformAddress: "tab-1", receive: "all" },
+    ]);
+
+    const result = await startPipelineRun(deps, ARGS);
+
+    expect(result._unsafeUnwrapErr()).toEqual({ kind: "no_gate_channel" });
+    expect(agentStore.createConversation).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("carries the originating conversation onto the first stage", async () => {
+    const { deps, send } = makeDeps();
+
+    await startPipelineRun(deps, { ...ARGS, originConversationId: "conv-chat" });
+
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: {
+          runId: "run-1",
+          stageId: "gather-context",
+          iteration: 0,
+          originConversationId: "conv-chat",
+        },
+      }),
     );
   });
 

@@ -25,16 +25,16 @@ import {
   buildPipelineStageDueEvent,
   pipelineGateKey,
   pipelineStageDue,
+  responseReady,
 } from "../../inngest/events.js";
-import { isRetriableProviderError } from "../../llm/fallback.js";
 import { logger } from "../../logger.js";
 import type { DeliveryRouter } from "../../transport/delivery-router.js";
 import type { StepRunner } from "../loop.js";
-import {
-  type AgenticStageArgs,
-  type AgenticStageOutcome,
-  type AgenticStageSteps,
-  asNonRetriable,
+import { createTurnStepRunner } from "../turn-step-runner.js";
+import type {
+  AgenticStageArgs,
+  AgenticStageOutcome,
+  AgenticStageSteps,
 } from "./run-agentic-stage.js";
 import { StageOutputsSchema } from "./run-types.js";
 import type { PipelineRunStore } from "./store/index.js";
@@ -152,6 +152,19 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
         return failRun(`stage "${stageId}" is not in the pinned definition`);
       }
 
+      // A run started from chat: its first stage would otherwise stream into
+      // the same chat while the starting turn's reply is still streaming.
+      // Bounded — if that turn's `response/ready` has already gone by, or
+      // never comes, the stage starts after the timeout anyway.
+      const origin = event.data.originConversationId;
+      if (origin !== undefined && index === 0) {
+        await step.waitForEvent("wait-for-origin-turn", {
+          event: responseReady,
+          timeout: "30s",
+          if: `async.data.conversationId == ${JSON.stringify(origin)}`,
+        });
+      }
+
       if (stage.kind === "wait") {
         return failRun("wait stages are not supported yet");
       }
@@ -188,19 +201,10 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
 
       // The cast erases Inngest's `Jsonify<T>`: every value these steps return
       // is JSON-safe by construction, so `Jsonify<T>` and `T` coincide at
-      // runtime but not for the compiler — same as handle-message's wrapper.
+      // runtime but not for the compiler.
       const run: StepRunner = <T>(id: string, fn: () => Promise<T>) =>
         step.run(id, fn) as Promise<T>;
-      const stepRun: StepRunner = <T>(id: string, fn: () => Promise<T>) =>
-        step.run(id, async () => {
-          try {
-            return await fn();
-          } catch (err) {
-            if (id.startsWith("tool-iter")) throw asNonRetriable(err);
-            if (!isRetriableProviderError(err)) throw asNonRetriable(err);
-            throw err;
-          }
-        }) as Promise<T>;
+      const stepRun = createTurnStepRunner((id, fn) => step.run(id, fn));
 
       const outcome = await deps.executeAgenticStage(
         {

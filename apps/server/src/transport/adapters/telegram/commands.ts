@@ -535,16 +535,19 @@ export interface PipelineGateCallbackOutcome {
 
 /**
  * Pure handler for Approve / Cancel taps on a pipeline gate keyboard.
- * Identity and the parked-gate check live in `transport.pipelines`; this
- * only renders the outcome the adapter writes back over the keyboard.
+ * Identity, the gate token and the parked-gate check live in
+ * `transport.pipelines`; this only renders what the adapter writes back over
+ * the keyboard. The text says the decision was sent, not that it won: a tap
+ * can still lose to the gate's own timeout, and the resolver reports that.
  */
 export async function handlePipelineGateCallback(
   transport: Transport,
-  parsed: { runId: string; action: "approve" | "cancel" },
+  parsed: { runId: string; action: "approve" | "cancel"; token: string },
   tapperPlatformHandle: string,
 ): Promise<PipelineGateCallbackOutcome> {
   const res = await transport.pipelines.resolveGate(
     parsed.runId,
+    parsed.token,
     parsed.action,
     tapperPlatformHandle,
   );
@@ -552,12 +555,12 @@ export async function handlePipelineGateCallback(
   const { pipelineName, stageId } = res.value;
   return parsed.action === "approve"
     ? {
-        editText: `✅ Approved — pipeline "${pipelineName}" continues past "${stageId}".`,
+        editText: `✅ Approval sent for checkpoint "${stageId}" of pipeline "${pipelineName}".`,
         toast: "Approved",
       }
     : {
-        editText: `❌ Pipeline "${pipelineName}" cancelled at "${stageId}".`,
-        toast: "Cancelled",
+        editText: `❌ Cancellation sent for checkpoint "${stageId}" of pipeline "${pipelineName}".`,
+        toast: "Cancelling",
       };
 }
 

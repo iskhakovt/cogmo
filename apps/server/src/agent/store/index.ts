@@ -9,6 +9,7 @@ import {
   inArray,
   isNull,
   lte,
+  ne,
   or,
   sql,
 } from "drizzle-orm";
@@ -16,6 +17,7 @@ import * as R from "remeda";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
 import type { ContentBlock, Message } from "../../llm/types.js";
+import { inboundMessages } from "../../transport/store/schema.js";
 import { truncate } from "../../util/string.js";
 import type { EvolutionEventPayload } from "../evolution/event-schema.js";
 import { isCoreCompartment } from "../evolution/memory-extraction-schema.js";
@@ -514,7 +516,13 @@ export interface AgentStore {
     },
   ): Promise<{ id: string }>;
 
-  /** Get the most recent assistant message for a conversation (for cursor chain). */
+  /**
+   * The newest assistant message answering chat input — its cursor is the
+   * inbound batch the chat pipeline has consumed. Assistant messages a
+   * pipeline stage wrote cursor on a `source='pipeline'` inbound and are
+   * skipped: counting them would mark chat messages sent before the stage's
+   * prompt as already answered.
+   */
   getLastAssistantMessage(
     tx: Transaction,
     conversationId: string,
@@ -1611,7 +1619,16 @@ export class DrizzleAgentStore implements AgentStore {
         lastInboundMessageId: messages.lastInboundMessageId,
       })
       .from(messages)
-      .where(and(eq(messages.conversationId, conversationId), eq(messages.role, "assistant")))
+      // Left join: the cursor is not a foreign key, and a row whose cursor has
+      // no inbound (fixtures, pruned buffers) is still a chat turn.
+      .leftJoin(inboundMessages, eq(inboundMessages.id, messages.lastInboundMessageId))
+      .where(
+        and(
+          eq(messages.conversationId, conversationId),
+          eq(messages.role, "assistant"),
+          or(isNull(inboundMessages.source), ne(inboundMessages.source, "pipeline")),
+        ),
+      )
       .orderBy(desc(messages.id))
       .limit(1);
     return rows[0];
