@@ -200,14 +200,26 @@ export async function teardown() {
   if (mock) await mock.stop();
 
   console.log("Stopping containers...");
+  let failedStops = 0;
   for (const container of containers.reverse()) {
     // Guarded for the same reason as the network removal below: a container
     // already reaped answers 404/409, and an exception here escapes teardown,
     // reddening a green suite and skipping the rest of the cleanup.
     await container.stop().catch((err) => {
+      failedStops += 1;
       console.warn("teardown: stopping a test container failed", err);
     });
   }
   if (network) await c.stopNetwork(network);
-  console.log("Containers stopped.");
+  // Counted, because the line below is the only summary of this pass and
+  // an unconditional success message would report a clean teardown over
+  // the top of containers that are still running. Those keep whatever
+  // networks they hold, so `stopNetwork` force-detaching them is the
+  // intended outcome rather than collateral — a stray container costs
+  // less than a network that cannot be removed.
+  console.log(
+    failedStops === 0
+      ? "Containers stopped."
+      : `Containers stopped, except ${failedStops} that would not stop — see the warnings above.`,
+  );
 }
