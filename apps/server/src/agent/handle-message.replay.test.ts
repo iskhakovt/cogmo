@@ -24,6 +24,8 @@
 import { InngestTestEngine } from "@inngest/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { inngest } from "../inngest/client.js";
+import { agentIterations } from "../metrics.js";
+import { expectDefined } from "../test/assertions.js";
 import {
   fakeRunInTx,
   mockAgentStore,
@@ -433,6 +435,65 @@ describe("handle-message — crash recovery / step replay", () => {
     const insertArgs = (deps.agentStore.insertMessages as ReturnType<typeof vi.fn>).mock
       .calls[0]?.[1] as { messages: Array<{ content: unknown }> } | undefined;
     expect(insertArgs?.messages?.[0]?.content).toEqual([{ type: "text", text: "cached reply" }]);
+  });
+
+  it("records the turn's iteration count from inside the persist step", async () => {
+    const record = vi.spyOn(agentIterations, "record");
+    const deps = mockDeps();
+    const fn = createHandleMessage(deps);
+
+    await new InngestTestEngine({ function: fn, events: [event] }).execute();
+
+    expect(record).toHaveBeenCalledTimes(1);
+    expect(record).toHaveBeenCalledWith(1, { model: "mock-model" });
+
+    // After the write, not before it: a step body re-runs on every retry, so a
+    // sample taken ahead of the transaction is repeated whenever the
+    // transaction is what keeps failing.
+    const insert = vi.mocked(deps.agentStore.insertMessages);
+    expect(record.mock.invocationCallOrder[0]).toBeGreaterThan(
+      expectDefined(insert.mock.invocationCallOrder[0], "insertMessages call order"),
+    );
+  });
+
+  it("does not record the iteration count again when persist-new-messages is cached", async () => {
+    // The anti-inflation contract, with the REAL loop so the assertion covers
+    // the whole turn rather than a stubbed result. @inngest/test re-invokes
+    // the function once per step boundary, so anything recording from the bare
+    // body lands a sample on each pass — several per turn, all for the same
+    // turn. Recording inside `persist-new-messages` means a cached step
+    // contributes nothing.
+    const record = vi.spyOn(agentIterations, "record");
+    const deps = mockDeps({ runStreamingAgentLoop });
+    const fn = createHandleMessage(deps);
+
+    // `llm-iter1` is cached too, so the real loop completes a turn and reaches
+    // its result builder without a provider call. Without it the loop dies on
+    // the unimplemented `chatStream` before building a result, and the
+    // assertion below passes for the wrong reason.
+    const engine = new InngestTestEngine({
+      function: fn,
+      events: [event],
+      steps: [
+        {
+          id: "llm-iter1",
+          handler: () => ({
+            kind: "drained",
+            content: [{ type: "text", text: "cached reply" }],
+            stopReason: "end_turn",
+            model: "mock-model",
+            usage: { inputTokens: 10, outputTokens: 5 },
+            repaired: null,
+            emitted: { text: "cached reply", toolUseIds: [] },
+          }),
+        },
+        { id: "persist-new-messages", handler: () => ({ id: "asst-1" }) },
+      ],
+    });
+
+    await engine.execute();
+
+    expect(record).not.toHaveBeenCalled();
   });
 
   it("does not re-run synthesis or the apology pushes when degraded-reply is cached", async () => {
