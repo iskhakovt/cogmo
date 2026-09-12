@@ -1,12 +1,12 @@
-### `pnpm test:e2e` builds its own image again
+### `pnpm test:e2e` builds its own image from the repo root
 
-`test/e2e-setup.ts` builds the app image when `E2E_IMAGE` is unset, and passes the repo root as the build context. The Dockerfile's first `COPY` takes the workspace manifests and then descends into `apps/`, and `.dockerignore`'s allowlist is written against the same root, so that is the directory the build has to start from.
+`test/e2e-setup.ts` builds the app image when `E2E_IMAGE` is unset, and passes the repo root as the build context. That is the only directory the build can start from: the Dockerfile's first `COPY` takes the workspace manifests and then descends into `apps/`, and `.dockerignore`'s allowlist is written against the same root.
 
-Vitest runs with the cwd set to the package that owns the config — `apps/server` — which holds neither file. CI never meets this: its e2e job bakes the image first and passes `E2E_IMAGE`, leaving the build branch unreached. The documented local command, `pnpm test:e2e` on its own, is the one that takes it.
+The root has to be named explicitly because Vitest runs with the cwd set to the package that owns the config — `apps/server` — which holds neither file. CI passes `E2E_IMAGE` from its bake step, so this branch belongs to local runs alone, and `pnpm test:e2e` on its own is what reaches it.
 
-`src/test/repo-root.ts` owns the resolution as `repoRoot()`, walking up to `pnpm-workspace.yaml` rather than counting `../`, so the answer holds wherever the caller sits. It replaces three byte-identical copies of that walk in `engine-ranges`, `version-pins` and `skill-authoring`, and backs `loadRootEnv`, which needs the same root for the repo's `.env`.
+`src/test/repo-root.ts` owns the resolution as `repoRoot()`, walking up to `pnpm-workspace.yaml` rather than counting `../`, so the answer holds wherever the caller sits. `engine-ranges`, `version-pins`, `skill-authoring` and `loadRootEnv` all share it.
 
-`src/test/repo-root.test.ts` is the layout canary. The consumers outside `src/` both fail quietly when the path is wrong — an absent `.env` reads as "not recording" and returns, and the image build sits behind a branch CI always skips — so the guard asserts against real files instead: `Dockerfile`, `.dockerignore`, and `apps/server/package.json` below the root.
+`src/test/repo-root.test.ts` is the layout canary. The consumers outside `src/` both fail quietly on a wrong path — an absent `.env` reads as "not recording" and returns, and the image build sits behind a branch CI skips — so the guard asserts against real files: `Dockerfile`, `.dockerignore`, and `apps/server/package.json` below the root.
 
 ### Local integration runs need container-to-host loopback
 
