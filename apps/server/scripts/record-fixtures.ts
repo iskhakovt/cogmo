@@ -11,7 +11,8 @@ import { HindsightClient } from "@vectorize-io/hindsight-client";
  * Embeddings use llmock's deterministic vectors (text-embedding-3-small
  * dimensions are hardcoded in Hindsight — no probe call needed).
  *
- * Usage:
+ * Usage — export `SSHD_CONTAINER_IMAGE` with the tag `vitest.config.ts` pins to
+ * mirror the port-forwarder sidecar; without it this script pulls from Docker Hub:
  *   pnpm tsx scripts/record-fixtures.ts
  *
  * Requires: Docker, .env with OPENAI_API_KEY.
@@ -55,10 +56,12 @@ async function main() {
     // No fixtures yet
   }
   await mock.start();
-  console.log(`llmock recording proxy at ${mock.url}`);
+  // Must precede the Hindsight container below — see `exposeHostPort`.
+  const llmockBase = await c.exposeHostPort(mock.port);
+  console.log(`llmock recording proxy at ${mock.url}, containers use ${llmockBase}`);
 
   // Slim Hindsight — OpenAI for LLM, deterministic embeddings via llmock, RRF reranker
-  const llmockUrl = `http://host.docker.internal:${mock.port}/v1`;
+  const llmockUrl = `${llmockBase}/v1`;
   const hindsightContainer = await c
     .hindsightSlim(network, {
       llmBaseUrl: llmockUrl,

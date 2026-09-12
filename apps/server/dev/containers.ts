@@ -5,7 +5,27 @@
  * The caller starts them in the right order and manages lifecycle.
  */
 
-import { GenericContainer, type StartedNetwork, Wait } from "testcontainers";
+import { GenericContainer, type StartedNetwork, TestContainers, Wait } from "testcontainers";
+
+/**
+ * Publish a host port to every container created afterwards, and return the
+ * base URL they reach it on.
+ *
+ * Not `--add-host host.docker.internal:host-gateway`: under rootless Docker that
+ * gateway sits inside RootlessKit's namespace, not on the host. The sshd sidecar
+ * tunnels instead, so no host address is involved and loopback-bound listeners
+ * work too.
+ *
+ * Call before creating any container that needs the port — the mapping is
+ * injected at create time, and one created too early silently gets none. The
+ * check is per-process, so worker-fork containers get none either. Sidecar image
+ * is pinned in `vitest.config.ts`. Teardown does not stop the forwarder — cleanup
+ * is Ryuk's, and it has been seen to outlive a run even with Ryuk enabled.
+ */
+export async function exposeHostPort(port: number): Promise<string> {
+  await TestContainers.exposeHostPorts(port);
+  return `http://host.testcontainers.internal:${port}`;
+}
 
 export function postgres(network: StartedNetwork) {
   return new GenericContainer("mirror.gcr.io/pgvector/pgvector:pg18")
@@ -33,6 +53,8 @@ export function redis(network: StartedNetwork) {
     .withStartupTimeout(30_000);
 }
 
+/** `appUrl` pointing at the host must come from `exposeHostPort()` — there is no
+ * `host.docker.internal` mapping on these containers. */
 export function inngest(network: StartedNetwork, opts?: { appUrl?: string }) {
   const cmd = ["inngest", "dev", "--host", "0.0.0.0", "--port", "8288", "--no-discovery"];
   if (opts?.appUrl) {
@@ -42,7 +64,6 @@ export function inngest(network: StartedNetwork, opts?: { appUrl?: string }) {
     .withNetwork(network)
     .withNetworkAliases("inngest")
     .withExposedPorts(8288, 8289)
-    .withExtraHosts([{ host: "host.docker.internal", ipAddress: "host-gateway" }])
     .withCommand(cmd)
     .withWaitStrategy(Wait.forHttp("/health", 8288))
     .withStartupTimeout(60_000);
@@ -89,6 +110,7 @@ export function hindsight(
   network: StartedNetwork,
   opts: {
     apiKey: string;
+    /** A host address here must come from `exposeHostPort()`. */
     baseUrl?: string;
   },
 ) {
@@ -106,7 +128,6 @@ export function hindsight(
     .withNetwork(network)
     .withNetworkAliases("hindsight")
     .withExposedPorts(8888)
-    .withExtraHosts([{ host: "host.docker.internal", ipAddress: "host-gateway" }])
     .withEnvironment(env)
     .withWaitStrategy(Wait.forHttp("/health", 8888))
     .withStartupTimeout(300_000);
@@ -167,7 +188,6 @@ export function hindsightSlim(
     .withNetwork(network)
     .withNetworkAliases("hindsight")
     .withExposedPorts(8888)
-    .withExtraHosts([{ host: "host.docker.internal", ipAddress: "host-gateway" }])
     .withEnvironment(env)
     .withWaitStrategy(Wait.forHttp("/health", 8888))
     .withStartupTimeout(300_000);
