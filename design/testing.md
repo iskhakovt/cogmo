@@ -52,19 +52,25 @@ Docker services + app wired in-process. Tests the orchestration pipeline — deb
 
 ## E2E Tests `[confirmed]`
 
-Full deployment-like stack — cogmo as a subprocess in connect mode. Smoke test.
+Full deployment-like stack — cogmo runs from its release image, in connect mode. Smoke test.
 
 **Infrastructure:**
-- Testcontainers (PostgreSQL, Redis, Inngest, Hindsight) — started in vitest `globalSetup`
+- Testcontainers (PostgreSQL, Redis, Inngest, Hindsight, MinIO) — started in vitest `globalSetup`
 - llmock in-process — replaces both mock-anthropic container and Ollama
-- App spawned as subprocess with connect mode (WebSocket to Inngest dev server)
-- Seed runs before app start (`tsx src/cli.ts seed`)
+- App image: `E2E_IMAGE` when set, which is how CI hands over the tag its bake step
+  produced; otherwise `globalSetup` runs `docker buildx bake --load cogmo-e2e`, the same
+  bake file CI builds from. That target is `cogmo` minus the GHA cache, pinned to
+  `BAKE_LOCAL_PLATFORM` because `--load` imports one platform per tag. Needs the docker
+  CLI with buildx. The image stays after the run, so a repeat run can skip the rebuild
+  with `E2E_IMAGE=cogmo-e2e`
+- Seed and app both run as containers off that image — `withCommand(["seed"])`, then
+  `withCommand(["serve"])` in connect mode (WebSocket to the Inngest dev server)
 
 **Naming:** `.e2e.test.ts` suffix. `pnpm test:e2e`.
 
 | Test | What |
 |-|-|
-| Migrations | App subprocess applies migrations on boot. Verify tables queryable. |
+| Migrations | The app container applies migrations on boot. Verify tables queryable. |
 | Smoke | Emit one event via Inngest API -> assert assistant response in DB |
 
 ## Skill-Authoring Integration `[proposed]`

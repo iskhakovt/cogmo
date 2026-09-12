@@ -1,7 +1,7 @@
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { repoRoot } from "./repo-root.js";
 
 /**
  * Cross-file version-pin consistency guard.
@@ -15,16 +15,6 @@ import { describe, expect, it } from "vitest";
  * it would have caught the devbase pnpm pin silently drifting to 10.27.0
  * while the workspace moved to 11.x.
  */
-
-function repoRoot(): string {
-  let dir = dirname(fileURLToPath(import.meta.url));
-  while (!existsSync(join(dir, "pnpm-workspace.yaml"))) {
-    const parent = dirname(dir);
-    if (parent === dir) throw new Error("repo root (pnpm-workspace.yaml) not found");
-    dir = parent;
-  }
-  return dir;
-}
 
 const ROOT = repoRoot();
 
@@ -90,5 +80,37 @@ describe("task-image version pins stay in sync", () => {
 
   it("claude-code version: bake == devbase", () => {
     expect(devbaseArg("CLAUDE_CODE_VERSION")).toBe(bakeVar("CLAUDE_CODE_VERSION"));
+  });
+});
+
+/**
+ * The `cogmo-e2e` bake target's tag, and the two TypeScript literals that have
+ * to name the same image: `e2e-setup.ts` starts a container from whatever bake
+ * produced, and `skills.e2e.test.ts` filters containers by image name. All
+ * three are only exercised by a local `pnpm test:e2e` — CI sets `E2E_IMAGE`
+ * and skips the build — so a rename that splits them surfaces as testcontainers
+ * trying to pull `cogmo-e2e:latest` off Docker Hub, not as a red pipeline.
+ */
+const bakeE2eTag = extract(
+  bake,
+  "bake cogmo-e2e tag",
+  /target\s+"cogmo-e2e"\s*\{[\s\S]*?tags\s*=\s*\["([^"]+)"\]/,
+);
+
+function tsImageFallback(relativePath: string): string {
+  return extract(
+    read(relativePath),
+    `E2E image fallback in ${relativePath}`,
+    // Either spelling of the fallback: the named constant, or the inline `??`.
+    /(?:E2E_IMAGE_FALLBACK = |process\.env\.E2E_IMAGE \?\? )"([^"]+)"/,
+  );
+}
+
+describe("e2e image name stays in sync", () => {
+  it("bake tag == e2e-setup fallback == skills.e2e filter", () => {
+    expect(bakeE2eTag).toBe("cogmo-e2e:latest");
+    const [repository] = bakeE2eTag.split(":");
+    expect(tsImageFallback("apps/server/test/e2e-setup.ts")).toBe(repository);
+    expect(tsImageFallback("apps/server/src/skills/skills.e2e.test.ts")).toBe(repository);
   });
 });

@@ -89,13 +89,20 @@ target "_common" {
   platforms = ["linux/amd64", "linux/arm64"]
 }
 
-target "cogmo" {
-  inherits   = ["_common", "cogmo-meta"]
+// Build inputs for the runtime app image, shared by the release target and
+// the local e2e one so there is a single answer to "what goes into this
+// image". Everything that differs between the two — tags, platforms, cache —
+// stays out of here.
+target "_cogmo-build" {
   context    = "."
   dockerfile = "Dockerfile"
   args = {
     VERSION = "${VERSION}"
   }
+}
+
+target "cogmo" {
+  inherits = ["_common", "cogmo-meta", "_cogmo-build"]
   // Per-platform cache scopes — single buildx invocation on a single
   // runner needs split scopes to avoid moby/buildkit#2758 (last platform's
   // cache manifest overwrites the first's, so subsequent runs cache-miss).
@@ -109,6 +116,22 @@ target "cogmo" {
     "type=gha,scope=cogmo-amd64,mode=max",
     "type=gha,scope=cogmo-arm64,mode=max",
   ]
+}
+
+// Local e2e image. The e2e tier builds this when `E2E_IMAGE` is unset; CI
+// bakes `cogmo` and hands the tag over instead, so this target belongs to
+// local runs. It inherits the build inputs rather than the `cogmo` target,
+// which keeps the GHA cache attributes out — that backend wants an Actions
+// runtime token that exists only inside a workflow.
+//
+// One native platform, because `--load` imports into the daemon's image
+// store and that holds a single platform per tag. `BAKE_LOCAL_PLATFORM`
+// resolves to whichever the machine running bake is, so an Apple Silicon or
+// Ampere box takes this path without an amd64 hardcoded into it.
+target "cogmo-e2e" {
+  inherits  = ["_cogmo-build"]
+  tags      = ["cogmo-e2e:latest"]
+  platforms = [BAKE_LOCAL_PLATFORM]
 }
 
 target "devbase" {
