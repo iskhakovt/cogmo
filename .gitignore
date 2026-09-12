@@ -3,6 +3,10 @@ dist/
 build/
 coverage/
 test-results/
+# Vitest 5 writes every artefact it isn't told to place elsewhere here —
+# failure screenshots, attachments, blob reports. JUnit and coverage are
+# pointed at the two entries above by vitest.config.ts and CI.
+.vitest/
 .env
 .dev/
 *.tfvars

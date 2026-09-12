@@ -31,38 +31,44 @@ updates:
     # collapses that scenario into a single PR with one semantically-
     # resolved lockfile.
     #
-    # Majors stay ungrouped — they deserve individual review.
     # Security and version updates can't share a group (Dependabot rule),
     # hence the security group.
     #
     # Family-specific groups precede the catch-alls so peer-dep-coupled
     # packages (OTel, Vitest, Drizzle, etc.) merge into a single PR even
-    # when Dependabot's broad grouping splits them.
+    # when Dependabot's broad grouping splits them. They carry no
+    # `update-types`, so they cover majors too: members that peer-pin each
+    # other — `@vitest/coverage-v8` names `vitest` at an exact version —
+    # have no mergeable single-package major. Review stays per-major, one
+    # PR per family.
+    #
+    # The catch-alls stay minor/patch-only, so a major of anything outside
+    # a family still arrives as its own PR.
     groups:
       opentelemetry:
         applies-to: version-updates
         patterns: ["@opentelemetry/*"]
-        update-types: ["minor", "patch"]
       vitest:
         applies-to: version-updates
-        patterns: ["vitest", "@vitest/*"]
-        update-types: ["minor", "patch"]
+        # `vitest-*` catches the third-party ecosystem packages
+        # (`vitest-browser-react`, `vitest-mock-extended`), which peer-depend
+        # on vitest and so move with it.
+        patterns: ["vitest", "vitest-*", "@vitest/*"]
       drizzle:
         applies-to: version-updates
         patterns: ["drizzle-orm", "drizzle-kit"]
-        update-types: ["minor", "patch"]
       inngest:
         applies-to: version-updates
         patterns: ["inngest", "@inngest/*"]
-        update-types: ["minor", "patch"]
       octokit:
         applies-to: version-updates
         patterns: ["@octokit/*"]
-        update-types: ["minor", "patch"]
       noble:
         applies-to: version-updates
         patterns: ["@noble/*"]
-        update-types: ["minor", "patch"]
+      # `@types/*` share a group for noise reduction, not coupling — a
+      # major there is independent of its siblings, so it keeps the
+      # minor/patch bound and majors arrive individually.
       types:
         applies-to: version-updates
         patterns: ["@types/*"]
