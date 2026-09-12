@@ -53,6 +53,8 @@ export function redis(network: StartedNetwork) {
     .withStartupTimeout(30_000);
 }
 
+/** `appUrl` pointing at the host must come from `exposeHostPort()` — there is no
+ * `host.docker.internal` mapping on these containers. */
 export function inngest(network: StartedNetwork, opts?: { appUrl?: string }) {
   const cmd = ["inngest", "dev", "--host", "0.0.0.0", "--port", "8288", "--no-discovery"];
   if (opts?.appUrl) {
@@ -108,6 +110,7 @@ export function hindsight(
   network: StartedNetwork,
   opts: {
     apiKey: string;
+    /** A host address here must come from `exposeHostPort()`. */
     baseUrl?: string;
   },
 ) {
