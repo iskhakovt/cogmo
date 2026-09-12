@@ -19,8 +19,8 @@ import { GenericContainer, type StartedNetwork, TestContainers, Wait } from "tes
  * Call before creating any container that needs the port — the mapping is
  * injected at create time, and one created too early silently gets none. The
  * check is per-process, so worker-fork containers get none either. Sidecar image
- * is pinned in `vitest.config.ts`; Ryuk reaps the forwarder, teardown doesn't, so
- * `TESTCONTAINERS_RYUK_DISABLED=true` leaves it behind.
+ * is pinned in `vitest.config.ts`. Teardown does not stop the forwarder — cleanup
+ * is Ryuk's, and it has been seen to outlive a run even with Ryuk enabled.
  */
 export async function exposeHostPort(port: number): Promise<string> {
   await TestContainers.exposeHostPorts(port);

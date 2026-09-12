@@ -38,7 +38,7 @@ const RESOURCE_LIMITS: ResourceLimits = {
 };
 
 let tx: Transactor;
-let closeDb: () => Promise<void>;
+let closeDb: (() => Promise<void>) | undefined;
 let store: DrizzleSandboxStore;
 let docker: Docker;
 let skipReason: string | null = null;
@@ -100,7 +100,10 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(async () => {
-  if (skipReason) return;
+  // `beforeAll` throws on an unreachable daemon before assigning closeDb, and a
+  // teardown that called it would mask that error with a TypeError.
+  const close = closeDb;
+  if (skipReason || !close) return;
   for (const s of sandboxes) await s.shutdown();
   for (const instanceId of testFileInstanceIds) {
     const leftover = await docker.listContainers({
@@ -121,7 +124,7 @@ afterAll(async () => {
       .catch(() => {});
   }
   if (workspaceTmp) rmSync(workspaceTmp, { recursive: true, force: true });
-  await closeDb();
+  await close();
 });
 
 function uniqueName(prefix: string): string {
