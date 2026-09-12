@@ -38,7 +38,7 @@ Docker services + app wired in-process. Tests the orchestration pipeline — deb
 - Testcontainers (PostgreSQL, Redis, Inngest, Hindsight) — started in vitest `globalSetup`, random ports
 - Container definitions in `dev/containers.ts` (shared with `scripts/dev-infra.ts` for local dev)
 - llmock (`@copilotkit/aimock`) runs in-process — serves both Anthropic API (for app) and OpenAI-compatible API (for Hindsight)
-- Hindsight reaches llmock via `host.docker.internal`
+- Hindsight reaches llmock via `host.testcontainers.internal`, published by `exposeHostPort()` in `dev/containers.ts` — not `host-gateway`, which points into the wrong namespace under rootless Docker
 - App modules imported directly — `bootstrap()` from `src/index.ts` wires everything
 
 **Env injection:** `process.env` mutations in `globalSetup` propagate to Vitest test workers. Dynamic container URLs set via `process.env`, static values in `vitest.config.ts` `test.env`. Test files use normal top-level imports — `createEnv()` in `env.ts` sees all values.
