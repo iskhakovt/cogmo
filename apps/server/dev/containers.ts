@@ -27,6 +27,36 @@ export async function exposeHostPort(port: number): Promise<string> {
   return `http://host.testcontainers.internal:${port}`;
 }
 
+/**
+ * Remove a test network, detaching whatever is still attached to it first.
+ *
+ * A tier stops the containers it tracks, but not everything on the network is
+ * its own: Testcontainers starts the port forwarder itself and joins it to
+ * each user-defined network, and sandbox containers are created by the
+ * supervisor through dockerode. Docker refuses to remove a network that still
+ * has endpoints, and the 403 surfaces from teardown — failing the run even
+ * when every test passed, which reads as a green suite with a red job.
+ *
+ * Disconnecting is deliberately not the same as stopping: a forwarder shared
+ * with a concurrently-running tier must keep running, it just has no business
+ * holding this network open. Best-effort throughout — anything already gone is
+ * the outcome we wanted.
+ */
+export async function stopNetwork(network: StartedNetwork): Promise<void> {
+  const { default: Docker } = await import("dockerode");
+  const handle = new Docker().getNetwork(network.getId());
+  try {
+    const inspected: { Containers?: Record<string, unknown> } = await handle.inspect();
+    for (const containerId of Object.keys(inspected.Containers ?? {})) {
+      await handle.disconnect({ Container: containerId, Force: true }).catch(() => {});
+    }
+  } catch {
+    // Network already gone, or the daemon will not describe it — either way
+    // the stop below is what decides the outcome.
+  }
+  await network.stop();
+}
+
 export function postgres(network: StartedNetwork) {
   return new GenericContainer("mirror.gcr.io/pgvector/pgvector:pg18")
     .withNetwork(network)

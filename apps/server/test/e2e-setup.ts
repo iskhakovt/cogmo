@@ -203,6 +203,6 @@ export async function teardown() {
   for (const container of containers.reverse()) {
     await container.stop();
   }
-  if (network) await network.stop();
+  if (network) await c.stopNetwork(network);
   console.log("Containers stopped.");
 }
