@@ -5,7 +5,82 @@
  * The caller starts them in the right order and manages lifecycle.
  */
 
-import { GenericContainer, type StartedNetwork, Wait } from "testcontainers";
+import { GenericContainer, type StartedNetwork, TestContainers, Wait } from "testcontainers";
+
+/**
+ * Publish a host port to every container created afterwards, and return the
+ * base URL they reach it on.
+ *
+ * Not `--add-host host.docker.internal:host-gateway`: under rootless Docker that
+ * gateway sits inside RootlessKit's namespace, not on the host. The sshd sidecar
+ * tunnels instead, so no host address is involved and loopback-bound listeners
+ * work too.
+ *
+ * Call before creating any container that needs the port — the mapping is
+ * injected at create time, and one created too early silently gets none. The
+ * check is per-process, so worker-fork containers get none either. Sidecar image
+ * is pinned in `vitest.config.ts`. Teardown does not stop the forwarder — cleanup
+ * is Ryuk's, and it has been seen to outlive a run even with Ryuk enabled.
+ */
+export async function exposeHostPort(port: number): Promise<string> {
+  await TestContainers.exposeHostPorts(port);
+  return `http://host.testcontainers.internal:${port}`;
+}
+
+/**
+ * Remove a test network, detaching whatever is still attached to it first.
+ *
+ * Docker refuses to remove a network that still has endpoints, and the 403
+ * surfaces from `globalSetup`'s teardown — where a throw is indistinguishable
+ * from a failing suite in the job's exit code, so a fully green run reports
+ * red. A tier stops the containers it tracks, but attachments outlasting that
+ * pass have been observed (three of them, on one local run), and this detaches
+ * whatever is there rather than naming a culprit: the set is not currently
+ * identified, so a fix keyed to one kind of container would be a guess.
+ *
+ * Note it is *not* the Testcontainers port forwarder, despite the shape of the
+ * coincidence. That container is created without `withNetwork`, and
+ * `connectContainerToPortForwarder` joins our containers to *its* network, not
+ * the reverse — so it never holds a user-defined network open.
+ *
+ * Disconnect rather than stop: whatever is attached may belong to a
+ * concurrently-running tier, and the only claim being made here is that it has
+ * no business holding this network open.
+ *
+ * Cleanup is best-effort to the end, removal included — see the warning there
+ * for what a failure costs.
+ */
+export async function stopNetwork(network: StartedNetwork): Promise<void> {
+  const { default: Docker } = await import("dockerode");
+  const handle = new Docker().getNetwork(network.getId());
+  let attached: string[] = [];
+  try {
+    const inspected: { Containers?: Record<string, { Name?: string }> } = await handle.inspect();
+    attached = Object.entries(inspected.Containers ?? {}).map(
+      ([id, c]) => `${c.Name ?? "?"}(${id.slice(0, 12)})`,
+    );
+    for (const containerId of Object.keys(inspected.Containers ?? {})) {
+      await handle.disconnect({ Container: containerId, Force: true }).catch(() => {});
+    }
+  } catch {
+    // Network already gone, or the daemon will not describe it. Fall through:
+    // the removal below is guarded too, so there is nothing to decide here.
+  }
+  await network.stop().catch((err) => {
+    // Deliberately not rethrown: teardown must not redden a green suite. The
+    // cost is that a recurrence is a warning rather than a failure, and the
+    // network leaks — on a long-lived dev box enough of those exhaust Docker's
+    // address pool and later runs fail at `new Network().start()`. So log what
+    // was attached: that list is the thing needed to identify the holder, and
+    // it is not recoverable after the fact.
+    console.warn(
+      `stopNetwork: removing the test network failed; endpoints seen before the disconnect pass: ${
+        attached.length > 0 ? attached.join(", ") : "(none)"
+      }`,
+      err,
+    );
+  });
+}
 
 export function postgres(network: StartedNetwork) {
   return new GenericContainer("mirror.gcr.io/pgvector/pgvector:pg18")
@@ -33,6 +108,8 @@ export function redis(network: StartedNetwork) {
     .withStartupTimeout(30_000);
 }
 
+/** `appUrl` pointing at the host must come from `exposeHostPort()` — there is no
+ * `host.docker.internal` mapping on these containers. */
 export function inngest(network: StartedNetwork, opts?: { appUrl?: string }) {
   const cmd = ["inngest", "dev", "--host", "0.0.0.0", "--port", "8288", "--no-discovery"];
   if (opts?.appUrl) {
@@ -42,7 +119,6 @@ export function inngest(network: StartedNetwork, opts?: { appUrl?: string }) {
     .withNetwork(network)
     .withNetworkAliases("inngest")
     .withExposedPorts(8288, 8289)
-    .withExtraHosts([{ host: "host.docker.internal", ipAddress: "host-gateway" }])
     .withCommand(cmd)
     .withWaitStrategy(Wait.forHttp("/health", 8288))
     .withStartupTimeout(60_000);
@@ -89,6 +165,7 @@ export function hindsight(
   network: StartedNetwork,
   opts: {
     apiKey: string;
+    /** A host address here must come from `exposeHostPort()`. */
     baseUrl?: string;
   },
 ) {
@@ -106,7 +183,6 @@ export function hindsight(
     .withNetwork(network)
     .withNetworkAliases("hindsight")
     .withExposedPorts(8888)
-    .withExtraHosts([{ host: "host.docker.internal", ipAddress: "host-gateway" }])
     .withEnvironment(env)
     .withWaitStrategy(Wait.forHttp("/health", 8888))
     .withStartupTimeout(300_000);
@@ -167,7 +243,6 @@ export function hindsightSlim(
     .withNetwork(network)
     .withNetworkAliases("hindsight")
     .withExposedPorts(8888)
-    .withExtraHosts([{ host: "host.docker.internal", ipAddress: "host-gateway" }])
     .withEnvironment(env)
     .withWaitStrategy(Wait.forHttp("/health", 8888))
     .withStartupTimeout(300_000);

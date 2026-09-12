@@ -38,10 +38,10 @@ const RESOURCE_LIMITS: ResourceLimits = {
 };
 
 let tx: Transactor;
-let closeDb: () => Promise<void>;
+let closeDb: (() => Promise<void>) | undefined;
 let store: DrizzleSandboxStore;
 let docker: Docker;
-let imagePresent = false;
+let skipReason: string | null = null;
 let bridgeGateway: string | null = null;
 let workspaceTmp: string | null = null;
 const sandboxes: LocalDockerSandboxClient[] = [];
@@ -58,20 +58,26 @@ beforeAll(async () => {
     );
   }
 
-  try {
-    await docker.getImage(DEVBASE_IMAGE).inspect();
-    imagePresent = true;
-  } catch {
-    imagePresent = false;
+  // Rootless Docker still answers `network inspect bridge` with a gateway, but it
+  // is RootlessKit's, not the host's — the CLI would dial an address nothing
+  // listens on and hang to the test timeout. Skip with a reason instead.
+  const info = (await docker.info()) as { SecurityOptions?: string[] };
+  if ((info.SecurityOptions ?? []).some((o) => o.includes("name=rootless"))) {
+    skipReason = "rootless Docker: the supervisor's containers cannot reach a host-bound mock";
+    return;
   }
 
-  if (!imagePresent) return;
+  try {
+    await docker.getImage(DEVBASE_IMAGE).inspect();
+  } catch {
+    skipReason = `${DEVBASE_IMAGE} not present`;
+    return;
+  }
 
-  // Default bridge gateway = the address the container can reach back
-  // to the host on. Resolved dynamically rather than hard-coding 172.17.0.1
-  // so docker-rootless / custom-bip setups work. `host.docker.internal`
-  // isn't an option here — the supervisor doesn't set ExtraHosts and we
-  // don't want to change production container config for a test seam.
+  // Default bridge gateway = the address the container reaches the host on,
+  // resolved dynamically so a custom --bip works. `exposeHostPort` would be the
+  // portable answer but maps only containers Testcontainers creates, and these
+  // come from the supervisor via dockerode.
   const bridge = await docker.getNetwork("bridge").inspect();
   bridgeGateway = bridge.IPAM?.Config?.[0]?.Gateway ?? null;
   if (!bridgeGateway) {
@@ -94,7 +100,10 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(async () => {
-  if (!imagePresent) return;
+  // `beforeAll` throws on an unreachable daemon before assigning closeDb, and a
+  // teardown that called it would mask that error with a TypeError.
+  const close = closeDb;
+  if (skipReason || !close) return;
   for (const s of sandboxes) await s.shutdown();
   for (const instanceId of testFileInstanceIds) {
     const leftover = await docker.listContainers({
@@ -115,7 +124,7 @@ afterAll(async () => {
       .catch(() => {});
   }
   if (workspaceTmp) rmSync(workspaceTmp, { recursive: true, force: true });
-  await closeDb();
+  await close();
 });
 
 function uniqueName(prefix: string): string {
@@ -202,8 +211,8 @@ describe("ClaudeCodeBackend against cogmo-devbase:test", () => {
   it(
     "plan flow runs the real CLI to completion with ExitPlanMode in the tool calls",
     async (ctx) => {
-      if (!imagePresent) {
-        ctx.skip();
+      if (skipReason) {
+        ctx.skip(skipReason);
         return;
       }
       const { sandbox } = await bootSandbox();
@@ -289,8 +298,8 @@ describe("ClaudeCodeBackend against cogmo-devbase:test", () => {
   it(
     "execute flow resumes a real session and completes without wedging on close-stdin",
     async (ctx) => {
-      if (!imagePresent) {
-        ctx.skip();
+      if (skipReason) {
+        ctx.skip(skipReason);
         return;
       }
       const { sandbox } = await bootSandbox();

@@ -13,7 +13,6 @@ import type {
   ToolUseBlock,
   Usage,
 } from "../llm/types.js";
-import { agentIterations } from "../metrics.js";
 import { validateHistory } from "./history-invariants.js";
 import {
   canonicalJson,
@@ -623,8 +622,6 @@ function buildResult(
     text = lastAssistant.content;
   }
 
-  agentIterations.record(iterations, { model });
-
   const ephemeral = new Set(ephemeralIndices);
   const newMessages = messages
     .slice(initialLength)
@@ -664,8 +661,6 @@ function buildDegradedResult(
   subtype: DegradeSubtype | null,
   streamed: EmittedLedger,
 ): AgentLoopResult {
-  agentIterations.record(iterations, { model });
-
   const ephemeral = new Set(ephemeralIndices);
   const newMessages = messages
     .slice(initialLength)

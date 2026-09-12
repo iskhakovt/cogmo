@@ -22,6 +22,7 @@ import type { ContentBlock, CountTokensParams, Message, StreamEvent } from "../l
 import { logger } from "../logger.js";
 import type { McpRegistry } from "../mcp/registry.js";
 import type { MemoryProvider } from "../memory/provider.js";
+import { agentIterations } from "../metrics.js";
 import type { SkillRunner } from "../skills/runner.js";
 import { buildSkillTools, composeTurnTools } from "../skills/skill-tool-builder.js";
 import { createSkillsService } from "../skills/skills-service.js";
@@ -1225,7 +1226,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
 
       const wasCoolingDown = conv.cooldownState !== null;
       const assistantMsg = await step.run("persist-new-messages", async () => {
-        return await deps.runInTx(async (tx) => {
+        const persisted = await deps.runInTx(async (tx) => {
           const inserted = await agentStore.insertMessages(tx, {
             conversationId,
             messages: result.newMessages,
@@ -1240,6 +1241,26 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           }
           return inserted;
         });
+        // Inside the step, because the bare body re-executes once per
+        // remaining boundary and would record the same turn 3-6 times; a step
+        // body fires once and is suppressed on replay. After the write,
+        // because a step body re-runs on every retry too — recording first
+        // would add a sample per attempt whenever the transaction is the thing
+        // failing. The turn is durably persisted by the time the sample is
+        // taken, and the step has not returned, so nothing downstream has
+        // moved on.
+        //
+        // The cost is coverage: a turn whose persist fails irrecoverably is
+        // never sampled, so the histogram counts turns that produced a
+        // persisted reply rather than every turn the loop ran. Recording
+        // ahead of the write would not buy back much — a turn that fails
+        // before reaching this step is unsampled either way — and it would
+        // pay in duplicates, N identical samples whenever the transaction is
+        // what keeps retrying. For a histogram read to spot runaway
+        // iteration counts, repeated copies of one value are worse than a
+        // missing one: they invent the pattern it exists to detect.
+        agentIterations.record(result.iterations, { model: result.model });
+        return persisted;
       });
 
       // Half-open success: cooldown was cleared inside the persist tx.

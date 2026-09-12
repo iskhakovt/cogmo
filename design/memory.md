@@ -300,13 +300,13 @@ HINDSIGHT_API_RERANKER_1_PROVIDER=rrf
 ```bash
 # LLM — llmock replays recorded fixtures
 HINDSIGHT_API_LLM_PROVIDER=openai
-HINDSIGHT_API_LLM_BASE_URL=http://host.docker.internal:$LLMOCK_PORT/v1
+HINDSIGHT_API_LLM_BASE_URL=http://host.testcontainers.internal:$LLMOCK_PORT/v1
 HINDSIGHT_API_LLM_API_KEY=test-key
 HINDSIGHT_API_LLM_MODEL=gpt-4o-mini  # NOT gpt-5-nano — see "Known Gaps" below
 
 # Embeddings — llmock deterministic vectors (no real API)
 HINDSIGHT_API_EMBEDDINGS_PROVIDER=openai
-HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL=http://host.docker.internal:$LLMOCK_PORT/v1
+HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL=http://host.testcontainers.internal:$LLMOCK_PORT/v1
 HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY=test-key
 HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL=text-embedding-3-small
 

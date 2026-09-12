@@ -1,5 +1,12 @@
 import { defineConfig } from "vitest/config";
 
+/** Mirror the Testcontainers port-forwarder sidecar off Docker Hub. Must be set
+ * here: `testcontainers` reads `SSHD_CONTAINER_IMAGE` at import time, so the
+ * helper that starts the forwarder is already too late. Bump with the
+ * `testcontainers` version — this is 12.1.0's own default, and a stale tag
+ * silently downgrades the sidecar. */
+process.env.SSHD_CONTAINER_IMAGE ??= "mirror.gcr.io/testcontainers/sshd:1.4.0";
+
 /** Defaults to 2 — matches the parallelism of CI's 2-core runners.
  * Override with `PYODIDE_MAX_WORKERS=N` on bigger dev boxes if 2 leaves
  * perf on the table. */

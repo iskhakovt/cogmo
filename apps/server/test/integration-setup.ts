@@ -38,7 +38,9 @@ export async function setup({ provide }: GlobalSetupContext) {
 
   mock = createMock();
   await mock.start();
-  console.log(`llmock at ${mock.url}`);
+  // Must precede every container below — see `exposeHostPort`.
+  const llmockBase = await c.exposeHostPort(mock.port);
+  console.log(`llmock at ${mock.url}, reachable from containers at ${llmockBase}`);
 
   console.log("Starting containers...");
   const [pg, _rd, inn, mn] = await Promise.all([
@@ -50,7 +52,7 @@ export async function setup({ provide }: GlobalSetupContext) {
   containers.push(pg, _rd, inn, mn);
 
   // Slim Hindsight — external LLM + embeddings via llmock (replays recorded fixtures)
-  const llmockUrl = `http://host.docker.internal:${mock.port}/v1`;
+  const llmockUrl = `${llmockBase}/v1`;
   const hindsightContainer = await c
     .hindsightSlim(network, {
       llmBaseUrl: llmockUrl,
@@ -191,10 +193,17 @@ export async function teardown() {
   if (mcpEchoServer) await mcpEchoServer.close();
 
   console.log("Stopping test containers...");
+  let failedStops = 0;
   for (const container of containers.reverse()) {
-    await container.stop();
+    // Guarded for the same reason as the network removal below: a container
+    // already reaped answers 404/409, and an exception here escapes teardown,
+    // reddening a green suite and skipping the rest of the cleanup.
+    await container.stop().catch((err) => {
+      failedStops += 1;
+      console.warn("teardown: stopping a test container failed", err);
+    });
   }
-  if (network) await network.stop();
+  if (network) await c.stopNetwork(network);
   if (skillsPath) {
     await rm(skillsPath, { recursive: true, force: true });
   }
@@ -213,5 +222,15 @@ export async function teardown() {
       .remove()
       .catch(() => {});
   }
-  console.log("Test containers stopped.");
+  // Counted, because the line below is the only summary of this pass and
+  // an unconditional success message would report a clean teardown over
+  // the top of containers that are still running. Those keep whatever
+  // networks they hold, so `stopNetwork` force-detaching them is the
+  // intended outcome rather than collateral — a stray container costs
+  // less than a network that cannot be removed.
+  console.log(
+    failedStops === 0
+      ? "Test containers stopped."
+      : `Test containers stopped, except ${failedStops} that would not stop — see the warnings above.`,
+  );
 }

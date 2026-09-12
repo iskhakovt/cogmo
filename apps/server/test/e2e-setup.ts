@@ -1,8 +1,10 @@
+import { spawn } from "node:child_process";
 import type { LLMock } from "@copilotkit/aimock";
 import type { StartedTestContainer } from "testcontainers";
 import { GenericContainer, Network, Wait } from "testcontainers";
 import type { GlobalSetupContext } from "vitest/node";
 import * as c from "../dev/containers.js";
+import { repoRoot } from "../src/test/repo-root.js";
 import { createMock } from "./llmock-setup.js";
 import { loadRootEnv } from "./load-root-env.js";
 
@@ -14,12 +16,100 @@ const containers: StartedTestContainer[] = [];
 let network: Awaited<ReturnType<InstanceType<typeof Network>["start"]>> | null = null;
 let mock: LLMock | null = null;
 
+/**
+ * Tag the local build produces, mirrored from the `cogmo-e2e` bake target.
+ * Also the image name `skills.e2e.test.ts` filters containers by.
+ */
+const E2E_IMAGE_FALLBACK = "cogmo-e2e";
+
+/** Ceiling on the local image build. See `bakeAppImage`. */
+const BAKE_TIMEOUT_MS = 20 * 60_000;
+
+/** How long a timed-out bake gets to exit on SIGTERM before SIGKILL. */
+const BAKE_KILL_GRACE_MS = 10_000;
+
+/**
+ * Build the app image through the same bake file CI uses, so both tiers build
+ * from one definition of what goes into it. `--load` imports the result into
+ * the daemon, which is where `GenericContainer` then looks for it.
+ *
+ * Bake rather than `GenericContainer.fromDockerfile`: testcontainers builds
+ * its tar client-side, and to honour a `.dockerignore` whose allowlist
+ * re-includes nested paths — which the repo's is — it has to enumerate every
+ * file under the context before filtering, `node_modules` and `.git`
+ * included. BuildKit does that walk itself, with the ignore rules applied as
+ * it goes.
+ *
+ * stdio is inherited so a cold build (several minutes) shows progress rather
+ * than hanging silently behind `globalSetup`.
+ */
+async function bakeAppImage(): Promise<void> {
+  console.log("Baking app image (target cogmo-e2e)...");
+  await new Promise<void>((resolve, reject) => {
+    const bake = spawn(
+      "docker",
+      ["buildx", "bake", "--file", "docker-bake.hcl", "--load", "cogmo-e2e"],
+      { cwd: repoRoot(), stdio: "inherit" },
+    );
+
+    let timedOut = false;
+    let escalation: NodeJS.Timeout | undefined;
+
+    // Nothing else bounds this: `globalSetup` has no timeout of its own, and a
+    // BuildKit stall or a registry that accepts the connection and then goes
+    // quiet leaves the child alive with no output. Without a deadline that is
+    // an indefinitely hung `pnpm test:e2e`. Generous enough for a cold build of
+    // every stage on a slow link; the point is to fail loudly, not to be tight.
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      bake.kill("SIGTERM");
+      // Rejecting here would hand the run back while the child is still alive,
+      // and the stall this deadline exists for is exactly when a docker CLI is
+      // slow to honour a signal — the process would outlive the test run
+      // holding a build slot. Wait for `close` instead, escalating if the
+      // grace period passes, so the rejection means the child is gone.
+      escalation = setTimeout(() => bake.kill("SIGKILL"), BAKE_KILL_GRACE_MS);
+    }, BAKE_TIMEOUT_MS);
+
+    const settle = (finish: () => void) => {
+      clearTimeout(deadline);
+      clearTimeout(escalation);
+      finish();
+    };
+
+    bake.on("error", (err) =>
+      settle(() =>
+        reject(
+          new Error(
+            `could not run \`docker buildx bake\` — is the docker CLI on PATH? (${err.message})`,
+          ),
+        ),
+      ),
+    );
+    bake.on("close", (code, signal) =>
+      settle(() => {
+        if (timedOut) {
+          reject(new Error(`\`docker buildx bake cogmo-e2e\` exceeded ${BAKE_TIMEOUT_MS}ms`));
+        } else if (code === 0) {
+          resolve();
+        } else {
+          reject(
+            new Error(`\`docker buildx bake cogmo-e2e\` failed (code ${code}, signal ${signal})`),
+          );
+        }
+      }),
+    );
+  });
+}
+
 export async function setup({ provide }: GlobalSetupContext) {
   network = await new Network().start();
 
   mock = createMock();
   await mock.start();
-  console.log(`llmock at ${mock.url}`);
+  // Must precede every container below — see `exposeHostPort`.
+  const llmockBase = await c.exposeHostPort(mock.port);
+  console.log(`llmock at ${mock.url}, reachable from containers at ${llmockBase}`);
 
   console.log("Starting containers...");
   const [pg, _rd, inn, mn] = await Promise.all([
@@ -31,7 +121,7 @@ export async function setup({ provide }: GlobalSetupContext) {
   containers.push(pg, _rd, inn, mn);
 
   // Slim Hindsight
-  const llmockUrl = `http://host.docker.internal:${mock.port}/v1`;
+  const llmockUrl = `${llmockBase}/v1`;
   const hindsightContainer = await c
     .hindsightSlim(network, {
       llmBaseUrl: llmockUrl,
@@ -55,18 +145,16 @@ export async function setup({ provide }: GlobalSetupContext) {
 
   await c.ensureFilesBucket(s3Endpoint);
 
-  // Use pre-built Docker image if available (CI builds it), otherwise build from Dockerfile.
-  const imageName = process.env.E2E_IMAGE ?? "cogmo-e2e";
-  let appImage: GenericContainer;
-  if (process.env.E2E_IMAGE) {
-    console.log(`Using pre-built image: ${imageName}`);
-    appImage = new GenericContainer(imageName);
+  // CI bakes the image and passes the tag; a local run bakes it here.
+  // `E2E_IMAGE_FALLBACK` mirrors the `cogmo-e2e` bake target's tag —
+  // version-pins.test.ts holds the two together.
+  const imageName = process.env.E2E_IMAGE ?? E2E_IMAGE_FALLBACK;
+  if (process.env.E2E_IMAGE === undefined) {
+    await bakeAppImage();
   } else {
-    console.log("Building app Docker image...");
-    appImage = await GenericContainer.fromDockerfile(".", "Dockerfile")
-      .withBuildkit()
-      .build(imageName);
+    console.log(`Using pre-built image: ${imageName}`);
   }
+  const appImage = new GenericContainer(imageName);
 
   // Same DB URL is used by both the seed container and the long-running app container,
   // both reaching Postgres via the testcontainers network alias.
@@ -128,7 +216,7 @@ export async function setup({ provide }: GlobalSetupContext) {
       .values({
         name: "anthropic",
         type: "anthropic",
-        baseUrl: `http://host.docker.internal:${mock.port}`,
+        baseUrl: llmockBase,
         secretId: secret.id,
         attrs: {},
       })
@@ -150,7 +238,6 @@ export async function setup({ provide }: GlobalSetupContext) {
   console.log("Starting app container (connect mode)...");
   const appContainer = await appImage
     .withNetwork(network)
-    .withExtraHosts([{ host: "host.docker.internal", ipAddress: "host-gateway" }])
     .withCommand(["serve"])
     .withEnvironment({
       DATABASE_URL: inNetworkDatabaseUrl,
@@ -199,9 +286,26 @@ export async function teardown() {
   if (mock) await mock.stop();
 
   console.log("Stopping containers...");
+  let failedStops = 0;
   for (const container of containers.reverse()) {
-    await container.stop();
+    // Guarded for the same reason as the network removal below: a container
+    // already reaped answers 404/409, and an exception here escapes teardown,
+    // reddening a green suite and skipping the rest of the cleanup.
+    await container.stop().catch((err) => {
+      failedStops += 1;
+      console.warn("teardown: stopping a test container failed", err);
+    });
   }
-  if (network) await network.stop();
-  console.log("Containers stopped.");
+  if (network) await c.stopNetwork(network);
+  // Counted, because the line below is the only summary of this pass and
+  // an unconditional success message would report a clean teardown over
+  // the top of containers that are still running. Those keep whatever
+  // networks they hold, so `stopNetwork` force-detaching them is the
+  // intended outcome rather than collateral — a stray container costs
+  // less than a network that cannot be removed.
+  console.log(
+    failedStops === 0
+      ? "Containers stopped."
+      : `Containers stopped, except ${failedStops} that would not stop — see the warnings above.`,
+  );
 }
