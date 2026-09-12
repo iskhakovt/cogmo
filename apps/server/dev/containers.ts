@@ -51,10 +51,16 @@ export async function stopNetwork(network: StartedNetwork): Promise<void> {
       await handle.disconnect({ Container: containerId, Force: true }).catch(() => {});
     }
   } catch {
-    // Network already gone, or the daemon will not describe it — either way
-    // the stop below is what decides the outcome.
+    // Network already gone, or the daemon will not describe it. Fall through:
+    // the stop below is guarded too, so there is nothing to decide here.
   }
-  await network.stop();
+  // Guarded as well, and that is the point of the function: a disconnect that
+  // silently failed above, or a network already removed, must not put the 403
+  // back. Teardown failing is indistinguishable from the suite failing in the
+  // job's exit code, so cleanup warns and moves on.
+  await network.stop().catch((err) => {
+    console.warn("stopNetwork: removing the test network failed", err);
+  });
 }
 
 export function postgres(network: StartedNetwork) {
