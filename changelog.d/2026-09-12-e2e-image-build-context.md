@@ -2,7 +2,7 @@
 
 `test/e2e-setup.ts` builds the app image when `E2E_IMAGE` is unset, by running `docker buildx bake --load cogmo-e2e` from the repo root — the same bake file CI builds `cogmo` from, so both tiers have one definition of what goes into the image. CI passes `E2E_IMAGE` from its bake step, so the build belongs to local runs, and `pnpm test:e2e` on its own is what reaches it.
 
-The build carries a 20-minute ceiling. `globalSetup` has no timeout of its own, so a BuildKit stall would otherwise hang `pnpm test:e2e` with no output and no way out.
+The build carries a 20-minute ceiling. `globalSetup` has no timeout of its own, so a BuildKit stall would otherwise hang `pnpm test:e2e` with no output and no way out. On expiry the child gets SIGTERM, ten seconds of grace, then SIGKILL, and the failure is raised only once it has exited — a stall is precisely when a docker CLI is slow to honour a signal, and rejecting earlier would hand the run back while the build is still holding resources.
 
 `cogmo-e2e` inherits the build inputs rather than the `cogmo` target, which keeps the GHA cache attributes out — that backend wants an Actions runtime token that only exists inside a workflow. Its platform is `BAKE_LOCAL_PLATFORM`, since `--load` imports into the daemon's image store and that holds one platform per tag; an Apple Silicon or Ampere machine takes the same path without an amd64 hardcoded into it. `_cogmo-build` holds the context, Dockerfile and args both targets share, and `cogmo` resolves byte-identically to before.
 

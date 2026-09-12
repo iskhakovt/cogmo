@@ -25,6 +25,9 @@ const E2E_IMAGE_FALLBACK = "cogmo-e2e";
 /** Ceiling on the local image build. See `bakeAppImage`. */
 const BAKE_TIMEOUT_MS = 20 * 60_000;
 
+/** How long a timed-out bake gets to exit on SIGTERM before SIGKILL. */
+const BAKE_KILL_GRACE_MS = 10_000;
+
 /**
  * Build the app image through the same bake file CI uses, so both tiers build
  * from one definition of what goes into it. `--load` imports the result into
@@ -49,20 +52,28 @@ async function bakeAppImage(): Promise<void> {
       { cwd: repoRoot(), stdio: "inherit" },
     );
 
+    let timedOut = false;
+    let escalation: NodeJS.Timeout | undefined;
+
     // Nothing else bounds this: `globalSetup` has no timeout of its own, and a
     // BuildKit stall or a registry that accepts the connection and then goes
     // quiet leaves the child alive with no output. Without a deadline that is
     // an indefinitely hung `pnpm test:e2e`. Generous enough for a cold build of
     // every stage on a slow link; the point is to fail loudly, not to be tight.
     const deadline = setTimeout(() => {
+      timedOut = true;
       bake.kill("SIGTERM");
-      reject(new Error(`\`docker buildx bake cogmo-e2e\` exceeded ${BAKE_TIMEOUT_MS}ms`));
+      // Rejecting here would hand the run back while the child is still alive,
+      // and the stall this deadline exists for is exactly when a docker CLI is
+      // slow to honour a signal — the process would outlive the test run
+      // holding a build slot. Wait for `close` instead, escalating if the
+      // grace period passes, so the rejection means the child is gone.
+      escalation = setTimeout(() => bake.kill("SIGKILL"), BAKE_KILL_GRACE_MS);
     }, BAKE_TIMEOUT_MS);
-    // The kill above makes `close` fire with SIGTERM; the promise has already
-    // settled by then, so that rejection is dropped and the deadline message
-    // is the one the caller sees.
+
     const settle = (finish: () => void) => {
       clearTimeout(deadline);
+      clearTimeout(escalation);
       finish();
     };
 
@@ -76,13 +87,17 @@ async function bakeAppImage(): Promise<void> {
       ),
     );
     bake.on("close", (code, signal) =>
-      settle(() =>
-        code === 0
-          ? resolve()
-          : reject(
-              new Error(`\`docker buildx bake cogmo-e2e\` failed (code ${code}, signal ${signal})`),
-            ),
-      ),
+      settle(() => {
+        if (timedOut) {
+          reject(new Error(`\`docker buildx bake cogmo-e2e\` exceeded ${BAKE_TIMEOUT_MS}ms`));
+        } else if (code === 0) {
+          resolve();
+        } else {
+          reject(
+            new Error(`\`docker buildx bake cogmo-e2e\` failed (code ${code}, signal ${signal})`),
+          );
+        }
+      }),
     );
   });
 }
