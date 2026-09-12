@@ -38,11 +38,7 @@ Docker services + app wired in-process. Tests the orchestration pipeline — deb
 - Testcontainers (PostgreSQL, Redis, Inngest, Hindsight) — started in vitest `globalSetup`, random ports
 - Container definitions in `dev/containers.ts` (shared with `scripts/dev-infra.ts` for local dev)
 - llmock (`@copilotkit/aimock`) runs in-process — serves both Anthropic API (for app) and OpenAI-compatible API (for Hindsight)
-- Hindsight reaches llmock via `host.docker.internal` — so the runtime has to let a container
-  open a connection back to a port on the host. Rootless Docker blocks that by default
-  (`rootlesskit --disable-host-loopback`); run the daemon with
-  `DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false` or the memory-backed tests fail
-  with Hindsight reporting `Failed to generate batch embeddings: Connection error`
+- Hindsight reaches llmock via `host.docker.internal`
 - App modules imported directly — `bootstrap()` from `src/index.ts` wires everything
 
 **Env injection:** `process.env` mutations in `globalSetup` propagate to Vitest test workers. Dynamic container URLs set via `process.env`, static values in `vitest.config.ts` `test.env`. Test files use normal top-level imports — `createEnv()` in `env.ts` sees all values.
@@ -69,8 +65,6 @@ Full deployment-like stack — cogmo runs from its release image, in connect mod
   with `E2E_IMAGE=cogmo-e2e`
 - Seed and app both run as containers off that image — `withCommand(["seed"])`, then
   `withCommand(["serve"])` in connect mode (WebSocket to the Inngest dev server)
-- Hindsight and the app container both reach llmock over `host.docker.internal`, so the
-  same container-to-host loopback the integration tier needs applies here
 
 **Naming:** `.e2e.test.ts` suffix. `pnpm test:e2e`.
 

@@ -9,7 +9,3 @@ Bake rather than `GenericContainer.fromDockerfile`: testcontainers assembles the
 The root has to be named explicitly either way, because Vitest runs with the cwd set to the package that owns the config — `apps/server` — which holds neither the bake file nor the Dockerfile. `src/test/repo-root.ts` owns that as `repoRoot()`, walking up to `pnpm-workspace.yaml` rather than counting `../`, so the answer holds wherever the caller sits. `engine-ranges`, `version-pins`, `skill-authoring` and `loadRootEnv` all share it.
 
 Two guards, both for paths CI never runs. `src/test/repo-root.test.ts` asserts real files, one per consumer target — `docker-bake.hcl`, `Dockerfile`, `.dockerignore`, `.env.example`, `images/devbase/Dockerfile`, and `apps/server/package.json` below the root — plus the premise the explicit root rests on, that the cwd holds no `Dockerfile`. `version-pins.test.ts` holds the `cogmo-e2e` bake tag against the two TypeScript literals naming the same image; a rename that splits them otherwise surfaces as testcontainers trying to pull `cogmo-e2e:latest` off Docker Hub.
-
-### Local integration runs need container-to-host loopback
-
-`design/testing.md` records what the Hindsight container needs in order to reach llmock on the host. Rootless Docker blocks that by default via `rootlesskit --disable-host-loopback`, and the symptom points nowhere near the network: Hindsight reports `Failed to generate batch embeddings: Connection error` and the memory-backed tests fail. `DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false` on the daemon is the knob.
