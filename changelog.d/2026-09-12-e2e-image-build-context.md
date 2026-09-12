@@ -4,9 +4,11 @@
 
 The root has to be named explicitly because Vitest runs with the cwd set to the package that owns the config — `apps/server` — which holds neither file. CI passes `E2E_IMAGE` from its bake step, so this branch belongs to local runs alone, and `pnpm test:e2e` on its own is what reaches it.
 
+The image the build produces outlives the run (`deleteOnExit: false`), so a repeat run can skip the rebuild with `E2E_IMAGE=cogmo-e2e`. `design/testing.md`'s E2E section carries the contract.
+
 `src/test/repo-root.ts` owns the resolution as `repoRoot()`, walking up to `pnpm-workspace.yaml` rather than counting `../`, so the answer holds wherever the caller sits. `engine-ranges`, `version-pins`, `skill-authoring` and `loadRootEnv` all share it.
 
-`src/test/repo-root.test.ts` is the layout canary. The consumers outside `src/` both fail quietly on a wrong path — an absent `.env` reads as "not recording" and returns, and the image build sits behind a branch CI skips — so the guard asserts against real files: `Dockerfile`, `.dockerignore`, and `apps/server/package.json` below the root.
+`src/test/repo-root.test.ts` is the layout canary. Every consumer fails quietly on a wrong path — an absent `.env` reads as "not recording" and returns, the image build sits behind a branch CI skips, and the devbase snapshot only builds in record mode — so the guard asserts against real files, one per consumer target: `Dockerfile`, `.dockerignore`, `.env.example`, `images/devbase/Dockerfile`, and `apps/server/package.json` below the root. It also pins the premise the explicit context rests on, that the cwd holds no `Dockerfile`.
 
 ### Local integration runs need container-to-host loopback
 

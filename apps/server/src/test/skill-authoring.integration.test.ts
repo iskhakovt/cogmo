@@ -89,11 +89,6 @@ import { repoRoot } from "./repo-root.js";
 
 const execFileP = promisify(execFileCb);
 
-/**
- * Walk up to the workspace root. Build context for the devbase snapshot lives
- * at `images/` next to `pnpm-workspace.yaml`, one level above this package.
- */
-
 // --- Mode gating ─────────────────────────────────────────────────────
 
 const SCENARIO = "skill-authoring";

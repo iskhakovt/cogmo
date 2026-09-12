@@ -69,7 +69,10 @@ export async function setup({ provide }: GlobalSetupContext) {
     // `.dockerignore`'s allowlist is written against the same root.
     appImage = await GenericContainer.fromDockerfile(repoRoot(), "Dockerfile")
       .withBuildkit()
-      .build(imageName);
+      // Survive the run, so a second `pnpm test:e2e` can skip the rebuild with
+      // `E2E_IMAGE=cogmo-e2e`. Testcontainers otherwise labels the image with
+      // the session id and has Ryuk reap it on exit.
+      .build(imageName, { deleteOnExit: false });
   }
 
   // Same DB URL is used by both the seed container and the long-running app container,
