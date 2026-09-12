@@ -11,10 +11,9 @@ import { HindsightClient } from "@vectorize-io/hindsight-client";
  * Embeddings use llmock's deterministic vectors (text-embedding-3-small
  * dimensions are hardcoded in Hindsight — no probe call needed).
  *
- * Usage — the override mirrors the sidecar, which Vitest runs get from their
- * own config:
- *   SSHD_CONTAINER_IMAGE=mirror.gcr.io/testcontainers/sshd:1.4.0 \
- *     pnpm tsx scripts/record-fixtures.ts
+ * Usage — export `SSHD_CONTAINER_IMAGE` with the tag `vitest.config.ts` pins to
+ * mirror the port-forwarder sidecar; without it this script pulls from Docker Hub:
+ *   pnpm tsx scripts/record-fixtures.ts
  *
  * Requires: Docker, .env with OPENAI_API_KEY.
  * Output: test/fixtures/recorded/*.json (llmock fixture format)
