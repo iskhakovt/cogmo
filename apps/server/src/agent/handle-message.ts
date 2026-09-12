@@ -1303,6 +1303,16 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         // failing. The turn is durably persisted by the time the sample is
         // taken, and the step has not returned, so nothing downstream has
         // moved on.
+        //
+        // The cost is coverage: a turn whose persist fails irrecoverably is
+        // never sampled, so the histogram counts turns that produced a
+        // persisted reply rather than every turn the loop ran. Recording
+        // ahead of the write would not buy back much — a turn that fails
+        // before reaching this step is unsampled either way — and it would
+        // pay in duplicates, N identical samples whenever the transaction is
+        // what keeps retrying. For a histogram read to spot runaway
+        // iteration counts, repeated copies of one value are worse than a
+        // missing one: they invent the pattern it exists to detect.
         agentIterations.record(result.iterations, { model: result.model });
         return persisted;
       });
