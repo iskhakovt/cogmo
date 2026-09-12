@@ -47,6 +47,13 @@ export async function buildTurnService(
   // for the conversation user, and restricted-class semantics follow the
   // user's own registry. One extra round-trip per turn on a small table
   // indexed on user_id.
+  //
+  // FUTURE: deployments that have never used class restriction pay for this
+  // round-trip every turn for nothing. A per-user cache (invalidated by
+  // `setProfileClassRestricted` / `createProfileClass` / `deleteProfileClass`)
+  // would close that gap, but it's strictly more code than the round-trip
+  // costs at single-user scale — revisit when telemetry shows the read taking
+  // a meaningful slice of turn latency.
   const restrictedClassNames = await deps
     .runInTx((tx) => deps.agentStore.listProfileClasses(tx, userId))
     .then((classes) => classes.filter((c) => c.restricted).map((c) => c.name));
