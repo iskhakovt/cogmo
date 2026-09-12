@@ -67,11 +67,15 @@ beforeAll(async () => {
 
   if (!imagePresent) return;
 
-  // Default bridge gateway = the address the container can reach back
-  // to the host on. Resolved dynamically rather than hard-coding 172.17.0.1
-  // so docker-rootless / custom-bip setups work. `host.docker.internal`
-  // isn't an option here — the supervisor doesn't set ExtraHosts and we
-  // don't want to change production container config for a test seam.
+  // Default bridge gateway = the address the container can reach back to the
+  // host on, resolved dynamically rather than hard-coded so a custom --bip
+  // works. Rootful only: under rootless Docker this gateway belongs to
+  // RootlessKit's own network namespace and is not the host, so this test
+  // cannot reach the mock there. Testcontainers' port forwarder (see
+  // `exposeHostPort` in dev/containers.ts) is the portable answer, but it only
+  // injects into containers *it* creates — these come from the supervisor via
+  // dockerode, and giving it a test-only ExtraHosts seam means changing
+  // production container config. Left as-is until that trade is worth making.
   const bridge = await docker.getNetwork("bridge").inspect();
   bridgeGateway = bridge.IPAM?.Config?.[0]?.Gateway ?? null;
   if (!bridgeGateway) {

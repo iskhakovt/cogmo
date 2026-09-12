@@ -5,7 +5,30 @@
  * The caller starts them in the right order and manages lifecycle.
  */
 
-import { GenericContainer, type StartedNetwork, Wait } from "testcontainers";
+import { GenericContainer, type StartedNetwork, TestContainers, Wait } from "testcontainers";
+
+/**
+ * Publish a host port to every container created afterwards, and return the
+ * base URL they reach it on.
+ *
+ * Deliberately not `--add-host host.docker.internal:host-gateway`: under
+ * rootless Docker `host-gateway` resolves to the bridge gateway *inside*
+ * RootlessKit's network namespace, which is not the host, so the connection is
+ * refused. Testcontainers tunnels through an sshd sidecar instead — no host
+ * address is involved, so one code path covers rootful, rootless and CI, and it
+ * reaches loopback-bound listeners too.
+ *
+ * Ordering matters: `GenericContainer` consults the forwarder at *create* time
+ * to inject the host mapping, so containers needing the port must be created
+ * after this resolves.
+ */
+export async function exposeHostPort(port: number): Promise<string> {
+  // Mirror + pin the forwarder's sidecar like every other image in this file;
+  // upstream defaults to an unmirrored Docker Hub pull. An explicit override wins.
+  process.env.SSHD_CONTAINER_IMAGE ??= "mirror.gcr.io/testcontainers/sshd:1.3.0";
+  await TestContainers.exposeHostPorts(port);
+  return `http://host.testcontainers.internal:${port}`;
+}
 
 export function postgres(network: StartedNetwork) {
   return new GenericContainer("mirror.gcr.io/pgvector/pgvector:pg18")
@@ -42,7 +65,6 @@ export function inngest(network: StartedNetwork, opts?: { appUrl?: string }) {
     .withNetwork(network)
     .withNetworkAliases("inngest")
     .withExposedPorts(8288, 8289)
-    .withExtraHosts([{ host: "host.docker.internal", ipAddress: "host-gateway" }])
     .withCommand(cmd)
     .withWaitStrategy(Wait.forHttp("/health", 8288))
     .withStartupTimeout(60_000);
@@ -106,7 +128,6 @@ export function hindsight(
     .withNetwork(network)
     .withNetworkAliases("hindsight")
     .withExposedPorts(8888)
-    .withExtraHosts([{ host: "host.docker.internal", ipAddress: "host-gateway" }])
     .withEnvironment(env)
     .withWaitStrategy(Wait.forHttp("/health", 8888))
     .withStartupTimeout(300_000);
@@ -167,7 +188,6 @@ export function hindsightSlim(
     .withNetwork(network)
     .withNetworkAliases("hindsight")
     .withExposedPorts(8888)
-    .withExtraHosts([{ host: "host.docker.internal", ipAddress: "host-gateway" }])
     .withEnvironment(env)
     .withWaitStrategy(Wait.forHttp("/health", 8888))
     .withStartupTimeout(300_000);

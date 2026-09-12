@@ -38,7 +38,9 @@ export async function setup({ provide }: GlobalSetupContext) {
 
   mock = createMock();
   await mock.start();
-  console.log(`llmock at ${mock.url}`);
+  // Must precede every container below — see `exposeHostPort`.
+  const llmockBase = await c.exposeHostPort(mock.port);
+  console.log(`llmock at ${mock.url}, reachable from containers at ${llmockBase}`);
 
   console.log("Starting containers...");
   const [pg, _rd, inn, mn] = await Promise.all([
@@ -50,7 +52,7 @@ export async function setup({ provide }: GlobalSetupContext) {
   containers.push(pg, _rd, inn, mn);
 
   // Slim Hindsight — external LLM + embeddings via llmock (replays recorded fixtures)
-  const llmockUrl = `http://host.docker.internal:${mock.port}/v1`;
+  const llmockUrl = `${llmockBase}/v1`;
   const hindsightContainer = await c
     .hindsightSlim(network, {
       llmBaseUrl: llmockUrl,
