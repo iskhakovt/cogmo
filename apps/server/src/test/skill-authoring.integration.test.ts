@@ -61,8 +61,7 @@ import { execFile as execFileCb } from "node:child_process";
 import { existsSync } from "node:fs";
 import { copyFile, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { Daytona, Image } from "@daytona/sdk";
 import { Octokit } from "@octokit/rest";
@@ -86,6 +85,7 @@ import { skillRuns, skills } from "../skills/store/schema.js";
 import { channelSessions, channels, inboundMessages } from "../transport/store/schema.js";
 import { expectDefined } from "./assertions.js";
 import { DaytonaMock, type DaytonaMockOptions } from "./daytona-mock.js";
+import { repoRoot } from "./repo-root.js";
 
 const execFileP = promisify(execFileCb);
 
@@ -93,15 +93,6 @@ const execFileP = promisify(execFileCb);
  * Walk up to the workspace root. Build context for the devbase snapshot lives
  * at `images/` next to `pnpm-workspace.yaml`, one level above this package.
  */
-function repoRoot(): string {
-  let dir = dirname(fileURLToPath(import.meta.url));
-  while (!existsSync(join(dir, "pnpm-workspace.yaml"))) {
-    const parent = dirname(dir);
-    if (parent === dir) throw new Error("repo root (pnpm-workspace.yaml) not found");
-    dir = parent;
-  }
-  return dir;
-}
 
 // --- Mode gating ─────────────────────────────────────────────────────
 

@@ -1,7 +1,7 @@
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { repoRoot } from "./repo-root.js";
 
 /**
  * Cross-file version-pin consistency guard.
@@ -15,16 +15,6 @@ import { describe, expect, it } from "vitest";
  * it would have caught the devbase pnpm pin silently drifting to 10.27.0
  * while the workspace moved to 11.x.
  */
-
-function repoRoot(): string {
-  let dir = dirname(fileURLToPath(import.meta.url));
-  while (!existsSync(join(dir, "pnpm-workspace.yaml"))) {
-    const parent = dirname(dir);
-    if (parent === dir) throw new Error("repo root (pnpm-workspace.yaml) not found");
-    dir = parent;
-  }
-  return dir;
-}
 
 const ROOT = repoRoot();
 

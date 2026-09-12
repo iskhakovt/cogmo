@@ -1,10 +1,9 @@
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { loadEnvFile } from "node:process";
-import { fileURLToPath } from "node:url";
+import { repoRoot } from "../src/test/repo-root.js";
 
-// Resolve the repo-root .env relative to this file, not the cwd, so RECORD=1
-// runs load real upstream keys no matter how vitest is launched.
-const ROOT_ENV = fileURLToPath(new URL("../../../.env", import.meta.url));
+const ROOT_ENV = join(repoRoot(), ".env");
 
 /** Load the repo-root .env for record mode — no-op when it's absent (e.g. CI). */
 export function loadRootEnv(): void {

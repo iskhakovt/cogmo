@@ -1,10 +1,10 @@
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import semver from "semver";
 import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
+import { repoRoot } from "./repo-root.js";
 
 /**
  * Declared-runtime consistency guard.
@@ -42,16 +42,6 @@ import { z } from "zod";
  * every dependency accepts, or hold the offending dependency back. Prefer the
  * former — the failure means we were advertising support we didn't have.
  */
-
-function repoRoot(): string {
-  let dir = dirname(fileURLToPath(import.meta.url));
-  while (!existsSync(join(dir, "pnpm-workspace.yaml"))) {
-    const parent = dirname(dir);
-    if (parent === dir) throw new Error("repo root (pnpm-workspace.yaml) not found");
-    dir = parent;
-  }
-  return dir;
-}
 
 const ROOT = repoRoot();
 const SERVER_PKG_DIR = join(ROOT, "apps", "server");

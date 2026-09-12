@@ -38,7 +38,11 @@ Docker services + app wired in-process. Tests the orchestration pipeline — deb
 - Testcontainers (PostgreSQL, Redis, Inngest, Hindsight) — started in vitest `globalSetup`, random ports
 - Container definitions in `dev/containers.ts` (shared with `scripts/dev-infra.ts` for local dev)
 - llmock (`@copilotkit/aimock`) runs in-process — serves both Anthropic API (for app) and OpenAI-compatible API (for Hindsight)
-- Hindsight reaches llmock via `host.docker.internal`
+- Hindsight reaches llmock via `host.docker.internal` — so the runtime has to let a container
+  open a connection back to a port on the host. Rootless Docker blocks that by default
+  (`rootlesskit --disable-host-loopback`); run the daemon with
+  `DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false` or the memory-backed tests fail
+  with Hindsight reporting `Failed to generate batch embeddings: Connection error`
 - App modules imported directly — `bootstrap()` from `src/index.ts` wires everything
 
 **Env injection:** `process.env` mutations in `globalSetup` propagate to Vitest test workers. Dynamic container URLs set via `process.env`, static values in `vitest.config.ts` `test.env`. Test files use normal top-level imports — `createEnv()` in `env.ts` sees all values.
