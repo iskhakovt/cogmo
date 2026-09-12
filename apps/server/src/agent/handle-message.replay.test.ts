@@ -25,6 +25,7 @@ import { InngestTestEngine } from "@inngest/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { inngest } from "../inngest/client.js";
 import { agentIterations } from "../metrics.js";
+import { expectDefined } from "../test/assertions.js";
 import {
   fakeRunInTx,
   mockAgentStore,
@@ -445,6 +446,14 @@ describe("handle-message — crash recovery / step replay", () => {
 
     expect(record).toHaveBeenCalledTimes(1);
     expect(record).toHaveBeenCalledWith(1, { model: "mock-model" });
+
+    // After the write, not before it: a step body re-runs on every retry, so a
+    // sample taken ahead of the transaction is repeated whenever the
+    // transaction is what keeps failing.
+    const insert = vi.mocked(deps.agentStore.insertMessages);
+    expect(record.mock.invocationCallOrder[0]).toBeGreaterThan(
+      expectDefined(insert.mock.invocationCallOrder[0], "insertMessages call order"),
+    );
   });
 
   it("does not record the iteration count again when persist-new-messages is cached", async () => {
