@@ -36,12 +36,24 @@ export function formatGateTimeout(ms: number): string {
   return `${Number((ms / size).toFixed(1))}${suffix}`;
 }
 
+/** Telegram rejects a message longer than this (counted here in UTF-16 units, which is conservative). */
+const TELEGRAM_MESSAGE_LIMIT = 4096;
+
+/**
+ * The checkpoint message. Gate instructions may be up to 4,000 characters,
+ * which with the header and footer can pass Telegram's limit — and a rejected
+ * send would leave the gate with no buttons. The prompt is truncated to fit;
+ * the header and the deadline always survive.
+ */
 export function buildPipelineGateText(event: PipelineGatePendingData): string {
-  return (
-    `🚦 Pipeline "${event.pipelineName}" — checkpoint "${event.stageId}"\n\n` +
-    `${event.prompt}\n\n` +
-    `Waiting up to ${formatGateTimeout(event.timeoutMs)} for your decision.`
-  );
+  const header = `🚦 Pipeline "${event.pipelineName}" — checkpoint "${event.stageId}"\n\n`;
+  const footer = `\n\nWaiting up to ${formatGateTimeout(event.timeoutMs)} for your decision.`;
+  const room = TELEGRAM_MESSAGE_LIMIT - header.length - footer.length;
+  const prompt =
+    event.prompt.length <= room
+      ? event.prompt
+      : `${event.prompt.slice(0, room - 1).replace(/[\uD800-\uDBFF]$/, "")}…`;
+  return header + prompt + footer;
 }
 
 /**

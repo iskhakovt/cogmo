@@ -78,6 +78,18 @@ describe("validateDefinition", () => {
     expect(issues.some((i) => i.path === "stages[0].output.schema")).toBe(true);
   });
 
+  it("flags a JSON Schema whose $ref points nowhere", () => {
+    // Meta-schema valid, but it can never be compiled to check an artifact.
+    const def = validPipelineDefinition();
+    stage(def, 0).output = {
+      kind: "json",
+      schema: { type: "object", properties: { owner: { $ref: "#/$defs/missing" } } },
+    };
+    const issues = validateDefinition(def, CTX);
+    const issue = issues.find((i) => i.path === "stages[0].output.schema");
+    expect(issue?.message).toContain("can't be compiled");
+  });
+
   it("accepts a valid JSON Schema on a json output", () => {
     const def = validPipelineDefinition();
     stage(def, 0).output = {

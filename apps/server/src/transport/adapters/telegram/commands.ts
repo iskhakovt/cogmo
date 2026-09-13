@@ -531,6 +531,12 @@ export async function handlePlanCallback(
 export interface PipelineGateCallbackOutcome {
   editText: string;
   toast: string;
+  /**
+   * Whether the keyboard should go. Yes once the decision was sent or the
+   * checkpoint is already resolved; no for a rejected tap, which must not take
+   * the buttons away from whoever can use them.
+   */
+  clearKeyboard: boolean;
 }
 
 /**
@@ -551,16 +557,24 @@ export async function handlePipelineGateCallback(
     parsed.action,
     tapperPlatformHandle,
   );
-  if (res.isErr()) return { editText: errorMessage(res.error), toast: errorMessage(res.error) };
+  if (res.isErr()) {
+    return {
+      editText: errorMessage(res.error),
+      toast: errorMessage(res.error),
+      clearKeyboard: res.error.code === "pipeline_gate_not_pending",
+    };
+  }
   const { pipelineName, stageId } = res.value;
   return parsed.action === "approve"
     ? {
         editText: `✅ Approval sent for checkpoint "${stageId}" of pipeline "${pipelineName}".`,
         toast: "Approved",
+        clearKeyboard: true,
       }
     : {
         editText: `❌ Cancellation sent for checkpoint "${stageId}" of pipeline "${pipelineName}".`,
         toast: "Cancelling",
+        clearKeyboard: true,
       };
 }
 

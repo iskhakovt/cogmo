@@ -44,6 +44,26 @@ describe("formatGateTimeout", () => {
   });
 });
 
+describe("buildPipelineGateText", () => {
+  it("fits Telegram's 4,096-character message limit for the longest valid gate", () => {
+    const text = buildPipelineGateText({
+      ...EVENT,
+      pipelineName: "p".repeat(64),
+      stageId: "s".repeat(64),
+      prompt: "x".repeat(4000),
+    });
+
+    expect(text.length).toBeLessThanOrEqual(4096);
+    expect(text).toContain("…");
+    expect(text.endsWith("for your decision.")).toBe(true);
+  });
+
+  it("leaves a prompt that already fits untouched", () => {
+    expect(buildPipelineGateText(EVENT)).toContain("\n\nApprove the plan?\n\n");
+    expect(buildPipelineGateText(EVENT)).not.toContain("…");
+  });
+});
+
 describe("postPipelineGateKeyboard", () => {
   it("posts the checkpoint text with the run's keyboard to this channel's session", async () => {
     const sendMessage = vi.fn().mockResolvedValue({ message_id: 1 });

@@ -350,4 +350,123 @@ describe("createPipelineStageRunner", () => {
 
     expect(notifyConversation).not.toHaveBeenCalled();
   });
+
+  describe("recovery after a step committed but its result was lost", () => {
+    function reloaded(overrides: Record<string, unknown>) {
+      return { status: "running", currentStage: "draft", iteration: 0, ...overrides };
+    }
+
+    it("re-sends gate.pending when the park had already committed for this gate", async () => {
+      const { fn, runStore } = harness();
+      runStore.transitionStatus.mockResolvedValue({ kind: "stale", status: "waiting_gate" });
+      const t = new InngestTestEngine({ function: fn, events: [stageDue("approve")] });
+
+      const { result, ctx } = await t.execute({
+        steps: [
+          { id: "load-run", handler: () => snapshot({ currentStage: "approve" }) },
+          {
+            id: "reload-run",
+            handler: () => reloaded({ status: "waiting_gate", currentStage: "approve" }),
+          },
+        ],
+      });
+
+      expect(result).toEqual({ status: "waiting_gate" });
+      expect(ctx.step.sendEvent).toHaveBeenCalledWith(
+        "emit-gate-pending",
+        expect.objectContaining({ id: `pipeline-gate-pending-${RUN_ID}:approve:0` }),
+      );
+    });
+
+    it("stays skipped when the run is parked somewhere else", async () => {
+      const { fn, runStore } = harness();
+      runStore.transitionStatus.mockResolvedValue({ kind: "stale", status: "waiting_gate" });
+      const t = new InngestTestEngine({ function: fn, events: [stageDue("approve")] });
+
+      const { result, ctx } = await t.execute({
+        steps: [
+          { id: "load-run", handler: () => snapshot({ currentStage: "approve" }) },
+          {
+            id: "reload-run",
+            handler: () => reloaded({ status: "waiting_gate", currentStage: "sign-off" }),
+          },
+        ],
+      });
+
+      expect(result).toEqual({ status: "skipped", reason: "stale" });
+      expect(ctx.step.sendEvent).not.toHaveBeenCalled();
+    });
+
+    it("re-sends the next stage when the advance had already committed", async () => {
+      const { fn, runStore } = harness();
+      runStore.advanceStage.mockResolvedValue({ kind: "stale", currentStage: "approve" });
+      const t = new InngestTestEngine({ function: fn, events: [stageDue("draft")] });
+
+      const { result, ctx } = await t.execute({
+        steps: [
+          { id: "load-run", handler: () => snapshot() },
+          { id: "reload-run", handler: () => reloaded({ currentStage: "approve" }) },
+        ],
+      });
+
+      expect(result).toEqual({ status: "advanced", nextStage: "approve" });
+      expect(ctx.step.sendEvent).toHaveBeenCalledWith(
+        "emit-next-stage",
+        expect.objectContaining({ id: `pipeline-stage-due-${RUN_ID}-approve-0` }),
+      );
+    });
+
+    it("sends the completion notice when the completion had already committed", async () => {
+      const { fn, runStore, notifyConversation } = harness();
+      runStore.completeRun.mockResolvedValue({ kind: "stale", currentStage: "build" });
+      const t = new InngestTestEngine({ function: fn, events: [stageDue("build")] });
+
+      const { result } = await t.execute({
+        steps: [
+          { id: "load-run", handler: () => snapshot({ currentStage: "build" }) },
+          {
+            id: "reload-run",
+            handler: () => reloaded({ status: "completed", currentStage: "build" }),
+          },
+        ],
+      });
+
+      expect(result).toEqual({ status: "completed" });
+      expect(notifyConversation).toHaveBeenCalledWith(
+        "conv-1",
+        '✅ Pipeline "plan-then-build" completed.',
+      );
+    });
+
+    it("stays skipped when another delivery moved the run past the next stage", async () => {
+      const { fn, runStore } = harness();
+      runStore.advanceStage.mockResolvedValue({ kind: "stale", currentStage: "build" });
+      const t = new InngestTestEngine({ function: fn, events: [stageDue("draft")] });
+
+      const { result, ctx } = await t.execute({
+        steps: [
+          { id: "load-run", handler: () => snapshot() },
+          { id: "reload-run", handler: () => reloaded({ currentStage: "build" }) },
+        ],
+      });
+
+      expect(result).toEqual({ status: "skipped", reason: "stale" });
+      expect(ctx.step.sendEvent).not.toHaveBeenCalled();
+    });
+  });
+
+  it("onFailure still resolves when the failure notice can't be delivered", async () => {
+    const { fn, runStore, notifyConversation } = harness();
+    runStore.failRun.mockResolvedValue({ kind: "failed", conversationId: "conv-1" });
+    notifyConversation.mockRejectedValue(new Error("session lookup failed"));
+
+    await expect(
+      invokeInngestOnFailure<FailureCtx>(fn, {
+        event: { data: { event: { data: { runId: RUN_ID, stageId: "draft", iteration: 0 } } } },
+        error: new Error("boom"),
+        step: { run: (_id, body) => body() },
+      }),
+    ).resolves.toBeUndefined();
+    expect(runStore.failRun).toHaveBeenCalled();
+  });
 });

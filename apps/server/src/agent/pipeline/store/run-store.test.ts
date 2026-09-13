@@ -29,8 +29,8 @@ afterAll(async () => {
   await close();
 });
 
-/** Insert a user + profile + conversation + definition and open a run on its first stage. */
-async function seedRun(currentStage = "gather-context") {
+/** Insert a user + profile + conversation + definition — everything a run needs. */
+async function seedDefinitionAndConversation() {
   const userId = (await tx((trx) => agentStore.createUser(trx))).id;
   const profile = await tx((trx) =>
     agentStore.createProfile(trx, {
@@ -52,14 +52,20 @@ async function seedRun(currentStage = "gather-context") {
       compiled: validPipelineDefinition(),
     }),
   );
+  return { userId, conversationId: conversation.id, definitionId: def.id };
+}
+
+/** Seed a definition and conversation, then open a run on `currentStage`. */
+async function seedRun(currentStage = "gather-context") {
+  const seeded = await seedDefinitionAndConversation();
   const run = await tx((trx) =>
     runStore.createRun(trx, {
-      definitionId: def.id,
-      conversationId: conversation.id,
+      definitionId: seeded.definitionId,
+      conversationId: seeded.conversationId,
       currentStage,
     }),
   );
-  return { userId, definitionId: def.id, conversationId: conversation.id, run };
+  return { ...seeded, run };
 }
 
 const textArtifact: StageArtifact = { kind: "text", text: "gathered context" };
@@ -299,31 +305,6 @@ describe("DrizzlePipelineRunStore", () => {
 });
 
 describe("DrizzlePipelineRunStore — recovery and joins", () => {
-  async function seedDefinitionAndConversation() {
-    const userId = (await tx((trx) => agentStore.createUser(trx))).id;
-    const profile = await tx((trx) =>
-      agentStore.createProfile(trx, {
-        userId,
-        name: "default",
-        basePrompt: "p",
-        model: "test-model",
-        toolSet: [],
-      }),
-    );
-    const conversation = await tx((trx) =>
-      agentStore.createConversation(trx, { userId, profileId: profile.id, isPrivate: true }),
-    );
-    const def = await tx((trx) =>
-      defStore.insertDefinition(trx, {
-        userId,
-        name: "issue-to-pr",
-        sourceText: "on command, gather context, gate, implement",
-        compiled: validPipelineDefinition(),
-      }),
-    );
-    return { userId, conversationId: conversation.id, definitionId: def.id };
-  }
-
   it("insertOrRecoverRun returns the existing run for a repeated key", async () => {
     const { conversationId, definitionId } = await seedDefinitionAndConversation();
     const params = { definitionId, conversationId, currentStage: "gather-context" };

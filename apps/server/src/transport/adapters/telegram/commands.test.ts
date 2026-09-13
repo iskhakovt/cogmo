@@ -4697,6 +4697,7 @@ describe("handlePipelineGateCallback", () => {
     expect(outcome).toEqual({
       editText: '✅ Approval sent for checkpoint "approve" of pipeline "issue-to-pr".',
       toast: "Approved",
+      clearKeyboard: true,
     });
   });
 
@@ -4716,6 +4717,7 @@ describe("handlePipelineGateCallback", () => {
     expect(outcome).toEqual({
       editText: '❌ Cancellation sent for checkpoint "approve" of pipeline "issue-to-pr".',
       toast: "Cancelling",
+      clearKeyboard: true,
     });
   });
 
@@ -4736,6 +4738,8 @@ describe("handlePipelineGateCallback", () => {
 
     expect(outcome.editText).toBe("This checkpoint was already resolved — the run is running.");
     expect(outcome.toast).toBe(outcome.editText);
+    // A resolved checkpoint's buttons can go.
+    expect(outcome.clearKeyboard).toBe(true);
   });
 
   it("an unauthorized tapper gets the identity rejection", async () => {
@@ -4750,5 +4754,7 @@ describe("handlePipelineGateCallback", () => {
     );
 
     expect(outcome.editText).toBe("You're not authorized on this bot.");
+    // A rejected tap must not take the buttons away from whoever can use them.
+    expect(outcome.clearKeyboard).toBe(false);
   });
 });

@@ -9,11 +9,25 @@
  * The resolution must name the gate the run is actually parked on
  * (`gateKey` against the row's current stage and iteration): a resolution
  * for an earlier gate of the same run, delivered late, is stale.
+ *
+ * A stale outcome reports where the run actually is. From that the caller can
+ * tell a resolution whose effect already stands — the same step re-run after
+ * its commit, or a same-effect resolution that raced it — from one that
+ * genuinely lost.
  */
 
 import type { Transactor } from "../../db/index.js";
-import { type PipelineGateDecision, pipelineGateKey } from "../../inngest/events.js";
-import type { PipelineRunStore } from "./store/index.js";
+import {
+  type PipelineGateDecision,
+  parsePipelineGateKey,
+  pipelineGateKey,
+} from "../../inngest/events.js";
+import type {
+  PipelineRunRow,
+  PipelineRunStatus,
+  PipelineRunStore,
+  PipelineRunWithDefinition,
+} from "./store/index.js";
 
 export interface ResolveGateDeps {
   runInTx: Transactor;
@@ -44,8 +58,47 @@ export type ResolveGateOutcome =
     }
   | { kind: "completed"; conversationId: string; pipelineName: string }
   | { kind: "cancelled"; conversationId: string; pipelineName: string }
-  | { kind: "stale" }
+  | {
+      kind: "stale";
+      status: PipelineRunStatus;
+      currentStage: string;
+      iteration: number;
+      /** The stage the resolution's gate key names. */
+      gateStage: string;
+      /** The stage after that gate, or null when the gate is the last stage. */
+      nextStage: string | null;
+      /** The run has moved forward past the gate: onto a later stage, or completed at it. */
+      pastGate: boolean;
+    }
   | { kind: "not_found" };
+
+function staleOutcome(
+  run: PipelineRunRow,
+  definition: PipelineRunWithDefinition["definition"],
+  gateKey: string,
+): ResolveGateOutcome {
+  const gate = parsePipelineGateKey(gateKey);
+  const stages = definition.compiled.stages;
+  const gateIndex = stages.findIndex((s) => s.id === gate.stageId);
+  const currentIndex = stages.findIndex((s) => s.id === run.currentStage);
+  const pastGate =
+    gateIndex >= 0 &&
+    (run.status === "completed"
+      ? currentIndex >= gateIndex
+      : run.status !== "cancelled" &&
+        run.status !== "failed" &&
+        run.iteration === gate.iteration &&
+        currentIndex > gateIndex);
+  return {
+    kind: "stale",
+    status: run.status,
+    currentStage: run.currentStage,
+    iteration: run.iteration,
+    gateStage: gate.stageId,
+    nextStage: gateIndex >= 0 ? (stages[gateIndex + 1]?.id ?? null) : null,
+    pastGate,
+  };
+}
 
 export async function resolveGate(
   deps: ResolveGateDeps,
@@ -56,11 +109,11 @@ export async function resolveGate(
     if (!loaded) return { kind: "not_found" };
     const { run, definition } = loaded;
     if (pipelineGateKey(run.id, run.currentStage, run.iteration) !== args.gateKey) {
-      return { kind: "stale" };
+      return staleOutcome(run, definition, args.gateKey);
     }
 
     const claimed = await deps.runStore.transitionStatus(tx, run.id, "waiting_gate", "running");
-    if (claimed.kind !== "transitioned") return { kind: "stale" };
+    if (claimed.kind !== "transitioned") return staleOutcome(run, definition, args.gateKey);
 
     const base = { conversationId: run.conversationId, pipelineName: definition.name };
 

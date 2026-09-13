@@ -25,6 +25,27 @@ const advanced: ResolveGateOutcome = {
   iteration: 0,
 };
 
+/** A resolution that found the run already moved on past the approve gate. */
+const staleAdvanced: ResolveGateOutcome = {
+  kind: "stale",
+  status: "running",
+  currentStage: "build",
+  iteration: 0,
+  gateStage: "approve",
+  nextStage: "build",
+  pastGate: true,
+};
+/** A resolution that found the run already cancelled at the approve gate. */
+const staleCancelled: ResolveGateOutcome = {
+  kind: "stale",
+  status: "cancelled",
+  currentStage: "approve",
+  iteration: 0,
+  gateStage: "approve",
+  nextStage: "build",
+  pastGate: false,
+};
+
 function eventData(decision: PipelineGateDecision) {
   return { runId: "run-1", gateKey: "run-1:approve:0", conversationId: "conv-1", decision };
 }
@@ -66,9 +87,11 @@ describe("gateNotice", () => {
     ["timeout_proceed", { kind: "completed", ...base }, "timed out — pipeline"],
     ["cancelled", { kind: "cancelled", ...base }, '❌ Pipeline "issue-to-pr" cancelled.'],
     ["timeout_abort", { kind: "cancelled", ...base }, "was cancelled"],
-    ["approved", { kind: "stale" }, "arrived after the checkpoint had already been resolved"],
-    ["cancelled", { kind: "stale" }, "was not applied"],
-    ["timeout_abort", { kind: "stale" }, null],
+    ["approved", staleCancelled, "arrived after the checkpoint had already been resolved"],
+    ["cancelled", staleAdvanced, "was not applied"],
+    ["approved", staleAdvanced, null],
+    ["cancelled", staleCancelled, null],
+    ["timeout_abort", staleAdvanced, null],
     ["timeout_abort", { kind: "not_found" }, null],
   ] as const)("%s + %o → %s", (decision, outcome, expected) => {
     const notice = gateNotice(decision, outcome);
@@ -132,14 +155,47 @@ describe("createPipelineGateResolver", () => {
     const { t, notifyConversation } = harness("approved");
 
     const { result } = await t.execute({
-      steps: [{ id: "resolve-gate", handler: () => ({ kind: "stale" }) }],
+      steps: [{ id: "resolve-gate", handler: () => staleCancelled }],
     });
 
-    expect(result).toEqual({ kind: "stale" });
+    expect(result).toEqual(staleCancelled);
     expect(notifyConversation).toHaveBeenCalledWith(
       "conv-1",
       expect.stringContaining("was not applied"),
     );
+  });
+
+  it("re-sends the next stage, silently, when this resolution had already been applied", async () => {
+    // A retry after `resolve-gate` committed but lost its result, or a
+    // same-effect resolution that raced it: either way the run sits on the
+    // stage after the gate and the emit is deduped on the cursor.
+    const { t, notifyConversation } = harness("approved");
+
+    const { ctx } = await t.execute({
+      steps: [{ id: "resolve-gate", handler: () => staleAdvanced }],
+    });
+
+    expect(ctx.step.sendEvent).toHaveBeenCalledWith(
+      "emit-next-stage",
+      expect.objectContaining({ id: "pipeline-stage-due-run-1-build-0" }),
+    );
+    expect(notifyConversation).not.toHaveBeenCalled();
+  });
+
+  it("doesn't re-send a stage the run has already moved beyond", async () => {
+    const { t } = harness("timeout_proceed");
+
+    const { ctx } = await t.execute({
+      steps: [
+        {
+          id: "resolve-gate",
+          handler: () => ({ ...staleAdvanced, currentStage: "sign-off" }),
+        },
+      ],
+    });
+
+    expect(ctx.step.sendEvent).toHaveBeenCalledTimes(1);
+    expect(ctx.step.sendEvent).toHaveBeenCalledWith("emit-gate-settled", expect.anything());
   });
 
   it("neither settles nor notifies for a run that does not exist", async () => {
@@ -191,5 +247,14 @@ describe("createPipelineGateResolver onFailure", () => {
     await invokeInngestOnFailure<FailureCtx>(fn, failureCtx("timeout_abort"));
 
     expect(notifyConversation).not.toHaveBeenCalled();
+  });
+
+  it("still resolves when the failure notice can't be delivered", async () => {
+    const { fn, notifyConversation } = harness("approved");
+    notifyConversation.mockRejectedValue(new Error("session lookup failed"));
+
+    await expect(
+      invokeInngestOnFailure<FailureCtx>(fn, failureCtx("approved")),
+    ).resolves.toBeUndefined();
   });
 });

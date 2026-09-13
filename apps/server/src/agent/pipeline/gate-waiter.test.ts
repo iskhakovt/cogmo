@@ -102,4 +102,27 @@ describe("pipeline gate waiter", () => {
     expect(ctx.step.sleep).toHaveBeenCalledTimes(1);
     expect(ctx.step.sleep).toHaveBeenCalledWith("wait-1", "3600000ms");
   });
+
+  it("still times out when a reminder can't be delivered", async () => {
+    const notifyConversation = vi.fn().mockRejectedValue(new Error("session lookup failed"));
+    const fn = createPipelineGateWaiter({ deliveryRouter: { notifyConversation } });
+    const t = new InngestTestEngine({
+      function: fn,
+      events: [pendingEvent({ kind: "remind", maxReminders: 1, finalAction: "proceed" })],
+    });
+
+    const { result } = await t.execute({
+      steps: ["wait-1", "wait-2"].map((id) => ({ id, handler: () => null })),
+    });
+
+    expect(notifyConversation).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ gateKey: "run-1:plan-gate:0", decision: "timeout_proceed" });
+  });
+
+  it("rejects a pending gate asking for more reminders than a definition may declare", () => {
+    const data = pendingEvent({ kind: "remind", maxReminders: 11, finalAction: "abort" }).data;
+    expect(pipelineGatePending.schema.safeParse(data).success).toBe(false);
+    const withinBound = pendingEvent({ kind: "remind", maxReminders: 10, finalAction: "abort" });
+    expect(pipelineGatePending.schema.safeParse(withinBound.data).success).toBe(true);
+  });
 });

@@ -969,12 +969,14 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     if (!parsed) return;
 
     const outcome = await handlePipelineGateCallback(transport, parsed, String(fromId));
-    try {
-      await ctx.editMessageText(outcome.editText, { reply_markup: { inline_keyboard: [] } });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "";
-      if (!msg.includes("message is not modified")) {
-        logger.warn({ err }, "telegram: failed to edit pipeline gate message");
+    if (outcome.clearKeyboard) {
+      try {
+        await ctx.editMessageText(outcome.editText, { reply_markup: { inline_keyboard: [] } });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "";
+        if (!msg.includes("message is not modified")) {
+          logger.warn({ err }, "telegram: failed to edit pipeline gate message");
+        }
       }
     }
     await ctx.answerCallbackQuery({ text: outcome.toast });

@@ -15,6 +15,12 @@
  * live read of state the run's own steps mutate. A delivery whose cursor no
  * longer matches the run — a duplicate, or one the run has moved past — is
  * skipped.
+ *
+ * A transition step that re-runs after its own commit (the worker died before
+ * Inngest recorded the result) finds the run already moved and reads `stale`.
+ * It then reloads the run, and when the run sits exactly where this step
+ * would have put it, carries on to the follow-up — the event is deduped on
+ * the run cursor, so a second send is harmless.
  */
 
 import { NonRetriableError } from "inngest";
@@ -44,7 +50,12 @@ export interface PipelineStageRunnerDeps {
   runInTx: Transactor;
   runStore: Pick<
     PipelineRunStore,
-    "getRunWithDefinition" | "transitionStatus" | "advanceStage" | "completeRun" | "failRun"
+    | "getRun"
+    | "getRunWithDefinition"
+    | "transitionStatus"
+    | "advanceStage"
+    | "completeRun"
+    | "failRun"
   >;
   deliveryRouter: Pick<DeliveryRouter, "notifyConversation">;
   executeAgenticStage: (
@@ -52,6 +63,21 @@ export interface PipelineStageRunnerDeps {
     steps: AgenticStageSteps,
     log: typeof logger,
   ) => Promise<AgenticStageOutcome>;
+}
+
+async function notifyBestEffort(
+  deps: Pick<PipelineStageRunnerDeps, "deliveryRouter">,
+  conversationId: string,
+  text: string,
+): Promise<void> {
+  try {
+    await deps.deliveryRouter.notifyConversation(conversationId, text);
+  } catch (err) {
+    logger.warn(
+      { err, conversationId, component: "pipeline.stage-runner" },
+      "pipeline notice not delivered",
+    );
+  }
 }
 
 export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
@@ -79,7 +105,8 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
         if (failed.kind === "failed") {
           const { conversationId } = failed;
           await step.run("notify-failure", () =>
-            deps.deliveryRouter.notifyConversation(
+            notifyBestEffort(
+              deps,
               conversationId,
               `❌ The pipeline run failed at stage "${stageId}" and has stopped.`,
             ),
@@ -133,13 +160,27 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
       const stage = definition.stages[index];
       const next = definition.stages[index + 1];
 
+      /** The run as it is now, projected to its cursor — for recovering a committed step. */
+      const reloadRun = () =>
+        step.run("reload-run", async () => {
+          const current = await deps.runInTx((tx) => deps.runStore.getRun(tx, runId));
+          return current
+            ? {
+                status: current.status,
+                currentStage: current.currentStage,
+                iteration: current.iteration,
+              }
+            : null;
+        });
+
       const failRun = async (reason: string) => {
         const failed = await step.run("fail-run", () =>
           deps.runInTx((tx) => deps.runStore.failRun(tx, runId, reason)),
         );
         if (failed.kind === "failed") {
           await step.run("notify-failure", () =>
-            deps.deliveryRouter.notifyConversation(
+            notifyBestEffort(
+              deps,
               conversationId,
               `❌ Pipeline "${definition.name}" failed at stage "${stageId}": ${reason}`,
             ),
@@ -181,7 +222,15 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
           ),
         );
         if (parked.kind !== "transitioned") {
-          return { status: "skipped" as const, reason: "stale" as const };
+          const current = parked.kind === "stale" ? await reloadRun() : null;
+          const alreadyParkedHere =
+            current !== null &&
+            current.status === "waiting_gate" &&
+            current.currentStage === stageId &&
+            current.iteration === iteration;
+          if (!alreadyParkedHere) {
+            return { status: "skipped" as const, reason: "stale" as const };
+          }
         }
         await step.sendEvent(
           "emit-gate-pending",
@@ -236,7 +285,17 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
         ),
       );
       if (moved.kind !== "advanced") {
-        return { status: "skipped" as const, reason: "stale" as const };
+        const current = moved.kind === "stale" ? await reloadRun() : null;
+        const alreadyMoved =
+          current !== null &&
+          (next === undefined
+            ? current.status === "completed" && current.currentStage === stageId
+            : current.status === "running" &&
+              current.currentStage === next.id &&
+              current.iteration === iteration);
+        if (!alreadyMoved) {
+          return { status: "skipped" as const, reason: "stale" as const };
+        }
       }
 
       if (next !== undefined) {
@@ -248,10 +307,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
       }
 
       await step.run("notify-completed", () =>
-        deps.deliveryRouter.notifyConversation(
-          conversationId,
-          `✅ Pipeline "${definition.name}" completed.`,
-        ),
+        notifyBestEffort(deps, conversationId, `✅ Pipeline "${definition.name}" completed.`),
       );
       return { status: "completed" as const };
     },

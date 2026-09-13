@@ -1648,6 +1648,24 @@ describe("telegram adapter", () => {
       expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Approved" });
     });
 
+    it("pipeline gate: a rejected tap answers with a toast and leaves the keyboard", async () => {
+      const { transport } = await createAdapter({
+        pipelines: {
+          resolveGate: vi.fn().mockResolvedValue(err({ code: "identity_rejected" })),
+        },
+      });
+      const ctx = makeCallbackCtx(`pipe:${TASK_ID}:approve:0a1b2c3d`);
+
+      const handler = handlers.get(`callbackQuery:${PIPELINE_GATE_CALLBACK_REGEX.source}`);
+      await handler(ctx);
+
+      expect(transport.pipelines.resolveGate).toHaveBeenCalled();
+      expect(ctx.editMessageText).not.toHaveBeenCalled();
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({
+        text: "You're not authorized on this bot.",
+      });
+    });
+
     it("pipeline gate: cancel → pipelines.resolveGate with cancel", async () => {
       const { transport } = await createAdapter();
       const ctx = makeCallbackCtx(`pipe:${TASK_ID}:cancel:0a1b2c3d`);

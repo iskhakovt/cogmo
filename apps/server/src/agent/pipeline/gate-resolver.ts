@@ -39,11 +39,43 @@ function isTap(decision: PipelineGateDecision): boolean {
   return decision === "approved" || decision === "cancelled";
 }
 
+function isApproval(decision: PipelineGateDecision): boolean {
+  return decision === "approved" || decision === "timeout_proceed";
+}
+
+/**
+ * Whether a stale resolution's decision already stands in the run: an
+ * approval finds the run past the gate, a cancellation finds it cancelled at
+ * the gate. True for this step re-run after its own commit and for a
+ * same-effect resolution that raced it; false only for one that lost.
+ */
+export function decisionReflected(
+  decision: PipelineGateDecision,
+  outcome: Extract<ResolveGateOutcome, { kind: "stale" }>,
+): boolean {
+  return isApproval(decision)
+    ? outcome.pastGate
+    : outcome.status === "cancelled" && outcome.currentStage === outcome.gateStage;
+}
+
+async function notifyBestEffort(
+  deps: Pick<PipelineGateResolverDeps, "deliveryRouter">,
+  conversationId: string,
+  text: string,
+): Promise<void> {
+  try {
+    await deps.deliveryRouter.notifyConversation(conversationId, text);
+  } catch (err) {
+    log.warn({ err, conversationId }, "pipeline gate notice not delivered");
+  }
+}
+
 /**
  * What the run's conversation hears about a resolution, or null. A tapped
  * approval that advances says nothing: the tap already rewrote the keyboard
- * message, and the next stage's own output follows. A tap that lost to the
- * gate's own resolution is told so, since its keyboard said "sent".
+ * message, and the next stage's own output follows. A tap whose decision
+ * didn't take is told so, since its keyboard said "sent"; a stale resolution
+ * whose effect already stands says nothing.
  */
 export function gateNotice(
   decision: PipelineGateDecision,
@@ -64,7 +96,7 @@ export function gateNotice(
         ? `⏱ Checkpoint timed out — pipeline "${outcome.pipelineName}" was cancelled.`
         : `❌ Pipeline "${outcome.pipelineName}" cancelled.`;
     case "stale":
-      return timedOut
+      return timedOut || decisionReflected(decision, outcome)
         ? null
         : "⌛ That decision arrived after the checkpoint had already been resolved, so it was not applied.";
     case "not_found":
@@ -84,7 +116,8 @@ export function createPipelineGateResolver(deps: PipelineGateResolverDeps) {
         log.error({ err: error, runId, gateKey, decision }, "gate resolution failed after retries");
         if (isTap(decision)) {
           await step.run("notify-tap-failed", () =>
-            deps.deliveryRouter.notifyConversation(
+            notifyBestEffort(
+              deps,
               conversationId,
               "⚠️ Your decision at this checkpoint couldn't be applied. The checkpoint is still open and will resolve on its timeout.",
             ),
@@ -98,7 +131,8 @@ export function createPipelineGateResolver(deps: PipelineGateResolverDeps) {
         );
         if (failed.kind === "failed") {
           await step.run("notify-timeout-failed", () =>
-            deps.deliveryRouter.notifyConversation(
+            notifyBestEffort(
+              deps,
               conversationId,
               "❌ A pipeline checkpoint's timeout couldn't be applied, so the run has stopped.",
             ),
@@ -116,6 +150,28 @@ export function createPipelineGateResolver(deps: PipelineGateResolverDeps) {
         await step.sendEvent("emit-gate-settled", pipelineGateSettled.create({ runId, gateKey }));
       }
 
+      // A stale approval whose effect already stands re-sends the next stage:
+      // if this is the resolution's own retry, the first attempt died before
+      // sending it. Deduped on the run cursor, so a raced same-effect
+      // resolution that did send it makes this a no-op.
+      if (
+        outcome.kind === "stale" &&
+        isApproval(decision) &&
+        outcome.pastGate &&
+        outcome.nextStage !== null &&
+        outcome.status === "running" &&
+        outcome.currentStage === outcome.nextStage
+      ) {
+        await step.sendEvent(
+          "emit-next-stage",
+          buildPipelineStageDueEvent({
+            runId,
+            stageId: outcome.nextStage,
+            iteration: outcome.iteration,
+          }),
+        );
+      }
+
       if (outcome.kind === "advanced") {
         await step.sendEvent(
           "emit-next-stage",
@@ -129,9 +185,7 @@ export function createPipelineGateResolver(deps: PipelineGateResolverDeps) {
 
       const notice = gateNotice(decision, outcome);
       if (notice !== null) {
-        await step.run("notify", () =>
-          deps.deliveryRouter.notifyConversation(conversationId, notice),
-        );
+        await step.run("notify", () => notifyBestEffort(deps, conversationId, notice));
       }
       return outcome;
     },

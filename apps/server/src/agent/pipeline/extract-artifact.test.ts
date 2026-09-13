@@ -90,8 +90,9 @@ describe("extractStageArtifact", () => {
     expect(feedback?.content).toContain("must have required property 'hours'");
   });
 
-  it("fails with the last validation detail once the retry is spent", async () => {
-    const provider = providerReplying("not json", "[1,2]");
+  it("fails with the last attempt's validation detail once the retry is spent", async () => {
+    // The two attempts fail differently, so the detail proves which one is reported.
+    const provider = providerReplying("not json", '{"title":"Fix login","hours":"three"}');
     const result = await extractStageArtifact({
       ...base,
       output: { kind: "json", schema: SCHEMA },
@@ -99,9 +100,24 @@ describe("extractStageArtifact", () => {
     });
     expect(result._unsafeUnwrapErr()).toEqual({
       kind: "artifact_invalid",
-      detail: "reply was not a JSON object",
+      detail: "/hours must be number",
     });
     expect(provider.chat).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports a schema that can't be compiled instead of throwing", async () => {
+    const provider = providerReplying();
+    const result = await extractStageArtifact({
+      ...base,
+      output: {
+        kind: "json",
+        schema: { type: "object", properties: { owner: { $ref: "#/$defs/missing" } } },
+      },
+      provider,
+    });
+    expect(result._unsafeUnwrapErr()).toMatchObject({ kind: "artifact_invalid" });
+    expect(result._unsafeUnwrapErr().detail).toContain("could not be compiled");
+    expect(provider.chat).not.toHaveBeenCalled();
   });
 
   it("refuses a non-object top-level schema without calling the provider", async () => {

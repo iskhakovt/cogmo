@@ -387,7 +387,8 @@ export async function runAgenticStage(
 
   // The target check sits inside the step so the step exists on every replay.
   await steps.run("batch-delivery", async () => {
-    if (delivery.hasBatchTargets()) await delivery.deliverBatch(result.text);
+    // A degraded turn has no reply text to deliver; its failure notice follows.
+    if (!result.degraded && delivery.hasBatchTargets()) await delivery.deliverBatch(result.text);
     return null;
   });
 

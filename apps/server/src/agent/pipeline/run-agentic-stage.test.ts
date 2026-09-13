@@ -102,10 +102,15 @@ async function harness(opts: { existingInbound?: { id: string; conversationId: s
   );
   vi.mocked(agentStore.getProfile).mockResolvedValue({ ...defaultProfile, toolSet: ["*"] });
   const transportStore = mockTransportStore({
-    findInboundByIdempotencyKey: vi.fn().mockResolvedValue(opts.existingInbound),
+    // Keyed on the stage cursor, so recovery only happens for the right key.
+    findInboundByIdempotencyKey: vi
+      .fn()
+      .mockImplementation(async (_tx: unknown, key: string) =>
+        key === stageInboundKey("run-1", "draft", 0) ? opts.existingInbound : undefined,
+      ),
     persistInbound: vi.fn().mockResolvedValue({ id: "inbound-1" }),
   });
-  const delivery = mockDeliveryHandle();
+  const delivery = mockDeliveryHandle({ hasBatchTargets: vi.fn().mockReturnValue(true) });
   const deliveryRouter = mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(delivery) });
   const tools = new ToolRegistry();
   for (const name of ["web_search", "read_file", "start_pipeline"]) tools.register(toolNamed(name));
@@ -190,6 +195,14 @@ describe("runAgenticStage", () => {
     );
   });
 
+  it("delivers the stage's reply to batch targets", async () => {
+    const h = await harness();
+
+    await runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+
+    expect(h.delivery.deliverBatch).toHaveBeenCalledWith("Here is the plan.");
+  });
+
   it("recovers an already-persisted stage prompt instead of writing it again", async () => {
     const h = await harness({
       existingInbound: { id: "inbound-earlier", conversationId: "conv-1" },
@@ -239,6 +252,8 @@ describe("runAgenticStage", () => {
       reason: "the stage's agent turn could not finish (iteration_cap)",
     });
     expect(h.agentStore.insertMessages).toHaveBeenCalled();
+    // Nothing to deliver: a degraded turn's text is empty.
+    expect(h.delivery.deliverBatch).not.toHaveBeenCalled();
   });
 
   it("fails the stage when its json artifact doesn't satisfy the declared schema", async () => {

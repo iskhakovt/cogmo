@@ -696,6 +696,15 @@ export function pipelineGateKey(runId: string, stageId: string, iteration: numbe
 }
 
 /**
+ * Split a gate key back into the stage and iteration it names. Run ids are
+ * UUIDs and stage ids are slugs, so neither carries a colon.
+ */
+export function parsePipelineGateKey(gateKey: string): { stageId: string; iteration: number } {
+  const parts = gateKey.split(":");
+  return { stageId: parts.at(-2) ?? "", iteration: Number(parts.at(-1)) };
+}
+
+/**
  * A run has parked on a `gate` stage (`status = waiting_gate`). Two
  * independent consumers: the channel adapter posts the Approve / Cancel
  * keyboard, and `pipeline-gate-waiter` sleeps out the timeout (re-arming
@@ -716,7 +725,9 @@ export const pipelineGatePending = eventType("pipeline/gate.pending", {
       z.object({ kind: z.literal("abort") }),
       z.object({
         kind: z.literal("remind"),
-        maxReminders: z.number().int().min(1),
+        // Same bound the definition schema enforces — the waiter sleeps and
+        // notifies once per reminder, so the event must not ask for more.
+        maxReminders: z.number().int().min(1).max(10),
         finalAction: z.enum(["proceed", "abort"]),
       }),
     ]),
