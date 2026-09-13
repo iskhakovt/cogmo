@@ -114,8 +114,8 @@ importers:
         specifier: ^8.20.0
         version: 8.20.0
       canonicalize:
-        specifier: 4.0.0
-        version: 4.0.0
+        specifier: 5.0.0
+        version: 5.0.0
       croner:
         specifier: ^10.0.1
         version: 10.0.1
@@ -4097,9 +4097,9 @@ packages:
   canonicalize@1.0.8:
     resolution: {integrity: sha512-0CNTVCLZggSh7bc5VkX5WWPWO+cyZbNd07IHIsSXLia/eAq+r836hgk+8BKoEh7949Mda87VUOitx5OddVj64A==}
 
-  canonicalize@4.0.0:
-    resolution: {integrity: sha512-FEdXzwWs+N3rZqEqpqleiY9M1A6IAf9oo1zHFABnLW9FcJ/jzsu+G/Ks3Hq3FglmPKe80GeGBw8ZXLEnwPB0vQ==}
-    engines: {node: '>=18'}
+  canonicalize@5.0.0:
+    resolution: {integrity: sha512-O/NCg79G0/TWoD3Fo6scOMfP4p7/TsxRXVmRo9mEfD6h/5y5o1wtVbKyBO0E2i7FEcqe5tRijyAH/IWHIHMH4w==}
+    engines: {node: '>=22'}
     hasBin: true
 
   chai@6.2.2:
@@ -10118,7 +10118,7 @@ snapshots:
 
   canonicalize@1.0.8: {}
 
-  canonicalize@4.0.0: {}
+  canonicalize@5.0.0: {}
 
   chai@6.2.2: {}
 
