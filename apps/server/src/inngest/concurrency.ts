@@ -10,9 +10,11 @@
  * that evaluates to the same value (a `has()` fallback, a split string) gets a
  * queue of its own. Use this object, never a copy of the key.
  *
- * Inngest counts executing steps, not runs. Best-effort FIFO keeps a started
- * run's steps ahead of a newer run's, but a run parked in `step.sleep` or
- * `step.waitForEvent` frees the slot while it waits.
+ * Inngest counts executing steps, not runs, and orders them best-effort by run
+ * age. A run parked in `step.sleep` or `step.waitForEvent` frees the slot;
+ * once woken, it lets a younger run already in flight finish first. A step
+ * retried after an error is the exception: the retry can run between two of a
+ * younger run's steps, and the rest of its run queues behind.
  */
 export const conversationTurnConcurrency = {
   limit: 1,

@@ -461,6 +461,7 @@ describe("pipeline run engine", () => {
           decision: "cancelled",
         }),
       );
+      await waitForRun(runId, (run) => run.status === "cancelled", "cancelled", 20_000);
     } finally {
       release();
       draftHold = null;
