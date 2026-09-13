@@ -6,6 +6,7 @@
 import { randomBytes } from "node:crypto";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
+import { workerInngestBaseUrl } from "../test/worker-inngest.js";
 import {
   BootCheckError,
   checkHindsightAuth,
@@ -86,7 +87,7 @@ describe("checkInngestAuth — real Inngest", () => {
   it("refuses `inngest dev`, which accepts any key", async () => {
     await expect(
       checkInngestAuth(probeDeps, {
-        baseUrl: inject("inngestBaseUrl"),
+        baseUrl: workerInngestBaseUrl(),
         dev: false,
         eventKey,
         signingKey,

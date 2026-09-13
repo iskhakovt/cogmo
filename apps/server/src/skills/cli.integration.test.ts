@@ -15,6 +15,7 @@ import { randomBytes } from "node:crypto";
 import postgres from "postgres";
 import { beforeAll, describe, expect, inject, it } from "vitest";
 import { deriveMasterKey, encrypt, parseMasterKey, toBase64 } from "../secrets/encryption.js";
+import { workerInngestBaseUrl } from "../test/worker-inngest.js";
 
 const SUITE = randomBytes(4).toString("hex");
 const skillName = (tag: string) => `it-${SUITE}-${tag}`;
@@ -100,7 +101,7 @@ function runCli(
         DATABASE_URL: inject("databaseUrl"),
         HINDSIGHT_URL: inject("hindsightUrl"),
         HINDSIGHT_API_KEY: inject("hindsightApiKey"),
-        INNGEST_BASE_URL: inject("inngestBaseUrl"),
+        INNGEST_BASE_URL: workerInngestBaseUrl(),
         COGMO_MASTER_KEY: process.env.COGMO_MASTER_KEY,
         COGMO_SKILLS_PATH: process.env.COGMO_SKILLS_PATH,
         INNGEST_DEV: "true",
@@ -163,7 +164,7 @@ async function seedSkill(name: string, manifestSource: string, body: string): Pr
         DATABASE_URL: inject("databaseUrl"),
         HINDSIGHT_URL: inject("hindsightUrl"),
         HINDSIGHT_API_KEY: inject("hindsightApiKey"),
-        INNGEST_BASE_URL: inject("inngestBaseUrl"),
+        INNGEST_BASE_URL: workerInngestBaseUrl(),
         COGMO_MASTER_KEY: process.env.COGMO_MASTER_KEY,
         COGMO_SKILLS_PATH: process.env.COGMO_SKILLS_PATH,
         INNGEST_DEV: "true",

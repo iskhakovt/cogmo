@@ -18,6 +18,7 @@ import { OpenAIVoiceProvider } from "../voice/openai.js";
 import { createFalFetch } from "./fal-mock.js";
 import { createOpenAIVoiceFetch } from "./openai-voice-mock.js";
 import { type OtelHarness, setupOtelHarness } from "./otel-harness.js";
+import { workerInngestBaseUrl } from "./worker-inngest.js";
 
 let inngestBaseUrl: string;
 let connection: Awaited<ReturnType<typeof connect>>;
@@ -39,7 +40,7 @@ interface CapturedOutbound {
 const capturedOutbound: CapturedOutbound[] = [];
 
 beforeAll(async () => {
-  inngestBaseUrl = inject("inngestBaseUrl");
+  inngestBaseUrl = workerInngestBaseUrl();
 
   // Set up the OTel harness BEFORE bootstrap so the global tracer/meter
   // providers exist by the time domain modules first call startSpan/record.
@@ -215,13 +216,9 @@ async function sendEvent(name: string, data: Record<string, unknown>) {
  * keeps a multi-iteration turn whole, since its points arrive across several
  * collects.
  *
- * The retry itself is for the cross-process race: when a peer fork subscribes
- * to the same trigger under its own app id, the gateway broadcasts to both
- * apps and `waitForAssistantMessage` may return on the peer's DB write before
- * this fork's handle-message has recorded. Retrying only converges while this
- * fork also completes its own turn — a fork that reaches `llm-iter<N>` (so
- * `cogmo.llm.tokens` lands) but never reaches `persist-new-messages` records
- * no iteration count at all, and no timeout saves that. See `todo.md`.
+ * The retry covers the gap between the assistant row committing inside
+ * `persist-new-messages` and the step returning, where the iteration count is
+ * recorded.
  */
 type CollectedMetric = ResourceMetrics["scopeMetrics"][number]["metrics"][number];
 
