@@ -33,7 +33,7 @@ let askpassPath: string | null = null;
  */
 const TELEGRAM_TEST_BOT_TOKEN = "1234567890:fake-test-token";
 
-export async function setup({ provide, globalConfig }: GlobalSetupContext) {
+export async function setup({ provide, config }: GlobalSetupContext) {
   network = await new Network().start();
 
   mock = createMock();
@@ -48,7 +48,7 @@ export async function setup({ provide, globalConfig }: GlobalSetupContext) {
     c.postgres(network).start(),
     c.redis(network).start(),
     c.minio(network).start(),
-    ...Array.from({ length: globalConfig.maxWorkers }, () => c.inngest(network).start()),
+    ...Array.from({ length: config.maxWorkers }, () => c.inngest(network).start()),
   ]);
   containers.push(pg, _rd, mn, ...inngestServers);
 
