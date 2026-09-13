@@ -153,19 +153,24 @@ describe("Hindsight verification in the memory CLIs", () => {
   });
 
   it.each([
-    ["migrate-memories", (deps: ReturnType<typeof buildDeps>) => runMigrateMemoriesCli([], deps)],
+    [
+      "migrate-memories",
+      (deps: ReturnType<typeof buildDeps>) => runMigrateMemoriesCli([], deps),
+      migrateUntaggedMemoriesSpy,
+    ],
     [
       "backfill",
       (deps: ReturnType<typeof buildDeps>) =>
         runBackfillProfileClassCli(["profile-class", "--tag=general"], deps),
+      backfillProfileClassSpy,
     ],
-  ])("%s touches no bank when Hindsight fails verification", async (_name, run) => {
+  ])("%s touches no bank when Hindsight fails verification", async (_name, run, command) => {
     const deps = buildDeps({ defaultBankId: "u" });
     deps.verifyHindsight.mockRejectedValueOnce(new Error("hindsight auth check failed"));
 
     await expect(run(deps)).rejects.toThrow("hindsight auth check failed");
     expect(hindsightCtor).not.toHaveBeenCalled();
-    expect(migrateUntaggedMemoriesSpy).not.toHaveBeenCalled();
+    expect(command).not.toHaveBeenCalled();
   });
 });
 

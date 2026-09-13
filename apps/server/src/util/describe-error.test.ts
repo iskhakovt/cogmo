@@ -24,6 +24,29 @@ describe("describeError", () => {
     );
   });
 
+  it("describes an empty-message AggregateError thrown directly by its first inner error", () => {
+    // The AWS SDK rejects this way when every address of a dual-stack endpoint refuses.
+    const err = Object.assign(
+      new AggregateError(
+        [
+          new Error("connect ECONNREFUSED ::1:59999"),
+          new Error("connect ECONNREFUSED 127.0.0.1:59999"),
+        ],
+        "",
+      ),
+      { code: "ECONNREFUSED" },
+    );
+
+    expect(describeError(err)).toBe("connect ECONNREFUSED ::1:59999");
+  });
+
+  it("falls back to the code, then the name, for an empty AggregateError thrown directly", () => {
+    expect(describeError(Object.assign(new AggregateError([], ""), { code: "ECONNREFUSED" }))).toBe(
+      "ECONNREFUSED",
+    );
+    expect(describeError(new AggregateError([], ""))).toBe("AggregateError");
+  });
+
   it("ignores a cause that is neither an Error nor informative", () => {
     expect(describeError(new Error("boom", { cause: "not an error" }))).toBe("boom");
     expect(describeError(new Error("boom", { cause: new AggregateError([], "") }))).toBe("boom");
