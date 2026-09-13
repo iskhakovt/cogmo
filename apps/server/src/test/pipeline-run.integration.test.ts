@@ -336,14 +336,21 @@ describe("pipeline run engine", () => {
     expect(completed.gateResolution).toEqual({ gateKey, resolverRunId: expect.any(String) });
     await waitForOutbound(seeded.directAddress, `✅ Pipeline "${seeded.name}" completed.`);
 
-    // Read after the last delivery, so a late duplicate would already be here:
-    // the waiter's cancel went out once for this gate, and each stage was
-    // scheduled once, under its run-cursor dedup id.
-    expect(settled.filter((s) => s.gateKey === gateKey)).toHaveLength(1);
+    // The waiter's cancel went out once for this gate, and each stage was
+    // scheduled once, under its run-cursor dedup id. The capture functions run
+    // independently of the delivery above, so poll for their records. A
+    // duplicate can't land after the match: stage.due is deduped on its id, and
+    // this file's server runs no other app that could settle the gate again.
     const dueFor = (stageId: string) =>
       stagesDue.filter((d) => d.runId === runId && d.stageId === stageId).map((d) => d.id);
-    expect(dueFor("draft")).toEqual([`pipeline-stage-due-${runId}-draft-0`]);
-    expect(dueFor("build")).toEqual([`pipeline-stage-due-${runId}-build-0`]);
+    await vi.waitFor(
+      () => {
+        expect(settled.filter((s) => s.gateKey === gateKey)).toHaveLength(1);
+        expect(dueFor("draft")).toEqual([`pipeline-stage-due-${runId}-draft-0`]);
+        expect(dueFor("build")).toEqual([`pipeline-stage-due-${runId}-build-0`]);
+      },
+      { timeout: 10_000, interval: 250 },
+    );
 
     // One persisted stage prompt per agentic stage, keyed on the run cursor.
     const prompts = await db
