@@ -48,6 +48,10 @@ ARG CLAUDE_CODE_VERSION=2.1.236
 # that maintainers keep base images patched; in practice they don't, and
 # this image runs inside sysbox sandboxes where every patch we can apply
 # at build time tightens the userland surface.
+#
+# APT_REFRESH (a build date, from docker-bake.hcl) keys this layer's cache so
+# the upgrade re-runs daily instead of replaying a stale package set forever.
+ARG APT_REFRESH
 # hadolint ignore=DL3005
 RUN apt-get update \
  && apt-get upgrade -y \

@@ -59,6 +59,10 @@ ENV PYTHONUNBUFFERED=1
 # the slim image trails Debian DSA advisories and this image runs inside
 # sysbox sandboxes where every patch we can apply at build time tightens
 # the userland surface. Cache cleanup keeps the runtime layer small.
+#
+# APT_REFRESH (a build date, from docker-bake.hcl) keys this layer's cache so
+# the upgrade re-runs daily instead of replaying a stale package set forever.
+ARG APT_REFRESH
 # hadolint ignore=DL3005
 RUN apt-get update \
  && apt-get upgrade -y \
