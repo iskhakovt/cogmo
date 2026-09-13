@@ -24,6 +24,7 @@ import { pipelineRuns } from "../agent/pipeline/store/schema.js";
 import type { PipelineDefinition, Stage } from "../agent/pipeline/types.js";
 import { profiles } from "../agent/store/schema.js";
 import { db } from "../db/index.js";
+import { bootstrap } from "../index.js";
 import {
   directOutbound,
   pipelineGateKey,
@@ -81,7 +82,7 @@ const stubProvider: LlmProvider = {
   },
 };
 
-let app: Awaited<ReturnType<typeof import("../index.js")["bootstrap"]>>;
+let app: Awaited<ReturnType<typeof bootstrap>>;
 let connection: Awaited<ReturnType<typeof connect>>;
 let userId: string;
 let directChannelId: string;
@@ -92,7 +93,6 @@ const settled: Array<{ gateKey: string }> = [];
 const stagesDue: Array<{ id: string | undefined; runId: string; stageId: string }> = [];
 
 beforeAll(async () => {
-  const { bootstrap } = await import("../index.js");
   app = await bootstrap({ providerOverride: stubProvider });
 
   const captures = [
