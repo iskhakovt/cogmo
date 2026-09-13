@@ -69,7 +69,7 @@ Hindsight server creates and manages its own tables in its own database. Do not 
 | Profiles split into org + user (nullable `user_id`) | Org profiles (NULL) are admin-curated and shared, evolving as a unit via shared steering rules. User profiles (set) are private and self-managed. Transport never mutates org profiles — admin ops happen out-of-band (psql/wizard). No admin role in code. |
 | `user_selectable` on `model_providers` | Org policy gate: admins can route internal models (cheap summarization, experimental) via `model_providers` without exposing them in the user `/model` picker. Toggled out-of-band. |
 | Steering rules separate from prompts | Rules change fast (per correction), prompts change slow (globally optimized). Rules can be toggled, prioritized, scoped. |
-| Serialized per conversation | Agents not thread-safe (Letta docs). `concurrency: { limit: 1, key: conversationId }`. |
+| Serialized per conversation | Agents not thread-safe (Letta docs). `conversationTurnConcurrency` (limit 1, env-scoped per conversation, shared by `handle-message` and `pipeline-stage-runner`). |
 
 ## Migration Conventions `[confirmed]`
 

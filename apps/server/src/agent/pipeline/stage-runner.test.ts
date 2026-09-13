@@ -138,11 +138,11 @@ describe("createPipelineStageRunner", () => {
   it("runs a stage.due without a conversation id, taking it from the run", async () => {
     const { fn, runStore, executeAgenticStage } = harness({ kind: "completed", artifact: null });
     runStore.advanceStage.mockResolvedValue({ kind: "advanced" });
-    const legacy = {
+    const withoutConversation = {
       name: "pipeline/stage.due" as const,
       data: { runId: RUN_ID, stageId: "draft", iteration: 0 },
     };
-    const t = new InngestTestEngine({ function: fn, events: [legacy] });
+    const t = new InngestTestEngine({ function: fn, events: [withoutConversation] });
 
     const { result, ctx } = await t.execute({
       steps: [{ id: "load-run", handler: () => snapshot() }],
