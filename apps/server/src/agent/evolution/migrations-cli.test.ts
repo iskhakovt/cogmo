@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../../db/index.js";
+import { expectDefined } from "../../test/assertions.js";
 import type { AgentStore } from "../store/index.js";
 
 const FAKE_TX = { __mockTx: true } as never;
@@ -66,6 +67,7 @@ function buildDeps(opts: { defaultBankId?: string | null } = {}) {
     agentStore: mock<AgentStore>(),
     runInTx: fakeRunInTx,
     resolveDefaultBankId: vi.fn(async () => opts.defaultBankId ?? null),
+    verifyHindsight: vi.fn(async () => undefined),
   };
 }
 
@@ -119,6 +121,51 @@ describe("parseBackfillArgs", () => {
     const r = parseBackfillArgs(["profile-class", "--tag=general", "--frob=baz"]);
     expect(typeof r).toBe("string");
     if (typeof r === "string") expect(r).toContain('Unknown argument "--frob=baz"');
+  });
+});
+
+describe("Hindsight verification in the memory CLIs", () => {
+  it("migrate-memories reports a usage error without probing Hindsight", async () => {
+    const deps = buildDeps({ defaultBankId: null });
+
+    expect(await runMigrateMemoriesCli([], deps)).toBe(1);
+    expect(deps.verifyHindsight).not.toHaveBeenCalled();
+    expect(hindsightCtor).not.toHaveBeenCalled();
+  });
+
+  it("backfill reports bad arguments without probing Hindsight", async () => {
+    const deps = buildDeps({ defaultBankId: "u" });
+
+    expect(await runBackfillProfileClassCli(["profile-klass", "--tag=x"], deps)).toBe(1);
+    expect(deps.verifyHindsight).not.toHaveBeenCalled();
+  });
+
+  it("migrate-memories verifies Hindsight before building a client for the bank", async () => {
+    const deps = buildDeps({ defaultBankId: "u" });
+    migrateUntaggedMemoriesSpy.mockResolvedValueOnce({ migrated: 0 });
+
+    await runMigrateMemoriesCli([], deps);
+
+    expect(deps.verifyHindsight).toHaveBeenCalledTimes(1);
+    const verifiedAt = expectDefined(deps.verifyHindsight.mock.invocationCallOrder[0], "verify");
+    const constructedAt = expectDefined(hindsightCtor.mock.invocationCallOrder[0], "client");
+    expect(verifiedAt).toBeLessThan(constructedAt);
+  });
+
+  it.each([
+    ["migrate-memories", (deps: ReturnType<typeof buildDeps>) => runMigrateMemoriesCli([], deps)],
+    [
+      "backfill",
+      (deps: ReturnType<typeof buildDeps>) =>
+        runBackfillProfileClassCli(["profile-class", "--tag=general"], deps),
+    ],
+  ])("%s touches no bank when Hindsight fails verification", async (_name, run) => {
+    const deps = buildDeps({ defaultBankId: "u" });
+    deps.verifyHindsight.mockRejectedValueOnce(new Error("hindsight auth check failed"));
+
+    await expect(run(deps)).rejects.toThrow("hindsight auth check failed");
+    expect(hindsightCtor).not.toHaveBeenCalled();
+    expect(migrateUntaggedMemoriesSpy).not.toHaveBeenCalled();
   });
 });
 

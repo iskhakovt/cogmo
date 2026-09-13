@@ -107,9 +107,6 @@ async function dispatch(cmd: string): Promise<number> {
       // CLI mode: data layer only. No sandbox client, no instance row, no
       // reaper — running this concurrently with `cogmo serve` is harmless.
       const core = await bootstrapCore();
-      // These commands clear and rewrite memory banks, so they refuse a
-      // Hindsight outside the pinned range or one that ignores its key.
-      await verifyHindsight(core, independentProbeContext());
       const { agentStore, runInTx } = core;
       const resolveDefaultBankId = async (): Promise<string | null> => {
         const user = await runInTx((tx) => agentStore.getFirstUser(tx));
@@ -121,6 +118,9 @@ async function dispatch(cmd: string): Promise<number> {
         agentStore,
         runInTx,
         resolveDefaultBankId,
+        // These commands clear and rewrite memory banks, so they refuse a
+        // Hindsight outside the pinned range or one that ignores its key.
+        verifyHindsight: () => verifyHindsight(core, independentProbeContext()),
       };
       const args = process.argv.slice(3);
       return cmd === "migrate-memories"

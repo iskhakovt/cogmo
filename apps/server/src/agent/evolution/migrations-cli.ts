@@ -52,6 +52,13 @@ export interface MigrationCliDeps {
   agentStore: AgentStore;
   runInTx: Transactor;
   /**
+   * Verifies Hindsight enforces its key and runs a version in the pinned
+   * range; rejects otherwise. Both commands clear and rewrite a bank, so it
+   * runs before anything touches Hindsight — but after arguments and the bank
+   * are validated, so a usage error is reported at once.
+   */
+  verifyHindsight: () => Promise<void>;
+  /**
    * Resolves the default bank id when `--bankId` is omitted. Returns
    * the first user's id by convention. Returns `null` when no user
    * exists yet — the CLI surfaces a friendly usage line instead of
@@ -100,6 +107,7 @@ export async function runMigrateMemoriesCli(
     return 1;
   }
 
+  await deps.verifyHindsight();
   const { hindsight, sdkClient } = makeHindsightShared(deps);
   const backupPath = makeBackupPath(bankId);
   console.log(`Migrating bank "${bankId}" — Hindsight ${deps.hindsightUrl}`);
@@ -186,6 +194,7 @@ export async function runBackfillProfileClassCli(
     );
     return 1;
   }
+  await deps.verifyHindsight();
   const { hindsight, sdkClient } = makeHindsightShared(deps);
   const backupPath = makeBackupPath(bankId);
   console.log(`Backfilling bank "${bankId}" with classes [${parsed.classTags.join(", ")}]`);

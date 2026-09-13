@@ -11,22 +11,22 @@
  * Policy:
  * - **Hard fail at once (throw `BootCheckError`):** deterministic,
  *   deployment-shaped problems that won't self-heal — missing extension,
- *   missing bucket, wrong region, rejected credentials, a server that
- *   answers without auth, a version outside the supported range. Operator
- *   action required.
+ *   missing bucket, wrong region, missing or rejected configured
+ *   credentials, a server that answers without auth, a version outside the
+ *   supported range. Operator action required.
  * - **Retry, then hard fail:** a dependency that can't be reached, doesn't
  *   answer in time, or answers with something that proves nothing either
- *   way — including S3 credentials that fail to load, which on EC2/ECS can be
- *   a briefly slow metadata endpoint. Each check gets `BOOT_PROBE_DEADLINE_MS`
- *   to become conclusive, long enough to ride out a restart during a deploy.
- *   Every attempt is bounded by `BOOT_PROBE_ATTEMPT_TIMEOUT_MS` and by the
- *   time left, so a request that hangs cannot overrun. Past the deadline boot
- *   fails closed: a supervisor restart loop is visible, a check that silently
- *   never ran is not.
+ *   way — including ambient S3 credentials that fail to load, which on
+ *   EC2/ECS can be a briefly slow metadata endpoint. Each check gets
+ *   `BOOT_PROBE_DEADLINE_MS` to become conclusive, long enough to ride out a
+ *   restart during a deploy. Every attempt is bounded by
+ *   `BOOT_PROBE_ATTEMPT_TIMEOUT_MS` and by the time left, so a request that
+ *   hangs cannot overrun. Past the deadline boot fails closed: a supervisor
+ *   restart loop is visible, a check that silently never ran is not.
  *
  * Probe URLs in logs and errors drop query strings, fragments and userinfo,
- * and the Inngest event key is redacted. A credential carried in a path
- * segment is not detected.
+ * the Inngest event key is redacted, and `user:password@` is scrubbed from
+ * request errors. A credential carried in a path segment is not detected.
  */
 
 import { constants as fsConstants, readFileSync } from "node:fs";
@@ -40,6 +40,7 @@ import { z } from "zod";
 import type { Database } from "../db/index.js";
 import { logger } from "../logger.js";
 import type { HindsightMemoryProvider } from "../memory/hindsight.js";
+import { describeError } from "../util/describe-error.js";
 
 export class BootCheckError extends Error {
   override readonly name = "BootCheckError";
@@ -51,6 +52,12 @@ export const BOOT_PROBE_DEADLINE_MS = 60_000;
 export const BOOT_PROBE_ATTEMPT_TIMEOUT_MS = 5_000;
 const BOOT_PROBE_MIN_DELAY_MS = 1_000;
 const BOOT_PROBE_MAX_DELAY_MS = 10_000;
+/**
+ * The least time worth giving an attempt. A retry that would get less is
+ * certain to time out, and its timeout would replace the real reason — an
+ * HTTP 502, a refused connection — in the final error.
+ */
+const BOOT_PROBE_MIN_ATTEMPT_MS = 1_000;
 
 /** Time source for boot probes — injected so retry and timeout tests do not wait. */
 export interface BootClock {
@@ -85,6 +92,32 @@ export function independentProbeContext(): BootProbeContext {
   return { clock: systemBootClock, cancel: new AbortController().signal };
 }
 
+/**
+ * Run independent boot checks together. The first to fail cancels the rest,
+ * and the call settles only once every check has — so when it rejects, with
+ * that first failure, nothing is still retrying or logging behind it. A
+ * cancellation of `parent` reaches every check too.
+ */
+export async function runBootChecks(
+  parent: BootProbeContext,
+  checks: ReadonlyArray<(context: BootProbeContext) => Promise<void>>,
+): Promise<void> {
+  const failed = new AbortController();
+  const context: BootProbeContext = {
+    clock: parent.clock,
+    cancel: AbortSignal.any([parent.cancel, failed.signal]),
+  };
+  await Promise.allSettled(
+    checks.map((check) =>
+      check(context).catch((err: unknown) => {
+        if (!failed.signal.aborted) failed.abort(err);
+        throw err;
+      }),
+    ),
+  );
+  if (failed.signal.aborted) throw failed.signal.reason;
+}
+
 type ProbeAttempt<T> = { conclusive: true; value: T } | { conclusive: false; reason: string };
 
 function conclusive<T>(value: T): ProbeAttempt<T> {
@@ -98,10 +131,10 @@ function conclusive<T>(value: T): ProbeAttempt<T> {
  * the attempt must pass it to every request it makes. A `BootCheckError`
  * thrown by `attempt` is a deterministic verdict and propagates at once.
  *
- * Backoff keeps room for another full attempt where it can and never waits
- * as long as the time left. Once no more than `BOOT_PROBE_MIN_DELAY_MS`
- * remains, the attempt that just failed is the last: waiting would only reach
- * the deadline.
+ * Backoff keeps room for another full attempt where it can, and another try
+ * happens only if, after the wait, it would still get
+ * `BOOT_PROBE_MIN_ATTEMPT_MS` to run. Otherwise the attempt that just failed
+ * is the last, and its reason is the one reported.
  *
  * Once `context.cancel` aborts, the attempt in flight is aborted with it and
  * the loop stops at its next attempt or wait, clearing the wait's timer, so
@@ -134,7 +167,9 @@ async function retryUntilConclusive<T>(
     lastReason = result.reason;
     if (cancel.aborted) continue;
     const left = deadline - clock.now();
-    if (left <= BOOT_PROBE_MIN_DELAY_MS) throw failClosed(lastReason);
+    if (left < BOOT_PROBE_MIN_DELAY_MS + BOOT_PROBE_MIN_ATTEMPT_MS) throw failClosed(lastReason);
+    // At most `left - BOOT_PROBE_MIN_ATTEMPT_MS`, so the next attempt keeps
+    // at least that long to run.
     const wait = Math.min(
       delay,
       Math.max(left - BOOT_PROBE_ATTEMPT_TIMEOUT_MS, BOOT_PROBE_MIN_DELAY_MS),
@@ -156,9 +191,10 @@ async function retryUntilConclusive<T>(
 /**
  * Settle with `work`, or reject with `signal`'s reason once it aborts,
  * whichever comes first. For calls that honour the signal in only part of
- * their work — the S3 client ignores it while resolving credentials. The
- * abandoned call keeps running; its outcome is dropped, since the attempt it
- * belonged to has already been judged inconclusive.
+ * their work — the S3 client ignores it while resolving credentials, and the
+ * Hindsight client while building its request. The abandoned call keeps
+ * running; its outcome is dropped, since the attempt it belonged to has
+ * already been judged inconclusive.
  */
 function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) {
@@ -248,7 +284,7 @@ export async function checkUuidv7(db: Database): Promise<void> {
     throw new BootCheckError(
       `uuidv7() not callable — required for table primary keys. ` +
         `Run scripts/init-db.sql against the database, or upgrade to PG18+ ` +
-        `(native uuidv7). Underlying error: ${stringifyError(err)}`,
+        `(native uuidv7). Underlying error: ${describeError(err)}`,
     );
   }
 }
@@ -272,22 +308,36 @@ function awsServiceError(
 }
 
 /**
+ * Where the S3 client's credentials come from. `configured`: an endpoint or
+ * a key is set, so credentials that fail to load are a misconfiguration —
+ * a missing or half-set key pair. `ambient`: nothing is set, so the SDK's
+ * default chain may be reading an EC2/ECS metadata endpoint that is briefly
+ * slow.
+ */
+export type S3CredentialSource = "configured" | "ambient";
+
+/**
  * Verify the configured S3 bucket exists and credentials are valid.
  * `HeadBucket` is the cheapest probe — no list, no read, no write.
  *
- * Errors are classified by HTTP status alone: a HEAD response has no body,
- * so the SDK names every error other than a 404 `Unknown`. The store's
- * verdicts fail at once — a 301 (how S3 answers for a bucket in another
- * region when the client does not follow region redirects) and a 4xx other
- * than 400 and 429 (missing bucket, bad credentials). A 400 is retried, since
- * S3's transient `RequestTimeout` is indistinguishable from any other 400
- * here. Credentials that fail to load are retried too: from EC2 or ECS they
- * come from a metadata endpoint that can be briefly slow. Network errors,
- * timeouts, 5xx, 429 and temporary redirects are retried up to the deadline.
+ * Errors are classified by HTTP status and headers alone: a HEAD response has
+ * no body, so the SDK names every error other than a 404 `Unknown`. The
+ * store's verdicts fail at once:
+ * - a bucket in another region — a 301, or a 400 carrying
+ *   `x-amz-bucket-region`, the same two shapes the SDK's own region-redirect
+ *   handling recognises for `HeadBucket`;
+ * - any other 4xx except 400 and 429 (missing bucket, bad credentials);
+ * - credentials that fail to load when they are `configured`.
+ *
+ * A plain 400 is retried, since S3's transient `RequestTimeout` is
+ * indistinguishable from any other bodiless 400; so are `ambient`
+ * credentials that fail to load, network errors, timeouts, 5xx, 429 and
+ * temporary redirects, up to the deadline.
  */
 export async function checkS3Bucket(
   s3: S3Client,
   bucket: string,
+  credentials: S3CredentialSource,
   context: BootProbeContext,
 ): Promise<void> {
   await retryUntilConclusive(`S3 bucket "${bucket}" check`, context, async (signal) => {
@@ -299,11 +349,14 @@ export async function checkS3Bucket(
       return conclusive(undefined);
     } catch (err) {
       const service = awsServiceError(err);
-      if (service?.status === 301) {
+      if (
+        service !== undefined &&
+        (service.status === 301 || (service.status === 400 && service.bucketRegion !== undefined))
+      ) {
         throw new BootCheckError(
           `S3 bucket "${bucket}" is in a different region than S3_REGION` +
             `${service.bucketRegion !== undefined ? ` (the bucket is in ${service.bucketRegion})` : ""}. ` +
-            `Set S3_REGION to the bucket's region. Underlying error: ${stringifyError(err)}`,
+            `Set S3_REGION to the bucket's region. Underlying error: HTTP ${service.status} ${describeError(err)}`,
         );
       }
       if (
@@ -315,23 +368,22 @@ export async function checkS3Bucket(
         throw new BootCheckError(
           `S3 bucket "${bucket}" not reachable. Check S3_ENDPOINT, ` +
             `S3_ACCESS_KEY/S3_SECRET_KEY, S3_REGION, and that the bucket exists. ` +
-            `Underlying error: HTTP ${service.status} ${stringifyError(err)}`,
+            `Underlying error: HTTP ${service.status} ${describeError(err)}`,
         );
       }
       if (err instanceof Error && err.name === "CredentialsProviderError") {
-        return {
-          conclusive: false,
-          reason:
-            "S3 credentials could not be loaded — set S3_ACCESS_KEY and S3_SECRET_KEY, or " +
-            `provide ambient AWS credentials (${stringifyError(err)})`,
-        };
+        const guidance =
+          `S3 credentials could not be loaded for bucket "${bucket}" — set S3_ACCESS_KEY and ` +
+          `S3_SECRET_KEY, or provide ambient AWS credentials (${describeError(err)})`;
+        if (credentials === "configured") throw new BootCheckError(`${guidance}.`);
+        return { conclusive: false, reason: guidance };
       }
       return {
         conclusive: false,
         reason:
           service !== undefined
-            ? `HTTP ${service.status} ${stringifyError(err)}`
-            : stringifyError(err),
+            ? `HTTP ${service.status} ${describeError(err)}`
+            : describeError(err),
       };
     }
   });
@@ -358,7 +410,7 @@ export async function checkHindsightVersion(
     try {
       return conclusive(await abortable(memory.getServerVersion(signal), signal));
     } catch (err) {
-      return { conclusive: false, reason: stringifyError(err) };
+      return { conclusive: false, reason: describeError(err) };
     }
   });
   // Always coerce — strips prerelease (`0.6.0-rc.1`) and build (`0.6.0+sha`)
@@ -440,7 +492,7 @@ export async function checkDirWritable(path: string, envVarName: string): Promis
         `Pre-create the directory and chown it to the runtime user, or set ` +
         `${envVarName} to a path the runtime user can write (the shipping ` +
         `image pre-creates /var/lib/cogmo/* with the right ownership). ` +
-        `Underlying error: ${stringifyError(err)}`,
+        `Underlying error: ${describeError(err)}`,
       { cause: err },
     );
   }
@@ -466,9 +518,7 @@ function serviceUrl(baseUrl: string, path: string): string {
 /**
  * `url` as it may appear in logs and errors: userinfo, query and fragment
  * dropped, and with `redactLastSegment` the final path segment — where the
- * Inngest event URL carries its key — replaced by `REDACTED`. Env validation
- * already rejects service URLs with userinfo; dropping it here keeps the
- * helper safe for any URL.
+ * Inngest event URL carries its key — replaced by `REDACTED`.
  */
 function displayUrl(url: string, options: { redactLastSegment: boolean }): string {
   const shown = new URL(url);
@@ -480,6 +530,15 @@ function displayUrl(url: string, options: { redactLastSegment: boolean }): strin
     shown.pathname = shown.pathname.replace(/[^/]+$/, "REDACTED");
   }
   return shown.toString();
+}
+
+/**
+ * `text` with the userinfo of any URL in it replaced. A request error can
+ * quote the URL it was built from — `fetch` refuses a URL with credentials
+ * and names it in full — and that text reaches retry logs and boot errors.
+ */
+function scrubUrlCredentials(text: string): string {
+  return text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1REDACTED@");
 }
 
 type ProbeResult = { kind: "status"; status: number } | { kind: "unreachable"; error: string };
@@ -495,7 +554,7 @@ async function probe(
   try {
     res = await fetchFn(url, { ...init, signal });
   } catch (err) {
-    return { kind: "unreachable", error: stringifyError(err) };
+    return { kind: "unreachable", error: scrubUrlCredentials(describeError(err)) };
   }
   // Discarding the body rejects if the attempt signal fires after the headers
   // arrived. The status is already in hand, and it is the whole result.
@@ -666,8 +725,4 @@ export async function checkInngestAuth(
     return conclusive(undefined);
   });
   logger.info("inngest auth check passed");
-}
-
-function stringifyError(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

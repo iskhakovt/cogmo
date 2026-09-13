@@ -4,6 +4,7 @@ import {
   createConfig,
   HindsightClient,
 } from "@vectorize-io/hindsight-client";
+import { describeError } from "../util/describe-error.js";
 
 export interface HindsightClients {
   /** Class wrapper — retain, bank and memory listing. */
@@ -15,11 +16,11 @@ export interface HindsightClients {
 /**
  * Readable text for the `error` a raw sdk call returns. A failed or aborted
  * fetch comes back as an `Error`, whose fields are non-enumerable, so
- * `JSON.stringify` would print `{}`; a server error body is a plain object
- * and stringifies as-is.
+ * `JSON.stringify` would print `{}` — and whose network reason sits in
+ * `cause`; a server error body is a plain object and stringifies as-is.
  */
 export function describeHindsightError(error: unknown): string {
-  return error instanceof Error ? error.message : JSON.stringify(error);
+  return error instanceof Error ? describeError(error) : JSON.stringify(error);
 }
 
 /**

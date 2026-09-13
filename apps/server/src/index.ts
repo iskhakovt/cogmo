@@ -56,8 +56,10 @@ import {
   checkS3Bucket,
   checkUuidv7,
   type HindsightCompat,
+  independentProbeContext,
   loadHindsightCompat,
-  systemBootClock,
+  runBootChecks,
+  type S3CredentialSource,
 } from "./boot/checks.js";
 import { type Database, db, type Transactor, transactor } from "./db/index.js";
 import { migratePerFile } from "./db/migrate-per-file.js";
@@ -1274,23 +1276,16 @@ export async function bootstrapRuntime(
 async function verifyDependencies(core: CoreDeps): Promise<void> {
   // Independent probes run together, so a certain verdict from one is not
   // held behind another's retry window and the slowest check bounds the wait.
-  // The first failure cancels the rest: boot has already failed, and a caller
-  // that catches it must not have stray retries overlapping its next attempt.
-  const siblings = new AbortController();
-  const context = { clock: systemBootClock, cancel: siblings.signal };
-  const cancelSiblingsOnFailure = (check: Promise<void>) =>
-    check.catch((err: unknown) => {
-      siblings.abort(err);
-      throw err;
-    });
-  await Promise.all([
+  // `runBootChecks` cancels the rest on the first failure and settles only
+  // once they have stopped.
+  await runBootChecks(independentProbeContext(), [
     // Confirm the bucket is reachable + credentials work before tools that
     // depend on it (image generation, file workspace, attachment delivery)
     // start handling traffic. HeadBucket is the cheapest probe.
-    cancelSiblingsOnFailure(checkS3Bucket(core.s3Client, env.S3_BUCKET, context)),
-    cancelSiblingsOnFailure(verifyHindsight(core, context)),
+    (context) => checkS3Bucket(core.s3Client, env.S3_BUCKET, s3CredentialSource(), context),
+    (context) => verifyHindsight(core, context),
     // Inngest, like Hindsight, answers anything on its network when unkeyed.
-    cancelSiblingsOnFailure(
+    (context) =>
       checkInngestAuth(
         { fetch, ...context },
         {
@@ -1300,8 +1295,21 @@ async function verifyDependencies(core: CoreDeps): Promise<void> {
           signingKey: env.INNGEST_SIGNING_KEY,
         },
       ),
-    ),
   ]);
+}
+
+/**
+ * Whether the S3 client's credentials come from configuration or from the
+ * SDK's ambient chain. The client uses static keys only when both are set,
+ * so an endpoint or a single key without its pair still counts as
+ * configured: credentials that fail to load there are a misconfiguration.
+ */
+function s3CredentialSource(): S3CredentialSource {
+  return env.S3_ENDPOINT === undefined &&
+    env.S3_ACCESS_KEY === undefined &&
+    env.S3_SECRET_KEY === undefined
+    ? "ambient"
+    : "configured";
 }
 
 /**
@@ -1310,10 +1318,14 @@ async function verifyDependencies(core: CoreDeps): Promise<void> {
  * memory CLIs (`migrate-memories`, `backfill`), which clear and rewrite
  * banks: against an out-of-range server (0.5.x drops batch items past the
  * first) or one that ignores its key, they would lose memories with no error.
+ * The two checks run together, so Hindsight is held to one probe deadline.
  */
 export async function verifyHindsight(core: CoreDeps, context: BootProbeContext): Promise<void> {
-  await checkHindsightAuth({ fetch, ...context }, env.HINDSIGHT_URL, env.HINDSIGHT_API_KEY);
-  await checkHindsightVersion(core.memory, core.hindsightCompat, context);
+  await runBootChecks(context, [
+    (checkContext) =>
+      checkHindsightAuth({ fetch, ...checkContext }, env.HINDSIGHT_URL, env.HINDSIGHT_API_KEY),
+    (checkContext) => checkHindsightVersion(core.memory, core.hindsightCompat, checkContext),
+  ]);
 }
 
 /**
