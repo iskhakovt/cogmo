@@ -13,8 +13,8 @@ import { workerInngestBaseUrl } from "./worker-inngest.js";
  * LLM-driven MCP pipeline integration test. Drives `handle-message`
  * end-to-end through the production registry / pool / dispatcher
  * pipeline and the production `HostRunner` — the test's MCP server runs
- * in `globalSetup` over Streamable HTTP, so every worker can reach it
- * regardless of which one Inngest routes the event to.
+ * in `globalSetup` over Streamable HTTP, so every worker reaches the same
+ * server.
  *
  * What this test catches that the registry-level tests don't:
  * 1. `resolveTools` output is merged into the agent loop's tool list
@@ -27,16 +27,11 @@ import { workerInngestBaseUrl } from "./worker-inngest.js";
  *    echoed payload.
  *
  * Assertion strategy: poll the persisted `messages` table for the final
- * assistant turn (instead of attaching an Inngest function to capture
- * `directOutbound`). Reason: `inngest.connect` consolidates function
- * registrations under one app id ("cogmo"). When this test runs in
- * parallel with `pipeline.integration.test.ts` — which also calls
- * `connect` with its own outbound-capture function on the same app id —
- * one fork's capture function shadows the other, and the event never
- * reaches this fork's buffer. Polling `messages` reads from the shared
- * Postgres so the assertion is fork-routing-independent. The outbound
- * event itself is covered by `pipeline.integration.test.ts`'s
- * `processes inbound/arrived end-to-end` case.
+ * assistant turn rather than registering an Inngest function to capture
+ * `directOutbound`. The persisted turn is the most direct record of what
+ * this test is about; the outbound event itself is covered by
+ * `pipeline.integration.test.ts`'s `processes inbound/arrived end-to-end`
+ * case.
  *
  * Fixture stability: the test's tool schema lives inside
  * `src/test/mcp-http-echo-server.ts` (frozen with the test, not with
@@ -64,8 +59,8 @@ beforeAll(async () => {
 
   // Connect this worker so production functions (handle-message, the
   // direct-channel adapter, etc.) are reachable from the gateway.
-  // No test capture function — see file-header note on cross-fork
-  // routing — the assertion polls `messages` directly.
+  // No test capture function: the assertion polls `messages` directly (see
+  // the file header).
   connection = await connect({ apps: [{ client: inngest, functions }] });
 });
 
