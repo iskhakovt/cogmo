@@ -666,6 +666,14 @@ export const pipelineStageDue = eventType("pipeline/stage.due", {
     stageId: z.string(),
     iteration: z.number().int().nonnegative(),
     /**
+     * The run's own conversation, whose turns the stage shares a queue with.
+     * Optional in the schema because the SDK validates a run's trigger event
+     * on every invocation: a stage sent or mid-turn across the deploy that
+     * added the field would otherwise fail. The runner reads the conversation
+     * from the run row; `buildPipelineStageDueEvent` requires the field.
+     */
+    conversationId: z.string().optional(),
+    /**
      * The chat conversation whose turn started the run — set on the first
      * stage only. The runner waits (bounded) for that turn's
      * `response/ready` so the stage's output doesn't stream into the same
@@ -678,7 +686,9 @@ export const pipelineStageDue = eventType("pipeline/stage.due", {
 export type PipelineStageDueData = z.infer<typeof pipelineStageDue.schema>;
 
 /** Bus-dedup id keyed on the full run cursor — one stage execution per (run, stage, iteration). */
-export function buildPipelineStageDueEvent(data: PipelineStageDueData) {
+export function buildPipelineStageDueEvent(
+  data: PipelineStageDueData & { conversationId: string },
+) {
   return {
     ...pipelineStageDue.create(data),
     id: `pipeline-stage-due-${data.runId}-${data.stageId}-${data.iteration}`,

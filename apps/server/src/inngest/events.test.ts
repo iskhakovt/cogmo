@@ -6,6 +6,7 @@ import {
   deriveCauseClass,
   inboundArrived,
   pipelineGatePending,
+  pipelineStageDue,
   responseReady,
 } from "./events.js";
 
@@ -84,6 +85,13 @@ describe("buildConversationCooldownClearedEvent", () => {
     );
     expect(event.name).toBe("conversation/cooldown/cleared");
     expect(event.id).toBe("cooldown-cleared-conv-1-2026-05-19T12:00:00.000Z");
+  });
+});
+
+describe("pipeline/stage.due", () => {
+  it("accepts an event without the run's conversation id", () => {
+    const data = { runId: "run-1", stageId: "draft", iteration: 0 };
+    expect(pipelineStageDue.schema.safeParse(data).success).toBe(true);
   });
 });
 

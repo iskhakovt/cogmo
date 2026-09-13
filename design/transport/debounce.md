@@ -129,13 +129,13 @@ const debounceMaxwait = buildDebounceTimer("debounce-maxwait", "debounce/maxwait
 
 #### handle-message (orchestrator)
 
-**Critical:** This single function handles the ENTIRE message processing pipeline end-to-end: load unbatched inbound messages, batch into a turn, run the agent, persist the response, emit delivery events, and apply resume policy. All within `concurrency: { limit: 1, key: conversationId }` — guaranteeing exactly one message batch is processed by the agent at a time per conversation. No parallel processing, no race conditions on conversation state.
+**Critical:** This single function handles the ENTIRE message processing pipeline end-to-end: load unbatched inbound messages, batch into a turn, run the agent, persist the response, emit delivery events, and apply resume policy. All within `conversationTurnConcurrency` — a limit of 1 on an env-scoped key per conversation, shared with `pipeline-stage-runner` — so one turn, chat batch or pipeline stage, runs at a time per conversation and no two of its steps run in parallel. Ordering is best-effort by run age: a step retried after an error can run between two steps of a younger turn (see `src/inngest/concurrency.ts`).
 
 ```typescript
 inngest.createFunction({
   id: "handle-message",
   triggers: [{ event: "inbound/ready" }],
-  concurrency: { limit: 1, key: "event.data.conversationId" },
+  concurrency: conversationTurnConcurrency, // env-scoped, keyed on conversationId
 }, async ({ event, step }) => {
   const { conversationId, triggerInboundId } = event.data;
 

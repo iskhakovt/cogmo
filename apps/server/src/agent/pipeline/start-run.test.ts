@@ -120,7 +120,12 @@ describe("startPipelineRun", () => {
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({
         name: "pipeline/stage.due",
-        data: { runId: "run-1", stageId: "gather-context", iteration: 0 },
+        data: {
+          runId: "run-1",
+          conversationId: "conv-new",
+          stageId: "gather-context",
+          iteration: 0,
+        },
         id: "pipeline-stage-due-run-1-gather-context-0",
       }),
     );
@@ -194,6 +199,7 @@ describe("startPipelineRun", () => {
       expect.objectContaining({
         data: {
           runId: "run-1",
+          conversationId: "conv-new",
           stageId: "gather-context",
           iteration: 0,
           originConversationId: "conv-chat",

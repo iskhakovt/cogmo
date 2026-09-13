@@ -146,7 +146,7 @@ Each LLM iteration runs inside `step.run("llm-iter<N>")` — streaming does not 
 inngest.createFunction({
   id: "handle-message",
   triggers: [{ event: "inbound/ready" }],
-  concurrency: { limit: 1, key: "event.data.conversationId" },
+  concurrency: conversationTurnConcurrency, // env-scoped, keyed on conversationId
 }, async ({ event, step, runId }) => {
   const { conversationId } = event.data;
   // runId from Inngest — stable across retries of the same invocation
