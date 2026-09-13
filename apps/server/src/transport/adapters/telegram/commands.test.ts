@@ -18,6 +18,7 @@ import {
   handleModel,
   handleName,
   handleNew,
+  handlePipelineGateCallback,
   handlePlanCallback,
   handleProfile,
   handleReflect,
@@ -4673,5 +4674,118 @@ describe("handleLearned detail rendering", () => {
     await handleLearned(transport, ctx);
     const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
     expect(reply).not.toContain("Took:");
+  });
+});
+
+describe("handlePipelineGateCallback", () => {
+  const runId = "019d0000-0000-7000-8000-0000000000aa";
+  const token = "0a1b2c3d";
+
+  it("Approve resolves the gate with its token and says the approval was sent", async () => {
+    const resolveGate = vi
+      .fn()
+      .mockResolvedValue(ok({ runId, pipelineName: "issue-to-pr", stageId: "approve" }));
+    const transport = mockTransportDeep({ pipelines: { resolveGate } });
+
+    const outcome = await handlePipelineGateCallback(
+      transport,
+      { runId, action: "approve", token },
+      "tg-1",
+    );
+
+    expect(resolveGate).toHaveBeenCalledWith(runId, token, "approve", "tg-1");
+    expect(outcome).toEqual({
+      editText: '✅ Approval sent for checkpoint "approve" of pipeline "issue-to-pr".',
+      toast: "Approved",
+      clearKeyboard: true,
+    });
+  });
+
+  it("Cancel resolves the gate as cancelled and says the cancellation was sent", async () => {
+    const resolveGate = vi
+      .fn()
+      .mockResolvedValue(ok({ runId, pipelineName: "issue-to-pr", stageId: "approve" }));
+    const transport = mockTransportDeep({ pipelines: { resolveGate } });
+
+    const outcome = await handlePipelineGateCallback(
+      transport,
+      { runId, action: "cancel", token },
+      "tg-1",
+    );
+
+    expect(resolveGate).toHaveBeenCalledWith(runId, token, "cancel", "tg-1");
+    expect(outcome).toEqual({
+      editText: '❌ Cancellation sent for checkpoint "approve" of pipeline "issue-to-pr".',
+      toast: "Cancelling",
+      clearKeyboard: true,
+    });
+  });
+
+  it.each([
+    [
+      "waiting_gate",
+      "This button is from an earlier checkpoint. Use the buttons on the latest one.",
+    ],
+    ["running", "This checkpoint was already decided, and the pipeline has moved on."],
+    ["queued", "This checkpoint was already decided, and the pipeline has moved on."],
+    ["waiting_event", "This checkpoint was already decided, and the pipeline has moved on."],
+    ["completed", "This pipeline run has already finished."],
+    ["cancelled", "This pipeline run was cancelled."],
+    ["failed", "This pipeline run stopped after a failure."],
+  ] as const)(
+    "a tap on a checkpoint that isn't open, with the run %s, says why",
+    async (status, text) => {
+      const transport = mockTransportDeep({
+        pipelines: {
+          resolveGate: vi
+            .fn()
+            .mockResolvedValue(err({ code: "pipeline_gate_not_pending", runId, status })),
+        },
+      });
+
+      const outcome = await handlePipelineGateCallback(
+        transport,
+        { runId, action: "approve", token },
+        "tg-1",
+      );
+
+      expect(outcome.editText).toBe(text);
+      expect(outcome.toast).toBe(text);
+      // A checkpoint that isn't open can't be resolved from these buttons.
+      expect(outcome.clearKeyboard).toBe(true);
+    },
+  );
+
+  it.each([
+    [{ code: "pipeline_run_not_found", runId: "019d0000-0000-7000-8000-0000000000aa" } as const],
+    [{ code: "pipelines_disabled" } as const],
+  ])("clears buttons that can never work (%o)", async (error) => {
+    const transport = mockTransportDeep({
+      pipelines: { resolveGate: vi.fn().mockResolvedValue(err(error)) },
+    });
+
+    const outcome = await handlePipelineGateCallback(
+      transport,
+      { runId: "019d0000-0000-7000-8000-0000000000aa", action: "approve", token: "0a1b2c3d" },
+      "tg-1",
+    );
+
+    expect(outcome.clearKeyboard).toBe(true);
+  });
+
+  it("an unauthorized tapper gets the identity rejection", async () => {
+    const transport = mockTransportDeep({
+      pipelines: { resolveGate: vi.fn().mockResolvedValue(err({ code: "identity_rejected" })) },
+    });
+
+    const outcome = await handlePipelineGateCallback(
+      transport,
+      { runId, action: "cancel", token },
+      "tg-9",
+    );
+
+    expect(outcome.editText).toBe("You're not authorized on this bot.");
+    // A rejected tap must not take the buttons away from whoever can use them.
+    expect(outcome.clearKeyboard).toBe(false);
   });
 });

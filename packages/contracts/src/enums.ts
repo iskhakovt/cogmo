@@ -9,6 +9,18 @@
  * described `string` rather than a closed enum.
  */
 export type AutoRecallMode = "off" | "always" | "heuristic" | "llm";
+
+export const PIPELINE_RUN_STATUSES = [
+  "queued",
+  "running",
+  "waiting_gate",
+  "waiting_event",
+  "completed",
+  "failed",
+  "cancelled",
+] as const;
+
+export type PipelineRunStatus = (typeof PIPELINE_RUN_STATUSES)[number];
 export type VoiceMode = "auto" | "always" | "never";
 export type CodingAutoapproveMode = "off" | "on";
 export type ScheduleKind = "recurring" | "one_off";

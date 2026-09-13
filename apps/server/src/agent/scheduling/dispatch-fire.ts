@@ -21,7 +21,7 @@ export interface DispatchScheduledFireDeps {
   transportStore: Pick<
     TransportStore,
     | "findReachableChannelsForUserProfile"
-    | "findInboundByScheduledFireKey"
+    | "findInboundByIdempotencyKey"
     | "swapSession"
     | "persistInbound"
   >;
@@ -50,7 +50,7 @@ export async function dispatchScheduledFire(
     // didn't get the step ack, the inbound row is already there. Reuse
     // its ids so the downstream `inbound/arrived` event id (and the
     // pipeline state below it) stays stable.
-    const existing = await deps.transportStore.findInboundByScheduledFireKey(
+    const existing = await deps.transportStore.findInboundByIdempotencyKey(
       tx,
       args.scheduledFireKey,
     );
@@ -89,7 +89,7 @@ export async function dispatchScheduledFire(
 
     const inbound = await deps.transportStore.persistInbound(tx, {
       source: "scheduled",
-      scheduledFireKey: args.scheduledFireKey,
+      idempotencyKey: args.scheduledFireKey,
       conversationId: targetConversationId,
       content: buildSyntheticInboundContent(args.scheduledFor, args.prompt),
       platformTs: new Date(args.scheduledFor),

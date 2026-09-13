@@ -2,7 +2,7 @@
  * Shared mock factories for unit tests.
  * Every store interface method is mocked — tests override what they need.
  */
-import type { Inngest } from "inngest";
+import { type Inngest, StepError } from "inngest";
 import { ok } from "neverthrow";
 import { vi } from "vitest";
 import { mock } from "vitest-mock-extended";
@@ -275,7 +275,7 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
     setChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
     clearChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
     findReachableChannelsForUserProfile: vi.fn().mockResolvedValue([]),
-    findInboundByScheduledFireKey: vi.fn().mockResolvedValue(undefined),
+    findInboundByIdempotencyKey: vi.fn().mockResolvedValue(undefined),
     peekPriorClosedConversation: vi.fn().mockResolvedValue(undefined),
     createBoundaryPending: vi.fn().mockResolvedValue({ id: "boundary-1" }),
     getBoundaryPendingByAddress: vi.fn().mockResolvedValue(undefined),
@@ -316,6 +316,7 @@ export function mockTransportDeep(overrides: DeepPartial<Transport> = {}): Trans
     repos: { ...base.repos, ...(overrides.repos ?? {}) },
     coding: { ...base.coding, ...(overrides.coding ?? {}) },
     skills: { ...base.skills, ...(overrides.skills ?? {}) },
+    pipelines: { ...base.pipelines, ...(overrides.pipelines ?? {}) },
     scheduling: { ...base.scheduling, ...(overrides.scheduling ?? {}) },
     mcp: { ...base.mcp, ...(overrides.mcp ?? {}) },
     evolution: { ...base.evolution, ...(overrides.evolution ?? {}) },
@@ -489,6 +490,11 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
       disable: vi.fn().mockResolvedValue(ok({ name: "echo" })),
       enable: vi.fn().mockResolvedValue(ok({ name: "echo", alreadyEnabled: false })),
     },
+    pipelines: {
+      resolveGate: vi
+        .fn()
+        .mockResolvedValue(ok({ runId: "run-1", pipelineName: "issue-to-pr", stageId: "approve" })),
+    },
     scheduling: {
       list: vi.fn().mockResolvedValue(ok([])),
       // Echo the id the caller passed instead of a hardcoded constant.
@@ -623,6 +629,33 @@ export function makeStepSendEvent(inngest: Pick<Inngest, "send">): StepSendEvent
  */
 export function nullStepSendEvent(): StepSendEvent {
   return (async () => ({ ids: [] })) as unknown as StepSendEvent;
+}
+
+/**
+ * A hand-built `step` for driving a handler directly with `invokeInngestFn` /
+ * `invokeInngestOnFailure`. `run` throws a `StepError` for `failingStep` —
+ * what the SDK throws in the body for a step that exhausted its retries —
+ * returns a memoized result by id, and otherwise runs the body inline and
+ * memoizes its result, so a later invocation sharing this `step` replays it.
+ *
+ * `InngestTestEngine` can't stand in here: a memoized step that throws
+ * doesn't reject in the body the way a permanently failed step does.
+ */
+export function directStep(memo: Record<string, unknown>, failingStep: string | null) {
+  return {
+    run: vi.fn(async (id: string, body: () => Promise<unknown>) => {
+      if (id === failingStep) {
+        throw new StepError(id, new Error(`step "${id}" failed after retries`));
+      }
+      if (id in memo) return memo[id];
+      const result = await body();
+      memo[id] = result;
+      return result;
+    }),
+    sendEvent: vi.fn().mockResolvedValue({ ids: [] }),
+    sleep: vi.fn().mockResolvedValue(undefined),
+    waitForEvent: vi.fn().mockResolvedValue(null),
+  };
 }
 
 /**

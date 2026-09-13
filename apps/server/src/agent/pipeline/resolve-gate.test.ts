@@ -1,0 +1,453 @@
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import type { Database, Transactor } from "../../db/index.js";
+import { pipelineGateKey } from "../../inngest/events.js";
+import { createTestDatabase, truncateAll } from "../../test/pglite.js";
+import { DrizzleAgentStore } from "../store/index.js";
+import { inspectFailedResolution, resolveGate } from "./resolve-gate.js";
+import { DrizzlePipelineRunStore, DrizzlePipelineStore } from "./store/index.js";
+import type { PipelineDefinition } from "./types.js";
+
+let db: Database;
+let tx: Transactor;
+let close: () => Promise<void>;
+const runStore = new DrizzlePipelineRunStore();
+const defStore = new DrizzlePipelineStore();
+const agentStore = new DrizzleAgentStore();
+
+beforeAll(async () => {
+  ({ db, tx, close } = await createTestDatabase());
+});
+afterEach(async () => {
+  await truncateAll(db);
+});
+afterAll(async () => {
+  await close();
+});
+
+const DEFINITION: PipelineDefinition = {
+  name: "plan-then-build",
+  trigger: { kind: "command", phrase: "plan then build" },
+  stages: [
+    { id: "draft", kind: "agentic", instructions: "Draft a plan.", output: { kind: "text" } },
+    {
+      id: "approve",
+      kind: "gate",
+      instructions: "Approve the plan?",
+      gate: { timeout: "1d", onTimeout: { kind: "abort" } },
+    },
+    { id: "build", kind: "agentic", instructions: "Build it." },
+    {
+      id: "sign-off",
+      kind: "gate",
+      instructions: "Happy with it?",
+      gate: { timeout: "1d", onTimeout: { kind: "proceed" } },
+    },
+  ],
+};
+
+/** A run parked at `waiting_gate` on `stage`. */
+async function parkedRun(stage: "approve" | "sign-off") {
+  const userId = (await tx((trx) => agentStore.createUser(trx))).id;
+  const profile = await tx((trx) =>
+    agentStore.createProfile(trx, {
+      userId,
+      name: "default",
+      basePrompt: "p",
+      model: "test-model",
+      toolSet: [],
+    }),
+  );
+  const conversation = await tx((trx) =>
+    agentStore.createConversation(trx, { userId, profileId: profile.id, isPrivate: true }),
+  );
+  const def = await tx((trx) =>
+    defStore.insertDefinition(trx, {
+      userId,
+      name: DEFINITION.name,
+      sourceText: "source",
+      compiled: DEFINITION,
+    }),
+  );
+  const run = await tx((trx) =>
+    runStore.createRun(trx, {
+      definitionId: def.id,
+      conversationId: conversation.id,
+      currentStage: stage,
+    }),
+  );
+  await tx((trx) => runStore.transitionStatus(trx, run.id, "running", "waiting_gate"));
+  return {
+    runId: run.id,
+    conversationId: conversation.id,
+    gateKey: pipelineGateKey(run.id, stage, 0),
+  };
+}
+
+const deps = () => ({ runInTx: tx, runStore });
+
+describe("resolveGate", () => {
+  it("approval advances a mid-pipeline gate to the next stage", async () => {
+    const { runId, conversationId, gateKey } = await parkedRun("approve");
+
+    const outcome = await resolveGate(deps(), {
+      runId,
+      gateKey,
+      decision: "approved",
+      resolverRunId: "r-1",
+    });
+
+    expect(outcome).toEqual({
+      kind: "advanced",
+      conversationId,
+      pipelineName: "plan-then-build",
+      nextStage: "build",
+      iteration: 0,
+    });
+    expect(await tx((trx) => runStore.getRun(trx, runId))).toMatchObject({
+      status: "running",
+      currentStage: "build",
+    });
+  });
+
+  it("a proceeding timeout on the final gate completes the run", async () => {
+    const { runId, conversationId, gateKey } = await parkedRun("sign-off");
+
+    const outcome = await resolveGate(deps(), {
+      runId,
+      gateKey,
+      decision: "timeout_proceed",
+      resolverRunId: "r-1",
+    });
+
+    expect(outcome).toEqual({ kind: "completed", conversationId, pipelineName: "plan-then-build" });
+    expect(await tx((trx) => runStore.getRun(trx, runId))).toMatchObject({
+      status: "completed",
+      currentStage: "sign-off",
+    });
+  });
+
+  it.each([
+    ["cancelled", 'cancelled by the user at gate "approve"'],
+    ["timeout_abort", 'gate "approve" timed out'],
+  ] as const)("%s cancels the run with its reason", async (decision, reason) => {
+    const { runId, conversationId, gateKey } = await parkedRun("approve");
+
+    const outcome = await resolveGate(deps(), { runId, gateKey, decision, resolverRunId: "r-1" });
+
+    expect(outcome).toEqual({ kind: "cancelled", conversationId, pipelineName: "plan-then-build" });
+    expect(await tx((trx) => runStore.getRun(trx, runId))).toMatchObject({
+      status: "cancelled",
+      failureReason: reason,
+    });
+  });
+
+  it("the second of two racing resolutions is stale and changes nothing", async () => {
+    const { runId, gateKey } = await parkedRun("approve");
+
+    const first = await resolveGate(deps(), {
+      runId,
+      gateKey,
+      decision: "approved",
+      resolverRunId: "r-1",
+    });
+    const second = await resolveGate(deps(), {
+      runId,
+      gateKey,
+      decision: "timeout_abort",
+      resolverRunId: "r-2",
+    });
+
+    expect(first.kind).toBe("advanced");
+    // The loser reports where the run actually is, so the caller can tell a
+    // same-effect resolution from one that lost.
+    expect(second).toEqual({
+      kind: "stale",
+      conversationId: expect.any(String),
+      pipelineName: "plan-then-build",
+      status: "running",
+      currentStage: "build",
+      iteration: 0,
+      gateStage: "approve",
+      gateIteration: 0,
+      nextStage: "build",
+      pastGate: true,
+      appliedByThis: false,
+    });
+    // The late abort must not cancel the run the approval already advanced.
+    expect(await tx((trx) => runStore.getRun(trx, runId))).toMatchObject({
+      status: "running",
+      currentStage: "build",
+    });
+  });
+
+  it("a resolution naming a different gate than the run is parked on is stale", async () => {
+    const { runId } = await parkedRun("sign-off");
+
+    const outcome = await resolveGate(deps(), {
+      runId,
+      gateKey: pipelineGateKey(runId, "approve", 0),
+      decision: "cancelled",
+      resolverRunId: "r-1",
+    });
+
+    expect(outcome).toMatchObject({
+      kind: "stale",
+      status: "waiting_gate",
+      currentStage: "sign-off",
+      gateStage: "approve",
+      pastGate: true,
+      appliedByThis: false,
+    });
+    expect((await tx((trx) => runStore.getRun(trx, runId)))?.status).toBe("waiting_gate");
+  });
+
+  it("a run that is not parked is stale", async () => {
+    const { runId, gateKey } = await parkedRun("approve");
+    await tx((trx) => runStore.transitionStatus(trx, runId, "waiting_gate", "running"));
+
+    expect(
+      await resolveGate(deps(), { runId, gateKey, decision: "approved", resolverRunId: "r-1" }),
+    ).toMatchObject({
+      kind: "stale",
+      status: "running",
+      currentStage: "approve",
+      pastGate: false,
+    });
+  });
+
+  it("a cancelled run reports it has not moved past the gate", async () => {
+    const { runId, gateKey } = await parkedRun("approve");
+    await resolveGate(deps(), { runId, gateKey, decision: "cancelled", resolverRunId: "r-1" });
+
+    expect(
+      await resolveGate(deps(), { runId, gateKey, decision: "approved", resolverRunId: "r-1" }),
+    ).toMatchObject({
+      kind: "stale",
+      status: "cancelled",
+      currentStage: "approve",
+      pastGate: false,
+    });
+  });
+
+  it("a completed run on its final gate reports it has moved past it", async () => {
+    const { runId, gateKey } = await parkedRun("sign-off");
+    await resolveGate(deps(), { runId, gateKey, decision: "approved", resolverRunId: "r-1" });
+
+    expect(
+      await resolveGate(deps(), {
+        runId,
+        gateKey,
+        decision: "timeout_proceed",
+        resolverRunId: "r-1",
+      }),
+    ).toMatchObject({ kind: "stale", status: "completed", nextStage: null, pastGate: true });
+  });
+
+  it("a run that failed on a later stage still counts as past the gate", async () => {
+    const { runId, gateKey } = await parkedRun("approve");
+    await resolveGate(deps(), { runId, gateKey, decision: "approved", resolverRunId: "r-1" });
+    await tx((trx) => runStore.failRun(trx, runId, "build failed"));
+
+    expect(
+      await resolveGate(deps(), { runId, gateKey, decision: "approved", resolverRunId: "r-1" }),
+    ).toMatchObject({
+      kind: "stale",
+      status: "failed",
+      currentStage: "build",
+      pastGate: true,
+    });
+  });
+
+  it("records the claim on the run in the same transaction as the flip", async () => {
+    const { runId, gateKey } = await parkedRun("approve");
+
+    await resolveGate(deps(), { runId, gateKey, decision: "approved", resolverRunId: "r-1" });
+
+    expect((await tx((trx) => runStore.getRun(trx, runId)))?.gateResolution).toEqual({
+      gateKey,
+      resolverRunId: "r-1",
+    });
+  });
+
+  it.each([
+    ["approve", "approved", "running"],
+    ["sign-off", "approved", "completed"],
+    ["approve", "cancelled", "cancelled"],
+  ] as const)(
+    "a resolution re-run after its own commit at %s (%s) knows it was the one applied",
+    async (stage, decision, status) => {
+      const { runId, gateKey } = await parkedRun(stage);
+      await resolveGate(deps(), { runId, gateKey, decision, resolverRunId: "r-1" });
+
+      // Same function run, so the same resolver run id: the step re-ran.
+      const again = await resolveGate(deps(), { runId, gateKey, decision, resolverRunId: "r-1" });
+
+      expect(again).toMatchObject({ kind: "stale", status, appliedByThis: true });
+    },
+  );
+
+  it("a resolution for an earlier gate isn't credited with a later gate's claim", async () => {
+    const { runId, gateKey } = await parkedRun("approve");
+    await resolveGate(deps(), { runId, gateKey, decision: "approved", resolverRunId: "r-1" });
+    await tx((trx) =>
+      runStore.advanceStage(trx, {
+        runId,
+        fromStage: "build",
+        output: null,
+        toStage: "sign-off",
+      }),
+    );
+    await tx((trx) => runStore.transitionStatus(trx, runId, "running", "waiting_gate"));
+    await resolveGate(deps(), {
+      runId,
+      gateKey: pipelineGateKey(runId, "sign-off", 0),
+      decision: "approved",
+      resolverRunId: "r-1",
+    });
+
+    expect(
+      await resolveGate(deps(), { runId, gateKey, decision: "approved", resolverRunId: "r-1" }),
+    ).toMatchObject({ kind: "stale", status: "completed", appliedByThis: false });
+  });
+
+  it("an unknown run is not_found", async () => {
+    const runId = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
+    expect(
+      await resolveGate(deps(), {
+        runId,
+        gateKey: pipelineGateKey(runId, "approve", 0),
+        decision: "approved",
+        resolverRunId: "r-1",
+      }),
+    ).toEqual({ kind: "not_found" });
+  });
+});
+
+describe("inspectFailedResolution", () => {
+  const REASON = "gate timeout could not be applied (TypeError)";
+
+  it("reports a run still parked on the gate, without claiming or failing it", async () => {
+    const { runId, gateKey } = await parkedRun("approve");
+
+    expect(
+      await inspectFailedResolution(deps(), {
+        runId,
+        gateKey,
+        resolverRunId: "r-1",
+        failParkedRunWith: null,
+      }),
+    ).toEqual({ kind: "parked" });
+    expect(await tx((trx) => runStore.getRun(trx, runId))).toMatchObject({
+      status: "waiting_gate",
+      gateResolution: null,
+    });
+  });
+
+  it("fails a run still parked on the gate when asked, in the same transaction as the check", async () => {
+    const { runId, gateKey, conversationId } = await parkedRun("approve");
+
+    expect(
+      await inspectFailedResolution(deps(), {
+        runId,
+        gateKey,
+        resolverRunId: "r-1",
+        failParkedRunWith: REASON,
+      }),
+    ).toEqual({ kind: "failed", conversationId });
+    expect(await tx((trx) => runStore.getRun(trx, runId))).toMatchObject({
+      status: "failed",
+      failureReason: REASON,
+    });
+  });
+
+  it("reports a run it already failed as failed when the check re-runs after its commit", async () => {
+    // The failure commits inside a step; if the step's result is lost, the
+    // re-run finds the run failed with this reason and must still say so,
+    // or the "run stopped" notice is never sent.
+    const { runId, gateKey, conversationId } = await parkedRun("approve");
+    const args = { runId, gateKey, resolverRunId: "r-1", failParkedRunWith: REASON };
+    await inspectFailedResolution(deps(), args);
+
+    expect(await inspectFailedResolution(deps(), args)).toEqual({ kind: "failed", conversationId });
+  });
+
+  it("doesn't claim a run failed for another reason", async () => {
+    const { runId, gateKey } = await parkedRun("approve");
+    await tx((trx) => runStore.failRun(trx, runId, "build failed"));
+
+    expect(
+      await inspectFailedResolution(deps(), {
+        runId,
+        gateKey,
+        resolverRunId: "r-1",
+        failParkedRunWith: REASON,
+      }),
+    ).toMatchObject({ kind: "stale", status: "failed" });
+  });
+
+  it("leaves a run that moved on alone even when asked to fail a parked one", async () => {
+    const { runId, gateKey } = await parkedRun("approve");
+    await resolveGate(deps(), { runId, gateKey, decision: "approved", resolverRunId: "r-tap" });
+
+    expect(
+      await inspectFailedResolution(deps(), {
+        runId,
+        gateKey,
+        resolverRunId: "r-timeout",
+        failParkedRunWith: REASON,
+      }),
+    ).toMatchObject({
+      kind: "stale",
+      status: "running",
+      currentStage: "build",
+      appliedByThis: false,
+    });
+    expect((await tx((trx) => runStore.getRun(trx, runId)))?.status).toBe("running");
+  });
+
+  it("reports where a resolved run is and that the claim is this resolver's", async () => {
+    const { runId, gateKey } = await parkedRun("approve");
+    await resolveGate(deps(), { runId, gateKey, decision: "approved", resolverRunId: "r-1" });
+
+    expect(
+      await inspectFailedResolution(deps(), {
+        runId,
+        gateKey,
+        resolverRunId: "r-1",
+        failParkedRunWith: null,
+      }),
+    ).toMatchObject({
+      kind: "stale",
+      status: "running",
+      currentStage: "build",
+      pastGate: true,
+      appliedByThis: true,
+    });
+  });
+
+  it("reports a run parked on a different gate as stale, and doesn't fail it", async () => {
+    const { runId } = await parkedRun("sign-off");
+
+    expect(
+      await inspectFailedResolution(deps(), {
+        runId,
+        gateKey: pipelineGateKey(runId, "approve", 0),
+        resolverRunId: "r-1",
+        failParkedRunWith: REASON,
+      }),
+    ).toMatchObject({ kind: "stale", status: "waiting_gate", currentStage: "sign-off" });
+    expect((await tx((trx) => runStore.getRun(trx, runId)))?.status).toBe("waiting_gate");
+  });
+
+  it("reports an unknown run as not_found", async () => {
+    const runId = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
+    expect(
+      await inspectFailedResolution(deps(), {
+        runId,
+        gateKey: pipelineGateKey(runId, "approve", 0),
+        resolverRunId: "r-1",
+        failParkedRunWith: REASON,
+      }),
+    ).toEqual({ kind: "not_found" });
+  });
+});

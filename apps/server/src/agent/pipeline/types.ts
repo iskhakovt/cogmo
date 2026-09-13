@@ -19,12 +19,18 @@ import { z } from "zod";
 /** Stable slug for stage ids and pipeline names — run state keys off these. */
 const SLUG_REGEX = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
+/** Longest stage id or pipeline name. `pipeline/gate.pending` enforces the same bound. */
+export const MAX_SLUG_LENGTH = 64;
+
+/** Most reminders a gate may declare. `pipeline/gate.pending` enforces the same bound. */
+export const MAX_GATE_REMINDERS = 10;
+
 /**
  * ms-style duration constrained to minutes/hours/days/weeks. The
  * constrained grammar excludes ms-style's `M`-ambiguity (months vs
  * minutes) and months/years entirely — engine waits cap at ~1 year
- * anyway. Strings pass to Inngest's `waitForEvent`/`sleep` untouched;
- * the DB-park path parses with {@link parseDurationMs}.
+ * anyway. {@link parseDurationMs} turns a duration into the milliseconds
+ * the gate waiter sleeps.
  */
 export const DURATION_REGEX = /^\d+(\.\d+)?(m|h|d|w)$/;
 
@@ -56,7 +62,9 @@ export function parseDurationMs(duration: string): number {
   if (multiplier === undefined) {
     throw new Error(`parseDurationMs: unknown unit in "${duration}"`);
   }
-  return Number.parseFloat(duration) * multiplier;
+  // Rounded: a decimal such as "4.1m" is not exact in floating point, and
+  // every consumer (event schemas, sleeps) wants whole milliseconds.
+  return Math.round(Number.parseFloat(duration) * multiplier);
 }
 
 /**
@@ -70,7 +78,7 @@ export const TimeoutActionSchema = z.discriminatedUnion("kind", [
   z
     .object({
       kind: z.literal("remind"),
-      maxReminders: z.number().int().min(1).max(10),
+      maxReminders: z.number().int().min(1).max(MAX_GATE_REMINDERS),
       finalAction: z.enum(["proceed", "abort"]),
     })
     .strict(),
@@ -160,7 +168,7 @@ const LoopSchema = z
 
 export const StageSchema = z
   .object({
-    id: z.string().regex(SLUG_REGEX).min(1).max(64),
+    id: z.string().regex(SLUG_REGEX).min(1).max(MAX_SLUG_LENGTH),
     kind: z.enum(["agentic", "gate", "wait"]),
     /**
      * The user's prose for this stage, interpreted at run time. Required
@@ -182,7 +190,7 @@ export type Stage = z.infer<typeof StageSchema>;
 
 export const PipelineDefinitionSchema = z
   .object({
-    name: z.string().regex(SLUG_REGEX).min(1).max(64),
+    name: z.string().regex(SLUG_REGEX).min(1).max(MAX_SLUG_LENGTH),
     trigger: TriggerSchema,
     stages: z.array(StageSchema).min(1).max(20),
   })

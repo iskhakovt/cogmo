@@ -1,7 +1,7 @@
-import { and, count, desc, eq, max, sql } from "drizzle-orm";
+import { and, count, desc, eq, getTableColumns, max, sql } from "drizzle-orm";
 import { single } from "../../../db/helpers.js";
 import type { Transaction } from "../../../db/index.js";
-import type { StageArtifact, StageOutputs } from "../run-types.js";
+import type { GateResolution, StageArtifact, StageOutputs } from "../run-types.js";
 import type { PipelineDefinition } from "../types.js";
 import { pipelineDefinitions, type pipelineRunStatus, pipelineRuns } from "./schema.js";
 
@@ -45,6 +45,16 @@ export interface PipelineStore {
     userId: string,
     name: string,
     version?: number,
+  ): Promise<PipelineDefinitionRow | undefined>;
+
+  /**
+   * The active version for `(userId, name)`, or undefined when no version of
+   * that name is active. Runs start from this row and pin its id.
+   */
+  getActiveDefinition(
+    tx: Transaction,
+    userId: string,
+    name: string,
   ): Promise<PipelineDefinitionRow | undefined>;
 
   /** All definition rows for a user, name ASC then version DESC. */
@@ -136,6 +146,25 @@ export class DrizzlePipelineStore implements PipelineStore {
       .from(pipelineDefinitions)
       .where(and(...conditions))
       .orderBy(desc(pipelineDefinitions.version))
+      .limit(1);
+    return rows[0];
+  }
+
+  async getActiveDefinition(
+    tx: Transaction,
+    userId: string,
+    name: string,
+  ): Promise<PipelineDefinitionRow | undefined> {
+    const rows = await tx
+      .select()
+      .from(pipelineDefinitions)
+      .where(
+        and(
+          eq(pipelineDefinitions.userId, userId),
+          eq(pipelineDefinitions.name, name),
+          eq(pipelineDefinitions.active, true),
+        ),
+      )
       .limit(1);
     return rows[0];
   }
@@ -235,20 +264,36 @@ export interface PipelineRunRow {
   iteration: number;
   stageOutputs: StageOutputs;
   failureReason: string | null;
+  gateResolution: GateResolution | null;
+  idempotencyKey: string | null;
   createdAt: Date;
 }
 
-/** Conditional-transition result shared by the run store's status mutations. */
+/** A run joined to the definition version it pinned at start. */
+export interface PipelineRunWithDefinition {
+  run: PipelineRunRow;
+  definition: PipelineDefinitionRow;
+}
+
+/**
+ * Where a run was when a conditional mutation found it elsewhere, read under
+ * the row lock that decided `stale`. A step re-run after its own commit uses
+ * it to tell "already where I would have put it" from "moved elsewhere"
+ * without a second read.
+ */
+interface RunCursor {
+  status: PipelineRunStatus;
+  currentStage: string;
+  iteration: number;
+}
+
 type RunTransition =
   | { kind: "transitioned" }
-  | { kind: "stale"; status: PipelineRunStatus }
+  | ({ kind: "stale" } & RunCursor)
   | { kind: "not_found" };
 
 /** Result of recording a stage output and moving the run forward. */
-type RunAdvance =
-  | { kind: "advanced" }
-  | { kind: "stale"; currentStage: string }
-  | { kind: "not_found" };
+type RunAdvance = { kind: "advanced" } | ({ kind: "stale" } & RunCursor) | { kind: "not_found" };
 
 /**
  * Run-state access for the pipeline run engine. Separate interface from
@@ -263,12 +308,39 @@ export interface PipelineRunStore {
     params: { definitionId: string; conversationId: string; currentStage: string },
   ): Promise<PipelineRunRow>;
 
+  /**
+   * {@link createRun} keyed on the durable tool call that requested it. A
+   * retry of that call — a step replay, or the re-execution after a crash
+   * between commit and Inngest recording the step — returns the existing row
+   * as `recovered` instead of opening a second run. `ON CONFLICT DO UPDATE`
+   * with a no-op SET, not `DO NOTHING`, so a concurrent loser under
+   * REPEATABLE READ raises 40001 for the transactor to retry rather than
+   * re-selecting a row its snapshot cannot see.
+   */
+  insertOrRecoverRun(
+    tx: Transaction,
+    params: {
+      definitionId: string;
+      conversationId: string;
+      currentStage: string;
+      idempotencyKey: string;
+    },
+  ): Promise<{ kind: "new" | "recovered"; row: PipelineRunRow }>;
+
   getRun(tx: Transaction, id: string): Promise<PipelineRunRow | undefined>;
 
   /**
-   * Flip status conditionally (e.g. `running` → `waiting_gate` before a
-   * gate's `step.waitForEvent`, then back on resume). Conditional on `from`
-   * so a duplicate delivery is a no-op `stale`.
+   * Read-only counterpart to {@link insertOrRecoverRun}'s conflict arm — lets
+   * the starter recognise a retry before it creates the run's conversation.
+   */
+  getRunByIdempotencyKey(tx: Transaction, key: string): Promise<PipelineRunRow | undefined>;
+
+  /** The run plus its pinned definition, or undefined when the run doesn't exist. */
+  getRunWithDefinition(tx: Transaction, id: string): Promise<PipelineRunWithDefinition | undefined>;
+
+  /**
+   * Flip status conditionally (e.g. `running` → `waiting_gate` when a gate
+   * parks). Conditional on `from`, so a duplicate delivery is a no-op `stale`.
    */
   transitionStatus(
     tx: Transaction,
@@ -276,6 +348,14 @@ export interface PipelineRunStore {
     from: PipelineRunStatus,
     to: PipelineRunStatus,
   ): Promise<RunTransition>;
+
+  /**
+   * Claim the gate a run is parked on for one resolution: flip
+   * `waiting_gate → running` and record `claim` as the run's gate resolution,
+   * under the same row lock. A run that isn't parked is `stale` and keeps
+   * whatever claim it already carries.
+   */
+  claimGate(tx: Transaction, id: string, claim: GateResolution): Promise<RunTransition>;
 
   /**
    * Record `output` for `fromStage` (when the stage declares one) and move
@@ -342,8 +422,61 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
     );
   }
 
+  async insertOrRecoverRun(
+    tx: Transaction,
+    params: {
+      definitionId: string;
+      conversationId: string;
+      currentStage: string;
+      idempotencyKey: string;
+    },
+  ): Promise<{ kind: "new" | "recovered"; row: PipelineRunRow }> {
+    // `xmax = 0` is true only on a tuple this statement inserted; the
+    // conflict arm's no-op update stamps the locking xid instead.
+    const rows = await tx
+      .insert(pipelineRuns)
+      .values({
+        definitionId: params.definitionId,
+        conversationId: params.conversationId,
+        status: "running",
+        currentStage: params.currentStage,
+        iteration: 0,
+        stageOutputs: {},
+        idempotencyKey: params.idempotencyKey,
+      })
+      .onConflictDoUpdate({
+        target: pipelineRuns.idempotencyKey,
+        set: { idempotencyKey: params.idempotencyKey },
+      })
+      .returning({ ...getTableColumns(pipelineRuns), inserted: sql<boolean>`(xmax = 0)` });
+    const { inserted, ...row } = single(rows);
+    return { kind: inserted ? "new" : "recovered", row };
+  }
+
   async getRun(tx: Transaction, id: string): Promise<PipelineRunRow | undefined> {
     const rows = await tx.select().from(pipelineRuns).where(eq(pipelineRuns.id, id)).limit(1);
+    return rows[0];
+  }
+
+  async getRunByIdempotencyKey(tx: Transaction, key: string): Promise<PipelineRunRow | undefined> {
+    const rows = await tx
+      .select()
+      .from(pipelineRuns)
+      .where(eq(pipelineRuns.idempotencyKey, key))
+      .limit(1);
+    return rows[0];
+  }
+
+  async getRunWithDefinition(
+    tx: Transaction,
+    id: string,
+  ): Promise<PipelineRunWithDefinition | undefined> {
+    const rows = await tx
+      .select({ run: pipelineRuns, definition: pipelineDefinitions })
+      .from(pipelineRuns)
+      .innerJoin(pipelineDefinitions, eq(pipelineRuns.definitionId, pipelineDefinitions.id))
+      .where(eq(pipelineRuns.id, id))
+      .limit(1);
     return rows[0];
   }
 
@@ -353,11 +486,28 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
     from: PipelineRunStatus,
     to: PipelineRunStatus,
   ): Promise<RunTransition> {
+    return this.#transition(tx, id, from, { status: to });
+  }
+
+  async claimGate(tx: Transaction, id: string, claim: GateResolution): Promise<RunTransition> {
+    return this.#transition(tx, id, "waiting_gate", { status: "running", gateResolution: claim });
+  }
+
+  async #transition(
+    tx: Transaction,
+    id: string,
+    from: PipelineRunStatus,
+    set: { status: PipelineRunStatus; gateResolution?: GateResolution },
+  ): Promise<RunTransition> {
     // `.for("update")` row-locks, and the terminal guard makes "terminal is
     // final" hold store-wide: a flip out of completed/failed/cancelled is
     // refused even if a caller passes a terminal `from`.
     const rows = await tx
-      .select({ status: pipelineRuns.status })
+      .select({
+        status: pipelineRuns.status,
+        currentStage: pipelineRuns.currentStage,
+        iteration: pipelineRuns.iteration,
+      })
       .from(pipelineRuns)
       .where(eq(pipelineRuns.id, id))
       .limit(1)
@@ -365,9 +515,14 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
     const row = rows[0];
     if (!row) return { kind: "not_found" as const };
     if (isTerminalPipelineRunStatus(row.status) || row.status !== from) {
-      return { kind: "stale" as const, status: row.status };
+      return {
+        kind: "stale" as const,
+        status: row.status,
+        currentStage: row.currentStage,
+        iteration: row.iteration,
+      };
     }
-    await tx.update(pipelineRuns).set({ status: to }).where(eq(pipelineRuns.id, id));
+    await tx.update(pipelineRuns).set(set).where(eq(pipelineRuns.id, id));
     return { kind: "transitioned" as const };
   }
 
@@ -418,6 +573,7 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
       .select({
         status: pipelineRuns.status,
         currentStage: pipelineRuns.currentStage,
+        iteration: pipelineRuns.iteration,
         stageOutputs: pipelineRuns.stageOutputs,
       })
       .from(pipelineRuns)
@@ -431,7 +587,12 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
     // (stageA, iter 0) could re-fire against a run that legitimately looped
     // back to (stageA, iter 1). Sufficient now: iteration is invariantly 0.
     if (isTerminalPipelineRunStatus(row.status) || row.currentStage !== fromStage) {
-      return { kind: "stale" as const, currentStage: row.currentStage };
+      return {
+        kind: "stale" as const,
+        status: row.status,
+        currentStage: row.currentStage,
+        iteration: row.iteration,
+      };
     }
     const stageOutputs =
       output === null ? row.stageOutputs : { ...row.stageOutputs, [fromStage]: output };
