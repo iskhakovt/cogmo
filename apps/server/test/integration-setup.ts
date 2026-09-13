@@ -199,17 +199,12 @@ export async function setup({ provide, config }: GlobalSetupContext) {
 }
 
 export async function teardown() {
-  // Containers stop before llmock. They reach it through the testcontainers
-  // SSH forwarder, which dials llmock's port from this process for every
-  // forwarded connection without an error listener: one call after llmock has
-  // stopped — Hindsight still extracting in the background, say — throws an
-  // unhandled ECONNREFUSED that kills the run after every test has passed. So
-  // llmock stops only once every container has: a container that failed to
-  // stop keeps its route to the forwarder (testcontainers attaches it to the
-  // forwarder's network, which `stopNetwork` leaves alone). A llmock left
-  // listening costs a "close timed out" warning instead — Vitest force-exits
-  // after `teardownTimeout`. The Telegram and MCP echo mocks aren't forwarded
-  // and simply stop alongside it.
+  // Containers stop before llmock: they reach it via the testcontainers SSH
+  // forwarder, which dials llmock from this process with no error listener, so
+  // a late call (Hindsight's background work) crashes a green run with an
+  // unhandled ECONNREFUSED. If a container survives, llmock stays up: the
+  // container remains on the forwarder's network, which `stopNetwork` leaves
+  // alone, and Vitest force-exits after `teardownTimeout` anyway.
   console.log("Stopping test containers...");
   let failedStops = 0;
   for (const container of containers.reverse()) {
