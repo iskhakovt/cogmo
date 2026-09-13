@@ -73,7 +73,7 @@ refactor(memory): extract Hindsight client into provider interface
 chore: bump drizzle-orm to 0.46
 ```
 
-Wrong format = no release. The PR title check (`amannn/action-semantic-pull-request`) blocks merge if the title doesn't parse.
+Wrong format = no release. The PR title check runs commitlint (the `pr-title` job in `.github/workflows/ci.yml`, configured by `commitlint.config.js`) and blocks merge if the title doesn't parse.
 
 ## What CI runs
 
@@ -103,7 +103,7 @@ Releases are cut on demand, not on every merge. The version is never bumped by h
 
 `chore:`/`docs:`/`refactor:`/etc. commits land in `main` without producing a version on their own. The next release that includes a `feat:` or `fix:` picks them up.
 
-If a release needs to be skipped for some reason, append `[skip release]` to the commit footer (semantic-release honours it).
+There is no per-commit opt-out: a release includes every commit since the last tag. To leave a change out, revert it before dispatching the release.
 
 ## Code style
 
