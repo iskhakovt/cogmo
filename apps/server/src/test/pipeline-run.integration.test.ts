@@ -11,6 +11,12 @@
  * event wiring (stage.due dedup ids, `pipeline/gate.settled`, the waiter's
  * timeout), and the gate claim against Postgres rather than PGlite.
  *
+ * The file runs its own Inngest dev server. Every integration file that
+ * boots the app registers the pipeline functions under its own app id, so on
+ * the shared server one event would run this file's stages, gates and
+ * resolutions in every such app at once — something production, with one
+ * app, never does.
+ *
  * The model is a canned stub: stage turns reply with fixed text, so the
  * assertions are about the engine, not model output.
  */
@@ -18,13 +24,13 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, like } from "drizzle-orm";
 import { connect } from "inngest/connect";
+import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { startPipelineRun } from "../agent/pipeline/start-run.js";
 import { pipelineRuns } from "../agent/pipeline/store/schema.js";
 import type { PipelineDefinition, Stage } from "../agent/pipeline/types.js";
 import { profiles } from "../agent/store/schema.js";
 import { db } from "../db/index.js";
-import { bootstrap } from "../index.js";
 import {
   directOutbound,
   pipelineGateKey,
@@ -82,7 +88,8 @@ const stubProvider: LlmProvider = {
   },
 };
 
-let app: Awaited<ReturnType<typeof bootstrap>>;
+let app: Awaited<ReturnType<typeof import("../index.js")["bootstrap"]>>;
+let inngestServer: StartedTestContainer | undefined;
 let connection: Awaited<ReturnType<typeof connect>>;
 let userId: string;
 let directChannelId: string;
@@ -93,6 +100,22 @@ const settled: Array<{ gateKey: string }> = [];
 const stagesDue: Array<{ runId: string; stageId: string }> = [];
 
 beforeAll(async () => {
+  // Mirrors `dev/containers.ts → inngest(...)`, without the shared network:
+  // the app reaches it on mapped host ports.
+  inngestServer = await new GenericContainer("mirror.gcr.io/inngest/inngest:v1.41.1")
+    .withExposedPorts(8288, 8289)
+    .withCommand(["inngest", "dev", "--host", "0.0.0.0", "--port", "8288", "--no-discovery"])
+    .withWaitStrategy(Wait.forHttp("/health", 8288))
+    .withStartupTimeout(60_000)
+    .start();
+  const host = inngestServer.getHost();
+  process.env.INNGEST_BASE_URL = `http://${host}:${inngestServer.getMappedPort(8288)}`;
+  process.env.INNGEST_CONNECT_GATEWAY_URL = `ws://${host}:${inngestServer.getMappedPort(8289)}/v0/connect`;
+
+  // The Inngest client reads its environment when `src/inngest/client.ts`
+  // first loads, and none of this file's static imports reach it — so the app
+  // loads only now, against this file's server.
+  const { bootstrap } = await import("../index.js");
   app = await bootstrap({ providerOverride: stubProvider });
 
   const captures = [
@@ -135,6 +158,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (connection) await connection.close();
+  if (inngestServer) await inngestServer.stop();
 });
 
 type Gate = NonNullable<Stage["gate"]>;
