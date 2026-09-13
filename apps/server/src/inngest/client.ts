@@ -20,7 +20,11 @@ import { env } from "../env.js";
 // `INNGEST_APP_ID` override gives each parallel test fork a unique
 // app id so the connect-mode gateway doesn't round-robin events
 // across peer workers.
+//
+// Keys come from `env`: `_FILE` values never reach the SDK's `process.env` fallback.
 export const inngest = new Inngest({
   id: process.env.INNGEST_APP_ID ?? "cogmo",
   isDev: env.INNGEST_DEV,
+  ...(env.INNGEST_EVENT_KEY !== undefined && { eventKey: env.INNGEST_EVENT_KEY }),
+  ...(env.INNGEST_SIGNING_KEY !== undefined && { signingKey: env.INNGEST_SIGNING_KEY }),
 });

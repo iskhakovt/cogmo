@@ -29,9 +29,10 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createClient, createConfig, HindsightClient, sdk } from "@vectorize-io/hindsight-client";
+import { type Client, type HindsightClient, sdk } from "@vectorize-io/hindsight-client";
 import type { Transactor } from "../../db/index.js";
 import { logger } from "../../logger.js";
+import { createHindsightClients, describeHindsightError } from "../../memory/hindsight-clients.js";
 import type { AgentStore } from "../store/index.js";
 import {
   type BackfillDeps,
@@ -47,8 +48,14 @@ import {
 
 export interface MigrationCliDeps {
   hindsightUrl: string;
+  hindsightApiKey: string;
   agentStore: AgentStore;
   runInTx: Transactor;
+  /**
+   * Verifies Hindsight's key enforcement and version; rejects otherwise.
+   * Called after arguments are parsed and the bank id resolved.
+   */
+  verifyHindsight: () => Promise<void>;
   /**
    * Resolves the default bank id when `--bankId` is omitted. Returns
    * the first user's id by convention. Returns `null` when no user
@@ -76,14 +83,12 @@ function writeBackupFn<T>(backupPath: string): (rows: ReadonlyArray<T>) => Promi
   };
 }
 
-function makeHindsightShared(hindsightUrl: string): {
+function makeHindsightShared(deps: MigrationCliDeps): {
   hindsight: HindsightClient;
-  sdkClient: ReturnType<typeof createClient>;
+  sdkClient: Client;
 } {
-  return {
-    hindsight: new HindsightClient({ baseUrl: hindsightUrl }),
-    sdkClient: createClient(createConfig({ baseUrl: hindsightUrl })),
-  };
+  const { client, sdkClient } = createHindsightClients(deps.hindsightUrl, deps.hindsightApiKey);
+  return { hindsight: client, sdkClient };
 }
 
 /** `cogmo migrate-memories <bankId>` */
@@ -100,7 +105,8 @@ export async function runMigrateMemoriesCli(
     return 1;
   }
 
-  const { hindsight, sdkClient } = makeHindsightShared(deps.hindsightUrl);
+  await deps.verifyHindsight();
+  const { hindsight, sdkClient } = makeHindsightShared(deps);
   const backupPath = makeBackupPath(bankId);
   console.log(`Migrating bank "${bankId}" — Hindsight ${deps.hindsightUrl}`);
   console.log(`Backup will be written to ${backupPath}`);
@@ -111,7 +117,7 @@ export async function runMigrateMemoriesCli(
     clearBankMemories: async (id) => {
       const res = await sdk.clearBankMemories({ client: sdkClient, path: { bank_id: id } });
       if (res.error) {
-        throw new Error(`clearBankMemories failed: ${JSON.stringify(res.error)}`);
+        throw new Error(`clearBankMemories failed: ${describeHindsightError(res.error)}`);
       }
     },
     runInTx: deps.runInTx,
@@ -186,7 +192,8 @@ export async function runBackfillProfileClassCli(
     );
     return 1;
   }
-  const { hindsight, sdkClient } = makeHindsightShared(deps.hindsightUrl);
+  await deps.verifyHindsight();
+  const { hindsight, sdkClient } = makeHindsightShared(deps);
   const backupPath = makeBackupPath(bankId);
   console.log(`Backfilling bank "${bankId}" with classes [${parsed.classTags.join(", ")}]`);
   console.log(`Hindsight ${deps.hindsightUrl}`);
@@ -223,7 +230,7 @@ export async function runBackfillProfileClassCli(
     clearBankMemories: async (id) => {
       const res = await sdk.clearBankMemories({ client: sdkClient, path: { bank_id: id } });
       if (res.error) {
-        throw new Error(`clearBankMemories failed: ${JSON.stringify(res.error)}`);
+        throw new Error(`clearBankMemories failed: ${describeHindsightError(res.error)}`);
       }
     },
     retainBatch: async (id, items: ReadonlyArray<RetainItem>) => {

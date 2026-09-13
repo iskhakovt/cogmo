@@ -106,6 +106,23 @@ function tsImageFallback(relativePath: string): string {
   );
 }
 
+function inngestImage(relativePath: string): string {
+  return extract(
+    read(relativePath),
+    `inngest image in ${relativePath}`,
+    /"(mirror\.gcr\.io\/inngest\/inngest:[^"]+)"/,
+  );
+}
+
+describe("inngest image stays in sync", () => {
+  // The boot-check integration test's premises hold only for the image the harnesses run.
+  it("dev/containers.ts == checks.integration.test.ts", () => {
+    expect(inngestImage("apps/server/src/boot/checks.integration.test.ts")).toBe(
+      inngestImage("apps/server/dev/containers.ts"),
+    );
+  });
+});
+
 describe("e2e image name stays in sync", () => {
   it("bake tag == e2e-setup fallback == skills.e2e filter", () => {
     expect(bakeE2eTag).toBe("cogmo-e2e:latest");

@@ -46,7 +46,10 @@ docker run --rm -it \
   -e DATABASE_URL=postgresql://... \
   -e COGMO_MASTER_KEY=... \
   -e HINDSIGHT_URL=http://hindsight:8888 \
+  -e HINDSIGHT_API_KEY=... \
   -e INNGEST_BASE_URL=http://inngest:8288 \
+  -e INNGEST_EVENT_KEY=... \
+  -e INNGEST_SIGNING_KEY=... \
   ghcr.io/iskhakovt/cogmo:<version> setup
 ```
 
@@ -67,7 +70,10 @@ docker run -d \
   -e DATABASE_URL=... \
   -e COGMO_MASTER_KEY=... \
   -e HINDSIGHT_URL=... \
+  -e HINDSIGHT_API_KEY=... \
   -e INNGEST_BASE_URL=... \
+  -e INNGEST_EVENT_KEY=... \
+  -e INNGEST_SIGNING_KEY=... \
   -p 9090:9090 \
   ghcr.io/iskhakovt/cogmo:<version>
 ```

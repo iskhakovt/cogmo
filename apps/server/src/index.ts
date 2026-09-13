@@ -47,12 +47,20 @@ import { SUBAGENT_PROMPT_GUIDANCE } from "./agent/subagent/sub-agent-tool-builde
 import { createDefaultTools } from "./agent/tools.js";
 import { createWebTools } from "./agent/web-tools.js";
 import {
+  type BootProbeContext,
   checkDirWritable,
+  checkHindsightAuth,
   checkHindsightClientVersion,
   checkHindsightVersion,
+  checkInngestAuth,
   checkS3Bucket,
+  checkS3KeyPair,
   checkUuidv7,
+  type HindsightCompat,
+  independentProbeContext,
   loadHindsightCompat,
+  runBootChecks,
+  runHindsightChecks,
 } from "./boot/checks.js";
 import { type Database, db, type Transactor, transactor } from "./db/index.js";
 import { migratePerFile } from "./db/migrate-per-file.js";
@@ -207,6 +215,8 @@ export interface CoreDeps {
   user: { id: string };
   profile: { id: string };
   memory: HindsightMemoryProvider;
+  /** Supported Hindsight server range, read once from `package.json`. */
+  hindsightCompat: HindsightCompat;
 }
 
 /**
@@ -378,6 +388,7 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
     : createDbProviderResolver({ runInTx: tx, agentStore, secretsStore });
 
   // S3-compatible file storage (MinIO locally, AWS S3 / R2 in production).
+  checkS3KeyPair(env.S3_ACCESS_KEY, env.S3_SECRET_KEY);
   const s3Client = new S3Client({
     ...(env.S3_ENDPOINT ? { endpoint: env.S3_ENDPOINT, forcePathStyle: true } : {}),
     region: env.S3_REGION,
@@ -385,10 +396,6 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
       ? { credentials: { accessKeyId: env.S3_ACCESS_KEY, secretAccessKey: env.S3_SECRET_KEY } }
       : {}),
   });
-  // Confirm the bucket is reachable + credentials work before tools that
-  // depend on it (image generation, file workspace, attachment delivery)
-  // start handling traffic. HeadBucket is the cheapest probe.
-  await checkS3Bucket(s3Client, env.S3_BUCKET);
   // Optional client-side encryption — when enabled, attachment bodies AND
   // workspace file bodies are AES-256-GCM-encrypted before upload using
   // a key derived from `COGMO_MASTER_KEY` (already validated above).
@@ -421,17 +428,12 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
     (await tx((trx) => secretsStore.getSecret(trx, "openrouter_api_key"))) ??
     env.OPENROUTER_API_KEY;
   const memory = new HindsightMemoryProvider(env.HINDSIGHT_URL, {
+    apiKey: env.HINDSIGHT_API_KEY,
     maxQueryTokens: env.HINDSIGHT_RECALL_MAX_QUERY_TOKENS,
   });
-  // Hard-fail when the running server reports a version outside the
-  // compat range pinned in `package.json` → `cogmo.hindsightCompat`.
-  // Soft-fail (warn) when /version itself can't be reached — memory
-  // tools surface their own errors at request time. See `src/boot/checks.ts`.
-  // The client check is instant (no I/O) and catches dependency↔pin drift
-  // before the network probe, so run it first.
+  // Client↔pin drift needs no server; network probes run in `bootstrap`.
   const hindsightCompat = loadHindsightCompat();
   checkHindsightClientVersion(hindsightCompat, HINDSIGHT_CLIENT_VERSION);
-  await checkHindsightVersion(memory, hindsightCompat);
 
   return {
     db,
@@ -456,6 +458,7 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
     user,
     profile,
     memory,
+    hindsightCompat,
   };
 }
 
@@ -1264,6 +1267,42 @@ export async function bootstrapRuntime(
 }
 
 /**
+ * Probe the dependencies `cogmo serve` needs before it takes traffic. Runs in
+ * `bootstrap`, not `bootstrapCore`, so one-shot CLIs neither wait on
+ * dependencies they may never touch nor need Inngest keys.
+ */
+async function verifyDependencies(core: CoreDeps): Promise<void> {
+  await runBootChecks(independentProbeContext(), [
+    (context) =>
+      checkS3Bucket(core.s3Client, { bucket: env.S3_BUCKET, region: env.S3_REGION }, context),
+    (context) => verifyHindsight(core, context),
+    (context) =>
+      checkInngestAuth(
+        { fetch, ...context },
+        {
+          baseUrl: env.INNGEST_BASE_URL,
+          dev: env.INNGEST_DEV,
+          eventKey: env.INNGEST_EVENT_KEY,
+          signingKey: env.INNGEST_SIGNING_KEY,
+        },
+      ),
+  ]);
+}
+
+/**
+ * Verify Hindsight's key enforcement and version. Also run by the memory CLIs
+ * (`migrate-memories`, `backfill`), which clear and rewrite banks.
+ */
+export async function verifyHindsight(core: CoreDeps, context: BootProbeContext): Promise<void> {
+  await runHindsightChecks(context, {
+    auth: (checkContext) =>
+      checkHindsightAuth({ fetch, ...checkContext }, env.HINDSIGHT_URL, env.HINDSIGHT_API_KEY),
+    version: (checkContext) =>
+      checkHindsightVersion(core.memory, core.hindsightCompat, checkContext),
+  });
+}
+
+/**
  * Aggregate bootstrap — wires every stage together. Used by `cogmo serve`
  * and the integration test harness.
  *
@@ -1272,6 +1311,7 @@ export async function bootstrapRuntime(
  */
 export async function bootstrap(opts: BootstrapOptions = {}) {
   const core = await bootstrapCore(opts);
+  await verifyDependencies(core);
   const sandbox = await bootstrapSandbox(core, opts);
   const { skillRunner } = await bootstrapSkillRunner(core, sandbox);
   const runtime = await bootstrapRuntime(core, sandbox, skillRunner, opts);

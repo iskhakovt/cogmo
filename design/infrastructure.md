@@ -72,7 +72,20 @@ The `v1` tag enables future re-derivation without rotating the master key. If a 
 
 ### `_FILE` convention for Docker secrets
 
-Standard Docker pattern (Postgres, MariaDB, Redis, Keycloak). For any env var `FOO`, if `FOO_FILE` is set, read the file contents and use as the value. Applied to `COGMO_MASTER_KEY` and `DATABASE_URL` in `src/env.ts`. Extensible to any env var.
+Standard Docker pattern (Postgres, MariaDB, Redis, Keycloak). For any env var `FOO`, if `FOO_FILE` is set, read the file contents and use as the value. Applied to `COGMO_MASTER_KEY`, `DATABASE_URL`, `HINDSIGHT_API_KEY`, `INNGEST_EVENT_KEY` and `INNGEST_SIGNING_KEY` in `src/env.ts`. Extensible to any env var.
+
+### Internal service credentials `[confirmed]`
+
+Hindsight and Inngest credentials are **env vars, not `secrets` rows**: deployment configuration that must match what the server was started with, like `DATABASE_URL`.
+
+| Service | Cogmo side | Server side | Boot check |
+|-|-|-|-|
+| Hindsight | `HINDSIGHT_API_KEY` (required) | `ApiKeyTenantExtension` + `HINDSIGHT_API_TENANT_API_KEY` | `checkHindsightAuth` |
+| Inngest | `INNGEST_EVENT_KEY`, `INNGEST_SIGNING_KEY` (required unless `INNGEST_DEV`) | `inngest start --event-key --signing-key` | `checkInngestAuth` |
+
+Each check fails boot if the server answers an unauthenticated request (the key would be ignored) or rejects Cogmo's key; `src/boot/checks.integration.test.ts` pins these premises against the pinned images. Dev and test Hindsight containers enforce a fixed key (`HINDSIGHT_TEST_API_KEY`), so every integration and e2e run uses the authenticated path; Inngest runs `inngest dev` with `INNGEST_DEV=true` there.
+
+Keys don't close every route — see `DEPLOYMENT.md` → Securing internal services.
 
 ### Env lifecycle
 
@@ -92,7 +105,9 @@ Standard Docker pattern (Postgres, MariaDB, Redis, Keycloak). For any env var `F
 - DB migrations (`migrate(db, ...)`)
 - Master-key presence (`COGMO_MASTER_KEY` check)
 - User + profile load
-- Fast health probes (`checkUuidv7`, `checkS3Bucket`, `checkHindsightVersion`) — keep blocking because they fail loudly at deploy time and run in <200 ms total; the operator-visibility win beats the latency cost
+- Dependency probes — they fail loudly at deploy time and, against healthy dependencies, finish in well under a second.
+  - **Where they run.** `checkUuidv7`, `checkS3KeyPair` and the Hindsight client-version check in `bootstrapCore`; `checkS3Bucket`, `checkHindsightAuth`, `checkHindsightVersion` and `checkInngestAuth` concurrently from `verifyDependencies` in `bootstrap` (`cogmo serve`, integration harness). `migrate-memories` and `backfill` run the two Hindsight checks too; other one-shot CLIs run none.
+  - **Policy.** A deterministic verdict (rejected key, unkeyed server, version out of range, missing or wrong-region bucket, half-set S3 key pair) fails at once. Anything else is retried with backoff for up to `BOOT_PROBE_DEADLINE_MS` (60 s) per check, each attempt capped at `BOOT_PROBE_ATTEMPT_TIMEOUT_MS` (5 s), then boot fails closed with the last reason. The first failure cancels the other checks. Classification and retry mechanics: `src/boot/checks.ts`.
 - Channel adapter startup (`startChannels`) — without channels open we can't receive anything
 
 **Fire-and-forget at boot**:
@@ -103,7 +118,7 @@ Standard Docker pattern (Postgres, MariaDB, Redis, Keycloak). For any env var `F
 - Skill warm pool (`SysboxWorkerPool.create`) — pool is constructed lazily inside `SkillRunnerImpl` on the first tier-2 invocation, so the eager `min` worker spawn never blocks boot.
 - Daytona snapshot warming — Daytona's runner caches the first-pull derived snapshot itself; cold pulls measured at 15–30 s in May 2026 and rare enough to leave on the first-task path. Pre-creating explicit snapshots is an open `[proposed]` lever; see `design/sandbox.md`.
 
-**Principle.** Block on what the first request needs and what we can probe in <200 ms. Defer the rest with a `Promise<void>` that logs on both fulfilment and rejection (structured, includes the subsystem label) and clears any in-flight cache on rejection so the next caller retries instead of inheriting a poisoned state. Never silently swallow a deferred failure — operators read logs to discover state.
+**Principle.** Block on what the first request needs and what a healthy dependency answers in well under a second; a dependency that is down or undecided holds boot for about one probe deadline before boot fails. Defer the rest with a `Promise<void>` that logs on both fulfilment and rejection (structured, includes the subsystem label) and clears any in-flight cache on rejection so the next caller retries instead of inheriting a poisoned state. Never silently swallow a deferred failure — operators read logs to discover state.
 
 ## Deployment `[proposed]`
 

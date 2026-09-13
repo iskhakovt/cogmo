@@ -15,8 +15,11 @@ let sdkClient: ReturnType<typeof createClient>;
 
 beforeAll(async () => {
   hindsightUrl = inject("hindsightUrl");
-  hindsight = new HindsightClient({ baseUrl: hindsightUrl });
-  sdkClient = createClient(createConfig({ baseUrl: hindsightUrl }));
+  const apiKey = inject("hindsightApiKey");
+  hindsight = new HindsightClient({ baseUrl: hindsightUrl, apiKey });
+  sdkClient = createClient(
+    createConfig({ baseUrl: hindsightUrl, headers: { Authorization: `Bearer ${apiKey}` } }),
+  );
   await hindsight.createBank(BANK_ID);
 });
 

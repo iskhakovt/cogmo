@@ -101,20 +101,24 @@ async function dispatch(cmd: string): Promise<number> {
       const { runMigrateMemoriesCli, runBackfillProfileClassCli } = await import(
         "./agent/evolution/migrations-cli.js"
       );
-      const { bootstrapCore } = await import("./index.js");
+      const { bootstrapCore, verifyHindsight } = await import("./index.js");
+      const { independentProbeContext } = await import("./boot/checks.js");
       const { env } = await import("./env.js");
       // CLI mode: data layer only. No sandbox client, no instance row, no
       // reaper — running this concurrently with `cogmo serve` is harmless.
-      const { agentStore, runInTx } = await bootstrapCore();
+      const core = await bootstrapCore();
+      const { agentStore, runInTx } = core;
       const resolveDefaultBankId = async (): Promise<string | null> => {
         const user = await runInTx((tx) => agentStore.getFirstUser(tx));
         return user ? user.id : null;
       };
       const cliDeps = {
         hindsightUrl: env.HINDSIGHT_URL,
+        hindsightApiKey: env.HINDSIGHT_API_KEY,
         agentStore,
         runInTx,
         resolveDefaultBankId,
+        verifyHindsight: () => verifyHindsight(core, independentProbeContext()),
       };
       const args = process.argv.slice(3);
       return cmd === "migrate-memories"

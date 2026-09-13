@@ -30,10 +30,33 @@ export function defaultSkillsImage(): string {
 // Apply _FILE convention for Docker secrets before Zod validation.
 // Only specific vars support this — not a global wrapper.
 const resolved: Record<string, string | undefined> = { ...process.env };
-for (const name of ["COGMO_MASTER_KEY", "DATABASE_URL"]) {
+for (const name of [
+  "COGMO_MASTER_KEY",
+  "DATABASE_URL",
+  "HINDSIGHT_API_KEY",
+  "INNGEST_EVENT_KEY",
+  "INNGEST_SIGNING_KEY",
+]) {
   const val = resolveEnvFile(process.env, name);
   if (val !== undefined) resolved[name] = val;
 }
+
+/**
+ * A service base URL without `user:password@` — credentials go in the
+ * service's key variable. The issue message never echoes the value.
+ */
+export const ServiceUrlSchema = z
+  .string()
+  .url()
+  .refine(
+    (value) => {
+      // Zod refines even after `.url()` fails; `new URL` would throw here.
+      if (!URL.canParse(value)) return true;
+      const url = new URL(value);
+      return url.username === "" && url.password === "";
+    },
+    { message: "must not embed credentials (user:password@) — use the service's key variable" },
+  );
 
 /**
  * Full runtime env, validated at module load. Server entrypoints (`cogmo
@@ -48,7 +71,12 @@ export const env = createEnv({
     NODE_ENV: z.enum(["development", "production", "test"]),
     LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
     DATABASE_URL: z.string().default("postgresql://cogmo@localhost/cogmo"),
-    HINDSIGHT_URL: z.string().url(),
+    HINDSIGHT_URL: ServiceUrlSchema,
+    /**
+     * Bearer token for the Hindsight API; must equal the server's
+     * `HINDSIGHT_API_TENANT_API_KEY` (verified at boot by `checkHindsightAuth`).
+     */
+    HINDSIGHT_API_KEY: z.string().min(1),
     /**
      * Truncation budget for recall queries, in tokens. Must match the Hindsight
      * server's `HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS` (server default: 500).
@@ -106,9 +134,14 @@ export const env = createEnv({
       .string()
       .optional()
       .transform((v) => v === "true" || v === "1"),
+    /**
+     * Keys the self-hosted server was started with. Optional only for
+     * `INNGEST_DEV`; `cogmo serve` refuses to start without both
+     * (`checkInngestAuth`).
+     */
     INNGEST_EVENT_KEY: z.string().optional(),
     INNGEST_SIGNING_KEY: z.string().optional(),
-    INNGEST_BASE_URL: z.string().url(),
+    INNGEST_BASE_URL: ServiceUrlSchema,
     TAVILY_API_KEY: z.string().optional(),
     OPENROUTER_API_KEY: z.string().optional(),
     FAL_API_KEY: z.string().optional(),

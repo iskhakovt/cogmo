@@ -28,8 +28,11 @@ let store: DrizzleAgentStore;
 beforeAll(async () => {
   const hindsightUrl = inject("hindsightUrl");
   const databaseUrl = inject("databaseUrl");
-  hindsight = new HindsightClient({ baseUrl: hindsightUrl });
-  sdkClient = createClient(createConfig({ baseUrl: hindsightUrl }));
+  const apiKey = inject("hindsightApiKey");
+  hindsight = new HindsightClient({ baseUrl: hindsightUrl, apiKey });
+  sdkClient = createClient(
+    createConfig({ baseUrl: hindsightUrl, headers: { Authorization: `Bearer ${apiKey}` } }),
+  );
   pgClient = postgres(databaseUrl);
   db = drizzle(pgClient);
   store = new DrizzleAgentStore();

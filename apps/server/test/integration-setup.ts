@@ -82,6 +82,7 @@ export async function setup({ provide }: GlobalSetupContext) {
   // credentials are stored, but bootstrap requires the key unconditionally.
   process.env.COGMO_MASTER_KEY = "bSK9MVRqsqWnRcp4oNTQLQ+LmKJT+BvUvzytD5LH4AE="; // 32 bytes base64 (test-only)
   process.env.HINDSIGHT_URL = hindsightUrl;
+  process.env.HINDSIGHT_API_KEY = c.HINDSIGHT_TEST_API_KEY;
   process.env.INNGEST_BASE_URL = urls.inngestBaseUrl;
   process.env.INNGEST_DEV = "true";
   process.env.DEBOUNCE_IDLE_SECONDS = "0";
@@ -180,6 +181,7 @@ export async function setup({ provide }: GlobalSetupContext) {
   provide("inngestBaseUrl", urls.inngestBaseUrl);
   provide("inngestEventKey", "test");
   provide("hindsightUrl", hindsightUrl);
+  provide("hindsightApiKey", c.HINDSIGHT_TEST_API_KEY);
   provide("defaultUserId", defaultUserId);
   provide("llmockBaseUrl", mock.url);
   provide("mcpEchoUrl", mcpEchoServer.url);

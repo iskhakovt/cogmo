@@ -147,13 +147,11 @@ const HttpRequestArgsSchema = z.object({
 /**
  * Addresses a skill must not reach. `fetch` runs in the Cogmo server
  * process, so `ctx.http` carries the host's network position — which
- * includes every internal service the deployment can see. Hindsight sits
- * on `HINDSIGHT_URL` (`http://hindsight:8888` in the shipped compose) and
- * takes no auth, so an unchecked request reads or writes any memory bank,
- * around both the `memoryBankId` scoping and the `reads_memory` /
- * `writes_memory` gates this handler enforces for `ctx.memory`. Inngest,
- * the web UI and cloud metadata at 169.254.169.254 are the same shape of
- * target.
+ * includes every internal service the deployment can see. Hindsight and
+ * Inngest require keys a skill never holds, but still answer some routes
+ * without one (see DEPLOYMENT.md → Securing internal services); the web UI,
+ * cloud metadata at 169.254.169.254 and any unkeyed service are the same
+ * shape of target.
  *
  * This is the one place tier 1 is not at parity with tier 2: a tier-2
  * skill has real sockets but runs in a remote Daytona sandbox with no
