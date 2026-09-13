@@ -107,9 +107,11 @@ async function main() {
   const entries = mock.getRequests();
   console.log(`Captured ${entries.length} requests. Fixtures saved to ${FIXTURE_DIR}/`);
 
-  await mock.stop();
+  // Hindsight before llmock: it reaches llmock through the testcontainers SSH
+  // forwarder, which crashes this process on a call to a stopped host port.
   await hindsightContainer.stop();
   await network.stop();
+  await mock.stop();
   console.log("Done.");
 }
 

@@ -199,10 +199,12 @@ export async function setup({ provide, config }: GlobalSetupContext) {
 }
 
 export async function teardown() {
-  if (mock) await mock.stop();
-  if (telegramMock) await telegramMock.stop();
-  if (mcpEchoServer) await mcpEchoServer.close();
-
+  // Containers go first, host-side servers last. A container reaches llmock
+  // through the testcontainers SSH forwarder, which dials the host port from
+  // this process for every forwarded connection without an error listener: one
+  // call after llmock has stopped — Hindsight still extracting in the
+  // background, say — throws an unhandled ECONNREFUSED that kills the run after
+  // every test has passed.
   console.log("Stopping test containers...");
   let failedStops = 0;
   for (const container of containers.reverse()) {
@@ -215,6 +217,9 @@ export async function teardown() {
     });
   }
   if (network) await c.stopNetwork(network);
+  if (mock) await mock.stop();
+  if (telegramMock) await telegramMock.stop();
+  if (mcpEchoServer) await mcpEchoServer.close();
   if (skillsPath) {
     await rm(skillsPath, { recursive: true, force: true });
   }

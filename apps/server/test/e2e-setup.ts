@@ -285,8 +285,10 @@ export async function setup({ provide }: GlobalSetupContext) {
 }
 
 export async function teardown() {
-  if (mock) await mock.stop();
-
+  // Containers before llmock: they reach it through the testcontainers SSH
+  // forwarder, which dials the host port from this process without an error
+  // listener, so a call after llmock stopped would crash teardown with an
+  // unhandled ECONNREFUSED. See `integration-setup.ts`.
   console.log("Stopping containers...");
   let failedStops = 0;
   for (const container of containers.reverse()) {
@@ -299,6 +301,7 @@ export async function teardown() {
     });
   }
   if (network) await c.stopNetwork(network);
+  if (mock) await mock.stop();
   // Counted, because the line below is the only summary of this pass and
   // an unconditional success message would report a clean teardown over
   // the top of containers that are still running. Those keep whatever
