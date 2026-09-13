@@ -6,7 +6,7 @@ import {
   pipelineGatePending,
   pipelineGateSettled,
 } from "../../inngest/events.js";
-import { spyOnInngestSend } from "../../test/factories.js";
+import { invokeInngestFn, spyOnInngestSend } from "../../test/factories.js";
 import { createPipelineGateWaiter, reminderCount, timeoutDecision } from "./gate-waiter.js";
 
 let sendSpy: ReturnType<typeof spyOnInngestSend>;
@@ -31,6 +31,25 @@ function pendingEvent(onTimeout: PipelineGatePendingData["onTimeout"]) {
       timeoutMs: 3_600_000,
       onTimeout,
     },
+  };
+}
+
+/**
+ * A hand-built `step` for driving the handler directly. `run` throws for
+ * `failingStep` — a step that failed permanently, which is what the handler's
+ * catch has to absorb — returns memoized results by id, and runs every other
+ * body inline.
+ */
+function directStep(memo: Record<string, unknown>, failingStep: string) {
+  return {
+    run: vi.fn(async (id: string, body: () => Promise<unknown>) => {
+      if (id === failingStep) throw new Error(`step "${id}" failed after retries`);
+      if (id in memo) return memo[id];
+      return body();
+    }),
+    sendEvent: vi.fn().mockResolvedValue({ ids: [] }),
+    sleep: vi.fn().mockResolvedValue(undefined),
+    waitForEvent: vi.fn().mockResolvedValue(null),
   };
 }
 
@@ -103,19 +122,23 @@ describe("pipeline gate waiter", () => {
     expect(ctx.step.sleep).toHaveBeenCalledWith("wait-1", "3600000ms");
   });
 
-  it("still times out when a reminder can't be delivered", async () => {
-    const notifyConversation = vi.fn().mockRejectedValue(new Error("session lookup failed"));
-    const fn = createPipelineGateWaiter({ deliveryRouter: { notifyConversation } });
-    const t = new InngestTestEngine({
-      function: fn,
-      events: [pendingEvent({ kind: "remind", maxReminders: 1, finalAction: "proceed" })],
+  it("still times out when a reminder step fails permanently", async () => {
+    // The catch wraps the step, so a reminder keeps its retries and only one
+    // that failed for good is dropped — the waiter still reaches its timeout.
+    const fn = createPipelineGateWaiter({ deliveryRouter: { notifyConversation: vi.fn() } });
+    const step = directStep({}, "remind-1");
+
+    const result = await invokeInngestFn(fn, {
+      event: pendingEvent({ kind: "remind", maxReminders: 1, finalAction: "proceed" }),
+      step,
     });
 
-    const { result } = await t.execute({
-      steps: ["wait-1", "wait-2"].map((id) => ({ id, handler: () => null })),
-    });
-
-    expect(notifyConversation).toHaveBeenCalledTimes(1);
+    expect(step.run).toHaveBeenCalledWith("remind-1", expect.any(Function));
+    expect(step.sleep).toHaveBeenCalledTimes(2);
+    expect(step.sendEvent).toHaveBeenCalledWith(
+      "emit-timeout-resolution",
+      expect.objectContaining({ data: expect.objectContaining({ decision: "timeout_proceed" }) }),
+    );
     expect(result).toEqual({ gateKey: "run-1:plan-gate:0", decision: "timeout_proceed" });
   });
 

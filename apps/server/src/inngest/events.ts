@@ -715,8 +715,9 @@ export const pipelineGatePending = eventType("pipeline/gate.pending", {
     runId: z.string(),
     gateKey: z.string(),
     conversationId: z.string(),
-    // Slugs of at most 64 characters, as the definition schema allows — which
-    // also keeps the posted checkpoint message inside Telegram's length limit.
+    // The definition schema's slug bound (`MAX_SLUG_LENGTH`), which also keeps
+    // the posted checkpoint message inside Telegram's length limit. The event
+    // schema doesn't import domain code; events.test.ts pins the two together.
     pipelineName: z.string().max(64),
     stageId: z.string().max(64),
     /** The gate's prose instructions — rendered above the keyboard. */
@@ -727,8 +728,8 @@ export const pipelineGatePending = eventType("pipeline/gate.pending", {
       z.object({ kind: z.literal("abort") }),
       z.object({
         kind: z.literal("remind"),
-        // Same bound the definition schema enforces — the waiter sleeps and
-        // notifies once per reminder, so the event must not ask for more.
+        // The definition schema's `MAX_GATE_REMINDERS` — the waiter sleeps and
+        // notifies once per reminder. events.test.ts pins the two together.
         maxReminders: z.number().int().min(1).max(10),
         finalAction: z.enum(["proceed", "abort"]),
       }),

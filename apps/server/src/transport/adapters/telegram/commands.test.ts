@@ -4742,6 +4742,23 @@ describe("handlePipelineGateCallback", () => {
     expect(outcome.clearKeyboard).toBe(true);
   });
 
+  it.each([
+    [{ code: "pipeline_run_not_found", runId: "019d0000-0000-7000-8000-0000000000aa" } as const],
+    [{ code: "pipelines_disabled" } as const],
+  ])("clears buttons that can never work (%o)", async (error) => {
+    const transport = mockTransportDeep({
+      pipelines: { resolveGate: vi.fn().mockResolvedValue(err(error)) },
+    });
+
+    const outcome = await handlePipelineGateCallback(
+      transport,
+      { runId: "019d0000-0000-7000-8000-0000000000aa", action: "approve", token: "0a1b2c3d" },
+      "tg-1",
+    );
+
+    expect(outcome.clearKeyboard).toBe(true);
+  });
+
   it("an unauthorized tapper gets the identity rejection", async () => {
     const transport = mockTransportDeep({
       pipelines: { resolveGate: vi.fn().mockResolvedValue(err({ code: "identity_rejected" })) },

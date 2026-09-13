@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MAX_GATE_REMINDERS, MAX_SLUG_LENGTH } from "../agent/pipeline/types.js";
 import {
   buildConversationCooldownClearedEvent,
   calculateElapsedCooldown,
   deriveCauseClass,
   inboundArrived,
+  pipelineGatePending,
   responseReady,
 } from "./events.js";
 
@@ -82,5 +84,35 @@ describe("buildConversationCooldownClearedEvent", () => {
     );
     expect(event.name).toBe("conversation/cooldown/cleared");
     expect(event.id).toBe("cooldown-cleared-conv-1-2026-05-19T12:00:00.000Z");
+  });
+});
+
+describe("pipeline/gate.pending bounds", () => {
+  const base = {
+    runId: "run-1",
+    gateKey: "run-1:approve:0",
+    conversationId: "conv-1",
+    pipelineName: "p",
+    stageId: "s",
+    prompt: "Approve?",
+    timeoutMs: 60_000,
+    onTimeout: { kind: "abort" as const },
+  };
+  const accepts = (data: object) => pipelineGatePending.schema.safeParse(data).success;
+
+  it("allows exactly the name and stage-id length a definition allows", () => {
+    expect(accepts({ ...base, pipelineName: "p".repeat(MAX_SLUG_LENGTH) })).toBe(true);
+    expect(accepts({ ...base, pipelineName: "p".repeat(MAX_SLUG_LENGTH + 1) })).toBe(false);
+    expect(accepts({ ...base, stageId: "s".repeat(MAX_SLUG_LENGTH) })).toBe(true);
+    expect(accepts({ ...base, stageId: "s".repeat(MAX_SLUG_LENGTH + 1) })).toBe(false);
+  });
+
+  it("allows exactly the reminder count a definition allows", () => {
+    const remind = (maxReminders: number) => ({
+      ...base,
+      onTimeout: { kind: "remind" as const, maxReminders, finalAction: "abort" as const },
+    });
+    expect(accepts(remind(MAX_GATE_REMINDERS))).toBe(true);
+    expect(accepts(remind(MAX_GATE_REMINDERS + 1))).toBe(false);
   });
 });

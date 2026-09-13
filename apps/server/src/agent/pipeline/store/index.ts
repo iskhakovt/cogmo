@@ -275,16 +275,25 @@ export interface PipelineRunWithDefinition {
 }
 
 /** Conditional-transition result shared by the run store's status mutations. */
+/**
+ * Where a run was when a conditional mutation found it elsewhere, read under
+ * the row lock that decided `stale`. A step re-run after its own commit uses
+ * it to tell "already where I would have put it" from "moved elsewhere"
+ * without a second read.
+ */
+interface RunCursor {
+  status: PipelineRunStatus;
+  currentStage: string;
+  iteration: number;
+}
+
 type RunTransition =
   | { kind: "transitioned" }
-  | { kind: "stale"; status: PipelineRunStatus }
+  | ({ kind: "stale" } & RunCursor)
   | { kind: "not_found" };
 
 /** Result of recording a stage output and moving the run forward. */
-type RunAdvance =
-  | { kind: "advanced" }
-  | { kind: "stale"; currentStage: string }
-  | { kind: "not_found" };
+type RunAdvance = { kind: "advanced" } | ({ kind: "stale" } & RunCursor) | { kind: "not_found" };
 
 /**
  * Run-state access for the pipeline run engine. Separate interface from
@@ -474,7 +483,11 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
     // final" hold store-wide: a flip out of completed/failed/cancelled is
     // refused even if a caller passes a terminal `from`.
     const rows = await tx
-      .select({ status: pipelineRuns.status })
+      .select({
+        status: pipelineRuns.status,
+        currentStage: pipelineRuns.currentStage,
+        iteration: pipelineRuns.iteration,
+      })
       .from(pipelineRuns)
       .where(eq(pipelineRuns.id, id))
       .limit(1)
@@ -482,7 +495,12 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
     const row = rows[0];
     if (!row) return { kind: "not_found" as const };
     if (isTerminalPipelineRunStatus(row.status) || row.status !== from) {
-      return { kind: "stale" as const, status: row.status };
+      return {
+        kind: "stale" as const,
+        status: row.status,
+        currentStage: row.currentStage,
+        iteration: row.iteration,
+      };
     }
     await tx.update(pipelineRuns).set({ status: to }).where(eq(pipelineRuns.id, id));
     return { kind: "transitioned" as const };
@@ -535,6 +553,7 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
       .select({
         status: pipelineRuns.status,
         currentStage: pipelineRuns.currentStage,
+        iteration: pipelineRuns.iteration,
         stageOutputs: pipelineRuns.stageOutputs,
       })
       .from(pipelineRuns)
@@ -548,7 +567,12 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
     // (stageA, iter 0) could re-fire against a run that legitimately looped
     // back to (stageA, iter 1). Sufficient now: iteration is invariantly 0.
     if (isTerminalPipelineRunStatus(row.status) || row.currentStage !== fromStage) {
-      return { kind: "stale" as const, currentStage: row.currentStage };
+      return {
+        kind: "stale" as const,
+        status: row.status,
+        currentStage: row.currentStage,
+        iteration: row.iteration,
+      };
     }
     const stageOutputs =
       output === null ? row.stageOutputs : { ...row.stageOutputs, [fromStage]: output };

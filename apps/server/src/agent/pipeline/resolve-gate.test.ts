@@ -148,6 +148,7 @@ describe("resolveGate", () => {
       currentStage: "build",
       iteration: 0,
       gateStage: "approve",
+      gateIteration: 0,
       nextStage: "build",
       pastGate: true,
     });

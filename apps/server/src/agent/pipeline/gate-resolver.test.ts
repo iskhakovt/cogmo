@@ -3,7 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { inngest } from "../../inngest/client.js";
 import { type PipelineGateDecision, pipelineGateResolved } from "../../inngest/events.js";
-import { fakeRunInTx, invokeInngestOnFailure, spyOnInngestSend } from "../../test/factories.js";
+import {
+  fakeRunInTx,
+  invokeInngestFn,
+  invokeInngestOnFailure,
+  spyOnInngestSend,
+} from "../../test/factories.js";
 import { createPipelineGateResolver, gateNotice } from "./gate-resolver.js";
 import type { ResolveGateOutcome } from "./resolve-gate.js";
 import type { PipelineRunStore } from "./store/index.js";
@@ -18,6 +23,7 @@ afterEach(() => {
 });
 
 const base = { conversationId: "conv-1", pipelineName: "issue-to-pr" };
+const TOO_LATE = "arrived after the checkpoint had already been resolved";
 const advanced: ResolveGateOutcome = {
   kind: "advanced",
   ...base,
@@ -25,40 +31,25 @@ const advanced: ResolveGateOutcome = {
   iteration: 0,
 };
 
-/** A resolution that found the run already moved on past the approve gate. */
-const staleAdvanced: ResolveGateOutcome = {
+type Stale = Extract<ResolveGateOutcome, { kind: "stale" }>;
+const staleAt = (overrides: Partial<Stale>): Stale => ({
   kind: "stale",
   ...base,
   status: "running",
   currentStage: "build",
   iteration: 0,
   gateStage: "approve",
+  gateIteration: 0,
   nextStage: "build",
   pastGate: true,
-};
-/** A resolution that found the run already cancelled at the approve gate. */
-const staleCancelled: ResolveGateOutcome = {
-  kind: "stale",
-  ...base,
-  status: "cancelled",
-  currentStage: "approve",
-  iteration: 0,
-  gateStage: "approve",
-  nextStage: "build",
-  pastGate: false,
-};
-
-/** A resolution that found the run already completed at its final gate. */
-const staleCompleted: ResolveGateOutcome = {
-  kind: "stale",
-  ...base,
-  status: "completed",
-  currentStage: "approve",
-  iteration: 0,
-  gateStage: "approve",
-  nextStage: null,
-  pastGate: true,
-};
+  ...overrides,
+});
+/** The run sits on the stage right after the approve gate. */
+const staleAdvanced = staleAt({});
+/** The run was cancelled at the approve gate. */
+const staleCancelled = staleAt({ status: "cancelled", currentStage: "approve", pastGate: false });
+/** The run completed at its final gate. */
+const staleCompleted = staleAt({ status: "completed", currentStage: "approve", nextStage: null });
 
 function eventData(decision: PipelineGateDecision) {
   return { runId: "run-1", gateKey: "run-1:approve:0", conversationId: "conv-1", decision };
@@ -79,6 +70,11 @@ function harness(decision: PipelineGateDecision) {
   return { t, fn, runStore, notifyConversation };
 }
 
+/** The memoized `resolve-gate` step result. */
+function resolved(outcome: ResolveGateOutcome, retried = false) {
+  return { id: "resolve-gate", handler: () => ({ outcome, retried }) };
+}
+
 type FailureCtx = {
   event: { data: { event: { data: ReturnType<typeof eventData> } } };
   error: Error;
@@ -93,27 +89,80 @@ function failureCtx(decision: PipelineGateDecision): FailureCtx {
   };
 }
 
+/**
+ * A hand-built `step` for driving the handler directly. `run` throws for
+ * `failingStep` — a step that failed permanently, which is what the handler's
+ * catch has to absorb — returns memoized results by id, and runs every other
+ * body inline.
+ */
+function directStep(memo: Record<string, unknown>, failingStep: string) {
+  return {
+    run: vi.fn(async (id: string, body: () => Promise<unknown>) => {
+      if (id === failingStep) throw new Error(`step "${id}" failed after retries`);
+      if (id in memo) return memo[id];
+      return body();
+    }),
+    sendEvent: vi.fn().mockResolvedValue({ ids: [] }),
+    sleep: vi.fn().mockResolvedValue(undefined),
+    waitForEvent: vi.fn().mockResolvedValue(null),
+  };
+}
+
 describe("gateNotice", () => {
   it.each([
-    ["approved", advanced, null],
-    ["timeout_proceed", advanced, 'pipeline "issue-to-pr" is proceeding to "build"'],
-    ["approved", { kind: "completed", ...base }, '✅ Pipeline "issue-to-pr" completed.'],
-    ["timeout_proceed", { kind: "completed", ...base }, "timed out — pipeline"],
-    ["cancelled", { kind: "cancelled", ...base }, '❌ Pipeline "issue-to-pr" cancelled.'],
-    ["timeout_abort", { kind: "cancelled", ...base }, "was cancelled"],
-    ["approved", staleCancelled, "arrived after the checkpoint had already been resolved"],
+    ["approved", advanced, false, null],
+    ["timeout_proceed", advanced, false, 'pipeline "issue-to-pr" is proceeding to "build"'],
+    ["approved", { kind: "completed", ...base }, false, '✅ Pipeline "issue-to-pr" completed.'],
+    ["timeout_proceed", { kind: "completed", ...base }, false, "timed out — pipeline"],
+    ["cancelled", { kind: "cancelled", ...base }, false, '❌ Pipeline "issue-to-pr" cancelled.'],
+    ["timeout_abort", { kind: "cancelled", ...base }, false, "was cancelled"],
+    ["timeout_abort", { kind: "not_found" }, false, null],
+  ] as const)("%s + %o (retried %s) → %s", (decision, outcome, retried, expected) => {
+    const notice = gateNotice(decision, outcome, retried);
+    if (expected === null) expect(notice).toBeNull();
+    else expect(notice).toContain(expected);
+  });
+
+  it.each([
+    // A tap whose decision didn't take is told so.
+    ["approved", staleCancelled, TOO_LATE],
     ["cancelled", staleAdvanced, "was not applied"],
+    // On a first attempt, a decision that already stands was applied by another
+    // resolution — a tap racing the timeout — which sent its own notice.
     ["approved", staleAdvanced, null],
-    // A stale resolution whose decision already stands sends the notice its
-    // effect calls for: a retry after a lost commit would otherwise send none.
+    ["timeout_proceed", staleAdvanced, null],
+    ["timeout_abort", staleCancelled, null],
+    ["cancelled", staleCancelled, null],
+    ["timeout_abort", staleAdvanced, null],
+  ] as const)("first attempt: %s + %o → %s", (decision, outcome, expected) => {
+    const notice = gateNotice(decision, outcome, false);
+    if (expected === null) expect(notice).toBeNull();
+    else expect(notice).toContain(expected);
+  });
+
+  it.each([
+    // A retry that finds its own effect exactly in place sends the notice the
+    // first attempt died before sending.
     ["cancelled", staleCancelled, '❌ Pipeline "issue-to-pr" cancelled.'],
     ["timeout_abort", staleCancelled, "was cancelled"],
     ["approved", staleCompleted, '✅ Pipeline "issue-to-pr" completed.'],
     ["timeout_proceed", staleAdvanced, 'is proceeding to "build"'],
-    ["timeout_abort", staleAdvanced, null],
-    ["timeout_abort", { kind: "not_found" }, null],
-  ] as const)("%s + %o → %s", (decision, outcome, expected) => {
-    const notice = gateNotice(decision, outcome);
+    // Once the run has moved on from that position, a notice would describe
+    // something this resolution didn't do.
+    ["timeout_proceed", staleAt({ status: "failed" }), null],
+    ["timeout_proceed", staleAt({ currentStage: "sign-off" }), null],
+    [
+      "approved",
+      staleAt({ status: "completed", currentStage: "sign-off", nextStage: "build" }),
+      null,
+    ],
+    [
+      "timeout_abort",
+      staleAt({ status: "cancelled", currentStage: "approve", iteration: 1, pastGate: false }),
+      null,
+    ],
+  ] as const)("retry: %s + %o → %s", (decision, outcome, expected) => {
+    const notice = gateNotice(decision, outcome, true);
     if (expected === null) expect(notice).toBeNull();
     else expect(notice).toContain(expected);
   });
@@ -130,9 +179,7 @@ describe("createPipelineGateResolver", () => {
   it("settles the gate, then emits the next stage, and stays quiet on a tapped approval", async () => {
     const { t, notifyConversation } = harness("approved");
 
-    const { result, ctx } = await t.execute({
-      steps: [{ id: "resolve-gate", handler: () => advanced }],
-    });
+    const { result, ctx } = await t.execute({ steps: [resolved(advanced)] });
 
     expect(result).toEqual(advanced);
     expect(ctx.step.sendEvent).toHaveBeenNthCalledWith(
@@ -158,9 +205,7 @@ describe("createPipelineGateResolver", () => {
   it("notifies the conversation when a timeout cancels the run, without emitting a stage", async () => {
     const { t, notifyConversation } = harness("timeout_abort");
 
-    const { ctx } = await t.execute({
-      steps: [{ id: "resolve-gate", handler: () => ({ kind: "cancelled", ...base }) }],
-    });
+    const { ctx } = await t.execute({ steps: [resolved({ kind: "cancelled", ...base })] });
 
     expect(ctx.step.sendEvent).toHaveBeenCalledTimes(1);
     expect(ctx.step.sendEvent).toHaveBeenCalledWith("emit-gate-settled", expect.anything());
@@ -173,26 +218,26 @@ describe("createPipelineGateResolver", () => {
   it("tells a tap that lost the race it was not applied", async () => {
     const { t, notifyConversation } = harness("approved");
 
-    const { result } = await t.execute({
-      steps: [{ id: "resolve-gate", handler: () => staleCancelled }],
-    });
+    const { result } = await t.execute({ steps: [resolved(staleCancelled)] });
 
     expect(result).toEqual(staleCancelled);
-    expect(notifyConversation).toHaveBeenCalledWith(
-      "conv-1",
-      expect.stringContaining("was not applied"),
-    );
+    expect(notifyConversation).toHaveBeenCalledWith("conv-1", expect.stringContaining(TOO_LATE));
   });
 
-  it("re-sends the next stage, silently, when this resolution had already been applied", async () => {
-    // A retry after `resolve-gate` committed but lost its result, or a
-    // same-effect resolution that raced it: either way the run sits on the
-    // stage after the gate and the emit is deduped on the cursor.
+  it("stays silent when a timeout lost to a tap with the same effect", async () => {
+    // The tap advanced the run (silently, as taps do); the queued timeout must
+    // not then announce that the checkpoint timed out.
+    const { t, notifyConversation } = harness("timeout_proceed");
+
+    await t.execute({ steps: [resolved(staleAdvanced)] });
+
+    expect(notifyConversation).not.toHaveBeenCalled();
+  });
+
+  it("re-sends the next stage when this resolution's effect already stands", async () => {
     const { t, notifyConversation } = harness("approved");
 
-    const { ctx } = await t.execute({
-      steps: [{ id: "resolve-gate", handler: () => staleAdvanced }],
-    });
+    const { ctx } = await t.execute({ steps: [resolved(staleAdvanced, true)] });
 
     expect(ctx.step.sendEvent).toHaveBeenCalledWith(
       "emit-next-stage",
@@ -201,10 +246,21 @@ describe("createPipelineGateResolver", () => {
     expect(notifyConversation).not.toHaveBeenCalled();
   });
 
-  it("sends the lost notice when a timeout's cancellation had already been applied", async () => {
+  it("doesn't re-send a next stage that has already parked", async () => {
+    const { t } = harness("approved");
+
+    const { ctx } = await t.execute({
+      steps: [resolved(staleAt({ status: "waiting_gate" }), true)],
+    });
+
+    expect(ctx.step.sendEvent).toHaveBeenCalledTimes(1);
+    expect(ctx.step.sendEvent).toHaveBeenCalledWith("emit-gate-settled", expect.anything());
+  });
+
+  it("sends the lost notice when its own cancellation had already been applied", async () => {
     const { t, notifyConversation } = harness("timeout_abort");
 
-    await t.execute({ steps: [{ id: "resolve-gate", handler: () => staleCancelled }] });
+    await t.execute({ steps: [resolved(staleCancelled, true)] });
 
     expect(notifyConversation).toHaveBeenCalledWith(
       "conv-1",
@@ -216,24 +272,34 @@ describe("createPipelineGateResolver", () => {
     const { t } = harness("timeout_proceed");
 
     const { ctx } = await t.execute({
-      steps: [
-        {
-          id: "resolve-gate",
-          handler: () => ({ ...staleAdvanced, currentStage: "sign-off" }),
-        },
-      ],
+      steps: [resolved(staleAt({ currentStage: "sign-off" }), true)],
     });
 
     expect(ctx.step.sendEvent).toHaveBeenCalledTimes(1);
     expect(ctx.step.sendEvent).toHaveBeenCalledWith("emit-gate-settled", expect.anything());
   });
 
+  it("finishes the run even when the notice step fails permanently", async () => {
+    // Without the catch around the notice step, this failure would reach
+    // onFailure, which fails a run the resolution already advanced.
+    const { fn } = harness("timeout_abort");
+    const cancelled: ResolveGateOutcome = { kind: "cancelled", ...base };
+    const step = directStep({ "resolve-gate": { outcome: cancelled, retried: false } }, "notify");
+
+    const result = await invokeInngestFn(fn, {
+      event: { name: "pipeline/gate.resolved", data: eventData("timeout_abort") },
+      step,
+      attempt: 0,
+    });
+
+    expect(step.run).toHaveBeenCalledWith("notify", expect.any(Function));
+    expect(result).toEqual(cancelled);
+  });
+
   it("neither settles nor notifies for a run that does not exist", async () => {
     const { t, notifyConversation } = harness("timeout_abort");
 
-    const { ctx } = await t.execute({
-      steps: [{ id: "resolve-gate", handler: () => ({ kind: "not_found" }) }],
-    });
+    const { ctx } = await t.execute({ steps: [resolved({ kind: "not_found" })] });
 
     expect(ctx.step.sendEvent).not.toHaveBeenCalled();
     expect(notifyConversation).not.toHaveBeenCalled();

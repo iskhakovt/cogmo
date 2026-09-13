@@ -112,7 +112,12 @@ describe("DrizzlePipelineRunStore", () => {
       const result = await tx((trx) =>
         runStore.transitionStatus(trx, run.id, "waiting_gate", "running"),
       );
-      expect(result).toEqual({ kind: "stale", status: "running" });
+      expect(result).toEqual({
+        kind: "stale",
+        status: "running",
+        currentStage: "gather-context",
+        iteration: 0,
+      });
     });
 
     it("reports not_found for an unknown run", async () => {
@@ -129,7 +134,7 @@ describe("DrizzlePipelineRunStore", () => {
       const result = await tx((trx) =>
         runStore.transitionStatus(trx, run.id, "cancelled", "running"),
       );
-      expect(result).toEqual({ kind: "stale", status: "cancelled" });
+      expect(result).toMatchObject({ kind: "stale", status: "cancelled", iteration: 0 });
       expect((await tx((trx) => runStore.getRun(trx, run.id)))?.status).toBe("cancelled");
     });
   });
@@ -211,7 +216,12 @@ describe("DrizzlePipelineRunStore", () => {
           toStage: "plan-gate",
         }),
       );
-      expect(replay).toEqual({ kind: "stale", currentStage: "plan-gate" });
+      expect(replay).toEqual({
+        kind: "stale",
+        status: "running",
+        currentStage: "plan-gate",
+        iteration: 0,
+      });
     });
 
     it("reports not_found for an unknown run", async () => {
@@ -239,7 +249,7 @@ describe("DrizzlePipelineRunStore", () => {
           toStage: "plan-gate",
         }),
       );
-      expect(result).toEqual({ kind: "stale", currentStage: "gather-context" });
+      expect(result).toMatchObject({ kind: "stale", currentStage: "gather-context", iteration: 0 });
       const after = await tx((trx) => runStore.getRun(trx, run.id));
       expect(after?.status).toBe("cancelled");
       expect(after?.stageOutputs).toEqual({});
@@ -265,7 +275,12 @@ describe("DrizzlePipelineRunStore", () => {
       const result = await tx((trx) =>
         runStore.completeRun(trx, { runId: run.id, fromStage: "gather-context", output: null }),
       );
-      expect(result).toEqual({ kind: "stale", currentStage: "implement" });
+      expect(result).toEqual({
+        kind: "stale",
+        status: "running",
+        currentStage: "implement",
+        iteration: 0,
+      });
     });
   });
 

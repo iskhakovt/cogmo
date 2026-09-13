@@ -532,9 +532,10 @@ export interface PipelineGateCallbackOutcome {
   editText: string;
   toast: string;
   /**
-   * Whether the keyboard should go. Yes once the decision was sent or the
-   * checkpoint is already resolved; no for a rejected tap, which must not take
-   * the buttons away from whoever can use them.
+   * Whether the keyboard should go. Yes unless the tapper was rejected: a
+   * rejected tap must not take the buttons away from whoever can use them,
+   * while every other outcome (sent, already resolved, run gone, pipelines
+   * disabled) leaves buttons that can never do anything again.
    */
   clearKeyboard: boolean;
 }
@@ -561,7 +562,7 @@ export async function handlePipelineGateCallback(
     return {
       editText: errorMessage(res.error),
       toast: errorMessage(res.error),
-      clearKeyboard: res.error.code === "pipeline_gate_not_pending",
+      clearKeyboard: res.error.code !== "identity_rejected",
     };
   }
   const { pipelineName, stageId } = res.value;

@@ -18,9 +18,10 @@
  *
  * A transition step that re-runs after its own commit (the worker died before
  * Inngest recorded the result) finds the run already moved and reads `stale`.
- * It then reloads the run, and when the run sits exactly where this step
- * would have put it, carries on to the follow-up — the event is deduped on
- * the run cursor, so a second send is harmless.
+ * The store reports the run's cursor from the same locked read; when it sits
+ * exactly where this step would have put it — same stage, same iteration — the
+ * step carries on to the follow-up. That event is deduped on the run cursor,
+ * so a second send is harmless.
  */
 
 import { NonRetriableError } from "inngest";
@@ -37,6 +38,7 @@ import { logger } from "../../logger.js";
 import type { DeliveryRouter } from "../../transport/delivery-router.js";
 import type { StepRunner } from "../loop.js";
 import { createTurnStepRunner } from "../turn-step-runner.js";
+import { notifyAfterRetries } from "./notify.js";
 import type {
   AgenticStageArgs,
   AgenticStageOutcome,
@@ -50,12 +52,7 @@ export interface PipelineStageRunnerDeps {
   runInTx: Transactor;
   runStore: Pick<
     PipelineRunStore,
-    | "getRun"
-    | "getRunWithDefinition"
-    | "transitionStatus"
-    | "advanceStage"
-    | "completeRun"
-    | "failRun"
+    "getRunWithDefinition" | "transitionStatus" | "advanceStage" | "completeRun" | "failRun"
   >;
   deliveryRouter: Pick<DeliveryRouter, "notifyConversation">;
   executeAgenticStage: (
@@ -63,21 +60,6 @@ export interface PipelineStageRunnerDeps {
     steps: AgenticStageSteps,
     log: typeof logger,
   ) => Promise<AgenticStageOutcome>;
-}
-
-async function notifyBestEffort(
-  deps: Pick<PipelineStageRunnerDeps, "deliveryRouter">,
-  conversationId: string,
-  text: string,
-): Promise<void> {
-  try {
-    await deps.deliveryRouter.notifyConversation(conversationId, text);
-  } catch (err) {
-    logger.warn(
-      { err, conversationId, component: "pipeline.stage-runner" },
-      "pipeline notice not delivered",
-    );
-  }
 }
 
 export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
@@ -103,13 +85,12 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
           ),
         );
         if (failed.kind === "failed") {
-          const { conversationId } = failed;
-          await step.run("notify-failure", () =>
-            notifyBestEffort(
-              deps,
-              conversationId,
-              `❌ The pipeline run failed at stage "${stageId}" and has stopped.`,
-            ),
+          await notifyAfterRetries(
+            (id, body) => step.run(id, body),
+            "notify-failure",
+            deps.deliveryRouter,
+            failed.conversationId,
+            `❌ The pipeline run failed at stage "${stageId}" and has stopped.`,
           );
         }
       },
@@ -160,30 +141,17 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
       const stage = definition.stages[index];
       const next = definition.stages[index + 1];
 
-      /** The run as it is now, projected to its cursor — for recovering a committed step. */
-      const reloadRun = () =>
-        step.run("reload-run", async () => {
-          const current = await deps.runInTx((tx) => deps.runStore.getRun(tx, runId));
-          return current
-            ? {
-                status: current.status,
-                currentStage: current.currentStage,
-                iteration: current.iteration,
-              }
-            : null;
-        });
-
       const failRun = async (reason: string) => {
         const failed = await step.run("fail-run", () =>
           deps.runInTx((tx) => deps.runStore.failRun(tx, runId, reason)),
         );
         if (failed.kind === "failed") {
-          await step.run("notify-failure", () =>
-            notifyBestEffort(
-              deps,
-              conversationId,
-              `❌ Pipeline "${definition.name}" failed at stage "${stageId}": ${reason}`,
-            ),
+          await notifyAfterRetries(
+            (id, body) => step.run(id, body),
+            "notify-failure",
+            deps.deliveryRouter,
+            conversationId,
+            `❌ Pipeline "${definition.name}" failed at stage "${stageId}": ${reason}`,
           );
         }
         return { status: "failed" as const, reason };
@@ -222,12 +190,11 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
           ),
         );
         if (parked.kind !== "transitioned") {
-          const current = parked.kind === "stale" ? await reloadRun() : null;
           const alreadyParkedHere =
-            current !== null &&
-            current.status === "waiting_gate" &&
-            current.currentStage === stageId &&
-            current.iteration === iteration;
+            parked.kind === "stale" &&
+            parked.status === "waiting_gate" &&
+            parked.currentStage === stageId &&
+            parked.iteration === iteration;
           if (!alreadyParkedHere) {
             return { status: "skipped" as const, reason: "stale" as const };
           }
@@ -285,14 +252,12 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
         ),
       );
       if (moved.kind !== "advanced") {
-        const current = moved.kind === "stale" ? await reloadRun() : null;
         const alreadyMoved =
-          current !== null &&
+          moved.kind === "stale" &&
+          moved.iteration === iteration &&
           (next === undefined
-            ? current.status === "completed" && current.currentStage === stageId
-            : current.status === "running" &&
-              current.currentStage === next.id &&
-              current.iteration === iteration);
+            ? moved.status === "completed" && moved.currentStage === stageId
+            : moved.status === "running" && moved.currentStage === next.id);
         if (!alreadyMoved) {
           return { status: "skipped" as const, reason: "stale" as const };
         }
@@ -306,8 +271,12 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
         return { status: "advanced" as const, nextStage: next.id };
       }
 
-      await step.run("notify-completed", () =>
-        notifyBestEffort(deps, conversationId, `✅ Pipeline "${definition.name}" completed.`),
+      await notifyAfterRetries(
+        (id, body) => step.run(id, body),
+        "notify-completed",
+        deps.deliveryRouter,
+        conversationId,
+        `✅ Pipeline "${definition.name}" completed.`,
       );
       return { status: "completed" as const };
     },

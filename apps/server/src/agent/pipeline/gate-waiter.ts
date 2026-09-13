@@ -24,10 +24,8 @@ import {
   pipelineGateResolved,
   pipelineGateSettled,
 } from "../../inngest/events.js";
-import { logger } from "../../logger.js";
 import type { DeliveryRouter } from "../../transport/delivery-router.js";
-
-const log = logger.child({ component: "pipeline.gate-waiter" });
+import { notifyAfterRetries } from "./notify.js";
 
 export interface PipelineGateWaiterDeps {
   deliveryRouter: Pick<DeliveryRouter, "notifyConversation">;
@@ -59,18 +57,15 @@ export function createPipelineGateWaiter(deps: PipelineGateWaiterDeps) {
 
       for (let i = 1; i <= reminders; i++) {
         await step.sleep(`wait-${i}`, `${timeoutMs}ms`);
-        // A reminder is a courtesy: a delivery failure must not fail the
-        // waiter, or the gate would never reach its timeout action.
-        await step.run(`remind-${i}`, async () => {
-          try {
-            await deps.deliveryRouter.notifyConversation(
-              conversationId,
-              `⏳ Reminder ${i} of ${reminders}: pipeline "${pipelineName}" is waiting for your decision at stage "${stageId}".`,
-            );
-          } catch (err) {
-            log.warn({ err, runId, gateKey, reminder: i }, "gate reminder not delivered");
-          }
-        });
+        // A reminder is a courtesy: one that fails for good is dropped, never
+        // allowed to fail the waiter and keep the gate from its timeout action.
+        await notifyAfterRetries(
+          (id, body) => step.run(id, body),
+          `remind-${i}`,
+          deps.deliveryRouter,
+          conversationId,
+          `⏳ Reminder ${i} of ${reminders}: pipeline "${pipelineName}" is waiting for your decision at stage "${stageId}".`,
+        );
       }
       await step.sleep(`wait-${reminders + 1}`, `${timeoutMs}ms`);
 

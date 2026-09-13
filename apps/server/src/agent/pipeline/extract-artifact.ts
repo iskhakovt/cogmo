@@ -11,18 +11,17 @@
  * properties, open objects), and a user's definition is under no obligation
  * to be strict-compatible. ajv is the authority on the result either way.
  *
- * `format` keywords are not enforced — no format plugin is loaded — so a
- * declared `format` (`email`, `date-time`, …) is advisory to the model, not
- * checked.
+ * The schema compiles through `compileOutputSchema`, the same path the
+ * definition-time check uses; `format` keywords are advisory, not checked.
  *
  * The agent loop itself can't produce the JSON: a stage that uses tools
  * needs them until its last iteration.
  */
 
-import { Ajv, type ValidateFunction } from "ajv";
 import { err, ok, type Result } from "neverthrow";
 import type { LlmProvider } from "../../llm/provider.js";
 import type { Message } from "../../llm/types.js";
+import { compileOutputSchema } from "./output-schema.js";
 import type { StageArtifact } from "./run-types.js";
 import type { StageOutput } from "./types.js";
 
@@ -59,19 +58,11 @@ export async function extractStageArtifact(args: {
   }
   // One Ajv per extraction: a shared instance caches every compiled schema by
   // object identity and refuses a second schema registering the same `$id`.
-  // A meta-schema-valid schema can still fail to compile (a `$ref` that
-  // resolves nowhere); that can never succeed, so it is a stage failure with a
-  // reason rather than an error the step would retry.
-  let validate: ValidateFunction;
-  try {
-    validate = new Ajv({ allErrors: true, strict: false }).compile(output.schema);
-  } catch (compileError) {
-    const detail = compileError instanceof Error ? compileError.message : String(compileError);
-    return err({
-      kind: "artifact_invalid",
-      detail: `output schema could not be compiled: ${detail}`,
-    });
+  const compiled = compileOutputSchema(output.schema);
+  if (compiled.isErr()) {
+    return err({ kind: "artifact_invalid", detail: `output schema ${compiled.error}` });
   }
+  const validate = compiled.value;
   const messages: Message[] = [
     {
       role: "user",

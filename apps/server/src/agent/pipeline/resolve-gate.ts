@@ -65,8 +65,9 @@ export type ResolveGateOutcome =
       status: PipelineRunStatus;
       currentStage: string;
       iteration: number;
-      /** The stage the resolution's gate key names. */
+      /** The stage and iteration the resolution's gate key names. */
       gateStage: string;
+      gateIteration: number;
       /** The stage after that gate, or null when the gate is the last stage. */
       nextStage: string | null;
       /**
@@ -90,9 +91,8 @@ function staleOutcome(
   // on a later stage still had this gate's approval applied.
   const pastGate =
     gateIndex >= 0 &&
-    (run.status === "completed"
-      ? currentIndex >= gateIndex
-      : run.iteration === gate.iteration && currentIndex > gateIndex);
+    run.iteration === gate.iteration &&
+    (run.status === "completed" ? currentIndex >= gateIndex : currentIndex > gateIndex);
   return {
     kind: "stale",
     conversationId: run.conversationId,
@@ -101,6 +101,7 @@ function staleOutcome(
     currentStage: run.currentStage,
     iteration: run.iteration,
     gateStage: gate.stageId,
+    gateIteration: gate.iteration,
     nextStage: gateIndex >= 0 ? (stages[gateIndex + 1]?.id ?? null) : null,
     pastGate,
   };

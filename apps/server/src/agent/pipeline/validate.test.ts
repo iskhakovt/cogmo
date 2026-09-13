@@ -90,6 +90,31 @@ describe("validateDefinition", () => {
     expect(issue?.message).toContain("can't be compiled");
   });
 
+  it("accepts a JSON Schema declaring draft 2020-12", () => {
+    const def = validPipelineDefinition();
+    stage(def, 0).output = {
+      kind: "json",
+      schema: {
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        type: "object",
+        properties: { summary: { type: "string" } },
+      },
+    };
+    expect(
+      validateDefinition(def, CTX).filter((i) => i.path === "stages[0].output.schema"),
+    ).toEqual([]);
+  });
+
+  it("flags an unknown $schema dialect instead of throwing", () => {
+    const def = validPipelineDefinition();
+    stage(def, 0).output = {
+      kind: "json",
+      schema: { $schema: "https://example.com/my-dialect", type: "object" },
+    };
+    const issues = validateDefinition(def, CTX);
+    expect(issues.some((i) => i.path === "stages[0].output.schema")).toBe(true);
+  });
+
   it("accepts a valid JSON Schema on a json output", () => {
     const def = validPipelineDefinition();
     stage(def, 0).output = {

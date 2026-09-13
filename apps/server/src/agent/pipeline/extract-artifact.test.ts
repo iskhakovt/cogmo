@@ -62,6 +62,22 @@ describe("extractStageArtifact", () => {
     expect(JSON.stringify(params.messages)).toContain('\\"required\\":[\\"title\\",\\"hours\\"]');
   });
 
+  it("extracts against a schema declaring draft 2020-12", async () => {
+    const provider = providerReplying('{"title":"Fix login","hours":3}');
+    const result = await extractStageArtifact({
+      ...base,
+      output: {
+        kind: "json",
+        schema: { $schema: "https://json-schema.org/draft/2020-12/schema", ...SCHEMA },
+      },
+      provider,
+    });
+    expect(result._unsafeUnwrap()).toEqual({
+      kind: "json",
+      value: { title: "Fix login", hours: 3 },
+    });
+  });
+
   it("compiles a schema carrying an $id on every extraction", async () => {
     const schema = { ...SCHEMA, $id: "issue-summary" };
     for (let i = 0; i < 2; i++) {
@@ -116,7 +132,7 @@ describe("extractStageArtifact", () => {
       provider,
     });
     expect(result._unsafeUnwrapErr()).toMatchObject({ kind: "artifact_invalid" });
-    expect(result._unsafeUnwrapErr().detail).toContain("could not be compiled");
+    expect(result._unsafeUnwrapErr().detail).toContain("can't be compiled");
     expect(provider.chat).not.toHaveBeenCalled();
   });
 
