@@ -66,3 +66,14 @@ describe("PipelineDefinitionSchema", () => {
     expect(() => PipelineDefinitionSchema.parse(def)).toThrow();
   });
 });
+
+describe("parseDurationMs — decimal durations", () => {
+  it.each([
+    ["4.1m", 246_000],
+    ["2.3h", 8_280_000],
+    ["0.5m", 30_000],
+  ])("%s resolves to a whole %i ms", (duration, ms) => {
+    expect(parseDurationMs(duration)).toBe(ms);
+    expect(Number.isInteger(parseDurationMs(duration))).toBe(true);
+  });
+});

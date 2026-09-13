@@ -109,7 +109,7 @@ The user observes a message that took longer than usual, but never sees a corrup
 
 Tool handlers run in the loop, in the bare body unless marked durable — so a non-durable handler re-executes **once per remaining step boundary of the turn**, not merely on retry. That count is what decides the flag:
 
-**Durable (side-effectful or billable — exactly-once per turn):** `generate_image`, `web_answer`, `web_search`, `fetch_url`, `memory_recall`, `memory_reflect`, `memory_retain`, `write_file`, `edit_file`, `core_memory_update`, `schedule_task`, `remove_task`, `activate_pipeline`, `define_pipeline`, `delegate_coding`, `register_skill`, `send_document`, every `subagent__*` tool, and every MCP tool (`src/mcp/adapter.ts`).
+**Durable (side-effectful or billable — exactly-once per turn):** `generate_image`, `web_answer`, `web_search`, `fetch_url`, `memory_recall`, `memory_reflect`, `memory_retain`, `write_file`, `edit_file`, `core_memory_update`, `schedule_task`, `remove_task`, `activate_pipeline`, `define_pipeline`, `start_pipeline`, `delegate_coding`, `register_skill`, `send_document`, every `subagent__*` tool, and every MCP tool (`src/mcp/adapter.ts`).
 
 **Non-durable (cheap idempotent reads whose output may be large or is trivially recomputed):** `read_file`, `list_files`, `list_tasks`, `list_pipelines`, `core_memory_read`, `current_time`. Re-execution costs a local read; keeping their possibly-large outputs out of Inngest state matters more. Accepted drift: the *persisted* `tool_result` for these is whatever the **last** invocation's re-execution returned, which can differ from what the model saw live (e.g. a file changed mid-turn).
 
@@ -123,6 +123,7 @@ Marking a tool `durable: true` is a cost decision with two sides: it buys exactl
 |-|-|
 | `delegate_coding` | **Keyed** — `coding_tasks.idempotency_key`, plain `UNIQUE` + `ON CONFLICT DO UPDATE` with a no-op SET and an `xmax = 0` discriminator (see `.claude/rules/inngest.md` for why `DO NOTHING` can't resolve a concurrent loser under REPEATABLE READ). A duplicate would mint a second sandbox, a second billable claude session and a second PR. |
 | `schedule_task` | **Keyed** — `scheduled_tasks.idempotency_key`. The worst duplicate on this list: it fires on every tick from then on, and only an explicit `remove_task` stops it. |
+| `start_pipeline` | **Keyed** — `pipeline_runs.idempotency_key`, written by `insertOrRecoverRun` with `ON CONFLICT DO UPDATE`. A retry looks the run up by key first and re-sends the first `pipeline/stage.due`, which is bus-deduped on the run cursor. A duplicate would open a second run, conversation and session rotation. |
 | skill tools (`buildSkillToolSpec`) | **Keyed** — forwarded to `runner.invoke`, which drives the `skill_runs` `recovery_point` state machine. |
 | `register_skill` | Self-deduping — a register against an unchanged branch tip resolves as `no_op` rather than a second deploy. |
 | `activate_pipeline` | Naturally idempotent — activation is a state, not an event; re-activating the same version converges. |

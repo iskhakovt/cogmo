@@ -78,6 +78,50 @@ describe("validateDefinition", () => {
     expect(issues.some((i) => i.path === "stages[0].output.schema")).toBe(true);
   });
 
+  it("flags a JSON Schema whose top level isn't an object, as extraction would", () => {
+    const def = validPipelineDefinition();
+    stage(def, 0).output = { kind: "json", schema: { type: "array", items: { type: "string" } } };
+    const issue = validateDefinition(def, CTX).find((i) => i.path === "stages[0].output.schema");
+    expect(issue?.message).toBe('output schema must have top-level "type": "object", got "array"');
+  });
+
+  it("flags a JSON Schema whose $ref points nowhere", () => {
+    // Meta-schema valid, but it can never be compiled to check an artifact.
+    const def = validPipelineDefinition();
+    stage(def, 0).output = {
+      kind: "json",
+      schema: { type: "object", properties: { owner: { $ref: "#/$defs/missing" } } },
+    };
+    const issues = validateDefinition(def, CTX);
+    const issue = issues.find((i) => i.path === "stages[0].output.schema");
+    expect(issue?.message).toContain("can't be compiled");
+  });
+
+  it("accepts a JSON Schema declaring draft 2020-12", () => {
+    const def = validPipelineDefinition();
+    stage(def, 0).output = {
+      kind: "json",
+      schema: {
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        type: "object",
+        properties: { summary: { type: "string" } },
+      },
+    };
+    expect(
+      validateDefinition(def, CTX).filter((i) => i.path === "stages[0].output.schema"),
+    ).toEqual([]);
+  });
+
+  it("flags an unknown $schema dialect instead of throwing", () => {
+    const def = validPipelineDefinition();
+    stage(def, 0).output = {
+      kind: "json",
+      schema: { $schema: "https://example.com/my-dialect", type: "object" },
+    };
+    const issues = validateDefinition(def, CTX);
+    expect(issues.some((i) => i.path === "stages[0].output.schema")).toBe(true);
+  });
+
   it("accepts a valid JSON Schema on a json output", () => {
     const def = validPipelineDefinition();
     stage(def, 0).output = {

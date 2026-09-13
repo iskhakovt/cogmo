@@ -37,6 +37,12 @@ export interface SkillsApprovalDeps {
   transportStore: TransportStore;
 }
 
+/** Deps for posting a pipeline gate's keyboard onto the run conversation's session. */
+export interface PipelineGateDeps {
+  runInTx: Transactor;
+  transportStore: TransportStore;
+}
+
 /**
  * Boundary-hold UX configuration — see `design/transport/sessions.md`.
  * Threaded from the runtime env at registry time; adapters use it to gate
@@ -70,6 +76,8 @@ export interface AdapterDeps {
   codingProgress?: CodingProgressDeps;
   /** Optional — present only when the skills module is wired. */
   skillsApproval?: SkillsApprovalDeps;
+  /** Always supplied by the registry — every Telegram channel can host a gate. */
+  pipelineGate?: PipelineGateDeps;
   /**
    * SSE stream registry — present only for the web channel. The bridge the
    * `WebUiAdapter` writes streamed turns through to a tab's open connection;
@@ -166,4 +174,9 @@ export interface AdapterModule {
   setup: (deps: AdapterDeps) => Promise<AdapterSetupResult>;
   /** Convert canonical markdown to channel-specific format. Undefined = identity (raw markdown). */
   renderOutput?: (markdown: string) => RenderedMessage;
+  /**
+   * The adapter posts pipeline gate keyboards (`pipeline/gate.pending`), so a
+   * run with checkpoints can reach the user through a channel of this type.
+   */
+  pipelineGates?: true;
 }

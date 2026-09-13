@@ -4,6 +4,7 @@ import type { CodingStore } from "../agent/coding/store/index.js";
 import type { CodingStreamingRegistry } from "../agent/coding/streaming-registry.js";
 import type { CompactConversationResult } from "../agent/conversation/compact-conversation.js";
 import type { TriggerReflectionResult } from "../agent/evolution/trigger-reflection.js";
+import type { PipelineRunStore } from "../agent/pipeline/store/index.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { Transactor } from "../db/index.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
@@ -48,6 +49,8 @@ export interface RegistryDeps {
   skillRunner?: SkillRunner;
   /** Skills store — paired with `skillRunner` for the Transport identity check. */
   skillStore?: SkillStore;
+  /** Run store behind the pipeline gate callback (`transport.pipelines`). */
+  pipelineRunStore?: PipelineRunStore;
   /**
    * MCP registry — wired into `transport.mcp.{addServer,approveServer,…}` so
    * the `/mcp` admin commands drive the same singleton handle-message uses
@@ -121,6 +124,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
       ...(deps.reposDir && { reposDir: deps.reposDir }),
       ...(deps.skillRunner && { skillRunner: deps.skillRunner }),
       ...(deps.skillStore && { skillStore: deps.skillStore }),
+      ...(deps.pipelineRunStore && { pipelineRunStore: deps.pipelineRunStore }),
       ...(deps.mcpRegistry && { mcpRegistry: deps.mcpRegistry }),
       ...(deps.triggerReflection && { triggerReflection: deps.triggerReflection }),
       ...(deps.compactConversation && { compactConversation: deps.compactConversation }),
@@ -162,6 +166,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
           transportStore: deps.transportStore,
         },
       }),
+      pipelineGate: { runInTx: deps.runInTx, transportStore: deps.transportStore },
       ...(deps.webStream && { webStream: deps.webStream }),
     });
 

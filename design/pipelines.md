@@ -59,7 +59,7 @@ interface Stage {
   tools?: string[];                   // allowlist globs resolved against the tool registry (envelope, not prose)
   output?: StageOutput;               // typed handoff to later stages
   gate?: {                            // kind: "gate" — human checkpoint on Telegram
-    timeout: string;                  // ms-style duration, grammar ^\d+(\.\d+)?(m|h|d|w)$ — Zod-enforced. Passes to Inngest waitForEvent untouched; the DB-park path parses it with a tiny unit-multiplier table (no `ms` dep). No months/years: excludes the M-ambiguity and engine waits cap at ~1y anyway.
+    timeout: string;                  // ms-style duration, grammar ^\d+(\.\d+)?(m|h|d|w)$ — Zod-enforced. `parseDurationMs` turns it into whole milliseconds with a tiny unit-multiplier table (no `ms` dep); the gate waiter sleeps `${timeoutMs}ms`. No months/years: excludes the M-ambiguity and engine waits cap at ~1y anyway.
     onTimeout: TimeoutAction;
   };
   wait?: {                            // kind: "wait" — external event, e.g. PR review submitted
@@ -110,7 +110,7 @@ Compiler hardening (n8n's lesson): the LLM never emits the definition as freefor
 4. **Confirm.** Explicit user approval activates the definition. The preview *is* the contract — no hidden prompts (gh-aw's trust lesson).
 5. **Version.** `pipeline_definitions` rows are immutable in every column except `active` (fits the prefer-immutable-rows rule — `active` is a status transition, like `coding_tasks.status`). Activation flips the old version off and the new one on in a single tx, deactivate-then-activate so the partial unique index holds throughout. The original free text is stored alongside the compiled JSON as the editable source. Editing recompiles into a new version; **in-flight runs keep the version they started with** (Temporal's stance — the only safe choice given week-long waits). New runs use the latest active version.
 
-## Execution Model `[proposed]`
+## Execution Model `[confirmed]`
 
 **DB-backed run state + one short Inngest function per stage transition, chained by events** — not one long-lived durable function per run.
 
@@ -119,35 +119,45 @@ Compiler hardening (n8n's lesson): the LLM never emits the definition as freefor
 | Mid-flight code/definition drift | Inngest versioning is fail-soft: step-ID memoization, warnings not errors. A run sleeping a week inside one function while Cogmo redeploys risks silent drift. Stage boundaries as event seams make every deploy safe. |
 | Unbounded review loops | Each loop iteration consumes steps from a single 1000-step budget; event-chained stages give every stage its own budget. |
 | Observability & admin | `pipeline_runs.current_stage` is queryable for `/status` and the web UI without going through Inngest's API. |
-| Fit | Matches the event-decoupling philosophy, the immutable-rows rule, and the proven `scheduled_tasks` ticker pattern ([scheduling.md](scheduling.md)). |
+| Fit | Matches the event-decoupling philosophy and the immutable-rows rule. |
 
 Shape:
 
 - `pipeline_runs` row is the source of truth: definition version FK, current stage, per-stage typed outputs, loop counters, status.
-- A generic `pipeline-stage-runner` Inngest function is triggered by `pipeline/stage.due { runId, stageId, iteration }`. It loads the run + pinned definition, executes the stage, persists the typed output and transition in one tx inside a `step.run`, then emits the next `pipeline/stage.due` (or a terminal event) via a separate `step.sendEvent` — the same persist/emit step split as coding delegation's `emit-cli-done`, so a retry after the commit replays only the emit, never the transition. Stage-internal work uses normal `step.run` durability.
-- **Short gates may still use `step.waitForEvent` inside the stage function** — that's exactly how coding delegation's plan approval works today (`wait-for-approval`, [coding-delegation.md](coding-delegation.md) → Inngest step boundaries). Multi-day waits (`kind: "wait"` stages, e.g. PR review) park the run in the DB (`status = 'waiting'`, a `wait_key` correlation column) and resume when the matching inbound event arrives — no Inngest function stays in flight across deploys. The cutover heuristic: waits expected ≤ hours → `waitForEvent`; days+ → DB-park.
-- Every gate/wait is **bounded**: timeout + declared default action. Timeouts for DB-parked waits fire via the existing 1-minute ticker (same `FOR UPDATE SKIP LOCKED` scan shape as `scheduled_tasks`).
-- One run at a time per definition by default (`max_concurrent_runs = 1`), same admission-control spirit as [coding-delegation.md](coding-delegation.md) → Admission & Rate Limiting.
+- A generic `pipeline-stage-runner` Inngest function is triggered by `pipeline/stage.due { runId, stageId, iteration }`. It loads the run + pinned definition, executes the stage, persists the typed output and transition in one tx inside a `step.run`, then emits the next `pipeline/stage.due` via a separate `step.sendEvent`. On the last stage, `advance-run` calls `completeRun` and a `notify-completed` notice follows. Persist and emit are separate steps, as in coding delegation's `emit-cli-done`, so a retry after the commit replays only the emit, never the transition. If the transition step itself re-runs after its commit, it finds the run already at its target and re-sends the follow-up event (deduped on the run cursor) rather than stopping. The store reports the run's cursor from the same locked read that decided `stale`, so the step decides without a second read. Stage-internal work uses normal `step.run` durability.
+- **Gates park in the DB.** A `gate` stage sets `status = 'waiting_gate'` and emits `pipeline/gate.pending`. The channel adapter posts Approve / Cancel buttons carrying the run id and an 8-hex token of the gate key `${runId}:${stageId}:${iteration}`, so a leftover button from an earlier gate is refused. `pipeline-gate-waiter` sleeps `reminders + 1` times, one sleep before each reminder and one more, then emits `pipeline/gate.resolved`. A tap emits the same event, with no bus-dedup id. `pipeline-gate-resolver` applies it in one step. Its locked flip out of `waiting_gate` records `gate_resolution`: the gate key and the resolver's Inngest run id. One resolution wins; the others read `stale`. A stale outcome whose claim is its own is a post-commit re-run: it re-sends the next stage and notice while the run hasn't moved. Otherwise it stays silent, except that a losing tap is told. Every outcome but `not_found` emits `pipeline/gate.settled` after the commit, which cancels the waiter. If resolution fails for good, `onFailure` runs `inspectFailedResolution` under the failed run's id; it checks the park and fails a timed-out run in one transaction, so a tap landing in between is never failed. Still parked: a tap is told the checkpoint resolves on its timeout, and a timeout fails the run. Moved on: it sends the follow-ups the stale path would (`sendFollowUps`). Only the waiter stays in flight across a deploy, like coding plan approval, which parks at `awaiting_approval` and resumes in a separate function.
+- Every gate is **bounded**: timeout + declared default action, slept out by `pipeline-gate-waiter`.
+- **Waits and admission `[proposed]`** (slice 3). Multi-day `wait` stages park in the DB with a `wait_key` correlation column, resumed when the matching inbound event arrives. Their `wait_deadline` fires via the existing 1-minute ticker (same `FOR UPDATE SKIP LOCKED` scan as `scheduled_tasks`). One run at a time per definition by default (`max_concurrent_runs = 1`), in the admission-control spirit of [coding-delegation.md](coding-delegation.md) → Admission & Rate Limiting.
 
 ### Stage kinds
 
 | Kind | Executes as | Notes |
 |-|-|-|
-| `agentic` | Agent-loop turn (or coding delegation when the instructions resolve to a coding task) with the stage's `instructions`, tool allowlist, and prior-stage outputs in context | Produces the stage's typed `output` via structured output when declared |
-| `gate` | Telegram message + inline keyboard (Approve / Revise / Cancel), back-and-forth allowed — replies route into the run's conversation | Approval emits the resume event |
-| `wait` | DB-parked wait on an external event | e.g. `github/pr.review_submitted` filtered to the run's PR |
+| `agentic` | Agent-loop turn with the stage's `instructions`, tool allowlist, and prior-stage outputs in context. Coding delegation as a stage is slice 4 `[proposed]` | A declared `json` output comes from a tools-free prompted call validated with Ajv |
+| `gate` | Telegram message + inline keyboard (Approve / Cancel) on the run's conversation | A tap emits `pipeline/gate.resolved`; the resolver then emits `pipeline/stage.due`. Revise — re-running the prior stage with the user's feedback — is itself a back-edge, so it arrives with loop execution |
+| `wait` `[proposed]` | DB-parked wait on an external event | e.g. `github/pr.review_submitted` filtered to the run's PR |
 
-### Loops
+### Starting a run and running a stage `[confirmed]`
+
+- **Start.** `start_pipeline(name)` pins the active definition version and refuses, with the list, any envelope using features the engine can't run yet (non-command triggers, `wait` stages, loops, `plan` / `pr_metadata` artifacts) — so a definition can compile, preview and activate before it is runnable. A pipeline with gates also needs a reachable channel whose adapter posts gate keyboards (`AdapterModule.pipelineGates`; Telegram today). It creates the run's own conversation, routes the user's reachable channel sessions onto it (the same rotation a scheduled fire performs), opens the run on its first stage, and emits `pipeline/stage.due`, carrying the starting chat conversation so the first stage waits (up to 30s) for that turn's `response/ready` before streaming into the same chat. The tool is durable and keyed: the run row carries the call's idempotency key, and a retry looks the run up before anything else — the active version may have changed since — and resumes it against its pinned definition, re-sending the first stage under its bus-dedup id.
+- **Agentic stage.** The stage runner executes the stage as an agent turn built from the primitives `handle-message` composes, under stage policy. The stage's prose and earlier artifacts become the user message. It is persisted as a `source='pipeline'` inbound keyed `pipeline:<runId>:<stageId>:<iteration>`, whose id is the messages' cursor and the loop's `turnKey`. The stage allowlist narrows the profile's composed tools. Output streams by broadcast to every session on the run conversation.
+- **Cursor isolation.** `getUnbatchedInbound` skips `source='pipeline'` inbounds, and `getLastAssistantMessage` skips assistant rows cursored on one. Chat input sent around a stage is neither dropped as already answered nor batched with the stage prompt.
+- **JSON artifacts.** A `json` output schema must be a top-level `"type": "object"`, checked at definition and at run time. The artifact comes from a tools-free call with the schema in the prompt, since provider strict modes reject ordinary schemas. Ajv validates it through the compile path the definition check uses (drafts 07, 2019-09 and 2020-12; draft-06 against its meta-schema on the draft-07 class; see `output-schema.ts`; `format` is advisory). A failing result gets one retry with the errors fed back.
+- **Handoffs.** Earlier artifacts follow the stage's instructions and output contract. They sit in blocks marked as data, with any handoff tag in their content neutralised (text escaped, JSON as `\u003c`). The prompt closes by restating the contract. This mitigates injected text; the stage allowlist is the boundary.
+- **Failure.** A degraded loop, or a result that still fails its JSON Schema, fails the run with the reason.
+- **Known residual.** `handle-message` serializes on conversation id within its own function only, so a message sent into the run conversation mid-stage runs a chat turn concurrently with the stage turn — answered, but interleaved with the stage's transcript.
+
+### Loops `[proposed]`
 
 The back-edge is code-owned: the runner checks `iteration < maxIterations` and emits `pipeline/stage.due` for `backTo`. Loop scopes are flat — the validation pass rejects nested or crossing back-edges — so the single `iteration` counter on the run suffices; it resets to 0 when the run advances past the loop's back-edge stage (exits the scope). The `until` condition is evaluated by an LLM step (structured `{ done: boolean, reason: string }`), but the LLM cannot raise `maxIterations` — exhausting the cap surfaces to the user as a gate ("5 review rounds done, threads still open — continue?"). Temporal's "deterministic but not predetermined."
 
 ### Context handoff
 
-Typed `output` artifacts flow forward (Anthropic's delegation guidance: objective, format, boundaries), **and** the full prior-stage transcripts stay retrievable — each run owns a conversation, stages append to it, so later stages can read everything (Cognition: don't summarize away decisions; actions carry implicit decisions). Within a loop, `stage_outputs` keeps only the latest iteration's artifact per stage (latest-wins, intentional) — earlier iterations' reasoning survives in the run conversation, which is where decision history belongs. For review loops specifically: same branch, same coding session resumed via `--resume <sid>` — the PR is the durable checkpoint.
+Typed `output` artifacts flow forward (Anthropic's delegation guidance: objective, format, boundaries), **and** the full prior-stage transcripts stay retrievable — each run owns a conversation, stages append to it, so later stages can read everything (Cognition: don't summarize away decisions; actions carry implicit decisions). Within a loop, `stage_outputs` keeps only the latest iteration's artifact per stage (latest-wins, intentional) — earlier iterations' reasoning survives in the run conversation, which is where decision history belongs. For review loops specifically `[proposed]`: same branch, same coding session resumed via `--resume <sid>` — the PR is the durable checkpoint.
 
 ## Safety `[proposed]`
 
-- **Per-stage tool allowlists** compile into the envelope and resolve through the existing `Service` ACL boundary ([agents.md](agents.md) → Tool Architecture) — the orchestrator scopes what each stage's agent can touch. A "gather context" stage gets read tools only. The pipeline tools themselves (`define_pipeline` / `activate_pipeline` / `list_pipelines`) are excluded from allowlist resolution — a run must not define or activate pipelines mid-run; that self-modification path always goes through the user-facing preview/confirm gate.
+- **Per-stage tool allowlists** `[confirmed]` compile into the envelope. `restrictToStage` (`stage-tools.ts`) filters the profile's composed `ToolRegistry` by the stage's globs, so a stage can only narrow what the profile allows. A "gather context" stage gets read tools only. The pipeline tools (`define_pipeline` / `activate_pipeline` / `list_pipelines` / `start_pipeline`) are always removed, and a stage's `Service` carries no `pipelines` namespace. A run must not define, activate or start pipelines; that path always goes through the user-facing preview/confirm gate.
 - **Writes as safe-outputs** (gh-aw's flagship pattern, already Cogmo's shape): agentic stages never hold "open PR" / "push" capabilities — they produce artifacts; the orchestrator executes the side effects deterministically, exactly as coding delegation's CLI is told "do NOT open a PR."
 - **Risk-rate tools** (read-only / reversible / irreversible — OpenAI's guide). Irreversible tools in a stage allowlist force an implicit gate before that stage unless the user explicitly waived it in the definition (and the preview says so).
 - **Budgets**: per-run token/wall-time caps and per-definition daily run quotas, enforced like coding delegation's admission checks. A runaway pipeline pauses with backoff, never silently retries forever.
@@ -158,7 +168,7 @@ One generic surface; sources arrive independently:
 
 | Kind | Mechanism | Status |
 |-|-|-|
-| `command` | Chat phrase match in the agent loop → `pipeline/run.requested` | First slice — zero new infrastructure |
+| `command` | `start_pipeline` agent tool — the model routes the user's request, by phrase or paraphrase, to it; `trigger.phrase` is prose the model matches, not a literal matcher | Shipped (slice 2) |
 | `cron` | A `scheduled_tasks` row owned by the definition; the fire handler emits `pipeline/run.requested` instead of a synthetic turn | Rides existing ticker |
 | `event` | Inbound external events normalized onto the event bus as `<source>/<entity>.<action>` | Per-source follow-ups |
 
@@ -167,17 +177,17 @@ External event sources are deliberately out of scope here; parked findings for w
 - **GitHub PR review events** (the "wait for review" stage): webhook through a named Cloudflare Tunnel (production-grade, free, needs a domain) with signature check (`X-Hub-Signature-256`, constant-time compare), **plus** an ETag reconciliation poller — GitHub does not retry failed deliveries. Pure polling is also viable at personal scale: conditional requests returning 304 are rate-limit-free; 5k req/hr budget dwarfs a handful of open PRs at 60s cadence. Avoid the Events API (30s–6h latency). Relevant webhook events: `pull_request_review` (submitted), `pull_request_review_comment`, `issue_comment` (PR conversation), `pull_request` (`synchronize`, `closed` + `merged: true`).
 - **Linear**: personal API key + UI-created webhook (workspace admin) covers issue/comment triggers — no OAuth app needed. The Agents API (sessions, activities, @-mention UX) requires an `actor=app` OAuth installation; only worth it if Cogmo should appear as a delegable agent inside Linear.
 
-## Data Model `[proposed]`
+## Data Model `[confirmed]`
 
 ```sql
 CREATE TYPE pipeline_run_status AS ENUM (
   'queued', 'running', 'waiting_gate', 'waiting_event', 'completed', 'failed', 'cancelled'
 );
--- 'queued' = admitted-pending behind max_concurrent_runs, same naming convention as coding_task_status.
+-- 'queued' (admission control) and 'waiting_event' (wait stages) are declared for slice 3 and unused.
 
 pipeline_definitions (
   id            UUID v7 PK,
-  user_id       UUID NOT NULL,                  -- multi-user from day 1, like scheduled_tasks
+  user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   name          TEXT NOT NULL,
   version       INT NOT NULL,                   -- UNIQUE(user_id, name, version); all columns except active are immutable
   source_text   TEXT NOT NULL,                  -- the user's free text — the editable source
@@ -192,39 +202,40 @@ pipeline_runs (
   conversation_id    UUID NOT NULL REFERENCES conversations(id),  -- the run's thread; gates and progress land here (ON DELETE no-action — conversations are not pruned)
   status             pipeline_run_status NOT NULL,
   current_stage      TEXT NOT NULL,             -- stage id from the pinned definition
-  iteration          INT NOT NULL,              -- loop counter for current_stage's loop scope
+  iteration          INT NOT NULL,              -- loop counter for current_stage's loop scope; 0 until loops land
   stage_outputs      JSONB NOT NULL,            -- StageOutputsSchema: stageId → typed artifact; latest loop iteration wins (see Context handoff)
-  wait_key           TEXT,                      -- correlation key; partial index WHERE status='waiting_event' serves event-resume lookups
-  wait_deadline      TIMESTAMPTZ,               -- ticker fires onTimeout when passed
   failure_reason     TEXT,
+  gate_resolution    JSONB,                     -- GateResolutionSchema: { gateKey, resolverRunId } of the resolution that claimed the latest gate; null until one does
+  idempotency_key    TEXT UNIQUE,               -- the start_pipeline tool call's key, so a retried call recovers its run; null when opened outside a retrying context
   created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 ```
 
-No `user_id` on `pipeline_runs` — deliberate: every run load also fetches the pinned definition (the stages live in its `compiled` blob), and that row carries `user_id`, so the join is free on every path that needs it. The hot run lookups — `wait_key` event-resume, `wait_deadline` ticker scan — are not user-keyed, and admission quotas count per definition. Denormalize only if a user-keyed hot path materializes.
+`[proposed]` Wait stages (slice 3) add `wait_key TEXT` (correlation key, with a partial index `WHERE status = 'waiting_event'` for event-resume lookups) and `wait_deadline TIMESTAMPTZ` (the ticker applies `onTimeout` once it passes). A gate's deadline lives in its waiter's `step.sleep`, so gates need neither column.
 
-Owned by a new `agent/pipeline/` domain folder (pipelines are agent work items, like `coding_tasks`). Listed in [data-model.md](data-model.md) → Deferred Tables.
+No `user_id` on `pipeline_runs`, deliberately. Every run load also fetches the pinned definition (the stages live in its `compiled` blob), and that row carries `user_id`. The run lookups (by id, and by `idempotency_key` on a retried start) are not user-keyed, and the proposed wait-stage lookups and admission quotas aren't either. Denormalize only if a user-keyed hot path materializes.
+
+Owned by the `agent/pipeline/` domain folder (pipelines are agent work items, like `coding_tasks`). Listed in [data-model.md](data-model.md) → Table Index.
 
 ## Relationship to Existing Concepts `[proposed]`
 
 | Concept | Relationship |
 |-|-|
 | Coding delegation | First built-in pipeline. Near-term it stays as-is; an `agentic` stage can *invoke* it (goal in, PR metadata out). Re-expressing its orchestrators as a built-in `PipelineDefinition` is a later refactor, attempted only once user-defined pipelines prove the model. |
-| `scheduled_tasks` | Cron triggers ride it; the DB-park + ticker timeout pattern is borrowed from it. |
+| `scheduled_tasks` | Cron triggers ride it `[proposed]`. `start_pipeline` routes sessions onto the run's conversation with the same rotation a scheduled fire performs. |
 | Skills | Orthogonal: a skill is a capability inside a stage; a pipeline is the spine across stages. A stage's tool allowlist can include skills. |
 | Steering rules | Apply per-profile as usual inside `agentic` stages; pipeline definitions are not steering rules (different lifecycle: versioned artifacts vs. accumulated guidance). |
 | Evolution | Stage-1 corrections during pipeline runs graduate into steering rules normally. A later evolution stage could propose pipeline edits — gated like code changes, since a definition is executable configuration. |
 
 ## Implementation Plan `[confirmed]`
 
-Phased as **PROGRESS.md → Phase 8**, four slices mirroring coding delegation's thin-slice precedent: (1) definitions spine — compile → preview → activate, no execution, plus the compile-quality eval set; (2) run engine MVP — command trigger, linear `agentic`/`gate` stages; (3) loops, DB-parked waits, cron triggers, admission control; (4) integration breadth — coding delegation as a stage, first external event source. The only new runtime dependency is `@marcbachmann/cel-js`, deferred to slice 3. Durations use the ms-style grammar above (decision: legibility in previews and pass-through to Inngest beat ISO-8601's standardness; the Zod regex removes ms-style's ambiguity).
+Phased as **PROGRESS.md → Phase 8**, four slices mirroring coding delegation's thin-slice precedent: (1) definitions spine — compile → preview → activate, no execution, plus the compile-quality eval set; (2) run engine MVP — command trigger, linear `agentic`/`gate` stages; (3) loops, DB-parked waits, cron triggers, admission control; (4) integration breadth — coding delegation as a stage, first external event source. The only new runtime dependency is `@marcbachmann/cel-js`, deferred to slice 3. Durations use the ms-style grammar above (decision: legibility in previews beat ISO-8601's standardness; the Zod regex removes ms-style's ambiguity, and `parseDurationMs` converts to milliseconds for `step.sleep`).
 
 ## Open Questions
 
 - Compiler model/prompt: how much pipeline-design knowledge (gate placement, loop bounds) does the compile contract encode vs. ask the user about during preview?
-- Revise-at-gate semantics: does "Revise" at a gate re-run the prior stage with feedback (cheap) or allow editing the remaining pipeline mid-run (powerful, but mutates a pinned version)?
+- Revise-at-gate semantics: does "Revise" at a gate re-run the prior stage with feedback (cheap) or allow editing the remaining pipeline mid-run (powerful, but mutates a pinned version)? Slice 2 ships Approve / Cancel only; the question reopens with back-edges.
 - Where event-source normalization lives (`src/transport/` adapter vs. a new `src/events/` edge) once the first external webhook/poller source lands.
-- Whether `command` triggers are explicit phrase matches or the agent loop routes intent ("kick off the release flow") to a `start_pipeline` tool — the tool route fits the existing tool surface better.
 
 ## Sources `[research]`
 

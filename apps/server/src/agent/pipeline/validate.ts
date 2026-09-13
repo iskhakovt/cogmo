@@ -8,9 +8,9 @@
  * retry can hand them back to the LLM verbatim.
  */
 
-import { Ajv } from "ajv";
 import picomatch from "picomatch";
 import { validateCron } from "../scheduling/cron.js";
+import { compileOutputSchema } from "./output-schema.js";
 import { MAX_DURATION_MS, type PipelineDefinition, parseDurationMs } from "./types.js";
 
 export interface ValidationIssue {
@@ -29,11 +29,6 @@ export interface ValidationContext {
    */
   knownEventSources: ReadonlyArray<string>;
 }
-
-// One process-wide Ajv for meta-schema checks. `strict: false` matches the
-// skills runner's instance — compiler-emitted schemas routinely carry
-// harmless annotations (title, examples) that strict mode rejects.
-const ajv = new Ajv({ allErrors: true, strict: false });
 
 /**
  * Validate a structurally-valid definition against the deterministic rules.
@@ -118,12 +113,11 @@ export function validateDefinition(
       }
     }
 
-    if (stage.output?.kind === "json" && !ajv.validateSchema(stage.output.schema)) {
-      const detail = ajv.errors?.map((e) => `${e.instancePath || "/"} ${e.message}`).join("; ");
-      issues.push({
-        path: at("output.schema"),
-        message: `not a valid JSON Schema: ${detail ?? "unknown error"}`,
-      });
+    if (stage.output?.kind === "json") {
+      const compiled = compileOutputSchema(stage.output.schema);
+      if (compiled.isErr()) {
+        issues.push({ path: at("output.schema"), message: `output schema ${compiled.error}` });
+      }
     }
 
     if (stage.wait !== undefined && !ctx.knownEventSources.includes(stage.wait.event)) {
