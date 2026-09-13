@@ -103,7 +103,7 @@ Releases are cut on demand, not on every merge. The version is never bumped by h
 
 `chore:`/`docs:`/`refactor:`/etc. commits land in `main` without producing a version on their own. The next release that includes a `feat:` or `fix:` picks them up.
 
-There is no per-commit opt-out: a release includes every commit since the last tag. To leave a change out, revert it before dispatching the release.
+A commit whose message contains `[skip release]` (or `[release skip]`) is ignored when semantic-release computes the version, so it cannot trigger a release or raise the bump on its own. It still appears in the next release's notes; to keep a change out of a release entirely, revert it before dispatching.
 
 ## Code style
 
