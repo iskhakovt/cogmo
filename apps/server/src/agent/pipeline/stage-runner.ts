@@ -86,7 +86,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
         );
         if (failed.kind === "failed") {
           await notifyAfterRetries(
-            (id, body) => step.run(id, body),
+            step,
             "notify-failure",
             deps.deliveryRouter,
             failed.conversationId,
@@ -147,7 +147,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
         );
         if (failed.kind === "failed") {
           await notifyAfterRetries(
-            (id, body) => step.run(id, body),
+            step,
             "notify-failure",
             deps.deliveryRouter,
             conversationId,
@@ -272,7 +272,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
       }
 
       await notifyAfterRetries(
-        (id, body) => step.run(id, body),
+        step,
         "notify-completed",
         deps.deliveryRouter,
         conversationId,

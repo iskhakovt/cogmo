@@ -15,18 +15,20 @@
  * before notifying — so it sends the notice for its effect, but only while
  * the run still sits exactly where that effect left it.
  *
- * If the resolution itself cannot be applied, `onFailure` handles the two
- * sources differently. A tap leaves the gate parked with its waiter still
- * armed (settlement never happened), so the user is told the decision didn't
- * take and the checkpoint will resolve on its timeout. A timeout has no
- * waiter behind it any more, so the run is failed rather than left parked
- * with nothing that could ever move it.
+ * If the resolution fails for good, `onFailure` first checks whether the run
+ * is still parked on this gate. If it is, the resolution never committed: a
+ * tap's waiter is still armed, so the user is told the decision didn't take
+ * and the checkpoint will resolve on its timeout. Otherwise — a timeout, whose
+ * waiter is gone, or a resolution that committed before a later step failed,
+ * leaving no stage scheduled and possibly no waiter — nothing could ever move
+ * the run again, so it is failed.
  */
 
 import { inngest as inngestClient } from "../../inngest/client.js";
 import {
   buildPipelineStageDueEvent,
   type PipelineGateDecision,
+  pipelineGateKey,
   pipelineGateResolved,
   pipelineGateSettled,
 } from "../../inngest/events.js";
@@ -42,7 +44,7 @@ const TOO_LATE =
   "⌛ That decision arrived after the checkpoint had already been resolved, so it was not applied.";
 
 export interface PipelineGateResolverDeps extends ResolveGateDeps {
-  runStore: ResolveGateDeps["runStore"] & Pick<PipelineRunStore, "failRun">;
+  runStore: ResolveGateDeps["runStore"] & Pick<PipelineRunStore, "getRun" | "failRun">;
   deliveryRouter: Pick<DeliveryRouter, "notifyConversation">;
 }
 
@@ -56,17 +58,20 @@ function isApproval(decision: PipelineGateDecision): boolean {
   return decision === "approved" || decision === "timeout_proceed";
 }
 
+/** The run's cursor is on the resolution's gate stage and iteration. */
+function atGate(outcome: StaleOutcome): boolean {
+  return outcome.currentStage === outcome.gateStage && outcome.iteration === outcome.gateIteration;
+}
+
 /**
  * Whether a stale resolution's decision already stands in the run: an
  * approval finds the run past the gate, a cancellation finds it cancelled at
- * this gate's stage and iteration.
+ * this gate.
  */
-export function decisionReflected(decision: PipelineGateDecision, outcome: StaleOutcome): boolean {
+function decisionReflected(decision: PipelineGateDecision, outcome: StaleOutcome): boolean {
   return isApproval(decision)
     ? outcome.pastGate
-    : outcome.status === "cancelled" &&
-        outcome.currentStage === outcome.gateStage &&
-        outcome.iteration === outcome.gateIteration;
+    : outcome.status === "cancelled" && atGate(outcome);
 }
 
 /**
@@ -80,13 +85,13 @@ function effectInPlace(
   outcome: StaleOutcome,
 ): ResolveGateOutcome | null {
   const base = { conversationId: outcome.conversationId, pipelineName: outcome.pipelineName };
-  const atGate =
-    outcome.currentStage === outcome.gateStage && outcome.iteration === outcome.gateIteration;
   if (!isApproval(decision)) {
-    return outcome.status === "cancelled" && atGate ? { kind: "cancelled", ...base } : null;
+    return decisionReflected(decision, outcome) ? { kind: "cancelled", ...base } : null;
   }
   if (outcome.nextStage === null) {
-    return outcome.status === "completed" && atGate ? { kind: "completed", ...base } : null;
+    return outcome.status === "completed" && atGate(outcome)
+      ? { kind: "completed", ...base }
+      : null;
   }
   const atNextStage =
     outcome.currentStage === outcome.nextStage &&
@@ -143,9 +148,16 @@ export function createPipelineGateResolver(deps: PipelineGateResolverDeps) {
       onFailure: async ({ event, error, step }) => {
         const { runId, gateKey, conversationId, decision } = event.data.event.data;
         log.error({ err: error, runId, gateKey, decision }, "gate resolution failed after retries");
-        if (isTap(decision)) {
+        const parked = await step.run("check-gate", async () => {
+          const run = await deps.runInTx((tx) => deps.runStore.getRun(tx, runId));
+          return (
+            run?.status === "waiting_gate" &&
+            pipelineGateKey(run.id, run.currentStage, run.iteration) === gateKey
+          );
+        });
+        if (parked && isTap(decision)) {
           await notifyAfterRetries(
-            (id, body) => step.run(id, body),
+            step,
             "notify-tap-failed",
             deps.deliveryRouter,
             conversationId,
@@ -153,18 +165,19 @@ export function createPipelineGateResolver(deps: PipelineGateResolverDeps) {
           );
           return;
         }
+        const reason = parked
+          ? `gate timeout could not be applied (${error.name})`
+          : `gate resolution could not be completed (${error.name})`;
         const failed = await step.run("fail-run", () =>
-          deps.runInTx((tx) =>
-            deps.runStore.failRun(tx, runId, `gate timeout could not be applied (${error.name})`),
-          ),
+          deps.runInTx((tx) => deps.runStore.failRun(tx, runId, reason)),
         );
         if (failed.kind === "failed") {
           await notifyAfterRetries(
-            (id, body) => step.run(id, body),
-            "notify-timeout-failed",
+            step,
+            "notify-run-failed",
             deps.deliveryRouter,
             conversationId,
-            "❌ A pipeline checkpoint's timeout couldn't be applied, so the run has stopped.",
+            "❌ A pipeline checkpoint couldn't be resolved, so the run has stopped.",
           );
         }
       },
@@ -182,49 +195,27 @@ export function createPipelineGateResolver(deps: PipelineGateResolverDeps) {
         await step.sendEvent("emit-gate-settled", pipelineGateSettled.create({ runId, gateKey }));
       }
 
-      // A stale approval whose run sits on the next stage re-sends it: if this
-      // is the resolution's own retry, the first attempt died before sending
-      // it. Deduped on the run cursor, so when another resolution already sent
-      // it this is a no-op.
-      if (
-        outcome.kind === "stale" &&
-        isApproval(decision) &&
-        outcome.pastGate &&
-        outcome.nextStage !== null &&
-        outcome.status === "running" &&
-        outcome.currentStage === outcome.nextStage &&
-        outcome.iteration === outcome.gateIteration
-      ) {
+      // The next stage is due when this resolution advanced the run, or when a
+      // stale approval finds the run still running on that stage: if this is
+      // the resolution's own retry, the first attempt died before sending it.
+      // Deduped on the run cursor, so when another resolution already sent it
+      // this is a no-op. A run already parked there has had its stage run.
+      const due =
+        outcome.kind === "stale"
+          ? outcome.status === "running"
+            ? effectInPlace(decision, outcome)
+            : null
+          : outcome;
+      if (due?.kind === "advanced") {
         await step.sendEvent(
           "emit-next-stage",
-          buildPipelineStageDueEvent({
-            runId,
-            stageId: outcome.nextStage,
-            iteration: outcome.iteration,
-          }),
-        );
-      }
-
-      if (outcome.kind === "advanced") {
-        await step.sendEvent(
-          "emit-next-stage",
-          buildPipelineStageDueEvent({
-            runId,
-            stageId: outcome.nextStage,
-            iteration: outcome.iteration,
-          }),
+          buildPipelineStageDueEvent({ runId, stageId: due.nextStage, iteration: due.iteration }),
         );
       }
 
       const notice = gateNotice(decision, outcome, retried);
       if (notice !== null) {
-        await notifyAfterRetries(
-          (id, body) => step.run(id, body),
-          "notify",
-          deps.deliveryRouter,
-          conversationId,
-          notice,
-        );
+        await notifyAfterRetries(step, "notify", deps.deliveryRouter, conversationId, notice);
       }
       return outcome;
     },

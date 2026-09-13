@@ -4,6 +4,7 @@ import { mock } from "vitest-mock-extended";
 import { inngest } from "../../inngest/client.js";
 import { type PipelineGateDecision, pipelineGateResolved } from "../../inngest/events.js";
 import {
+  directStep,
   fakeRunInTx,
   invokeInngestFn,
   invokeInngestOnFailure,
@@ -11,7 +12,7 @@ import {
 } from "../../test/factories.js";
 import { createPipelineGateResolver, gateNotice } from "./gate-resolver.js";
 import type { ResolveGateOutcome } from "./resolve-gate.js";
-import type { PipelineRunStore } from "./store/index.js";
+import type { PipelineRunRow, PipelineRunStore } from "./store/index.js";
 
 let sendSpy: ReturnType<typeof spyOnInngestSend>;
 beforeEach(() => {
@@ -55,6 +56,21 @@ function eventData(decision: PipelineGateDecision) {
   return { runId: "run-1", gateKey: "run-1:approve:0", conversationId: "conv-1", decision };
 }
 
+function runAt(status: PipelineRunRow["status"], currentStage: string): PipelineRunRow {
+  return {
+    id: "run-1",
+    definitionId: "def-1",
+    conversationId: "conv-1",
+    status,
+    currentStage,
+    iteration: 0,
+    stageOutputs: {},
+    failureReason: null,
+    idempotencyKey: "k1",
+    createdAt: new Date("2026-09-12T00:00:00Z"),
+  };
+}
+
 function harness(decision: PipelineGateDecision) {
   const notifyConversation = vi.fn().mockResolvedValue(undefined);
   const runStore = mock<PipelineRunStore>();
@@ -71,40 +87,21 @@ function harness(decision: PipelineGateDecision) {
 }
 
 /** The memoized `resolve-gate` step result. */
-function resolved(outcome: ResolveGateOutcome, retried = false) {
+function resolved(outcome: ResolveGateOutcome, retried: boolean) {
   return { id: "resolve-gate", handler: () => ({ outcome, retried }) };
 }
 
 type FailureCtx = {
   event: { data: { event: { data: ReturnType<typeof eventData> } } };
   error: Error;
-  step: { run: (id: string, fn: () => unknown) => unknown };
+  step: ReturnType<typeof directStep>;
 };
 
-function failureCtx(decision: PipelineGateDecision): FailureCtx {
+function failureCtx(decision: PipelineGateDecision, failingStep: string | null): FailureCtx {
   return {
     event: { data: { event: { data: eventData(decision) } } },
     error: new TypeError("connection terminated"),
-    step: { run: (_id, fn) => fn() },
-  };
-}
-
-/**
- * A hand-built `step` for driving the handler directly. `run` throws for
- * `failingStep` — a step that failed permanently, which is what the handler's
- * catch has to absorb — returns memoized results by id, and runs every other
- * body inline.
- */
-function directStep(memo: Record<string, unknown>, failingStep: string) {
-  return {
-    run: vi.fn(async (id: string, body: () => Promise<unknown>) => {
-      if (id === failingStep) throw new Error(`step "${id}" failed after retries`);
-      if (id in memo) return memo[id];
-      return body();
-    }),
-    sendEvent: vi.fn().mockResolvedValue({ ids: [] }),
-    sleep: vi.fn().mockResolvedValue(undefined),
-    waitForEvent: vi.fn().mockResolvedValue(null),
+    step: directStep({}, failingStep),
   };
 }
 
@@ -179,7 +176,7 @@ describe("createPipelineGateResolver", () => {
   it("settles the gate, then emits the next stage, and stays quiet on a tapped approval", async () => {
     const { t, notifyConversation } = harness("approved");
 
-    const { result, ctx } = await t.execute({ steps: [resolved(advanced)] });
+    const { result, ctx } = await t.execute({ steps: [resolved(advanced, false)] });
 
     expect(result).toEqual(advanced);
     expect(ctx.step.sendEvent).toHaveBeenNthCalledWith(
@@ -205,7 +202,7 @@ describe("createPipelineGateResolver", () => {
   it("notifies the conversation when a timeout cancels the run, without emitting a stage", async () => {
     const { t, notifyConversation } = harness("timeout_abort");
 
-    const { ctx } = await t.execute({ steps: [resolved({ kind: "cancelled", ...base })] });
+    const { ctx } = await t.execute({ steps: [resolved({ kind: "cancelled", ...base }, false)] });
 
     expect(ctx.step.sendEvent).toHaveBeenCalledTimes(1);
     expect(ctx.step.sendEvent).toHaveBeenCalledWith("emit-gate-settled", expect.anything());
@@ -218,7 +215,7 @@ describe("createPipelineGateResolver", () => {
   it("tells a tap that lost the race it was not applied", async () => {
     const { t, notifyConversation } = harness("approved");
 
-    const { result } = await t.execute({ steps: [resolved(staleCancelled)] });
+    const { result } = await t.execute({ steps: [resolved(staleCancelled, false)] });
 
     expect(result).toEqual(staleCancelled);
     expect(notifyConversation).toHaveBeenCalledWith("conv-1", expect.stringContaining(TOO_LATE));
@@ -229,7 +226,7 @@ describe("createPipelineGateResolver", () => {
     // not then announce that the checkpoint timed out.
     const { t, notifyConversation } = harness("timeout_proceed");
 
-    await t.execute({ steps: [resolved(staleAdvanced)] });
+    await t.execute({ steps: [resolved(staleAdvanced, false)] });
 
     expect(notifyConversation).not.toHaveBeenCalled();
   });
@@ -299,7 +296,7 @@ describe("createPipelineGateResolver", () => {
   it("neither settles nor notifies for a run that does not exist", async () => {
     const { t, notifyConversation } = harness("timeout_abort");
 
-    const { ctx } = await t.execute({ steps: [resolved({ kind: "not_found" })] });
+    const { ctx } = await t.execute({ steps: [resolved({ kind: "not_found" }, false)] });
 
     expect(ctx.step.sendEvent).not.toHaveBeenCalled();
     expect(notifyConversation).not.toHaveBeenCalled();
@@ -307,10 +304,11 @@ describe("createPipelineGateResolver", () => {
 });
 
 describe("createPipelineGateResolver onFailure", () => {
-  it("tells the user a tapped decision didn't apply and leaves the run to its waiter", async () => {
+  it("tells the user a tapped decision didn't apply while the gate is still parked", async () => {
     const { fn, runStore, notifyConversation } = harness("approved");
+    runStore.getRun.mockResolvedValue(runAt("waiting_gate", "approve"));
 
-    await invokeInngestOnFailure<FailureCtx>(fn, failureCtx("approved"));
+    await invokeInngestOnFailure<FailureCtx>(fn, failureCtx("approved", null));
 
     expect(runStore.failRun).not.toHaveBeenCalled();
     expect(notifyConversation).toHaveBeenCalledWith(
@@ -319,11 +317,37 @@ describe("createPipelineGateResolver onFailure", () => {
     );
   });
 
-  it("fails the run when a timeout can't be applied, since no waiter remains", async () => {
-    const { fn, runStore, notifyConversation } = harness("timeout_proceed");
+  it("fails the run when a tap's resolution committed but what follows it couldn't be sent", async () => {
+    // The flip and advance committed; a later emit failed for good. The waiter
+    // may already be cancelled and no stage is scheduled, so nothing else would
+    // ever move the run — and the gate is no longer open to resolve.
+    const { fn, runStore, notifyConversation } = harness("approved");
+    runStore.getRun.mockResolvedValue(runAt("running", "build"));
     runStore.failRun.mockResolvedValue({ kind: "failed", conversationId: "conv-1" });
 
-    await invokeInngestOnFailure<FailureCtx>(fn, failureCtx("timeout_proceed"));
+    await invokeInngestOnFailure<FailureCtx>(fn, failureCtx("approved", null));
+
+    expect(runStore.failRun).toHaveBeenCalledWith(
+      expect.anything(),
+      "run-1",
+      "gate resolution could not be completed (TypeError)",
+    );
+    expect(notifyConversation).toHaveBeenCalledWith(
+      "conv-1",
+      expect.stringContaining("the run has stopped"),
+    );
+    expect(notifyConversation).not.toHaveBeenCalledWith(
+      "conv-1",
+      expect.stringContaining("will resolve on its timeout"),
+    );
+  });
+
+  it("fails the run when a timeout can't be applied, since no waiter remains", async () => {
+    const { fn, runStore, notifyConversation } = harness("timeout_proceed");
+    runStore.getRun.mockResolvedValue(runAt("waiting_gate", "approve"));
+    runStore.failRun.mockResolvedValue({ kind: "failed", conversationId: "conv-1" });
+
+    await invokeInngestOnFailure<FailureCtx>(fn, failureCtx("timeout_proceed", null));
 
     expect(runStore.failRun).toHaveBeenCalledWith(
       expect.anything(),
@@ -338,19 +362,20 @@ describe("createPipelineGateResolver onFailure", () => {
 
   it("stays quiet when the run was already terminal", async () => {
     const { fn, runStore, notifyConversation } = harness("timeout_abort");
+    runStore.getRun.mockResolvedValue(runAt("cancelled", "approve"));
     runStore.failRun.mockResolvedValue({ kind: "already_terminal", status: "cancelled" });
 
-    await invokeInngestOnFailure<FailureCtx>(fn, failureCtx("timeout_abort"));
+    await invokeInngestOnFailure<FailureCtx>(fn, failureCtx("timeout_abort", null));
 
     expect(notifyConversation).not.toHaveBeenCalled();
   });
 
   it("still resolves when the failure notice can't be delivered", async () => {
-    const { fn, notifyConversation } = harness("approved");
-    notifyConversation.mockRejectedValue(new Error("session lookup failed"));
+    const { fn, runStore } = harness("approved");
+    runStore.getRun.mockResolvedValue(runAt("waiting_gate", "approve"));
 
     await expect(
-      invokeInngestOnFailure<FailureCtx>(fn, failureCtx("approved")),
+      invokeInngestOnFailure<FailureCtx>(fn, failureCtx("approved", "notify-tap-failed")),
     ).resolves.toBeUndefined();
   });
 });

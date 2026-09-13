@@ -60,7 +60,7 @@ export function createPipelineGateWaiter(deps: PipelineGateWaiterDeps) {
         // A reminder is a courtesy: one that fails for good is dropped, never
         // allowed to fail the waiter and keep the gate from its timeout action.
         await notifyAfterRetries(
-          (id, body) => step.run(id, body),
+          step,
           `remind-${i}`,
           deps.deliveryRouter,
           conversationId,

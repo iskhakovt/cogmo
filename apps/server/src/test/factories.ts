@@ -2,7 +2,7 @@
  * Shared mock factories for unit tests.
  * Every store interface method is mocked — tests override what they need.
  */
-import type { Inngest } from "inngest";
+import { type Inngest, StepError } from "inngest";
 import { ok } from "neverthrow";
 import { vi } from "vitest";
 import { mock } from "vitest-mock-extended";
@@ -629,6 +629,30 @@ export function makeStepSendEvent(inngest: Pick<Inngest, "send">): StepSendEvent
  */
 export function nullStepSendEvent(): StepSendEvent {
   return (async () => ({ ids: [] })) as unknown as StepSendEvent;
+}
+
+/**
+ * A hand-built `step` for driving a handler directly with `invokeInngestFn` /
+ * `invokeInngestOnFailure`. `run` returns memoized results by id, throws a
+ * `StepError` for `failingStep` — what the SDK throws in the body for a step
+ * that exhausted its retries — and runs every other body inline.
+ *
+ * `InngestTestEngine` can't stand in here: a memoized step that throws
+ * doesn't reject in the body the way a permanently failed step does.
+ */
+export function directStep(memo: Record<string, unknown>, failingStep: string | null) {
+  return {
+    run: vi.fn(async (id: string, body: () => Promise<unknown>) => {
+      if (id === failingStep) {
+        throw new StepError(id, new Error(`step "${id}" failed after retries`));
+      }
+      if (id in memo) return memo[id];
+      return body();
+    }),
+    sendEvent: vi.fn().mockResolvedValue({ ids: [] }),
+    sleep: vi.fn().mockResolvedValue(undefined),
+    waitForEvent: vi.fn().mockResolvedValue(null),
+  };
 }
 
 /**

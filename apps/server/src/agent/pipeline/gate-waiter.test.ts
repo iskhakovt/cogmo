@@ -6,7 +6,7 @@ import {
   pipelineGatePending,
   pipelineGateSettled,
 } from "../../inngest/events.js";
-import { invokeInngestFn, spyOnInngestSend } from "../../test/factories.js";
+import { directStep, invokeInngestFn, spyOnInngestSend } from "../../test/factories.js";
 import { createPipelineGateWaiter, reminderCount, timeoutDecision } from "./gate-waiter.js";
 
 let sendSpy: ReturnType<typeof spyOnInngestSend>;
@@ -31,25 +31,6 @@ function pendingEvent(onTimeout: PipelineGatePendingData["onTimeout"]) {
       timeoutMs: 3_600_000,
       onTimeout,
     },
-  };
-}
-
-/**
- * A hand-built `step` for driving the handler directly. `run` throws for
- * `failingStep` — a step that failed permanently, which is what the handler's
- * catch has to absorb — returns memoized results by id, and runs every other
- * body inline.
- */
-function directStep(memo: Record<string, unknown>, failingStep: string) {
-  return {
-    run: vi.fn(async (id: string, body: () => Promise<unknown>) => {
-      if (id === failingStep) throw new Error(`step "${id}" failed after retries`);
-      if (id in memo) return memo[id];
-      return body();
-    }),
-    sendEvent: vi.fn().mockResolvedValue({ ids: [] }),
-    sleep: vi.fn().mockResolvedValue(undefined),
-    waitForEvent: vi.fn().mockResolvedValue(null),
   };
 }
 

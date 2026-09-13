@@ -9,10 +9,48 @@ describe("compileOutputSchema", () => {
     ["draft-07", { $schema: "http://json-schema.org/draft-07/schema#", ...OBJECT }],
     ["draft 2019-09", { $schema: "https://json-schema.org/draft/2019-09/schema", ...OBJECT }],
     ["draft 2020-12", { $schema: "https://json-schema.org/draft/2020-12/schema", ...OBJECT }],
+    ["draft-06", { $schema: "http://json-schema.org/draft-06/schema#", ...OBJECT }],
+    ["https draft-07", { $schema: "https://json-schema.org/draft-07/schema#", ...OBJECT }],
+    [
+      "draft-07 without the fragment",
+      { $schema: "http://json-schema.org/draft-07/schema", ...OBJECT },
+    ],
+    ["https draft-06", { $schema: "https://json-schema.org/draft-06/schema", ...OBJECT }],
+    ["http draft 2020-12", { $schema: "http://json-schema.org/draft/2020-12/schema", ...OBJECT }],
+    [
+      "draft 2019-09 with a fragment",
+      { $schema: "https://json-schema.org/draft/2019-09/schema#", ...OBJECT },
+    ],
   ])("compiles a schema with %s into a working validator", (_label, schema) => {
     const validate = compileOutputSchema(schema)._unsafeUnwrap();
     expect(validate({ title: "Fix login" })).toBe(true);
     expect(validate({})).toBe(false);
+  });
+
+  it("applies the declared dialect's keywords", () => {
+    // `exclusiveMinimum` is a boolean modifier in draft-04 but a number from draft-06 on.
+    const validate = compileOutputSchema({
+      $schema: "http://json-schema.org/draft-06/schema#",
+      type: "object",
+      properties: { hours: { type: "number", exclusiveMinimum: 0 } },
+    })._unsafeUnwrap();
+    expect(validate({ hours: 0 })).toBe(false);
+    expect(validate({ hours: 1 })).toBe(true);
+  });
+
+  it("names draft-04 as unsupported rather than as an unknown dialect", () => {
+    const result = compileOutputSchema({
+      $schema: "http://json-schema.org/draft-04/schema#",
+      ...OBJECT,
+    });
+    expect(result._unsafeUnwrapErr()).toBe(
+      "declares JSON Schema draft-04, which isn't supported — use draft-06 or later",
+    );
+  });
+
+  it("reads as a sentence after its subject", () => {
+    const result = compileOutputSchema({ type: "not-a-type" });
+    expect(result._unsafeUnwrapErr()).toMatch(/^is not a valid JSON Schema: /);
   });
 
   it("reports a schema that isn't valid JSON Schema", () => {

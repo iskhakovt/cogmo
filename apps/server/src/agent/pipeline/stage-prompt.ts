@@ -12,13 +12,22 @@
 import type { StageOutputs } from "./run-types.js";
 import type { PipelineDefinition, Stage } from "./types.js";
 
+/** A `<` that would start a handoff tag — opening or closing, any case or spacing. */
+const HANDOFF_TAG_START = /<(?=\s*\/?\s*handoff\b)/gi;
+
 /**
- * Neutralise anything that would read as a handoff tag — opening or closing,
- * whatever its case or spacing — so a handoff can neither end its own block
- * early nor fake a block attributed to another stage.
+ * Neutralise anything that would read as a handoff tag, so a handoff can
+ * neither end its own block early nor fake a block attributed to another
+ * stage. Text gets a backslash after the `<`. JSON gets the `<` as `<`:
+ * in JSON a `<` can only sit inside a string, where that escape is valid and
+ * parses back to the same value.
  */
-function escapeHandoff(text: string): string {
-  return text.replace(/<(\s*\/?\s*handoff\b)/gi, "<\\$1");
+function escapeTextHandoff(text: string): string {
+  return text.replace(HANDOFF_TAG_START, "<\\");
+}
+
+function escapeJsonHandoff(json: string): string {
+  return json.replace(HANDOFF_TAG_START, "\\u003c");
 }
 
 export function buildStagePrompt(args: {
@@ -54,8 +63,10 @@ export function buildStagePrompt(args: {
     // the boundary that actually limits what a misled stage can do.
     const rendered = handoffs.map(([stageId, artifact]) => {
       const body =
-        artifact.kind === "text" ? artifact.text : JSON.stringify(artifact.value, null, 2);
-      return `<handoff stage="${stageId}">\n${escapeHandoff(body)}\n</handoff>`;
+        artifact.kind === "text"
+          ? escapeTextHandoff(artifact.text)
+          : escapeJsonHandoff(JSON.stringify(artifact.value, null, 2));
+      return `<handoff stage="${stageId}">\n${body}\n</handoff>`;
     });
     sections.push(
       "## Outputs from earlier stages\n\n" +

@@ -274,7 +274,6 @@ export interface PipelineRunWithDefinition {
   definition: PipelineDefinitionRow;
 }
 
-/** Conditional-transition result shared by the run store's status mutations. */
 /**
  * Where a run was when a conditional mutation found it elsewhere, read under
  * the row lock that decided `stale`. A step re-run after its own commit uses

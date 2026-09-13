@@ -56,8 +56,6 @@ export async function extractStageArtifact(args: {
       detail: `output schema must have top-level "type": "object", got ${JSON.stringify(output.schema.type)}`,
     });
   }
-  // One Ajv per extraction: a shared instance caches every compiled schema by
-  // object identity and refuses a second schema registering the same `$id`.
   const compiled = compileOutputSchema(output.schema);
   if (compiled.isErr()) {
     return err({ kind: "artifact_invalid", detail: `output schema ${compiled.error}` });

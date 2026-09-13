@@ -30,10 +30,6 @@ export interface ValidationContext {
   knownEventSources: ReadonlyArray<string>;
 }
 
-// One process-wide Ajv for meta-schema checks. `strict: false` matches the
-// skills runner's instance — compiler-emitted schemas routinely carry
-// harmless annotations (title, examples) that strict mode rejects.
-
 /**
  * Validate a structurally-valid definition against the deterministic rules.
  * Returns all issues found (never throws on bad input) — an empty array

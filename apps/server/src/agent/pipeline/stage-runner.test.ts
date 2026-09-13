@@ -4,6 +4,7 @@ import { mock } from "vitest-mock-extended";
 import { inngest } from "../../inngest/client.js";
 import { pipelineStageDue, responseReady } from "../../inngest/events.js";
 import {
+  directStep,
   fakeRunInTx,
   invokeInngestFn,
   invokeInngestOnFailure,
@@ -71,7 +72,7 @@ function stageDue(stageId: string, iteration = 0, originConversationId?: string)
 type FailureCtx = {
   event: { data: { event: { data: { runId: string; stageId: string; iteration: number } } } };
   error: Error;
-  step: { run: (id: string, fn: () => unknown) => unknown };
+  step: { run: (id: string, fn: () => Promise<unknown>) => Promise<unknown> };
 };
 
 function harness(outcome?: AgenticStageOutcome) {
@@ -87,25 +88,6 @@ function harness(outcome?: AgenticStageOutcome) {
     executeAgenticStage,
   });
   return { fn, runStore, notifyConversation, executeAgenticStage };
-}
-
-/**
- * A hand-built `step` for driving the handler directly. `run` throws for
- * `failingStep` — a step that failed permanently, which is what the handler's
- * catch has to absorb — returns memoized results by id, and runs every other
- * body inline.
- */
-function directStep(memo: Record<string, unknown>, failingStep: string) {
-  return {
-    run: vi.fn(async (id: string, body: () => Promise<unknown>) => {
-      if (id === failingStep) throw new Error(`step "${id}" failed after retries`);
-      if (id in memo) return memo[id];
-      return body();
-    }),
-    sendEvent: vi.fn().mockResolvedValue({ ids: [] }),
-    sleep: vi.fn().mockResolvedValue(undefined),
-    waitForEvent: vi.fn().mockResolvedValue(null),
-  };
 }
 
 describe("createPipelineStageRunner", () => {
@@ -383,7 +365,7 @@ describe("createPipelineStageRunner", () => {
   describe("recovery after a step committed but its result was lost", () => {
     // The store reports where the run is under the row lock that decided
     // `stale`, so recovery decides from the memoized step result alone.
-    const at = (status: PipelineRunStatus, currentStage: string, iteration = 0) => ({
+    const at = (status: PipelineRunStatus, currentStage: string, iteration: number) => ({
       kind: "stale" as const,
       status,
       currentStage,
@@ -392,7 +374,7 @@ describe("createPipelineStageRunner", () => {
 
     it("re-sends gate.pending when the park had already committed for this gate", async () => {
       const { fn, runStore } = harness();
-      runStore.transitionStatus.mockResolvedValue(at("waiting_gate", "approve"));
+      runStore.transitionStatus.mockResolvedValue(at("waiting_gate", "approve", 0));
       const t = new InngestTestEngine({ function: fn, events: [stageDue("approve")] });
 
       const { result, ctx } = await t.execute({
@@ -408,7 +390,7 @@ describe("createPipelineStageRunner", () => {
 
     it("stays skipped when the run is parked somewhere else", async () => {
       const { fn, runStore } = harness();
-      runStore.transitionStatus.mockResolvedValue(at("waiting_gate", "sign-off"));
+      runStore.transitionStatus.mockResolvedValue(at("waiting_gate", "sign-off", 0));
       const t = new InngestTestEngine({ function: fn, events: [stageDue("approve")] });
 
       const { result, ctx } = await t.execute({
@@ -421,7 +403,7 @@ describe("createPipelineStageRunner", () => {
 
     it("re-sends the next stage when the advance had already committed", async () => {
       const { fn, runStore } = harness();
-      runStore.advanceStage.mockResolvedValue(at("running", "approve"));
+      runStore.advanceStage.mockResolvedValue(at("running", "approve", 0));
       const t = new InngestTestEngine({ function: fn, events: [stageDue("draft")] });
 
       const { result, ctx } = await t.execute({
@@ -437,7 +419,7 @@ describe("createPipelineStageRunner", () => {
 
     it("sends the completion notice when the completion had already committed", async () => {
       const { fn, runStore, notifyConversation } = harness();
-      runStore.completeRun.mockResolvedValue(at("completed", "build"));
+      runStore.completeRun.mockResolvedValue(at("completed", "build", 0));
       const t = new InngestTestEngine({ function: fn, events: [stageDue("build")] });
 
       const { result } = await t.execute({
@@ -466,7 +448,7 @@ describe("createPipelineStageRunner", () => {
 
     it("stays skipped when another delivery moved the run past the next stage", async () => {
       const { fn, runStore } = harness();
-      runStore.advanceStage.mockResolvedValue(at("running", "build"));
+      runStore.advanceStage.mockResolvedValue(at("running", "build", 0));
       const t = new InngestTestEngine({ function: fn, events: [stageDue("draft")] });
 
       const { result, ctx } = await t.execute({
@@ -517,15 +499,15 @@ describe("createPipelineStageRunner", () => {
   it("onFailure still resolves when the failure notice can't be delivered", async () => {
     const { fn, runStore, notifyConversation } = harness();
     runStore.failRun.mockResolvedValue({ kind: "failed", conversationId: "conv-1" });
-    notifyConversation.mockRejectedValue(new Error("session lookup failed"));
 
     await expect(
       invokeInngestOnFailure<FailureCtx>(fn, {
         event: { data: { event: { data: { runId: RUN_ID, stageId: "draft", iteration: 0 } } } },
         error: new Error("boom"),
-        step: { run: (_id, body) => body() },
+        step: directStep({}, "notify-failure"),
       }),
     ).resolves.toBeUndefined();
     expect(runStore.failRun).toHaveBeenCalled();
+    expect(notifyConversation).not.toHaveBeenCalled();
   });
 });
