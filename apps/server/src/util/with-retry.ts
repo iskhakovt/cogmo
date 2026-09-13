@@ -56,6 +56,13 @@ export interface RetryOptions {
    * the predicate side-effect-free.
    */
   shouldRetry?: (err: unknown) => boolean;
+  /**
+   * Retry even when `RETRY_DISABLED` is set. For retries that are part of a
+   * concurrency contract rather than a mask over transient failures — the
+   * transactor's 40001 retry is how concurrent transactions resolve, so tests
+   * that run them in parallel need it as much as production does.
+   */
+  ignoreRetryDisabled?: boolean;
 }
 
 const DEFAULT_RETRIES = 3;
@@ -71,7 +78,7 @@ export function withRetry<T>(fn: () => Promise<T>, opts?: RetryOptions): Promise
   // Test-only escape hatch — read at call time so `vi.stubEnv` works.
   // Stays out of the typed env schema because it's a test concern, not
   // production config.
-  if (process.env.RETRY_DISABLED === "true") {
+  if (process.env.RETRY_DISABLED === "true" && opts?.ignoreRetryDisabled !== true) {
     return fn();
   }
 

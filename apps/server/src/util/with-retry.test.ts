@@ -232,4 +232,17 @@ describe("withRetry", () => {
       vi.unstubAllEnvs();
     }
   });
+
+  it("retries despite RETRY_DISABLED when ignoreRetryDisabled is set", async () => {
+    vi.stubEnv("RETRY_DISABLED", "true");
+    try {
+      const fn = vi.fn().mockRejectedValueOnce(new Error("conflict")).mockResolvedValue("ok");
+      await expect(
+        withRetry(fn, { retries: 2, minTimeoutMs: 1, maxTimeoutMs: 5, ignoreRetryDisabled: true }),
+      ).resolves.toBe("ok");
+      expect(fn).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });

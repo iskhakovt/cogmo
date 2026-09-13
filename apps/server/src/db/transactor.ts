@@ -57,6 +57,7 @@ export function transactor(db: Database): Transactor {
       minTimeoutMs: 5,
       maxTimeoutMs: 50,
       shouldRetry: isSerializationFailure,
+      ignoreRetryDisabled: true,
       context: "tx-serialization-retry",
     });
 }
