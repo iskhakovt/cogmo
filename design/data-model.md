@@ -22,6 +22,8 @@ Tables are documented in the design doc that owns their domain:
 | `core_memory_blocks` | [agents.md](agents.md) | Structured persistent notes (user profile, projects). Upsert by (user_id, key). Always in system prompt. |
 | `conversation_summaries` | [context-management.md](context-management.md) | Durable output of the summarize compaction strategy. Append-only overlay on `messages` — `through_message_id` names the last row the summary stands in for, and the turn loader drops that prefix in favour of one synthetic user message. `source` distinguishes the 80%-budget path from `/compact`. UNIQUE(conversation_id, through_message_id) is the idempotency key for the Inngest write step. |
 | `aliases` | [transport/sessions.md](transport/sessions.md) | Human-friendly conversation names ('work', 'shopping'). Scoped per user (`UNIQUE(user_id, alias)`). Set via `transport.conversations.setAlias` (`/name <alias>` in Telegram). |
+| `pipeline_definitions` | [pipelines.md](pipelines.md) | Versioned user-defined pipeline definitions (free-text source + compiled JSONB; immutable except `active`). |
+| `pipeline_runs` | [pipelines.md](pipelines.md) | Pipeline run state — pinned definition version, the run's own conversation, status, current stage and loop iteration, typed stage outputs, the latest gate's winning resolution, the `start_pipeline` call's idempotency key. |
 
 ## New Tables (Setup Infrastructure) `[confirmed]`
 
@@ -51,8 +53,6 @@ Design sketches — added via Drizzle migrations when their phase begins.
 | `mcp_servers` | 2 | MCP server configs (transport, config blob, enabled, approval). See [integrations/mcp.md](integrations/mcp.md). |
 | `mcp_server_tools` | 2 | Per-tool schema hash + approval state. Cascades from `mcp_servers`. |
 | `skills` | 3 | Skill library metadata. Code on filesystem, descriptions for retrieval. |
-| `pipeline_definitions` | 8 | Versioned user-defined pipeline definitions (free-text source + compiled JSONB; immutable except `active`). See [pipelines.md](pipelines.md). |
-| `pipeline_runs` | 8 | Pipeline run state — pinned definition version, current stage, typed stage outputs, wait keys. See [pipelines.md](pipelines.md). |
 
 ## Hindsight Tables (Managed Externally) `[confirmed]`
 

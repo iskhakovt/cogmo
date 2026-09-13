@@ -85,7 +85,7 @@ describe("createScheduledTaskFireHandler", () => {
 
     expect(d.transportStore.persistInbound).toHaveBeenCalledWith(expect.anything(), {
       source: "scheduled",
-      scheduledFireKey: `${baseEvent.data.taskId}:${baseEvent.data.scheduledFor}`,
+      idempotencyKey: `${baseEvent.data.taskId}:${baseEvent.data.scheduledFor}`,
       conversationId: "conv-existing",
       content: buildSyntheticInboundContent(baseEvent.data.scheduledFor, baseEvent.data.prompt),
       platformTs: new Date(baseEvent.data.scheduledFor),
@@ -163,7 +163,7 @@ describe("createScheduledTaskFireHandler", () => {
     // Synthetic inbound on the new conversation, no originating session
     expect(d.transportStore.persistInbound).toHaveBeenCalledWith(expect.anything(), {
       source: "scheduled",
-      scheduledFireKey: `${baseEvent.data.taskId}:${baseEvent.data.scheduledFor}`,
+      idempotencyKey: `${baseEvent.data.taskId}:${baseEvent.data.scheduledFor}`,
       conversationId: "conv-fresh",
       content: buildSyntheticInboundContent(baseEvent.data.scheduledFor, baseEvent.data.prompt),
       platformTs: new Date(baseEvent.data.scheduledFor),

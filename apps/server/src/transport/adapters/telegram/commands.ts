@@ -13,6 +13,7 @@ import {
   isCoreCompartment,
   MemoryTrustSchema,
 } from "../../../agent/evolution/memory-extraction-schema.js";
+import type { PipelineRunStatus } from "../../../agent/pipeline/store/index.js";
 import type { Profile } from "../../../agent/store/index.js";
 import { type ProfileMemoryScope, ProfileMemoryScopeSchema } from "../../../agent/store/schema.js";
 import { SERVER_NAME_RE } from "../../../mcp/config.js";
@@ -526,6 +527,76 @@ export async function handlePlanCallback(
     };
   }
   return { editText: "❌ Plan cancelled.", toast: "Cancelled" };
+}
+
+export interface PipelineGateCallbackOutcome {
+  editText: string;
+  toast: string;
+  /**
+   * Whether the keyboard should go. Yes unless the tapper was rejected: a
+   * rejected tap must not take the buttons away from whoever can use them,
+   * while every other outcome (sent, already resolved, run gone, pipelines
+   * disabled) leaves buttons that can never do anything again.
+   */
+  clearKeyboard: boolean;
+}
+
+/** Why a gate button can't act, told from where the run is. */
+function gateNotPendingMessage(status: PipelineRunStatus): string {
+  return match(status)
+    .with(
+      "waiting_gate",
+      () => "This button is from an earlier checkpoint. Use the buttons on the latest one.",
+    )
+    .with(
+      "running",
+      "queued",
+      "waiting_event",
+      () => "This checkpoint was already decided, and the pipeline has moved on.",
+    )
+    .with("completed", () => "This pipeline run has already finished.")
+    .with("cancelled", () => "This pipeline run was cancelled.")
+    .with("failed", () => "This pipeline run stopped after a failure.")
+    .exhaustive();
+}
+
+/**
+ * Pure handler for Approve / Cancel taps on a pipeline gate keyboard.
+ * Identity, the gate token and the parked-gate check live in
+ * `transport.pipelines`; this only renders what the adapter writes back over
+ * the keyboard. The text says the decision was sent, not that it won: a tap
+ * can still lose to the gate's own timeout, and the resolver reports that.
+ */
+export async function handlePipelineGateCallback(
+  transport: Transport,
+  parsed: { runId: string; action: "approve" | "cancel"; token: string },
+  tapperPlatformHandle: string,
+): Promise<PipelineGateCallbackOutcome> {
+  const res = await transport.pipelines.resolveGate(
+    parsed.runId,
+    parsed.token,
+    parsed.action,
+    tapperPlatformHandle,
+  );
+  if (res.isErr()) {
+    return {
+      editText: errorMessage(res.error),
+      toast: errorMessage(res.error),
+      clearKeyboard: res.error.code !== "identity_rejected",
+    };
+  }
+  const { pipelineName, stageId } = res.value;
+  return parsed.action === "approve"
+    ? {
+        editText: `✅ Approval sent for checkpoint "${stageId}" of pipeline "${pipelineName}".`,
+        toast: "Approved",
+        clearKeyboard: true,
+      }
+    : {
+        editText: `❌ Cancellation sent for checkpoint "${stageId}" of pipeline "${pipelineName}".`,
+        toast: "Cancelling",
+        clearKeyboard: true,
+      };
 }
 
 export interface SkillsApprovalCallbackOutcome {
@@ -2086,6 +2157,12 @@ function errorMessage(err: TransportError): string {
       return `Skill deploy ${shortenId(err.pendingId)} not found.`;
     case "skill_deploy_not_pending":
       return `This deploy can't be acted on (status: ${err.status}).`;
+    case "pipelines_disabled":
+      return "Pipelines aren't wired in this deployment.";
+    case "pipeline_run_not_found":
+      return `No pipeline run with id "${shortenId(err.runId)}".`;
+    case "pipeline_gate_not_pending":
+      return gateNotPendingMessage(err.status);
     case "skill_deploy_register_failed":
       return `Approve failed: ${err.reason}`;
     case "mcp_disabled":

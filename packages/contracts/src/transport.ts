@@ -17,6 +17,7 @@ import type {
   CodingAutoapproveMode,
   McpServerApprovalStatus,
   McpTransportKind,
+  PipelineRunStatus,
   SkillRiskTier,
   SkillTier,
   VoiceMode,
@@ -62,6 +63,9 @@ export type TransportError =
   | { code: "skill_deploy_not_found"; pendingId: string }
   | { code: "skill_deploy_not_pending"; pendingId: string; status: string }
   | { code: "skill_deploy_register_failed"; pendingId: string; reason: string }
+  | { code: "pipelines_disabled" }
+  | { code: "pipeline_run_not_found"; runId: string }
+  | { code: "pipeline_gate_not_pending"; runId: string; status: PipelineRunStatus }
   | { code: "mcp_disabled" }
   | { code: "mcp_server_not_found"; serverId: string }
   | { code: "mcp_server_name_taken"; name: string }

@@ -233,12 +233,14 @@ describe("withRetry", () => {
     }
   });
 
-  it("retries despite RETRY_DISABLED when ignoreRetryDisabled is set", async () => {
+  it("keeps an essential retry when RETRY_DISABLED is set", async () => {
+    // A retry that is part of the operation's contract — resolving a lost
+    // race, not smoothing over a blip — must behave in tests as in production.
     vi.stubEnv("RETRY_DISABLED", "true");
     try {
-      const fn = vi.fn().mockRejectedValueOnce(new Error("conflict")).mockResolvedValue("ok");
+      const fn = vi.fn().mockRejectedValueOnce(new Error("lost the race")).mockResolvedValue("ok");
       await expect(
-        withRetry(fn, { retries: 2, minTimeoutMs: 1, maxTimeoutMs: 5, ignoreRetryDisabled: true }),
+        withRetry(fn, { retries: 2, minTimeoutMs: 1, maxTimeoutMs: 5, essential: true }),
       ).resolves.toBe("ok");
       expect(fn).toHaveBeenCalledTimes(2);
     } finally {

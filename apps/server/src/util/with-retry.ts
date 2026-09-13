@@ -57,12 +57,12 @@ export interface RetryOptions {
    */
   shouldRetry?: (err: unknown) => boolean;
   /**
-   * Retry even when `RETRY_DISABLED` is set. For retries that are part of a
-   * concurrency contract rather than a mask over transient failures — the
-   * transactor's 40001 retry is how concurrent transactions resolve, so tests
-   * that run them in parallel need it as much as production does.
+   * The retry is part of the operation's contract rather than smoothing over
+   * a transient failure — the transactor's `40001` retry, which is how a
+   * REPEATABLE READ writer resolves a lost race. `RETRY_DISABLED` leaves an
+   * essential retry on, so tests see the same behaviour production does.
    */
-  ignoreRetryDisabled?: boolean;
+  essential?: boolean;
 }
 
 const DEFAULT_RETRIES = 3;
@@ -72,13 +72,14 @@ const DEFAULT_MAX_TIMEOUT_MS = 10_000;
 export function withRetry<T>(fn: () => Promise<T>, opts?: RetryOptions): Promise<T> {
   // Tests opt out via RETRY_DISABLED so transient failures surface as
   // hard test failures instead of being silently smoothed over by a
-  // retry. Retry behaviour itself is exercised in with-retry.test.ts;
+  // retry. Essential retries (see `RetryOptions.essential`) stay on.
+  // Retry behaviour itself is exercised in with-retry.test.ts;
   // integration and e2e tests verify the pipeline, not the retry layer.
   // Production never sets this var.
   // Test-only escape hatch — read at call time so `vi.stubEnv` works.
   // Stays out of the typed env schema because it's a test concern, not
   // production config.
-  if (process.env.RETRY_DISABLED === "true" && opts?.ignoreRetryDisabled !== true) {
+  if (process.env.RETRY_DISABLED === "true" && opts?.essential !== true) {
     return fn();
   }
 

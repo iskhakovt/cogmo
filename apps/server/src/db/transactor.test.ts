@@ -100,11 +100,12 @@ describe("transactor", () => {
     expect(calls.every((c) => c.isolationLevel === "repeatable read")).toBe(true);
   });
 
-  it("retries a 40001 even when RETRY_DISABLED is set", async () => {
-    // RETRY_DISABLED stops tests smoothing over transient transport failures.
-    // A serialization failure is not one: retrying it is how concurrent
-    // transactions resolve, so tests that run transactions in parallel need
-    // the same retry production has.
+  it("still retries a 40001 when RETRY_DISABLED is set", async () => {
+    // RETRY_DISABLED exists to surface transient infrastructure failures in
+    // integration tests. A serialization failure is how REPEATABLE READ
+    // resolves concurrent writers, so the retry is part of the contract —
+    // without it, parallel test forks booting the app fail on a race that
+    // production absorbs.
     vi.stubEnv("RETRY_DISABLED", "true");
     const { db, calls } = mockDb([
       async () => {

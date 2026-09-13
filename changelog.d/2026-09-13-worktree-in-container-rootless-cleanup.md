@@ -1,0 +1,3 @@
+**`worktree-in-container.integration.test.ts` cleans up under rootless Docker.** The test hands the files its container wrote through the bind mount back to the owner of the mount root, as the container sees it (`stat -c %u:%g /workspace`). Under rootful Docker that owner is the host test uid, and under rootless Docker it is `0`. Chowning to the host uid from inside a rootless container would map the files onto a subordinate uid the host user cannot delete, so `afterAll` could not remove its temp dir.
+
+`design/agent-resilience.md` gives the transactor's serialization-retry budget as up to two retries, matching `.claude/rules/store-pattern.md`.
