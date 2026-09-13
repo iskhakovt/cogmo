@@ -32,6 +32,7 @@
 import { constants as fsConstants, readFileSync } from "node:fs";
 import { access, mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
+import { setTimeout as sleepFor } from "node:timers/promises";
 import { HeadBucketCommand, type S3Client } from "@aws-sdk/client-s3";
 import { sql } from "drizzle-orm";
 import semver from "semver";
@@ -55,7 +56,8 @@ const BOOT_PROBE_MAX_DELAY_MS = 10_000;
 export interface BootClock {
   /** Monotonic milliseconds; only differences are meaningful. */
   now(): number;
-  sleep(ms: number): Promise<void>;
+  /** Resolves after `ms`; rejects early, clearing its timer, once `signal` aborts. */
+  sleep(ms: number, signal: AbortSignal): Promise<void>;
   /** A signal that aborts after `ms`. */
   timeout(ms: number): AbortSignal;
 }
@@ -64,9 +66,24 @@ export const systemBootClock: BootClock = {
   // Monotonic: a wall-clock step at boot (NTP correcting an RTC-less host)
   // must not end the deadline early or stretch it.
   now: () => performance.now(),
-  sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
+  sleep: (ms, signal) => sleepFor(ms, undefined, { signal }),
   timeout: (ms) => AbortSignal.timeout(ms),
 };
+
+/**
+ * What every boot check runs against: the clock, and a signal that aborts
+ * once the check is no longer wanted — a check run alongside it has already
+ * failed boot.
+ */
+export interface BootProbeContext {
+  clock: BootClock;
+  cancel: AbortSignal;
+}
+
+/** Context for a check that runs on its own, which nothing cancels. */
+export function independentProbeContext(): BootProbeContext {
+  return { clock: systemBootClock, cancel: new AbortController().signal };
+}
 
 type ProbeAttempt<T> = { conclusive: true; value: T } | { conclusive: false; reason: string };
 
@@ -85,12 +102,17 @@ function conclusive<T>(value: T): ProbeAttempt<T> {
  * as long as the time left. Once no more than `BOOT_PROBE_MIN_DELAY_MS`
  * remains, the attempt that just failed is the last: waiting would only reach
  * the deadline.
+ *
+ * Once `context.cancel` aborts, the attempt in flight is aborted with it and
+ * the loop stops at its next attempt or wait, clearing the wait's timer, so
+ * nothing keeps retrying for a boot that has already failed.
  */
 async function retryUntilConclusive<T>(
   label: string,
-  clock: BootClock,
+  context: BootProbeContext,
   attempt: (signal: AbortSignal) => Promise<ProbeAttempt<T>>,
 ): Promise<T> {
+  const { clock, cancel } = context;
   const deadline = clock.now() + BOOT_PROBE_DEADLINE_MS;
   const failClosed = (reason: string) =>
     new BootCheckError(
@@ -100,11 +122,17 @@ async function retryUntilConclusive<T>(
   let delay = BOOT_PROBE_MIN_DELAY_MS;
   let lastReason = "no attempt completed";
   for (;;) {
+    if (cancel.aborted) {
+      throw new BootCheckError(`${label} abandoned: another boot check already failed.`);
+    }
     const remaining = deadline - clock.now();
     if (remaining <= 0) throw failClosed(lastReason);
-    const result = await attempt(clock.timeout(Math.min(BOOT_PROBE_ATTEMPT_TIMEOUT_MS, remaining)));
+    const result = await attempt(
+      AbortSignal.any([clock.timeout(Math.min(BOOT_PROBE_ATTEMPT_TIMEOUT_MS, remaining)), cancel]),
+    );
     if (result.conclusive) return result.value;
     lastReason = result.reason;
+    if (cancel.aborted) continue;
     const left = deadline - clock.now();
     if (left <= BOOT_PROBE_MIN_DELAY_MS) throw failClosed(lastReason);
     const wait = Math.min(
@@ -115,7 +143,12 @@ async function retryUntilConclusive<T>(
       { label, reason: result.reason, retryInMs: wait },
       `${label} inconclusive — retrying`,
     );
-    await clock.sleep(wait);
+    try {
+      await clock.sleep(wait, cancel);
+    } catch (err) {
+      // A cancelled wait ends the loop at the check above.
+      if (!cancel.aborted) throw err;
+    }
     delay = Math.min(delay * 2, BOOT_PROBE_MAX_DELAY_MS);
   }
 }
@@ -252,8 +285,12 @@ function awsServiceError(
  * come from a metadata endpoint that can be briefly slow. Network errors,
  * timeouts, 5xx, 429 and temporary redirects are retried up to the deadline.
  */
-export async function checkS3Bucket(s3: S3Client, bucket: string, clock: BootClock): Promise<void> {
-  await retryUntilConclusive(`S3 bucket "${bucket}" check`, clock, async (signal) => {
+export async function checkS3Bucket(
+  s3: S3Client,
+  bucket: string,
+  context: BootProbeContext,
+): Promise<void> {
+  await retryUntilConclusive(`S3 bucket "${bucket}" check`, context, async (signal) => {
     try {
       await abortable(
         s3.send(new HeadBucketCommand({ Bucket: bucket }), { abortSignal: signal }),
@@ -315,9 +352,9 @@ export async function checkS3Bucket(s3: S3Client, bucket: string, clock: BootClo
 export async function checkHindsightVersion(
   memory: HindsightMemoryProvider,
   range: HindsightCompat,
-  clock: BootClock,
+  context: BootProbeContext,
 ): Promise<void> {
-  const actual = await retryUntilConclusive("hindsight version check", clock, async (signal) => {
+  const actual = await retryUntilConclusive("hindsight version check", context, async (signal) => {
     try {
       return conclusive(await abortable(memory.getServerVersion(signal), signal));
     } catch (err) {
@@ -412,9 +449,8 @@ export async function checkDirWritable(path: string, envVarName: string): Promis
 /** The slice of `fetch` the auth probes use — injected so tests need no server. */
 export type ProbeFetch = (url: string, init?: RequestInit) => Promise<Response>;
 
-export interface BootProbeDeps {
+export interface BootProbeDeps extends BootProbeContext {
   fetch: ProbeFetch;
-  clock: BootClock;
 }
 
 /**
@@ -511,7 +547,7 @@ export async function checkHindsightAuth(
   const shownBase = displayUrl(baseUrl, { redactLastSegment: false });
   const url = serviceUrl(baseUrl, "/v1/default/banks");
   const shownUrl = displayUrl(url, { redactLastSegment: false });
-  await retryUntilConclusive("hindsight auth check", deps.clock, async (signal) => {
+  await retryUntilConclusive("hindsight auth check", deps, async (signal) => {
     const anonymous = await probe(deps.fetch, url, {}, signal);
     if (isSuccess(anonymous)) {
       throw new BootCheckError(
@@ -591,7 +627,7 @@ export async function checkInngestAuth(
   const shownEventsUrl = displayUrl(eventsUrl, { redactLastSegment: false });
   const eventUrl = serviceUrl(baseUrl, `/e/${encodeURIComponent(eventKey)}`);
   const shownEventUrl = displayUrl(eventUrl, { redactLastSegment: true });
-  await retryUntilConclusive("inngest auth check", deps.clock, async (signal) => {
+  await retryUntilConclusive("inngest auth check", deps, async (signal) => {
     const anonymous = await probe(deps.fetch, eventsUrl, {}, signal);
     if (isSuccess(anonymous)) {
       throw new BootCheckError(

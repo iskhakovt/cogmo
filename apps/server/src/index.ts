@@ -47,6 +47,7 @@ import { SUBAGENT_PROMPT_GUIDANCE } from "./agent/subagent/sub-agent-tool-builde
 import { createDefaultTools } from "./agent/tools.js";
 import { createWebTools } from "./agent/web-tools.js";
 import {
+  type BootProbeContext,
   checkDirWritable,
   checkHindsightAuth,
   checkHindsightClientVersion,
@@ -1273,21 +1274,32 @@ export async function bootstrapRuntime(
 async function verifyDependencies(core: CoreDeps): Promise<void> {
   // Independent probes run together, so a certain verdict from one is not
   // held behind another's retry window and the slowest check bounds the wait.
+  // The first failure cancels the rest: boot has already failed, and a caller
+  // that catches it must not have stray retries overlapping its next attempt.
+  const siblings = new AbortController();
+  const context = { clock: systemBootClock, cancel: siblings.signal };
+  const cancelSiblingsOnFailure = (check: Promise<void>) =>
+    check.catch((err: unknown) => {
+      siblings.abort(err);
+      throw err;
+    });
   await Promise.all([
     // Confirm the bucket is reachable + credentials work before tools that
     // depend on it (image generation, file workspace, attachment delivery)
     // start handling traffic. HeadBucket is the cheapest probe.
-    checkS3Bucket(core.s3Client, env.S3_BUCKET, systemBootClock),
-    verifyHindsight(core),
+    cancelSiblingsOnFailure(checkS3Bucket(core.s3Client, env.S3_BUCKET, context)),
+    cancelSiblingsOnFailure(verifyHindsight(core, context)),
     // Inngest, like Hindsight, answers anything on its network when unkeyed.
-    checkInngestAuth(
-      { fetch, clock: systemBootClock },
-      {
-        baseUrl: env.INNGEST_BASE_URL,
-        dev: env.INNGEST_DEV,
-        eventKey: env.INNGEST_EVENT_KEY,
-        signingKey: env.INNGEST_SIGNING_KEY,
-      },
+    cancelSiblingsOnFailure(
+      checkInngestAuth(
+        { fetch, ...context },
+        {
+          baseUrl: env.INNGEST_BASE_URL,
+          dev: env.INNGEST_DEV,
+          eventKey: env.INNGEST_EVENT_KEY,
+          signingKey: env.INNGEST_SIGNING_KEY,
+        },
+      ),
     ),
   ]);
 }
@@ -1299,13 +1311,9 @@ async function verifyDependencies(core: CoreDeps): Promise<void> {
  * banks: against an out-of-range server (0.5.x drops batch items past the
  * first) or one that ignores its key, they would lose memories with no error.
  */
-export async function verifyHindsight(core: CoreDeps): Promise<void> {
-  await checkHindsightAuth(
-    { fetch, clock: systemBootClock },
-    env.HINDSIGHT_URL,
-    env.HINDSIGHT_API_KEY,
-  );
-  await checkHindsightVersion(core.memory, core.hindsightCompat, systemBootClock);
+export async function verifyHindsight(core: CoreDeps, context: BootProbeContext): Promise<void> {
+  await checkHindsightAuth({ fetch, ...context }, env.HINDSIGHT_URL, env.HINDSIGHT_API_KEY);
+  await checkHindsightVersion(core.memory, core.hindsightCompat, context);
 }
 
 /**

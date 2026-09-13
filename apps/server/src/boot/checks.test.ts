@@ -24,6 +24,7 @@ import {
   HindsightCompatSchema,
   loadHindsightCompat,
   type ProbeFetch,
+  systemBootClock,
 } from "./checks.js";
 
 interface FakeClock extends BootClock {
@@ -43,7 +44,8 @@ function fakeClock(): FakeClock {
     sleeps,
     timeouts,
     now: () => now,
-    sleep: async (ms) => {
+    sleep: async (ms, signal) => {
+      if (signal.aborted) throw signal.reason;
       sleeps.push(ms);
       now += ms;
     },
@@ -92,8 +94,16 @@ function neverSettles<T>(clock: FakeClock): Promise<T> {
   return pending;
 }
 
+/** A probe context; `cancel` defaults to a signal nothing aborts. */
+function context(
+  clock: BootClock = fakeClock(),
+  cancel: AbortSignal = new AbortController().signal,
+) {
+  return { clock, cancel };
+}
+
 function deps(fetchFn: ProbeFetch, clock: BootClock = fakeClock()) {
-  return { fetch: fetchFn, clock };
+  return { fetch: fetchFn, ...context(clock) };
 }
 
 function bearer(init: RequestInit | undefined): string | null {
@@ -309,6 +319,81 @@ describe("checkHindsightAuth", () => {
     const fetchFn = probeFetch((_, init) => (bearer(init) === null ? 401 : 500));
 
     await expect(checkHindsightAuth(deps(fetchFn), url, "k")).rejects.toThrow(/HTTP 500/);
+  });
+});
+
+describe("boot check cancellation", () => {
+  const url = "http://hindsight:8888";
+
+  it("stops at its next wait once cancelled, instead of sleeping it out", async () => {
+    const clock = fakeClock();
+    const siblings = new AbortController();
+    let calls = 0;
+    const fetchFn = probeFetch(() => {
+      calls += 1;
+      if (calls === 2) siblings.abort(new Error("S3 check failed"));
+      return new Error("ECONNREFUSED");
+    });
+
+    await expect(
+      checkHindsightAuth({ fetch: fetchFn, ...context(clock, siblings.signal) }, url, "k"),
+    ).rejects.toThrow(/hindsight auth check abandoned: another boot check already failed/);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    expect(clock.sleeps).toEqual([1_000]);
+  });
+
+  it("aborts the request in flight once cancelled", async () => {
+    const clock = fakeClock();
+    const siblings = new AbortController();
+    const fetchFn = vi.fn<ProbeFetch>(
+      (_, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          const signal = expectDefined(init?.signal, "probe signal");
+          signal.addEventListener("abort", () => reject(signal.reason));
+          siblings.abort(new Error("S3 check failed"));
+        }),
+    );
+
+    await expect(
+      checkHindsightAuth({ fetch: fetchFn, ...context(clock, siblings.signal) }, url, "k"),
+    ).rejects.toThrow(/abandoned/);
+    // Ended by the cancellation, not by waiting out the attempt timeout.
+    expect(clock.now()).toBe(0);
+  });
+
+  it("abandons an S3 call that ignores its signal once cancelled", async () => {
+    const clock = fakeClock();
+    const siblings = new AbortController();
+    const s3 = mock<S3Client>();
+    s3.send.mockImplementation((() => {
+      const pending = new Promise(() => undefined);
+      siblings.abort(new Error("hindsight check failed"));
+      return pending;
+    }) as never);
+
+    await expect(checkS3Bucket(s3, "cogmo-files", context(clock, siblings.signal))).rejects.toThrow(
+      /S3 bucket "cogmo-files" check abandoned/,
+    );
+    expect(clock.now()).toBe(0);
+  });
+
+  it("does not probe at all when already cancelled", async () => {
+    const siblings = new AbortController();
+    siblings.abort(new Error("inngest check failed"));
+    const fetchFn = probeFetch(() => 200);
+
+    await expect(
+      checkHindsightAuth({ fetch: fetchFn, ...context(fakeClock(), siblings.signal) }, url, "k"),
+    ).rejects.toThrow(/abandoned/);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("clears the system clock's wait when its signal aborts", async () => {
+    const controller = new AbortController();
+    const waiting = systemBootClock.sleep(60_000, controller.signal);
+    controller.abort(new Error("cancelled"));
+
+    await expect(waiting).rejects.toThrow();
   });
 });
 
@@ -633,7 +718,7 @@ describe("checkS3Bucket", () => {
   it("returns when HeadBucket succeeds, bounding the request with the attempt signal", async () => {
     const s3 = mock<S3Client>();
     s3.send.mockResolvedValue({} as never);
-    await expect(checkS3Bucket(s3, "cogmo-files", fakeClock())).resolves.toBeUndefined();
+    await expect(checkS3Bucket(s3, "cogmo-files", context())).resolves.toBeUndefined();
     expect(s3.send).toHaveBeenCalledWith(expect.any(HeadBucketCommand), {
       abortSignal: expect.any(AbortSignal),
     });
@@ -646,7 +731,7 @@ describe("checkS3Bucket", () => {
       const s3 = mock<S3Client>();
       s3.send.mockRejectedValue(awsError(status));
 
-      const err = await checkS3Bucket(s3, "missing", clock).catch((e: unknown) => e);
+      const err = await checkS3Bucket(s3, "missing", context(clock)).catch((e: unknown) => e);
 
       expect(err).toBeInstanceOf(BootCheckError);
       expect(String(err)).toMatch(new RegExp(`S3 bucket "missing" not reachable.*HTTP ${status}`));
@@ -659,7 +744,7 @@ describe("checkS3Bucket", () => {
     const s3 = mock<S3Client>();
     s3.send.mockRejectedValue(awsError(301, { "x-amz-bucket-region": "eu-west-2" }));
 
-    const err = await checkS3Bucket(s3, "cogmo-files", clock).catch((e: unknown) => e);
+    const err = await checkS3Bucket(s3, "cogmo-files", context(clock)).catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(BootCheckError);
     expect(String(err)).toMatch(/different region than S3_REGION \(the bucket is in eu-west-2\)/);
@@ -672,7 +757,7 @@ describe("checkS3Bucket", () => {
     const s3 = mock<S3Client>();
     s3.send.mockRejectedValueOnce(credentialsProviderError()).mockResolvedValue({} as never);
 
-    await expect(checkS3Bucket(s3, "cogmo-files", clock)).resolves.toBeUndefined();
+    await expect(checkS3Bucket(s3, "cogmo-files", context(clock))).resolves.toBeUndefined();
     expect(clock.sleeps).toEqual([1_000]);
   });
 
@@ -680,7 +765,7 @@ describe("checkS3Bucket", () => {
     const s3 = mock<S3Client>();
     s3.send.mockRejectedValue(credentialsProviderError());
 
-    await expect(checkS3Bucket(s3, "cogmo-files", fakeClock())).rejects.toThrow(
+    await expect(checkS3Bucket(s3, "cogmo-files", context())).rejects.toThrow(
       /within 60s.*S3 credentials could not be loaded.*S3_ACCESS_KEY and S3_SECRET_KEY/,
     );
   });
@@ -690,7 +775,7 @@ describe("checkS3Bucket", () => {
     const s3 = mock<S3Client>();
     s3.send.mockRejectedValueOnce(awsError(307)).mockResolvedValue({} as never);
 
-    await expect(checkS3Bucket(s3, "cogmo-files", clock)).resolves.toBeUndefined();
+    await expect(checkS3Bucket(s3, "cogmo-files", context(clock))).resolves.toBeUndefined();
     expect(clock.sleeps).toEqual([1_000]);
   });
 
@@ -699,7 +784,7 @@ describe("checkS3Bucket", () => {
     const s3 = mock<S3Client>();
     s3.send.mockRejectedValueOnce(awsError(400)).mockResolvedValue({} as never);
 
-    await expect(checkS3Bucket(s3, "cogmo-files", clock)).resolves.toBeUndefined();
+    await expect(checkS3Bucket(s3, "cogmo-files", context(clock))).resolves.toBeUndefined();
     expect(clock.sleeps).toEqual([1_000]);
   });
 
@@ -711,7 +796,7 @@ describe("checkS3Bucket", () => {
       .mockRejectedValueOnce(awsError(503))
       .mockResolvedValue({} as never);
 
-    await expect(checkS3Bucket(s3, "cogmo-files", clock)).resolves.toBeUndefined();
+    await expect(checkS3Bucket(s3, "cogmo-files", context(clock))).resolves.toBeUndefined();
     expect(clock.sleeps).toEqual([1_000, 2_000]);
   });
 
@@ -720,7 +805,7 @@ describe("checkS3Bucket", () => {
     const s3 = mock<S3Client>();
     s3.send.mockRejectedValueOnce(awsError(429)).mockResolvedValue({} as never);
 
-    await expect(checkS3Bucket(s3, "cogmo-files", clock)).resolves.toBeUndefined();
+    await expect(checkS3Bucket(s3, "cogmo-files", context(clock))).resolves.toBeUndefined();
     expect(clock.sleeps).toEqual([1_000]);
   });
 
@@ -730,7 +815,9 @@ describe("checkS3Bucket", () => {
     const s3 = mock<S3Client>();
     s3.send.mockImplementation((() => neverSettles(clock)) as never);
 
-    await expect(checkS3Bucket(s3, "cogmo-files", clock)).rejects.toThrow(/within 60s.*timeout/);
+    await expect(checkS3Bucket(s3, "cogmo-files", context(clock))).rejects.toThrow(
+      /within 60s.*timeout/,
+    );
     expect(clock.now()).toBe(BOOT_PROBE_DEADLINE_MS);
   });
 
@@ -738,7 +825,7 @@ describe("checkS3Bucket", () => {
     const s3 = mock<S3Client>();
     s3.send.mockRejectedValue(new Error("connect ECONNREFUSED"));
 
-    await expect(checkS3Bucket(s3, "cogmo-files", fakeClock())).rejects.toThrow(
+    await expect(checkS3Bucket(s3, "cogmo-files", context())).rejects.toThrow(
       /S3 bucket "cogmo-files" check could not reach a conclusive answer within 60s/,
     );
   });
@@ -754,7 +841,7 @@ describe("checkHindsightVersion", () => {
   const range = ">=0.6.0 <0.7.0";
 
   function check(memory: HindsightMemoryProvider, pin: string = range) {
-    return checkHindsightVersion(memory, pin, fakeClock());
+    return checkHindsightVersion(memory, pin, context());
   }
 
   it("passes when server version satisfies the range at the lower bound", async () => {
@@ -808,7 +895,7 @@ describe("checkHindsightVersion", () => {
     const m = mock<HindsightMemoryProvider>();
     m.getServerVersion.mockRejectedValueOnce(new Error("fetch failed")).mockResolvedValue("0.6.1");
 
-    await expect(checkHindsightVersion(m, range, clock)).resolves.toBeUndefined();
+    await expect(checkHindsightVersion(m, range, context(clock))).resolves.toBeUndefined();
     expect(clock.sleeps).toEqual([1_000]);
   });
 
@@ -817,7 +904,9 @@ describe("checkHindsightVersion", () => {
     const m = mock<HindsightMemoryProvider>();
     m.getServerVersion.mockImplementation(() => neverSettles(clock));
 
-    await expect(checkHindsightVersion(m, range, clock)).rejects.toThrow(/within 60s.*timeout/);
+    await expect(checkHindsightVersion(m, range, context(clock))).rejects.toThrow(
+      /within 60s.*timeout/,
+    );
     expect(clock.now()).toBe(BOOT_PROBE_DEADLINE_MS);
   });
 

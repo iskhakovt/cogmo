@@ -12,11 +12,16 @@
 import { randomBytes } from "node:crypto";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
-import { BootCheckError, checkHindsightAuth, checkInngestAuth, systemBootClock } from "./checks.js";
+import {
+  BootCheckError,
+  checkHindsightAuth,
+  checkInngestAuth,
+  independentProbeContext,
+} from "./checks.js";
 
 const INNGEST_IMAGE = "mirror.gcr.io/inngest/inngest:v1.41.1";
 
-const probeDeps = { fetch, clock: systemBootClock };
+const probeDeps = { fetch, ...independentProbeContext() };
 
 describe("checkHindsightAuth — real Hindsight with ApiKeyTenantExtension", () => {
   it("passes with the configured key", async () => {
