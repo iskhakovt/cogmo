@@ -157,11 +157,11 @@ export async function runAgenticStage(
   const { inboundId } = await steps.run("persist-stage-prompt", () =>
     deps.runInTx(async (tx) => {
       const key = stageInboundKey(runId, stageId, iteration);
-      const existing = await deps.transportStore.findInboundByScheduledFireKey(tx, key);
+      const existing = await deps.transportStore.findInboundByIdempotencyKey(tx, key);
       if (existing) return { inboundId: existing.id };
       const inbound = await deps.transportStore.persistInbound(tx, {
         source: "pipeline",
-        scheduledFireKey: key,
+        idempotencyKey: key,
         conversationId,
         content: prompt,
         platformTs: new Date(),

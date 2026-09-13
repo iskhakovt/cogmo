@@ -44,20 +44,20 @@ export type PersistInboundParams =
     }
   | {
       source: "scheduled";
-      scheduledFireKey: string;
+      idempotencyKey: string;
       conversationId: string;
       content: InboundContent;
       platformTs: Date;
     }
   | {
       /**
-       * A pipeline stage's prompt. `scheduledFireKey` carries the stage
+       * A pipeline stage's prompt. `idempotencyKey` carries the stage
        * cursor `pipeline:<runId>:<stageId>:<iteration>` — the same unique
        * idempotency column scheduled fires use, namespaced so the two key
        * spaces cannot collide.
        */
       source: "pipeline";
-      scheduledFireKey: string;
+      idempotencyKey: string;
       conversationId: string;
       content: InboundContent;
       platformTs: Date;
@@ -170,9 +170,9 @@ export interface TransportStore {
    * Persist a raw inbound message. The `source` discriminator selects which
    * additional fields must be supplied:
    *   - `'user'` → `channelSessionId` (originating session).
-   *   - `'scheduled'` → `scheduledFireKey` (idempotency key
+   *   - `'scheduled'` → `idempotencyKey` (idempotency key
    *     `${taskId}:${scheduledFor}`; UNIQUE WHERE NOT NULL).
-   *   - `'pipeline'` → `scheduledFireKey` (idempotency key
+   *   - `'pipeline'` → `idempotencyKey` (idempotency key
    *     `pipeline:${runId}:${stageId}:${iteration}`; same UNIQUE).
    * The DB check constraint enforces this; the type narrows it at the
    * call site.
@@ -185,9 +185,9 @@ export interface TransportStore {
    * fire-handler to short-circuit a retry that lands after the original
    * tx committed but before Inngest got the step ack.
    */
-  findInboundByScheduledFireKey(
+  findInboundByIdempotencyKey(
     tx: Transaction,
-    scheduledFireKey: string,
+    idempotencyKey: string,
   ): Promise<{ id: string; conversationId: string } | undefined>;
 
   /** Load unbatched inbound messages after a cursor (null = all). */
@@ -550,7 +550,7 @@ export class DrizzleTransportStore implements TransportStore {
           }
         : {
             source: params.source,
-            scheduledFireKey: params.scheduledFireKey,
+            idempotencyKey: params.idempotencyKey,
             conversationId: params.conversationId,
             content: params.content,
             platformTs: params.platformTs,
@@ -560,14 +560,14 @@ export class DrizzleTransportStore implements TransportStore {
     );
   }
 
-  async findInboundByScheduledFireKey(
+  async findInboundByIdempotencyKey(
     tx: Transaction,
-    scheduledFireKey: string,
+    idempotencyKey: string,
   ): Promise<{ id: string; conversationId: string } | undefined> {
     const rows = await tx
       .select({ id: inboundMessages.id, conversationId: inboundMessages.conversationId })
       .from(inboundMessages)
-      .where(eq(inboundMessages.scheduledFireKey, scheduledFireKey))
+      .where(eq(inboundMessages.idempotencyKey, idempotencyKey))
       .limit(1);
     return rows[0];
   }

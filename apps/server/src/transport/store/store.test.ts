@@ -300,13 +300,13 @@ describe("DrizzleTransportStore", () => {
       expect(await tx((trx) => store.getUnbatchedInbound(trx, conversationId, null))).toEqual([]);
     });
 
-    it("persists a scheduled inbound and finds it by scheduledFireKey", async () => {
+    it("persists a scheduled inbound and finds it by idempotencyKey", async () => {
       const { conversationId } = await seedConversation();
 
       const { id } = await tx((trx) =>
         store.persistInbound(trx, {
           source: "scheduled",
-          scheduledFireKey: "task-1:2026-05-14T09:00:00.000Z",
+          idempotencyKey: "task-1:2026-05-14T09:00:00.000Z",
           conversationId,
           content: "morning briefing",
           platformTs: new Date("2026-05-14T09:00:00.000Z"),
@@ -314,25 +314,25 @@ describe("DrizzleTransportStore", () => {
       );
 
       const found = await tx((trx) =>
-        store.findInboundByScheduledFireKey(trx, "task-1:2026-05-14T09:00:00.000Z"),
+        store.findInboundByIdempotencyKey(trx, "task-1:2026-05-14T09:00:00.000Z"),
       );
       expect(found).toEqual({ id, conversationId });
 
       const missing = await tx((trx) =>
-        store.findInboundByScheduledFireKey(trx, "task-1:2026-05-14T10:00:00.000Z"),
+        store.findInboundByIdempotencyKey(trx, "task-1:2026-05-14T10:00:00.000Z"),
       );
       expect(missing).toBeUndefined();
     });
 
-    it("rejects a second scheduled inbound with the same scheduledFireKey", async () => {
+    it("rejects a second scheduled inbound with the same idempotencyKey", async () => {
       // The partial unique index is the DB-level safety net against a
-      // concurrent retry that slips past `findInboundByScheduledFireKey`.
+      // concurrent retry that slips past `findInboundByIdempotencyKey`.
       const { conversationId } = await seedConversation();
       const insert = (key: string) =>
         tx((trx) =>
           store.persistInbound(trx, {
             source: "scheduled",
-            scheduledFireKey: key,
+            idempotencyKey: key,
             conversationId,
             content: "ping",
             platformTs: new Date(),
@@ -343,7 +343,7 @@ describe("DrizzleTransportStore", () => {
       await expect(insert("task-1:2026-05-14T09:00:00.000Z")).rejects.toThrow();
     });
 
-    it("rejects a scheduled inbound without a scheduledFireKey at the DB constraint", async () => {
+    it("rejects a scheduled inbound without a idempotencyKey at the DB constraint", async () => {
       // Type narrowing prevents a TS caller from constructing this shape,
       // but the check constraint must also catch raw inserts (migrations,
       // adhoc psql, future store changes).
@@ -367,14 +367,14 @@ describe("DrizzleTransportStore", () => {
       const { id } = await tx((trx) =>
         store.persistInbound(trx, {
           source: "pipeline",
-          scheduledFireKey: key,
+          idempotencyKey: key,
           conversationId,
           content: "stage prompt",
           platformTs: new Date("2026-09-12T09:00:00.000Z"),
         }),
       );
 
-      expect(await tx((trx) => store.findInboundByScheduledFireKey(trx, key))).toEqual({
+      expect(await tx((trx) => store.findInboundByIdempotencyKey(trx, key))).toEqual({
         id,
         conversationId,
       });
@@ -398,7 +398,7 @@ describe("DrizzleTransportStore", () => {
       await tx((trx) =>
         store.persistInbound(trx, {
           source: "pipeline",
-          scheduledFireKey: "pipeline:run-1:draft:0",
+          idempotencyKey: "pipeline:run-1:draft:0",
           conversationId,
           content: "stage prompt",
           platformTs: new Date(),

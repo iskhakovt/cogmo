@@ -873,7 +873,7 @@ describe("DrizzleAgentStore", () => {
         .insert(inboundMessages)
         .values({
           source: "scheduled",
-          scheduledFireKey: "task-1:2026-09-12T09:00:00.000Z",
+          idempotencyKey: "task-1:2026-09-12T09:00:00.000Z",
           conversationId,
           content: "briefing",
           platformTs: new Date(),
@@ -894,7 +894,7 @@ describe("DrizzleAgentStore", () => {
         .insert(inboundMessages)
         .values({
           source: "pipeline",
-          scheduledFireKey: "pipeline:run-1:draft:0",
+          idempotencyKey: "pipeline:run-1:draft:0",
           conversationId,
           content: "stage prompt",
           platformTs: new Date(),

@@ -275,7 +275,7 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
     setChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
     clearChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
     findReachableChannelsForUserProfile: vi.fn().mockResolvedValue([]),
-    findInboundByScheduledFireKey: vi.fn().mockResolvedValue(undefined),
+    findInboundByIdempotencyKey: vi.fn().mockResolvedValue(undefined),
     peekPriorClosedConversation: vi.fn().mockResolvedValue(undefined),
     createBoundaryPending: vi.fn().mockResolvedValue({ id: "boundary-1" }),
     getBoundaryPendingByAddress: vi.fn().mockResolvedValue(undefined),

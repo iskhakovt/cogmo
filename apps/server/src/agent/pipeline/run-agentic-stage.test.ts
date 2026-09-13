@@ -102,7 +102,7 @@ async function harness(opts: { existingInbound?: { id: string; conversationId: s
   );
   vi.mocked(agentStore.getProfile).mockResolvedValue({ ...defaultProfile, toolSet: ["*"] });
   const transportStore = mockTransportStore({
-    findInboundByScheduledFireKey: vi.fn().mockResolvedValue(opts.existingInbound),
+    findInboundByIdempotencyKey: vi.fn().mockResolvedValue(opts.existingInbound),
     persistInbound: vi.fn().mockResolvedValue({ id: "inbound-1" }),
   });
   const delivery = mockDeliveryHandle();
@@ -146,7 +146,7 @@ describe("runAgenticStage", () => {
     )[1];
     expect(persisted).toMatchObject({
       source: "pipeline",
-      scheduledFireKey: stageInboundKey("run-1", "draft", 0),
+      idempotencyKey: stageInboundKey("run-1", "draft", 0),
       conversationId: "conv-1",
       content: expect.stringContaining("Draft a plan."),
     });
