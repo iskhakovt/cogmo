@@ -85,6 +85,13 @@ function hangingFetch(clock: FakeClock) {
   );
 }
 
+/** A call that never settles and ignores every signal; the attempt's timeout still fires. */
+function neverSettles<T>(clock: FakeClock): Promise<T> {
+  const pending = new Promise<T>(() => undefined);
+  clock.expire();
+  return pending;
+}
+
 function deps(fetchFn: ProbeFetch, clock: BootClock = fakeClock()) {
   return { fetch: fetchFn, clock };
 }
@@ -100,16 +107,22 @@ function spyOnWarn() {
   return warn;
 }
 
-/** An S3 service error as the AWS SDK shapes it. */
-function awsError(
-  name: string,
-  httpStatusCode: number,
-  headers: Record<string, string> = {},
-): Error {
-  return Object.assign(new Error(name), {
+/**
+ * An S3 service error as the SDK builds it for `HeadBucket`: the response has
+ * no body, so every status but 404 is named `Unknown`.
+ */
+function awsError(httpStatusCode: number, headers: Record<string, string> = {}): Error {
+  const name = httpStatusCode === 404 ? "NotFound" : "Unknown";
+  return Object.assign(new Error(name === "Unknown" ? "UnknownError" : name), {
     name,
     $metadata: { httpStatusCode },
     $response: { headers },
+  });
+}
+
+function credentialsProviderError(): Error {
+  return Object.assign(new Error("Could not load credentials from any providers"), {
+    name: "CredentialsProviderError",
   });
 }
 
@@ -183,21 +196,6 @@ describe("checkHindsightAuth", () => {
     expect(clock.sleeps).toEqual([]);
   });
 
-  it("hard-fails at once on a base URL with embedded credentials, without echoing them", async () => {
-    const fetchFn = probeFetch(() => 401);
-
-    const err = await checkHindsightAuth(
-      deps(fetchFn),
-      "http://operator:s3cret@hindsight:8888",
-      "k",
-    ).catch((e: unknown) => e);
-
-    expect(err).toBeInstanceOf(BootCheckError);
-    expect(String(err)).toMatch(/HINDSIGHT_URL must not embed credentials/);
-    expect(String(err)).not.toContain("s3cret");
-    expect(fetchFn).not.toHaveBeenCalled();
-  });
-
   it("keeps a path prefix on the base URL", async () => {
     const fetchFn = probeFetch((_, init) => (bearer(init) === "Bearer k" ? 200 : 401));
 
@@ -250,9 +248,10 @@ describe("checkHindsightAuth", () => {
     expect(clock.sleeps).toEqual([1_000, 2_000, 4_000]);
   });
 
-  it("makes a last attempt close to the deadline instead of sleeping into it", async () => {
+  it("still catches a server that comes up in the last seconds before the deadline", async () => {
     const clock = fakeClock();
-    // Down until 56s: the full backoff would sleep from 55s straight to 60s.
+    // Down until 56s. Near the deadline attempts come every second, so the
+    // attempt at 56s sees it up.
     const fetchFn = probeFetch((_, init) => {
       if (clock.now() < 56_000) return new Error("ECONNREFUSED");
       return bearer(init) === "Bearer k" ? 200 : 401;
@@ -262,17 +261,21 @@ describe("checkHindsightAuth", () => {
     expect(clock.now()).toBe(56_000);
   });
 
-  it("fails closed when the server stays unreachable past the deadline", async () => {
+  it("stops once too little time is left to wait, without sleeping into the deadline", async () => {
     const clock = fakeClock();
+    const warn = spyOnWarn();
     const fetchFn = probeFetch(() => new Error("ECONNREFUSED"));
 
     await expect(checkHindsightAuth(deps(fetchFn, clock), url, "k")).rejects.toThrow(
       /hindsight auth check could not reach a conclusive answer within 60s.*ECONNREFUSED/,
     );
-    expect(clock.now()).toBe(BOOT_PROBE_DEADLINE_MS);
+    // The last attempt runs at 59s; with a second left, the check gives up
+    // rather than waiting out that second.
+    expect(clock.now()).toBe(59_000);
     expect(Math.max(...clock.sleeps)).toBe(10_000);
-    // Near the deadline, attempts keep coming at the minimum interval.
-    expect(clock.sleeps.slice(-5)).toEqual([1_000, 1_000, 1_000, 1_000, 1_000]);
+    expect(clock.sleeps.slice(-4)).toEqual([1_000, 1_000, 1_000, 1_000]);
+    // One "retrying" warning per sleep: none is logged for a retry that never happens.
+    expect(warn).toHaveBeenCalledTimes(clock.sleeps.length);
   });
 
   it("times out a request that never answers and fails closed exactly at the deadline", async () => {
@@ -356,15 +359,6 @@ describe("checkInngestAuth", () => {
     expect(fetchFn).not.toHaveBeenCalled();
   });
 
-  it("hard-fails at once on a base URL with embedded credentials", async () => {
-    const fetchFn = probeFetch(() => 401);
-
-    await expect(
-      checkInngestAuth(deps(fetchFn), { ...keyed, baseUrl: "http://u:p@inngest:8288" }),
-    ).rejects.toThrow(/INNGEST_BASE_URL must not embed credentials/);
-    expect(fetchFn).not.toHaveBeenCalled();
-  });
-
   it("hard-fails at once against a server that answers without a signing key", async () => {
     const clock = fakeClock();
     const fetchFn = probeFetch(() => 200);
@@ -422,7 +416,7 @@ describe("checkInngestAuth", () => {
     expect(clock.sleeps).toEqual([1_000]);
   });
 
-  it("fails closed when the server stays unreachable past the deadline", async () => {
+  it("fails closed when the server stays unreachable", async () => {
     const fetchFn = probeFetch(() => new Error("ECONNREFUSED"));
 
     await expect(checkInngestAuth(deps(fetchFn), keyed)).rejects.toThrow(
@@ -645,44 +639,25 @@ describe("checkS3Bucket", () => {
     });
   });
 
-  it.each([
-    ["NotFound", 404],
-    ["Forbidden", 403],
-  ])("fails at once, naming the bucket, on the store's %s verdict", async (name, status) => {
-    const clock = fakeClock();
-    const s3 = mock<S3Client>();
-    s3.send.mockRejectedValue(awsError(name, status));
+  it.each([404, 403])(
+    "fails at once, naming the bucket, on the store's HTTP %i verdict",
+    async (status) => {
+      const clock = fakeClock();
+      const s3 = mock<S3Client>();
+      s3.send.mockRejectedValue(awsError(status));
 
-    const err = await checkS3Bucket(s3, "missing", clock).catch((e: unknown) => e);
+      const err = await checkS3Bucket(s3, "missing", clock).catch((e: unknown) => e);
 
-    expect(err).toBeInstanceOf(BootCheckError);
-    expect(String(err)).toMatch(/S3 bucket "missing" not reachable/);
-    expect(clock.sleeps).toEqual([]);
-  });
-
-  it("fails at once, with credentials guidance, when no S3 credentials can be loaded", async () => {
-    const clock = fakeClock();
-    const s3 = mock<S3Client>();
-    // The SDK's shape: thrown before any request, so it carries no HTTP status.
-    s3.send.mockRejectedValue(
-      Object.assign(new Error("Could not load credentials from any providers"), {
-        name: "CredentialsProviderError",
-      }),
-    );
-
-    const err = await checkS3Bucket(s3, "cogmo-files", clock).catch((e: unknown) => e);
-
-    expect(err).toBeInstanceOf(BootCheckError);
-    expect(String(err)).toMatch(/credentials could not be loaded.*S3_ACCESS_KEY and S3_SECRET_KEY/);
-    expect(clock.sleeps).toEqual([]);
-  });
+      expect(err).toBeInstanceOf(BootCheckError);
+      expect(String(err)).toMatch(new RegExp(`S3 bucket "missing" not reachable.*HTTP ${status}`));
+      expect(clock.sleeps).toEqual([]);
+    },
+  );
 
   it("fails at once on a 301, naming the bucket's actual region", async () => {
     const clock = fakeClock();
     const s3 = mock<S3Client>();
-    s3.send.mockRejectedValue(
-      awsError("PermanentRedirect", 301, { "x-amz-bucket-region": "eu-west-2" }),
-    );
+    s3.send.mockRejectedValue(awsError(301, { "x-amz-bucket-region": "eu-west-2" }));
 
     const err = await checkS3Bucket(s3, "cogmo-files", clock).catch((e: unknown) => e);
 
@@ -691,21 +666,38 @@ describe("checkS3Bucket", () => {
     expect(clock.sleeps).toEqual([]);
   });
 
-  it("retries a temporary redirect", async () => {
+  it("retries credentials that fail to load and passes once they do", async () => {
+    // From EC2/ECS the chain reads a metadata endpoint that can be briefly slow.
     const clock = fakeClock();
     const s3 = mock<S3Client>();
-    s3.send
-      .mockRejectedValueOnce(awsError("TemporaryRedirect", 307))
-      .mockResolvedValue({} as never);
+    s3.send.mockRejectedValueOnce(credentialsProviderError()).mockResolvedValue({} as never);
 
     await expect(checkS3Bucket(s3, "cogmo-files", clock)).resolves.toBeUndefined();
     expect(clock.sleeps).toEqual([1_000]);
   });
 
-  it("retries S3's transient 400 RequestTimeout instead of treating it as a verdict", async () => {
+  it("fails closed with credentials guidance when credentials never load", async () => {
+    const s3 = mock<S3Client>();
+    s3.send.mockRejectedValue(credentialsProviderError());
+
+    await expect(checkS3Bucket(s3, "cogmo-files", fakeClock())).rejects.toThrow(
+      /within 60s.*S3 credentials could not be loaded.*S3_ACCESS_KEY and S3_SECRET_KEY/,
+    );
+  });
+
+  it("retries a temporary redirect", async () => {
     const clock = fakeClock();
     const s3 = mock<S3Client>();
-    s3.send.mockRejectedValueOnce(awsError("RequestTimeout", 400)).mockResolvedValue({} as never);
+    s3.send.mockRejectedValueOnce(awsError(307)).mockResolvedValue({} as never);
+
+    await expect(checkS3Bucket(s3, "cogmo-files", clock)).resolves.toBeUndefined();
+    expect(clock.sleeps).toEqual([1_000]);
+  });
+
+  it("retries a 400, which may be S3's transient RequestTimeout", async () => {
+    const clock = fakeClock();
+    const s3 = mock<S3Client>();
+    s3.send.mockRejectedValueOnce(awsError(400)).mockResolvedValue({} as never);
 
     await expect(checkS3Bucket(s3, "cogmo-files", clock)).resolves.toBeUndefined();
     expect(clock.sleeps).toEqual([1_000]);
@@ -716,7 +708,7 @@ describe("checkS3Bucket", () => {
     const s3 = mock<S3Client>();
     s3.send
       .mockRejectedValueOnce(new Error("connect ECONNREFUSED"))
-      .mockRejectedValueOnce(awsError("ServiceUnavailable", 503))
+      .mockRejectedValueOnce(awsError(503))
       .mockResolvedValue({} as never);
 
     await expect(checkS3Bucket(s3, "cogmo-files", clock)).resolves.toBeUndefined();
@@ -726,28 +718,23 @@ describe("checkS3Bucket", () => {
   it("retries a throttled request instead of treating 429 as a verdict", async () => {
     const clock = fakeClock();
     const s3 = mock<S3Client>();
-    s3.send.mockRejectedValueOnce(awsError("SlowDown", 429)).mockResolvedValue({} as never);
+    s3.send.mockRejectedValueOnce(awsError(429)).mockResolvedValue({} as never);
 
     await expect(checkS3Bucket(s3, "cogmo-files", clock)).resolves.toBeUndefined();
     expect(clock.sleeps).toEqual([1_000]);
   });
 
-  it("times out a HeadBucket that never answers and fails closed at the deadline", async () => {
+  it("times out a HeadBucket that ignores its signal and fails closed at the deadline", async () => {
+    // Credential resolution runs before the request and never sees the signal.
     const clock = fakeClock();
     const s3 = mock<S3Client>();
-    s3.send.mockImplementation(
-      ((_command: unknown, options: { abortSignal: AbortSignal }) =>
-        new Promise((_resolve, reject) => {
-          options.abortSignal.addEventListener("abort", () => reject(options.abortSignal.reason));
-          clock.expire();
-        })) as never,
-    );
+    s3.send.mockImplementation((() => neverSettles(clock)) as never);
 
     await expect(checkS3Bucket(s3, "cogmo-files", clock)).rejects.toThrow(/within 60s.*timeout/);
     expect(clock.now()).toBe(BOOT_PROBE_DEADLINE_MS);
   });
 
-  it("fails closed when the store stays unreachable past the deadline", async () => {
+  it("fails closed when the store stays unreachable", async () => {
     const s3 = mock<S3Client>();
     s3.send.mockRejectedValue(new Error("connect ECONNREFUSED"));
 
@@ -825,23 +812,16 @@ describe("checkHindsightVersion", () => {
     expect(clock.sleeps).toEqual([1_000]);
   });
 
-  it("times out a /version request that never answers and fails closed at the deadline", async () => {
+  it("times out a /version request that ignores its signal and fails closed at the deadline", async () => {
     const clock = fakeClock();
     const m = mock<HindsightMemoryProvider>();
-    m.getServerVersion.mockImplementation(
-      (signal) =>
-        new Promise((_resolve, reject) => {
-          const bounded = expectDefined(signal, "version signal");
-          bounded.addEventListener("abort", () => reject(bounded.reason));
-          clock.expire();
-        }),
-    );
+    m.getServerVersion.mockImplementation(() => neverSettles(clock));
 
     await expect(checkHindsightVersion(m, range, clock)).rejects.toThrow(/within 60s.*timeout/);
     expect(clock.now()).toBe(BOOT_PROBE_DEADLINE_MS);
   });
 
-  it("fails closed when /version stays unreadable past the deadline", async () => {
+  it("fails closed when /version stays unreadable", async () => {
     const m = mock<HindsightMemoryProvider>();
     m.getServerVersion.mockRejectedValue(new Error("fetch failed"));
 

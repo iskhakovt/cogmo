@@ -10,7 +10,7 @@ import {
 import { getEncoding, type Tiktoken } from "js-tiktoken";
 import { logger } from "../logger.js";
 import { AbortError, withRetry } from "../util/with-retry.js";
-import { createHindsightClients } from "./hindsight-clients.js";
+import { createHindsightClients, describeHindsightError } from "./hindsight-clients.js";
 import type {
   Memory,
   MemoryProvider,
@@ -126,14 +126,7 @@ export class HindsightMemoryProvider implements MemoryProvider {
     });
     if (res.error !== undefined || !res.data) {
       const status = res.response?.status ?? "?";
-      // A failed or aborted fetch comes back as an `Error` in `res.error`,
-      // whose fields are non-enumerable — `JSON.stringify` would print `{}`.
-      const detail =
-        res.error instanceof Error
-          ? res.error.message
-          : res.error !== undefined
-            ? JSON.stringify(res.error)
-            : "no body";
+      const detail = res.error !== undefined ? describeHindsightError(res.error) : "no body";
       throw new Error(`hindsight /version failed: ${status} ${detail}`);
     }
     return res.data.api_version;
@@ -208,7 +201,7 @@ export class HindsightMemoryProvider implements MemoryProvider {
               });
               if (res.error !== undefined) {
                 const status = res.response?.status;
-                const detail = JSON.stringify(res.error);
+                const detail = describeHindsightError(res.error);
                 // Hindsight 4xx is deterministic — bad request, malformed bank,
                 // etc. Retrying just burns latency before failing the same way.
                 // Surface as AbortError so withRetry stops, and let the caller
@@ -261,7 +254,7 @@ export class HindsightMemoryProvider implements MemoryProvider {
         });
         if (res.error !== undefined) {
           const status = res.response?.status;
-          const detail = JSON.stringify(res.error);
+          const detail = describeHindsightError(res.error);
           if (isClientError(status)) {
             throw new AbortError(`reflect ${status}: ${detail}`);
           }

@@ -54,6 +54,7 @@ import {
   checkInngestAuth,
   checkS3Bucket,
   checkUuidv7,
+  type HindsightCompat,
   loadHindsightCompat,
   systemBootClock,
 } from "./boot/checks.js";
@@ -210,6 +211,8 @@ export interface CoreDeps {
   user: { id: string };
   profile: { id: string };
   memory: HindsightMemoryProvider;
+  /** Supported Hindsight server range, read once from `package.json`. */
+  hindsightCompat: HindsightCompat;
 }
 
 /**
@@ -425,7 +428,8 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
   });
   // Dependency↔pin drift in this repo needs no server and costs nothing to
   // detect, so every entrypoint checks it. Server probes run in `bootstrap`.
-  checkHindsightClientVersion(loadHindsightCompat(), HINDSIGHT_CLIENT_VERSION);
+  const hindsightCompat = loadHindsightCompat();
+  checkHindsightClientVersion(hindsightCompat, HINDSIGHT_CLIENT_VERSION);
 
   return {
     db,
@@ -450,6 +454,7 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
     user,
     profile,
     memory,
+    hindsightCompat,
   };
 }
 
@@ -1266,24 +1271,41 @@ export async function bootstrapRuntime(
  * retried until the deadline.
  */
 async function verifyDependencies(core: CoreDeps): Promise<void> {
-  const probeDeps = { fetch, clock: systemBootClock };
-  // Confirm the bucket is reachable + credentials work before tools that
-  // depend on it (image generation, file workspace, attachment delivery)
-  // start handling traffic. HeadBucket is the cheapest probe.
-  await checkS3Bucket(core.s3Client, env.S3_BUCKET, systemBootClock);
-  // Hindsight and Inngest are reachable by anything on their network, and an
-  // unkeyed one answers all of it: refuse a server that does not enforce its
-  // key, or one whose key we do not hold.
-  await checkHindsightAuth(probeDeps, env.HINDSIGHT_URL, env.HINDSIGHT_API_KEY);
-  // Hard-fail when the running server reports a version outside the compat
-  // range pinned in `package.json` → `cogmo.hindsightCompat`.
-  await checkHindsightVersion(core.memory, loadHindsightCompat(), systemBootClock);
-  await checkInngestAuth(probeDeps, {
-    baseUrl: env.INNGEST_BASE_URL,
-    dev: env.INNGEST_DEV,
-    eventKey: env.INNGEST_EVENT_KEY,
-    signingKey: env.INNGEST_SIGNING_KEY,
-  });
+  // Independent probes run together, so a certain verdict from one is not
+  // held behind another's retry window and the slowest check bounds the wait.
+  await Promise.all([
+    // Confirm the bucket is reachable + credentials work before tools that
+    // depend on it (image generation, file workspace, attachment delivery)
+    // start handling traffic. HeadBucket is the cheapest probe.
+    checkS3Bucket(core.s3Client, env.S3_BUCKET, systemBootClock),
+    verifyHindsight(core),
+    // Inngest, like Hindsight, answers anything on its network when unkeyed.
+    checkInngestAuth(
+      { fetch, clock: systemBootClock },
+      {
+        baseUrl: env.INNGEST_BASE_URL,
+        dev: env.INNGEST_DEV,
+        eventKey: env.INNGEST_EVENT_KEY,
+        signingKey: env.INNGEST_SIGNING_KEY,
+      },
+    ),
+  ]);
+}
+
+/**
+ * Verify Hindsight enforces its key, that ours is the one it holds, and that
+ * its version is inside the pinned range. Shared by `bootstrap` and the
+ * memory CLIs (`migrate-memories`, `backfill`), which clear and rewrite
+ * banks: against an out-of-range server (0.5.x drops batch items past the
+ * first) or one that ignores its key, they would lose memories with no error.
+ */
+export async function verifyHindsight(core: CoreDeps): Promise<void> {
+  await checkHindsightAuth(
+    { fetch, clock: systemBootClock },
+    env.HINDSIGHT_URL,
+    env.HINDSIGHT_API_KEY,
+  );
+  await checkHindsightVersion(core.memory, core.hindsightCompat, systemBootClock);
 }
 
 /**

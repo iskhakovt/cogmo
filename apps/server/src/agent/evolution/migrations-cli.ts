@@ -32,7 +32,7 @@ import { join } from "node:path";
 import { type Client, type HindsightClient, sdk } from "@vectorize-io/hindsight-client";
 import type { Transactor } from "../../db/index.js";
 import { logger } from "../../logger.js";
-import { createHindsightClients } from "../../memory/hindsight-clients.js";
+import { createHindsightClients, describeHindsightError } from "../../memory/hindsight-clients.js";
 import type { AgentStore } from "../store/index.js";
 import {
   type BackfillDeps,
@@ -111,7 +111,7 @@ export async function runMigrateMemoriesCli(
     clearBankMemories: async (id) => {
       const res = await sdk.clearBankMemories({ client: sdkClient, path: { bank_id: id } });
       if (res.error) {
-        throw new Error(`clearBankMemories failed: ${JSON.stringify(res.error)}`);
+        throw new Error(`clearBankMemories failed: ${describeHindsightError(res.error)}`);
       }
     },
     runInTx: deps.runInTx,
@@ -223,7 +223,7 @@ export async function runBackfillProfileClassCli(
     clearBankMemories: async (id) => {
       const res = await sdk.clearBankMemories({ client: sdkClient, path: { bank_id: id } });
       if (res.error) {
-        throw new Error(`clearBankMemories failed: ${JSON.stringify(res.error)}`);
+        throw new Error(`clearBankMemories failed: ${describeHindsightError(res.error)}`);
       }
     },
     retainBatch: async (id, items: ReadonlyArray<RetainItem>) => {

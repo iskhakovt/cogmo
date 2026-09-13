@@ -101,11 +101,15 @@ async function dispatch(cmd: string): Promise<number> {
       const { runMigrateMemoriesCli, runBackfillProfileClassCli } = await import(
         "./agent/evolution/migrations-cli.js"
       );
-      const { bootstrapCore } = await import("./index.js");
+      const { bootstrapCore, verifyHindsight } = await import("./index.js");
       const { env } = await import("./env.js");
       // CLI mode: data layer only. No sandbox client, no instance row, no
       // reaper — running this concurrently with `cogmo serve` is harmless.
-      const { agentStore, runInTx } = await bootstrapCore();
+      const core = await bootstrapCore();
+      // These commands clear and rewrite memory banks, so they refuse a
+      // Hindsight outside the pinned range or one that ignores its key.
+      await verifyHindsight(core);
+      const { agentStore, runInTx } = core;
       const resolveDefaultBankId = async (): Promise<string | null> => {
         const user = await runInTx((tx) => agentStore.getFirstUser(tx));
         return user ? user.id : null;

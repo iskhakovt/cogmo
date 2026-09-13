@@ -42,6 +42,26 @@ for (const name of [
 }
 
 /**
+ * A service base URL without `user:password@`. `fetch` refuses to build a
+ * request from one, so every call would fail — with the credentials echoed
+ * in the error — and service credentials belong in their own key variables.
+ * The issue message never includes the value.
+ */
+export const ServiceUrlSchema = z
+  .string()
+  .url()
+  .refine(
+    (value) => {
+      // Zod runs refinements even after `.url()` has failed; an unparseable
+      // value is already reported there, and `new URL` would throw on it.
+      if (!URL.canParse(value)) return true;
+      const url = new URL(value);
+      return url.username === "" && url.password === "";
+    },
+    { message: "must not embed credentials (user:password@) — use the service's key variable" },
+  );
+
+/**
  * Full runtime env, validated at module load. Server entrypoints (`cogmo
  * serve`, `cogmo skills`) import this and get a typed `env` covering all
  * the infrastructure vars they need. Bootstrap-tier code (`logger`,
@@ -54,7 +74,7 @@ export const env = createEnv({
     NODE_ENV: z.enum(["development", "production", "test"]),
     LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
     DATABASE_URL: z.string().default("postgresql://cogmo@localhost/cogmo"),
-    HINDSIGHT_URL: z.string().url(),
+    HINDSIGHT_URL: ServiceUrlSchema,
     /**
      * Bearer token for the Hindsight API. The server must run
      * `ApiKeyTenantExtension` with the same value in
@@ -130,7 +150,7 @@ export const env = createEnv({
      */
     INNGEST_EVENT_KEY: z.string().optional(),
     INNGEST_SIGNING_KEY: z.string().optional(),
-    INNGEST_BASE_URL: z.string().url(),
+    INNGEST_BASE_URL: ServiceUrlSchema,
     TAVILY_API_KEY: z.string().optional(),
     OPENROUTER_API_KEY: z.string().optional(),
     FAL_API_KEY: z.string().optional(),

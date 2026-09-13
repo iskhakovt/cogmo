@@ -4,27 +4,29 @@
  * Each function probes one external dependency that production code paths
  * silently assume is in place. `checkUuidv7` runs from `bootstrapCore`; the
  * network probes run from `bootstrap()` in `src/index.ts` before the
- * orchestrator starts taking traffic — fail fast at boot beats failing
- * mid-turn after the user has already sent a message.
+ * orchestrator starts taking traffic, and the Hindsight probes also from the
+ * memory CLIs — fail fast at boot beats failing mid-turn after the user has
+ * already sent a message.
  *
  * Policy:
  * - **Hard fail at once (throw `BootCheckError`):** deterministic,
  *   deployment-shaped problems that won't self-heal — missing extension,
- *   missing bucket, wrong region, missing or rejected credentials, a server
- *   that answers without auth, a version outside the supported range, a
- *   service URL with embedded credentials. Operator action required.
+ *   missing bucket, wrong region, rejected credentials, a server that
+ *   answers without auth, a version outside the supported range. Operator
+ *   action required.
  * - **Retry, then hard fail:** a dependency that can't be reached, doesn't
- *   answer in time, or answers with a status that proves nothing either way.
- *   Each check gets `BOOT_PROBE_DEADLINE_MS` to become conclusive — long
- *   enough to ride out a restart during a deploy — and makes its last attempt
- *   close to the deadline rather than sleeping into it. Every attempt is
- *   bounded by `BOOT_PROBE_ATTEMPT_TIMEOUT_MS` and by the time left, so a
- *   request that hangs cannot overrun. Past the deadline boot fails closed: a
- *   supervisor restart loop is visible, a check that silently never ran is
- *   not.
+ *   answer in time, or answers with something that proves nothing either
+ *   way — including S3 credentials that fail to load, which on EC2/ECS can be
+ *   a briefly slow metadata endpoint. Each check gets `BOOT_PROBE_DEADLINE_MS`
+ *   to become conclusive, long enough to ride out a restart during a deploy.
+ *   Every attempt is bounded by `BOOT_PROBE_ATTEMPT_TIMEOUT_MS` and by the
+ *   time left, so a request that hangs cannot overrun. Past the deadline boot
+ *   fails closed: a supervisor restart loop is visible, a check that silently
+ *   never ran is not.
  *
- * URLs that reach logs and errors carry no credential: query strings,
- * fragments and userinfo are dropped, and the Inngest event key is redacted.
+ * Probe URLs in logs and errors drop query strings, fragments and userinfo,
+ * and the Inngest event key is redacted. A credential carried in a path
+ * segment is not detected.
  */
 
 import { constants as fsConstants, readFileSync } from "node:fs";
@@ -79,10 +81,10 @@ function conclusive<T>(value: T): ProbeAttempt<T> {
  * the attempt must pass it to every request it makes. A `BootCheckError`
  * thrown by `attempt` is a deterministic verdict and propagates at once.
  *
- * Backoff never sleeps into the deadline: when little time is left, the wait
- * shrinks so another attempt still fits, down to `BOOT_PROBE_MIN_DELAY_MS`
- * between attempts. The last attempt therefore starts within that interval
- * of the deadline.
+ * Backoff keeps room for another full attempt where it can and never waits
+ * as long as the time left. Once no more than `BOOT_PROBE_MIN_DELAY_MS`
+ * remains, the attempt that just failed is the last: waiting would only reach
+ * the deadline.
  */
 async function retryUntilConclusive<T>(
   label: string,
@@ -90,25 +92,24 @@ async function retryUntilConclusive<T>(
   attempt: (signal: AbortSignal) => Promise<ProbeAttempt<T>>,
 ): Promise<T> {
   const deadline = clock.now() + BOOT_PROBE_DEADLINE_MS;
+  const failClosed = (reason: string) =>
+    new BootCheckError(
+      `${label} could not reach a conclusive answer within ${BOOT_PROBE_DEADLINE_MS / 1000}s ` +
+        `(last: ${reason}). Refusing to start unverified.`,
+    );
   let delay = BOOT_PROBE_MIN_DELAY_MS;
   let lastReason = "no attempt completed";
   for (;;) {
     const remaining = deadline - clock.now();
-    if (remaining <= 0) {
-      throw new BootCheckError(
-        `${label} could not reach a conclusive answer within ${BOOT_PROBE_DEADLINE_MS / 1000}s ` +
-          `(last: ${lastReason}). Refusing to start unverified.`,
-      );
-    }
+    if (remaining <= 0) throw failClosed(lastReason);
     const result = await attempt(clock.timeout(Math.min(BOOT_PROBE_ATTEMPT_TIMEOUT_MS, remaining)));
     if (result.conclusive) return result.value;
     lastReason = result.reason;
     const left = deadline - clock.now();
-    if (left <= 0) continue;
-    const roomForAnotherAttempt = left - BOOT_PROBE_ATTEMPT_TIMEOUT_MS;
+    if (left <= BOOT_PROBE_MIN_DELAY_MS) throw failClosed(lastReason);
     const wait = Math.min(
       delay,
-      Math.max(roomForAnotherAttempt, Math.min(BOOT_PROBE_MIN_DELAY_MS, left)),
+      Math.max(left - BOOT_PROBE_ATTEMPT_TIMEOUT_MS, BOOT_PROBE_MIN_DELAY_MS),
     );
     logger.warn(
       { label, reason: result.reason, retryInMs: wait },
@@ -117,6 +118,34 @@ async function retryUntilConclusive<T>(
     await clock.sleep(wait);
     delay = Math.min(delay * 2, BOOT_PROBE_MAX_DELAY_MS);
   }
+}
+
+/**
+ * Settle with `work`, or reject with `signal`'s reason once it aborts,
+ * whichever comes first. For calls that honour the signal in only part of
+ * their work — the S3 client ignores it while resolving credentials. The
+ * abandoned call keeps running; its outcome is dropped, since the attempt it
+ * belonged to has already been judged inconclusive.
+ */
+function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    work.catch(() => undefined);
+    return Promise.reject(signal.reason);
+  }
+  return new Promise<T>((resolveWork, rejectWork) => {
+    const onAbort = () => rejectWork(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolveWork(value);
+      },
+      (err: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        rejectWork(err);
+      },
+    );
+  });
 }
 
 /**
@@ -213,30 +242,25 @@ function awsServiceError(
  * Verify the configured S3 bucket exists and credentials are valid.
  * `HeadBucket` is the cheapest probe — no list, no read, no write.
  *
- * The store's verdicts fail at once:
- * - no credentials could be loaded (`CredentialsProviderError`, which has no
- *   HTTP status because no request was sent);
- * - a 301 — how S3 answers for a bucket in another region when the client
- *   does not follow region redirects;
- * - any other 4xx (missing bucket, bad credentials), except 429 and S3's
- *   transient `400 RequestTimeout`.
- *
- * A network error, timeout, 5xx, 429, `RequestTimeout` or temporary redirect
- * is retried up to the boot probe deadline.
+ * Errors are classified by HTTP status alone: a HEAD response has no body,
+ * so the SDK names every error other than a 404 `Unknown`. The store's
+ * verdicts fail at once — a 301 (how S3 answers for a bucket in another
+ * region when the client does not follow region redirects) and a 4xx other
+ * than 400 and 429 (missing bucket, bad credentials). A 400 is retried, since
+ * S3's transient `RequestTimeout` is indistinguishable from any other 400
+ * here. Credentials that fail to load are retried too: from EC2 or ECS they
+ * come from a metadata endpoint that can be briefly slow. Network errors,
+ * timeouts, 5xx, 429 and temporary redirects are retried up to the deadline.
  */
 export async function checkS3Bucket(s3: S3Client, bucket: string, clock: BootClock): Promise<void> {
   await retryUntilConclusive(`S3 bucket "${bucket}" check`, clock, async (signal) => {
     try {
-      await s3.send(new HeadBucketCommand({ Bucket: bucket }), { abortSignal: signal });
+      await abortable(
+        s3.send(new HeadBucketCommand({ Bucket: bucket }), { abortSignal: signal }),
+        signal,
+      );
       return conclusive(undefined);
     } catch (err) {
-      const name = err instanceof Error ? err.name : undefined;
-      if (name === "CredentialsProviderError") {
-        throw new BootCheckError(
-          `S3 credentials could not be loaded for bucket "${bucket}". Set S3_ACCESS_KEY and ` +
-            `S3_SECRET_KEY, or provide ambient AWS credentials. Underlying error: ${stringifyError(err)}`,
-        );
-      }
       const service = awsServiceError(err);
       if (service?.status === 301) {
         throw new BootCheckError(
@@ -245,20 +269,33 @@ export async function checkS3Bucket(s3: S3Client, bucket: string, clock: BootClo
             `Set S3_REGION to the bucket's region. Underlying error: ${stringifyError(err)}`,
         );
       }
-      const isVerdict =
+      if (
         service !== undefined &&
-        service.status >= 400 &&
+        service.status > 400 &&
         service.status < 500 &&
-        service.status !== 429 &&
-        name !== "RequestTimeout";
-      if (isVerdict) {
+        service.status !== 429
+      ) {
         throw new BootCheckError(
           `S3 bucket "${bucket}" not reachable. Check S3_ENDPOINT, ` +
             `S3_ACCESS_KEY/S3_SECRET_KEY, S3_REGION, and that the bucket exists. ` +
-            `Underlying error: ${stringifyError(err)}`,
+            `Underlying error: HTTP ${service.status} ${stringifyError(err)}`,
         );
       }
-      return { conclusive: false, reason: stringifyError(err) };
+      if (err instanceof Error && err.name === "CredentialsProviderError") {
+        return {
+          conclusive: false,
+          reason:
+            "S3 credentials could not be loaded — set S3_ACCESS_KEY and S3_SECRET_KEY, or " +
+            `provide ambient AWS credentials (${stringifyError(err)})`,
+        };
+      }
+      return {
+        conclusive: false,
+        reason:
+          service !== undefined
+            ? `HTTP ${service.status} ${stringifyError(err)}`
+            : stringifyError(err),
+      };
     }
   });
 }
@@ -282,7 +319,7 @@ export async function checkHindsightVersion(
 ): Promise<void> {
   const actual = await retryUntilConclusive("hindsight version check", clock, async (signal) => {
     try {
-      return conclusive(await memory.getServerVersion(signal));
+      return conclusive(await abortable(memory.getServerVersion(signal), signal));
     } catch (err) {
       return { conclusive: false, reason: stringifyError(err) };
     }
@@ -393,7 +430,9 @@ function serviceUrl(baseUrl: string, path: string): string {
 /**
  * `url` as it may appear in logs and errors: userinfo, query and fragment
  * dropped, and with `redactLastSegment` the final path segment — where the
- * Inngest event URL carries its key — replaced by `REDACTED`.
+ * Inngest event URL carries its key — replaced by `REDACTED`. Env validation
+ * already rejects service URLs with userinfo; dropping it here keeps the
+ * helper safe for any URL.
  */
 function displayUrl(url: string, options: { redactLastSegment: boolean }): string {
   const shown = new URL(url);
@@ -405,22 +444,6 @@ function displayUrl(url: string, options: { redactLastSegment: boolean }): strin
     shown.pathname = shown.pathname.replace(/[^/]+$/, "REDACTED");
   }
   return shown.toString();
-}
-
-/**
- * Reject a service URL with embedded credentials at once. `fetch` refuses to
- * build a request from one, so every attempt would fail the same way until
- * the deadline — and the credentials belong in the service's own key, not
- * the URL.
- */
-function assertNoEmbeddedCredentials(envVarName: string, baseUrl: string): void {
-  const url = new URL(baseUrl);
-  if (url.username !== "" || url.password !== "") {
-    throw new BootCheckError(
-      `${envVarName} must not embed credentials (${displayUrl(baseUrl, { redactLastSegment: false })}). ` +
-        "Remove the user:password part of the URL.",
-    );
-  }
 }
 
 type ProbeResult = { kind: "status"; status: number } | { kind: "unreachable"; error: string };
@@ -485,7 +508,6 @@ export async function checkHindsightAuth(
   baseUrl: string,
   apiKey: string,
 ): Promise<void> {
-  assertNoEmbeddedCredentials("HINDSIGHT_URL", baseUrl);
   const shownBase = displayUrl(baseUrl, { redactLastSegment: false });
   const url = serviceUrl(baseUrl, "/v1/default/banks");
   const shownUrl = displayUrl(url, { redactLastSegment: false });
@@ -564,7 +586,6 @@ export async function checkInngestAuth(
         "Use the values the server was started with (`inngest start --event-key … --signing-key …`).",
     );
   }
-  assertNoEmbeddedCredentials("INNGEST_BASE_URL", baseUrl);
   const shownBase = displayUrl(baseUrl, { redactLastSegment: false });
   const eventsUrl = serviceUrl(baseUrl, "/v1/events");
   const shownEventsUrl = displayUrl(eventsUrl, { redactLastSegment: false });

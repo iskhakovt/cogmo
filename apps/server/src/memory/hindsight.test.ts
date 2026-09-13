@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { HindsightMemoryProvider } from "./hindsight.js";
 
 // Mock the hindsight client module — we don't want real HTTP calls.
@@ -100,6 +100,22 @@ describe("HindsightMemoryProvider", () => {
     await expect(provider.getServerVersion()).rejects.toThrow(
       "hindsight /version failed: ? The operation was aborted due to timeout",
     );
+  });
+
+  it("recall keeps the message of a failed request instead of printing {}", async () => {
+    vi.stubEnv("RETRY_DISABLED", "true");
+    onTestFinished(() => {
+      vi.unstubAllEnvs();
+    });
+    const provider = createProvider();
+    // The generated client returns fetch failures in `error` instead of throwing.
+    mockRecallMemories.mockResolvedValue({
+      data: undefined,
+      error: new TypeError("fetch failed"),
+      response: undefined,
+    });
+
+    await expect(provider.recall("bank-1", "q")).rejects.toThrow("recall ?: fetch failed");
   });
 
   it("retain passes content and options to client", async () => {

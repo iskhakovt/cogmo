@@ -13,6 +13,16 @@ export interface HindsightClients {
 }
 
 /**
+ * Readable text for the `error` a raw sdk call returns. A failed or aborted
+ * fetch comes back as an `Error`, whose fields are non-enumerable, so
+ * `JSON.stringify` would print `{}`; a server error body is a plain object
+ * and stringifies as-is.
+ */
+export function describeHindsightError(error: unknown): string {
+  return error instanceof Error ? error.message : JSON.stringify(error);
+}
+
+/**
  * Build the class wrapper and the raw sdk client against one server with one
  * credential. `HindsightClient` adds the `Authorization` header from `apiKey`
  * itself; the raw client only sends the headers its config carries, so it
