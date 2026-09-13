@@ -203,13 +203,17 @@ describe("allocateWorktree output inside a task container (real Docker, runc)", 
       expect(hostSubject.trim()).toBe("in-container commit");
     } finally {
       // The image's root user owns whatever it wrote into the bind mount
-      // (objects, change.txt); hand ownership back to the host test uid
-      // so afterAll's rmSync can clean the temp dir.
+      // (objects, change.txt); hand it back to the mount root's owner so
+      // afterAll's rmSync can clean the temp dir. That owner is the host
+      // test uid as the container sees it: itself under rootful Docker, 0
+      // under rootless, where chowning to the host uid would map the files
+      // onto a subordinate uid the host user cannot delete.
       await session
-        .exec(
-          ["/bin/sh", "-c", `chown -R ${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0} .`],
-          { workingDir: "/workspace", timeoutMs: 60_000, idleTimeoutMs: 30_000 },
-        )
+        .exec(["/bin/sh", "-c", 'chown -R "$(stat -c %u:%g /workspace)" .'], {
+          workingDir: "/workspace",
+          timeoutMs: 60_000,
+          idleTimeoutMs: 30_000,
+        })
         .catch(() => {});
       // Swallow teardown errors so a failure here can't replace an
       // assertion error from the try block (afterAll force-removes any
