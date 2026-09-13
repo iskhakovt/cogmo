@@ -201,7 +201,7 @@ Sessions on `isPrivate: false` conversations are constrained:
 -- Enums
 channel_session_status   AS ENUM ('active', 'closed');
 channel_session_receive  AS ENUM ('none', 'routed', 'all');
-inbound_message_source   AS ENUM ('user', 'scheduled');
+inbound_message_source   AS ENUM ('user', 'scheduled', 'pipeline');
 
 channel_sessions (
   id               UUID v7 PK,

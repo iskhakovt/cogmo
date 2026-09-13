@@ -715,8 +715,10 @@ export const pipelineGatePending = eventType("pipeline/gate.pending", {
     runId: z.string(),
     gateKey: z.string(),
     conversationId: z.string(),
-    pipelineName: z.string(),
-    stageId: z.string(),
+    // Slugs of at most 64 characters, as the definition schema allows — which
+    // also keeps the posted checkpoint message inside Telegram's length limit.
+    pipelineName: z.string().max(64),
+    stageId: z.string().max(64),
     /** The gate's prose instructions — rendered above the keyboard. */
     prompt: z.string(),
     timeoutMs: z.number().int().positive(),

@@ -60,6 +60,8 @@ export type ResolveGateOutcome =
   | { kind: "cancelled"; conversationId: string; pipelineName: string }
   | {
       kind: "stale";
+      conversationId: string;
+      pipelineName: string;
       status: PipelineRunStatus;
       currentStage: string;
       iteration: number;
@@ -67,7 +69,10 @@ export type ResolveGateOutcome =
       gateStage: string;
       /** The stage after that gate, or null when the gate is the last stage. */
       nextStage: string | null;
-      /** The run has moved forward past the gate: onto a later stage, or completed at it. */
+      /**
+       * The run's cursor has moved forward past the gate — onto a later stage
+       * (whatever became of the run there), or completed at it.
+       */
       pastGate: boolean;
     }
   | { kind: "not_found" };
@@ -81,16 +86,17 @@ function staleOutcome(
   const stages = definition.compiled.stages;
   const gateIndex = stages.findIndex((s) => s.id === gate.stageId);
   const currentIndex = stages.findIndex((s) => s.id === run.currentStage);
+  // Judged by the cursor, not the status: a run that failed or was cancelled
+  // on a later stage still had this gate's approval applied.
   const pastGate =
     gateIndex >= 0 &&
     (run.status === "completed"
       ? currentIndex >= gateIndex
-      : run.status !== "cancelled" &&
-        run.status !== "failed" &&
-        run.iteration === gate.iteration &&
-        currentIndex > gateIndex);
+      : run.iteration === gate.iteration && currentIndex > gateIndex);
   return {
     kind: "stale",
+    conversationId: run.conversationId,
+    pipelineName: definition.name,
     status: run.status,
     currentStage: run.currentStage,
     iteration: run.iteration,

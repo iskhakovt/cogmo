@@ -142,6 +142,8 @@ describe("resolveGate", () => {
     // same-effect resolution from one that lost.
     expect(second).toEqual({
       kind: "stale",
+      conversationId: expect.any(String),
+      pipelineName: "plan-then-build",
       status: "running",
       currentStage: "build",
       iteration: 0,
@@ -206,6 +208,19 @@ describe("resolveGate", () => {
     expect(
       await resolveGate(deps(), { runId, gateKey, decision: "timeout_proceed" }),
     ).toMatchObject({ kind: "stale", status: "completed", nextStage: null, pastGate: true });
+  });
+
+  it("a run that failed on a later stage still counts as past the gate", async () => {
+    const { runId, gateKey } = await parkedRun("approve");
+    await resolveGate(deps(), { runId, gateKey, decision: "approved" });
+    await tx((trx) => runStore.failRun(trx, runId, "build failed"));
+
+    expect(await resolveGate(deps(), { runId, gateKey, decision: "approved" })).toMatchObject({
+      kind: "stale",
+      status: "failed",
+      currentStage: "build",
+      pastGate: true,
+    });
   });
 
   it("an unknown run is not_found", async () => {

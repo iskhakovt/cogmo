@@ -9,6 +9,14 @@
 import type { StageOutputs } from "./run-types.js";
 import type { PipelineDefinition, Stage } from "./types.js";
 
+/**
+ * Neutralise anything that would read as a closing handoff tag, whatever its
+ * case or spacing, so a handoff can't end its own block early.
+ */
+function escapeHandoff(text: string): string {
+  return text.replace(/<\/(\s*handoff\s*)>/gi, "<\\/$1>");
+}
+
 export function buildStagePrompt(args: {
   definition: PipelineDefinition;
   stage: Stage;
@@ -32,7 +40,7 @@ export function buildStagePrompt(args: {
     const rendered = handoffs.map(([stageId, artifact]) => {
       const body =
         artifact.kind === "text" ? artifact.text : JSON.stringify(artifact.value, null, 2);
-      return `<handoff stage="${stageId}">\n${body.replaceAll("</handoff>", "<\\/handoff>")}\n</handoff>`;
+      return `<handoff stage="${stageId}">\n${escapeHandoff(body)}\n</handoff>`;
     });
     sections.push(
       "## Outputs from earlier stages\n\n" +

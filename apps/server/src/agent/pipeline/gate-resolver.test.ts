@@ -28,6 +28,7 @@ const advanced: ResolveGateOutcome = {
 /** A resolution that found the run already moved on past the approve gate. */
 const staleAdvanced: ResolveGateOutcome = {
   kind: "stale",
+  ...base,
   status: "running",
   currentStage: "build",
   iteration: 0,
@@ -38,12 +39,25 @@ const staleAdvanced: ResolveGateOutcome = {
 /** A resolution that found the run already cancelled at the approve gate. */
 const staleCancelled: ResolveGateOutcome = {
   kind: "stale",
+  ...base,
   status: "cancelled",
   currentStage: "approve",
   iteration: 0,
   gateStage: "approve",
   nextStage: "build",
   pastGate: false,
+};
+
+/** A resolution that found the run already completed at its final gate. */
+const staleCompleted: ResolveGateOutcome = {
+  kind: "stale",
+  ...base,
+  status: "completed",
+  currentStage: "approve",
+  iteration: 0,
+  gateStage: "approve",
+  nextStage: null,
+  pastGate: true,
 };
 
 function eventData(decision: PipelineGateDecision) {
@@ -90,7 +104,12 @@ describe("gateNotice", () => {
     ["approved", staleCancelled, "arrived after the checkpoint had already been resolved"],
     ["cancelled", staleAdvanced, "was not applied"],
     ["approved", staleAdvanced, null],
-    ["cancelled", staleCancelled, null],
+    // A stale resolution whose decision already stands sends the notice its
+    // effect calls for: a retry after a lost commit would otherwise send none.
+    ["cancelled", staleCancelled, '❌ Pipeline "issue-to-pr" cancelled.'],
+    ["timeout_abort", staleCancelled, "was cancelled"],
+    ["approved", staleCompleted, '✅ Pipeline "issue-to-pr" completed.'],
+    ["timeout_proceed", staleAdvanced, 'is proceeding to "build"'],
     ["timeout_abort", staleAdvanced, null],
     ["timeout_abort", { kind: "not_found" }, null],
   ] as const)("%s + %o → %s", (decision, outcome, expected) => {
@@ -180,6 +199,17 @@ describe("createPipelineGateResolver", () => {
       expect.objectContaining({ id: "pipeline-stage-due-run-1-build-0" }),
     );
     expect(notifyConversation).not.toHaveBeenCalled();
+  });
+
+  it("sends the lost notice when a timeout's cancellation had already been applied", async () => {
+    const { t, notifyConversation } = harness("timeout_abort");
+
+    await t.execute({ steps: [{ id: "resolve-gate", handler: () => staleCancelled }] });
+
+    expect(notifyConversation).toHaveBeenCalledWith(
+      "conv-1",
+      '⏱ Checkpoint timed out — pipeline "issue-to-pr" was cancelled.',
+    );
   });
 
   it("doesn't re-send a stage the run has already moved beyond", async () => {

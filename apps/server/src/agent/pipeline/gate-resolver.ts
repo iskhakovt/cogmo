@@ -71,11 +71,32 @@ async function notifyBestEffort(
 }
 
 /**
+ * The effect a stale resolution's decision already has in the run, as the
+ * outcome that would have produced it.
+ */
+function reflectedEffect(
+  decision: PipelineGateDecision,
+  outcome: Extract<ResolveGateOutcome, { kind: "stale" }>,
+): ResolveGateOutcome {
+  const base = { conversationId: outcome.conversationId, pipelineName: outcome.pipelineName };
+  if (!isApproval(decision)) return { kind: "cancelled", ...base };
+  if (outcome.status === "completed" || outcome.nextStage === null) {
+    return { kind: "completed", ...base };
+  }
+  return { kind: "advanced", ...base, nextStage: outcome.nextStage, iteration: outcome.iteration };
+}
+
+/**
  * What the run's conversation hears about a resolution, or null. A tapped
  * approval that advances says nothing: the tap already rewrote the keyboard
  * message, and the next stage's own output follows. A tap whose decision
- * didn't take is told so, since its keyboard said "sent"; a stale resolution
- * whose effect already stands says nothing.
+ * didn't take is told so, since its keyboard said "sent".
+ *
+ * A stale resolution whose decision already stands sends the notice for that
+ * effect. It may be this resolution's own retry after its commit — the first
+ * attempt died before notifying — so staying silent could lose the only
+ * notice. The cost is a second notice when a same-effect resolution raced it
+ * (a tap landing on the timeout), which is the rarer and cheaper failure.
  */
 export function gateNotice(
   decision: PipelineGateDecision,
@@ -96,7 +117,10 @@ export function gateNotice(
         ? `⏱ Checkpoint timed out — pipeline "${outcome.pipelineName}" was cancelled.`
         : `❌ Pipeline "${outcome.pipelineName}" cancelled.`;
     case "stale":
-      return timedOut || decisionReflected(decision, outcome)
+      if (decisionReflected(decision, outcome)) {
+        return gateNotice(decision, reflectedEffect(decision, outcome));
+      }
+      return timedOut
         ? null
         : "⌛ That decision arrived after the checkpoint had already been resolved, so it was not applied.";
     case "not_found":

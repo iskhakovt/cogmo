@@ -125,4 +125,21 @@ describe("pipeline gate waiter", () => {
     const withinBound = pendingEvent({ kind: "remind", maxReminders: 10, finalAction: "abort" });
     expect(pipelineGatePending.schema.safeParse(withinBound.data).success).toBe(true);
   });
+
+  it("rejects a pending gate whose pipeline name or stage id exceeds a definition's 64-character slug", () => {
+    const base = pendingEvent({ kind: "abort" }).data;
+    expect(
+      pipelineGatePending.schema.safeParse({ ...base, pipelineName: "p".repeat(65) }).success,
+    ).toBe(false);
+    expect(pipelineGatePending.schema.safeParse({ ...base, stageId: "s".repeat(65) }).success).toBe(
+      false,
+    );
+    expect(
+      pipelineGatePending.schema.safeParse({
+        ...base,
+        pipelineName: "p".repeat(64),
+        stageId: "s".repeat(64),
+      }).success,
+    ).toBe(true);
+  });
 });
