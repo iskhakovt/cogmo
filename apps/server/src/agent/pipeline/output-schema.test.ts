@@ -27,35 +27,50 @@ describe("compileOutputSchema", () => {
     expect(validate({})).toBe(false);
   });
 
-  it("applies the declared dialect's keywords", () => {
-    // `exclusiveMinimum` is a boolean modifier in draft-04 but a number from draft-06 on.
-    const validate = compileOutputSchema({
-      $schema: "http://json-schema.org/draft-06/schema#",
-      type: "object",
-      properties: { hours: { type: "number", exclusiveMinimum: 0 } },
-    })._unsafeUnwrap();
-    expect(validate({ hours: 0 })).toBe(false);
-    expect(validate({ hours: 1 })).toBe(true);
+  it("checks a schema against its declared dialect's meta-schema", () => {
+    // Draft-07's meta-schema requires `$comment` to be a string; draft-06 has no `$comment`.
+    const schema = { type: "object", $comment: 5 };
+    expect(
+      compileOutputSchema({ $schema: "http://json-schema.org/draft-06/schema#", ...schema }).isOk(),
+    ).toBe(true);
+    expect(
+      compileOutputSchema({
+        $schema: "http://json-schema.org/draft-07/schema#",
+        ...schema,
+      })._unsafeUnwrapErr(),
+    ).toMatch(/^is not a valid JSON Schema: /);
   });
 
-  it("names draft-04 as unsupported rather than as an unknown dialect", () => {
+  it.each(["draft-03", "draft-04"])("names %s as a real but unsupported dialect", (draft) => {
     const result = compileOutputSchema({
-      $schema: "http://json-schema.org/draft-04/schema#",
+      $schema: `http://json-schema.org/${draft}/schema#`,
       ...OBJECT,
     });
     expect(result._unsafeUnwrapErr()).toBe(
-      "declares JSON Schema draft-04, which isn't supported — use draft-06 or later",
+      `declares JSON Schema ${draft}, which isn't supported — use draft-06 or later`,
     );
   });
 
-  it("reads as a sentence after its subject", () => {
-    const result = compileOutputSchema({ type: "not-a-type" });
-    expect(result._unsafeUnwrapErr()).toMatch(/^is not a valid JSON Schema: /);
+  it.each([
+    ["a draft number that doesn't exist", "http://json-schema.org/draft-09/schema#"],
+    ["draft-05, which was never published", "http://json-schema.org/draft-05/schema#"],
+    ["a dated draft that doesn't exist", "https://json-schema.org/draft/2021-01/schema"],
+    ["trailing path segments", "http://json-schema.org/draft-07/schema#/definitions"],
+  ])("reports %s as an unknown $schema", (_label, uri) => {
+    expect(compileOutputSchema({ $schema: uri, ...OBJECT })._unsafeUnwrapErr()).toBe(
+      `declares an unknown $schema ${JSON.stringify(uri)}`,
+    );
   });
 
-  it("reports a schema that isn't valid JSON Schema", () => {
+  it("reports a non-string $schema as unknown", () => {
+    expect(compileOutputSchema({ $schema: 7, ...OBJECT })._unsafeUnwrapErr()).toBe(
+      "declares an unknown $schema 7",
+    );
+  });
+
+  it("reports a schema that isn't valid JSON Schema as a sentence after its subject", () => {
     const result = compileOutputSchema({ type: "not-a-type" });
-    expect(result._unsafeUnwrapErr()).toContain("not a valid JSON Schema");
+    expect(result._unsafeUnwrapErr()).toMatch(/^is not a valid JSON Schema: /);
   });
 
   it("reports a $ref that resolves nowhere", () => {

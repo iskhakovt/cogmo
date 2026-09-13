@@ -8,8 +8,11 @@
  * `$schema` in every spelling — http or https, with or without the trailing
  * `#`. The dialect is read from that declaration (draft-07 when absent) and
  * the schema checked against its meta-schema, then compiled by the matching
- * Ajv class. Draft-06, -07, 2019-09 and 2020-12 are supported; draft-04 needs
- * a separate Ajv package and is reported as unsupported. Nothing here throws —
+ * Ajv class. Draft-07, 2019-09 and 2020-12 are supported natively. Draft-06
+ * follows Ajv's documented setup: the schema is checked against the draft-06
+ * meta-schema, then evaluated by the draft-07 class, so draft-07 keywords
+ * (`if`/`then`/`else`) take effect in it. Draft-03 and -04 need a separate
+ * Ajv package and are reported as unsupported. Nothing here throws —
  * an unknown dialect, a meta-schema violation or a `$ref` that resolves
  * nowhere all come back as a message that reads after "output schema".
  *
@@ -36,7 +39,8 @@ const CANONICAL_URI: Record<Dialect, string> = {
   "2020-12": "https://json-schema.org/draft/2020-12/schema",
 };
 
-const DIALECT_URI = /^https?:\/\/json-schema\.org\/(draft-0\d|draft\/\d{4}-\d{2})\/schema#?$/;
+const DIALECT_URI =
+  /^https?:\/\/json-schema\.org\/(draft-0[34]|draft-0[67]|draft\/2019-09|draft\/2020-12)\/schema#?$/;
 
 type DialectMatch =
   | { kind: "dialect"; dialect: Dialect }

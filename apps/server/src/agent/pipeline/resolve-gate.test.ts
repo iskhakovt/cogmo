@@ -3,7 +3,7 @@ import type { Database, Transactor } from "../../db/index.js";
 import { pipelineGateKey } from "../../inngest/events.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { DrizzleAgentStore } from "../store/index.js";
-import { resolveGate } from "./resolve-gate.js";
+import { inspectGate, resolveGate } from "./resolve-gate.js";
 import { DrizzlePipelineRunStore, DrizzlePipelineStore } from "./store/index.js";
 import type { PipelineDefinition } from "./types.js";
 
@@ -317,6 +317,66 @@ describe("resolveGate", () => {
         runId,
         gateKey: pipelineGateKey(runId, "approve", 0),
         decision: "approved",
+        resolverRunId: "r-1",
+      }),
+    ).toEqual({ kind: "not_found" });
+  });
+});
+
+describe("inspectGate", () => {
+  it("reports a run still parked on the gate, without claiming it", async () => {
+    const { runId, gateKey } = await parkedRun("approve");
+
+    expect(await inspectGate(deps(), { runId, gateKey, resolverRunId: "r-1" })).toEqual({
+      kind: "parked",
+    });
+    expect(await tx((trx) => runStore.getRun(trx, runId))).toMatchObject({
+      status: "waiting_gate",
+      gateResolution: null,
+    });
+  });
+
+  it("reports where a resolved run is and that the claim is this resolver's", async () => {
+    const { runId, gateKey } = await parkedRun("approve");
+    await resolveGate(deps(), { runId, gateKey, decision: "approved", resolverRunId: "r-1" });
+
+    expect(await inspectGate(deps(), { runId, gateKey, resolverRunId: "r-1" })).toMatchObject({
+      kind: "stale",
+      status: "running",
+      currentStage: "build",
+      pastGate: true,
+      appliedByThis: true,
+    });
+  });
+
+  it("reports a claim held by another resolver as not this one's", async () => {
+    const { runId, gateKey } = await parkedRun("approve");
+    await resolveGate(deps(), { runId, gateKey, decision: "approved", resolverRunId: "r-1" });
+
+    expect(await inspectGate(deps(), { runId, gateKey, resolverRunId: "r-2" })).toMatchObject({
+      kind: "stale",
+      appliedByThis: false,
+    });
+  });
+
+  it("reports a run parked on a different gate as stale, not parked", async () => {
+    const { runId } = await parkedRun("sign-off");
+
+    expect(
+      await inspectGate(deps(), {
+        runId,
+        gateKey: pipelineGateKey(runId, "approve", 0),
+        resolverRunId: "r-1",
+      }),
+    ).toMatchObject({ kind: "stale", status: "waiting_gate", currentStage: "sign-off" });
+  });
+
+  it("reports an unknown run as not_found", async () => {
+    const runId = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
+    expect(
+      await inspectGate(deps(), {
+        runId,
+        gateKey: pipelineGateKey(runId, "approve", 0),
         resolverRunId: "r-1",
       }),
     ).toEqual({ kind: "not_found" });

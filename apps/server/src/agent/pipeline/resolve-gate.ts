@@ -15,6 +15,9 @@
  * where the run actually is and whether that recorded claim is this
  * resolution's own, so the caller can tell its own step re-run after the
  * commit from a resolution that raced it, whatever the effect.
+ *
+ * `inspectGate` reads the same picture without claiming anything, for a
+ * resolution that failed and needs to know what, if anything, it committed.
  */
 
 import type { Transactor } from "../../db/index.js";
@@ -79,11 +82,19 @@ export type ResolveGateOutcome =
     }
   | { kind: "not_found" };
 
+type StaleOutcome = Extract<ResolveGateOutcome, { kind: "stale" }>;
+
+/** Who is asking about a gate: the gate key and the resolving Inngest function run. */
+export type GateClaimArgs = Omit<ResolveGateArgs, "decision">;
+
+/** Where a run stands relative to one gate, as read by {@link inspectGate}. */
+export type GateInspection = { kind: "parked" } | StaleOutcome | { kind: "not_found" };
+
 function staleOutcome(
   run: PipelineRunRow,
   definition: PipelineRunWithDefinition["definition"],
-  args: ResolveGateArgs,
-): ResolveGateOutcome {
+  args: GateClaimArgs,
+): StaleOutcome {
   const gate = parsePipelineGateKey(args.gateKey);
   const stages = definition.compiled.stages;
   const gateIndex = stages.findIndex((s) => s.id === gate.stageId);
@@ -109,6 +120,28 @@ function staleOutcome(
       run.gateResolution?.gateKey === args.gateKey &&
       run.gateResolution.resolverRunId === args.resolverRunId,
   };
+}
+
+/**
+ * Read where the run stands relative to `args.gateKey` without changing it:
+ * still parked on that gate, or the stale outcome a resolution would report
+ * — including whether the run's recorded claim is `args.resolverRunId`'s.
+ */
+export async function inspectGate(
+  deps: Pick<ResolveGateDeps, "runInTx"> & {
+    runStore: Pick<ResolveGateDeps["runStore"], "getRunWithDefinition">;
+  },
+  args: GateClaimArgs,
+): Promise<GateInspection> {
+  return deps.runInTx(async (tx): Promise<GateInspection> => {
+    const loaded = await deps.runStore.getRunWithDefinition(tx, args.runId);
+    if (!loaded) return { kind: "not_found" };
+    const { run, definition } = loaded;
+    const parked =
+      run.status === "waiting_gate" &&
+      pipelineGateKey(run.id, run.currentStage, run.iteration) === args.gateKey;
+    return parked ? { kind: "parked" } : staleOutcome(run, definition, args);
+  });
 }
 
 export async function resolveGate(

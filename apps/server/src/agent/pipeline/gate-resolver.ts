@@ -17,40 +17,59 @@
  * resolution won and sent its own; this one stays silent, or, if it was a tap
  * whose decision didn't take, says so.
  *
- * If the resolution fails for good, `onFailure` first checks whether the run
- * is still parked on this gate. If it is, the resolution never committed: a
- * tap's waiter is still armed, so the user is told the decision didn't take
- * and the checkpoint will resolve on its timeout. Otherwise — a timeout, whose
- * waiter is gone, or a resolution that committed before a later step failed,
- * leaving no stage scheduled and possibly no waiter — nothing could ever move
- * the run again, so it is failed.
+ * If the resolution fails for good, `onFailure` inspects the run under the
+ * failed function run's id. Still parked on the gate means nothing committed:
+ * a tap's waiter is still armed, so the user is told the checkpoint will
+ * resolve on its timeout, while a timeout has no waiter left and fails the
+ * run. Otherwise the run has moved on, and `onFailure` sends the same
+ * follow-ups the handler would for that stale outcome — the lost ones if the
+ * claim is its own, nothing but a losing tap's notice if it isn't — so a
+ * failure after the commit, or in a resolution that lost, never fails a run
+ * that is moving.
  */
 
 import { inngest as inngestClient } from "../../inngest/client.js";
 import {
   buildPipelineStageDueEvent,
   type PipelineGateDecision,
-  pipelineGateKey,
   pipelineGateResolved,
   pipelineGateSettled,
 } from "../../inngest/events.js";
+import type { StepSendEvent } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
 import type { DeliveryRouter } from "../../transport/delivery-router.js";
-import { notifyAfterRetries } from "./notify.js";
-import { type ResolveGateDeps, type ResolveGateOutcome, resolveGate } from "./resolve-gate.js";
+import { type NoticeStep, notifyAfterRetries } from "./notify.js";
+import {
+  inspectGate,
+  type ResolveGateDeps,
+  type ResolveGateOutcome,
+  resolveGate,
+} from "./resolve-gate.js";
 import type { PipelineRunStore } from "./store/index.js";
 
 const log = logger.child({ component: "pipeline.gate-resolver" });
 
 const TOO_LATE =
   "⌛ That decision arrived after the checkpoint had already been resolved, so it was not applied.";
+const RUN_STOPPED = "⌛ That decision wasn't applied: the pipeline run has already stopped.";
 
 export interface PipelineGateResolverDeps extends ResolveGateDeps {
-  runStore: ResolveGateDeps["runStore"] & Pick<PipelineRunStore, "getRun" | "failRun">;
+  runStore: ResolveGateDeps["runStore"] & Pick<PipelineRunStore, "failRun">;
   deliveryRouter: Pick<DeliveryRouter, "notifyConversation">;
 }
 
 type StaleOutcome = Extract<ResolveGateOutcome, { kind: "stale" }>;
+
+interface GateResolution {
+  runId: string;
+  gateKey: string;
+  conversationId: string;
+  decision: PipelineGateDecision;
+}
+
+interface FollowUpStep extends NoticeStep {
+  sendEvent: StepSendEvent;
+}
 
 function isTap(decision: PipelineGateDecision): boolean {
   return decision === "approved" || decision === "cancelled";
@@ -134,11 +153,49 @@ export function gateNotice(
         const effect = effectInPlace(decision, outcome);
         return effect === null ? null : gateNotice(decision, effect);
       }
-      if (decisionReflected(decision, outcome)) return null;
-      return timedOut ? null : TOO_LATE;
+      if (timedOut || decisionReflected(decision, outcome)) return null;
+      return outcome.status === "failed" ? RUN_STOPPED : TOO_LATE;
     }
     case "not_found":
       return null;
+  }
+}
+
+/**
+ * Everything that follows a resolution's outcome: settle the gate's waiter,
+ * send the next stage when it is due, and deliver the notice. The next stage
+ * is due when the resolution advanced the run, or when its own claim, re-run
+ * after the commit, finds the run still running on that stage — deduped on
+ * the run cursor, and never for a run already parked there, whose stage has
+ * run.
+ */
+async function sendFollowUps(
+  step: FollowUpStep,
+  deliveryRouter: PipelineGateResolverDeps["deliveryRouter"],
+  resolution: GateResolution,
+  outcome: ResolveGateOutcome,
+): Promise<void> {
+  const { runId, gateKey, conversationId, decision } = resolution;
+  if (outcome.kind !== "not_found") {
+    await step.sendEvent("emit-gate-settled", pipelineGateSettled.create({ runId, gateKey }));
+  }
+
+  const due =
+    outcome.kind !== "stale"
+      ? outcome
+      : outcome.status === "running"
+        ? effectInPlace(decision, outcome)
+        : null;
+  if (due?.kind === "advanced") {
+    await step.sendEvent(
+      "emit-next-stage",
+      buildPipelineStageDueEvent({ runId, stageId: due.nextStage, iteration: due.iteration }),
+    );
+  }
+
+  const notice = gateNotice(decision, outcome);
+  if (notice !== null) {
+    await notifyAfterRetries(step, "notify", deliveryRouter, conversationId, notice);
   }
 }
 
@@ -150,16 +207,18 @@ export function createPipelineGateResolver(deps: PipelineGateResolverDeps) {
       retries: 2,
       concurrency: { limit: 1, key: "event.data.runId" },
       onFailure: async ({ event, error, step }) => {
-        const { runId, gateKey, conversationId, decision } = event.data.event.data;
+        const resolution = event.data.event.data;
+        const { runId, gateKey, conversationId, decision } = resolution;
         log.error({ err: error, runId, gateKey, decision }, "gate resolution failed after retries");
-        const parked = await step.run("check-gate", async () => {
-          const run = await deps.runInTx((tx) => deps.runStore.getRun(tx, runId));
-          return (
-            run?.status === "waiting_gate" &&
-            pipelineGateKey(run.id, run.currentStage, run.iteration) === gateKey
-          );
-        });
-        if (parked && isTap(decision)) {
+        const inspection = await step.run("inspect-gate", () =>
+          inspectGate(deps, { runId, gateKey, resolverRunId: event.data.run_id }),
+        );
+
+        if (inspection.kind !== "parked") {
+          await sendFollowUps(step, deps.deliveryRouter, resolution, inspection);
+          return;
+        }
+        if (isTap(decision)) {
           await notifyAfterRetries(
             step,
             "notify-tap-failed",
@@ -169,11 +228,10 @@ export function createPipelineGateResolver(deps: PipelineGateResolverDeps) {
           );
           return;
         }
-        const reason = parked
-          ? `gate timeout could not be applied (${error.name})`
-          : `gate resolution could not be completed (${error.name})`;
         const failed = await step.run("fail-run", () =>
-          deps.runInTx((tx) => deps.runStore.failRun(tx, runId, reason)),
+          deps.runInTx((tx) =>
+            deps.runStore.failRun(tx, runId, `gate timeout could not be applied (${error.name})`),
+          ),
         );
         if (failed.kind === "failed") {
           await notifyAfterRetries(
@@ -181,43 +239,18 @@ export function createPipelineGateResolver(deps: PipelineGateResolverDeps) {
             "notify-run-failed",
             deps.deliveryRouter,
             conversationId,
-            "❌ A pipeline checkpoint couldn't be resolved, so the run has stopped.",
+            "❌ A pipeline checkpoint's timeout couldn't be applied, so the run has stopped.",
           );
         }
       },
     },
     async ({ event, step, runId: resolverRunId }) => {
-      const { runId, gateKey, conversationId, decision } = event.data;
+      const resolution = event.data;
+      const { runId, gateKey, decision } = resolution;
       const outcome = await step.run("resolve-gate", () =>
         resolveGate(deps, { runId, gateKey, decision, resolverRunId }),
       );
-
-      if (outcome.kind !== "not_found") {
-        await step.sendEvent("emit-gate-settled", pipelineGateSettled.create({ runId, gateKey }));
-      }
-
-      // The next stage is due when this resolution advanced the run, or when
-      // its own claim, re-run after the commit, finds the run still running on
-      // that stage — the first run of the step may have died before sending
-      // it. Deduped on the run cursor. A run already parked there has had its
-      // stage run.
-      const due =
-        outcome.kind !== "stale"
-          ? outcome
-          : outcome.status === "running"
-            ? effectInPlace(decision, outcome)
-            : null;
-      if (due?.kind === "advanced") {
-        await step.sendEvent(
-          "emit-next-stage",
-          buildPipelineStageDueEvent({ runId, stageId: due.nextStage, iteration: due.iteration }),
-        );
-      }
-
-      const notice = gateNotice(decision, outcome);
-      if (notice !== null) {
-        await notifyAfterRetries(step, "notify", deps.deliveryRouter, conversationId, notice);
-      }
+      await sendFollowUps(step, deps.deliveryRouter, resolution, outcome);
       return outcome;
     },
   );

@@ -18,7 +18,7 @@ const HANDOFF_TAG_START = /<(?=\s*\/?\s*handoff\b)/gi;
 /**
  * Neutralise anything that would read as a handoff tag, so a handoff can
  * neither end its own block early nor fake a block attributed to another
- * stage. Text gets a backslash after the `<`. JSON gets the `<` as `<`:
+ * stage. Text gets a backslash after the `<`. JSON gets the `<` as `\u003c`:
  * in JSON a `<` can only sit inside a string, where that escape is valid and
  * parses back to the same value.
  */

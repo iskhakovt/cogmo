@@ -12,7 +12,7 @@ import {
 } from "../../test/factories.js";
 import { createPipelineGateResolver, gateNotice } from "./gate-resolver.js";
 import type { ResolveGateOutcome } from "./resolve-gate.js";
-import type { PipelineRunRow, PipelineRunStore } from "./store/index.js";
+import type { PipelineRunRow, PipelineRunStore, PipelineRunWithDefinition } from "./store/index.js";
 
 let sendSpy: ReturnType<typeof spyOnInngestSend>;
 beforeEach(() => {
@@ -69,7 +69,11 @@ function eventData(decision: PipelineGateDecision) {
   return { runId: "run-1", gateKey: "run-1:approve:0", conversationId: "conv-1", decision };
 }
 
-function runAt(status: PipelineRunRow["status"], currentStage: string): PipelineRunRow {
+function runAt(
+  status: PipelineRunRow["status"],
+  currentStage: string,
+  gateResolution: PipelineRunRow["gateResolution"],
+): PipelineRunRow {
   return {
     id: "run-1",
     definitionId: "def-1",
@@ -79,9 +83,48 @@ function runAt(status: PipelineRunRow["status"], currentStage: string): Pipeline
     iteration: 0,
     stageOutputs: {},
     failureReason: null,
-    gateResolution: null,
+    gateResolution,
     idempotencyKey: "k1",
     createdAt: new Date("2026-09-12T00:00:00Z"),
+  };
+}
+
+/** The run at a position, joined to a gate → build → gate definition. */
+function loadedAt(
+  status: PipelineRunRow["status"],
+  currentStage: string,
+  gateResolution: PipelineRunRow["gateResolution"],
+): PipelineRunWithDefinition {
+  return {
+    run: runAt(status, currentStage, gateResolution),
+    definition: {
+      id: "def-1",
+      userId: "user-1",
+      name: "issue-to-pr",
+      version: 1,
+      sourceText: "source",
+      compiled: {
+        name: "issue-to-pr",
+        trigger: { kind: "command", phrase: "issue to pr" },
+        stages: [
+          {
+            id: "approve",
+            kind: "gate",
+            instructions: "Approve?",
+            gate: { timeout: "1d", onTimeout: { kind: "abort" } },
+          },
+          { id: "build", kind: "agentic", instructions: "Build." },
+          {
+            id: "sign-off",
+            kind: "gate",
+            instructions: "Happy?",
+            gate: { timeout: "1d", onTimeout: { kind: "proceed" } },
+          },
+        ],
+      },
+      active: true,
+      createdAt: new Date("2026-09-12T00:00:00Z"),
+    },
   };
 }
 
@@ -105,15 +148,20 @@ function resolved(outcome: ResolveGateOutcome) {
   return { id: "resolve-gate", handler: () => outcome };
 }
 
+/** The Inngest run id of the resolution that failed. */
+const FAILED_RUN = "inngest-run-failed";
+/** The gate claim that failed resolution would have recorded. */
+const OWN_CLAIM = { gateKey: "run-1:approve:0", resolverRunId: FAILED_RUN };
+
 type FailureCtx = {
-  event: { data: { event: { data: ReturnType<typeof eventData> } } };
+  event: { data: { run_id: string; event: { data: ReturnType<typeof eventData> } } };
   error: Error;
   step: ReturnType<typeof directStep>;
 };
 
 function failureCtx(decision: PipelineGateDecision, failingStep: string | null): FailureCtx {
   return {
-    event: { data: { event: { data: eventData(decision) } } },
+    event: { data: { run_id: FAILED_RUN, event: { data: eventData(decision) } } },
     error: new TypeError("connection terminated"),
     step: directStep({}, failingStep),
   };
@@ -145,6 +193,17 @@ describe("gateNotice", () => {
     ["timeout_abort", staleCancelled, null],
     ["cancelled", staleCancelled, null],
     ["timeout_abort", staleAdvanced, null],
+    // A run that failed at the gate wasn't resolved: a tap is told it stopped.
+    [
+      "approved",
+      staleAt({ status: "failed", currentStage: "approve", pastGate: false }),
+      "the pipeline run has already stopped",
+    ],
+    [
+      "timeout_proceed",
+      staleAt({ status: "failed", currentStage: "approve", pastGate: false }),
+      null,
+    ],
   ] as const)("claimed by another resolution: %s + %o → %s", (decision, outcome, expected) => {
     const notice = gateNotice(decision, outcome);
     if (expected === null) expect(notice).toBeNull();
@@ -311,31 +370,7 @@ describe("createPipelineGateResolver", () => {
     // The Inngest run id is stable across retries of the resolution and unique
     // to it, so a re-run step recognises its own claim and nothing else's.
     const { fn, runStore } = harness("approved");
-    runStore.getRunWithDefinition.mockResolvedValue({
-      run: runAt("waiting_gate", "approve"),
-      definition: {
-        id: "def-1",
-        userId: "user-1",
-        name: "issue-to-pr",
-        version: 1,
-        sourceText: "source",
-        compiled: {
-          name: "issue-to-pr",
-          trigger: { kind: "command", phrase: "issue to pr" },
-          stages: [
-            {
-              id: "approve",
-              kind: "gate",
-              instructions: "Approve?",
-              gate: { timeout: "1d", onTimeout: { kind: "abort" } },
-            },
-            { id: "build", kind: "agentic", instructions: "Build." },
-          ],
-        },
-        active: true,
-        createdAt: new Date("2026-09-12T00:00:00Z"),
-      },
-    });
+    runStore.getRunWithDefinition.mockResolvedValue(loadedAt("waiting_gate", "approve", null));
     runStore.claimGate.mockResolvedValue({ kind: "transitioned" });
     runStore.advanceStage.mockResolvedValue({ kind: "advanced" });
 
@@ -365,37 +400,14 @@ describe("createPipelineGateResolver", () => {
 describe("createPipelineGateResolver onFailure", () => {
   it("tells the user a tapped decision didn't apply while the gate is still parked", async () => {
     const { fn, runStore, notifyConversation } = harness("approved");
-    runStore.getRun.mockResolvedValue(runAt("waiting_gate", "approve"));
+    runStore.getRunWithDefinition.mockResolvedValue(loadedAt("waiting_gate", "approve", null));
+    const ctx = failureCtx("approved", null);
 
-    await invokeInngestOnFailure<FailureCtx>(fn, failureCtx("approved", null));
+    await invokeInngestOnFailure<FailureCtx>(fn, ctx);
 
     expect(runStore.failRun).not.toHaveBeenCalled();
+    expect(ctx.step.sendEvent).not.toHaveBeenCalled();
     expect(notifyConversation).toHaveBeenCalledWith(
-      "conv-1",
-      expect.stringContaining("will resolve on its timeout"),
-    );
-  });
-
-  it("fails the run when a tap's resolution committed but what follows it couldn't be sent", async () => {
-    // The flip and advance committed; a later emit failed for good. The waiter
-    // may already be cancelled and no stage is scheduled, so nothing else would
-    // ever move the run — and the gate is no longer open to resolve.
-    const { fn, runStore, notifyConversation } = harness("approved");
-    runStore.getRun.mockResolvedValue(runAt("running", "build"));
-    runStore.failRun.mockResolvedValue({ kind: "failed", conversationId: "conv-1" });
-
-    await invokeInngestOnFailure<FailureCtx>(fn, failureCtx("approved", null));
-
-    expect(runStore.failRun).toHaveBeenCalledWith(
-      expect.anything(),
-      "run-1",
-      "gate resolution could not be completed (TypeError)",
-    );
-    expect(notifyConversation).toHaveBeenCalledWith(
-      "conv-1",
-      expect.stringContaining("the run has stopped"),
-    );
-    expect(notifyConversation).not.toHaveBeenCalledWith(
       "conv-1",
       expect.stringContaining("will resolve on its timeout"),
     );
@@ -403,7 +415,7 @@ describe("createPipelineGateResolver onFailure", () => {
 
   it("fails the run when a timeout can't be applied, since no waiter remains", async () => {
     const { fn, runStore, notifyConversation } = harness("timeout_proceed");
-    runStore.getRun.mockResolvedValue(runAt("waiting_gate", "approve"));
+    runStore.getRunWithDefinition.mockResolvedValue(loadedAt("waiting_gate", "approve", null));
     runStore.failRun.mockResolvedValue({ kind: "failed", conversationId: "conv-1" });
 
     await invokeInngestOnFailure<FailureCtx>(fn, failureCtx("timeout_proceed", null));
@@ -419,19 +431,105 @@ describe("createPipelineGateResolver onFailure", () => {
     );
   });
 
-  it("stays quiet when the run was already terminal", async () => {
+  it("finishes a resolution that committed before a later step failed, without failing the run", async () => {
+    // The flip and advance committed under this run's claim; a follow-up emit
+    // then failed for good. Re-sending is safe: the waiter cancel is idempotent
+    // and the next stage is deduped on the run cursor.
+    const { fn, runStore, notifyConversation } = harness("approved");
+    runStore.getRunWithDefinition.mockResolvedValue(loadedAt("running", "build", OWN_CLAIM));
+    const ctx = failureCtx("approved", null);
+
+    await invokeInngestOnFailure<FailureCtx>(fn, ctx);
+
+    expect(runStore.failRun).not.toHaveBeenCalled();
+    expect(ctx.step.sendEvent).toHaveBeenCalledWith(
+      "emit-gate-settled",
+      expect.objectContaining({ data: { runId: "run-1", gateKey: "run-1:approve:0" } }),
+    );
+    expect(ctx.step.sendEvent).toHaveBeenCalledWith(
+      "emit-next-stage",
+      expect.objectContaining({ id: "pipeline-stage-due-run-1-build-0" }),
+    );
+    expect(notifyConversation).not.toHaveBeenCalled();
+  });
+
+  it("delivers the notice of a committed cancellation whose follow-up failed", async () => {
     const { fn, runStore, notifyConversation } = harness("timeout_abort");
-    runStore.getRun.mockResolvedValue(runAt("cancelled", "approve"));
-    runStore.failRun.mockResolvedValue({ kind: "already_terminal", status: "cancelled" });
+    runStore.getRunWithDefinition.mockResolvedValue(loadedAt("cancelled", "approve", OWN_CLAIM));
 
     await invokeInngestOnFailure<FailureCtx>(fn, failureCtx("timeout_abort", null));
 
+    expect(runStore.failRun).not.toHaveBeenCalled();
+    expect(notifyConversation).toHaveBeenCalledWith(
+      "conv-1",
+      '⏱ Checkpoint timed out — pipeline "issue-to-pr" was cancelled.',
+    );
+  });
+
+  it("leaves a run another resolution moved alone", async () => {
+    // The timeout advanced the run; the tap queued behind it failed. Its failure
+    // says nothing about the run, which is healthy.
+    const { fn, runStore, notifyConversation } = harness("approved");
+    runStore.getRunWithDefinition.mockResolvedValue(
+      loadedAt("running", "build", {
+        gateKey: "run-1:approve:0",
+        resolverRunId: "inngest-run-timeout",
+      }),
+    );
+    const ctx = failureCtx("approved", null);
+
+    await invokeInngestOnFailure<FailureCtx>(fn, ctx);
+
+    expect(runStore.failRun).not.toHaveBeenCalled();
+    expect(ctx.step.sendEvent).not.toHaveBeenCalledWith("emit-next-stage", expect.anything());
+    expect(notifyConversation).not.toHaveBeenCalled();
+  });
+
+  it("tells a tap that another resolution's opposite decision stands", async () => {
+    const { fn, runStore, notifyConversation } = harness("cancelled");
+    runStore.getRunWithDefinition.mockResolvedValue(
+      loadedAt("running", "build", {
+        gateKey: "run-1:approve:0",
+        resolverRunId: "inngest-run-timeout",
+      }),
+    );
+
+    await invokeInngestOnFailure<FailureCtx>(fn, failureCtx("cancelled", null));
+
+    expect(runStore.failRun).not.toHaveBeenCalled();
+    expect(notifyConversation).toHaveBeenCalledWith("conv-1", expect.stringContaining(TOO_LATE));
+  });
+
+  it("doesn't treat a run parked on a later gate as this gate still open", async () => {
+    const { fn, runStore, notifyConversation } = harness("approved");
+    runStore.getRunWithDefinition.mockResolvedValue(
+      loadedAt("waiting_gate", "sign-off", { gateKey: "run-1:approve:0", resolverRunId: "other" }),
+    );
+
+    await invokeInngestOnFailure<FailureCtx>(fn, failureCtx("approved", null));
+
+    expect(runStore.failRun).not.toHaveBeenCalled();
+    expect(notifyConversation).not.toHaveBeenCalledWith(
+      "conv-1",
+      expect.stringContaining("will resolve on its timeout"),
+    );
+  });
+
+  it("does nothing for a run that no longer exists", async () => {
+    const { fn, runStore, notifyConversation } = harness("timeout_abort");
+    runStore.getRunWithDefinition.mockResolvedValue(undefined);
+    const ctx = failureCtx("timeout_abort", null);
+
+    await invokeInngestOnFailure<FailureCtx>(fn, ctx);
+
+    expect(runStore.failRun).not.toHaveBeenCalled();
+    expect(ctx.step.sendEvent).not.toHaveBeenCalled();
     expect(notifyConversation).not.toHaveBeenCalled();
   });
 
   it("still resolves when the failure notice can't be delivered", async () => {
     const { fn, runStore } = harness("approved");
-    runStore.getRun.mockResolvedValue(runAt("waiting_gate", "approve"));
+    runStore.getRunWithDefinition.mockResolvedValue(loadedAt("waiting_gate", "approve", null));
 
     await expect(
       invokeInngestOnFailure<FailureCtx>(fn, failureCtx("approved", "notify-tap-failed")),
