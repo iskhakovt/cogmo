@@ -10,12 +10,15 @@
  * Policy:
  * - **Hard fail at once (throw `BootCheckError`):** deterministic,
  *   deployment-shaped problems that won't self-heal — missing extension,
- *   missing bucket, rejected credentials, a server that answers without
- *   auth, a version outside the supported range. Operator action required.
- * - **Retry, then hard fail:** a dependency that can't be reached, or
- *   answers with a status that proves nothing either way. It gets
- *   `BOOT_PROBE_DEADLINE_MS` to become conclusive — long enough to ride out
- *   a restart during a deploy. Past the deadline boot fails closed: a
+ *   missing bucket, wrong region, rejected credentials, a server that
+ *   answers without auth, a version outside the supported range. Operator
+ *   action required.
+ * - **Retry, then hard fail:** a dependency that can't be reached, doesn't
+ *   answer in time, or answers with a status that proves nothing either way.
+ *   It gets `BOOT_PROBE_DEADLINE_MS` to become conclusive — long enough to
+ *   ride out a restart during a deploy. Every attempt is bounded by
+ *   `BOOT_PROBE_ATTEMPT_TIMEOUT_MS` and by the time left, so a request that
+ *   hangs cannot hold boot past the deadline. Past it, boot fails closed: a
  *   supervisor restart loop is visible, a check that silently never ran is
  *   not.
  */
@@ -37,18 +40,23 @@ export class BootCheckError extends Error {
 
 /** How long a boot probe retries an inconclusive answer before failing closed. */
 export const BOOT_PROBE_DEADLINE_MS = 60_000;
+/** Upper bound on one attempt, including every request it makes. */
+export const BOOT_PROBE_ATTEMPT_TIMEOUT_MS = 5_000;
 const BOOT_PROBE_MIN_DELAY_MS = 1_000;
 const BOOT_PROBE_MAX_DELAY_MS = 10_000;
 
-/** Time source for boot probes — injected so retry tests do not wait. */
+/** Time source for boot probes — injected so retry and timeout tests do not wait. */
 export interface BootClock {
   now(): number;
   sleep(ms: number): Promise<void>;
+  /** A signal that aborts after `ms`. */
+  timeout(ms: number): AbortSignal;
 }
 
 export const systemBootClock: BootClock = {
   now: () => Date.now(),
   sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
+  timeout: (ms) => AbortSignal.timeout(ms),
 };
 
 type ProbeAttempt<T> = { conclusive: true; value: T } | { conclusive: false; reason: string };
@@ -59,27 +67,33 @@ function conclusive<T>(value: T): ProbeAttempt<T> {
 
 /**
  * Run `attempt` until it is conclusive, backing off between tries, and fail
- * closed at the deadline. A `BootCheckError` thrown by `attempt` is a
- * deterministic verdict and propagates at once.
+ * closed at the deadline. Each attempt receives a signal that aborts after
+ * `BOOT_PROBE_ATTEMPT_TIMEOUT_MS` or at the deadline, whichever is sooner;
+ * the attempt must pass it to every request it makes. A `BootCheckError`
+ * thrown by `attempt` is a deterministic verdict and propagates at once.
  */
 async function retryUntilConclusive<T>(
   label: string,
   clock: BootClock,
-  attempt: () => Promise<ProbeAttempt<T>>,
+  attempt: (signal: AbortSignal) => Promise<ProbeAttempt<T>>,
 ): Promise<T> {
   const deadline = clock.now() + BOOT_PROBE_DEADLINE_MS;
   let delay = BOOT_PROBE_MIN_DELAY_MS;
+  let lastReason = "no attempt completed";
   for (;;) {
-    const result = await attempt();
-    if (result.conclusive) return result.value;
     const remaining = deadline - clock.now();
     if (remaining <= 0) {
       throw new BootCheckError(
         `${label} could not reach a conclusive answer within ${BOOT_PROBE_DEADLINE_MS / 1000}s ` +
-          `(last: ${result.reason}). Refusing to start unverified.`,
+          `(last: ${lastReason}). Refusing to start unverified.`,
       );
     }
-    const wait = Math.min(delay, remaining);
+    const result = await attempt(clock.timeout(Math.min(BOOT_PROBE_ATTEMPT_TIMEOUT_MS, remaining)));
+    if (result.conclusive) return result.value;
+    lastReason = result.reason;
+    const left = deadline - clock.now();
+    if (left <= 0) continue;
+    const wait = Math.min(delay, left);
     logger.warn(
       { label, reason: result.reason, retryInMs: wait },
       `${label} inconclusive — retrying`,
@@ -161,39 +175,59 @@ export async function checkUuidv7(db: Database): Promise<void> {
   }
 }
 
-const AwsHttpStatusSchema = z.object({
+const AwsServiceErrorSchema = z.object({
   $metadata: z.object({ httpStatusCode: z.number() }),
+  $response: z.object({ headers: z.record(z.string(), z.unknown()) }).optional(),
 });
 
-/** HTTP status an AWS SDK service error carries; absent for network failures. */
-function awsHttpStatus(err: unknown): number | undefined {
-  const parsed = AwsHttpStatusSchema.safeParse(err);
-  return parsed.success ? parsed.data.$metadata.httpStatusCode : undefined;
+/** Status and bucket region an AWS SDK service error carries; absent for network failures. */
+function awsServiceError(
+  err: unknown,
+): { status: number; bucketRegion: string | undefined } | undefined {
+  const parsed = AwsServiceErrorSchema.safeParse(err);
+  if (!parsed.success) return undefined;
+  const region = parsed.data.$response?.headers["x-amz-bucket-region"];
+  return {
+    status: parsed.data.$metadata.httpStatusCode,
+    bucketRegion: typeof region === "string" ? region : undefined,
+  };
 }
 
 /**
  * Verify the configured S3 bucket exists and credentials are valid.
  * `HeadBucket` is the cheapest probe — no list, no read, no write.
  *
- * A 4xx (other than 429) is the store's verdict — missing bucket, bad
- * credentials, wrong region — and fails at once. A network error or 5xx is
- * retried up to the boot probe deadline.
+ * The store's verdicts fail at once: a 4xx other than 429 (missing bucket,
+ * bad credentials) and a 301, which is how S3 answers a bucket in another
+ * region when the client does not follow region redirects. A network error,
+ * timeout, 5xx, 429 or temporary redirect is retried up to the boot probe
+ * deadline.
  */
 export async function checkS3Bucket(s3: S3Client, bucket: string, clock: BootClock): Promise<void> {
-  const failure = (err: unknown) =>
-    new BootCheckError(
-      `S3 bucket "${bucket}" not reachable. Check S3_ENDPOINT, ` +
-        `S3_ACCESS_KEY/S3_SECRET_KEY, S3_REGION, and that the bucket exists. ` +
-        `Underlying error: ${stringifyError(err)}`,
-    );
-  await retryUntilConclusive(`S3 bucket "${bucket}" check`, clock, async () => {
+  await retryUntilConclusive(`S3 bucket "${bucket}" check`, clock, async (signal) => {
     try {
-      await s3.send(new HeadBucketCommand({ Bucket: bucket }));
+      await s3.send(new HeadBucketCommand({ Bucket: bucket }), { abortSignal: signal });
       return conclusive(undefined);
     } catch (err) {
-      const status = awsHttpStatus(err);
-      if (status !== undefined && status >= 400 && status < 500 && status !== 429) {
-        throw failure(err);
+      const service = awsServiceError(err);
+      if (service?.status === 301) {
+        throw new BootCheckError(
+          `S3 bucket "${bucket}" is in a different region than S3_REGION` +
+            `${service.bucketRegion !== undefined ? ` (the bucket is in ${service.bucketRegion})` : ""}. ` +
+            `Set S3_REGION to the bucket's region. Underlying error: ${stringifyError(err)}`,
+        );
+      }
+      if (
+        service !== undefined &&
+        service.status >= 400 &&
+        service.status < 500 &&
+        service.status !== 429
+      ) {
+        throw new BootCheckError(
+          `S3 bucket "${bucket}" not reachable. Check S3_ENDPOINT, ` +
+            `S3_ACCESS_KEY/S3_SECRET_KEY, S3_REGION, and that the bucket exists. ` +
+            `Underlying error: ${stringifyError(err)}`,
+        );
       }
       return { conclusive: false, reason: stringifyError(err) };
     }
@@ -217,9 +251,9 @@ export async function checkHindsightVersion(
   range: HindsightCompat,
   clock: BootClock,
 ): Promise<void> {
-  const actual = await retryUntilConclusive("hindsight version check", clock, async () => {
+  const actual = await retryUntilConclusive("hindsight version check", clock, async (signal) => {
     try {
-      return conclusive(await memory.getServerVersion());
+      return conclusive(await memory.getServerVersion(signal));
     } catch (err) {
       return { conclusive: false, reason: stringifyError(err) };
     }
@@ -327,12 +361,28 @@ function serviceUrl(baseUrl: string, path: string): string {
   return url.toString();
 }
 
+/**
+ * `url` with its last path segment replaced by `REDACTED`, for logs and
+ * errors. The Inngest event URL carries the event key there, and the key is
+ * a credential for posting events.
+ */
+function redactLastSegment(url: string): string {
+  const redacted = new URL(url);
+  redacted.pathname = redacted.pathname.replace(/[^/]+$/, "REDACTED");
+  return redacted.toString();
+}
+
 type ProbeResult = { kind: "status"; status: number } | { kind: "unreachable"; error: string };
 
 /** One probe request. The body is discarded unread: only the status is evidence. */
-async function probe(fetchFn: ProbeFetch, url: string, init: RequestInit): Promise<ProbeResult> {
+async function probe(
+  fetchFn: ProbeFetch,
+  url: string,
+  init: RequestInit,
+  signal: AbortSignal,
+): Promise<ProbeResult> {
   try {
-    const res = await fetchFn(url, { ...init, signal: AbortSignal.timeout(5_000) });
+    const res = await fetchFn(url, { ...init, signal });
     await res.body?.cancel();
     return { kind: "status", status: res.status };
   } catch (err) {
@@ -353,12 +403,13 @@ function statusText(result: ProbeResult): string {
 }
 
 /**
- * Unreachable, or a status that proves neither enforcement nor its absence —
- * a 404 from a wrong base path, a 502 from a proxy in front of a restarting
- * server. Retried until the deadline.
+ * Unreachable, timed out, or a status that proves neither enforcement nor
+ * its absence — a 404 from a wrong base path, a 502 from a proxy in front of
+ * a restarting server. Retried until the deadline. `displayUrl` reaches logs
+ * and the final error, so it must carry no credential.
  */
-function inconclusive(url: string, result: ProbeResult): ProbeAttempt<void> {
-  return { conclusive: false, reason: `${url} → ${statusText(result)}` };
+function inconclusive(displayUrl: string, result: ProbeResult): ProbeAttempt<void> {
+  return { conclusive: false, reason: `${displayUrl} → ${statusText(result)}` };
 }
 
 /**
@@ -381,8 +432,8 @@ export async function checkHindsightAuth(
   apiKey: string,
 ): Promise<void> {
   const url = serviceUrl(baseUrl, "/v1/default/banks");
-  await retryUntilConclusive("hindsight auth check", deps.clock, async () => {
-    const anonymous = await probe(deps.fetch, url, {});
+  await retryUntilConclusive("hindsight auth check", deps.clock, async (signal) => {
+    const anonymous = await probe(deps.fetch, url, {}, signal);
     if (isSuccess(anonymous)) {
       throw new BootCheckError(
         `Hindsight at ${baseUrl} answered an unauthenticated request (${statusText(anonymous)}). ` +
@@ -391,9 +442,12 @@ export async function checkHindsightAuth(
       );
     }
     if (!isAuthRejection(anonymous)) return inconclusive(url, anonymous);
-    const authenticated = await probe(deps.fetch, url, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-    });
+    const authenticated = await probe(
+      deps.fetch,
+      url,
+      { headers: { Authorization: `Bearer ${apiKey}` } },
+      signal,
+    );
     if (isAuthRejection(authenticated)) {
       throw new BootCheckError(
         `Hindsight at ${baseUrl} rejected HINDSIGHT_API_KEY (${statusText(authenticated)}). ` +
@@ -455,8 +509,8 @@ export async function checkInngestAuth(
   }
   const eventsUrl = serviceUrl(baseUrl, "/v1/events");
   const eventUrl = serviceUrl(baseUrl, `/e/${encodeURIComponent(eventKey)}`);
-  await retryUntilConclusive("inngest auth check", deps.clock, async () => {
-    const anonymous = await probe(deps.fetch, eventsUrl, {});
+  await retryUntilConclusive("inngest auth check", deps.clock, async (signal) => {
+    const anonymous = await probe(deps.fetch, eventsUrl, {}, signal);
     if (isSuccess(anonymous)) {
       throw new BootCheckError(
         `Inngest at ${baseUrl} answered an unauthenticated API request (${statusText(anonymous)}), ` +
@@ -465,9 +519,12 @@ export async function checkInngestAuth(
       );
     }
     if (!isAuthRejection(anonymous)) return inconclusive(eventsUrl, anonymous);
-    const signed = await probe(deps.fetch, eventsUrl, {
-      headers: { Authorization: `Bearer ${signingKey}` },
-    });
+    const signed = await probe(
+      deps.fetch,
+      eventsUrl,
+      { headers: { Authorization: `Bearer ${signingKey}` } },
+      signal,
+    );
     if (isAuthRejection(signed)) {
       throw new BootCheckError(
         `Inngest at ${baseUrl} rejected INNGEST_SIGNING_KEY (${statusText(signed)}). ` +
@@ -475,18 +532,19 @@ export async function checkInngestAuth(
       );
     }
     if (!isSuccess(signed)) return inconclusive(eventsUrl, signed);
-    const event = await probe(deps.fetch, eventUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "[]",
-    });
+    const event = await probe(
+      deps.fetch,
+      eventUrl,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: "[]" },
+      signal,
+    );
     if (isAuthRejection(event)) {
       throw new BootCheckError(
         `Inngest at ${baseUrl} rejected INNGEST_EVENT_KEY (${statusText(event)}). ` +
           "It must be one of the server's --event-key values.",
       );
     }
-    if (!isSuccess(event)) return inconclusive(eventUrl, event);
+    if (!isSuccess(event)) return inconclusive(redactLastSegment(eventUrl), event);
     return conclusive(undefined);
   });
   logger.info("inngest auth check passed");

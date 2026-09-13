@@ -120,8 +120,13 @@ export class HindsightMemoryProvider implements MemoryProvider {
    * wants a fast yes/no, and a flaky-Hindsight-at-boot signal is more
    * useful than a 10-second backoff that hides the network problem.
    */
-  async getServerVersion(): Promise<string> {
-    const res = await sdk.getVersion({ client: this.#sdkClient });
+  async getServerVersion(signal?: AbortSignal): Promise<string> {
+    // `signal` bounds the request; the boot check passes its per-attempt
+    // timeout so a server that never answers cannot hold boot.
+    const res = await sdk.getVersion({
+      client: this.#sdkClient,
+      ...(signal !== undefined && { signal }),
+    });
     if (res.error !== undefined || !res.data) {
       const status = res.response?.status ?? "?";
       const detail = res.error !== undefined ? JSON.stringify(res.error) : "no body";

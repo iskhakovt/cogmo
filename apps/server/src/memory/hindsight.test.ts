@@ -13,6 +13,7 @@ const mockRetainBatch = vi
   .mockResolvedValue({ success: true, bank_id: "test", items_count: 2, async: true });
 const mockRecallMemories = vi.fn();
 const mockReflect = vi.fn();
+const mockGetVersion = vi.fn();
 const fakeSdkClient = { __sdkClient: true };
 const mockClientConstructor = vi.fn();
 const mockCreateConfig = vi.fn();
@@ -35,6 +36,7 @@ vi.mock("@vectorize-io/hindsight-client", () => {
     sdk: {
       recallMemories: (...args: unknown[]) => mockRecallMemories(...args),
       reflect: (...args: unknown[]) => mockReflect(...args),
+      getVersion: (...args: unknown[]) => mockGetVersion(...args),
     },
   };
 });
@@ -70,6 +72,20 @@ describe("HindsightMemoryProvider", () => {
       baseUrl: "http://localhost:8888",
       headers: { Authorization: "Bearer test-api-key" },
     });
+  });
+
+  it("getServerVersion bounds the version request with the caller's signal", async () => {
+    const provider = createProvider();
+    mockGetVersion.mockResolvedValue({
+      data: { api_version: "0.9.1" },
+      error: undefined,
+      response: { status: 200 },
+    });
+    const signal = new AbortController().signal;
+
+    await expect(provider.getServerVersion(signal)).resolves.toBe("0.9.1");
+
+    expect(mockGetVersion).toHaveBeenCalledWith({ client: fakeSdkClient, signal });
   });
 
   it("retain passes content and options to client", async () => {

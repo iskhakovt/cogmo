@@ -6,9 +6,11 @@ import { CLIENT_VERSION } from "@vectorize-io/hindsight-client";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Database } from "../db/index.js";
+import { logger } from "../logger.js";
 import type { HindsightMemoryProvider } from "../memory/hindsight.js";
 import { expectDefined } from "../test/assertions.js";
 import {
+  BOOT_PROBE_ATTEMPT_TIMEOUT_MS,
   BOOT_PROBE_DEADLINE_MS,
   BootCheckError,
   type BootClock,
@@ -24,16 +26,40 @@ import {
   type ProbeFetch,
 } from "./checks.js";
 
-/** A clock whose `sleep` advances time instantly, recording each wait. */
-function fakeClock(): BootClock & { sleeps: number[] } {
+interface FakeClock extends BootClock {
+  sleeps: number[];
+  timeouts: number[];
+  /** Let the most recent attempt's timeout elapse: advance time and abort its signal. */
+  expire(): void;
+}
+
+/** A clock whose `sleep` advances time instantly and whose timeouts fire on `expire()`. */
+function fakeClock(): FakeClock {
   let now = 0;
+  let pending: { ms: number; controller: AbortController } | undefined;
   const sleeps: number[] = [];
+  const timeouts: number[] = [];
   return {
     sleeps,
+    timeouts,
     now: () => now,
     sleep: async (ms) => {
       sleeps.push(ms);
       now += ms;
+    },
+    timeout: (ms) => {
+      timeouts.push(ms);
+      const controller = new AbortController();
+      pending = { ms, controller };
+      return controller.signal;
+    },
+    expire: () => {
+      if (pending === undefined) return;
+      now += pending.ms;
+      pending.controller.abort(
+        new DOMException("The operation was aborted due to timeout", "TimeoutError"),
+      );
+      pending = undefined;
     },
   };
 }
@@ -47,6 +73,18 @@ function probeFetch(respond: (url: string, init: RequestInit | undefined) => num
   });
 }
 
+/** A fetch that never answers: it settles only when its signal aborts, which it triggers. */
+function hangingFetch(clock: FakeClock) {
+  return vi.fn<ProbeFetch>(
+    (_, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        const signal = expectDefined(init?.signal, "probe signal");
+        signal.addEventListener("abort", () => reject(signal.reason));
+        clock.expire();
+      }),
+  );
+}
+
 function deps(fetchFn: ProbeFetch, clock: BootClock = fakeClock()) {
   return { fetch: fetchFn, clock };
 }
@@ -56,8 +94,12 @@ function bearer(init: RequestInit | undefined): string | null {
 }
 
 /** An S3 service error as the AWS SDK shapes it. */
-function awsError(name: string, httpStatusCode: number): Error {
-  return Object.assign(new Error(name), { $metadata: { httpStatusCode } });
+function awsError(
+  name: string,
+  httpStatusCode: number,
+  headers: Record<string, string> = {},
+): Error {
+  return Object.assign(new Error(name), { $metadata: { httpStatusCode }, $response: { headers } });
 }
 
 describe("checkHindsightAuth", () => {
@@ -72,6 +114,18 @@ describe("checkHindsightAuth", () => {
       "http://hindsight:8888/v1/default/banks",
       "http://hindsight:8888/v1/default/banks",
     ]);
+  });
+
+  it("gives every request of an attempt the attempt's timeout signal", async () => {
+    const clock = fakeClock();
+    const fetchFn = probeFetch((_, init) => (bearer(init) === "Bearer k" ? 200 : 401));
+
+    await checkHindsightAuth(deps(fetchFn, clock), url, "k");
+
+    expect(clock.timeouts).toEqual([BOOT_PROBE_ATTEMPT_TIMEOUT_MS]);
+    const [first, second] = fetchFn.mock.calls.map(([, init]) => init?.signal);
+    expect(first).toBeInstanceOf(AbortSignal);
+    expect(second).toBe(first);
   });
 
   it("hard-fails at once when the server answers without a token", async () => {
@@ -137,9 +191,21 @@ describe("checkHindsightAuth", () => {
     await expect(checkHindsightAuth(deps(fetchFn, clock), url, "k")).rejects.toThrow(
       /hindsight auth check could not reach a conclusive answer within 60s.*ECONNREFUSED/,
     );
-    const waited = clock.sleeps.reduce((a, b) => a + b, 0);
-    expect(waited).toBe(BOOT_PROBE_DEADLINE_MS);
+    expect(clock.now()).toBe(BOOT_PROBE_DEADLINE_MS);
     expect(Math.max(...clock.sleeps)).toBe(10_000);
+  });
+
+  it("times out a request that never answers and fails closed exactly at the deadline", async () => {
+    const clock = fakeClock();
+    const fetchFn = hangingFetch(clock);
+
+    await expect(checkHindsightAuth(deps(fetchFn, clock), url, "k")).rejects.toThrow(
+      /within 60s.*timeout/,
+    );
+    // Each attempt is bounded, and none is granted more time than remains.
+    expect(clock.now()).toBe(BOOT_PROBE_DEADLINE_MS);
+    expect(fetchFn.mock.calls.length).toBeGreaterThan(1);
+    expect(Math.max(...clock.timeouts)).toBe(BOOT_PROBE_ATTEMPT_TIMEOUT_MS);
   });
 
   it.each([404, 502, 503])(
@@ -275,6 +341,15 @@ describe("checkInngestAuth", () => {
     );
   });
 
+  it("times out a request that never answers and fails closed exactly at the deadline", async () => {
+    const clock = fakeClock();
+
+    await expect(checkInngestAuth(deps(hangingFetch(clock), clock), keyed)).rejects.toThrow(
+      /within 60s.*timeout/,
+    );
+    expect(clock.now()).toBe(BOOT_PROBE_DEADLINE_MS);
+  });
+
   it.each([404, 502, 503])(
     "retries, then fails closed, when the anonymous request keeps getting HTTP %i",
     async (status) => {
@@ -298,13 +373,26 @@ describe("checkInngestAuth", () => {
     expect(fetchFn.mock.calls.some(([u]) => u.includes("/e/"))).toBe(false);
   });
 
-  it("fails closed when the event probe keeps getting neither a 2xx nor a rejection", async () => {
+  it("keeps the event key out of logs and the failure when the event probe is inconclusive", async () => {
+    const secretKey = "event-key-secret-7f3a";
+    const warn = vi.spyOn(logger, "warn");
     const fetchFn = probeFetch((u, init) => {
       if (u.includes("/e/")) return 404;
       return bearer(init) === "Bearer abcd" ? 200 : 401;
     });
 
-    await expect(checkInngestAuth(deps(fetchFn), keyed)).rejects.toThrow(/\/e\/evt → HTTP 404/);
+    const err = await checkInngestAuth(deps(fetchFn), { ...keyed, eventKey: secretKey }).catch(
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(BootCheckError);
+    expect(String(err)).toMatch(/\/e\/REDACTED → HTTP 404/);
+    expect(String(err)).not.toContain(secretKey);
+    expect(warn).toHaveBeenCalled();
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(secretKey);
+    // The request itself still goes to the real key.
+    expect(fetchFn.mock.calls.some(([u]) => u.endsWith(`/e/${secretKey}`))).toBe(true);
+    warn.mockRestore();
   });
 });
 
@@ -460,17 +548,18 @@ describe("checkDirWritable", () => {
 });
 
 describe("checkS3Bucket", () => {
-  it("returns when HeadBucket succeeds", async () => {
+  it("returns when HeadBucket succeeds, bounding the request with the attempt signal", async () => {
     const s3 = mock<S3Client>();
     s3.send.mockResolvedValue({} as never);
     await expect(checkS3Bucket(s3, "cogmo-files", fakeClock())).resolves.toBeUndefined();
-    expect(s3.send).toHaveBeenCalledWith(expect.any(HeadBucketCommand));
+    expect(s3.send).toHaveBeenCalledWith(expect.any(HeadBucketCommand), {
+      abortSignal: expect.any(AbortSignal),
+    });
   });
 
   it.each([
     ["NotFound", 404],
     ["Forbidden", 403],
-    ["PermanentRedirect", 301],
   ])("fails at once, naming the bucket, on the store's %s verdict", async (name, status) => {
     const clock = fakeClock();
     const s3 = mock<S3Client>();
@@ -478,10 +567,34 @@ describe("checkS3Bucket", () => {
 
     const err = await checkS3Bucket(s3, "missing", clock).catch((e: unknown) => e);
 
-    // 3xx is not a 4xx verdict, so it is retried to the deadline; 4xx is not.
     expect(err).toBeInstanceOf(BootCheckError);
-    expect(String(err)).toMatch(/missing/);
-    if (status >= 400) expect(clock.sleeps).toEqual([]);
+    expect(String(err)).toMatch(/S3 bucket "missing" not reachable/);
+    expect(clock.sleeps).toEqual([]);
+  });
+
+  it("fails at once on a 301, naming the bucket's actual region", async () => {
+    const clock = fakeClock();
+    const s3 = mock<S3Client>();
+    s3.send.mockRejectedValue(
+      awsError("PermanentRedirect", 301, { "x-amz-bucket-region": "eu-west-2" }) as never,
+    );
+
+    const err = await checkS3Bucket(s3, "cogmo-files", clock).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(BootCheckError);
+    expect(String(err)).toMatch(/different region than S3_REGION \(the bucket is in eu-west-2\)/);
+    expect(clock.sleeps).toEqual([]);
+  });
+
+  it("retries a temporary redirect", async () => {
+    const clock = fakeClock();
+    const s3 = mock<S3Client>();
+    s3.send
+      .mockRejectedValueOnce(awsError("TemporaryRedirect", 307) as never)
+      .mockResolvedValue({} as never);
+
+    await expect(checkS3Bucket(s3, "cogmo-files", clock)).resolves.toBeUndefined();
+    expect(clock.sleeps).toEqual([1_000]);
   });
 
   it("retries a network failure and passes once the store answers", async () => {
@@ -505,6 +618,21 @@ describe("checkS3Bucket", () => {
 
     await expect(checkS3Bucket(s3, "cogmo-files", clock)).resolves.toBeUndefined();
     expect(clock.sleeps).toEqual([1_000]);
+  });
+
+  it("times out a HeadBucket that never answers and fails closed at the deadline", async () => {
+    const clock = fakeClock();
+    const s3 = mock<S3Client>();
+    s3.send.mockImplementation(
+      ((_command: unknown, options: { abortSignal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          options.abortSignal.addEventListener("abort", () => reject(options.abortSignal.reason));
+          clock.expire();
+        })) as never,
+    );
+
+    await expect(checkS3Bucket(s3, "cogmo-files", clock)).rejects.toThrow(/within 60s.*timeout/);
+    expect(clock.now()).toBe(BOOT_PROBE_DEADLINE_MS);
   });
 
   it("fails closed when the store stays unreachable past the deadline", async () => {
@@ -532,6 +660,12 @@ describe("checkHindsightVersion", () => {
 
   it("passes when server version satisfies the range at the lower bound", async () => {
     await expect(check(memoryReporting("0.6.0"))).resolves.toBeUndefined();
+  });
+
+  it("passes the attempt's timeout signal to the version request", async () => {
+    const m = memoryReporting("0.6.0");
+    await check(m);
+    expect(m.getServerVersion).toHaveBeenCalledWith(expect.any(AbortSignal));
   });
 
   it("passes when server version is inside the range", async () => {
@@ -577,6 +711,22 @@ describe("checkHindsightVersion", () => {
 
     await expect(checkHindsightVersion(m, range, clock)).resolves.toBeUndefined();
     expect(clock.sleeps).toEqual([1_000]);
+  });
+
+  it("times out a /version request that never answers and fails closed at the deadline", async () => {
+    const clock = fakeClock();
+    const m = mock<HindsightMemoryProvider>();
+    m.getServerVersion.mockImplementation(
+      (signal) =>
+        new Promise((_resolve, reject) => {
+          const bounded = expectDefined(signal, "version signal");
+          bounded.addEventListener("abort", () => reject(bounded.reason));
+          clock.expire();
+        }),
+    );
+
+    await expect(checkHindsightVersion(m, range, clock)).rejects.toThrow(/within 60s.*timeout/);
+    expect(clock.now()).toBe(BOOT_PROBE_DEADLINE_MS);
   });
 
   it("fails closed when /version stays unreadable past the deadline", async () => {
