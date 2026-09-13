@@ -26,7 +26,9 @@ import { profiles } from "../agent/store/schema.js";
 import { db } from "../db/index.js";
 import { bootstrap } from "../index.js";
 import {
+  directInbound,
   directOutbound,
+  inboundReady,
   pipelineGateKey,
   pipelineGateResolved,
   pipelineGateSettled,
@@ -37,11 +39,13 @@ import type { LlmProvider } from "../llm/provider.js";
 import type { ChatParams, LlmResponse } from "../llm/types.js";
 import { channelSessions, channels, inboundMessages } from "../transport/store/schema.js";
 import { expectDefined } from "./assertions.js";
-import { asyncIterableOf } from "./factories.js";
 import { createIsolatedUser } from "./isolated-user.js";
 
 const DRAFT_REPLY = "Draft: add a retry around the flaky call.";
 const BUILD_REPLY = "Built: the retry is in.";
+const CHAT_MARKER = "mid-stage question";
+const CHAT_REPLY = "Chat: answered after the stage.";
+const DRAFT_PROMPT = /stage 1 of 3: draft\b/;
 
 /** The text of the last user message a model call carries. */
 function lastUserText(params: ChatParams): string {
@@ -52,11 +56,24 @@ function lastUserText(params: ChatParams): string {
     : last.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
 }
 
-function replyFor(params: ChatParams): string {
-  const prompt = lastUserText(params);
-  if (/stage 1 of 3: draft\b/.test(prompt)) return DRAFT_REPLY;
+function replyFor(prompt: string): string {
+  if (DRAFT_PROMPT.test(prompt)) return DRAFT_REPLY;
   if (/stage 3 of 3: build\b/.test(prompt)) return BUILD_REPLY;
+  if (prompt.includes(CHAT_MARKER)) return CHAT_REPLY;
   return "ok";
+}
+
+/** Model calls in the order they start and end. */
+const modelCalls: Array<{ edge: "start" | "end"; prompt: string }> = [];
+/** While set, the draft stage's model call waits on it. */
+let draftHold: Promise<void> | null = null;
+
+async function respond(params: ChatParams): Promise<string> {
+  const prompt = lastUserText(params);
+  modelCalls.push({ edge: "start", prompt });
+  if (draftHold !== null && DRAFT_PROMPT.test(prompt)) await draftHold;
+  modelCalls.push({ edge: "end", prompt });
+  return replyFor(prompt);
 }
 
 const usage = { inputTokens: 10, outputTokens: 5 };
@@ -65,16 +82,19 @@ const stubProvider: LlmProvider = {
   name: "pipeline-run-stub",
   async chat(params): Promise<LlmResponse> {
     return {
-      content: [{ type: "text", text: replyFor(params) }],
+      content: [{ type: "text", text: await respond(params) }],
       stopReason: "end_turn",
       model: params.model,
       usage,
     };
   },
   chatStream(params) {
+    const text = respond(params);
     return {
-      events: asyncIterableOf([{ type: "text_delta" as const, text: replyFor(params) }]),
-      response: Promise.resolve({ stopReason: "end_turn" as const, model: params.model, usage }),
+      events: (async function* () {
+        yield { type: "text_delta" as const, text: await text };
+      })(),
+      response: text.then(() => ({ stopReason: "end_turn" as const, model: params.model, usage })),
     };
   },
   async countTokens() {
@@ -91,6 +111,7 @@ let telegramChannelId: string;
 const outbound: Array<{ platformAddress: string; content: string }> = [];
 const settled: Array<{ gateKey: string }> = [];
 const stagesDue: Array<{ id: string | undefined; runId: string; stageId: string }> = [];
+const readyConversations: string[] = [];
 
 beforeAll(async () => {
   app = await bootstrap({ providerOverride: stubProvider });
@@ -112,6 +133,12 @@ beforeAll(async () => {
       { id: "test-capture-stage-due", triggers: [pipelineStageDue] },
       async ({ event }) => {
         stagesDue.push({ id: event.id, runId: event.data.runId, stageId: event.data.stageId });
+      },
+    ),
+    app.inngest.createFunction(
+      { id: "test-capture-inbound-ready", triggers: [inboundReady] },
+      async ({ event }) => {
+        readyConversations.push(event.data.conversationId);
       },
     ),
   ];
@@ -370,5 +397,73 @@ describe("pipeline run engine", () => {
       seeded.directAddress,
       `⏱ Checkpoint timed out — pipeline "${seeded.name}" is proceeding to "build".`,
     );
+  });
+
+  it("holds a chat turn on the run conversation until the stage turn finishes", async () => {
+    let release = () => {};
+    draftHold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    modelCalls.length = 0;
+    try {
+      const seeded = await seedRunnable({ timeout: "1d", onTimeout: { kind: "abort" } });
+      const { runId, conversationId } = (
+        await startRun({ name: seeded.name, profileId: seeded.profileId })
+      )._unsafeUnwrap();
+
+      await vi.waitFor(
+        () => {
+          if (!modelCalls.some((c) => c.edge === "start" && DRAFT_PROMPT.test(c.prompt)))
+            throw new Error("draft stage turn has not reached the model yet");
+        },
+        { timeout: 20_000, interval: 100 },
+      );
+
+      // The user's session is routed onto the run conversation.
+      await app.inngest.send(
+        directInbound.create({
+          platformAddress: seeded.directAddress,
+          text: `${CHAT_MARKER} ${randomUUID()}`,
+          platformTs: new Date().toISOString(),
+        }),
+      );
+      await vi.waitFor(
+        () => {
+          if (!readyConversations.includes(conversationId))
+            throw new Error("the chat turn has not been scheduled yet");
+        },
+        { timeout: 20_000, interval: 100 },
+      );
+      // Room for a concurrent chat turn to reach the model while the stage holds.
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+      release();
+
+      await waitForOutbound(seeded.directAddress, CHAT_REPLY);
+      const draftEnd = modelCalls.findIndex((c) => c.edge === "end" && DRAFT_PROMPT.test(c.prompt));
+      const chatStart = modelCalls.findIndex(
+        (c) => c.edge === "start" && c.prompt.includes(CHAT_MARKER),
+      );
+      expect(draftEnd).toBeGreaterThanOrEqual(0);
+      expect(chatStart).toBeGreaterThan(draftEnd);
+
+      const parked = await waitForRun(
+        runId,
+        (run) => run.status === "waiting_gate",
+        "parked on its gate",
+        20_000,
+      );
+      expect(parked.stageOutputs).toEqual({ draft: { kind: "text", text: DRAFT_REPLY } });
+      await app.inngest.send(
+        pipelineGateResolved.create({
+          runId,
+          gateKey: pipelineGateKey(runId, "approve", 0),
+          conversationId,
+          decision: "cancelled",
+        }),
+      );
+    } finally {
+      release();
+      draftHold = null;
+    }
   });
 });
