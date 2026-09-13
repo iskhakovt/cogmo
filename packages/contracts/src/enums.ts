@@ -9,6 +9,15 @@
  * described `string` rather than a closed enum.
  */
 export type AutoRecallMode = "off" | "always" | "heuristic" | "llm";
+
+export type PipelineRunStatus =
+  | "queued"
+  | "running"
+  | "waiting_gate"
+  | "waiting_event"
+  | "completed"
+  | "failed"
+  | "cancelled";
 export type VoiceMode = "auto" | "always" | "never";
 export type CodingAutoapproveMode = "off" | "on";
 export type ScheduleKind = "recurring" | "one_off";

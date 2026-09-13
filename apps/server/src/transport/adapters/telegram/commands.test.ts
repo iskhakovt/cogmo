@@ -4721,26 +4721,40 @@ describe("handlePipelineGateCallback", () => {
     });
   });
 
-  it("a tap on a resolved or superseded checkpoint renders the not-pending error", async () => {
-    const transport = mockTransportDeep({
-      pipelines: {
-        resolveGate: vi
-          .fn()
-          .mockResolvedValue(err({ code: "pipeline_gate_not_pending", runId, status: "running" })),
-      },
-    });
+  it.each([
+    [
+      "waiting_gate",
+      "This button is from an earlier checkpoint. Use the buttons on the latest one.",
+    ],
+    ["running", "This checkpoint was already decided, and the pipeline has moved on."],
+    ["queued", "This checkpoint was already decided, and the pipeline has moved on."],
+    ["waiting_event", "This checkpoint was already decided, and the pipeline has moved on."],
+    ["completed", "This pipeline run has already finished."],
+    ["cancelled", "This pipeline run was cancelled."],
+    ["failed", "This pipeline run stopped after a failure."],
+  ] as const)(
+    "a tap on a checkpoint that isn't open, with the run %s, says why",
+    async (status, text) => {
+      const transport = mockTransportDeep({
+        pipelines: {
+          resolveGate: vi
+            .fn()
+            .mockResolvedValue(err({ code: "pipeline_gate_not_pending", runId, status })),
+        },
+      });
 
-    const outcome = await handlePipelineGateCallback(
-      transport,
-      { runId, action: "approve", token },
-      "tg-1",
-    );
+      const outcome = await handlePipelineGateCallback(
+        transport,
+        { runId, action: "approve", token },
+        "tg-1",
+      );
 
-    expect(outcome.editText).toBe("This checkpoint was already resolved — the run is running.");
-    expect(outcome.toast).toBe(outcome.editText);
-    // A resolved checkpoint's buttons can go.
-    expect(outcome.clearKeyboard).toBe(true);
-  });
+      expect(outcome.editText).toBe(text);
+      expect(outcome.toast).toBe(text);
+      // A checkpoint that isn't open can't be resolved from these buttons.
+      expect(outcome.clearKeyboard).toBe(true);
+    },
+  );
 
   it.each([
     [{ code: "pipeline_run_not_found", runId: "019d0000-0000-7000-8000-0000000000aa" } as const],

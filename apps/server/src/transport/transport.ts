@@ -7,7 +7,7 @@ import type { CompactConversationResult } from "../agent/conversation/compact-co
 import { isCoreCompartment } from "../agent/evolution/memory-extraction-schema.js";
 import type { TriggerReflectionResult } from "../agent/evolution/trigger-reflection.js";
 import { gateToken } from "../agent/pipeline/gate-keyboard.js";
-import type { PipelineRunStore } from "../agent/pipeline/store/index.js";
+import type { PipelineRunStatus, PipelineRunStore } from "../agent/pipeline/store/index.js";
 import type { AutoRecallMode } from "../agent/recall-gate.js";
 import type { ScheduledTaskSummary } from "../agent/scheduling/scheduling-service.js";
 import {
@@ -322,7 +322,7 @@ export type TransportError =
   | { code: "skill_deploy_register_failed"; pendingId: string; reason: string }
   | { code: "pipelines_disabled" }
   | { code: "pipeline_run_not_found"; runId: string }
-  | { code: "pipeline_gate_not_pending"; runId: string; status: string }
+  | { code: "pipeline_gate_not_pending"; runId: string; status: PipelineRunStatus }
   | { code: "mcp_disabled" }
   | { code: "mcp_server_not_found"; serverId: string }
   | { code: "mcp_server_name_taken"; name: string }

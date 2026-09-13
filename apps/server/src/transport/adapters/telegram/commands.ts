@@ -13,6 +13,7 @@ import {
   isCoreCompartment,
   MemoryTrustSchema,
 } from "../../../agent/evolution/memory-extraction-schema.js";
+import type { PipelineRunStatus } from "../../../agent/pipeline/store/index.js";
 import type { Profile } from "../../../agent/store/index.js";
 import { type ProfileMemoryScope, ProfileMemoryScopeSchema } from "../../../agent/store/schema.js";
 import { SERVER_NAME_RE } from "../../../mcp/config.js";
@@ -547,6 +548,25 @@ export interface PipelineGateCallbackOutcome {
  * the keyboard. The text says the decision was sent, not that it won: a tap
  * can still lose to the gate's own timeout, and the resolver reports that.
  */
+/** Why a gate button can't act, told from where the run is. */
+function gateNotPendingMessage(status: PipelineRunStatus): string {
+  return match(status)
+    .with(
+      "waiting_gate",
+      () => "This button is from an earlier checkpoint. Use the buttons on the latest one.",
+    )
+    .with(
+      "running",
+      "queued",
+      "waiting_event",
+      () => "This checkpoint was already decided, and the pipeline has moved on.",
+    )
+    .with("completed", () => "This pipeline run has already finished.")
+    .with("cancelled", () => "This pipeline run was cancelled.")
+    .with("failed", () => "This pipeline run stopped after a failure.")
+    .exhaustive();
+}
+
 export async function handlePipelineGateCallback(
   transport: Transport,
   parsed: { runId: string; action: "approve" | "cancel"; token: string },
@@ -2142,7 +2162,7 @@ function errorMessage(err: TransportError): string {
     case "pipeline_run_not_found":
       return `No pipeline run with id "${shortenId(err.runId)}".`;
     case "pipeline_gate_not_pending":
-      return `This checkpoint was already resolved — the run is ${err.status}.`;
+      return gateNotPendingMessage(err.status);
     case "skill_deploy_register_failed":
       return `Approve failed: ${err.reason}`;
     case "mcp_disabled":

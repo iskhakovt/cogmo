@@ -10,6 +10,7 @@
 import type * as C from "@cogmo/contracts";
 import type { EvolutionEventPayload } from "../agent/evolution/event-schema.js";
 import type { MemoryTrust } from "../agent/evolution/memory-extraction-schema.js";
+import type { PipelineRunStatus } from "../agent/pipeline/store/index.js";
 import type { AutoRecallMode } from "../agent/recall-gate.js";
 import type { ScheduledTaskSummary } from "../agent/scheduling/scheduling-service.js";
 import type {
@@ -58,6 +59,7 @@ assertParity<Mutual<TransportError, C.TransportError>>();
 
 // --- enums / closed value sets ---
 assertParity<Mutual<AutoRecallMode, C.AutoRecallMode>>();
+assertParity<Mutual<PipelineRunStatus, C.PipelineRunStatus>>();
 assertParity<Mutual<VoiceMode, C.VoiceMode>>();
 assertParity<Mutual<CodingAutoapproveMode, C.CodingAutoapproveMode>>();
 assertParity<Mutual<ScheduleKind, C.ScheduleKind>>();
