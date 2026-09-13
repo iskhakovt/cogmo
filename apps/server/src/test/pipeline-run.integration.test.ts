@@ -293,12 +293,17 @@ describe("pipeline run engine", () => {
     // An event only matches a wait registered before it arrives, so keep
     // sending until the stage has run instead of racing the registration.
     const turnFinished = setInterval(() => {
-      void app.inngest.send(
-        responseReady.create({
-          conversationId: seeded.originConversationId,
-          messageId: randomUUID(),
-        }),
-      );
+      app.inngest
+        .send(
+          responseReady.create({
+            conversationId: seeded.originConversationId,
+            messageId: randomUUID(),
+          }),
+        )
+        .catch(() => {
+          // A lost resend is retried on the next tick; the parked wait below
+          // bounds a real outage.
+        });
     }, 500);
     const parked = await waitForRun(
       runId,
