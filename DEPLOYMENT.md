@@ -33,7 +33,7 @@ Each release publishes to GitHub Container Registry:
 ghcr.io/iskhakovt/cogmo:<version>
 ```
 
-See [packages](https://github.com/iskhakovt/cogmo/pkgs/container/cogmo) for available tags. Versions are SemVer driven by [semantic-release](https://semantic-release.gitbook.io/) on every push to `main`. Pin a tag in production — don't track `latest`.
+See [packages](https://github.com/iskhakovt/cogmo/pkgs/container/cogmo) for available tags. Versions are SemVer, computed by [semantic-release](https://semantic-release.gitbook.io/) from Conventional Commit titles when a release is dispatched from `main` (see [CONTRIBUTING.md → Release process](CONTRIBUTING.md#release-process)). Pin a tag in production — don't track `latest`.
 
 To build locally instead:
 

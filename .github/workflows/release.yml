@@ -81,6 +81,12 @@ jobs:
       - id: semantic
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # `.releaserc.json` uses the `conventionalcommits` preset, the one that
+        # reads a `!` after the type or scope as a breaking change; the plugins'
+        # default Angular preset does not parse those headers at all. It stays on
+        # 9.x: 10.x needs conventional-changelog-writer@9, and
+        # release-notes-generator@14.1.0 ships writer 8, so notes generation
+        # throws "Missing helper". Bump the two together.
         run: |
           set -euo pipefail
           npx --yes \
@@ -88,6 +94,7 @@ jobs:
             -p @semantic-release/commit-analyzer@13.0.1 \
             -p @semantic-release/release-notes-generator@14.1.0 \
             -p @semantic-release/github@12.0.6 \
+            -p conventional-changelog-conventionalcommits@9.1.0 \
             semantic-release
           if git describe --exact-match --tags HEAD >/dev/null 2>&1; then
             echo "published=true" >> "$GITHUB_OUTPUT"
