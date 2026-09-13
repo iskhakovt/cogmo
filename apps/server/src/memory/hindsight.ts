@@ -3,15 +3,14 @@ import { SpanStatusCode, trace } from "@opentelemetry/api";
 import {
   CLIENT_VERSION,
   type Client,
-  createClient,
-  createConfig,
-  HindsightClient,
+  type HindsightClient,
   type MemoryItemInput,
   sdk,
 } from "@vectorize-io/hindsight-client";
 import { getEncoding, type Tiktoken } from "js-tiktoken";
 import { logger } from "../logger.js";
 import { AbortError, withRetry } from "../util/with-retry.js";
+import { createHindsightClients } from "./hindsight-clients.js";
 import type {
   Memory,
   MemoryProvider,
@@ -75,6 +74,11 @@ function isClientError(statusCode: number | undefined): boolean {
 
 export interface HindsightMemoryProviderOptions {
   /**
+   * Bearer token for a server running `ApiKeyTenantExtension`. Sent on every
+   * request, including the version probe.
+   */
+  apiKey: string;
+  /**
    * Truncation budget for recall queries, in tokens. Must match the server's
    * `HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS`. Defaults to the upstream default
    * of 500. Bump on both sides simultaneously when long multi-turn context
@@ -102,24 +106,34 @@ export class HindsightMemoryProvider implements MemoryProvider {
   #sdkClient: Client;
   #maxQueryTokens: number;
 
-  constructor(baseUrl: string, options?: HindsightMemoryProviderOptions) {
-    this.#client = new HindsightClient({ baseUrl });
-    this.#sdkClient = createClient(createConfig({ baseUrl }));
-    this.#maxQueryTokens = options?.maxQueryTokens ?? DEFAULT_MAX_QUERY_TOKENS;
+  constructor(baseUrl: string, options: HindsightMemoryProviderOptions) {
+    const { client, sdkClient } = createHindsightClients(baseUrl, options.apiKey);
+    this.#client = client;
+    this.#sdkClient = sdkClient;
+    this.#maxQueryTokens = options.maxQueryTokens ?? DEFAULT_MAX_QUERY_TOKENS;
   }
 
   /**
    * Read the running server's reported version (`GET /version` →
    * `api_version`). Used at boot to enforce the `cogmo.hindsightCompat`
-   * range from package.json. Bypasses `withRetry` — the boot-time check
-   * wants a fast yes/no, and a flaky-Hindsight-at-boot signal is more
-   * useful than a 10-second backoff that hides the network problem.
+   * range from package.json. Makes exactly one request: the boot check owns
+   * retries and the deadline, and passes `signal` to bound each attempt.
    */
-  async getServerVersion(): Promise<string> {
-    const res = await sdk.getVersion({ client: this.#sdkClient });
+  async getServerVersion(signal?: AbortSignal): Promise<string> {
+    const res = await sdk.getVersion({
+      client: this.#sdkClient,
+      ...(signal !== undefined && { signal }),
+    });
     if (res.error !== undefined || !res.data) {
       const status = res.response?.status ?? "?";
-      const detail = res.error !== undefined ? JSON.stringify(res.error) : "no body";
+      // A failed or aborted fetch comes back as an `Error` in `res.error`,
+      // whose fields are non-enumerable — `JSON.stringify` would print `{}`.
+      const detail =
+        res.error instanceof Error
+          ? res.error.message
+          : res.error !== undefined
+            ? JSON.stringify(res.error)
+            : "no body";
       throw new Error(`hindsight /version failed: ${status} ${detail}`);
     }
     return res.data.api_version;

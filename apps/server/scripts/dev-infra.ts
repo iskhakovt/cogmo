@@ -132,6 +132,7 @@ async function main() {
       // `env.ts` validates the whole schema eagerly on import, so even the
       // setup command (which doesn't talk to either) needs these infra URLs.
       HINDSIGHT_URL: hindsightUrl,
+      HINDSIGHT_API_KEY: c.HINDSIGHT_TEST_API_KEY,
       INNGEST_BASE_URL: inngestBaseUrl,
     },
   });
@@ -161,6 +162,7 @@ async function main() {
     // Dev mode — connect to the local Inngest dev server without a signing key.
     INNGEST_DEV: "true",
     HINDSIGHT_URL: hindsightUrl,
+    HINDSIGHT_API_KEY: c.HINDSIGHT_TEST_API_KEY,
     // Override any real-S3 config from the shell/.env — dev is self-contained on MinIO.
     S3_ENDPOINT: s3Endpoint,
     S3_ACCESS_KEY: "minioadmin",
@@ -174,11 +176,13 @@ async function main() {
   // can pick them up via Node's `--env-file-if-exists=.dev/env`. Filtered
   // to the truly-dynamic vars — paths are project-local and don't need
   // exporting; secrets like COGMO_MASTER_KEY stay in `.dev/master-key`.
+  // The Hindsight key rides along: no Hindsight call works without it.
   const sidecarKeys = [
     "DATABASE_URL",
     "INNGEST_BASE_URL",
     "INNGEST_CONNECT_GATEWAY_URL",
     "HINDSIGHT_URL",
+    "HINDSIGHT_API_KEY",
   ];
   const sidecar = sidecarKeys.map((k) => `${k}=${envVars[k as keyof typeof envVars]}`).join("\n");
   writeFileSync(join(DEV_ROOT, "env"), `${sidecar}\n`);

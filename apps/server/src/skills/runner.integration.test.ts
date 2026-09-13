@@ -44,10 +44,11 @@ beforeAll(async () => {
   secretsStore = new DrizzleSecretsStore(key);
 
   const hindsightUrl = inject("hindsightUrl");
-  memory = new HindsightMemoryProvider(hindsightUrl);
+  const apiKey = inject("hindsightApiKey");
+  memory = new HindsightMemoryProvider(hindsightUrl, { apiKey });
 
   const { HindsightClient } = await import("@vectorize-io/hindsight-client");
-  const client = new HindsightClient({ baseUrl: hindsightUrl });
+  const client = new HindsightClient({ baseUrl: hindsightUrl, apiKey });
   await client.createBank(BANK_ID);
 }, 60_000);
 

@@ -29,9 +29,10 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createClient, createConfig, HindsightClient, sdk } from "@vectorize-io/hindsight-client";
+import { type Client, type HindsightClient, sdk } from "@vectorize-io/hindsight-client";
 import type { Transactor } from "../../db/index.js";
 import { logger } from "../../logger.js";
+import { createHindsightClients } from "../../memory/hindsight-clients.js";
 import type { AgentStore } from "../store/index.js";
 import {
   type BackfillDeps,
@@ -47,6 +48,7 @@ import {
 
 export interface MigrationCliDeps {
   hindsightUrl: string;
+  hindsightApiKey: string;
   agentStore: AgentStore;
   runInTx: Transactor;
   /**
@@ -76,14 +78,12 @@ function writeBackupFn<T>(backupPath: string): (rows: ReadonlyArray<T>) => Promi
   };
 }
 
-function makeHindsightShared(hindsightUrl: string): {
+function makeHindsightShared(deps: MigrationCliDeps): {
   hindsight: HindsightClient;
-  sdkClient: ReturnType<typeof createClient>;
+  sdkClient: Client;
 } {
-  return {
-    hindsight: new HindsightClient({ baseUrl: hindsightUrl }),
-    sdkClient: createClient(createConfig({ baseUrl: hindsightUrl })),
-  };
+  const { client, sdkClient } = createHindsightClients(deps.hindsightUrl, deps.hindsightApiKey);
+  return { hindsight: client, sdkClient };
 }
 
 /** `cogmo migrate-memories <bankId>` */
@@ -100,7 +100,7 @@ export async function runMigrateMemoriesCli(
     return 1;
   }
 
-  const { hindsight, sdkClient } = makeHindsightShared(deps.hindsightUrl);
+  const { hindsight, sdkClient } = makeHindsightShared(deps);
   const backupPath = makeBackupPath(bankId);
   console.log(`Migrating bank "${bankId}" — Hindsight ${deps.hindsightUrl}`);
   console.log(`Backup will be written to ${backupPath}`);
@@ -186,7 +186,7 @@ export async function runBackfillProfileClassCli(
     );
     return 1;
   }
-  const { hindsight, sdkClient } = makeHindsightShared(deps.hindsightUrl);
+  const { hindsight, sdkClient } = makeHindsightShared(deps);
   const backupPath = makeBackupPath(bankId);
   console.log(`Backfilling bank "${bankId}" with classes [${parsed.classTags.join(", ")}]`);
   console.log(`Hindsight ${deps.hindsightUrl}`);

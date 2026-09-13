@@ -124,6 +124,17 @@ export function inngest(network: StartedNetwork, opts?: { appUrl?: string }) {
     .withStartupTimeout(60_000);
 }
 
+/** Bearer token dev and test Hindsight containers enforce. */
+export const HINDSIGHT_TEST_API_KEY = "cogmo-test-hindsight-key";
+
+/** Server env that makes Hindsight reject any request not carrying `apiKey`. */
+function hindsightAuthEnv(apiKey: string): Record<string, string> {
+  return {
+    HINDSIGHT_API_TENANT_EXTENSION: "hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension",
+    HINDSIGHT_API_TENANT_API_KEY: apiKey,
+  };
+}
+
 export function minio(network: StartedNetwork) {
   return new GenericContainer("cgr.dev/chainguard/minio:latest")
     .withNetwork(network)
@@ -172,6 +183,7 @@ export function hindsight(
   const env: Record<string, string> = {
     HINDSIGHT_API_LLM_PROVIDER: "anthropic",
     HINDSIGHT_API_LLM_API_KEY: opts.apiKey,
+    ...hindsightAuthEnv(HINDSIGHT_TEST_API_KEY),
   };
   if (opts.baseUrl) env.HINDSIGHT_API_LLM_BASE_URL = opts.baseUrl;
 
@@ -229,6 +241,7 @@ export function hindsightSlim(
     HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL: opts.embeddingsModel,
     HINDSIGHT_API_RERANKER_PROVIDER: rerankerProvider,
     HINDSIGHT_API_SKIP_LLM_VERIFICATION: "true",
+    ...hindsightAuthEnv(HINDSIGHT_TEST_API_KEY),
   };
 
   if (rerankerProvider === "openrouter") {

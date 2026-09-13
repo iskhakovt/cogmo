@@ -13,7 +13,10 @@ const mockRetainBatch = vi
   .mockResolvedValue({ success: true, bank_id: "test", items_count: 2, async: true });
 const mockRecallMemories = vi.fn();
 const mockReflect = vi.fn();
+const mockGetVersion = vi.fn();
 const fakeSdkClient = { __sdkClient: true };
+const mockClientConstructor = vi.fn();
+const mockCreateConfig = vi.fn();
 
 vi.mock("@vectorize-io/hindsight-client", () => {
   return {
@@ -21,12 +24,19 @@ vi.mock("@vectorize-io/hindsight-client", () => {
     HindsightClient: class {
       retain = mockRetain;
       retainBatch = mockRetainBatch;
+      constructor(options: unknown) {
+        mockClientConstructor(options);
+      }
     },
     createClient: () => fakeSdkClient,
-    createConfig: () => ({}),
+    createConfig: (config: unknown) => {
+      mockCreateConfig(config);
+      return {};
+    },
     sdk: {
       recallMemories: (...args: unknown[]) => mockRecallMemories(...args),
       reflect: (...args: unknown[]) => mockReflect(...args),
+      getVersion: (...args: unknown[]) => mockGetVersion(...args),
     },
   };
 });
@@ -36,7 +46,7 @@ function createProvider(opts?: { maxQueryTokens?: number }): HindsightMemoryProv
   mockRetainBatch.mockClear();
   mockRecallMemories.mockClear();
   mockReflect.mockClear();
-  return new HindsightMemoryProvider("http://localhost:8888", opts);
+  return new HindsightMemoryProvider("http://localhost:8888", { apiKey: "test-api-key", ...opts });
 }
 
 function okRecall(results: Array<Record<string, unknown>>) {
@@ -50,6 +60,48 @@ function errResp(status: number, detail = "boom") {
 }
 
 describe("HindsightMemoryProvider", () => {
+  it("authenticates both the class client and the raw sdk client with the API key", () => {
+    createProvider();
+
+    expect(mockClientConstructor).toHaveBeenCalledWith(
+      expect.objectContaining({ baseUrl: "http://localhost:8888", apiKey: "test-api-key" }),
+    );
+    // The raw client carries no apiKey option — recall and reflect go through
+    // it, so a missing header here is a 401 on every read.
+    expect(mockCreateConfig).toHaveBeenCalledWith({
+      baseUrl: "http://localhost:8888",
+      headers: { Authorization: "Bearer test-api-key" },
+    });
+  });
+
+  it("getServerVersion bounds the version request with the caller's signal", async () => {
+    const provider = createProvider();
+    mockGetVersion.mockResolvedValue({
+      data: { api_version: "0.9.1" },
+      error: undefined,
+      response: { status: 200 },
+    });
+    const signal = new AbortController().signal;
+
+    await expect(provider.getServerVersion(signal)).resolves.toBe("0.9.1");
+
+    expect(mockGetVersion).toHaveBeenCalledWith({ client: fakeSdkClient, signal });
+  });
+
+  it("getServerVersion keeps the message of a failed or aborted request", async () => {
+    const provider = createProvider();
+    // The generated client returns fetch failures in `error` instead of throwing.
+    mockGetVersion.mockResolvedValue({
+      data: undefined,
+      error: new DOMException("The operation was aborted due to timeout", "TimeoutError"),
+      response: undefined,
+    });
+
+    await expect(provider.getServerVersion()).rejects.toThrow(
+      "hindsight /version failed: ? The operation was aborted due to timeout",
+    );
+  });
+
   it("retain passes content and options to client", async () => {
     const provider = createProvider();
 

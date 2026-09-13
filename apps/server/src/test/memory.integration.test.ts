@@ -9,10 +9,11 @@ let memory: HindsightMemoryProvider;
 
 beforeAll(async () => {
   const hindsightUrl = inject("hindsightUrl");
-  memory = new HindsightMemoryProvider(hindsightUrl);
+  const apiKey = inject("hindsightApiKey");
+  memory = new HindsightMemoryProvider(hindsightUrl, { apiKey });
 
   const { HindsightClient } = await import("@vectorize-io/hindsight-client");
-  const client = new HindsightClient({ baseUrl: hindsightUrl });
+  const client = new HindsightClient({ baseUrl: hindsightUrl, apiKey });
   await client.createBank(BANK_ID);
   await client.createBank(COMPARTMENT_BANK_ID);
 });

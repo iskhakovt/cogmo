@@ -48,11 +48,14 @@ import { createDefaultTools } from "./agent/tools.js";
 import { createWebTools } from "./agent/web-tools.js";
 import {
   checkDirWritable,
+  checkHindsightAuth,
   checkHindsightClientVersion,
   checkHindsightVersion,
+  checkInngestAuth,
   checkS3Bucket,
   checkUuidv7,
   loadHindsightCompat,
+  systemBootClock,
 } from "./boot/checks.js";
 import { type Database, db, type Transactor, transactor } from "./db/index.js";
 import { migratePerFile } from "./db/migrate-per-file.js";
@@ -385,10 +388,6 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
       ? { credentials: { accessKeyId: env.S3_ACCESS_KEY, secretAccessKey: env.S3_SECRET_KEY } }
       : {}),
   });
-  // Confirm the bucket is reachable + credentials work before tools that
-  // depend on it (image generation, file workspace, attachment delivery)
-  // start handling traffic. HeadBucket is the cheapest probe.
-  await checkS3Bucket(s3Client, env.S3_BUCKET);
   // Optional client-side encryption — when enabled, attachment bodies AND
   // workspace file bodies are AES-256-GCM-encrypted before upload using
   // a key derived from `COGMO_MASTER_KEY` (already validated above).
@@ -421,17 +420,12 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
     (await tx((trx) => secretsStore.getSecret(trx, "openrouter_api_key"))) ??
     env.OPENROUTER_API_KEY;
   const memory = new HindsightMemoryProvider(env.HINDSIGHT_URL, {
+    apiKey: env.HINDSIGHT_API_KEY,
     maxQueryTokens: env.HINDSIGHT_RECALL_MAX_QUERY_TOKENS,
   });
-  // Hard-fail when the running server reports a version outside the
-  // compat range pinned in `package.json` → `cogmo.hindsightCompat`.
-  // Soft-fail (warn) when /version itself can't be reached — memory
-  // tools surface their own errors at request time. See `src/boot/checks.ts`.
-  // The client check is instant (no I/O) and catches dependency↔pin drift
-  // before the network probe, so run it first.
-  const hindsightCompat = loadHindsightCompat();
-  checkHindsightClientVersion(hindsightCompat, HINDSIGHT_CLIENT_VERSION);
-  await checkHindsightVersion(memory, hindsightCompat);
+  // Dependency↔pin drift in this repo needs no server and costs nothing to
+  // detect, so every entrypoint checks it. Server probes run in `bootstrap`.
+  checkHindsightClientVersion(loadHindsightCompat(), HINDSIGHT_CLIENT_VERSION);
 
   return {
     db,
@@ -1264,6 +1258,35 @@ export async function bootstrapRuntime(
 }
 
 /**
+ * Probe every external dependency the running process needs before it takes
+ * traffic. Called from `bootstrap`, not `bootstrapCore`: one-shot admin CLIs
+ * should neither wait a probe deadline per dependency nor need Inngest keys
+ * for commands that never touch them — they surface a dependency error when
+ * they use it. See `src/boot/checks.ts` for what fails at once and what is
+ * retried until the deadline.
+ */
+async function verifyDependencies(core: CoreDeps): Promise<void> {
+  const probeDeps = { fetch, clock: systemBootClock };
+  // Confirm the bucket is reachable + credentials work before tools that
+  // depend on it (image generation, file workspace, attachment delivery)
+  // start handling traffic. HeadBucket is the cheapest probe.
+  await checkS3Bucket(core.s3Client, env.S3_BUCKET, systemBootClock);
+  // Hindsight and Inngest are reachable by anything on their network, and an
+  // unkeyed one answers all of it: refuse a server that does not enforce its
+  // key, or one whose key we do not hold.
+  await checkHindsightAuth(probeDeps, env.HINDSIGHT_URL, env.HINDSIGHT_API_KEY);
+  // Hard-fail when the running server reports a version outside the compat
+  // range pinned in `package.json` → `cogmo.hindsightCompat`.
+  await checkHindsightVersion(core.memory, loadHindsightCompat(), systemBootClock);
+  await checkInngestAuth(probeDeps, {
+    baseUrl: env.INNGEST_BASE_URL,
+    dev: env.INNGEST_DEV,
+    eventKey: env.INNGEST_EVENT_KEY,
+    signingKey: env.INNGEST_SIGNING_KEY,
+  });
+}
+
+/**
  * Aggregate bootstrap — wires every stage together. Used by `cogmo serve`
  * and the integration test harness.
  *
@@ -1272,6 +1295,7 @@ export async function bootstrapRuntime(
  */
 export async function bootstrap(opts: BootstrapOptions = {}) {
   const core = await bootstrapCore(opts);
+  await verifyDependencies(core);
   const sandbox = await bootstrapSandbox(core, opts);
   const { skillRunner } = await bootstrapSkillRunner(core, sandbox);
   const runtime = await bootstrapRuntime(core, sandbox, skillRunner, opts);

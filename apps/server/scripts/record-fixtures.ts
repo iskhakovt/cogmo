@@ -76,12 +76,12 @@ async function main() {
   const hindsightUrl = `http://${hindsightContainer.getHost()}:${hindsightContainer.getMappedPort(8888)}`;
   console.log(`Hindsight at ${hindsightUrl}`);
 
-  const client = new HindsightClient({ baseUrl: hindsightUrl });
+  const client = new HindsightClient({ baseUrl: hindsightUrl, apiKey: c.HINDSIGHT_TEST_API_KEY });
   await client.createBank(BANK_ID);
   console.log(`Created bank ${BANK_ID}`);
 
   const { HindsightMemoryProvider } = await import("../src/memory/hindsight.js");
-  const memory = new HindsightMemoryProvider(hindsightUrl);
+  const memory = new HindsightMemoryProvider(hindsightUrl, { apiKey: c.HINDSIGHT_TEST_API_KEY });
   await memory.retain(BANK_ID, "The user's favorite color is blue");
   console.log("Retained fact. Polling for recall...");
 

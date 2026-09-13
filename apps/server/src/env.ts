@@ -30,7 +30,13 @@ export function defaultSkillsImage(): string {
 // Apply _FILE convention for Docker secrets before Zod validation.
 // Only specific vars support this — not a global wrapper.
 const resolved: Record<string, string | undefined> = { ...process.env };
-for (const name of ["COGMO_MASTER_KEY", "DATABASE_URL"]) {
+for (const name of [
+  "COGMO_MASTER_KEY",
+  "DATABASE_URL",
+  "HINDSIGHT_API_KEY",
+  "INNGEST_EVENT_KEY",
+  "INNGEST_SIGNING_KEY",
+]) {
   const val = resolveEnvFile(process.env, name);
   if (val !== undefined) resolved[name] = val;
 }
@@ -49,6 +55,15 @@ export const env = createEnv({
     LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
     DATABASE_URL: z.string().default("postgresql://cogmo@localhost/cogmo"),
     HINDSIGHT_URL: z.string().url(),
+    /**
+     * Bearer token for the Hindsight API. The server must run
+     * `ApiKeyTenantExtension` with the same value in
+     * `HINDSIGHT_API_TENANT_API_KEY`; boot refuses a server that answers
+     * unauthenticated requests (`checkHindsightAuth`). Required, so that a
+     * memory server reachable from anything on its network is never the
+     * silent default.
+     */
+    HINDSIGHT_API_KEY: z.string().min(1),
     /**
      * Truncation budget for recall queries, in tokens. Must match the Hindsight
      * server's `HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS` (server default: 500).
@@ -106,6 +121,13 @@ export const env = createEnv({
       .string()
       .optional()
       .transform((v) => v === "true" || v === "1"),
+    /**
+     * Event and signing keys the self-hosted server was started with
+     * (`inngest start --event-key … --signing-key …`). Optional in the
+     * schema only because `INNGEST_DEV` runs against `inngest dev`, which
+     * has no keys; outside dev mode `checkInngestAuth` refuses to boot
+     * without both, or against a server that does not enforce them.
+     */
     INNGEST_EVENT_KEY: z.string().optional(),
     INNGEST_SIGNING_KEY: z.string().optional(),
     INNGEST_BASE_URL: z.string().url(),
