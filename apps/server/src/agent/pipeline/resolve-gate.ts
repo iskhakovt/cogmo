@@ -7,7 +7,8 @@
  *
  * A resolution for any gate but the one the run is parked on is stale. A
  * stale outcome reports where the run is and whether its recorded claim is
- * this resolution's. `inspectGate` reads the same without claiming anything.
+ * this resolution's. `inspectFailedResolution` reads the same for a
+ * resolution that failed, failing a still-parked run in the same transaction.
  */
 
 import type { Transactor } from "../../db/index.js";
@@ -77,8 +78,12 @@ type StaleOutcome = Extract<ResolveGateOutcome, { kind: "stale" }>;
 /** Who is asking about a gate: the gate key and the resolving Inngest function run. */
 export type GateClaimArgs = Omit<ResolveGateArgs, "decision">;
 
-/** Where a run stands relative to one gate, as read by {@link inspectGate}. */
-export type GateInspection = { kind: "parked" } | StaleOutcome | { kind: "not_found" };
+/** Where a run stands after a resolution failed for good, as read by {@link inspectFailedResolution}. */
+export type FailedResolutionInspection =
+  | { kind: "parked" }
+  | { kind: "failed"; conversationId: string }
+  | StaleOutcome
+  | { kind: "not_found" };
 
 function staleOutcome(
   run: PipelineRunRow,
@@ -113,24 +118,33 @@ function staleOutcome(
 }
 
 /**
- * Read where the run stands relative to `args.gateKey` without changing it:
- * still parked on that gate, or the stale outcome a resolution would report
- * — including whether the run's recorded claim is `args.resolverRunId`'s.
+ * Read where the run stands relative to a failed resolution's gate. A run
+ * still parked there is failed with `failParkedRunWith` when one is given, in
+ * the same transaction as the check: a resolution that claims the gate
+ * concurrently then forces a serialization retry instead of losing its run.
+ * A run that moved on reports the stale outcome, including whether the
+ * recorded claim is `resolverRunId`'s.
  */
-export async function inspectGate(
+export async function inspectFailedResolution(
   deps: Pick<ResolveGateDeps, "runInTx"> & {
-    runStore: Pick<ResolveGateDeps["runStore"], "getRunWithDefinition">;
+    runStore: Pick<PipelineRunStore, "getRunWithDefinition" | "failRun">;
   },
-  args: GateClaimArgs,
-): Promise<GateInspection> {
-  return deps.runInTx(async (tx): Promise<GateInspection> => {
+  args: GateClaimArgs & { failParkedRunWith: string | null },
+): Promise<FailedResolutionInspection> {
+  return deps.runInTx(async (tx): Promise<FailedResolutionInspection> => {
     const loaded = await deps.runStore.getRunWithDefinition(tx, args.runId);
     if (!loaded) return { kind: "not_found" };
     const { run, definition } = loaded;
     const parked =
       run.status === "waiting_gate" &&
       pipelineGateKey(run.id, run.currentStage, run.iteration) === args.gateKey;
-    return parked ? { kind: "parked" } : staleOutcome(run, definition, args);
+    if (!parked) return staleOutcome(run, definition, args);
+    if (args.failParkedRunWith === null) return { kind: "parked" };
+    const failed = await deps.runStore.failRun(tx, run.id, args.failParkedRunWith);
+    if (failed.kind !== "failed") {
+      throw new Error(`run ${run.id} read as parked but could not be failed (${failed.kind})`);
+    }
+    return failed;
   });
 }
 

@@ -1,6 +1,7 @@
 import { InngestTestEngine } from "@inngest/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import type { Transactor } from "../../db/index.js";
 import { inngest } from "../../inngest/client.js";
 import { type PipelineGateDecision, pipelineGateResolved } from "../../inngest/events.js";
 import {
@@ -204,6 +205,9 @@ describe("gateNotice", () => {
       staleAt({ status: "failed", currentStage: "approve", pastGate: false }),
       null,
     ],
+    // A tapped cancellation against a run that ended at a later stage.
+    ["cancelled", staleAt({ status: "cancelled", currentStage: "sign-off" }), TOO_LATE],
+    ["cancelled", staleAt({ status: "failed" }), "the pipeline run has already stopped"],
   ] as const)("claimed by another resolution: %s + %o → %s", (decision, outcome, expected) => {
     const notice = gateNotice(decision, outcome);
     if (expected === null) expect(notice).toBeNull();
@@ -413,6 +417,29 @@ describe("createPipelineGateResolver onFailure", () => {
     );
   });
 
+  it("checks the gate and fails the run in one transaction, so a tap landing between can't be failed", async () => {
+    // onFailure runs outside the resolver's per-run concurrency: a tap can
+    // claim the gate right after a read. One transaction turns that commit into
+    // a serialization failure for this one to retry, never a stale decision.
+    const notifyConversation = vi.fn().mockResolvedValue(undefined);
+    const runStore = mock<PipelineRunStore>();
+    let opened = 0;
+    const runInTx: Transactor = (cb) => cb({ txNumber: ++opened } as never);
+    const fn = createPipelineGateResolver({
+      runInTx,
+      runStore,
+      deliveryRouter: { notifyConversation },
+    });
+    runStore.getRunWithDefinition.mockResolvedValue(loadedAt("waiting_gate", "approve", null));
+    runStore.failRun.mockResolvedValue({ kind: "failed", conversationId: "conv-1" });
+
+    await invokeInngestOnFailure<FailureCtx>(fn, failureCtx("timeout_proceed", null));
+
+    const readTx = runStore.getRunWithDefinition.mock.calls[0]?.[0];
+    expect(readTx).toBeDefined();
+    expect(runStore.failRun).toHaveBeenCalledWith(readTx, "run-1", expect.any(String));
+  });
+
   it("fails the run when a timeout can't be applied, since no waiter remains", async () => {
     const { fn, runStore, notifyConversation } = harness("timeout_proceed");
     runStore.getRunWithDefinition.mockResolvedValue(loadedAt("waiting_gate", "approve", null));
@@ -451,6 +478,21 @@ describe("createPipelineGateResolver onFailure", () => {
       expect.objectContaining({ id: "pipeline-stage-due-run-1-build-0" }),
     );
     expect(notifyConversation).not.toHaveBeenCalled();
+  });
+
+  it("doesn't re-send a next stage that has already parked, but still delivers the lost notice", async () => {
+    const { fn, runStore, notifyConversation } = harness("timeout_proceed");
+    runStore.getRunWithDefinition.mockResolvedValue(loadedAt("waiting_gate", "build", OWN_CLAIM));
+    const ctx = failureCtx("timeout_proceed", null);
+
+    await invokeInngestOnFailure<FailureCtx>(fn, ctx);
+
+    expect(runStore.failRun).not.toHaveBeenCalled();
+    expect(ctx.step.sendEvent).not.toHaveBeenCalledWith("emit-next-stage", expect.anything());
+    expect(notifyConversation).toHaveBeenCalledWith(
+      "conv-1",
+      '⏱ Checkpoint timed out — pipeline "issue-to-pr" is proceeding to "build".',
+    );
   });
 
   it("delivers the notice of a committed cancellation whose follow-up failed", async () => {
@@ -509,10 +551,7 @@ describe("createPipelineGateResolver onFailure", () => {
     await invokeInngestOnFailure<FailureCtx>(fn, failureCtx("approved", null));
 
     expect(runStore.failRun).not.toHaveBeenCalled();
-    expect(notifyConversation).not.toHaveBeenCalledWith(
-      "conv-1",
-      expect.stringContaining("will resolve on its timeout"),
-    );
+    expect(notifyConversation).not.toHaveBeenCalled();
   });
 
   it("does nothing for a run that no longer exists", async () => {

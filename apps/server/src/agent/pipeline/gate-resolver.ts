@@ -12,7 +12,9 @@
  *
  * `onFailure` inspects the run under the failed run's id. Still parked means
  * nothing committed: a tap is told the gate resolves on its timeout, and a
- * timeout, with no waiter left, fails the run. Moved on, it sends the
+ * timeout, with no waiter left, fails the run. The check and the failure
+ * share one transaction, since `onFailure` runs outside the per-run
+ * concurrency and a tap can claim the gate in between. Moved on, it sends the
  * follow-ups the stale path would, so a failure never stops a moving run.
  */
 
@@ -28,7 +30,7 @@ import { logger } from "../../logger.js";
 import type { DeliveryRouter } from "../../transport/delivery-router.js";
 import { type NoticeStep, notifyAfterRetries } from "./notify.js";
 import {
-  inspectGate,
+  inspectFailedResolution,
   type ResolveGateDeps,
   type ResolveGateOutcome,
   resolveGate,
@@ -199,38 +201,39 @@ export function createPipelineGateResolver(deps: PipelineGateResolverDeps) {
         const { runId, gateKey, conversationId, decision } = resolution;
         log.error({ err: error, runId, gateKey, decision }, "gate resolution failed after retries");
         const inspection = await step.run("inspect-gate", () =>
-          inspectGate(deps, { runId, gateKey, resolverRunId: event.data.run_id }),
+          inspectFailedResolution(deps, {
+            runId,
+            gateKey,
+            resolverRunId: event.data.run_id,
+            failParkedRunWith: isTap(decision)
+              ? null
+              : `gate timeout could not be applied (${error.name})`,
+          }),
         );
 
-        if (inspection.kind !== "parked") {
-          await sendFollowUps(step, deps.deliveryRouter, resolution, inspection);
-          return;
-        }
-        if (isTap(decision)) {
-          await notifyAfterRetries(
-            step,
-            "notify-tap-failed",
-            deps.deliveryRouter,
-            conversationId,
-            "⚠️ Your decision at this checkpoint couldn't be applied. The checkpoint is still open and will resolve on its timeout.",
-            { runId, gateKey },
-          );
-          return;
-        }
-        const failed = await step.run("fail-run", () =>
-          deps.runInTx((tx) =>
-            deps.runStore.failRun(tx, runId, `gate timeout could not be applied (${error.name})`),
-          ),
-        );
-        if (failed.kind === "failed") {
-          await notifyAfterRetries(
-            step,
-            "notify-run-failed",
-            deps.deliveryRouter,
-            conversationId,
-            "❌ A pipeline checkpoint's timeout couldn't be applied, so the run has stopped.",
-            { runId, gateKey },
-          );
+        switch (inspection.kind) {
+          case "parked":
+            await notifyAfterRetries(
+              step,
+              "notify-tap-failed",
+              deps.deliveryRouter,
+              conversationId,
+              "⚠️ Your decision at this checkpoint couldn't be applied. The checkpoint is still open and will resolve on its timeout.",
+              { runId, gateKey },
+            );
+            return;
+          case "failed":
+            await notifyAfterRetries(
+              step,
+              "notify-run-failed",
+              deps.deliveryRouter,
+              conversationId,
+              "❌ A pipeline checkpoint's timeout couldn't be applied, so the run has stopped.",
+              { runId, gateKey },
+            );
+            return;
+          default:
+            await sendFollowUps(step, deps.deliveryRouter, resolution, inspection);
         }
       },
     },
