@@ -42,18 +42,15 @@ for (const name of [
 }
 
 /**
- * A service base URL without `user:password@`. `fetch` refuses to build a
- * request from one, so every call would fail — with the credentials echoed
- * in the error — and service credentials belong in their own key variables.
- * The issue message never includes the value.
+ * A service base URL without `user:password@` — credentials go in the
+ * service's key variable. The issue message never echoes the value.
  */
 export const ServiceUrlSchema = z
   .string()
   .url()
   .refine(
     (value) => {
-      // Zod runs refinements even after `.url()` has failed; an unparseable
-      // value is already reported there, and `new URL` would throw on it.
+      // Zod refines even after `.url()` fails; `new URL` would throw here.
       if (!URL.canParse(value)) return true;
       const url = new URL(value);
       return url.username === "" && url.password === "";
@@ -76,12 +73,8 @@ export const env = createEnv({
     DATABASE_URL: z.string().default("postgresql://cogmo@localhost/cogmo"),
     HINDSIGHT_URL: ServiceUrlSchema,
     /**
-     * Bearer token for the Hindsight API. The server must run
-     * `ApiKeyTenantExtension` with the same value in
-     * `HINDSIGHT_API_TENANT_API_KEY`; boot refuses a server that answers
-     * unauthenticated requests (`checkHindsightAuth`). Required, so that a
-     * memory server reachable from anything on its network is never the
-     * silent default.
+     * Bearer token for the Hindsight API; must equal the server's
+     * `HINDSIGHT_API_TENANT_API_KEY` (verified at boot by `checkHindsightAuth`).
      */
     HINDSIGHT_API_KEY: z.string().min(1),
     /**
@@ -142,11 +135,9 @@ export const env = createEnv({
       .optional()
       .transform((v) => v === "true" || v === "1"),
     /**
-     * Event and signing keys the self-hosted server was started with
-     * (`inngest start --event-key … --signing-key …`). Optional in the
-     * schema only because `INNGEST_DEV` runs against `inngest dev`, which
-     * has no keys; outside dev mode `checkInngestAuth` refuses to boot
-     * without both, or against a server that does not enforce them.
+     * Keys the self-hosted server was started with. Optional only for
+     * `INNGEST_DEV`; `cogmo serve` refuses to start without both
+     * (`checkInngestAuth`).
      */
     INNGEST_EVENT_KEY: z.string().optional(),
     INNGEST_SIGNING_KEY: z.string().optional(),

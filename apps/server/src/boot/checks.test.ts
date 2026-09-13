@@ -517,6 +517,27 @@ describe("runHindsightChecks", () => {
     ).rejects.toThrow(/unauthenticated request/);
   });
 
+  it("cancels the version check once auth fails, instead of waiting out its retries", async () => {
+    let versionSawCancel = false;
+
+    await expect(
+      runHindsightChecks(context(), {
+        auth: async () => {
+          throw new BootCheckError("Hindsight rejected HINDSIGHT_API_KEY");
+        },
+        // Stands in for a /version that keeps retrying until cancelled.
+        version: (checkContext) =>
+          new Promise<void>((resolveVersion) => {
+            checkContext.cancel.addEventListener("abort", () => {
+              versionSawCancel = true;
+              resolveVersion();
+            });
+          }),
+      }),
+    ).rejects.toThrow("rejected HINDSIGHT_API_KEY");
+    expect(versionSawCancel).toBe(true);
+  });
+
   it("does not cancel the auth check when the version check fails", async () => {
     let authSawCancel: boolean | undefined;
 

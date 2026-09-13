@@ -52,6 +52,12 @@ describe("describeError", () => {
     expect(describeError(new Error("boom", { cause: new AggregateError([], "") }))).toBe("boom");
   });
 
+  it("falls back to 'Error' when even the name is empty", () => {
+    const err = Object.assign(new Error(""), { name: "" });
+
+    expect(describeError(err)).toBe("Error");
+  });
+
   it("stringifies a thrown non-Error", () => {
     expect(describeError("plain string")).toBe("plain string");
   });

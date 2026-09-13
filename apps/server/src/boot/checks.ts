@@ -1,34 +1,15 @@
 /**
  * Boot-time dependency checks.
  *
- * Each function probes one external dependency that production code paths
- * silently assume is in place. `checkUuidv7` and `checkS3KeyPair` run from
- * `bootstrapCore`; the network probes run from `bootstrap()` in
- * `src/index.ts` before the orchestrator starts taking traffic, and the
- * Hindsight probes also from the memory CLIs — fail fast at boot beats
- * failing mid-turn after the user has already sent a message.
+ * `checkUuidv7`, `checkS3KeyPair` and `checkHindsightClientVersion` run from
+ * `bootstrapCore`, `checkDirWritable` from `bootstrapSandbox`, and the network
+ * probes from `bootstrap()` — Hindsight's also from the memory CLIs.
  *
- * Policy:
- * - **Hard fail at once (throw `BootCheckError`):** deterministic,
- *   deployment-shaped problems that won't self-heal — missing extension,
- *   missing bucket, wrong region, rejected credentials, a half-set S3 key
- *   pair, a server that answers without auth, a version outside the
- *   supported range, a service URL with embedded credentials. Operator
- *   action required.
- * - **Retry, then hard fail:** a dependency that can't be reached, doesn't
- *   answer in time, or answers with something that proves nothing either
- *   way — including S3 credentials that fail to load, which on EC2/ECS can be
- *   a briefly slow metadata endpoint. Each check gets
- *   `BOOT_PROBE_DEADLINE_MS` to become conclusive, long enough to ride out a
- *   restart during a deploy. Every attempt is bounded by
- *   `BOOT_PROBE_ATTEMPT_TIMEOUT_MS` and by the time left, so a request that
- *   hangs cannot overrun. Past the deadline boot fails closed: a supervisor
- *   restart loop is visible, a check that silently never ran is not.
- *
- * Probe URLs in logs and errors drop query strings, fragments and userinfo,
- * and the Inngest event key is redacted. Every `BootCheckError` message and
- * logged retry reason has `user:password@` scrubbed from any URL it quotes.
- * A credential carried in a path segment is not detected.
+ * Policy: a deterministic, deployment-shaped problem throws `BootCheckError`
+ * at once. A dependency that can't be reached or answers inconclusively is
+ * retried until `BOOT_PROBE_DEADLINE_MS`, then boot fails closed: a restart
+ * loop with the reason logged is visible, a check that silently never ran is
+ * not.
  */
 
 import { constants as fsConstants, readFileSync } from "node:fs";
@@ -47,7 +28,7 @@ import { describeError } from "../util/describe-error.js";
 export class BootCheckError extends Error {
   override readonly name = "BootCheckError";
 
-  /** The message has `user:password@` scrubbed from any URL it quotes. */
+  /** Scrubs `user:password@` from any URL the message quotes. */
   constructor(message: string, options?: ErrorOptions) {
     super(scrubUrlCredentials(message), options);
   }
@@ -59,20 +40,10 @@ export const BOOT_PROBE_DEADLINE_MS = 60_000;
 export const BOOT_PROBE_ATTEMPT_TIMEOUT_MS = 5_000;
 const BOOT_PROBE_MIN_DELAY_MS = 1_000;
 const BOOT_PROBE_MAX_DELAY_MS = 10_000;
-/**
- * The least time worth giving an attempt. A retry that would get less is
- * certain to time out, and its timeout would replace the real reason — an
- * HTTP 502, a refused connection — in the final error.
- */
+/** Least time worth giving a retry: less would only time out and hide the real reason. */
 const BOOT_PROBE_MIN_ATTEMPT_MS = 1_000;
 
-/**
- * `text` with the userinfo of any URL in it replaced. A request error can
- * quote the URL it was built from — `fetch` refuses a URL with credentials
- * and names it in full — or a proxy URL, and that text reaches retry logs
- * and boot errors. The match runs to the last `@` before the host, as URL
- * parsers do, so a password containing `@` is covered too.
- */
+/** Replace the userinfo of any URL in `text`, up to the last `@` before the host. */
 function scrubUrlCredentials(text: string): string {
   return text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#]*@/gi, "$1REDACTED@");
 }
@@ -88,18 +59,13 @@ export interface BootClock {
 }
 
 export const systemBootClock: BootClock = {
-  // Monotonic: a wall-clock step at boot (NTP correcting an RTC-less host)
-  // must not end the deadline early or stretch it.
+  // Monotonic, so a clock step at boot doesn't move the deadline.
   now: () => performance.now(),
   sleep: (ms, signal) => sleepFor(ms, undefined, { signal }),
   timeout: (ms) => AbortSignal.timeout(ms),
 };
 
-/**
- * What every boot check runs against: the clock, and a signal that aborts
- * once the check is no longer wanted — a check run alongside it has already
- * failed boot.
- */
+/** The clock, and a signal that aborts once a check run alongside has failed boot. */
 export interface BootProbeContext {
   clock: BootClock;
   cancel: AbortSignal;
@@ -119,10 +85,8 @@ function start(
 }
 
 /**
- * Run independent boot checks together. The first to fail cancels the rest,
- * and the call settles only once every check has — so when it rejects, with
- * that first failure, nothing is still retrying or logging behind it. A
- * cancellation of `parent` reaches every check too.
+ * Run checks together. The first failure cancels the rest; the call rejects
+ * with it only once every check has settled.
  */
 export async function runBootChecks(
   parent: BootProbeContext,
@@ -145,12 +109,10 @@ export async function runBootChecks(
 }
 
 /**
- * Hindsight's auth and version checks, run together so Hindsight is held to
- * one probe deadline, but without cancelling each other. An auth failure is
- * reported ahead of a version failure whichever finishes first: an unkeyed
- * server answers its open `/version` quickly, and reporting only an
- * out-of-range version would leave the missing key to be found after the
- * upgrade. A cancellation of `context` reaches both.
+ * Run Hindsight's auth and version checks together, reporting an auth failure
+ * ahead of a version failure — an unkeyed server answers its open `/version`
+ * first. An auth failure cancels the version check; a version failure does
+ * not cancel auth.
  */
 export async function runHindsightChecks(
   context: BootProbeContext,
@@ -159,9 +121,17 @@ export async function runHindsightChecks(
     version: (context: BootProbeContext) => Promise<void>;
   },
 ): Promise<void> {
+  const authFailed = new AbortController();
+  const versionContext: BootProbeContext = {
+    clock: context.clock,
+    cancel: AbortSignal.any([context.cancel, authFailed.signal]),
+  };
   const [auth, version] = await Promise.allSettled([
-    start(checks.auth, context),
-    start(checks.version, context),
+    start(checks.auth, context).catch((err: unknown) => {
+      authFailed.abort(err);
+      throw err;
+    }),
+    start(checks.version, versionContext),
   ]);
   if (auth.status === "rejected") throw auth.reason;
   if (version.status === "rejected") throw version.reason;
@@ -174,20 +144,11 @@ function conclusive<T>(value: T): ProbeAttempt<T> {
 }
 
 /**
- * Run `attempt` until it is conclusive, backing off between tries, and fail
- * closed at the deadline. Each attempt receives a signal that aborts after
- * `BOOT_PROBE_ATTEMPT_TIMEOUT_MS` or at the deadline, whichever is sooner;
- * the attempt must pass it to every request it makes. A `BootCheckError`
- * thrown by `attempt` is a deterministic verdict and propagates at once.
- *
- * Backoff keeps room for another full attempt where it can, and a retry runs
- * only if it gets `BOOT_PROBE_MIN_ATTEMPT_MS` to run — checked when the wait
- * is chosen and again after it, since a timer can wake late. Otherwise the
- * attempt that just failed is the last, and its reason is the one reported.
- *
- * Once `context.cancel` aborts, the attempt in flight is aborted with it and
- * the loop stops at its next attempt or wait, clearing the wait's timer, so
- * nothing keeps retrying for a boot that has already failed.
+ * Retry `attempt` with backoff until it is conclusive, failing closed at the
+ * deadline. Each attempt's signal aborts on its timeout, the deadline or
+ * `context.cancel`, and must reach every request it makes. A `BootCheckError`
+ * from `attempt` propagates at once. A retry runs only if it gets
+ * `BOOT_PROBE_MIN_ATTEMPT_MS`, checked again after the wait.
  */
 async function retryUntilConclusive<T>(
   label: string,
@@ -221,8 +182,6 @@ async function retryUntilConclusive<T>(
     if (cancel.aborted) continue;
     const left = deadline - clock.now();
     if (left < BOOT_PROBE_MIN_DELAY_MS + BOOT_PROBE_MIN_ATTEMPT_MS) throw failClosed(lastReason);
-    // At most `left - BOOT_PROBE_MIN_ATTEMPT_MS`, so the next attempt keeps
-    // at least that long to run.
     const wait = Math.min(
       delay,
       Math.max(left - BOOT_PROBE_ATTEMPT_TIMEOUT_MS, BOOT_PROBE_MIN_DELAY_MS),
@@ -231,7 +190,7 @@ async function retryUntilConclusive<T>(
     try {
       await clock.sleep(wait, cancel);
     } catch (err) {
-      // A cancelled wait ends the loop at the check above.
+      // A cancelled wait ends the loop at the top.
       if (!cancel.aborted) throw err;
     }
     delay = Math.min(delay * 2, BOOT_PROBE_MAX_DELAY_MS);
@@ -239,12 +198,9 @@ async function retryUntilConclusive<T>(
 }
 
 /**
- * Settle with `work`, or reject with `signal`'s reason once it aborts,
- * whichever comes first. For calls that honour the signal in only part of
- * their work — the S3 client ignores it while resolving credentials, and the
- * Hindsight client while building its request. The abandoned call keeps
- * running; its outcome is dropped, since the attempt it belonged to has
- * already been judged inconclusive.
+ * Settle with `work`, or reject once `signal` aborts. For calls that honour
+ * the signal only partly (S3 credential resolution, Hindsight request setup);
+ * the abandoned call's outcome is dropped.
  */
 function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) {
@@ -323,9 +279,7 @@ export function loadHindsightCompat(): HindsightCompat {
  * `function uuidv7() does not exist` mid-turn. `scripts/init-db.sql`
  * installs it (native on PG18+, plpgsql fallback for older versions);
  * this check is the safety net for deployments that skipped that step.
- *
- * Not retried: migrations run against the same database immediately before,
- * so a failure here is the function, not the connection.
+ * Not retried: migrations have just used the connection.
  */
 export async function checkUuidv7(db: Database): Promise<void> {
   try {
@@ -339,12 +293,7 @@ export async function checkUuidv7(db: Database): Promise<void> {
   }
 }
 
-/**
- * Reject a half-set S3 key pair. The S3 client uses static credentials only
- * when both keys are set; with one, it silently falls back to the ambient
- * chain — and on a host with an instance role, runs with credentials the
- * operator did not choose. Neither value is echoed.
- */
+/** Reject a half-set S3 key pair: with one key the client silently uses ambient credentials. */
 export function checkS3KeyPair(accessKey: string | undefined, secretKey: string | undefined): void {
   if ((accessKey === undefined) !== (secretKey === undefined)) {
     throw new BootCheckError(
@@ -379,23 +328,13 @@ export interface S3BucketTarget {
 }
 
 /**
- * Verify the configured S3 bucket exists and credentials are valid.
- * `HeadBucket` is the cheapest probe — no list, no read, no write.
- *
- * Errors are classified by HTTP status and headers alone: a HEAD response has
- * no body, so the SDK names every error other than a 404 `Unknown`. The
- * store's verdicts fail at once:
- * - a bucket in another region — a 301, or a 400 whose
- *   `x-amz-bucket-region` names a region other than `target.region` (S3 sends
- *   that header for existing buckets, so a same-region 400 carries it too);
- * - any other 4xx except 400 and 429 (missing bucket, bad credentials).
- *
- * A same-region or header-less 400 is retried, since S3's transient
- * `RequestTimeout` is indistinguishable from any other bodiless 400; so are
- * credentials that fail to load (with a complete key pair the client never
- * loads any, so this is the ambient chain, possibly a briefly slow EC2/ECS
- * metadata endpoint), network errors, timeouts, 5xx, 429 and temporary
- * redirects, up to the deadline.
+ * `HeadBucket` the configured bucket. A HEAD error has no body (the SDK names
+ * every non-404 `Unknown`), so classification uses the status and the
+ * `x-amz-bucket-region` header. Fails at once on another region — a 301, or a
+ * 400 whose header differs from `target.region` (S3 sends it for existing
+ * buckets, so a same-region 400 carries it too) — and on any other 4xx except
+ * 400 and 429. Retries the rest, including credentials that fail to load
+ * (ambient, possibly a slow metadata endpoint).
  */
 export async function checkS3Bucket(
   s3: S3Client,
@@ -463,10 +402,8 @@ export async function checkS3Bucket(
  * Hard fail when the server reports a version outside the range — that's
  * a real compatibility problem (e.g. against 0.5.x the async `retainBatch`
  * path silently drops items past the first), and the operator needs to
- * fix the deployment, not retry.
- *
- * When `/version` can't be read, retry up to the boot probe deadline, then
- * fail closed.
+ * fix the deployment, not retry. An unreadable `/version` is retried up to
+ * the boot probe deadline.
  */
 export async function checkHindsightVersion(
   memory: HindsightMemoryProvider,
@@ -572,21 +509,14 @@ export interface BootProbeDeps extends BootProbeContext {
   fetch: ProbeFetch;
 }
 
-/**
- * Append `path` to a service base URL, keeping any path prefix the base
- * carries (`https://gateway/hindsight`) and any query or fragment in place.
- */
+/** Append `path` to a base URL, keeping its path prefix, query and fragment. */
 function serviceUrl(baseUrl: string, path: string): string {
   const url = new URL(baseUrl);
   url.pathname = `${url.pathname.replace(/\/+$/, "")}${path}`;
   return url.toString();
 }
 
-/**
- * `url` as it may appear in logs and errors: userinfo, query and fragment
- * dropped, and with `redactLastSegment` the final path segment — where the
- * Inngest event URL carries its key — replaced by `REDACTED`.
- */
+/** `url` for logs: no userinfo, query or fragment; `redactLastSegment` hides the Inngest event key. */
 function displayUrl(url: string, options: { redactLastSegment: boolean }): string {
   const shown = new URL(url);
   shown.username = "";
@@ -599,12 +529,7 @@ function displayUrl(url: string, options: { redactLastSegment: boolean }): strin
   return shown.toString();
 }
 
-/**
- * Reject a service URL with embedded credentials at once. `fetch` refuses to
- * build a request from one, so every attempt would fail the same way until
- * the deadline. Env validation (`ServiceUrlSchema`) already rejects such
- * values for every entrypoint; this covers callers that pass a URL directly.
- */
+/** Fail at once on credentials in a service URL: `fetch` would refuse every attempt. */
 function assertNoEmbeddedCredentials(envVarName: string, baseUrl: string): void {
   const url = new URL(baseUrl);
   if (url.username !== "" || url.password !== "") {
@@ -617,7 +542,7 @@ function assertNoEmbeddedCredentials(envVarName: string, baseUrl: string): void 
 
 type ProbeResult = { kind: "status"; status: number } | { kind: "unreachable"; error: string };
 
-/** One probe request. The body is discarded unread: only the status is evidence. */
+/** One probe request; only its status matters. */
 async function probe(
   fetchFn: ProbeFetch,
   url: string,
@@ -630,8 +555,7 @@ async function probe(
   } catch (err) {
     return { kind: "unreachable", error: describeError(err) };
   }
-  // Discarding the body rejects if the attempt signal fires after the headers
-  // arrived. The status is already in hand, and it is the whole result.
+  // Cancelling the body rejects if the signal fired after the headers; the status stands.
   await res.body?.cancel().catch(() => undefined);
   return { kind: "status", status: res.status };
 }
@@ -648,29 +572,15 @@ function statusText(result: ProbeResult): string {
   return result.kind === "status" ? `HTTP ${result.status}` : result.error;
 }
 
-/**
- * Unreachable, timed out, or a status that proves neither enforcement nor
- * its absence — a 404 from a wrong base path, a 502 from a proxy in front of
- * a restarting server. Retried until the deadline. `shownUrl` reaches logs
- * and the final error, so it must come from `displayUrl`.
- */
+/** A result that neither proves nor disproves enforcement. `shownUrl` must come from `displayUrl`. */
 function inconclusive(shownUrl: string, result: ProbeResult): ProbeAttempt<void> {
   return { conclusive: false, reason: `${shownUrl} → ${statusText(result)}` };
 }
 
 /**
- * Verify Hindsight enforces its API key, and that ours is the one it holds.
- *
- * Two requests against the bank list, which runs through the tenant
- * extension's `authenticate` (`/health` and `/version` do not):
- * - **Without a token** it must be refused. A 2xx means the server runs the
- *   default no-auth tenant extension, where the key Cogmo sends is ignored —
- *   a credential believed to protect memory that protects nothing.
- * - **With the token** it must succeed, otherwise every memory call fails at
- *   request time on a mismatched key.
- *
- * Those two outcomes hard-fail at once. Anything else is retried until
- * conclusive, then fails closed.
+ * Verify Hindsight enforces its API key and holds ours: the bank list, which
+ * goes through the tenant extension, must refuse an anonymous request and
+ * accept our token. Either failing is a verdict; anything else is retried.
  */
 export async function checkHindsightAuth(
   deps: BootProbeDeps,
@@ -711,35 +621,19 @@ export async function checkHindsightAuth(
 
 export interface InngestAuthConfig {
   baseUrl: string;
-  /** `INNGEST_DEV` — the dev server has no keys, so there is nothing to check. */
+  /** `INNGEST_DEV`: the dev server has no keys. */
   dev: boolean;
   eventKey: string | undefined;
   signingKey: string | undefined;
 }
 
 /**
- * Verify the self-hosted Inngest server enforces its keys, and that Cogmo
- * holds the right ones.
- *
- * Anything that can post an event to an unkeyed server drives the agent:
- * `adapter/direct/inbound` injects a user turn, `coding/task/plan-approved`
- * approves a plan. `inngest start` refuses to run without keys, but
- * `inngest dev` accepts every request, so a production deployment pointed
- * at a dev server is the failure mode this check exists for.
- *
- * - Both keys must be set.
- * - `GET /v1/events` without a signing key must be refused; a 2xx means the
- *   server is not enforcing keys at all.
- * - The same request with our signing key must succeed.
- * - An empty event batch posted under our event key must succeed. It
- *   creates no event, so the probe has no side effect.
- *
- * Any other outcome is retried until conclusive, then fails closed. The
- * whole check is skipped under `INNGEST_DEV`, which is taken at its word:
- * setting it in production disables this check along with the SDK's
- * signature verification, and DEPLOYMENT.md says never to. Keys do not cover
- * the dashboard or its GraphQL API, which can invoke functions — see
- * DEPLOYMENT.md → Securing internal services.
+ * Verify self-hosted Inngest enforces its keys and holds ours: `GET /v1/events`
+ * must refuse an anonymous request and accept the signing key, and an empty
+ * event batch — which creates no event — must be accepted under the event key.
+ * Skipped under `INNGEST_DEV`, which also disables SDK signature verification;
+ * never set it in production. Keys don't cover the dashboard or GraphQL API —
+ * see DEPLOYMENT.md → Securing internal services.
  */
 export async function checkInngestAuth(
   deps: BootProbeDeps,

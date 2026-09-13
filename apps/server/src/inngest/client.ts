@@ -21,8 +21,7 @@ import { env } from "../env.js";
 // app id so the connect-mode gateway doesn't round-robin events
 // across peer workers.
 //
-// Keys are passed explicitly: the SDK's own fallback reads `process.env`,
-// which never sees the `_FILE` resolution `env.ts` applies.
+// Keys come from `env`: `_FILE` values never reach the SDK's `process.env` fallback.
 export const inngest = new Inngest({
   id: process.env.INNGEST_APP_ID ?? "cogmo",
   isDev: env.INNGEST_DEV,

@@ -66,8 +66,7 @@ describe("HindsightMemoryProvider", () => {
     expect(mockClientConstructor).toHaveBeenCalledWith(
       expect.objectContaining({ baseUrl: "http://localhost:8888", apiKey: "test-api-key" }),
     );
-    // The raw client carries no apiKey option — recall and reflect go through
-    // it, so a missing header here is a 401 on every read.
+    // The raw client has no apiKey option.
     expect(mockCreateConfig).toHaveBeenCalledWith({
       baseUrl: "http://localhost:8888",
       headers: { Authorization: "Bearer test-api-key" },
@@ -108,7 +107,6 @@ describe("HindsightMemoryProvider", () => {
       vi.unstubAllEnvs();
     });
     const provider = createProvider();
-    // The generated client returns fetch failures in `error` instead of throwing.
     mockRecallMemories.mockResolvedValue({
       data: undefined,
       error: new TypeError("fetch failed"),

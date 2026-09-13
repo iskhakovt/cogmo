@@ -76,22 +76,16 @@ Standard Docker pattern (Postgres, MariaDB, Redis, Keycloak). For any env var `F
 
 ### Internal service credentials `[confirmed]`
 
-Hindsight and Inngest credentials are **env vars, not `secrets` rows**. They are deployment configuration that has to match what the server was started with, like `DATABASE_URL`. A DB row would put them behind the master key and the wizard, for a value the operator sets on both sides at deploy time anyway.
+Hindsight and Inngest credentials are **env vars, not `secrets` rows**: deployment configuration that must match what the server was started with, like `DATABASE_URL`.
 
 | Service | Cogmo side | Server side | Boot check |
 |-|-|-|-|
 | Hindsight | `HINDSIGHT_API_KEY` (required) | `ApiKeyTenantExtension` + `HINDSIGHT_API_TENANT_API_KEY` | `checkHindsightAuth` |
 | Inngest | `INNGEST_EVENT_KEY`, `INNGEST_SIGNING_KEY` (required unless `INNGEST_DEV`) | `inngest start --event-key --signing-key` | `checkInngestAuth` |
 
-Each check hard-fails on two conditions. If the server answers an unauthenticated request, a key Cogmo sends would be ignored — believed to protect something, while protecting nothing. If the server rejects Cogmo's key, every call would fail at request time. Both probes leave no trace:
-- **Hindsight:** a bank list, a route that goes through the tenant extension (`/health` and `/version` do not).
-- **Inngest:** `GET /v1/events`, plus an empty event batch posted to `/e/<key>`.
+Each check fails boot if the server answers an unauthenticated request (the key would be ignored) or rejects Cogmo's key; `src/boot/checks.integration.test.ts` pins these premises against the pinned images. Dev and test Hindsight containers enforce a fixed key (`HINDSIGHT_TEST_API_KEY`), so every integration and e2e run uses the authenticated path; Inngest runs `inngest dev` with `INNGEST_DEV=true` there.
 
-`src/boot/checks.integration.test.ts` pins these premises against the pinned images.
-
-Dev and test Hindsight containers enforce a fixed key (`HINDSIGHT_TEST_API_KEY` in `dev/containers.ts`), so every integration and e2e run exercises the authenticated client path. Inngest stays on `inngest dev` with `INNGEST_DEV=true` there.
-
-Keys do not close every route. Inngest's dashboard and GraphQL API, and Hindsight's health, version and metrics routes, answer without them. The deploy-side mitigations (`--no-ui`, private ports) are in `DEPLOYMENT.md` → Securing internal services.
+Keys don't close every route — see `DEPLOYMENT.md` → Securing internal services.
 
 ### Env lifecycle
 
@@ -111,12 +105,9 @@ Keys do not close every route. Inngest's dashboard and GraphQL API, and Hindsigh
 - DB migrations (`migrate(db, ...)`)
 - Master-key presence (`COGMO_MASTER_KEY` check)
 - User + profile load
-- Dependency probes — keep blocking because they fail loudly at deploy time and, against healthy dependencies, finish in well under a second; the operator-visibility win beats the latency cost.
-  - **Where they run.** `checkUuidv7` and the pure Hindsight client-version check run in `bootstrapCore`, since every entrypoint uses them. `checkS3Bucket`, `checkHindsightAuth`, `checkHindsightVersion` and `checkInngestAuth` run together through `runBootChecks` from `verifyDependencies` in `bootstrap`, so `cogmo serve` and the integration harness probe them. The two Hindsight checks (`verifyHindsight`) also run for `migrate-memories` and `backfill`, which clear and rewrite memory banks — after their arguments and target bank are validated, so a usage error is reported at once. Other one-shot admin CLIs don't wait on dependencies they may never touch — they surface a dependency error when they use one.
-  - **Verdicts fail at once:** a missing bucket or rejected S3 credentials, a bucket in another region (a 301, or a 400 whose `x-amz-bucket-region` names a region other than `S3_REGION` — the client does not follow region redirects, so it answers that way on every try; S3 sends the header for existing buckets, so a same-region 400 is not a verdict), a half-set S3 key pair (`checkS3KeyPair`, in `bootstrapCore`, since the client would silently use ambient credentials), a service URL with embedded credentials, a rejected key, an unkeyed server, a version out of range. S3 errors are classified by HTTP status and the `x-amz-bucket-region` header: a `HeadBucket` response has no body, so the SDK names every non-404 error `Unknown`.
-  - **Everything else fails closed after a deadline.** An unreachable dependency, a request that doesn't answer, an inconclusive status, a same-region or header-less 400 (S3's transient `RequestTimeout` is indistinguishable from others), or S3 credentials that fail to load (with a complete key pair none are loaded, so this is the ambient chain — possibly a briefly slow EC2/ECS metadata endpoint) is retried with backoff for up to `BOOT_PROBE_DEADLINE_MS` (60 s) per check. Backoff keeps room for another attempt, and one is made only if it would still get a second to run — checked again after the wait, since a timer can wake late; otherwise the attempt that just failed is the last, so its reason — not a certain timeout — is the one reported. Each attempt carries an abort signal capped at `BOOT_PROBE_ATTEMPT_TIMEOUT_MS` (5 s) and at the time left, and calls that ignore the signal in part of their work (S3 credential resolution) are raced against it, so a hung call cannot overrun. The checks run concurrently, so boot fails within about one deadline however many dependencies are down. The first check to fail cancels the others: they abort the request in flight, stop at their next attempt or wait and clear its timer, so a caller that catches the failure has no stray retries overlapping its next boot. `runBootChecks` settles only once the cancelled checks have stopped, then rethrows the first failure. The Hindsight auth and version checks run together through `runHindsightChecks`, holding Hindsight to one deadline without cancelling each other, and an auth failure is reported ahead of a version failure: an unkeyed server answers its open `/version` first, and reporting only the version would hide the missing key. A restart loop with the reason logged beats a process running with a check it never completed.
-  - **Credentials in URLs:** env validation (`ServiceUrlSchema`) rejects `HINDSIGHT_URL` and `INNGEST_BASE_URL` values with `user:password@` for every entrypoint. Probe URLs in logs and errors drop query strings, fragments and userinfo, and the Inngest event key is redacted; every `BootCheckError` message and logged retry reason has `user:password@` scrubbed from any URL it quotes, up to the last `@` before the host. A credential carried in a path segment is not detected.
-  - `checkUuidv7` is not retried: migrations have just used the same connection.
+- Dependency probes — they fail loudly at deploy time and, against healthy dependencies, finish in well under a second.
+  - **Where they run.** `checkUuidv7`, `checkS3KeyPair` and the Hindsight client-version check in `bootstrapCore`; `checkS3Bucket`, `checkHindsightAuth`, `checkHindsightVersion` and `checkInngestAuth` concurrently from `verifyDependencies` in `bootstrap` (`cogmo serve`, integration harness). `migrate-memories` and `backfill` run the two Hindsight checks too; other one-shot CLIs run none.
+  - **Policy.** A deterministic verdict (rejected key, unkeyed server, version out of range, missing or wrong-region bucket, half-set S3 key pair) fails at once. Anything else is retried with backoff for up to `BOOT_PROBE_DEADLINE_MS` (60 s) per check, each attempt capped at `BOOT_PROBE_ATTEMPT_TIMEOUT_MS` (5 s), then boot fails closed with the last reason. The first failure cancels the other checks. Classification and retry mechanics: `src/boot/checks.ts`.
 - Channel adapter startup (`startChannels`) — without channels open we can't receive anything
 
 **Fire-and-forget at boot**:

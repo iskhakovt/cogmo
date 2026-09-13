@@ -115,8 +115,7 @@ function inngestImage(relativePath: string): string {
 }
 
 describe("inngest image stays in sync", () => {
-  // The boot-check integration test pins what a keyed server enforces; it
-  // proves nothing about an image the dev and test harnesses no longer run.
+  // The boot-check integration test's premises hold only for the image the harnesses run.
   it("dev/containers.ts == checks.integration.test.ts", () => {
     expect(inngestImage("apps/server/src/boot/checks.integration.test.ts")).toBe(
       inngestImage("apps/server/dev/containers.ts"),

@@ -1,13 +1,7 @@
 /**
- * The auth probes against the real pinned server images.
- *
- * The unit tests fix the probe logic; these fix its premises — that a keyed
- * `inngest start` refuses `/v1/events` without a signing key and `/e/<key>`
- * under an unknown event key, that `inngest dev` refuses neither, and that
- * Hindsight's `ApiKeyTenantExtension` guards the bank list. An image bump
- * that moves any of those breaks here rather than silently turning the boot
- * check into a no-op. `version-pins.test.ts` keeps `INNGEST_IMAGE` equal to
- * the dev server's image in `dev/containers.ts`.
+ * Pins the auth probes' premises against the pinned images: a keyed
+ * `inngest start` refuses both anonymous probes, `inngest dev` refuses
+ * neither, and Hindsight's `ApiKeyTenantExtension` guards the bank list.
  */
 import { randomBytes } from "node:crypto";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";

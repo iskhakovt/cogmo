@@ -118,8 +118,6 @@ async function dispatch(cmd: string): Promise<number> {
         agentStore,
         runInTx,
         resolveDefaultBankId,
-        // These commands clear and rewrite memory banks, so they refuse a
-        // Hindsight outside the pinned range or one that ignores its key.
         verifyHindsight: () => verifyHindsight(core, independentProbeContext()),
       };
       const args = process.argv.slice(3);

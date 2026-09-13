@@ -1,19 +1,13 @@
 /**
- * Readable text for a thrown value, never empty for an `Error`.
- *
- * Node's `fetch` reports a network failure as `TypeError("fetch failed")` and
- * keeps the actual reason — ECONNREFUSED, ENOTFOUND, a TLS error — in
- * `cause`, so the cause's description is appended. A connection refused on
- * every address of a dual-stack host surfaces as an `AggregateError` with an
- * empty message, sometimes thrown directly (the AWS SDK does), so an empty
- * message falls back to the first inner error's message, then the error
- * code, then the error's name.
+ * Readable, non-empty text for a thrown `Error`: its message, else an
+ * `AggregateError`'s first inner message, its code or its name, with the
+ * `cause` appended — undici's `fetch failed` keeps the network reason there.
  */
 export function describeError(err: unknown): string {
   if (!(err instanceof Error)) return String(err);
   const own = ownDescription(err);
   const cause = err.cause instanceof Error ? ownDescription(err.cause) : "";
-  if (own === "") return cause !== "" ? cause : err.name;
+  if (own === "") return cause !== "" ? cause : err.name || "Error";
   return cause === "" ? own : `${own} (${cause})`;
 }
 

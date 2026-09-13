@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-// `env` carries keys resolved from `INNGEST_*_KEY_FILE`, which never reach
-// `process.env` — the only source the SDK would otherwise read.
+// Keys resolved from `_FILE` exist only in `env`.
 vi.mock("../env.js", () => ({
   env: {
     INNGEST_DEV: false,

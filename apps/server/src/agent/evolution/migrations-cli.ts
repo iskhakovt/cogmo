@@ -52,10 +52,8 @@ export interface MigrationCliDeps {
   agentStore: AgentStore;
   runInTx: Transactor;
   /**
-   * Verifies Hindsight enforces its key and runs a version in the pinned
-   * range; rejects otherwise. Both commands clear and rewrite a bank, so it
-   * runs before anything touches Hindsight — but after arguments and the bank
-   * are validated, so a usage error is reported at once.
+   * Verifies Hindsight's key enforcement and version; rejects otherwise.
+   * Called after arguments are parsed and the bank id resolved.
    */
   verifyHindsight: () => Promise<void>;
   /**

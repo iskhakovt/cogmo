@@ -388,7 +388,6 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
     : createDbProviderResolver({ runInTx: tx, agentStore, secretsStore });
 
   // S3-compatible file storage (MinIO locally, AWS S3 / R2 in production).
-  // A half-set key pair would silently fall back to ambient credentials.
   checkS3KeyPair(env.S3_ACCESS_KEY, env.S3_SECRET_KEY);
   const s3Client = new S3Client({
     ...(env.S3_ENDPOINT ? { endpoint: env.S3_ENDPOINT, forcePathStyle: true } : {}),
@@ -432,8 +431,7 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
     apiKey: env.HINDSIGHT_API_KEY,
     maxQueryTokens: env.HINDSIGHT_RECALL_MAX_QUERY_TOKENS,
   });
-  // Dependency↔pin drift in this repo needs no server and costs nothing to
-  // detect, so every entrypoint checks it. Server probes run in `bootstrap`.
+  // Client↔pin drift needs no server; network probes run in `bootstrap`.
   const hindsightCompat = loadHindsightCompat();
   checkHindsightClientVersion(hindsightCompat, HINDSIGHT_CLIENT_VERSION);
 
@@ -1269,26 +1267,15 @@ export async function bootstrapRuntime(
 }
 
 /**
- * Probe every external dependency the running process needs before it takes
- * traffic. Called from `bootstrap`, not `bootstrapCore`: one-shot admin CLIs
- * should neither wait a probe deadline per dependency nor need Inngest keys
- * for commands that never touch them — they surface a dependency error when
- * they use it. See `src/boot/checks.ts` for what fails at once and what is
- * retried until the deadline.
+ * Probe the dependencies `cogmo serve` needs before it takes traffic. Runs in
+ * `bootstrap`, not `bootstrapCore`, so one-shot CLIs neither wait on
+ * dependencies they may never touch nor need Inngest keys.
  */
 async function verifyDependencies(core: CoreDeps): Promise<void> {
-  // Independent probes run together, so a certain verdict from one is not
-  // held behind another's retry window and the slowest check bounds the wait.
-  // `runBootChecks` cancels the rest on the first failure and settles only
-  // once they have stopped.
   await runBootChecks(independentProbeContext(), [
-    // Confirm the bucket is reachable + credentials work before tools that
-    // depend on it (image generation, file workspace, attachment delivery)
-    // start handling traffic. HeadBucket is the cheapest probe.
     (context) =>
       checkS3Bucket(core.s3Client, { bucket: env.S3_BUCKET, region: env.S3_REGION }, context),
     (context) => verifyHindsight(core, context),
-    // Inngest, like Hindsight, answers anything on its network when unkeyed.
     (context) =>
       checkInngestAuth(
         { fetch, ...context },
@@ -1303,13 +1290,8 @@ async function verifyDependencies(core: CoreDeps): Promise<void> {
 }
 
 /**
- * Verify Hindsight enforces its key, that ours is the one it holds, and that
- * its version is inside the pinned range. Shared by `bootstrap` and the
- * memory CLIs (`migrate-memories`, `backfill`), which clear and rewrite
- * banks: against an out-of-range server (0.5.x drops batch items past the
- * first) or one that ignores its key, they would lose memories with no error.
- * The two checks run together, so Hindsight is held to one probe deadline,
- * and an auth failure is reported ahead of a version failure.
+ * Verify Hindsight's key enforcement and version. Also run by the memory CLIs
+ * (`migrate-memories`, `backfill`), which clear and rewrite banks.
  */
 export async function verifyHindsight(core: CoreDeps, context: BootProbeContext): Promise<void> {
   await runHindsightChecks(context, {

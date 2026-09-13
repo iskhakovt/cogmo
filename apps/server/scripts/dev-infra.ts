@@ -176,7 +176,7 @@ async function main() {
   // can pick them up via Node's `--env-file-if-exists=.dev/env`. Filtered
   // to the truly-dynamic vars — paths are project-local and don't need
   // exporting; secrets like COGMO_MASTER_KEY stay in `.dev/master-key`.
-  // The Hindsight key rides along: no Hindsight call works without it.
+  // Includes the Hindsight key: no Hindsight call works without it.
   const sidecarKeys = [
     "DATABASE_URL",
     "INNGEST_BASE_URL",
