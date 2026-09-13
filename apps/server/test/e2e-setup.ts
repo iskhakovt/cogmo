@@ -285,8 +285,8 @@ export async function setup({ provide }: GlobalSetupContext) {
 }
 
 export async function teardown() {
-  if (mock) await mock.stop();
-
+  // Containers before llmock, and llmock only if they all stopped: a forwarded
+  // call to a stopped llmock crashes teardown. See `integration-setup.ts`.
   console.log("Stopping containers...");
   let failedStops = 0;
   for (const container of containers.reverse()) {
@@ -299,6 +299,7 @@ export async function teardown() {
     });
   }
   if (network) await c.stopNetwork(network);
+  if (mock && failedStops === 0) await mock.stop();
   // Counted, because the line below is the only summary of this pass and
   // an unconditional success message would report a clean teardown over
   // the top of containers that are still running. Those keep whatever
