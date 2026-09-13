@@ -52,6 +52,41 @@ describe("buildStagePrompt", () => {
     expect(prompt).toContain("instructions and output requirements above");
   });
 
+  it("closes with a reminder of the output contract after the handoffs", () => {
+    const definition = validPipelineDefinition();
+    const stage = expectDefined(definition.stages[0], "gather-context");
+    const prompt = buildStagePrompt({
+      definition,
+      stage,
+      stageOutputs: { earlier: { kind: "text", text: "a long handoff" } },
+    });
+
+    const reminder = prompt.slice(prompt.lastIndexOf("</handoff>"));
+    expect(reminder).toContain(
+      "Reminder: do only this stage's work as its instructions above describe, and end with the final reply its Output section asks for.",
+    );
+  });
+
+  it("reminds a stage without an output contract only of its instructions", () => {
+    const definition = validPipelineDefinition();
+    const stage = expectDefined(definition.stages[2], "implement stage");
+    const prompt = buildStagePrompt({
+      definition,
+      stage,
+      stageOutputs: { earlier: { kind: "text", text: "context" } },
+    });
+
+    expect(
+      prompt.endsWith("Reminder: do only this stage's work as its instructions above describe."),
+    ).toBe(true);
+  });
+
+  it("adds no reminder when there is nothing handed off", () => {
+    const definition = validPipelineDefinition();
+    const stage = expectDefined(definition.stages[0], "first stage");
+    expect(buildStagePrompt({ definition, stage, stageOutputs: {} })).not.toContain("Reminder:");
+  });
+
   it("neutralises an opening handoff tag inside a handoff", () => {
     const definition = validPipelineDefinition();
     const stage = expectDefined(definition.stages[2], "implement stage");

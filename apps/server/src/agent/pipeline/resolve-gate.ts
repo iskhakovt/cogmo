@@ -10,10 +10,11 @@
  * (`gateKey` against the row's current stage and iteration): a resolution
  * for an earlier gate of the same run, delivered late, is stale.
  *
- * A stale outcome reports where the run actually is. From that the caller can
- * tell a resolution whose effect already stands — the same step re-run after
- * its commit, or a same-effect resolution that raced it — from one that
- * genuinely lost.
+ * The winning flip records the claim — the gate key and the resolving Inngest
+ * function run — on the run in the same transaction. A stale outcome reports
+ * where the run actually is and whether that recorded claim is this
+ * resolution's own, so the caller can tell its own step re-run after the
+ * commit from a resolution that raced it, whatever the effect.
  */
 
 import type { Transactor } from "../../db/index.js";
@@ -33,11 +34,7 @@ export interface ResolveGateDeps {
   runInTx: Transactor;
   runStore: Pick<
     PipelineRunStore,
-    | "getRunWithDefinition"
-    | "transitionStatus"
-    | "advanceStage"
-    | "completeRun"
-    | "cancelRunIfActive"
+    "getRunWithDefinition" | "claimGate" | "advanceStage" | "completeRun" | "cancelRunIfActive"
   >;
 }
 
@@ -45,6 +42,8 @@ export interface ResolveGateArgs {
   runId: string;
   gateKey: string;
   decision: PipelineGateDecision;
+  /** The Inngest function run applying this resolution — stable across its retries. */
+  resolverRunId: string;
 }
 
 /** Plain JSON — returned from a `step.run` and replayed from the step cache. */
@@ -75,15 +74,17 @@ export type ResolveGateOutcome =
        * (whatever became of the run there), or completed at it.
        */
       pastGate: boolean;
+      /** The run's recorded gate claim is this resolution's — same gate, same resolver run. */
+      appliedByThis: boolean;
     }
   | { kind: "not_found" };
 
 function staleOutcome(
   run: PipelineRunRow,
   definition: PipelineRunWithDefinition["definition"],
-  gateKey: string,
+  args: ResolveGateArgs,
 ): ResolveGateOutcome {
-  const gate = parsePipelineGateKey(gateKey);
+  const gate = parsePipelineGateKey(args.gateKey);
   const stages = definition.compiled.stages;
   const gateIndex = stages.findIndex((s) => s.id === gate.stageId);
   const currentIndex = stages.findIndex((s) => s.id === run.currentStage);
@@ -104,6 +105,9 @@ function staleOutcome(
     gateIteration: gate.iteration,
     nextStage: gateIndex >= 0 ? (stages[gateIndex + 1]?.id ?? null) : null,
     pastGate,
+    appliedByThis:
+      run.gateResolution?.gateKey === args.gateKey &&
+      run.gateResolution.resolverRunId === args.resolverRunId,
   };
 }
 
@@ -116,11 +120,14 @@ export async function resolveGate(
     if (!loaded) return { kind: "not_found" };
     const { run, definition } = loaded;
     if (pipelineGateKey(run.id, run.currentStage, run.iteration) !== args.gateKey) {
-      return staleOutcome(run, definition, args.gateKey);
+      return staleOutcome(run, definition, args);
     }
 
-    const claimed = await deps.runStore.transitionStatus(tx, run.id, "waiting_gate", "running");
-    if (claimed.kind !== "transitioned") return staleOutcome(run, definition, args.gateKey);
+    const claimed = await deps.runStore.claimGate(tx, run.id, {
+      gateKey: args.gateKey,
+      resolverRunId: args.resolverRunId,
+    });
+    if (claimed.kind !== "transitioned") return staleOutcome(run, definition, args);
 
     const base = { conversationId: run.conversationId, pipelineName: definition.name };
 

@@ -52,6 +52,7 @@ function runRow(overrides: Partial<PipelineRunRow> = {}): PipelineRunRow {
     iteration: 0,
     stageOutputs: {},
     failureReason: null,
+    gateResolution: null,
     idempotencyKey: "k1",
     createdAt: new Date("2026-09-12T00:00:00Z"),
     ...overrides,

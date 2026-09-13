@@ -1,5 +1,5 @@
 {
-  "id": "95e7e799-533a-452b-b440-44c4450063a9",
+  "id": "7e8fbd3c-b1da-4474-8e62-49881caf8890",
   "prevId": "71b38e62-114e-4e0e-b920-59e8b813298d",
   "version": "7",
   "dialect": "postgresql",
@@ -458,6 +458,12 @@
         "failure_reason": {
           "name": "failure_reason",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "gate_resolution": {
+          "name": "gate_resolution",
+          "type": "jsonb",
           "primaryKey": false,
           "notNull": false
         },

@@ -11,7 +11,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { jsonbZod, pk, ts } from "../../../db/helpers.js";
 import { conversations, users } from "../../store/schema.js";
-import { StageOutputsSchema } from "../run-types.js";
+import { GateResolutionSchema, StageOutputsSchema } from "../run-types.js";
 import { PipelineDefinitionSchema } from "../types.js";
 
 /**
@@ -91,6 +91,9 @@ export const pipelineRuns = pgTable(
     iteration: integer("iteration").notNull(),
     stageOutputs: jsonbZod("stage_outputs", StageOutputsSchema).notNull(),
     failureReason: text("failure_reason"),
+    // Which resolution claimed the run's most recent gate. Nullable: a run
+    // that hasn't resolved a gate yet has no claim.
+    gateResolution: jsonbZod("gate_resolution", GateResolutionSchema),
     // Caller-supplied key for `start_pipeline`'s durable tool step — the
     // `ToolCallContext.idempotencyKey` of the call that opened the run.
     // Nullable: a run opened without a retrying context carries none, and

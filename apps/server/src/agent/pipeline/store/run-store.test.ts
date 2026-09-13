@@ -139,6 +139,56 @@ describe("DrizzlePipelineRunStore", () => {
     });
   });
 
+  describe("claimGate", () => {
+    const claim = { gateKey: "k:plan-gate:0", resolverRunId: "inngest-run-1" };
+
+    it("flips waiting_gate → running and records which resolution claimed the gate", async () => {
+      const { run } = await seedRun();
+      expect(run.gateResolution).toBeNull();
+      await tx((trx) => runStore.transitionStatus(trx, run.id, "running", "waiting_gate"));
+
+      const result = await tx((trx) => runStore.claimGate(trx, run.id, claim));
+
+      expect(result).toEqual({ kind: "transitioned" });
+      const after = await tx((trx) => runStore.getRun(trx, run.id));
+      expect(after?.status).toBe("running");
+      expect(after?.gateResolution).toEqual(claim);
+    });
+
+    it("is stale for a run that isn't parked, and leaves the recorded claim alone", async () => {
+      const { run } = await seedRun();
+      await tx((trx) => runStore.transitionStatus(trx, run.id, "running", "waiting_gate"));
+      await tx((trx) => runStore.claimGate(trx, run.id, claim));
+
+      const second = await tx((trx) =>
+        runStore.claimGate(trx, run.id, { ...claim, resolverRunId: "inngest-run-2" }),
+      );
+
+      expect(second).toEqual({
+        kind: "stale",
+        status: "running",
+        currentStage: "gather-context",
+        iteration: 0,
+      });
+      expect((await tx((trx) => runStore.getRun(trx, run.id)))?.gateResolution).toEqual(claim);
+    });
+
+    it("refuses a terminal run", async () => {
+      const { run } = await seedRun();
+      await tx((trx) => runStore.cancelRunIfActive(trx, run.id, "done"));
+      expect(await tx((trx) => runStore.claimGate(trx, run.id, claim))).toMatchObject({
+        kind: "stale",
+        status: "cancelled",
+      });
+    });
+
+    it("reports not_found for an unknown run", async () => {
+      expect(await tx((trx) => runStore.claimGate(trx, randomUUID(), claim))).toEqual({
+        kind: "not_found",
+      });
+    });
+  });
+
   describe("advanceStage", () => {
     it("records the output, moves the cursor, and resets status to running", async () => {
       const { run } = await seedRun();

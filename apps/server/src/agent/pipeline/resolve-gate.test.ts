@@ -89,7 +89,12 @@ describe("resolveGate", () => {
   it("approval advances a mid-pipeline gate to the next stage", async () => {
     const { runId, conversationId, gateKey } = await parkedRun("approve");
 
-    const outcome = await resolveGate(deps(), { runId, gateKey, decision: "approved" });
+    const outcome = await resolveGate(deps(), {
+      runId,
+      gateKey,
+      decision: "approved",
+      resolverRunId: "r-1",
+    });
 
     expect(outcome).toEqual({
       kind: "advanced",
@@ -107,7 +112,12 @@ describe("resolveGate", () => {
   it("a proceeding timeout on the final gate completes the run", async () => {
     const { runId, conversationId, gateKey } = await parkedRun("sign-off");
 
-    const outcome = await resolveGate(deps(), { runId, gateKey, decision: "timeout_proceed" });
+    const outcome = await resolveGate(deps(), {
+      runId,
+      gateKey,
+      decision: "timeout_proceed",
+      resolverRunId: "r-1",
+    });
 
     expect(outcome).toEqual({ kind: "completed", conversationId, pipelineName: "plan-then-build" });
     expect(await tx((trx) => runStore.getRun(trx, runId))).toMatchObject({
@@ -122,7 +132,7 @@ describe("resolveGate", () => {
   ] as const)("%s cancels the run with its reason", async (decision, reason) => {
     const { runId, conversationId, gateKey } = await parkedRun("approve");
 
-    const outcome = await resolveGate(deps(), { runId, gateKey, decision });
+    const outcome = await resolveGate(deps(), { runId, gateKey, decision, resolverRunId: "r-1" });
 
     expect(outcome).toEqual({ kind: "cancelled", conversationId, pipelineName: "plan-then-build" });
     expect(await tx((trx) => runStore.getRun(trx, runId))).toMatchObject({
@@ -134,8 +144,18 @@ describe("resolveGate", () => {
   it("the second of two racing resolutions is stale and changes nothing", async () => {
     const { runId, gateKey } = await parkedRun("approve");
 
-    const first = await resolveGate(deps(), { runId, gateKey, decision: "approved" });
-    const second = await resolveGate(deps(), { runId, gateKey, decision: "timeout_abort" });
+    const first = await resolveGate(deps(), {
+      runId,
+      gateKey,
+      decision: "approved",
+      resolverRunId: "r-1",
+    });
+    const second = await resolveGate(deps(), {
+      runId,
+      gateKey,
+      decision: "timeout_abort",
+      resolverRunId: "r-2",
+    });
 
     expect(first.kind).toBe("advanced");
     // The loser reports where the run actually is, so the caller can tell a
@@ -151,6 +171,7 @@ describe("resolveGate", () => {
       gateIteration: 0,
       nextStage: "build",
       pastGate: true,
+      appliedByThis: false,
     });
     // The late abort must not cancel the run the approval already advanced.
     expect(await tx((trx) => runStore.getRun(trx, runId))).toMatchObject({
@@ -166,6 +187,7 @@ describe("resolveGate", () => {
       runId,
       gateKey: pipelineGateKey(runId, "approve", 0),
       decision: "cancelled",
+      resolverRunId: "r-1",
     });
 
     expect(outcome).toMatchObject({
@@ -174,6 +196,7 @@ describe("resolveGate", () => {
       currentStage: "sign-off",
       gateStage: "approve",
       pastGate: true,
+      appliedByThis: false,
     });
     expect((await tx((trx) => runStore.getRun(trx, runId)))?.status).toBe("waiting_gate");
   });
@@ -182,7 +205,9 @@ describe("resolveGate", () => {
     const { runId, gateKey } = await parkedRun("approve");
     await tx((trx) => runStore.transitionStatus(trx, runId, "waiting_gate", "running"));
 
-    expect(await resolveGate(deps(), { runId, gateKey, decision: "approved" })).toMatchObject({
+    expect(
+      await resolveGate(deps(), { runId, gateKey, decision: "approved", resolverRunId: "r-1" }),
+    ).toMatchObject({
       kind: "stale",
       status: "running",
       currentStage: "approve",
@@ -192,9 +217,11 @@ describe("resolveGate", () => {
 
   it("a cancelled run reports it has not moved past the gate", async () => {
     const { runId, gateKey } = await parkedRun("approve");
-    await resolveGate(deps(), { runId, gateKey, decision: "cancelled" });
+    await resolveGate(deps(), { runId, gateKey, decision: "cancelled", resolverRunId: "r-1" });
 
-    expect(await resolveGate(deps(), { runId, gateKey, decision: "approved" })).toMatchObject({
+    expect(
+      await resolveGate(deps(), { runId, gateKey, decision: "approved", resolverRunId: "r-1" }),
+    ).toMatchObject({
       kind: "stale",
       status: "cancelled",
       currentStage: "approve",
@@ -204,24 +231,83 @@ describe("resolveGate", () => {
 
   it("a completed run on its final gate reports it has moved past it", async () => {
     const { runId, gateKey } = await parkedRun("sign-off");
-    await resolveGate(deps(), { runId, gateKey, decision: "approved" });
+    await resolveGate(deps(), { runId, gateKey, decision: "approved", resolverRunId: "r-1" });
 
     expect(
-      await resolveGate(deps(), { runId, gateKey, decision: "timeout_proceed" }),
+      await resolveGate(deps(), {
+        runId,
+        gateKey,
+        decision: "timeout_proceed",
+        resolverRunId: "r-1",
+      }),
     ).toMatchObject({ kind: "stale", status: "completed", nextStage: null, pastGate: true });
   });
 
   it("a run that failed on a later stage still counts as past the gate", async () => {
     const { runId, gateKey } = await parkedRun("approve");
-    await resolveGate(deps(), { runId, gateKey, decision: "approved" });
+    await resolveGate(deps(), { runId, gateKey, decision: "approved", resolverRunId: "r-1" });
     await tx((trx) => runStore.failRun(trx, runId, "build failed"));
 
-    expect(await resolveGate(deps(), { runId, gateKey, decision: "approved" })).toMatchObject({
+    expect(
+      await resolveGate(deps(), { runId, gateKey, decision: "approved", resolverRunId: "r-1" }),
+    ).toMatchObject({
       kind: "stale",
       status: "failed",
       currentStage: "build",
       pastGate: true,
     });
+  });
+
+  it("records the claim on the run in the same transaction as the flip", async () => {
+    const { runId, gateKey } = await parkedRun("approve");
+
+    await resolveGate(deps(), { runId, gateKey, decision: "approved", resolverRunId: "r-1" });
+
+    expect((await tx((trx) => runStore.getRun(trx, runId)))?.gateResolution).toEqual({
+      gateKey,
+      resolverRunId: "r-1",
+    });
+  });
+
+  it.each([
+    ["approve", "approved", "running"],
+    ["sign-off", "approved", "completed"],
+    ["approve", "cancelled", "cancelled"],
+  ] as const)(
+    "a resolution re-run after its own commit at %s (%s) knows it was the one applied",
+    async (stage, decision, status) => {
+      const { runId, gateKey } = await parkedRun(stage);
+      await resolveGate(deps(), { runId, gateKey, decision, resolverRunId: "r-1" });
+
+      // Same function run, so the same resolver run id: the step re-ran.
+      const again = await resolveGate(deps(), { runId, gateKey, decision, resolverRunId: "r-1" });
+
+      expect(again).toMatchObject({ kind: "stale", status, appliedByThis: true });
+    },
+  );
+
+  it("a resolution for an earlier gate isn't credited with a later gate's claim", async () => {
+    const { runId, gateKey } = await parkedRun("approve");
+    await resolveGate(deps(), { runId, gateKey, decision: "approved", resolverRunId: "r-1" });
+    await tx((trx) =>
+      runStore.advanceStage(trx, {
+        runId,
+        fromStage: "build",
+        output: null,
+        toStage: "sign-off",
+      }),
+    );
+    await tx((trx) => runStore.transitionStatus(trx, runId, "running", "waiting_gate"));
+    await resolveGate(deps(), {
+      runId,
+      gateKey: pipelineGateKey(runId, "sign-off", 0),
+      decision: "approved",
+      resolverRunId: "r-1",
+    });
+
+    expect(
+      await resolveGate(deps(), { runId, gateKey, decision: "approved", resolverRunId: "r-1" }),
+    ).toMatchObject({ kind: "stale", status: "completed", appliedByThis: false });
   });
 
   it("an unknown run is not_found", async () => {
@@ -231,6 +317,7 @@ describe("resolveGate", () => {
         runId,
         gateKey: pipelineGateKey(runId, "approve", 0),
         decision: "approved",
+        resolverRunId: "r-1",
       }),
     ).toEqual({ kind: "not_found" });
   });

@@ -8,12 +8,14 @@
  * Per-run concurrency of one: a tap and a timeout for the same gate queue
  * behind each other, and the second reads `stale` from the conditional flip.
  *
- * A stale resolution is one of two things. On a first attempt it lost to
- * another resolution, which sent its own notice — so it stays silent, or, if
- * it was a tap whose decision didn't take, says so. On a retry it may be this
- * resolution's own step re-run after its commit, whose first attempt died
- * before notifying — so it sends the notice for its effect, but only while
- * the run still sits exactly where that effect left it.
+ * The winning flip records its claim on the run: the gate key and this
+ * function run's Inngest id, which stays the same across its retries. A stale
+ * outcome says whether that claim is this resolution's own. If it is, the
+ * step re-ran after its commit and the first run may have died before its
+ * follow-ups, so it re-sends the next stage and its notice — but only while
+ * the run still sits exactly where its effect left it. If it isn't, another
+ * resolution won and sent its own; this one stays silent, or, if it was a tap
+ * whose decision didn't take, says so.
  *
  * If the resolution fails for good, `onFailure` first checks whether the run
  * is still parked on this gate. If it is, the resolution never committed: a
@@ -75,15 +77,17 @@ function decisionReflected(decision: PipelineGateDecision, outcome: StaleOutcome
 }
 
 /**
- * The outcome this decision produced, if the run still sits exactly where it
- * left it — cancelled or completed at the gate, or on the next stage at the
- * gate's iteration. Null once the run has moved on: a notice then would
- * describe something this resolution didn't do.
+ * The outcome this resolution produced, if the run still sits exactly where
+ * it left it — cancelled or completed at the gate, or on the next stage at
+ * the gate's iteration. Null once the run has moved on, or when the run's
+ * claim isn't this resolution's: a notice or re-send then would describe
+ * something this resolution didn't do.
  */
 function effectInPlace(
   decision: PipelineGateDecision,
   outcome: StaleOutcome,
 ): ResolveGateOutcome | null {
+  if (!outcome.appliedByThis) return null;
   const base = { conversationId: outcome.conversationId, pipelineName: outcome.pipelineName };
   if (!isApproval(decision)) {
     return decisionReflected(decision, outcome) ? { kind: "cancelled", ...base } : null;
@@ -105,13 +109,11 @@ function effectInPlace(
 /**
  * What the run's conversation hears about a resolution, or null. A tapped
  * approval that advances says nothing: the tap already rewrote the keyboard
- * message, and the next stage's own output follows. `retried` is whether the
- * `resolve-gate` step ran on a retry attempt (see the module comment).
+ * message, and the next stage's own output follows.
  */
 export function gateNotice(
   decision: PipelineGateDecision,
   outcome: ResolveGateOutcome,
-  retried: boolean,
 ): string | null {
   const timedOut = !isTap(decision);
   switch (outcome.kind) {
@@ -128,10 +130,12 @@ export function gateNotice(
         ? `⏱ Checkpoint timed out — pipeline "${outcome.pipelineName}" was cancelled.`
         : `❌ Pipeline "${outcome.pipelineName}" cancelled.`;
     case "stale": {
-      if (!decisionReflected(decision, outcome)) return timedOut ? null : TOO_LATE;
-      if (!retried) return null;
-      const effect = effectInPlace(decision, outcome);
-      return effect === null ? null : gateNotice(decision, effect, retried);
+      if (outcome.appliedByThis) {
+        const effect = effectInPlace(decision, outcome);
+        return effect === null ? null : gateNotice(decision, effect);
+      }
+      if (decisionReflected(decision, outcome)) return null;
+      return timedOut ? null : TOO_LATE;
     }
     case "not_found":
       return null;
@@ -182,30 +186,27 @@ export function createPipelineGateResolver(deps: PipelineGateResolverDeps) {
         }
       },
     },
-    async ({ event, step, attempt }) => {
+    async ({ event, step, runId: resolverRunId }) => {
       const { runId, gateKey, conversationId, decision } = event.data;
-      // `retried` is captured inside the step, so it records the attempt that
-      // actually ran the resolution and replays with its memoized result.
-      const { outcome, retried } = await step.run("resolve-gate", async () => ({
-        outcome: await resolveGate(deps, { runId, gateKey, decision }),
-        retried: attempt > 0,
-      }));
+      const outcome = await step.run("resolve-gate", () =>
+        resolveGate(deps, { runId, gateKey, decision, resolverRunId }),
+      );
 
       if (outcome.kind !== "not_found") {
         await step.sendEvent("emit-gate-settled", pipelineGateSettled.create({ runId, gateKey }));
       }
 
-      // The next stage is due when this resolution advanced the run, or when a
-      // stale approval finds the run still running on that stage: if this is
-      // the resolution's own retry, the first attempt died before sending it.
-      // Deduped on the run cursor, so when another resolution already sent it
-      // this is a no-op. A run already parked there has had its stage run.
+      // The next stage is due when this resolution advanced the run, or when
+      // its own claim, re-run after the commit, finds the run still running on
+      // that stage — the first run of the step may have died before sending
+      // it. Deduped on the run cursor. A run already parked there has had its
+      // stage run.
       const due =
-        outcome.kind === "stale"
-          ? outcome.status === "running"
+        outcome.kind !== "stale"
+          ? outcome
+          : outcome.status === "running"
             ? effectInPlace(decision, outcome)
-            : null
-          : outcome;
+            : null;
       if (due?.kind === "advanced") {
         await step.sendEvent(
           "emit-next-stage",
@@ -213,7 +214,7 @@ export function createPipelineGateResolver(deps: PipelineGateResolverDeps) {
         );
       }
 
-      const notice = gateNotice(decision, outcome, retried);
+      const notice = gateNotice(decision, outcome);
       if (notice !== null) {
         await notifyAfterRetries(step, "notify", deps.deliveryRouter, conversationId, notice);
       }

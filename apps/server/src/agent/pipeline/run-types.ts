@@ -34,3 +34,17 @@ export type StageArtifact = z.infer<typeof StageArtifactSchema>;
 export const StageOutputsSchema = z.record(z.string(), StageArtifactSchema);
 
 export type StageOutputs = z.infer<typeof StageOutputsSchema>;
+
+/**
+ * The gate resolution that last claimed a gate on the run: the gate it named
+ * and the Inngest function run that applied it. That run id is stable across
+ * retries of the resolution and unique to it, so a resolution step re-run
+ * after its own commit can tell its claim from a competing one's. Recorded in
+ * the same transaction as the `waiting_gate → running` flip; overwritten by
+ * the next gate's claim.
+ */
+export const GateResolutionSchema = z
+  .object({ gateKey: z.string().min(1), resolverRunId: z.string().min(1) })
+  .strict();
+
+export type GateResolution = z.infer<typeof GateResolutionSchema>;

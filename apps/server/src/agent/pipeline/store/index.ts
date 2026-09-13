@@ -1,7 +1,7 @@
 import { and, count, desc, eq, getTableColumns, max, sql } from "drizzle-orm";
 import { single } from "../../../db/helpers.js";
 import type { Transaction } from "../../../db/index.js";
-import type { StageArtifact, StageOutputs } from "../run-types.js";
+import type { GateResolution, StageArtifact, StageOutputs } from "../run-types.js";
 import type { PipelineDefinition } from "../types.js";
 import { pipelineDefinitions, type pipelineRunStatus, pipelineRuns } from "./schema.js";
 
@@ -264,6 +264,7 @@ export interface PipelineRunRow {
   iteration: number;
   stageOutputs: StageOutputs;
   failureReason: string | null;
+  gateResolution: GateResolution | null;
   idempotencyKey: string | null;
   createdAt: Date;
 }
@@ -348,6 +349,14 @@ export interface PipelineRunStore {
     from: PipelineRunStatus,
     to: PipelineRunStatus,
   ): Promise<RunTransition>;
+
+  /**
+   * Claim the gate a run is parked on for one resolution: flip
+   * `waiting_gate → running` and record `claim` as the run's gate resolution,
+   * under the same row lock. A run that isn't parked is `stale` and keeps
+   * whatever claim it already carries.
+   */
+  claimGate(tx: Transaction, id: string, claim: GateResolution): Promise<RunTransition>;
 
   /**
    * Record `output` for `fromStage` (when the stage declares one) and move
@@ -478,6 +487,19 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
     from: PipelineRunStatus,
     to: PipelineRunStatus,
   ): Promise<RunTransition> {
+    return this.#transition(tx, id, from, { status: to });
+  }
+
+  async claimGate(tx: Transaction, id: string, claim: GateResolution): Promise<RunTransition> {
+    return this.#transition(tx, id, "waiting_gate", { status: "running", gateResolution: claim });
+  }
+
+  async #transition(
+    tx: Transaction,
+    id: string,
+    from: PipelineRunStatus,
+    set: { status: PipelineRunStatus; gateResolution?: GateResolution },
+  ): Promise<RunTransition> {
     // `.for("update")` row-locks, and the terminal guard makes "terminal is
     // final" hold store-wide: a flip out of completed/failed/cancelled is
     // refused even if a caller passes a terminal `from`.
@@ -501,7 +523,7 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
         iteration: row.iteration,
       };
     }
-    await tx.update(pipelineRuns).set({ status: to }).where(eq(pipelineRuns.id, id));
+    await tx.update(pipelineRuns).set(set).where(eq(pipelineRuns.id, id));
     return { kind: "transitioned" as const };
   }
 
