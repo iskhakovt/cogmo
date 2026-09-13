@@ -100,6 +100,24 @@ describe("transactor", () => {
     expect(calls.every((c) => c.isolationLevel === "repeatable read")).toBe(true);
   });
 
+  it("still retries a 40001 when RETRY_DISABLED is set", async () => {
+    // RETRY_DISABLED exists to surface transient infrastructure failures in
+    // integration tests. A serialization failure is how REPEATABLE READ
+    // resolves concurrent writers, so the retry is part of the contract —
+    // without it, parallel test forks booting the app fail on a race that
+    // production absorbs.
+    vi.stubEnv("RETRY_DISABLED", "true");
+    const { db, calls } = mockDb([
+      async () => {
+        throw serializationFailure();
+      },
+      async () => "ok-on-retry",
+    ]);
+    const tx = transactor(db);
+    await expect(tx(async () => "unused")).resolves.toBe("ok-on-retry");
+    expect(calls).toHaveLength(2);
+  });
+
   it("retries an unwrapped 40001 from the driver's own begin/commit", async () => {
     // postgres-js issues `begin` / `commit` / `rollback` outside Drizzle's
     // prepared-query path and rethrows their errors as-is, so the bare

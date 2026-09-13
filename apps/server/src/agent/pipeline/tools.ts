@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 /**
  * Agent tools for user-defined pipelines. Dumb adapters over
  * `service.pipelines` — compile/cap/ownership logic lives in the service,
@@ -18,6 +19,8 @@ import {
 export const PIPELINES_PROMPT_GUIDANCE = `You can turn a user's described multi-stage workflow into a saved pipeline via \`define_pipeline\`. The flow is strictly two-step:
 1. \`define_pipeline\` compiles their description and returns a preview. Show the preview to the user **verbatim** and ask whether to activate. Nothing runs yet.
 2. Only after the user explicitly confirms, call \`activate_pipeline\`. Never activate without that confirmation; if they want changes, call \`define_pipeline\` again with the revised description (it creates a new version).
+
+To run an active pipeline, call \`start_pipeline\` when the user asks for it — by its trigger phrase or in their own words. The run continues in a new conversation of its own: tell the user it has started and that its stages and checkpoints will appear there.
 
 Pipelines are for repeatable multi-stage workflows with checkpoints ("draft a plan, wait for my approval, then implement"). For a one-shot reminder or scheduled prompt, use \`schedule_task\` instead.`;
 
@@ -91,9 +94,9 @@ export const activatePipelineTool: ToolSpec = defineTool({
       name: result.value.name,
       version: result.value.version,
       note:
-        "Active. Pipeline execution is not implemented yet — the definition is saved and " +
-        "activated, but runs will not start from any trigger until the run engine ships. " +
-        "Tell the user this honestly if they ask when it will fire.",
+        "Active. Command-triggered pipelines start when the user asks and you call " +
+        "start_pipeline. Cron and event triggers, loops and wait stages are not runnable yet — " +
+        "start_pipeline reports which features block a run.",
     });
   },
 });
@@ -112,10 +115,47 @@ export const listPipelinesTool: ToolSpec = defineTool({
   },
 });
 
+const startSchema = z.object({
+  name: z.string().describe("Name of the active pipeline to run, as shown by list_pipelines."),
+});
+
+export const startPipelineTool: ToolSpec = defineTool({
+  name: "start_pipeline",
+  description:
+    "Start a run of one of the user's active pipelines. Call when the user asks to run it — " +
+    "by its trigger phrase or by describing it. The run proceeds stage by stage in a new " +
+    "conversation of its own, pausing at checkpoints for the user's approval.",
+  schema: startSchema,
+  // Durable: opens a run, a conversation, and moves the user's sessions onto
+  // it. The call's idempotency key makes a retry recover that run.
+  durable: true,
+  handler: async ({ name }, service, ctx) => {
+    const pipelines = requirePipelines(service);
+    // Outside a retrying context nothing re-executes this call, so a fresh
+    // key carries no dedup obligation.
+    const idempotencyKey =
+      ctx !== undefined ? `start_pipeline:${ctx.idempotencyKey}` : randomUUID();
+    const result = await pipelines.start({ name, idempotencyKey });
+    if (result.isErr()) return renderError(result.error);
+    const { runId, version, firstStage } = result.value;
+    return JSON.stringify({
+      ok: true,
+      runId,
+      name: result.value.name,
+      version,
+      firstStage,
+      note:
+        "The run has started in a new conversation, which the user's chat now points at. Tell " +
+        "the user it is underway; its stage output and checkpoints will appear there.",
+    });
+  },
+});
+
 export const pipelineTools: ReadonlyArray<ToolSpec> = [
   definePipelineTool,
   activatePipelineTool,
   listPipelinesTool,
+  startPipelineTool,
 ];
 
 /**
@@ -159,5 +199,15 @@ function renderError(error: PipelinesError): string {
       return `Definition cap reached (${error.current}/${error.limit}). The user must remove pipelines before defining more.`;
     case "not_found":
       return `No pipeline named "${error.name}"${error.version !== undefined ? ` with version ${error.version}` : ""}. Use list_pipelines to see what exists.`;
+    case "not_active":
+      return `Pipeline "${error.name}" has no active version. Use list_pipelines to check its name, and activate_pipeline only after the user confirms its preview.`;
+    case "unsupported_features":
+      return `Pipeline "${error.name}" can't run yet — it uses features the run engine doesn't support: ${error.features.join(", ")}. Tell the user; they can redefine it without those features.`;
+    case "no_reachable_channel":
+      return "No channel can reach the user for this run's checkpoints, so it was not started.";
+    case "no_gate_channel":
+      return "This pipeline has approval checkpoints, and none of the user's reachable channels can show them (approval buttons appear on Telegram), so it was not started.";
+    case "runs_unavailable":
+      return "Pipeline runs aren't available in this context.";
   }
 }
