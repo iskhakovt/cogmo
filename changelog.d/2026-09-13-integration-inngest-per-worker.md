@@ -1,0 +1,6 @@
+**Each integration worker gets its own Inngest dev server.** Inngest functions subscribe by event name, not by app id, so forks sharing one server would each run every event any of them sent: two forks racing through one turn against the shared Postgres. With a server per worker, the fork that sends an event is the only one that runs it. Per-fork assertions such as `pipeline.integration.test.ts` → "emits gen_ai chat spans + token metrics" depend on that.
+
+- **Setup:** `test/integration-setup.ts` starts one `inngest dev` per worker slot, about 40 MiB and under half a second each, and provides their URLs as `inngestWorkers`.
+- **Routing:** `test/integration-setup-per-fork.ts` points each fork at its slot's server by `VITEST_POOL_ID`. Tests read it back through `workerInngestBaseUrl()`.
+- **Worker count:** the integration project sets `maxWorkers` explicitly, because `globalSetup` runs before Vitest resolves its default. It also has its own `sequence.groupOrder`, because Vitest refuses projects with different `maxWorkers` in one group.
+- **Cap:** the default is one worker per CPU but one, capped at 8, and `INTEGRATION_MAX_WORKERS=N` overrides it. Each slot publishes two ports, and at 31 slots rootless Docker fails to publish them all (`bind: address already in use`).

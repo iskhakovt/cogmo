@@ -86,6 +86,7 @@ import { channelSessions, channels, inboundMessages } from "../transport/store/s
 import { expectDefined } from "./assertions.js";
 import { DaytonaMock, type DaytonaMockOptions } from "./daytona-mock.js";
 import { repoRoot } from "./repo-root.js";
+import { workerInngestBaseUrl } from "./worker-inngest.js";
 
 const execFileP = promisify(execFileCb);
 
@@ -143,7 +144,7 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
   let bareRemotePath: string | undefined;
 
   beforeAll(async () => {
-    inngestBaseUrl = inject("inngestBaseUrl");
+    inngestBaseUrl = workerInngestBaseUrl();
     const databaseUrl = inject("databaseUrl");
     defaultUserId = inject("defaultUserId");
     db = drizzle({ connection: databaseUrl, schema });

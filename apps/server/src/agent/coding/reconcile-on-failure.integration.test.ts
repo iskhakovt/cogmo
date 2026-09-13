@@ -33,6 +33,7 @@ import { connect } from "inngest/connect";
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
 import { db, transactor } from "../../db/index.js";
 import { codingTaskFailed } from "../../inngest/events.js";
+import { workerInngestBaseUrl } from "../../test/worker-inngest.js";
 import { createCodingTaskReconcile } from "./reconcile-on-failure.js";
 import { DrizzleCodingStore } from "./store/index.js";
 import { codingRepos, codingTasks } from "./store/schema.js";
@@ -161,7 +162,7 @@ async function seedRepoAndTask(initialStatus: "planning" | "executing" | "failed
 }
 
 async function sendInngestEvent(name: string, data: Record<string, unknown>): Promise<void> {
-  const baseUrl = inject("inngestBaseUrl");
+  const baseUrl = workerInngestBaseUrl();
   const eventKey = inject("inngestEventKey");
   const res = await fetch(`${baseUrl}/e/${eventKey}`, {
     method: "POST",

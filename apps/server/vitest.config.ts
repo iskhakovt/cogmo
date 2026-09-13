@@ -1,4 +1,17 @@
+import { availableParallelism } from "node:os";
 import { defineConfig } from "vitest/config";
+
+/** Integration worker count. Set explicitly because `test/integration-setup.ts`
+ * starts one Inngest dev server per worker slot, and `globalSetup` runs before
+ * Vitest resolves its own default. That default, one per CPU but one, has no
+ * ceiling, so this caps it at 8. Each slot publishes two ports, and at 31
+ * slots rootless Docker was observed failing to publish them (`bind: address
+ * already in use`); another session shared that daemon, so the cause isn't
+ * isolated. Override with `INTEGRATION_MAX_WORKERS=N`. */
+const INTEGRATION_MAX_WORKERS = (() => {
+  const v = Number(process.env.INTEGRATION_MAX_WORKERS);
+  return Number.isFinite(v) && v >= 1 ? v : Math.min(Math.max(availableParallelism() - 1, 1), 8);
+})();
 
 /** Mirror the Testcontainers port-forwarder sidecar off Docker Hub. Must be set
  * here: `testcontainers` reads `SSHD_CONTAINER_IMAGE` at import time, so the
@@ -125,6 +138,10 @@ export default defineConfig({
           include: ["src/**/*.integration.test.ts"],
           globalSetup: "./test/integration-setup.ts",
           setupFiles: ["./test/integration-setup-per-fork.ts"],
+          maxWorkers: INTEGRATION_MAX_WORKERS,
+          // Its own group: Vitest refuses projects with different `maxWorkers`
+          // in one `groupOrder`, which `test:all` would otherwise hit.
+          sequence: { groupOrder: 2 },
           // 90s for the image-gen test in record mode (fal call + 2x LLM round trips).
           // Replay is much faster but one bound covers both modes.
           testTimeout: 90_000,

@@ -41,7 +41,7 @@ Docker services + app wired in-process. Tests the orchestration pipeline — deb
 - Hindsight reaches llmock via `host.testcontainers.internal`, published by `exposeHostPort()` in `dev/containers.ts` — not `host-gateway`, which points into the wrong namespace under rootless Docker
 - App modules imported directly — `bootstrap()` from `src/index.ts` wires everything
 
-**Env injection:** `process.env` mutations in `globalSetup` propagate to Vitest test workers. Dynamic container URLs set via `process.env`, static values in `vitest.config.ts` `test.env`. Test files use normal top-level imports — `createEnv()` in `env.ts` sees all values.
+**Env injection:** `process.env` mutations in `globalSetup` propagate to Vitest test workers. Dynamic container URLs set via `process.env`, static values in `vitest.config.ts` `test.env`. Inngest is per worker: each worker slot has its own dev server, so one fork's events never run in another, and `test/integration-setup-per-fork.ts` points its fork at that server. Test files use normal top-level imports — `createEnv()` in `env.ts` sees all values.
 
 **Naming:** `.integration.test.ts` suffix. `pnpm test:integration`.
 

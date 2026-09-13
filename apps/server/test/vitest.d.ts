@@ -9,7 +9,13 @@ export {};
 declare module "vitest" {
   export interface ProvidedContext {
     databaseUrl: string;
+    /** The e2e stack's Inngest. Integration workers each get their own: see `inngestWorkers`. */
     inngestBaseUrl: string;
+    /**
+     * One Inngest dev server per integration worker slot, indexed by
+     * `VITEST_POOL_ID - 1`. Read through `workerInngestBaseUrl()`.
+     */
+    inngestWorkers: ReadonlyArray<{ baseUrl: string; gatewayUrl: string }>;
     inngestEventKey: string;
     hindsightUrl: string;
     /** Bearer token the integration/e2e Hindsight container enforces. */
