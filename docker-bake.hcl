@@ -58,18 +58,6 @@ variable "CLAUDE_CODE_VERSION" {
   default = "2.1.236"
 }
 
-// Cache key for each image's `apt-get upgrade` layer. The Dockerfiles pin
-// base images by digest, so without a changing input that RUN line is a
-// permanent GHA cache hit and replays whatever package set it saw the first
-// time — security updates published since never land. The build date rotates
-// the key daily: every release picks up the current Debian/Ubuntu security
-// archive, while PR builds on the same day keep their cache hits. Set it
-// explicitly (`APT_REFRESH=$(date +%s) docker buildx bake`) to force a
-// refresh mid-day.
-variable "APT_REFRESH" {
-  default = formatdate("YYYY-MM-DD", timestamp())
-}
-
 // Default group builds every image — used by publish.yml on release.
 // Per-image targeting (`--targets skills`) is for the sysbox-e2e
 // build→test loop.
@@ -109,8 +97,7 @@ target "_cogmo-build" {
   context    = "."
   dockerfile = "Dockerfile"
   args = {
-    VERSION     = "${VERSION}"
-    APT_REFRESH = "${APT_REFRESH}"
+    VERSION = "${VERSION}"
   }
 }
 
@@ -157,7 +144,6 @@ target "devbase" {
     CLAUDE_CODE_VERSION = "${CLAUDE_CODE_VERSION}"
     UV_VERSION          = "${UV_VERSION}"
     UV_DIGEST           = "${UV_DIGEST}"
-    APT_REFRESH         = "${APT_REFRESH}"
   }
   // Sysbox amd64-only today — see _common comment. Single-platform cache
   // scope matches the platform.
@@ -171,9 +157,8 @@ target "skills" {
   context    = "./images/skills"
   dockerfile = "Dockerfile"
   args = {
-    UV_VERSION  = "${UV_VERSION}"
-    UV_DIGEST   = "${UV_DIGEST}"
-    APT_REFRESH = "${APT_REFRESH}"
+    UV_VERSION = "${UV_VERSION}"
+    UV_DIGEST  = "${UV_DIGEST}"
   }
   platforms  = ["linux/amd64"]
   cache-from = ["type=gha,scope=skills-amd64"]

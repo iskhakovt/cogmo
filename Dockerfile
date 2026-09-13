@@ -62,10 +62,6 @@ WORKDIR /app
 # premise that base maintainers keep up — in practice node:24-trixie-slim trails
 # Debian security advisories by days to weeks, and the resulting CVE gap
 # in our published image is real. See trivy scan output on prior builds.
-#
-# APT_REFRESH (a build date, from docker-bake.hcl) keys this layer's cache so
-# the upgrade re-runs daily instead of replaying a stale package set forever.
-ARG APT_REFRESH
 # hadolint ignore=DL3005
 RUN apt-get update \
  && apt-get upgrade -y \
