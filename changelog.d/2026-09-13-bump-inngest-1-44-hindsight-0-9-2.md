@@ -1,0 +1,5 @@
+**Inngest v1.44.0, Hindsight 0.9.2 and `canonicalize` 5.** The dev and test stacks pin `inngest/inngest:v1.44.0` and `hindsight-api:0.9.2`; production servers should match. `cogmo.hindsightCompat` stays `>=0.9.0 <0.10.0`.
+
+- **Inngest:** no self-hosted migration steps between v1.41.1 and v1.44.0. The key coverage in `DEPLOYMENT.md` → *Securing internal services* was re-verified on v1.44.0: GraphQL and the dashboard stay open without `--no-ui`, and `/metrics` and `/debug/pprof` stay open either way.
+- **Hindsight:** the API key still covers everything but `/health`, `/version`, `/metrics`, `/docs` and `/openapi.json` (re-verified on 0.9.2). 0.9.2 still makes one reranker attempt per chain member, so the recall timeout budget in `design/memory.md` holds; the retry settings that would break it are unreleased.
+- **`canonicalize` 5:** changes canonical output only for shapes model-supplied JSON cannot produce (`undefined` properties, sparse arrays, boxed primitives), so loop-pathology fingerprints are unchanged. MCP schema pins use their own hashing and are unaffected.
