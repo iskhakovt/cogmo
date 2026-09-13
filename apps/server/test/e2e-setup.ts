@@ -286,7 +286,8 @@ export async function setup({ provide }: GlobalSetupContext) {
 
 export async function teardown() {
   // Containers before llmock, and llmock only once every container has
-  // stopped: they reach it through the testcontainers SSH forwarder, which
+  // stopped (a leftover llmock only delays Vitest's forced exit by
+  // `teardownTimeout`): they reach it through the testcontainers SSH forwarder, which
   // dials the host port from this process without an error listener, so a
   // call after llmock stopped would crash teardown with an unhandled
   // ECONNREFUSED. See `integration-setup.ts`.
