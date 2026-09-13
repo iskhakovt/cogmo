@@ -38,7 +38,11 @@ export type ChannelSessionReceive = (typeof channelSessionReceive.enumValues)[nu
  * (originating session FK populated), `scheduled` for synthetic inbounds
  * with no originating session. A check constraint enforces the link.
  */
-export const inboundMessageSource = pgEnum("inbound_message_source", ["user", "scheduled"]);
+export const inboundMessageSource = pgEnum("inbound_message_source", [
+  "user",
+  "scheduled",
+  "pipeline",
+]);
 export type InboundMessageSource = (typeof inboundMessageSource.enumValues)[number];
 
 export const channels = pgTable("channels", {
@@ -89,7 +93,8 @@ export const inboundMessages = pgTable(
   "inbound_messages",
   {
     id: pk(),
-    // Nullable: `source='scheduled'` rows have no originating session.
+    // Nullable: `source='scheduled'` and `source='pipeline'` rows have no
+    // originating session.
     // The check constraint below ties nullability to `source`.
     channelSessionId: uuid("channel_session_id").references(() => channelSessions.id),
     conversationId: uuid("conversation_id")
@@ -99,24 +104,27 @@ export const inboundMessages = pgTable(
     platformTs: timestamp("platform_ts", { withTimezone: true }).notNull(), // when the user sent it
     source: inboundMessageSource("source").notNull(),
     /**
-     * Idempotency key for scheduled fires: `${taskId}:${scheduledFor}` —
-     * matches the Inngest event-bus dedup key on the ticker's fan-out.
-     * The fire-handler pre-checks this on every dispatch so a retry that
-     * lands after a successful commit (worker died between tx commit and
-     * Inngest ack) reuses the existing row instead of rotating again.
-     * NULL for `source='user'`; the check constraint enforces the link.
+     * Idempotency key every system-originated inbound carries; NULL for
+     * `source='user'` (the check constraint enforces the link). Scheduled
+     * fires use `${taskId}:${scheduledFor}` — the Inngest event-bus dedup key
+     * on the ticker's fan-out, pre-checked on every dispatch so a retry that
+     * lands after the commit reuses the row instead of rotating again.
+     * Pipeline stages use `pipeline:${runId}:${stageId}:${iteration}`.
      */
-    scheduledFireKey: text("scheduled_fire_key"),
+    idempotencyKey: text("idempotency_key"),
     createdAt: ts(),
   },
   (t) => [
-    uniqueIndex("uq_inbound_scheduled_fire_key")
-      .on(t.scheduledFireKey)
-      .where(sql`scheduled_fire_key IS NOT NULL`),
+    uniqueIndex("uq_inbound_idempotency_key")
+      .on(t.idempotencyKey)
+      .where(sql`idempotency_key IS NOT NULL`),
+    // A user inbound arrives on a session and carries no key; every
+    // system-originated source (`scheduled`, `pipeline`, and any added later)
+    // has no session and carries its idempotency key.
     check(
       "chk_inbound_source_session",
-      sql`(${t.source} = 'user' AND ${t.channelSessionId} IS NOT NULL AND ${t.scheduledFireKey} IS NULL)
-        OR (${t.source} = 'scheduled' AND ${t.channelSessionId} IS NULL AND ${t.scheduledFireKey} IS NOT NULL)`,
+      sql`(${t.source} = 'user' AND ${t.channelSessionId} IS NOT NULL AND ${t.idempotencyKey} IS NULL)
+        OR (${t.source} <> 'user' AND ${t.channelSessionId} IS NULL AND ${t.idempotencyKey} IS NOT NULL)`,
     ),
   ],
 );

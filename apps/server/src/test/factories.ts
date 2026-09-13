@@ -275,7 +275,7 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
     setChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
     clearChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
     findReachableChannelsForUserProfile: vi.fn().mockResolvedValue([]),
-    findInboundByScheduledFireKey: vi.fn().mockResolvedValue(undefined),
+    findInboundByIdempotencyKey: vi.fn().mockResolvedValue(undefined),
     peekPriorClosedConversation: vi.fn().mockResolvedValue(undefined),
     createBoundaryPending: vi.fn().mockResolvedValue({ id: "boundary-1" }),
     getBoundaryPendingByAddress: vi.fn().mockResolvedValue(undefined),
@@ -316,6 +316,7 @@ export function mockTransportDeep(overrides: DeepPartial<Transport> = {}): Trans
     repos: { ...base.repos, ...(overrides.repos ?? {}) },
     coding: { ...base.coding, ...(overrides.coding ?? {}) },
     skills: { ...base.skills, ...(overrides.skills ?? {}) },
+    pipelines: { ...base.pipelines, ...(overrides.pipelines ?? {}) },
     scheduling: { ...base.scheduling, ...(overrides.scheduling ?? {}) },
     mcp: { ...base.mcp, ...(overrides.mcp ?? {}) },
     evolution: { ...base.evolution, ...(overrides.evolution ?? {}) },
@@ -488,6 +489,11 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
       list: vi.fn().mockResolvedValue(ok([])),
       disable: vi.fn().mockResolvedValue(ok({ name: "echo" })),
       enable: vi.fn().mockResolvedValue(ok({ name: "echo", alreadyEnabled: false })),
+    },
+    pipelines: {
+      resolveGate: vi
+        .fn()
+        .mockResolvedValue(ok({ runId: "run-1", pipelineName: "issue-to-pr", stageId: "approve" })),
     },
     scheduling: {
       list: vi.fn().mockResolvedValue(ok([])),

@@ -201,7 +201,7 @@ Sessions on `isPrivate: false` conversations are constrained:
 -- Enums
 channel_session_status   AS ENUM ('active', 'closed');
 channel_session_receive  AS ENUM ('none', 'routed', 'all');
-inbound_message_source   AS ENUM ('user', 'scheduled');
+inbound_message_source   AS ENUM ('user', 'scheduled', 'pipeline');
 
 channel_sessions (
   id               UUID v7 PK,
@@ -216,20 +216,22 @@ channel_sessions (
 
 inbound_messages (
   id                  UUID v7 PK,
-  channel_session_id  UUID FK → channel_sessions,            -- NULL ⟺ source='scheduled'
+  channel_session_id  UUID FK → channel_sessions,            -- NULL ⟺ source <> 'user'
   conversation_id     UUID FK → conversations NOT NULL,
   content             JSONB NOT NULL,                        -- InboundContentSchema
   platform_ts         TIMESTAMPTZ NOT NULL,
-  source              inbound_message_source NOT NULL,
-  scheduled_fire_key  TEXT,                                  -- NOT NULL ⟺ source='scheduled'
+  source              inbound_message_source NOT NULL,       -- 'user' | 'scheduled' | 'pipeline'
+  idempotency_key     TEXT,                                  -- NOT NULL ⟺ source <> 'user'
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-  CHECK ((source = 'user' AND channel_session_id IS NOT NULL AND scheduled_fire_key IS NULL)
-      OR (source = 'scheduled' AND channel_session_id IS NULL AND scheduled_fire_key IS NOT NULL))
+  CHECK ((source = 'user' AND channel_session_id IS NOT NULL AND idempotency_key IS NULL)
+      OR (source <> 'user' AND channel_session_id IS NULL AND idempotency_key IS NOT NULL))
 );
--- Partial unique index — scheduled-fire idempotency
-CREATE UNIQUE INDEX uq_inbound_scheduled_fire_key
-  ON inbound_messages (scheduled_fire_key)
-  WHERE scheduled_fire_key IS NOT NULL;
+-- Partial unique index — idempotency for system-originated inbounds
+-- (scheduled fires: `${taskId}:${scheduledFor}`; pipeline stages:
+-- `pipeline:${runId}:${stageId}:${iteration}`)
+CREATE UNIQUE INDEX uq_inbound_idempotency_key
+  ON inbound_messages (idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
 ```
 
 Indexes:

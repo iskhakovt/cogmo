@@ -32,7 +32,11 @@ import { createIdleTimer } from "./agent/idle-timer.js";
 import { ImageToolsLoader } from "./agent/image-tools-loader.js";
 import { runStreamingAgentLoop } from "./agent/loop.js";
 import { memoryTools } from "./agent/memory-tools.js";
-import { DrizzlePipelineStore } from "./agent/pipeline/store/index.js";
+import { createPipelineGateResolver } from "./agent/pipeline/gate-resolver.js";
+import { createPipelineGateWaiter } from "./agent/pipeline/gate-waiter.js";
+import { runAgenticStage } from "./agent/pipeline/run-agentic-stage.js";
+import { createPipelineStageRunner } from "./agent/pipeline/stage-runner.js";
+import { DrizzlePipelineRunStore, DrizzlePipelineStore } from "./agent/pipeline/store/index.js";
 import { PIPELINES_PROMPT_GUIDANCE, pipelineTools } from "./agent/pipeline/tools.js";
 import { DefaultPromptSource } from "./agent/prompt.js";
 import { createHandleMessageReconcile } from "./agent/reconcile-on-failure.js";
@@ -85,6 +89,7 @@ import { SkillRunnerImpl } from "./skills/runner.js";
 import { registerSkillTool, SKILLS_PROMPT_GUIDANCE } from "./skills/skills-tool.js";
 import { DrizzleSkillStore } from "./skills/store/index.js";
 import { DEFAULT_RESOURCE_LIMITS as SKILLS_DEFAULT_RESOURCE_LIMITS } from "./skills/worker-sysbox/host.js";
+import { adapterModules } from "./transport/adapters/index.js";
 import { WebStreamRegistry } from "./transport/adapters/web/stream-registry.js";
 import type { AttachmentStore } from "./transport/attachment-store.js";
 import { createAttachmentStore } from "./transport/attachment-store.js";
@@ -185,6 +190,7 @@ export interface CoreDeps {
   sandboxStore: DrizzleSandboxStore;
   codingStore: DrizzleCodingStore;
   pipelineStore: DrizzlePipelineStore;
+  pipelineRunStore: DrizzlePipelineRunStore;
   mcpStore: DrizzleMcpStore;
   skillStore: DrizzleSkillStore;
   secretsStore: DrizzleSecretsStore;
@@ -329,6 +335,7 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
   const sandboxStore = new DrizzleSandboxStore();
   const codingStore = new DrizzleCodingStore();
   const pipelineStore = new DrizzlePipelineStore();
+  const pipelineRunStore = new DrizzlePipelineRunStore();
   const mcpStore = new DrizzleMcpStore();
   const skillStore = new DrizzleSkillStore();
   const webSessionStore = new DrizzleWebSessionStore();
@@ -441,6 +448,7 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
     sandboxStore,
     codingStore,
     pipelineStore,
+    pipelineRunStore,
     mcpStore,
     skillStore,
     secretsStore,
@@ -1066,6 +1074,7 @@ export async function bootstrapRuntime(
     codingStreamingRegistry,
     skillRunner,
     skillStore: core.skillStore,
+    pipelineRunStore: core.pipelineRunStore,
     mcpRegistry,
     triggerReflection: reflectionTrigger,
     compactConversation: compactionTrigger,
@@ -1166,6 +1175,49 @@ export async function bootstrapRuntime(
     userTimezone: env.USER_TIMEZONE,
     voiceResolver,
     pipelineStore: core.pipelineStore,
+    pipelineRunStore: core.pipelineRunStore,
+    pipelineGateChannelTypes: new Set(
+      adapterModules.flatMap((module) => (module.pipelineGates ? [module.channelType] : [])),
+    ),
+  });
+
+  // User-defined pipeline runs (design/pipelines.md → Execution Model): one
+  // short function per stage, gates parked in the DB behind a timeout waiter,
+  // and a resolver that owns the `waiting_gate` transition for taps and
+  // timeouts alike.
+  const pipelineStageRunner = createPipelineStageRunner({
+    runInTx: core.runInTx,
+    runStore: core.pipelineRunStore,
+    deliveryRouter,
+    executeAgenticStage: (args, steps, log) =>
+      runAgenticStage(
+        {
+          runInTx: core.runInTx,
+          agentStore: core.agentStore,
+          transportStore: core.transportStore,
+          resolveProvider: core.resolveProvider,
+          tools,
+          imageToolsLoader,
+          memory: core.memory,
+          promptSource,
+          fileService: core.fileService,
+          deliveryRouter,
+          runStreamingAgentLoop,
+          codingServiceFactory,
+          skillRunner,
+          mcpRegistry,
+          userTimezone: env.USER_TIMEZONE,
+        },
+        args,
+        steps,
+        log,
+      ),
+  });
+  const pipelineGateWaiter = createPipelineGateWaiter({ deliveryRouter });
+  const pipelineGateResolver = createPipelineGateResolver({
+    runInTx: core.runInTx,
+    runStore: core.pipelineRunStore,
+    deliveryRouter,
   });
 
   const observer = createObserver({
@@ -1255,6 +1307,9 @@ export async function bootstrapRuntime(
     skillDepsReaper,
     boundaryWaiter,
     boundaryJanitor,
+    pipelineStageRunner,
+    pipelineGateWaiter,
+    pipelineGateResolver,
     ...debounceFunctions,
     ...channelFunctions,
     ...codingFunctions,

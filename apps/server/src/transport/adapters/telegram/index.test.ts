@@ -1,11 +1,18 @@
 import { err, ok } from "neverthrow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PLAN_CALLBACK_REGEX } from "../../../agent/coding/plan-keyboard.js";
+import { PIPELINE_GATE_CALLBACK_REGEX } from "../../../agent/pipeline/gate-keyboard.js";
 import type { BoundaryResolvedData } from "../../../inngest/events.js";
-import { boundaryResolvedEvent } from "../../../inngest/events.js";
+import { boundaryResolvedEvent, pipelineGatePending } from "../../../inngest/events.js";
 import { SKILLS_APPROVAL_CALLBACK_REGEX } from "../../../skills/skills-keyboard.js";
 import { asBatchAdapter, expectDefined } from "../../../test/assertions.js";
-import { mockAttachmentStore, mockInngest, mockTransport } from "../../../test/factories.js";
+import {
+  fakeRunInTx,
+  mockAttachmentStore,
+  mockInngest,
+  mockTransport,
+  mockTransportStore,
+} from "../../../test/factories.js";
 import type { StreamingAdapter } from "../../types.js";
 import { findTelegramSplitBoundary, rebalanceCodeFence, setup } from "./index.js";
 
@@ -1619,6 +1626,80 @@ describe("telegram adapter", () => {
 
       expect(transport.skills.denyDeploy).toHaveBeenCalledWith(PENDING_ID, "111");
       expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Denied" });
+    });
+
+    it("pipeline gate: approve → pipelines.resolveGate with the token, edit clears keyboard, answers toast", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeCallbackCtx(`pipe:${TASK_ID}:approve:0a1b2c3d`);
+
+      const handler = handlers.get(`callbackQuery:${PIPELINE_GATE_CALLBACK_REGEX.source}`);
+      await handler(ctx);
+
+      expect(transport.pipelines.resolveGate).toHaveBeenCalledWith(
+        TASK_ID,
+        "0a1b2c3d",
+        "approve",
+        "111",
+      );
+      expect(ctx.editMessageText).toHaveBeenCalledWith(
+        '✅ Approval sent for checkpoint "approve" of pipeline "issue-to-pr".',
+        { reply_markup: { inline_keyboard: [] } },
+      );
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Approved" });
+    });
+
+    it("pipeline gate: a rejected tap answers with a toast and leaves the keyboard", async () => {
+      const { transport } = await createAdapter({
+        pipelines: {
+          resolveGate: vi.fn().mockResolvedValue(err({ code: "identity_rejected" })),
+        },
+      });
+      const ctx = makeCallbackCtx(`pipe:${TASK_ID}:approve:0a1b2c3d`);
+
+      const handler = handlers.get(`callbackQuery:${PIPELINE_GATE_CALLBACK_REGEX.source}`);
+      await handler(ctx);
+
+      expect(transport.pipelines.resolveGate).toHaveBeenCalled();
+      expect(ctx.editMessageText).not.toHaveBeenCalled();
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({
+        text: "You're not authorized on this bot.",
+      });
+    });
+
+    it("pipeline gate: cancel → pipelines.resolveGate with cancel", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeCallbackCtx(`pipe:${TASK_ID}:cancel:0a1b2c3d`);
+
+      const handler = handlers.get(`callbackQuery:${PIPELINE_GATE_CALLBACK_REGEX.source}`);
+      await handler(ctx);
+
+      expect(transport.pipelines.resolveGate).toHaveBeenCalledWith(
+        TASK_ID,
+        "0a1b2c3d",
+        "cancel",
+        "111",
+      );
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Cancelling" });
+    });
+
+    it("registers the pipeline gate poster on pipeline/gate.pending when gate deps are supplied", async () => {
+      const inngest = mockInngest();
+      await setup({
+        channelId: "tg-ch",
+        credentials: { token: "fake" },
+        transport: mockTransport(),
+        attachments: mockAttachmentStore(),
+        inngest,
+        boundary: { promptTimeoutMs: 30000, minUserTurns: 3 },
+        pipelineGate: { runInTx: fakeRunInTx, transportStore: mockTransportStore() },
+      });
+
+      const opts = vi.mocked(inngest.createFunction).mock.calls.map((call) => call[0]);
+      expect(opts).toContainEqual({
+        id: "telegram-pipeline-gate-tg-ch",
+        triggers: [pipelineGatePending],
+        retries: 0,
+      });
     });
 
     it("missing callbackQuery.data exits early without dispatching", async () => {

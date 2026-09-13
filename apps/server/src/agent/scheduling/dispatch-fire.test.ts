@@ -39,7 +39,7 @@ describe("dispatchScheduledFire", () => {
       createConversation: vi.fn().mockRejectedValue(new Error("must not run on idempotency hit")),
     });
     const transportStore = mockTransportStore({
-      findInboundByScheduledFireKey: vi
+      findInboundByIdempotencyKey: vi
         .fn()
         .mockResolvedValue({ id: "inbound-prior", conversationId: "conv-prior" }),
       persistInbound: vi.fn().mockRejectedValue(new Error("must not run on idempotency hit")),
@@ -56,7 +56,7 @@ describe("dispatchScheduledFire", () => {
       conversationId: "conv-prior",
       inboundId: "inbound-prior",
     });
-    expect(transportStore.findInboundByScheduledFireKey).toHaveBeenCalledWith(
+    expect(transportStore.findInboundByIdempotencyKey).toHaveBeenCalledWith(
       expect.anything(),
       baseArgs.scheduledFireKey,
     );
@@ -91,7 +91,7 @@ describe("dispatchScheduledFire", () => {
     expect(agentStore.createConversation).not.toHaveBeenCalled();
     expect(transportStore.persistInbound).toHaveBeenCalledWith(expect.anything(), {
       source: "scheduled",
-      scheduledFireKey: baseArgs.scheduledFireKey,
+      idempotencyKey: baseArgs.scheduledFireKey,
       conversationId: "conv-existing",
       content: buildSyntheticInboundContent(baseArgs.scheduledFor, baseArgs.prompt),
       platformTs: new Date(baseArgs.scheduledFor),

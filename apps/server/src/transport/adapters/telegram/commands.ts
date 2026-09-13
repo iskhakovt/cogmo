@@ -528,6 +528,56 @@ export async function handlePlanCallback(
   return { editText: "❌ Plan cancelled.", toast: "Cancelled" };
 }
 
+export interface PipelineGateCallbackOutcome {
+  editText: string;
+  toast: string;
+  /**
+   * Whether the keyboard should go. Yes once the decision was sent or the
+   * checkpoint is already resolved; no for a rejected tap, which must not take
+   * the buttons away from whoever can use them.
+   */
+  clearKeyboard: boolean;
+}
+
+/**
+ * Pure handler for Approve / Cancel taps on a pipeline gate keyboard.
+ * Identity, the gate token and the parked-gate check live in
+ * `transport.pipelines`; this only renders what the adapter writes back over
+ * the keyboard. The text says the decision was sent, not that it won: a tap
+ * can still lose to the gate's own timeout, and the resolver reports that.
+ */
+export async function handlePipelineGateCallback(
+  transport: Transport,
+  parsed: { runId: string; action: "approve" | "cancel"; token: string },
+  tapperPlatformHandle: string,
+): Promise<PipelineGateCallbackOutcome> {
+  const res = await transport.pipelines.resolveGate(
+    parsed.runId,
+    parsed.token,
+    parsed.action,
+    tapperPlatformHandle,
+  );
+  if (res.isErr()) {
+    return {
+      editText: errorMessage(res.error),
+      toast: errorMessage(res.error),
+      clearKeyboard: res.error.code === "pipeline_gate_not_pending",
+    };
+  }
+  const { pipelineName, stageId } = res.value;
+  return parsed.action === "approve"
+    ? {
+        editText: `✅ Approval sent for checkpoint "${stageId}" of pipeline "${pipelineName}".`,
+        toast: "Approved",
+        clearKeyboard: true,
+      }
+    : {
+        editText: `❌ Cancellation sent for checkpoint "${stageId}" of pipeline "${pipelineName}".`,
+        toast: "Cancelling",
+        clearKeyboard: true,
+      };
+}
+
 export interface SkillsApprovalCallbackOutcome {
   editText: string;
   toast: string;
@@ -2086,6 +2136,12 @@ function errorMessage(err: TransportError): string {
       return `Skill deploy ${shortenId(err.pendingId)} not found.`;
     case "skill_deploy_not_pending":
       return `This deploy can't be acted on (status: ${err.status}).`;
+    case "pipelines_disabled":
+      return "Pipelines aren't wired in this deployment.";
+    case "pipeline_run_not_found":
+      return `No pipeline run with id "${shortenId(err.runId)}".`;
+    case "pipeline_gate_not_pending":
+      return `This checkpoint was already resolved — the run is ${err.status}.`;
     case "skill_deploy_register_failed":
       return `Approve failed: ${err.reason}`;
     case "mcp_disabled":

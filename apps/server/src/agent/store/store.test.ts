@@ -5,6 +5,7 @@ import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../../secret
 import { DrizzleSecretsStore } from "../../secrets/store/index.js";
 import { expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
+import { inboundMessages } from "../../transport/store/schema.js";
 import { DrizzleAgentStore } from "./index.js";
 import { conversationSummaries, messages } from "./schema.js";
 
@@ -862,6 +863,55 @@ describe("DrizzleAgentStore", () => {
       const last = await tx((trx) => store.getLastAssistantMessage(trx, conversationId));
       expect(last?.id).toBe(secondId);
       expect(last?.lastInboundMessageId).toBe(inboundId);
+    });
+
+    it("getLastAssistantMessage skips messages a pipeline stage wrote", async () => {
+      // A stage's assistant rows cursor on its `source='pipeline'` inbound.
+      // Reading that as the chat cursor would mark earlier chat input answered.
+      const { conversationId, stamp } = await seedConversation();
+      const [chatInbound] = await db
+        .insert(inboundMessages)
+        .values({
+          source: "scheduled",
+          idempotencyKey: "task-1:2026-09-12T09:00:00.000Z",
+          conversationId,
+          content: "briefing",
+          platformTs: new Date(),
+        })
+        .returning({ id: inboundMessages.id });
+      const chatCursor = expectDefined(chatInbound, "chat inbound").id;
+      const { id: chatReplyId } = await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId,
+          role: "assistant",
+          content: "chat reply",
+          lastInboundMessageId: chatCursor,
+          ...stamp,
+        }),
+      );
+      await new Promise((r) => setTimeout(r, 2));
+      const [stageInbound] = await db
+        .insert(inboundMessages)
+        .values({
+          source: "pipeline",
+          idempotencyKey: "pipeline:run-1:draft:0",
+          conversationId,
+          content: "stage prompt",
+          platformTs: new Date(),
+        })
+        .returning({ id: inboundMessages.id });
+      await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId,
+          role: "assistant",
+          content: "stage output",
+          lastInboundMessageId: expectDefined(stageInbound, "stage inbound").id,
+          ...stamp,
+        }),
+      );
+
+      const last = await tx((trx) => store.getLastAssistantMessage(trx, conversationId));
+      expect(last).toEqual({ id: chatReplyId, lastInboundMessageId: chatCursor });
     });
 
     it("listMessages returns empty array for no messages", async () => {

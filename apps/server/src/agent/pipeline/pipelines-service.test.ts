@@ -3,8 +3,10 @@ import { type MockProxy, mock } from "vitest-mock-extended";
 import type { Transactor } from "../../db/index.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import { expectDefined } from "../../test/assertions.js";
+import type { TransportStore } from "../../transport/store/index.js";
+import type { AgentStore } from "../store/index.js";
 import { createPipelinesService, type PipelinesServiceDeps } from "./pipelines-service.js";
-import type { PipelineDefinitionRow, PipelineStore } from "./store/index.js";
+import type { PipelineDefinitionRow, PipelineRunStore, PipelineStore } from "./store/index.js";
 import { FIXTURE_TOOLS, validPipelineDefinition } from "./test-fixtures.js";
 
 const FAKE_TX = { __mockTx: true } as never;
@@ -175,5 +177,96 @@ describe("pipelines service", () => {
         expect.objectContaining({ name: "other", latestVersion: 1, activeVersion: null }),
       ]);
     });
+  });
+});
+
+describe("PipelinesService.start", () => {
+  function runDeps() {
+    const pipelineStore = mock<PipelineStore>();
+    const runStore = mock<PipelineRunStore>();
+    const agentStore = mock<AgentStore>();
+    const transportStore = mock<TransportStore>();
+    const linear = validPipelineDefinition();
+    linear.stages = linear.stages.map(({ loop: _loop, ...stage }) => stage);
+    pipelineStore.getActiveDefinition.mockResolvedValue(row({ active: true, compiled: linear }));
+    runStore.getRunByIdempotencyKey.mockResolvedValue(undefined);
+    agentStore.createConversation.mockResolvedValue({ id: "conv-run" });
+    transportStore.findReachableChannelsForUserProfile.mockResolvedValue([
+      { channelId: "tg", channelType: "telegram", platformAddress: "42", receive: "routed" },
+    ]);
+    runStore.insertOrRecoverRun.mockResolvedValue({
+      kind: "new",
+      row: {
+        id: "run-1",
+        definitionId: "row-1",
+        conversationId: "conv-run",
+        status: "running",
+        currentStage: "gather-context",
+        iteration: 0,
+        stageOutputs: {},
+        failureReason: null,
+        idempotencyKey: "k1",
+        createdAt: new Date("2026-09-12T00:00:00Z"),
+      },
+    });
+    const send = vi.fn().mockResolvedValue({ ids: [] });
+    return {
+      deps: {
+        runInTx: fakeRunInTx,
+        pipelineStore,
+        runStore,
+        agentStore,
+        transportStore,
+        inngest: { send },
+        gateChannelTypes: new Set(["telegram"]),
+      },
+      pipelineStore,
+      send,
+    };
+  }
+
+  it("starts the active version under the service's user and profile", async () => {
+    const run = runDeps();
+    const service = createPipelinesService(
+      makeDeps({ run: { deps: run.deps, profileId: "p-1", originConversationId: "conv-chat" } }),
+    );
+
+    const result = await service.start({ name: "issue-to-pr", idempotencyKey: "k1" });
+
+    expect(run.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ originConversationId: "conv-chat" }),
+      }),
+    );
+    expect(result._unsafeUnwrap()).toMatchObject({
+      runId: "run-1",
+      conversationId: "conv-run",
+      firstStage: "gather-context",
+      recovered: false,
+    });
+    expect(run.pipelineStore.getActiveDefinition).toHaveBeenCalledWith(
+      expect.anything(),
+      "user-1",
+      "issue-to-pr",
+    );
+    expect(run.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes the start-run error through as a PipelinesError", async () => {
+    const run = runDeps();
+    run.pipelineStore.getActiveDefinition.mockResolvedValue(undefined);
+    const service = createPipelinesService(makeDeps({ run: { deps: run.deps, profileId: "p-1" } }));
+
+    const result = await service.start({ name: "issue-to-pr", idempotencyKey: "k1" });
+
+    expect(result._unsafeUnwrapErr()).toEqual({ kind: "not_active", name: "issue-to-pr" });
+  });
+
+  it("returns runs_unavailable when the run engine isn't wired", async () => {
+    const service = createPipelinesService(makeDeps());
+
+    const result = await service.start({ name: "issue-to-pr", idempotencyKey: "k1" });
+
+    expect(result._unsafeUnwrapErr()).toEqual({ kind: "runs_unavailable" });
   });
 });

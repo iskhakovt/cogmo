@@ -15,6 +15,11 @@ import type { LlmProviderResolver } from "../../llm/resolver.js";
 import { logger } from "../../logger.js";
 import { type CompileError, compilePipeline } from "./compile.js";
 import { renderPipelinePreview } from "./preview.js";
+import {
+  type StartedPipelineRun,
+  type StartPipelineRunDeps,
+  startPipelineRun,
+} from "./start-run.js";
 import type { PipelineDefinitionRow, PipelineStore } from "./store/index.js";
 import type { Trigger } from "./types.js";
 import type { ValidationContext } from "./validate.js";
@@ -31,7 +36,12 @@ export type PipelinesError =
   | { kind: "compile_failed"; issues: ReadonlyArray<{ path: string; message: string }> }
   | { kind: "source_too_long"; length: number; maxLength: number }
   | { kind: "definition_cap_exceeded"; limit: number; current: number }
-  | { kind: "not_found"; name: string; version?: number };
+  | { kind: "not_found"; name: string; version?: number }
+  | { kind: "not_active"; name: string }
+  | { kind: "unsupported_features"; name: string; features: ReadonlyArray<string> }
+  | { kind: "no_reachable_channel" }
+  | { kind: "no_gate_channel" }
+  | { kind: "runs_unavailable" };
 
 export interface DefinePipelineResult {
   id: string;
@@ -65,6 +75,16 @@ export interface PipelinesService {
 
   /** One summary per pipeline name, with active + latest version. */
   list(): Promise<ReadonlyArray<PipelineSummary>>;
+
+  /**
+   * Start a run of the named pipeline's active version. `idempotencyKey`
+   * is the durable tool call's key — a retry of the same call recovers the
+   * run it already opened.
+   */
+  start(args: {
+    name: string;
+    idempotencyKey: string;
+  }): Promise<Result<StartedPipelineRun, PipelinesError>>;
 }
 
 export interface PipelinesServiceDeps {
@@ -76,6 +96,17 @@ export interface PipelinesServiceDeps {
   model: string;
   validation: ValidationContext;
   definitionCap?: number;
+  /**
+   * Run-engine wiring for `start`. Absent where runs can't be started (unit
+   * setups that exercise only definitions); `start` then returns
+   * `runs_unavailable`.
+   */
+  run?: {
+    deps: StartPipelineRunDeps;
+    profileId: string;
+    /** The conversation this service's turn belongs to — the run's origin. */
+    originConversationId?: string;
+  };
 }
 
 export function createPipelinesService(deps: PipelinesServiceDeps): PipelinesService {
@@ -181,6 +212,31 @@ export function createPipelinesService(deps: PipelinesServiceDeps): PipelinesSer
     async list() {
       const rows = await deps.runInTx((tx) => deps.store.listDefinitions(tx, deps.userId));
       return summarize(rows);
+    },
+
+    async start(args) {
+      if (!deps.run) return err({ kind: "runs_unavailable" as const });
+      const started = await startPipelineRun(deps.run.deps, {
+        userId: deps.userId,
+        profileId: deps.run.profileId,
+        name: args.name,
+        idempotencyKey: args.idempotencyKey,
+        ...(deps.run.originConversationId !== undefined && {
+          originConversationId: deps.run.originConversationId,
+        }),
+      });
+      if (started.isErr()) return err(started.error);
+      log.info(
+        {
+          runId: started.value.runId,
+          name: started.value.name,
+          version: started.value.version,
+          recovered: started.value.recovered,
+          userId: deps.userId,
+        },
+        "pipeline run started",
+      );
+      return ok(started.value);
     },
   };
 }

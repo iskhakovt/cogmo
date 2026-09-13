@@ -29,8 +29,8 @@ afterAll(async () => {
   await close();
 });
 
-/** Insert a user + profile + conversation + definition and open a run on its first stage. */
-async function seedRun(currentStage = "gather-context") {
+/** Insert a user + profile + conversation + definition — everything a run needs. */
+async function seedDefinitionAndConversation() {
   const userId = (await tx((trx) => agentStore.createUser(trx))).id;
   const profile = await tx((trx) =>
     agentStore.createProfile(trx, {
@@ -52,14 +52,20 @@ async function seedRun(currentStage = "gather-context") {
       compiled: validPipelineDefinition(),
     }),
   );
+  return { userId, conversationId: conversation.id, definitionId: def.id };
+}
+
+/** Seed a definition and conversation, then open a run on `currentStage`. */
+async function seedRun(currentStage = "gather-context") {
+  const seeded = await seedDefinitionAndConversation();
   const run = await tx((trx) =>
     runStore.createRun(trx, {
-      definitionId: def.id,
-      conversationId: conversation.id,
+      definitionId: seeded.definitionId,
+      conversationId: seeded.conversationId,
       currentStage,
     }),
   );
-  return { userId, definitionId: def.id, conversationId: conversation.id, run };
+  return { ...seeded, run };
 }
 
 const textArtifact: StageArtifact = { kind: "text", text: "gathered context" };
@@ -295,5 +301,98 @@ describe("DrizzlePipelineRunStore", () => {
       const result = await tx((trx) => runStore.cancelRunIfActive(trx, randomUUID(), "x"));
       expect(result).toEqual({ kind: "not_found" });
     });
+  });
+});
+
+describe("DrizzlePipelineRunStore — recovery and joins", () => {
+  it("insertOrRecoverRun returns the existing run for a repeated key", async () => {
+    const { conversationId, definitionId } = await seedDefinitionAndConversation();
+    const params = { definitionId, conversationId, currentStage: "gather-context" };
+
+    const first = await tx((trx) =>
+      runStore.insertOrRecoverRun(trx, { ...params, idempotencyKey: "k1" }),
+    );
+    const second = await tx((trx) =>
+      runStore.insertOrRecoverRun(trx, { ...params, idempotencyKey: "k1" }),
+    );
+    expect(first.kind).toBe("new");
+    expect(second.kind).toBe("recovered");
+    expect(second.row.id).toBe(first.row.id);
+    expect(first.row).toMatchObject({
+      status: "running",
+      iteration: 0,
+      stageOutputs: {},
+      idempotencyKey: "k1",
+    });
+
+    const other = await tx((trx) =>
+      runStore.insertOrRecoverRun(trx, { ...params, idempotencyKey: "k2" }),
+    );
+    expect(other.kind).toBe("new");
+    expect(other.row.id).not.toBe(first.row.id);
+  });
+
+  it("getRunByIdempotencyKey finds a keyed run and nothing else", async () => {
+    const { conversationId, definitionId } = await seedDefinitionAndConversation();
+    const { row } = await tx((trx) =>
+      runStore.insertOrRecoverRun(trx, {
+        definitionId,
+        conversationId,
+        currentStage: "gather-context",
+        idempotencyKey: "k-lookup",
+      }),
+    );
+    expect((await tx((trx) => runStore.getRunByIdempotencyKey(trx, "k-lookup")))?.id).toBe(row.id);
+    expect(await tx((trx) => runStore.getRunByIdempotencyKey(trx, "nope"))).toBeUndefined();
+  });
+
+  it("unkeyed runs never collide on the unique", async () => {
+    const { conversationId, definitionId } = await seedDefinitionAndConversation();
+    const params = { definitionId, conversationId, currentStage: "gather-context" };
+    const a = await tx((trx) => runStore.createRun(trx, params));
+    const b = await tx((trx) => runStore.createRun(trx, params));
+    expect(a.id).not.toBe(b.id);
+    expect(a.idempotencyKey).toBeNull();
+  });
+
+  it("recovers a run that has since advanced without resetting it", async () => {
+    const { conversationId, definitionId } = await seedDefinitionAndConversation();
+    const params = {
+      definitionId,
+      conversationId,
+      currentStage: "gather-context",
+      idempotencyKey: "k-adv",
+    };
+    const first = await tx((trx) => runStore.insertOrRecoverRun(trx, params));
+    await tx((trx) =>
+      runStore.advanceStage(trx, {
+        runId: first.row.id,
+        fromStage: "gather-context",
+        output: { kind: "text", text: "scope" },
+        toStage: "plan-gate",
+      }),
+    );
+    const recovered = await tx((trx) => runStore.insertOrRecoverRun(trx, params));
+    expect(recovered.kind).toBe("recovered");
+    expect(recovered.row.currentStage).toBe("plan-gate");
+    expect(recovered.row.stageOutputs).toEqual({
+      "gather-context": { kind: "text", text: "scope" },
+    });
+  });
+
+  it("getRunWithDefinition joins the pinned definition", async () => {
+    const { userId, conversationId, definitionId } = await seedDefinitionAndConversation();
+    const run = await tx((trx) =>
+      runStore.createRun(trx, { definitionId, conversationId, currentStage: "gather-context" }),
+    );
+    const joined = await tx((trx) => runStore.getRunWithDefinition(trx, run.id));
+    expect(joined?.run.id).toBe(run.id);
+    expect(joined?.definition).toMatchObject({ id: definitionId, userId, name: "issue-to-pr" });
+    expect(joined?.definition.compiled.stages.map((s) => s.id)).toEqual([
+      "gather-context",
+      "plan-gate",
+      "implement",
+    ]);
+    expect(await tx((trx) => runStore.getRunWithDefinition(trx, randomUUID()))).toBeUndefined();
   });
 });

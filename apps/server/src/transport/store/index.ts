@@ -44,15 +44,30 @@ export type PersistInboundParams =
     }
   | {
       source: "scheduled";
-      scheduledFireKey: string;
+      idempotencyKey: string;
+      conversationId: string;
+      content: InboundContent;
+      platformTs: Date;
+    }
+  | {
+      /**
+       * A pipeline stage's prompt. `idempotencyKey` carries the stage
+       * cursor `pipeline:<runId>:<stageId>:<iteration>` — the same unique
+       * idempotency column scheduled fires use, namespaced so the two key
+       * spaces cannot collide.
+       */
+      source: "pipeline";
+      idempotencyKey: string;
       conversationId: string;
       content: InboundContent;
       platformTs: Date;
     };
 
-/** `(channelId, platformAddress, receive)` tuple from `findReachableChannelsForUserProfile`. */
+/** `(channelId, channelType, platformAddress, receive)` tuple from `findReachableChannelsForUserProfile`. */
 export interface ReachableChannel {
   channelId: string;
+  /** `channels.type` — lets callers require a channel with a given capability. */
+  channelType: string;
   platformAddress: string;
   receive: ChannelSessionReceive;
 }
@@ -155,8 +170,10 @@ export interface TransportStore {
    * Persist a raw inbound message. The `source` discriminator selects which
    * additional fields must be supplied:
    *   - `'user'` → `channelSessionId` (originating session).
-   *   - `'scheduled'` → `scheduledFireKey` (idempotency key
+   *   - `'scheduled'` → `idempotencyKey` (idempotency key
    *     `${taskId}:${scheduledFor}`; UNIQUE WHERE NOT NULL).
+   *   - `'pipeline'` → `idempotencyKey` (idempotency key
+   *     `pipeline:${runId}:${stageId}:${iteration}`; same UNIQUE).
    * The DB check constraint enforces this; the type narrows it at the
    * call site.
    */
@@ -168,9 +185,9 @@ export interface TransportStore {
    * fire-handler to short-circuit a retry that lands after the original
    * tx committed but before Inngest got the step ack.
    */
-  findInboundByScheduledFireKey(
+  findInboundByIdempotencyKey(
     tx: Transaction,
-    scheduledFireKey: string,
+    idempotencyKey: string,
   ): Promise<{ id: string; conversationId: string } | undefined>;
 
   /** Load unbatched inbound messages after a cursor (null = all). */
@@ -532,8 +549,8 @@ export class DrizzleTransportStore implements TransportStore {
             platformTs: params.platformTs,
           }
         : {
-            source: "scheduled" as const,
-            scheduledFireKey: params.scheduledFireKey,
+            source: params.source,
+            idempotencyKey: params.idempotencyKey,
             conversationId: params.conversationId,
             content: params.content,
             platformTs: params.platformTs,
@@ -543,14 +560,14 @@ export class DrizzleTransportStore implements TransportStore {
     );
   }
 
-  async findInboundByScheduledFireKey(
+  async findInboundByIdempotencyKey(
     tx: Transaction,
-    scheduledFireKey: string,
+    idempotencyKey: string,
   ): Promise<{ id: string; conversationId: string } | undefined> {
     const rows = await tx
       .select({ id: inboundMessages.id, conversationId: inboundMessages.conversationId })
       .from(inboundMessages)
-      .where(eq(inboundMessages.scheduledFireKey, scheduledFireKey))
+      .where(eq(inboundMessages.idempotencyKey, idempotencyKey))
       .limit(1);
     return rows[0];
   }
@@ -560,7 +577,12 @@ export class DrizzleTransportStore implements TransportStore {
     conversationId: string,
     afterId: string | null,
   ): Promise<ReadonlyArray<{ id: string; content: InboundContent; source: InboundMessageSource }>> {
-    const conditions = [eq(inboundMessages.conversationId, conversationId)];
+    // Pipeline-stage prompts are consumed by the stage runner, never by a
+    // chat turn — batching one would replay the stage as chat input.
+    const conditions = [
+      eq(inboundMessages.conversationId, conversationId),
+      ne(inboundMessages.source, "pipeline"),
+    ];
     if (afterId) {
       conditions.push(gt(inboundMessages.id, afterId));
     }
@@ -1028,11 +1050,13 @@ export class DrizzleTransportStore implements TransportStore {
     return tx
       .selectDistinctOn([channelSessions.channelId, channelSessions.platformAddress], {
         channelId: channelSessions.channelId,
+        channelType: channels.type,
         platformAddress: channelSessions.platformAddress,
         receive: channelSessions.receive,
       })
       .from(channelSessions)
       .innerJoin(conversations, eq(conversations.id, channelSessions.conversationId))
+      .innerJoin(channels, eq(channels.id, channelSessions.channelId))
       .where(
         and(
           eq(conversations.userId, userId),

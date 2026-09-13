@@ -300,13 +300,13 @@ describe("DrizzleTransportStore", () => {
       expect(await tx((trx) => store.getUnbatchedInbound(trx, conversationId, null))).toEqual([]);
     });
 
-    it("persists a scheduled inbound and finds it by scheduledFireKey", async () => {
+    it("persists a scheduled inbound and finds it by idempotencyKey", async () => {
       const { conversationId } = await seedConversation();
 
       const { id } = await tx((trx) =>
         store.persistInbound(trx, {
           source: "scheduled",
-          scheduledFireKey: "task-1:2026-05-14T09:00:00.000Z",
+          idempotencyKey: "task-1:2026-05-14T09:00:00.000Z",
           conversationId,
           content: "morning briefing",
           platformTs: new Date("2026-05-14T09:00:00.000Z"),
@@ -314,25 +314,25 @@ describe("DrizzleTransportStore", () => {
       );
 
       const found = await tx((trx) =>
-        store.findInboundByScheduledFireKey(trx, "task-1:2026-05-14T09:00:00.000Z"),
+        store.findInboundByIdempotencyKey(trx, "task-1:2026-05-14T09:00:00.000Z"),
       );
       expect(found).toEqual({ id, conversationId });
 
       const missing = await tx((trx) =>
-        store.findInboundByScheduledFireKey(trx, "task-1:2026-05-14T10:00:00.000Z"),
+        store.findInboundByIdempotencyKey(trx, "task-1:2026-05-14T10:00:00.000Z"),
       );
       expect(missing).toBeUndefined();
     });
 
-    it("rejects a second scheduled inbound with the same scheduledFireKey", async () => {
+    it("rejects a second scheduled inbound with the same idempotencyKey", async () => {
       // The partial unique index is the DB-level safety net against a
-      // concurrent retry that slips past `findInboundByScheduledFireKey`.
+      // concurrent retry that slips past `findInboundByIdempotencyKey`.
       const { conversationId } = await seedConversation();
       const insert = (key: string) =>
         tx((trx) =>
           store.persistInbound(trx, {
             source: "scheduled",
-            scheduledFireKey: key,
+            idempotencyKey: key,
             conversationId,
             content: "ping",
             platformTs: new Date(),
@@ -343,7 +343,7 @@ describe("DrizzleTransportStore", () => {
       await expect(insert("task-1:2026-05-14T09:00:00.000Z")).rejects.toThrow();
     });
 
-    it("rejects a scheduled inbound without a scheduledFireKey at the DB constraint", async () => {
+    it("rejects a scheduled inbound without a idempotencyKey at the DB constraint", async () => {
       // Type narrowing prevents a TS caller from constructing this shape,
       // but the check constraint must also catch raw inserts (migrations,
       // adhoc psql, future store changes).
@@ -354,6 +354,69 @@ describe("DrizzleTransportStore", () => {
             source: "scheduled",
             conversationId,
             content: "ping",
+            platformTs: new Date(),
+          });
+        }),
+      ).rejects.toThrow();
+    });
+
+    it("persists a pipeline-stage inbound keyed on the stage cursor", async () => {
+      const { conversationId } = await seedConversation();
+      const key = "pipeline:019d0000-0000-7000-8000-0000000000aa:gather-context:0";
+
+      const { id } = await tx((trx) =>
+        store.persistInbound(trx, {
+          source: "pipeline",
+          idempotencyKey: key,
+          conversationId,
+          content: "stage prompt",
+          platformTs: new Date("2026-09-12T09:00:00.000Z"),
+        }),
+      );
+
+      expect(await tx((trx) => store.findInboundByIdempotencyKey(trx, key))).toEqual({
+        id,
+        conversationId,
+      });
+    });
+
+    it("leaves pipeline-stage inbounds out of the chat turn's unbatched read", async () => {
+      // A stage prompt is consumed by the stage runner, never by
+      // handle-message — batching it would replay the stage as chat input.
+      const channelId = await seedChannel();
+      const { conversationId } = await seedConversation();
+      const sessionId = await seedSession(channelId, conversationId, "addr-1");
+      const user = await tx((trx) =>
+        store.persistInbound(trx, {
+          source: "user",
+          channelSessionId: sessionId,
+          conversationId,
+          content: "hello",
+          platformTs: new Date(),
+        }),
+      );
+      await tx((trx) =>
+        store.persistInbound(trx, {
+          source: "pipeline",
+          idempotencyKey: "pipeline:run-1:draft:0",
+          conversationId,
+          content: "stage prompt",
+          platformTs: new Date(),
+        }),
+      );
+
+      const unbatched = await tx((trx) => store.getUnbatchedInbound(trx, conversationId, null));
+      expect(unbatched.map((r) => r.id)).toEqual([user.id]);
+    });
+
+    it("rejects a pipeline inbound without a key at the DB constraint", async () => {
+      const { conversationId } = await seedConversation();
+      await expect(
+        tx(async (trx) => {
+          await trx.insert(inboundMessagesTable).values({
+            source: "pipeline",
+            conversationId,
+            content: "stage prompt",
             platformTs: new Date(),
           });
         }),
@@ -901,7 +964,9 @@ describe("DrizzleTransportStore", () => {
       const result = await tx((trx) =>
         store.findReachableChannelsForUserProfile(trx, userId, profileId),
       );
-      expect(result).toEqual([{ channelId, platformAddress: "addr-1", receive: "routed" }]);
+      expect(result).toEqual([
+        { channelId, channelType: "direct", platformAddress: "addr-1", receive: "routed" },
+      ]);
     });
 
     it("returns an empty array when the user has no prior session for the profile", async () => {
@@ -974,7 +1039,9 @@ describe("DrizzleTransportStore", () => {
       const result = await tx((trx) =>
         store.findReachableChannelsForUserProfile(trx, userId, profileId),
       );
-      expect(result).toEqual([{ channelId, platformAddress: "shared-addr", receive: "routed" }]);
+      expect(result).toEqual([
+        { channelId, channelType: "direct", platformAddress: "shared-addr", receive: "routed" },
+      ]);
     });
 
     it("scopes by both userId AND profileId — does not leak across users", async () => {

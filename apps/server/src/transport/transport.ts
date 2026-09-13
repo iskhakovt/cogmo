@@ -6,6 +6,8 @@ import type { CodingStore } from "../agent/coding/store/index.js";
 import type { CompactConversationResult } from "../agent/conversation/compact-conversation.js";
 import { isCoreCompartment } from "../agent/evolution/memory-extraction-schema.js";
 import type { TriggerReflectionResult } from "../agent/evolution/trigger-reflection.js";
+import { gateToken } from "../agent/pipeline/gate-keyboard.js";
+import type { PipelineRunStore } from "../agent/pipeline/store/index.js";
 import type { AutoRecallMode } from "../agent/recall-gate.js";
 import type { ScheduledTaskSummary } from "../agent/scheduling/scheduling-service.js";
 import {
@@ -37,6 +39,8 @@ import {
   type CooldownClearedBy,
   calculateElapsedCooldown,
   type inboundArrived as InboundArrivedEvent,
+  pipelineGateKey,
+  pipelineGateResolved,
 } from "../inngest/events.js";
 import { AllProvidersFailedError, extractStatus } from "../llm/fallback.js";
 import { computeBudget, resolveLimits } from "../llm/models.js";
@@ -316,6 +320,9 @@ export type TransportError =
   | { code: "skill_deploy_not_found"; pendingId: string }
   | { code: "skill_deploy_not_pending"; pendingId: string; status: string }
   | { code: "skill_deploy_register_failed"; pendingId: string; reason: string }
+  | { code: "pipelines_disabled" }
+  | { code: "pipeline_run_not_found"; runId: string }
+  | { code: "pipeline_gate_not_pending"; runId: string; status: string }
   | { code: "mcp_disabled" }
   | { code: "mcp_server_not_found"; serverId: string }
   | { code: "mcp_server_name_taken"; name: string }
@@ -712,6 +719,29 @@ export interface Transport {
   };
 
   /**
+   * Pipeline gate checkpoints — the Approve / Cancel keyboard on a run parked
+   * at `waiting_gate`. Identity-checked against the owner of the run's pinned
+   * definition. Returns `pipelines_disabled` when no run store is wired.
+   */
+  pipelines: {
+    /**
+     * Emit `pipeline/gate.resolved` for the gate the run is parked on, if
+     * `gateToken` names that gate — a button left over from an earlier gate
+     * of the same run is refused. The tapper is identified before the run is
+     * looked up, so an unknown tapper learns nothing about which runs exist.
+     * The status check here is advisory — it gives a late tap a precise answer —
+     * while `pipeline-gate-resolver`'s conditional transition decides a tap
+     * racing the gate's own timeout.
+     */
+    resolveGate(
+      runId: string,
+      gateToken: string,
+      action: "approve" | "cancel",
+      tapperPlatformHandle: string,
+    ): Promise<Result<{ runId: string; pipelineName: string; stageId: string }, TransportError>>;
+  };
+
+  /**
    * Skills-deploy approval surface for the approve-tier inline keyboard.
    * Mirrors the `coding` namespace shape: identity-checked, calls into the
    * existing `SkillRunner` RPCs, returns `Result` with skills-specific
@@ -933,6 +963,11 @@ export function createTransport(deps: {
    */
   skillStore?: SkillStore;
   /**
+   * Run store for the pipeline gate callback. Optional — when undefined,
+   * `pipelines.*` returns `pipelines_disabled`.
+   */
+  pipelineRunStore?: PipelineRunStore;
+  /**
    * MCP client registry. Production bootstrap always supplies it (the
    * registry is lazy-connect, so it carries zero cost when unused).
    * Optional only so tests don't have to wire a real registry when they
@@ -979,6 +1014,7 @@ export function createTransport(deps: {
     reposDir,
     skillRunner,
     skillStore,
+    pipelineRunStore,
     mcpRegistry,
     triggerReflection,
     compactConversation,
@@ -2169,6 +2205,43 @@ export function createTransport(deps: {
           case "not_found":
             return err({ code: "task_not_found" as const, taskId });
         }
+      },
+    },
+
+    pipelines: {
+      async resolveGate(runId, token, action, tapperPlatformHandle) {
+        if (!pipelineRunStore) return err({ code: "pipelines_disabled" as const });
+        const checked = await runInTx(async (tx) => {
+          const tapper = await transportStore.resolveUser(tx, channelId, tapperPlatformHandle);
+          if (!tapper) return err({ code: "identity_rejected" as const });
+          const loaded = await pipelineRunStore.getRunWithDefinition(tx, runId);
+          if (!loaded) return err({ code: "pipeline_run_not_found" as const, runId });
+          const { run, definition } = loaded;
+          if (tapper.userId !== definition.userId) {
+            return err({ code: "identity_rejected" as const });
+          }
+          const gateKey = pipelineGateKey(run.id, run.currentStage, run.iteration);
+          if (run.status !== "waiting_gate" || gateToken(gateKey) !== token) {
+            return err({ code: "pipeline_gate_not_pending" as const, runId, status: run.status });
+          }
+          return ok({
+            gateKey,
+            conversationId: run.conversationId,
+            pipelineName: definition.name,
+            stageId: run.currentStage,
+          });
+        });
+        if (checked.isErr()) return err(checked.error);
+        const { gateKey, conversationId, pipelineName, stageId } = checked.value;
+        await inngest.send(
+          pipelineGateResolved.create({
+            runId,
+            gateKey,
+            conversationId,
+            decision: action === "approve" ? "approved" : "cancelled",
+          }),
+        );
+        return ok({ runId, pipelineName, stageId });
       },
     },
 

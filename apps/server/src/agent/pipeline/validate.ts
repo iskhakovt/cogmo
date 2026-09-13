@@ -118,12 +118,28 @@ export function validateDefinition(
       }
     }
 
-    if (stage.output?.kind === "json" && !ajv.validateSchema(stage.output.schema)) {
-      const detail = ajv.errors?.map((e) => `${e.instancePath || "/"} ${e.message}`).join("; ");
-      issues.push({
-        path: at("output.schema"),
-        message: `not a valid JSON Schema: ${detail ?? "unknown error"}`,
-      });
+    if (stage.output?.kind === "json") {
+      if (!ajv.validateSchema(stage.output.schema)) {
+        const detail = ajv.errors?.map((e) => `${e.instancePath || "/"} ${e.message}`).join("; ");
+        issues.push({
+          path: at("output.schema"),
+          message: `not a valid JSON Schema: ${detail ?? "unknown error"}`,
+        });
+      } else {
+        // Meta-schema validity doesn't guarantee the schema compiles (a `$ref`
+        // that resolves nowhere). A fresh instance per check, so one schema's
+        // `$id` can't collide with another's.
+        try {
+          new Ajv({ strict: false }).compile(stage.output.schema);
+        } catch (compileError) {
+          const detail =
+            compileError instanceof Error ? compileError.message : String(compileError);
+          issues.push({
+            path: at("output.schema"),
+            message: `JSON Schema can't be compiled: ${detail}`,
+          });
+        }
+      }
     }
 
     if (stage.wait !== undefined && !ctx.knownEventSources.includes(stage.wait.event)) {
