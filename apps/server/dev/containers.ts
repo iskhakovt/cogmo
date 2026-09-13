@@ -115,7 +115,7 @@ export function inngest(network: StartedNetwork, opts?: { appUrl?: string }) {
   if (opts?.appUrl) {
     cmd.push("-u", opts.appUrl);
   }
-  return new GenericContainer("mirror.gcr.io/inngest/inngest:v1.41.1")
+  return new GenericContainer("mirror.gcr.io/inngest/inngest:v1.44.0")
     .withNetwork(network)
     .withNetworkAliases("inngest")
     .withExposedPorts(8288, 8289)
@@ -191,7 +191,7 @@ export function hindsight(
   // the Control Plane web UI (which Cogmo never talks to). Pinned within
   // `cogmo.hindsightCompat`: a floating `latest` drifts past the range and
   // trips the boot version check.
-  return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:0.9.1")
+  return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:0.9.2")
     .withNetwork(network)
     .withNetworkAliases("hindsight")
     .withExposedPorts(8888)
@@ -252,7 +252,7 @@ export function hindsightSlim(
 
   // Pin version — floating `latest-slim` breaks llmock fixtures when Hindsight
   // changes its LLM request format. Update version + re-record fixtures together.
-  return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:0.9.1-slim")
+  return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:0.9.2-slim")
     .withNetwork(network)
     .withNetworkAliases("hindsight")
     .withExposedPorts(8888)

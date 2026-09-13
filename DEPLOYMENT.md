@@ -202,7 +202,7 @@ HINDSIGHT_API_TENANT_API_KEY=<same value as HINDSIGHT_API_KEY>
 ```
 
 The key does not cover everything:
-- **Open routes:** `/health`, `/version`, `/metrics`, `/docs` and `/openapi.json` still answer without it (verified on 0.9.1).
+- **Open routes:** `/health`, `/version`, `/metrics`, `/docs` and `/openapi.json` still answer without it (verified on 0.9.2).
 - **MCP endpoint:** uses the same key unless `HINDSIGHT_API_TENANT_MCP_AUTH_DISABLED` is set.
 - **Control Plane UI:** a separate app with its own `HINDSIGHT_CP_ACCESS_KEY`. Cogmo does not use it — use the API-only image.
 
@@ -230,7 +230,7 @@ inngest start \
 
 `inngest start` itself refuses to run without both keys, and the signing key must be hex. Regenerating them on a restart breaks Cogmo's boot until its values are updated to match.
 
-Keys cover events, the REST API and app sync. They do **not** cover everything on the server (verified on v1.41.1):
+Keys cover events, the REST API and app sync. They do **not** cover everything on the server (verified on v1.44.0):
 
 - **Dashboard and GraphQL API (port 8288).** Both are served with no auth, and GraphQL can `invokeFunction` and `rerun`. Pass `--no-ui`, which removes both; you lose the Inngest dashboard. If you need the dashboard, keep port 8288 reachable only from Cogmo and an authenticating proxy.
 - **`/metrics` and `/debug/pprof`.** Also open.
