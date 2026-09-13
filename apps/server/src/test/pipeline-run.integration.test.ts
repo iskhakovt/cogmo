@@ -97,7 +97,7 @@ let telegramChannelId: string;
 
 const outbound: Array<{ platformAddress: string; content: string }> = [];
 const settled: Array<{ gateKey: string }> = [];
-const stagesDue: Array<{ runId: string; stageId: string }> = [];
+const stagesDue: Array<{ id: string | undefined; runId: string; stageId: string }> = [];
 
 beforeAll(async () => {
   // Mirrors `dev/containers.ts → inngest(...)`, without the shared network:
@@ -134,7 +134,7 @@ beforeAll(async () => {
     app.inngest.createFunction(
       { id: "test-capture-stage-due", triggers: [pipelineStageDue] },
       async ({ event }) => {
-        stagesDue.push({ runId: event.data.runId, stageId: event.data.stageId });
+        stagesDue.push({ id: event.id, runId: event.data.runId, stageId: event.data.stageId });
       },
     ),
   ];
@@ -254,6 +254,7 @@ async function waitForRun(
   runId: string,
   ready: (run: Awaited<ReturnType<typeof readRun>>) => boolean,
   label: string,
+  timeoutMs: number,
 ) {
   return vi.waitFor(
     async () => {
@@ -262,7 +263,7 @@ async function waitForRun(
         throw new Error(`run ${runId} not ${label} yet (${run.status} at ${run.currentStage})`);
       return run;
     },
-    { timeout: 45_000, interval: 250 },
+    { timeout: timeoutMs, interval: 250 },
   );
 }
 
@@ -303,6 +304,9 @@ describe("pipeline run engine", () => {
       runId,
       (run) => run.status === "waiting_gate",
       "parked on its gate",
+      // Under the stage runner's 30s origin-turn timeout: parking in time
+      // proves the wait was satisfied by a `response/ready`, not timed out.
+      20_000,
     ).finally(() => clearInterval(turnFinished));
 
     expect(parked.currentStage).toBe("approve");
@@ -314,7 +318,12 @@ describe("pipeline run engine", () => {
       pipelineGateResolved.create({ runId, gateKey, conversationId, decision: "approved" }),
     );
 
-    const completed = await waitForRun(runId, (run) => run.status === "completed", "completed");
+    const completed = await waitForRun(
+      runId,
+      (run) => run.status === "completed",
+      "completed",
+      45_000,
+    );
     expect(completed.stageOutputs).toEqual({
       draft: { kind: "text", text: DRAFT_REPLY },
       build: { kind: "text", text: BUILD_REPLY },
@@ -322,16 +331,14 @@ describe("pipeline run engine", () => {
     expect(completed.gateResolution).toEqual({ gateKey, resolverRunId: expect.any(String) });
     await waitForOutbound(seeded.directAddress, `✅ Pipeline "${seeded.name}" completed.`);
 
-    // The waiter's cancel signal went out for this gate, and each stage was
-    // scheduled exactly once.
-    await vi.waitFor(() => expect(settled.filter((s) => s.gateKey === gateKey)).toHaveLength(1), {
-      timeout: 10_000,
-      interval: 250,
-    });
+    // Read after the last delivery, so a late duplicate would already be here:
+    // the waiter's cancel went out once for this gate, and each stage was
+    // scheduled once, under its run-cursor dedup id.
+    expect(settled.filter((s) => s.gateKey === gateKey)).toHaveLength(1);
     const dueFor = (stageId: string) =>
-      stagesDue.filter((d) => d.runId === runId && d.stageId === stageId);
-    expect(dueFor("draft")).toHaveLength(1);
-    expect(dueFor("build")).toHaveLength(1);
+      stagesDue.filter((d) => d.runId === runId && d.stageId === stageId).map((d) => d.id);
+    expect(dueFor("draft")).toEqual([`pipeline-stage-due-${runId}-draft-0`]);
+    expect(dueFor("build")).toEqual([`pipeline-stage-due-${runId}-build-0`]);
 
     // One persisted stage prompt per agentic stage, keyed on the run cursor.
     const prompts = await db
@@ -356,7 +363,12 @@ describe("pipeline run engine", () => {
       await startRun({ name: seeded.name, profileId: seeded.profileId })
     )._unsafeUnwrap();
 
-    const completed = await waitForRun(runId, (run) => run.status === "completed", "completed");
+    const completed = await waitForRun(
+      runId,
+      (run) => run.status === "completed",
+      "completed",
+      45_000,
+    );
 
     expect(completed.stageOutputs).toEqual({
       draft: { kind: "text", text: DRAFT_REPLY },

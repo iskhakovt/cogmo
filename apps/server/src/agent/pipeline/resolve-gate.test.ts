@@ -360,6 +360,31 @@ describe("inspectFailedResolution", () => {
     });
   });
 
+  it("reports a run it already failed as failed when the check re-runs after its commit", async () => {
+    // The failure commits inside a step; if the step's result is lost, the
+    // re-run finds the run failed with this reason and must still say so,
+    // or the "run stopped" notice is never sent.
+    const { runId, gateKey, conversationId } = await parkedRun("approve");
+    const args = { runId, gateKey, resolverRunId: "r-1", failParkedRunWith: REASON };
+    await inspectFailedResolution(deps(), args);
+
+    expect(await inspectFailedResolution(deps(), args)).toEqual({ kind: "failed", conversationId });
+  });
+
+  it("doesn't claim a run failed for another reason", async () => {
+    const { runId, gateKey } = await parkedRun("approve");
+    await tx((trx) => runStore.failRun(trx, runId, "build failed"));
+
+    expect(
+      await inspectFailedResolution(deps(), {
+        runId,
+        gateKey,
+        resolverRunId: "r-1",
+        failParkedRunWith: REASON,
+      }),
+    ).toMatchObject({ kind: "stale", status: "failed" });
+  });
+
   it("leaves a run that moved on alone even when asked to fail a parked one", async () => {
     const { runId, gateKey } = await parkedRun("approve");
     await resolveGate(deps(), { runId, gateKey, decision: "approved", resolverRunId: "r-tap" });

@@ -72,7 +72,8 @@ const DEFAULT_MAX_TIMEOUT_MS = 10_000;
 export function withRetry<T>(fn: () => Promise<T>, opts?: RetryOptions): Promise<T> {
   // Tests opt out via RETRY_DISABLED so transient failures surface as
   // hard test failures instead of being silently smoothed over by a
-  // retry. Essential retries (see `RetryOptions.essential`) stay on. Retry behaviour itself is exercised in with-retry.test.ts;
+  // retry. Essential retries (see `RetryOptions.essential`) stay on.
+  // Retry behaviour itself is exercised in with-retry.test.ts;
   // integration and e2e tests verify the pipeline, not the retry layer.
   // Production never sets this var.
   // Test-only escape hatch — read at call time so `vi.stubEnv` works.

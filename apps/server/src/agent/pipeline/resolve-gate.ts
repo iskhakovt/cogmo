@@ -138,7 +138,17 @@ export async function inspectFailedResolution(
     const parked =
       run.status === "waiting_gate" &&
       pipelineGateKey(run.id, run.currentStage, run.iteration) === args.gateKey;
-    if (!parked) return staleOutcome(run, definition, args);
+    if (!parked) {
+      // This check's own failure, committed by an earlier run of the step
+      // whose result was lost: report it, so the notice still goes out.
+      const failedByThis =
+        args.failParkedRunWith !== null &&
+        run.status === "failed" &&
+        run.failureReason === args.failParkedRunWith;
+      return failedByThis
+        ? { kind: "failed", conversationId: run.conversationId }
+        : staleOutcome(run, definition, args);
+    }
     if (args.failParkedRunWith === null) return { kind: "parked" };
     const failed = await deps.runStore.failRun(tx, run.id, args.failParkedRunWith);
     if (failed.kind !== "failed") {

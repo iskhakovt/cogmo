@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PIPELINE_RUN_STATUSES } from "./enums.js";
 import type { TransportError } from "./transport.js";
 
 /**
@@ -65,15 +66,7 @@ export const TransportErrorSchema = z.discriminatedUnion("code", [
   z.object({
     code: z.literal("pipeline_gate_not_pending"),
     runId: z.string(),
-    status: z.enum([
-      "queued",
-      "running",
-      "waiting_gate",
-      "waiting_event",
-      "completed",
-      "failed",
-      "cancelled",
-    ]),
+    status: z.enum(PIPELINE_RUN_STATUSES),
   }),
   z.object({ code: z.literal("mcp_disabled") }),
   z.object({ code: z.literal("mcp_server_not_found"), serverId: z.string() }),

@@ -541,13 +541,6 @@ export interface PipelineGateCallbackOutcome {
   clearKeyboard: boolean;
 }
 
-/**
- * Pure handler for Approve / Cancel taps on a pipeline gate keyboard.
- * Identity, the gate token and the parked-gate check live in
- * `transport.pipelines`; this only renders what the adapter writes back over
- * the keyboard. The text says the decision was sent, not that it won: a tap
- * can still lose to the gate's own timeout, and the resolver reports that.
- */
 /** Why a gate button can't act, told from where the run is. */
 function gateNotPendingMessage(status: PipelineRunStatus): string {
   return match(status)
@@ -567,6 +560,13 @@ function gateNotPendingMessage(status: PipelineRunStatus): string {
     .exhaustive();
 }
 
+/**
+ * Pure handler for Approve / Cancel taps on a pipeline gate keyboard.
+ * Identity, the gate token and the parked-gate check live in
+ * `transport.pipelines`; this only renders what the adapter writes back over
+ * the keyboard. The text says the decision was sent, not that it won: a tap
+ * can still lose to the gate's own timeout, and the resolver reports that.
+ */
 export async function handlePipelineGateCallback(
   transport: Transport,
   parsed: { runId: string; action: "approve" | "cancel"; token: string },
