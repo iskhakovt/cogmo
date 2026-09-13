@@ -7,6 +7,7 @@ import { conversations, messages } from "../agent/store/schema.js";
 import { db } from "../db/index.js";
 import { bootstrap } from "../index.js";
 import { channelSessions, inboundMessages } from "../transport/store/schema.js";
+import { workerInngestBaseUrl } from "./worker-inngest.js";
 
 /**
  * LLM-driven MCP pipeline integration test. Drives `handle-message`
@@ -51,7 +52,7 @@ let mcpServerId: string | undefined;
 const MCP_SERVER_NAME = "echotest";
 
 beforeAll(async () => {
-  inngestBaseUrl = inject("inngestBaseUrl");
+  inngestBaseUrl = workerInngestBaseUrl();
 
   const { AnthropicProvider } = await import("../llm/anthropic.js");
   const anthropicKey =

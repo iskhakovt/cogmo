@@ -1,0 +1,5 @@
+**Each integration worker gets its own Inngest dev server, ending cross-fork event fan-out.** Integration forks shared one Inngest dev server and registered under unique app ids. Functions subscribe by event name, not by app, so every fork's app ran every `inbound/arrived` event any fork sent. With a per-turn log of `INNGEST_APP_ID` over the five `bootstrap()` files, 4 of 6 conversations were run by more than one fork, and one by three.
+
+That was the cause of the `pipeline.integration.test.ts` → "emits gen_ai chat spans + token metrics" flake. `waitForAssistantMessage` returned on whichever fork persisted first. A fork that lost the persist race never recorded `cogmo.agent.iterations`, so the assertion in the fork that sent the event could never be satisfied.
+
+`test/integration-setup.ts` starts one `inngest dev` per worker slot (`maxWorkers`, about 40 MiB and under half a second each) and provides their URLs as `inngestWorkers`. `test/integration-setup-per-fork.ts` points each fork at its slot's server by `VITEST_POOL_ID`. Tests read it back through `workerInngestBaseUrl()`.

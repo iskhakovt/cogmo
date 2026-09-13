@@ -33,7 +33,7 @@ let askpassPath: string | null = null;
  */
 const TELEGRAM_TEST_BOT_TOKEN = "1234567890:fake-test-token";
 
-export async function setup({ provide }: GlobalSetupContext) {
+export async function setup({ provide, globalConfig }: GlobalSetupContext) {
   network = await new Network().start();
 
   mock = createMock();
@@ -43,13 +43,14 @@ export async function setup({ provide }: GlobalSetupContext) {
   console.log(`llmock at ${mock.url}, reachable from containers at ${llmockBase}`);
 
   console.log("Starting containers...");
-  const [pg, _rd, inn, mn] = await Promise.all([
+  // One Inngest per worker slot — see `integration-setup-per-fork.ts`.
+  const [pg, _rd, mn, ...inngestServers] = await Promise.all([
     c.postgres(network).start(),
     c.redis(network).start(),
-    c.inngest(network).start(),
     c.minio(network).start(),
+    ...Array.from({ length: globalConfig.maxWorkers }, () => c.inngest(network).start()),
   ]);
-  containers.push(pg, _rd, inn, mn);
+  containers.push(pg, _rd, mn, ...inngestServers);
 
   // Slim Hindsight — external LLM + embeddings via llmock (replays recorded fixtures)
   const llmockUrl = `${llmockBase}/v1`;
@@ -65,9 +66,16 @@ export async function setup({ provide }: GlobalSetupContext) {
     .start();
   containers.push(hindsightContainer);
 
-  const { hindsightUrl, s3Endpoint, ...urls } = c.getUrls({
+  const [firstInngest] = inngestServers;
+  if (!firstInngest) throw new Error("integration tests need at least one worker");
+  const {
+    hindsightUrl,
+    s3Endpoint,
+    inngestBaseUrl: _firstWorkerInngest,
+    ...urls
+  } = c.getUrls({
     postgres: pg,
-    inngest: inn,
+    inngest: firstInngest,
     hindsight: hindsightContainer,
     minio: mn,
   });
@@ -83,7 +91,6 @@ export async function setup({ provide }: GlobalSetupContext) {
   process.env.COGMO_MASTER_KEY = "bSK9MVRqsqWnRcp4oNTQLQ+LmKJT+BvUvzytD5LH4AE="; // 32 bytes base64 (test-only)
   process.env.HINDSIGHT_URL = hindsightUrl;
   process.env.HINDSIGHT_API_KEY = c.HINDSIGHT_TEST_API_KEY;
-  process.env.INNGEST_BASE_URL = urls.inngestBaseUrl;
   process.env.INNGEST_DEV = "true";
   process.env.DEBOUNCE_IDLE_SECONDS = "0";
   process.env.DEBOUNCE_MAXWAIT_SECONDS = "0";
@@ -119,8 +126,10 @@ export async function setup({ provide }: GlobalSetupContext) {
   skillsPath = await mkdtemp(join(tmpdir(), "cogmo-skills-it-"));
   process.env.COGMO_SKILLS_PATH = skillsPath;
 
-  const gatewayUrl = `ws://${inn.getHost()}:${inn.getMappedPort(8289)}/v0/connect`;
-  process.env.INNGEST_CONNECT_GATEWAY_URL = gatewayUrl;
+  const inngestWorkers = inngestServers.map((server) => ({
+    baseUrl: `http://${server.getHost()}:${server.getMappedPort(8288)}`,
+    gatewayUrl: `ws://${server.getHost()}:${server.getMappedPort(8289)}/v0/connect`,
+  }));
 
   // Telegram Bot API mock — listens on 127.0.0.1:<random>. Seeded into the
   // `channels` row's `apiRoot` credential below so every grammY API call from
@@ -178,7 +187,7 @@ export async function setup({ provide }: GlobalSetupContext) {
   await sql.end();
 
   provide("databaseUrl", urls.databaseUrl);
-  provide("inngestBaseUrl", urls.inngestBaseUrl);
+  provide("inngestWorkers", inngestWorkers);
   provide("inngestEventKey", "test");
   provide("hindsightUrl", hindsightUrl);
   provide("hindsightApiKey", c.HINDSIGHT_TEST_API_KEY);
