@@ -42,7 +42,9 @@ export type Transactor = <T>(callback: (tx: Transaction) => Promise<T>) => Promi
  * type, unlike `AbortError`). Worst-case added latency under ~50 ms,
  * well below Inngest's per-step overhead, so the inner retries are
  * effectively free for genuinely transient snapshot staleness;
- * persistent conflicts surface to Inngest's step-level retry budget.
+ * persistent conflicts surface to Inngest's step-level retry budget. The
+ * retry is `essential`: `RETRY_DISABLED` in tests leaves it on, since it is
+ * how concurrent writers resolve, not a transient failure being masked.
  *
  * Re-execution hazard: the `cb` may run up to 3 times on 40001. DB
  * work is safe — the failed attempt's tx rolls back — but anything
@@ -58,6 +60,7 @@ export function transactor(db: Database): Transactor {
       maxTimeoutMs: 50,
       shouldRetry: isSerializationFailure,
       context: "tx-serialization-retry",
+      essential: true,
     });
 }
 
