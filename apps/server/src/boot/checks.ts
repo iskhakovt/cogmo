@@ -2,25 +2,29 @@
  * Boot-time dependency checks.
  *
  * Each function probes one external dependency that production code paths
- * silently assume is in place. Run from `bootstrap()` in `src/index.ts`
- * after the dependency has been constructed but before the orchestrator
- * starts taking traffic — fail fast at boot beats failing mid-turn after
- * the user has already sent a message.
+ * silently assume is in place. `checkUuidv7` runs from `bootstrapCore`; the
+ * network probes run from `bootstrap()` in `src/index.ts` before the
+ * orchestrator starts taking traffic — fail fast at boot beats failing
+ * mid-turn after the user has already sent a message.
  *
  * Policy:
  * - **Hard fail at once (throw `BootCheckError`):** deterministic,
  *   deployment-shaped problems that won't self-heal — missing extension,
- *   missing bucket, wrong region, rejected credentials, a server that
- *   answers without auth, a version outside the supported range. Operator
- *   action required.
+ *   missing bucket, wrong region, missing or rejected credentials, a server
+ *   that answers without auth, a version outside the supported range, a
+ *   service URL with embedded credentials. Operator action required.
  * - **Retry, then hard fail:** a dependency that can't be reached, doesn't
  *   answer in time, or answers with a status that proves nothing either way.
- *   It gets `BOOT_PROBE_DEADLINE_MS` to become conclusive — long enough to
- *   ride out a restart during a deploy. Every attempt is bounded by
- *   `BOOT_PROBE_ATTEMPT_TIMEOUT_MS` and by the time left, so a request that
- *   hangs cannot hold boot past the deadline. Past it, boot fails closed: a
+ *   Each check gets `BOOT_PROBE_DEADLINE_MS` to become conclusive — long
+ *   enough to ride out a restart during a deploy — and makes its last attempt
+ *   close to the deadline rather than sleeping into it. Every attempt is
+ *   bounded by `BOOT_PROBE_ATTEMPT_TIMEOUT_MS` and by the time left, so a
+ *   request that hangs cannot overrun. Past the deadline boot fails closed: a
  *   supervisor restart loop is visible, a check that silently never ran is
  *   not.
+ *
+ * URLs that reach logs and errors carry no credential: query strings,
+ * fragments and userinfo are dropped, and the Inngest event key is redacted.
  */
 
 import { constants as fsConstants, readFileSync } from "node:fs";
@@ -38,7 +42,7 @@ export class BootCheckError extends Error {
   override readonly name = "BootCheckError";
 }
 
-/** How long a boot probe retries an inconclusive answer before failing closed. */
+/** How long one check retries an inconclusive answer before failing closed. */
 export const BOOT_PROBE_DEADLINE_MS = 60_000;
 /** Upper bound on one attempt, including every request it makes. */
 export const BOOT_PROBE_ATTEMPT_TIMEOUT_MS = 5_000;
@@ -47,6 +51,7 @@ const BOOT_PROBE_MAX_DELAY_MS = 10_000;
 
 /** Time source for boot probes — injected so retry and timeout tests do not wait. */
 export interface BootClock {
+  /** Monotonic milliseconds; only differences are meaningful. */
   now(): number;
   sleep(ms: number): Promise<void>;
   /** A signal that aborts after `ms`. */
@@ -54,7 +59,9 @@ export interface BootClock {
 }
 
 export const systemBootClock: BootClock = {
-  now: () => Date.now(),
+  // Monotonic: a wall-clock step at boot (NTP correcting an RTC-less host)
+  // must not end the deadline early or stretch it.
+  now: () => performance.now(),
   sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
   timeout: (ms) => AbortSignal.timeout(ms),
 };
@@ -71,6 +78,11 @@ function conclusive<T>(value: T): ProbeAttempt<T> {
  * `BOOT_PROBE_ATTEMPT_TIMEOUT_MS` or at the deadline, whichever is sooner;
  * the attempt must pass it to every request it makes. A `BootCheckError`
  * thrown by `attempt` is a deterministic verdict and propagates at once.
+ *
+ * Backoff never sleeps into the deadline: when little time is left, the wait
+ * shrinks so another attempt still fits, down to `BOOT_PROBE_MIN_DELAY_MS`
+ * between attempts. The last attempt therefore starts within that interval
+ * of the deadline.
  */
 async function retryUntilConclusive<T>(
   label: string,
@@ -93,7 +105,11 @@ async function retryUntilConclusive<T>(
     lastReason = result.reason;
     const left = deadline - clock.now();
     if (left <= 0) continue;
-    const wait = Math.min(delay, left);
+    const roomForAnotherAttempt = left - BOOT_PROBE_ATTEMPT_TIMEOUT_MS;
+    const wait = Math.min(
+      delay,
+      Math.max(roomForAnotherAttempt, Math.min(BOOT_PROBE_MIN_DELAY_MS, left)),
+    );
     logger.warn(
       { label, reason: result.reason, retryInMs: wait },
       `${label} inconclusive — retrying`,
@@ -197,11 +213,16 @@ function awsServiceError(
  * Verify the configured S3 bucket exists and credentials are valid.
  * `HeadBucket` is the cheapest probe — no list, no read, no write.
  *
- * The store's verdicts fail at once: a 4xx other than 429 (missing bucket,
- * bad credentials) and a 301, which is how S3 answers a bucket in another
- * region when the client does not follow region redirects. A network error,
- * timeout, 5xx, 429 or temporary redirect is retried up to the boot probe
- * deadline.
+ * The store's verdicts fail at once:
+ * - no credentials could be loaded (`CredentialsProviderError`, which has no
+ *   HTTP status because no request was sent);
+ * - a 301 — how S3 answers for a bucket in another region when the client
+ *   does not follow region redirects;
+ * - any other 4xx (missing bucket, bad credentials), except 429 and S3's
+ *   transient `400 RequestTimeout`.
+ *
+ * A network error, timeout, 5xx, 429, `RequestTimeout` or temporary redirect
+ * is retried up to the boot probe deadline.
  */
 export async function checkS3Bucket(s3: S3Client, bucket: string, clock: BootClock): Promise<void> {
   await retryUntilConclusive(`S3 bucket "${bucket}" check`, clock, async (signal) => {
@@ -209,6 +230,13 @@ export async function checkS3Bucket(s3: S3Client, bucket: string, clock: BootClo
       await s3.send(new HeadBucketCommand({ Bucket: bucket }), { abortSignal: signal });
       return conclusive(undefined);
     } catch (err) {
+      const name = err instanceof Error ? err.name : undefined;
+      if (name === "CredentialsProviderError") {
+        throw new BootCheckError(
+          `S3 credentials could not be loaded for bucket "${bucket}". Set S3_ACCESS_KEY and ` +
+            `S3_SECRET_KEY, or provide ambient AWS credentials. Underlying error: ${stringifyError(err)}`,
+        );
+      }
       const service = awsServiceError(err);
       if (service?.status === 301) {
         throw new BootCheckError(
@@ -217,12 +245,13 @@ export async function checkS3Bucket(s3: S3Client, bucket: string, clock: BootClo
             `Set S3_REGION to the bucket's region. Underlying error: ${stringifyError(err)}`,
         );
       }
-      if (
+      const isVerdict =
         service !== undefined &&
         service.status >= 400 &&
         service.status < 500 &&
-        service.status !== 429
-      ) {
+        service.status !== 429 &&
+        name !== "RequestTimeout";
+      if (isVerdict) {
         throw new BootCheckError(
           `S3 bucket "${bucket}" not reachable. Check S3_ENDPOINT, ` +
             `S3_ACCESS_KEY/S3_SECRET_KEY, S3_REGION, and that the bucket exists. ` +
@@ -362,14 +391,36 @@ function serviceUrl(baseUrl: string, path: string): string {
 }
 
 /**
- * `url` with its last path segment replaced by `REDACTED`, for logs and
- * errors. The Inngest event URL carries the event key there, and the key is
- * a credential for posting events.
+ * `url` as it may appear in logs and errors: userinfo, query and fragment
+ * dropped, and with `redactLastSegment` the final path segment — where the
+ * Inngest event URL carries its key — replaced by `REDACTED`.
  */
-function redactLastSegment(url: string): string {
-  const redacted = new URL(url);
-  redacted.pathname = redacted.pathname.replace(/[^/]+$/, "REDACTED");
-  return redacted.toString();
+function displayUrl(url: string, options: { redactLastSegment: boolean }): string {
+  const shown = new URL(url);
+  shown.username = "";
+  shown.password = "";
+  shown.search = "";
+  shown.hash = "";
+  if (options.redactLastSegment) {
+    shown.pathname = shown.pathname.replace(/[^/]+$/, "REDACTED");
+  }
+  return shown.toString();
+}
+
+/**
+ * Reject a service URL with embedded credentials at once. `fetch` refuses to
+ * build a request from one, so every attempt would fail the same way until
+ * the deadline — and the credentials belong in the service's own key, not
+ * the URL.
+ */
+function assertNoEmbeddedCredentials(envVarName: string, baseUrl: string): void {
+  const url = new URL(baseUrl);
+  if (url.username !== "" || url.password !== "") {
+    throw new BootCheckError(
+      `${envVarName} must not embed credentials (${displayUrl(baseUrl, { redactLastSegment: false })}). ` +
+        "Remove the user:password part of the URL.",
+    );
+  }
 }
 
 type ProbeResult = { kind: "status"; status: number } | { kind: "unreachable"; error: string };
@@ -381,13 +432,16 @@ async function probe(
   init: RequestInit,
   signal: AbortSignal,
 ): Promise<ProbeResult> {
+  let res: Response;
   try {
-    const res = await fetchFn(url, { ...init, signal });
-    await res.body?.cancel();
-    return { kind: "status", status: res.status };
+    res = await fetchFn(url, { ...init, signal });
   } catch (err) {
     return { kind: "unreachable", error: stringifyError(err) };
   }
+  // Discarding the body rejects if the attempt signal fires after the headers
+  // arrived. The status is already in hand, and it is the whole result.
+  await res.body?.cancel().catch(() => undefined);
+  return { kind: "status", status: res.status };
 }
 
 function isAuthRejection(result: ProbeResult): boolean {
@@ -405,11 +459,11 @@ function statusText(result: ProbeResult): string {
 /**
  * Unreachable, timed out, or a status that proves neither enforcement nor
  * its absence — a 404 from a wrong base path, a 502 from a proxy in front of
- * a restarting server. Retried until the deadline. `displayUrl` reaches logs
- * and the final error, so it must carry no credential.
+ * a restarting server. Retried until the deadline. `shownUrl` reaches logs
+ * and the final error, so it must come from `displayUrl`.
  */
-function inconclusive(displayUrl: string, result: ProbeResult): ProbeAttempt<void> {
-  return { conclusive: false, reason: `${displayUrl} → ${statusText(result)}` };
+function inconclusive(shownUrl: string, result: ProbeResult): ProbeAttempt<void> {
+  return { conclusive: false, reason: `${shownUrl} → ${statusText(result)}` };
 }
 
 /**
@@ -431,17 +485,20 @@ export async function checkHindsightAuth(
   baseUrl: string,
   apiKey: string,
 ): Promise<void> {
+  assertNoEmbeddedCredentials("HINDSIGHT_URL", baseUrl);
+  const shownBase = displayUrl(baseUrl, { redactLastSegment: false });
   const url = serviceUrl(baseUrl, "/v1/default/banks");
+  const shownUrl = displayUrl(url, { redactLastSegment: false });
   await retryUntilConclusive("hindsight auth check", deps.clock, async (signal) => {
     const anonymous = await probe(deps.fetch, url, {}, signal);
     if (isSuccess(anonymous)) {
       throw new BootCheckError(
-        `Hindsight at ${baseUrl} answered an unauthenticated request (${statusText(anonymous)}). ` +
+        `Hindsight at ${shownBase} answered an unauthenticated request (${statusText(anonymous)}). ` +
           `Start it with HINDSIGHT_API_TENANT_EXTENSION=hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension ` +
           `and HINDSIGHT_API_TENANT_API_KEY set to the value of HINDSIGHT_API_KEY.`,
       );
     }
-    if (!isAuthRejection(anonymous)) return inconclusive(url, anonymous);
+    if (!isAuthRejection(anonymous)) return inconclusive(shownUrl, anonymous);
     const authenticated = await probe(
       deps.fetch,
       url,
@@ -450,11 +507,11 @@ export async function checkHindsightAuth(
     );
     if (isAuthRejection(authenticated)) {
       throw new BootCheckError(
-        `Hindsight at ${baseUrl} rejected HINDSIGHT_API_KEY (${statusText(authenticated)}). ` +
+        `Hindsight at ${shownBase} rejected HINDSIGHT_API_KEY (${statusText(authenticated)}). ` +
           `It must equal the server's HINDSIGHT_API_TENANT_API_KEY.`,
       );
     }
-    if (!isSuccess(authenticated)) return inconclusive(url, authenticated);
+    if (!isSuccess(authenticated)) return inconclusive(shownUrl, authenticated);
     return conclusive(undefined);
   });
   logger.info("hindsight auth check passed");
@@ -507,18 +564,22 @@ export async function checkInngestAuth(
         "Use the values the server was started with (`inngest start --event-key … --signing-key …`).",
     );
   }
+  assertNoEmbeddedCredentials("INNGEST_BASE_URL", baseUrl);
+  const shownBase = displayUrl(baseUrl, { redactLastSegment: false });
   const eventsUrl = serviceUrl(baseUrl, "/v1/events");
+  const shownEventsUrl = displayUrl(eventsUrl, { redactLastSegment: false });
   const eventUrl = serviceUrl(baseUrl, `/e/${encodeURIComponent(eventKey)}`);
+  const shownEventUrl = displayUrl(eventUrl, { redactLastSegment: true });
   await retryUntilConclusive("inngest auth check", deps.clock, async (signal) => {
     const anonymous = await probe(deps.fetch, eventsUrl, {}, signal);
     if (isSuccess(anonymous)) {
       throw new BootCheckError(
-        `Inngest at ${baseUrl} answered an unauthenticated API request (${statusText(anonymous)}), ` +
+        `Inngest at ${shownBase} answered an unauthenticated API request (${statusText(anonymous)}), ` +
           "so it is not enforcing keys — likely `inngest dev`. Run `inngest start` with " +
           "--event-key and --signing-key, or set INNGEST_DEV for local development.",
       );
     }
-    if (!isAuthRejection(anonymous)) return inconclusive(eventsUrl, anonymous);
+    if (!isAuthRejection(anonymous)) return inconclusive(shownEventsUrl, anonymous);
     const signed = await probe(
       deps.fetch,
       eventsUrl,
@@ -527,11 +588,11 @@ export async function checkInngestAuth(
     );
     if (isAuthRejection(signed)) {
       throw new BootCheckError(
-        `Inngest at ${baseUrl} rejected INNGEST_SIGNING_KEY (${statusText(signed)}). ` +
+        `Inngest at ${shownBase} rejected INNGEST_SIGNING_KEY (${statusText(signed)}). ` +
           "It must equal the server's --signing-key.",
       );
     }
-    if (!isSuccess(signed)) return inconclusive(eventsUrl, signed);
+    if (!isSuccess(signed)) return inconclusive(shownEventsUrl, signed);
     const event = await probe(
       deps.fetch,
       eventUrl,
@@ -540,11 +601,11 @@ export async function checkInngestAuth(
     );
     if (isAuthRejection(event)) {
       throw new BootCheckError(
-        `Inngest at ${baseUrl} rejected INNGEST_EVENT_KEY (${statusText(event)}). ` +
+        `Inngest at ${shownBase} rejected INNGEST_EVENT_KEY (${statusText(event)}). ` +
           "It must be one of the server's --event-key values.",
       );
     }
-    if (!isSuccess(event)) return inconclusive(redactLastSegment(eventUrl), event);
+    if (!isSuccess(event)) return inconclusive(shownEventUrl, event);
     return conclusive(undefined);
   });
   logger.info("inngest auth check passed");

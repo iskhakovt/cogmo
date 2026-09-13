@@ -116,20 +116,24 @@ export class HindsightMemoryProvider implements MemoryProvider {
   /**
    * Read the running server's reported version (`GET /version` →
    * `api_version`). Used at boot to enforce the `cogmo.hindsightCompat`
-   * range from package.json. Bypasses `withRetry` — the boot-time check
-   * wants a fast yes/no, and a flaky-Hindsight-at-boot signal is more
-   * useful than a 10-second backoff that hides the network problem.
+   * range from package.json. Makes exactly one request: the boot check owns
+   * retries and the deadline, and passes `signal` to bound each attempt.
    */
   async getServerVersion(signal?: AbortSignal): Promise<string> {
-    // `signal` bounds the request; the boot check passes its per-attempt
-    // timeout so a server that never answers cannot hold boot.
     const res = await sdk.getVersion({
       client: this.#sdkClient,
       ...(signal !== undefined && { signal }),
     });
     if (res.error !== undefined || !res.data) {
       const status = res.response?.status ?? "?";
-      const detail = res.error !== undefined ? JSON.stringify(res.error) : "no body";
+      // A failed or aborted fetch comes back as an `Error` in `res.error`,
+      // whose fields are non-enumerable — `JSON.stringify` would print `{}`.
+      const detail =
+        res.error instanceof Error
+          ? res.error.message
+          : res.error !== undefined
+            ? JSON.stringify(res.error)
+            : "no body";
       throw new Error(`hindsight /version failed: ${status} ${detail}`);
     }
     return res.data.api_version;

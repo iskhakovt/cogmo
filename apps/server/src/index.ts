@@ -388,10 +388,6 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
       ? { credentials: { accessKeyId: env.S3_ACCESS_KEY, secretAccessKey: env.S3_SECRET_KEY } }
       : {}),
   });
-  // Confirm the bucket is reachable + credentials work before tools that
-  // depend on it (image generation, file workspace, attachment delivery)
-  // start handling traffic. HeadBucket is the cheapest probe.
-  await checkS3Bucket(s3Client, env.S3_BUCKET, systemBootClock);
   // Optional client-side encryption — when enabled, attachment bodies AND
   // workspace file bodies are AES-256-GCM-encrypted before upload using
   // a key derived from `COGMO_MASTER_KEY` (already validated above).
@@ -427,23 +423,9 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
     apiKey: env.HINDSIGHT_API_KEY,
     maxQueryTokens: env.HINDSIGHT_RECALL_MAX_QUERY_TOKENS,
   });
-  // Hindsight is reachable by anything on its network, and an unkeyed one
-  // answers all of it. Refuse a server that does not enforce its key, or one
-  // whose key we do not hold. Runs here, not in `bootstrap`, because the
-  // memory CLIs talk to Hindsight too.
-  await checkHindsightAuth(
-    { fetch, clock: systemBootClock },
-    env.HINDSIGHT_URL,
-    env.HINDSIGHT_API_KEY,
-  );
-  // Hard-fail when the running server reports a version outside the
-  // compat range pinned in `package.json` → `cogmo.hindsightCompat`, or
-  // when /version stays unreadable past the boot probe deadline. See
-  // `src/boot/checks.ts`. The client check is instant (no I/O) and catches
-  // dependency↔pin drift before the network probe, so run it first.
-  const hindsightCompat = loadHindsightCompat();
-  checkHindsightClientVersion(hindsightCompat, HINDSIGHT_CLIENT_VERSION);
-  await checkHindsightVersion(memory, hindsightCompat, systemBootClock);
+  // Dependency↔pin drift in this repo needs no server and costs nothing to
+  // detect, so every entrypoint checks it. Server probes run in `bootstrap`.
+  checkHindsightClientVersion(loadHindsightCompat(), HINDSIGHT_CLIENT_VERSION);
 
   return {
     db,
@@ -1276,6 +1258,35 @@ export async function bootstrapRuntime(
 }
 
 /**
+ * Probe every external dependency the running process needs before it takes
+ * traffic. Called from `bootstrap`, not `bootstrapCore`: one-shot admin CLIs
+ * should neither wait a probe deadline per dependency nor need Inngest keys
+ * for commands that never touch them — they surface a dependency error when
+ * they use it. See `src/boot/checks.ts` for what fails at once and what is
+ * retried until the deadline.
+ */
+async function verifyDependencies(core: CoreDeps): Promise<void> {
+  const probeDeps = { fetch, clock: systemBootClock };
+  // Confirm the bucket is reachable + credentials work before tools that
+  // depend on it (image generation, file workspace, attachment delivery)
+  // start handling traffic. HeadBucket is the cheapest probe.
+  await checkS3Bucket(core.s3Client, env.S3_BUCKET, systemBootClock);
+  // Hindsight and Inngest are reachable by anything on their network, and an
+  // unkeyed one answers all of it: refuse a server that does not enforce its
+  // key, or one whose key we do not hold.
+  await checkHindsightAuth(probeDeps, env.HINDSIGHT_URL, env.HINDSIGHT_API_KEY);
+  // Hard-fail when the running server reports a version outside the compat
+  // range pinned in `package.json` → `cogmo.hindsightCompat`.
+  await checkHindsightVersion(core.memory, loadHindsightCompat(), systemBootClock);
+  await checkInngestAuth(probeDeps, {
+    baseUrl: env.INNGEST_BASE_URL,
+    dev: env.INNGEST_DEV,
+    eventKey: env.INNGEST_EVENT_KEY,
+    signingKey: env.INNGEST_SIGNING_KEY,
+  });
+}
+
+/**
  * Aggregate bootstrap — wires every stage together. Used by `cogmo serve`
  * and the integration test harness.
  *
@@ -1284,18 +1295,7 @@ export async function bootstrapRuntime(
  */
 export async function bootstrap(opts: BootstrapOptions = {}) {
   const core = await bootstrapCore(opts);
-  // Only the long-running process consumes and emits Inngest events, so the
-  // key check lives here: one-shot admin CLIs stay usable while an operator
-  // is still re-keying Inngest.
-  await checkInngestAuth(
-    { fetch, clock: systemBootClock },
-    {
-      baseUrl: env.INNGEST_BASE_URL,
-      dev: env.INNGEST_DEV,
-      eventKey: env.INNGEST_EVENT_KEY,
-      signingKey: env.INNGEST_SIGNING_KEY,
-    },
-  );
+  await verifyDependencies(core);
   const sandbox = await bootstrapSandbox(core, opts);
   const { skillRunner } = await bootstrapSkillRunner(core, sandbox);
   const runtime = await bootstrapRuntime(core, sandbox, skillRunner, opts);

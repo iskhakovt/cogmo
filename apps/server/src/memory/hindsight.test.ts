@@ -88,6 +88,20 @@ describe("HindsightMemoryProvider", () => {
     expect(mockGetVersion).toHaveBeenCalledWith({ client: fakeSdkClient, signal });
   });
 
+  it("getServerVersion keeps the message of a failed or aborted request", async () => {
+    const provider = createProvider();
+    // The generated client returns fetch failures in `error` instead of throwing.
+    mockGetVersion.mockResolvedValue({
+      data: undefined,
+      error: new DOMException("The operation was aborted due to timeout", "TimeoutError"),
+      response: undefined,
+    });
+
+    await expect(provider.getServerVersion()).rejects.toThrow(
+      "hindsight /version failed: ? The operation was aborted due to timeout",
+    );
+  });
+
   it("retain passes content and options to client", async () => {
     const provider = createProvider();
 
