@@ -73,7 +73,7 @@ refactor(memory): extract Hindsight client into provider interface
 chore: bump drizzle-orm to 0.46
 ```
 
-Wrong format = no release. The PR title check (`amannn/action-semantic-pull-request`) blocks merge if the title doesn't parse.
+Wrong format = no release. The PR title check runs commitlint (the `pr-title` job in `.github/workflows/ci.yml`, configured by `commitlint.config.js`) and blocks merge if the title doesn't parse.
 
 ## What CI runs
 
@@ -86,26 +86,24 @@ Wrong format = no release. The PR title check (`amannn/action-semantic-pull-requ
 | **Unit Tests** | `pnpm test` (PGlite, mocked LLM) + Codecov upload |
 | **Integration Tests** | `pnpm test:integration` against testcontainers + llmock fixtures |
 | **E2E Tests** | Builds Docker image, runs `pnpm test:e2e` against it |
-| **Release** | `semantic-release` (push to `main` only, after all jobs pass) |
 
 ## Release process
 
-Releases are fully automated. There is no manual version bump.
+Releases are cut on demand, not on every merge. The version is never bumped by hand: semantic-release computes it from the Conventional Commit titles merged since the last tag (the `conventionalcommits` preset, so a `!` after the type or scope marks a breaking change as well as a `BREAKING CHANGE:` footer).
 
-1. Merge a PR with a `feat:` or `fix:` title (or include `BREAKING CHANGE:` for a major).
-2. The `release` job runs `semantic-release` on `main`:
-   - Reads commit history since the last tag.
-   - Computes the next version from commit types.
-   - Generates release notes.
-   - Creates a GitHub release and a `vX.Y.Z` git tag.
-3. The tag triggers `.github/workflows/publish.yml`:
-   - Derives the version from the tag (Dunamai).
-   - Builds the Docker image (cache hit from CI).
-   - Pushes to `ghcr.io/<owner>/cogmo:<version>`.
+1. Merge PRs with Conventional Commit titles. A breaking change needs `!` (`feat(infra)!: …`) or a `BREAKING CHANGE:` footer to produce a major.
+2. Dispatch `.github/workflows/release.yml` from `main` — Actions → Release → Run workflow, or `gh workflow run release.yml --ref main`. The run:
+   - Waits for every check on `main` HEAD to be green (the `skip_ci_check` input bypasses this when an external check is stuck).
+   - Pauses for approval on the `production` environment.
+   - Runs `semantic-release`: reads commits since the last tag, computes the next version, generates release notes, and creates the GitHub release and `vX.Y.Z` tag.
+3. If a release was published, the same run calls `.github/workflows/publish.yml`:
+   - Derives the version from the tag at HEAD (Dunamai).
+   - Builds the images.
+   - Pushes `ghcr.io/<owner>/cogmo:<version>` and its variants.
 
-`chore:`/`docs:`/`refactor:`/etc. commits land in `main` without cutting a release. The next `feat:` or `fix:` will pick them up in the release notes.
+`chore:`/`docs:`/`refactor:`/etc. commits land in `main` without producing a version on their own. The next release that includes a `feat:` or `fix:` picks them up.
 
-If a release needs to be skipped for some reason, append `[skip release]` to the commit footer (semantic-release honours it).
+A commit whose message contains `[skip release]` (or `[release skip]`) is ignored when semantic-release computes the version, so it cannot trigger a release or raise the bump on its own. It still appears in the next release's notes; to keep a change out of a release entirely, revert it before dispatching.
 
 ## Code style
 
