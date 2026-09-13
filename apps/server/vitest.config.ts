@@ -3,11 +3,13 @@ import { defineConfig } from "vitest/config";
 
 /** Integration worker count. Set explicitly because `test/integration-setup.ts`
  * starts one Inngest dev server per worker slot, and `globalSetup` runs before
- * Vitest resolves its own default. The default below is Vitest's: one per CPU
- * but one. Override with `INTEGRATION_MAX_WORKERS=N`. */
+ * Vitest resolves its own default. Vitest's default (one per CPU but one) is
+ * capped at 8: at 31 slots, rootless Docker failed to publish container ports
+ * (`bind: address already in use`) in three full-tier runs out of three.
+ * Override with `INTEGRATION_MAX_WORKERS=N`. */
 const INTEGRATION_MAX_WORKERS = (() => {
   const v = Number(process.env.INTEGRATION_MAX_WORKERS);
-  return Number.isFinite(v) && v >= 1 ? v : Math.max(availableParallelism() - 1, 1);
+  return Number.isFinite(v) && v >= 1 ? v : Math.min(Math.max(availableParallelism() - 1, 1), 8);
 })();
 
 /** Mirror the Testcontainers port-forwarder sidecar off Docker Hub. Must be set
