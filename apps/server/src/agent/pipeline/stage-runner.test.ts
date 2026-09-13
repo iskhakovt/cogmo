@@ -135,6 +135,33 @@ describe("createPipelineStageRunner", () => {
     );
   });
 
+  it("runs a stage.due without a conversation id, taking it from the run", async () => {
+    const { fn, runStore, executeAgenticStage } = harness({ kind: "completed", artifact: null });
+    runStore.advanceStage.mockResolvedValue({ kind: "advanced" });
+    const legacy = {
+      name: "pipeline/stage.due" as const,
+      data: { runId: RUN_ID, stageId: "draft", iteration: 0 },
+    };
+    const t = new InngestTestEngine({ function: fn, events: [legacy] });
+
+    const { result, ctx } = await t.execute({
+      steps: [{ id: "load-run", handler: () => snapshot() }],
+    });
+
+    expect(result).toEqual({ status: "advanced", nextStage: "approve" });
+    expect(executeAgenticStage).toHaveBeenCalledWith(
+      expect.objectContaining({ conversationId: "conv-1" }),
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(ctx.step.sendEvent).toHaveBeenCalledWith(
+      "emit-next-stage",
+      expect.objectContaining({
+        data: { runId: RUN_ID, conversationId: "conv-1", stageId: "approve", iteration: 0 },
+      }),
+    );
+  });
+
   it("completes the run after its final agentic stage and says so", async () => {
     const { fn, runStore, notifyConversation } = harness();
     runStore.completeRun.mockResolvedValue({ kind: "advanced" });
