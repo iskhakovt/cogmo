@@ -1,23 +1,13 @@
 /**
  * Apply one gate resolution to a run parked at `waiting_gate`. The first
- * statement is the conditional `waiting_gate → running` flip under a row
- * lock, so a keyboard tap and a timeout racing for the same gate produce
- * exactly one winner; the loser reads `stale` and changes nothing. The flip
- * and the resulting advance / complete / cancel share one transaction, so a
- * crash cannot leave a run `running` on a gate stage with nothing scheduled.
+ * statement is a conditional `waiting_gate → running` flip under a row lock,
+ * so a tap and a timeout racing for one gate produce exactly one winner. The
+ * flip records the claim (gate key + resolving Inngest run) and shares a
+ * transaction with the resulting advance, completion or cancellation.
  *
- * The resolution must name the gate the run is actually parked on
- * (`gateKey` against the row's current stage and iteration): a resolution
- * for an earlier gate of the same run, delivered late, is stale.
- *
- * The winning flip records the claim — the gate key and the resolving Inngest
- * function run — on the run in the same transaction. A stale outcome reports
- * where the run actually is and whether that recorded claim is this
- * resolution's own, so the caller can tell its own step re-run after the
- * commit from a resolution that raced it, whatever the effect.
- *
- * `inspectGate` reads the same picture without claiming anything, for a
- * resolution that failed and needs to know what, if anything, it committed.
+ * A resolution for any gate but the one the run is parked on is stale. A
+ * stale outcome reports where the run is and whether its recorded claim is
+ * this resolution's. `inspectGate` reads the same without claiming anything.
  */
 
 import type { Transactor } from "../../db/index.js";

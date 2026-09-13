@@ -29,8 +29,8 @@ export const MAX_GATE_REMINDERS = 10;
  * ms-style duration constrained to minutes/hours/days/weeks. The
  * constrained grammar excludes ms-style's `M`-ambiguity (months vs
  * minutes) and months/years entirely — engine waits cap at ~1 year
- * anyway. Strings pass to Inngest's `waitForEvent`/`sleep` untouched;
- * the DB-park path parses with {@link parseDurationMs}.
+ * anyway. {@link parseDurationMs} turns a duration into the milliseconds
+ * the gate waiter sleeps.
  */
 export const DURATION_REGEX = /^\d+(\.\d+)?(m|h|d|w)$/;
 

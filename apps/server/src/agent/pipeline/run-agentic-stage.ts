@@ -18,10 +18,7 @@
  * its id is the messages' cursor and the loop's `turnKey`.
  *
  * The stage's rows stay out of the chat pipeline's cursor: chat reads skip
- * `source='pipeline'` inbounds and the assistant rows cursored on them. Known
- * residual: `handle-message` serializes on conversation id within its own
- * function only, so a message the user sends into the run conversation
- * mid-stage runs a chat turn concurrently with this one.
+ * `source='pipeline'` inbounds and the assistant rows cursored on them.
  */
 
 import type { Logger } from "pino";

@@ -6,8 +6,8 @@
  *
  * A stage's `output` declaration (definition-side {@link StageOutput})
  * names the *kind* a stage will produce; a {@link StageArtifact} is the
- * produced *value*. Slice 2 produces `text` and `json`; `plan` and
- * `pr_metadata` artifacts arrive with the coding-delegation stage (slice 4).
+ * produced *value*. The engine produces `text` and `json`; `start_pipeline`
+ * refuses definitions whose stages declare `plan` or `pr_metadata`.
  */
 
 import { z } from "zod";
@@ -36,12 +36,9 @@ export const StageOutputsSchema = z.record(z.string(), StageArtifactSchema);
 export type StageOutputs = z.infer<typeof StageOutputsSchema>;
 
 /**
- * The gate resolution that last claimed a gate on the run: the gate it named
- * and the Inngest function run that applied it. That run id is stable across
- * retries of the resolution and unique to it, so a resolution step re-run
- * after its own commit can tell its claim from a competing one's. Recorded in
- * the same transaction as the `waiting_gate → running` flip; overwritten by
- * the next gate's claim.
+ * The resolution that claimed the run's latest gate. `resolverRunId` is its
+ * Inngest function run, stable across that run's retries, so a re-run step
+ * recognises its own claim. Written with the `waiting_gate → running` flip.
  */
 export const GateResolutionSchema = z
   .object({ gateKey: z.string().min(1), resolverRunId: z.string().min(1) })

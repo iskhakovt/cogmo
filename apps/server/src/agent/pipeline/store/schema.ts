@@ -45,9 +45,8 @@ export const pipelineDefinitions = pgTable(
 
 /**
  * Run status (design/pipelines.md → Data Model). The full set is declared
- * up front so slice 3 doesn't pay an `ALTER TYPE ADD VALUE` migration:
- * `queued` (admission control) and `waiting_event` (DB-parked waits) are
- * unused until then. `waiting_gate` is the parked state of a gate
+ * up front, so admission control (`queued`) and DB-parked waits
+ * (`waiting_event`) need no `ALTER TYPE ADD VALUE`; neither is set yet. `waiting_gate` is the parked state of a gate
  * checkpoint: the stage runner sets it and returns, and the run leaves it
  * only through `pipeline-gate-resolver` — no Inngest function stays in
  * flight across the wait except the small timeout waiter.
@@ -86,8 +85,8 @@ export const pipelineRuns = pgTable(
     status: pipelineRunStatus("status").notNull(),
     // Stage id from the pinned definition the run currently sits on.
     currentStage: text("current_stage").notNull(),
-    // Loop counter for `current_stage`'s loop scope. Always 0 until slice 3
-    // back-edges land; carried now because `pipeline/stage.due` keys off it.
+    // Loop counter for `current_stage`'s loop scope. Always 0 while loops are
+    // unsupported; part of the `pipeline/stage.due` cursor.
     iteration: integer("iteration").notNull(),
     stageOutputs: jsonbZod("stage_outputs", StageOutputsSchema).notNull(),
     failureReason: text("failure_reason"),

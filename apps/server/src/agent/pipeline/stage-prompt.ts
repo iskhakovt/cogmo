@@ -30,6 +30,21 @@ function escapeJsonHandoff(json: string): string {
   return json.replace(HANDOFF_TAG_START, "\\u003c");
 }
 
+/** The stage's output contract, or null for a stage whose output needs none in the prompt. */
+function renderOutputSection(stage: Stage): string | null {
+  switch (stage.output?.kind) {
+    case "text":
+      return "## Output\n\nEnd with a final reply that is this stage's result. Later stages receive that reply verbatim.";
+    case "json":
+      return (
+        "## Output\n\nEnd with a final reply that states this stage's result completely. It will be converted into structured data matching this JSON Schema, so every required field must be derivable from it:\n\n" +
+        `\`\`\`json\n${JSON.stringify(stage.output.schema, null, 2)}\n\`\`\``
+      );
+    default:
+      return null;
+  }
+}
+
 export function buildStagePrompt(args: {
   definition: PipelineDefinition;
   stage: Stage;
@@ -44,16 +59,8 @@ export function buildStagePrompt(args: {
     `## Instructions\n\n${stage.instructions ?? ""}`,
   ];
 
-  if (stage.output?.kind === "text") {
-    sections.push(
-      "## Output\n\nEnd with a final reply that is this stage's result. Later stages receive that reply verbatim.",
-    );
-  } else if (stage.output?.kind === "json") {
-    sections.push(
-      "## Output\n\nEnd with a final reply that states this stage's result completely. It will be converted into structured data matching this JSON Schema, so every required field must be derivable from it:\n\n" +
-        `\`\`\`json\n${JSON.stringify(stage.output.schema, null, 2)}\n\`\`\``,
-    );
-  }
+  const outputSection = renderOutputSection(stage);
+  if (outputSection !== null) sections.push(outputSection);
 
   const handoffs = Object.entries(stageOutputs);
   if (handoffs.length > 0) {
@@ -76,7 +83,7 @@ export function buildStagePrompt(args: {
     // Handoffs can be long enough to bury the contract above; the model reads
     // the end of the message last, so the contract is restated there.
     sections.push(
-      stage.output === undefined
+      outputSection === null
         ? "Reminder: do only this stage's work as its instructions above describe."
         : "Reminder: do only this stage's work as its instructions above describe, and end with the final reply its Output section asks for.",
     );

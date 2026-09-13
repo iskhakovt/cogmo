@@ -69,8 +69,31 @@ describe("compileOutputSchema", () => {
   });
 
   it("reports a schema that isn't valid JSON Schema as a sentence after its subject", () => {
-    const result = compileOutputSchema({ type: "not-a-type" });
+    const result = compileOutputSchema({
+      type: "object",
+      properties: { title: { type: "not-a-type" } },
+    });
     expect(result._unsafeUnwrapErr()).toMatch(/^is not a valid JSON Schema: /);
+  });
+
+  it.each([
+    ["an array", { type: "array", items: { type: "string" } }, '"array"'],
+    ["no type", { properties: { title: { type: "string" } } }, "undefined"],
+  ])(
+    "rejects a schema whose top level is %s, since artifacts are stored as objects",
+    (_label, schema, got) => {
+      expect(compileOutputSchema(schema)._unsafeUnwrapErr()).toBe(
+        `must have top-level "type": "object", got ${got}`,
+      );
+    },
+  );
+
+  it("rejects an $async schema, whose validator returns a promise", () => {
+    // Callers validate synchronously; a promise is truthy and would pass anything.
+    const result = compileOutputSchema({ $async: true, ...OBJECT });
+    expect(result._unsafeUnwrapErr()).toBe(
+      "is an $async schema, which isn't supported — validation must be synchronous",
+    );
   });
 
   it("reports a $ref that resolves nowhere", () => {

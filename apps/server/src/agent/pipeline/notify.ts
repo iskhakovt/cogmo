@@ -1,13 +1,8 @@
 /**
- * Best-effort pipeline notices that keep their step's retries.
- *
- * `notifyConversation` already swallows per-session delivery failures, so what
- * can still throw is its session lookup — usually a transient DB error. The
- * catch therefore wraps the step, not its body: a failing notice is retried by
- * Inngest like any other step, and only one that failed permanently — the
- * `StepError` the SDK throws in the body — is dropped. A notice is never worth
- * failing a function that has already committed the run's state. Anything
- * else reaching the catch is a bug, and propagates.
+ * Best-effort pipeline notice that keeps its step's retries. The catch wraps
+ * the step, so only a notice that failed permanently (`StepError`) is logged
+ * and dropped: a notice is never worth failing a function that has already
+ * committed the run's state. Anything else propagates.
  */
 
 import { StepError } from "inngest";
@@ -27,11 +22,16 @@ export async function notifyAfterRetries(
   deliveryRouter: Pick<DeliveryRouter, "notifyConversation">,
   conversationId: string,
   text: string,
+  /** Identifies the run behind the notice in the drop log (run id, gate key, stage). */
+  logContext: Readonly<Record<string, string | number>>,
 ): Promise<void> {
   try {
     await step.run(stepId, () => deliveryRouter.notifyConversation(conversationId, text));
   } catch (error) {
     if (!(error instanceof StepError)) throw error;
-    log.warn({ err: error, conversationId, stepId }, "pipeline notice not delivered after retries");
+    log.warn(
+      { ...logContext, err: error, conversationId, stepId },
+      "pipeline notice not delivered after retries",
+    );
   }
 }

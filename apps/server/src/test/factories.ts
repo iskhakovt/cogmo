@@ -633,9 +633,10 @@ export function nullStepSendEvent(): StepSendEvent {
 
 /**
  * A hand-built `step` for driving a handler directly with `invokeInngestFn` /
- * `invokeInngestOnFailure`. `run` returns memoized results by id, throws a
- * `StepError` for `failingStep` — what the SDK throws in the body for a step
- * that exhausted its retries — and runs every other body inline.
+ * `invokeInngestOnFailure`. `run` throws a `StepError` for `failingStep` —
+ * what the SDK throws in the body for a step that exhausted its retries —
+ * returns a memoized result by id, and otherwise runs the body inline and
+ * memoizes its result, so a later invocation sharing this `step` replays it.
  *
  * `InngestTestEngine` can't stand in here: a memoized step that throws
  * doesn't reject in the body the way a permanently failed step does.
@@ -647,7 +648,9 @@ export function directStep(memo: Record<string, unknown>, failingStep: string | 
         throw new StepError(id, new Error(`step "${id}" failed after retries`));
       }
       if (id in memo) return memo[id];
-      return body();
+      const result = await body();
+      memo[id] = result;
+      return result;
     }),
     sendEvent: vi.fn().mockResolvedValue({ ids: [] }),
     sleep: vi.fn().mockResolvedValue(undefined),

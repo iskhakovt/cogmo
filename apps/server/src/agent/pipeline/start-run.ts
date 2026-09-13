@@ -1,17 +1,13 @@
 /**
  * Start a run of a user's active pipeline: pin the active definition version,
- * give the run its own conversation, route the user's reachable channel
- * sessions onto it, open the run on its first stage, and schedule that stage.
+ * give the run its own conversation, route the user's reachable sessions onto
+ * it, open the run on its first stage, and schedule that stage.
  *
- * Runs inside the `start_pipeline` tool's durable step, keyed on the tool
- * call's idempotency key. The existing run is looked up by key before
- * anything else — before the active-definition lookup too, since the active
- * version may have changed or been deactivated between an attempt that
- * committed and its retry. A recovered run resumes against the definition it
- * pinned, and its first `pipeline/stage.due` is sent again: the first attempt
- * may have died between the commit and the send, and the send is bus-deduped
- * on the run cursor while the stage runner skips a delivery the run has
- * already moved past.
+ * Runs inside `start_pipeline`'s durable step. The run is looked up by the
+ * call's idempotency key first, since the active version may have changed
+ * since the attempt that committed. A recovered run resumes on its pinned
+ * definition and re-sends its first `pipeline/stage.due`, bus-deduped on the
+ * run cursor.
  */
 
 import type { Inngest } from "inngest";

@@ -7,7 +7,14 @@ describe("notifyAfterRetries", () => {
     const notifyConversation = vi.fn().mockResolvedValue(undefined);
     const run = vi.fn((_id: string, body: () => Promise<unknown>) => body());
 
-    await notifyAfterRetries({ run }, "notify-completed", { notifyConversation }, "conv-1", "done");
+    await notifyAfterRetries(
+      { run },
+      "notify-completed",
+      { notifyConversation },
+      "conv-1",
+      "done",
+      { runId: "run-1" },
+    );
 
     expect(run).toHaveBeenCalledWith("notify-completed", expect.any(Function));
     expect(notifyConversation).toHaveBeenCalledWith("conv-1", "done");
@@ -23,7 +30,9 @@ describe("notifyAfterRetries", () => {
     });
 
     await expect(
-      notifyAfterRetries({ run }, "notify", { notifyConversation }, "conv-1", "done"),
+      notifyAfterRetries({ run }, "notify", { notifyConversation }, "conv-1", "done", {
+        runId: "run-1",
+      }),
     ).resolves.toBeUndefined();
     // The body itself rejected: nothing inside the step swallowed the error.
     expect(bodyOutcome).toBe(failure);
@@ -33,7 +42,9 @@ describe("notifyAfterRetries", () => {
     const run = vi.fn().mockRejectedValue(new StepError("notify", new Error("gave up")));
 
     await expect(
-      notifyAfterRetries({ run }, "notify", { notifyConversation: vi.fn() }, "conv-1", "done"),
+      notifyAfterRetries({ run }, "notify", { notifyConversation: vi.fn() }, "conv-1", "done", {
+        runId: "run-1",
+      }),
     ).resolves.toBeUndefined();
   });
 
@@ -42,7 +53,9 @@ describe("notifyAfterRetries", () => {
     const run = vi.fn().mockRejectedValue(bug);
 
     await expect(
-      notifyAfterRetries({ run }, "notify", { notifyConversation: vi.fn() }, "conv-1", "done"),
+      notifyAfterRetries({ run }, "notify", { notifyConversation: vi.fn() }, "conv-1", "done", {
+        runId: "run-1",
+      }),
     ).rejects.toBe(bug);
   });
 });

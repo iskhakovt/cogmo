@@ -16,12 +16,9 @@
  * longer matches the run — a duplicate, or one the run has moved past — is
  * skipped.
  *
- * A transition step that re-runs after its own commit (the worker died before
- * Inngest recorded the result) finds the run already moved and reads `stale`.
- * The store reports the run's cursor from the same locked read; when it sits
- * exactly where this step would have put it — same stage, same iteration — the
- * step carries on to the follow-up. That event is deduped on the run cursor,
- * so a second send is harmless.
+ * A transition step re-run after its own commit reads `stale` with the run's
+ * cursor. When that is where the step would have put the run, it sends the
+ * follow-up anyway; the event is deduped on the run cursor.
  */
 
 import { NonRetriableError } from "inngest";
@@ -91,6 +88,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
             deps.deliveryRouter,
             failed.conversationId,
             `❌ The pipeline run failed at stage "${stageId}" and has stopped.`,
+            { runId, stageId },
           );
         }
       },
@@ -152,6 +150,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
             deps.deliveryRouter,
             conversationId,
             `❌ Pipeline "${definition.name}" failed at stage "${stageId}": ${reason}`,
+            { runId, stageId },
           );
         }
         return { status: "failed" as const, reason };
@@ -277,6 +276,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
         deps.deliveryRouter,
         conversationId,
         `✅ Pipeline "${definition.name}" completed.`,
+        { runId, stageId },
       );
       return { status: "completed" as const };
     },

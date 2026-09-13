@@ -32,7 +32,8 @@ export interface Session {
 
 /**
  * Discriminated input for `persistInbound`. `user` rows carry their
- * originating session FK; `scheduled` rows carry the idempotency key.
+ * originating session FK; `scheduled` and `pipeline` rows carry an idempotency
+ * key.
  */
 export type PersistInboundParams =
   | {
@@ -180,10 +181,9 @@ export interface TransportStore {
   persistInbound(tx: Transaction, params: PersistInboundParams): Promise<{ id: string }>;
 
   /**
-   * Look up a scheduled-source inbound by its idempotency key. Returns
-   * `undefined` when the fire hasn't been dispatched yet. Used by the
-   * fire-handler to short-circuit a retry that lands after the original
-   * tx committed but before Inngest got the step ack.
+   * Look up a `scheduled` or `pipeline` inbound by its idempotency key, or
+   * `undefined` when none was persisted. Lets a retried fire or stage prompt
+   * reuse the row its committed attempt wrote.
    */
   findInboundByIdempotencyKey(
     tx: Transaction,

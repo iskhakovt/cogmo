@@ -11,9 +11,6 @@
  * properties, open objects), and a user's definition is under no obligation
  * to be strict-compatible. ajv is the authority on the result either way.
  *
- * The schema compiles through `compileOutputSchema`, the same path the
- * definition-time check uses; `format` keywords are advisory, not checked.
- *
  * The agent loop itself can't produce the JSON: a stage that uses tools
  * needs them until its last iteration.
  */
@@ -49,13 +46,6 @@ export async function extractStageArtifact(args: {
     return err({ kind: "artifact_invalid", detail: `unsupported output kind "${output.kind}"` });
   }
 
-  // The artifact is stored as an object map, so the schema must describe one.
-  if (output.schema.type !== "object") {
-    return err({
-      kind: "artifact_invalid",
-      detail: `output schema must have top-level "type": "object", got ${JSON.stringify(output.schema.type)}`,
-    });
-  }
   const compiled = compileOutputSchema(output.schema);
   if (compiled.isErr()) {
     return err({ kind: "artifact_invalid", detail: `output schema ${compiled.error}` });

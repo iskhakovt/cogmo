@@ -65,6 +65,7 @@ export function createPipelineGateWaiter(deps: PipelineGateWaiterDeps) {
           deps.deliveryRouter,
           conversationId,
           `⏳ Reminder ${i} of ${reminders}: pipeline "${pipelineName}" is waiting for your decision at stage "${stageId}".`,
+          { runId, gateKey },
         );
       }
       await step.sleep(`wait-${reminders + 1}`, `${timeoutMs}ms`);

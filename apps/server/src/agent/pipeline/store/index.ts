@@ -339,9 +339,8 @@ export interface PipelineRunStore {
   getRunWithDefinition(tx: Transaction, id: string): Promise<PipelineRunWithDefinition | undefined>;
 
   /**
-   * Flip status conditionally (e.g. `running` → `waiting_gate` before a
-   * gate's `step.waitForEvent`, then back on resume). Conditional on `from`
-   * so a duplicate delivery is a no-op `stale`.
+   * Flip status conditionally (e.g. `running` → `waiting_gate` when a gate
+   * parks). Conditional on `from`, so a duplicate delivery is a no-op `stale`.
    */
   transitionStatus(
     tx: Transaction,

@@ -725,13 +725,11 @@ export interface Transport {
    */
   pipelines: {
     /**
-     * Emit `pipeline/gate.resolved` for the gate the run is parked on, if
-     * `gateToken` names that gate — a button left over from an earlier gate
-     * of the same run is refused. The tapper is identified before the run is
-     * looked up, so an unknown tapper learns nothing about which runs exist.
-     * The status check here is advisory — it gives a late tap a precise answer —
-     * while `pipeline-gate-resolver`'s conditional transition decides a tap
-     * racing the gate's own timeout.
+     * Emit `pipeline/gate.resolved` if `gateToken` names the gate the run is
+     * parked on, so a leftover button from an earlier gate is refused. The
+     * tapper is identified before the run is looked up, so an unknown tapper
+     * learns nothing about which runs exist. The status check is advisory;
+     * the resolver's conditional flip decides races.
      */
     resolveGate(
       runId: string,

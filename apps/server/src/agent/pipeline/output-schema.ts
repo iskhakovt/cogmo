@@ -1,26 +1,19 @@
 /**
- * One way to turn a stage's declared JSON output schema into a validator,
- * shared by the definition-time check (`validateDefinition`) and the run-time
- * extraction (`extractStageArtifact`) so the two can never disagree about
- * which schemas work.
+ * One path from a stage's declared JSON output schema to a validator, shared
+ * by the definition check (`validateDefinition`) and run-time extraction
+ * (`extractStageArtifact`) so the two accept exactly the same schemas.
  *
- * The schema is user-shaped: the compiler model writes it, and models declare
- * `$schema` in every spelling — http or https, with or without the trailing
- * `#`. The dialect is read from that declaration (draft-07 when absent) and
- * the schema checked against its meta-schema, then compiled by the matching
- * Ajv class. Draft-07, 2019-09 and 2020-12 are supported natively. Draft-06
- * follows Ajv's documented setup: the schema is checked against the draft-06
- * meta-schema, then evaluated by the draft-07 class, so draft-07 keywords
- * (`if`/`then`/`else`) take effect in it. Draft-03 and -04 need a separate
- * Ajv package and are reported as unsupported. Nothing here throws —
- * an unknown dialect, a meta-schema violation or a `$ref` that resolves
- * nowhere all come back as a message that reads after "output schema".
+ * The dialect comes from `$schema` in any http/https or trailing-`#` spelling,
+ * draft-07 when absent. Draft-07, 2019-09 and 2020-12 compile natively;
+ * draft-06 is checked against its own meta-schema and runs on the draft-07
+ * class, Ajv's documented setup. Draft-03/04 are unsupported. The schema must
+ * describe an object (artifacts are stored as one) and must not be `$async`
+ * (callers validate synchronously). Nothing throws: every failure is a
+ * message that reads after "output schema".
  *
  * Meta-schema checks share one Ajv per dialect, which never registers a user
- * schema; compiling uses a fresh instance per call, so one schema's `$id` can
- * never collide with another's.
- *
- * `format` keywords are not enforced (no format plugin is loaded).
+ * schema; each compile gets a fresh instance, so `$id`s never collide.
+ * `format` keywords are advisory (no format plugin).
  */
 
 import { Ajv, type ValidateFunction } from "ajv";
@@ -101,6 +94,13 @@ export function compileOutputSchema(
   }
   if (match.kind === "unknown") {
     return err(`declares an unknown $schema ${JSON.stringify(schema.$schema)}`);
+  }
+  if (schema.type !== "object") {
+    return err(`must have top-level "type": "object", got ${JSON.stringify(schema.type)}`);
+  }
+  // Ajv compiles an async validator exactly when the root declares `$async`.
+  if (schema.$async === true) {
+    return err("is an $async schema, which isn't supported — validation must be synchronous");
   }
   const normalised = { ...schema, $schema: CANONICAL_URI[match.dialect] };
   try {

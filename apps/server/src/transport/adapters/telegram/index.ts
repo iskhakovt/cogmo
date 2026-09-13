@@ -960,7 +960,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     await ctx.answerCallbackQuery({ text: outcome.toast });
   });
 
-  // Pipeline gate keyboard: Approve / Cancel — callback_data = "pipe:<runId>:<action>"
+  // Pipeline gate keyboard: Approve / Cancel — callback_data = "pipe:<runId>:<action>:<token>"
   bot.callbackQuery(PIPELINE_GATE_CALLBACK_REGEX, async (ctx) => {
     const data = ctx.callbackQuery?.data;
     const fromId = ctx.from?.id;

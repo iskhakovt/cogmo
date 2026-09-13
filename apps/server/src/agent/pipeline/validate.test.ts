@@ -78,6 +78,13 @@ describe("validateDefinition", () => {
     expect(issues.some((i) => i.path === "stages[0].output.schema")).toBe(true);
   });
 
+  it("flags a JSON Schema whose top level isn't an object, as extraction would", () => {
+    const def = validPipelineDefinition();
+    stage(def, 0).output = { kind: "json", schema: { type: "array", items: { type: "string" } } };
+    const issue = validateDefinition(def, CTX).find((i) => i.path === "stages[0].output.schema");
+    expect(issue?.message).toBe('output schema must have top-level "type": "object", got "array"');
+  });
+
   it("flags a JSON Schema whose $ref points nowhere", () => {
     // Meta-schema valid, but it can never be compiled to check an artifact.
     const def = validPipelineDefinition();

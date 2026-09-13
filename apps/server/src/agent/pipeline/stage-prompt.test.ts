@@ -81,6 +81,27 @@ describe("buildStagePrompt", () => {
     ).toBe(true);
   });
 
+  it("reminds only of the instructions when the stage's output kind renders no Output section", () => {
+    const definition = validPipelineDefinition();
+    definition.stages[2] = {
+      id: "implement",
+      kind: "agentic",
+      instructions: "Implement it.",
+      output: { kind: "plan" },
+    };
+    const stage = expectDefined(definition.stages[2], "implement stage");
+    const prompt = buildStagePrompt({
+      definition,
+      stage,
+      stageOutputs: { earlier: { kind: "text", text: "context" } },
+    });
+
+    expect(prompt).not.toContain("## Output\n");
+    expect(
+      prompt.endsWith("Reminder: do only this stage's work as its instructions above describe."),
+    ).toBe(true);
+  });
+
   it("adds no reminder when there is nothing handed off", () => {
     const definition = validPipelineDefinition();
     const stage = expectDefined(definition.stages[0], "first stage");

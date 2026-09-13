@@ -1,31 +1,19 @@
 /**
- * Inngest function for `pipeline/gate.resolved`. Applies the resolution in
- * one durable step, then — only once that has committed — emits
- * `pipeline/gate.settled` (cancelling the gate's waiter) and the next stage,
- * each in its own step, and finally tells the run's conversation what
- * happened when nobody else already has.
+ * Inngest function for `pipeline/gate.resolved`: applies the resolution in
+ * one step, then sends its follow-ups (`pipeline/gate.settled`, the next
+ * stage, a notice), each in its own step. Per-run concurrency of one, so a
+ * tap and a timeout for the same gate queue and the second reads `stale`.
  *
- * Per-run concurrency of one: a tap and a timeout for the same gate queue
- * behind each other, and the second reads `stale` from the conditional flip.
+ * A stale outcome whose recorded claim is this function run's own is a re-run
+ * after the commit: it re-sends what the first run may have lost, while the
+ * run still sits where its effect left it. Otherwise another resolution won
+ * and sent its own follow-ups; this one stays silent, except to tell a tap
+ * its decision didn't take.
  *
- * The winning flip records its claim on the run: the gate key and this
- * function run's Inngest id, which stays the same across its retries. A stale
- * outcome says whether that claim is this resolution's own. If it is, the
- * step re-ran after its commit and the first run may have died before its
- * follow-ups, so it re-sends the next stage and its notice — but only while
- * the run still sits exactly where its effect left it. If it isn't, another
- * resolution won and sent its own; this one stays silent, or, if it was a tap
- * whose decision didn't take, says so.
- *
- * If the resolution fails for good, `onFailure` inspects the run under the
- * failed function run's id. Still parked on the gate means nothing committed:
- * a tap's waiter is still armed, so the user is told the checkpoint will
- * resolve on its timeout, while a timeout has no waiter left and fails the
- * run. Otherwise the run has moved on, and `onFailure` sends the same
- * follow-ups the handler would for that stale outcome — the lost ones if the
- * claim is its own, nothing but a losing tap's notice if it isn't — so a
- * failure after the commit, or in a resolution that lost, never fails a run
- * that is moving.
+ * `onFailure` inspects the run under the failed run's id. Still parked means
+ * nothing committed: a tap is told the gate resolves on its timeout, and a
+ * timeout, with no waiter left, fails the run. Moved on, it sends the
+ * follow-ups the stale path would, so a failure never stops a moving run.
  */
 
 import { inngest as inngestClient } from "../../inngest/client.js";
@@ -162,12 +150,9 @@ export function gateNotice(
 }
 
 /**
- * Everything that follows a resolution's outcome: settle the gate's waiter,
- * send the next stage when it is due, and deliver the notice. The next stage
- * is due when the resolution advanced the run, or when its own claim, re-run
- * after the commit, finds the run still running on that stage — deduped on
- * the run cursor, and never for a run already parked there, whose stage has
- * run.
+ * Settle the gate's waiter, send the next stage when this resolution advanced
+ * the run (or, as its own re-run, finds it still `running` there; deduped on
+ * the run cursor), and deliver the notice.
  */
 async function sendFollowUps(
   step: FollowUpStep,
@@ -195,7 +180,10 @@ async function sendFollowUps(
 
   const notice = gateNotice(decision, outcome);
   if (notice !== null) {
-    await notifyAfterRetries(step, "notify", deliveryRouter, conversationId, notice);
+    await notifyAfterRetries(step, "notify", deliveryRouter, conversationId, notice, {
+      runId,
+      gateKey,
+    });
   }
 }
 
@@ -225,6 +213,7 @@ export function createPipelineGateResolver(deps: PipelineGateResolverDeps) {
             deps.deliveryRouter,
             conversationId,
             "⚠️ Your decision at this checkpoint couldn't be applied. The checkpoint is still open and will resolve on its timeout.",
+            { runId, gateKey },
           );
           return;
         }
@@ -240,6 +229,7 @@ export function createPipelineGateResolver(deps: PipelineGateResolverDeps) {
             deps.deliveryRouter,
             conversationId,
             "❌ A pipeline checkpoint's timeout couldn't be applied, so the run has stopped.",
+            { runId, gateKey },
           );
         }
       },

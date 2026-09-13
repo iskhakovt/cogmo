@@ -657,9 +657,8 @@ export const skillCronFire = eventType("skills/cron.fire", {
  * emits the next `pipeline/stage.due`, parks on a gate, or terminates the run.
  *
  * `iteration` is the loop counter the run sat at when the stage was
- * scheduled — invariantly 0 until back-edges land, carried now so the
- * dedup id and the stage runner's stale-delivery check already key on the
- * full cursor.
+ * scheduled. Always 0 while loops are unsupported; it completes the run
+ * cursor the dedup id and the stage runner's stale-delivery check key on.
  */
 export const pipelineStageDue = eventType("pipeline/stage.due", {
   schema: z.object({
@@ -776,10 +775,10 @@ export const pipelineGateResolved = eventType("pipeline/gate.resolved", {
 export type PipelineGateResolvedData = z.infer<typeof pipelineGateResolved.schema>;
 
 /**
- * A gate resolution has been applied (or found already applied) by
- * `pipeline-gate-resolver`. Cancels the gate's waiter via `cancelOn`. Keyed
- * on commit rather than on `pipeline/gate.resolved`, so a resolution whose
- * step fails leaves the waiter — and with it the gate's timeout — alive.
+ * The run has left this gate. `pipeline-gate-resolver` emits it once its step
+ * has committed, or from `onFailure` once the run is found moved on; the
+ * gate's waiter cancels on it. A resolution that fails before committing
+ * emits nothing, so the gate's timeout stays armed.
  */
 export const pipelineGateSettled = eventType("pipeline/gate.settled", {
   schema: z.object({
