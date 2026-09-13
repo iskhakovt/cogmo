@@ -17,9 +17,10 @@ import { env } from "../env.js";
 // don't propagate `traceparent` through event payloads (see DEPLOYMENT.md →
 // Observability for rationale), so the processor would be dormant. Skipping
 // it keeps setup minimal; re-add if we adopt traceparent propagation.
-// `INNGEST_APP_ID` override gives each parallel test fork a unique
-// app id so the connect-mode gateway doesn't round-robin events
-// across peer workers.
+// `INNGEST_APP_ID` gives each integration test file a fresh app id. Files
+// that run one after another in a worker slot share that slot's Inngest dev
+// server, and a reused id would let a file take over runs the previous file
+// left queued there.
 //
 // Keys come from `env`: `_FILE` values never reach the SDK's `process.env` fallback.
 export const inngest = new Inngest({

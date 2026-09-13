@@ -55,7 +55,7 @@ Integration tests run against frozen wire fixtures captured from real upstreams.
 
 ## Integration Test Env Injection
 
-`process.env` mutations in Vitest `globalSetup` propagate to test workers (worker env = `{ ...process.env, ...config.env }`). Dynamic values (container URLs, `COGMO_MASTER_KEY`) are set via `process.env` in globalSetup. Static values (`NODE_ENV`) go in `vitest.config.ts` `test.env`. Test files use normal top-level imports — `createEnv()` in `env.ts` sees all values.
+`process.env` mutations in Vitest `globalSetup` propagate to test workers (worker env = `{ ...process.env, ...config.env }`). Dynamic values (container URLs, `COGMO_MASTER_KEY`) are set via `process.env` in globalSetup. The exception is Inngest: `globalSetup` starts one dev server per worker slot and provides them as `inngestWorkers`, and `test/integration-setup-per-fork.ts` sets `INNGEST_BASE_URL` and `INNGEST_CONNECT_GATEWAY_URL` for its fork by `VITEST_POOL_ID`. Read the URL in tests with `workerInngestBaseUrl()`, never a shared value. Static values (`NODE_ENV`) go in `vitest.config.ts` `test.env`. Test files use normal top-level imports — `createEnv()` in `env.ts` sees all values.
 
 ## Telegram Testing
 
