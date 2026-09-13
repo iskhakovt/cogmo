@@ -24,6 +24,7 @@
 import { NonRetriableError } from "inngest";
 import type { Transactor } from "../../db/index.js";
 import { inngest as inngestClient } from "../../inngest/client.js";
+import { conversationTurnConcurrency } from "../../inngest/concurrency.js";
 import {
   buildPipelineGatePendingEvent,
   buildPipelineStageDueEvent,
@@ -65,7 +66,9 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
       id: "pipeline-stage-runner",
       triggers: [pipelineStageDue],
       retries: 2,
-      concurrency: { limit: 1, key: "event.data.runId" },
+      // A run owns its conversation, so the shared key also runs one stage of
+      // a run at a time.
+      concurrency: conversationTurnConcurrency,
       // Retries exhausted (or non-retriable): the run cannot advance past this
       // stage, so it fails rather than sitting `running` with nothing scheduled.
       // The reason carries the error class only — messages can hold query text
@@ -265,7 +268,7 @@ export function createPipelineStageRunner(deps: PipelineStageRunnerDeps) {
       if (next !== undefined) {
         await step.sendEvent(
           "emit-next-stage",
-          buildPipelineStageDueEvent({ runId, stageId: next.id, iteration }),
+          buildPipelineStageDueEvent({ runId, conversationId, stageId: next.id, iteration }),
         );
         return { status: "advanced" as const, nextStage: next.id };
       }

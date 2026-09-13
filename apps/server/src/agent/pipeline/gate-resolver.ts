@@ -176,7 +176,12 @@ async function sendFollowUps(
   if (due?.kind === "advanced") {
     await step.sendEvent(
       "emit-next-stage",
-      buildPipelineStageDueEvent({ runId, stageId: due.nextStage, iteration: due.iteration }),
+      buildPipelineStageDueEvent({
+        runId,
+        conversationId,
+        stageId: due.nextStage,
+        iteration: due.iteration,
+      }),
     );
   }
 

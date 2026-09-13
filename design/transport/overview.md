@@ -122,7 +122,7 @@ Shared core — same for all platforms. The agent never knows which platform the
 8. Persist all new messages produced by the loop (intermediate tool_use/tool_result turns + final assistant), each as a `messages` row with full `ContentBlock[]` content. All carry the same `lastInboundMessageId`, `profile_id`, and `model`.
 9. Emit `response/ready` event
 
-Concurrency: `limit: 1, key: conversationId` — one batch at a time per conversation. Second batch queues in Inngest until the first completes.
+Concurrency: `limit: 1, key: conversationId` — one batch at a time per conversation. Second batch queues in Inngest until the first completes. The key is env-scoped and shared with `pipeline-stage-runner`, so pipeline stage turns queue with chat turns on a run's conversation.
 
 ## Event Bus
 

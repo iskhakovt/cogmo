@@ -139,6 +139,7 @@ export async function startPipelineRun(
   await deps.inngest.send(
     buildPipelineStageDueEvent({
       runId: started.value.runId,
+      conversationId: started.value.conversationId,
       stageId: started.value.firstStage,
       iteration: 0,
       ...(args.originConversationId !== undefined && {

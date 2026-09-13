@@ -665,6 +665,8 @@ export const pipelineStageDue = eventType("pipeline/stage.due", {
     runId: z.string(),
     stageId: z.string(),
     iteration: z.number().int().nonnegative(),
+    /** The run's own conversation, whose turns the stage shares a queue with. */
+    conversationId: z.string(),
     /**
      * The chat conversation whose turn started the run — set on the first
      * stage only. The runner waits (bounded) for that turn's

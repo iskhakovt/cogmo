@@ -260,7 +260,7 @@ describe("createPipelineGateResolver", () => {
       "emit-next-stage",
       expect.objectContaining({
         name: "pipeline/stage.due",
-        data: { runId: "run-1", stageId: "build", iteration: 0 },
+        data: { runId: "run-1", conversationId: "conv-1", stageId: "build", iteration: 0 },
         id: "pipeline-stage-due-run-1-build-0",
       }),
     );

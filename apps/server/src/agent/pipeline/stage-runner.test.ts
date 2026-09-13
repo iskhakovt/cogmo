@@ -2,6 +2,7 @@ import { InngestTestEngine } from "@inngest/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { inngest } from "../../inngest/client.js";
+import { conversationTurnConcurrency } from "../../inngest/concurrency.js";
 import { pipelineStageDue, responseReady } from "../../inngest/events.js";
 import {
   directStep,
@@ -62,6 +63,7 @@ function stageDue(stageId: string, iteration = 0, originConversationId?: string)
     name: "pipeline/stage.due" as const,
     data: {
       runId: RUN_ID,
+      conversationId: "conv-1",
       stageId,
       iteration,
       ...(originConversationId !== undefined && { originConversationId }),
@@ -91,11 +93,11 @@ function harness(outcome?: AgenticStageOutcome) {
 }
 
 describe("createPipelineStageRunner", () => {
-  it("pins the trigger and per-run concurrency", () => {
+  it("pins the trigger and the conversation-turn concurrency it shares with chat", () => {
     const { fn } = harness();
     expect(fn.opts.id).toBe("pipeline-stage-runner");
     expect(fn.opts.triggers).toEqual([pipelineStageDue]);
-    expect(fn.opts.concurrency).toEqual({ limit: 1, key: "event.data.runId" });
+    expect(fn.opts.concurrency).toBe(conversationTurnConcurrency);
   });
 
   it("runs an agentic stage, records its artifact, and emits the next stage", async () => {
@@ -127,7 +129,7 @@ describe("createPipelineStageRunner", () => {
       "emit-next-stage",
       expect.objectContaining({
         name: "pipeline/stage.due",
-        data: { runId: RUN_ID, stageId: "approve", iteration: 0 },
+        data: { runId: RUN_ID, conversationId: "conv-1", stageId: "approve", iteration: 0 },
         id: `pipeline-stage-due-${RUN_ID}-approve-0`,
       }),
     );

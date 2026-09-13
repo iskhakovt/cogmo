@@ -2,6 +2,7 @@ import { NonRetriableError } from "inngest";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { z } from "zod";
+import { conversationTurnConcurrency } from "../inngest/concurrency.js";
 import type { inboundReady } from "../inngest/events.js";
 import { ProviderConfigError } from "../llm/resolver.js";
 import type { Message, StopReason } from "../llm/types.js";
@@ -97,6 +98,10 @@ const testEvent: { data: InboundReadyData } = {
 const testRunId = "run-123";
 
 describe("createHandleMessage", () => {
+  it("shares the conversation-turn concurrency with pipeline stage turns", () => {
+    expect(createHandleMessage(mockDeps()).opts.concurrency).toBe(conversationTurnConcurrency);
+  });
+
   it("loads unbatched inbound messages via transportStore", async () => {
     const deps = mockDeps();
     await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {

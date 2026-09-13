@@ -3,6 +3,7 @@ import type { Logger } from "pino";
 import * as R from "remeda";
 import type { Transactor } from "../db/index.js";
 import { inngest } from "../inngest/client.js";
+import { conversationTurnConcurrency } from "../inngest/concurrency.js";
 import {
   buildConversationCooldownClearedEvent,
   buildConversationErroredEvent,
@@ -268,7 +269,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       id: "handle-message",
       triggers: [inboundReady],
       retries: 2,
-      concurrency: { limit: 1, key: "event.data.conversationId" },
+      concurrency: conversationTurnConcurrency,
       // Last-chance handler: retries are exhausted (or the run failed
       // non-retriably). Two responsibilities, ordered durable-first:
       //  1. Emit `conversation/errored` — the durable signal downstream
