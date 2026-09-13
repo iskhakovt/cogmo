@@ -2,4 +2,4 @@
 
 That was the cause of the `pipeline.integration.test.ts` → "emits gen_ai chat spans + token metrics" flake. `waitForAssistantMessage` returned on whichever fork persisted first. A fork that lost the persist race never recorded `cogmo.agent.iterations`, so the assertion in the fork that sent the event could never be satisfied.
 
-`test/integration-setup.ts` starts one `inngest dev` per worker slot (`maxWorkers`, about 40 MiB and under half a second each) and provides their URLs as `inngestWorkers`. `test/integration-setup-per-fork.ts` points each fork at its slot's server by `VITEST_POOL_ID`. Tests read it back through `workerInngestBaseUrl()`.
+`test/integration-setup.ts` starts one `inngest dev` per worker slot (about 40 MiB and under half a second each) and provides their URLs as `inngestWorkers`. The integration project now sets `maxWorkers` explicitly, because `globalSetup` runs before Vitest resolves its default. It keeps Vitest's default of one per CPU but one, overridable with `INTEGRATION_MAX_WORKERS=N`. `test/integration-setup-per-fork.ts` points each fork at its slot's server by `VITEST_POOL_ID`. Tests read it back through `workerInngestBaseUrl()`.
