@@ -74,7 +74,7 @@ export class WizardCancelled extends Error {
   }
 }
 
-function cancelGuard<T>(value: T | symbol): T {
+function cancelGuard<T>(value: T | typeof p.CANCEL_SYMBOL): T {
   if (p.isCancel(value)) throw new WizardCancelled();
   return value;
 }

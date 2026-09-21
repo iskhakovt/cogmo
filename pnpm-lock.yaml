@@ -36,8 +36,8 @@ importers:
         specifier: ^3.1127.0
         version: 3.1127.0
       '@clack/prompts':
-        specifier: ^1.7.0
-        version: 1.7.0
+        specifier: ^1.8.1
+        version: 1.8.1
       '@cogmo/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
@@ -171,8 +171,8 @@ importers:
         specifier: ^314.0.6
         version: 314.0.6
       remeda:
-        specifier: ^2.45.0
-        version: 2.45.0
+        specifier: ^2.47.0
+        version: 2.47.0
       semver:
         specifier: ^7.8.5
         version: 7.8.5
@@ -632,12 +632,12 @@ packages:
   '@bufbuild/protobuf@2.14.1':
     resolution: {integrity: sha512-agRJn3+EJDUe8AvxTx/LnHA/GErvLE62pSaSk7+MwFOtOv8eWBu/qCq2qoZjBjVZ3C2aiFJCveuSs17KMkYGOw==}
 
-  '@clack/core@1.4.3':
-    resolution: {integrity: sha512-/kr3UWNtdJfxZtPgDqUOmG2pvwlmcLGheex5yiZKdwbzZJxhV+HMNR9QNmyY5cGwTNV6LrR7Jtp+KjhUAP1qBQ==}
+  '@clack/core@1.5.1':
+    resolution: {integrity: sha512-iHTrHA8MtVuLl2TfZySmcKv1qO2PoyC9Z7pfSDozEuV5vtY3/wcOPKJXlqJ5Oq2Cx5DDGQGAMVx6HZfRRoVEbQ==}
     engines: {node: '>= 20.12.0'}
 
-  '@clack/prompts@1.7.0':
-    resolution: {integrity: sha512-y7/yvZ2TPAnR9+jnc00klvNNLkJiXFFrQA/hlLCcxA9a2A4zQIOimyFQ9XfwYKiGD1fb5GY8vbKIIgO8d5Tb2A==}
+  '@clack/prompts@1.8.1':
+    resolution: {integrity: sha512-dlT1m5e/0yUL0kRNcQn7yGLVThkgbB0Ga/1AmfDDC/8ik6AIiSf2QLQO2zPYvefsHP0aFgxO93cVLCCfDp7kzQ==}
     engines: {node: '>= 20.12.0'}
 
   '@copilotkit/aimock@1.39.0':
@@ -5581,8 +5581,8 @@ packages:
     resolution: {integrity: sha512-57frrGM/OCTLqLOAh0mhVA9VBMHd+9U7Zb2THMGdBUoZVOtGbJzjxsYGDJ3A9AYYCP4hn6y1TVbaOfzWtm5GFg==}
     engines: {node: '>= 12.13.0'}
 
-  remeda@2.45.0:
-    resolution: {integrity: sha512-CTftZ0GJSox3CH77OhJemj20sXXUScH/kpkExD6t2LP3IG+mPKASBMFkbvWtsvzhU+54gKcgH38WWVihfr7bCA==}
+  remeda@2.47.0:
+    resolution: {integrity: sha512-LPyRi+dI3IGGeoNBKdfsTbx0Q+3mLonMbPipGF75Ym+/zNm5cpnwsTXtLbS79yb0V04D0gMS7qNAiTOwb4IoVQ==}
     engines: {node: '>=18.0.0'}
 
   require-directory@2.1.1:
@@ -6704,14 +6704,14 @@ snapshots:
 
   '@bufbuild/protobuf@2.14.1': {}
 
-  '@clack/core@1.4.3':
+  '@clack/core@1.5.1':
     dependencies:
       fast-wrap-ansi: 0.2.2
       sisteransi: 1.0.5
 
-  '@clack/prompts@1.7.0':
+  '@clack/prompts@1.8.1':
     dependencies:
-      '@clack/core': 1.4.3
+      '@clack/core': 1.5.1
       fast-string-width: 3.0.2
       fast-wrap-ansi: 0.2.2
       sisteransi: 1.0.5
@@ -11574,7 +11574,7 @@ snapshots:
 
   real-require@0.2.0: {}
 
-  remeda@2.45.0: {}
+  remeda@2.47.0: {}
 
   require-directory@2.1.1: {}
 
