@@ -141,7 +141,9 @@ export const S3_TEST_SECRET_KEY = "cogmo-test-s3-secret";
 
 /** S3-compatible object store. Serves `/data`, the image's default volume. */
 export function rustfs(network: StartedNetwork) {
-  return new GenericContainer("mirror.gcr.io/rustfs/rustfs:1.0.0")
+  return new GenericContainer(
+    "mirror.gcr.io/rustfs/rustfs:1.0.0@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff",
+  )
     .withNetwork(network)
     .withNetworkAliases("rustfs")
     .withExposedPorts(9000)
