@@ -135,22 +135,26 @@ function hindsightAuthEnv(apiKey: string): Record<string, string> {
   };
 }
 
-export function minio(network: StartedNetwork) {
-  return new GenericContainer("cgr.dev/chainguard/minio:latest")
+/** Root credentials dev and test RustFS containers enforce. */
+export const S3_TEST_ACCESS_KEY = "cogmo-test-s3-access";
+export const S3_TEST_SECRET_KEY = "cogmo-test-s3-secret";
+
+/** S3-compatible object store. Serves `/data`, the image's default volume. */
+export function rustfs(network: StartedNetwork) {
+  return new GenericContainer("mirror.gcr.io/rustfs/rustfs:1.0.0")
     .withNetwork(network)
-    .withNetworkAliases("minio")
+    .withNetworkAliases("rustfs")
     .withExposedPorts(9000)
     .withEnvironment({
-      MINIO_ROOT_USER: "minioadmin",
-      MINIO_ROOT_PASSWORD: "minioadmin",
+      RUSTFS_ACCESS_KEY: S3_TEST_ACCESS_KEY,
+      RUSTFS_SECRET_KEY: S3_TEST_SECRET_KEY,
     })
-    .withCommand(["server", "/data"])
-    .withWaitStrategy(Wait.forHttp("/minio/health/live", 9000))
+    .withWaitStrategy(Wait.forHttp("/health/ready", 9000))
     .withStartupTimeout(30_000);
 }
 
 /**
- * Create the files bucket in MinIO. Idempotent — a reused MinIO volume (dev's
+ * Create the files bucket in RustFS. Idempotent — a reused container (dev's
  * `withReuse`) already has it, so BucketAlreadyOwnedByYou / BucketAlreadyExists
  * is swallowed; any other failure propagates.
  */
@@ -160,7 +164,7 @@ export async function ensureFilesBucket(s3Endpoint: string): Promise<void> {
     endpoint: s3Endpoint,
     region: "us-east-1",
     forcePathStyle: true,
-    credentials: { accessKeyId: "minioadmin", secretAccessKey: "minioadmin" },
+    credentials: { accessKeyId: S3_TEST_ACCESS_KEY, secretAccessKey: S3_TEST_SECRET_KEY },
   });
   try {
     await s3.send(new CreateBucketCommand({ Bucket: "cogmo-files" }));
@@ -293,7 +297,7 @@ export function getUrls(containers: {
   postgres: ContainerEndpoint;
   inngest: ContainerEndpoint;
   hindsight?: ContainerEndpoint;
-  minio?: ContainerEndpoint;
+  rustfs?: ContainerEndpoint;
 }) {
   return {
     databaseUrl: `postgresql://cogmo@${containers.postgres.getHost()}:${containers.postgres.getMappedPort(5432)}/cogmo`,
@@ -301,8 +305,8 @@ export function getUrls(containers: {
     ...(containers.hindsight && {
       hindsightUrl: `http://${containers.hindsight.getHost()}:${containers.hindsight.getMappedPort(8888)}`,
     }),
-    ...(containers.minio && {
-      s3Endpoint: `http://${containers.minio.getHost()}:${containers.minio.getMappedPort(9000)}`,
+    ...(containers.rustfs && {
+      s3Endpoint: `http://${containers.rustfs.getHost()}:${containers.rustfs.getMappedPort(9000)}`,
     }),
   };
 }

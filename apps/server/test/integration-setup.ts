@@ -44,13 +44,13 @@ export async function setup({ provide, config }: GlobalSetupContext) {
 
   console.log("Starting containers...");
   // One Inngest per worker slot — see `integration-setup-per-fork.ts`.
-  const [pg, _rd, mn, ...inngestServers] = await Promise.all([
+  const [pg, _rd, rfs, ...inngestServers] = await Promise.all([
     c.postgres(network).start(),
     c.redis(network).start(),
-    c.minio(network).start(),
+    c.rustfs(network).start(),
     ...Array.from({ length: config.maxWorkers }, () => c.inngest(network).start()),
   ]);
-  containers.push(pg, _rd, mn, ...inngestServers);
+  containers.push(pg, _rd, rfs, ...inngestServers);
 
   // Slim Hindsight — external LLM + embeddings via llmock (replays recorded fixtures)
   const llmockUrl = `${llmockBase}/v1`;
@@ -77,10 +77,10 @@ export async function setup({ provide, config }: GlobalSetupContext) {
     postgres: pg,
     inngest: firstInngest,
     hindsight: hindsightContainer,
-    minio: mn,
+    rustfs: rfs,
   });
   if (!hindsightUrl) throw new Error("hindsight is required for integration tests");
-  if (!s3Endpoint) throw new Error("minio is required for integration tests");
+  if (!s3Endpoint) throw new Error("rustfs is required for integration tests");
 
   await c.ensureFilesBucket(s3Endpoint);
 
@@ -95,8 +95,8 @@ export async function setup({ provide, config }: GlobalSetupContext) {
   process.env.DEBOUNCE_IDLE_SECONDS = "0";
   process.env.DEBOUNCE_MAXWAIT_SECONDS = "0";
   process.env.S3_ENDPOINT = s3Endpoint;
-  process.env.S3_ACCESS_KEY = "minioadmin";
-  process.env.S3_SECRET_KEY = "minioadmin";
+  process.env.S3_ACCESS_KEY = c.S3_TEST_ACCESS_KEY;
+  process.env.S3_SECRET_KEY = c.S3_TEST_SECRET_KEY;
   process.env.S3_BUCKET = "cogmo-files";
   // Default to `warn` so noisy info-level logs don't drown the test
   // output, but let the operator opt-in to `info` / `debug` for a

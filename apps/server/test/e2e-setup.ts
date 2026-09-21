@@ -112,13 +112,13 @@ export async function setup({ provide }: GlobalSetupContext) {
   console.log(`llmock at ${mock.url}, reachable from containers at ${llmockBase}`);
 
   console.log("Starting containers...");
-  const [pg, _rd, inn, mn] = await Promise.all([
+  const [pg, _rd, inn, rfs] = await Promise.all([
     c.postgres(network).start(),
     c.redis(network).start(),
     c.inngest(network).start(),
-    c.minio(network).start(),
+    c.rustfs(network).start(),
   ]);
-  containers.push(pg, _rd, inn, mn);
+  containers.push(pg, _rd, inn, rfs);
 
   // Slim Hindsight
   const llmockUrl = `${llmockBase}/v1`;
@@ -138,10 +138,10 @@ export async function setup({ provide }: GlobalSetupContext) {
     postgres: pg,
     inngest: inn,
     hindsight: hindsightContainer,
-    minio: mn,
+    rustfs: rfs,
   });
   if (!hindsightUrl) throw new Error("hindsight is required for e2e");
-  if (!s3Endpoint) throw new Error("minio is required for e2e");
+  if (!s3Endpoint) throw new Error("rustfs is required for e2e");
 
   await c.ensureFilesBucket(s3Endpoint);
 
@@ -246,9 +246,9 @@ export async function setup({ provide }: GlobalSetupContext) {
       INNGEST_CONNECT_GATEWAY_URL: "ws://inngest:8289/v0/connect",
       HINDSIGHT_URL: "http://hindsight:8888",
       HINDSIGHT_API_KEY: c.HINDSIGHT_TEST_API_KEY,
-      S3_ENDPOINT: "http://minio:9000",
-      S3_ACCESS_KEY: "minioadmin",
-      S3_SECRET_KEY: "minioadmin",
+      S3_ENDPOINT: "http://rustfs:9000",
+      S3_ACCESS_KEY: c.S3_TEST_ACCESS_KEY,
+      S3_SECRET_KEY: c.S3_TEST_SECRET_KEY,
       S3_BUCKET: "cogmo-files",
       INNGEST_DEV: "true",
       DEBOUNCE_IDLE_SECONDS: "0",

@@ -489,7 +489,7 @@ Three tiers, same pattern as the rest of the codebase.
 
 llmock (`@copilotkit/aimock`) is LLM-API-specific (Anthropic Messages, OpenAI chat/embeddings) — it doesn't support fal.ai's endpoints or CDN downloads. We add a mock that intercepts fal HTTP traffic specifically, **without patching global `fetch`**.
 
-**Design:** `createFalFetch({ mode, fixturePath })` returns a function with fetch signature. Pass it to `createFal({ fetch })` via `BootstrapOptions.falFetchOverride` in tests. The wrapper handles fal endpoints; everything else delegates to `globalThis.fetch`, so the Anthropic SDK (through llmock), Hindsight, MinIO, Inngest — all untouched.
+**Design:** `createFalFetch({ mode, fixturePath })` returns a function with fetch signature. Pass it to `createFal({ fetch })` via `BootstrapOptions.falFetchOverride` in tests. The wrapper handles fal endpoints; everything else delegates to `globalThis.fetch`, so the Anthropic SDK (through llmock), Hindsight, RustFS, Inngest — all untouched.
 
 **Why not MSW:** MSW patches `globalThis.fetch` process-wide. When we tried it, `onUnhandledRequest: "bypass"` was not transparent for the Anthropic SDK's streaming requests going through llmock — auth headers came back mangled even with a valid key. A library-scoped `fetch` option eliminates this class of interaction. Prefer per-library fetch injection over global patching when the library supports it; MSW is the fallback when it doesn't.
 

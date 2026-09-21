@@ -394,7 +394,7 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
     ? constantResolver(opts.providerOverride)
     : createDbProviderResolver({ runInTx: tx, agentStore, secretsStore });
 
-  // S3-compatible file storage (MinIO locally, AWS S3 / R2 in production).
+  // S3-compatible file storage (RustFS locally, AWS S3 / R2 in production).
   checkS3KeyPair(env.S3_ACCESS_KEY, env.S3_SECRET_KEY);
   const s3Client = new S3Client({
     ...(env.S3_ENDPOINT ? { endpoint: env.S3_ENDPOINT, forcePathStyle: true } : {}),
