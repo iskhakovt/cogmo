@@ -53,11 +53,11 @@ async function main() {
     });
   }
 
-  const [pg, _rd, inn, mn] = await Promise.all([
+  const [pg, _rd, inn, rfs] = await Promise.all([
     startWithProgress("Postgres", () => c.postgres(network).withReuse().start()),
     startWithProgress("Redis", () => c.redis(network).withReuse().start()),
     startWithProgress("Inngest", () => c.inngest(network).withReuse().start()),
-    startWithProgress("MinIO", () => c.minio(network).withReuse().start()),
+    startWithProgress("RustFS", () => c.rustfs(network).withReuse().start()),
   ]);
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -79,7 +79,7 @@ async function main() {
   // container, manifesting as "Reconnecting after failure" in a loop.
   const inngestConnectGatewayUrl = `ws://${inn.getHost()}:${inn.getMappedPort(8289)}/v0/connect`;
   const hindsightUrl = `http://${hindsightContainer.getHost()}:${hindsightContainer.getMappedPort(8888)}`;
-  const s3Endpoint = `http://${mn.getHost()}:${mn.getMappedPort(9000)}`;
+  const s3Endpoint = `http://${rfs.getHost()}:${rfs.getMappedPort(9000)}`;
   await c.ensureFilesBucket(s3Endpoint);
 
   // Override the prod-flavoured `/var/lib/cogmo/...` defaults from
@@ -163,10 +163,10 @@ async function main() {
     INNGEST_DEV: "true",
     HINDSIGHT_URL: hindsightUrl,
     HINDSIGHT_API_KEY: c.HINDSIGHT_TEST_API_KEY,
-    // Override any real-S3 config from the shell/.env — dev is self-contained on MinIO.
+    // Override any real-S3 config from the shell/.env — dev is self-contained on RustFS.
     S3_ENDPOINT: s3Endpoint,
-    S3_ACCESS_KEY: "minioadmin",
-    S3_SECRET_KEY: "minioadmin",
+    S3_ACCESS_KEY: c.S3_TEST_ACCESS_KEY,
+    S3_SECRET_KEY: c.S3_TEST_SECRET_KEY,
     S3_BUCKET: "cogmo-files",
     S3_REGION: "us-east-1",
   };

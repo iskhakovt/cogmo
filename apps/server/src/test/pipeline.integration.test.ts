@@ -15,6 +15,7 @@ import { DrizzleSecretsStore } from "../secrets/store/index.js";
 import { createAttachmentStore } from "../transport/attachment-store.js";
 import { channelSessions, channels, inboundMessages } from "../transport/store/schema.js";
 import { OpenAIVoiceProvider } from "../voice/openai.js";
+import { expectDefined } from "./assertions.js";
 import { createFalFetch } from "./fal-mock.js";
 import { createOpenAIVoiceFetch } from "./openai-voice-mock.js";
 import { type OtelHarness, setupOtelHarness } from "./otel-harness.js";
@@ -469,8 +470,8 @@ describe("message pipeline", () => {
       region: "us-east-1",
       forcePathStyle: true,
       credentials: {
-        accessKeyId: process.env.S3_ACCESS_KEY ?? "minioadmin",
-        secretAccessKey: process.env.S3_SECRET_KEY ?? "minioadmin",
+        accessKeyId: expectDefined(process.env.S3_ACCESS_KEY, "S3_ACCESS_KEY"),
+        secretAccessKey: expectDefined(process.env.S3_SECRET_KEY, "S3_SECRET_KEY"),
       },
     });
     const attachments = createAttachmentStore(s3, process.env.S3_BUCKET ?? "cogmo-files");

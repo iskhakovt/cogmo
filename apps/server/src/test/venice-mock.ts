@@ -8,7 +8,7 @@
  *
  * Why a custom fetch, not MSW: same reasoning as fal-mock. Per-library fetch
  * injection (`VeniceImageProvider({ fetch })`) is strictly scoped to Venice —
- * Anthropic via llmock, Hindsight, MinIO are untouched.
+ * Anthropic via llmock, Hindsight, RustFS are untouched.
  *
  * Strategy:
  * - Intercept `POST {VENICE_HOST}/api/v1/image/generate`.

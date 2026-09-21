@@ -13,7 +13,7 @@
  * - MSW patches `globalThis.fetch`, which caused issues with the Anthropic
  *   SDK's streaming requests going through llmock (the auth header ended up
  *   mangled via MSW's bypass path).
- * - Tests for other providers (Anthropic via llmock, S3 via MinIO) are
+ * - Tests for other providers (Anthropic via llmock, S3 via RustFS) are
  *   completely unaffected by this module.
  *
  * Strategy:

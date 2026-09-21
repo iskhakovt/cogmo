@@ -123,7 +123,7 @@ Defaults below match the in-image expectations: every host-state path sits under
 
 | Variable | Default | Purpose |
 |-|-|-|
-| `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_REGION` | — / `cogmo-files` / — / — / `us-east-1` | Object storage for the file tools and image attachments. MinIO works. |
+| `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_REGION` | — / `cogmo-files` / — / — / `us-east-1` | Object storage for the file tools and image attachments. Any S3-compatible store works; dev and tests run RustFS. |
 | `S3_CLIENT_ENCRYPT` | — | `true` / `1` enables client-side AES-256-GCM for **both** attachments and workspace files. Bucket sees only opaque ciphertext bodies (attachments uploaded as `.bin` with `Content-Type: application/octet-stream`; workspace files written with `Content-Type: application/octet-stream`). Reads transparently fall back to plaintext when the magic prefix is absent, so the flag is safe to flip on a populated bucket. **Object keys remain plaintext** — matches the AWS S3 Encryption Client convention; if file names need to stay secret, choose non-revealing names. **Caveats**: rotating `COGMO_MASTER_KEY` requires re-encrypting every existing object; bucket loses direct-browser-serve; flipping the flag *off* with encrypted blobs in the bucket leaves them unreadable. Off by default. |
 
 #### Session & debounce

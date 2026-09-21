@@ -55,7 +55,7 @@ Docker services + app wired in-process. Tests the orchestration pipeline — deb
 Full deployment-like stack — cogmo runs from its release image, in connect mode. Smoke test.
 
 **Infrastructure:**
-- Testcontainers (PostgreSQL, Redis, Inngest, Hindsight, MinIO) — started in vitest `globalSetup`
+- Testcontainers (PostgreSQL, Redis, Inngest, Hindsight, RustFS) — started in vitest `globalSetup`
 - llmock in-process — replaces both mock-anthropic container and Ollama
 - App image: `E2E_IMAGE` when set, which is how CI hands over the tag its bake step
   produced; otherwise `globalSetup` runs `docker buildx bake --load cogmo-e2e`, the same
