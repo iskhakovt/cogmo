@@ -10,8 +10,13 @@ on:
     # shouldn't invalidate a passing e2e result for the same SHA.
     types: [opened, synchronize, reopened, labeled]
 
+# A push to a PR cancels the run for the commit it replaced. `labeled` and
+# `reopened` leave the head commit where it is, so each of those runs gets a
+# group of its own and neither cancels nor is cancelled: a cancelled run
+# still reports a failed `Required Checks` on its commit, and the PR's check
+# rollup stays red after another run on the same commit passes.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}${{ (github.event.action == 'labeled' || github.event.action == 'reopened') && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 # Deny-by-default; each job grants what it needs.
