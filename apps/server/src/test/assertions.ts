@@ -61,8 +61,9 @@ export function assertKind<U extends { kind: string }, K extends U["kind"]>(
 
 /**
  * Run a `@clack/prompts` string `validate` option. The option is a union of a
- * validator function and a Standard Schema object; wizard prompts always pass
- * the function form, so this narrows to it (throwing otherwise) and calls it.
+ * validator function, which may return a promise, and a Standard Schema object;
+ * wizard prompts always pass a synchronous function, so this narrows to it
+ * (throwing otherwise) and returns its result.
  */
 export function runClackValidate(
   validate: TextOptions["validate"],
@@ -71,5 +72,9 @@ export function runClackValidate(
   if (typeof validate !== "function") {
     throw new Error("expected a clack validate function, got a schema or undefined");
   }
-  return validate(value);
+  const result = validate(value);
+  if (result instanceof Promise) {
+    throw new Error("expected a synchronous clack validate function, got an async one");
+  }
+  return result;
 }
