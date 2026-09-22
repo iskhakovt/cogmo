@@ -1,0 +1,18 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Return valid json only.\n\nExtract facts from the following chunk.\n\nChunk: 1/1\nEvent Date: [DATE] ([TS])\nContext: none\n\nContent:\nuser feels close to wife after the trip",
+        "model": "gpt-4o-mini",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\n  \"facts\": [\n    {\n      \"what\": \"User feels close to wife after the trip\",\n      \"when\": \"N/A\",\n      \"where\": \"N/A\",\n      \"who\": \"user, user's wife\",\n      \"why\": \"N/A\",\n      \"fact_kind\": \"conversation\",\n      \"occurred_start\": \"N/A\",\n      \"occurred_end\": \"N/A\",\n      \"fact_type\": \"world\",\n      \"entities\": [\"user\", \"user's wife\"],\n      \"causal_relations\": null\n    }\n  ]\n}"
+      },
+      "metadata": {
+        "systemHash": "a24b0767"
+      }
+    }
+  ]
+}

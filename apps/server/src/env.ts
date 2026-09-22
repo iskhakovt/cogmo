@@ -78,8 +78,10 @@ export const env = createEnv({
      */
     HINDSIGHT_API_KEY: z.string().min(1),
     /**
-     * Truncation budget for recall queries, in tokens. Must match the Hindsight
-     * server's `HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS` (server default: 500).
+     * Truncation budget for recall queries, in o200k_base tokens. Must match the
+     * Hindsight server's `HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS` (server default:
+     * 500), counted in the server's `HINDSIGHT_API_TOKENIZER_ENCODING` (default
+     * `o200k_base`).
      * Bump on both sides simultaneously when long multi-turn context needs to
      * flow into the recall query — semantic search quality degrades past
      * ~1500 tokens regardless of the cap.

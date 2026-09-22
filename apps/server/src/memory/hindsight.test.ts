@@ -1,3 +1,4 @@
+import { getEncoding } from "js-tiktoken";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { HindsightMemoryProvider } from "./hindsight.js";
 
@@ -296,7 +297,7 @@ describe("HindsightMemoryProvider", () => {
     const provider = createProvider({ maxQueryTokens: 10 });
     mockRecallMemories.mockResolvedValueOnce(okRecall([]));
 
-    // ~80 cl100k_base tokens — well past the 10-token cap
+    // 181 o200k_base tokens — well past the 10-token cap
     const longQuery = "the quick brown fox jumps over the lazy dog ".repeat(20);
     await provider.recall("bank-1", longQuery);
 
@@ -305,6 +306,48 @@ describe("HindsightMemoryProvider", () => {
     const sent = call.body.query;
     expect(sent.length).toBeLessThan(longQuery.length);
     expect(longQuery.startsWith(sent)).toBe(true);
+  });
+
+  it("recall truncates to the cap as Hindsight counts it, in o200k_base", async () => {
+    const provider = createProvider({ maxQueryTokens: 500 });
+    mockRecallMemories.mockResolvedValueOnce(okRecall([]));
+
+    // 15 o200k_base tokens per sentence against 10 cl100k_base ones, so a
+    // query cut to 500 tokens in the wrong vocabulary is far over the cap.
+    const longQuery = "PostgreSQL deduplicates orthogonal hardcoded rows cleanly. ".repeat(100);
+    await provider.recall("bank-1", longQuery);
+
+    const call = mockRecallMemories.mock.calls[0]?.[0] as { body: { query: string } };
+    const sentTokens = getEncoding("o200k_base").encode(call.body.query).length;
+    expect(sentTokens).toBeLessThanOrEqual(500);
+    expect(sentTokens).toBeGreaterThan(490);
+    expect(longQuery.startsWith(call.body.query)).toBe(true);
+  });
+
+  it("recall counts special-token text as ordinary text, as Hindsight does", async () => {
+    const provider = createProvider({ maxQueryTokens: 500 });
+    mockRecallMemories.mockResolvedValueOnce(okRecall([]));
+
+    await provider.recall("bank-1", "what did I say about <|endoftext|> and <|endofprompt|>?");
+
+    const call = mockRecallMemories.mock.calls[0]?.[0] as { body: { query: string } };
+    expect(call.body.query).toBe("what did I say about <|endoftext|> and <|endofprompt|>?");
+  });
+
+  it("recall truncates special-token text to the cap as Hindsight counts it", async () => {
+    const provider = createProvider({ maxQueryTokens: 50 });
+    mockRecallMemories.mockResolvedValueOnce(okRecall([]));
+
+    // Several ordinary tokens each on the server, one each if counted as a
+    // special token — which would cut far past the cap.
+    const longQuery = "note <|endoftext|> ".repeat(40);
+    await provider.recall("bank-1", longQuery);
+
+    const call = mockRecallMemories.mock.calls[0]?.[0] as { body: { query: string } };
+    const sentTokens = getEncoding("o200k_base").encode(call.body.query, [], []).length;
+    expect(sentTokens).toBeLessThanOrEqual(50);
+    expect(sentTokens).toBeGreaterThan(45);
+    expect(longQuery.startsWith(call.body.query)).toBe(true);
   });
 
   it("recall passes short queries through unchanged", async () => {
@@ -324,6 +367,45 @@ describe("HindsightMemoryProvider", () => {
     await expect(provider.recall("bank-1", "q")).rejects.toThrow(/recall 400/);
     // Single attempt — AbortError opt-out kicked in
     expect(mockRecallMemories).toHaveBeenCalledTimes(1);
+  });
+
+  it("recall returns no memories for a bank that has never been created", async () => {
+    const provider = createProvider();
+    mockRecallMemories.mockResolvedValue(errResp(404, "Bank 'bank-1' not found"));
+
+    const result = await provider.recall("bank-1", "q");
+
+    expect(result.memories).toEqual([]);
+    expect(mockRecallMemories).toHaveBeenCalledTimes(1);
+  });
+
+  it("recall fails on a 404 that does not name the bank", async () => {
+    const provider = createProvider();
+    mockRecallMemories.mockResolvedValue(errResp(404, "Not Found"));
+
+    await expect(provider.recall("bank-1", "q")).rejects.toThrow(/recall 404/);
+    expect(mockRecallMemories).toHaveBeenCalledTimes(1);
+  });
+
+  it("recall fails on a 404 that mentions the bank without reporting it missing", async () => {
+    const provider = createProvider();
+    // A gateway that echoes the request path carries the bank id in its detail.
+    mockRecallMemories.mockResolvedValue(
+      errResp(404, "No route for POST /v1/default/banks/bank-1/memories/recall"),
+    );
+
+    await expect(provider.recall("bank-1", "q")).rejects.toThrow(/recall 404/);
+  });
+
+  it("recall fails on a 404 without a detail body", async () => {
+    const provider = createProvider();
+    mockRecallMemories.mockResolvedValue({
+      data: undefined,
+      error: "404 page not found",
+      response: { status: 404 },
+    });
+
+    await expect(provider.recall("bank-1", "q")).rejects.toThrow(/recall 404/);
   });
 
   it("recall retries on 5xx errors", async () => {

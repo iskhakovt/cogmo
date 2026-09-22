@@ -8,6 +8,7 @@ import {
   sdk,
 } from "@vectorize-io/hindsight-client";
 import { getEncoding, type Tiktoken } from "js-tiktoken";
+import { z } from "zod";
 import { logger } from "../logger.js";
 import { AbortError, withRetry } from "../util/with-retry.js";
 import { createHindsightClients, describeHindsightError } from "./hindsight-clients.js";
@@ -49,21 +50,42 @@ const tracer = trace.getTracer("cogmo.memory");
  */
 const DEFAULT_MAX_QUERY_TOKENS = 500;
 
-// cl100k_base matches the tiktoken encoding Hindsight uses server-side
-// (`tiktoken.get_encoding("cl100k_base")` in `memory_engine.py`). Decoding
-// the token slice back to a string yields exactly what Hindsight will see
-// after re-encoding, so our token count and the server's never disagree.
+// o200k_base is the vocabulary Hindsight counts recall queries with
+// (`HINDSIGHT_API_TOKENIZER_ENCODING`, server default `o200k_base`), and the
+// server rejects an over-cap query with a 400 rather than truncating it. The
+// cap only holds if both sides count in the same vocabulary: other encodings
+// disagree with o200k by a few tokens either way on ordinary prose and code,
+// so a query cut to the cap in one of them often lands over it server-side.
+// A deployment that overrides the server encoding must change this one to
+// match. Special-token text such as `<|endoftext|>` is counted as ordinary
+// text, as the server counts it, rather than refused.
 let queryEncoder: Tiktoken | null = null;
 function getQueryEncoder(): Tiktoken {
-  if (!queryEncoder) queryEncoder = getEncoding("cl100k_base");
+  if (!queryEncoder) queryEncoder = getEncoding("o200k_base");
   return queryEncoder;
 }
 
 function truncateQuery(query: string, maxTokens: number): { query: string; truncated: boolean } {
   const enc = getQueryEncoder();
-  const tokens = enc.encode(query);
+  const tokens = enc.encode(query, [], []);
   if (tokens.length <= maxTokens) return { query, truncated: false };
   return { query: enc.decode(tokens.slice(0, maxTokens)), truncated: true };
+}
+
+/** Hindsight's error body for a request it refused with a message. */
+const DetailErrorSchema = z.object({ detail: z.string() });
+
+/**
+ * Whether a failed request is Hindsight's 404 for a bank that has never been
+ * created, `{"detail": "Bank '<id>' not found"}`. Only that exact detail
+ * qualifies: any other 404 — a wrong base path, a proxy prefix, a gateway
+ * echoing the request path, which contains the bank id — stays an error rather
+ * than a silently empty recall.
+ */
+function isMissingBank(statusCode: number | undefined, error: unknown, bankId: string): boolean {
+  if (statusCode !== 404) return false;
+  const parsed = DetailErrorSchema.safeParse(error);
+  return parsed.success && parsed.data.detail === `Bank '${bankId}' not found`;
 }
 
 function isClientError(statusCode: number | undefined): boolean {
@@ -201,6 +223,10 @@ export class HindsightMemoryProvider implements MemoryProvider {
               });
               if (res.error !== undefined) {
                 const status = res.response?.status;
+                // A bank comes into being with its first retain, so a user who
+                // has nothing retained yet has no bank to recall from. That is
+                // an empty memory, not a failure.
+                if (isMissingBank(status, res.error, bankId)) return { results: [] };
                 const detail = describeHindsightError(res.error);
                 // Hindsight 4xx is deterministic — bad request, malformed bank,
                 // etc. Retrying just burns latency before failing the same way.

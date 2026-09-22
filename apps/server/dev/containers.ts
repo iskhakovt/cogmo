@@ -197,7 +197,7 @@ export function hindsight(
   // the Control Plane web UI (which Cogmo never talks to). Pinned within
   // `cogmo.hindsightCompat`: a floating `latest` drifts past the range and
   // trips the boot version check.
-  return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:0.9.2")
+  return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:0.10.1")
     .withNetwork(network)
     .withNetworkAliases("hindsight")
     .withExposedPorts(8888)
@@ -245,6 +245,14 @@ export function hindsightSlim(
     HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL: opts.embeddingsBaseUrl,
     HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY: opts.embeddingsApiKey,
     HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL: opts.embeddingsModel,
+    // One text per embeddings request. Hindsight coalesces a retain's
+    // concurrent embedding calls into shared requests by event-loop timing,
+    // so which texts share a request, and in what order, varies from run to
+    // run. llmock keys a request on its space-joined texts up to the first
+    // " | " (`requestTransform` in test/llmock-setup.ts), so a shared request's
+    // key depends on that grouping. With one text per request, the key is that
+    // fact's own text.
+    HINDSIGHT_API_EMBEDDINGS_OPENAI_BATCH_SIZE: "1",
     HINDSIGHT_API_RERANKER_PROVIDER: rerankerProvider,
     HINDSIGHT_API_SKIP_LLM_VERIFICATION: "true",
     ...hindsightAuthEnv(HINDSIGHT_TEST_API_KEY),
@@ -258,7 +266,7 @@ export function hindsightSlim(
 
   // Pin version — floating `latest-slim` breaks llmock fixtures when Hindsight
   // changes its LLM request format. Update version + re-record fixtures together.
-  return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:0.9.2-slim")
+  return new GenericContainer("ghcr.io/vectorize-io/hindsight-api:0.10.1-slim")
     .withNetwork(network)
     .withNetworkAliases("hindsight")
     .withExposedPorts(8888)

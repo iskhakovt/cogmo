@@ -75,6 +75,10 @@ function requestTransform(req: ChatCompletionRequest): ChatCompletionRequest {
       ...m,
       content: typeof m.content === "string" ? normalizeContent(m.content) : m.content,
     })),
+    // Hindsight embeds a fact as `what | When: … | Involving: … | why`; keying
+    // on the text before the first " | " keeps the key to the fact itself.
+    // aimock joins a request's texts with a space, so a multi-text request
+    // keys on everything up to the first fact's " | ".
     embeddingInput: normalizeHappenedIn(req.embeddingInput?.split(" | ")[0]),
   };
 }
