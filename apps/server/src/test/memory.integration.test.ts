@@ -120,4 +120,23 @@ describe("hindsight memory", () => {
     const workHaystack = work.memories.map((m) => m.content.toLowerCase()).join("\n");
     expect(workHaystack).not.toMatch(/pepper|hiking|retriever|kreuzberg|berlin|apartment/);
   });
+
+  // A bank comes into being with its first retain, so a user who has
+  // retained nothing has no bank, and Hindsight answers recall on it with
+  // a 404 rather than an empty result.
+  it("recall on a bank that has never been created returns no memories", async () => {
+    const result = await memory.recall(`test-uncreated-${Date.now()}`, "what does the user like?");
+    expect(result.memories).toEqual([]);
+  });
+
+  // The server counts a recall query in its own vocabulary and rejects one
+  // over the cap with a 400, ahead of the missing-bank check. So against a
+  // bank that was never created, an empty result means the truncated query
+  // fitted, and a failure means the two sides counted it differently. The
+  // sentence takes half again as many tokens in o200k_base as in cl100k_base.
+  it("recall sends a long query that fits the server's token cap", async () => {
+    const longQuery = "PostgreSQL deduplicates orthogonal hardcoded rows cleanly. ".repeat(100);
+    const result = await memory.recall(`test-uncreated-long-${Date.now()}`, longQuery);
+    expect(result.memories).toEqual([]);
+  });
 });
