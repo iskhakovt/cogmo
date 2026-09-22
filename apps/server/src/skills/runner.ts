@@ -11,7 +11,7 @@ import { runGit, withGitAskpass } from "../secrets/git-askpass.js";
 import { DEFAULT_GITHUB_IDENTITY_NAME, resolveGitHubIdentity } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { classifyManifest, STUB_CLASSIFIER_VERSION } from "./classifier.js";
-import { type CtxUser, DefaultCtxHandler } from "./ctx-handler.js";
+import { type CtxUser, DefaultCtxHandler, type DefaultCtxHandlerOptions } from "./ctx-handler.js";
 import {
   hashLockfileContents,
   type LockfileCompiler,
@@ -350,6 +350,18 @@ export interface SkillRunnerOptions {
    * resolver isn't re-run. Set explicitly in tests to swap a stub.
    */
   lockfileCompiler?: LockfileCompiler;
+  /**
+   * The network `ctx.http` reaches, passed to every `DefaultCtxHandler`
+   * the runner builds — so it covers both tiers, while a tier-2 skill's
+   * own sockets stay on the real network. Omit in production for real DNS
+   * and the global `fetch`. The allowlist and address checks run against
+   * whatever this answers.
+   *
+   * Both halves or neither: a resolver alone would pass the address guard
+   * on its own answer while the global `fetch` connects wherever the name
+   * really points.
+   */
+  ctxHttp?: Required<Pick<DefaultCtxHandlerOptions, "resolveHost" | "fetch">>;
 }
 
 interface SkillLockfileCacheValue {
@@ -407,6 +419,7 @@ export class SkillRunnerImpl implements SkillRunner {
   #depsCacheVolumeName: string | undefined;
   #clock: () => Date;
   #lockfileCompiler: LockfileCompiler | undefined;
+  #ctxHttp: SkillRunnerOptions["ctxHttp"];
   /**
    * Lazily-created warm pool over `#sandbox`. Created on first tier-2
    * invocation, not at boot — keeps cogmo serve startup independent of
@@ -468,6 +481,7 @@ export class SkillRunnerImpl implements SkillRunner {
     }
     this.#poolOptions = opts.poolOptions;
     this.#clock = opts.clock ?? (() => new Date());
+    this.#ctxHttp = opts.ctxHttp;
     this.#ajv = new Ajv({ allErrors: true, strict: false });
     // Explicit override wins; otherwise default to a sandbox-backed
     // compiler when the runtime has both a sandbox and a tier-2 image
@@ -1293,6 +1307,13 @@ export class SkillRunnerImpl implements SkillRunner {
         memory: this.#memory,
         files: this.#files,
         recordContextCall: (call) => this.#runInTx((tx) => this.#store.recordContextCall(tx, call)),
+        // Named fields, not a spread: a wider object is assignable to the
+        // option's type, and anything else it carried would override the
+        // handler's manifest or audit binding.
+        ...(this.#ctxHttp && {
+          resolveHost: this.#ctxHttp.resolveHost,
+          fetch: this.#ctxHttp.fetch,
+        }),
       });
 
       const result = await this.#dispatchToRuntime(skill, cached, opts.inputs, ctxHandler, runId);

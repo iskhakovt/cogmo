@@ -102,9 +102,11 @@ Single integration test that exercises the full chat -> delegate_coding -> skill
 | `register_skill` returns `status: "live"` | Exact text of the SKILL.md description |
 | `requirements.lock` byte-equals re-compiled output | Plan-mode summary wording |
 | Skill tool appears in tool list on next turn | Specific tool argument shape claude chose |
-| Skill invocation returns a `{ price: number }` shape | Exact format of the assistant's final reply |
+| Skill invocation returns the stand-in network's price | Exact format of the assistant's final reply |
 | `coding/task/completed` then `skill/registered` emitted | Number of edit calls claude makes |
 | `skill_runs` row has `status: "succeeded"` | Wall-clock duration |
+
+**Skill network.** The authored skill's `ctx.http` call is answered in-process by a stand-in network: a resolver and a `fetch` passed through `BootstrapOptions.skillCtxHttpOverride`, serving the one CoinGecko endpoint the skill calls. It applies in record mode as well as replay. The cassettes cover the chat and the sandbox, not the skill's own request, so without it the suite would depend on a public API's uptime and rate limits and fail offline. The allowlist and address checks still run against what the stand-in answers, since the override replaces the network, not the policy. A loopback stub server is not an alternative. A manifest can list `127.0.0.1` in `network.allow`, but the resolved-address check refuses loopback, so reaching a local server would take an injected resolver that misreports its address. That goes around the guard instead of through it. For the same reason the override takes both halves or neither: a resolver alone would pass the guard on its own answer while the global `fetch` connects wherever the name really points.
 
 Cassettes pin the conversation; assertions pin the contract. This is the AgentRR pattern (record/replay derived experience, not raw token streams) — replay the pinned plan + edit sequence, assert structural invariants around it.
 

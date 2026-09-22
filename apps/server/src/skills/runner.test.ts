@@ -12,9 +12,12 @@ import {
   mapManifestResourceLimits,
   SkillInflightError,
   SkillRunnerImpl,
+  type SkillRunnerOptions,
 } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
 import { SysboxWorkerPool } from "./worker-sysbox/pool.js";
+
+type SkillRunnerCtxHttp = NonNullable<SkillRunnerOptions["ctxHttp"]>;
 
 function makeMockFiles(): Service["files"] {
   return mockFilesService();
@@ -52,7 +55,12 @@ function makeMockSecrets(map: Record<string, string> = {}): SecretsStore {
 }
 
 async function makeRunner(
-  opts: { memory?: MemoryProvider; secretsStore?: SecretsStore; files?: Service["files"] } = {},
+  opts: {
+    memory?: MemoryProvider;
+    secretsStore?: SecretsStore;
+    files?: Service["files"];
+    ctxHttp?: SkillRunnerCtxHttp;
+  } = {},
 ) {
   return SkillRunnerImpl.create({
     store,
@@ -62,6 +70,7 @@ async function makeRunner(
     files: opts.files ?? makeMockFiles(),
     user: { id: "user-1", timezone: "UTC" },
     memoryBankId: "bank-1",
+    ...(opts.ctxHttp && { ctxHttp: opts.ctxHttp }),
   });
 }
 
@@ -202,6 +211,113 @@ async def run(inputs, ctx):
     expect(methods).toContain("files.write");
     expect(methods).toContain("files.read");
     expect(methods).toContain("files.list");
+  });
+
+  it("sends ctx.http through the network the runner was built with", async () => {
+    const globalFetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("reached the live network"));
+    try {
+      const resolveHost = vi
+        .fn<NonNullable<SkillRunnerCtxHttp["resolveHost"]>>()
+        .mockResolvedValue([{ address: "104.18.32.7", family: 4 }]);
+      const fetchImpl = vi
+        .fn<NonNullable<SkillRunnerCtxHttp["fetch"]>>()
+        .mockResolvedValue(new Response('{"n": 42}', { status: 200 }));
+      const runner = await makeRunner({ ctxHttp: { resolveHost, fetch: fetchImpl } });
+
+      const manifest = `---
+name: with-http
+description: skill that calls ctx.http.get
+tier: wasm
+inputs:
+  type: object
+  properties: {}
+network:
+  allow:
+    - api.example.com
+---
+`;
+      const body = `
+import json
+
+async def run(inputs, ctx):
+    resp = await ctx.http.get("https://api.example.com/n")
+    return {"status": resp["status"], "n": json.loads(resp["body"])["n"]}
+`;
+      await runner.__registerForTests({ name: "with-http", manifestSource: manifest, body });
+
+      const result = await runner.invoke({ name: "with-http", inputs: {} });
+      expect(result.status).toBe("success");
+      expect(result.output).toEqual({ status: 200, n: 42 });
+      expect(resolveHost).toHaveBeenCalledWith("api.example.com");
+      expect(fetchImpl).toHaveBeenCalledWith("https://api.example.com/n", expect.anything());
+      expect(globalFetch).not.toHaveBeenCalled();
+    } finally {
+      globalFetch.mockRestore();
+    }
+  });
+
+  it("takes only the resolver and fetch from ctxHttp, keeping its own audit binding", async () => {
+    const globalFetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("reached the live network"));
+    try {
+      // A wider object is assignable to the option's type, so anything else
+      // it carries reaches the runner at runtime. The handler's audit
+      // binding, manifest and the rest must stay the runner's own.
+      const network = {
+        resolveHost: vi
+          .fn<NonNullable<SkillRunnerCtxHttp["resolveHost"]>>()
+          .mockResolvedValue([{ address: "104.18.32.7", family: 4 }]),
+        fetch: vi
+          .fn<NonNullable<SkillRunnerCtxHttp["fetch"]>>()
+          .mockResolvedValue(new Response("{}", { status: 200 })),
+        recordContextCall: async () => undefined,
+      };
+      const runner = await makeRunner({ ctxHttp: network });
+
+      const manifest = `---
+name: http-audited
+description: skill whose ctx.http call must be audited
+tier: wasm
+inputs:
+  type: object
+  properties: {}
+network:
+  allow:
+    - api.example.com
+---
+`;
+      const body = `
+async def run(inputs, ctx):
+    resp = await ctx.http.get("https://api.example.com/n")
+    return {"status": resp["status"]}
+`;
+      await runner.__registerForTests({ name: "http-audited", manifestSource: manifest, body });
+
+      const result = await runner.invoke({ name: "http-audited", inputs: {} });
+      expect(result.status).toBe("success");
+      const calls = await tx((trx) => store.listContextCallsForRun(trx, result.runId));
+      expect(calls.find((c) => c.method === "http.request")?.ok).toBe(true);
+      // The audit row proves the runner kept its own binding only if the
+      // request also went through the injected network — the two assertions
+      // below pin that.
+      expect(network.fetch).toHaveBeenCalledWith("https://api.example.com/n", expect.anything());
+      expect(globalFetch).not.toHaveBeenCalled();
+    } finally {
+      globalFetch.mockRestore();
+    }
+  });
+
+  it("requires both halves of the ctx.http network", () => {
+    // A resolver without a fetch would pass the address guard on the fake
+    // answer while the global fetch connects wherever the name really points.
+    // @ts-expect-error — a half-override must not compile
+    const resolverOnly: SkillRunnerOptions["ctxHttp"] = { resolveHost: async () => [] };
+    // @ts-expect-error — nor the other half
+    const fetchOnly: SkillRunnerOptions["ctxHttp"] = { fetch: async () => new Response() };
+    expect([resolverOnly, fetchOnly]).toHaveLength(2);
   });
 
   it("rejects ctx.files.read when reads_filesystem is not declared", async () => {
