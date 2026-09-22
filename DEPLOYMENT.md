@@ -25,11 +25,13 @@ Hindsight publishes two image families: **slim** (`:latest-slim`, ~500 MB, no lo
 
 Pick **full** only if you need fully offline operation (air-gapped deploy, no external API calls for memory) and can spare ~4 GB of always-on RAM.
 
-The API images ship without `curl` or `wget`, so a container healthcheck has to use the image's Python, or probe `/health` from outside the container:
+The API images ship without `curl` or `wget`. A healthcheck that runs inside the container (Docker `HEALTHCHECK`, compose `healthcheck:`) therefore has to use the image's Python:
 
 ```bash
 python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8888/health', timeout=5)"
 ```
+
+A probe from the host or a sidecar can `curl` the published port's `/health` as usual.
 
 ## The image
 
