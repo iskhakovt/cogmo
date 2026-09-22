@@ -23,7 +23,7 @@ import type { ContentBlock, CountTokensParams, Message, StreamEvent } from "../l
 import { logger } from "../logger.js";
 import type { McpRegistry } from "../mcp/registry.js";
 import type { MemoryProvider } from "../memory/provider.js";
-import { agentIterations } from "../metrics.js";
+import { agentIterations, memoryRecallFailures } from "../metrics.js";
 import type { SkillRunner } from "../skills/runner.js";
 import { buildSkillTools, composeTurnTools } from "../skills/skill-tool-builder.js";
 import { createSkillsService } from "../skills/skills-service.js";
@@ -815,16 +815,20 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // both the spend and the prompt identical across the ~one re-invocation
       // per step boundary that a tool-calling turn produces. The `.catch`
       // stays INSIDE the body so a Hindsight failure degrades to "no
-      // memories" instead of failing the step into Inngest retries. Known
-      // conditional-step caveat: the gate reads `profile.autoRecall` from a
-      // non-durable read, so a concurrent settings change mid-turn can flip
-      // the step's existence between invocations — same accepted hazard as
-      // `summarize-prefix-outcome`, see design/crash-recovery.md.
+      // memories" instead of failing the step into Inngest retries, and so
+      // the failure counts once per failed recall rather than once per
+      // replay. `bank_id` is the conversation user, who owns the bank
+      // (`buildTurnService`). Known conditional-step caveat: the gate reads
+      // `profile.autoRecall` from a non-durable read, so a concurrent
+      // settings change mid-turn can flip the step's existence between
+      // invocations — same accepted hazard as `summarize-prefix-outcome`,
+      // see design/crash-recovery.md.
       const recallResult = shouldSkipRecall(autoRecallMode, userContentText)
         ? { memories: [] }
         : await stepRun("auto-recall", async () =>
             service.memory.recall(userContentText, { maxTokens: 2000 }).catch((err: unknown) => {
               turnLogger.warn({ err }, "auto-recall failed, proceeding without recalled context");
+              memoryRecallFailures.add(1, { bank_id: userId });
               return { memories: [] };
             }),
           );

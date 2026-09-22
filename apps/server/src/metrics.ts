@@ -14,6 +14,7 @@ interface Instruments {
   llmTokens: Counter;
   debounceWaitMs: Histogram;
   agentIterations: Histogram;
+  memoryRecallFailures: Counter;
 }
 
 let cached: Instruments | null = null;
@@ -32,6 +33,10 @@ function instruments(): Instruments {
     }),
     agentIterations: meter.createHistogram("cogmo.agent.iterations", {
       description: "LLM call iterations per agent loop turn",
+    }),
+    memoryRecallFailures: meter.createCounter("cogmo.memory.recall.failures", {
+      description: "Auto-recall calls that failed and left the turn without recalled context",
+      unit: "{failure}",
     }),
   };
   return cached;
@@ -70,6 +75,24 @@ export const debounceWaitMs = {
 export const agentIterations = {
   record(value: number, attrs?: MetricAttributes): void {
     instruments().agentIterations.record(value, attrs);
+  },
+};
+
+/**
+ * Auto-recall failures, labeled by `bank_id`. The turn degrades to a system
+ * prompt with no `# Recalled Context` block rather than failing, so a memory
+ * outage otherwise shows up only as an agent that seems to have forgotten
+ * things.
+ *
+ * Only the auto-recall path counts, because only it fails silently. The
+ * `memory_recall` tool hands its failure to the model as an `is_error`
+ * tool_result, which the reply usually relays in the same turn. Incremented
+ * inside the `auto-recall` step body, so a re-invocation that replays the
+ * cached step adds nothing.
+ */
+export const memoryRecallFailures = {
+  add(value: number, attrs?: MetricAttributes): void {
+    instruments().memoryRecallFailures.add(value, attrs);
   },
 };
 
