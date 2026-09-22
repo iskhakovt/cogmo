@@ -256,6 +256,71 @@ describe("runAgenticStage", () => {
     expect(h.delivery.deliverBatch).not.toHaveBeenCalled();
   });
 
+  // The degrade dropped the iteration that streamed this output — here a tool
+  // call cut off at the output cap, which never ran — so the stage's sessions
+  // must not keep showing it.
+  it("retracts a degraded turn's dropped output before closing the stream", async () => {
+    const h = await harness();
+    h.runStreamingAgentLoop.mockResolvedValue(
+      loopResult({
+        text: "",
+        newMessages: [],
+        streamed: { text: "Writing it now.", toolUseIds: ["t1"] },
+        degraded: {
+          reason: "reply hit the output token limit during a tool call",
+          subtype: "max_tokens",
+        },
+      }),
+    );
+    const steps = recordingSteps();
+
+    await runAgenticStage(h.deps, stageArgs(), steps.steps, log);
+
+    expect(h.delivery.push).toHaveBeenCalledWith({
+      type: "retract",
+      text: "Writing it now.",
+      toolUseIds: ["t1"],
+    });
+    expect(steps.ids).toContain("retract-degraded-output");
+    const pushed = vi.mocked(h.delivery.push).mock.invocationCallOrder.at(-1) ?? 0;
+    const finished = vi.mocked(h.delivery.finish).mock.invocationCallOrder[0] ?? 0;
+    expect(pushed).toBeLessThan(finished);
+  });
+
+  it("pushes no retraction when a degraded turn persists everything it streamed", async () => {
+    const h = await harness();
+    h.runStreamingAgentLoop.mockResolvedValue(
+      loopResult({ text: "", degraded: { reason: "iteration_cap", subtype: null } }),
+    );
+    const steps = recordingSteps();
+
+    await runAgenticStage(h.deps, stageArgs(), steps.steps, log);
+
+    expect(h.delivery.push).not.toHaveBeenCalledWith(expect.objectContaining({ type: "retract" }));
+    expect(steps.ids).not.toContain("retract-degraded-output");
+  });
+
+  it("fails the stage when the reply was cut off at the output cap, after persisting and delivering it", async () => {
+    // A truncated reply is still what the user was streamed, so it lands in
+    // the transcript and reaches batch targets — but it is not the stage's
+    // output, and extracting an artifact from half a document would hand
+    // the next stage a result that looks finished.
+    const h = await harness();
+    const partial = "Here is the pl\n\n[Reply cut off: it reached the model's output limit.]";
+    h.runStreamingAgentLoop.mockResolvedValue(loopResult({ text: partial, truncated: true }));
+    const steps = recordingSteps();
+
+    const outcome = await runAgenticStage(h.deps, stageArgs(), steps.steps, log);
+
+    expect(outcome).toEqual({
+      kind: "failed",
+      reason: "the stage's reply was cut off at the model's output limit",
+    });
+    expect(h.agentStore.insertMessages).toHaveBeenCalled();
+    expect(h.delivery.deliverBatch).toHaveBeenCalledWith(partial);
+    expect(steps.ids).not.toContain("extract-artifact");
+  });
+
   it("fails the stage when its json artifact doesn't satisfy the declared schema", async () => {
     const h = await harness();
     const provider = providerReplying('{"title": 1}', '{"title": 2}');

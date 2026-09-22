@@ -24,7 +24,7 @@
 import { InngestTestEngine } from "@inngest/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { inngest } from "../inngest/client.js";
-import { agentIterations } from "../metrics.js";
+import { agentIterations, memoryRecallFailures } from "../metrics.js";
 import { expectDefined } from "../test/assertions.js";
 import {
   fakeRunInTx,
@@ -578,5 +578,34 @@ describe("handle-message — crash recovery / step replay", () => {
     const loopCalls = (deps.runStreamingAgentLoop as ReturnType<typeof vi.fn>).mock.calls;
     const systemPrompt = loopCalls[0]?.[0]?.systemPrompt as string;
     expect(systemPrompt).toContain("cached homelab memory");
+  });
+
+  it("counts a failed auto-recall once per turn, not once per re-invocation", async () => {
+    // The engine re-invokes the function at every step boundary. The count is
+    // taken in the `auto-recall` body's catch, which runs once and is then
+    // replayed from the step cache, so the turn contributes one failure however
+    // many passes the body makes.
+    const add = vi.spyOn(memoryRecallFailures, "add");
+    const recall = vi.fn().mockRejectedValue(new Error("recall 500: reranker unreachable"));
+    const deps = mockDeps({
+      memory: mockMemoryProvider({ recall }),
+      transportStore: mockTransportStore({
+        getUnbatchedInbound: vi
+          .fn()
+          .mockResolvedValue([
+            { id: "inbound-1", content: "tell me about my homelab setup", source: "user" },
+          ]),
+      }),
+    });
+    const fn = createHandleMessage(deps);
+
+    await new InngestTestEngine({ function: fn, events: [event] }).execute();
+
+    expect(recall).toHaveBeenCalledTimes(1);
+    expect(add).toHaveBeenCalledTimes(1);
+    expect(add).toHaveBeenCalledWith(1, { bank_id: "user-1" });
+    // Non-vacuity: the bare body reached the recall site on more than one
+    // pass. `buildTurnService` reads the profile-class registry just above it.
+    expect(vi.mocked(deps.agentStore.listProfileClasses).mock.calls.length).toBeGreaterThan(1);
   });
 });

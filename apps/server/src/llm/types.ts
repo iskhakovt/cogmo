@@ -121,10 +121,13 @@ export interface ToolDefinition {
  * `context_overflow` is input-plus-output overrunning the model's context
  * window — Anthropic's `stop_reason: "model_context_window_exceeded"`. It is
  * deliberately separate from `max_tokens`: `max_tokens` is a *budget* stop
- * (there is room left in the window, the output cap was hit) and re-prompting
- * can complete the thought, whereas `context_overflow` means there is no room
- * left at all, so appending anything to the request guarantees the identical
- * failure. `classifyPostStream` routes it straight to the degraded off-ramp.
+ * (there is room left in the window, the output cap was hit), so a partial
+ * text reply is worth keeping and a follow-up turn can complete the thought,
+ * whereas `context_overflow` means there is no room left at all, so
+ * appending anything to the request guarantees the identical failure.
+ * `classifyPostStream` marks the first as truncated (or degrades it, when
+ * there is no text to keep or a tool call may be cut off) and routes the
+ * second straight to the degraded off-ramp.
  * Providers without a distinct overflow signal (the OpenAI wire format folds
  * it into `finish_reason: "length"`) never produce this value.
  */

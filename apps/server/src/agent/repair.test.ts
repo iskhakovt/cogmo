@@ -1,10 +1,11 @@
+import { Marked } from "marked";
 import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
-import { ProviderProtocolError } from "../llm/errors.js";
+import { ProviderProtocolError, ToolArgsCutOffError } from "../llm/errors.js";
 import { RefusalError } from "../llm/fallback.js";
 import type { LlmProvider } from "../llm/provider.js";
-import type { LlmResponse, Message, ToolUseBlock } from "../llm/types.js";
+import type { ContentBlock, LlmResponse, Message, ToolUseBlock } from "../llm/types.js";
 import {
   CLASS_D_CONSECUTIVE_LIMIT,
   CLASS_D_CUMULATIVE_LIMIT,
@@ -20,6 +21,7 @@ import {
   type RepairBudgets,
   summarizeToolHistory,
   synthesizeDegradedReply,
+  truncationNotice,
 } from "./repair.js";
 
 describe("classifyPostStream", () => {
@@ -84,9 +86,9 @@ describe("classifyPostStream", () => {
   });
 
   // A contentless overflow must not be mistaken for either neighbour: a
-  // normal `max_tokens` completion (which returns `ok` and lets the blank
-  // turn persist as the answer) or an empty `end_turn` (which earns a
-  // continuation prompt — more tokens appended to a full window).
+  // `max_tokens` stop (a different subtype, whose apology tells the user to
+  // ask for less rather than to start over) or an empty `end_turn` (which
+  // earns a continuation prompt — more tokens appended to a full window).
   it("returns immediate degrade on stop_reason: context_overflow with no content", () => {
     const budgets = freshBudgets();
     const outcome = classifyPostStream([], "context_overflow", budgets);
@@ -121,11 +123,206 @@ describe("classifyPostStream", () => {
   it("context_overflow never yields a repair, so no continuation prompt is ever built", () => {
     // Exhausting every budget can't flip the verdict — there's no budgeted
     // arm on this path to exhaust in the first place.
-    const drained: RepairBudgets = { empty_end_turn: 0, stream_truncation: 0 };
+    const drained: RepairBudgets = { empty_end_turn: 0, stream_truncation: 0, max_tokens: 0 };
     for (const budgets of [freshBudgets(), drained]) {
       const outcome = classifyPostStream([], "context_overflow", budgets);
       expect(outcome.kind).toBe("degrade");
     }
+  });
+
+  // The quiet failure: a reply that filled its output cap wears the shape
+  // of a finished one. It must come back flagged, not `ok`.
+  it("returns truncated for a text reply that stopped at max_tokens", () => {
+    const budgets = freshBudgets();
+    const outcome = classifyPostStream(
+      [
+        { type: "thinking", thinking: "plan the list", signature: "sig" },
+        { type: "text", text: "Here are the first three of the ten items you as" },
+      ],
+      "max_tokens",
+      budgets,
+    );
+    expect(outcome).toEqual({ kind: "truncated" });
+    expect(budgets).toEqual(freshBudgets());
+  });
+
+  // Blocks are generated in order, so a trailing tool call is the one the
+  // cap interrupted: its arguments are whatever was written before the cut,
+  // closed up into an object that can still validate. It gets answered, not
+  // run, so the model can retry it smaller.
+  it.each<[string, ContentBlock[]]>([
+    [
+      "a lone tool call",
+      [{ type: "tool_use", id: "t1", name: "write_file", input: { path: "a" } }],
+    ],
+    [
+      "text followed by a tool call",
+      [
+        { type: "text", text: "Writing the file now." },
+        { type: "tool_use", id: "t1", name: "write_file", input: { path: "a", content: "par" } },
+      ],
+    ],
+    [
+      "an intact call followed by a cut-off one",
+      [
+        { type: "tool_use", id: "t0", name: "list_dir", input: { path: "." } },
+        { type: "tool_use", id: "t1", name: "write_file", input: { path: "a" } },
+      ],
+    ],
+  ])("repairs a max_tokens reply ending in %s", (_label, content) => {
+    const budgets = freshBudgets();
+    const outcome = classifyPostStream(content, "max_tokens", budgets);
+    expect(outcome).toEqual({
+      kind: "repair",
+      subtype: "max_tokens",
+      instructions: { kind: "tool_args_cut_off", toolUseId: "t1", toolName: "write_file" },
+    });
+    // The loop owns the decrement.
+    expect(budgets).toEqual(freshBudgets());
+  });
+
+  it("degrades a cut-off tool call once the max_tokens budget is spent", () => {
+    const budgets = freshBudgets();
+    const content: ContentBlock[] = [
+      { type: "tool_use", id: "t1", name: "write_file", input: { path: "a" } },
+    ];
+    expect(classifyPostStream(content, "max_tokens", budgets).kind).toBe("repair");
+
+    budgets.max_tokens--;
+
+    expect(classifyPostStream(content, "max_tokens", budgets)).toEqual({
+      kind: "degrade",
+      reason: "reply hit the output token limit during a tool call",
+      subtype: "max_tokens",
+    });
+  });
+
+  // The cap cut the prose after the calls, so every call is whole: they run,
+  // and their results give the model room to finish the sentence.
+  it.each<[string, ContentBlock[]]>([
+    [
+      "trailing text",
+      [
+        { type: "tool_use", id: "t1", name: "list_dir", input: {} },
+        { type: "text", text: "Now let me summar" },
+      ],
+    ],
+    [
+      "trailing reasoning",
+      [
+        { type: "tool_use", id: "t1", name: "list_dir", input: {} },
+        { type: "thinking", thinking: "next I should", signature: "sig" },
+      ],
+    ],
+  ])("returns ok for a max_tokens reply whose calls are complete, ending in %s", (_l, content) => {
+    expect(classifyPostStream(content, "max_tokens", freshBudgets())).toEqual({ kind: "ok" });
+  });
+
+  it.each<[string, ContentBlock[]]>([
+    ["no content", []],
+    ["only reasoning", [{ type: "thinking", thinking: "long deliberation", signature: "sig" }]],
+    ["whitespace text", [{ type: "text", text: " \n " }]],
+  ])(
+    "degrades on max_tokens when the reply has %s — there is nothing to keep",
+    (_label, content) => {
+      const outcome = classifyPostStream(content, "max_tokens", freshBudgets());
+      expect(outcome).toEqual({
+        kind: "degrade",
+        reason: "reply hit the output token limit before producing any text",
+        subtype: "max_tokens",
+      });
+    },
+  );
+
+  it("never re-requests a capped text reply, whatever the budgets", () => {
+    // Retrying at the same cap re-bills the whole input to stop in the same
+    // place, so a text reply's verdict doesn't depend on what's left to spend.
+    const drained: RepairBudgets = { empty_end_turn: 0, stream_truncation: 0, max_tokens: 0 };
+    for (const budgets of [freshBudgets(), drained]) {
+      expect(classifyPostStream([], "max_tokens", budgets).kind).toBe("degrade");
+      expect(
+        classifyPostStream([{ type: "text", text: "partial" }], "max_tokens", budgets),
+      ).toEqual({ kind: "truncated" });
+    }
+  });
+});
+
+describe("truncationNotice", () => {
+  const MARKER = "\n\n[Reply cut off: it reached the model's output limit.]";
+
+  it("appends the marker after plain prose", () => {
+    expect(truncationNotice("The first three steps are")).toBe(MARKER);
+  });
+
+  // A cut on a line boundary leaves the reply ending in newlines. The marker
+  // still sits exactly one blank line below the text, and a fence closes on
+  // the line right after the last line of code, with no empty code line.
+  it("counts the reply's own trailing newlines toward the gap", () => {
+    expect(truncationNotice("Step one.\n")).toBe(MARKER.slice(1));
+    expect(truncationNotice("Step one.\n\n")).toBe(MARKER.slice(2));
+    expect(truncationNotice("Step one.\n\n\n")).toBe(MARKER.slice(2));
+    expect(truncationNotice("```ts\nconst x = 1;\n")).toBe(`\`\`\`${MARKER}`);
+  });
+
+  it("closes a code fence the cut left open, so the marker isn't read as code", () => {
+    expect(truncationNotice("Here:\n```ts\nconst x = 1;\nconst y")).toBe(`\n\`\`\`${MARKER}`);
+  });
+
+  it("leaves a fence alone once it has been closed", () => {
+    expect(truncationNotice("```\ncode\n```\nand then prose")).toBe(MARKER);
+  });
+
+  it("closes with the opener's own run: tildes for tildes, the full length for a long fence", () => {
+    expect(truncationNotice("~~~~\ncode")).toBe(`\n~~~~${MARKER}`);
+    // A shorter run inside a four-backtick block is content, not a closer.
+    expect(truncationNotice("````md\n```\nnested")).toBe(`\n\`\`\`\`${MARKER}`);
+    // Nor does a run of the other character close it.
+    expect(truncationNotice("```\n~~~\ncode")).toBe(`\n\`\`\`${MARKER}`);
+  });
+
+  it("does not treat inline code or indented code as a fence opener", () => {
+    // A backtick info string containing a backtick is inline code.
+    expect(truncationNotice("``` `x` ```\nprose")).toBe(MARKER);
+    // Four spaces of indent is an indented code block, not a fence.
+    expect(truncationNotice("    ```\nprose")).toBe(MARKER);
+  });
+
+  // Windows-style output: `\r` is a line terminator, so a fence scan that
+  // splits on `\n` alone sees no fence line at all — leaving an open block
+  // unclosed, or reopening a closed one over finished prose.
+  it("reads fences the same with CRLF line endings", () => {
+    expect(truncationNotice("Here:\r\n```ts\r\nconst x = 1;\r\nconst y")).toBe(`\n\`\`\`${MARKER}`);
+    expect(truncationNotice("```js\nconst x = 1;\r\n```\r\nAnd then prose that got cut")).toBe(
+      MARKER,
+    );
+  });
+
+  it("ignores a closer-shaped line that carries an info string", () => {
+    expect(truncationNotice("```\ncode\n```js\nmore code")).toBe(`\n\`\`\`${MARKER}`);
+  });
+
+  // A code block inside a list item is written with its fence indented to
+  // the item's content. An unindented closer isn't part of the item: it ends
+  // the list and opens a fresh code block, which then swallows the marker.
+  // The Telegram renderer (marked, GFM) is the reader that matters.
+  it("closes an indented fence at the opener's indent, so the marker renders as prose", () => {
+    const partial = "Steps:\n\n1. Install the deps:\n   ```bash\n   npm i";
+    const notice = truncationNotice(partial);
+    expect(notice).toBe(`\n   \`\`\`${MARKER}`);
+    const html = new Marked({ gfm: true }).parse(partial + notice, { async: false });
+    expect(html).toContain("<p>[Reply cut off: it reached the model&#39;s output limit.]</p>");
+  });
+
+  // Degenerate output — a runaway stream of newlines — is what hits the cap,
+  // and this runs on every Inngest invocation of the turn. The wall clock is
+  // the assertion because a quadratic scan blocks the event loop, which the
+  // suite timeout cannot interrupt; the bound sits between the ~10ms a linear
+  // scan of this input costs and the ~50s a retry-from-every-position one does.
+  it("stays linear on a long run of newlines", () => {
+    const partial = `${"\n".repeat(400_000)}x`;
+    const started = performance.now();
+    expect(truncationNotice(partial)).toBe(MARKER);
+    expect(performance.now() - started).toBeLessThan(2000);
   });
 });
 
@@ -163,6 +360,20 @@ describe("classifyStreamError", () => {
       reason: "streamed tool-call arguments could not be parsed",
       subtype: "stream_truncation",
     });
+  });
+
+  // Unfinished JSON, not malformed: the replay would send the same request
+  // into the same cap, so it is skipped whatever the budget says.
+  it("degrades arguments cut off at the output cap without spending a replay", () => {
+    const cutOff = new ToolArgsCutOffError(new ProviderProtocolError("boom", new SyntaxError("x")));
+    const drained: RepairBudgets = { empty_end_turn: 0, stream_truncation: 0, max_tokens: 0 };
+    for (const budgets of [freshBudgets(), drained]) {
+      expect(classifyStreamError(cutOff, budgets)).toEqual({
+        kind: "degrade",
+        reason: "reply hit the output token limit during a tool call",
+        subtype: "max_tokens",
+      });
+    }
   });
 
   it("returns immediate degrade for RefusalError regardless of budget state", () => {
@@ -668,6 +879,15 @@ describe("degradedReplyText", () => {
     const text = degradedReplyText("context_overflow");
     expect(text).toMatch(/context window/i);
     expect(text).toContain("/new");
+    expect(text).not.toMatch(/trouble generating/i);
+  });
+
+  it("returns the output-limit message for the max_tokens subtype", () => {
+    // "Rephrase or try again" would hit the same cap; asking for less is
+    // the move that helps.
+    const text = degradedReplyText("max_tokens");
+    expect(text).toMatch(/output limit/i);
+    expect(text).toMatch(/shorter answer|smaller steps/i);
     expect(text).not.toMatch(/trouble generating/i);
   });
 

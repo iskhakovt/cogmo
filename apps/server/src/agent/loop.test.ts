@@ -2,7 +2,7 @@ import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
-import { ProviderProtocolError } from "../llm/errors.js";
+import { ProviderProtocolError, ToolArgsCutOffError } from "../llm/errors.js";
 import { RefusalError } from "../llm/fallback.js";
 import type { LlmProvider } from "../llm/provider.js";
 import type {
@@ -858,17 +858,258 @@ describe("runStreamingAgentLoop", () => {
     expect(provider.chatStream).toHaveBeenCalledTimes(2);
   });
 
-  // Regression: streamed tool_use accompanied by stop_reason: max_tokens.
-  // Mirror of the end_turn case below — both must execute the tool, since
-  // production saw end_turn but max_tokens is a structurally identical
-  // failure mode (model truncated mid-thought after emitting a tool_use).
-  it("executes tool_use even when stream reports stop_reason: max_tokens", async () => {
+  // A tool call at the end of a capped turn is the block the cap cut off:
+  // its arguments still validate once jsonrepair closes them, so running it
+  // would act on truncated input. It is answered instead, and the model gets
+  // to retry it smaller inside the same turn.
+  it("answers a tool call cut off at the output cap instead of running it", async () => {
     const provider = mockStreamProvider([
       {
-        events: [{ type: "tool_start", id: "t1", name: "echo", input: {} }],
+        events: [
+          { type: "text_delta", text: "Writing it now." },
+          { type: "tool_start", id: "t1", name: "write", input: { content: "the first ha" } },
+        ],
+        stopReason: "max_tokens",
+      },
+      { events: [{ type: "text_delta", text: "I'll split it up." }], stopReason: "end_turn" },
+    ]);
+    const handler = vi.fn(async () => "written");
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "write",
+        description: "write",
+        schema: z.object({ content: z.string() }),
+        handler,
+      }),
+    );
+    const turnLogger = mock<Logger>();
+    const collected: StreamEvent[] = [];
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "write the essay to a file" }],
+      tools,
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+      turnLogger,
+    });
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(result.degraded).toBeUndefined();
+    expect(result.truncated).toBeUndefined();
+    expect(result.iterations).toBe(2);
+    expect(result.text).toBe("I'll split it up.");
+    const answer = expectDefined(result.newMessages[1], "tool result turn");
+    expect(answer.role).toBe("user");
+    expect(answer.content).toEqual([
+      {
+        type: "tool_result",
+        toolUseId: "t1",
+        isError: true,
+        content: expect.stringMatching(/`write` were cut off at the model's output limit/),
+      },
+    ]);
+    // The user sees the failed card, not a silent drop.
+    expect(collected).toContainEqual(
+      expect.objectContaining({ type: "tool_result", name: "write", isError: true }),
+    );
+    expect(turnLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "agent.repair", subtype: "max_tokens" }),
+      expect.any(String),
+    );
+  });
+
+  it("runs the intact calls of a capped iteration and answers only the cut-off one", async () => {
+    const provider = mockStreamProvider([
+      {
+        events: [
+          { type: "tool_start", id: "t0", name: "look", input: {} },
+          { type: "tool_start", id: "t1", name: "write", input: { content: "half" } },
+        ],
         stopReason: "max_tokens",
       },
       { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+    const look = vi.fn(async () => "looked");
+    const write = vi.fn(async () => "written");
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({ name: "look", description: "look", schema: z.object({}), handler: look }),
+    );
+    tools.register(
+      defineTool({
+        name: "write",
+        description: "write",
+        schema: z.object({ content: z.string() }),
+        handler: write,
+      }),
+    );
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "look then write" }],
+      tools,
+      onEvent: async () => {},
+    });
+
+    expect(look).toHaveBeenCalledOnce();
+    expect(write).not.toHaveBeenCalled();
+    const answer = expectDefined(result.newMessages[1], "tool result turn");
+    expect(answer.content).toEqual([
+      { type: "tool_result", toolUseId: "t0", content: "looked" },
+      expect.objectContaining({ type: "tool_result", toolUseId: "t1", isError: true }),
+    ]);
+  });
+
+  it("degrades a second cut-off tool call in the same turn, once the budget is spent", async () => {
+    const capped = {
+      events: [{ type: "tool_start" as const, id: "t1", name: "write", input: { content: "x" } }],
+      stopReason: "max_tokens" as const,
+    };
+    const provider = mockStreamProvider([capped, { ...capped, events: [...capped.events] }]);
+    const write = vi.fn(async () => "written");
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "write",
+        description: "write",
+        schema: z.object({ content: z.string() }),
+        handler: write,
+      }),
+    );
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "write it" }],
+      tools,
+      onEvent: async () => {},
+    });
+
+    expect(write).not.toHaveBeenCalled();
+    expect(result.iterations).toBe(2);
+    expect(result.degraded).toEqual({
+      reason: "reply hit the output token limit during a tool call",
+      subtype: "max_tokens",
+    });
+    // The first iteration's answered call is real history and stays; the
+    // degrading iteration is dropped.
+    expect(result.newMessages).toHaveLength(2);
+  });
+
+  it("runs the complete calls of a turn the cap cut off mid-sentence", async () => {
+    const provider = mockStreamProvider([
+      {
+        events: [
+          { type: "tool_start", id: "t1", name: "look", input: {} },
+          { type: "text_delta", text: "Now let me summar" },
+        ],
+        stopReason: "max_tokens",
+      },
+      { events: [{ type: "text_delta", text: "Here is the summary." }], stopReason: "end_turn" },
+    ]);
+    const look = vi.fn(async () => "looked");
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({ name: "look", description: "look", schema: z.object({}), handler: look }),
+    );
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "look and summarize" }],
+      tools,
+      onEvent: async () => {},
+    });
+
+    expect(look).toHaveBeenCalledOnce();
+    expect(result.truncated).toBeUndefined();
+    expect(result.degraded).toBeUndefined();
+    expect(result.text).toBe("Here is the summary.");
+  });
+
+  // The reply is the answer and was already streamed, so it stays — but
+  // it's marked as cut off everywhere it is read, and the result says so.
+  it("keeps a text reply that stopped at max_tokens and marks it as truncated", async () => {
+    const provider = mockStreamProvider([
+      {
+        events: [
+          { type: "text_delta", text: "Step one: install. " },
+          { type: "text_delta", text: "Step two: conf" },
+        ],
+        stopReason: "max_tokens",
+      },
+    ]);
+    const collected: StreamEvent[] = [];
+    const turnLogger = mock<Logger>();
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "walk me through it" }],
+      tools: new ToolRegistry(),
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+      maxTokens: 4096,
+      turnLogger,
+    });
+
+    const notice = "\n\n[Reply cut off: it reached the model's output limit.]";
+    expect(result.truncated).toBe(true);
+    expect(result.degraded).toBeUndefined();
+    expect(result.newMessages).toEqual([
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Step one: install. Step two: conf" },
+          { type: "text", text: notice },
+        ],
+      },
+    ]);
+    expect(result.text).toBe(`Step one: install. Step two: conf${notice}`);
+    // The notice streams after the partial, and the ledger shows both.
+    expect(collected.at(-1)).toEqual({ type: "text_delta", text: notice });
+    expect(result.streamed.text).toBe(`Step one: install. Step two: conf${notice}`);
+    expect(turnLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "agent.truncated", maxTokens: 4096 }),
+      expect.any(String),
+    );
+  });
+
+  it("logs the truncation only once its notice has been delivered", async () => {
+    // The log line counts delivered notices: a push that fails takes the
+    // step with it, and the retry would otherwise log the same turn twice.
+    const provider = mockStreamProvider([
+      { events: [{ type: "text_delta", text: "Partial" }], stopReason: "max_tokens" },
+    ]);
+    const turnLogger = mock<Logger>();
+    const boom = new Error("socket closed");
+
+    await expect(
+      testRunStreamingAgentLoop({
+        provider,
+        messages: [{ role: "user", content: "hi" }],
+        tools: new ToolRegistry(),
+        onEvent: async (event) => {
+          if (event.type === "text_delta" && event.text.includes("cut off")) throw boom;
+        },
+        turnLogger,
+      }),
+    ).rejects.toBe(boom);
+
+    expect(turnLogger.warn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ event: "agent.truncated" }),
+      expect.any(String),
+    );
+  });
+
+  it("marks a max_tokens reply as truncated after earlier tool iterations, which stay persisted", async () => {
+    const provider = mockStreamProvider([
+      {
+        events: [{ type: "tool_start", id: "t1", name: "echo", input: {} }],
+        stopReason: "tool_use",
+      },
+      { events: [{ type: "text_delta", text: "The results show" }], stopReason: "max_tokens" },
     ]);
     const tools = new ToolRegistry();
     tools.register(
@@ -882,16 +1123,36 @@ describe("runStreamingAgentLoop", () => {
 
     const result = await testRunStreamingAgentLoop({
       provider,
-      messages: [{ role: "user", content: "echo" }],
+      messages: [{ role: "user", content: "echo then summarize" }],
       tools,
       onEvent: async () => {},
     });
 
+    expect(result.truncated).toBe(true);
     expect(result.iterations).toBe(2);
-    expect(result.newMessages[1]).toEqual({
-      role: "user",
-      content: [{ type: "tool_result", toolUseId: "t1", content: "ok" }],
+    expect(result.newMessages.slice(0, 2)).toEqual([
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "echo", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", toolUseId: "t1", content: "ok" }] },
+    ]);
+    expect(result.text).toMatch(/^The results show\n\n\[Reply cut off/);
+  });
+
+  it("degrades a max_tokens turn that produced no text instead of persisting a blank answer", async () => {
+    const provider = mockStreamProvider([{ events: [], stopReason: "max_tokens" }]);
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "think hard" }],
+      tools: new ToolRegistry(),
+      onEvent: async () => {},
     });
+
+    expect(result.degraded).toEqual({
+      reason: "reply hit the output token limit before producing any text",
+      subtype: "max_tokens",
+    });
+    expect(result.truncated).toBeUndefined();
+    expect(result.newMessages).toEqual([]);
   });
 
   // Regression: streamed tool_use accompanied by stop_reason: end_turn.
@@ -1602,6 +1863,63 @@ describe("durable LLM iterations (stepRun)", () => {
     // The degrade's pre-throw emission feeds the ledger so the
     // orchestrator's retraction still names it on a replay.
     expect(result.streamed).toEqual({ text: "partial", toolUseIds: [] });
+  });
+
+  it("pushes the truncation notice from its own step, once across replays", async () => {
+    // The live invocation emits the notice inside `truncation-notice-iter1`;
+    // a replay with that step cached must persist the same message without
+    // pushing the notice again — or logging the truncation a second time.
+    const cache = new Map<string, unknown>();
+    const provider = mockStreamProvider([
+      { events: [{ type: "text_delta", text: "Chapter one begins" }], stopReason: "max_tokens" },
+    ]);
+    const live = cachingStepRun(cache);
+    const liveEvents: StreamEvent[] = [];
+    const liveLogger = mock<Logger>();
+
+    const first = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "write a novel" }],
+      tools: new ToolRegistry(),
+      onEvent: async (e) => {
+        liveEvents.push(e);
+      },
+      stepRun: live.stepRun,
+      turnLogger: liveLogger,
+    });
+
+    expect(live.calls).toEqual(["llm-iter1", "truncation-notice-iter1"]);
+    const notices = liveEvents.filter((e) => e.type === "text_delta" && e.text.includes("cut off"));
+    expect(notices).toHaveLength(1);
+    expect(liveLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "agent.truncated" }),
+      expect.any(String),
+    );
+
+    const replay = cachingStepRun(cache);
+    const replayEvents: StreamEvent[] = [];
+    const replayLogger = mock<Logger>();
+    const second = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "write a novel" }],
+      tools: new ToolRegistry(),
+      onEvent: async (e) => {
+        replayEvents.push(e);
+      },
+      stepRun: replay.stepRun,
+      turnLogger: replayLogger,
+    });
+
+    expect(replay.calls).toEqual(["llm-iter1", "truncation-notice-iter1"]);
+    expect(replayEvents).toEqual([]);
+    expect(replayLogger.warn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ event: "agent.truncated" }),
+      expect.any(String),
+    );
+    expect(provider.chatStream).toHaveBeenCalledTimes(1);
+    expect(second.newMessages).toEqual(first.newMessages);
+    expect(second.streamed).toEqual(first.streamed);
+    expect(second.truncated).toBe(true);
   });
 
   it("reports the streamed ledger from live iterations", async () => {
@@ -2344,6 +2662,129 @@ describe("in-loop model-misbehavior repair", () => {
     );
   });
 
+  it("tool arguments cut off at the output cap → max_tokens degrade, no replay", async () => {
+    // Unfinished JSON, not malformed: a replay sends the same request into
+    // the same cap and re-bills the whole input for nothing.
+    const cutOff = new ToolArgsCutOffError(new ProviderProtocolError("first", new Error("eof")));
+    const { provider, chatCalls } = repairStreamProvider([{ kind: "throw", error: cutOff }]);
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "write the essay to a file" }],
+      tools: new ToolRegistry(),
+      onEvent: async () => {},
+    });
+
+    expect(chatCalls).toHaveLength(0);
+    expect(result.degraded).toEqual({
+      reason: "reply hit the output token limit during a tool call",
+      subtype: "max_tokens",
+    });
+    expect(result.newMessages).toEqual([]);
+  });
+
+  it("stream replay whose arguments are cut off at the cap → max_tokens degrade", async () => {
+    const streamErr = new ProviderProtocolError("first", new Error("boom"));
+    const replayErr = new ToolArgsCutOffError(
+      new ProviderProtocolError("replay", new Error("eof")),
+    );
+    const { provider } = repairStreamProvider([{ kind: "throw", error: streamErr }]);
+    vi.mocked(provider.chat).mockReset();
+    vi.mocked(provider.chat).mockRejectedValue(replayErr);
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+      onEvent: async () => {},
+    });
+
+    expect(result.degraded).toEqual({
+      reason: "non-streaming replay hit the output token limit during a tool call",
+      subtype: "max_tokens",
+    });
+  });
+
+  // A replay that parses still reaches the post-stream classifier: its
+  // trailing tool call is the one the cap cut off, so it is answered rather
+  // than run, exactly as on the streaming path.
+  it("stream replay that stops at max_tokens with a tool call → answered, never run", async () => {
+    const { provider, chatCalls } = repairStreamProvider([
+      { kind: "throw", error: new ProviderProtocolError("first", new Error("boom")) },
+      {
+        kind: "stream",
+        events: [{ type: "tool_start", id: "t1", name: "write", input: { content: "half" } }],
+        stopReason: "max_tokens",
+      },
+      {
+        kind: "stream",
+        events: [{ type: "text_delta", text: "smaller next time" }],
+        stopReason: "end_turn",
+      },
+    ]);
+    const handler = vi.fn(async () => "written");
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "write",
+        description: "write",
+        schema: z.object({ content: z.string() }),
+        handler,
+      }),
+    );
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "write it" }],
+      tools,
+      onEvent: async () => {},
+    });
+
+    expect(chatCalls).toHaveLength(1);
+    expect(handler).not.toHaveBeenCalled();
+    expect(result.degraded).toBeUndefined();
+    expect(result.text).toBe("smaller next time");
+    const answer = expectDefined(result.newMessages[1], "tool result turn");
+    expect(answer.content).toEqual([
+      expect.objectContaining({ type: "tool_result", toolUseId: "t1", isError: true }),
+    ]);
+  });
+
+  it("stream replay that stops at max_tokens with text → kept and marked as truncated", async () => {
+    const { provider } = repairStreamProvider([
+      { kind: "throw", error: new ProviderProtocolError("first", new Error("boom")) },
+      {
+        kind: "stream",
+        events: [{ type: "text_delta", text: "The answer starts here" }],
+        stopReason: "max_tokens",
+      },
+    ]);
+    const collected: StreamEvent[] = [];
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "explain" }],
+      tools: new ToolRegistry(),
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+    });
+
+    const notice = "\n\n[Reply cut off: it reached the model's output limit.]";
+    expect(result.truncated).toBe(true);
+    expect(result.newMessages).toEqual([
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "The answer starts here" },
+          { type: "text", text: notice },
+        ],
+      },
+    ]);
+    // The replay's own text never streams; the notice still does.
+    expect(collected).toEqual([{ type: "text_delta", text: notice }]);
+  });
+
   it("RefusalError during stream replay → degrade with refusal subtype", async () => {
     // First streaming attempt throws a parse error → repair invokes
     // chat() for the replay. The replay throws RefusalError (model
@@ -2441,11 +2882,11 @@ describe("in-loop model-misbehavior repair", () => {
   });
 
   it("context_overflow stopReason with no content → immediate degrade, no continuation prompt", async () => {
-    // The dangerous shape: an overflow that emitted nothing. Read as a
-    // normal `max_tokens` completion this returns a successful turn with an
-    // empty assistant message; read as an empty `end_turn` it earns a
-    // continuation prompt, which appends tokens to a window that just
-    // overflowed. Neither happens — one stream call, then degrade.
+    // The dangerous shape: an overflow that emitted nothing. Read as an
+    // empty `end_turn` it would earn a continuation prompt, which appends
+    // tokens to a window that just overflowed; read as `max_tokens` it would
+    // degrade with the wrong subtype and advice. Neither happens — one stream
+    // call, then a `context_overflow` degrade.
     const { provider, streamCalls } = repairStreamProvider([
       { kind: "stream", events: [], stopReason: "context_overflow" },
     ]);

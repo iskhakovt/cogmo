@@ -21,7 +21,7 @@ Hindsight publishes two image families: **slim** (`:latest-slim`, ~500 MB, no lo
 
 - You already configured an LLM provider for Cogmo's main loop. Reusing that same OpenAI-/OpenRouter-/Cohere-compatible key for Hindsight's embeddings and reranker costs a few cents per month at personal scale.
 - The image is ~18× smaller, cold-start is seconds instead of a minute, and idle RAM stays under 500 MB.
-- Configure embeddings + reranker provider URLs/keys via Hindsight's own env vars — see [Hindsight's installation docs](https://hindsight.vectorize.io/developer/installation).
+- Configure embeddings + reranker provider URLs/keys via Hindsight's own env vars — see [Hindsight's installation docs](https://hindsight.vectorize.io/developer/installation), and [Hindsight reranker](#hindsight-reranker) for the settings Cogmo needs.
 
 Pick **full** only if you need fully offline operation (air-gapped deploy, no external API calls for memory) and can spare ~4 GB of always-on RAM.
 
@@ -32,6 +32,31 @@ python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8888
 ```
 
 A probe from the host or a sidecar can `curl` the published port's `/health` as usual.
+
+### Hindsight reranker
+
+Set the reranker explicitly and end its failover chain with `rrf`. Hindsight defaults to the `local` reranker, which the slim image does not ship, and a reranker that fails takes the whole recall down with it unless the chain ends in `rrf`. Cogmo recalls memory ahead of a turn's first model call, and carries on without it when recall fails, so a broken reranker raises no error. The agent just stops remembering things. `cogmo.memory.recall.failures` counts these failures (see [Observability](#observability)).
+
+```bash
+# Primary: a hosted cross-encoder. Set its key explicitly — it otherwise falls back
+# to HINDSIGHT_API_LLM_API_KEY, and a key for any other provider 401s on every rerank.
+HINDSIGHT_API_RERANKER_PROVIDER=openrouter
+HINDSIGHT_API_RERANKER_OPENROUTER_API_KEY=...
+HINDSIGHT_API_RERANKER_OPENROUTER_MODEL=voyageai/rerank-2.5
+# The default is 60s, and a recalling turn waits on it.
+HINDSIGHT_API_RERANKER_OPENROUTER_TIMEOUT=2
+# The default is 3 retries within a 10s budget before the chain moves on.
+HINDSIGHT_API_RERANKER_MAX_RETRIES=0
+
+# Failover: keep the fusion order instead of failing the recall.
+HINDSIGHT_API_RERANKER_1_PROVIDER=rrf
+```
+
+- **Indexed members inherit nothing.** `HINDSIGHT_API_RERANKER_1_*` reads nothing from the primary's settings or the shared provider keys, so give each member every setting it needs under its own index. `rrf` needs none.
+- **A dead primary still costs time on every recall.** Hindsight tries members in order on every request, with no circuit breaker, so a primary that is down spends its full timeout before `rrf` answers. That is why the timeout is short and retries are off.
+- **A quiet counter is not proof of health.** It only sees turns that recall, and the default `heuristic` mode skips greetings, acks and continuations while an `off` profile never recalls at all.
+- **A failover is not a failure.** When `rrf` answers, the recall succeeds and `cogmo.memory.recall.failures` stays at zero, even though ranking quality has dropped. Hindsight logs each failover at `WARNING`, so watch its logs to catch a primary that stays down.
+- **Skipping the cross-encoder is valid.** `HINDSIGHT_API_RERANKER_PROVIDER=rrf` on its own is free and has no dependency that can go down, at a cost of a few percent of ranking quality. For model choice and costs, see [design/memory.md → Reranking](design/memory.md#reranking).
 
 ## The image
 
@@ -323,7 +348,7 @@ The image entrypoint always launches with `node --import ./dist/otel.js`, which 
 | Signal | Where |
 |-|-|
 | Traces | One trace per Inngest function run. Inngest's engine unconditionally opens an `inngest.execution` root span via the active tracer provider (no middleware required), and our domain spans parent under it via standard OTel context propagation. Children: `chat` spans tagged with `gen_ai.*` semantic conventions (`provider.name`, `request.model`, `usage.input_tokens`/`output_tokens`/`cache_*`, `response.finish_reasons`); `tool.execute` spans (`cogmo.tool.name`); `memory.recall`/`memory.retain` spans (`memory.hit`, `memory.count`). Auto-instrumented HTTP and undici give you outbound calls (Anthropic, OpenAI, Hindsight, fal.ai, Tavily, Telegram). |
-| Metrics | `cogmo.llm.tokens` counter (labels `type`/`model`/`provider`, where `type` ∈ `input`/`output`/`cache_read`/`cache_create`); `cogmo.agent.iterations` histogram (per turn, labeled by model); `cogmo.debounce.wait_ms` histogram. |
+| Metrics | `cogmo.llm.tokens` counter (labels `type`/`model`/`provider`, where `type` ∈ `input`/`output`/`cache_read`/`cache_create`); `cogmo.agent.iterations` histogram (per turn, labeled by model); `cogmo.debounce.wait_ms` histogram; `cogmo.memory.recall.failures` counter (label `bank_id`) — auto-recall failures, after which the turn continues without a `# Recalled Context` block. Alert on a sustained non-zero rate: a memory outage otherwise looks like an agent that has forgotten things. A reranker failover is not counted — see [Hindsight reranker](#hindsight-reranker). |
 | Logs | Pino lines automatically gain `trace_id` / `span_id` / `trace_flags` via `instrumentation-pino`, so journald correlation works without code changes. |
 
 ### Cross-function-run correlation

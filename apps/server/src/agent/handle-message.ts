@@ -1,6 +1,4 @@
 import { NonRetriableError } from "inngest";
-import type { Logger } from "pino";
-import * as R from "remeda";
 import type { Transactor } from "../db/index.js";
 import { inngest } from "../inngest/client.js";
 import { conversationTurnConcurrency } from "../inngest/concurrency.js";
@@ -23,7 +21,7 @@ import type { ContentBlock, CountTokensParams, Message, StreamEvent } from "../l
 import { logger } from "../logger.js";
 import type { McpRegistry } from "../mcp/registry.js";
 import type { MemoryProvider } from "../memory/provider.js";
-import { agentIterations } from "../metrics.js";
+import { agentIterations, memoryRecallFailures } from "../metrics.js";
 import type { SkillRunner } from "../skills/runner.js";
 import { buildSkillTools, composeTurnTools } from "../skills/skill-tool-builder.js";
 import { createSkillsService } from "../skills/skills-service.js";
@@ -53,6 +51,7 @@ import { PIPELINE_TOOL_NAMES } from "./pipeline/tools.js";
 import type { PromptSource } from "./prompt.js";
 import { shouldSkipRecall } from "./recall-gate.js";
 import { synthesizeDegradedReply } from "./repair.js";
+import { computeRetraction } from "./retraction.js";
 import { createSchedulingService } from "./scheduling/scheduling-service.js";
 import type { Service } from "./service.js";
 import type { AgentStore } from "./store/index.js";
@@ -168,78 +167,6 @@ async function resolveOrFail(
     }
     throw err;
   }
-}
-
-/**
- * What the streaming adapters were shown during one turn. Sourced from
- * `AgentLoopResult.streamed`, which the loop derives from its durable
- * iteration outcomes — identical on every Inngest re-invocation, unlike a
- * ledger of this invocation's live emissions (empty when the iterations
- * replay from the step cache).
- */
-interface StreamedOutput {
-  /** Every `text_delta` forwarded this turn, concatenated in order. */
-  text: string;
-  /** Every `tool_start` id forwarded this turn, in order. */
-  toolUseIds: ReadonlyArray<string>;
-}
-
-/**
- * Work out what the degraded off-ramp has to take back off the user's screen.
- *
- * The orchestrator is the only component that sees both sides: `streamed` is
- * what the adapters were told during the turn, `newMessages` is what the
- * persist step is about to write. The difference is the degrade-triggering
- * iteration's output — the loop drops that iteration, so the user must not be
- * left reading it. Everything else streamed this turn is persisted and stays
- * exactly where it is.
- *
- * The persisted assistant text is a prefix of the streamed text: the dropped
- * iteration is always the last one, and each earlier iteration's text blocks
- * are reassembled from precisely the deltas that were forwarded. When that
- * prefix relationship doesn't hold, the turn is persisting text that was never
- * streamed — the non-streaming replay is the one path that does this, since it
- * deliberately doesn't re-emit its deltas — and there is no honest retraction
- * to make, so the text stands and only tool cards are reconciled.
- *
- * Returns null when everything streamed is being persisted (the iteration-cap
- * degrade drops nothing) — there is no retraction to push.
- */
-function computeRetraction(
-  streamed: StreamedOutput,
-  newMessages: ReadonlyArray<Message>,
-  log: Logger,
-): { text: string; toolUseIds: ReadonlyArray<string> } | null {
-  const persistedText = R.pipe(
-    newMessages,
-    R.filter((m) => m.role === "assistant"),
-    R.flatMap((m) =>
-      typeof m.content === "string"
-        ? [m.content]
-        : R.flatMap(m.content, (b) => (b.type === "text" ? [b.text] : [])),
-    ),
-    R.join(""),
-  );
-  const persistedToolUseIds = new Set(
-    R.pipe(
-      newMessages,
-      R.flatMap((m) => (typeof m.content === "string" ? [] : m.content)),
-      R.flatMap((b) => (b.type === "tool_use" ? [b.id] : [])),
-    ),
-  );
-
-  const textIsPrefix = streamed.text.startsWith(persistedText);
-  if (!textIsPrefix) {
-    log.warn(
-      { streamedChars: streamed.text.length, persistedChars: persistedText.length },
-      "degraded turn persists assistant text that was never streamed; retracting no text",
-    );
-  }
-  const text = textIsPrefix ? streamed.text.slice(persistedText.length) : "";
-  const toolUseIds = streamed.toolUseIds.filter((id) => !persistedToolUseIds.has(id));
-
-  if (text.length === 0 && toolUseIds.length === 0) return null;
-  return { text, toolUseIds };
 }
 
 /**
@@ -815,16 +742,20 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // both the spend and the prompt identical across the ~one re-invocation
       // per step boundary that a tool-calling turn produces. The `.catch`
       // stays INSIDE the body so a Hindsight failure degrades to "no
-      // memories" instead of failing the step into Inngest retries. Known
-      // conditional-step caveat: the gate reads `profile.autoRecall` from a
-      // non-durable read, so a concurrent settings change mid-turn can flip
-      // the step's existence between invocations — same accepted hazard as
-      // `summarize-prefix-outcome`, see design/crash-recovery.md.
+      // memories" instead of failing the step into Inngest retries, and so
+      // the failure counts once per failed recall rather than once per
+      // replay. `bank_id` is the conversation user, who owns the bank
+      // (`buildTurnService`). Known conditional-step caveat: the gate reads
+      // `profile.autoRecall` from a non-durable read, so a concurrent
+      // settings change mid-turn can flip the step's existence between
+      // invocations — same accepted hazard as `summarize-prefix-outcome`,
+      // see design/crash-recovery.md.
       const recallResult = shouldSkipRecall(autoRecallMode, userContentText)
         ? { memories: [] }
         : await stepRun("auto-recall", async () =>
             service.memory.recall(userContentText, { maxTokens: 2000 }).catch((err: unknown) => {
               turnLogger.warn({ err }, "auto-recall failed, proceeding without recalled context");
+              memoryRecallFailures.add(1, { bank_id: userId });
               return { memories: [] };
             }),
           );

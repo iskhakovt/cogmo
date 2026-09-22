@@ -28,11 +28,12 @@ The bug class to catch is #2 — and to catch it you have to **count boundaries,
 | **Compact** | *(none — runs on every invocation)* | `compactMessages` (token count, clear, summarize, truncate) | token counting + decision | ✗ |
 | Compact | `summarize-prefix-outcome` (conditional) | status push + `provider.chat` for prefix summarization; returns `{ text, stopReason }` | **LLM call + stream push** | ✓ |
 | Compact | `persist-summary` (conditional) | `agentStore.insertOrRecoverSummary` — stores what `summarize-prefix-outcome` produced; failures degrade inside the body | **DB write** | ✓ |
-| Recall | `auto-recall` (conditional) | `service.memory.recall` (failure degraded to no-memories inside the body) | **embedding + vector search** | ✓ |
+| Recall | `auto-recall` (conditional) | `service.memory.recall` (failure degraded to no-memories and counted in `cogmo.memory.recall.failures`, both inside the body) | **embedding + vector search** | ✓ |
 | **Streaming glue** | *(none — runs on every invocation)* | image resolution, `getProfile`, `deliveryRouter.prepare`, tool-registry assembly, `compactMessages` orchestration, the loop's control flow, `delivery.finish` | cheap reads + deterministic assembly | ✗ |
 | Loop | `llm-iter<N>` (one per iteration) | stream drain + in-step Class C repair; tokens stream to the delivery layer live from inside the body | **LLM stream + emission** | ✓ |
 | Loop | `tool-iter<N>-<P>` (per durable tool call) | the tool handler | **tool side effect** | ✓ |
 | Loop | `emit-tool-results-iter<N>` (per tool-bearing iteration) | push the iteration's `tool_result` events to the delivery layer | **stream pushes (media cards)** | ✓ |
+| Loop | `truncation-notice-iter<N>` (conditional — final iteration stopped at `max_tokens` with text) | push the truncation notice after the partial reply | **stream push** | ✓ |
 | Degrade | `degraded-reply` (conditional) | `synthesizeDegradedReply` + retract/apology pushes; returns the apology text | **LLM call + stream pushes** | ✓ |
 | Persist | `persist-new-messages` | `agentStore.insertMessages` (batch INSERT: intermediate tool turns + final assistant, single transaction) | **DB write** | ✓ |
 | Deliver | `batch-delivery` (conditional) | image resolution via `Promise.allSettled` + `delivery.deliverBatch` | **S3 GET + network send to batch adapters** | ✓ |
@@ -201,6 +202,8 @@ The cases:
 7. `auto-recall` cached → no `memory.recall` round trip, cached memories reach the system prompt.
 8. `tool-iter1-0` cached → the durable tool handler body does not run; the cached output flows into the transcript.
 9. `persist-summary` cached → no `insertOrRecoverSummary` call, with the same run uncached asserted to reach the store (non-vacuity check).
+
+Two more tests run a turn with nothing cached and count metrics recorded inside a step. Across all of the turn's re-invocations, `cogmo.agent.iterations` records once, from `persist-new-messages`, and a failed recall adds one to `cogmo.memory.recall.failures`, from `auto-recall`. That makes them once per turn across replays, not exactly-once. A crash after the metric is recorded but before Inngest records the step result re-runs the body, which records it again. This is the same residual as any other side effect inside a step.
 
 The loop-level companions live in `src/agent/loop.test.ts` → "durable LLM iterations (stepRun)": cached iterations don't call the provider or re-emit, the `streamed` ledger rebuilds from cached outcomes, cached durable tools don't re-emit their `tool_result` events, and repair budgets recompute deterministically from cached outcomes.
 
