@@ -75,14 +75,15 @@ const DetailErrorSchema = z.object({ detail: z.string() });
 
 /**
  * Whether a failed request is Hindsight's 404 for a bank that has never been
- * created (`{"detail": "Bank '<id>' not found"}`). Requiring the bank id in
- * the detail keeps a route-level 404 — a wrong base path, a proxy prefix — an
- * error rather than a silently empty recall.
+ * created, `{"detail": "Bank '<id>' not found"}`. Only that exact detail
+ * qualifies: any other 404 — a wrong base path, a proxy prefix, a gateway
+ * echoing the request path, which contains the bank id — stays an error rather
+ * than a silently empty recall.
  */
 function isMissingBank(statusCode: number | undefined, error: unknown, bankId: string): boolean {
   if (statusCode !== 404) return false;
   const parsed = DetailErrorSchema.safeParse(error);
-  return parsed.success && parsed.data.detail.includes(bankId);
+  return parsed.success && parsed.data.detail === `Bank '${bankId}' not found`;
 }
 
 function isClientError(statusCode: number | undefined): boolean {

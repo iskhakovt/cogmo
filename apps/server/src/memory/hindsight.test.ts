@@ -361,6 +361,27 @@ describe("HindsightMemoryProvider", () => {
     expect(mockRecallMemories).toHaveBeenCalledTimes(1);
   });
 
+  it("recall fails on a 404 that mentions the bank without reporting it missing", async () => {
+    const provider = createProvider();
+    // A gateway that echoes the request path carries the bank id in its detail.
+    mockRecallMemories.mockResolvedValue(
+      errResp(404, "No route for POST /v1/default/banks/bank-1/memories/recall"),
+    );
+
+    await expect(provider.recall("bank-1", "q")).rejects.toThrow(/recall 404/);
+  });
+
+  it("recall fails on a 404 without a detail body", async () => {
+    const provider = createProvider();
+    mockRecallMemories.mockResolvedValue({
+      data: undefined,
+      error: "404 page not found",
+      response: { status: 404 },
+    });
+
+    await expect(provider.recall("bank-1", "q")).rejects.toThrow(/recall 404/);
+  });
+
   it("recall retries on 5xx errors", async () => {
     const provider = createProvider();
     mockRecallMemories

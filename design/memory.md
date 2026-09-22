@@ -200,7 +200,7 @@ Decision: **implemented** as the `memory_reflect` tool alongside `memory_recall`
 
 Three upstream behaviours the `HindsightMemoryProvider` adapter compensates for. Bypassing the adapter (calling `HindsightClient` directly) loses memories silently on each of them. The first two are pinned by integration tests against the real server in `src/test/memory.integration.test.ts`.
 
-**Recall on a bank that was never created is a 404.** Hindsight creates a bank on its first write; reads refuse a bank that does not exist rather than answer as if it were empty. With `bankId = userId`, that is every user who has not had a memory retained yet — a new user's first conversation, before the Observer drains anything. The adapter maps the 404 to no memories, so auto-recall, `memory_recall` and skills see an empty bank rather than an error. It matches on the bank id in the error detail (`Bank '<id>' not found`), so a route-level 404 from a wrong base path or proxy prefix still fails loudly instead of reading as a forgetful agent. Operator CLIs that list a bank (`cogmo migrate-memories`, `cogmo backfill profile-class`) keep the 404: an explicitly named bank that does not exist is worth being told about. Reflect is unaffected — it creates the bank.
+**Recall on a bank that was never created is a 404.** Hindsight creates a bank on its first write; reads refuse a bank that does not exist rather than answer as if it were empty. With `bankId = userId`, that is every user who has not had a memory retained yet — a new user's first conversation, before the Observer drains anything. The adapter maps the 404 to no memories, so auto-recall, `memory_recall` and skills see an empty bank rather than an error. It matches Hindsight's exact detail, `Bank '<id>' not found`, so any other 404 (a wrong base path, a proxy prefix, a gateway echoing the request path, which carries the bank id) still fails loudly instead of reading as a forgetful agent. Operator CLIs that list a bank (`cogmo migrate-memories`, `cogmo backfill profile-class`) keep the 404: an explicitly named bank that does not exist is worth being told about. Reflect is unaffected — it creates the bank.
 
 **Query cap counted in `o200k_base`.** Hindsight caps a recall query at `HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS` (default 500) counted in `HINDSIGHT_API_TOKENIZER_ENCODING` (default `o200k_base`), and rejects an over-cap query with a 400 rather than truncating it. The adapter truncates to the cap in the same vocabulary before sending. The two must agree: English prose and code routinely take more tokens in `o200k_base` than in `cl100k_base`, so a query cut in any other encoding lands over the cap, and the 400 degrades auto-recall to nothing for exactly the long messages that carry the most context.
 
@@ -316,7 +316,7 @@ HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL=http://host.testcontainers.internal:$LL
 HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY=test-key
 HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL=text-embedding-3-small
 # One text per request — Hindsight coalesces a retain's concurrent embedding
-# calls by timing, and llmock keys a request on its whole input
+# calls by timing, and llmock's key for a shared request depends on the grouping
 HINDSIGHT_API_EMBEDDINGS_OPENAI_BATCH_SIZE=1
 
 # Reranker — RRF (math only, no model)
