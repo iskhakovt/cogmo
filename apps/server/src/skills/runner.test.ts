@@ -262,21 +262,22 @@ async def run(inputs, ctx):
     const globalFetch = vi
       .spyOn(globalThis, "fetch")
       .mockRejectedValue(new Error("reached the live network"));
-    // A wider object is assignable to the option's type, so anything else it
-    // carries reaches the runner at runtime. The handler's audit binding,
-    // manifest and the rest must stay the runner's own.
-    const network = {
-      resolveHost: vi
-        .fn<NonNullable<SkillRunnerCtxHttp["resolveHost"]>>()
-        .mockResolvedValue([{ address: "104.18.32.7", family: 4 }]),
-      fetch: vi
-        .fn<NonNullable<SkillRunnerCtxHttp["fetch"]>>()
-        .mockResolvedValue(new Response("{}", { status: 200 })),
-      recordContextCall: async () => undefined,
-    };
-    const runner = await makeRunner({ ctxHttp: network });
+    try {
+      // A wider object is assignable to the option's type, so anything else
+      // it carries reaches the runner at runtime. The handler's audit
+      // binding, manifest and the rest must stay the runner's own.
+      const network = {
+        resolveHost: vi
+          .fn<NonNullable<SkillRunnerCtxHttp["resolveHost"]>>()
+          .mockResolvedValue([{ address: "104.18.32.7", family: 4 }]),
+        fetch: vi
+          .fn<NonNullable<SkillRunnerCtxHttp["fetch"]>>()
+          .mockResolvedValue(new Response("{}", { status: 200 })),
+        recordContextCall: async () => undefined,
+      };
+      const runner = await makeRunner({ ctxHttp: network });
 
-    const manifest = `---
+      const manifest = `---
 name: http-audited
 description: skill whose ctx.http call must be audited
 tier: wasm
@@ -288,12 +289,11 @@ network:
     - api.example.com
 ---
 `;
-    const body = `
+      const body = `
 async def run(inputs, ctx):
     resp = await ctx.http.get("https://api.example.com/n")
     return {"status": resp["status"]}
 `;
-    try {
       await runner.__registerForTests({ name: "http-audited", manifestSource: manifest, body });
 
       const result = await runner.invoke({ name: "http-audited", inputs: {} });
