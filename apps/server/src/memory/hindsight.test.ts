@@ -334,6 +334,22 @@ describe("HindsightMemoryProvider", () => {
     expect(call.body.query).toBe("what did I say about <|endoftext|> and <|endofprompt|>?");
   });
 
+  it("recall truncates special-token text to the cap as Hindsight counts it", async () => {
+    const provider = createProvider({ maxQueryTokens: 50 });
+    mockRecallMemories.mockResolvedValueOnce(okRecall([]));
+
+    // Several ordinary tokens each on the server, one each if counted as a
+    // special token — which would cut far past the cap.
+    const longQuery = "note <|endoftext|> ".repeat(40);
+    await provider.recall("bank-1", longQuery);
+
+    const call = mockRecallMemories.mock.calls[0]?.[0] as { body: { query: string } };
+    const sentTokens = getEncoding("o200k_base").encode(call.body.query, [], []).length;
+    expect(sentTokens).toBeLessThanOrEqual(50);
+    expect(sentTokens).toBeGreaterThan(45);
+    expect(longQuery.startsWith(call.body.query)).toBe(true);
+  });
+
   it("recall passes short queries through unchanged", async () => {
     const provider = createProvider({ maxQueryTokens: 500 });
     mockRecallMemories.mockResolvedValueOnce(okRecall([]));
