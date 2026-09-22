@@ -14,7 +14,7 @@ Tests:
 
 The counter reports broken recall. The reranker failover chain is what keeps recall working, and `DEPLOYMENT.md` → "Hindsight reranker" now tells operators to set it. Hindsight's default reranker is `local`, which the slim image doesn't ship, and by default a failing reranker fails the whole recall. The section gives the chain to set instead:
 
-- an explicit primary with a 2s timeout. Hindsight's OpenRouter default is 60s, and every turn waits on recall.
+- an explicit primary with a 2s timeout. Hindsight's OpenRouter default is 60s, and a recalling turn waits on it.
 - `HINDSIGHT_API_RERANKER_MAX_RETRIES=0`.
 - `HINDSIGHT_API_RERANKER_1_PROVIDER=rrf`, so an unreachable reranker falls back to the retrieval order instead of failing the recall.
 
