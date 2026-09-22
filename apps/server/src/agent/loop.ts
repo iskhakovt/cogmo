@@ -22,6 +22,7 @@ import {
   classifyVolumeCluster,
   computeIterationFingerprint,
   type DegradeSubtype,
+  formatCutOffToolArgsContent,
   formatVolumeClusterContent,
   freshBudgets,
   type RepairBudgets,
@@ -899,6 +900,10 @@ export async function runStreamingAgentLoop(
 
   while (iterations < maxIterations) {
     iterations++;
+    // Set when this iteration's last block is a tool call the output cap cut
+    // off: it is answered with a synthetic `is_error` tool_result instead of
+    // running. Per-iteration, and only ever read below in the same one.
+    let cutOffCall: { toolUseId: string; toolName: string } | null = null;
 
     const chatParams: Parameters<LlmProvider["chat"]>[0] = {
       model,
@@ -1004,9 +1009,17 @@ export async function runStreamingAgentLoop(
         messages.push({ role: "user", content: outcome.instructions.text });
         ephemeralIndices.push(messages.length - 1);
       }
-      // stream_replay was handled in-line in the catch above — no extra
-      // action here.
-      continue;
+      if (outcome.instructions.kind === "tool_args_cut_off") {
+        // The one repair that stays inside the iteration: the cut-off call
+        // is answered below, alongside its intact siblings' real results,
+        // so flow continues through the tool-execution path rather than
+        // re-entering the loop here.
+        cutOffCall = outcome.instructions;
+      } else {
+        // continuation_prompt re-iterates; stream_replay was handled in-line
+        // in the catch above.
+        continue;
+      }
     }
     if (outcome.kind === "truncated") {
       // The cut-off reply is the turn's answer and stays — it has been on
@@ -1078,6 +1091,16 @@ export async function runStreamingAgentLoop(
     // degrades. See design/agent-resilience.md → Volume cluster
     // trigger.
     const interceptions = computeVolumeClusterInterceptions(messages, initialLength, tools, log);
+    if (cutOffCall) {
+      // Whatever the volume-cluster verdict was for this call, the output cap
+      // is the more specific reason it isn't running.
+      interceptions.set(cutOffCall.toolUseId, {
+        type: "tool_result",
+        toolUseId: cutOffCall.toolUseId,
+        content: formatCutOffToolArgsContent(cutOffCall.toolName),
+        isError: true,
+      });
+    }
 
     // Execute tool calls, emit results, append to messages
     const toolResults = await executeToolCalls(

@@ -42,11 +42,12 @@ import type { ContentBlock, Message, StopReason, ToolUseBlock } from "../llm/typ
  *    ({@link classifyPostStream}). Immediate-degrade with no repair: the
  *    only thing that would help is a smaller request, and compaction runs
  *    pre-flight per turn, outside the loop.
- *  - `max_tokens` — the reply hit its output cap with nothing that can be
- *    kept: a tool call that may be cut off mid-arguments, or no visible
- *    text at all ({@link classifyPostStream}). Immediate-degrade. A cut-off
- *    reply that *does* carry text is not a degrade — see the `truncated`
- *    arm of {@link TurnOutcome}.
+ *  - `max_tokens` — the reply hit its output cap. The repair answers a
+ *    cut-off tool call with an `is_error` tool_result so the model can
+ *    retry it smaller; the degrade covers budget exhaustion and a reply
+ *    with no text to keep ({@link classifyPostStream}). A cut-off reply
+ *    that *does* carry text is neither — see the `truncated` arm of
+ *    {@link TurnOutcome}.
  *  - `stuck_loop`, `stuck_loop_cumulative` — Class D loop-pathology trips
  *    fired from the loop body when {@link computeIterationFingerprint}
  *    repeats without an observable side effect.
@@ -78,11 +79,11 @@ export type DegradeSubtype = Exclude<RepairSubtype, "volume_cluster">;
 
 /**
  * Subset of {@link RepairSubtype} that carries a per-turn repair budget.
- * Refusal, context overflow and `max_tokens` are excluded — all three are
- * immediate-degrade with nothing to decrement. Class D subtypes are
- * excluded — they're trip-only (loop-pathology), no repair attempt to
- * budget against. Used to keep the `repair` arm of {@link TurnOutcome}
- * narrow so a `budgets[outcome.subtype]--` decrement is always sound.
+ * Refusal and context overflow are excluded — both are immediate-degrade
+ * with nothing to decrement. Class D subtypes are excluded — they're
+ * trip-only (loop-pathology), no repair attempt to budget against. Used to
+ * keep the `repair` arm of {@link TurnOutcome} narrow so a
+ * `budgets[outcome.subtype]--` decrement is always sound.
  */
 export type BudgetedSubtype = keyof RepairBudgets;
 
@@ -95,6 +96,7 @@ export type BudgetedSubtype = keyof RepairBudgets;
 export interface RepairBudgets {
   empty_end_turn: number;
   stream_truncation: number;
+  max_tokens: number;
 }
 
 /**
@@ -106,16 +108,19 @@ export interface RepairBudgets {
  *  - `empty_end_turn: 1` — Anthropic's documented recovery is a single
  *    continuation nudge.
  *  - `stream_truncation: 1` — one non-streaming replay of the same turn.
+ *  - `max_tokens: 1` — one cut-off tool call answered with an `is_error`
+ *    tool_result. A second cut-off call in the same turn means the model
+ *    didn't take the hint, and each attempt re-bills the whole input.
  *
- * Refusal, context overflow and `max_tokens` have no budget entry: the
- * classifier degrades (or, for a cut-off text reply, finishes the turn)
- * immediately and the loop never decrements anything on those paths. If a
- * future "try refusal-recovery prompt" experiment wants a budget, it can
- * re-add the field deliberately with logic.
+ * Refusal and context overflow have no budget entry: the classifier
+ * degrades immediately and the loop never decrements anything on either
+ * path. If a future "try refusal-recovery prompt" experiment wants a
+ * budget, it can re-add the field deliberately with logic.
  */
 export const INITIAL_BUDGETS: Readonly<RepairBudgets> = Object.freeze({
   empty_end_turn: 1,
   stream_truncation: 1,
+  max_tokens: 1,
 });
 
 export function freshBudgets(): RepairBudgets {
@@ -130,10 +135,15 @@ export function freshBudgets(): RepairBudgets {
  *    same convention as `validateHistory`-synthesized tool_results).
  *  - `stream_replay`: replay the just-failed turn with `stream: false`.
  *    The non-streaming response should complete the partial output.
+ *  - `tool_args_cut_off`: answer the named tool call — the one the output
+ *    cap cut off mid-arguments — with a synthetic `is_error` tool_result
+ *    instead of running it, and carry on with the iteration. Every other
+ *    call in the same iteration runs normally.
  */
 export type RepairInstructions =
   | { kind: "continuation_prompt"; text: string }
-  | { kind: "stream_replay" };
+  | { kind: "stream_replay" }
+  | { kind: "tool_args_cut_off"; toolUseId: string; toolName: string };
 
 /**
  * Classifier output.
@@ -205,7 +215,7 @@ export function classifyPostStream(
   }
 
   if (stopReason === "max_tokens") {
-    return classifyOutputCap(content);
+    return classifyOutputCap(content, budgets);
   }
 
   if (stopReason === "end_turn" && content.length === 0) {
@@ -233,29 +243,52 @@ export function classifyPostStream(
  * The `max_tokens` arm of {@link classifyPostStream}: the request fit, the
  * reply didn't. What survives depends on where the cap cut it.
  *
- * There is no repair on any branch. The cap the loop sends is already the
+ * Blocks are generated in order and the cap stops generation, so the *last*
+ * block is the only one that can be incomplete. Everything before it is
+ * whole, including tool calls — which is what lets the repair answer one
+ * cut-off call while its siblings run.
+ *
+ * Nothing here re-requests the reply. The cap the loop sends is already the
  * model's resolved `maxOutputTokens`, so a second attempt at the same cap
  * re-bills the whole input and usually stops in the same place. Continuing
  * the reply in-loop would also need something the transcript can't hold
  * honestly: current Claude models reject an assistant prefill, and a
  * synthetic "continue" user turn has to be either persisted (words the user
  * never sent) or dropped afterwards, which rewrites the prefix any later
- * thinking block is bound to. The user asking for the rest on the next turn
- * is the append-only form of the same thing.
+ * thinking block is bound to. The tool_result the repair appends has neither
+ * problem — it is a real turn in the transcript, and the model re-decides
+ * with it in context.
  */
-function classifyOutputCap(content: ReadonlyArray<ContentBlock>): TurnOutcome {
-  if (content.some((b) => b.type === "tool_use")) {
-    // A tool call in a capped turn may be the block the cap interrupted, and
-    // nothing in the content says which call is whole: `jsonrepair` closes a
-    // cut-off argument object into one that still validates. Running it would
-    // act on truncated input (a half-written file, a clipped message), so the
-    // whole iteration degrades before `executeToolCalls` sees it — which also
-    // keeps its tool_use blocks out of history, where they'd be orphans.
+function classifyOutputCap(
+  content: ReadonlyArray<ContentBlock>,
+  budgets: RepairBudgets,
+): TurnOutcome {
+  const last = content.at(-1);
+  if (last?.type === "tool_use") {
+    // The cap landed inside this call's arguments: `jsonrepair` closes a
+    // cut-off argument object into one that still validates, so running it
+    // would act on truncated input (a half-written file, a clipped message).
+    // Answering it with an `is_error` tool_result keeps the turn going and
+    // tells the model what to do about it — and keeps the pairing invariant,
+    // which dropping the block would break.
+    if (budgets.max_tokens > 0) {
+      return {
+        kind: "repair",
+        subtype: "max_tokens",
+        instructions: { kind: "tool_args_cut_off", toolUseId: last.id, toolName: last.name },
+      };
+    }
     return {
       kind: "degrade",
       reason: "reply hit the output token limit during a tool call",
       subtype: "max_tokens",
     };
+  }
+  if (content.some((b) => b.type === "tool_use")) {
+    // The cap cut trailing prose or reasoning, after the tool calls were
+    // already complete. They run, and their results give the model the room
+    // to finish what it was saying.
+    return { kind: "ok" };
   }
   if (!content.some((b) => b.type === "text" && b.text.trim().length > 0)) {
     // The allowance went on reasoning, or on nothing at all. There is no
@@ -267,6 +300,20 @@ function classifyOutputCap(content: ReadonlyArray<ContentBlock>): TurnOutcome {
     };
   }
   return { kind: "truncated" };
+}
+
+/**
+ * The synthetic `is_error` tool_result content the loop puts in place of a
+ * call whose arguments the output cap cut off. Names the cause so the model
+ * doesn't read it as a tool failure it should retry unchanged, and the way
+ * out: the same work in smaller pieces.
+ */
+export function formatCutOffToolArgsContent(toolName: string): string {
+  return (
+    `The arguments for \`${toolName}\` were cut off at the model's output limit, so the call was ` +
+    "not run. Nothing was written or sent. Split the work into smaller calls, or reply to the " +
+    "user with what you have."
+  );
 }
 
 /**

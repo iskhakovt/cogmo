@@ -123,7 +123,7 @@ describe("classifyPostStream", () => {
   it("context_overflow never yields a repair, so no continuation prompt is ever built", () => {
     // Exhausting every budget can't flip the verdict — there's no budgeted
     // arm on this path to exhaust in the first place.
-    const drained: RepairBudgets = { empty_end_turn: 0, stream_truncation: 0 };
+    const drained: RepairBudgets = { empty_end_turn: 0, stream_truncation: 0, max_tokens: 0 };
     for (const budgets of [freshBudgets(), drained]) {
       const outcome = classifyPostStream([], "context_overflow", budgets);
       expect(outcome.kind).toBe("degrade");
@@ -146,9 +146,10 @@ describe("classifyPostStream", () => {
     expect(budgets).toEqual(freshBudgets());
   });
 
-  // A capped tool call's arguments are whatever was generated before the
-  // cap, closed up into an object that can still validate — running it acts
-  // on truncated input. Text alongside the call doesn't rescue the turn.
+  // Blocks are generated in order, so a trailing tool call is the one the
+  // cap interrupted: its arguments are whatever was written before the cut,
+  // closed up into an object that can still validate. It gets answered, not
+  // run, so the model can retry it smaller.
   it.each<[string, ContentBlock[]]>([
     [
       "a lone tool call",
@@ -161,13 +162,60 @@ describe("classifyPostStream", () => {
         { type: "tool_use", id: "t1", name: "write_file", input: { path: "a", content: "par" } },
       ],
     ],
-  ])("degrades on max_tokens when the reply carries %s", (_label, content) => {
-    const outcome = classifyPostStream(content, "max_tokens", freshBudgets());
+    [
+      "an intact call followed by a cut-off one",
+      [
+        { type: "tool_use", id: "t0", name: "list_dir", input: { path: "." } },
+        { type: "tool_use", id: "t1", name: "write_file", input: { path: "a" } },
+      ],
+    ],
+  ])("repairs a max_tokens reply ending in %s", (_label, content) => {
+    const budgets = freshBudgets();
+    const outcome = classifyPostStream(content, "max_tokens", budgets);
     expect(outcome).toEqual({
+      kind: "repair",
+      subtype: "max_tokens",
+      instructions: { kind: "tool_args_cut_off", toolUseId: "t1", toolName: "write_file" },
+    });
+    // The loop owns the decrement.
+    expect(budgets).toEqual(freshBudgets());
+  });
+
+  it("degrades a cut-off tool call once the max_tokens budget is spent", () => {
+    const budgets = freshBudgets();
+    const content: ContentBlock[] = [
+      { type: "tool_use", id: "t1", name: "write_file", input: { path: "a" } },
+    ];
+    expect(classifyPostStream(content, "max_tokens", budgets).kind).toBe("repair");
+
+    budgets.max_tokens--;
+
+    expect(classifyPostStream(content, "max_tokens", budgets)).toEqual({
       kind: "degrade",
       reason: "reply hit the output token limit during a tool call",
       subtype: "max_tokens",
     });
+  });
+
+  // The cap cut the prose after the calls, so every call is whole: they run,
+  // and their results give the model room to finish the sentence.
+  it.each<[string, ContentBlock[]]>([
+    [
+      "trailing text",
+      [
+        { type: "tool_use", id: "t1", name: "list_dir", input: {} },
+        { type: "text", text: "Now let me summar" },
+      ],
+    ],
+    [
+      "trailing reasoning",
+      [
+        { type: "tool_use", id: "t1", name: "list_dir", input: {} },
+        { type: "thinking", thinking: "next I should", signature: "sig" },
+      ],
+    ],
+  ])("returns ok for a max_tokens reply whose calls are complete, ending in %s", (_l, content) => {
+    expect(classifyPostStream(content, "max_tokens", freshBudgets())).toEqual({ kind: "ok" });
   });
 
   it.each<[string, ContentBlock[]]>([
@@ -186,10 +234,10 @@ describe("classifyPostStream", () => {
     },
   );
 
-  it("max_tokens never yields a repair, whatever the budgets", () => {
+  it("never re-requests a capped text reply, whatever the budgets", () => {
     // Retrying at the same cap re-bills the whole input to stop in the same
-    // place, so the verdict must not depend on what's left to spend.
-    const drained: RepairBudgets = { empty_end_turn: 0, stream_truncation: 0 };
+    // place, so a text reply's verdict doesn't depend on what's left to spend.
+    const drained: RepairBudgets = { empty_end_turn: 0, stream_truncation: 0, max_tokens: 0 };
     for (const budgets of [freshBudgets(), drained]) {
       expect(classifyPostStream([], "max_tokens", budgets).kind).toBe("degrade");
       expect(
@@ -305,7 +353,7 @@ describe("classifyStreamError", () => {
   // into the same cap, so it is skipped whatever the budget says.
   it("degrades arguments cut off at the output cap without spending a replay", () => {
     const cutOff = new ToolArgsCutOffError(new ProviderProtocolError("boom", new SyntaxError("x")));
-    const drained: RepairBudgets = { empty_end_turn: 0, stream_truncation: 0 };
+    const drained: RepairBudgets = { empty_end_turn: 0, stream_truncation: 0, max_tokens: 0 };
     for (const budgets of [freshBudgets(), drained]) {
       expect(classifyStreamError(cutOff, budgets)).toEqual({
         kind: "degrade",
