@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@orpc/contract": "1.15.0",
+    "@orpc/contract": "1.15.1",
     "zod": "^4.5.4"
   },
   "devDependencies": {
