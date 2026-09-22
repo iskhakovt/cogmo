@@ -41,6 +41,11 @@ import type { ContentBlock, Message, StopReason, ToolUseBlock } from "../llm/typ
  *    ({@link classifyPostStream}). Immediate-degrade with no repair: the
  *    only thing that would help is a smaller request, and compaction runs
  *    pre-flight per turn, outside the loop.
+ *  - `max_tokens` — the reply hit its output cap with nothing that can be
+ *    kept: a tool call that may be cut off mid-arguments, or no visible
+ *    text at all ({@link classifyPostStream}). Immediate-degrade. A cut-off
+ *    reply that *does* carry text is not a degrade — see the `truncated`
+ *    arm of {@link TurnOutcome}.
  *  - `stuck_loop`, `stuck_loop_cumulative` — Class D loop-pathology trips
  *    fired from the loop body when {@link computeIterationFingerprint}
  *    repeats without an observable side effect.
@@ -56,6 +61,7 @@ export type RepairSubtype =
   | "stream_truncation"
   | "refusal"
   | "context_overflow"
+  | "max_tokens"
   | "stuck_loop"
   | "stuck_loop_cumulative"
   | "volume_cluster";
@@ -71,11 +77,11 @@ export type DegradeSubtype = Exclude<RepairSubtype, "volume_cluster">;
 
 /**
  * Subset of {@link RepairSubtype} that carries a per-turn repair budget.
- * Refusal and context overflow are excluded — both are immediate-degrade
- * with nothing to decrement. Class D subtypes are excluded — they're
- * trip-only (loop-pathology), no repair attempt to budget against. Used to
- * keep the `repair` arm of {@link TurnOutcome} narrow so a
- * `budgets[outcome.subtype]--` decrement is always sound.
+ * Refusal, context overflow and `max_tokens` are excluded — all three are
+ * immediate-degrade with nothing to decrement. Class D subtypes are
+ * excluded — they're trip-only (loop-pathology), no repair attempt to
+ * budget against. Used to keep the `repair` arm of {@link TurnOutcome}
+ * narrow so a `budgets[outcome.subtype]--` decrement is always sound.
  */
 export type BudgetedSubtype = keyof RepairBudgets;
 
@@ -100,10 +106,11 @@ export interface RepairBudgets {
  *    continuation nudge.
  *  - `stream_truncation: 1` — one non-streaming replay of the same turn.
  *
- * Refusal and context overflow have no budget entry: the classifier
- * degrades immediately and the loop never decrements anything on either
- * path. If a future "try refusal-recovery prompt" experiment wants a
- * budget, it can re-add the field deliberately with logic.
+ * Refusal, context overflow and `max_tokens` have no budget entry: the
+ * classifier degrades (or, for a cut-off text reply, finishes the turn)
+ * immediately and the loop never decrements anything on those paths. If a
+ * future "try refusal-recovery prompt" experiment wants a budget, it can
+ * re-add the field deliberately with logic.
  */
 export const INITIAL_BUDGETS: Readonly<RepairBudgets> = Object.freeze({
   empty_end_turn: 1,
@@ -137,11 +144,15 @@ export type RepairInstructions =
  *    reply. Every classifier `degrade` carries a `subtype` tag; the
  *    iteration-cap backstop bypasses the classifier entirely and is the
  *    only callsite that constructs a degraded result with `subtype: null`.
+ *  - `truncated`: a text reply cut off at the output cap. It is the final
+ *    answer and stays, but the loop marks it with {@link truncationNotice}
+ *    and flags the result, so nobody downstream takes it for a finished one.
  */
 export type TurnOutcome =
   | { kind: "ok" }
   | { kind: "repair"; subtype: BudgetedSubtype; instructions: RepairInstructions }
-  | { kind: "degrade"; reason: string; subtype: DegradeSubtype };
+  | { kind: "degrade"; reason: string; subtype: DegradeSubtype }
+  | { kind: "truncated" };
 
 /**
  * Classify the just-finished turn based on its drained content and
@@ -192,6 +203,10 @@ export function classifyPostStream(
     };
   }
 
+  if (stopReason === "max_tokens") {
+    return classifyOutputCap(content);
+  }
+
   if (stopReason === "end_turn" && content.length === 0) {
     if (budgets.empty_end_turn > 0) {
       return {
@@ -214,12 +229,91 @@ export function classifyPostStream(
 }
 
 /**
- * The non-`ok` arms of {@link TurnOutcome}, used as the return shape of
- * {@link classifyStreamError} — an error never produces an "ok" outcome,
- * so narrowing this in the caller is cleaner than re-checking `.kind`
- * against the full union.
+ * The `max_tokens` arm of {@link classifyPostStream}: the request fit, the
+ * reply didn't. What survives depends on where the cap cut it.
+ *
+ * There is no repair on any branch. The cap the loop sends is already the
+ * model's resolved `maxOutputTokens`, so a second attempt at the same cap
+ * re-bills the whole input and usually stops in the same place. Continuing
+ * the reply in-loop would also need something the transcript can't hold
+ * honestly: current Claude models reject an assistant prefill, and a
+ * synthetic "continue" user turn has to be either persisted (words the user
+ * never sent) or dropped afterwards, which rewrites the prefix any later
+ * thinking block is bound to. The user asking for the rest on the next turn
+ * is the append-only form of the same thing.
  */
-export type StreamErrorOutcome = Exclude<TurnOutcome, { kind: "ok" }>;
+function classifyOutputCap(content: ReadonlyArray<ContentBlock>): TurnOutcome {
+  if (content.some((b) => b.type === "tool_use")) {
+    // A tool call in a capped turn may be the block the cap interrupted, and
+    // nothing in the content says which call is whole: `jsonrepair` closes a
+    // cut-off argument object into one that still validates. Running it would
+    // act on truncated input (a half-written file, a clipped message), so the
+    // whole iteration degrades before `executeToolCalls` sees it — which also
+    // keeps its tool_use blocks out of history, where they'd be orphans.
+    return {
+      kind: "degrade",
+      reason: "reply hit the output token limit during a tool call",
+      subtype: "max_tokens",
+    };
+  }
+  if (!content.some((b) => b.type === "text" && b.text.trim().length > 0)) {
+    // The allowance went on reasoning, or on nothing at all. There is no
+    // partial answer to keep.
+    return {
+      kind: "degrade",
+      reason: "reply hit the output token limit before producing any text",
+      subtype: "max_tokens",
+    };
+  }
+  return { kind: "truncated" };
+}
+
+/**
+ * What the loop appends to a text reply that {@link classifyPostStream}
+ * returned as `truncated` — streamed after the partial text and persisted as
+ * a trailing text block on the same assistant message, so the live view, the
+ * transcript, and the model's own history on the next turn all show that the
+ * reply stops short. A reply cut off inside a fenced code block gets the
+ * fence closed first, so the marker reads as a marker and not as more code.
+ */
+export function truncationNotice(partialText: string): string {
+  const fence = openCodeFence(partialText);
+  const close = fence === null ? "" : `\n${fence}`;
+  return `${close}\n\n[Reply cut off: it reached the model's output limit.]`;
+}
+
+/**
+ * CommonMark fence lines: up to three spaces of indent, then a run of three
+ * or more backticks or tildes, then the info string (opener) or nothing but
+ * whitespace (closer).
+ */
+const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+
+/**
+ * The fence run that opened a code block still open at the end of `text`,
+ * or null. A closer must use the opener's character and be at least as long;
+ * a backtick "opener" whose info string contains a backtick is inline code,
+ * not a fence.
+ */
+function openCodeFence(text: string): string | null {
+  return text.split("\n").reduce<string | null>((open, line) => {
+    const match = FENCE_LINE.exec(line);
+    const run = match?.[1];
+    const rest = match?.[2] ?? "";
+    if (run === undefined) return open;
+    if (open === null) return run.startsWith("`") && rest.includes("`") ? null : run;
+    const closes = run[0] === open[0] && run.length >= open.length && rest.trim() === "";
+    return closes ? null : open;
+  }, null);
+}
+
+/**
+ * The failure arms of {@link TurnOutcome}, used as the return shape of
+ * {@link classifyStreamError} — an error never produces an `ok` or
+ * `truncated` outcome, so narrowing this in the caller is cleaner than
+ * re-checking `.kind` against the full union.
+ */
+export type StreamErrorOutcome = Extract<TurnOutcome, { kind: "repair" | "degrade" }>;
 
 /**
  * Classify an error thrown out of the stream-drain section of an iteration.
@@ -266,9 +360,9 @@ export function classifyStreamError(
 
 /**
  * The text the orchestrator shows the user when a turn ends via the
- * degraded off-ramp. Refusal and context overflow each carry a subtype-
- * specific message because the user's next move differs; every other
- * subtype shares the same apology.
+ * degraded off-ramp. Refusal, context overflow and `max_tokens` each carry a
+ * subtype-specific message because the user's next move differs; every
+ * other subtype shares the same apology.
  */
 export function degradedReplyText(subtype: DegradeSubtype | null): string {
   if (subtype === "refusal") {
@@ -276,6 +370,9 @@ export function degradedReplyText(subtype: DegradeSubtype | null): string {
   }
   if (subtype === "context_overflow") {
     return "This conversation is too long for the model's context window. Start a fresh one with `/new`, or switch to a larger-context model with `/model`.";
+  }
+  if (subtype === "max_tokens") {
+    return "My reply hit the model's output limit before it was complete, so I stopped without acting on it. Try asking for a shorter answer, or splitting the task into smaller steps.";
   }
   return "I had trouble generating a clean response — the model returned an output I couldn't process. Could you rephrase or try again?";
 }
@@ -484,6 +581,8 @@ function humanReasonForDegrade(subtype: DegradeSubtype | null, reason: string): 
       return "you declined the request on policy grounds";
     case "context_overflow":
       return "the conversation plus your reply exceeded the model's context window, so the turn was cut off";
+    case "max_tokens":
+      return "your reply reached the output token limit before it was complete, so nothing in it was acted on";
     case "stuck_loop":
       return "the loop detected the same tool call repeated three times in a row without observable progress";
     case "stuck_loop_cumulative":

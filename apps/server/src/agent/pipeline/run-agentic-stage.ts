@@ -395,6 +395,11 @@ export async function runAgenticStage(
       reason: `the stage's agent turn could not finish (${result.degraded.reason})`,
     };
   }
+  // The partial reply stands in the transcript and was delivered, but it is
+  // not the stage's output: an artifact extracted from it would look finished.
+  if (result.truncated) {
+    return { kind: "failed", reason: "the stage's reply was cut off at the model's output limit" };
+  }
 
   const extracted = await steps.stepRun("extract-artifact", async () => {
     const artifact = await extractStageArtifact({

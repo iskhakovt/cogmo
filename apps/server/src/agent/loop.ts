@@ -27,6 +27,7 @@ import {
   type RepairBudgets,
   sha256,
   summarizeToolHistory,
+  truncationNotice,
 } from "./repair.js";
 import type { Service } from "./service.js";
 import {
@@ -146,6 +147,16 @@ export interface AgentLoopResult {
    * `reason: "iteration_cap"` carries the distinguishing label.
    */
   degraded?: { reason: string; subtype: DegradeSubtype | null };
+  /**
+   * Set when the final reply stopped at the output cap (`max_tokens`) with
+   * text worth keeping. The reply is persisted and delivered like any other,
+   * but its last assistant message already ends with a
+   * {@link truncationNotice} block — streamed live and included in `text` —
+   * so the user sees where it stops. Callers that consume `text` as a
+   * finished artifact must check this flag rather than read the partial as
+   * complete. Mutually exclusive with `degraded`.
+   */
+  truncated?: true;
 }
 
 const DEFAULT_MAX_ITERATIONS = 20;
@@ -695,6 +706,9 @@ function buildDegradedResult(
  * - `{ event: "agent.degrade", reason: "iteration_cap", subtype: null }`
  *   — backstop trigger; `subtype: null` distinguishes it from
  *   classifier-driven degrades.
+ * - `{ event: "agent.truncated", maxTokens }` — the final reply stopped at
+ *   the output cap and was kept with a truncation notice; `maxTokens` is
+ *   the cap the loop requested (`null` when it left the provider default).
  *
  * Every emission uses `turnLogger` (bound `runId` + `conversationId`)
  * so the failure-reflector can join logs to `conversation/degraded`
@@ -842,7 +856,9 @@ async function runLlmIteration(
  * In-loop Class C handling: stream errors are classified inside the
  * iteration step (truncated tool-arg JSON → a single non-streaming replay;
  * refusal → degrade). Empty `end_turn` is classified post-stream out here
- * and triggers a single continuation-prompt retry. See `repair.ts` and
+ * and triggers a single continuation-prompt retry; `max_tokens` either
+ * degrades (a cut-off tool call, or no text) or ends the turn with the
+ * partial reply marked as truncated. See `repair.ts` and
  * `design/agent-resilience.md` → Class C.
  */
 export async function runStreamingAgentLoop(
@@ -950,8 +966,10 @@ export async function runStreamingAgentLoop(
 
     // Post-stream classifier. Runs BEFORE the hasToolUse gate so an empty
     // end_turn that still has a tool_use somehow (unlikely) doesn't trip
-    // the empty-content path. Refusal goes straight to degrade; empty
-    // end_turn appends a synthetic user turn and re-iterates.
+    // the empty-content path, and so a tool call cut off at `max_tokens`
+    // degrades instead of running. Refusal goes straight to degrade; empty
+    // end_turn appends a synthetic user turn and re-iterates; a text reply
+    // cut off at `max_tokens` ends the turn marked as truncated.
     const outcome = classifyPostStream(iterationContent, iterationStopReason, budgets);
     if (outcome.kind === "degrade") {
       // The just-pushed assistant message is the one that triggered the
@@ -998,6 +1016,52 @@ export async function runStreamingAgentLoop(
       // stream_replay was handled in-line in the catch above — no extra
       // action here.
       continue;
+    }
+    if (outcome.kind === "truncated") {
+      // The cut-off reply is the turn's answer and stays — it has been on
+      // the user's screen since it streamed — but it ends with a notice
+      // both live and in the persisted message. The push gets its own step
+      // for the same reason as `emit-tool-results-iter<N>`: in the bare body
+      // it would repeat once per remaining boundary of the turn. The notice
+      // is derived from the cached content, so every invocation appends the
+      // same block to the message it hands to persistence.
+      const notice = truncationNotice(
+        iterationContent
+          .filter((b): b is TextBlock => b.type === "text")
+          .map((b) => b.text)
+          .join(""),
+      );
+      const emitNotice = async (): Promise<null> => {
+        await onEvent({ type: "text_delta", text: notice });
+        return null;
+      };
+      if (stepRun) {
+        await stepRun(`truncation-notice-iter${iterations}`, emitNotice);
+      } else {
+        await emitNotice();
+      }
+      streamed.text += notice;
+      messages.pop();
+      messages.push({
+        role: "assistant",
+        content: [...iterationContent, { type: "text", text: notice }],
+      });
+      log.warn(
+        { event: "agent.truncated", maxTokens: maxTokens ?? null },
+        "agent loop reply truncated at the output cap",
+      );
+      return {
+        ...buildResult(
+          messages,
+          initialLength,
+          ephemeralIndices,
+          totalUsage,
+          finalModel,
+          iterations,
+          streamed,
+        ),
+        truncated: true,
+      };
     }
 
     // Drive flow on content, not `stop_reason` — see runAgentLoop above.

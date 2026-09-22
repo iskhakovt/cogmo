@@ -12,7 +12,7 @@ Every provider failure falls into one of four classes. The class determines the 
 |-|-|-|
 | **A. Transport / infra** | DNS/TLS timeout, 408, 425, 429, any 5xx, mid-stream socket reset before first event | Provider chain (`FallbackLlmProvider`) tries the next candidate. Inngest `retries: 2` retries the whole turn if the chain exhausts. |
 | **B. Provider-permanent** | 4xx auth/quota, model deprecated, malformed tool schema (ours), `ProviderConfigError` | `NonRetriableError`. `onFailure` emits `conversation/errored`. `recover-conversation` writes a `cooldown_state` blob on the conversation (see [Auto-repair](#auto-repair-proposed)). New inbounds get an in-cooldown reply until the cooldown elapses or a clear-trigger command (`/repair`, `/model`, `/profile`) runs. |
-| **C. Model misbehavior, recoverable** | Empty `content` + `end_turn`, truncated tool-arg JSON, schema-invalid `chatTyped` output, model refusal (`stop_reason: "refusal"` / `finish_reason: "content_filter"` / 400 with content-policy class) | **In-loop per-subtype repair budgets** (most subtypes: 1; refusal: 0, immediate degrade). On exhaustion: degraded reply, conversation stays `active`. |
+| **C. Model misbehavior, recoverable** | Empty `content` + `end_turn`, truncated tool-arg JSON, schema-invalid `chatTyped` output, model refusal (`stop_reason: "refusal"` / `finish_reason: "content_filter"` / 400 with content-policy class), reply cut off at the output cap (`stop_reason: "max_tokens"`) | **In-loop per-subtype repair budgets** (most subtypes: 1; refusal: 0, immediate degrade). On exhaustion: degraded reply, conversation stays `active`. |
 | **D. Loop pathology** | N consecutive turns producing the same tool calls with no successful side effect; iteration cap hit | Progress fingerprint trips → degraded reply, conversation stays `active`. |
 
 Class A and B are provider-layer concerns and live in `FallbackLlmProvider` + `resolveOrFail`. This doc covers C and D.
@@ -23,7 +23,7 @@ A turn ends in one of three states. Each is a durable signal downstream consumer
 
 | Off-ramp | Event | Trigger |
 |-|-|-|
-| Normal | `response/ready` | Turn produced a usable assistant reply |
+| Normal | `response/ready` | Turn produced a usable assistant reply — including one cut off at the output cap, which is kept and marked (see [Truncated reply](#truncated-reply-confirmed)) |
 | Degraded | `conversation/degraded` | Class C repair budget exhausted, or Class D fingerprint tripped. User sees a system-generated apology; can retry. |
 | Errored | `conversation/errored` | Class B failure, Inngest function retries exhausted on Class A, history-invariant violation, programmer-bug exception. Enters auto-repair cooldown — see [Auto-repair](#auto-repair-proposed). |
 
@@ -161,7 +161,7 @@ Class C has two handling surfaces. Most callsites are inside the agent loop, whe
 
 A turn classifier runs at two points inside `runStreamingAgentLoop`:
 
-1. **Post-stream**, after content blocks are reconstructed, before the `hasToolUse` gate. Detects: empty content, truncation mid-`tool_use`, explicit refusal signal from the SDK adapter (see model-refusal subtype below).
+1. **Post-stream**, after content blocks are reconstructed, before the `hasToolUse` gate. Detects: empty content, truncation mid-`tool_use`, explicit refusal signal from the SDK adapter (see model-refusal subtype below), context overflow, and a reply stopped at the output cap (`max_tokens`).
 2. **Post-`executeToolCalls`**, before appending results. Detects: schema-validation failure on tool args (Zod failed after `tool-input-coercion` and `jsonrepair`).
 
 Classifier returns a discriminated union:
@@ -170,7 +170,8 @@ Classifier returns a discriminated union:
 type TurnOutcome =
   | { kind: "ok" }
   | { kind: "repair"; subtype: ClassCSubtype; instructions: RepairInstructions }
-  | { kind: "degrade"; reason: string };
+  | { kind: "degrade"; reason: string }
+  | { kind: "truncated" };   // text reply cut off at max_tokens — kept, marked
 ```
 
 #### Repair budgets
@@ -182,6 +183,7 @@ type TurnOutcome =
 | Empty `content` + `end_turn` | 1 | Anthropic's documented recovery is a continuation nudge; succeeds on first try when it works. |
 | Stream truncated mid-`tool_use` | 1 | One non-streaming replay attempt. |
 | Model refusal | 0 | Refusal is policy, not a transient mistake. Re-prompting the same model is unlikely to change the outcome — go straight to degrade with a refusal-specific message. |
+| Output cap (`max_tokens`) | 0 | A retry at the same cap re-bills the whole input and usually stops in the same place. A text reply is kept and marked; anything else degrades. See [Truncated reply](#truncated-reply-confirmed). |
 | Truncated / invalid JSON in tool-arg stream | — | `jsonrepair` is a deterministic transform, not a retry. Runs unconditionally before the parse-failure classification fires; doesn't consume a budget entry. |
 
 The repair runs inside the `llm-iter<N>` step body, so its verdict is cached and replays deterministically. Budget state is recomputed by the loop from the cached iteration outcomes on every invocation — a Class A per-step retry that succeeds does NOT reset Class C budgets; a spent budget stays spent for the rest of the turn, which is what keeps the step graph identical across replays.
@@ -194,7 +196,9 @@ The repair runs inside the `llm-iter<N>` step body, so its verdict is cached and
 |-|-|
 | Empty `content` + `end_turn` | Append a user turn with a continuation nudge ("Please complete your response."). Per Anthropic's [stop-reason guidance](https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons), naive same-prompt retry does not help — the continuation prompt is the documented recovery. |
 | Truncated / invalid JSON in tool-arg stream | Run `jsonrepair` on the buffered chunks before declaring failure. If repair produces valid JSON, validate against Zod and proceed. If repair fails, the tool_use surfaces as a tool-arg validation failure — which uses the existing unbounded `is_error: true` feedback channel, not a Class C budget entry. |
-| Stream truncated mid-`tool_use` (`stop_reason: "max_tokens"` with partial JSON) | Replay non-streaming with the same params. Single-shot token budget often completes where the chunked stream did not. If the replay itself hits a Class A failure, normal Class A handling applies (provider chain → the error escapes the `llm-iter<N>` step body and Inngest's per-step retries take over); if the replay raises another Class C signal (`ProviderProtocolError` or `RefusalError`), the loop maps it to a `degrade` with the matching subtype rather than letting it surface as `errored` — the documented recovery was attempted and didn't work. The budget decrement is outcome-driven: the loop decrements when the cached iteration outcome says a replay was consumed (`repaired`), so it survives Inngest replays deterministically. One consequence: if the failed iteration's *step* is retried by Inngest (Class A during the replay) and the retry's fresh stream succeeds cleanly, no budget was consumed — the iteration never needed the repair. |
+| Stream truncated mid-`tool_use` (`stop_reason: "max_tokens"` with partial JSON) | Replay non-streaming with the same params. Single-shot token budget often completes where the chunked stream did not. If the replay itself hits a Class A failure, normal Class A handling applies (provider chain → the error escapes the `llm-iter<N>` step body and Inngest's per-step retries take over); if the replay raises another Class C signal (`ProviderProtocolError` or `RefusalError`), the loop maps it to a `degrade` with the matching subtype rather than letting it surface as `errored` — the documented recovery was attempted and didn't work. A replay that parses but stops at `max_tokens` again reaches the post-stream classifier like any drained iteration and degrades with subtype `max_tokens` instead of running the call. The budget decrement is outcome-driven: the loop decrements when the cached iteration outcome says a replay was consumed (`repaired`), so it survives Inngest replays deterministically. One consequence: if the failed iteration's *step* is retried by Inngest (Class A during the replay) and the retry's fresh stream succeeds cleanly, no budget was consumed — the iteration never needed the repair. |
+| Output cap (`max_tokens`) with a `tool_use` in the content, or with no visible text | Immediate degrade, subtype `max_tokens`. A tool call in a capped turn may be the block the cap cut off, and `jsonrepair` closes a cut-off argument object into one that still validates — running it would act on truncated input (a half-written file, a clipped message), so none of the iteration's calls run and the iteration is dropped like any degrade-triggering one. A reply that spent its whole allowance reasoning has nothing to keep. Degraded-reply text is subtype-specific: ask for a shorter answer or split the task. |
+| Output cap (`max_tokens`) with visible text | Not a degrade — the turn ends with the partial reply kept and marked. See [Truncated reply](#truncated-reply-confirmed). |
 | Model refusal | Immediate degrade — no repair attempt. Degraded-reply text is refusal-specific: *"The model declined that request. Try rephrasing, or switch model with `/model`."* Provider-fallback on refusal is **not** the default per Anthropic's documented guidance — policies are deliberately different across models, and silent re-routing on safety refusal is the wrong shape. If a per-profile fallback chain is configured (future work in [providers.md](providers.md)) it could opt into refusal-triggered fallback before degrade; not in the baseline. |
 
 **Scope of the refusal subtype (v1):** detection requires an explicit signal from the SDK adapter — `stop_reason: "refusal"` (Anthropic-direct) or `finish_reason: "content_filter"` plus 400-with-content-policy class (OpenAI-direct). `openai-compat.ts` covering OpenAI-compatible providers (OpenRouter, Venice, xAI, generic OpenAI-compat shims) does **not** participate in v1: refusal signals on that surface arrive in too many non-standard shapes (provider-specific 400 bodies, `error.code` inside a 200, empty `choices`, refusal text in a normal `end_turn` reply) for a reliable decoder. LiteLLM does string-pattern matching on error messages and explicitly notes the heuristic is Azure-shaped; that's the prior art and it's brittle. Refusals on OpenAI-compat surfaces degrade through the empty-content path instead: one continuation-prompt budget entry wasted, then degrade. Acceptable cost for v1. Follow-up: per-adapter `decodeRefusal(response): boolean` hook with a permissive regex default for `openai-compat.ts` — wire it when telemetry shows the wasted-budget cost matters.
@@ -218,7 +222,7 @@ The degraded reply is persisted as a normal assistant message (role `assistant`,
 - **Synthetic user turns** injected by the repair flow (continuation prompts, validation-feedback messages) are **not** persisted. They're internal mechanics, not real user input — persisting them would confuse future-turn retrieval and the failure-reflector. This matches the existing ephemeral pattern for `validateHistory`-synthesized tool_results (`history-invariants.ts`) and the `[Previous conversation summary]` turn injected during compaction (`context.ts:234-237`).
 - The degraded reply is persisted as the final assistant message of the turn.
 
-**The user-visible turn matches the persisted one.** A degrade can fire after the model already streamed output — `context_overflow` and the Class D trips both can — and streaming adapters have shown it by then (Telegram edits the live message every ~500ms; the web adapter forwards every delta as an SSE frame). The iteration that triggered the degrade is not persisted, so immediately before the degraded reply the orchestrator pushes a `retract` stream event naming exactly that iteration's output: `text` is the streamed text the loop dropped, `toolUseIds` its tool calls (which under `context_overflow` / `refusal` never executed at all — the loop exits before `executeToolCalls`). Both are computed by diffing `AgentLoopResult.streamed` — the loop's emission ledger, rebuilt from durable iteration outcomes so it is identical on every Inngest re-invocation — against `AgentLoopResult.newMessages`, the messages the persist step is about to write; adapters apply the named removal rather than guessing how much of the turn to drop. What follows from that:
+**The user-visible turn matches the persisted one.** A degrade can fire after the model already streamed output — `context_overflow`, `max_tokens` and the Class D trips all can — and streaming adapters have shown it by then (Telegram edits the live message every ~500ms; the web adapter forwards every delta as an SSE frame). The iteration that triggered the degrade is not persisted, so immediately before the degraded reply the orchestrator pushes a `retract` stream event naming exactly that iteration's output: `text` is the streamed text the loop dropped, `toolUseIds` its tool calls (which under `context_overflow` / `refusal` / `max_tokens` never executed at all — the loop exits before `executeToolCalls`). Both are computed by diffing `AgentLoopResult.streamed` — the loop's emission ledger, rebuilt from durable iteration outcomes so it is identical on every Inngest re-invocation — against `AgentLoopResult.newMessages`, the messages the persist step is about to write; adapters apply the named removal rather than guessing how much of the turn to drop. What follows from that:
 
 - Output from **earlier iterations of the same turn is not named and stays on screen**, because those messages are persisted. A turn that streamed "Let me check the weather", ran the tool, then overflowed keeps that prose and its tool card and lands the apology under them — which is exactly what the transcript holds.
 - The dropped iteration is always the last one, so the retracted text is always a **tail** of what streamed. Adapters cut it off the still-editable surface, along with anything appended after it (Telegram's tool / status banners for that same iteration).
@@ -228,6 +232,16 @@ The degraded reply is persisted as a normal assistant message (role `assistant`,
 - It is best-effort where the surface is immutable: a Telegram chunk that already overflowed into its own message cannot be edited back, so a retraction reaching into a sent chunk clears the editable remainder and leaves that chunk visible.
 
 The forensic record of *what the model produced before degrading* lives in the `agent.repair` / `agent.degrade` structured logs (see Telemetry below), not in `messages`. The `messages` table is the conversation transcript; structured logs are the failure audit.
+
+#### Truncated reply `[confirmed]`
+
+A text reply that stops at `max_tokens` wears the shape of a finished one. It is not a degrade — the text is the model's answer, and it has been on the user's screen since it streamed, so dropping it and posting an apology would take back the useful part of the turn. The loop keeps it and makes the cut visible everywhere the reply is read:
+
+- **The notice.** The loop appends a trailing text block to the final assistant message — `[Reply cut off: it reached the model's output limit.]` after a blank line — and streams the same text right after the partial. When the cut lands inside a fenced code block, the notice closes the fence first, so it reads as a notice and not as more code. The notice is persisted, which keeps the transcript matching what the user saw, and tells the model on the next turn that its previous reply stops short.
+- **Exactly once.** The push runs in its own `truncation-notice-iter<N>` step, for the same reason `emit-tool-results-iter<N>` does: in the bare body it would repeat once per remaining boundary. The notice is derived from the cached iteration content, so every invocation appends the same block.
+- **The flag.** `AgentLoopResult.truncated` is set, and the `agent.truncated` log line records the cap the loop asked for. `handle-message` persists and delivers the reply like any other. A pipeline stage fails instead of extracting an artifact from it: an artifact built from half a document looks finished to the stage after it.
+
+**Why not continue automatically.** The in-loop alternative — a "continue" repair — has no honest shape. Current Claude models reject an assistant prefill with a 400, so the continuation would need a synthetic user turn. Persisting it puts words in the user's mouth. Dropping it afterwards, the ephemeral convention the other repairs use, rewrites the prefix the continuation's thinking blocks are bound to, which Anthropic's history-editing check rejects on accounts where it is enforced. And the cap the loop sends is already the model's resolved `maxOutputTokens`, so a second attempt re-bills the full input and usually stops in the same place — Anthropic's guidance is to treat `max_tokens` as a failed attempt, not to retry at the same cap. The user asking for the rest on the next turn is the append-only form of the same thing.
 
 #### Tools-free synthesis on degrade `[confirmed]`
 
@@ -399,6 +413,7 @@ Every repair attempt and every degrade decision emits a structured log line (Pin
 ```typescript
 { event: "agent.repair", subtype, instructions: { kind: "continuation_prompt" | "json_repair" | "feedback_injection" | "disable_stream" } }
 { event: "agent.degrade", reason, subtype? }
+{ event: "agent.truncated", maxTokens }   // reply kept with a truncation notice; not a degrade
 ```
 
 The durable Inngest signal is `conversation/degraded` (emitted once per degraded turn from inside the persist step — see "Degraded reply" above). The structured logs are the per-attempt forensic record. The evolution failure-reflector subscribes to the Inngest event and can join the logs by `runId` + `conversationId` for subtype-level analysis.

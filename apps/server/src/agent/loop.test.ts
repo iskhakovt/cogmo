@@ -858,17 +858,110 @@ describe("runStreamingAgentLoop", () => {
     expect(provider.chatStream).toHaveBeenCalledTimes(2);
   });
 
-  // Regression: streamed tool_use accompanied by stop_reason: max_tokens.
-  // Mirror of the end_turn case below — both must execute the tool, since
-  // production saw end_turn but max_tokens is a structurally identical
-  // failure mode (model truncated mid-thought after emitting a tool_use).
-  it("executes tool_use even when stream reports stop_reason: max_tokens", async () => {
+  // A tool call in a turn that stopped at max_tokens may be the block the cap
+  // cut off, and its arguments still validate once `jsonrepair` closes them —
+  // so it must not run. Degrading also keeps the tool_use out of history,
+  // where it would be an orphan with no tool_result.
+  it("does not run a tool call from a turn that stopped at max_tokens", async () => {
+    const provider = mockStreamProvider([
+      {
+        events: [
+          { type: "text_delta", text: "Writing it now." },
+          { type: "tool_start", id: "t1", name: "write", input: { content: "the first ha" } },
+        ],
+        stopReason: "max_tokens",
+      },
+    ]);
+    const handler = vi.fn(async () => "written");
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "write",
+        description: "write",
+        schema: z.object({ content: z.string() }),
+        handler,
+      }),
+    );
+    const turnLogger = mock<Logger>();
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "write the essay to a file" }],
+      tools,
+      onEvent: async () => {},
+      turnLogger,
+    });
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(result.degraded).toEqual({
+      reason: "reply hit the output token limit during a tool call",
+      subtype: "max_tokens",
+    });
+    expect(result.iterations).toBe(1);
+    expect(result.newMessages).toEqual([]);
+    // What streamed stays on the ledger, so the orchestrator retracts it.
+    expect(result.streamed).toEqual({ text: "Writing it now.", toolUseIds: ["t1"] });
+    expect(turnLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "agent.degrade", subtype: "max_tokens" }),
+      expect.any(String),
+    );
+  });
+
+  // The reply is the answer and was already streamed, so it stays — but
+  // it's marked as cut off everywhere it is read, and the result says so.
+  it("keeps a text reply that stopped at max_tokens and marks it as truncated", async () => {
+    const provider = mockStreamProvider([
+      {
+        events: [
+          { type: "text_delta", text: "Step one: install. " },
+          { type: "text_delta", text: "Step two: conf" },
+        ],
+        stopReason: "max_tokens",
+      },
+    ]);
+    const collected: StreamEvent[] = [];
+    const turnLogger = mock<Logger>();
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "walk me through it" }],
+      tools: new ToolRegistry(),
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+      maxTokens: 4096,
+      turnLogger,
+    });
+
+    const notice = "\n\n[Reply cut off: it reached the model's output limit.]";
+    expect(result.truncated).toBe(true);
+    expect(result.degraded).toBeUndefined();
+    expect(result.newMessages).toEqual([
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Step one: install. Step two: conf" },
+          { type: "text", text: notice },
+        ],
+      },
+    ]);
+    expect(result.text).toBe(`Step one: install. Step two: conf${notice}`);
+    // The notice streams after the partial, and the ledger shows both.
+    expect(collected.at(-1)).toEqual({ type: "text_delta", text: notice });
+    expect(result.streamed.text).toBe(`Step one: install. Step two: conf${notice}`);
+    expect(turnLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "agent.truncated", maxTokens: 4096 }),
+      expect.any(String),
+    );
+  });
+
+  it("marks a max_tokens reply as truncated after earlier tool iterations, which stay persisted", async () => {
     const provider = mockStreamProvider([
       {
         events: [{ type: "tool_start", id: "t1", name: "echo", input: {} }],
-        stopReason: "max_tokens",
+        stopReason: "tool_use",
       },
-      { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+      { events: [{ type: "text_delta", text: "The results show" }], stopReason: "max_tokens" },
     ]);
     const tools = new ToolRegistry();
     tools.register(
@@ -882,16 +975,36 @@ describe("runStreamingAgentLoop", () => {
 
     const result = await testRunStreamingAgentLoop({
       provider,
-      messages: [{ role: "user", content: "echo" }],
+      messages: [{ role: "user", content: "echo then summarize" }],
       tools,
       onEvent: async () => {},
     });
 
+    expect(result.truncated).toBe(true);
     expect(result.iterations).toBe(2);
-    expect(result.newMessages[1]).toEqual({
-      role: "user",
-      content: [{ type: "tool_result", toolUseId: "t1", content: "ok" }],
+    expect(result.newMessages.slice(0, 2)).toEqual([
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "echo", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", toolUseId: "t1", content: "ok" }] },
+    ]);
+    expect(result.text).toMatch(/^The results show\n\n\[Reply cut off/);
+  });
+
+  it("degrades a max_tokens turn that produced no text instead of persisting a blank answer", async () => {
+    const provider = mockStreamProvider([{ events: [], stopReason: "max_tokens" }]);
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "think hard" }],
+      tools: new ToolRegistry(),
+      onEvent: async () => {},
     });
+
+    expect(result.degraded).toEqual({
+      reason: "reply hit the output token limit before producing any text",
+      subtype: "max_tokens",
+    });
+    expect(result.truncated).toBeUndefined();
+    expect(result.newMessages).toEqual([]);
   });
 
   // Regression: streamed tool_use accompanied by stop_reason: end_turn.
@@ -1602,6 +1715,51 @@ describe("durable LLM iterations (stepRun)", () => {
     // The degrade's pre-throw emission feeds the ledger so the
     // orchestrator's retraction still names it on a replay.
     expect(result.streamed).toEqual({ text: "partial", toolUseIds: [] });
+  });
+
+  it("pushes the truncation notice from its own step, once across replays", async () => {
+    // The live invocation emits the notice inside `truncation-notice-iter1`;
+    // a replay with that step cached must persist the same message without
+    // pushing the notice again.
+    const cache = new Map<string, unknown>();
+    const provider = mockStreamProvider([
+      { events: [{ type: "text_delta", text: "Chapter one begins" }], stopReason: "max_tokens" },
+    ]);
+    const live = cachingStepRun(cache);
+    const liveEvents: StreamEvent[] = [];
+
+    const first = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "write a novel" }],
+      tools: new ToolRegistry(),
+      onEvent: async (e) => {
+        liveEvents.push(e);
+      },
+      stepRun: live.stepRun,
+    });
+
+    expect(live.calls).toEqual(["llm-iter1", "truncation-notice-iter1"]);
+    const notices = liveEvents.filter((e) => e.type === "text_delta" && e.text.includes("cut off"));
+    expect(notices).toHaveLength(1);
+
+    const replay = cachingStepRun(cache);
+    const replayEvents: StreamEvent[] = [];
+    const second = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "write a novel" }],
+      tools: new ToolRegistry(),
+      onEvent: async (e) => {
+        replayEvents.push(e);
+      },
+      stepRun: replay.stepRun,
+    });
+
+    expect(replay.calls).toEqual(["llm-iter1", "truncation-notice-iter1"]);
+    expect(replayEvents).toEqual([]);
+    expect(provider.chatStream).toHaveBeenCalledTimes(1);
+    expect(second.newMessages).toEqual(first.newMessages);
+    expect(second.streamed).toEqual(first.streamed);
+    expect(second.truncated).toBe(true);
   });
 
   it("reports the streamed ledger from live iterations", async () => {

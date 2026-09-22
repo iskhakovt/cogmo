@@ -256,6 +256,27 @@ describe("runAgenticStage", () => {
     expect(h.delivery.deliverBatch).not.toHaveBeenCalled();
   });
 
+  it("fails the stage when the reply was cut off at the output cap, after persisting and delivering it", async () => {
+    // A truncated reply is still what the user was streamed, so it lands in
+    // the transcript and reaches batch targets — but it is not the stage's
+    // output, and extracting an artifact from half a document would hand
+    // the next stage a result that looks finished.
+    const h = await harness();
+    const partial = "Here is the pl\n\n[Reply cut off: it reached the model's output limit.]";
+    h.runStreamingAgentLoop.mockResolvedValue(loopResult({ text: partial, truncated: true }));
+    const steps = recordingSteps();
+
+    const outcome = await runAgenticStage(h.deps, stageArgs(), steps.steps, log);
+
+    expect(outcome).toEqual({
+      kind: "failed",
+      reason: "the stage's reply was cut off at the model's output limit",
+    });
+    expect(h.agentStore.insertMessages).toHaveBeenCalled();
+    expect(h.delivery.deliverBatch).toHaveBeenCalledWith(partial);
+    expect(steps.ids).not.toContain("extract-artifact");
+  });
+
   it("fails the stage when its json artifact doesn't satisfy the declared schema", async () => {
     const h = await harness();
     const provider = providerReplying('{"title": 1}', '{"title": 2}');
