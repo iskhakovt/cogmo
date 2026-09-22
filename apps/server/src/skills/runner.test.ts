@@ -259,12 +259,19 @@ async def run(inputs, ctx):
   });
 
   it("takes only the resolver and fetch from ctxHttp, keeping its own audit binding", async () => {
+    const globalFetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("reached the live network"));
     // A wider object is assignable to the option's type, so anything else it
     // carries reaches the runner at runtime. The handler's audit binding,
     // manifest and the rest must stay the runner's own.
     const network = {
-      resolveHost: async () => [{ address: "104.18.32.7", family: 4 }],
-      fetch: async () => new Response("{}", { status: 200 }),
+      resolveHost: vi
+        .fn<NonNullable<SkillRunnerCtxHttp["resolveHost"]>>()
+        .mockResolvedValue([{ address: "104.18.32.7", family: 4 }]),
+      fetch: vi
+        .fn<NonNullable<SkillRunnerCtxHttp["fetch"]>>()
+        .mockResolvedValue(new Response("{}", { status: 200 })),
       recordContextCall: async () => undefined,
     };
     const runner = await makeRunner({ ctxHttp: network });
@@ -286,12 +293,20 @@ async def run(inputs, ctx):
     resp = await ctx.http.get("https://api.example.com/n")
     return {"status": resp["status"]}
 `;
-    await runner.__registerForTests({ name: "http-audited", manifestSource: manifest, body });
+    try {
+      await runner.__registerForTests({ name: "http-audited", manifestSource: manifest, body });
 
-    const result = await runner.invoke({ name: "http-audited", inputs: {} });
-    expect(result.status).toBe("success");
-    const calls = await tx((trx) => store.listContextCallsForRun(trx, result.runId));
-    expect(calls.find((c) => c.method === "http.request")?.ok).toBe(true);
+      const result = await runner.invoke({ name: "http-audited", inputs: {} });
+      expect(result.status).toBe("success");
+      const calls = await tx((trx) => store.listContextCallsForRun(trx, result.runId));
+      expect(calls.find((c) => c.method === "http.request")?.ok).toBe(true);
+      // The success above only means the audit binding survived if the
+      // request went through the injected network rather than the real one.
+      expect(network.fetch).toHaveBeenCalledWith("https://api.example.com/n", expect.anything());
+      expect(globalFetch).not.toHaveBeenCalled();
+    } finally {
+      globalFetch.mockRestore();
+    }
   });
 
   it("requires both halves of the ctx.http network", () => {
