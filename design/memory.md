@@ -267,7 +267,7 @@ A cross-encoder pass over the candidates RRF fusion produces — **not an altern
 
 ZeroEntropy's zerank-2 led this table at ELO 1638 and was the original choice. ZeroEntropy was acquired by Notion and sunset all hosted products on 2026-09-04; the weights are Apache-2.0 on HuggingFace but only as H100-class self-hosting, which personal scale does not justify. No gateway resells them.
 
-**Chosen:** `voyageai/rerank-2.5` through Hindsight's native `openrouter` provider, with `rrf` as a failover member so an unreachable reranker degrades to fusion order instead of taking recall down. Hindsight is *not* fail-open by default — "a reranker that is unreachable takes recall down with it" — and `recall` sits on the interactive path, so the chain is load-bearing rather than belt-and-braces. Keep the primary's timeout short: auto-recall runs ahead of every turn's first model call, and members are tried in order with no circuit breaker, so a dead primary adds its full cost to every turn before the fallback runs. Nothing on Cogmo's side cuts that short — `HindsightMemoryProvider`'s retry window stops new attempts after 5s but does not abort one in flight.
+**Chosen:** `voyageai/rerank-2.5` through Hindsight's native `openrouter` provider, with `rrf` as a failover member so an unreachable reranker degrades to fusion order instead of taking recall down. Hindsight is *not* fail-open by default — "a reranker that is unreachable takes recall down with it" — and `recall` sits on the interactive path, so the chain is load-bearing rather than belt-and-braces. Keep the primary's timeout short: auto-recall runs ahead of a turn's first model call, and members are tried in order with no circuit breaker, so a dead primary adds its full cost to every recalling turn before the fallback runs. Nothing on Cogmo's side cuts that short — `HindsightMemoryProvider`'s retry window stops new attempts after 5s but does not abort one in flight.
 
 RRF alone for tests — zero dependencies, deterministic, sufficient for "did recall find the fact" assertions.
 
@@ -374,6 +374,8 @@ Add `mention_count` and `last_mentioned_at` metadata to Hindsight memories.
 ## Auto-Recall and Intention Gate `[confirmed]`
 
 Auto-recall searches Hindsight for memories relevant to the user's message and injects them into the system prompt as `# Recalled Context`. This runs before the agent loop — the agent sees recalled memories as context, not as tool output.
+
+A failed recall degrades to no memories: the turn runs with no `# Recalled Context` block rather than failing into Inngest retries, and `cogmo.memory.recall.failures` counts it against the bank. Nothing else marks the outage — see [DEPLOYMENT.md → Hindsight reranker](../DEPLOYMENT.md#hindsight-reranker) for the failover chain that keeps a dead reranker from causing one.
 
 ### Profile Setting `[confirmed]`
 

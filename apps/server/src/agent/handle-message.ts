@@ -816,13 +816,13 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // per step boundary that a tool-calling turn produces. The `.catch`
       // stays INSIDE the body so a Hindsight failure degrades to "no
       // memories" instead of failing the step into Inngest retries, and so
-      // the failure is counted once per failed recall — a replay of the
-      // cached step never re-enters the catch. The bank is the conversation
-      // user's (see `buildTurnService`). Known
-      // conditional-step caveat: the gate reads `profile.autoRecall` from a
-      // non-durable read, so a concurrent settings change mid-turn can flip
-      // the step's existence between invocations — same accepted hazard as
-      // `summarize-prefix-outcome`, see design/crash-recovery.md.
+      // the failure counts once per failed recall rather than once per
+      // replay. `bank_id` is the conversation user, who owns the bank
+      // (`buildTurnService`). Known conditional-step caveat: the gate reads
+      // `profile.autoRecall` from a non-durable read, so a concurrent
+      // settings change mid-turn can flip the step's existence between
+      // invocations — same accepted hazard as `summarize-prefix-outcome`,
+      // see design/crash-recovery.md.
       const recallResult = shouldSkipRecall(autoRecallMode, userContentText)
         ? { memories: [] }
         : await stepRun("auto-recall", async () =>

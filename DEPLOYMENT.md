@@ -35,14 +35,13 @@ A probe from the host or a sidecar can `curl` the published port's `/health` as 
 
 ### Hindsight reranker
 
-Set the reranker explicitly and end its failover chain with `rrf`. Hindsight defaults to the `local` reranker, which the slim image does not ship, and a reranker that fails takes the whole recall down with it unless the chain ends in `rrf`. Cogmo recalls memory ahead of a turn's first model call, and carries on without it when recall fails, so a broken reranker raises no error. The agent just stops remembering things. `cogmo.memory.recall.failures` counts these failures (see [Observability](#observability)). It only sees turns that recall. The default `heuristic` auto-recall mode skips greetings, acknowledgements and continuations, and a profile set to `off` never recalls, so a quiet counter only means healthy recall if recall has actually been running.
+Set the reranker explicitly and end its failover chain with `rrf`. Hindsight defaults to the `local` reranker, which the slim image does not ship, and a reranker that fails takes the whole recall down with it unless the chain ends in `rrf`. Cogmo recalls memory ahead of a turn's first model call, and carries on without it when recall fails, so a broken reranker raises no error. The agent just stops remembering things. `cogmo.memory.recall.failures` counts these failures (see [Observability](#observability)).
 
 ```bash
-# Primary: a hosted cross-encoder. It needs an OpenRouter key: unset, it falls back
-# to HINDSIGHT_API_OPENROUTER_API_KEY, then HINDSIGHT_API_LLM_API_KEY. Any other
-# key fails every rerank, so `rrf` answers every recall and the counter stays at zero.
-# HINDSIGHT_API_RERANKER_OPENROUTER_API_KEY=...
+# Primary: a hosted cross-encoder. Set its key explicitly — it otherwise falls back
+# to HINDSIGHT_API_LLM_API_KEY, and a key for any other provider 401s on every rerank.
 HINDSIGHT_API_RERANKER_PROVIDER=openrouter
+HINDSIGHT_API_RERANKER_OPENROUTER_API_KEY=...
 HINDSIGHT_API_RERANKER_OPENROUTER_MODEL=voyageai/rerank-2.5
 # The default is 60s, and a recalling turn waits on it.
 HINDSIGHT_API_RERANKER_OPENROUTER_TIMEOUT=2
@@ -55,6 +54,7 @@ HINDSIGHT_API_RERANKER_1_PROVIDER=rrf
 
 - **Indexed members inherit nothing.** `HINDSIGHT_API_RERANKER_1_*` reads nothing from the primary's settings or the shared provider keys, so give each member every setting it needs under its own index. `rrf` needs none.
 - **A dead primary still costs time on every recall.** Hindsight tries members in order on every request, with no circuit breaker, so a primary that is down spends its full timeout before `rrf` answers. That is why the timeout is short and retries are off.
+- **A quiet counter is not proof of health.** It only sees turns that recall, and the default `heuristic` mode skips greetings, acks and continuations while an `off` profile never recalls at all.
 - **A failover is not a failure.** When `rrf` answers, the recall succeeds and `cogmo.memory.recall.failures` stays at zero, even though ranking quality has dropped. Hindsight logs each failover at `WARNING`, so watch its logs to catch a primary that stays down.
 - **Skipping the cross-encoder is valid.** `HINDSIGHT_API_RERANKER_PROVIDER=rrf` on its own is free and has no dependency that can go down, at a cost of a few percent of ranking quality. For model choice and costs, see [design/memory.md → Reranking](design/memory.md#reranking).
 

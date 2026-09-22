@@ -82,9 +82,7 @@ export const agentIterations = {
  * Auto-recall failures, labeled by `bank_id`. The turn degrades to a system
  * prompt with no `# Recalled Context` block rather than failing, so a memory
  * outage otherwise shows up only as an agent that seems to have forgotten
- * things. A sustained non-zero rate is the signal: an unreachable Hindsight,
- * or a reranker with no fail-open member, fails every recall rather than a
- * sample of them.
+ * things.
  *
  * Only the auto-recall path counts. The `memory_recall` tool hands its failure
  * to the model as an `is_error` tool_result, which the `tool.execute` span
