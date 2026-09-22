@@ -375,7 +375,7 @@ Add `mention_count` and `last_mentioned_at` metadata to Hindsight memories.
 
 Auto-recall searches Hindsight for memories relevant to the user's message and injects them into the system prompt as `# Recalled Context`. This runs before the agent loop — the agent sees recalled memories as context, not as tool output.
 
-A failed recall degrades to no memories: the turn runs with no `# Recalled Context` block rather than failing into Inngest retries, and `cogmo.memory.recall.failures` counts it against the bank. Nothing else marks the outage — see [DEPLOYMENT.md → Hindsight reranker](../DEPLOYMENT.md#hindsight-reranker) for the failover chain that keeps a dead reranker from causing one.
+A failed recall degrades to no memories: the turn runs with no `# Recalled Context` block rather than failing into Inngest retries, and `cogmo.memory.recall.failures` counts it against the bank. The failure also logs a warning and puts the `memory.recall` span into ERROR, but the counter is the only signal an alert can watch — see [DEPLOYMENT.md → Hindsight reranker](../DEPLOYMENT.md#hindsight-reranker) for the failover chain that keeps a dead reranker from causing one.
 
 ### Profile Setting `[confirmed]`
 
