@@ -1,5 +1,5 @@
 import { NonRetriableError } from "inngest";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { z } from "zod";
 import { conversationTurnConcurrency } from "../inngest/concurrency.js";
@@ -8,6 +8,7 @@ import { ProviderConfigError } from "../llm/resolver.js";
 import type { Message, StopReason } from "../llm/types.js";
 import { logger } from "../logger.js";
 import type { McpRegistry } from "../mcp/registry.js";
+import { memoryRecallFailures } from "../metrics.js";
 import type { SkillRunner } from "../skills/runner.js";
 import { expectDefined } from "../test/assertions.js";
 import {
@@ -2765,6 +2766,84 @@ describe("createHandleMessage", () => {
 
     expect(memory.recall).toHaveBeenCalledWith("user-1", expect.any(String), {
       maxTokens: 2000,
+    });
+  });
+
+  describe("auto-recall failure", () => {
+    let add: MockInstance<typeof memoryRecallFailures.add>;
+    beforeEach(() => {
+      add = vi.spyOn(memoryRecallFailures, "add");
+    });
+    afterEach(() => {
+      add.mockRestore();
+    });
+
+    // Substantive enough that the default `heuristic` gate runs the recall.
+    const recallingInbound = () =>
+      mockTransportStore({
+        getUnbatchedInbound: vi
+          .fn()
+          .mockResolvedValue([
+            { id: "inbound-1", content: "tell me about my homelab setup", source: "user" },
+          ]),
+      });
+
+    it("degrades to a prompt with no recalled context and counts the failure against the bank", async () => {
+      const memory = mockMemoryProvider({
+        recall: vi.fn().mockRejectedValue(new Error("recall 500: reranker unreachable")),
+      });
+      const deps = mockDeps({ memory, transportStore: recallingInbound() });
+
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(memory.recall).toHaveBeenCalledTimes(1);
+      expect(add).toHaveBeenCalledTimes(1);
+      expect(add).toHaveBeenCalledWith(1, { bank_id: "user-1" });
+      // The turn still runs, on the bare assembled prompt.
+      const loopArgs = expectDefined(
+        vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+        "runStreamingAgentLoop call",
+      )[0];
+      expect(loopArgs.systemPrompt).toBe("system prompt");
+      expect(deps.agentStore.insertMessages).toHaveBeenCalled();
+    });
+
+    it("does not count a recall that succeeds, with or without memories", async () => {
+      const recall = vi
+        .fn()
+        .mockResolvedValueOnce({ memories: [{ type: "world", content: "runs Proxmox" }] })
+        .mockResolvedValueOnce({ memories: [] });
+      const deps = mockDeps({
+        memory: mockMemoryProvider({ recall }),
+        transportStore: recallingInbound(),
+      });
+      const fn = createHandleMessage(deps);
+
+      await invokeInngestFn<HandleMessageCtx>(fn, {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+      await invokeInngestFn<HandleMessageCtx>(fn, {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(recall).toHaveBeenCalledTimes(2);
+      expect(add).not.toHaveBeenCalled();
+      // Non-vacuity: the first turn's memory reached the prompt.
+      const firstLoopArgs = expectDefined(
+        vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+        "runStreamingAgentLoop call",
+      )[0];
+      expect(firstLoopArgs.systemPrompt).toBe(
+        "system prompt\n\n# Recalled Context\n\nruns Proxmox",
+      );
     });
   });
 

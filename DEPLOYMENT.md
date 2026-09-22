@@ -323,7 +323,7 @@ The image entrypoint always launches with `node --import ./dist/otel.js`, which 
 | Signal | Where |
 |-|-|
 | Traces | One trace per Inngest function run. Inngest's engine unconditionally opens an `inngest.execution` root span via the active tracer provider (no middleware required), and our domain spans parent under it via standard OTel context propagation. Children: `chat` spans tagged with `gen_ai.*` semantic conventions (`provider.name`, `request.model`, `usage.input_tokens`/`output_tokens`/`cache_*`, `response.finish_reasons`); `tool.execute` spans (`cogmo.tool.name`); `memory.recall`/`memory.retain` spans (`memory.hit`, `memory.count`). Auto-instrumented HTTP and undici give you outbound calls (Anthropic, OpenAI, Hindsight, fal.ai, Tavily, Telegram). |
-| Metrics | `cogmo.llm.tokens` counter (labels `type`/`model`/`provider`, where `type` ∈ `input`/`output`/`cache_read`/`cache_create`); `cogmo.agent.iterations` histogram (per turn, labeled by model); `cogmo.debounce.wait_ms` histogram. |
+| Metrics | `cogmo.llm.tokens` counter (labels `type`/`model`/`provider`, where `type` ∈ `input`/`output`/`cache_read`/`cache_create`); `cogmo.agent.iterations` histogram (per turn, labeled by model); `cogmo.debounce.wait_ms` histogram; `cogmo.memory.recall.failures` counter (label `bank_id`) — auto-recall failures the turn degraded past with no recalled context. Alert on a sustained non-zero rate: a memory outage otherwise looks like an agent that has forgotten things. |
 | Logs | Pino lines automatically gain `trace_id` / `span_id` / `trace_flags` via `instrumentation-pino`, so journald correlation works without code changes. |
 
 ### Cross-function-run correlation
