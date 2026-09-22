@@ -14,4 +14,10 @@ Tests:
 
 Every assertion on the count was checked to fail with the increment removed.
 
-The fix that actually restores recall is on the deploy side: the `HINDSIGHT_API_RERANKER_1_PROVIDER=rrf` failover member in `design/memory.md`'s production config, so an unreachable reranker degrades to fusion order instead of failing the recall. This repo has no production Hindsight env to change.
+The counter reports broken recall. The reranker failover chain is what keeps recall working, and `DEPLOYMENT.md` → "Hindsight reranker" now tells operators to set it. Hindsight's defaults are the `local` reranker, which the slim image doesn't ship, and a chain that fails the whole recall when the reranker fails. The section gives the chain to set instead:
+
+- an explicit primary with a 2s timeout. Hindsight's OpenRouter default is 60s, and every turn waits on recall.
+- `HINDSIGHT_API_RERANKER_MAX_RETRIES=0`.
+- `HINDSIGHT_API_RERANKER_1_PROVIDER=rrf`, so an unreachable reranker falls back to the retrieval order instead of failing the recall.
+
+It warns that indexed members inherit nothing from the primary. It also notes that a failover is a successful recall: the counter stays at zero, and a primary that stays down shows up only in Hindsight's `WARNING` logs. Each claim was checked against Hindsight 0.10.1's configuration docs. `design/memory.md` → Reranking keeps the model comparison and the reasoning behind the chain.
