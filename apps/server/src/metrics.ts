@@ -36,6 +36,7 @@ function instruments(): Instruments {
     }),
     memoryRecallFailures: meter.createCounter("cogmo.memory.recall.failures", {
       description: "Auto-recall calls that failed and left the turn without recalled context",
+      unit: "{failure}",
     }),
   };
   return cached;

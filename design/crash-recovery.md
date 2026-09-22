@@ -202,6 +202,8 @@ The cases:
 8. `tool-iter1-0` cached → the durable tool handler body does not run; the cached output flows into the transcript.
 9. `persist-summary` cached → no `insertOrRecoverSummary` call, with the same run uncached asserted to reach the store (non-vacuity check).
 
+Metrics recorded inside a step are pinned from the other side, with nothing cached: across every re-invocation of one turn, `cogmo.agent.iterations` records once from `persist-new-messages`, and a failed recall adds one to `cogmo.memory.recall.failures` from `auto-recall`.
+
 The loop-level companions live in `src/agent/loop.test.ts` → "durable LLM iterations (stepRun)": cached iterations don't call the provider or re-emit, the `streamed` ledger rebuilds from cached outcomes, cached durable tools don't re-emit their `tool_result` events, and repair budgets recompute deterministically from cached outcomes.
 
 **Why only side-effectful steps get individual tests.** Tests 1-3 and 9 cover the steps where re-execution would cause concrete harm (duplicate DB writes, duplicate LLM round trips). The pure-read steps (`load-conversation`, `last-assistant`, `load-inbound`, `load-turn-history`, `assemble-prompt`) are exercised collectively by test 4 and aren't worth individual coverage: if one of them accidentally moved out of `step.run`, the only consequence on retry would be a wasted DB query, not corruption. The cost-of-bug is too low to justify a test per read.
