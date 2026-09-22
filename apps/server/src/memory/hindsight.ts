@@ -53,10 +53,12 @@ const DEFAULT_MAX_QUERY_TOKENS = 500;
 // o200k_base is the vocabulary Hindsight counts recall queries with
 // (`HINDSIGHT_API_TOKENIZER_ENCODING`, server default `o200k_base`), and the
 // server rejects an over-cap query with a 400 rather than truncating it. The
-// cap only holds if both sides count in the same vocabulary: English prose
-// and code routinely take more o200k tokens than cl100k ones, so a query cut
-// to the cap in any other encoding lands over it server-side. A deployment
-// that overrides the server encoding must change this one to match.
+// cap only holds if both sides count in the same vocabulary: other encodings
+// disagree with o200k by a few tokens either way on ordinary prose and code,
+// so a query cut to the cap in one of them often lands over it server-side.
+// A deployment that overrides the server encoding must change this one to
+// match. Special-token text such as `<|endoftext|>` is counted as ordinary
+// text, as the server counts it, rather than refused.
 let queryEncoder: Tiktoken | null = null;
 function getQueryEncoder(): Tiktoken {
   if (!queryEncoder) queryEncoder = getEncoding("o200k_base");
@@ -65,7 +67,7 @@ function getQueryEncoder(): Tiktoken {
 
 function truncateQuery(query: string, maxTokens: number): { query: string; truncated: boolean } {
   const enc = getQueryEncoder();
-  const tokens = enc.encode(query);
+  const tokens = enc.encode(query, [], []);
   if (tokens.length <= maxTokens) return { query, truncated: false };
   return { query: enc.decode(tokens.slice(0, maxTokens)), truncated: true };
 }
