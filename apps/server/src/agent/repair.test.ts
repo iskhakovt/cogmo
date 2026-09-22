@@ -303,13 +303,11 @@ describe("truncationNotice", () => {
     expect(html).toContain("<p>[Reply cut off: it reached the model&#39;s output limit.]</p>");
   });
 
-  // Degenerate output — a runaway stream of newlines — is exactly what hits
-  // the cap, and this runs on every Inngest invocation of the turn. The
-  // wall clock is the assertion because a quadratic scan blocks the event
-  // loop, which the suite's own timeout cannot interrupt. The bound is two
-  // orders of magnitude above what a linear scan of this input costs, and
-  // more than an order below the ~50s a scan that retries from every
-  // position takes on it.
+  // Degenerate output — a runaway stream of newlines — is what hits the cap,
+  // and this runs on every Inngest invocation of the turn. The wall clock is
+  // the assertion because a quadratic scan blocks the event loop, which the
+  // suite timeout cannot interrupt; the bound sits between the ~10ms a linear
+  // scan of this input costs and the ~50s a retry-from-every-position one does.
   it("stays linear on a long run of newlines", () => {
     const partial = `${"\n".repeat(400_000)}x`;
     const started = performance.now();

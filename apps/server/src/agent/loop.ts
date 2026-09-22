@@ -150,12 +150,11 @@ export interface AgentLoopResult {
   degraded?: { reason: string; subtype: DegradeSubtype | null };
   /**
    * Set when the final reply stopped at the output cap (`max_tokens`) with
-   * text worth keeping. The reply is persisted and delivered like any other,
-   * but its last assistant message already ends with a
-   * {@link truncationNotice} block — streamed live and included in `text` —
-   * so the user sees where it stops. Callers that consume `text` as a
-   * finished artifact must check this flag rather than read the partial as
-   * complete. Mutually exclusive with `degraded`.
+   * text worth keeping. It is persisted and delivered like any other, but
+   * its last assistant message ends with a {@link truncationNotice} block —
+   * streamed live and included in `text`. Callers that consume `text` as a
+   * finished artifact must check this flag. Mutually exclusive with
+   * `degraded`.
    */
   truncated?: true;
 }
@@ -848,10 +847,9 @@ async function runLlmIteration(
  * In-loop Class C handling: stream errors are classified inside the
  * iteration step (truncated tool-arg JSON → a single non-streaming replay;
  * refusal → degrade). Empty `end_turn` is classified post-stream out here
- * and triggers a single continuation-prompt retry; `max_tokens` either
- * degrades (a cut-off tool call, or no text) or ends the turn with the
- * partial reply marked as truncated. See `repair.ts` and
- * `design/agent-resilience.md` → Class C.
+ * and triggers a single continuation-prompt retry; `max_tokens` answers a
+ * cut-off tool call, marks a cut-off text reply, or degrades. See
+ * `repair.ts` and `design/agent-resilience.md` → Class C.
  */
 export async function runStreamingAgentLoop(
   params: StreamingAgentLoopParams,
@@ -900,9 +898,8 @@ export async function runStreamingAgentLoop(
 
   while (iterations < maxIterations) {
     iterations++;
-    // Set when this iteration's last block is a tool call the output cap cut
-    // off: it is answered with a synthetic `is_error` tool_result instead of
-    // running. Per-iteration, and only ever read below in the same one.
+    // Set when the output cap cut off this iteration's last tool call: it is
+    // answered with a synthetic `is_error` tool_result instead of running.
     let cutOffCall: { toolUseId: string; toolName: string } | null = null;
 
     const chatParams: Parameters<LlmProvider["chat"]>[0] = {
@@ -962,10 +959,8 @@ export async function runStreamingAgentLoop(
 
     // Post-stream classifier. Runs BEFORE the hasToolUse gate so an empty
     // end_turn that still has a tool_use somehow (unlikely) doesn't trip
-    // the empty-content path, and so a tool call cut off at `max_tokens`
-    // degrades instead of running. Refusal goes straight to degrade; empty
-    // end_turn appends a synthetic user turn and re-iterates; a text reply
-    // cut off at `max_tokens` ends the turn marked as truncated.
+    // the empty-content path, and so a call the output cap cut off is
+    // answered rather than dispatched. See `repair.ts` for the verdicts.
     const outcome = classifyPostStream(iterationContent, iterationStopReason, budgets);
     if (outcome.kind === "degrade") {
       // The just-pushed assistant message is the one that triggered the
@@ -1010,10 +1005,8 @@ export async function runStreamingAgentLoop(
         ephemeralIndices.push(messages.length - 1);
       }
       if (outcome.instructions.kind === "tool_args_cut_off") {
-        // The one repair that stays inside the iteration: the cut-off call
-        // is answered below, alongside its intact siblings' real results,
-        // so flow continues through the tool-execution path rather than
-        // re-entering the loop here.
+        // The one repair that stays inside the iteration: the cut-off call is
+        // answered below, alongside its intact siblings' real results.
         cutOffCall = outcome.instructions;
       } else {
         // continuation_prompt re-iterates; stream_replay was handled in-line
@@ -1022,15 +1015,13 @@ export async function runStreamingAgentLoop(
       }
     }
     if (outcome.kind === "truncated") {
-      // The cut-off reply is the turn's answer and stays — it has been on
-      // the user's screen since it streamed — but it ends with a notice
-      // both live and in the persisted message. The push gets its own step
-      // for the same reason as `emit-tool-results-iter<N>`: in the bare body
-      // it would repeat once per remaining boundary of the turn. The log line
-      // rides in the same step, after the push, so it counts delivered
-      // notices rather than invocations or failed attempts. The notice is
-      // derived from the cached content, so every invocation appends the
-      // same block to the message it hands to persistence.
+      // The reply stays — it has been on the user's screen since it
+      // streamed — and gains a notice, live and in the persisted message.
+      // Its own step for the same reason as `emit-tool-results-iter<N>`: in
+      // the bare body the push would repeat once per remaining boundary.
+      // The log follows the push so it counts delivered notices. The notice
+      // derives from cached content, so every invocation appends the same
+      // block.
       const notice = truncationNotice(extractText(iterationContent));
       const emitNotice = async (): Promise<null> => {
         await onEvent({ type: "text_delta", text: notice });

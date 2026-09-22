@@ -248,16 +248,11 @@ export function classifyPostStream(
  * whole, including tool calls — which is what lets the repair answer one
  * cut-off call while its siblings run.
  *
- * Nothing here re-requests the reply. The cap the loop sends is already the
- * model's resolved `maxOutputTokens`, so a second attempt at the same cap
- * re-bills the whole input and usually stops in the same place. Continuing
- * the reply in-loop would also need something the transcript can't hold
- * honestly: current Claude models reject an assistant prefill, and a
- * synthetic "continue" user turn has to be either persisted (words the user
- * never sent) or dropped afterwards, which rewrites the prefix any later
- * thinking block is bound to. The tool_result the repair appends has neither
- * problem — it is a real turn in the transcript, and the model re-decides
- * with it in context.
+ * Nothing here re-requests the reply: the cap is already the model's
+ * resolved `maxOutputTokens`, and the continuation shapes that would carry
+ * it either put words in the user's mouth or rewrite history. The
+ * tool_result the repair appends does neither — see
+ * design/agent-resilience.md → Truncated reply.
  */
 function classifyOutputCap(
   content: ReadonlyArray<ContentBlock>,
@@ -265,12 +260,11 @@ function classifyOutputCap(
 ): TurnOutcome {
   const last = content.at(-1);
   if (last?.type === "tool_use") {
-    // The cap landed inside this call's arguments: `jsonrepair` closes a
-    // cut-off argument object into one that still validates, so running it
-    // would act on truncated input (a half-written file, a clipped message).
-    // Answering it with an `is_error` tool_result keeps the turn going and
-    // tells the model what to do about it — and keeps the pairing invariant,
-    // which dropping the block would break.
+    // The cap landed inside this call's arguments: `jsonrepair` closes them
+    // into an object that still validates, so running it would act on
+    // truncated input (a half-written file, a clipped message). Answering
+    // keeps the turn going, and keeps the tool_use/tool_result pairing that
+    // dropping the block would break.
     if (budgets.max_tokens > 0) {
       return {
         kind: "repair",
@@ -321,17 +315,13 @@ export function formatCutOffToolArgsContent(toolName: string): string {
  * returned as `truncated` — streamed after the partial text and persisted as
  * a trailing text block on the same assistant message, so the live view, the
  * transcript, and the model's own history on the next turn all show that the
- * reply stops short. A reply cut off inside a fenced code block gets the
- * fence closed first, so the marker reads as a marker and not as more code.
+ * reply stops short.
  *
- * The marker sits one blank line below the text. A cut on a line boundary
- * leaves the reply already ending in newlines, and those count toward the
- * gap — inside a fence they are code, so the fence closes right after them.
- *
- * The closer repeats the opener's indent. A block inside a list item has its
- * fence indented to the item's content, and an unindented closer is not part
- * of the item: it ends the list and opens a new block that swallows the
- * marker.
+ * It sits one blank line below the text, counting newlines the reply already
+ * ends with. A cut inside a fenced code block closes the fence first, at the
+ * opener's indent: a block inside a list item is indented to the item's
+ * content, and an unindented closer would end the list and open a new block
+ * that swallows the marker.
  */
 export function truncationNotice(partialText: string): string {
   const fence = openCodeFence(partialText);
