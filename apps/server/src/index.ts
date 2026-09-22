@@ -125,6 +125,8 @@ import { DrizzleWebSessionStore } from "./web/store/index.js";
  *   without hitting Daytona Cloud or a self-hosted compose).
  * - `skillCtxHttpOverride` → read by `bootstrapSkillRunner` (the network
  *   skills reach through `ctx.http`).
+ * - `codingAuthOverride`, `octokitFactory` → read by `bootstrapRuntime`
+ *   (the coding orchestrators' in-sandbox auth and GitHub client).
  *
  * Adding a new field? Add it to the relevant stage's signature and update
  * this map so the next reader knows where to wire it.

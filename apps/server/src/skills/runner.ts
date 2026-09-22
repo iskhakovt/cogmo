@@ -354,7 +354,8 @@ export interface SkillRunnerOptions {
    * The network `ctx.http` reaches, passed to every `DefaultCtxHandler`
    * the runner builds — so it covers both tiers, while a tier-2 skill's
    * own sockets stay on the real network. Omit in production for real DNS
-   * and the global `fetch`.
+   * and the global `fetch`. The allowlist and address checks run against
+   * whatever this answers.
    *
    * Both halves or neither: a resolver alone would pass the address guard
    * on its own answer while the global `fetch` connects wherever the name

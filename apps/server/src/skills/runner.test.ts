@@ -300,8 +300,9 @@ async def run(inputs, ctx):
       expect(result.status).toBe("success");
       const calls = await tx((trx) => store.listContextCallsForRun(trx, result.runId));
       expect(calls.find((c) => c.method === "http.request")?.ok).toBe(true);
-      // The success above only means the audit binding survived if the
-      // request went through the injected network rather than the real one.
+      // The audit row proves the runner kept its own binding only if the
+      // request also went through the injected network — the two assertions
+      // below pin that.
       expect(network.fetch).toHaveBeenCalledWith("https://api.example.com/n", expect.anything());
       expect(globalFetch).not.toHaveBeenCalled();
     } finally {
