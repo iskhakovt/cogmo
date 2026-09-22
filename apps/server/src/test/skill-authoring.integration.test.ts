@@ -510,9 +510,12 @@ const STUB_BTC_USD = 64725;
 
 /**
  * Stand-in network for the authored skill's `ctx.http`: one host that
- * resolves to a public address and serves one endpoint. Anything else fails
- * the way a missing host or an unreachable server would, which surfaces in
- * the skill run's `error` rather than as a silent live request.
+ * resolves to a public address and answers GET on one endpoint. Any other
+ * host, path or method fails the way a missing host or an unreachable server
+ * would, which surfaces in the skill run's `error` rather than as a silent
+ * live request. The query is not matched: a recorded skill may add harmless
+ * parameters, and one that asks for another coin or currency still fails on
+ * the missing key in the body.
  */
 function makeStubSkillNetwork(): NonNullable<BootstrapOptions["skillCtxHttpOverride"]> {
   return {
@@ -522,10 +525,11 @@ function makeStubSkillNetwork(): NonNullable<BootstrapOptions["skillCtxHttpOverr
       }
       return [{ address: "104.18.32.7", family: 4 }];
     },
-    fetch: async (input) => {
+    fetch: async (input, init) => {
       const url = new URL(input instanceof Request ? input.url : input);
-      if (`${url.origin}${url.pathname}` !== COINGECKO_PRICE_URL) {
-        throw new Error(`stand-in network has no route for ${url.origin}${url.pathname}`);
+      const method = init?.method ?? "GET";
+      if (method !== "GET" || `${url.origin}${url.pathname}` !== COINGECKO_PRICE_URL) {
+        throw new Error(`stand-in network has no route for ${method} ${url.origin}${url.pathname}`);
       }
       return new Response(JSON.stringify({ bitcoin: { usd: STUB_BTC_USD } }), {
         status: 200,
