@@ -287,6 +287,16 @@ describe("truncationNotice", () => {
     expect(truncationNotice("    ```\nprose")).toBe(MARKER);
   });
 
+  // Windows-style output: `\r` is a line terminator, so a fence scan that
+  // splits on `\n` alone sees no fence line at all — leaving an open block
+  // unclosed, or reopening a closed one over finished prose.
+  it("reads fences the same with CRLF line endings", () => {
+    expect(truncationNotice("Here:\r\n```ts\r\nconst x = 1;\r\nconst y")).toBe(`\n\`\`\`${MARKER}`);
+    expect(truncationNotice("```js\nconst x = 1;\r\n```\r\nAnd then prose that got cut")).toBe(
+      MARKER,
+    );
+  });
+
   it("ignores a closer-shaped line that carries an info string", () => {
     expect(truncationNotice("```\ncode\n```js\nmore code")).toBe(`\n\`\`\`${MARKER}`);
   });

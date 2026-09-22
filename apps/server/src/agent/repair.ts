@@ -248,6 +248,13 @@ export function classifyPostStream(
  * whole, including tool calls — which is what lets the repair answer one
  * cut-off call while its siblings run.
  *
+ * That ordering is exact only where the adapter preserves it. `anthropic.ts`
+ * does; `openai-compat.ts` buffers tool calls and appends them after the
+ * text, and the Chat Completions format carries no ordering between
+ * `content` and `tool_calls` at all. On that path a capped turn ending in
+ * prose after complete calls reads as a cut-off call, so the last call is
+ * refused rather than run — an iteration wasted in the safe direction.
+ *
  * Nothing here re-requests the reply: the cap is already the model's
  * resolved `maxOutputTokens`, and the continuation shapes that would carry
  * it either put words in the user's mouth or rewrite history. The
@@ -360,7 +367,10 @@ interface OpenFence {
  * "opener" whose info string contains a backtick is inline code, not a fence.
  */
 function openCodeFence(text: string): OpenFence | null {
-  return text.split("\n").reduce<OpenFence | null>((open, line) => {
+  // Split on both endings: `\r` is a line terminator, so a `\r`-suffixed line
+  // matches no fence pattern at all — CRLF output would leave an open block
+  // unclosed, or a closed one reopened over finished prose.
+  return text.split(/\r?\n/).reduce<OpenFence | null>((open, line) => {
     const match = FENCE_LINE.exec(line);
     const indent = match?.[1] ?? "";
     const run = match?.[2];
@@ -449,7 +459,7 @@ export function degradedReplyText(subtype: DegradeSubtype | null): string {
     return "This conversation is too long for the model's context window. Start a fresh one with `/new`, or switch to a larger-context model with `/model`.";
   }
   if (subtype === "max_tokens") {
-    return "My reply hit the model's output limit before it was complete, so I stopped without acting on it. Try asking for a shorter answer, or splitting the task into smaller steps.";
+    return "My reply hit the model's output limit before it was complete, so I stopped there — anything I had already done this turn stands. Try asking for a shorter answer, or splitting the task into smaller steps.";
   }
   return "I had trouble generating a clean response — the model returned an output I couldn't process. Could you rephrase or try again?";
 }
