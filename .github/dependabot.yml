@@ -6,6 +6,11 @@ updates:
       interval: weekly
     commit-message:
       prefix: "chore(deps)"
+    # No labels. Every label Dependabot applies fires a `labeled` event, and
+    # CI runs in full on `labeled` so the `e2e` opt-in can retrigger it —
+    # the default `dependencies` + ecosystem labels would cost a CI run
+    # apiece. Nothing reads them; the `chore(deps)` prefix marks these PRs.
+    labels: []
     # Wait 7 days after a release before bumping. pnpm 11 enforces a 24h
     # minimumReleaseAge soak at install time, so Dependabot's default
     # (bump the instant a version is published) produces lockfiles that
@@ -93,6 +98,7 @@ updates:
       interval: weekly
     commit-message:
       prefix: "chore(deps)"
+    labels: [] # see the npm entry
     ignore:
       # Block Node major bumps. Dependabot has no LTS awareness and will
       # happily PR odd-numbered releases (which never become LTS), and
@@ -111,6 +117,7 @@ updates:
       interval: weekly
     commit-message:
       prefix: "chore(deps)"
+    labels: [] # see the npm entry
     groups:
       actions-minor-patch:
         applies-to: version-updates
