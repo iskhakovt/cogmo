@@ -202,7 +202,7 @@ The cases:
 8. `tool-iter1-0` cached → the durable tool handler body does not run; the cached output flows into the transcript.
 9. `persist-summary` cached → no `insertOrRecoverSummary` call, with the same run uncached asserted to reach the store (non-vacuity check).
 
-Metrics recorded inside a step are pinned from the other side, with nothing cached: across every re-invocation of one turn, `cogmo.agent.iterations` records once from `persist-new-messages`, and a failed recall adds one to `cogmo.memory.recall.failures` from `auto-recall`.
+Two more tests run a turn with nothing cached and count metrics recorded inside a step. Across all of the turn's re-invocations, `cogmo.agent.iterations` records once, from `persist-new-messages`, and a failed recall adds one to `cogmo.memory.recall.failures`, from `auto-recall`. That makes them once per turn across replays, not exactly-once. A crash after the metric is recorded but before Inngest records the step result re-runs the body, which records it again. This is the same residual as any other side effect inside a step.
 
 The loop-level companions live in `src/agent/loop.test.ts` → "durable LLM iterations (stepRun)": cached iterations don't call the provider or re-emit, the `streamed` ledger rebuilds from cached outcomes, cached durable tools don't re-emit their `tool_result` events, and repair budgets recompute deterministically from cached outcomes.
 
