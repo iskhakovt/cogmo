@@ -4,7 +4,7 @@ A new OTel counter, labeled by `bank_id`, counts auto-recall failures. The turn 
 
 The increment sits in the `.catch` inside the `auto-recall` step body, next to the warn log. A step body runs live once and is replayed from cache on every later re-invocation, so a failed recall counts once per turn. A count taken in the bare body would count it on every pass. The catch never rethrows, so no step retry re-enters it either. The residual is the usual one for a side effect inside a step: a crash after the increment but before Inngest records the result counts it twice.
 
-Only auto-recall counts. The `memory_recall` tool passes its failure to the model as an `is_error` tool_result, which the `tool.execute` span already marks. A missing bank (a user with nothing retained yet) is an empty recall in `HindsightMemoryProvider`, not a failure, so it does not count.
+Only auto-recall counts, because only it fails silently. The `memory_recall` tool passes its failure to the model as an `is_error` tool_result, which the reply usually relays to the user in the same turn; counting both would put two different operational meanings on one series. A missing bank (a user with nothing retained yet) is an empty recall in `HindsightMemoryProvider`, not a failure, so it does not count.
 
 Tests:
 
@@ -16,6 +16,6 @@ The counter reports broken recall. The reranker failover chain is what keeps rec
 
 - an explicit primary with a 2s timeout. Hindsight's OpenRouter default is 60s, and a recalling turn waits on it.
 - `HINDSIGHT_API_RERANKER_MAX_RETRIES=0`.
-- `HINDSIGHT_API_RERANKER_1_PROVIDER=rrf`, so an unreachable reranker falls back to the retrieval order instead of failing the recall.
+- `HINDSIGHT_API_RERANKER_1_PROVIDER=rrf`, so an unreachable reranker falls back to the fusion order instead of failing the recall.
 
 The section also covers the traps: indexed members inherit nothing from the primary; the OpenRouter primary needs its own OpenRouter key, since the key it otherwise falls back to may belong to another provider and then every rerank silently lands on `rrf`; the counter only sees turns that recall; and a failover is a successful recall, so the counter stays at zero while a primary that stays down shows up only in Hindsight's `WARNING` logs. Settings and defaults are Hindsight 0.10.1's. `design/memory.md` → Reranking keeps the model comparison and the reasoning behind the chain.

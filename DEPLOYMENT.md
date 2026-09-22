@@ -48,7 +48,7 @@ HINDSIGHT_API_RERANKER_OPENROUTER_TIMEOUT=2
 # The default is 3 retries within a 10s budget before the chain moves on.
 HINDSIGHT_API_RERANKER_MAX_RETRIES=0
 
-# Failover: keep the retrieval order instead of failing the recall.
+# Failover: keep the fusion order instead of failing the recall.
 HINDSIGHT_API_RERANKER_1_PROVIDER=rrf
 ```
 
