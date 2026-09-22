@@ -205,6 +205,16 @@ describe("truncationNotice", () => {
     expect(truncationNotice("The first three steps are")).toBe(MARKER);
   });
 
+  // A cut on a line boundary leaves the reply ending in newlines. The marker
+  // still sits exactly one blank line below the text, and a fence closes on
+  // the line right after the last line of code, with no empty code line.
+  it("counts the reply's own trailing newlines toward the gap", () => {
+    expect(truncationNotice("Step one.\n")).toBe(MARKER.slice(1));
+    expect(truncationNotice("Step one.\n\n")).toBe(MARKER.slice(2));
+    expect(truncationNotice("Step one.\n\n\n")).toBe(MARKER.slice(2));
+    expect(truncationNotice("```ts\nconst x = 1;\n")).toBe(`\`\`\`${MARKER}`);
+  });
+
   it("closes a code fence the cut left open, so the marker isn't read as code", () => {
     expect(truncationNotice("Here:\n```ts\nconst x = 1;\nconst y")).toBe(`\n\`\`\`${MARKER}`);
   });

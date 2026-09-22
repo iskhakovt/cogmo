@@ -275,11 +275,17 @@ function classifyOutputCap(content: ReadonlyArray<ContentBlock>): TurnOutcome {
  * transcript, and the model's own history on the next turn all show that the
  * reply stops short. A reply cut off inside a fenced code block gets the
  * fence closed first, so the marker reads as a marker and not as more code.
+ *
+ * The marker sits one blank line below the text. A cut on a line boundary
+ * leaves the reply already ending in newlines, and those count toward the
+ * gap — inside a fence they are code, so the fence closes right after them.
  */
 export function truncationNotice(partialText: string): string {
   const fence = openCodeFence(partialText);
-  const close = fence === null ? "" : `\n${fence}`;
-  return `${close}\n\n[Reply cut off: it reached the model's output limit.]`;
+  const trailingNewlines = partialText.match(/\n*$/)?.[0].length ?? 0;
+  const close = fence === null ? "" : `${trailingNewlines > 0 ? "" : "\n"}${fence}`;
+  const gap = fence === null ? Math.max(0, 2 - trailingNewlines) : 2;
+  return `${close}${"\n".repeat(gap)}[Reply cut off: it reached the model's output limit.]`;
 }
 
 /**

@@ -12,7 +12,7 @@ Every provider failure falls into one of four classes. The class determines the 
 |-|-|-|
 | **A. Transport / infra** | DNS/TLS timeout, 408, 425, 429, any 5xx, mid-stream socket reset before first event | Provider chain (`FallbackLlmProvider`) tries the next candidate. Inngest `retries: 2` retries the whole turn if the chain exhausts. |
 | **B. Provider-permanent** | 4xx auth/quota, model deprecated, malformed tool schema (ours), `ProviderConfigError` | `NonRetriableError`. `onFailure` emits `conversation/errored`. `recover-conversation` writes a `cooldown_state` blob on the conversation (see [Auto-repair](#auto-repair-proposed)). New inbounds get an in-cooldown reply until the cooldown elapses or a clear-trigger command (`/repair`, `/model`, `/profile`) runs. |
-| **C. Model misbehavior, recoverable** | Empty `content` + `end_turn`, truncated tool-arg JSON, schema-invalid `chatTyped` output, model refusal (`stop_reason: "refusal"` / `finish_reason: "content_filter"` / 400 with content-policy class), reply cut off at the output cap (`stop_reason: "max_tokens"`) | **In-loop per-subtype repair budgets** (most subtypes: 1; refusal: 0, immediate degrade). On exhaustion: degraded reply, conversation stays `active`. |
+| **C. Model misbehavior, recoverable** | Empty `content` + `end_turn`, truncated tool-arg JSON, schema-invalid `chatTyped` output, model refusal (`stop_reason: "refusal"` / `finish_reason: "content_filter"` / 400 with content-policy class), reply cut off at the output cap (`stop_reason: "max_tokens"`) | **In-loop per-subtype repair budgets** (most subtypes: 1; refusal, context overflow and `max_tokens`: 0, immediate degrade). On exhaustion: degraded reply, conversation stays `active`. A text reply cut off at `max_tokens` is the exception: it is kept and marked, and the turn ends on the normal off-ramp (see [Truncated reply](#truncated-reply-confirmed)). |
 | **D. Loop pathology** | N consecutive turns producing the same tool calls with no successful side effect; iteration cap hit | Progress fingerprint trips → degraded reply, conversation stays `active`. |
 
 Class A and B are provider-layer concerns and live in `FallbackLlmProvider` + `resolveOrFail`. This doc covers C and D.
@@ -169,8 +169,8 @@ Classifier returns a discriminated union:
 ```typescript
 type TurnOutcome =
   | { kind: "ok" }
-  | { kind: "repair"; subtype: ClassCSubtype; instructions: RepairInstructions }
-  | { kind: "degrade"; reason: string }
+  | { kind: "repair"; subtype: BudgetedSubtype; instructions: RepairInstructions }
+  | { kind: "degrade"; reason: string; subtype: DegradeSubtype }
   | { kind: "truncated" };   // text reply cut off at max_tokens — kept, marked
 ```
 
