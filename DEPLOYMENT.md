@@ -10,7 +10,7 @@ This is the canonical install guide. Cogmo is a single Node.js process distribut
 | pgvector | latest | Postgres extension for vector storage. The `pgvector/pgvector:pg18` image bundles it. |
 | Redis | 7+ | Inngest queue and state store. |
 | Inngest | latest | Self-hosted `inngest start` with an event key and signing key. `inngest dev` is for local development only — see [Securing internal services](#securing-internal-services). |
-| [Hindsight](https://github.com/vectorize-io/hindsight) | latest-slim recommended | Memory server, HTTP API on port 8888. See [Hindsight image variant](#hindsight-image-variant) for which tag to pick. |
+| [Hindsight](https://github.com/vectorize-io/hindsight) | 0.10.x, slim recommended | Memory server, HTTP API on port 8888. Cogmo reads the server's version at boot and refuses to start outside `cogmo.hindsightCompat` in `apps/server/package.json`, so upgrade the two together. See [Hindsight image variant](#hindsight-image-variant) for which tag to pick. |
 | Docker | latest | For pulling and running the image. |
 
 Cogmo stores its application state in your Postgres; Hindsight stores its vectors in the same Postgres (different schema). One database is enough for personal scale.
@@ -24,6 +24,12 @@ Hindsight publishes two image families: **slim** (`:latest-slim`, ~500 MB, no lo
 - Configure embeddings + reranker provider URLs/keys via Hindsight's own env vars — see [Hindsight's installation docs](https://hindsight.vectorize.io/developer/installation).
 
 Pick **full** only if you need fully offline operation (air-gapped deploy, no external API calls for memory) and can spare ~4 GB of always-on RAM.
+
+The API images ship without `curl` or `wget`, so a container healthcheck has to use the image's Python, or probe `/health` from outside the container:
+
+```bash
+python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8888/health', timeout=5)"
+```
 
 ## The image
 
@@ -117,7 +123,7 @@ Defaults below match the in-image expectations: every host-state path sits under
 
 | Variable | Default | Purpose |
 |-|-|-|
-| `HINDSIGHT_RECALL_MAX_QUERY_TOKENS` | `500` | Truncation budget for recall queries, in tokens. Must match Hindsight's `HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS`. Bump on both sides if long multi-turn context needs to flow into the recall query — but past ~1500 tokens semantic-search quality degrades regardless of the cap. |
+| `HINDSIGHT_RECALL_MAX_QUERY_TOKENS` | `500` | Truncation budget for recall queries, in `o200k_base` tokens. Must match Hindsight's `HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS`, and Hindsight's `HINDSIGHT_API_TOKENIZER_ENCODING` must stay at its `o200k_base` default: the server rejects an over-cap query rather than truncating it. Bump on both sides if long multi-turn context needs to flow into the recall query — but past ~1500 tokens semantic-search quality degrades regardless of the cap. |
 
 #### Object storage
 
@@ -202,7 +208,7 @@ HINDSIGHT_API_TENANT_API_KEY=<same value as HINDSIGHT_API_KEY>
 ```
 
 The key does not cover everything:
-- **Open routes:** `/health`, `/version`, `/metrics`, `/docs` and `/openapi.json` still answer without it (verified on 0.9.2).
+- **Open routes:** `/health`, `/version`, `/metrics`, `/docs` and `/openapi.json` still answer without it (verified on 0.10.1).
 - **MCP endpoint:** uses the same key unless `HINDSIGHT_API_TENANT_MCP_AUTH_DISABLED` is set.
 - **Control Plane UI:** a separate app with its own `HINDSIGHT_CP_ACCESS_KEY`. Cogmo does not use it — use the API-only image.
 

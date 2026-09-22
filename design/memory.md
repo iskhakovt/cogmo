@@ -198,7 +198,11 @@ Decision: **implemented** as the `memory_reflect` tool alongside `memory_recall`
 
 ### Hindsight Adapter Workarounds `[confirmed]`
 
-One upstream quirk the `HindsightMemoryProvider` adapter compensates for — verified empirically while wiring the integration test for tag_groups, important enough that bypassing the adapter (calling `HindsightClient` directly) loses memories silently.
+Three upstream behaviours the `HindsightMemoryProvider` adapter compensates for. Bypassing the adapter (calling `HindsightClient` directly) loses memories silently on each of them. The first two are pinned by integration tests against the real server in `src/test/memory.integration.test.ts`.
+
+**Recall on a bank that was never created is a 404.** Hindsight creates a bank on its first write; reads refuse a bank that does not exist rather than answer as if it were empty. With `bankId = userId`, that is every user who has not had a memory retained yet — a new user's first conversation, before the Observer drains anything. The adapter maps the 404 to no memories, so auto-recall, `memory_recall` and skills see an empty bank rather than an error. It matches on the bank id in the error detail (`Bank '<id>' not found`), so a route-level 404 from a wrong base path or proxy prefix still fails loudly instead of reading as a forgetful agent. Operator CLIs that list a bank (`cogmo migrate-memories`, `cogmo backfill profile-class`) keep the 404: an explicitly named bank that does not exist is worth being told about. Reflect is unaffected — it creates the bank.
+
+**Query cap counted in `o200k_base`.** Hindsight caps a recall query at `HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS` (default 500) counted in `HINDSIGHT_API_TOKENIZER_ENCODING` (default `o200k_base`), and rejects an over-cap query with a 400 rather than truncating it. The adapter truncates to the cap in the same vocabulary before sending. The two must agree: English prose and code routinely take more tokens in `o200k_base` than in `cl100k_base`, so a query cut in any other encoding lands over the cap, and the 400 degrades auto-recall to nothing for exactly the long messages that carry the most context.
 
 **Default `types` filter excludes `observation`**. Hindsight's `recall` endpoint defaults to `types: ["world", "experience"]`. The extraction LLM produces `observation`-type facts routinely — enough that the default filter hides a meaningful slice of stored content. The adapter overrides the default in `buildRecallBody` to `["world", "experience", "observation"]` so callers see every extracted fact unless they explicitly narrow. This is independent of our `network:*` tag taxonomy: Hindsight's `fact_type` is a server-side classification, our `network:*` is a client-side tag, both are stored, both are queryable. No upstream issue filed (the default is a deliberate Hindsight design choice).
 
@@ -263,11 +267,11 @@ A cross-encoder pass over the candidates RRF fusion produces — **not an altern
 
 ZeroEntropy's zerank-2 led this table at ELO 1638 and was the original choice. ZeroEntropy was acquired by Notion and sunset all hosted products on 2026-09-04; the weights are Apache-2.0 on HuggingFace but only as H100-class self-hosting, which personal scale does not justify. No gateway resells them.
 
-**Chosen:** `voyageai/rerank-2.5` through Hindsight's native `openrouter` provider, with `rrf` as a failover member so an unreachable reranker degrades to fusion order instead of taking recall down. Hindsight is *not* fail-open by default — "a reranker that is unreachable takes recall down with it" — and `recall` sits on the interactive path, so the chain is load-bearing rather than belt-and-braces. Keep the primary's timeout well under the 5s recall budget `HindsightMemoryProvider` enforces: members are tried in order with no circuit breaker, so a dead primary spends its full timeout on every request before the fallback runs.
+**Chosen:** `voyageai/rerank-2.5` through Hindsight's native `openrouter` provider, with `rrf` as a failover member so an unreachable reranker degrades to fusion order instead of taking recall down. Hindsight is *not* fail-open by default — "a reranker that is unreachable takes recall down with it" — and `recall` sits on the interactive path, so the chain is load-bearing rather than belt-and-braces. Keep the primary's timeout short: auto-recall runs ahead of every turn's first model call, and members are tried in order with no circuit breaker, so a dead primary adds its full cost to every turn before the fallback runs. Nothing on Cogmo's side cuts that short — `HindsightMemoryProvider`'s retry window stops new attempts after 5s but does not abort one in flight.
 
 RRF alone for tests — zero dependencies, deterministic, sufficient for "did recall find the fact" assertions.
 
-**On the next Hindsight bump, re-check the timeout budget.** 0.9.2 gives a remote reranker one attempt per chain member, so a timeout is the whole cost of a dead primary. Hindsight's main branch (unreleased as of 0.9.2) adds retries — `HINDSIGHT_API_RERANKER_MAX_RETRIES` (default 3) with exponential backoff, under a `HINDSIGHT_API_RERANKER_RETRY_BUDGET` of 10s *per member*, spent before the chain advances. Against the 5s ceiling `HindsightMemoryProvider` puts on recall, those defaults mean the client gives up long before the `rrf` member is ever reached, and the fail-open becomes decorative. Lower the retry budget alongside the timeout when the pin moves.
+**Retries multiply that cost, so production turns them off.** Hindsight retries a remote reranker before advancing the chain: `HINDSIGHT_API_RERANKER_MAX_RETRIES` (default 3) with 0.5s→4s backoff, bounded by `HINDSIGHT_API_RERANKER_RETRY_BUDGET` (default 10s, spent on failed attempts and backoff, not on successful work). A timeout counts as transient, so on those defaults a primary that times out at 2s costs about 11s per recall before `rrf` answers, against 2s for a single attempt. `HINDSIGHT_API_RERANKER_MAX_RETRIES=0` keeps it at one timeout. With a fallback member behind the primary, a transient 429 or 5xx then costs one recall its cross-encoder ordering, which is cheaper than stalling the turn. The setting is global, but `rrf` carries no retry policy, so in this chain it only reaches the primary.
 
 ### Production Config
 
@@ -289,6 +293,8 @@ HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL=qwen/qwen3-embedding-8b
 HINDSIGHT_API_RERANKER_PROVIDER=openrouter
 HINDSIGHT_API_RERANKER_OPENROUTER_MODEL=voyageai/rerank-2.5
 HINDSIGHT_API_RERANKER_OPENROUTER_TIMEOUT=2
+# One attempt, then fail over — see "Retries multiply that cost" above.
+HINDSIGHT_API_RERANKER_MAX_RETRIES=0
 
 # Failover member 1 — indexed members inherit nothing, so spell out every
 # setting they need with their own index.
