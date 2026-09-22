@@ -315,6 +315,9 @@ HINDSIGHT_API_EMBEDDINGS_PROVIDER=openai
 HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL=http://host.testcontainers.internal:$LLMOCK_PORT/v1
 HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY=test-key
 HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL=text-embedding-3-small
+# One text per request — Hindsight coalesces a retain's concurrent embedding
+# calls by timing, and llmock keys a request on its whole input
+HINDSIGHT_API_EMBEDDINGS_OPENAI_BATCH_SIZE=1
 
 # Reranker — RRF (math only, no model)
 HINDSIGHT_API_RERANKER_PROVIDER=rrf

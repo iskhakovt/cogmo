@@ -245,6 +245,12 @@ export function hindsightSlim(
     HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL: opts.embeddingsBaseUrl,
     HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY: opts.embeddingsApiKey,
     HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL: opts.embeddingsModel,
+    // One text per embeddings request. Hindsight coalesces a retain's
+    // concurrent embedding calls into shared requests by event-loop timing,
+    // so which texts share a request varies from run to run, and llmock keys
+    // a request on its whole input. Single-text requests keep every fixture
+    // key a single fact.
+    HINDSIGHT_API_EMBEDDINGS_OPENAI_BATCH_SIZE: "1",
     HINDSIGHT_API_RERANKER_PROVIDER: rerankerProvider,
     HINDSIGHT_API_SKIP_LLM_VERIFICATION: "true",
     ...hindsightAuthEnv(HINDSIGHT_TEST_API_KEY),
