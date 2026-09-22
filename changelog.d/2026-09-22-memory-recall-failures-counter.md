@@ -9,15 +9,13 @@ Only auto-recall counts. The `memory_recall` tool passes its failure to the mode
 Tests:
 
 - `handle-message.test.ts`: the degrade path (a rejected recall counts once against `user-1` and the loop gets the bare assembled prompt) and the success path (neither a recall with memories nor an empty one counts, and the memories reach the prompt).
-- `handle-message.replay.test.ts`: under `InngestTestEngine`'s re-invocation model, a failed recall counts once per turn. Moving the count into the bare body makes this test see six.
+- `handle-message.replay.test.ts`: under `InngestTestEngine`'s re-invocation model, a failed recall counts once per turn. It fails if the count moves into the bare body, which runs on every pass.
 - `metrics.test.ts`: pins the exported instrument name and its monotonic-sum shape, which is what an alert rule keys on.
 
-Every assertion on the count was checked to fail with the increment removed.
-
-The counter reports broken recall. The reranker failover chain is what keeps recall working, and `DEPLOYMENT.md` → "Hindsight reranker" now tells operators to set it. Hindsight's defaults are the `local` reranker, which the slim image doesn't ship, and a chain that fails the whole recall when the reranker fails. The section gives the chain to set instead:
+The counter reports broken recall. The reranker failover chain is what keeps recall working, and `DEPLOYMENT.md` → "Hindsight reranker" now tells operators to set it. Hindsight's default reranker is `local`, which the slim image doesn't ship, and by default a failing reranker fails the whole recall. The section gives the chain to set instead:
 
 - an explicit primary with a 2s timeout. Hindsight's OpenRouter default is 60s, and every turn waits on recall.
 - `HINDSIGHT_API_RERANKER_MAX_RETRIES=0`.
 - `HINDSIGHT_API_RERANKER_1_PROVIDER=rrf`, so an unreachable reranker falls back to the retrieval order instead of failing the recall.
 
-It warns that indexed members inherit nothing from the primary. It also notes that a failover is a successful recall: the counter stays at zero, and a primary that stays down shows up only in Hindsight's `WARNING` logs. Each claim was checked against Hindsight 0.10.1's configuration docs. `design/memory.md` → Reranking keeps the model comparison and the reasoning behind the chain.
+It warns that indexed members inherit nothing from the primary. It also notes that a failover is a successful recall: the counter stays at zero, and a primary that stays down shows up only in Hindsight's `WARNING` logs. The settings and defaults are those of Hindsight 0.10.1's configuration reference. `design/memory.md` → Reranking keeps the model comparison and the reasoning behind the chain.
