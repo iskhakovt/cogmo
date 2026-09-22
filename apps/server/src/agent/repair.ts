@@ -26,7 +26,8 @@ import { createHash } from "node:crypto";
 import canonicalize from "canonicalize";
 import type { Logger } from "pino";
 import * as R from "remeda";
-import { ProviderProtocolError } from "../llm/errors.js";
+import { extractText } from "../llm/content.js";
+import { ProviderProtocolError, ToolArgsCutOffError } from "../llm/errors.js";
 import { RefusalError } from "../llm/fallback.js";
 import type { LlmProvider } from "../llm/provider.js";
 import type { ContentBlock, Message, StopReason, ToolUseBlock } from "../llm/types.js";
@@ -279,13 +280,29 @@ function classifyOutputCap(content: ReadonlyArray<ContentBlock>): TurnOutcome {
  * The marker sits one blank line below the text. A cut on a line boundary
  * leaves the reply already ending in newlines, and those count toward the
  * gap — inside a fence they are code, so the fence closes right after them.
+ *
+ * The closer repeats the opener's indent. A block inside a list item has its
+ * fence indented to the item's content, and an unindented closer is not part
+ * of the item: it ends the list and opens a new block that swallows the
+ * marker.
  */
 export function truncationNotice(partialText: string): string {
   const fence = openCodeFence(partialText);
-  const trailingNewlines = partialText.match(/\n*$/)?.[0].length ?? 0;
-  const close = fence === null ? "" : `${trailingNewlines > 0 ? "" : "\n"}${fence}`;
-  const gap = fence === null ? Math.max(0, 2 - trailingNewlines) : 2;
+  const newlines = trailingNewlines(partialText);
+  const close = fence === null ? "" : `${newlines > 0 ? "" : "\n"}${fence.indent}${fence.run}`;
+  const gap = fence === null ? Math.max(0, 2 - newlines) : 2;
   return `${close}${"\n".repeat(gap)}[Reply cut off: it reached the model's output limit.]`;
+}
+
+/**
+ * Count of `\n` at the end of `text`. A backward scan rather than
+ * `/\n*$/`, which retries from every position of a newline run and so goes
+ * quadratic on the runaway output that tends to hit the cap.
+ */
+function trailingNewlines(text: string): number {
+  let count = 0;
+  while (count < text.length && text[text.length - 1 - count] === "\n") count++;
+  return count;
 }
 
 /**
@@ -293,22 +310,27 @@ export function truncationNotice(partialText: string): string {
  * or more backticks or tildes, then the info string (opener) or nothing but
  * whitespace (closer).
  */
-const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+const FENCE_LINE = /^( {0,3})(`{3,}|~{3,})(.*)$/;
+
+interface OpenFence {
+  indent: string;
+  run: string;
+}
 
 /**
- * The fence run that opened a code block still open at the end of `text`,
- * or null. A closer must use the opener's character and be at least as long;
- * a backtick "opener" whose info string contains a backtick is inline code,
- * not a fence.
+ * The opener of a code block still open at the end of `text`, or null. A
+ * closer must use the opener's character and be at least as long; a backtick
+ * "opener" whose info string contains a backtick is inline code, not a fence.
  */
-function openCodeFence(text: string): string | null {
-  return text.split("\n").reduce<string | null>((open, line) => {
+function openCodeFence(text: string): OpenFence | null {
+  return text.split("\n").reduce<OpenFence | null>((open, line) => {
     const match = FENCE_LINE.exec(line);
-    const run = match?.[1];
-    const rest = match?.[2] ?? "";
+    const indent = match?.[1] ?? "";
+    const run = match?.[2];
+    const rest = match?.[3] ?? "";
     if (run === undefined) return open;
-    if (open === null) return run.startsWith("`") && rest.includes("`") ? null : run;
-    const closes = run[0] === open[0] && run.length >= open.length && rest.trim() === "";
+    if (open === null) return run.startsWith("`") && rest.includes("`") ? null : { indent, run };
+    const closes = run[0] === open.run[0] && run.length >= open.run.length && rest.trim() === "";
     return closes ? null : open;
   }, null);
 }
@@ -324,6 +346,11 @@ export type StreamErrorOutcome = Extract<TurnOutcome, { kind: "repair" | "degrad
 /**
  * Classify an error thrown out of the stream-drain section of an iteration.
  *
+ *  - `ToolArgsCutOffError`: the unparseable arguments are the ones the
+ *    output cap cut off. Immediate `max_tokens` degrade — the replay would
+ *    send the same request into the same cap, and even a replay that parsed
+ *    would stop at `max_tokens` with a tool call, which
+ *    {@link classifyPostStream} degrades anyway.
  *  - `ProviderProtocolError`: the streamed tool-arg JSON failed to parse
  *    even after `jsonrepair`. The design doc treats this as the
  *    `stream_truncation` subtype — a non-streaming replay often completes
@@ -340,6 +367,13 @@ export function classifyStreamError(
   err: unknown,
   budgets: RepairBudgets,
 ): StreamErrorOutcome | undefined {
+  if (err instanceof ToolArgsCutOffError) {
+    return {
+      kind: "degrade",
+      reason: "reply hit the output token limit during a tool call",
+      subtype: "max_tokens",
+    };
+  }
   if (err instanceof ProviderProtocolError) {
     if (budgets.stream_truncation > 0) {
       return {
@@ -501,11 +535,7 @@ export async function synthesizeDegradedReply(
       }),
     ]);
 
-    const text = response.content
-      .filter((b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text")
-      .map((b) => b.text)
-      .join("")
-      .trim();
+    const text = extractText(response.content).trim();
 
     if (text.length === 0) {
       log.warn(

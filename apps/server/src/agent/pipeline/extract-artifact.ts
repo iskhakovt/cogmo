@@ -16,6 +16,7 @@
  */
 
 import { err, ok, type Result } from "neverthrow";
+import { extractText } from "../../llm/content.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import type { Message } from "../../llm/types.js";
 import { compileOutputSchema } from "./output-schema.js";
@@ -68,7 +69,7 @@ export async function extractStageArtifact(args: {
       system: "You extract structured data from text. Reply with a single JSON object only.",
       messages,
     });
-    const text = response.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("");
+    const text = extractText(response.content);
 
     const parsed = parseObject(text);
     if (parsed === null) {

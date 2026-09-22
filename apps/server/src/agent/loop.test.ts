@@ -2,7 +2,7 @@ import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
-import { ProviderProtocolError } from "../llm/errors.js";
+import { ProviderProtocolError, ToolArgsCutOffError } from "../llm/errors.js";
 import { RefusalError } from "../llm/fallback.js";
 import type { LlmProvider } from "../llm/provider.js";
 import type {
@@ -1720,13 +1720,14 @@ describe("durable LLM iterations (stepRun)", () => {
   it("pushes the truncation notice from its own step, once across replays", async () => {
     // The live invocation emits the notice inside `truncation-notice-iter1`;
     // a replay with that step cached must persist the same message without
-    // pushing the notice again.
+    // pushing the notice again — or logging the truncation a second time.
     const cache = new Map<string, unknown>();
     const provider = mockStreamProvider([
       { events: [{ type: "text_delta", text: "Chapter one begins" }], stopReason: "max_tokens" },
     ]);
     const live = cachingStepRun(cache);
     const liveEvents: StreamEvent[] = [];
+    const liveLogger = mock<Logger>();
 
     const first = await testRunStreamingAgentLoop({
       provider,
@@ -1736,14 +1737,20 @@ describe("durable LLM iterations (stepRun)", () => {
         liveEvents.push(e);
       },
       stepRun: live.stepRun,
+      turnLogger: liveLogger,
     });
 
     expect(live.calls).toEqual(["llm-iter1", "truncation-notice-iter1"]);
     const notices = liveEvents.filter((e) => e.type === "text_delta" && e.text.includes("cut off"));
     expect(notices).toHaveLength(1);
+    expect(liveLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "agent.truncated" }),
+      expect.any(String),
+    );
 
     const replay = cachingStepRun(cache);
     const replayEvents: StreamEvent[] = [];
+    const replayLogger = mock<Logger>();
     const second = await testRunStreamingAgentLoop({
       provider,
       messages: [{ role: "user", content: "write a novel" }],
@@ -1752,10 +1759,15 @@ describe("durable LLM iterations (stepRun)", () => {
         replayEvents.push(e);
       },
       stepRun: replay.stepRun,
+      turnLogger: replayLogger,
     });
 
     expect(replay.calls).toEqual(["llm-iter1", "truncation-notice-iter1"]);
     expect(replayEvents).toEqual([]);
+    expect(replayLogger.warn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ event: "agent.truncated" }),
+      expect.any(String),
+    );
     expect(provider.chatStream).toHaveBeenCalledTimes(1);
     expect(second.newMessages).toEqual(first.newMessages);
     expect(second.streamed).toEqual(first.streamed);
@@ -2502,6 +2514,122 @@ describe("in-loop model-misbehavior repair", () => {
     );
   });
 
+  it("tool arguments cut off at the output cap → max_tokens degrade, no replay", async () => {
+    // Unfinished JSON, not malformed: a replay sends the same request into
+    // the same cap and re-bills the whole input for nothing.
+    const cutOff = new ToolArgsCutOffError(new ProviderProtocolError("first", new Error("eof")));
+    const { provider, chatCalls } = repairStreamProvider([{ kind: "throw", error: cutOff }]);
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "write the essay to a file" }],
+      tools: new ToolRegistry(),
+      onEvent: async () => {},
+    });
+
+    expect(chatCalls).toHaveLength(0);
+    expect(result.degraded).toEqual({
+      reason: "reply hit the output token limit during a tool call",
+      subtype: "max_tokens",
+    });
+    expect(result.newMessages).toEqual([]);
+  });
+
+  it("stream replay whose arguments are cut off at the cap → max_tokens degrade", async () => {
+    const streamErr = new ProviderProtocolError("first", new Error("boom"));
+    const replayErr = new ToolArgsCutOffError(
+      new ProviderProtocolError("replay", new Error("eof")),
+    );
+    const { provider } = repairStreamProvider([{ kind: "throw", error: streamErr }]);
+    vi.mocked(provider.chat).mockReset();
+    vi.mocked(provider.chat).mockRejectedValue(replayErr);
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools: new ToolRegistry(),
+      onEvent: async () => {},
+    });
+
+    expect(result.degraded).toEqual({
+      reason: "non-streaming replay hit the output token limit during a tool call",
+      subtype: "max_tokens",
+    });
+  });
+
+  // A replay that parses still reaches the post-stream classifier: stopping at
+  // the cap with a tool call degrades rather than running it.
+  it("stream replay that stops at max_tokens with a tool call → degrade, the call never runs", async () => {
+    const { provider, chatCalls } = repairStreamProvider([
+      { kind: "throw", error: new ProviderProtocolError("first", new Error("boom")) },
+      {
+        kind: "stream",
+        events: [{ type: "tool_start", id: "t1", name: "write", input: { content: "half" } }],
+        stopReason: "max_tokens",
+      },
+    ]);
+    const handler = vi.fn(async () => "written");
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "write",
+        description: "write",
+        schema: z.object({ content: z.string() }),
+        handler,
+      }),
+    );
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "write it" }],
+      tools,
+      onEvent: async () => {},
+    });
+
+    expect(chatCalls).toHaveLength(1);
+    expect(handler).not.toHaveBeenCalled();
+    expect(result.degraded).toEqual({
+      reason: "reply hit the output token limit during a tool call",
+      subtype: "max_tokens",
+    });
+    expect(result.newMessages).toEqual([]);
+  });
+
+  it("stream replay that stops at max_tokens with text → kept and marked as truncated", async () => {
+    const { provider } = repairStreamProvider([
+      { kind: "throw", error: new ProviderProtocolError("first", new Error("boom")) },
+      {
+        kind: "stream",
+        events: [{ type: "text_delta", text: "The answer starts here" }],
+        stopReason: "max_tokens",
+      },
+    ]);
+    const collected: StreamEvent[] = [];
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "explain" }],
+      tools: new ToolRegistry(),
+      onEvent: async (e) => {
+        collected.push(e);
+      },
+    });
+
+    const notice = "\n\n[Reply cut off: it reached the model's output limit.]";
+    expect(result.truncated).toBe(true);
+    expect(result.newMessages).toEqual([
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "The answer starts here" },
+          { type: "text", text: notice },
+        ],
+      },
+    ]);
+    // The replay's own text never streams; the notice still does.
+    expect(collected).toEqual([{ type: "text_delta", text: notice }]);
+  });
+
   it("RefusalError during stream replay → degrade with refusal subtype", async () => {
     // First streaming attempt throws a parse error → repair invokes
     // chat() for the replay. The replay throws RefusalError (model
@@ -2599,11 +2727,11 @@ describe("in-loop model-misbehavior repair", () => {
   });
 
   it("context_overflow stopReason with no content → immediate degrade, no continuation prompt", async () => {
-    // The dangerous shape: an overflow that emitted nothing. Read as a
-    // normal `max_tokens` completion this returns a successful turn with an
-    // empty assistant message; read as an empty `end_turn` it earns a
-    // continuation prompt, which appends tokens to a window that just
-    // overflowed. Neither happens — one stream call, then degrade.
+    // The dangerous shape: an overflow that emitted nothing. Read as an
+    // empty `end_turn` it would earn a continuation prompt, which appends
+    // tokens to a window that just overflowed; read as `max_tokens` it would
+    // degrade with the wrong subtype and advice. Neither happens — one stream
+    // call, then a `context_overflow` degrade.
     const { provider, streamCalls } = repairStreamProvider([
       { kind: "stream", events: [], stopReason: "context_overflow" },
     ]);

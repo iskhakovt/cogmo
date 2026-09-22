@@ -1,7 +1,7 @@
 import { getEncoding, type Tiktoken } from "js-tiktoken";
 import OpenAI from "openai";
 import { logger } from "../logger.js";
-import { parseToolArgs } from "./errors.js";
+import { ProviderProtocolError, parseToolArgs, ToolArgsCutOffError } from "./errors.js";
 import { RefusalError } from "./fallback.js";
 import { withFailureLogging } from "./logging-fetch.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
@@ -161,7 +161,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
       recordChatUsage(span, this.name, response.model, usage, stopReason);
 
       return {
-        content: fromOpenAIMessage(choice.message),
+        content: fromOpenAIMessage(choice.message, stopReason),
         stopReason,
         model: response.model,
         usage,
@@ -267,22 +267,14 @@ export class OpenAICompatibleProvider implements LlmProvider {
         }
 
         // Yield accumulated tool calls as complete tool_start events.
-        for (const [, call] of [...toolCalls.entries()].sort(([a], [b]) => a - b)) {
-          // parseToolArgs wraps SyntaxError as ProviderProtocolError so
-          // the fallback chain doesn't misclassify it as transient.
-          let input: unknown;
-          try {
-            input = parseToolArgs(
-              call.argumentChunks.join(""),
-              call.name,
-              "OpenAI-compatible streamed tool_calls arguments",
-            );
-          } catch (parseErr) {
-            completed = true;
-            failChatSpan(span, parseErr);
-            rejectResponse(parseErr);
-            throw parseErr;
-          }
+        const calls = [...toolCalls.entries()].sort(([a], [b]) => a - b).map(([, call]) => call);
+        for (const [position, call] of calls.entries()) {
+          const input = parseCallArgs(
+            call.argumentChunks.join(""),
+            call.name,
+            "OpenAI-compatible streamed tool_calls arguments",
+            finishReason === "max_tokens" && position === calls.length - 1,
+          );
           yield { type: "tool_start", id: call.id, name: call.name, input };
         }
 
@@ -455,30 +447,54 @@ function toOpenAITool(tool: ToolDefinition): OpenAI.ChatCompletionTool {
 
 // --- Response mapping ---
 
-function fromOpenAIMessage(message: OpenAI.ChatCompletionMessage): ContentBlock[] {
+function fromOpenAIMessage(
+  message: OpenAI.ChatCompletionMessage,
+  stopReason: StopReason,
+): ContentBlock[] {
   const blocks: ContentBlock[] = [];
 
   if (message.content) {
     blocks.push({ type: "text", text: message.content });
   }
 
-  if (message.tool_calls) {
-    for (const tc of message.tool_calls) {
-      if (tc.type !== "function") continue;
-      blocks.push({
-        type: "tool_use",
-        id: tc.id,
-        name: tc.function.name,
-        input: parseToolArgs(
-          tc.function.arguments,
-          tc.function.name,
-          "OpenAI-compatible non-streaming tool_calls arguments",
-        ),
-      });
-    }
+  const calls = (message.tool_calls ?? []).filter((tc) => tc.type === "function");
+  for (const [position, tc] of calls.entries()) {
+    blocks.push({
+      type: "tool_use",
+      id: tc.id,
+      name: tc.function.name,
+      input: parseCallArgs(
+        tc.function.arguments,
+        tc.function.name,
+        "OpenAI-compatible non-streaming tool_calls arguments",
+        stopReason === "max_tokens" && position === calls.length - 1,
+      ),
+    });
   }
 
   return blocks;
+}
+
+/**
+ * Parse one call's arguments. `lastCallAtCap` marks the call the output cap
+ * could have cut off — the response's final call when it stopped at
+ * `max_tokens` — so a parse failure there is reported as unfinished JSON
+ * ({@link ToolArgsCutOffError}) rather than malformed JSON. `parseToolArgs`
+ * wraps SyntaxError as ProviderProtocolError so the fallback chain doesn't
+ * misclassify it as transient.
+ */
+function parseCallArgs(
+  raw: string,
+  toolName: string,
+  context: string,
+  lastCallAtCap: boolean,
+): unknown {
+  try {
+    return parseToolArgs(raw, toolName, context);
+  } catch (err) {
+    if (lastCallAtCap && err instanceof ProviderProtocolError) throw new ToolArgsCutOffError(err);
+    throw err;
+  }
 }
 
 // --- Error mapping ---

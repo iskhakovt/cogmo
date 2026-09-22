@@ -51,6 +51,7 @@ import { loadTurnHistory, summarizedSpan } from "../conversation/load-turn-histo
 import type { ImageToolsLoader } from "../image-tools-loader.js";
 import type { AgentLoopResult, StepRunner, StreamingAgentLoopParams } from "../loop.js";
 import type { PromptSource } from "../prompt.js";
+import { computeRetraction } from "../retraction.js";
 import { createSchedulingService } from "../scheduling/scheduling-service.js";
 import type { Service } from "../service.js";
 import type { AgentStore } from "../store/index.js";
@@ -358,6 +359,20 @@ export async function runAgenticStage(
       turnKey: inboundId,
       turnLogger: log,
     });
+    // A degrade drops the iteration that triggered it, so its streamed output
+    // comes back off the sessions before the stream closes. The push gets a
+    // step so a later boundary's re-invocation doesn't repeat it; the
+    // retraction is derived from the loop's durable ledger, so the step
+    // exists on every replay that needs it.
+    const retraction = result.degraded
+      ? computeRetraction(result.streamed, result.newMessages, log)
+      : null;
+    if (retraction) {
+      await steps.run("retract-degraded-output", async () => {
+        await delivery.push({ type: "retract", ...retraction });
+        return null;
+      });
+    }
     await delivery.finish();
   } catch (err) {
     await delivery.abort(err instanceof Error ? err.message : "Unknown error");

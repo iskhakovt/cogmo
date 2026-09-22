@@ -1,7 +1,8 @@
+import { Marked } from "marked";
 import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
-import { ProviderProtocolError } from "../llm/errors.js";
+import { ProviderProtocolError, ToolArgsCutOffError } from "../llm/errors.js";
 import { RefusalError } from "../llm/fallback.js";
 import type { LlmProvider } from "../llm/provider.js";
 import type { ContentBlock, LlmResponse, Message, ToolUseBlock } from "../llm/types.js";
@@ -241,6 +242,27 @@ describe("truncationNotice", () => {
   it("ignores a closer-shaped line that carries an info string", () => {
     expect(truncationNotice("```\ncode\n```js\nmore code")).toBe(`\n\`\`\`${MARKER}`);
   });
+
+  // A code block inside a list item is written with its fence indented to
+  // the item's content. An unindented closer isn't part of the item: it ends
+  // the list and opens a fresh code block, which then swallows the marker.
+  // The Telegram renderer (marked, GFM) is the reader that matters.
+  it("closes an indented fence at the opener's indent, so the marker renders as prose", () => {
+    const partial = "Steps:\n\n1. Install the deps:\n   ```bash\n   npm i";
+    const notice = truncationNotice(partial);
+    expect(notice).toBe(`\n   \`\`\`${MARKER}`);
+    const html = new Marked({ gfm: true }).parse(partial + notice, { async: false });
+    expect(html).toContain("<p>[Reply cut off: it reached the model&#39;s output limit.]</p>");
+  });
+
+  // Degenerate output — a runaway stream of newlines — is exactly what hits
+  // the cap, and this runs on every Inngest invocation of the turn.
+  it("stays linear on a long run of newlines", () => {
+    const partial = `${"\n".repeat(200_000)}x`;
+    const started = performance.now();
+    expect(truncationNotice(partial)).toBe(MARKER);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
 });
 
 describe("classifyStreamError", () => {
@@ -277,6 +299,20 @@ describe("classifyStreamError", () => {
       reason: "streamed tool-call arguments could not be parsed",
       subtype: "stream_truncation",
     });
+  });
+
+  // Unfinished JSON, not malformed: the replay would send the same request
+  // into the same cap, so it is skipped whatever the budget says.
+  it("degrades arguments cut off at the output cap without spending a replay", () => {
+    const cutOff = new ToolArgsCutOffError(new ProviderProtocolError("boom", new SyntaxError("x")));
+    const drained: RepairBudgets = { empty_end_turn: 0, stream_truncation: 0 };
+    for (const budgets of [freshBudgets(), drained]) {
+      expect(classifyStreamError(cutOff, budgets)).toEqual({
+        kind: "degrade",
+        reason: "reply hit the output token limit during a tool call",
+        subtype: "max_tokens",
+      });
+    }
   });
 
   it("returns immediate degrade for RefusalError regardless of budget state", () => {

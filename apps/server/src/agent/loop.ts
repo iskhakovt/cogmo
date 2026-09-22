@@ -1,7 +1,8 @@
 import { SpanStatusCode, trace } from "@opentelemetry/api";
 import type { Logger } from "pino";
 import * as R from "remeda";
-import { ProviderProtocolError } from "../llm/errors.js";
+import { extractText } from "../llm/content.js";
+import { ProviderProtocolError, ToolArgsCutOffError } from "../llm/errors.js";
 import { RefusalError } from "../llm/fallback.js";
 import type { LlmProvider } from "../llm/provider.js";
 import type {
@@ -9,7 +10,6 @@ import type {
   Message,
   StopReason,
   StreamEvent,
-  TextBlock,
   ToolUseBlock,
   Usage,
 } from "../llm/types.js";
@@ -621,17 +621,8 @@ function buildResult(
   iterations: number,
   streamed: EmittedLedger,
 ): AgentLoopResult {
-  // Extract final text from the last assistant message
   const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
-  let text = "";
-  if (lastAssistant && Array.isArray(lastAssistant.content)) {
-    text = lastAssistant.content
-      .filter((b): b is TextBlock => b.type === "text")
-      .map((b) => b.text)
-      .join("");
-  } else if (lastAssistant && typeof lastAssistant.content === "string") {
-    text = lastAssistant.content;
-  }
+  const text = lastAssistant ? extractText(lastAssistant.content) : "";
 
   const ephemeral = new Set(ephemeralIndices);
   const newMessages = messages
@@ -1022,16 +1013,16 @@ export async function runStreamingAgentLoop(
       // the user's screen since it streamed — but it ends with a notice
       // both live and in the persisted message. The push gets its own step
       // for the same reason as `emit-tool-results-iter<N>`: in the bare body
-      // it would repeat once per remaining boundary of the turn. The notice
-      // is derived from the cached content, so every invocation appends the
-      // same block to the message it hands to persistence.
-      const notice = truncationNotice(
-        iterationContent
-          .filter((b): b is TextBlock => b.type === "text")
-          .map((b) => b.text)
-          .join(""),
-      );
+      // it would repeat once per remaining boundary of the turn. The log line
+      // rides in the same step so it counts truncated turns, not invocations.
+      // The notice is derived from the cached content, so every invocation
+      // appends the same block to the message it hands to persistence.
+      const notice = truncationNotice(extractText(iterationContent));
       const emitNotice = async (): Promise<null> => {
+        log.warn(
+          { event: "agent.truncated", maxTokens: maxTokens ?? null },
+          "agent loop reply truncated at the output cap",
+        );
         await onEvent({ type: "text_delta", text: notice });
         return null;
       };
@@ -1046,10 +1037,6 @@ export async function runStreamingAgentLoop(
         role: "assistant",
         content: [...iterationContent, { type: "text", text: notice }],
       });
-      log.warn(
-        { event: "agent.truncated", maxTokens: maxTokens ?? null },
-        "agent loop reply truncated at the output cap",
-      );
       return {
         ...buildResult(
           messages,
@@ -1363,6 +1350,13 @@ async function applyStreamReplay(
   try {
     replay = await provider.chat(chatParams);
   } catch (err) {
+    if (err instanceof ToolArgsCutOffError) {
+      return {
+        kind: "degrade",
+        subtype: "max_tokens",
+        reason: "non-streaming replay hit the output token limit during a tool call",
+      };
+    }
     if (err instanceof ProviderProtocolError) {
       return {
         kind: "degrade",

@@ -42,6 +42,7 @@ import {
   pipelineGateKey,
   pipelineGateResolved,
 } from "../inngest/events.js";
+import { extractText } from "../llm/content.js";
 import { AllProvidersFailedError, extractStatus } from "../llm/fallback.js";
 import { computeBudget, resolveLimits } from "../llm/models.js";
 import { ProviderConfigError } from "../llm/resolver.js";
@@ -1303,10 +1304,7 @@ export function createTransport(deps: {
           }
           const rows = await agentStore.listMessages(tx, conversationId);
           const history = rows.flatMap((m) => {
-            const text =
-              typeof m.content === "string"
-                ? m.content
-                : m.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("");
+            const text = extractText(m.content);
             // Drop internal tool-roundtrip turns (tool_use / tool_result only) —
             // they carry no displayable prose.
             return text.length > 0 ? [{ id: m.id, role: m.role, text }] : [];

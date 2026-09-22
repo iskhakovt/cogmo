@@ -22,6 +22,7 @@
 
 import type { ZodType } from "zod";
 import { logger } from "../logger.js";
+import { extractText } from "./content.js";
 import { ProviderProtocolError, parseProviderJson } from "./errors.js";
 import { toObjectJsonSchema } from "./json-schema.js";
 import type { LlmProvider } from "./provider.js";
@@ -136,10 +137,7 @@ export async function chatTyped<T>(params: TypedChatParams<T>): Promise<TypedCha
     totalUsage.inputTokens += response.usage.inputTokens;
     totalUsage.outputTokens += response.usage.outputTokens;
 
-    const text = response.content
-      .filter((b) => b.type === "text")
-      .map((b) => (b as { text: string }).text)
-      .join("");
+    const text = extractText(response.content);
 
     const parsed = parseStructuredOutput(text, name, repair.jsonrepair);
 
