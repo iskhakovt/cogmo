@@ -74,8 +74,8 @@ export interface DefaultCtxHandlerOptions {
   /**
    * Sends the `http.request` once the destination has passed the allowlist
    * and address checks. Injected so a test can answer a skill's request
-   * without the public internet; the checks run ahead of it either way.
-   * Defaults to the global `fetch`, looked up per call.
+   * without the public internet. Defaults to the global `fetch`, looked up
+   * per call.
    */
   fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 }

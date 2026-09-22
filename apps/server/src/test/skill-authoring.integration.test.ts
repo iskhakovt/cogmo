@@ -513,9 +513,9 @@ const STUB_BTC_USD = 64725;
  * resolves to a public address and answers GET on one endpoint. Any other
  * host, path or method fails the way a missing host or an unreachable server
  * would, which surfaces in the skill run's `error` rather than as a silent
- * live request. The query is not matched: a recorded skill may add harmless
- * parameters, and one that asks for another coin or currency still fails on
- * the missing key in the body.
+ * live request. The query is deliberately not matched — a re-recorded skill
+ * may add harmless parameters, and one that asks for another coin fails on
+ * the missing key anyway.
  */
 function makeStubSkillNetwork(): NonNullable<BootstrapOptions["skillCtxHttpOverride"]> {
   return {
