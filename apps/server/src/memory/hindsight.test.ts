@@ -297,7 +297,7 @@ describe("HindsightMemoryProvider", () => {
     const provider = createProvider({ maxQueryTokens: 10 });
     mockRecallMemories.mockResolvedValueOnce(okRecall([]));
 
-    // ~80 o200k_base tokens — well past the 10-token cap
+    // 181 o200k_base tokens — well past the 10-token cap
     const longQuery = "the quick brown fox jumps over the lazy dog ".repeat(20);
     await provider.recall("bank-1", longQuery);
 
