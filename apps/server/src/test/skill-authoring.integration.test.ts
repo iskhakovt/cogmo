@@ -15,6 +15,10 @@
  *     In-sandbox claude-cli hits real Anthropic at record time and the
  *     stream-json output gets baked into the DaytonaMock PTY frames; in
  *     replay no real sandbox runs.
+ *   - The authored skill's `ctx.http` call is answered in-process by a
+ *     stand-in network (`skillCtxHttpOverride`) in both modes, so the
+ *     suite never reaches CoinGecko. The skill's allowlist and address
+ *     checks still run against what the stand-in answers.
  *   - The cogmo-skills coding-repo points at a real GitHub repo set via
  *     `COGMO_TEST_SKILLS_REMOTE` (a throwaway repo the operator
  *     authorized). All test branches sit under
@@ -73,7 +77,7 @@ import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
 import { codingTasks } from "../agent/coding/store/schema.js";
 import { conversations, llmProviders, modelProviders, profiles } from "../agent/store/schema.js";
 import * as schema from "../db/schemas.js";
-import { bootstrap } from "../index.js";
+import { type BootstrapOptions, bootstrap } from "../index.js";
 import { directOutbound } from "../inngest/events.js";
 import { AnthropicProvider } from "../llm/anthropic.js";
 import { DaytonaSandboxClient, snapshotNameFor } from "../sandbox/daytona/client.js";
@@ -252,6 +256,10 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     bootstrapResult = await bootstrap({
       providerOverride: provider,
       sandboxClientOverride: daytonaClient,
+      // Both modes: the cassette covers the chat and the sandbox, not the
+      // skill's own request, so a live CoinGecko would make the run depend
+      // on its uptime and rate limits in replay and record alike.
+      skillCtxHttpOverride: makeStubSkillNetwork(),
       codingAuthOverride: async () =>
         // Pinned model + disabled thinking match `claude-cli.integration.test.ts`
         // and keep the recorded stream-json output stable across runs.
@@ -380,9 +388,10 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     // is the thing the suite exists to prove.
     const run = await waitForSkillRun(db, skillRow.id, 60_000);
     expect(run.status).toBe("success");
+    // Exact, not just numeric: only the stand-in network answers with this
+    // figure, so a match proves the request never left the process.
     const price = (run.output as { price?: unknown } | null)?.price;
-    expect(typeof price).toBe("number");
-    expect(price as number).toBeGreaterThan(0);
+    expect(price).toBe(STUB_BTC_USD);
 
     // And the number reaches the user. Anchored on tens-of-thousands shape
     // so years / HTTP codes don't false-positive.
@@ -489,6 +498,41 @@ async function createLocalBareRemote(): Promise<{ url: string; path: string }> {
     throw err;
   }
   return { url: `file://${bareDir}`, path: bareDir };
+}
+
+/** The one endpoint the stand-in network serves. */
+const COINGECKO_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price";
+/**
+ * BTC/USD as the stand-in network reports it — the figure in the recorded
+ * turn-2 reply, so the skill's output and the replayed prose agree.
+ */
+const STUB_BTC_USD = 64725;
+
+/**
+ * Stand-in network for the authored skill's `ctx.http`: one host that
+ * resolves to a public address and serves one endpoint. Anything else fails
+ * the way a missing host or an unreachable server would, which surfaces in
+ * the skill run's `error` rather than as a silent live request.
+ */
+function makeStubSkillNetwork(): NonNullable<BootstrapOptions["skillCtxHttpOverride"]> {
+  return {
+    resolveHost: async (hostname) => {
+      if (hostname !== new URL(COINGECKO_PRICE_URL).hostname) {
+        throw new Error(`stand-in network has no DNS entry for ${hostname}`);
+      }
+      return [{ address: "104.18.32.7", family: 4 }];
+    },
+    fetch: async (input) => {
+      const url = new URL(input instanceof Request ? input.url : input);
+      if (`${url.origin}${url.pathname}` !== COINGECKO_PRICE_URL) {
+        throw new Error(`stand-in network has no route for ${url.origin}${url.pathname}`);
+      }
+      return new Response(JSON.stringify({ bitcoin: { usd: STUB_BTC_USD } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  };
 }
 
 /**

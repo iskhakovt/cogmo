@@ -12,9 +12,12 @@ import {
   mapManifestResourceLimits,
   SkillInflightError,
   SkillRunnerImpl,
+  type SkillRunnerOptions,
 } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
 import { SysboxWorkerPool } from "./worker-sysbox/pool.js";
+
+type SkillRunnerCtxHttp = NonNullable<SkillRunnerOptions["ctxHttp"]>;
 
 function makeMockFiles(): Service["files"] {
   return mockFilesService();
@@ -52,7 +55,12 @@ function makeMockSecrets(map: Record<string, string> = {}): SecretsStore {
 }
 
 async function makeRunner(
-  opts: { memory?: MemoryProvider; secretsStore?: SecretsStore; files?: Service["files"] } = {},
+  opts: {
+    memory?: MemoryProvider;
+    secretsStore?: SecretsStore;
+    files?: Service["files"];
+    ctxHttp?: SkillRunnerCtxHttp;
+  } = {},
 ) {
   return SkillRunnerImpl.create({
     store,
@@ -62,6 +70,7 @@ async function makeRunner(
     files: opts.files ?? makeMockFiles(),
     user: { id: "user-1", timezone: "UTC" },
     memoryBankId: "bank-1",
+    ...(opts.ctxHttp && { ctxHttp: opts.ctxHttp }),
   });
 }
 
@@ -202,6 +211,51 @@ async def run(inputs, ctx):
     expect(methods).toContain("files.write");
     expect(methods).toContain("files.read");
     expect(methods).toContain("files.list");
+  });
+
+  it("sends ctx.http through the network the runner was built with", async () => {
+    const globalFetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("reached the live network"));
+    try {
+      const resolveHost = vi
+        .fn<NonNullable<SkillRunnerCtxHttp["resolveHost"]>>()
+        .mockResolvedValue([{ address: "104.18.32.7", family: 4 }]);
+      const fetchImpl = vi
+        .fn<NonNullable<SkillRunnerCtxHttp["fetch"]>>()
+        .mockResolvedValue(new Response('{"n": 42}', { status: 200 }));
+      const runner = await makeRunner({ ctxHttp: { resolveHost, fetch: fetchImpl } });
+
+      const manifest = `---
+name: with-http
+description: skill that calls ctx.http.get
+tier: wasm
+inputs:
+  type: object
+  properties: {}
+network:
+  allow:
+    - api.example.com
+---
+`;
+      const body = `
+import json
+
+async def run(inputs, ctx):
+    resp = await ctx.http.get("https://api.example.com/n")
+    return {"status": resp["status"], "n": json.loads(resp["body"])["n"]}
+`;
+      await runner.__registerForTests({ name: "with-http", manifestSource: manifest, body });
+
+      const result = await runner.invoke({ name: "with-http", inputs: {} });
+      expect(result.status).toBe("success");
+      expect(result.output).toEqual({ status: 200, n: 42 });
+      expect(resolveHost).toHaveBeenCalledWith("api.example.com");
+      expect(fetchImpl).toHaveBeenCalledWith("https://api.example.com/n", expect.anything());
+      expect(globalFetch).not.toHaveBeenCalled();
+    } finally {
+      globalFetch.mockRestore();
+    }
   });
 
   it("rejects ctx.files.read when reads_filesystem is not declared", async () => {

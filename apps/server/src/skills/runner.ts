@@ -11,7 +11,7 @@ import { runGit, withGitAskpass } from "../secrets/git-askpass.js";
 import { DEFAULT_GITHUB_IDENTITY_NAME, resolveGitHubIdentity } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { classifyManifest, STUB_CLASSIFIER_VERSION } from "./classifier.js";
-import { type CtxUser, DefaultCtxHandler } from "./ctx-handler.js";
+import { type CtxUser, DefaultCtxHandler, type DefaultCtxHandlerOptions } from "./ctx-handler.js";
 import {
   hashLockfileContents,
   type LockfileCompiler,
@@ -350,6 +350,15 @@ export interface SkillRunnerOptions {
    * resolver isn't re-run. Set explicitly in tests to swap a stub.
    */
   lockfileCompiler?: LockfileCompiler;
+  /**
+   * The network tier-1 `ctx.http` reaches — how a destination resolves and
+   * how the request is sent. Passed through to every `DefaultCtxHandler`
+   * the runner builds. Omit in production for real DNS and the global
+   * `fetch`; tests inject both so a skill's request never leaves the
+   * process. The allowlist and address checks run against whatever this
+   * answers, so a stub replaces the network, not the policy.
+   */
+  ctxHttp?: Pick<DefaultCtxHandlerOptions, "resolveHost" | "fetch">;
 }
 
 interface SkillLockfileCacheValue {
@@ -407,6 +416,7 @@ export class SkillRunnerImpl implements SkillRunner {
   #depsCacheVolumeName: string | undefined;
   #clock: () => Date;
   #lockfileCompiler: LockfileCompiler | undefined;
+  #ctxHttp: SkillRunnerOptions["ctxHttp"];
   /**
    * Lazily-created warm pool over `#sandbox`. Created on first tier-2
    * invocation, not at boot — keeps cogmo serve startup independent of
@@ -468,6 +478,7 @@ export class SkillRunnerImpl implements SkillRunner {
     }
     this.#poolOptions = opts.poolOptions;
     this.#clock = opts.clock ?? (() => new Date());
+    this.#ctxHttp = opts.ctxHttp;
     this.#ajv = new Ajv({ allErrors: true, strict: false });
     // Explicit override wins; otherwise default to a sandbox-backed
     // compiler when the runtime has both a sandbox and a tier-2 image
@@ -1293,6 +1304,7 @@ export class SkillRunnerImpl implements SkillRunner {
         memory: this.#memory,
         files: this.#files,
         recordContextCall: (call) => this.#runInTx((tx) => this.#store.recordContextCall(tx, call)),
+        ...this.#ctxHttp,
       });
 
       const result = await this.#dispatchToRuntime(skill, cached, opts.inputs, ctxHandler, runId);

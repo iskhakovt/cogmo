@@ -93,7 +93,7 @@ import { createSkillCronFireHandler } from "./skills/cron-fire-handler.js";
 import { createSkillCronTicker } from "./skills/cron-ticker.js";
 import { createSkillDepsReaper } from "./skills/deps-reaper-function.js";
 import { bootstrapSkillsRepo, ensureSkillsCodingRepo } from "./skills/repo.js";
-import { SkillRunnerImpl } from "./skills/runner.js";
+import { SkillRunnerImpl, type SkillRunnerOptions } from "./skills/runner.js";
 import { registerSkillTool, SKILLS_PROMPT_GUIDANCE } from "./skills/skills-tool.js";
 import { DrizzleSkillStore } from "./skills/store/index.js";
 import { DEFAULT_RESOURCE_LIMITS as SKILLS_DEFAULT_RESOURCE_LIMITS } from "./skills/worker-sysbox/host.js";
@@ -123,10 +123,11 @@ import { DrizzleWebSessionStore } from "./web/store/index.js";
  * - `sandboxClientOverride` → read by `bootstrapSandbox` (skips env-driven
  *   backend selection so tests can wire `FakeDaytonaSandboxClient`
  *   without hitting Daytona Cloud or a self-hosted compose).
+ * - `skillCtxHttpOverride` → read by `bootstrapSkillRunner` (the network
+ *   tier-1 skills reach through `ctx.http`).
  *
- * `bootstrapSkillRunner` takes no options today. Adding a new field?
- * Add it to the relevant stage's signature and update this map so the
- * next reader knows where to wire it.
+ * Adding a new field? Add it to the relevant stage's signature and update
+ * this map so the next reader knows where to wire it.
  */
 export interface BootstrapOptions {
   /**
@@ -179,6 +180,14 @@ export interface BootstrapOptions {
   codingAuthOverride?: CodingOrchestratorDeps["loadCodingSandboxEnv"];
   /** Test seam — stub injected by replay tests in lieu of real GitHub. */
   octokitFactory?: (pat: string) => Octokit;
+  /**
+   * Stand-in network for tier-1 `ctx.http` — a resolver and a `fetch` that
+   * answer a skill's request inside the test process, so a suite that
+   * invokes a network-calling skill stays off the public internet. The
+   * allowlist and address checks still run against what it answers.
+   * Production wiring leaves this undefined: real DNS, global `fetch`.
+   */
+  skillCtxHttpOverride?: SkillRunnerOptions["ctxHttp"];
 }
 
 /**
@@ -725,6 +734,7 @@ async function retryBootWarm(
 export async function bootstrapSkillRunner(
   core: CoreDeps,
   sandbox: SandboxDeps,
+  opts: BootstrapOptions = {},
 ): Promise<SkillRunnerHandle> {
   const skillRunner = await SkillRunnerImpl.create({
     store: core.skillStore,
@@ -747,6 +757,7 @@ export async function bootstrapSkillRunner(
       min: env.COGMO_SKILLS_POOL_MIN,
       idleShutdownMs: env.COGMO_SKILLS_POOL_IDLE_SHUTDOWN_MS,
     },
+    ...(opts.skillCtxHttpOverride && { ctxHttp: opts.skillCtxHttpOverride }),
   });
   return { skillRunner };
 }
@@ -1368,7 +1379,7 @@ export async function bootstrap(opts: BootstrapOptions = {}) {
   const core = await bootstrapCore(opts);
   await verifyDependencies(core);
   const sandbox = await bootstrapSandbox(core, opts);
-  const { skillRunner } = await bootstrapSkillRunner(core, sandbox);
+  const { skillRunner } = await bootstrapSkillRunner(core, sandbox, opts);
   const runtime = await bootstrapRuntime(core, sandbox, skillRunner, opts);
 
   // Spread every stage so any field added to a stage interface flows

@@ -71,6 +71,13 @@ export interface DefaultCtxHandlerOptions {
    * the same reason `now` is pluggable.
    */
   resolveHost?: (hostname: string) => Promise<Array<{ address: string; family: number }>>;
+  /**
+   * Sends the `http.request` once the destination has passed the allowlist
+   * and address checks. Injected so a test can answer a skill's request
+   * without the public internet; the checks run ahead of it either way.
+   * Defaults to the global `fetch`, looked up per call.
+   */
+  fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 }
 
 /**
@@ -335,6 +342,7 @@ export class DefaultCtxHandler implements CtxHandler {
   #recordContextCall: DefaultCtxHandlerOptions["recordContextCall"];
   #now: () => string;
   #resolveHost: NonNullable<DefaultCtxHandlerOptions["resolveHost"]>;
+  #fetch: NonNullable<DefaultCtxHandlerOptions["fetch"]>;
   #declaredSecrets: ReadonlySet<string>;
   #allowedHosts: ReadonlyArray<string>;
 
@@ -350,6 +358,7 @@ export class DefaultCtxHandler implements CtxHandler {
     this.#recordContextCall = opts.recordContextCall;
     this.#now = opts.now ?? (() => new Date().toISOString());
     this.#resolveHost = opts.resolveHost ?? ((hostname) => lookup(hostname, { all: true }));
+    this.#fetch = opts.fetch ?? ((input, init) => fetch(input, init));
     this.#declaredSecrets = new Set(
       opts.manifest.secrets.map((s) => (typeof s === "string" ? s : s.name)),
     );
@@ -681,7 +690,7 @@ export class DefaultCtxHandler implements CtxHandler {
 
     let response: Response;
     try {
-      response = await fetch(url, {
+      response = await this.#fetch(url, {
         method,
         ...(headers && { headers }),
         ...(body !== undefined && { body }),
