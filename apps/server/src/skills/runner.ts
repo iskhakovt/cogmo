@@ -351,14 +351,19 @@ export interface SkillRunnerOptions {
    */
   lockfileCompiler?: LockfileCompiler;
   /**
-   * The network tier-1 `ctx.http` reaches — how a destination resolves and
-   * how the request is sent. Passed through to every `DefaultCtxHandler`
-   * the runner builds. Omit in production for real DNS and the global
-   * `fetch`; tests inject both so a skill's request never leaves the
+   * The network `ctx.http` reaches — how a destination resolves and how the
+   * request is sent. Passed to every `DefaultCtxHandler` the runner builds,
+   * so it covers `ctx.http` in both tiers; a tier-2 skill's own sockets
+   * stay on the real network. Omit in production for real DNS and the
+   * global `fetch`; tests inject it so a skill's request never leaves the
    * process. The allowlist and address checks run against whatever this
    * answers, so a stub replaces the network, not the policy.
+   *
+   * Both halves or neither: a resolver alone would pass the address guard
+   * on its own answer while the global `fetch` connects wherever the name
+   * really points.
    */
-  ctxHttp?: Pick<DefaultCtxHandlerOptions, "resolveHost" | "fetch">;
+  ctxHttp?: Required<Pick<DefaultCtxHandlerOptions, "resolveHost" | "fetch">>;
 }
 
 interface SkillLockfileCacheValue {
@@ -1304,7 +1309,13 @@ export class SkillRunnerImpl implements SkillRunner {
         memory: this.#memory,
         files: this.#files,
         recordContextCall: (call) => this.#runInTx((tx) => this.#store.recordContextCall(tx, call)),
-        ...this.#ctxHttp,
+        // Named fields, not a spread: a wider object is assignable to the
+        // option's type, and anything else it carried would override the
+        // handler's manifest or audit binding.
+        ...(this.#ctxHttp && {
+          resolveHost: this.#ctxHttp.resolveHost,
+          fetch: this.#ctxHttp.fetch,
+        }),
       });
 
       const result = await this.#dispatchToRuntime(skill, cached, opts.inputs, ctxHandler, runId);

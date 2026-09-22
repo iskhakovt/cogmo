@@ -221,24 +221,30 @@ describe("DefaultCtxHandler", () => {
     it("refuses a private destination before the injected fetch is reached", async () => {
       // The injected fetch replaces the network, not the policy: the
       // allowlist and address checks run ahead of it on every path.
-      const injected = vi.fn<NonNullable<DefaultCtxHandlerOptions["fetch"]>>();
-      const d = deps();
-      const h = makeHandler(
-        httpManifest(),
-        d,
-        async () => [{ address: "127.0.0.1", family: 4 }],
-        injected,
-      );
-      await expect(
-        h.handle({
-          method: "http.request",
-          args: { method: "GET", url: "http://hindsight.internal:8888/v1/banks" },
-        }),
-      ).rejects.toThrow(/host's own network/);
-      expect(injected).not.toHaveBeenCalled();
-      expect(d.recordContextCall).toHaveBeenCalledWith(
-        expect.objectContaining({ ok: false, error: "blocked_destination" }),
-      );
+      const globalFetch = vi.spyOn(globalThis, "fetch");
+      try {
+        const injected = vi.fn<NonNullable<DefaultCtxHandlerOptions["fetch"]>>();
+        const d = deps();
+        const h = makeHandler(
+          httpManifest(),
+          d,
+          async () => [{ address: "127.0.0.1", family: 4 }],
+          injected,
+        );
+        await expect(
+          h.handle({
+            method: "http.request",
+            args: { method: "GET", url: "http://hindsight.internal:8888/v1/banks" },
+          }),
+        ).rejects.toThrow(/host's own network/);
+        expect(injected).not.toHaveBeenCalled();
+        expect(globalFetch).not.toHaveBeenCalled();
+        expect(d.recordContextCall).toHaveBeenCalledWith(
+          expect.objectContaining({ ok: false, error: "blocked_destination" }),
+        );
+      } finally {
+        globalFetch.mockRestore();
+      }
     });
 
     it.each([

@@ -124,7 +124,7 @@ import { DrizzleWebSessionStore } from "./web/store/index.js";
  *   backend selection so tests can wire `FakeDaytonaSandboxClient`
  *   without hitting Daytona Cloud or a self-hosted compose).
  * - `skillCtxHttpOverride` → read by `bootstrapSkillRunner` (the network
- *   tier-1 skills reach through `ctx.http`).
+ *   skills reach through `ctx.http`).
  *
  * Adding a new field? Add it to the relevant stage's signature and update
  * this map so the next reader knows where to wire it.
@@ -181,7 +181,7 @@ export interface BootstrapOptions {
   /** Test seam — stub injected by replay tests in lieu of real GitHub. */
   octokitFactory?: (pat: string) => Octokit;
   /**
-   * Stand-in network for tier-1 `ctx.http` — a resolver and a `fetch` that
+   * Stand-in network for `ctx.http` — a resolver and a `fetch` that
    * answer a skill's request inside the test process, so a suite that
    * invokes a network-calling skill stays off the public internet. The
    * allowlist and address checks still run against what it answers.

@@ -258,6 +258,52 @@ async def run(inputs, ctx):
     }
   });
 
+  it("takes only the resolver and fetch from ctxHttp, keeping its own audit binding", async () => {
+    // A wider object is assignable to the option's type, so anything else it
+    // carries reaches the runner at runtime. The handler's audit binding,
+    // manifest and the rest must stay the runner's own.
+    const network = {
+      resolveHost: async () => [{ address: "104.18.32.7", family: 4 }],
+      fetch: async () => new Response("{}", { status: 200 }),
+      recordContextCall: async () => undefined,
+    };
+    const runner = await makeRunner({ ctxHttp: network });
+
+    const manifest = `---
+name: http-audited
+description: skill whose ctx.http call must be audited
+tier: wasm
+inputs:
+  type: object
+  properties: {}
+network:
+  allow:
+    - api.example.com
+---
+`;
+    const body = `
+async def run(inputs, ctx):
+    resp = await ctx.http.get("https://api.example.com/n")
+    return {"status": resp["status"]}
+`;
+    await runner.__registerForTests({ name: "http-audited", manifestSource: manifest, body });
+
+    const result = await runner.invoke({ name: "http-audited", inputs: {} });
+    expect(result.status).toBe("success");
+    const calls = await tx((trx) => store.listContextCallsForRun(trx, result.runId));
+    expect(calls.find((c) => c.method === "http.request")?.ok).toBe(true);
+  });
+
+  it("requires both halves of the ctx.http network", () => {
+    // A resolver without a fetch would pass the address guard on the fake
+    // answer while the global fetch connects wherever the name really points.
+    // @ts-expect-error — a half-override must not compile
+    const resolverOnly: SkillRunnerOptions["ctxHttp"] = { resolveHost: async () => [] };
+    // @ts-expect-error — nor the other half
+    const fetchOnly: SkillRunnerOptions["ctxHttp"] = { fetch: async () => new Response() };
+    expect([resolverOnly, fetchOnly]).toHaveLength(2);
+  });
+
   it("rejects ctx.files.read when reads_filesystem is not declared", async () => {
     const files = makeMockFiles();
     const runner = await makeRunner({ files });

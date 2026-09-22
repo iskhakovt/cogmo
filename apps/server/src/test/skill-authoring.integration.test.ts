@@ -388,8 +388,8 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     // is the thing the suite exists to prove.
     const run = await waitForSkillRun(db, skillRow.id, 60_000);
     expect(run.status).toBe("success");
-    // Exact, not just numeric: only the stand-in network answers with this
-    // figure, so a match proves the request never left the process.
+    // Only the stand-in network answers with this exact figure, so a match
+    // proves the skill's request never left the test process.
     const price = (run.output as { price?: unknown } | null)?.price;
     expect(price).toBe(STUB_BTC_USD);
 
@@ -527,7 +527,8 @@ function makeStubSkillNetwork(): NonNullable<BootstrapOptions["skillCtxHttpOverr
     },
     fetch: async (input, init) => {
       const url = new URL(input instanceof Request ? input.url : input);
-      const method = init?.method ?? "GET";
+      // As in `fetch` itself, `init.method` wins over the Request's own.
+      const method = init?.method ?? (input instanceof Request ? input.method : "GET");
       if (method !== "GET" || `${url.origin}${url.pathname}` !== COINGECKO_PRICE_URL) {
         throw new Error(`stand-in network has no route for ${method} ${url.origin}${url.pathname}`);
       }
