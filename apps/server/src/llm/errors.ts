@@ -37,6 +37,21 @@ export class ProviderProtocolError extends Error {
 }
 
 /**
+ * A {@link ProviderProtocolError} for tool arguments the output cap cut off:
+ * the call that failed to parse is the response's last block, and the
+ * response stopped at `max_tokens`. The JSON is unfinished rather than
+ * malformed, so re-requesting it — the stream-truncation replay — sends the
+ * same request into the same cap. The in-loop classifier degrades it
+ * directly instead.
+ */
+export class ToolArgsCutOffError extends ProviderProtocolError {
+  constructor(parseError: ProviderProtocolError) {
+    super(`${parseError.message} (cut off at the output cap)`, parseError);
+    this.name = "ToolArgsCutOffError";
+  }
+}
+
+/**
  * Parse a JSON payload streamed by a provider (e.g. buffered tool-use
  * argument chunks). Try `JSON.parse` first; on failure, run `jsonrepair`
  * (handles trailing commas, unclosed strings within reason, missing

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { ProviderProtocolError } from "./errors.js";
+import { ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
 import { isRetriableProviderError, RefusalError } from "./fallback.js";
 import { OpenAICompatibleProvider } from "./openai-compat.js";
 import type { StreamEvent } from "./types.js";
@@ -618,6 +618,107 @@ describe("OpenAICompatibleProvider", () => {
 
       await expect(collect()).rejects.toBeInstanceOf(ProviderProtocolError);
       await expect(response).rejects.toBeInstanceOf(ProviderProtocolError);
+    });
+
+    // `length` means the cap cut the response off, so the unparseable final
+    // call is unfinished JSON. An earlier call, or any other finish reason,
+    // is malformed JSON.
+    it.each([
+      {
+        label: "the last call of a length-capped stream",
+        failing: 1,
+        finish: "length",
+        cutOff: true,
+      },
+      {
+        label: "an earlier call of a length-capped stream",
+        failing: 0,
+        finish: "length",
+        cutOff: false,
+      },
+      {
+        label: "the last call of a tool_calls stream",
+        failing: 1,
+        finish: "tool_calls",
+        cutOff: false,
+      },
+    ])(
+      "reports unparseable args of $label as cut off: $cutOff",
+      async ({ failing, finish, cutOff }) => {
+        const provider = createProvider();
+        const args = (index: number) => (index === failing ? "}}}]]]" : '{"q":"x"}');
+        mockCreate.mockResolvedValueOnce(
+          mockStream([
+            {
+              model: "m",
+              choices: [
+                {
+                  delta: {
+                    tool_calls: [
+                      { index: 0, id: "call_1", function: { name: "search", arguments: args(0) } },
+                      { index: 1, id: "call_2", function: { name: "write", arguments: args(1) } },
+                    ],
+                  },
+                  finish_reason: null,
+                },
+              ],
+              usage: null,
+            },
+            {
+              model: "m",
+              choices: [{ delta: {}, finish_reason: finish }],
+              usage: { prompt_tokens: 10, completion_tokens: 8 },
+            },
+          ]),
+        );
+
+        const { events, response } = provider.chatStream({
+          model: "m",
+          system: "sys",
+          messages: [{ role: "user", content: "go" }],
+        });
+        const drained = (async () => {
+          for await (const _event of events) {
+            // drain
+          }
+        })();
+
+        const error = await drained.then(
+          () => undefined,
+          (err: unknown) => err,
+        );
+        expect(error).toBeInstanceOf(ProviderProtocolError);
+        expect(error instanceof ToolArgsCutOffError).toBe(cutOff);
+        await expect(response).rejects.toBe(error);
+      },
+    );
+
+    it("reports a length-capped non-streaming response's unparseable final call as cut off", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        model: "m",
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_1",
+                  type: "function",
+                  function: { name: "write", arguments: "}}}]]]" },
+                },
+              ],
+            },
+            finish_reason: "length",
+          },
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 8 },
+      });
+
+      await expect(
+        provider.chat({ model: "m", system: "sys", messages: [{ role: "user", content: "go" }] }),
+      ).rejects.toBeInstanceOf(ToolArgsCutOffError);
     });
   });
 

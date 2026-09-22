@@ -1,7 +1,8 @@
 import { SpanStatusCode, trace } from "@opentelemetry/api";
 import type { Logger } from "pino";
 import * as R from "remeda";
-import { ProviderProtocolError } from "../llm/errors.js";
+import { extractText } from "../llm/content.js";
+import { ProviderProtocolError, ToolArgsCutOffError } from "../llm/errors.js";
 import { RefusalError } from "../llm/fallback.js";
 import type { LlmProvider } from "../llm/provider.js";
 import type {
@@ -9,7 +10,6 @@ import type {
   Message,
   StopReason,
   StreamEvent,
-  TextBlock,
   ToolUseBlock,
   Usage,
 } from "../llm/types.js";
@@ -22,11 +22,13 @@ import {
   classifyVolumeCluster,
   computeIterationFingerprint,
   type DegradeSubtype,
+  formatCutOffToolArgsContent,
   formatVolumeClusterContent,
   freshBudgets,
   type RepairBudgets,
   sha256,
   summarizeToolHistory,
+  truncationNotice,
 } from "./repair.js";
 import type { Service } from "./service.js";
 import {
@@ -146,6 +148,15 @@ export interface AgentLoopResult {
    * `reason: "iteration_cap"` carries the distinguishing label.
    */
   degraded?: { reason: string; subtype: DegradeSubtype | null };
+  /**
+   * Set when the final reply stopped at the output cap (`max_tokens`) with
+   * text worth keeping. It is persisted and delivered like any other, but
+   * its last assistant message ends with a {@link truncationNotice} block —
+   * streamed live and included in `text`. Callers that consume `text` as a
+   * finished artifact must check this flag. Mutually exclusive with
+   * `degraded`.
+   */
+  truncated?: true;
 }
 
 const DEFAULT_MAX_ITERATIONS = 20;
@@ -610,17 +621,8 @@ function buildResult(
   iterations: number,
   streamed: EmittedLedger,
 ): AgentLoopResult {
-  // Extract final text from the last assistant message
   const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
-  let text = "";
-  if (lastAssistant && Array.isArray(lastAssistant.content)) {
-    text = lastAssistant.content
-      .filter((b): b is TextBlock => b.type === "text")
-      .map((b) => b.text)
-      .join("");
-  } else if (lastAssistant && typeof lastAssistant.content === "string") {
-    text = lastAssistant.content;
-  }
+  const text = lastAssistant ? extractText(lastAssistant.content) : "";
 
   const ephemeral = new Set(ephemeralIndices);
   const newMessages = messages
@@ -695,6 +697,9 @@ function buildDegradedResult(
  * - `{ event: "agent.degrade", reason: "iteration_cap", subtype: null }`
  *   — backstop trigger; `subtype: null` distinguishes it from
  *   classifier-driven degrades.
+ * - `{ event: "agent.truncated", maxTokens }` — the final reply stopped at
+ *   the output cap and was kept with a truncation notice; `maxTokens` is
+ *   the cap the loop requested (`null` when it left the provider default).
  *
  * Every emission uses `turnLogger` (bound `runId` + `conversationId`)
  * so the failure-reflector can join logs to `conversation/degraded`
@@ -842,8 +847,9 @@ async function runLlmIteration(
  * In-loop Class C handling: stream errors are classified inside the
  * iteration step (truncated tool-arg JSON → a single non-streaming replay;
  * refusal → degrade). Empty `end_turn` is classified post-stream out here
- * and triggers a single continuation-prompt retry. See `repair.ts` and
- * `design/agent-resilience.md` → Class C.
+ * and triggers a single continuation-prompt retry; `max_tokens` answers a
+ * cut-off tool call, marks a cut-off text reply, or degrades. See
+ * `repair.ts` and `design/agent-resilience.md` → Class C.
  */
 export async function runStreamingAgentLoop(
   params: StreamingAgentLoopParams,
@@ -892,6 +898,9 @@ export async function runStreamingAgentLoop(
 
   while (iterations < maxIterations) {
     iterations++;
+    // Set when the output cap cut off this iteration's last tool call: it is
+    // answered with a synthetic `is_error` tool_result instead of running.
+    let cutOffCall: { toolUseId: string; toolName: string } | null = null;
 
     const chatParams: Parameters<LlmProvider["chat"]>[0] = {
       model,
@@ -950,8 +959,8 @@ export async function runStreamingAgentLoop(
 
     // Post-stream classifier. Runs BEFORE the hasToolUse gate so an empty
     // end_turn that still has a tool_use somehow (unlikely) doesn't trip
-    // the empty-content path. Refusal goes straight to degrade; empty
-    // end_turn appends a synthetic user turn and re-iterates.
+    // the empty-content path, and so a call the output cap cut off is
+    // answered rather than dispatched. See `repair.ts` for the verdicts.
     const outcome = classifyPostStream(iterationContent, iterationStopReason, budgets);
     if (outcome.kind === "degrade") {
       // The just-pushed assistant message is the one that triggered the
@@ -995,9 +1004,56 @@ export async function runStreamingAgentLoop(
         messages.push({ role: "user", content: outcome.instructions.text });
         ephemeralIndices.push(messages.length - 1);
       }
-      // stream_replay was handled in-line in the catch above — no extra
-      // action here.
-      continue;
+      if (outcome.instructions.kind === "tool_args_cut_off") {
+        // The one repair that stays inside the iteration: the cut-off call is
+        // answered below, alongside its intact siblings' real results.
+        cutOffCall = outcome.instructions;
+      } else {
+        // continuation_prompt re-iterates; stream_replay was handled in-line
+        // in the catch above.
+        continue;
+      }
+    }
+    if (outcome.kind === "truncated") {
+      // The reply stays — it has been on the user's screen since it
+      // streamed — and gains a notice, live and in the persisted message.
+      // Its own step for the same reason as `emit-tool-results-iter<N>`: in
+      // the bare body the push would repeat once per remaining boundary.
+      // The log follows the push so it counts delivered notices. The notice
+      // derives from cached content, so every invocation appends the same
+      // block.
+      const notice = truncationNotice(extractText(iterationContent));
+      const emitNotice = async (): Promise<null> => {
+        await onEvent({ type: "text_delta", text: notice });
+        log.warn(
+          { event: "agent.truncated", maxTokens: maxTokens ?? null },
+          "agent loop reply truncated at the output cap",
+        );
+        return null;
+      };
+      if (stepRun) {
+        await stepRun(`truncation-notice-iter${iterations}`, emitNotice);
+      } else {
+        await emitNotice();
+      }
+      streamed.text += notice;
+      messages.pop();
+      messages.push({
+        role: "assistant",
+        content: [...iterationContent, { type: "text", text: notice }],
+      });
+      return {
+        ...buildResult(
+          messages,
+          initialLength,
+          ephemeralIndices,
+          totalUsage,
+          finalModel,
+          iterations,
+          streamed,
+        ),
+        truncated: true,
+      };
     }
 
     // Drive flow on content, not `stop_reason` — see runAgentLoop above.
@@ -1027,6 +1083,16 @@ export async function runStreamingAgentLoop(
     // degrades. See design/agent-resilience.md → Volume cluster
     // trigger.
     const interceptions = computeVolumeClusterInterceptions(messages, initialLength, tools, log);
+    if (cutOffCall) {
+      // Whatever the volume-cluster verdict was for this call, the output cap
+      // is the more specific reason it isn't running.
+      interceptions.set(cutOffCall.toolUseId, {
+        type: "tool_result",
+        toolUseId: cutOffCall.toolUseId,
+        content: formatCutOffToolArgsContent(cutOffCall.toolName),
+        isError: true,
+      });
+    }
 
     // Execute tool calls, emit results, append to messages
     const toolResults = await executeToolCalls(
@@ -1299,6 +1365,13 @@ async function applyStreamReplay(
   try {
     replay = await provider.chat(chatParams);
   } catch (err) {
+    if (err instanceof ToolArgsCutOffError) {
+      return {
+        kind: "degrade",
+        subtype: "max_tokens",
+        reason: "non-streaming replay hit the output token limit during a tool call",
+      };
+    }
     if (err instanceof ProviderProtocolError) {
       return {
         kind: "degrade",

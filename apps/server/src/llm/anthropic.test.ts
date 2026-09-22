@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { logger } from "../logger.js";
 import { AnthropicProvider } from "./anthropic.js";
-import { ProviderProtocolError } from "./errors.js";
+import { ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
 import type { StreamEvent } from "./types.js";
 
 // Mock the Anthropic SDK — use a class so `new Anthropic()` works
@@ -769,6 +769,91 @@ describe("AnthropicProvider", () => {
       // Avoid an unhandled rejection from the parallel response promise.
       await expect(response).rejects.toBeInstanceOf(ProviderProtocolError);
     });
+
+    // The parse failure is held until the stream says whether the cap cut the
+    // block off: only a `max_tokens` stop straight after the failed block is
+    // unfinished JSON. A later block means the model wrote malformed JSON.
+    it.each([
+      {
+        label: "stops at max_tokens right after the failed block",
+        tail: [
+          {
+            type: "message_delta",
+            delta: { stop_reason: "max_tokens" },
+            usage: { output_tokens: 12 },
+          },
+        ],
+        cutOff: true,
+      },
+      {
+        label: "ends its turn normally",
+        tail: [
+          {
+            type: "message_delta",
+            delta: { stop_reason: "tool_use" },
+            usage: { output_tokens: 12 },
+          },
+        ],
+        cutOff: false,
+      },
+      {
+        label: "goes on to another block before hitting the cap",
+        tail: [
+          { type: "content_block_start", index: 1, content_block: { type: "text", text: "" } },
+          {
+            type: "message_delta",
+            delta: { stop_reason: "max_tokens" },
+            usage: { output_tokens: 12 },
+          },
+        ],
+        cutOff: false,
+      },
+    ])(
+      "reports unparseable tool args as cut off only when the stream $label",
+      async ({ tail, cutOff }) => {
+        const provider = createProvider();
+        mockCreate.mockResolvedValueOnce(
+          mockStream([
+            {
+              type: "message_start",
+              message: {
+                model: "claude-sonnet-4-6",
+                usage: { input_tokens: 10, output_tokens: 0 },
+              },
+            },
+            {
+              type: "content_block_start",
+              index: 0,
+              content_block: { type: "tool_use", id: "tu_1", name: "write_file" },
+            },
+            {
+              type: "content_block_delta",
+              index: 0,
+              delta: { type: "input_json_delta", partial_json: "}}}]]]" },
+            },
+            { type: "content_block_stop", index: 0 },
+            ...tail,
+            { type: "message_stop" },
+          ]),
+        );
+
+        const { events, response } = provider.chatStream(defaultParams);
+        const collected: StreamEvent[] = [];
+        const drained = (async () => {
+          for await (const event of events) collected.push(event);
+        })();
+
+        const error = await drained.then(
+          () => undefined,
+          (err: unknown) => err,
+        );
+        expect(error).toBeInstanceOf(ProviderProtocolError);
+        expect(error instanceof ToolArgsCutOffError).toBe(cutOff);
+        // Nothing from the failed block or after it reaches the consumer.
+        expect(collected).toEqual([]);
+        await expect(response).rejects.toBe(error);
+      },
+    );
   });
 
   describe("prompt caching", () => {

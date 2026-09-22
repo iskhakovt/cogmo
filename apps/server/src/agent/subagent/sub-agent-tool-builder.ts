@@ -1,12 +1,12 @@
 import { NonRetriableError } from "inngest";
 import { z } from "zod";
+import { extractText } from "../../llm/content.js";
 import { resolveLimits } from "../../llm/models.js";
 import {
   type LlmProviderResolver,
   ProviderConfigError,
   type ResolvedLlm,
 } from "../../llm/resolver.js";
-import type { ContentBlock } from "../../llm/types.js";
 import type { SubAgent } from "../store/index.js";
 import { defineTool, type ToolSpec } from "../tools.js";
 
@@ -115,10 +115,7 @@ export function buildSubAgentTools(
         });
         // Concatenate the text blocks verbatim — no trim — so exact output
         // fidelity (leading/trailing whitespace, formatting) survives.
-        const text = response.content
-          .filter((b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text")
-          .map((b) => b.text)
-          .join("");
+        const text = extractText(response.content);
         // No text (the model emitted only thinking, refused, or stopped early)
         // is a failed delegation, not an empty answer — throw so the loop
         // records an isError tool_result, rather than handing the orchestrator

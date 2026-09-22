@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { logger } from "../logger.js";
-import { parseToolArgs } from "./errors.js";
+import { ProviderProtocolError, parseToolArgs, ToolArgsCutOffError } from "./errors.js";
 import { withFailureLogging } from "./logging-fetch.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
@@ -68,8 +68,21 @@ export class AnthropicProvider implements LlmProvider {
         let model = "";
         let stopReason: StopReason = "end_turn";
         const usage: Usage = { inputTokens: 0, outputTokens: 0 };
+        // A tool block whose arguments failed to parse, held until the stream
+        // shows whether the output cap cut it off: a response that stops at
+        // `max_tokens` with no further block did, and one that goes on to
+        // another block wrote malformed JSON.
+        let unparsed: ProviderProtocolError | undefined;
 
         for await (const event of stream) {
+          if (unparsed !== undefined) {
+            if (event.type === "message_delta") {
+              const cutOff = fromAnthropicStopReason(event.delta.stop_reason) === "max_tokens";
+              throw cutOff ? new ToolArgsCutOffError(unparsed) : unparsed;
+            }
+            if (event.type === "content_block_start") throw unparsed;
+            continue;
+          }
           switch (event.type) {
             case "message_start":
               model = event.message.model;
@@ -127,6 +140,7 @@ export class AnthropicProvider implements LlmProvider {
               if (toolBlock) {
                 // parseToolArgs wraps SyntaxError as ProviderProtocolError so
                 // the fallback chain doesn't misclassify it as transient.
+                toolBlocks.delete(event.index);
                 let input: unknown;
                 try {
                   input = parseToolArgs(
@@ -135,13 +149,11 @@ export class AnthropicProvider implements LlmProvider {
                     "Anthropic streamed tool_use input",
                   );
                 } catch (parseErr) {
-                  completed = true;
-                  failChatSpan(span, parseErr);
-                  rejectResponse(parseErr);
-                  throw parseErr;
+                  if (!(parseErr instanceof ProviderProtocolError)) throw parseErr;
+                  unparsed = parseErr;
+                  break;
                 }
                 yield { type: "tool_start", id: toolBlock.id, name: toolBlock.name, input };
-                toolBlocks.delete(event.index);
               }
               const thinkingBlock = thinkingBlocks.get(event.index);
               if (thinkingBlock) {
@@ -164,6 +176,7 @@ export class AnthropicProvider implements LlmProvider {
           }
         }
 
+        if (unparsed !== undefined) throw unparsed;
         recordChatUsage(span, providerName, model, usage, stopReason);
         completed = true;
         resolveResponse({ stopReason, model, usage });
