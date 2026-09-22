@@ -858,10 +858,6 @@ describe("runStreamingAgentLoop", () => {
     expect(provider.chatStream).toHaveBeenCalledTimes(2);
   });
 
-  // A tool call in a turn that stopped at max_tokens may be the block the cap
-  // cut off, and its arguments still validate once `jsonrepair` closes them —
-  // so it must not run. Degrading also keeps the tool_use out of history,
-  // where it would be an orphan with no tool_result.
   // A tool call at the end of a capped turn is the block the cap cut off:
   // its arguments still validate once jsonrepair closes them, so running it
   // would act on truncated input. It is answered instead, and the model gets
@@ -1076,6 +1072,33 @@ describe("runStreamingAgentLoop", () => {
     expect(result.streamed.text).toBe(`Step one: install. Step two: conf${notice}`);
     expect(turnLogger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ event: "agent.truncated", maxTokens: 4096 }),
+      expect.any(String),
+    );
+  });
+
+  it("logs the truncation only once its notice has been delivered", async () => {
+    // The log line counts delivered notices: a push that fails takes the
+    // step with it, and the retry would otherwise log the same turn twice.
+    const provider = mockStreamProvider([
+      { events: [{ type: "text_delta", text: "Partial" }], stopReason: "max_tokens" },
+    ]);
+    const turnLogger = mock<Logger>();
+    const boom = new Error("socket closed");
+
+    await expect(
+      testRunStreamingAgentLoop({
+        provider,
+        messages: [{ role: "user", content: "hi" }],
+        tools: new ToolRegistry(),
+        onEvent: async (event) => {
+          if (event.type === "text_delta" && event.text.includes("cut off")) throw boom;
+        },
+        turnLogger,
+      }),
+    ).rejects.toBe(boom);
+
+    expect(turnLogger.warn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ event: "agent.truncated" }),
       expect.any(String),
     );
   });

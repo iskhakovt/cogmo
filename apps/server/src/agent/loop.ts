@@ -1027,16 +1027,17 @@ export async function runStreamingAgentLoop(
       // both live and in the persisted message. The push gets its own step
       // for the same reason as `emit-tool-results-iter<N>`: in the bare body
       // it would repeat once per remaining boundary of the turn. The log line
-      // rides in the same step so it counts truncated turns, not invocations.
-      // The notice is derived from the cached content, so every invocation
-      // appends the same block to the message it hands to persistence.
+      // rides in the same step, after the push, so it counts delivered
+      // notices rather than invocations or failed attempts. The notice is
+      // derived from the cached content, so every invocation appends the
+      // same block to the message it hands to persistence.
       const notice = truncationNotice(extractText(iterationContent));
       const emitNotice = async (): Promise<null> => {
+        await onEvent({ type: "text_delta", text: notice });
         log.warn(
           { event: "agent.truncated", maxTokens: maxTokens ?? null },
           "agent loop reply truncated at the output cap",
         );
-        await onEvent({ type: "text_delta", text: notice });
         return null;
       };
       if (stepRun) {
