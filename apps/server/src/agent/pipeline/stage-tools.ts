@@ -33,6 +33,20 @@ const log = logger.child({ component: "pipeline.stage-tools" });
 const FORBIDDEN_IN_STAGE: ReadonlySet<string> = new Set(PIPELINE_TOOL_NAMES);
 
 /**
+ * Drop the tools a turn inside a live run may never have, whatever stage it
+ * sits on. A gate turn is an ordinary turn in every other respect — the user
+ * is deciding, and can ask anything about what they are approving — but the
+ * run is live, so the self-modification denial still applies.
+ */
+export function denyRunForbiddenTools(turnTools: ToolRegistry): ToolRegistry {
+  const allowed = new ToolRegistry();
+  for (const spec of turnTools.snapshot()) {
+    if (!FORBIDDEN_IN_STAGE.has(spec.name)) allowed.register(spec);
+  }
+  return allowed;
+}
+
+/**
  * Build the registry for a turn that belongs to an `agentic` stage.
  *
  * A stage that declares no `tools` inherits the profile's toolset unchanged —
@@ -49,8 +63,7 @@ export function buildStageToolRegistry(
   const matcher = globs === undefined ? () => true : compileToolMatchers(globs);
 
   const scoped = new ToolRegistry();
-  for (const spec of turnTools.snapshot()) {
-    if (FORBIDDEN_IN_STAGE.has(spec.name)) continue;
+  for (const spec of denyRunForbiddenTools(turnTools).snapshot()) {
     if (matcher(spec.name)) scoped.register(spec);
   }
 

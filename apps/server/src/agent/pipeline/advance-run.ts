@@ -10,6 +10,9 @@
  */
 
 import type { Transactor } from "../../db/index.js";
+import { pipelineRunFinished, pipelineStageDue } from "../../inngest/events.js";
+import type { StepRun, StepSendEvent } from "../../inngest/index.js";
+import type { DeliveryRouter } from "../../transport/delivery-router.js";
 import type { PipelineStageContext } from "./load-stage-context.js";
 import type { StageArtifact } from "./run-types.js";
 import type { PipelineRunStore } from "./store/index.js";
@@ -56,4 +59,58 @@ export async function advanceRun(
   return result.kind === "advanced"
     ? { kind: "advanced" as const, toStage, toIteration: context.iteration }
     : { kind: result.kind };
+}
+
+/**
+ * What follows a successful move: hand the next stage to the runner, or tell
+ * the user the run is done. Shared by the two things that end a stage — an
+ * agentic stage's `complete_stage` and a gate's approval — so the emitted ids,
+ * the completion notice and the terminal event cannot drift between them.
+ *
+ * Kept out of {@link advanceRun} because that runs inside a `step.run`: the
+ * persist and the emit stay separate steps, so a retry after the commit
+ * replays only the emit.
+ */
+export async function emitAdvanceFollowUp(
+  deps: { deliveryRouter: Pick<DeliveryRouter, "notifyConversation"> },
+  args: { context: PipelineStageContext; moved: AdvanceRunResult },
+  stepRun: StepRun,
+  stepSendEvent: StepSendEvent,
+): Promise<
+  | { status: "advanced"; toStage: string }
+  | { status: "completed" }
+  | { status: "skipped"; reason: string }
+> {
+  const { context, moved } = args;
+  if (moved.kind === "advanced") {
+    await stepSendEvent("emit-next-stage-due", {
+      ...pipelineStageDue.create({
+        runId: context.runId,
+        stageId: moved.toStage,
+        iteration: moved.toIteration,
+      }),
+      id: `pipeline-stage-due-${context.runId}:${moved.toStage}:${moved.toIteration}`,
+    });
+    return { status: "advanced", toStage: moved.toStage };
+  }
+
+  if (moved.kind === "completed") {
+    await stepRun("notify-run-complete", () =>
+      deps.deliveryRouter.notifyConversation(
+        context.conversationId,
+        `✅ The "${context.pipelineName}" pipeline finished.`,
+      ),
+    );
+    await stepSendEvent("emit-run-finished", {
+      ...pipelineRunFinished.create({
+        runId: context.runId,
+        pipelineName: context.pipelineName,
+        status: "completed",
+      }),
+      id: `pipeline-run-finished-${context.runId}`,
+    });
+    return { status: "completed" };
+  }
+
+  return { status: "skipped", reason: moved.kind };
 }

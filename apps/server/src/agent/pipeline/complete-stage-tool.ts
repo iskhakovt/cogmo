@@ -21,8 +21,18 @@ import type { Stage, StageOutput } from "./types.js";
 
 export const COMPLETE_STAGE_TOOL_NAME = "complete_stage";
 
-/** One process-wide Ajv, same settings as the definition-validation pass. */
-const ajv = new Ajv({ allErrors: true, strict: false });
+/**
+ * A validator is compiled per tool build — i.e. per stage turn — on its own
+ * Ajv instance, never on a shared one. Ajv caches compiled schemas in a Map
+ * keyed by *object identity*, and the schema here is deserialized fresh from
+ * the pinned definition's JSONB on every invocation, so a shared instance
+ * would accumulate one entry per turn forever and, for any schema carrying
+ * `$id`, throw `schema with key or id "…" already exists` on the second
+ * compile — killing the turn from the bare body of `handle-message`.
+ */
+function compileOutputValidator(schema: Record<string, unknown>) {
+  return new Ajv({ allErrors: true, strict: false }).compile(schema);
+}
 
 /** Where a run sits — the coordinates a completion is recorded against. */
 export interface StageCursor {
@@ -68,6 +78,8 @@ function describeOutput(output: StageOutput | undefined): string {
       // Unreachable: `startPipelineRun` refuses a definition declaring these
       // kinds, since nothing produces them until coding-delegation stages land.
       return "This stage's output kind is not supported yet.";
+    default:
+      return output satisfies never;
   }
 }
 
@@ -87,7 +99,7 @@ export function buildCompleteStageTool(stage: Stage, cursor: StageCursor): ToolS
     return build(describe(describeOutput(output)), summarySchema, cursor, () => null);
   }
   if (output.kind === "json") {
-    const validate = ajv.compile(output.schema);
+    const validate = compileOutputValidator(output.schema);
     return build(describe(describeOutput(output)), jsonSchema, cursor, (input) => {
       if (!validate(input.value)) {
         const detail = validate.errors
@@ -98,10 +110,20 @@ export function buildCompleteStageTool(stage: Stage, cursor: StageCursor): ToolS
       return { kind: "json", value: input.value };
     });
   }
-  return build(describe(describeOutput(output)), textSchema, cursor, (input) => ({
-    kind: "text",
-    text: input.text,
-  }));
+  if (output.kind === "text") {
+    return build(describe(describeOutput(output)), textSchema, cursor, (input) => ({
+      kind: "text",
+      text: input.text,
+    }));
+  }
+  // `plan` / `pr_metadata` have no artifact variant to store and no stage can
+  // produce one until coding-delegation stages land. `startPipelineRun`
+  // refuses such definitions, so reaching here means that guard was relaxed
+  // without teaching this builder the new kind — louder than silently
+  // recording a text blob where a plan belongs.
+  throw new Error(
+    `complete_stage: stage "${stage.id}" declares an output kind (${output.kind}) this engine cannot record`,
+  );
 }
 
 /**
@@ -128,7 +150,11 @@ function build<T>(
     durable: true,
     parallelSafe: false,
     sideEffectful: true,
-    invocationBudget: 2,
+    // A rejected `json` artifact is handed back for the model to correct, so
+    // the budget has to cover more than one correction — and this tool is the
+    // stage's only exit, so exhausting it strands the run until the user
+    // speaks again. Matched to `memory_recall`'s retry-shaped budget.
+    invocationBudget: 4,
     handler: async (input, service) => {
       const artifact = toArtifact(input);
       if (typeof artifact === "string") return artifact;

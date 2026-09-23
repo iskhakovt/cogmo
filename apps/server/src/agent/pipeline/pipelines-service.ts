@@ -81,9 +81,9 @@ export interface PipelinesService {
   /**
    * Open a run of the named pipeline's active version in this
    * conversation, and emit the first `pipeline/stage.due`. Persist and
-   * emit are separate: a failure between them leaves a run parked at its
-   * first stage rather than a half-started one, which the stage runner's
-   * cursor check makes safe to re-drive.
+   * emit are separate, so a failure between them leaves a run committed but
+   * un-entered; the retry recognises that run as its own and resumes at the
+   * emit rather than reporting the conversation busy.
    */
   start(args: { name: string }): Promise<Result<StartPipelineResult, PipelinesError>>;
 
@@ -231,6 +231,7 @@ export function createPipelinesService(deps: PipelinesServiceDeps): PipelinesSer
         case "unsupported_feature":
           return err({ kind: "unsupported_feature" as const, detail: result.detail });
         case "started":
+        case "recovered":
           break;
       }
 
@@ -240,9 +241,9 @@ export function createPipelinesService(deps: PipelinesServiceDeps): PipelinesSer
           stageId: result.firstStageId,
           iteration: 0,
         }),
-        // Bus-level dedup: the run row is already committed, so a retried
-        // tool call resolves to the same run and must not enter the first
-        // stage twice.
+        // Bus-level dedup: a retried tool call resolves to the same run —
+        // whether it created it or recovered it — and must not enter the
+        // first stage twice.
         id: `pipeline-stage-due-${result.runId}:${result.firstStageId}:0`,
       });
 
@@ -252,6 +253,7 @@ export function createPipelinesService(deps: PipelinesServiceDeps): PipelinesSer
           name: result.pipelineName,
           version: result.version,
           conversationId: deps.conversationId,
+          recovered: result.kind === "recovered",
         },
         "pipeline run started",
       );

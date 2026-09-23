@@ -10,7 +10,6 @@
  * decision and the transition.
  */
 
-import { z } from "zod";
 import { UUID_PATTERN } from "../../util/uuid.js";
 
 export type GateCallbackAction = "approve" | "revise" | "cancel";
@@ -60,12 +59,6 @@ export function parseGateCallback(data: string): ParsedGateCallback | null {
 
 /** Regex for grammY's `bot.callbackQuery(REGEX, ...)` registration. */
 export const GATE_CALLBACK_REGEX = new RegExp(`^pgate:${UUID_PATTERN}:(approve|revise|cancel)$`);
-
-/** Zod schema for the parsed shape — runtime guard at the transport edge. */
-export const ParsedGateCallbackSchema = z.object({
-  runId: z.string().regex(new RegExp(`^${UUID_PATTERN}$`)),
-  action: z.enum(["approve", "revise", "cancel"]),
-});
 
 /**
  * Parse a `/gate <action> [feedback]` command body. Channel-agnostic: the

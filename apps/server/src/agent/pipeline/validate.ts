@@ -118,12 +118,28 @@ export function validateDefinition(
       }
     }
 
-    if (stage.output?.kind === "json" && !ajv.validateSchema(stage.output.schema)) {
-      const detail = ajv.errors?.map((e) => `${e.instancePath || "/"} ${e.message}`).join("; ");
-      issues.push({
-        path: at("output.schema"),
-        message: `not a valid JSON Schema: ${detail ?? "unknown error"}`,
-      });
+    if (stage.output?.kind === "json") {
+      if (ajv.validateSchema(stage.output.schema)) {
+        // The artifact travels as a JSON object — `complete_stage` takes it
+        // as one and `StageArtifactSchema` stores it as one — so a schema
+        // rooted at an array or a scalar is unsatisfiable at run time: the
+        // model could never produce a value that passes both. Caught here,
+        // where the user is still holding the preview, rather than as a
+        // stage that can be entered but never completed.
+        const root = stage.output.schema.type;
+        if (root !== undefined && root !== "object") {
+          issues.push({
+            path: at("output.schema.type"),
+            message: `a json stage output must be an object at its root; got "${String(root)}". Wrap it in an object (e.g. { "type": "object", "properties": { "items": … } }).`,
+          });
+        }
+      } else {
+        const detail = ajv.errors?.map((e) => `${e.instancePath || "/"} ${e.message}`).join("; ");
+        issues.push({
+          path: at("output.schema"),
+          message: `not a valid JSON Schema: ${detail ?? "unknown error"}`,
+        });
+      }
     }
 
     if (stage.wait !== undefined && !ctx.knownEventSources.includes(stage.wait.event)) {

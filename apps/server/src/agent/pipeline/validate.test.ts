@@ -78,6 +78,29 @@ describe("validateDefinition", () => {
     expect(issues.some((i) => i.path === "stages[0].output.schema")).toBe(true);
   });
 
+  it("flags a json output rooted at an array — the artifact travels as an object", () => {
+    const def = validPipelineDefinition();
+    stage(def, 0).output = {
+      kind: "json",
+      schema: { type: "array", items: { type: "string" } },
+    };
+    const issues = validateDefinition(def, CTX);
+    expect(issues.some((i) => i.path === "stages[0].output.schema.type")).toBe(true);
+  });
+
+  it("flags a json output rooted at a scalar", () => {
+    const def = validPipelineDefinition();
+    stage(def, 0).output = { kind: "json", schema: { type: "string" } };
+    const issues = validateDefinition(def, CTX);
+    expect(issues.some((i) => i.path === "stages[0].output.schema.type")).toBe(true);
+  });
+
+  it("accepts a json output that declares no root type", () => {
+    const def = validPipelineDefinition();
+    stage(def, 0).output = { kind: "json", schema: { properties: { a: { type: "string" } } } };
+    expect(validateDefinition(def, CTX)).toEqual([]);
+  });
+
   it("accepts a valid JSON Schema on a json output", () => {
     const def = validPipelineDefinition();
     stage(def, 0).output = {

@@ -104,6 +104,28 @@ describe("runPipelineStage — gate", () => {
     expect(emitted.id).toBe("pipeline-gate-requested-run-1:plan-gate:0");
   });
 
+  it("carries revise feedback into the gate prompt when the revise landed on a gate", async () => {
+    // Two adjacent gates: a revise at the second sends the run back to the
+    // first, which is a gate. The feedback has nowhere else to appear.
+    const { deps, deliveryRouter } = makeDeps(
+      pipelineRunRow({ currentStage: "plan-gate", iteration: 1 }),
+    );
+    const { stepSendEvent } = recordingStepSendEvent();
+
+    await runPipelineStage(
+      deps,
+      { ...AT_GATE, iteration: 1, note: "the budget line is wrong" },
+      stepRun,
+      stepSendEvent,
+    );
+
+    const [, prompt] = expectDefined(
+      deliveryRouter.notifyConversation.mock.calls[0],
+      "gate prompt delivery",
+    );
+    expect(prompt).toContain("the budget line is wrong");
+  });
+
   it("treats an already-parked run as this step replaying, not a conflict", async () => {
     const { deps, runStore, deliveryRouter } = makeDeps(
       pipelineRunRow({ currentStage: "plan-gate", status: "waiting_gate" }),

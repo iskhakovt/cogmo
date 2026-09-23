@@ -123,12 +123,31 @@ describe("resolvePipelineGate — revise", () => {
     expect(expectDefined(sent[0], "stage.due emission").data).not.toHaveProperty("note");
   });
 
+  it("re-requests the keyboard when a revise has nowhere to go", async () => {
+    // The tap was already accepted at the transport, so the channel cleared
+    // its buttons before this ran; the user would otherwise be left with
+    // `/gate` as their only route out of a gate that is still parked.
+    const compiled = linearPipelineDefinition();
+    compiled.stages = compiled.stages.slice(1);
+    const { deps, store } = makeDeps();
+    store.getDefinition.mockResolvedValue(pipelineDefinitionRow({ compiled }));
+    const { sent, stepSendEvent } = recordingStepSendEvent();
+
+    await resolvePipelineGate(deps, { ...AT_GATE, decision: "revise" }, stepRun, stepSendEvent);
+
+    const emitted = expectDefined(sent[0], "gate.requested re-emission");
+    expect(emitted.name).toBe("pipeline/gate.requested");
+    // A distinct id from the runner's original request for this cursor, or
+    // the bus dedup would swallow the replacement.
+    expect(emitted.id).toBe("pipeline-gate-requested-run-1:plan-gate:0:revise-refused");
+  });
+
   it("leaves a first-stage gate parked, since there is nothing to send back to", async () => {
     const compiled = linearPipelineDefinition();
     compiled.stages = compiled.stages.slice(1);
     const { deps, store, runStore, deliveryRouter } = makeDeps();
     store.getDefinition.mockResolvedValue(pipelineDefinitionRow({ compiled }));
-    const { sent, stepSendEvent } = recordingStepSendEvent();
+    const { stepSendEvent } = recordingStepSendEvent();
 
     const result = await resolvePipelineGate(
       deps,
@@ -140,7 +159,6 @@ describe("resolvePipelineGate — revise", () => {
     expect(result).toEqual({ status: "skipped", reason: "no_stage_to_revise" });
     expect(runStore.advanceStage).not.toHaveBeenCalled();
     expect(deliveryRouter.notifyConversation).toHaveBeenCalled();
-    expect(sent).toHaveLength(0);
   });
 });
 

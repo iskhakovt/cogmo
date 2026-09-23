@@ -18,6 +18,7 @@ import { match } from "ts-pattern";
 import type { z } from "zod";
 import type { Transactor } from "../../db/index.js";
 import {
+  pipelineGateRequested,
   pipelineGateResolved,
   pipelineRunFinished,
   pipelineStageDue,
@@ -25,7 +26,7 @@ import {
 import type { StepRun, StepSendEvent } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
 import type { DeliveryRouter } from "../../transport/delivery-router.js";
-import { advanceRun } from "./advance-run.js";
+import { advanceRun, emitAdvanceFollowUp } from "./advance-run.js";
 import { loadStageContextStep } from "./load-stage-context.js";
 import {
   isTerminalPipelineRunStatus,
@@ -87,47 +88,37 @@ export async function resolvePipelineGate(
       const moved = await stepRun("persist-approval", () =>
         advanceRun(deps, { context, artifact: null }),
       );
-      if (moved.kind === "advanced") {
-        await stepSendEvent("emit-next-stage-due", {
-          ...pipelineStageDue.create({
-            runId,
-            stageId: moved.toStage,
-            iteration: moved.toIteration,
-          }),
-          id: `pipeline-stage-due-${runId}:${moved.toStage}:${moved.toIteration}`,
-        });
-        return { status: "approved" as const, toStage: moved.toStage };
-      }
-      if (moved.kind === "completed") {
-        await stepRun("notify-run-complete", () =>
-          deps.deliveryRouter.notifyConversation(
-            context.conversationId,
-            `✅ The "${context.pipelineName}" pipeline finished.`,
-          ),
-        );
-        await stepSendEvent("emit-run-finished", {
-          ...pipelineRunFinished.create({
-            runId,
-            pipelineName: context.pipelineName,
-            status: "completed",
-          }),
-          id: `pipeline-run-finished-${runId}`,
-        });
-        return { status: "completed" as const };
-      }
-      return { status: "skipped" as const, reason: moved.kind };
+      const followUp = await emitAdvanceFollowUp(deps, { context, moved }, stepRun, stepSendEvent);
+      return followUp.status === "advanced"
+        ? { status: "approved" as const, toStage: followUp.toStage }
+        : followUp;
     })
     .with("revise", async () => {
       const backTo = context.priorStageIds.at(-1);
       if (backTo === undefined) {
         // A gate with nothing before it has nothing to send back. The run
-        // stays parked, so the user can still approve or cancel.
+        // stays parked — but the channel that rendered the keyboard tore it
+        // down when the tap was accepted at the transport, before this ran,
+        // so re-request one alongside the explanation rather than leaving
+        // `/gate` as the user's only remaining route.
         await stepRun("notify-nothing-to-revise", () =>
           deps.deliveryRouter.notifyConversation(
             context.conversationId,
             `"${context.pipelineName}" starts at this gate, so there is no earlier stage to revise. Approve or cancel it instead.`,
           ),
         );
+        await stepSendEvent("re-request-gate-keyboard", {
+          ...pipelineGateRequested.create({
+            runId,
+            stageId,
+            iteration,
+            conversationId: context.conversationId,
+            pipelineName: context.pipelineName,
+          }),
+          // Distinct from the runner's own request for this cursor, so the
+          // bus dedup doesn't swallow the replacement keyboard.
+          id: `pipeline-gate-requested-${runId}:${stageId}:${iteration}:revise-refused`,
+        });
         return { status: "skipped" as const, reason: "no_stage_to_revise" };
       }
 

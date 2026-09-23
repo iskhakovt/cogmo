@@ -1,5 +1,5 @@
 import { err, ok } from "neverthrow";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { asBatchAdapter, expectDefined } from "../../test/assertions.js";
 import {
   makeStepRun,
@@ -17,6 +17,13 @@ const activeSession = {
   status: "active",
   receive: "routed",
 };
+
+/** Control commands reply through this rather than the agent. */
+const notify = vi.fn().mockResolvedValue(undefined);
+
+beforeEach(() => {
+  notify.mockClear();
+});
 
 const baseEvent = {
   data: {
@@ -63,7 +70,7 @@ describe("direct adapter", () => {
         const transport = makeTransport({ pipelines: { resolveGate } });
 
         const result = await handleDirectInbound(
-          { transport },
+          { transport, notify },
           { ...baseEvent.data, text: "/gate approve" },
           makeStepRun(),
         );
@@ -84,7 +91,7 @@ describe("direct adapter", () => {
         const transport = makeTransport({ pipelines: { resolveGate } });
 
         await handleDirectInbound(
-          { transport },
+          { transport, notify },
           { ...baseEvent.data, text: "/gate revise use staging" },
           makeStepRun(),
         );
@@ -94,12 +101,53 @@ describe("direct adapter", () => {
         );
       });
 
+      it("tells the user how to use the command instead of going silent", async () => {
+        const resolveGate = vi.fn();
+        const transport = makeTransport({ pipelines: { resolveGate } });
+
+        await handleDirectInbound(
+          { transport, notify },
+          { ...baseEvent.data, text: "/gate maybe" },
+          makeStepRun(),
+        );
+
+        expect(notify).toHaveBeenCalledWith("console-0", expect.stringContaining("/gate approve"));
+      });
+
+      it("reports a refused decision rather than dropping it", async () => {
+        const resolveGate = vi.fn().mockResolvedValue(err({ code: "no_pending_gate" as const }));
+        const transport = makeTransport({ pipelines: { resolveGate } });
+
+        await handleDirectInbound(
+          { transport, notify },
+          { ...baseEvent.data, text: "/gate approve" },
+          makeStepRun(),
+        );
+
+        expect(notify).toHaveBeenCalledWith("console-0", expect.stringContaining("No pipeline"));
+      });
+
+      it("leaves a command that merely starts with /gate to the agent", async () => {
+        const resolveGate = vi.fn();
+        const transport = makeTransport({ pipelines: { resolveGate } });
+
+        const result = await handleDirectInbound(
+          { transport, notify },
+          { ...baseEvent.data, text: "/gateway is down" },
+          makeStepRun(),
+        );
+
+        expect(result).toMatchObject({ status: "emitted" });
+        expect(resolveGate).not.toHaveBeenCalled();
+        expect(transport.emit).toHaveBeenCalled();
+      });
+
       it("rejects an unparseable decision without touching the transport", async () => {
         const resolveGate = vi.fn();
         const transport = makeTransport({ pipelines: { resolveGate } });
 
         const result = await handleDirectInbound(
-          { transport },
+          { transport, notify },
           { ...baseEvent.data, text: "/gate maybe" },
           makeStepRun(),
         );
@@ -114,7 +162,7 @@ describe("direct adapter", () => {
         const transport = makeTransport({ pipelines: { resolveGate } });
 
         const result = await handleDirectInbound(
-          { transport },
+          { transport, notify },
           { ...baseEvent.data, text: "/gate cancel" },
           makeStepRun(),
         );
@@ -127,7 +175,7 @@ describe("direct adapter", () => {
         const transport = makeTransport({ pipelines: { resolveGate } });
 
         await handleDirectInbound(
-          { transport },
+          { transport, notify },
           { ...baseEvent.data, text: "gate approve please" },
           makeStepRun(),
         );
@@ -140,7 +188,7 @@ describe("direct adapter", () => {
     it("resolves session and emits via transport", async () => {
       const transport = makeTransport();
 
-      await handleDirectInbound({ transport }, baseEvent.data, makeStepRun());
+      await handleDirectInbound({ transport, notify }, baseEvent.data, makeStepRun());
 
       expect(transport.resolveSession).toHaveBeenCalledWith("console-0");
       expect(transport.emit).toHaveBeenCalledWith("session-1", "hello", expect.any(Date));
@@ -149,7 +197,7 @@ describe("direct adapter", () => {
     it("creates conversation when no session exists", async () => {
       const transport = makeTransport({ resolveSession: vi.fn().mockResolvedValue(null) });
 
-      await handleDirectInbound({ transport }, baseEvent.data, makeStepRun());
+      await handleDirectInbound({ transport, notify }, baseEvent.data, makeStepRun());
 
       expect(transport.createConversation).toHaveBeenCalledWith("console-0", "console-0", {
         isPrivate: true,
@@ -160,7 +208,7 @@ describe("direct adapter", () => {
       const transport = makeTransport();
 
       const result = await handleDirectInbound(
-        { transport },
+        { transport, notify },
         { ...baseEvent.data, text: "/new" },
         makeStepRun(),
       );

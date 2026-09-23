@@ -39,9 +39,9 @@ import type { DebounceConfig } from "./debounce.js";
 import { extractGeneratedDocuments, extractGeneratedImages } from "./extract-images.js";
 import type { ImageToolsLoader } from "./image-tools-loader.js";
 import type { AgentLoopResult, StreamingAgentLoopParams } from "./loop.js";
-import { loadStageContextStep } from "./pipeline/load-stage-context.js";
+import { loadPipelineStageContext } from "./pipeline/load-stage-context.js";
 import { createPipelinesService } from "./pipeline/pipelines-service.js";
-import { buildStageToolRegistry } from "./pipeline/stage-tools.js";
+import { buildStageToolRegistry, denyRunForbiddenTools } from "./pipeline/stage-tools.js";
 import type { PipelineRunStore, PipelineStore } from "./pipeline/store/index.js";
 import { PIPELINE_TOOL_NAMES } from "./pipeline/tools.js";
 import type { PromptSource } from "./prompt.js";
@@ -345,9 +345,28 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const snapshot = await step.run("load-turn-snapshot", async () => {
         const p = await deps.runInTx((tx) => agentStore.getProfile(tx, profileId));
         if (!p) throw new Error(`Profile not found: ${profileId}`);
+        // Does this turn belong to a pipeline stage? Read here rather than in
+        // its own step: the answer gates which tools the turn composes, so it
+        // has to be memoized (the `complete_stage` tool moves the run
+        // mid-turn, and a bare-body re-read would let a replay compose a
+        // different tool set than the model was offered) — and a step of its
+        // own would add a boundary, hence a full extra re-execution of this
+        // body, to every turn in the system to answer "no".
+        const pipelineStage =
+          deps.pipelineStore && deps.pipelineRunStore
+            ? await loadPipelineStageContext(
+                {
+                  runInTx: deps.runInTx,
+                  store: deps.pipelineStore,
+                  runStore: deps.pipelineRunStore,
+                },
+                { kind: "conversation", conversationId },
+              )
+            : undefined;
         return {
           profileId,
           model: p.model,
+          pipelineStage: pipelineStage ?? null,
           summarizationModel: p.summarizationModel ?? p.model,
         };
       });
@@ -609,27 +628,11 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         ),
       });
 
-      // Does this turn belong to a pipeline stage? Loaded in a durable step
-      // because the answer gates which tools the turn composes, and the
-      // `complete_stage` tool moves the run mid-turn — re-reading it in the
-      // bare body would let a replay compose a different tool set than the
-      // one the model was offered.
-      const pipelineStage =
-        deps.pipelineStore && deps.pipelineRunStore
-          ? await loadStageContextStep(
-              {
-                runInTx: deps.runInTx,
-                store: deps.pipelineStore,
-                runStore: deps.pipelineRunStore,
-              },
-              step.run,
-              { kind: "conversation", conversationId },
-            )
-          : undefined;
       // Only an `agentic` stage scopes the turn. At a gate the run is parked
-      // on the user's decision, so an ordinary turn (full profile toolset, no
-      // `complete_stage`) is exactly right — they can ask questions about
-      // what they are approving.
+      // on the user's decision, so the turn keeps the profile's tools (minus
+      // the authoring ones) — they can ask questions about what they are
+      // approving.
+      const pipelineStage = snapshot.pipelineStage;
       const agenticStage = pipelineStage?.stage.kind === "agentic" ? pipelineStage : undefined;
 
       // Per-turn tool registry — built-ins from bootstrap + the live image
@@ -673,12 +676,16 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         mcpTools,
         toolSetGlobs: turnToolSetGlobs,
       });
-      // A stage narrows the profile's toolset to what it declared and adds
-      // `complete_stage`; every other turn keeps the composed set as-is.
-      const turnTools =
-        agenticStage === undefined
-          ? composedTools
-          : buildStageToolRegistry(composedTools, agenticStage);
+      // An agentic stage narrows the profile's toolset to what it declared
+      // and adds `complete_stage`. A turn inside a live run that is *not* on
+      // an agentic stage — the user chatting while a gate waits on them —
+      // keeps the full composed set minus the pipeline-authoring tools, which
+      // no turn inside a run may call. Turns outside a run keep everything.
+      const turnTools = agenticStage
+        ? buildStageToolRegistry(composedTools, agenticStage)
+        : pipelineStage
+          ? denyRunForbiddenTools(composedTools)
+          : composedTools;
       const toolDefs = turnTools.definitions();
 
       // Profile passed in from the outer read (`profile`) so

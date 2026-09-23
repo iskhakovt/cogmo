@@ -3456,15 +3456,15 @@ describe("pipeline stage turns", () => {
     return registry;
   }
 
-  function pipelineDeps(run: PipelineRunRow | undefined) {
+  /** `wired: false` models a deployment with no pipeline stores at all. */
+  function pipelineDeps(run: PipelineRunRow | undefined, wired = true) {
     const pipelineStore = mock<PipelineStore>();
     pipelineStore.getDefinition.mockResolvedValue(pipelineDefinitionRow());
     const pipelineRunStore = mock<PipelineRunStore>();
     pipelineRunStore.findActiveRunByConversation.mockResolvedValue(run);
     return mockDeps({
       tools: builtInRegistry(),
-      pipelineStore,
-      pipelineRunStore,
+      ...(wired && { pipelineStore, pipelineRunStore }),
       agentStore: mockAgentStore({
         getProfile: vi.fn().mockResolvedValue({
           id: "profile-1",
@@ -3525,7 +3525,14 @@ describe("pipeline stage turns", () => {
     expect(tools.get("complete_stage")).toBeUndefined();
   });
 
-  it("loads the stage inside a durable step so a replay composes the same tools", async () => {
+  it("denies the authoring tools at a gate too — the run is still live", async () => {
+    const tools = await toolsForTurn(
+      pipelineDeps(pipelineRunRow({ currentStage: "plan-gate", status: "waiting_gate" })),
+    );
+    expect(tools.get("define_pipeline")).toBeUndefined();
+  });
+
+  it("reads the stage inside the turn snapshot, adding no step boundary of its own", async () => {
     const deps = pipelineDeps(pipelineRunRow());
     const step = mockStep();
     await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
@@ -3533,18 +3540,18 @@ describe("pipeline stage turns", () => {
       step,
       runId: testRunId,
     });
-    expect(step.run.mock.calls.map(([id]) => id)).toContain("load-pipeline-stage");
+    // Memoized with the profile rather than in its own step: a step per turn
+    // would cost a full extra re-execution of the bare body for every
+    // conversation in the system, pipeline or not.
+    const ids = step.run.mock.calls.map(([id]) => id);
+    expect(ids).toContain("load-turn-snapshot");
+    expect(ids).not.toContain("load-pipeline-stage");
   });
 
-  it("skips the lookup entirely when pipelines aren't wired", async () => {
-    const deps = mockDeps({ tools: builtInRegistry() });
-    const step = mockStep();
-    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
-      event: testEvent,
-      step,
-      runId: testRunId,
-    });
-    expect(step.run.mock.calls.map(([id]) => id)).not.toContain("load-pipeline-stage");
+  it("does not look for a run when pipelines aren't wired", async () => {
+    const tools = await toolsForTurn(pipelineDeps(undefined, false));
+    expect(tools.get("define_pipeline")).toBeDefined();
+    expect(tools.get("complete_stage")).toBeUndefined();
   });
 });
 

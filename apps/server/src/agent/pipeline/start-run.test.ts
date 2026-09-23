@@ -59,6 +59,60 @@ describe("startPipelineRun", () => {
     expect(runStore.createRun).not.toHaveBeenCalled();
   });
 
+  it("recovers its own committed run when the emit never happened", async () => {
+    // `start_pipeline` runs in a durable step: an attempt can commit the run
+    // row and lose the step ack. The retry must resume at the emit, not
+    // report the conversation busy with the run it just created.
+    const { deps, runStore } = makeDeps();
+    runStore.findActiveRunByConversation.mockResolvedValue(pipelineRunRow());
+
+    const result = await startPipelineRun(deps, ARGS);
+
+    expect(result).toEqual({
+      kind: "recovered",
+      runId: "run-1",
+      pipelineName: "issue-to-pr",
+      version: 2,
+      firstStageId: "gather-context",
+      stageCount: 3,
+    });
+    expect(runStore.createRun).not.toHaveBeenCalled();
+  });
+
+  it("refuses a run of a different pipeline sitting on a same-named first stage", async () => {
+    const { deps, runStore } = makeDeps();
+    runStore.findActiveRunByConversation.mockResolvedValue(
+      pipelineRunRow({ definitionId: "def-other" }),
+    );
+
+    const result = await startPipelineRun(deps, ARGS);
+
+    expect(result).toMatchObject({ kind: "run_already_active" });
+    expect(runStore.createRun).not.toHaveBeenCalled();
+  });
+
+  it("refuses a first-stage run that has already produced an artifact", async () => {
+    const { deps, runStore } = makeDeps();
+    runStore.findActiveRunByConversation.mockResolvedValue(
+      pipelineRunRow({ stageOutputs: { "gather-context": { kind: "text", text: "done" } } }),
+    );
+
+    const result = await startPipelineRun(deps, ARGS);
+
+    expect(result).toMatchObject({ kind: "run_already_active" });
+  });
+
+  it("refuses a parked gate even when it sits on the first stage", async () => {
+    const { deps, runStore } = makeDeps();
+    runStore.findActiveRunByConversation.mockResolvedValue(
+      pipelineRunRow({ status: "waiting_gate" }),
+    );
+
+    const result = await startPipelineRun(deps, ARGS);
+
+    expect(result).toMatchObject({ kind: "run_already_active" });
+  });
+
   it("refuses a second run while one is live in the conversation", async () => {
     const { deps, store, runStore } = makeDeps();
     runStore.findActiveRunByConversation.mockResolvedValue(
@@ -67,11 +121,7 @@ describe("startPipelineRun", () => {
 
     const result = await startPipelineRun(deps, ARGS);
 
-    expect(result).toEqual({
-      kind: "run_already_active",
-      runId: "run-1",
-      currentStage: "plan-gate",
-    });
+    expect(result).toMatchObject({ kind: "run_already_active", runId: "run-1" });
     expect(runStore.createRun).not.toHaveBeenCalled();
     expect(store.getActiveDefinitionByName).toHaveBeenCalled();
   });

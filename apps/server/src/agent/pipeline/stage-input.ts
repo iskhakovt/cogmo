@@ -75,6 +75,8 @@ export interface GatePromptArgs {
   stage: Stage;
   stageIndex: number;
   stageCount: number;
+  /** Revise feedback, when the run re-entered this gate carrying one. */
+  note?: string;
 }
 
 /**
@@ -84,8 +86,9 @@ export interface GatePromptArgs {
  */
 export function buildGatePrompt(args: GatePromptArgs): string {
   const instructions = args.stage.instructions ?? "Approve to continue.";
+  const note = args.note === undefined ? "" : `\n\n## Revision requested\n\n${args.note}`;
   return (
-    `⏸️ ${header(args)} — waiting on you\n\n${instructions}\n\n` +
+    `⏸️ ${header(args)} — waiting on you\n\n${instructions}${note}\n\n` +
     "Approve to continue, revise to send it back with feedback, or cancel the run. " +
     "Use the buttons, or reply `/gate approve`, `/gate revise <feedback>`, `/gate cancel`."
   );

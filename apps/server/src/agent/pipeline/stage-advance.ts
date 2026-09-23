@@ -12,15 +12,11 @@
 import type { Inngest } from "inngest";
 import type { z } from "zod";
 import type { Transactor } from "../../db/index.js";
-import {
-  pipelineRunFinished,
-  pipelineStageCompleted,
-  pipelineStageDue,
-} from "../../inngest/events.js";
+import { pipelineStageCompleted } from "../../inngest/events.js";
 import type { StepRun, StepSendEvent } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
 import type { DeliveryRouter } from "../../transport/delivery-router.js";
-import { advanceRun } from "./advance-run.js";
+import { advanceRun, emitAdvanceFollowUp } from "./advance-run.js";
 import { loadStageContextStep } from "./load-stage-context.js";
 import {
   isTerminalPipelineRunStatus,
@@ -78,38 +74,7 @@ export async function advancePipelineStage(
   }
 
   const moved = await stepRun("persist-advance", () => advanceRun(deps, { context, artifact }));
-
-  if (moved.kind === "advanced") {
-    await stepSendEvent("emit-next-stage-due", {
-      ...pipelineStageDue.create({
-        runId,
-        stageId: moved.toStage,
-        iteration: moved.toIteration,
-      }),
-      id: `pipeline-stage-due-${runId}:${moved.toStage}:${moved.toIteration}`,
-    });
-    return { status: "advanced" as const, toStage: moved.toStage };
-  }
-
-  if (moved.kind === "completed") {
-    await stepRun("notify-run-complete", () =>
-      deps.deliveryRouter.notifyConversation(
-        context.conversationId,
-        `✅ The "${context.pipelineName}" pipeline finished.`,
-      ),
-    );
-    await stepSendEvent("emit-run-finished", {
-      ...pipelineRunFinished.create({
-        runId,
-        pipelineName: context.pipelineName,
-        status: "completed",
-      }),
-      id: `pipeline-run-finished-${runId}`,
-    });
-    return { status: "completed" as const };
-  }
-
-  return { status: "skipped" as const, reason: moved.kind };
+  return emitAdvanceFollowUp(deps, { context, moved }, stepRun, stepSendEvent);
 }
 
 export function createPipelineStageAdvance(deps: PipelineStageAdvanceDeps, inngest: Inngest) {

@@ -120,6 +120,8 @@ describe("buildCompleteStageTool", () => {
     expect(tool.durable).toBe(true);
     expect(tool.sideEffectful).toBe(true);
     expect(tool.parallelSafe).toBe(false);
+    // The stage's only exit has to survive more than one correction round.
+    expect(tool.invocationBudget).toBeGreaterThan(2);
   });
 
   it("throws rather than silently dropping the completion when pipelines are unavailable", async () => {
@@ -135,6 +137,55 @@ describe("buildCompleteStageTool", () => {
     // Empty text is not a handoff; the Zod schema refuses it.
     await expect(tool.handler({ text: "" }, serviceWith(pipelines))).rejects.toThrow();
     expect(pipelines.completeStage).not.toHaveBeenCalled();
+  });
+});
+
+describe("json output schemas", () => {
+  it("compiles the same $id-carrying schema on every turn", () => {
+    // The schema is deserialized fresh from the pinned definition each turn.
+    // A shared Ajv would reject the second compile of an `$id`-carrying
+    // schema — and it is the model-facing compiler that decides whether a
+    // definition carries one.
+    const withId = () => ({
+      $id: "https://cogmo.example/stage-output.json",
+      type: "object",
+      properties: { severity: { type: "string" } },
+      required: ["severity"],
+    });
+    const first = buildCompleteStageTool(
+      stage({ output: { kind: "json", schema: withId() } }),
+      CURSOR,
+    );
+    const second = () =>
+      buildCompleteStageTool(stage({ output: { kind: "json", schema: withId() } }), CURSOR);
+    expect(first.name).toBe("complete_stage");
+    expect(second).not.toThrow();
+  });
+
+  it("still validates after a rebuild, rather than compiling a stale schema", async () => {
+    const pipelines = pipelinesStub();
+    const schema = () => ({
+      $id: "https://cogmo.example/stage-output.json",
+      type: "object",
+      properties: { severity: { type: "string" } },
+      required: ["severity"],
+    });
+    buildCompleteStageTool(stage({ output: { kind: "json", schema: schema() } }), CURSOR);
+    const tool = buildCompleteStageTool(
+      stage({ output: { kind: "json", schema: schema() } }),
+      CURSOR,
+    );
+    const result = await tool.handler({ value: { wrong: 1 } }, serviceWith(pipelines));
+    expect(result).toContain("does not satisfy");
+    expect(pipelines.completeStage).not.toHaveBeenCalled();
+  });
+});
+
+describe("unsupported output kinds", () => {
+  it("refuses to build a tool for an artifact kind it cannot record", () => {
+    expect(() => buildCompleteStageTool(stage({ output: { kind: "plan" } }), CURSOR)).toThrow(
+      /cannot record/,
+    );
   });
 });
 

@@ -83,7 +83,9 @@ export type TimeoutAction = z.infer<typeof TimeoutActionSchema>;
  * deterministically (safe-outputs). `json` carries a compiler-emitted
  * JSON Schema validated structurally at run time — user-shaped handoffs
  * need no Cogmo code change. The schema object itself is checked against
- * the JSON Schema meta-schema in `validate.ts` (ajv), not here.
+ * the JSON Schema meta-schema in `validate.ts` (ajv), not here, along with
+ * the one shape constraint the artifact imposes: an object at its root,
+ * since that is what `complete_stage` accepts and `StageArtifact` stores.
  */
 export const StageOutputSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("plan") }).strict(),

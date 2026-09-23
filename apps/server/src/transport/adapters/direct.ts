@@ -29,11 +29,19 @@ export type DirectInboundResult =
  * `step.run` so an Inngest retry replays from the durable cache.
  */
 export async function handleDirectInbound(
-  deps: { transport: Transport },
+  deps: {
+    transport: Transport;
+    /**
+     * Reply path for control commands, which never reach the agent and so
+     * would otherwise produce nothing a console client can render. Emits a
+     * `directOutbound` the same way `deliver` does.
+     */
+    notify: (platformAddress: string, text: string) => Promise<void>;
+  },
   event: DirectInboundData,
   stepRun: StepRun,
 ): Promise<DirectInboundResult> {
-  const { transport } = deps;
+  const { transport, notify } = deps;
   const { platformAddress, text, platformTs } = event;
 
   if (text === "/new") {
@@ -50,14 +58,20 @@ export async function handleDirectInbound(
   // A gate decision is not conversation input: routing it through `emit`
   // would hand the model a turn where the engine wants a deterministic
   // transition. Same Transport method the Telegram keyboard taps.
-  if (text.startsWith("/gate")) {
-    const parsed = parseGateCommand(text.slice("/gate".length));
+  const gateCommand = /^\/gate(?:\s+([\s\S]*))?$/.exec(text.trim());
+  if (gateCommand) {
+    const parsed = parseGateCommand(gateCommand[1] ?? "");
     if (!parsed) {
-      return { status: "gate_rejected", reason: "usage: /gate approve|revise [feedback]|cancel" };
+      const usage = "usage: /gate approve | /gate revise [feedback] | /gate cancel";
+      await stepRun("gate-usage", () => notify(platformAddress, usage));
+      return { status: "gate_rejected", reason: usage };
     }
     return stepRun("resolve-gate", async () => {
       const existing = await transport.resolveSession(platformAddress);
-      if (!existing) return { status: "gate_rejected" as const, reason: "no active conversation" };
+      if (!existing) {
+        await notify(platformAddress, "No active conversation here.");
+        return { status: "gate_rejected" as const, reason: "no active conversation" };
+      }
       const result = await transport.pipelines.resolveGate({
         target: { kind: "conversation", conversationId: existing.conversationId },
         decision: parsed.action,
@@ -65,8 +79,15 @@ export async function handleDirectInbound(
         ...(parsed.feedback !== undefined && { feedback: parsed.feedback }),
       });
       if (result.isErr()) {
+        await notify(
+          platformAddress,
+          result.error.code === "no_pending_gate"
+            ? "No pipeline is waiting on your decision here."
+            : `Could not answer the gate: ${result.error.code}`,
+        );
         return { status: "gate_rejected" as const, reason: result.error.code };
       }
+      await notify(platformAddress, `Gate ${parsed.action}d for "${result.value.pipelineName}".`);
       logger.info(
         { platformAddress, runId: result.value.runId, decision: parsed.action },
         "direct: pipeline gate resolved",
@@ -107,7 +128,17 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
 
   const inboundFn = inngest.createFunction(
     { id: "direct-inbound", triggers: [directInbound] },
-    async ({ event, step }) => handleDirectInbound({ transport }, event.data, step.run),
+    async ({ event, step }) =>
+      handleDirectInbound(
+        {
+          transport,
+          notify: async (platformAddress, content) => {
+            await inngest.send(directOutbound.create({ platformAddress, content }));
+          },
+        },
+        event.data,
+        step.run,
+      ),
   );
 
   return {

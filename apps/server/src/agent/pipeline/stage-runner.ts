@@ -110,10 +110,14 @@ export async function runPipelineStage(
         const result = await deps.runInTx((tx) =>
           deps.runStore.transitionStatus(tx, runId, "running", "waiting_gate"),
         );
-        // `stale` at `waiting_gate` is this same step replaying after a
-        // lost ack — the run is already parked where we want it. Any
-        // other stale status means something else moved the run, and
-        // posting a gate prompt for it would mislead the user.
+        // `stale` at `waiting_gate` means the run is already parked where
+        // this wants it, so the entry proceeds and the prompt is posted.
+        // That is a deliberate trade: a redelivered `stage.due` for a gate
+        // that is already parked re-posts the prompt, which is noise, while
+        // treating it as a skip would swallow the prompt entirely when the
+        // park committed and the post did not — a gate nobody is told about
+        // waits forever. Any other stale status means something else moved
+        // the run, and prompting for it would mislead the user.
         return {
           parked:
             result.kind === "transitioned" ||
@@ -132,6 +136,9 @@ export async function runPipelineStage(
             stage: context.stage,
             stageIndex: context.stageIndex,
             stageCount: context.stageCount,
+            // A revise can land on a gate when two gates sit next to each
+            // other; the feedback belongs in the prompt rather than nowhere.
+            ...(note !== undefined && { note }),
           }),
         ),
       );

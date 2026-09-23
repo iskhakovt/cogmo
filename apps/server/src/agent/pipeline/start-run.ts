@@ -30,7 +30,8 @@ export interface StartPipelineRunArgs {
 
 export type StartPipelineRunResult =
   | {
-      kind: "started";
+      /** `recovered` is a run this same call already committed — see below. */
+      kind: "started" | "recovered";
       runId: string;
       pipelineName: string;
       version: number;
@@ -77,6 +78,13 @@ export async function startPipelineRun(
     const blocker = unsupported(definition.compiled);
     if (blocker !== null) return { kind: "unsupported_feature" as const, detail: blocker };
 
+    const firstStage = definition.compiled.stages[0];
+    if (!firstStage) {
+      // Structurally impossible — `PipelineDefinitionSchema` requires at
+      // least one stage — but the pinned blob is data, so this stays total.
+      return { kind: "unsupported_feature" as const, detail: "the definition has no stages" };
+    }
+
     // Checked before the insert so the caller gets a useful answer instead of
     // a 23505 from `uq_pipeline_runs_active_conversation`. The index is still
     // the authority — REPEATABLE READ does not predicate-lock, so two
@@ -84,18 +92,35 @@ export async function startPipelineRun(
     // loser surfaces the constraint violation.
     const active = await deps.runStore.findActiveRunByConversation(tx, args.conversationId);
     if (active) {
+      // A run of this same pinned version, untouched on its first stage, is
+      // this call's own committed work seen again: `start_pipeline` runs in a
+      // durable step, so an attempt that committed the row and then lost the
+      // step ack re-executes here. Reporting it as somebody else's run would
+      // leave it parked forever, because nothing re-drives a run that never
+      // got its first `stage.due` — the caller resumes the emit instead
+      // (`.claude/rules/inngest.md` → a recovery resumes the remaining
+      // phases). Anything further along is a genuine second start.
+      const recoverable =
+        active.definitionId === definition.id &&
+        active.status === "running" &&
+        active.currentStage === firstStage.id &&
+        active.iteration === 0 &&
+        Object.keys(active.stageOutputs).length === 0;
+      if (!recoverable) {
+        return {
+          kind: "run_already_active" as const,
+          runId: active.id,
+          currentStage: active.currentStage,
+        };
+      }
       return {
-        kind: "run_already_active" as const,
+        kind: "recovered" as const,
         runId: active.id,
-        currentStage: active.currentStage,
+        pipelineName: definition.name,
+        version: definition.version,
+        firstStageId: firstStage.id,
+        stageCount: definition.compiled.stages.length,
       };
-    }
-
-    const firstStage = definition.compiled.stages[0];
-    if (!firstStage) {
-      // Structurally impossible — `PipelineDefinitionSchema` requires at
-      // least one stage — but the pinned blob is data, so this stays total.
-      return { kind: "unsupported_feature" as const, detail: "the definition has no stages" };
     }
 
     const run = await deps.runStore.createRun(tx, {
