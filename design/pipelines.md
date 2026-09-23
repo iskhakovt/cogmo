@@ -103,7 +103,7 @@ Compiler hardening (n8n's lesson): the LLM never emits the definition as freefor
 2. **Compile.** Typed LLM contract produces a candidate `PipelineDefinition`.
 3. **Preview.** Cogmo echoes the compiled pipeline as a readable stage list — trigger, numbered stages, gates bolded, loop bounds explicit:
    > Trigger: you say "start the issue pipeline".
-   > 1. Gather context — chat with you until I have enough.
+   > 1. Gather context — read the issue and the code around it.
    > 2. Draft a plan → **gate: your approval, 3d timeout, reminds ×3 then aborts**.
    > 3. Implement (coding delegation) → open PR.
    > 4. Wait for review comments (14d timeout) → address them → back to 4, max 5 rounds.
@@ -236,6 +236,7 @@ Phased as **PROGRESS.md → Phase 8**, four slices mirroring coding delegation's
 - Compiler model/prompt: how much pipeline-design knowledge (gate placement, loop bounds) does the compile contract encode vs. ask the user about during preview?
 - Revise-at-gate semantics: does "Revise" at a gate re-run the prior stage with feedback (cheap) or allow editing the remaining pipeline mid-run (powerful, but mutates a pinned version)? Slice 2 ships Approve / Cancel only; the question reopens with back-edges.
 - Where event-source normalization lives (`src/transport/` adapter vs. a new `src/events/` edge) once the first external webhook/poller source lands.
+- Whether a stage should ever be able to ask the user something. An `agentic` stage is one turn, which is what makes termination structural — the turn ends, the stage ends. A stage that converses would end on an explicit tool call instead, and would need a turn budget to stay bounded. A gate placed *before* a stage covers much of the same ground (ask, approve, then run) without giving that up. See todo.md → User-defined pipelines.
 
 ## Sources `[research]`
 
