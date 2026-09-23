@@ -391,11 +391,10 @@ export interface CodingStore {
   /**
    * Resolve a task's effective `coding_autoapprove_mode` by walking
    * `coding_tasks → conversations → profiles`. Returns `null` when the
-   * task has no conversation (evolution / signal-pipeline triggers) —
-   * the plan orchestrator treats null as `off` since those triggers
-   * already bypass the plan-approval gate by design. Used by the plan
-   * orchestrator to decide whether to auto-stamp `plan_approved_at` once
-   * the plan text is persisted.
+   * task has no conversation, which the plan orchestrator reads as `off`.
+   * Called only for `trigger_source = 'user'` tasks — automated triggers
+   * clear the plan gate on their own terms. Used to decide whether to
+   * stamp `plan_approved_at` in-run once the plan text is persisted.
    */
   getCodingAutoapproveModeForTask(tx: Transaction, taskId: string): Promise<"off" | "on" | null>;
 }

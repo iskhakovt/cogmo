@@ -115,6 +115,10 @@ export const codingTasks = pgTable(
     containerId: uuid("container_id").references(() => containers.id), // set after sandbox.createTaskContainer
     allowPrivilegedRunc: boolean("allow_privileged_runc").notNull(), // explicit at insert (no default)
     plan: text("plan"),
+    // When the plan gate cleared — a human tapping Approve, the profile's
+    // `coding_autoapprove_mode='on'`, or an automated trigger that has no
+    // interactive gate. It records the clearing, not who did it;
+    // `trigger_source` is what distinguishes those. Null until then.
     planApprovedAt: timestamp("plan_approved_at", { withTimezone: true }),
     // Slice 4.0g: PrMetadataSchema = { url, number, branchSha, openedAt };
     // null until the PR step populates it. Replaces the prior

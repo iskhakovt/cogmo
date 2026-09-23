@@ -453,6 +453,99 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
     });
   });
 
+  it("automated trigger: plan clears the gate in-run, execute reaches pending_verify with no human tap", async () => {
+    // `coding/task/plan-approved` is the sole trigger of the execute
+    // orchestrator, and an `evolution` task has no conversation, no
+    // Telegram keyboard and nobody to tap Approve. The plan run therefore
+    // has to clear the gate itself; if it doesn't, the task finishes
+    // planning and stalls with no CLI ever resuming it.
+    const repo = await tx((trx) =>
+      store.insertRepo(trx, {
+        name: "cogmo",
+        localPath: repoPath,
+        defaultBranch: "main",
+        remoteUrl: "git@github.com:user/cogmo.git",
+        devcontainer: null,
+        allowedBackends: ["claude"],
+        verifyCommand: "true",
+        taskTokenBudget: 100_000,
+        taskWallTimeSeconds: 600,
+        maxConcurrentTasks: 1,
+      }),
+    );
+    const task = await tx((trx) =>
+      store.insertTask(trx, {
+        repoId: repo.id,
+        goal: "update CLAUDE.md with the lesson from task X",
+        triggerSource: "evolution",
+        triggerRef: "evo-1",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      }),
+    );
+
+    const { sandbox, createCalls } = fakeSandbox();
+    const backend = flowBackend({
+      planEvents: [
+        { kind: "session_started", sessionId: "sess-evo" },
+        { kind: "plan_ready", plan: "## Plan\n1. Edit CLAUDE.md\n" },
+        { kind: "complete", exitCode: 0, isError: false },
+      ],
+      executeEvents: [
+        { kind: "session_started", sessionId: "sess-evo" },
+        { kind: "tool_result", tool: "Edit", ok: true, summary: "wrote 1 line" },
+        { kind: "complete", exitCode: 0, isError: false },
+      ],
+    });
+    const deps = {
+      runInTx: tx,
+      store,
+      sandbox,
+      backend,
+      devbaseImage: "cogmo/devbase:test",
+      defaultResourceLimits: RESOURCE_LIMITS,
+      taskTtlMs: 60_000,
+      worktreesDir: join(baseDir, "worktrees"),
+      askpassBaseDir: join(baseDir, "askpass"),
+    };
+
+    const sentEvents: { name: string; data: unknown }[] = [];
+    const recordingStepSendEvent = (async (_: string, payload: unknown) => {
+      sentEvents.push(payload as { name: string; data: unknown });
+      return { ids: [] };
+    }) as never;
+
+    const planResult = await runCodingTask({
+      taskId: task.id,
+      runId: "run-plan",
+      deps,
+      stepRun,
+      stepSendEvent: recordingStepSendEvent,
+    });
+    expect(planResult.status).toBe("awaiting_approval");
+
+    const afterPlan = await tx((trx) => store.getTask(trx, task.id));
+    expect(afterPlan?.status).toBe("awaiting_approval");
+    expect(afterPlan?.planApprovedAt).toBeInstanceOf(Date);
+    const approved = sentEvents.filter((e) => e.name === "coding/task/plan-approved");
+    expect(approved).toHaveLength(1);
+    expect(approved[0]?.data).toMatchObject({ taskId: task.id });
+
+    // Straight into execute on that event — no Transport.approvePlan call,
+    // because no human is in this loop.
+    const executeResult = await runCodingExecute({
+      taskId: task.id,
+      runId: "run-execute",
+      deps,
+      stepRun,
+      stepSendEvent,
+      inngest: { send: vi.fn().mockResolvedValue(undefined) },
+    });
+    expect(executeResult.status).toBe("pending_verify");
+    expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("pending_verify");
+    expect(createCalls).toEqual([task.id]); // one container, reused across phases
+  });
+
   it("approve from a different user is rejected; task stays awaiting_approval, no event emitted", async () => {
     const repo = await tx((trx) =>
       store.insertRepo(trx, {

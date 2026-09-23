@@ -584,13 +584,14 @@ describe("runCodingTask", () => {
     expect(sentEvents.find((e) => e.name === "coding/task/plan-approved")).toBeUndefined();
   });
 
-  it("autoapprove=on does NOT fire for evolution-triggered tasks even when the joined profile has it on", async () => {
-    // Defensive: today, evolution tasks have no conversation so the
-    // store join returns null, and the orchestrator's `triggerSource ===
-    // 'user'` guard means autoapprove never even gets resolved. This
-    // test pins both invariants by stitching together an unnatural
-    // combo (evolution trigger + conversation + autoapprove=on) and
-    // asserting the auto-approve emit doesn't fire.
+  it("evolution trigger clears the gate without consulting the profile's autoapprove mode", async () => {
+    // The profile is irrelevant on the automated path: an `evolution`
+    // task clears the gate because its trigger has no interactive gate,
+    // not because someone turned autoapprove on. Pinned by stitching
+    // together an unnatural combo (evolution trigger + conversation +
+    // autoapprove=on) and asserting the orchestrator never runs the
+    // `resolve-autoapprove-mode` step — the emit that follows is the
+    // trigger source's doing, not the profile's.
     const repo = await seedRepo();
     const user = await tx((trx) => agentStore.createUser(trx));
     const profile = await tx((trx) =>
@@ -634,23 +635,31 @@ describe("runCodingTask", () => {
       sentEvents.push(payload as { name: string });
       return { ids: [] };
     }) as never;
+    const stepIds: string[] = [];
+    const recordingStepRun = (async (id: string, fn: () => Promise<unknown>) => {
+      stepIds.push(id);
+      return fn();
+    }) as unknown as typeof stepRun;
 
     const result = await runCodingTask({
       taskId: task.id,
       runId: "run-test",
       deps: makeDeps({ sandbox, backend }),
-      stepRun,
+      stepRun: recordingStepRun,
       stepSendEvent: recordingStepSendEvent,
     });
-    // Evolution path lands at `executing` directly per the existing
-    // trigger-source branch — the autoapprove path is not consulted.
-    expect(result.status).toBe("executing");
+    expect(stepIds).not.toContain("resolve-autoapprove-mode");
+    expect(result.status).toBe("awaiting_approval");
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
-    expect(reloaded?.planApprovedAt).toBeNull();
-    expect(sentEvents.find((e) => e.name === "coding/task/plan-approved")).toBeUndefined();
+    expect(reloaded?.planApprovedAt).toBeInstanceOf(Date);
+    expect(sentEvents.filter((e) => e.name === "coding/task/plan-approved")).toHaveLength(1);
   });
 
-  it("automated trigger (evolution) auto-advances to executing", async () => {
+  it("automated trigger (evolution) clears the gate in-run and hands off to execute", async () => {
+    // The stall this guards against: an automated task that finishes
+    // planning with nobody to approve it and no `coding/task/plan-approved`
+    // emit sits forever, since that event is the sole trigger of
+    // `coding-task-execute`.
     const repo = await seedRepo();
     const task = await tx((trx) =>
       store.insertTask(trx, {
@@ -668,6 +677,11 @@ describe("runCodingTask", () => {
       { kind: "plan_ready", plan: "auto-plan" },
       { kind: "complete", exitCode: 0, isError: false },
     ]);
+    const sentEvents: { name: string; data: unknown; id?: string }[] = [];
+    const recordingStepSendEvent = (async (_: string, payload: unknown) => {
+      sentEvents.push(payload as { name: string; data: unknown; id?: string });
+      return { ids: [] };
+    }) as never;
     // plan_ready needs a non-empty plan and the orchestrator only emits
     // text_delta into the stream, so plan_ready's plan is what matters.
     const result = await runCodingTask({
@@ -675,10 +689,23 @@ describe("runCodingTask", () => {
       runId: "run-test",
       deps: makeDeps({ sandbox, backend }),
       stepRun,
-      stepSendEvent,
+      stepSendEvent: recordingStepSendEvent,
     });
-    expect(result.status).toBe("executing");
-    expect((await tx((trx) => store.getTask(trx, task.id)))?.status).toBe("executing");
+    // Parked where the execute orchestrator's claim expects it, with the
+    // gate already cleared — no human tap exists for this trigger.
+    expect(result.status).toBe("awaiting_approval");
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.status).toBe("awaiting_approval");
+    expect(reloaded?.planApprovedAt).toBeInstanceOf(Date);
+    const approved = sentEvents.filter((e) => e.name === "coding/task/plan-approved");
+    expect(approved).toHaveLength(1);
+    expect(approved[0]?.data).toMatchObject({ taskId: task.id });
+    expect(approved[0]?.id).toBe(`plan-approved-${task.id}`);
+    // The handoff the emit promises: execute's conditional claim fires.
+    const claim = await tx((trx) =>
+      store.transitionTaskStatus(trx, task.id, "awaiting_approval", "executing", "run-execute"),
+    );
+    expect(claim.kind).toBe("transitioned");
   });
 
   it("backend reports error → status=failed, sandbox stopped, plan stream failed", async () => {

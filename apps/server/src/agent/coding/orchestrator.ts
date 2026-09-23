@@ -34,11 +34,13 @@ export type { StepRun, StepSendEvent } from "../../inngest/index.js";
 export interface PlanStreamHandle {
   appendText(delta: string): Promise<void>;
   /**
-   * Finalize the plan stream. `autoApproved` propagates the profile's
-   * `coding_autoapprove_mode = 'on'` decision to subscribers (the
-   * Telegram progress renderer skips the approve/revise/cancel keyboard
-   * when set, since the orchestrator will emit `coding/task/plan-approved`
-   * unattended in the next step).
+   * Finalize the plan stream. `autoApproved` tells subscribers this run
+   * clears the approval gate itself — either the profile carries
+   * `coding_autoapprove_mode = 'on'`, or the task came from an `evolution` /
+   * `signal_pipeline` trigger, which has no interactive gate. The Telegram
+   * progress renderer skips the approve/revise/cancel keyboard when it is
+   * set, since the orchestrator emits `coding/task/plan-approved` unattended
+   * in the next step.
    */
   finalize(plan: string, opts?: { autoApproved?: boolean }): Promise<void>;
   fail(reason: string): Promise<void>;
@@ -127,7 +129,7 @@ export interface CodingOrchestratorResult {
    * happened), and a task cancelled while `plan-cli` was streaming (the
    * worktree, sandbox and askpass were reclaimed on the way out).
    */
-  status: "awaiting_approval" | "executing" | "failed" | "skipped";
+  status: "awaiting_approval" | "failed" | "skipped";
   plan?: string;
   failureReason?: string;
 }
@@ -538,14 +540,21 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       runInTx((tx) => store.setTaskPlan(tx, taskId, result.plan ?? "")),
     );
 
-    // Automated triggers (evolution, signal_pipeline) advance straight to
-    // executing. User-triggered tasks park at awaiting_approval until the
-    // human approves via Telegram — UNLESS the profile has
-    // `coding_autoapprove_mode='on'`, in which case we stamp
-    // `plan_approved_at` and emit `coding/task/plan-approved` directly
-    // (same code path the Telegram approve callback takes). Null mode
-    // (task without conversation — non-user triggers) reads as `off` and
-    // never reaches this branch anyway. Wrapped in `stepRun` so a future
+    // Every trigger parks the plan at `awaiting_approval` — the status
+    // means "plan is ready, the approval gate is what happens next", and
+    // `coding-task-execute` stays the only writer of `executing`. What
+    // differs by trigger is who clears the gate:
+    //
+    //   - `user`, `coding_autoapprove_mode='off'` — the human, by tapping
+    //     Approve on Telegram, which is a separate Inngest run.
+    //   - `user`, `coding_autoapprove_mode='on'` — this run, below.
+    //   - `evolution` / `signal_pipeline` — this run, below. Those triggers
+    //     have no interactive gate by design (the PR merge is their human
+    //     checkpoint), so nobody would ever tap for them.
+    //
+    // Only the user path pays for the autoapprove read: a task without a
+    // conversation resolves to null anyway, and skipping it keeps a step
+    // boundary off the automated path. Wrapped in `stepRun` so a future
     // loosening of `retries: 0` on this function doesn't quietly turn a
     // transient DB blip into a fresh CLI invocation on replay.
     const autoapproveMode =
@@ -554,8 +563,6 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
             runInTx((tx) => store.getCodingAutoapproveModeForTask(tx, taskId)),
           )) ?? "off")
         : "off";
-    const nextStatus: CodingOrchestratorResult["status"] =
-      task.triggerSource === "user" ? "awaiting_approval" : "executing";
     // Conditional on `planning`, not an unguarded write: `plan-cli` is a
     // durable step that runs for minutes, and a Cancel landing inside it
     // takes the `FOR UPDATE` path in `cancelTaskIfActive` and writes
@@ -572,7 +579,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     // task), and supplying one is what widens the store's predicate to adopt
     // an unclaimed row at the target — semantics this step doesn't want.
     const awaiting = await stepRun("set-status-plan-ready", () =>
-      runInTx((tx) => store.transitionTaskStatus(tx, taskId, "planning", nextStatus)),
+      runInTx((tx) => store.transitionTaskStatus(tx, taskId, "planning", "awaiting_approval")),
     );
     // `stale` at the target is this step re-executing after a lost result —
     // carry on. Anything else means the task left `planning` under us, and
@@ -588,7 +595,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       (awaiting.status === "cancelled" || awaiting.status === "failed");
     if (
       awaiting.kind !== "transitioned" &&
-      !(awaiting.kind === "stale" && awaiting.status === nextStatus)
+      !(awaiting.kind === "stale" && awaiting.status === "awaiting_approval")
     ) {
       taskLog.info({ awaiting, ended }, "plan: task left `planning` mid-session — stopping");
       if (!ended) {
@@ -634,20 +641,23 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     // committed, a subscriber error must not regress the task to failed.
     // Durable because two more boundaries follow on the auto-approve path,
     // and a bare-body finalize would re-render the plan message on each.
-    const willAutoApprove = task.triggerSource === "user" && autoapproveMode === "on";
+    const willAutoApprove = task.triggerSource !== "user" || autoapproveMode === "on";
     await stepRun("notify-plan-finalized", async () => {
       await stream
         .finalize(result.plan ?? "", { autoApproved: willAutoApprove })
         .catch((streamErr: unknown) => {
           taskLog.warn(
             { err: streamErr },
-            `plan stream finalize notification failed (task already ${nextStatus})`,
+            "plan stream finalize notification failed (task already awaiting_approval)",
           );
         });
       return null;
     });
-    // Auto-approve: same effect as the Telegram approve callback. Uses
-    // `approvePlanIfPending` so the path is atomic with concurrent
+    // Clear the gate in-run: same two effects as the Telegram approve
+    // callback — stamp `plan_approved_at`, emit `coding/task/plan-approved`.
+    // The timestamp records when the gate cleared, not that a human cleared
+    // it; `trigger_source` plus the profile's mode is what says who did.
+    // Uses `approvePlanIfPending` so the path is atomic with concurrent
     // cancels/manual approvals — if the user managed to tap Cancel in the
     // microseconds between `set-status-plan-ready` and this step, the
     // approve becomes a no-op and the task stays cancelled.
@@ -681,7 +691,10 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
           // idempotency id.
           id: `plan-approved-${taskId}`,
         });
-        taskLog.info("plan auto-approved via profile autoapprove=on");
+        taskLog.info(
+          { triggerSource: task.triggerSource, autoapproveMode },
+          "plan approved in-run — execute handed off",
+        );
       } else {
         taskLog.info(
           { kind: approveResult.kind },
@@ -689,7 +702,7 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
         );
       }
     }
-    return { status: nextStatus, plan: result.plan ?? "" };
+    return { status: "awaiting_approval", plan: result.plan ?? "" };
   } catch (err) {
     const reason = (err as Error).message;
     taskLog.error({ err }, "coding task failed");
