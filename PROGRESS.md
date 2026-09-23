@@ -188,7 +188,7 @@ Cogmo delegates heavy coding tasks (and evolution-driven code changes) to `claud
 - [ ] Vault socket for credentials — disk-based `.git-credentials` replaced with per-task Unix socket helper
 - [ ] GitHub App migration — installation tokens with ~1h expiry
 - [ ] Extract sandbox proxy to sidecar — `cogmo sandbox-proxy` subcommand, tRPC control plane
-- [ ] Automated self-modification surface — admission & rate limiting (global cap, per-source quotas, failure backoff, user-priority scheduler); wire `trigger_source IN ('evolution','signal_pipeline')`; expose steering-rules / prompts direct read/write capabilities
+- [ ] Automated self-modification surface — admission & rate limiting (global cap, per-source quotas, failure backoff, user-priority scheduler); wire `trigger_source IN ('evolution','signal_pipeline')` (the plan→execute handoff for those sources is in place — the plan run clears their gate and emits; what is missing is anything that files such a task); expose steering-rules / prompts direct read/write capabilities
 - [ ] Coding-scoped steering rules in `DefaultPromptSource` — layer `coding-claude` / `coding-codex` profile rules into the prompt skeleton
 
 ### P3 — polish

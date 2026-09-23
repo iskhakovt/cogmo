@@ -90,7 +90,10 @@ contract**. Design every function for the per-boundary model.
     request finished.** The first attempt may have died between two side
     effects, so returning early on "the row already exists" trades a
     duplicate for a permanent stall. Track a recovery point, or make the
-    later phases independently idempotent.
+    later phases independently idempotent. Reference: `planGateEmission`
+    (`src/agent/coding/plan-gate.ts`), where an `already_approved` row
+    still owes the `coding/task/plan-approved` emit that is the sole
+    trigger of the execute orchestrator.
 
   Store under a plain `UNIQUE` and write through `ON CONFLICT DO UPDATE`
   with a no-op SET — not `DO NOTHING`. Under REPEATABLE READ a concurrent
