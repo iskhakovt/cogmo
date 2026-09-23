@@ -15,41 +15,54 @@ Who clears the gate follows from the trigger:
   emit would hold a row claiming to execute with no CLI behind it, and since
   the plan run itself succeeds, nothing would reach `coding-task-reconcile`.
 
-Both in-run paths share one code path: `approvePlanIfPending` stamps
-`plan_approved_at` atomically against a concurrent cancel, then
-`step.sendEvent` emits under the `plan-approved-<taskId>` idempotency id. The
-profile lookup runs only for `trigger_source = 'user'` — an automated task has
-no conversation to join through, and skipping it keeps that step boundary off
-the automated path. `plan_finalized.autoApproved` covers both paths, so the
-approve/revise/cancel keyboard is suppressed for either.
+That decision is an exhaustive `match` over `coding_trigger_source`, so a
+future member is a compile error rather than a silent default into the ungated
+arm — which would hand it an unattended `--permission-mode bypassPermissions`
+session. The profile lookup runs only for `trigger_source = 'user'`: an
+automated task has no conversation to join through, and skipping it keeps that
+step boundary off the automated path.
 
-Both callers that clear the gate — this one and `Transport.coding.approvePlan`,
-the Telegram Approve tap — decide what to emit through `planGateEmission` in
-`src/agent/coding/plan-gate.ts`, so the recovery contract below cannot be
-changed on one and missed on the other.
+Clearing the gate means two things — `approvePlanIfPending` stamps
+`plan_approved_at` atomically against a concurrent cancel, then the event goes
+out under the `plan-approved-<taskId>` idempotency id. Both callers that do it,
+the plan orchestrator and `Transport.coding.approvePlan` behind the Telegram
+tap, decide what to emit through `planGateEmission`
+(`src/agent/coding/plan-gate.ts`), so the rule below holds for both.
 
-The emit also fires when `approvePlanIfPending` reports `already_approved`,
-which is what a re-executed step body sees after an attempt committed the
-stamp and lost its result. The recovery owes the remaining phase: skipping the
-emit there would leave a task holding a plan and a stamp with no execute run,
-and the function returns success, so nothing reconciles it. A duplicate is
-free — the bus dedups on `plan-approved-<taskId>`, and past that window the
-execute claim is conditional on `awaiting_approval`. The event carries the
-row's own timestamp in that case rather than the re-run's.
+**A stamp that is already there still owes an emit.** `already_approved` means
+an earlier attempt committed the stamp and lost its follow-through: a step
+result Inngest never recorded, or a `send` that threw after the transaction
+committed. Since the emit is the only trigger of the execute orchestrator and
+neither caller fails in that state, withholding it leaves a task holding a
+plan, a stamp and no execute run, with nothing to reconcile it. So it emits,
+carrying the row's stored timestamp rather than the caller's fresh one, and a
+second Approve tap recovers a send that failed the first time. Duplicates are
+free: the bus dedups on the idempotency id, and past that window the execute
+claim is conditional on `awaiting_approval`, so a second run finds the first
+one's `executing` and stands down. `not_pending` and `not_found` owe nothing —
+the task was cancelled, moved on under another run, or is gone.
 
 `plan_approved_at` records when the gate cleared, not that a human cleared it.
 `trigger_source` and the profile's mode are what say who did.
+
+`plan_finalized.autoApproved` is true on both in-run paths, so the
+approve/revise/cancel keyboard is suppressed whenever the buttons would be
+misleading.
 
 A flow test drives an `evolution` task from plan through execute to
 `pending_verify` with no `Transport.approvePlan` call in it. Orchestrator tests
 pin that the automated path emits exactly once, carries the right idempotency
 id, never reads the profile's autoapprove mode, and re-emits with the stored
-timestamp when the approve step body re-runs against an already-stamped row.
-The `autoApproved` flag is asserted on all three paths, so inverting it fails a
-test rather than silently rendering buttons nobody can use.
+timestamp when the approve step body re-runs against an already-stamped row;
+transport tests pin the same recovery behind a second tap. The `autoApproved`
+flag is asserted on all three paths, so inverting it fails a test rather than
+silently rendering buttons nobody can use.
 
 Deferred, filed as `p2` in `todo.md`: plan and execute key their askpass
 material on the same `${askpassBaseDir}/<taskId>` directory, which is also the
 container's bind-mount source, so the plan run's `finally` cleanup races
 execute's `provision-askpass` whenever the gate clears in-run. Reachable only
-on `workingTreeTransport === 'git-remote'`.
+on `workingTreeTransport === 'git-remote'`. The review passes over this change
+also filed six unrelated coding-lifecycle findings in `todo.md`, including
+run-branch deletion destroying the only copy of a task's work on that same
+transport.
