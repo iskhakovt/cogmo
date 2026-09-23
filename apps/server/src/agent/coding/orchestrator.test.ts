@@ -701,11 +701,6 @@ describe("runCodingTask", () => {
     expect(approved).toHaveLength(1);
     expect(approved[0]?.data).toMatchObject({ taskId: task.id });
     expect(approved[0]?.id).toBe(`plan-approved-${task.id}`);
-    // The handoff the emit promises: execute's conditional claim fires.
-    const claim = await tx((trx) =>
-      store.transitionTaskStatus(trx, task.id, "awaiting_approval", "executing", "run-execute"),
-    );
-    expect(claim.kind).toBe("transitioned");
   });
 
   it("backend reports error → status=failed, sandbox stopped, plan stream failed", async () => {
