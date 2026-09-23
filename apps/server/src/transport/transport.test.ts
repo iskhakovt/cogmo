@@ -2450,6 +2450,53 @@ describe("createTransport", () => {
       expect(storeCallDate.toISOString()).toBe(eventArg.data.approvedAt);
     });
 
+    it("approvePlan: a second tap recovers an emit lost after the stamp committed", async () => {
+      // `coding/task/plan-approved` is the only trigger of the execute
+      // orchestrator, and this method commits the stamp before sending. A
+      // `send` that throws there leaves a task stamped with no event and no
+      // way back — every later tap reads `already_approved`. So that arm
+      // emits too, carrying the timestamp the row actually holds.
+      const storedAt = new Date("2026-09-23T09:00:00.000Z");
+      const { transport, inngestSend } = buildTransport({
+        task: { conversationId },
+        conversation: { userId: ownerUserId },
+        tapperUserId: ownerUserId,
+        approvePlanIfPending: vi
+          .fn()
+          .mockResolvedValue({ kind: "already_approved", approvedAt: storedAt }),
+      });
+
+      const res = await transport.coding.approvePlan(taskId, "owner-tg-id");
+
+      // The toast is unchanged — the user is told it was already approved —
+      // but the event goes out, which is what a double-tap relies on too.
+      expect(res.isErr()).toBe(true);
+      expect(inngestSend).toHaveBeenCalledTimes(1);
+      expect(inngestSend).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: "coding/task/plan-approved",
+          data: { taskId, approvedAt: storedAt.toISOString() },
+          id: `plan-approved-${taskId}`,
+        }),
+      );
+    });
+
+    it("approvePlan: not_pending emits nothing — the task left awaiting_approval", async () => {
+      const { transport, inngestSend } = buildTransport({
+        task: { conversationId },
+        conversation: { userId: ownerUserId },
+        tapperUserId: ownerUserId,
+        approvePlanIfPending: vi
+          .fn()
+          .mockResolvedValue({ kind: "not_pending", status: "cancelled" }),
+      });
+
+      const res = await transport.coding.approvePlan(taskId, "owner-tg-id");
+
+      expect(res.isErr()).toBe(true);
+      expect(inngestSend).not.toHaveBeenCalled();
+    });
+
     it("approvePlan: identity_rejected when tapper isn't the conversation owner — no store write, no event", async () => {
       const approve = vi.fn();
       const { transport, inngestSend } = buildTransport({
@@ -2476,7 +2523,7 @@ describe("createTransport", () => {
     });
 
     it("approvePlan: task_already_approved on double-tap", async () => {
-      const { transport, inngestSend } = buildTransport({
+      const { transport } = buildTransport({
         task: { conversationId },
         conversation: { userId: ownerUserId },
         tapperUserId: ownerUserId,
@@ -2487,7 +2534,6 @@ describe("createTransport", () => {
 
       const res = await transport.coding.approvePlan(taskId, "owner-tg-id");
       expect(res._unsafeUnwrapErr()).toEqual({ code: "task_already_approved", taskId });
-      expect(inngestSend).not.toHaveBeenCalled();
     });
 
     it("approvePlan: task_not_found when codingStore.getTask returns null", async () => {

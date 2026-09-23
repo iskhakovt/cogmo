@@ -791,9 +791,11 @@ export async function bootstrapRuntime(
       conversationId,
     );
 
-  // Register the durable orchestrator only when the LOCAL-DOCKER sandbox
-  // is available — coding-delegation needs the host-bind-mount + askpass
-  // surface that Phase 3a doesn't expose on Daytona. Phase 3b lifts this.
+  // Register the durable orchestrators only when a coding-capable sandbox
+  // is configured. Both sandbox backends qualify — local-docker via
+  // host-bind-mount worktrees, Daytona via git-as-transport — and the
+  // orchestrators branch on `capabilities.workingTreeTransport`, never on
+  // which sandbox provider is behind it.
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const codingFunctions: any[] = [];
   if (sandbox.codingSandbox) {

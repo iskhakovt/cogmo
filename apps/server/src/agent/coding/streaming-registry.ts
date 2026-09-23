@@ -28,12 +28,14 @@ export type CodingStreamEvent =
       kind: "plan_finalized";
       plan: string;
       /**
-       * `true` when the plan-orchestrator is about to auto-stamp
-       * `plan_approved_at` (profile `coding_autoapprove_mode = 'on'`,
-       * user trigger). Subscribers suppress the approve/revise/cancel
-       * keyboard in that case — the buttons would either be misleading
-       * (Approve is a no-op against an already-approved plan) or
-       * action-at-a-distance (a stray Cancel mid-execute).
+       * `true` when the plan orchestrator is about to stamp
+       * `plan_approved_at` itself — a user trigger whose profile carries
+       * `coding_autoapprove_mode = 'on'`, or an `evolution` /
+       * `signal_pipeline` trigger, which has no interactive gate.
+       * Subscribers suppress the approve/revise/cancel keyboard in that
+       * case — the buttons would either be misleading (Approve is a no-op
+       * against an already-approved plan) or action-at-a-distance (a stray
+       * Cancel mid-execute).
        */
       autoApproved?: boolean;
     }

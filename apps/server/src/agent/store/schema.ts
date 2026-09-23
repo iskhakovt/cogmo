@@ -44,8 +44,9 @@ export const voiceMode = pgEnum("voice_mode", ["auto", "always", "never"]);
  * via `/profile autoapprove`. Visibility is preserved — the plan still
  * streams to Telegram; only the approval round trip is skipped.
  *
- * Scope is limited to `triggerSource = 'user'` tasks: evolution /
- * signal-pipeline triggers already bypass plan approval by design.
+ * Read only for `triggerSource = 'user'` tasks. Evolution /
+ * signal-pipeline triggers have no interactive gate at all, so the plan
+ * orchestrator clears theirs without consulting a profile.
  */
 export const codingAutoapproveMode = pgEnum("coding_autoapprove_mode", ["off", "on"]);
 

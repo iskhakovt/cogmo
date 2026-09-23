@@ -427,10 +427,12 @@ export const codingTaskStart = eventType("coding/task/start", {
 });
 
 /**
- * Coding delegation — user approved the plan via the Telegram inline
- * keyboard (slice 2.0e). The execute orchestrator (slice 2.0f) consumes
- * this event and runs `claude --resume <sid> --permission-mode bypassPermissions`
- * against the same task container.
+ * Coding delegation — the plan gate cleared. Emitted by whichever party
+ * clears it: the Telegram Approve tap, or the plan orchestrator itself for
+ * a profile with `coding_autoapprove_mode='on'` and for `evolution` /
+ * `signal_pipeline` triggers, which have no interactive gate. The execute
+ * orchestrator consumes this event and runs `claude --resume <sid>
+ * --permission-mode bypassPermissions` against the same task container.
  */
 export const codingTaskPlanApproved = eventType("coding/task/plan-approved", {
   schema: z.object({

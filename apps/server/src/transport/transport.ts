@@ -2,6 +2,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
+import { planGateEmission } from "../agent/coding/plan-gate.js";
 import type { CodingStore } from "../agent/coding/store/index.js";
 import type { CompactConversationResult } from "../agent/conversation/compact-conversation.js";
 import { isCoreCompartment } from "../agent/evolution/memory-extraction-schema.js";
@@ -704,8 +705,14 @@ export interface Transport {
    */
   coding: {
     /**
-     * Stamp `plan_approved_at` and emit `coding/task/plan-approved`. Idempotent:
-     * a second tap returns `task_already_approved` instead of re-emitting.
+     * Stamp `plan_approved_at` and emit `coding/task/plan-approved`. A second
+     * tap still returns `task_already_approved` and makes no second state
+     * change, but the event repeats: a stamp that is already there cannot
+     * distinguish a double-tap from a first tap whose emit failed after the
+     * transaction committed, and the emit is the only thing that starts the
+     * execute run. The duplicate collapses at the bus on
+     * `plan-approved-<taskId>`, and past that window the execute claim is
+     * conditional on `awaiting_approval`. See `planGateEmission`.
      */
     approvePlan(
       taskId: string,
@@ -2158,21 +2165,29 @@ export function createTransport(deps: {
         const result = await runInTx((tx) =>
           codingStore.approvePlanIfPending(tx, taskId, approvedAt),
         );
+        // Emit before branching on the outcome — `already_approved` owes an
+        // event too. `planGateEmission` holds that rule for both callers and
+        // explains why.
+        const emission = planGateEmission(result, approvedAt);
+        if (emission) {
+          await inngest.send({
+            name: "coding/task/plan-approved",
+            data: { taskId, approvedAt: emission.approvedAt },
+            // Bus-level dedup, same `<verb>-<taskId>` shape as the
+            // orchestrators' emits. `approvePlanIfPending` above already
+            // makes a double tap a no-op at the DB, but a callback
+            // redelivery past that point would otherwise start a second
+            // execute run — which the `awaiting_approval -> executing`
+            // claim then skips, though collapsing it here is cheaper.
+            id: `plan-approved-${taskId}`,
+          });
+        }
         switch (result.kind) {
           case "approved":
-            await inngest.send({
-              name: "coding/task/plan-approved",
-              data: { taskId, approvedAt: approvedAt.toISOString() },
-              // Bus-level dedup, same `<verb>-<taskId>` shape as the
-              // orchestrators' emits. `approvePlanIfPending` above already
-              // makes a double tap a no-op at the DB, but a callback
-              // redelivery past that point would otherwise start a second
-              // execute run — which the `awaiting_approval -> executing`
-              // claim then skips, though collapsing it here is cheaper.
-              id: `plan-approved-${taskId}`,
-            });
             return ok({ taskId });
           case "already_approved":
+            // The toast still reads "already approved" — accurate whether
+            // the emit above was the first one or a recovery.
             return err({ code: "task_already_approved" as const, taskId });
           case "not_pending":
             return err({
