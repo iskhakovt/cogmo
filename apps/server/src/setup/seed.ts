@@ -26,14 +26,18 @@ const DEFAULT_TOOL_SET = ["*"];
  *
  * Anthropic direct is the adapter with the richest feature support — native
  * token counting (exact compaction budgets rather than a tiktoken estimate)
- * and prompt caching on the system prompt + tool block — and Opus 5.5 is the
- * strongest tool-loop model at a price a single-user deployment can carry.
+ * and prompt caching on the system prompt + tool block. Sonnet 5 is the tier
+ * of that family a personal assistant's mix actually spends its tokens on:
+ * chat, recall, summarising and drafting, where the Opus tier's margin is
+ * small and its input price is double. `/model` moves a profile to
+ * `claude-opus-5-5` for work whose tool chains are long enough that one bad
+ * step compounds.
  *
  * The id has to be one the bundled LiteLLM snapshot knows, or every profile
  * starts on the resolver's conservative 128k/4k fallback and compacts far
  * earlier than it needs to; `seed.test.ts` pins that.
  */
-export const DEFAULT_PROFILE_MODEL = "claude-opus-5-5";
+export const DEFAULT_PROFILE_MODEL = "claude-sonnet-5";
 
 /** Create the default user if none exists. Returns the user ID. */
 export async function ensureDefaultUser(
