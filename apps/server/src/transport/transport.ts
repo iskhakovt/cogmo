@@ -705,8 +705,14 @@ export interface Transport {
    */
   coding: {
     /**
-     * Stamp `plan_approved_at` and emit `coding/task/plan-approved`. Idempotent:
-     * a second tap returns `task_already_approved` instead of re-emitting.
+     * Stamp `plan_approved_at` and emit `coding/task/plan-approved`. A second
+     * tap still returns `task_already_approved` and makes no second state
+     * change, but the event repeats: a stamp that is already there cannot
+     * distinguish a double-tap from a first tap whose emit failed after the
+     * transaction committed, and the emit is the only thing that starts the
+     * execute run. The duplicate collapses at the bus on
+     * `plan-approved-<taskId>`, and past that window the execute claim is
+     * conditional on `awaiting_approval`. See `planGateEmission`.
      */
     approvePlan(
       taskId: string,
