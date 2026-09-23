@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
 import { conversations, messages, profiles, users } from "../agent/store/schema.js";
 import * as schema from "../db/schemas.js";
 import { transactor } from "../db/transactor.js";
+import { DEFAULT_PROFILE_MODEL } from "../setup/seed.js";
 import { DrizzleTransportStore } from "../transport/store/index.js";
 import {
   boundaryPending,
@@ -109,7 +110,7 @@ describe("e2e smoke", () => {
     // the file IS in the image; the bug is in how the bundled module
     // resolves the path.
     //
-    // We seed `claude-opus-5-5` as the default profile's model and
+    // We seed `DEFAULT_PROFILE_MODEL` as the default profile's model and
     // route it via the e2e provider. With the snapshot loaded, the
     // resolver finds LiteLLM data for that id and the CLI prints
     // `litellm`. Without the snapshot (the regressed state), every
@@ -120,7 +121,7 @@ describe("e2e smoke", () => {
       ["exec", containerId, "node", "dist/main.js", "model", "list"],
       { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
     );
-    expect(stdout).toMatch(/claude-opus-5-5/);
+    expect(stdout).toContain(DEFAULT_PROFILE_MODEL);
     // The source column for the seeded model is either `litellm` (both
     // columns from snapshot) or `cw=litellm,mo=litellm` if some future
     // refactor splits — anything matching `litellm` proves the snapshot
