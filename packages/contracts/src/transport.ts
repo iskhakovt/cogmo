@@ -70,7 +70,9 @@ export type TransportError =
   | { code: "mcp_connection_failed"; serverId: string; reason: string }
   | { code: "schedule_not_found"; id: string }
   | { code: "schedule_id_malformed"; id: string }
-  | { code: "evolution_unavailable" };
+  | { code: "evolution_unavailable" }
+  | { code: "pipelines_disabled" }
+  | { code: "no_pending_gate" };
 
 export interface ProfileInput {
   name: string;

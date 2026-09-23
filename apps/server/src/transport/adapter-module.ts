@@ -38,6 +38,16 @@ export interface SkillsApprovalDeps {
 }
 
 /**
+ * What a channel needs to render a pipeline gate's inline keyboard: the
+ * conversation's active sessions. The decision itself goes back through
+ * `Transport.pipelines.resolveGate`, which owns the identity check.
+ */
+export interface PipelineGateDeps {
+  runInTx: Transactor;
+  transportStore: TransportStore;
+}
+
+/**
  * Boundary-hold UX configuration — see `design/transport/sessions.md`.
  * Threaded from the runtime env at registry time; adapters use it to gate
  * when the "Resume previous / Start fresh" prompt fires after an idle
@@ -70,6 +80,12 @@ export interface AdapterDeps {
   codingProgress?: CodingProgressDeps;
   /** Optional — present only when the skills module is wired. */
   skillsApproval?: SkillsApprovalDeps;
+  /**
+   * Optional — channels that can render buttons use it to attach an
+   * Approve / Revise / Cancel keyboard to a parked gate. A channel without
+   * it degrades to the `/gate` command, which every channel has.
+   */
+  pipelineGate?: PipelineGateDeps;
   /**
    * SSE stream registry — present only for the web channel. The bridge the
    * `WebUiAdapter` writes streamed turns through to a tab's open connection;

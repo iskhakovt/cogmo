@@ -18,6 +18,9 @@ import {
 export const PIPELINES_PROMPT_GUIDANCE = `You can turn a user's described multi-stage workflow into a saved pipeline via \`define_pipeline\`. The flow is strictly two-step:
 1. \`define_pipeline\` compiles their description and returns a preview. Show the preview to the user **verbatim** and ask whether to activate. Nothing runs yet.
 2. Only after the user explicitly confirms, call \`activate_pipeline\`. Never activate without that confirmation; if they want changes, call \`define_pipeline\` again with the revised description (it creates a new version).
+3. \`start_pipeline\` opens a run when the user asks for one. Nothing starts a run on its own yet — activating is not starting.
+
+While a run is in flight this conversation belongs to it: each stage arrives as its own message, your tools are narrowed to what that stage declared, and \`complete_stage\` is how you hand the stage's result forward. Take the stage's instructions as the user's, ask them anything you need, and call \`complete_stage\` only when the work is genuinely done. A gate stage is the user's decision alone — never resolve one on their behalf.
 
 Pipelines are for repeatable multi-stage workflows with checkpoints ("draft a plan, wait for my approval, then implement"). For a one-shot reminder or scheduled prompt, use \`schedule_task\` instead.`;
 
@@ -30,6 +33,10 @@ const defineSchema = z.object({
       "The user's pipeline description in their own words — stages, checkpoints, repetition, " +
         "trigger. Pass their intent faithfully; do not pre-structure it into steps yourself.",
     ),
+});
+
+const startSchema = z.object({
+  name: z.string().describe("Pipeline name as returned by list_pipelines."),
 });
 
 const activateSchema = z.object({
@@ -91,9 +98,37 @@ export const activatePipelineTool: ToolSpec = defineTool({
       name: result.value.name,
       version: result.value.version,
       note:
-        "Active. Pipeline execution is not implemented yet — the definition is saved and " +
-        "activated, but runs will not start from any trigger until the run engine ships. " +
-        "Tell the user this honestly if they ask when it will fire.",
+        "Active. Start a run with start_pipeline when the user asks for it — command-triggered " +
+        "runs are the only trigger wired today, so it will not fire on its own.",
+    });
+  },
+});
+
+export const startPipelineTool: ToolSpec = defineTool({
+  name: "start_pipeline",
+  description:
+    "Start a run of an activated pipeline in this conversation. The run takes over the " +
+    "conversation until it finishes: each stage arrives as a message with its instructions, " +
+    "and gates wait for the user's explicit approval. Only one run at a time per conversation.",
+  // Durable: opens a run row and emits the first stage event. Exactly-once
+  // per turn, not once per step boundary after the call.
+  durable: true,
+  schema: startSchema,
+  handler: async (input, service) => {
+    const pipelines = requirePipelines(service);
+    const result = await pipelines.start({ name: input.name });
+    if (result.isErr()) return renderError(result.error);
+    const { runId, name, version, stageCount, firstStageId } = result.value;
+    return JSON.stringify({
+      ok: true,
+      runId,
+      name,
+      version,
+      stages: stageCount,
+      firstStage: firstStageId,
+      note:
+        "The run is open. Its first stage arrives as a separate message in a moment — do not " +
+        "start the stage's work yourself in this reply. Just tell the user the pipeline started.",
     });
   },
 });
@@ -115,6 +150,7 @@ export const listPipelinesTool: ToolSpec = defineTool({
 export const pipelineTools: ReadonlyArray<ToolSpec> = [
   definePipelineTool,
   activatePipelineTool,
+  startPipelineTool,
   listPipelinesTool,
 ];
 
@@ -159,5 +195,11 @@ function renderError(error: PipelinesError): string {
       return `Definition cap reached (${error.current}/${error.limit}). The user must remove pipelines before defining more.`;
     case "not_found":
       return `No pipeline named "${error.name}"${error.version !== undefined ? ` with version ${error.version}` : ""}. Use list_pipelines to see what exists.`;
+    case "no_active_version":
+      return `"${error.name}" has no active version — it was defined but never activated. Show the user the preview from list_pipelines and ask whether to activate it.`;
+    case "run_already_active":
+      return `A run is already in flight in this conversation, sitting at stage "${error.currentStage}". Finish or cancel it before starting another.`;
+    case "unsupported_feature":
+      return `That pipeline can't run yet: ${error.detail}. Tell the user plainly — do not try to work around it by running the stages yourself.`;
   }
 }

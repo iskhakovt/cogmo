@@ -23,8 +23,8 @@ const SLUG_REGEX = /^[a-z0-9]+(-[a-z0-9]+)*$/;
  * ms-style duration constrained to minutes/hours/days/weeks. The
  * constrained grammar excludes ms-style's `M`-ambiguity (months vs
  * minutes) and months/years entirely — engine waits cap at ~1 year
- * anyway. Strings pass to Inngest's `waitForEvent`/`sleep` untouched;
- * the DB-park path parses with {@link parseDurationMs}.
+ * anyway. The engine parks waits in the DB rather than inside a function,
+ * so every duration is read through {@link parseDurationMs}.
  */
 export const DURATION_REGEX = /^\d+(\.\d+)?(m|h|d|w)$/;
 

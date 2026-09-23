@@ -4,7 +4,7 @@ import type { Transactor } from "../../db/index.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import { expectDefined } from "../../test/assertions.js";
 import { createPipelinesService, type PipelinesServiceDeps } from "./pipelines-service.js";
-import type { PipelineDefinitionRow, PipelineStore } from "./store/index.js";
+import type { PipelineDefinitionRow, PipelineRunStore, PipelineStore } from "./store/index.js";
 import { FIXTURE_TOOLS, validPipelineDefinition } from "./test-fixtures.js";
 
 const FAKE_TX = { __mockTx: true } as never;
@@ -38,16 +38,23 @@ function row(overrides: Partial<PipelineDefinitionRow> = {}): PipelineDefinition
 }
 
 function makeDeps(
-  overrides: Partial<Omit<PipelinesServiceDeps, "store">> = {},
-): PipelinesServiceDeps & { store: MockProxy<PipelineStore> } {
+  overrides: Partial<Omit<PipelinesServiceDeps, "store" | "runStore">> = {},
+): PipelinesServiceDeps & {
+  store: MockProxy<PipelineStore>;
+  runStore: MockProxy<PipelineRunStore>;
+} {
   const store = mock<PipelineStore>();
   store.listDefinitions.mockResolvedValue([]);
   store.countDefinitions.mockResolvedValue(0);
   store.insertDefinition.mockResolvedValue(row());
+  const runStore = mock<PipelineRunStore>();
   return {
     runInTx: fakeRunInTx,
     store,
+    runStore,
+    inngest: { send: vi.fn().mockResolvedValue({ ids: [] }) },
     userId: "user-1",
+    conversationId: "conv-1",
     resolveProvider: vi.fn().mockResolvedValue({
       provider: providerReturning([validPipelineDefinition()]),
       limits: {},

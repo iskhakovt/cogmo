@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import { parseGateCommand } from "../../agent/pipeline/gate-keyboard.js";
 import { directInbound, directOutbound } from "../../inngest/events.js";
 import type { StepRun } from "../../inngest/index.js";
 import { logger } from "../../logger.js";
@@ -16,7 +17,9 @@ type DirectInboundData = z.infer<typeof directInbound.schema>;
 
 export type DirectInboundResult =
   | { status: "new_conversation" }
-  | { status: "emitted"; conversationId: string };
+  | { status: "emitted"; conversationId: string }
+  | { status: "gate_resolved"; conversationId: string }
+  | { status: "gate_rejected"; reason: string };
 
 /**
  * Inbound body for the Direct channel — extracted from the Inngest function
@@ -42,6 +45,34 @@ export async function handleDirectInbound(
       }
     });
     return { status: "new_conversation" };
+  }
+
+  // A gate decision is not conversation input: routing it through `emit`
+  // would hand the model a turn where the engine wants a deterministic
+  // transition. Same Transport method the Telegram keyboard taps.
+  if (text.startsWith("/gate")) {
+    const parsed = parseGateCommand(text.slice("/gate".length));
+    if (!parsed) {
+      return { status: "gate_rejected", reason: "usage: /gate approve|revise [feedback]|cancel" };
+    }
+    return stepRun("resolve-gate", async () => {
+      const existing = await transport.resolveSession(platformAddress);
+      if (!existing) return { status: "gate_rejected" as const, reason: "no active conversation" };
+      const result = await transport.pipelines.resolveGate({
+        target: { kind: "conversation", conversationId: existing.conversationId },
+        decision: parsed.action,
+        tapperPlatformHandle: platformAddress,
+        ...(parsed.feedback !== undefined && { feedback: parsed.feedback }),
+      });
+      if (result.isErr()) {
+        return { status: "gate_rejected" as const, reason: result.error.code };
+      }
+      logger.info(
+        { platformAddress, runId: result.value.runId, decision: parsed.action },
+        "direct: pipeline gate resolved",
+      );
+      return { status: "gate_resolved" as const, conversationId: existing.conversationId };
+    });
   }
 
   const session = await stepRun("resolve-session", async () => {

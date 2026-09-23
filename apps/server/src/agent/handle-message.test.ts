@@ -29,6 +29,8 @@ import {
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
 import type { ImageToolsLoader } from "./image-tools-loader.js";
+import type { PipelineRunRow, PipelineRunStore, PipelineStore } from "./pipeline/store/index.js";
+import { pipelineDefinitionRow, pipelineRunRow } from "./pipeline/test-fixtures.js";
 import { ToolRegistry } from "./tools.js";
 
 type InboundReadyData = z.infer<typeof inboundReady.schema>;
@@ -3436,5 +3438,182 @@ describe("createHandleMessage", () => {
       expect(caught).toBeInstanceOf(NonRetriableError);
       expect((caught as NonRetriableError).cause).toBe(badRequest);
     });
+  });
+});
+
+describe("pipeline stage turns", () => {
+  /** Built-ins a stage can narrow from. */
+  function builtInRegistry(): ToolRegistry {
+    const registry = new ToolRegistry();
+    for (const name of ["memory_recall", "web_search", "delegate_coding", "define_pipeline"]) {
+      registry.register({
+        name,
+        description: name,
+        inputSchema: { type: "object", properties: {} },
+        handler: async () => "ok",
+      });
+    }
+    return registry;
+  }
+
+  function pipelineDeps(run: PipelineRunRow | undefined) {
+    const pipelineStore = mock<PipelineStore>();
+    pipelineStore.getDefinition.mockResolvedValue(pipelineDefinitionRow());
+    const pipelineRunStore = mock<PipelineRunStore>();
+    pipelineRunStore.findActiveRunByConversation.mockResolvedValue(run);
+    return mockDeps({
+      tools: builtInRegistry(),
+      pipelineStore,
+      pipelineRunStore,
+      agentStore: mockAgentStore({
+        getProfile: vi.fn().mockResolvedValue({
+          id: "profile-1",
+          userId: null,
+          name: "assistant",
+          basePrompt: "test",
+          model: "claude-sonnet-4-6",
+          summarizationModel: null,
+          extractionModel: null,
+          autoRecall: "heuristic",
+          toolSet: ["*"],
+        }),
+      }),
+    });
+  }
+
+  async function toolsForTurn(deps: HandleMessageDeps): Promise<ToolRegistry> {
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+    return expectDefined(
+      vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+      "runStreamingAgentLoop call",
+    )[0].tools;
+  }
+
+  it("narrows an agentic stage's turn to the tools it declared, plus its exit", async () => {
+    const tools = await toolsForTurn(pipelineDeps(pipelineRunRow()));
+
+    // The fixture's first stage declares memory_recall + web_search.
+    expect(tools.get("memory_recall")).toBeDefined();
+    expect(tools.get("web_search")).toBeDefined();
+    expect(tools.get("delegate_coding")).toBeUndefined();
+    expect(tools.get("complete_stage")).toBeDefined();
+  });
+
+  it("keeps the pipeline-authoring tools out of a stage turn", async () => {
+    const tools = await toolsForTurn(pipelineDeps(pipelineRunRow()));
+    expect(tools.get("define_pipeline")).toBeUndefined();
+  });
+
+  it("leaves an ordinary turn untouched when no run supervises the conversation", async () => {
+    const tools = await toolsForTurn(pipelineDeps(undefined));
+
+    expect(tools.get("delegate_coding")).toBeDefined();
+    expect(tools.get("define_pipeline")).toBeDefined();
+    expect(tools.get("complete_stage")).toBeUndefined();
+  });
+
+  it("does not scope the turn at a gate — the user may ask about what they're approving", async () => {
+    const tools = await toolsForTurn(
+      pipelineDeps(pipelineRunRow({ currentStage: "plan-gate", status: "waiting_gate" })),
+    );
+
+    expect(tools.get("delegate_coding")).toBeDefined();
+    expect(tools.get("complete_stage")).toBeUndefined();
+  });
+
+  it("loads the stage inside a durable step so a replay composes the same tools", async () => {
+    const deps = pipelineDeps(pipelineRunRow());
+    const step = mockStep();
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step,
+      runId: testRunId,
+    });
+    expect(step.run.mock.calls.map(([id]) => id)).toContain("load-pipeline-stage");
+  });
+
+  it("skips the lookup entirely when pipelines aren't wired", async () => {
+    const deps = mockDeps({ tools: builtInRegistry() });
+    const step = mockStep();
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step,
+      runId: testRunId,
+    });
+    expect(step.run.mock.calls.map(([id]) => id)).not.toContain("load-pipeline-stage");
+  });
+});
+
+describe("routing kind for synthetic inbounds", () => {
+  function depsWithInbound(rows: { id: string; content: string; source: string }[]) {
+    return mockDeps({
+      transportStore: mockTransportStore({
+        getUnbatchedInbound: vi.fn().mockResolvedValue(rows),
+      }),
+    });
+  }
+
+  async function routingKindFor(deps: HandleMessageDeps): Promise<string> {
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+    return expectDefined(
+      vi.mocked(deps.deliveryRouter.prepare).mock.calls[0],
+      "deliveryRouter.prepare call",
+    )[0].kind;
+  }
+
+  it("broadcasts a pipeline stage turn — its inbound has no originating session", async () => {
+    const kind = await routingKindFor(
+      depsWithInbound([{ id: "inbound-1", content: "stage", source: "pipeline" }]),
+    );
+    expect(kind).toBe("broadcast");
+  });
+
+  it("broadcasts when a stage's inbound lands inside an open debounce window", async () => {
+    const kind = await routingKindFor(
+      depsWithInbound([
+        { id: "inbound-1", content: "user typing", source: "user" },
+        { id: "inbound-2", content: "stage", source: "pipeline" },
+      ]),
+    );
+    expect(kind).toBe("broadcast");
+  });
+
+  it("still replies to an all-user batch", async () => {
+    const kind = await routingKindFor(
+      depsWithInbound([{ id: "inbound-1", content: "hello", source: "user" }]),
+    );
+    expect(kind).toBe("reply");
+  });
+
+  it("still refuses a scheduled fire that landed in a user-batched turn", async () => {
+    const deps = depsWithInbound([
+      { id: "inbound-1", content: "hello", source: "user" },
+      { id: "inbound-2", content: "reminder", source: "scheduled" },
+    ]);
+    await expect(
+      invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      }),
+    ).rejects.toThrow(/mixed-source/);
+  });
+
+  it("allows a scheduled fire to share a turn with a pipeline stage", async () => {
+    const kind = await routingKindFor(
+      depsWithInbound([
+        { id: "inbound-1", content: "stage", source: "pipeline" },
+        { id: "inbound-2", content: "reminder", source: "scheduled" },
+      ]),
+    );
+    expect(kind).toBe("broadcast");
   });
 });

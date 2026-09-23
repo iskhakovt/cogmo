@@ -37,10 +37,11 @@ export const pipelineDefinitions = pgTable(
 /**
  * Run status (design/pipelines.md → Data Model). The full set is declared
  * up front so slice 3 doesn't pay an `ALTER TYPE ADD VALUE` migration:
- * `queued` (admission control) and `waiting_event` (DB-parked waits) are
- * unused until then. `waiting_gate` IS used in slice 2 — set before the
- * stage runner's `step.waitForEvent` so a parked gate is queryable for
- * `/status` without going through Inngest.
+ * `queued` (admission control) and `waiting_event` (external-event waits)
+ * are unused until then. `waiting_gate` IS used — the stage runner posts
+ * the gate prompt, flips the run to it, and ends; the user's approval
+ * arrives as a fresh event, so no function stays in flight and the parked
+ * gate is queryable without going through Inngest.
  */
 export const pipelineRunStatus = pgEnum("pipeline_run_status", [
   "queued",
@@ -56,27 +57,44 @@ export const pipelineRunStatus = pgEnum("pipeline_run_status", [
  * One pipeline run — the source of truth for an in-flight execution. The
  * pinned `definition_id` carries the stages (in its `compiled` blob) and the
  * owning `user_id`, so no `user_id` is denormalized here (design/pipelines.md
- * → Data Model). `wait_key` / `wait_deadline` arrive with slice 3's DB-parked
- * `wait` stages; slice 2 gates park inside Inngest, not the DB.
+ * → Data Model). `wait_key` / `wait_deadline` arrive with slice 3's
+ * external-event `wait` stages; a gate parks on `status = 'waiting_gate'`
+ * alone, since the resume event names the run.
  */
-export const pipelineRuns = pgTable("pipeline_runs", {
-  id: pk(),
-  definitionId: uuid("definition_id")
-    .notNull()
-    .references(() => pipelineDefinitions.id),
-  // The run's own conversation — gates and progress land here. A run always
-  // owns one (NOT NULL), created at run start; same agent-store module, so a
-  // real FK gives referential integrity for free.
-  conversationId: uuid("conversation_id")
-    .notNull()
-    .references(() => conversations.id),
-  status: pipelineRunStatus("status").notNull(),
-  // Stage id from the pinned definition the run currently sits on.
-  currentStage: text("current_stage").notNull(),
-  // Loop counter for `current_stage`'s loop scope. Always 0 until slice 3
-  // back-edges land; carried now because `pipeline/stage.due` keys off it.
-  iteration: integer("iteration").notNull(),
-  stageOutputs: jsonbZod("stage_outputs", StageOutputsSchema).notNull(),
-  failureReason: text("failure_reason"),
-  createdAt: ts(),
-});
+export const pipelineRuns = pgTable(
+  "pipeline_runs",
+  {
+    id: pk(),
+    definitionId: uuid("definition_id")
+      .notNull()
+      .references(() => pipelineDefinitions.id),
+    // The run's own conversation — gates and progress land here. A run always
+    // owns one (NOT NULL), created at run start; same agent-store module, so a
+    // real FK gives referential integrity for free.
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id),
+    status: pipelineRunStatus("status").notNull(),
+    // Stage id from the pinned definition the run currently sits on.
+    currentStage: text("current_stage").notNull(),
+    // Which pass the run is on through `current_stage`. Monotonic: forward
+    // moves carry it, backward moves (a gate's revise today, loop back-edges
+    // in slice 3) increment it. Part of the run's cursor, so every event the
+    // engine acts on names it.
+    iteration: integer("iteration").notNull(),
+    stageOutputs: jsonbZod("stage_outputs", StageOutputsSchema).notNull(),
+    failureReason: text("failure_reason"),
+    createdAt: ts(),
+  },
+  (t) => [
+    // One live run per conversation. The run supervises that conversation's
+    // turns (stage instructions arrive as synthetic inbounds, and
+    // `handle-message` scopes the turn's tools to the current stage), so a
+    // second concurrent run would give one conversation two cursors and two
+    // competing tool allowlists. Partial on the non-terminal statuses, so a
+    // finished run never blocks the next one.
+    uniqueIndex("uq_pipeline_runs_active_conversation")
+      .on(t.conversationId)
+      .where(sql`status NOT IN ('completed', 'failed', 'cancelled')`),
+  ],
+);

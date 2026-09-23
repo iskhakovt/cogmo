@@ -6,12 +6,14 @@
  * `index.ts` so the dispatcher logic is covered by unit tests.
  */
 
+import { match } from "ts-pattern";
 import { MIN_MESSAGES_FOR_EXTRACTION } from "../../../agent/evolution/index.js";
 import {
   CORE_COMPARTMENTS,
   isCoreCompartment,
   MemoryTrustSchema,
 } from "../../../agent/evolution/memory-extraction-schema.js";
+import { parseGateCommand } from "../../../agent/pipeline/gate-keyboard.js";
 import type { Profile } from "../../../agent/store/index.js";
 import { type ProfileMemoryScope, ProfileMemoryScopeSchema } from "../../../agent/store/schema.js";
 import { SERVER_NAME_RE } from "../../../mcp/config.js";
@@ -61,6 +63,9 @@ const CORE_LIST = CORE_COMPARTMENTS.join(", ");
 
 const USAGE = {
   resume: "Usage: /resume <alias>",
+  gate:
+    "Usage: /gate approve | /gate revise [what to change] | /gate cancel\n" +
+    "  Answers the pipeline gate waiting in this conversation.",
   name: "Usage: /name <alias>  (or /name -  to clear)",
   profile:
     "Usage: /profile [list|switch <name>|new <name>|edit <name>|delete <name>|default [<name>|clear]|scope <name> [clear|compartments=… trust=… [classes=…]]|class <name> <class|clear>]\n" +
@@ -525,6 +530,86 @@ export async function handlePlanCallback(
     };
   }
   return { editText: "❌ Plan cancelled.", toast: "Cancelled" };
+}
+
+export interface GateCallbackOutcome {
+  editText: string;
+  toast: string;
+  followUp?: string;
+}
+
+/**
+ * Pipeline-gate keyboard tap — hands the decision to
+ * `transport.pipelines.resolveGate`, which owns the identity check and the
+ * emit. Nothing here interprets the user's intent: the button they pressed
+ * IS the decision.
+ *
+ * A `revise` tap carries no feedback (a tap has no text), so the run goes
+ * back to the previous stage with the gate's own instructions and the user
+ * can say what they want in the conversation. `/gate revise <feedback>`
+ * carries text for the cases where they want to be specific up front.
+ */
+export async function handleGateCallback(
+  transport: Transport,
+  parsed: { runId: string; action: "approve" | "revise" | "cancel" },
+  tapperPlatformHandle: string,
+): Promise<GateCallbackOutcome> {
+  const res = await transport.pipelines.resolveGate({
+    target: { kind: "run", runId: parsed.runId },
+    decision: parsed.action,
+    tapperPlatformHandle,
+  });
+  if (res.isErr()) {
+    return { editText: errorMessage(res.error), toast: errorMessage(res.error) };
+  }
+  switch (parsed.action) {
+    case "approve":
+      return { editText: "✅ Approved — the pipeline continues.", toast: "Approved" };
+    case "revise":
+      return {
+        editText: "✏️ Sent back for revision.",
+        followUp: "Tell me what you'd like changed and I'll redo that stage.",
+        toast: "Revising",
+      };
+    case "cancel":
+      return { editText: "❌ Pipeline cancelled.", toast: "Cancelled" };
+  }
+}
+
+/**
+ * `/gate approve | revise [feedback] | cancel` — the channel-agnostic route
+ * to the same resolution, for chats where the keyboard is gone (scrolled
+ * away, a different client) and for channels that never had one. Targets the
+ * gate parked in the conversation the command was typed in.
+ */
+export async function handleGate(transport: Transport, ctx: TelegramCommandContext): Promise<void> {
+  const parsed = parseGateCommand(ctx.match ?? "");
+  if (!parsed) {
+    await ctx.reply(USAGE.gate);
+    return;
+  }
+  const session = await transport.resolveSession(String(ctx.chat.id));
+  if (!session) {
+    await ctx.reply("No active conversation here.");
+    return;
+  }
+  const res = await transport.pipelines.resolveGate({
+    target: { kind: "conversation", conversationId: session.conversationId },
+    decision: parsed.action,
+    tapperPlatformHandle: String(ctx.from.id),
+    ...(parsed.feedback !== undefined && { feedback: parsed.feedback }),
+  });
+  if (res.isErr()) {
+    await ctx.reply(errorMessage(res.error));
+    return;
+  }
+  await ctx.reply(
+    match(parsed.action)
+      .with("approve", () => `✅ Approved — "${res.value.pipelineName}" continues.`)
+      .with("revise", () => `✏️ Sent "${res.value.pipelineName}" back for revision.`)
+      .with("cancel", () => `❌ Cancelled "${res.value.pipelineName}".`)
+      .exhaustive(),
+  );
 }
 
 export interface SkillsApprovalCallbackOutcome {
@@ -2123,6 +2208,10 @@ function errorMessage(err: TransportError): string {
       return `"${err.id}" doesn't look like a valid task id. Use /schedules to list and copy an id.`;
     case "evolution_unavailable":
       return "Evolution isn't wired in this deployment.";
+    case "pipelines_disabled":
+      return "Pipelines aren't wired in this deployment.";
+    case "no_pending_gate":
+      return "No pipeline is waiting on your decision here.";
   }
 }
 

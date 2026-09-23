@@ -1,4 +1,4 @@
-import { ok } from "neverthrow";
+import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { asBatchAdapter, expectDefined } from "../../test/assertions.js";
 import {
@@ -55,6 +55,88 @@ async function setupAdapter(transportOverrides?: Partial<ReturnType<typeof mockT
 
 describe("direct adapter", () => {
   describe("handleDirectInbound", () => {
+    describe("/gate", () => {
+      it("routes a decision to the pipelines surface instead of the agent", async () => {
+        const resolveGate = vi
+          .fn()
+          .mockResolvedValue(ok({ runId: "run-1", pipelineName: "release" }));
+        const transport = makeTransport({ pipelines: { resolveGate } });
+
+        const result = await handleDirectInbound(
+          { transport },
+          { ...baseEvent.data, text: "/gate approve" },
+          makeStepRun(),
+        );
+
+        expect(result).toEqual({ status: "gate_resolved", conversationId: "conv-1" });
+        expect(resolveGate).toHaveBeenCalledWith({
+          target: { kind: "conversation", conversationId: "conv-1" },
+          decision: "approve",
+          tapperPlatformHandle: "console-0",
+        });
+        expect(transport.emit).not.toHaveBeenCalled();
+      });
+
+      it("passes revise feedback through", async () => {
+        const resolveGate = vi
+          .fn()
+          .mockResolvedValue(ok({ runId: "run-1", pipelineName: "release" }));
+        const transport = makeTransport({ pipelines: { resolveGate } });
+
+        await handleDirectInbound(
+          { transport },
+          { ...baseEvent.data, text: "/gate revise use staging" },
+          makeStepRun(),
+        );
+
+        expect(resolveGate).toHaveBeenCalledWith(
+          expect.objectContaining({ decision: "revise", feedback: "use staging" }),
+        );
+      });
+
+      it("rejects an unparseable decision without touching the transport", async () => {
+        const resolveGate = vi.fn();
+        const transport = makeTransport({ pipelines: { resolveGate } });
+
+        const result = await handleDirectInbound(
+          { transport },
+          { ...baseEvent.data, text: "/gate maybe" },
+          makeStepRun(),
+        );
+
+        expect(result).toMatchObject({ status: "gate_rejected" });
+        expect(resolveGate).not.toHaveBeenCalled();
+        expect(transport.emit).not.toHaveBeenCalled();
+      });
+
+      it("surfaces the transport's error code rather than failing the function", async () => {
+        const resolveGate = vi.fn().mockResolvedValue(err({ code: "no_pending_gate" as const }));
+        const transport = makeTransport({ pipelines: { resolveGate } });
+
+        const result = await handleDirectInbound(
+          { transport },
+          { ...baseEvent.data, text: "/gate cancel" },
+          makeStepRun(),
+        );
+
+        expect(result).toEqual({ status: "gate_rejected", reason: "no_pending_gate" });
+      });
+
+      it("does not treat a message that merely starts with the word as a command", async () => {
+        const resolveGate = vi.fn();
+        const transport = makeTransport({ pipelines: { resolveGate } });
+
+        await handleDirectInbound(
+          { transport },
+          { ...baseEvent.data, text: "gate approve please" },
+          makeStepRun(),
+        );
+
+        expect(resolveGate).not.toHaveBeenCalled();
+        expect(transport.emit).toHaveBeenCalled();
+      });
+    });
+
     it("resolves session and emits via transport", async () => {
       const transport = makeTransport();
 

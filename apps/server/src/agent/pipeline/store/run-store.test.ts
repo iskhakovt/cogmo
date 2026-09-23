@@ -82,8 +82,10 @@ describe("DrizzlePipelineRunStore", () => {
       runStore.advanceStage(trx, {
         runId: run.id,
         fromStage: "gather-context",
+        fromIteration: 0,
         output: textArtifact,
         toStage: "plan-gate",
+        toIteration: 0,
       }),
     );
     const fetched = await tx((trx) => runStore.getRun(trx, run.id));
@@ -136,8 +138,10 @@ describe("DrizzlePipelineRunStore", () => {
         runStore.advanceStage(trx, {
           runId: run.id,
           fromStage: "gather-context",
+          fromIteration: 0,
           output: textArtifact,
           toStage: "plan-gate",
+          toIteration: 0,
         }),
       );
       expect(result).toEqual({ kind: "advanced" });
@@ -153,8 +157,10 @@ describe("DrizzlePipelineRunStore", () => {
         runStore.advanceStage(trx, {
           runId: run.id,
           fromStage: "gather-context",
+          fromIteration: 0,
           output: textArtifact,
           toStage: "plan-gate",
+          toIteration: 0,
         }),
       );
       const second: StageArtifact = { kind: "json", value: { approved: true } };
@@ -162,8 +168,10 @@ describe("DrizzlePipelineRunStore", () => {
         runStore.advanceStage(trx, {
           runId: run.id,
           fromStage: "plan-gate",
+          fromIteration: 0,
           output: second,
           toStage: "implement",
+          toIteration: 0,
         }),
       );
       const after = await tx((trx) => runStore.getRun(trx, run.id));
@@ -179,8 +187,10 @@ describe("DrizzlePipelineRunStore", () => {
         runStore.advanceStage(trx, {
           runId: run.id,
           fromStage: "gather-context",
+          fromIteration: 0,
           output: null,
           toStage: "plan-gate",
+          toIteration: 0,
         }),
       );
       expect(result).toEqual({ kind: "advanced" });
@@ -193,19 +203,23 @@ describe("DrizzlePipelineRunStore", () => {
         runStore.advanceStage(trx, {
           runId: run.id,
           fromStage: "gather-context",
+          fromIteration: 0,
           output: textArtifact,
           toStage: "plan-gate",
+          toIteration: 0,
         }),
       );
       const replay = await tx((trx) =>
         runStore.advanceStage(trx, {
           runId: run.id,
           fromStage: "gather-context",
+          fromIteration: 0,
           output: textArtifact,
           toStage: "plan-gate",
+          toIteration: 0,
         }),
       );
-      expect(replay).toEqual({ kind: "stale", currentStage: "plan-gate" });
+      expect(replay).toEqual({ kind: "stale", iteration: 0, currentStage: "plan-gate" });
     });
 
     it("reports not_found for an unknown run", async () => {
@@ -213,8 +227,10 @@ describe("DrizzlePipelineRunStore", () => {
         runStore.advanceStage(trx, {
           runId: randomUUID(),
           fromStage: "gather-context",
+          fromIteration: 0,
           output: null,
           toStage: "plan-gate",
+          toIteration: 0,
         }),
       );
       expect(result).toEqual({ kind: "not_found" });
@@ -229,11 +245,13 @@ describe("DrizzlePipelineRunStore", () => {
         runStore.advanceStage(trx, {
           runId: run.id,
           fromStage: "gather-context",
+          fromIteration: 0,
           output: textArtifact,
           toStage: "plan-gate",
+          toIteration: 0,
         }),
       );
-      expect(result).toEqual({ kind: "stale", currentStage: "gather-context" });
+      expect(result).toEqual({ kind: "stale", iteration: 0, currentStage: "gather-context" });
       const after = await tx((trx) => runStore.getRun(trx, run.id));
       expect(after?.status).toBe("cancelled");
       expect(after?.stageOutputs).toEqual({});
@@ -245,7 +263,12 @@ describe("DrizzlePipelineRunStore", () => {
       const { run } = await seedRun("implement");
       const final: StageArtifact = { kind: "text", text: "done" };
       const result = await tx((trx) =>
-        runStore.completeRun(trx, { runId: run.id, fromStage: "implement", output: final }),
+        runStore.completeRun(trx, {
+          runId: run.id,
+          fromStage: "implement",
+          fromIteration: 0,
+          output: final,
+        }),
       );
       expect(result).toEqual({ kind: "advanced" });
       const after = await tx((trx) => runStore.getRun(trx, run.id));
@@ -257,9 +280,106 @@ describe("DrizzlePipelineRunStore", () => {
     it("is stale when the run already moved off the stage", async () => {
       const { run } = await seedRun("implement");
       const result = await tx((trx) =>
-        runStore.completeRun(trx, { runId: run.id, fromStage: "gather-context", output: null }),
+        runStore.completeRun(trx, {
+          runId: run.id,
+          fromStage: "gather-context",
+          fromIteration: 0,
+          output: null,
+        }),
       );
-      expect(result).toEqual({ kind: "stale", currentStage: "implement" });
+      expect(result).toEqual({ kind: "stale", iteration: 0, currentStage: "implement" });
+    });
+  });
+
+  describe("findActiveRunByConversation", () => {
+    it("returns the live run supervising a conversation", async () => {
+      const { run, conversationId } = await seedRun();
+      const found = await tx((trx) => runStore.findActiveRunByConversation(trx, conversationId));
+      expect(found?.id).toBe(run.id);
+    });
+
+    it("sees a parked gate — waiting_gate is live, not terminal", async () => {
+      const { run, conversationId } = await seedRun();
+      await tx((trx) => runStore.transitionStatus(trx, run.id, "running", "waiting_gate"));
+      const found = await tx((trx) => runStore.findActiveRunByConversation(trx, conversationId));
+      expect(found?.id).toBe(run.id);
+    });
+
+    it("ignores a terminated run so the conversation is free again", async () => {
+      const { run, conversationId } = await seedRun();
+      await tx((trx) => runStore.cancelRunIfActive(trx, run.id, "done"));
+      const found = await tx((trx) => runStore.findActiveRunByConversation(trx, conversationId));
+      expect(found).toBeUndefined();
+    });
+
+    it("refuses a second live run in the same conversation", async () => {
+      const { run, conversationId, definitionId } = await seedRun();
+      await expect(
+        tx((trx) =>
+          runStore.createRun(trx, {
+            definitionId,
+            conversationId,
+            currentStage: "gather-context",
+          }),
+        ),
+      ).rejects.toThrow();
+      // ...and allows one once the first ends.
+      await tx((trx) => runStore.cancelRunIfActive(trx, run.id, "done"));
+      const second = await tx((trx) =>
+        runStore.createRun(trx, { definitionId, conversationId, currentStage: "gather-context" }),
+      );
+      expect(second.id).not.toBe(run.id);
+    });
+  });
+
+  describe("iteration cursor", () => {
+    it("moves back to an earlier stage at the next iteration", async () => {
+      const { run } = await seedRun("plan-gate");
+      const result = await tx((trx) =>
+        runStore.advanceStage(trx, {
+          runId: run.id,
+          fromStage: "plan-gate",
+          fromIteration: 0,
+          output: null,
+          toStage: "gather-context",
+          toIteration: 1,
+        }),
+      );
+      expect(result).toEqual({ kind: "advanced" });
+      const after = await tx((trx) => runStore.getRun(trx, run.id));
+      expect(after?.currentStage).toBe("gather-context");
+      expect(after?.iteration).toBe(1);
+      expect(after?.status).toBe("running");
+    });
+
+    it("rejects a completion for the previous pass through the same stage", async () => {
+      const { run } = await seedRun("plan-gate");
+      await tx((trx) =>
+        runStore.advanceStage(trx, {
+          runId: run.id,
+          fromStage: "plan-gate",
+          fromIteration: 0,
+          output: null,
+          toStage: "gather-context",
+          toIteration: 1,
+        }),
+      );
+      // A redelivered completion for gather-context's *first* pass: right
+      // stage, wrong iteration. Stage-only matching would advance the run.
+      const replay = await tx((trx) =>
+        runStore.advanceStage(trx, {
+          runId: run.id,
+          fromStage: "gather-context",
+          fromIteration: 0,
+          output: textArtifact,
+          toStage: "plan-gate",
+          toIteration: 1,
+        }),
+      );
+      expect(replay).toEqual({ kind: "stale", currentStage: "gather-context", iteration: 1 });
+      const after = await tx((trx) => runStore.getRun(trx, run.id));
+      expect(after?.currentStage).toBe("gather-context");
+      expect(after?.stageOutputs).toEqual({});
     });
   });
 

@@ -39,8 +39,10 @@ import type { DebounceConfig } from "./debounce.js";
 import { extractGeneratedDocuments, extractGeneratedImages } from "./extract-images.js";
 import type { ImageToolsLoader } from "./image-tools-loader.js";
 import type { AgentLoopResult, StreamingAgentLoopParams } from "./loop.js";
+import { loadStageContextStep } from "./pipeline/load-stage-context.js";
 import { createPipelinesService } from "./pipeline/pipelines-service.js";
-import type { PipelineStore } from "./pipeline/store/index.js";
+import { buildStageToolRegistry } from "./pipeline/stage-tools.js";
+import type { PipelineRunStore, PipelineStore } from "./pipeline/store/index.js";
 import { PIPELINE_TOOL_NAMES } from "./pipeline/tools.js";
 import type { PromptSource } from "./prompt.js";
 import { shouldSkipRecall } from "./recall-gate.js";
@@ -127,6 +129,12 @@ export interface HandleMessageDeps {
    * it. See design/pipelines.md.
    */
   pipelineStore?: PipelineStore;
+  /**
+   * Run-state access for pipelines. Present with `pipelineStore` — the pair
+   * is what lets a turn recognise that it belongs to a pipeline stage and
+   * scope itself accordingly.
+   */
+  pipelineRunStore?: PipelineRunStore;
 }
 
 /**
@@ -437,22 +445,26 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // succeeds re-fires it with a different trigger over a grown batch.
       const firstInboundId = inboundMessages[0]?.id ?? "";
 
-      // A batch is either all-user or all-scheduled — never mixed. The
-      // debounce stages user inbounds; scheduled fires emit their own
-      // `inbound/arrived` independently after persisting a single
-      // synthetic row, so the two paths can't legitimately interleave
-      // into one turn. A mixed batch would mean a fire landed in a
-      // user-batched turn (or vice versa) and the routing kind below
-      // would silently pick the wrong path — fail fast instead.
+      // A scheduled fire never shares a turn with user input: the debounce
+      // stages user inbounds, while a fire persists one synthetic row and
+      // emits its own `inbound/arrived`. A batch holding both means a fire
+      // landed in a user-batched turn (or vice versa) — fail fast rather
+      // than answer a reminder as if the user had typed it.
       const scheduledCount = inboundMessages.filter((m) => m.source === "scheduled").length;
-      if (scheduledCount > 0 && scheduledCount !== inboundMessages.length) {
+      const userCount = inboundMessages.filter((m) => m.source === "user").length;
+      const syntheticCount = inboundMessages.length - userCount;
+      if (scheduledCount > 0 && userCount > 0) {
         throw new Error(
           `mixed-source inbound batch in conversation ${conversationId}: ${scheduledCount}/${inboundMessages.length} scheduled`,
         );
       }
-      // Scheduled inbounds have no originating session for source
-      // routing — broadcast to every reachable session instead.
-      const routingKind: "reply" | "broadcast" = scheduledCount > 0 ? "broadcast" : "reply";
+      // No synthetic inbound — scheduled fire or pipeline stage — has an
+      // originating session for source routing, so any turn carrying one
+      // broadcasts to every reachable session instead. A pipeline stage CAN
+      // share a turn with user input (its `inbound/arrived` can land inside
+      // an open debounce window), which is exactly why this reads "any
+      // synthetic" rather than "all synthetic".
+      const routingKind: "reply" | "broadcast" = syntheticCount > 0 ? "broadcast" : "reply";
 
       // Voice bundle resolved once per turn (one indexed singleton read +
       // two secret lookups; cached by content hash inside the resolver so
@@ -597,6 +609,29 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         ),
       });
 
+      // Does this turn belong to a pipeline stage? Loaded in a durable step
+      // because the answer gates which tools the turn composes, and the
+      // `complete_stage` tool moves the run mid-turn — re-reading it in the
+      // bare body would let a replay compose a different tool set than the
+      // one the model was offered.
+      const pipelineStage =
+        deps.pipelineStore && deps.pipelineRunStore
+          ? await loadStageContextStep(
+              {
+                runInTx: deps.runInTx,
+                store: deps.pipelineStore,
+                runStore: deps.pipelineRunStore,
+              },
+              step.run,
+              { kind: "conversation", conversationId },
+            )
+          : undefined;
+      // Only an `agentic` stage scopes the turn. At a gate the run is parked
+      // on the user's decision, so an ordinary turn (full profile toolset, no
+      // `complete_stage`) is exactly right — they can ask questions about
+      // what they are approving.
+      const agenticStage = pipelineStage?.stage.kind === "agentic" ? pipelineStage : undefined;
+
       // Per-turn tool registry — built-ins from bootstrap + the live image
       // catalog (loaded fresh each turn so wizard / CLI CRUD takes effect
       // without a restart) + one dynamic tool per live skill + MCP tools
@@ -632,12 +667,18 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const mcpTools = deps.mcpRegistry
         ? await deps.mcpRegistry.resolveTools({ toolGlobs: turnToolSetGlobs })
         : [];
-      const turnTools = composeTurnTools({
+      const composedTools = composeTurnTools({
         builtIns: [...tools.snapshot(), ...imageTools, ...subAgentTools],
         skillTools,
         mcpTools,
         toolSetGlobs: turnToolSetGlobs,
       });
+      // A stage narrows the profile's toolset to what it declared and adds
+      // `complete_stage`; every other turn keeps the composed set as-is.
+      const turnTools =
+        agenticStage === undefined
+          ? composedTools
+          : buildStageToolRegistry(composedTools, agenticStage);
       const toolDefs = turnTools.definitions();
 
       // Profile passed in from the outer read (`profile`) so
@@ -753,21 +794,25 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // pipeline tools themselves are excluded — a run defining/activating
       // pipelines mid-run is a self-modification surface the
       // preview/confirm gate exists to prevent.
-      const pipelinesService = deps.pipelineStore
-        ? createPipelinesService({
-            runInTx: deps.runInTx,
-            store: deps.pipelineStore,
-            userId,
-            resolveProvider,
-            model: snapshot.model,
-            validation: {
-              availableTools: toolDefs
-                .map((d) => d.name)
-                .filter((name) => !PIPELINE_TOOL_NAMES.includes(name)),
-              knownEventSources: [],
-            },
-          })
-        : undefined;
+      const pipelinesService =
+        deps.pipelineStore && deps.pipelineRunStore
+          ? createPipelinesService({
+              runInTx: deps.runInTx,
+              store: deps.pipelineStore,
+              runStore: deps.pipelineRunStore,
+              inngest,
+              userId,
+              conversationId,
+              resolveProvider,
+              model: snapshot.model,
+              validation: {
+                availableTools: toolDefs
+                  .map((d) => d.name)
+                  .filter((name) => !PIPELINE_TOOL_NAMES.includes(name)),
+                knownEventSources: [],
+              },
+            })
+          : undefined;
       const service = createService(
         memory,
         userId,

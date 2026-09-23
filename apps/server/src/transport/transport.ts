@@ -5,6 +5,7 @@ import { err, ok, type Result } from "neverthrow";
 import type { CodingStore } from "../agent/coding/store/index.js";
 import { isCoreCompartment } from "../agent/evolution/memory-extraction-schema.js";
 import type { TriggerReflectionResult } from "../agent/evolution/trigger-reflection.js";
+import type { PipelineRunStore, PipelineStore } from "../agent/pipeline/store/index.js";
 import type { AutoRecallMode } from "../agent/recall-gate.js";
 import type { ScheduledTaskSummary } from "../agent/scheduling/scheduling-service.js";
 import {
@@ -327,7 +328,17 @@ export type TransportError =
    * disable evolution). The read methods on the same namespace stay
    * available — only the trigger surfaces this code.
    */
-  | { code: "evolution_unavailable" };
+  | { code: "evolution_unavailable" }
+  /** No pipeline stores wired (test setups that don't exercise pipelines). */
+  | { code: "pipelines_disabled" }
+  /**
+   * The gate the user answered isn't there: no live run in the
+   * conversation, or the run has moved off the gate (approved elsewhere,
+   * cancelled, timed out). One code for all of them — the user's next step
+   * is the same, and distinguishing them would leak run state to a tap that
+   * failed identity.
+   */
+  | { code: "no_pending_gate" };
 
 /**
  * Transport — the adapter-facing contract for session management and inbound emission.
@@ -662,6 +673,23 @@ export interface Transport {
   };
 
   /**
+   * Pipeline gate resolution — the Approve / Revise / Cancel keyboard and
+   * the `/gate` command both land here. Identity-checked against the
+   * conversation the run lives in, and idempotent: a second tap on a gate
+   * the run has already left returns `no_pending_gate` rather than moving
+   * it twice.
+   */
+  pipelines: {
+    resolveGate(args: {
+      /** Keyboard taps name the run; `/gate` names the conversation it was typed in. */
+      target: { kind: "run"; runId: string } | { kind: "conversation"; conversationId: string };
+      decision: "approve" | "revise" | "cancel";
+      tapperPlatformHandle: string;
+      feedback?: string;
+    }): Promise<Result<{ runId: string; pipelineName: string }, TransportError>>;
+  };
+
+  /**
    * Skills-deploy approval surface for the approve-tier inline keyboard.
    * Mirrors the `coding` namespace shape: identity-checked, calls into the
    * existing `SkillRunner` RPCs, returns `Result` with skills-specific
@@ -891,6 +919,13 @@ export function createTransport(deps: {
    */
   mcpRegistry?: McpRegistry;
   /**
+   * Pipeline definition + run stores for gate resolution. Optional as a
+   * pair — when either is absent, `pipelines.resolveGate` returns
+   * `pipelines_disabled`. Production bootstrap always supplies both.
+   */
+  pipelineStore?: PipelineStore;
+  pipelineRunStore?: PipelineRunStore;
+  /**
    * Synchronous Observer driver for the `/reflect` manual trigger.
    * Production bootstrap supplies it once the Observer is wired; test
    * setups that don't exercise `evolution.triggerReflection` may omit, in
@@ -923,6 +958,8 @@ export function createTransport(deps: {
     skillRunner,
     skillStore,
     mcpRegistry,
+    pipelineStore,
+    pipelineRunStore,
     triggerReflection,
     inngest,
     inboundArrived,
@@ -2069,6 +2106,55 @@ export function createTransport(deps: {
           case "not_found":
             return err({ code: "task_not_found" as const, taskId });
         }
+      },
+    },
+
+    pipelines: {
+      async resolveGate(args) {
+        if (!pipelineStore || !pipelineRunStore) {
+          return err({ code: "pipelines_disabled" as const });
+        }
+        // One read for the run, its conversation, its pinned definition and
+        // the tapper's identity — the gate has to be live, on this stage, and
+        // owned by whoever is answering before anything is emitted.
+        const resolved = await runInTx(async (tx) => {
+          const run =
+            args.target.kind === "run"
+              ? await pipelineRunStore.getRun(tx, args.target.runId)
+              : await pipelineRunStore.findActiveRunByConversation(tx, args.target.conversationId);
+          if (run?.status !== "waiting_gate") {
+            return err({ code: "no_pending_gate" as const });
+          }
+          const definition = await pipelineStore.getDefinition(tx, run.definitionId);
+          if (!definition) return err({ code: "no_pending_gate" as const });
+
+          const conv = await agentStore.getConversation(tx, run.conversationId);
+          if (!conv) return err({ code: "conversation_not_found" as const });
+          const tapper = await transportStore.resolveUser(tx, channelId, args.tapperPlatformHandle);
+          if (!tapper || tapper.userId !== conv.userId) {
+            return err({ code: "identity_rejected" as const });
+          }
+          return ok({ run, pipelineName: definition.name });
+        });
+        if (resolved.isErr()) return err(resolved.error);
+        const { run, pipelineName } = resolved.value;
+
+        await inngest.send({
+          name: "pipeline/gate.resolved",
+          data: {
+            runId: run.id,
+            stageId: run.currentStage,
+            iteration: run.iteration,
+            decision: args.decision,
+            ...(args.feedback !== undefined && { feedback: args.feedback }),
+          },
+          // Bus-level dedup on the gate's coordinates plus the decision: a
+          // double tap on the same button collapses, while a user who taps
+          // Revise after Approve still gets their second decision delivered
+          // (the resolver's cursor check is what decides it arrives too late).
+          id: `pipeline-gate-resolved-${run.id}:${run.currentStage}:${run.iteration}:${args.decision}`,
+        });
+        return ok({ runId: run.id, pipelineName });
       },
     },
 

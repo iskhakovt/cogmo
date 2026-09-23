@@ -5,6 +5,7 @@
  * review loop on the last stage.
  */
 
+import type { PipelineDefinitionRow, PipelineRunRow } from "./store/index.js";
 import type { PipelineDefinition } from "./types.js";
 
 export const FIXTURE_TOOLS = ["memory_recall", "web_search", "delegate_coding", "read_file"];
@@ -46,3 +47,45 @@ const BASE: PipelineDefinition = {
     },
   ],
 };
+
+/** The fixture with its loop stripped — the linear shape the engine executes. */
+export function linearPipelineDefinition(): PipelineDefinition {
+  const definition = validPipelineDefinition();
+  for (const stage of definition.stages) {
+    delete stage.loop;
+  }
+  return definition;
+}
+
+/** A stored definition row wrapping `compiled`, active by default. */
+export function pipelineDefinitionRow(
+  overrides: Partial<PipelineDefinitionRow> = {},
+): PipelineDefinitionRow {
+  return {
+    id: "def-1",
+    userId: "user-1",
+    name: "issue-to-pr",
+    version: 2,
+    sourceText: "source",
+    compiled: linearPipelineDefinition(),
+    active: true,
+    createdAt: new Date("2026-09-01T00:00:00Z"),
+    ...overrides,
+  };
+}
+
+/** A run row sitting at the definition's first stage. */
+export function pipelineRunRow(overrides: Partial<PipelineRunRow> = {}): PipelineRunRow {
+  return {
+    id: "run-1",
+    definitionId: "def-1",
+    conversationId: "conv-1",
+    status: "running",
+    currentStage: "gather-context",
+    iteration: 0,
+    stageOutputs: {},
+    failureReason: null,
+    createdAt: new Date("2026-09-01T00:00:00Z"),
+    ...overrides,
+  };
+}

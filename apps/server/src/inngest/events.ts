@@ -1,5 +1,6 @@
 import { eventType } from "inngest";
 import { z } from "zod";
+import { StageArtifactSchema } from "../agent/pipeline/run-types.js";
 
 /**
  * Fired when an adapter has persisted an inbound message.
@@ -699,5 +700,90 @@ export const directOutbound = eventType("adapter/direct/outbound", {
         mediaType: z.string(),
       })
       .optional(),
+  }),
+});
+
+/**
+ * A pipeline run has arrived at a stage and the stage runner should enter
+ * it (design/pipelines.md → Execution Model). Emitted by `start_pipeline`
+ * for the first stage and by the advance / gate-resolve functions for
+ * every stage after it.
+ *
+ * `(runId, stageId, iteration)` is the run's cursor — the runner refuses
+ * to act when it no longer matches the row, which is what makes a
+ * redelivered or superseded event a no-op instead of a second entry into
+ * a stage. `note` carries the user's revise feedback back to a stage the
+ * run is re-entering; it is prepended to that stage's instructions.
+ */
+export const pipelineStageDue = eventType("pipeline/stage.due", {
+  schema: z.object({
+    runId: z.string(),
+    stageId: z.string(),
+    iteration: z.number().int().nonnegative(),
+    note: z.string().optional(),
+  }),
+});
+
+/**
+ * An agentic stage produced its artifact and is done. Emitted by the
+ * per-turn `complete_stage` tool — a stage ends because the model said so
+ * with a typed handoff in hand, not because a turn happened to finish.
+ * The advance function persists the artifact and moves the cursor.
+ *
+ * `artifact` is null for stages that declare no `output`.
+ */
+export const pipelineStageCompleted = eventType("pipeline/stage.completed", {
+  schema: z.object({
+    runId: z.string(),
+    stageId: z.string(),
+    iteration: z.number().int().nonnegative(),
+    artifact: StageArtifactSchema.nullable(),
+  }),
+});
+
+/**
+ * A gate stage is parked and needs the user's decision. Consumed by the
+ * per-channel poster that renders the Approve / Revise / Cancel keyboard
+ * (Telegram today) — the same shape as `skills/deploy/approval-requested`.
+ * The run is already at `waiting_gate` when this fires, so a channel that
+ * has no poster degrades to the plain-text prompt the runner delivered and
+ * the `/gate` command.
+ */
+export const pipelineGateRequested = eventType("pipeline/gate.requested", {
+  schema: z.object({
+    runId: z.string(),
+    stageId: z.string(),
+    iteration: z.number().int().nonnegative(),
+    conversationId: z.string(),
+    pipelineName: z.string(),
+  }),
+});
+
+/**
+ * The user resolved a parked gate — by keyboard tap or `/gate` command,
+ * both through the identity-checked `Transport.pipelines.resolveGate`.
+ * `revise` sends the run back to the stage before the gate with `feedback`
+ * as its note; `cancel` terminates the run.
+ */
+export const pipelineGateResolved = eventType("pipeline/gate.resolved", {
+  schema: z.object({
+    runId: z.string(),
+    stageId: z.string(),
+    iteration: z.number().int().nonnegative(),
+    decision: z.enum(["approve", "revise", "cancel"]),
+    feedback: z.string().optional(),
+  }),
+});
+
+/**
+ * A run reached a terminal status. Observability + the future web-UI run
+ * feed; the user-facing notice is delivered by whichever function made the
+ * transition, so no subscriber is required for the run to end cleanly.
+ */
+export const pipelineRunFinished = eventType("pipeline/run.finished", {
+  schema: z.object({
+    runId: z.string(),
+    pipelineName: z.string(),
+    status: z.enum(["completed", "failed", "cancelled"]),
   }),
 });

@@ -69,6 +69,8 @@ export const TransportErrorSchema = z.discriminatedUnion("code", [
   z.object({ code: z.literal("schedule_not_found"), id: z.string() }),
   z.object({ code: z.literal("schedule_id_malformed"), id: z.string() }),
   z.object({ code: z.literal("evolution_unavailable") }),
+  z.object({ code: z.literal("pipelines_disabled") }),
+  z.object({ code: z.literal("no_pending_gate") }),
 ]);
 
 // Compile-time parity: the Zod schema and the TS union must be mutually

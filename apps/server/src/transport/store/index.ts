@@ -1,5 +1,6 @@
 import { and, desc, eq, gt, inArray, isNull, lt, lte, ne, notExists, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
+import { match } from "ts-pattern";
 import type { JsonValue } from "type-fest";
 // Cross-module read: scheduled-task fire routing needs conversations.{user_id, profile_id}
 // joined to channel_sessions. Per CLAUDE.md → Store Pattern, store impls may import
@@ -32,7 +33,8 @@ export interface Session {
 
 /**
  * Discriminated input for `persistInbound`. `user` rows carry their
- * originating session FK; `scheduled` rows carry the idempotency key.
+ * originating session FK; the synthetic sources each carry their own
+ * idempotency key (`scheduled` a fire key, `pipeline` a stage-entry key).
  */
 export type PersistInboundParams =
   | {
@@ -45,6 +47,13 @@ export type PersistInboundParams =
   | {
       source: "scheduled";
       scheduledFireKey: string;
+      conversationId: string;
+      content: InboundContent;
+      platformTs: Date;
+    }
+  | {
+      source: "pipeline";
+      pipelineStageKey: string;
       conversationId: string;
       content: InboundContent;
       platformTs: Date;
@@ -171,6 +180,17 @@ export interface TransportStore {
   findInboundByScheduledFireKey(
     tx: Transaction,
     scheduledFireKey: string,
+  ): Promise<{ id: string; conversationId: string } | undefined>;
+
+  /**
+   * Look up a pipeline-source inbound by its `${runId}:${stageId}:${iteration}`
+   * key. Same retry-after-commit guard as the scheduled variant: the stage
+   * runner checks it before persisting so a replayed dispatch reuses the row
+   * instead of posting the stage's instructions to the user twice.
+   */
+  findInboundByPipelineStageKey(
+    tx: Transaction,
+    pipelineStageKey: string,
   ): Promise<{ id: string; conversationId: string } | undefined>;
 
   /** Load unbatched inbound messages after a cursor (null = all). */
@@ -522,22 +542,28 @@ export class DrizzleTransportStore implements TransportStore {
   }
 
   async persistInbound(tx: Transaction, params: PersistInboundParams): Promise<{ id: string }> {
-    const row =
-      params.source === "user"
-        ? {
-            source: "user" as const,
-            channelSessionId: params.channelSessionId,
-            conversationId: params.conversationId,
-            content: params.content,
-            platformTs: params.platformTs,
-          }
-        : {
-            source: "scheduled" as const,
-            scheduledFireKey: params.scheduledFireKey,
-            conversationId: params.conversationId,
-            content: params.content,
-            platformTs: params.platformTs,
-          };
+    const common = {
+      conversationId: params.conversationId,
+      content: params.content,
+      platformTs: params.platformTs,
+    };
+    const row = match(params)
+      .with({ source: "user" }, (p) => ({
+        ...common,
+        source: "user" as const,
+        channelSessionId: p.channelSessionId,
+      }))
+      .with({ source: "scheduled" }, (p) => ({
+        ...common,
+        source: "scheduled" as const,
+        scheduledFireKey: p.scheduledFireKey,
+      }))
+      .with({ source: "pipeline" }, (p) => ({
+        ...common,
+        source: "pipeline" as const,
+        pipelineStageKey: p.pipelineStageKey,
+      }))
+      .exhaustive();
     return single(
       await tx.insert(inboundMessages).values(row).returning({ id: inboundMessages.id }),
     );
@@ -551,6 +577,18 @@ export class DrizzleTransportStore implements TransportStore {
       .select({ id: inboundMessages.id, conversationId: inboundMessages.conversationId })
       .from(inboundMessages)
       .where(eq(inboundMessages.scheduledFireKey, scheduledFireKey))
+      .limit(1);
+    return rows[0];
+  }
+
+  async findInboundByPipelineStageKey(
+    tx: Transaction,
+    pipelineStageKey: string,
+  ): Promise<{ id: string; conversationId: string } | undefined> {
+    const rows = await tx
+      .select({ id: inboundMessages.id, conversationId: inboundMessages.conversationId })
+      .from(inboundMessages)
+      .where(eq(inboundMessages.pipelineStageKey, pipelineStageKey))
       .limit(1);
     return rows[0];
   }

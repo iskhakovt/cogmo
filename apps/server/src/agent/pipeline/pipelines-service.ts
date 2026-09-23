@@ -9,13 +9,17 @@
  * (design/pipelines.md → Definition Lifecycle).
  */
 
+import type { Inngest } from "inngest";
 import { err, ok, type Result } from "neverthrow";
 import type { Transactor } from "../../db/index.js";
+import { pipelineStageCompleted, pipelineStageDue } from "../../inngest/events.js";
 import type { LlmProviderResolver } from "../../llm/resolver.js";
 import { logger } from "../../logger.js";
 import { type CompileError, compilePipeline } from "./compile.js";
 import { renderPipelinePreview } from "./preview.js";
-import type { PipelineDefinitionRow, PipelineStore } from "./store/index.js";
+import type { StageArtifact } from "./run-types.js";
+import { startPipelineRun } from "./start-run.js";
+import type { PipelineDefinitionRow, PipelineRunStore, PipelineStore } from "./store/index.js";
 import type { Trigger } from "./types.js";
 import type { ValidationContext } from "./validate.js";
 
@@ -31,7 +35,18 @@ export type PipelinesError =
   | { kind: "compile_failed"; issues: ReadonlyArray<{ path: string; message: string }> }
   | { kind: "source_too_long"; length: number; maxLength: number }
   | { kind: "definition_cap_exceeded"; limit: number; current: number }
-  | { kind: "not_found"; name: string; version?: number };
+  | { kind: "not_found"; name: string; version?: number }
+  | { kind: "no_active_version"; name: string }
+  | { kind: "run_already_active"; currentStage: string }
+  | { kind: "unsupported_feature"; detail: string };
+
+export interface StartPipelineResult {
+  runId: string;
+  name: string;
+  version: number;
+  stageCount: number;
+  firstStageId: string;
+}
 
 export interface DefinePipelineResult {
   id: string;
@@ -63,6 +78,27 @@ export interface PipelinesService {
     version?: number;
   }): Promise<Result<{ name: string; version: number }, PipelinesError>>;
 
+  /**
+   * Open a run of the named pipeline's active version in this
+   * conversation, and emit the first `pipeline/stage.due`. Persist and
+   * emit are separate: a failure between them leaves a run parked at its
+   * first stage rather than a half-started one, which the stage runner's
+   * cursor check makes safe to re-drive.
+   */
+  start(args: { name: string }): Promise<Result<StartPipelineResult, PipelinesError>>;
+
+  /**
+   * Record an agentic stage's artifact and let the engine move the run on.
+   * Called by the per-turn `complete_stage` tool, which is the only thing
+   * that has a stage cursor in scope.
+   */
+  completeStage(args: {
+    runId: string;
+    stageId: string;
+    iteration: number;
+    artifact: StageArtifact | null;
+  }): Promise<void>;
+
   /** One summary per pipeline name, with active + latest version. */
   list(): Promise<ReadonlyArray<PipelineSummary>>;
 }
@@ -70,7 +106,11 @@ export interface PipelinesService {
 export interface PipelinesServiceDeps {
   runInTx: Transactor;
   store: PipelineStore;
+  runStore: PipelineRunStore;
+  inngest: Pick<Inngest, "send">;
   userId: string;
+  /** The conversation this turn is happening in — where a started run lives. */
+  conversationId: string;
   /** Per-turn provider lookup — the compiler runs on the conversation's current model. */
   resolveProvider: LlmProviderResolver;
   model: string;
@@ -176,6 +216,63 @@ export function createPipelinesService(deps: PipelinesServiceDeps): PipelinesSer
         );
         return ok({ name: outcome.name, version: outcome.version });
       });
+    },
+
+    async start(args) {
+      const result = await startPipelineRun(
+        { runInTx: deps.runInTx, store: deps.store, runStore: deps.runStore },
+        { userId: deps.userId, conversationId: deps.conversationId, name: args.name },
+      );
+      switch (result.kind) {
+        case "no_active_version":
+          return err({ kind: "no_active_version" as const, name: args.name });
+        case "run_already_active":
+          return err({ kind: "run_already_active" as const, currentStage: result.currentStage });
+        case "unsupported_feature":
+          return err({ kind: "unsupported_feature" as const, detail: result.detail });
+        case "started":
+          break;
+      }
+
+      await deps.inngest.send({
+        ...pipelineStageDue.create({
+          runId: result.runId,
+          stageId: result.firstStageId,
+          iteration: 0,
+        }),
+        // Bus-level dedup: the run row is already committed, so a retried
+        // tool call resolves to the same run and must not enter the first
+        // stage twice.
+        id: `pipeline-stage-due-${result.runId}:${result.firstStageId}:0`,
+      });
+
+      log.info(
+        {
+          runId: result.runId,
+          name: result.pipelineName,
+          version: result.version,
+          conversationId: deps.conversationId,
+        },
+        "pipeline run started",
+      );
+      return ok({
+        runId: result.runId,
+        name: result.pipelineName,
+        version: result.version,
+        stageCount: result.stageCount,
+        firstStageId: result.firstStageId,
+      });
+    },
+
+    async completeStage(args) {
+      await deps.inngest.send({
+        ...pipelineStageCompleted.create(args),
+        id: `pipeline-stage-completed-${args.runId}:${args.stageId}:${args.iteration}`,
+      });
+      log.info(
+        { runId: args.runId, stageId: args.stageId, iteration: args.iteration },
+        "pipeline stage completed by the agent",
+      );
     },
 
     async list() {

@@ -1,4 +1,4 @@
-import { and, count, desc, eq, max, sql } from "drizzle-orm";
+import { and, count, desc, eq, max, notInArray, sql } from "drizzle-orm";
 import { single } from "../../../db/helpers.js";
 import type { Transaction } from "../../../db/index.js";
 import type { StageArtifact, StageOutputs } from "../run-types.js";
@@ -45,6 +45,18 @@ export interface PipelineStore {
     userId: string,
     name: string,
     version?: number,
+  ): Promise<PipelineDefinitionRow | undefined>;
+
+  /**
+   * The one active version of a named pipeline, if the user has activated
+   * any. Distinct from {@link PipelineStore.getDefinitionByName}, which
+   * answers "latest version" — a run must pin the *active* version, which
+   * may be older than the latest when a newer draft is awaiting confirmation.
+   */
+  getActiveDefinitionByName(
+    tx: Transaction,
+    userId: string,
+    name: string,
   ): Promise<PipelineDefinitionRow | undefined>;
 
   /** All definition rows for a user, name ASC then version DESC. */
@@ -136,6 +148,25 @@ export class DrizzlePipelineStore implements PipelineStore {
       .from(pipelineDefinitions)
       .where(and(...conditions))
       .orderBy(desc(pipelineDefinitions.version))
+      .limit(1);
+    return rows[0];
+  }
+
+  async getActiveDefinitionByName(
+    tx: Transaction,
+    userId: string,
+    name: string,
+  ): Promise<PipelineDefinitionRow | undefined> {
+    const rows = await tx
+      .select()
+      .from(pipelineDefinitions)
+      .where(
+        and(
+          eq(pipelineDefinitions.userId, userId),
+          eq(pipelineDefinitions.name, name),
+          eq(pipelineDefinitions.active, true),
+        ),
+      )
       .limit(1);
     return rows[0];
   }
@@ -247,7 +278,7 @@ type RunTransition =
 /** Result of recording a stage output and moving the run forward. */
 type RunAdvance =
   | { kind: "advanced" }
-  | { kind: "stale"; currentStage: string }
+  | { kind: "stale"; currentStage: string; iteration: number }
   | { kind: "not_found" };
 
 /**
@@ -266,9 +297,20 @@ export interface PipelineRunStore {
   getRun(tx: Transaction, id: string): Promise<PipelineRunRow | undefined>;
 
   /**
-   * Flip status conditionally (e.g. `running` → `waiting_gate` before a
-   * gate's `step.waitForEvent`, then back on resume). Conditional on `from`
-   * so a duplicate delivery is a no-op `stale`.
+   * The live run supervising a conversation, if any. `handle-message` calls
+   * this once per turn to decide whether the turn belongs to a pipeline
+   * stage, so it reads through the partial unique index that also enforces
+   * "at most one live run per conversation".
+   */
+  findActiveRunByConversation(
+    tx: Transaction,
+    conversationId: string,
+  ): Promise<PipelineRunRow | undefined>;
+
+  /**
+   * Flip status conditionally (e.g. `running` → `waiting_gate` when a gate
+   * parks). Conditional on `from` so a duplicate delivery is a no-op
+   * `stale`.
    */
   transitionStatus(
     tx: Transaction,
@@ -279,24 +321,37 @@ export interface PipelineRunStore {
 
   /**
    * Record `output` for `fromStage` (when the stage declares one) and move
-   * `current_stage` to `toStage`, status back to `running`. Conditional on
-   * the row sitting at `fromStage` — a retried persist that already advanced
-   * returns `stale`.
+   * `current_stage` to `toStage` at `toIteration`, status back to `running`.
+   * Conditional on the row sitting at `fromStage` — a retried persist that
+   * already advanced returns `stale`.
+   *
+   * `toIteration` is the target stage's pass number. A forward move carries
+   * the run's current pass unchanged; a backward move (a gate's `revise`,
+   * and slice 3's loop back-edges) increments it, which keeps each entry's
+   * idempotency keys — the synthetic inbound's above all — distinct from
+   * the previous visit to that stage.
    */
   advanceStage(
     tx: Transaction,
     params: {
       runId: string;
       fromStage: string;
+      fromIteration: number;
       output: StageArtifact | null;
       toStage: string;
+      toIteration: number;
     },
   ): Promise<RunAdvance>;
 
   /** Record the final stage's `output` and mark the run `completed`. */
   completeRun(
     tx: Transaction,
-    params: { runId: string; fromStage: string; output: StageArtifact | null },
+    params: {
+      runId: string;
+      fromStage: string;
+      fromIteration: number;
+      output: StageArtifact | null;
+    },
   ): Promise<RunAdvance>;
 
   /** Terminal failure from any non-terminal state. */
@@ -347,6 +402,23 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
     return rows[0];
   }
 
+  async findActiveRunByConversation(
+    tx: Transaction,
+    conversationId: string,
+  ): Promise<PipelineRunRow | undefined> {
+    const rows = await tx
+      .select()
+      .from(pipelineRuns)
+      .where(
+        and(
+          eq(pipelineRuns.conversationId, conversationId),
+          notInArray(pipelineRuns.status, [...TERMINAL_RUN_STATUSES]),
+        ),
+      )
+      .limit(1);
+    return rows[0];
+  }
+
   async transitionStatus(
     tx: Transaction,
     id: string,
@@ -376,69 +448,91 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
     params: {
       runId: string;
       fromStage: string;
+      fromIteration: number;
       output: StageArtifact | null;
       toStage: string;
+      toIteration: number;
     },
   ): Promise<RunAdvance> {
-    return this.#recordAndMove(tx, params.runId, params.fromStage, params.output, {
+    return this.#recordAndMove(tx, params, () => ({
       currentStage: params.toStage,
-      status: "running",
-    });
+      iteration: params.toIteration,
+      status: "running" as const,
+    }));
   }
 
   async completeRun(
     tx: Transaction,
-    params: { runId: string; fromStage: string; output: StageArtifact | null },
+    params: {
+      runId: string;
+      fromStage: string;
+      fromIteration: number;
+      output: StageArtifact | null;
+    },
   ): Promise<RunAdvance> {
     // `current_stage` stays on the final stage — the run is terminal, so the
     // cursor's only remaining job is to point at what produced the result.
-    return this.#recordAndMove(tx, params.runId, params.fromStage, params.output, {
+    return this.#recordAndMove(tx, params, (row) => ({
       currentStage: params.fromStage,
-      status: "completed",
-    });
+      iteration: row.iteration,
+      status: "completed" as const,
+    }));
   }
 
   /**
    * Shared read-merge-write for `advanceStage` / `completeRun`. `.for("update")`
    * row-locks so a duplicate delivery for the same run serializes; the
-   * terminal-status and `current_stage === fromStage` guards make a retried
-   * persist idempotent. The terminal guard matters because the terminal
-   * paths leave `current_stage` untouched — without it, a stage.due replay
-   * that arrives after a cancel/fail would match `fromStage` and resurrect
-   * the run.
+   * terminal-status and cursor guards make a retried persist idempotent. The
+   * terminal guard matters because the terminal paths leave `current_stage`
+   * untouched — without it, a stage.due replay that arrives after a
+   * cancel/fail would match `fromStage` and resurrect the run.
+   *
+   * The cursor is `(current_stage, iteration)`, not the stage alone: a gate's
+   * `revise` sends the run back to an earlier stage at the next iteration, so
+   * a redelivered completion for that stage's previous pass must read as
+   * stale rather than advancing the run a second time.
    */
   async #recordAndMove(
     tx: Transaction,
-    runId: string,
-    fromStage: string,
-    output: StageArtifact | null,
-    move: { currentStage: string; status: PipelineRunStatus },
+    at: { runId: string; fromStage: string; fromIteration: number; output: StageArtifact | null },
+    move: (row: { iteration: number }) => {
+      currentStage: string;
+      iteration: number;
+      status: PipelineRunStatus;
+    },
   ): Promise<RunAdvance> {
     const rows = await tx
       .select({
         status: pipelineRuns.status,
         currentStage: pipelineRuns.currentStage,
+        iteration: pipelineRuns.iteration,
         stageOutputs: pipelineRuns.stageOutputs,
       })
       .from(pipelineRuns)
-      .where(eq(pipelineRuns.id, runId))
+      .where(eq(pipelineRuns.id, at.runId))
       .limit(1)
       .for("update");
     const row = rows[0];
     if (!row) return { kind: "not_found" as const };
-    // TODO(slice 3): once back-edges land, the cursor is (stage, iteration) —
-    // this guard must also match `iteration`, or a replayed stage.due for
-    // (stageA, iter 0) could re-fire against a run that legitimately looped
-    // back to (stageA, iter 1). Sufficient now: iteration is invariantly 0.
-    if (isTerminalPipelineRunStatus(row.status) || row.currentStage !== fromStage) {
-      return { kind: "stale" as const, currentStage: row.currentStage };
+    if (
+      isTerminalPipelineRunStatus(row.status) ||
+      row.currentStage !== at.fromStage ||
+      row.iteration !== at.fromIteration
+    ) {
+      return { kind: "stale" as const, currentStage: row.currentStage, iteration: row.iteration };
     }
     const stageOutputs =
-      output === null ? row.stageOutputs : { ...row.stageOutputs, [fromStage]: output };
+      at.output === null ? row.stageOutputs : { ...row.stageOutputs, [at.fromStage]: at.output };
+    const target = move(row);
     await tx
       .update(pipelineRuns)
-      .set({ stageOutputs, currentStage: move.currentStage, status: move.status })
-      .where(eq(pipelineRuns.id, runId));
+      .set({
+        stageOutputs,
+        currentStage: target.currentStage,
+        iteration: target.iteration,
+        status: target.status,
+      })
+      .where(eq(pipelineRuns.id, at.runId));
     return { kind: "advanced" as const };
   }
 

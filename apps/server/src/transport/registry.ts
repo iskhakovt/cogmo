@@ -3,6 +3,7 @@ import type { JsonValue } from "type-fest";
 import type { CodingStore } from "../agent/coding/store/index.js";
 import type { CodingStreamingRegistry } from "../agent/coding/streaming-registry.js";
 import type { TriggerReflectionResult } from "../agent/evolution/trigger-reflection.js";
+import type { PipelineRunStore, PipelineStore } from "../agent/pipeline/store/index.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { Transactor } from "../db/index.js";
 import type { inboundArrived as InboundArrivedEvent } from "../inngest/events.js";
@@ -56,6 +57,9 @@ export interface RegistryDeps {
    * absent, every `transport.mcp.*` method returns `mcp_disabled`.
    */
   mcpRegistry?: McpRegistry;
+  /** Pipeline stores — wired through to `Transport.pipelines.resolveGate`. */
+  pipelineStore?: PipelineStore;
+  pipelineRunStore?: PipelineRunStore;
   /**
    * Sync Observer driver for `/reflect`. Production bootstrap supplies it;
    * test setups that don't exercise `transport.evolution.triggerReflection`
@@ -115,6 +119,8 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
       ...(deps.skillRunner && { skillRunner: deps.skillRunner }),
       ...(deps.skillStore && { skillStore: deps.skillStore }),
       ...(deps.mcpRegistry && { mcpRegistry: deps.mcpRegistry }),
+      ...(deps.pipelineStore && { pipelineStore: deps.pipelineStore }),
+      ...(deps.pipelineRunStore && { pipelineRunStore: deps.pipelineRunStore }),
       ...(deps.triggerReflection && { triggerReflection: deps.triggerReflection }),
       inngest: deps.inngest,
       inboundArrived: deps.inboundArrived,
@@ -154,6 +160,7 @@ export async function startChannels(deps: RegistryDeps): Promise<RegistryResult>
           transportStore: deps.transportStore,
         },
       }),
+      pipelineGate: { runInTx: deps.runInTx, transportStore: deps.transportStore },
       ...(deps.webStream && { webStream: deps.webStream }),
     });
 

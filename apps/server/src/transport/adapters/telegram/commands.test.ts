@@ -12,6 +12,8 @@ import {
   handleDisable,
   handleEnable,
   handleEnd,
+  handleGate,
+  handleGateCallback,
   handleLearned,
   handleMcp,
   handleModel,
@@ -4582,5 +4584,106 @@ describe("handleLearned detail rendering", () => {
     await handleLearned(transport, ctx);
     const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
     expect(reply).not.toContain("Took:");
+  });
+});
+
+describe("handleGateCallback", () => {
+  const runId = "019d0000-0000-7000-8000-0000000000aa";
+
+  it("sends the tapped decision straight to resolveGate", async () => {
+    const resolveGate = vi.fn().mockResolvedValue(ok({ runId, pipelineName: "issue-to-pr" }));
+    const transport = transportWith({ pipelines: { resolveGate } });
+
+    const outcome = await handleGateCallback(transport, { runId, action: "approve" }, "1");
+
+    expect(resolveGate).toHaveBeenCalledWith({
+      target: { kind: "run", runId },
+      decision: "approve",
+      tapperPlatformHandle: "1",
+    });
+    expect(outcome.editText).toContain("Approved");
+    expect(outcome.toast).toBe("Approved");
+  });
+
+  it("tells the user how to say what to change after a Revise tap", async () => {
+    const resolveGate = vi.fn().mockResolvedValue(ok({ runId, pipelineName: "issue-to-pr" }));
+    const transport = transportWith({ pipelines: { resolveGate } });
+
+    const outcome = await handleGateCallback(transport, { runId, action: "revise" }, "1");
+
+    expect(outcome.followUp).toContain("changed");
+  });
+
+  it("renders the transport's refusal rather than claiming success", async () => {
+    const resolveGate = vi.fn().mockResolvedValue(err({ code: "no_pending_gate" as const }));
+    const transport = transportWith({ pipelines: { resolveGate } });
+
+    const outcome = await handleGateCallback(transport, { runId, action: "cancel" }, "1");
+
+    expect(outcome.editText).toContain("No pipeline is waiting");
+    expect(outcome.toast).toBe(outcome.editText);
+  });
+});
+
+describe("handleGate", () => {
+  it("targets the conversation the command was typed in", async () => {
+    const resolveGate = vi
+      .fn()
+      .mockResolvedValue(ok({ runId: "run-1", pipelineName: "issue-to-pr" }));
+    const transport = transportWith({
+      resolveSession: vi.fn().mockResolvedValue({ conversationId: "conv-9" }),
+      pipelines: { resolveGate },
+    });
+    const ctx = mkCtx("approve");
+
+    await handleGate(transport, ctx);
+
+    expect(resolveGate).toHaveBeenCalledWith({
+      target: { kind: "conversation", conversationId: "conv-9" },
+      decision: "approve",
+      tapperPlatformHandle: "1",
+    });
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("issue-to-pr"));
+  });
+
+  it("forwards revise feedback", async () => {
+    const resolveGate = vi
+      .fn()
+      .mockResolvedValue(ok({ runId: "run-1", pipelineName: "issue-to-pr" }));
+    const transport = transportWith({
+      resolveSession: vi.fn().mockResolvedValue({ conversationId: "conv-9" }),
+      pipelines: { resolveGate },
+    });
+
+    await handleGate(transport, mkCtx("revise use the staging DB"));
+
+    expect(resolveGate).toHaveBeenCalledWith(
+      expect.objectContaining({ decision: "revise", feedback: "use the staging DB" }),
+    );
+  });
+
+  it("shows usage for anything that isn't a decision", async () => {
+    const resolveGate = vi.fn();
+    const transport = transportWith({ pipelines: { resolveGate } });
+    const ctx = mkCtx("maybe");
+
+    await handleGate(transport, ctx);
+
+    expect(resolveGate).not.toHaveBeenCalled();
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("/gate approve"));
+  });
+
+  it("says so when there is no conversation to answer in", async () => {
+    const resolveGate = vi.fn();
+    const transport = transportWith({
+      resolveSession: vi.fn().mockResolvedValue(null),
+      pipelines: { resolveGate },
+    });
+    const ctx = mkCtx("cancel");
+
+    await handleGate(transport, ctx);
+
+    expect(resolveGate).not.toHaveBeenCalled();
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("No active conversation"));
   });
 });

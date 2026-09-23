@@ -35,10 +35,15 @@ export type ChannelSessionReceive = (typeof channelSessionReceive.enumValues)[nu
 
 /**
  * `inbound_messages.source` — `user` for platform-delivered messages
- * (originating session FK populated), `scheduled` for synthetic inbounds
- * with no originating session. A check constraint enforces the link.
+ * (originating session FK populated), `scheduled` / `pipeline` for
+ * synthetic inbounds with no originating session. A check constraint
+ * enforces the link between the source and which idempotency key is set.
  */
-export const inboundMessageSource = pgEnum("inbound_message_source", ["user", "scheduled"]);
+export const inboundMessageSource = pgEnum("inbound_message_source", [
+  "user",
+  "scheduled",
+  "pipeline",
+]);
 export type InboundMessageSource = (typeof inboundMessageSource.enumValues)[number];
 
 export const channels = pgTable("channels", {
@@ -107,16 +112,29 @@ export const inboundMessages = pgTable(
      * NULL for `source='user'`; the check constraint enforces the link.
      */
     scheduledFireKey: text("scheduled_fire_key"),
+    /**
+     * Idempotency key for a pipeline stage's synthetic inbound:
+     * `${runId}:${stageId}:${iteration}` — one row per stage entry. The
+     * stage runner pre-checks it so an Inngest retry that lands after the
+     * insert committed reuses the row instead of posting the stage
+     * instructions to the user twice. NULL for every other source; the
+     * check constraint enforces the link.
+     */
+    pipelineStageKey: text("pipeline_stage_key"),
     createdAt: ts(),
   },
   (t) => [
     uniqueIndex("uq_inbound_scheduled_fire_key")
       .on(t.scheduledFireKey)
       .where(sql`scheduled_fire_key IS NOT NULL`),
+    uniqueIndex("uq_inbound_pipeline_stage_key")
+      .on(t.pipelineStageKey)
+      .where(sql`pipeline_stage_key IS NOT NULL`),
     check(
       "chk_inbound_source_session",
-      sql`(${t.source} = 'user' AND ${t.channelSessionId} IS NOT NULL AND ${t.scheduledFireKey} IS NULL)
-        OR (${t.source} = 'scheduled' AND ${t.channelSessionId} IS NULL AND ${t.scheduledFireKey} IS NOT NULL)`,
+      sql`(${t.source} = 'user' AND ${t.channelSessionId} IS NOT NULL AND ${t.scheduledFireKey} IS NULL AND ${t.pipelineStageKey} IS NULL)
+        OR (${t.source} = 'scheduled' AND ${t.channelSessionId} IS NULL AND ${t.scheduledFireKey} IS NOT NULL AND ${t.pipelineStageKey} IS NULL)
+        OR (${t.source} = 'pipeline' AND ${t.channelSessionId} IS NULL AND ${t.scheduledFireKey} IS NULL AND ${t.pipelineStageKey} IS NOT NULL)`,
     ),
   ],
 );

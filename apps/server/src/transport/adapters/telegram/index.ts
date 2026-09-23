@@ -4,9 +4,11 @@ import { PLAN_CALLBACK_REGEX, parsePlanCallback } from "../../../agent/coding/pl
 import { startCodingProgressSubscriber } from "../../../agent/coding/progress-subscriber.js";
 import { parseGeneratedDocumentPayload } from "../../../agent/document-tools.js";
 import { parseGeneratedImagePayload } from "../../../agent/image-tools.js";
+import { GATE_CALLBACK_REGEX, parseGateCallback } from "../../../agent/pipeline/gate-keyboard.js";
 import {
   boundaryResolvedEvent,
   codingTaskStart,
+  pipelineGateRequested,
   skillsDeployApprovalRequested,
 } from "../../../inngest/events.js";
 import type { StreamEvent } from "../../../llm/types.js";
@@ -34,6 +36,8 @@ import {
   handleDisable,
   handleEnable,
   handleEnd,
+  handleGate,
+  handleGateCallback,
   handleLearned,
   handleMcp,
   handleModel,
@@ -54,6 +58,7 @@ import {
   handleVoice,
   type TelegramCommandContext,
 } from "./commands.js";
+import { postPipelineGateKeyboard } from "./pipeline-gate-poster.js";
 import { ProfileDialogs } from "./profile-dialog.js";
 import { renderTelegramHtml, stripHtmlTags } from "./render.js";
 import { RepoDialogs } from "./repo-dialog.js";
@@ -854,6 +859,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   bot.command("enable", (ctx) => handleEnable(transport, toCmdCtx(ctx)));
   bot.command("schedules", (ctx) => handleSchedules(transport, toCmdCtx(ctx)));
   bot.command("learned", (ctx) => handleLearned(transport, toCmdCtx(ctx)));
+  bot.command("gate", (ctx) => handleGate(transport, toCmdCtx(ctx)));
   bot.command("reflect", (ctx) => handleReflect(transport, toCmdCtx(ctx)));
 
   // Mid-dialog abort for /profile new|edit and /repo add flows. Evaluate
@@ -942,6 +948,33 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       const msg = err instanceof Error ? err.message : "";
       if (!msg.includes("message is not modified")) {
         logger.warn({ err }, "telegram: failed to edit plan message");
+      }
+    }
+    if (outcome.followUp) {
+      await ctx.reply(outcome.followUp);
+    }
+    await ctx.answerCallbackQuery({ text: outcome.toast });
+  });
+
+  // Pipeline gate keyboard: Approve / Revise / Cancel — callback_data =
+  // "pgate:<runId>:<action>"
+  bot.callbackQuery(GATE_CALLBACK_REGEX, async (ctx) => {
+    const data = ctx.callbackQuery?.data;
+    const fromId = ctx.from?.id;
+    if (!data || fromId === undefined) return;
+    const parsed = parseGateCallback(data);
+    if (!parsed) return;
+
+    const outcome = await handleGateCallback(transport, parsed, String(fromId));
+
+    // Replace the button message with its outcome and drop the keyboard, so
+    // a stale gate can't be tapped twice from scrollback.
+    try {
+      await ctx.editMessageText(outcome.editText, { reply_markup: { inline_keyboard: [] } });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "";
+      if (!msg.includes("message is not modified")) {
+        logger.warn({ err }, "telegram: failed to edit pipeline gate message");
       }
     }
     if (outcome.followUp) {
@@ -1391,6 +1424,30 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
             channelId,
             runInTx,
             skillStore,
+            transportStore,
+            sendMessage: (chatId, text, opts) => bot.api.sendMessage(chatId, text, opts),
+          }),
+      ),
+    );
+  }
+
+  // Pipeline gates — listen on pipeline/gate.requested and attach the
+  // Approve / Revise / Cancel buttons to the prompt the stage runner already
+  // delivered. The tap routes straight to transport.pipelines.resolveGate.
+  if (deps.pipelineGate) {
+    const { runInTx, transportStore } = deps.pipelineGate;
+    functions.push(
+      inngest.createFunction(
+        {
+          id: `telegram-pipeline-gate-${channelId}`,
+          triggers: [pipelineGateRequested],
+          retries: 0,
+        },
+        async ({ event }) =>
+          postPipelineGateKeyboard({
+            event: event.data,
+            channelId,
+            runInTx,
             transportStore,
             sendMessage: (chatId, text, opts) => bot.api.sendMessage(chatId, text, opts),
           }),

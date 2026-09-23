@@ -31,7 +31,10 @@ import { createIdleTimer } from "./agent/idle-timer.js";
 import { ImageToolsLoader } from "./agent/image-tools-loader.js";
 import { runStreamingAgentLoop } from "./agent/loop.js";
 import { memoryTools } from "./agent/memory-tools.js";
-import { DrizzlePipelineStore } from "./agent/pipeline/store/index.js";
+import { createPipelineGateResolve } from "./agent/pipeline/gate-resolve.js";
+import { createPipelineStageAdvance } from "./agent/pipeline/stage-advance.js";
+import { createPipelineStageRunner } from "./agent/pipeline/stage-runner.js";
+import { DrizzlePipelineRunStore, DrizzlePipelineStore } from "./agent/pipeline/store/index.js";
 import { PIPELINES_PROMPT_GUIDANCE, pipelineTools } from "./agent/pipeline/tools.js";
 import { DefaultPromptSource } from "./agent/prompt.js";
 import { createHandleMessageReconcile } from "./agent/reconcile-on-failure.js";
@@ -184,6 +187,7 @@ export interface CoreDeps {
   sandboxStore: DrizzleSandboxStore;
   codingStore: DrizzleCodingStore;
   pipelineStore: DrizzlePipelineStore;
+  pipelineRunStore: DrizzlePipelineRunStore;
   mcpStore: DrizzleMcpStore;
   skillStore: DrizzleSkillStore;
   secretsStore: DrizzleSecretsStore;
@@ -328,6 +332,7 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
   const sandboxStore = new DrizzleSandboxStore();
   const codingStore = new DrizzleCodingStore();
   const pipelineStore = new DrizzlePipelineStore();
+  const pipelineRunStore = new DrizzlePipelineRunStore();
   const mcpStore = new DrizzleMcpStore();
   const skillStore = new DrizzleSkillStore();
   const webSessionStore = new DrizzleWebSessionStore();
@@ -440,6 +445,7 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
     sandboxStore,
     codingStore,
     pipelineStore,
+    pipelineRunStore,
     mcpStore,
     skillStore,
     secretsStore,
@@ -1054,6 +1060,8 @@ export async function bootstrapRuntime(
     skillRunner,
     skillStore: core.skillStore,
     mcpRegistry,
+    pipelineStore: core.pipelineStore,
+    pipelineRunStore: core.pipelineRunStore,
     triggerReflection: reflectionTrigger,
     inngest,
     inboundArrived,
@@ -1091,6 +1099,8 @@ export async function bootstrapRuntime(
         skillRunner,
         skillStore: core.skillStore,
         mcpRegistry,
+        pipelineStore: core.pipelineStore,
+        pipelineRunStore: core.pipelineRunStore,
         triggerReflection: reflectionTrigger,
         inngest,
         inboundArrived,
@@ -1151,6 +1161,7 @@ export async function bootstrapRuntime(
     userTimezone: env.USER_TIMEZONE,
     voiceResolver,
     pipelineStore: core.pipelineStore,
+    pipelineRunStore: core.pipelineRunStore,
   });
 
   const observer = createObserver({
@@ -1195,6 +1206,23 @@ export async function bootstrapRuntime(
     inngest,
   );
 
+  // Pipeline run engine — three short functions chained by events: the
+  // runner enters a stage, the advancer moves the cursor when a stage
+  // completes, the gate resolver applies the user's decision. See
+  // design/pipelines.md → Execution Model.
+  const pipelineDeps = {
+    runInTx: core.runInTx,
+    store: core.pipelineStore,
+    runStore: core.pipelineRunStore,
+    deliveryRouter,
+  };
+  const pipelineStageRunner = createPipelineStageRunner(
+    { ...pipelineDeps, transportStore: core.transportStore },
+    inngest,
+  );
+  const pipelineStageAdvance = createPipelineStageAdvance(pipelineDeps, inngest);
+  const pipelineGateResolve = createPipelineGateResolve(pipelineDeps, inngest);
+
   // Skill cron ticker — parallel 1-min cron that locks due rows from
   // `skills` (where `schedule IS NOT NULL`) and fans out
   // `skills/cron.fire`. Separate from `scheduled-task-ticker` because
@@ -1235,6 +1263,9 @@ export async function bootstrapRuntime(
     handleMessageReconcile,
     scheduledTaskTicker,
     scheduledTaskFire,
+    pipelineStageRunner,
+    pipelineStageAdvance,
+    pipelineGateResolve,
     skillCronTicker,
     skillCronFire,
     skillDepsReaper,

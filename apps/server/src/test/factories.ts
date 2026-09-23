@@ -262,6 +262,7 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
     clearChatDefaultProfile: vi.fn().mockResolvedValue(undefined),
     findReachableChannelsForUserProfile: vi.fn().mockResolvedValue([]),
     findInboundByScheduledFireKey: vi.fn().mockResolvedValue(undefined),
+    findInboundByPipelineStageKey: vi.fn().mockResolvedValue(undefined),
     peekPriorClosedConversation: vi.fn().mockResolvedValue(undefined),
     createBoundaryPending: vi.fn().mockResolvedValue({ id: "boundary-1" }),
     getBoundaryPendingByAddress: vi.fn().mockResolvedValue(undefined),
@@ -302,6 +303,7 @@ export function mockTransportDeep(overrides: DeepPartial<Transport> = {}): Trans
     repos: { ...base.repos, ...(overrides.repos ?? {}) },
     coding: { ...base.coding, ...(overrides.coding ?? {}) },
     skills: { ...base.skills, ...(overrides.skills ?? {}) },
+    pipelines: { ...base.pipelines, ...(overrides.pipelines ?? {}) },
     scheduling: { ...base.scheduling, ...(overrides.scheduling ?? {}) },
     mcp: { ...base.mcp, ...(overrides.mcp ?? {}) },
     evolution: { ...base.evolution, ...(overrides.evolution ?? {}) },
@@ -458,6 +460,9 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
       approvePlan: vi.fn().mockResolvedValue(ok({ taskId: "t-1" })),
       cancelTask: vi.fn().mockResolvedValue(ok({ taskId: "t-1" })),
     },
+    pipelines: {
+      resolveGate: vi.fn().mockResolvedValue(ok({ runId: "run-1", pipelineName: "release" })),
+    },
     skills: {
       approveDeploy: vi
         .fn()
@@ -591,6 +596,23 @@ export function makeStepSendEvent(inngest: Pick<Inngest, "send">): StepSendEvent
     await inngest.send(payload as never);
     return { ids: [] };
   }) as unknown as StepSendEvent;
+}
+
+/**
+ * `step.sendEvent` that records what it was handed — for orchestrator tests
+ * that assert on event names and the bus-level dedup ids their emits carry.
+ */
+export function recordingStepSendEvent(): {
+  sent: { id: string; name: string; data: Record<string, unknown> }[];
+  stepSendEvent: StepSendEvent;
+} {
+  const sent: { id: string; name: string; data: Record<string, unknown> }[] = [];
+  const stepSendEvent = (async (_stepId: string, payload: unknown) => {
+    const p = payload as { id: string; name: string; data: Record<string, unknown> };
+    sent.push({ id: p.id, name: p.name, data: p.data });
+    return { ids: [] };
+  }) as unknown as StepSendEvent;
+  return { sent, stepSendEvent };
 }
 
 /**
