@@ -263,6 +263,8 @@ function throwingPlan(message: string): AsyncIterable<CodingEvent> {
 interface RecordingPlanStream {
   text: string[];
   finalized: string[];
+  /** `finalize`'s second argument, one entry per call. */
+  finalizeOpts: ({ autoApproved?: boolean } | undefined)[];
   failed: string[];
   handle: import("./orchestrator.js").PlanStreamHandle;
 }
@@ -271,6 +273,7 @@ function recordingPlanStream(): RecordingPlanStream {
   const out: RecordingPlanStream = {
     text: [],
     finalized: [],
+    finalizeOpts: [],
     failed: [],
     handle: undefined!,
   };
@@ -278,8 +281,9 @@ function recordingPlanStream(): RecordingPlanStream {
     appendText: async (delta) => {
       out.text.push(delta);
     },
-    finalize: async (plan) => {
+    finalize: async (plan, opts) => {
       out.finalized.push(plan);
+      out.finalizeOpts.push(opts);
     },
     fail: async (reason) => {
       out.failed.push(reason);
@@ -486,16 +490,19 @@ describe("runCodingTask", () => {
       return { ids: [] };
     }) as never;
 
+    const planStream = recordingPlanStream();
     const result = await runCodingTask({
       taskId: task.id,
       runId: "run-test",
-      deps: makeDeps({ sandbox, backend }),
+      deps: makeDeps({ sandbox, backend, openPlanStream: async () => planStream.handle }),
       stepRun,
       stepSendEvent: recordingStepSendEvent,
     });
     // Status stays at awaiting_approval (the execute orchestrator
     // transitions it to executing on the event we just emitted).
     expect(result.status).toBe("awaiting_approval");
+    // Subscribers are told to drop the approve/revise/cancel keyboard.
+    expect(planStream.finalizeOpts).toEqual([{ autoApproved: true }]);
 
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.planApprovedAt).toBeInstanceOf(Date);
@@ -522,14 +529,17 @@ describe("runCodingTask", () => {
       return { ids: [] };
     }) as never;
 
+    const planStream = recordingPlanStream();
     const result = await runCodingTask({
       taskId: task.id,
       runId: "run-test",
-      deps: makeDeps({ sandbox, backend }),
+      deps: makeDeps({ sandbox, backend, openPlanStream: async () => planStream.handle }),
       stepRun,
       stepSendEvent: recordingStepSendEvent,
     });
     expect(result.status).toBe("awaiting_approval");
+    // The human still holds this gate, so the keyboard has to render.
+    expect(planStream.finalizeOpts).toEqual([{ autoApproved: false }]);
 
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.planApprovedAt).toBeNull();
@@ -635,24 +645,29 @@ describe("runCodingTask", () => {
       sentEvents.push(payload as { name: string });
       return { ids: [] };
     }) as never;
-    const stepIds: string[] = [];
-    const recordingStepRun = (async (id: string, fn: () => Promise<unknown>) => {
-      stepIds.push(id);
-      return fn();
-    }) as unknown as typeof stepRun;
+    const modeSpy = vi.spyOn(store, "getCodingAutoapproveModeForTask");
+    const planStream = recordingPlanStream();
 
-    const result = await runCodingTask({
-      taskId: task.id,
-      runId: "run-test",
-      deps: makeDeps({ sandbox, backend }),
-      stepRun: recordingStepRun,
-      stepSendEvent: recordingStepSendEvent,
-    });
-    expect(stepIds).not.toContain("resolve-autoapprove-mode");
-    expect(result.status).toBe("awaiting_approval");
+    try {
+      const result = await runCodingTask({
+        taskId: task.id,
+        runId: "run-test",
+        deps: makeDeps({ sandbox, backend, openPlanStream: async () => planStream.handle }),
+        stepRun,
+        stepSendEvent: recordingStepSendEvent,
+      });
+      expect(modeSpy).not.toHaveBeenCalled();
+      expect(result.status).toBe("awaiting_approval");
+    } finally {
+      // `restoreMocks` is off, so an un-restored spy would leak into every
+      // later test in this file.
+      modeSpy.mockRestore();
+    }
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.planApprovedAt).toBeInstanceOf(Date);
     expect(sentEvents.filter((e) => e.name === "coding/task/plan-approved")).toHaveLength(1);
+    // No keyboard for a task nobody can tap.
+    expect(planStream.finalizeOpts).toEqual([{ autoApproved: true }]);
   });
 
   it("automated trigger (evolution) clears the gate in-run and hands off to execute", async () => {
@@ -701,6 +716,67 @@ describe("runCodingTask", () => {
     expect(approved).toHaveLength(1);
     expect(approved[0]?.data).toMatchObject({ taskId: task.id });
     expect(approved[0]?.id).toBe(`plan-approved-${task.id}`);
+  });
+
+  it("re-executed approve step emits anyway, carrying the stamp the row already holds", async () => {
+    // The recovery contract from .claude/rules/inngest.md: an attempt that
+    // commits `plan_approved_at` and loses its step result before Inngest
+    // records it leaves the re-run seeing `already_approved`. Reading that
+    // as "someone else finished the job" skips the only trigger of the
+    // execute orchestrator, and the function still returns success, so
+    // `coding-task-reconcile` never sees the stranded task either.
+    const repo = await seedRepo();
+    const task = await tx((trx) =>
+      store.insertTask(trx, {
+        repoId: repo.id,
+        goal: "g",
+        triggerSource: "evolution",
+        triggerRef: "evo-recover",
+        backend: "claude",
+        allowPrivilegedRunc: false,
+      }),
+    );
+    const { sandbox } = fakeSandbox();
+    const backend = backendYielding([
+      { kind: "session_started", sessionId: "sess-EVO" },
+      { kind: "plan_ready", plan: "auto-plan" },
+      { kind: "complete", exitCode: 0, isError: false },
+    ]);
+    const sentEvents: { name: string; data: unknown }[] = [];
+    const recordingStepSendEvent = (async (_: string, payload: unknown) => {
+      sentEvents.push(payload as { name: string; data: unknown });
+      return { ids: [] };
+    }) as never;
+
+    // Stands in for the lost attempt: stamp the row from "attempt 1"
+    // immediately before the orchestrator's own approve step body runs.
+    const firstAttemptAt = new Date("2026-09-23T09:00:00.000Z");
+    const interceptingStepRun = (async (id: string, fn: () => Promise<unknown>) => {
+      if (id === "auto-approve-plan") {
+        await tx((trx) => store.approvePlanIfPending(trx, task.id, firstAttemptAt));
+      }
+      return fn();
+    }) as unknown as typeof stepRun;
+
+    const result = await runCodingTask({
+      taskId: task.id,
+      runId: "run-test",
+      deps: makeDeps({ sandbox, backend }),
+      stepRun: interceptingStepRun,
+      stepSendEvent: recordingStepSendEvent,
+    });
+    expect(result.status).toBe("awaiting_approval");
+
+    const approved = sentEvents.filter((e) => e.name === "coding/task/plan-approved");
+    expect(approved).toHaveLength(1);
+    // Attempt 1's timestamp, not a fresh one — the event has to agree with
+    // the row, and `approvePlanIfPending` never restamps.
+    expect(approved[0]?.data).toMatchObject({
+      taskId: task.id,
+      approvedAt: firstAttemptAt.toISOString(),
+    });
+    const reloaded = await tx((trx) => store.getTask(trx, task.id));
+    expect(reloaded?.planApprovedAt?.toISOString()).toBe(firstAttemptAt.toISOString());
   });
 
   it("backend reports error → status=failed, sandbox stopped, plan stream failed", async () => {

@@ -1,5 +1,6 @@
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Inngest } from "inngest";
+import { match } from "ts-pattern";
 import type { Transactor } from "../../db/index.js";
 import { codingTaskFailed, codingTaskPlanApproved, codingTaskStart } from "../../inngest/events.js";
 import type { StepRun, StepSendEvent } from "../../inngest/index.js";
@@ -641,10 +642,18 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     // committed, a subscriber error must not regress the task to failed.
     // Durable because two more boundaries follow on the auto-approve path,
     // and a bare-body finalize would re-render the plan message on each.
-    const willAutoApprove = task.triggerSource !== "user" || autoapproveMode === "on";
+    // Who clears this task's plan gate. Exhaustive over
+    // `coding_trigger_source` on purpose: a new member is a compile error
+    // here rather than a silent default into the ungated arm, which would
+    // hand it an unattended `--permission-mode bypassPermissions` session.
+    const gate = match(task.triggerSource)
+      .with("user", () => (autoapproveMode === "on" ? "profile_autoapprove" : "human_tap"))
+      .with("evolution", "signal_pipeline", () => "no_interactive_gate")
+      .exhaustive();
+    const clearsGateInRun = gate !== "human_tap";
     await stepRun("notify-plan-finalized", async () => {
       await stream
-        .finalize(result.plan ?? "", { autoApproved: willAutoApprove })
+        .finalize(result.plan ?? "", { autoApproved: clearsGateInRun })
         .catch((streamErr: unknown) => {
           taskLog.warn(
             { err: streamErr },
@@ -661,20 +670,34 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     // cancels/manual approvals — if the user managed to tap Cancel in the
     // microseconds between `set-status-plan-ready` and this step, the
     // approve becomes a no-op and the task stays cancelled.
-    if (willAutoApprove) {
+    if (clearsGateInRun) {
       // Generate `approvedAt` INSIDE the step so the cached return on a
       // future replay carries the original timestamp — otherwise a
       // retry after the DB write but before the emit would persist
       // an `approvedAt` from attempt 1 while emitting one from attempt 2,
       // and downstream consumers see a row/event timestamp mismatch.
       // `retries: 0` makes this defensive today; pinning it here closes
-      // the footgun if retries ever loosen.
+      // the footgun if retries ever loosen. `already_approved` reports the
+      // row's own timestamp instead, for the same reason: that is the value
+      // `plan_approved_at` holds, and the emit has to agree with it.
       const approveResult = await stepRun("auto-approve-plan", async () => {
         const approvedAt = new Date();
         const result = await runInTx((tx) => store.approvePlanIfPending(tx, taskId, approvedAt));
-        return { ...result, approvedAt: approvedAt.toISOString() };
+        return result.kind === "already_approved"
+          ? { ...result, approvedAt: result.approvedAt.toISOString() }
+          : { ...result, approvedAt: approvedAt.toISOString() };
       });
-      if (approveResult.kind === "approved") {
+      // `already_approved` emits too. It means this step body is re-running
+      // after an attempt that committed the stamp and lost its result before
+      // Inngest recorded it — the recovery owes the remaining phase, and
+      // treating "the row already says approved" as done is what would leave
+      // a task with a plan, a stamp and no execute run, which nothing
+      // reconciles because this function returns success (see
+      // .claude/rules/inngest.md → idempotency). A duplicate costs nothing:
+      // the bus dedups on `plan-approved-<taskId>`, and past that window the
+      // execute claim is conditional on `awaiting_approval`, so a second run
+      // finds the first one's `executing` and stands down.
+      if (approveResult.kind === "approved" || approveResult.kind === "already_approved") {
         await stepSendEvent("emit-plan-approved", {
           ...codingTaskPlanApproved.create({
             taskId,
@@ -692,13 +715,17 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
           id: `plan-approved-${taskId}`,
         });
         taskLog.info(
-          { triggerSource: task.triggerSource, autoapproveMode },
-          "plan approved in-run — execute handed off",
+          { gate, kind: approveResult.kind },
+          "plan gate cleared in-run — execute handed off",
         );
       } else {
+        // `not_pending` / `not_found`: the task left `awaiting_approval`
+        // under us (a cancel, or a sibling run's failure cascade). Not a
+        // wedge — the row is terminal or owned elsewhere — so the emit is
+        // correctly withheld.
         taskLog.info(
-          { kind: approveResult.kind },
-          "auto-approve skipped — task no longer awaiting approval",
+          { gate, kind: approveResult.kind },
+          "plan gate not cleared — task no longer awaiting approval",
         );
       }
     }

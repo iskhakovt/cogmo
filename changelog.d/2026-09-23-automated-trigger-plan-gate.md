@@ -23,13 +23,25 @@ no conversation to join through, and skipping it keeps that step boundary off
 the automated path. `plan_finalized.autoApproved` covers both paths, so the
 approve/revise/cancel keyboard is suppressed for either.
 
+The emit also fires when `approvePlanIfPending` reports `already_approved`,
+which is what a re-executed step body sees after an attempt committed the
+stamp and lost its result. The recovery owes the remaining phase: skipping the
+emit there would leave a task holding a plan and a stamp with no execute run,
+and the function returns success, so nothing reconciles it. A duplicate is
+free — the bus dedups on `plan-approved-<taskId>`, and past that window the
+execute claim is conditional on `awaiting_approval`. The event carries the
+row's own timestamp in that case rather than the re-run's.
+
 `plan_approved_at` records when the gate cleared, not that a human cleared it.
 `trigger_source` and the profile's mode are what say who did.
 
 A flow test drives an `evolution` task from plan through execute to
-`pending_verify` with no `Transport.approvePlan` call in it; orchestrator tests
+`pending_verify` with no `Transport.approvePlan` call in it. Orchestrator tests
 pin that the automated path emits exactly once, carries the right idempotency
-id, and never reads the profile's autoapprove mode.
+id, never reads the profile's autoapprove mode, and re-emits with the stored
+timestamp when the approve step body re-runs against an already-stamped row.
+The `autoApproved` flag is asserted on all three paths, so inverting it fails a
+test rather than silently rendering buttons nobody can use.
 
 Deferred, filed as `p2` in `todo.md`: plan and execute key their askpass
 material on the same `${askpassBaseDir}/<taskId>` directory, which is also the
