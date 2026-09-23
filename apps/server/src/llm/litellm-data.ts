@@ -4,7 +4,7 @@
  * Reads the bundled `data/litellm-models.json` snapshot (refreshed by
  * `scripts/refresh-litellm-models.ts`) and exposes a normalized lookup. The
  * resolver consults this layer when no explicit DB override exists for a
- * model id; the snapshot covers ~2,200 models across all major providers.
+ * model id; the snapshot covers a few thousand models across all major providers.
  *
  * The snapshot lives in `data/` (outside `src/rootDir`) so it stays a
  * data artefact rather than a TS module. We load it lazily via `fs` on

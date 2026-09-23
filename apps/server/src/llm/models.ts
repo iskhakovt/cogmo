@@ -12,8 +12,8 @@
  *      when the operator wants explicit control. Highest priority — when
  *      either column is set we trust it without further lookup.
  *   2. **LiteLLM bundled snapshot** — `data/litellm-models.json`, refreshed
- *      manually via `scripts/refresh-litellm-models.ts`. Covers ~2,200
- *      models from the community-curated registry; bridges OpenRouter
+ *      manually via `scripts/refresh-litellm-models.ts`. Covers a few
+ *      thousand models from the community-curated registry; bridges OpenRouter
  *      slugs to vendor-direct ids via key normalization.
  *   3. **Conservative default** — 128k context, 4k max output, with a
  *      `WARN` log so operators see the fallback fire and can pin explicit
