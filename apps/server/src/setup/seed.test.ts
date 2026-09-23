@@ -3,12 +3,14 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { DrizzleAgentStore } from "../agent/store/index.js";
 import { imageModels } from "../agent/store/schema.js";
 import type { Database, Transactor } from "../db/index.js";
+import { resolveLimits } from "../llm/models.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../secrets/store/index.js";
 import { expectDefined } from "../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { DrizzleTransportStore } from "../transport/store/index.js";
 import {
+  DEFAULT_PROFILE_MODEL,
   ensureDefaultUser,
   ensureFalImageDefaults,
   ensureWebChannel,
@@ -210,5 +212,16 @@ describe("ensureWebChannel", () => {
     await seedDefaults(tx, agentStore, transportStore);
     expect(await tx((trx) => transportStore.getChannelByType(trx, "direct"))).toBeDefined();
     expect(await tx((trx) => transportStore.getChannelByType(trx, "web"))).toBeDefined();
+  });
+});
+
+describe("DEFAULT_PROFILE_MODEL", () => {
+  it("resolves real limits from the bundled LiteLLM snapshot", () => {
+    // A default the snapshot doesn't know still boots, so nothing else
+    // fails — it just silently lands every fresh install on the resolver's
+    // conservative 128k/4k fallback, compacting turns that would have fit.
+    const limits = resolveLimits(DEFAULT_PROFILE_MODEL);
+    expect(limits.contextWindowSource).toBe("litellm");
+    expect(limits.maxOutputTokensSource).toBe("litellm");
   });
 });
