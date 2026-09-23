@@ -18,6 +18,7 @@ import { loadCodingSandboxEnv } from "./auth.js";
 import type { BackendUsage, CodingBackend } from "./backend.js";
 import { commitAuthorFor, runCommitAndPush } from "./commit-push.js";
 import { loadIdentity, pushTaskBranchToRemote, runBranchFor } from "./git-as-transport.js";
+import { planGateEmission } from "./plan-gate.js";
 import type { CodingRepoRow, CodingStore, CodingTaskRow } from "./store/index.js";
 import { safeTeardownWorktree } from "./teardown.js";
 import type { WorktreeAssignment } from "./types.js";
@@ -671,37 +672,22 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
     // microseconds between `set-status-plan-ready` and this step, the
     // approve becomes a no-op and the task stays cancelled.
     if (clearsGateInRun) {
-      // Generate `approvedAt` INSIDE the step so the cached return on a
-      // future replay carries the original timestamp — otherwise a
-      // retry after the DB write but before the emit would persist
-      // an `approvedAt` from attempt 1 while emitting one from attempt 2,
-      // and downstream consumers see a row/event timestamp mismatch.
-      // `retries: 0` makes this defensive today; pinning it here closes
-      // the footgun if retries ever loosen. `already_approved` reports the
-      // row's own timestamp instead, for the same reason: that is the value
-      // `plan_approved_at` holds, and the emit has to agree with it.
+      // Mint `approvedAt` INSIDE the step so the cached return on a future
+      // replay carries the original timestamp rather than one from a later
+      // attempt. `planGateEmission` decides what the event carries — the
+      // same decision the Telegram approve callback makes, which is why it
+      // lives in one place; see its docstring for why a stamp that is
+      // already there still owes an emit.
       const approveResult = await stepRun("auto-approve-plan", async () => {
         const approvedAt = new Date();
         const result = await runInTx((tx) => store.approvePlanIfPending(tx, taskId, approvedAt));
-        return result.kind === "already_approved"
-          ? { ...result, approvedAt: result.approvedAt.toISOString() }
-          : { ...result, approvedAt: approvedAt.toISOString() };
+        return { kind: result.kind, emission: planGateEmission(result, approvedAt) };
       });
-      // `already_approved` emits too. It means this step body is re-running
-      // after an attempt that committed the stamp and lost its result before
-      // Inngest recorded it — the recovery owes the remaining phase, and
-      // treating "the row already says approved" as done is what would leave
-      // a task with a plan, a stamp and no execute run, which nothing
-      // reconciles because this function returns success (see
-      // .claude/rules/inngest.md → idempotency). A duplicate costs nothing:
-      // the bus dedups on `plan-approved-<taskId>`, and past that window the
-      // execute claim is conditional on `awaiting_approval`, so a second run
-      // finds the first one's `executing` and stands down.
-      if (approveResult.kind === "approved" || approveResult.kind === "already_approved") {
+      if (approveResult.emission) {
         await stepSendEvent("emit-plan-approved", {
           ...codingTaskPlanApproved.create({
             taskId,
-            approvedAt: approveResult.approvedAt,
+            approvedAt: approveResult.emission.approvedAt,
           }),
           // Idempotency id follows the same `<verb>-<taskId>` shape as
           // the catch-path `task-failed-<taskId>` emit; ensures bus-level

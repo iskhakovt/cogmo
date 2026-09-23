@@ -23,6 +23,11 @@ no conversation to join through, and skipping it keeps that step boundary off
 the automated path. `plan_finalized.autoApproved` covers both paths, so the
 approve/revise/cancel keyboard is suppressed for either.
 
+Both callers that clear the gate — this one and `Transport.coding.approvePlan`,
+the Telegram Approve tap — decide what to emit through `planGateEmission` in
+`src/agent/coding/plan-gate.ts`, so the recovery contract below cannot be
+changed on one and missed on the other.
+
 The emit also fires when `approvePlanIfPending` reports `already_approved`,
 which is what a re-executed step body sees after an attempt committed the
 stamp and lost its result. The recovery owes the remaining phase: skipping the
