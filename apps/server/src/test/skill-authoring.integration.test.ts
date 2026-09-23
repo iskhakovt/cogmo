@@ -88,6 +88,7 @@ import { bootstrapSkillsRepo } from "../skills/repo.js";
 import { skillRuns, skills } from "../skills/store/schema.js";
 import { channelSessions, channels, inboundMessages } from "../transport/store/schema.js";
 import { expectDefined } from "./assertions.js";
+import { CASSETTE_CHAT_MODEL } from "./cassette-model.js";
 import { DaytonaMock, type DaytonaMockOptions } from "./daytona-mock.js";
 import { repoRoot } from "./repo-root.js";
 import { workerInngestBaseUrl } from "./worker-inngest.js";
@@ -946,12 +947,31 @@ async function seedSecretsAndProvider(opts: {
       .returning({ id: llmProviders.id });
     if (!provider) throw new Error("llm_providers insert returned no row");
 
-    const profileRows = await tx.select({ model: profiles.model }).from(profiles).limit(1);
-    const profileRow = expectDefined(profileRows[0], "Default profile not found");
+    // Point every profile at the cassette's model and route that, so the
+    // host agent loop replays against the recorded fixtures.
+    //
+    // The missing WHERE is deliberate. Narrowing it to the org profile
+    // (`user_id IS NULL`) is correct on its face — the tier shares one
+    // Postgres across its forks and a sibling suite's profile is not ours
+    // — but it fails on CI: ten unmatched requests, `pipeline.integration`
+    // and `pipeline.mcp` timing out beside this suite. It passes locally
+    // either way. llmock holds one FIFO fixture pool for the whole
+    // process while the forks run in parallel, so which suite consumes
+    // which fixture depends on fork count and interleaving, and the
+    // runner's differ from a workstation's. Forcing every profile onto
+    // one model is what currently keeps that order deterministic.
+    // Untangling it (cassette-per-suite, per-fork database) is tracked in
+    // `todo.md`; until then this stays blanket and CI is the only
+    // authority on changing it.
+    const updated = await tx
+      .update(profiles)
+      .set({ model: CASSETTE_CHAT_MODEL })
+      .returning({ id: profiles.id });
+    expectDefined(updated[0], "Default profile not found");
     await tx
       .insert(modelProviders)
       .values({
-        model: profileRow.model,
+        model: CASSETTE_CHAT_MODEL,
         providerId: provider.id,
         position: 0,
         userSelectable: true,
