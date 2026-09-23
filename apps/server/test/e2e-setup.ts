@@ -4,6 +4,7 @@ import type { StartedTestContainer } from "testcontainers";
 import { GenericContainer, Network, Wait } from "testcontainers";
 import type { GlobalSetupContext } from "vitest/node";
 import * as c from "../dev/containers.js";
+import { CASSETTE_CHAT_MODEL } from "../src/test/cassette-model.js";
 import { repoRoot } from "../src/test/repo-root.js";
 import { createMock } from "./llmock-setup.js";
 import { loadRootEnv } from "./load-root-env.js";
@@ -223,11 +224,16 @@ export async function setup({ provide }: GlobalSetupContext) {
       .returning({ id: llmProviders.id });
     if (!provider) throw new Error("Provider insert returned no row");
 
-    const profileRows = await tx.select({ model: profiles.model }).from(profiles).limit(1);
-    if (!profileRows[0]) throw new Error("Default profile not found after seed");
+    // Point the seeded profile at the cassette's model and route that,
+    // so the app container's turns replay against the recorded fixtures.
+    const updated = await tx
+      .update(profiles)
+      .set({ model: CASSETTE_CHAT_MODEL })
+      .returning({ id: profiles.id });
+    if (!updated[0]) throw new Error("Default profile not found after seed");
 
     await tx.insert(modelProviders).values({
-      model: profileRows[0].model,
+      model: CASSETTE_CHAT_MODEL,
       providerId: provider.id,
       position: 0,
       userSelectable: true,

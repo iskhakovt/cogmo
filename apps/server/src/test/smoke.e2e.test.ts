@@ -6,7 +6,6 @@ import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
 import { conversations, messages, profiles, users } from "../agent/store/schema.js";
 import * as schema from "../db/schemas.js";
 import { transactor } from "../db/transactor.js";
-import { DEFAULT_PROFILE_MODEL } from "../setup/seed.js";
 import { DrizzleTransportStore } from "../transport/store/index.js";
 import {
   boundaryPending,
@@ -14,6 +13,7 @@ import {
   channels,
   inboundMessages,
 } from "../transport/store/schema.js";
+import { CASSETTE_CHAT_MODEL } from "./cassette-model.js";
 
 let db: ReturnType<typeof drizzle<typeof schema>>;
 let inngestBaseUrl: string;
@@ -110,8 +110,8 @@ describe("e2e smoke", () => {
     // the file IS in the image; the bug is in how the bundled module
     // resolves the path.
     //
-    // We seed `DEFAULT_PROFILE_MODEL` as the default profile's model and
-    // route it via the e2e provider. With the snapshot loaded, the
+    // The e2e stack points the seeded profile at `CASSETTE_CHAT_MODEL`
+    // and routes it via the e2e provider. With the snapshot loaded, the
     // resolver finds LiteLLM data for that id and the CLI prints
     // `litellm`. Without the snapshot (the regressed state), every
     // column would render `default`.
@@ -121,7 +121,7 @@ describe("e2e smoke", () => {
       ["exec", containerId, "node", "dist/main.js", "model", "list"],
       { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
     );
-    expect(stdout).toContain(DEFAULT_PROFILE_MODEL);
+    expect(stdout).toContain(CASSETTE_CHAT_MODEL);
     // The source column for the seeded model is either `litellm` (both
     // columns from snapshot) or `cw=litellm,mo=litellm` if some future
     // refactor splits — anything matching `litellm` proves the snapshot

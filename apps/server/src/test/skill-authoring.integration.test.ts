@@ -88,6 +88,7 @@ import { bootstrapSkillsRepo } from "../skills/repo.js";
 import { skillRuns, skills } from "../skills/store/schema.js";
 import { channelSessions, channels, inboundMessages } from "../transport/store/schema.js";
 import { expectDefined } from "./assertions.js";
+import { CASSETTE_CHAT_MODEL } from "./cassette-model.js";
 import { DaytonaMock, type DaytonaMockOptions } from "./daytona-mock.js";
 import { repoRoot } from "./repo-root.js";
 import { workerInngestBaseUrl } from "./worker-inngest.js";
@@ -946,12 +947,17 @@ async function seedSecretsAndProvider(opts: {
       .returning({ id: llmProviders.id });
     if (!provider) throw new Error("llm_providers insert returned no row");
 
-    const profileRows = await tx.select({ model: profiles.model }).from(profiles).limit(1);
-    const profileRow = expectDefined(profileRows[0], "Default profile not found");
+    // Point the seeded profile at the cassette's model and route that, so
+    // the host agent loop replays against the recorded fixtures.
+    const updated = await tx
+      .update(profiles)
+      .set({ model: CASSETTE_CHAT_MODEL })
+      .returning({ id: profiles.id });
+    expectDefined(updated[0], "Default profile not found");
     await tx
       .insert(modelProviders)
       .values({
-        model: profileRow.model,
+        model: CASSETTE_CHAT_MODEL,
         providerId: provider.id,
         position: 0,
         userSelectable: true,
