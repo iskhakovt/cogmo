@@ -69,7 +69,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { Daytona, Image } from "@daytona/sdk";
 import { Octokit } from "@octokit/rest";
-import { and, desc, eq, isNull, ne } from "drizzle-orm";
+import { and, desc, eq, ne } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { connect } from "inngest/connect";
 import { ok } from "neverthrow";
@@ -947,15 +947,25 @@ async function seedSecretsAndProvider(opts: {
       .returning({ id: llmProviders.id });
     if (!provider) throw new Error("llm_providers insert returned no row");
 
-    // Point the seeded org profile at the cassette's model and route
-    // that, so the host agent loop replays against the recorded fixtures.
-    // Scoped to the org profile (`user_id IS NULL`): the integration tier
-    // shares one Postgres across its forks, and a profile a sibling suite
-    // created is not ours to repoint.
+    // Point every profile at the cassette's model and route that, so the
+    // host agent loop replays against the recorded fixtures.
+    //
+    // The missing WHERE is deliberate. Narrowing it to the org profile
+    // (`user_id IS NULL`) is correct on its face — the tier shares one
+    // Postgres across its forks and a sibling suite's profile is not ours
+    // — but it fails on CI: ten unmatched requests, `pipeline.integration`
+    // and `pipeline.mcp` timing out beside this suite. It passes locally
+    // either way. llmock holds one FIFO fixture pool for the whole
+    // process while the forks run in parallel, so which suite consumes
+    // which fixture depends on fork count and interleaving, and the
+    // runner's differ from a workstation's. Forcing every profile onto
+    // one model is what currently keeps that order deterministic.
+    // Untangling it (cassette-per-suite, per-fork database) is tracked in
+    // `todo.md`; until then this stays blanket and CI is the only
+    // authority on changing it.
     const updated = await tx
       .update(profiles)
       .set({ model: CASSETTE_CHAT_MODEL })
-      .where(isNull(profiles.userId))
       .returning({ id: profiles.id });
     expectDefined(updated[0], "Default profile not found");
     await tx
