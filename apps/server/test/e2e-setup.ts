@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import type { LLMock } from "@copilotkit/aimock";
+import { isNull } from "drizzle-orm";
 import type { StartedTestContainer } from "testcontainers";
 import { GenericContainer, Network, Wait } from "testcontainers";
 import type { GlobalSetupContext } from "vitest/node";
@@ -224,11 +225,14 @@ export async function setup({ provide }: GlobalSetupContext) {
       .returning({ id: llmProviders.id });
     if (!provider) throw new Error("Provider insert returned no row");
 
-    // Point the seeded profile at the cassette's model and route that,
-    // so the app container's turns replay against the recorded fixtures.
+    // Point the seeded org profile at the cassette's model and route
+    // that, so the app container's turns replay against the recorded
+    // fixtures. Scoped to the org profile (`user_id IS NULL`) so a
+    // user-owned profile a suite creates keeps the model it asked for.
     const updated = await tx
       .update(profiles)
       .set({ model: CASSETTE_CHAT_MODEL })
+      .where(isNull(profiles.userId))
       .returning({ id: profiles.id });
     if (!updated[0]) throw new Error("Default profile not found after seed");
 

@@ -69,7 +69,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { Daytona, Image } from "@daytona/sdk";
 import { Octokit } from "@octokit/rest";
-import { and, desc, eq, ne } from "drizzle-orm";
+import { and, desc, eq, isNull, ne } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { connect } from "inngest/connect";
 import { ok } from "neverthrow";
@@ -947,11 +947,14 @@ async function seedSecretsAndProvider(opts: {
       .returning({ id: llmProviders.id });
     if (!provider) throw new Error("llm_providers insert returned no row");
 
-    // Point the seeded profile at the cassette's model and route that, so
-    // the host agent loop replays against the recorded fixtures.
+    // Point the seeded org profile at the cassette's model and route
+    // that, so the host agent loop replays against the recorded fixtures.
+    // Scoped to the org profile (`user_id IS NULL`) so a user-owned
+    // profile a test creates keeps the model it asked for.
     const updated = await tx
       .update(profiles)
       .set({ model: CASSETTE_CHAT_MODEL })
+      .where(isNull(profiles.userId))
       .returning({ id: profiles.id });
     expectDefined(updated[0], "Default profile not found");
     await tx
