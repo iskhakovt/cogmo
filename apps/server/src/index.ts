@@ -792,9 +792,10 @@ export async function bootstrapRuntime(
     );
 
   // Register the durable orchestrators only when a coding-capable sandbox
-  // is configured. Both backends qualify — local-docker via host-bind-mount
-  // worktrees, Daytona via git-as-transport — and the orchestrators branch
-  // on `capabilities.workingTreeTransport`, not on backend id.
+  // is configured. Both sandbox backends qualify — local-docker via
+  // host-bind-mount worktrees, Daytona via git-as-transport — and the
+  // orchestrators branch on `capabilities.workingTreeTransport`, never on
+  // which sandbox provider is behind it.
   // biome-ignore lint/suspicious/noExplicitAny: Inngest function types vary by trigger
   const codingFunctions: any[] = [];
   if (sandbox.codingSandbox) {

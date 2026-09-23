@@ -1,7 +1,5 @@
 import { match } from "ts-pattern";
-import type { CodingStore } from "./store/index.js";
-
-type ApprovePlanResult = Awaited<ReturnType<CodingStore["approvePlanIfPending"]>>;
+import type { ApprovePlanResult } from "./store/index.js";
 
 /**
  * Whether clearing a task's plan gate should emit `coding/task/plan-approved`,

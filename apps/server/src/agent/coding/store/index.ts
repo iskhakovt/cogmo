@@ -25,6 +25,13 @@ import {
 import { codingRepos, codingTasks } from "./schema.js";
 
 export type CodingBackend = "claude" | "codex";
+/** Outcome of {@link CodingStore.approvePlanIfPending}. */
+export type ApprovePlanResult =
+  | { kind: "approved"; conversationId: string | null }
+  | { kind: "already_approved"; approvedAt: Date }
+  | { kind: "not_pending"; status: CodingTaskStatus }
+  | { kind: "not_found" };
+
 export type CodingTriggerSource = "user" | "evolution" | "signal_pipeline";
 export type CodingTaskStatus =
   | "queued"
@@ -360,18 +367,11 @@ export interface CodingStore {
    * Atomic plan-approval: stamp `plan_approved_at` iff the task is still
    * `awaiting_approval` AND not already approved. Discriminated result so
    * callbacks can render the right Telegram message without a separate
-   * read trip + race window. Used by the slice 2.0e callback handler.
+   * read trip + race window. `already_approved` carries the timestamp the
+   * row holds, which is what the event has to agree with — see
+   * `planGateEmission` in `../plan-gate.js`.
    */
-  approvePlanIfPending(
-    tx: Transaction,
-    id: string,
-    approvedAt: Date,
-  ): Promise<
-    | { kind: "approved"; conversationId: string | null }
-    | { kind: "already_approved"; approvedAt: Date }
-    | { kind: "not_pending"; status: CodingTaskStatus }
-    | { kind: "not_found" }
-  >;
+  approvePlanIfPending(tx: Transaction, id: string, approvedAt: Date): Promise<ApprovePlanResult>;
 
   /**
    * Atomic cancel: set status=`cancelled` iff the task is non-terminal.
@@ -766,12 +766,7 @@ export class DrizzleCodingStore implements CodingStore {
     tx: Transaction,
     id: string,
     approvedAt: Date,
-  ): Promise<
-    | { kind: "approved"; conversationId: string | null }
-    | { kind: "already_approved"; approvedAt: Date }
-    | { kind: "not_pending"; status: CodingTaskStatus }
-    | { kind: "not_found" }
-  > {
+  ): Promise<ApprovePlanResult> {
     // `.for('update')` row-locks the matched row so a concurrent
     // callback for the same task blocks here until our transaction
     // commits — without it, two simultaneous Telegram callback

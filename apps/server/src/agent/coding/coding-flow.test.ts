@@ -31,7 +31,7 @@ import {
 } from "./orchestrator.js";
 import { startCodingProgressSubscriber } from "./progress-subscriber.js";
 import { createCodingService } from "./service.js";
-import { DrizzleCodingStore } from "./store/index.js";
+import { type CodingRepoRow, DrizzleCodingStore } from "./store/index.js";
 import { type CodingStreamEvent, CodingStreamingRegistry } from "./streaming-registry.js";
 
 const execFileP = promisify(execFile);
@@ -71,6 +71,24 @@ beforeEach(async () => {
   await truncateAll(db);
   instanceId = (await tx((trx) => sandboxStore.insertInstance(trx, { host: "test", pid: 1 }))).id;
 });
+
+/** The one repo every test in this file delegates against. */
+async function seedRepo(): Promise<CodingRepoRow> {
+  return tx((trx) =>
+    store.insertRepo(trx, {
+      name: "cogmo",
+      localPath: repoPath,
+      defaultBranch: "main",
+      remoteUrl: "git@github.com:user/cogmo.git",
+      devcontainer: null,
+      allowedBackends: ["claude"],
+      verifyCommand: "true",
+      taskTokenBudget: 100_000,
+      taskWallTimeSeconds: 600,
+      maxConcurrentTasks: 1,
+    }),
+  );
+}
 
 /** Real conversation (user → profile → conversation) for the task FK. */
 async function seedConversation(): Promise<string> {
@@ -215,20 +233,7 @@ function fakeSandbox(): {
 describe("coding flow — plan → approve → execute → pending_verify", () => {
   it("end-to-end: delegate submits, plan posts, approve fires execute, status reaches pending_verify", async () => {
     // ── Setup ──────────────────────────────────────────────────────────
-    const _repo = await tx((trx) =>
-      store.insertRepo(trx, {
-        name: "cogmo",
-        localPath: repoPath,
-        defaultBranch: "main",
-        remoteUrl: "git@github.com:user/cogmo.git",
-        devcontainer: null,
-        allowedBackends: ["claude"],
-        verifyCommand: "true",
-        taskTokenBudget: 100_000,
-        taskWallTimeSeconds: 600,
-        maxConcurrentTasks: 1,
-      }),
-    );
+    await seedRepo();
 
     const conversationId = await seedConversation();
     const ownerUserId = "user-owner";
@@ -459,20 +464,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
     // Telegram keyboard and nobody to tap Approve. The plan run therefore
     // has to clear the gate itself; if it doesn't, the task finishes
     // planning and stalls with no CLI ever resuming it.
-    const repo = await tx((trx) =>
-      store.insertRepo(trx, {
-        name: "cogmo",
-        localPath: repoPath,
-        defaultBranch: "main",
-        remoteUrl: "git@github.com:user/cogmo.git",
-        devcontainer: null,
-        allowedBackends: ["claude"],
-        verifyCommand: "true",
-        taskTokenBudget: 100_000,
-        taskWallTimeSeconds: 600,
-        maxConcurrentTasks: 1,
-      }),
-    );
+    const repo = await seedRepo();
     const task = await tx((trx) =>
       store.insertTask(trx, {
         repoId: repo.id,
@@ -547,20 +539,7 @@ describe("coding flow — plan → approve → execute → pending_verify", () =
   });
 
   it("approve from a different user is rejected; task stays awaiting_approval, no event emitted", async () => {
-    const repo = await tx((trx) =>
-      store.insertRepo(trx, {
-        name: "cogmo",
-        localPath: repoPath,
-        defaultBranch: "main",
-        remoteUrl: "git@github.com:user/cogmo.git",
-        devcontainer: null,
-        allowedBackends: ["claude"],
-        verifyCommand: "true",
-        taskTokenBudget: 100_000,
-        taskWallTimeSeconds: 600,
-        maxConcurrentTasks: 1,
-      }),
-    );
+    const repo = await seedRepo();
 
     const conversationId = await seedConversation();
     const task = await tx((trx) =>

@@ -639,10 +639,6 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       await stream.fail("Task cancelled while planning.").catch(() => {});
       return { status: "skipped" };
     }
-    // Same wrap as the failure-path notification above — once status is
-    // committed, a subscriber error must not regress the task to failed.
-    // Durable because two more boundaries follow on the auto-approve path,
-    // and a bare-body finalize would re-render the plan message on each.
     // Who clears this task's plan gate. Exhaustive over
     // `coding_trigger_source` on purpose: a new member is a compile error
     // here rather than a silent default into the ungated arm, which would
@@ -652,6 +648,11 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
       .with("evolution", "signal_pipeline", () => "no_interactive_gate")
       .exhaustive();
     const clearsGateInRun = gate !== "human_tap";
+    // Same wrap as the failure-path notification above — once status is
+    // committed, a subscriber error must not regress the task to failed.
+    // Durable because two more boundaries follow when this run clears the
+    // gate, and a bare-body finalize would re-render the plan message on
+    // each.
     await stepRun("notify-plan-finalized", async () => {
       await stream
         .finalize(result.plan ?? "", { autoApproved: clearsGateInRun })
@@ -690,14 +691,14 @@ export async function runCodingTask(params: RunParams): Promise<CodingOrchestrat
             approvedAt: approveResult.emission.approvedAt,
           }),
           // Idempotency id follows the same `<verb>-<taskId>` shape as
-          // the catch-path `task-failed-<taskId>` emit; ensures bus-level
-          // dedup on the off-chance the step fires more than once (e.g. a
-          // future retry change). Safe across the task's lifetime because
-          // revise cancels the current task and a re-plan issues a fresh
-          // `taskId` (commands.ts handles the Revise tap via
-          // `cancelTask`); no path re-emits `plan-approved` for the same
-          // id. A future in-place re-plan flow would need to pick a new
-          // idempotency id.
+          // the catch-path `task-failed-<taskId>` emit. It carries real
+          // weight here: the recovery arm re-emits by design, from this
+          // step and from the Telegram tap alike, and this id is what
+          // collapses those into one execute run inside the bus's window.
+          // Safe across the task's lifetime because a Revise cancels the
+          // task and re-plans under a fresh `taskId` (commands.ts handles
+          // that tap via `cancelTask`), so the id never spans two plans. A
+          // future in-place re-plan flow would need to pick a new one.
           id: `plan-approved-${taskId}`,
         });
         taskLog.info(

@@ -27,6 +27,7 @@ import {
   NULL_PLAN_STREAM,
   runCodingExecute,
   runCodingTask,
+  type StepSendEvent,
 } from "./orchestrator.js";
 import { type CodingRepoRow, type CodingTaskRow, DrizzleCodingStore } from "./store/index.js";
 
@@ -260,6 +261,25 @@ function throwingPlan(message: string): AsyncIterable<CodingEvent> {
   };
 }
 
+interface RecordedEvent {
+  name: string;
+  data?: unknown;
+  id?: string;
+}
+
+/**
+ * `stepSendEvent` shim that records each payload instead of forwarding it.
+ * Tests assert on `sent`; the orchestrator sees a normal durable emit.
+ */
+function recordingSendEvent(): { sent: RecordedEvent[]; handle: StepSendEvent } {
+  const sent: RecordedEvent[] = [];
+  const handle = (async (_: string, payload: unknown) => {
+    sent.push(payload as RecordedEvent);
+    return { ids: [] };
+  }) as unknown as StepSendEvent;
+  return { sent, handle };
+}
+
 interface RecordingPlanStream {
   text: string[];
   finalized: string[];
@@ -267,6 +287,20 @@ interface RecordingPlanStream {
   finalizeOpts: ({ autoApproved?: boolean } | undefined)[];
   failed: string[];
   handle: import("./orchestrator.js").PlanStreamHandle;
+}
+
+/** Automated task: no conversation, so no keyboard and nobody to tap it. */
+async function seedEvolutionTask(repo: CodingRepoRow, triggerRef: string): Promise<CodingTaskRow> {
+  return tx((trx) =>
+    store.insertTask(trx, {
+      repoId: repo.id,
+      goal: "g",
+      triggerSource: "evolution",
+      triggerRef,
+      backend: "claude",
+      allowPrivilegedRunc: false,
+    }),
+  );
 }
 
 function recordingPlanStream(): RecordingPlanStream {
@@ -484,11 +518,7 @@ describe("runCodingTask", () => {
       { kind: "complete", exitCode: 0, isError: false },
     ]);
 
-    const sentEvents: { name: string; data: unknown }[] = [];
-    const recordingStepSendEvent = (async (_: string, payload: unknown) => {
-      sentEvents.push(payload as { name: string; data: unknown });
-      return { ids: [] };
-    }) as never;
+    const { sent, handle: recordingStepSendEvent } = recordingSendEvent();
 
     const planStream = recordingPlanStream();
     const result = await runCodingTask({
@@ -507,7 +537,7 @@ describe("runCodingTask", () => {
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.planApprovedAt).toBeInstanceOf(Date);
     // The auto-approve emit landed.
-    const approvedEvents = sentEvents.filter((e) => e.name === "coding/task/plan-approved");
+    const approvedEvents = sent.filter((e) => e.name === "coding/task/plan-approved");
     expect(approvedEvents).toHaveLength(1);
     expect(approvedEvents[0]?.data).toMatchObject({ taskId: task.id });
   });
@@ -523,11 +553,7 @@ describe("runCodingTask", () => {
       { kind: "complete", exitCode: 0, isError: false },
     ]);
 
-    const sentEvents: { name: string }[] = [];
-    const recordingStepSendEvent = (async (_: string, payload: unknown) => {
-      sentEvents.push(payload as { name: string });
-      return { ids: [] };
-    }) as never;
+    const { sent, handle: recordingStepSendEvent } = recordingSendEvent();
 
     const planStream = recordingPlanStream();
     const result = await runCodingTask({
@@ -543,7 +569,7 @@ describe("runCodingTask", () => {
 
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.planApprovedAt).toBeNull();
-    expect(sentEvents.find((e) => e.name === "coding/task/plan-approved")).toBeUndefined();
+    expect(sent.find((e) => e.name === "coding/task/plan-approved")).toBeUndefined();
   });
 
   it("autoapprove=on race: concurrent cancel between set-status-plan-ready and auto-approve wins, no plan-approved emit", async () => {
@@ -572,11 +598,7 @@ describe("runCodingTask", () => {
       return fn();
     }) as unknown as typeof stepRun;
 
-    const sentEvents: { name: string }[] = [];
-    const recordingStepSendEvent = (async (_: string, payload: unknown) => {
-      sentEvents.push(payload as { name: string });
-      return { ids: [] };
-    }) as never;
+    const { sent, handle: recordingStepSendEvent } = recordingSendEvent();
 
     await runCodingTask({
       taskId: task.id,
@@ -591,7 +613,7 @@ describe("runCodingTask", () => {
     expect(reloaded?.planApprovedAt).toBeNull();
     // No plan-approved event: the auto-approve step observed
     // `not_pending` and skipped the emit.
-    expect(sentEvents.find((e) => e.name === "coding/task/plan-approved")).toBeUndefined();
+    expect(sent.find((e) => e.name === "coding/task/plan-approved")).toBeUndefined();
   });
 
   it("evolution trigger clears the gate without consulting the profile's autoapprove mode", async () => {
@@ -640,11 +662,7 @@ describe("runCodingTask", () => {
       { kind: "complete", exitCode: 0, isError: false },
     ]);
 
-    const sentEvents: { name: string }[] = [];
-    const recordingStepSendEvent = (async (_: string, payload: unknown) => {
-      sentEvents.push(payload as { name: string });
-      return { ids: [] };
-    }) as never;
+    const { sent, handle: recordingStepSendEvent } = recordingSendEvent();
     const modeSpy = vi.spyOn(store, "getCodingAutoapproveModeForTask");
     const planStream = recordingPlanStream();
 
@@ -665,7 +683,7 @@ describe("runCodingTask", () => {
     }
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.planApprovedAt).toBeInstanceOf(Date);
-    expect(sentEvents.filter((e) => e.name === "coding/task/plan-approved")).toHaveLength(1);
+    expect(sent.filter((e) => e.name === "coding/task/plan-approved")).toHaveLength(1);
     // No keyboard for a task nobody can tap.
     expect(planStream.finalizeOpts).toEqual([{ autoApproved: true }]);
   });
@@ -676,29 +694,14 @@ describe("runCodingTask", () => {
     // emit sits forever, since that event is the sole trigger of
     // `coding-task-execute`.
     const repo = await seedRepo();
-    const task = await tx((trx) =>
-      store.insertTask(trx, {
-        repoId: repo.id,
-        goal: "g",
-        triggerSource: "evolution",
-        triggerRef: "evo-1",
-        backend: "claude",
-        allowPrivilegedRunc: false,
-      }),
-    );
+    const task = await seedEvolutionTask(repo, "evo-1");
     const { sandbox } = fakeSandbox();
     const backend = backendYielding([
       { kind: "session_started", sessionId: "sess-EVO" },
       { kind: "plan_ready", plan: "auto-plan" },
       { kind: "complete", exitCode: 0, isError: false },
     ]);
-    const sentEvents: { name: string; data: unknown; id?: string }[] = [];
-    const recordingStepSendEvent = (async (_: string, payload: unknown) => {
-      sentEvents.push(payload as { name: string; data: unknown; id?: string });
-      return { ids: [] };
-    }) as never;
-    // plan_ready needs a non-empty plan and the orchestrator only emits
-    // text_delta into the stream, so plan_ready's plan is what matters.
+    const { sent, handle: recordingStepSendEvent } = recordingSendEvent();
     const result = await runCodingTask({
       taskId: task.id,
       runId: "run-test",
@@ -712,7 +715,7 @@ describe("runCodingTask", () => {
     const reloaded = await tx((trx) => store.getTask(trx, task.id));
     expect(reloaded?.status).toBe("awaiting_approval");
     expect(reloaded?.planApprovedAt).toBeInstanceOf(Date);
-    const approved = sentEvents.filter((e) => e.name === "coding/task/plan-approved");
+    const approved = sent.filter((e) => e.name === "coding/task/plan-approved");
     expect(approved).toHaveLength(1);
     expect(approved[0]?.data).toMatchObject({ taskId: task.id });
     expect(approved[0]?.id).toBe(`plan-approved-${task.id}`);
@@ -726,27 +729,14 @@ describe("runCodingTask", () => {
     // execute orchestrator, and the function still returns success, so
     // `coding-task-reconcile` never sees the stranded task either.
     const repo = await seedRepo();
-    const task = await tx((trx) =>
-      store.insertTask(trx, {
-        repoId: repo.id,
-        goal: "g",
-        triggerSource: "evolution",
-        triggerRef: "evo-recover",
-        backend: "claude",
-        allowPrivilegedRunc: false,
-      }),
-    );
+    const task = await seedEvolutionTask(repo, "evo-recover");
     const { sandbox } = fakeSandbox();
     const backend = backendYielding([
       { kind: "session_started", sessionId: "sess-EVO" },
       { kind: "plan_ready", plan: "auto-plan" },
       { kind: "complete", exitCode: 0, isError: false },
     ]);
-    const sentEvents: { name: string; data: unknown }[] = [];
-    const recordingStepSendEvent = (async (_: string, payload: unknown) => {
-      sentEvents.push(payload as { name: string; data: unknown });
-      return { ids: [] };
-    }) as never;
+    const { sent, handle: recordingStepSendEvent } = recordingSendEvent();
 
     // Stands in for the lost attempt: stamp the row from "attempt 1"
     // immediately before the orchestrator's own approve step body runs.
@@ -767,7 +757,7 @@ describe("runCodingTask", () => {
     });
     expect(result.status).toBe("awaiting_approval");
 
-    const approved = sentEvents.filter((e) => e.name === "coding/task/plan-approved");
+    const approved = sent.filter((e) => e.name === "coding/task/plan-approved");
     expect(approved).toHaveLength(1);
     // Attempt 1's timestamp, not a fresh one — the event has to agree with
     // the row, and `approvePlanIfPending` never restamps.

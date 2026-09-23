@@ -2159,11 +2159,9 @@ export function createTransport(deps: {
         const result = await runInTx((tx) =>
           codingStore.approvePlanIfPending(tx, taskId, approvedAt),
         );
-        // Emit before branching on the outcome: `already_approved` owes an
-        // event too, since the stamp may come from a tap whose `send` threw
-        // after the transaction committed, and this tap is the only thing
-        // that can recover it. `planGateEmission` owns that rule for both
-        // callers.
+        // Emit before branching on the outcome — `already_approved` owes an
+        // event too. `planGateEmission` holds that rule for both callers and
+        // explains why.
         const emission = planGateEmission(result, approvedAt);
         if (emission) {
           await inngest.send({

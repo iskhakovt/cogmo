@@ -62,7 +62,4 @@ Deferred, filed as `p2` in `todo.md`: plan and execute key their askpass
 material on the same `${askpassBaseDir}/<taskId>` directory, which is also the
 container's bind-mount source, so the plan run's `finally` cleanup races
 execute's `provision-askpass` whenever the gate clears in-run. Reachable only
-on `workingTreeTransport === 'git-remote'`. The review passes over this change
-also filed six unrelated coding-lifecycle findings in `todo.md`, including
-run-branch deletion destroying the only copy of a task's work on that same
-transport.
+on `workingTreeTransport === 'git-remote'`.

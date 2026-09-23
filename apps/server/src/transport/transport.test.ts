@@ -2468,8 +2468,10 @@ describe("createTransport", () => {
 
       const res = await transport.coding.approvePlan(taskId, "owner-tg-id");
 
-      // The toast is unchanged — the user is told it was already approved.
+      // The toast is unchanged — the user is told it was already approved —
+      // but the event goes out, which is what a double-tap relies on too.
       expect(res.isErr()).toBe(true);
+      expect(inngestSend).toHaveBeenCalledTimes(1);
       expect(inngestSend).toHaveBeenCalledWith(
         expect.objectContaining({
           name: "coding/task/plan-approved",
@@ -2521,7 +2523,7 @@ describe("createTransport", () => {
     });
 
     it("approvePlan: task_already_approved on double-tap", async () => {
-      const { transport, inngestSend } = buildTransport({
+      const { transport } = buildTransport({
         task: { conversationId },
         conversation: { userId: ownerUserId },
         tapperUserId: ownerUserId,
@@ -2532,12 +2534,6 @@ describe("createTransport", () => {
 
       const res = await transport.coding.approvePlan(taskId, "owner-tg-id");
       expect(res._unsafeUnwrapErr()).toEqual({ code: "task_already_approved", taskId });
-      // The emit repeats rather than being withheld — the tap cannot tell a
-      // genuine double-tap from a first tap whose `send` threw after the
-      // stamp committed, and only one of those is safe to ignore. The bus
-      // collapses the duplicate on `plan-approved-<taskId>`; see the sibling
-      // recovery test above.
-      expect(inngestSend).toHaveBeenCalledTimes(1);
     });
 
     it("approvePlan: task_not_found when codingStore.getTask returns null", async () => {
