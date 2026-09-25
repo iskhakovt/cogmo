@@ -136,6 +136,25 @@ describe("DrizzleAgentStore", () => {
       expect((await tx((trx) => store.getDefaultProfile(trx)))?.id).toBe(id);
     });
 
+    it("getDefaultProfile stays on the oldest profile after it is edited", async () => {
+      const create = (name: string) =>
+        tx((trx) =>
+          store.createProfile(trx, {
+            userId: null,
+            name,
+            basePrompt: "prompt",
+            model: "m",
+            toolSet: [],
+          }),
+        );
+      const { id: first } = await create("first");
+      await create("second");
+      // An in-place update writes a new row version after `second`'s.
+      await tx((trx) => store.updateProfile(trx, first, { model: "m2" }));
+
+      expect((await tx((trx) => store.getDefaultProfile(trx)))?.id).toBe(first);
+    });
+
     it("enforces unique org profile name (user_id null)", async () => {
       await tx((trx) =>
         store.createProfile(trx, {

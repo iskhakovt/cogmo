@@ -587,7 +587,7 @@ export interface AgentStore {
   /** Get the first user (for bootstrapping). */
   getFirstUser(tx: Transaction): Promise<{ id: string } | undefined>;
 
-  /** Get the first profile (for bootstrapping). */
+  /** Get the oldest profile, the one setup seeds (for bootstrapping). */
   getDefaultProfile(tx: Transaction): Promise<{ id: string } | undefined>;
 
   /** Create a profile and return the full row. `userId: null` = org profile (read-only via Transport); `userId: <id>` = user profile (owned by that user). Throws `UniqueViolationError` on (user_id, name) collision. */
@@ -1735,7 +1735,13 @@ export class DrizzleAgentStore implements AgentStore {
   }
 
   async getDefaultProfile(tx: Transaction): Promise<{ id: string } | undefined> {
-    const rows = await tx.select({ id: profiles.id }).from(profiles).limit(1);
+    // `id` is UUIDv7, so this is the oldest profile. Without the ORDER BY the
+    // pick follows heap order, which an in-place edit of that profile changes.
+    const rows = await tx
+      .select({ id: profiles.id })
+      .from(profiles)
+      .orderBy(asc(profiles.id))
+      .limit(1);
     return rows[0];
   }
 
