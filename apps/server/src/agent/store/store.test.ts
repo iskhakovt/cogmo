@@ -774,6 +774,46 @@ describe("DrizzleAgentStore", () => {
       expect(contents).toContainEqual([{ type: "text", text: "done�" }]);
     });
 
+    // `jsonb` keeps object keys ordered by length, then bytewise, so a
+    // tool_use input written in the model's emission order reloads in a
+    // different one. The loop sends every later request with the input in
+    // canonical key order; the reload has to reproduce those bytes, or the
+    // prompt cache misses from this call on.
+    it("listMessages returns tool_use input in canonical key order, not jsonb storage order", async () => {
+      const { conversationId, stamp } = await seedConversation();
+      // Emission order. jsonb would store the top level as
+      // {model, prompt, options, aspect_ratio} and `options` as
+      // {seed, guidance_scale}; canonical order sorts both.
+      const input = {
+        prompt: "a cat",
+        model: "flux",
+        options: { seed: 7, guidance_scale: 3, loras: [{ weight: 1, path: "x" }] },
+        aspect_ratio: "1:1",
+      };
+
+      await tx((trx) =>
+        store.insertMessages(trx, {
+          conversationId,
+          messages: [
+            {
+              role: "assistant",
+              content: [{ type: "tool_use", id: "t1", name: "generate_image", input }],
+            },
+          ],
+          lastInboundMessageId: "019d0000-0000-7000-8000-000000000001",
+          lastMessageOutputTokens: 10,
+          ...stamp,
+        }),
+      );
+
+      const history = await tx((trx) => store.listMessages(trx, conversationId));
+      const block = expectDefined(history[0]?.content[0]);
+      // The block the loop appends: the same input with sorted keys at every depth.
+      expect(JSON.stringify(block)).toBe(
+        '{"type":"tool_use","id":"t1","name":"generate_image","input":{"aspect_ratio":"1:1","model":"flux","options":{"guidance_scale":3,"loras":[{"path":"x","weight":1}],"seed":7},"prompt":"a cat"}}',
+      );
+    });
+
     it("insertMessages throws on empty array", async () => {
       const { conversationId, stamp } = await seedConversation();
       await expect(

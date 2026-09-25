@@ -10,6 +10,7 @@
  */
 
 import { z } from "zod";
+import { canonicalKeyOrder } from "../util/canonical-key-order.js";
 
 // --- Content blocks (Zod → inferred types) ---
 
@@ -22,7 +23,13 @@ const ToolUseBlockSchema = z.object({
   type: z.literal("tool_use"),
   id: z.string(),
   name: z.string(),
-  input: z.unknown(),
+  /**
+   * Parsed into canonical key order. `messages.content` is `jsonb`, which
+   * reorders object keys, and parses through this schema on every read — so a
+   * reload reproduces the bytes the agent loop sent, which it appends in the
+   * same order.
+   */
+  input: z.unknown().transform(canonicalKeyOrder),
 });
 
 const ToolResultBlockSchema = z.object({

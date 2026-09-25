@@ -1,7 +1,7 @@
 import { SpanStatusCode, trace } from "@opentelemetry/api";
 import type { Logger } from "pino";
 import * as R from "remeda";
-import { extractText } from "../llm/content.js";
+import { canonicalizeToolInputs, extractText } from "../llm/content.js";
 import { ProviderProtocolError, ToolArgsCutOffError } from "../llm/errors.js";
 import { RefusalError } from "../llm/fallback.js";
 import type { LlmProvider } from "../llm/provider.js";
@@ -225,7 +225,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     totalUsage.outputTokens += response.usage.outputTokens;
 
     // Append assistant response
-    messages.push({ role: "assistant", content: response.content });
+    messages.push({ role: "assistant", content: canonicalizeToolInputs(response.content) });
 
     // Drive flow on content, not `stop_reason`. Models occasionally return a
     // tool_use block alongside `stop_reason: "end_turn"` / `"max_tokens"`; if
@@ -948,7 +948,9 @@ export async function runStreamingAgentLoop(
       budgets[iterOutcome.repaired]--;
     }
 
-    const iterationContent = iterOutcome.content;
+    // Outside the step, so a cached outcome is canonical whatever key order
+    // the step state returns it in.
+    const iterationContent = canonicalizeToolInputs(iterOutcome.content);
     const iterationStopReason = iterOutcome.stopReason;
     finalModel = iterOutcome.model;
     totalUsage.inputTokens += iterOutcome.usage.inputTokens;

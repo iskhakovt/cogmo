@@ -223,12 +223,12 @@ Keeping every tool in every request and restricting at dispatch is what Claude C
 
 Anthropic has no per-request `allowed_tools`, and changing `tool_choice` invalidates the messages cache. Its append-only alternative is mid-conversation tool changes: `tool_addition` / `tool_removal` blocks in a `role: "system"` message withdraw or re-offer a declared tool without touching the cached prefix (beta `inline-tools-2026-09-15`; the older `mid-conversation-tool-changes-2026-07-01` still works by reference). They exist only on models with mid-conversation system messages, not Sonnet 5, so dispatch enforcement is the portable path; on Opus 5, 5.5 and Fable a stage turn can also withdraw its disallowed tools this way. On OpenAI routes the adapter can send `allowed_tools` as well.
 
-## Canonical Tool Inputs `[proposed]`
+## Canonical Tool Inputs `[confirmed]`
 
-A `tool_use` block's `input` is put into canonical key order — sorted keys at every depth, arrays in order, the RFC 8785 ordering the `canonicalize` library already provides for `canonicalJson` (`src/agent/repair.ts`) — at both boundaries where it enters a transcript:
+A `tool_use` block's `input` is put into canonical key order — sorted keys at every depth, arrays in order, the RFC 8785 ordering the `canonicalize` library already provides for `canonicalJson` (`src/agent/repair.ts`) — at both boundaries where it enters a transcript, through `canonicalKeyOrder` (`src/util/canonical-key-order.ts`):
 
-- **In the loop**, when the streamed tool call becomes part of the assistant message, so the in-turn transcript and every later request carry the same order.
-- **At the store boundary**, when `messages.content` is read back from `jsonb`, so a reload reproduces that order regardless of how Postgres stored it.
+- **In the loop**, where each iteration's content joins the transcript (`canonicalizeToolInputs`, `src/llm/content.ts`). It runs outside the `llm-iter<N>` step, so a memoized outcome is canonical too, whatever order the step state returns it in.
+- **At the store boundary**: `ToolUseBlockSchema.input` parses into canonical order, and `messages.content` parses through it on every read, so a reload reproduces the bytes the loop sent.
 
 The model never sees its own emission order again, only the canonical one, and that is safe: iteration 1's cache entry ends at the user message, and the preserved-thinking check ignores key order (measured, see [Validation](#validation)). Handlers receive the same values; only key order changes.
 
@@ -372,7 +372,7 @@ llmock's request journal can't serve here: it stores its own OpenAI-shaped conve
 ### Unit tier
 
 - `DefaultPromptSource.assemble` returns the same string at two different minutes under fake timers. Fails today.
-- A tool input round-tripped through a PGlite `messages` row serializes identically to the in-loop block. Fails today.
+- A tool input round-tripped through a PGlite `messages` row serializes identically to the in-loop block.
 - The loop sends exactly the text the render step stored, and a retried render step returns the stored row; tool-result rows and the compaction summary get no block; deduplication runs against the history after compaction.
 - The snapshot: re-rendered only when an epoch opens; a core-memory edit leaves it unchanged and is announced once, in the next turn context; a rule change, a prompt-text change or a new tool changes the digest and opens an epoch; rules sort by priority, then id; opening an epoch strips earlier turns' thinking blocks.
 - A stage turn sends the snapshot and the full frozen tool definitions; a call outside the stage allowlist returns an `is_error` result without running.
@@ -440,7 +440,7 @@ Recorded fixtures match on the last user message (`match: { userMessage }`), whi
 ## Implementation Plan `[proposed]`
 
 1. **Cache intent and usage accounting.** `ChatParams.cache`, the Anthropic mapping, usage totals across adapters, the metric split, loop totals, the injectable `fetch` and wire recorder, and live scenario A's within-turn assertions. Iterations 2 and later of every tool-using turn read the transcript. Until step 2, reads rarely cross a turn (only when the system prompt happens not to change), so a single-iteration turn usually pays 25% more on the transcript it writes; the step nets out cheaper once at most ~28% of turns iterate (`cogmo.agent.iterations`). Ships with `retention: "short"` everywhere.
-2. **Turn context and canonical tool inputs.** Clock, recall and voice hint out of the system prompt (voice as a modality in the turn context, its style guidance a standing system-prompt section); `turn_contexts` with stored rendered text, the render step after compaction with deduplication and the envelope; the frozen voice decision; per-turn tool definitions frozen in a step; canonical tool inputs; the llmock normalizer and re-record; `retention: "long"` for chat and pipeline runs; the integration suite; live scenarios B and C. Reads across turns on every provider, except after a configuration change.
+2. **Turn context.** Clock, recall and voice hint out of the system prompt (voice as a modality in the turn context, its style guidance a standing system-prompt section); `turn_contexts` with stored rendered text, the render step after compaction with deduplication and the envelope; the frozen voice decision; per-turn tool definitions frozen in a step; the llmock normalizer and re-record; `retention: "long"` for chat and pipeline runs; the integration suite; live scenarios B and C. Reads across turns on every provider, except after a configuration change.
 3. **System prompt snapshot and one prefix per conversation.** `system_prompt_snapshots` and epochs keyed on a configuration digest, core-memory announcements, every channel-scoped rule labelled in the snapshot with the delivery channels in the turn context, thinking blocks stripped when an epoch opens, and stage turns on the conversation's snapshot and tool definitions with the allowlist enforced at dispatch ([pipelines.md](pipelines.md) changes with it).
 4. **OpenAI-compatible routing hints.** `attrs.cacheDialect` with its migration and writers, OpenRouter `session_id` and markers, OpenAI `prompt_cache_key`, xAI `x-grok-conv-id`, and live scenario D.
 
