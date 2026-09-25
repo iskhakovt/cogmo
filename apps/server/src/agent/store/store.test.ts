@@ -1069,6 +1069,36 @@ describe("DrizzleAgentStore", () => {
       expect(rules).toEqual([{ rule: "Global safety rule" }, { rule: "Be concise" }]);
     });
 
+    it("keeps tied priorities in id order after both corrections are promoted", async () => {
+      const profileId = await seedProfile();
+      // Created and graduated the way the Observer does it: each correction is
+      // inserted at the same priority, then promoted by an in-place update that
+      // moves its row in the heap. Graduating the second first leaves the rows
+      // in reverse id order on disk.
+      const observe = (rule: string, existingRuleId?: string) =>
+        tx((trx) =>
+          store.upsertCorrection(trx, {
+            rule,
+            category: "style",
+            profileId: null,
+            ...(existingRuleId !== undefined && { existingRuleId }),
+          }),
+        );
+      const first = await observe("First rule");
+      const second = await observe("Second rule");
+      await observe("Second rule", second.id);
+      await observe("First rule", first.id);
+
+      expect(await tx((trx) => store.getActiveRules(trx, profileId, []))).toEqual([
+        { rule: "First rule" },
+        { rule: "Second rule" },
+      ]);
+      expect((await tx((trx) => store.getCorrections(trx, profileId))).map((c) => c.rule)).toEqual([
+        "First rule",
+        "Second rule",
+      ]);
+    });
+
     it("returns empty array when no active rules", async () => {
       const profileId = await seedProfile();
       expect(await tx((trx) => store.getActiveRules(trx, profileId, []))).toEqual([]);
