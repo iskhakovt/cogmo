@@ -1051,8 +1051,6 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           // tool to duplicate. (Not `triggerInboundId`, which a debounce
           // re-fire moves — see `firstInboundId` above.)
           ...(firstInboundId !== "" && { turnKey: firstInboundId }),
-          // Every iteration re-sends the one before it, so the transcript is
-          // cached for the next.
           cache: turnCacheIntent(conversationId),
           turnLogger,
         });

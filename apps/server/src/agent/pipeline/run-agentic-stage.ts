@@ -358,8 +358,6 @@ export async function runAgenticStage(
       onEvent: (event) => delivery.push(event),
       stepRun: steps.stepRun,
       turnKey: inboundId,
-      // The same intent as a chat turn: stage and chat turns share the run
-      // conversation's transcript.
       cache: turnCacheIntent(conversationId),
       turnLogger: log,
     });

@@ -413,7 +413,9 @@ The smoke test's migrations check gains `turn_contexts` and `system_prompt_snaps
 
 ### Live tier
 
-`src/test/prompt-caching.live.test.ts`, in a `live` Vitest project run by `pnpm test:live`, skipped unless `LIVE=1` and the provider's key is set. It reuses the integration global setup. Chat providers point at the real endpoints through the wire recorder; Hindsight keeps llmock, recording into a throwaway fixture directory.
+Step 1 ships the tier with A's relation at two levels: through the adapter (`src/llm/anthropic.live.test.ts`) and across a tool-using turn's iterations through `runStreamingAgentLoop` (`src/agent/loop.live.test.ts`). The full-conversation scenarios below arrive with step 2.
+
+`src/test/prompt-caching.live.test.ts`, in the `live` Vitest project run by `pnpm test:live`, skipped unless `LIVE=1` and the provider's key is set. It reuses the integration global setup. Chat providers point at the real endpoints through the wire recorder; Hindsight keeps llmock, recording into a throwaway fixture directory.
 
 **A. Anthropic, the production chat model.** The integration conversation, run straight through well inside the TTL, minus its image turn — a known divergence pinned at the integration tier that would break A's exact relation and B's `error` mode. The recorder adds the `diagnostics` object to every request (`previous_message_id: null` first, then the previous response's id), since a fingerprint is stored only for requests that include it, and keeps the `anthropic-beta` header set constant, since a change makes the comparison `unavailable`.
 - Each request reads exactly what the previous one cached: for every request `n` after the first, `cache_read(n) = cache_read(n−1) + cache_creation(n−1)`, within turns and across them. Any failure prints `diagnostics.cache_miss_reason`.

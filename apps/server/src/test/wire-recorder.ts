@@ -10,12 +10,10 @@
  * request.
  *
  * The response body is teed: the caller reads one branch unchanged while the
- * recorder reads the other to the end and pulls out the message id, the usage
- * block and cache diagnostics — from an Anthropic stream's `message_start`, an
- * OpenAI stream's final chunk, or a JSON body. llmock's request journal can't
- * stand in for this: it stores its own OpenAI-shaped conversion of an
- * Anthropic request, without `cache_control`, system blocks or the top-level
- * field.
+ * recorder reads the other for the message id, usage block and cache
+ * diagnostics (Anthropic `message_start`, OpenAI final chunk, or a JSON body).
+ * llmock's journal can't do this: it keeps an OpenAI-shaped conversion of
+ * Anthropic requests, without `cache_control` or system blocks.
  */
 
 import * as R from "remeda";
