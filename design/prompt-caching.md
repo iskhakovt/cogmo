@@ -146,9 +146,41 @@ Identity, `# User` (core memory), `# Tools`, `# Capabilities`, `# Rules`. Each c
 | Time as a trailing block on the latest message only, not persisted | The next turn removes it from an earlier message: a history edit that misses the cache from that message on and invalidates later thinking blocks. |
 | Date-only in the system prompt | Invalidates daily instead of per minute, loses time of day, and leaves recall in place. |
 | Mid-conversation `role: "system"` message | Not available on Sonnet 5, so every call site needs a capability gate and a fallback; a clock and recalled memories don't need operator authority. |
-| Recall as a trailing block after the last breakpoint, replaced each request (Zep's layout) | No schema change, and no accumulation: the memories never enter the transcript. But they are re-sent at the full input rate on every request instead of read at the cache rate, and removing last turn's block is an edit under the thinking blocks that followed it — dropped or a 400 wherever the preserved-thinking check is enforced. This account isn't enforced today (see [Validation](#validation)), so it is viable now, but not on a new account or a model that enforces for everyone. |
+| Recall as a trailing block after the last breakpoint, replaced each request (Zep's layout) | No schema change, and no accumulation: the memories never enter the transcript. But they are re-sent at the full input rate on every request instead of read at the cache rate, and removing last turn's block is an edit under the thinking blocks that followed it — dropped or a 400 wherever the preserved-thinking check is enforced. This account isn't enforced today (see [Validation](#validation)), so it is viable now, but not on a new account or a model that enforces for everyone. See [Persisted versus trailing memories](#persisted-versus-trailing-memories). |
 | No auto-recall; rely on the `memory_recall` tool | Append-only for free, but adds an iteration and latency to turns that need memory, and reverses auto-recall's design (see [memory.md](memory.md)). |
 | `turn_context` column on `messages` | Requires updating the user row after insert, and puts injected context next to what the user said. |
+
+### Persisted versus trailing memories
+
+Both layouts take recalled memories out of the system prompt, which is where most of the saving comes from — Zep's 1.3–1.9× is measured against memory in the system prompt. They differ in what happens to a memory after the turn that recalled it: this design keeps it in the transcript, deduplicated; Zep's replaces it each turn with a fresh block after the last breakpoint.
+
+**Where trailing memories are better:**
+
+- **Simpler storage.** No `turn_contexts`, no deduplication, no render-equality guarantee. The time still comes from `created_at`, which never changes.
+- **Cleaner context.** The model sees only the memories relevant to the current message; nothing accumulates mid-transcript to dilute attention.
+- **No stale facts.** A fact Hindsight has since updated stays in this design's transcript at the turn that recalled it, next to the newer version. Trailing memories are always current.
+- **Flat cost.** Trailing memories cost the same every turn. Persisted ones are written once, then re-read at the cache rate by every later request, so their cost grows until a compaction summary resets it.
+
+Illustrative cost of memories per turn, assuming ~1.5k tokens per recall, two requests per turn, 40% of each recall new, and the 1-hour TTL:
+
+| Model | Trailing | Persisted, turn 10 | Persisted, turn 50 | Break-even turn |
+|-|-|-|-|-|
+| Sonnet 5 | ≈ $0.006 | ≈ $0.005 | ≈ $0.015 | ~14 |
+| Opus 5.5 (reads 0.05×) | ≈ $0.012 | ≈ $0.008 | ≈ $0.017 | ~28 |
+
+Either is small next to re-reading the transcript itself — about $0.012 per turn at 30k tokens on Sonnet 5.
+
+**Where persisted memories are better:**
+
+- **Preserved thinking.** Removing last turn's block, or moving the block to the end of each tool iteration, edits the history the turn's thinking blocks were bound to. Where the check is enforced, that is a 400, or under `drop_block` every thinking block from the edit on is dropped — and dropped blocks change the messages cache from their position, so the cache goes too. This account isn't enforced (see [Validation](#validation)); a new key, a new organization, or a model that enforces for everyone would be.
+- **Automatic caching keeps working.** With a trailing block, Anthropic's automatic breakpoint lands on the memory block itself, paying a cache write for it on every request that is never read back. Trailing memories need the breakpoint placed by hand just before the block: a "trailing, uncached" notion in `ChatParams` and marker placement in every adapter, against a single intent field here.
+- **Tool loops.** A trailing block left in place for the rest of its turn forces the next turn to re-write that whole turn, tool results included, once the block is dropped; one moved to the end of every request is paid at the full input rate on every iteration.
+- **Provenance.** `turn_contexts` records what the model saw on each turn, so any past request can be rebuilt; trailing memories survive only as long as Inngest's step state.
+- **Grounding.** An earlier answer keeps the memory it was based on beside it.
+
+The deciding factor is the first: the persisted layout's costs are soft and bounded by deduplication and compaction, while the trailing layout fails hard the moment the preserved-thinking check applies.
+
+**A later path to both** `[research]`. On Opus 5, Opus 5.5 and Fable, a turn-scoped mid-conversation system message (`clear_at: "next_user_message"`, beta `mid-conversation-system-clear-at-2026-08-21`) renders for one turn and then stays in the transcript cleared, costing no input tokens. That is a trailing block without the history edit and without accumulation. It is not available on Sonnet 5, where mid-conversation system messages don't exist at all; it can't carry `cache_control`, so the breakpoint goes on the preceding user turn; and it gives recalled memories operator authority, which widens the injection surface of stored text that originated in web pages or tool output.
 
 ## Canonical Tool Inputs `[proposed]`
 
