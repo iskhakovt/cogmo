@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ContentBlock, Message, ToolResultBlock, ToolUseBlock } from "../llm/types.js";
+import type {
+  ContentBlock,
+  Message,
+  ToolDefinition,
+  ToolResultBlock,
+  ToolUseBlock,
+} from "../llm/types.js";
 import { expectDefined } from "../test/assertions.js";
 import {
   type ContextManagerDeps,
@@ -7,6 +13,7 @@ import {
   compactSameToolClusters,
   extractSummaryText,
   SUMMARIZATION_PROMPT,
+  type SupersessionOpts,
   shouldSkipCounting,
   snapToPairBoundary,
   summarizationRequest,
@@ -555,7 +562,12 @@ describe("compactSameToolClusters", () => {
       .map((b) => b.content);
   }
 
-  const defaultOpts = { retainRecent: 2, retainFirst: 1, triggerCount: 5 };
+  const defaultOpts: SupersessionOpts = {
+    retainRecent: 2,
+    retainFirst: 1,
+    triggerCount: 5,
+    tools: undefined,
+  };
 
   it("passes through unchanged when no tool has hit triggerCount", () => {
     const messages = cluster("web_search", [
@@ -598,6 +610,63 @@ describe("compactSameToolClusters", () => {
     // Same summary string on every compacted block (matches Strategy 1's
     // placeholder pattern).
     expect(contents[1]).toBe(contents[2]);
+  });
+
+  // Transcript inputs carry sorted keys, which puts `budget` ahead of
+  // `query`; the tool declares `query` first, and that is what tells the
+  // compacted calls apart.
+  const reflectTool: ToolDefinition = {
+    name: "memory_reflect",
+    description: "reflect",
+    parameters: {
+      type: "object",
+      properties: { query: { type: "string" }, budget: { type: "string" } },
+      required: ["query"],
+    },
+  };
+
+  function reflectCluster(): Message[] {
+    return cluster(
+      "memory_reflect",
+      ["alpha", "beta", "gamma", "delta", "epsilon"].map((query, i) => ({
+        id: `t${i + 1}`,
+        input: { budget: "mid", query },
+        result: `R${i + 1}`,
+      })),
+    );
+  }
+
+  it("names each compacted call by its first declared string argument", () => {
+    const result = compactSameToolClusters(reflectCluster(), {
+      ...defaultOpts,
+      tools: [reflectTool],
+    });
+
+    const contents = getToolResultContents(result.messages, "memory_reflect");
+    expect(contents[1]).toContain('calls: query: "beta"; query: "gamma".');
+  });
+
+  it("names a call by an undeclared argument, in input order, when no declared one is a string", () => {
+    const messages = cluster(
+      "memory_reflect",
+      ["alpha", "beta", "gamma", "delta", "epsilon"].map((note, i) => ({
+        id: `t${i + 1}`,
+        input: { budget: "", note, other: "x" },
+        result: `R${i + 1}`,
+      })),
+    );
+
+    const result = compactSameToolClusters(messages, { ...defaultOpts, tools: [reflectTool] });
+
+    const contents = getToolResultContents(result.messages, "memory_reflect");
+    expect(contents[1]).toContain('calls: note: "beta"; note: "gamma".');
+  });
+
+  it("names a call by its first string argument in input order when the tool has no definition", () => {
+    const result = compactSameToolClusters(reflectCluster(), { ...defaultOpts, tools: undefined });
+
+    const contents = getToolResultContents(result.messages, "memory_reflect");
+    expect(contents[1]).toContain('calls: budget: "mid"; budget: "mid".');
   });
 
   it("the first slot is sticky — its content stays byte-identical across multiple compactions", () => {
@@ -864,6 +933,52 @@ describe("compactMessages — Strategy 0 wiring", () => {
     expect(result.event?.sameToolResultsSuperseded).toBe(2);
   });
 
+  it("gives Strategy 0 the tool definitions, so a compacted call is named by its declared argument", async () => {
+    const messages: Message[] = ["alpha", "beta", "gamma", "delta", "epsilon"].flatMap(
+      (query, i): Message[] => [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: `t${i}`,
+              name: "memory_reflect",
+              input: { budget: "mid", query },
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool_result", toolUseId: `t${i}`, content: "·".repeat(500) }],
+        },
+      ],
+    );
+    const tools: ToolDefinition[] = [
+      {
+        name: "memory_reflect",
+        description: "reflect",
+        parameters: {
+          type: "object",
+          properties: { query: { type: "string" }, budget: { type: "string" } },
+        },
+      },
+    ];
+
+    const result = await compactMessages(
+      "system",
+      messages,
+      tools,
+      { countTokens: vi.fn().mockResolvedValue(100), budget: 1000 },
+      true,
+    );
+
+    // Message 3 carries the second call's result, the first compacted slot.
+    const content = expectDefined(result.messages[3]).content;
+    const block = Array.isArray(content) ? content[0] : undefined;
+    if (block?.type !== "tool_result") throw new Error("expected a tool_result block");
+    expect(block.content).toContain('calls: query: "beta"; query: "gamma".');
+  });
+
   it("does not flip didCompact when no cluster trips and budget is fine", async () => {
     const messages: Message[] = [
       { role: "user", content: "hello" },
@@ -958,6 +1073,7 @@ describe("pre-summarize strategies preserve the array's length", () => {
       retainRecent: 2,
       retainFirst: 1,
       triggerCount: 5,
+      tools: undefined,
     });
 
     expect(result.resultsCompacted).toBeGreaterThan(0);

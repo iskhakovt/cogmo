@@ -34,6 +34,24 @@ describe("canonicalKeyOrder", () => {
     expect(Object.keys(canonicalKeyOrder(value))).toEqual(["Z", "_x", "aa", "b"]);
   });
 
+  it("orders a key outside the BMP by its surrogates, not its code point", () => {
+    // U+1F600 is the pair D83D DE00, which sorts before U+FF01 by code unit
+    // and after it by code point (the order UTF-8 bytes, and so Postgres, use).
+    const value = { "！": 1, "\u{1F600}": 2, a: 3 };
+
+    expect(Object.keys(canonicalKeyOrder(value))).toEqual(["a", "\u{1F600}", "！"]);
+  });
+
+  it("puts integer-like keys first, in numeric order", () => {
+    // RFC 8785 would give "10", "9", "b"; JavaScript enumerates integer-like
+    // keys ahead of the rest whatever order they were inserted in.
+    const a = canonicalKeyOrder({ b: 1, "10": 2, "9": 3 });
+    const b = canonicalKeyOrder({ "9": 3, b: 1, "10": 2 });
+
+    expect(JSON.stringify(a)).toBe('{"9":3,"10":2,"b":1}');
+    expect(JSON.stringify(b)).toBe(JSON.stringify(a));
+  });
+
   it("returns an equal value, leaving the input untouched", () => {
     const value = { b: [1, { d: null, c: true }], a: "x" };
     const before = JSON.stringify(value);
@@ -70,6 +88,50 @@ describe("canonicalKeyOrder", () => {
 
     expect(JSON.stringify(result)).toBe('{"__proto__":{"polluted":true},"z":1}');
     expect(Object.getPrototypeOf(result)).toBe(Object.prototype);
+  });
+
+  it("sorts a value nested deeper than a recursive walk could go", () => {
+    // `JSON.parse` has no depth limit, so a tool input can nest this far;
+    // `JSON.stringify` gives out near 4,000 levels, so the check walks it.
+    const depth = 10_000;
+    const value: unknown = JSON.parse(`${'{"b":'.repeat(depth)}0${',"a":1}'.repeat(depth)}`);
+
+    const result = canonicalKeyOrder(value);
+
+    const keyOrders = new Set<string>();
+    let level: unknown = result;
+    let levels = 0;
+    while (typeof level === "object" && level !== null) {
+      keyOrders.add(Object.keys(level).join());
+      level = Reflect.get(level, "b");
+      levels++;
+    }
+    expect(levels).toBe(depth);
+    expect([...keyOrders]).toEqual(["a,b"]);
+    expect(level).toBe(0);
+  });
+
+  it("sorts every member of a very wide array", () => {
+    const width = 500_000;
+    const value = Array.from({ length: width }, (_, i) => ({ b: i, a: i }));
+
+    const result = canonicalKeyOrder(value);
+
+    expect(result).toHaveLength(width);
+    expect(result.every((member) => Object.keys(member).join() === "a,b")).toBe(true);
+  });
+
+  it("copies a shared or cyclic reference once and keeps it shared", () => {
+    const shared = { d: 1, c: 2 };
+    const cyclic: Record<string, unknown> = { z: shared, y: shared };
+    cyclic.self = cyclic;
+
+    const result = canonicalKeyOrder(cyclic);
+
+    expect(Object.keys(result)).toEqual(["self", "y", "z"]);
+    expect(result.self).toBe(result);
+    expect(result.y).toBe(result.z);
+    expect(Object.keys(result.y as object)).toEqual(["c", "d"]);
   });
 
   it("leaves non-plain objects as they are", () => {

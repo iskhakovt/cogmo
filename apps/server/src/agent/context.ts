@@ -225,6 +225,7 @@ export async function compactMessages(
     retainRecent: DEFAULT_RETAIN_RECENT,
     retainFirst: DEFAULT_RETAIN_FIRST,
     triggerCount: DEFAULT_TRIGGER_COUNT,
+    tools,
   });
   if (supersession.resultsCompacted > 0) {
     result = supersession.messages;
@@ -350,6 +351,14 @@ export interface SupersessionOpts {
   retainRecent: number;
   retainFirst: number;
   triggerCount: number;
+  /**
+   * The turn's tool definitions. A compacted call is named by its first
+   * string argument in the tool's declared parameter order, which puts the
+   * argument that identifies the call (`query`, `path`) ahead of modifiers
+   * like `budget`. `undefined`, or a tool missing from the list, falls back
+   * to the input's own key order.
+   */
+  tools: ReadonlyArray<ToolDefinition> | undefined;
 }
 
 export interface SupersessionResult {
@@ -405,7 +414,11 @@ export function compactSameToolClusters(
   messages: ReadonlyArray<Message>,
   opts: SupersessionOpts,
 ): SupersessionResult {
-  const { retainRecent, retainFirst, triggerCount } = opts;
+  const { retainRecent, retainFirst, triggerCount, tools } = opts;
+
+  const declaredParams = new Map(
+    (tools ?? []).map((t) => [t.name, Object.keys(t.parameters.properties ?? {})] as const),
+  );
 
   // Index every tool_use block by id → { name, input }.
   const toolUseById = new Map<string, { name: string; input: unknown }>(
@@ -455,7 +468,10 @@ export function compactSameToolClusters(
     if (middleEnd <= middleStart) continue;
 
     const middle = positions.slice(middleStart, middleEnd);
-    const argShapes = middle.map((p) => formatToolUseArgs(toolUseById.get(p.toolUseId)?.input));
+    const declared = declaredParams.get(toolName) ?? [];
+    const argShapes = middle.map((p) =>
+      formatToolUseArgs(toolUseById.get(p.toolUseId)?.input, declared),
+    );
     const summary =
       `[Same-tool cluster: ${middle.length} prior \`${toolName}\` results compacted — calls: ` +
       `${argShapes.join("; ")}. Latest ${retainRecent} verbatim below.]`;
@@ -509,16 +525,29 @@ export function compactSameToolClusters(
  * Compact one-line representation of a `tool_use.input` for the
  * supersession summary text. Falls back to a JSON-ish render for shapes
  * that don't look like a simple-string-keyed bag.
+ *
+ * `declared` is the tool's parameter names in declaration order. Transcript
+ * inputs carry sorted keys, so the input's own order says nothing about
+ * which argument matters; the declaration does.
  */
-function formatToolUseArgs(input: unknown): string {
+function formatToolUseArgs(input: unknown, declared: ReadonlyArray<string>): string {
   if (input === null || typeof input !== "object") return JSON.stringify(input);
   const entries = Object.entries(input as Record<string, unknown>);
   if (entries.length === 0) return "{}";
-  // Pick the first string-valued entry as the most descriptive
-  // (query, prompt, path, etc.); fall back to JSON for the rest.
-  const stringEntry = entries.find(([, v]) => typeof v === "string" && v.length > 0);
+  // Name the call by its first non-empty string argument (query, prompt,
+  // path, etc.): declared parameters in declaration order, then the input's
+  // other keys in their own order (`sortBy` is stable). Fall back to JSON
+  // when there is none.
+  const rank = (key: string): number => {
+    const i = declared.indexOf(key);
+    return i === -1 ? declared.length : i;
+  };
+  const [stringEntry] = R.sortBy(
+    entries.filter((e): e is [string, string] => typeof e[1] === "string" && e[1].length > 0),
+    ([k]) => rank(k),
+  );
   if (stringEntry) {
-    const [k, v] = stringEntry as [string, string];
+    const [k, v] = stringEntry;
     const trimmed = v.length > 80 ? `${v.slice(0, 77)}...` : v;
     return `${k}: ${JSON.stringify(trimmed)}`;
   }

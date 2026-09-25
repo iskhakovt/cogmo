@@ -19,6 +19,12 @@ import * as R from "remeda";
  * else, including a non-plain object, comes back as the same reference.
  * Entries are copied as own properties, so a parsed `__proto__` key stays a
  * key and never becomes a prototype.
+ *
+ * Never throws on JSON data, at any depth. The input is model output parsed
+ * by `JSON.parse`, which has no nesting limit, and it runs on every read of
+ * `messages.content` — so the walk is iterative, bounded by the heap rather
+ * than the call stack. A shared or cyclic reference, which JSON cannot
+ * produce, is copied once and stays shared in the result.
  */
 export function canonicalKeyOrder<T>(value: T): T {
   // Reordering keys keeps every value and its type; TypeScript cannot
@@ -26,10 +32,42 @@ export function canonicalKeyOrder<T>(value: T): T {
   return sortKeys(value) as T;
 }
 
+type Container = unknown[] | Record<PropertyKey, unknown>;
+
+function isContainer(value: unknown): value is Container {
+  return Array.isArray(value) || R.isPlainObject(value);
+}
+
 function sortKeys(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortKeys);
-  if (!R.isPlainObject(value)) return value;
-  return Object.fromEntries(
-    R.sortBy(Object.entries(value), ([key]) => key).map(([key, member]) => [key, sortKeys(member)]),
-  );
+  if (!isContainer(value)) return value;
+
+  // Pass 1: a shallow copy of every container reachable from `value`, object
+  // keys inserted in sorted order, members still the originals.
+  const copies = new Map<Container, Container>();
+  const pending: Container[] = [value];
+  for (let source = pending.pop(); source !== undefined; source = pending.pop()) {
+    if (copies.has(source)) continue;
+    copies.set(
+      source,
+      Array.isArray(source)
+        ? source.slice()
+        : Object.fromEntries(R.sortBy(Object.entries(source), ([key]) => key)),
+    );
+    // One push per member: spreading a wide array into `push` would hit the
+    // engine's argument limit.
+    for (const member of Object.values(source)) {
+      if (isContainer(member)) pending.push(member);
+    }
+  }
+
+  // Pass 2: point each copy's container members at their copies. Setting an
+  // existing key keeps its position, and for an own `__proto__` key writes
+  // the property rather than the prototype.
+  for (const copy of copies.values()) {
+    for (const [key, member] of Object.entries(copy)) {
+      const sorted = isContainer(member) ? copies.get(member) : undefined;
+      if (sorted !== undefined) Reflect.set(copy, key, sorted);
+    }
+  }
+  return copies.get(value);
 }
