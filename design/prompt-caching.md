@@ -313,7 +313,7 @@ select count(*) filter (where gap < interval '5 minutes') as under_5m,
 from turns where gap is not null;
 ```
 
-**Keep-alive pings** (a `max_tokens: 0` request shortly before a 5-minute entry expires) are rejected: they need a scheduler per idle conversation, and `max_tokens: 0` is rejected with `stream: true`. They also cost more than they save: each ping reads the whole prefix (0.1×, 0.05× on Opus 5.5), while the 1-hour TTL's premium applies only to newly written tokens — in a warm conversation, the turn's delta, far smaller than the prefix. The cost half is model-dependent: on Fable 5.1 and Mythos 5.1, reads at 0.025× make a ping cheap enough that Anthropic's own guidance for those models favours a keep-alive over the 1-hour TTL. The scheduler and streaming objections stand either way.
+**Keep-alive pings** — a `max_tokens: 0` request, sent without streaming, shortly before a 5-minute entry expires — are rejected for now. On every model they need a scheduler per idle conversation: a durable timer firing every few minutes until the conversation goes quiet for good. Whether they also save money depends on the read rate. On Sonnet 5 (reads 0.1×) and Opus 5.5 (0.05×), each ping reads the whole prefix, while the 1-hour TTL's premium applies only to newly written tokens — in a warm conversation, the turn's delta, far smaller than the prefix — so pings cost more than they save. On Fable 5.1 and Mythos 5.1, reads at 0.025× make pings cheap enough that Anthropic's own guidance for those models favours them over the 1-hour TTL; if the chat model moves there, the scheduler is the only objection left, and keep-alive is worth revisiting.
 
 ## Usage Accounting `[proposed]`
 
