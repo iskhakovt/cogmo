@@ -245,6 +245,8 @@ Your response will be spoken aloud. Keep it short and natural — one or two sen
 
 Hooks into `DefaultPromptSource.assemble` — extend the signature with `{ voiceMode: boolean }` so all conditional inputs sit together (channel types, voice mode, recall context). This is the same pattern channel-types use today.
 
+`[proposed]` The hint becomes a standing section of the system prompt that applies when the turn says `Reply modality: voice`, and the modality moves into the turn's user message with the voice decision persisted per turn, so alternating voice and text turns stop rewriting the system prompt — see [prompt-caching.md](prompt-caching.md) → Turn Context.
+
 ### `/voice` Telegram command `[confirmed]`
 
 ```

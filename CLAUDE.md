@@ -30,6 +30,7 @@ Read `design/` for the full picture. Key docs:
 | [agents.md](design/agents.md) | Agentic loop, sub-agents, crash recovery |
 | [crash-recovery.md](design/crash-recovery.md) | Durability map of `handle-message`, what re-executes on retry, test contract |
 | [context-management.md](design/context-management.md) | Token counting, compaction pipeline, model registry |
+| [prompt-caching.md](design/prompt-caching.md) | Byte-stable prompt prefix, per-turn context on the user message, provider-neutral cache intent, usage accounting |
 | [transport/](design/transport/) | Messaging architecture — adapters, sessions, debounce, routing, identity |
 | [web-ui.md](design/web-ui.md) | Browser cockpit — in-process UI server, oRPC admin API, SSE chat, auth, Ledger design system |
 | [integrations.md](design/integrations.md) | Channel adapters, skill library, permission tiers, plugin extensibility |
