@@ -25,6 +25,8 @@ Verified against the code on 2026-09-23.
 
 The first three are per-turn state; the rest are configuration. Because the transcript renders after the system block, a changed system block invalidates every cached message behind it — so moving the clock alone leaves the transcript uncacheable across turns, because recall changes it on nearly every turn anyway.
 
+**Tool-call inputs come back from the database in a different key order.** The loop appends the model's `tool_use` input as parsed from the stream, in the order the model emitted its keys. `messages.content` is `jsonb`, which stores object keys by length and then bytewise, so the next turn reloads `{"prompt": …, "model": …}` as `{"model": …, "prompt": …}`. Every turn after a tool call re-sends that call with different bytes: the cached prefix breaks at the first reordered input, on Anthropic and on the OpenAI-compatible path (whose `arguments` string is `JSON.stringify(input)`), and on Opus 5.5 / Fable 5.1 it is an edit under every later thinking block.
+
 **It is not Anthropic-specific.** OpenAI, xAI and OpenRouter's non-Claude routes cache the longest matching prefix automatically. With the clock and recall at the end of the system message, their cached prefix also stops where the transcript starts.
 
 **It breaks preserved thinking.** On Claude Opus 5.5 and Fable 5.1, a thinking block's signature binds the top-level `system` prompt, the tool set and every earlier message; replaying the block after any of them changed is a 400 for accounts created on or after 2026-08-31 (older accounts opt in). A system prompt that changes every turn is that edit, on every turn after the first.
@@ -55,7 +57,7 @@ Surveyed September 2026.
 ## Principles `[proposed]`
 
 1. **The system prompt is a function of configuration only** — identity, core memory, tools, capabilities, steering rules. Nothing per-turn goes in it.
-2. **The transcript is append-only.** What the model saw on one request, it sees again byte-identical on every later request, until compaction deliberately rewrites it.
+2. **The transcript is append-only.** What the model saw on one request, it sees again byte-identical on every later request, until compaction deliberately rewrites it. That includes key order inside tool-call inputs.
 3. **Per-turn state belongs to its turn.** It renders as part of that turn's user message, from durable data, identically every time the message is sent.
 4. **Cache intent is provider-neutral; wire format is the adapter's.** Domain code says "this transcript will be re-sent"; adapters decide what that means on the wire.
 5. **Usage reports total prompt size.** Cache reads and writes are subsets of `inputTokens`, never in addition to it.
@@ -143,6 +145,15 @@ Identity, `# User` (core memory), `# Tools`, `# Capabilities`, `# Rules`. Each c
 | Recall rendered ephemerally after a per-turn anchor breakpoint, dropped next turn | No schema change, and a 1-hour anchor keeps the prefix before it readable, but the previous turn is re-written every turn and the drop is a history edit — a 400 or dropped thinking on Opus 5.5 / Fable 5.1. Viable on Sonnet 5 only. |
 | No auto-recall; rely on the `memory_recall` tool | Append-only for free, but adds an iteration and latency to turns that need memory, and reverses auto-recall's design (see [memory.md](memory.md)). |
 | `turn_context` column on `messages` | Requires updating the user row after insert, and puts injected context next to what the user said. |
+
+## Canonical Tool Inputs `[proposed]`
+
+A `tool_use` block's `input` is put into canonical key order — sorted keys at every depth, arrays in order, the RFC 8785 ordering the `canonicalize` library already provides for `canonicalJson` (`src/agent/repair.ts`) — at both boundaries where it enters a transcript:
+
+- **In the loop**, when the streamed tool call becomes part of the assistant message, so the in-turn transcript and every later request carry the same order.
+- **At the store boundary**, when `messages.content` is read back from `jsonb`, so a reload reproduces that order regardless of how Postgres stored it.
+
+The model never sees its own emission order again, only the canonical one, and that is safe: iteration 1's cache entry ends at the user message, and a thinking block binds what precedes it, not the `tool_use` that follows it in the same message. Handlers receive the same values; only key order changes.
 
 ## Cache Intent `[proposed]`
 
@@ -234,26 +245,100 @@ The persisted per-turn input is the sum across the turn's iterations, which over
 
 - **Compaction.** Strategy 0 supersession, Strategy 1 clearing and Strategy 2 summarization rewrite history and invalidate the cache from the first rewritten position — by design, see [context-management.md](context-management.md). The summarization call could itself read the parent's cache by reusing the parent's exact tools, system and messages and appending its instruction; that is a follow-up.
 - **Inngest replays.** Every byte of `system` and `messages` derives from step results or the event payload, so a replayed invocation sends the same prefix; no bare-body clock or non-durable read may reach them. The `tools` array is the exception: each invocation rebuilds it from live reads of the image, skill, sub-agent and MCP catalogs (`handle-message.ts`, `run-agentic-stage.ts`). A catalog edit landing mid-run changes the prefix at position 0 — a full miss for the rest of the turn, and on Opus 5.5 / Fable 5.1 a thinking-block mismatch. Accepted as a concurrent-operator residual, the same class as the `auto-recall` gate; memoizing the definitions in a step is the fix if it ever bites.
-- **Preserved thinking.** Freezing the system prompt removes the one history edit that happens on every turn. The remaining edits — configuration changes to the system prompt, all three compaction strategies (Strategy 0 runs every turn and rewrites an earlier result whenever a same-tool cluster crosses its trigger), the ephemeral `empty_end_turn` continuation prompt, a tool-catalog edit mid-run, and image turns (below) — are tracked in `todo.md`.
+- **Preserved thinking.** Freezing the system prompt removes the one history edit that happens on every turn. The remaining edits — configuration changes to the system prompt, all three compaction strategies (Strategy 0 runs every turn and rewrites an earlier result whenever a same-tool cluster crosses its trigger), the ephemeral `empty_end_turn` continuation prompt, a tool-catalog edit mid-run, and image turns (below) — are tracked in `todo.md`. Canonical tool inputs remove the reordered-key edit.
 - **Image turns.** The current turn sends resolved image and document blocks; later turns load the row as its persisted JSON string. Anthropic treats added or removed images as a messages-cache invalidation, so the turn after an image turn re-writes from that message on. It is also a preserved-thinking edit. Out of scope here; tracked in `todo.md`.
 - **Model switches.** Caches are per model. A `/model` change or a fallback to another provider starts cold.
 
-## Verification `[proposed]`
+## Test Plan `[proposed]`
 
-1. **Prefix-stability invariant (CI, no network).** For a two-turn conversation whose first turn makes a tool call, every request's `tools`, `system` and `messages` — with `cache_control` stripped — is a byte prefix of the next request's. Unit level: `handle-message` with a provider that captures `ChatParams`. Integration level: the same assertion over llmock's request journal. It fails today at the system block on turn 2. This is the guard against the next invalidator, which usage numbers only show after the bill.
-2. **Adapter tests.** Marker placement and TTLs per intent; no top-level `cache_control` without an intent; usage totals and cache subsets for each provider's usage shape.
-3. **Fast-path regression.** A large conversation whose usage is mostly cache reads does not make `shouldSkipCounting` return true.
-4. **Render equality.** `renderTurnContext` over the current turn's in-run inputs equals its output over the reloaded row.
-5. **One live recording run** with real keys: on turn 1's second iteration, `cache_read_input_tokens` covers tools, system and the transcript; on turn 2's first iteration, it covers turn 1. If not, the cache-diagnostics beta (`cache-diagnosis-2026-04-07`) names the section that diverged. The same run on Opus 5.5 with `thinking.block_binding.prefix_mismatch_behavior: "drop_block"` should log no `input_transformations` outside image turns and compaction.
-6. **In production**, the existing per-call cache attributes and counters give a hit ratio of cache reads over total input per model.
+Three separate claims need proving, and no single tier proves all three:
+
+| Claim | Why it can fail | Where it is proven |
+|-|-|-|
+| **Byte stability** — every request's prefix is the previous request's, unchanged | A per-turn value in the system prompt, a history edit, a non-durable read on replay, a serializer reordering keys | Unit and integration tiers, every PR |
+| **Wire mapping** — each adapter puts the intent on the wire and reads usage back correctly | A marker in the wrong place, a TTL-ordering 400, a missing routing key, uncached tokens reported as total | Unit and integration tiers, every PR |
+| **Provider behaviour** — the provider actually serves our prefix from its cache | Anything the first two can't see: minimum sizes, lookback, TTL, a provider-side rendering difference | Live tier only |
+
+Replay cannot prove the third: recorded fixtures store content and tool calls, not usage, so llmock's replayed usage is synthetic.
+
+### Harness
+
+- **Injectable `fetch`** on `AnthropicProvider` and `OpenAICompatibleProvider`, as `OpenAIVoiceProvider` already takes for record/replay. Production passes the logging fetch it builds today.
+- **`createWireRecorder()`** (`src/test/`) wraps a fetch and records each request's URL, headers and body exactly as sent. It tees the response to keep the usage object: Anthropic's `message_start` usage including the `cache_creation` TTL breakdown, and the OpenAI final chunk's `usage`. An optional request mutator lets the live tier add headers and fields without production code.
+- **`assertAppendOnly(prev, next)`**, with `cache_control` stripped everywhere: `tools` and `system` equal, and `next.messages` starting with every message of `prev` byte-for-byte. A failure names the first diverging path (`system`, `tools[3]`, `messages[7].content[1].input`).
+
+llmock's request journal can't serve here: it stores its own OpenAI-shaped conversion of an Anthropic request, without `cache_control`, system blocks or the top-level field.
+
+### Unit tier
+
+- `DefaultPromptSource.assemble` returns the same string at two different minutes under fake timers. Fails today.
+- A tool input round-tripped through a PGlite `messages` row serializes identically to the in-loop block. Fails today.
+- `renderTurnContext` over the current turn's in-run inputs equals its output over the reloaded row; the compaction summary gets no time; the timezone formats as configured.
+- **Replay equality** in `handle-message.replay.test.ts`: `llm-iter2`'s `ChatParams` from a fresh run equal those from a run where every earlier step is memoized through `@inngest/test`'s `steps:`. Checkpointing can collapse a real run's steps into one invocation, so the integration tier alone doesn't reliably exercise a replayed body.
+- Anthropic adapter, per intent: no intent keeps today's 5-minute tools and system markers; `short` and `long` add top-level `cache_control` at the matching TTL with the markers at the same TTL; at most four breakpoints; `countTokens` sends no top-level field; usage sums to a total with the cache fields as subsets.
+- OpenAI-compatible adapter, per dialect: `prompt_cache_key`, the `x-grok-conv-id` header, OpenRouter's `session_id` and markers, and nothing for `none`; usage from `prompt_tokens_details`.
+- The loop passes the caller's intent on every iteration and to the in-step replay; summarization, degraded-reply synthesis, sub-agents and `chatTyped` send none.
+- `shouldSkipCounting` does not skip for a large conversation whose usage is mostly cache reads.
+
+### Integration tier (replay, every PR)
+
+`src/test/prompt-caching.integration.test.ts` bootstraps the app in-process as `pipeline.integration.test.ts` does, with the chat provider built on the wire recorder and pointed at llmock.
+
+**Anthropic conversation, four turns:**
+
+1. A tool turn of at least two iterations, calling a tool whose model-emitted key order differs from `jsonb` order — the recorded `generate_image` call (`prompt`, then `model`) is one.
+2. A follow-up with auto-recall returning memories from a seeded bank.
+3. A voice-mode turn, reusing the voice fixtures.
+4. An image turn, followed by one more plain turn.
+
+**Assertions:**
+
+- `assertAppendOnly` over every consecutive pair of loop requests in the conversation, within turns and across them. The one declared exception is the turn after the image turn, which must diverge exactly at the image message; that pins the known residual instead of tolerating divergence in general.
+- `system` is identical on every request and contains no time, no recalled context and no voice hint.
+- Each user-turn message opens with its turn context. The time matches the row's `created_at` in the configured timezone, the memories match `turn_contexts`, and a memory recalled on turns 2 and 3 renders once.
+- Every loop request carries top-level `cache_control` at `1h`, with the tools and system markers at `1h`.
+
+**A pipeline stage run:** its requests carry `5m`.
+
+**OpenAI-compatible:** the recorded xAI-via-OpenRouter route runs a two-turn conversation with a tool call. `assertAppendOnly` holds over the Chat Completions bodies, which catches a reordered `arguments` string, and the dialect's fields are present.
+
+The suite follows `.claude/rules/testing.md`: it runs alongside its noisiest peers before it counts as stable, since llmock's fixture pool is shared across forks.
+
+### E2E tier
+
+The smoke test's migrations check gains `turn_contexts`. The rest of the path runs in-process at the integration tier, and in replay the subprocess can't show anything about provider caching that the integration tier doesn't.
+
+### Live tier
+
+`src/test/prompt-caching.live.test.ts`, in a `live` Vitest project run by `pnpm test:live`, skipped unless `LIVE=1` and the provider's key is set. It reuses the integration global setup. Chat providers point at the real endpoints through the wire recorder; Hindsight keeps llmock, recording into a throwaway fixture directory.
+
+**A. Anthropic, the production chat model.** The integration conversation, run straight through (well inside the TTL). The recorder adds `cache-diagnosis-2026-04-07` to every request, since fingerprints are only stored for requests that carry it, and sets `diagnostics.previous_message_id`.
+- Each request reads exactly what the previous one cached: for every request `n` after the first, `cache_read(n) = cache_read(n−1) + cache_creation(n−1)`, within turns and across them. Any failure prints `diagnostics.cache_miss_reason`.
+- The first request's `cache_read + cache_creation` exceeds the model's minimum cacheable prefix, so a pass can't be vacuous.
+- `cache_creation.ephemeral_1h_input_tokens` is non-zero and `ephemeral_5m_input_tokens` is zero on the chat path.
+- `input_tokens` covers only the tail after the last breakpoint.
+
+**B. Opus 5.5 with preserved thinking enforced.** The recorder adds `thinking-binding-controls-2026-08-01` and `thinking.block_binding.prefix_mismatch_behavior: "error"`, so any history edit is a 400. The conversation completes, and `input_transformations` stays empty. This is also the live check that canonical tool inputs close the key-order edit.
+
+**C. TTL survival (nightly only).** Turn 1, a six-minute wait, then turn 2, whose first request reads turn 1's whole prefix. Only the 1-hour TTL makes that possible.
+
+**D. OpenAI, xAI, and OpenRouter to Claude.** The same conversation through each dialect. OpenAI and xAI cache best-effort, so their assertion is tolerant: from the second request on, `cached_tokens` is non-zero and covers most of the previous prompt, with one retry before failing. OpenRouter to Claude reports `cached_tokens` and `cache_write_tokens`, and gets A's relation, allowing one miss if OpenRouter moves the conversation to a different upstream.
+
+**Cost and cadence.** A run costs cents, since after the first request almost every input token is a cache read. It runs locally with the keys from the root `.env`, and on a scheduled and manually dispatched GitHub workflow once API-key secrets exist there. It never runs on PRs.
+
+### Production
+
+The `chat` spans and `cogmo.llm.tokens` already carry cache reads and writes per call. A hit ratio per model — reads over total input — on multi-iteration turns is the standing regression signal; the `agent loop complete` log carries the same per turn.
+
+### Fixtures
 
 Recorded fixtures match on the last user message (`match: { userMessage }`), which the clock in the system prompt never reached. Moving the time and recalled memories into it makes every chat cassette's key depend on them. `normalizeContent` (`test/llmock-setup.ts`) gains a rule for the time line, applied to string content and to the multipart text parts the OpenAI-compatible adapter sends for image turns, and every chat cassette is re-recorded.
 
 ## Implementation Plan `[proposed]`
 
-1. **Cache intent and usage accounting.** `ChatParams.cache`, the Anthropic mapping, usage totals across adapters, the metric split, loop totals. Iterations 2 and later of every tool-using turn read the transcript. Until step 2 lands, nothing reads across turns, so a single-iteration turn pays 25% more on the transcript it writes; the change nets out cheaper once roughly 28% of turns run two or more iterations (`cogmo.agent.iterations` shows the share). Ships with `retention: "short"` everywhere.
-2. **Turn context.** Frozen system prompt, `turn_contexts`, `renderTurnContext` in both loop callers, the frozen voice decision, the llmock normalizer and re-record, and `retention: "long"` for chat. Reads across turns, for every provider.
-3. **OpenAI-compatible routing hints.** `attrs.cacheDialect` with its data migration from `promptCaching`, OpenRouter `session_id` and markers, OpenAI `prompt_cache_key`, xAI `x-grok-conv-id`.
+1. **Cache intent and usage accounting.** `ChatParams.cache`, the Anthropic mapping, usage totals across adapters, the metric split, loop totals, the injectable `fetch` and wire recorder, and live scenario A's within-turn assertions. Iterations 2 and later of every tool-using turn read the transcript. Until step 2 lands, nothing reads across turns, so a single-iteration turn pays 25% more on the transcript it writes; the change nets out cheaper once roughly 28% of turns run two or more iterations (`cogmo.agent.iterations` shows the share). Ships with `retention: "short"` everywhere.
+2. **Turn context and canonical tool inputs.** Frozen system prompt, `turn_contexts`, `renderTurnContext` in both loop callers, the frozen voice decision, canonical tool inputs, the llmock normalizer and re-record, `retention: "long"` for chat, the integration suite, and live scenarios B and C. Reads across turns, for every provider.
+3. **OpenAI-compatible routing hints.** `attrs.cacheDialect` with its data migration from `promptCaching`, OpenRouter `session_id` and markers, OpenAI `prompt_cache_key`, xAI `x-grok-conv-id`, and live scenario D.
 
 ## Open questions
 
@@ -261,6 +346,8 @@ Recorded fixtures match on the last user message (`match: { userMessage }`), whi
 - **Preserved-thinking enforcement.** Whether the Anthropic account was created on or after 2026-08-31 decides whether the remaining system-prompt edits (core memory, steering rules, tool catalog) are 400s today. On Opus 5 and 5.5 they could become appended `role: "system"` messages; on Sonnet 5 they cannot.
 - **Anthropic-compatible endpoints.** If an Anthropic-protocol `llm_providers` row ever points at a third-party endpoint, check that it accepts top-level `cache_control`, or fall back to an explicit tail marker for that row.
 - **OpenRouter non-Claude routes.** OpenRouter translates a block-level `cache_control` into `prompt_cache_breakpoint` for OpenAI models, dropping the TTL; its docs don't say what other upstreams (xAI, DeepSeek) do with it. Verify with a recorded request before step 3 enables markers for every OpenRouter model.
+
+- **Live tier in CI.** The scheduled workflow needs Anthropic, OpenAI and xAI API keys as repository secrets; until they exist, the live tier runs locally only.
 
 ## Sources `[research]`
 
