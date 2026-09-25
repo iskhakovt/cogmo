@@ -4051,8 +4051,9 @@ describe("canonical tool inputs", () => {
     const followUp = expectDefined(streamCalls[1], "follow-up request");
     expect(serializedInput(followUp.messages[1]?.content)).toBe(CANONICAL);
     expect(serializedInput(result.newMessages[0]?.content)).toBe(CANONICAL);
-    // Only key order changes: the handler sees the values the model sent.
-    expect(received).toEqual([emittedInput()]);
+    // The handler gets the transcript's block: the values the model sent, in
+    // canonical key order.
+    expect(received.map((input) => JSON.stringify(input))).toEqual([CANONICAL]);
   });
 
   it("puts a tool call recovered by the non-streaming replay in canonical key order", async () => {
@@ -4081,7 +4082,7 @@ describe("canonical tool inputs", () => {
     const followUp = expectDefined(streamCalls[1], "follow-up request");
     expect(serializedInput(followUp.messages[1]?.content)).toBe(CANONICAL);
     expect(serializedInput(result.newMessages[0]?.content)).toBe(CANONICAL);
-    expect(received).toEqual([emittedInput()]);
+    expect(received.map((input) => JSON.stringify(input))).toEqual([CANONICAL]);
   });
 
   it("puts a memoized iteration's tool call in canonical key order", async () => {
@@ -4119,7 +4120,7 @@ describe("canonical tool inputs", () => {
     const followUp = expectDefined(streamCalls[0], "follow-up request");
     expect(serializedInput(followUp.messages[1]?.content)).toBe(CANONICAL);
     expect(serializedInput(result.newMessages[0]?.content)).toBe(CANONICAL);
-    expect(received).toEqual([emittedInput()]);
+    expect(received.map((input) => JSON.stringify(input))).toEqual([CANONICAL]);
   });
 
   it("appends a non-streaming tool call in canonical key order", async () => {
@@ -4138,6 +4139,6 @@ describe("canonical tool inputs", () => {
     const followUp = expectDefined(vi.mocked(provider.chat).mock.calls[1], "follow-up call")[0];
     expect(serializedInput(followUp.messages[1]?.content)).toBe(CANONICAL);
     expect(serializedInput(result.newMessages[0]?.content)).toBe(CANONICAL);
-    expect(received).toEqual([emittedInput()]);
+    expect(received.map((input) => JSON.stringify(input))).toEqual([CANONICAL]);
   });
 });

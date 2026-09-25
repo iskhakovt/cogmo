@@ -783,7 +783,7 @@ describe("DrizzleAgentStore", () => {
       const { conversationId, stamp } = await seedConversation();
       // Emission order. jsonb would store the top level as
       // {model, prompt, options, aspect_ratio} and `options` as
-      // {seed, guidance_scale}; canonical order sorts both.
+      // {seed, loras, guidance_scale}; canonical order sorts both.
       const input = {
         prompt: "a cat",
         model: "flux",

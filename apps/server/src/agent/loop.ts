@@ -224,8 +224,10 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     totalUsage.inputTokens += response.usage.inputTokens;
     totalUsage.outputTokens += response.usage.outputTokens;
 
-    // Append assistant response
-    messages.push({ role: "assistant", content: canonicalizeToolInputs(response.content) });
+    // Append assistant response. The same canonical blocks are appended and
+    // executed, so handlers see what the transcript records.
+    const content = canonicalizeToolInputs(response.content);
+    messages.push({ role: "assistant", content });
 
     // Drive flow on content, not `stop_reason`. Models occasionally return a
     // tool_use block alongside `stop_reason: "end_turn"` / `"max_tokens"`; if
@@ -233,7 +235,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     // persist an orphan tool_use that breaks every subsequent turn. The
     // Anthropic contract is "every tool_use must be answered by a
     // tool_result" — content presence is the only safe gate.
-    const hasToolUse = response.content.some((b) => b.type === "tool_use");
+    const hasToolUse = content.some((b) => b.type === "tool_use");
     if (!hasToolUse) {
       return buildResult(messages, initialLength, [], totalUsage, finalModel, iterations, {
         text: "",
@@ -246,7 +248,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     // design/agent-resilience.md → Volume cluster trigger.
     const interceptions = computeVolumeClusterInterceptions(messages, initialLength, tools, log);
     const toolResults = await executeToolCalls(
-      response.content,
+      content,
       tools,
       service,
       stepRun,
