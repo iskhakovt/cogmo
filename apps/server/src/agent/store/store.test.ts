@@ -1069,7 +1069,7 @@ describe("DrizzleAgentStore", () => {
       expect(rules).toEqual([{ rule: "Global safety rule" }, { rule: "Be concise" }]);
     });
 
-    it("keeps tied priorities in id order after one of them is updated", async () => {
+    it("keeps tied priorities in id order after both corrections are promoted", async () => {
       const profileId = await seedProfile();
       // Created and graduated the way the Observer does it: each correction is
       // inserted at the same priority, then promoted by an in-place update that
