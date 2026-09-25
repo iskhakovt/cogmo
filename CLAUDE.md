@@ -123,7 +123,7 @@ TypeScript idioms, naming, imports, error handling, casts, encapsulation. See [.
 
 ## Testing
 
-Principles, three-tier structure, PGlite store tests, record/replay mocks, integration env injection. See [.claude/rules/testing.md](.claude/rules/testing.md).
+Principles, test tiers, PGlite store tests, record/replay mocks, integration env injection. See [.claude/rules/testing.md](.claude/rules/testing.md).
 
 @.claude/rules/testing.md
 

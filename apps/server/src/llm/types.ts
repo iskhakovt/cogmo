@@ -138,6 +138,15 @@ export interface ToolDefinition {
  */
 export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "refusal" | "context_overflow";
 
+/**
+ * Token usage of one LLM call.
+ *
+ * `inputTokens` is the total prompt size. `cacheReadTokens` and
+ * `cacheCreationTokens` are subsets of it, never in addition to it — the
+ * convention of the OpenTelemetry GenAI attributes. Adapters whose wire format
+ * reports only the uncached remainder (Anthropic's `input_tokens`) add the
+ * cache fields back in. Present only when the provider reports them.
+ */
 export interface Usage {
   inputTokens: number;
   outputTokens: number;
@@ -210,6 +219,20 @@ export interface ResponseFormat {
 
 // --- Chat params ---
 
+/**
+ * Says that this request's transcript will be sent again, extended, and is
+ * worth caching. Provider-neutral: each adapter decides what it means on the
+ * wire (see design/prompt-caching.md → Cache Intent). Set only by callers that
+ * re-send a transcript — the agent loop's callers; a one-shot call caching its
+ * tail pays the write premium on tokens nothing reads back.
+ */
+export interface CacheIntent {
+  /** Stable per transcript — the conversation id. Routing / accounting key. */
+  key: string;
+  /** "short" ≈ minutes between requests; "long" ≈ a human reply gap. */
+  retention: "short" | "long";
+}
+
 export interface ChatParams {
   model: string;
   system: string;
@@ -230,9 +253,15 @@ export interface ChatParams {
    * chain that may span both.
    */
   temperature?: number;
+  /** Cache the transcript for the next request. Adapters without a mapping ignore it. */
+  cache?: CacheIntent;
 }
 
 // --- Token counting ---
 
-/** Same shape as ChatParams minus maxTokens — if you can chat(), you can count tokens for it. */
-export type CountTokensParams = Omit<ChatParams, "maxTokens">;
+/**
+ * ChatParams minus `maxTokens` and `cache` — if you can chat(), you can count
+ * tokens for it, since a `ChatParams` value still fits. A count is never sent
+ * again, so it takes no cache intent.
+ */
+export type CountTokensParams = Omit<ChatParams, "maxTokens" | "cache">;

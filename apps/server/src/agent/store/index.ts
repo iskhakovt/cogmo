@@ -721,7 +721,7 @@ export interface AgentStore {
     messageId: string,
   ): Promise<{ id: string; role: string; content: string | ContentBlock[] } | undefined>;
 
-  /** Load active steering rules for a profile + active channels (ordered by priority). */
+  /** Load active steering rules for a profile + active channels, ordered by priority, then id. */
   getActiveRules(
     tx: Transaction,
     profileId: string,
@@ -2081,6 +2081,10 @@ export class DrizzleAgentStore implements AgentStore {
     profileId: string,
     channelTypes: ReadonlyArray<string>,
   ): Promise<ReadonlyArray<{ rule: string }>> {
+    // `id` breaks priority ties, which are common (corrections share 100, seeded
+    // channel rules 50). An in-place update moves a row in the heap, so without
+    // it `# Rules` could reorder, invalidating the cached prompt, with no rule
+    // changed.
     return tx
       .select({ rule: steeringRules.rule })
       .from(steeringRules)
@@ -2094,7 +2098,7 @@ export class DrizzleAgentStore implements AgentStore {
           ),
         ),
       )
-      .orderBy(asc(steeringRules.priority));
+      .orderBy(asc(steeringRules.priority), asc(steeringRules.id));
   }
 
   async getCoreMemoryBlocks(
@@ -2800,7 +2804,7 @@ export class DrizzleAgentStore implements AgentStore {
           or(isNull(steeringRules.profileId), eq(steeringRules.profileId, profileId)),
         ),
       )
-      .orderBy(asc(steeringRules.priority));
+      .orderBy(asc(steeringRules.priority), asc(steeringRules.id));
   }
 
   async upsertCorrection(

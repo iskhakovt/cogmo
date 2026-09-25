@@ -1,15 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { logger } from "../logger.js";
+import { expectDefined } from "../test/assertions.js";
 import { ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
 import { isRetriableProviderError, RefusalError } from "./fallback.js";
 import { OpenAICompatibleProvider } from "./openai-compat.js";
 import type { StreamEvent } from "./types.js";
 
 const mockCreate = vi.fn();
+// Constructor options each client was built with, newest last.
+const clientOptions: Array<{ fetch?: typeof fetch }> = [];
 vi.mock("openai", () => {
   return {
     default: class MockOpenAI {
       chat = { completions: { create: mockCreate } };
+      constructor(opts: { fetch?: typeof fetch }) {
+        clientOptions.push(opts);
+      }
     },
   };
 });
@@ -896,6 +903,168 @@ describe("OpenAICompatibleProvider", () => {
       // the next candidate. The classification predicate stays binary; the
       // RefusalError instance check rides in front of the status-based rules.
       expect(isRetriableProviderError(new RefusalError("refused"))).toBe(false);
+    });
+  });
+
+  // `prompt_tokens` already includes cached tokens, so it stays the total and
+  // the cache counts are read alongside it as subsets.
+  describe("usage", () => {
+    it("reads cache reads and writes from prompt_tokens_details on a non-streaming response", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        model: "openai/gpt-5.6",
+        usage: {
+          prompt_tokens: 4711,
+          completion_tokens: 20,
+          prompt_tokens_details: { cached_tokens: 3840, cache_write_tokens: 800 },
+        },
+      });
+
+      const result = await provider.chat({
+        model: "openai/gpt-5.6",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+      });
+
+      expect(result.usage).toEqual({
+        inputTokens: 4711,
+        outputTokens: 20,
+        cacheReadTokens: 3840,
+        cacheCreationTokens: 800,
+      });
+    });
+
+    it("reports cache reads without writes when the server reports only cached_tokens", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        model: "gpt-5.4-nano",
+        usage: {
+          prompt_tokens: 4711,
+          completion_tokens: 20,
+          prompt_tokens_details: { cached_tokens: 3840 },
+        },
+      });
+
+      const result = await provider.chat({
+        model: "gpt-5.4-nano",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+      });
+
+      expect(result.usage).toEqual({ inputTokens: 4711, outputTokens: 20, cacheReadTokens: 3840 });
+    });
+
+    it("reads cache reads and writes from the final chunk's usage on a stream", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            model: "anthropic/claude-sonnet-5",
+            choices: [{ delta: { content: "ok" }, finish_reason: null }],
+            usage: null,
+          },
+          {
+            model: "anthropic/claude-sonnet-5",
+            choices: [{ delta: {}, finish_reason: "stop" }],
+            usage: {
+              prompt_tokens: 7500,
+              completion_tokens: 12,
+              prompt_tokens_details: { cached_tokens: 7360, cache_write_tokens: 68 },
+            },
+          },
+        ]),
+      );
+
+      const { events, response } = provider.chatStream({
+        model: "anthropic/claude-sonnet-5",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+      });
+      for await (const _ of events) {
+        // drain
+      }
+
+      expect((await response).usage).toEqual({
+        inputTokens: 7500,
+        outputTokens: 12,
+        cacheReadTokens: 7360,
+        cacheCreationTokens: 68,
+      });
+    });
+
+    // The SDK types both counts as required, but a compatible server can send
+    // a usage block without them. A missing count must read as zero: the
+    // loop sums usage across iterations and persists the input as an
+    // integer, where `undefined` would become NaN.
+    it("reads counts a server leaves out of the usage block as zero on a non-streaming response", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        model: "local-model",
+        usage: { total_tokens: 12 },
+      });
+
+      const result = await provider.chat({
+        model: "local-model",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+      });
+
+      expect(result.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
+    });
+
+    it("reads counts a server leaves out of the usage block as zero on a stream", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            model: "local-model",
+            choices: [{ delta: { content: "ok" }, finish_reason: "stop" }],
+            usage: { completion_tokens: 3 },
+          },
+        ]),
+      );
+
+      const { events, response } = provider.chatStream({
+        model: "local-model",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+      });
+      for await (const _ of events) {
+        // drain
+      }
+
+      expect((await response).usage).toEqual({ inputTokens: 0, outputTokens: 3 });
+    });
+  });
+
+  describe("injected fetch", () => {
+    it("sends requests through the injected fetch, wrapped in the failure logger", async () => {
+      const inner = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => {
+        return new Response('{"error":{}}', { status: 500 });
+      });
+      const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+      try {
+        new OpenAICompatibleProvider("openrouter", {
+          apiKey: "test-key",
+          baseURL: "http://test",
+          fetch: inner,
+        });
+        const sdkFetch = expectDefined(clientOptions.at(-1)?.fetch, "fetch handed to the SDK");
+
+        const res = await sdkFetch("http://test/chat/completions", { method: "POST", body: "{}" });
+
+        expect(res.status).toBe(500);
+        expect(inner).toHaveBeenCalledOnce();
+        expect(errorSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ providerName: "openrouter", status: 500 }),
+          "llm request failed",
+        );
+      } finally {
+        errorSpy.mockRestore();
+      }
     });
   });
 

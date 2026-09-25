@@ -12,6 +12,7 @@ import type {
   Message,
   StopReason,
   StreamEvent,
+  Usage,
 } from "../llm/types.js";
 import { logger } from "../logger.js";
 import { expectDefined } from "../test/assertions.js";
@@ -670,6 +671,7 @@ describe("runAgentLoop", () => {
 interface MockStreamTurn {
   events: StreamEvent[];
   stopReason: StopReason;
+  usage?: Usage;
 }
 
 function mockStreamProvider(turns: MockStreamTurn[]): LlmProvider {
@@ -682,7 +684,7 @@ function mockStreamProvider(turns: MockStreamTurn[]): LlmProvider {
       response: Promise.resolve({
         stopReason: turn.stopReason,
         model: "mock-model",
-        usage: { inputTokens: 10, outputTokens: 5 },
+        usage: turn.usage ?? { inputTokens: 10, outputTokens: 5 },
       }),
     } satisfies ChatStreamResult);
   }
@@ -2212,6 +2214,221 @@ describe("maxTokens", () => {
 
     const sent = expectDefined(vi.mocked(provider.chat).mock.calls[0])[0];
     expect(sent.maxTokens).toBeUndefined();
+  });
+});
+
+describe("cache intent", () => {
+  const INTENT = { key: "conv-1", retention: "short" } as const;
+
+  function echoTools(): ToolRegistry {
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echoes",
+        schema: z.object({ text: z.string() }),
+        handler: async (input) => `pong from ${input.text}`,
+      }),
+    );
+    return tools;
+  }
+
+  it("puts the caller's intent on every iteration's request", async () => {
+    const provider = mockStreamProvider([
+      {
+        events: [{ type: "tool_start", id: "t1", name: "echo", input: { text: "a" } }],
+        stopReason: "tool_use",
+      },
+      {
+        events: [{ type: "tool_start", id: "t2", name: "echo", input: { text: "b" } }],
+        stopReason: "tool_use",
+      },
+      { events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+
+    await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools: echoTools(),
+      onEvent: async () => {},
+      cache: INTENT,
+    });
+
+    const sent = vi.mocked(provider.chatStream).mock.calls.map(([params]) => params.cache);
+    expect(sent).toEqual([INTENT, INTENT, INTENT]);
+  });
+
+  it("sends no intent when the caller passes none", async () => {
+    const provider = mockStreamProvider([
+      { events: [{ type: "text_delta", text: "hi" }], stopReason: "end_turn" },
+    ]);
+
+    await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools: new ToolRegistry(),
+      onEvent: async () => {},
+    });
+
+    const sent = expectDefined(vi.mocked(provider.chatStream).mock.calls[0])[0];
+    expect(sent).not.toHaveProperty("cache");
+  });
+
+  it("carries the intent into the in-step non-streaming replay", async () => {
+    const { provider, chatCalls, streamCalls } = repairStreamProvider([
+      {
+        kind: "throw",
+        error: new ProviderProtocolError("tool args failed to parse", new SyntaxError("x")),
+      },
+      {
+        kind: "stream",
+        events: [{ type: "tool_start", id: "t1", name: "echo", input: { text: "hi" } }],
+        stopReason: "tool_use",
+      },
+      { kind: "stream", events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+
+    await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "hi" }],
+      tools: echoTools(),
+      onEvent: async () => {},
+      cache: INTENT,
+    });
+
+    expect(chatCalls.map((params) => params.cache)).toEqual([INTENT]);
+    expect(streamCalls.map((params) => params.cache)).toEqual([INTENT, INTENT]);
+  });
+});
+
+// The turn's totals are what `agent loop complete` logs and what the next
+// turn's compaction fast path reads, so they keep the cache split: reads and
+// writes summed across iterations, as subsets of the summed input.
+describe("usage totals", () => {
+  it("sums cache reads and writes across a streaming turn's iterations", async () => {
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echoes",
+        schema: z.object({ text: z.string() }),
+        handler: async (input) => input.text,
+      }),
+    );
+    const provider = mockStreamProvider([
+      {
+        events: [{ type: "tool_start", id: "t1", name: "echo", input: { text: "a" } }],
+        stopReason: "tool_use",
+        usage: {
+          inputTokens: 7440,
+          outputTokens: 30,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 7430,
+        },
+      },
+      {
+        events: [{ type: "text_delta", text: "done" }],
+        stopReason: "end_turn",
+        usage: {
+          inputTokens: 7520,
+          outputTokens: 9,
+          cacheReadTokens: 7430,
+          cacheCreationTokens: 80,
+        },
+      },
+    ]);
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      onEvent: async () => {},
+    });
+
+    expect(result.usage).toEqual({
+      inputTokens: 14_960,
+      outputTokens: 39,
+      cacheReadTokens: 7430,
+      cacheCreationTokens: 7510,
+    });
+  });
+
+  it("reports a cache field once any iteration does", async () => {
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echoes",
+        schema: z.object({ text: z.string() }),
+        handler: async (input) => input.text,
+      }),
+    );
+    const provider = mockStreamProvider([
+      {
+        events: [{ type: "tool_start", id: "t1", name: "echo", input: { text: "a" } }],
+        stopReason: "tool_use",
+        usage: { inputTokens: 100, outputTokens: 5 },
+      },
+      {
+        events: [{ type: "text_delta", text: "done" }],
+        stopReason: "end_turn",
+        usage: { inputTokens: 120, outputTokens: 5, cacheReadTokens: 90 },
+      },
+    ]);
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+      onEvent: async () => {},
+    });
+
+    expect(result.usage).toEqual({ inputTokens: 220, outputTokens: 10, cacheReadTokens: 90 });
+  });
+
+  it("sums cache reads and writes across a non-streaming turn's iterations", async () => {
+    const provider = mockProvider([
+      {
+        ...toolUseResponse("echo", "t1", { text: "a" }),
+        usage: {
+          inputTokens: 5000,
+          outputTokens: 20,
+          cacheReadTokens: 4000,
+          cacheCreationTokens: 900,
+        },
+      },
+      {
+        ...textResponse("done"),
+        usage: {
+          inputTokens: 5100,
+          outputTokens: 8,
+          cacheReadTokens: 4900,
+          cacheCreationTokens: 150,
+        },
+      },
+    ]);
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "echoes",
+        schema: z.object({ text: z.string() }),
+        handler: async (input) => input.text,
+      }),
+    );
+
+    const result = await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "go" }],
+      tools,
+    });
+
+    expect(result.usage).toEqual({
+      inputTokens: 10_100,
+      outputTokens: 28,
+      cacheReadTokens: 8900,
+      cacheCreationTokens: 1050,
+    });
   });
 });
 
