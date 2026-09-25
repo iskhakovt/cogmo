@@ -52,6 +52,10 @@ Surveyed September 2026.
 | `gen_ai.usage.input_tokens` "SHOULD include all types of input tokens, including cached tokens"; the Anthropic mapping sums the three fields. `cache_creation` was renamed `cache_write` (Development stability). | OpenTelemetry GenAI semantic conventions |
 | OpenAI caches automatically from 1,024 tokens. `prompt_cache_key` routes related requests to the same cache on models before GPT-5.6 and separates cache accounting on 5.6+. Usage reports `cached_tokens` inside a total that includes them. | OpenAI prompt-caching guide |
 | xAI caches automatically; `x-grok-conv-id` "routes requests with the same conversation ID to the same server. Since cache entries are stored per-server, this maximizes your cache hit rate." | xAI prompt-caching docs |
+| No open-source library supplies a provider-neutral cache intent. The Vercel AI SDK covers all four providers, each through its own `providerOptions` (Anthropic `cacheControl` with `ttl`, OpenAI `promptCacheKey`, xAI `promptCacheKey` on the Responses API only), and only behind `generateText` — adopting it for text calls would break the raw-SDK rule. LangChain.js's `anthropicPromptCachingMiddleware` and LiteLLM's `cache_control_injection_points` are single-provider or Python. | AI SDK provider docs; LangChain.js and LiteLLM docs |
+| The AI SDK 7 usage shape is `inputTokens: { total, noCache, cacheRead, cacheWrite }` — inclusive total, cache counts as subsets — the same convention as [Usage Accounting](#usage-accounting). Its own OpenRouter and xAI converters get the arithmetic wrong in different ways. | AI SDK 7.0 migration guide and provider source |
+| promptcachelint (Python, MIT) diffs consecutive requests segment by segment — each tool, system block and message block — with cache markers stripped, and flags a turn that appends more than 20 positions. `assertAppendOnly` follows that design. | github.com/OsmnvAslan/promptcachelint |
+| Zep places a memory block after the last breakpoint and replaces it each turn, measuring 1.3–1.9× lower cost over 18–54 turns — against memory in the system prompt, the layout this design also leaves. Letta is moving memory from the system prompt to mid-conversation system messages; Mastra keeps observational memory append-only "to keep the prompt prefix cacheable". | Zep blog (2026-06-24); letta-code #4551; Mastra docs |
 | OpenRouter passes Anthropic `cache_control` through (per-block, and top-level for the Anthropic, Vertex, Azure and Bedrock providers); `session_id` / `x-session-id` pins sticky routing; usage reports `cached_tokens` and `cache_write_tokens`. | OpenRouter prompt-caching docs |
 
 ## Principles `[proposed]`
@@ -142,7 +146,7 @@ Identity, `# User` (core memory), `# Tools`, `# Capabilities`, `# Rules`. Each c
 | Time as a trailing block on the latest message only, not persisted | The next turn removes it from an earlier message: a history edit that misses the cache from that message on and invalidates later thinking blocks. |
 | Date-only in the system prompt | Invalidates daily instead of per minute, loses time of day, and leaves recall in place. |
 | Mid-conversation `role: "system"` message | Not available on Sonnet 5, so every call site needs a capability gate and a fallback; a clock and recalled memories don't need operator authority. |
-| Recall rendered ephemerally after a per-turn anchor breakpoint, dropped next turn | No schema change, and a 1-hour anchor keeps the prefix before it readable, but the previous turn is re-written every turn and the drop is a history edit — a 400 or dropped thinking on Opus 5.5 / Fable 5.1. Viable on Sonnet 5 only. |
+| Recall as a trailing block after the last breakpoint, replaced each request (Zep's layout) | No schema change, and no accumulation: the memories never enter the transcript. But they are re-sent at the full input rate on every request instead of read at the cache rate, and removing last turn's block is an edit under the thinking blocks that followed it — dropped or a 400 wherever the preserved-thinking check is enforced. This account isn't enforced today (see [Validation](#validation)), so it is viable now, but not on a new account or a model that enforces for everyone. |
 | No auto-recall; rely on the `memory_recall` tool | Append-only for free, but adds an iteration and latency to turns that need memory, and reverses auto-recall's design (see [memory.md](memory.md)). |
 | `turn_context` column on `messages` | Requires updating the user row after insert, and puts injected context next to what the user said. |
 
@@ -181,7 +185,7 @@ interface CacheIntent {
 |-|-|-|-|
 | Anthropic | Only at `cache_control` breakpoints | Last tool and system block marked at the retention TTL, plus top-level `cache_control: { type: "ephemeral", ttl }`. Without an intent: tools and system at 5 minutes, as today. | `inputTokens` = `input_tokens` + `cache_read_input_tokens` + `cache_creation_input_tokens` |
 | OpenRouter | Passes `cache_control` through to Claude and Gemini; accepted without error on xAI, DeepSeek and OpenAI routes, which cache automatically either way (measured) | The same markers, plus `session_id: key` for sticky routing | `prompt_tokens`; `prompt_tokens_details.cached_tokens` / `cache_write_tokens` |
-| OpenAI | Automatic from 1,024 tokens | `prompt_cache_key: key`; retention ignored (GPT-5.6+ offers only `30m`, earlier models default to extended retention) | `prompt_tokens`; `prompt_tokens_details.cached_tokens` |
+| OpenAI | Automatic from 1,024 tokens; GPT-5.6+ bills writes at 1.25× | `prompt_cache_key: key`; retention ignored (GPT-5.6+ offers only `30m`, earlier models default to extended retention) | `prompt_tokens`; `prompt_tokens_details.cached_tokens` / `cache_write_tokens` (GPT-5.6+) |
 | xAI | Automatic, cached per server | `x-grok-conv-id: key` request header | `prompt_tokens`; `prompt_tokens_details.cached_tokens` |
 | Other OpenAI-compatible (DeepSeek, Groq, vLLM, …) | Automatic prefix caching, where offered | Nothing — strict servers reject unknown fields | Whatever the server reports |
 
@@ -231,7 +235,7 @@ from turns where gap is not null;
 
 ## Usage Accounting `[proposed]`
 
-`Usage.inputTokens` is the **total prompt size**. `cacheReadTokens` and `cacheCreationTokens` are subsets of it.
+`Usage.inputTokens` is the **total prompt size**. `cacheReadTokens` and `cacheCreationTokens` are subsets of it — the convention the OpenTelemetry GenAI attributes and the AI SDK 7 usage shape share.
 
 - The Anthropic adapter sums its three fields; OpenAI-compatible adapters already report the total and additionally read `prompt_tokens_details.cached_tokens` (and `cache_write_tokens` where present).
 - `shouldSkipCounting` and `messages.input_tokens` keep their meaning — the context the request occupied — with no change at their call sites.
@@ -264,6 +268,7 @@ Live measurements, 2026-09-25, from scripts kept outside the repo, each against 
 | Does tool-input key order count as a binding mismatch? | No. Reordered keys under `drop_block` gave `input_transformations: []`. |
 | Does OpenRouter accept `cache_control` on non-Claude upstreams? | Yes, top-level and per-block, on xAI, DeepSeek (via Together) and OpenAI routes. Claude routes cached as on Anthropic direct (served by Claude Platform on AWS); OpenAI GPT-5.6 reported `cache_write_tokens`. |
 | Do markers change xAI's hit rate through OpenRouter? | No. Over four pairs per variant — top-level and block markers, block only, none — an immediate repeat read 4,864 of 4,897 tokens in 3 or 4 of 4, regardless of markers. |
+| Does a 1-hour entry outlive a gap that expires a 5-minute one? | Yes. After 6.5 minutes the `1h` entry read all 6,875 tokens; the `5m` entry had expired and was written again. |
 | Does OpenAI's `prompt_tokens` include cached tokens? | Yes. The repeat reported `prompt_tokens` 4,711 with `cached_tokens` 3,840 (gpt-5.4-nano, `prompt_cache_key` set). |
 
 ## Test Plan `[proposed]`
@@ -276,13 +281,13 @@ Three separate claims need proving, and no single tier proves all three:
 | **Wire mapping** — each adapter puts the intent on the wire and reads usage back correctly | A marker in the wrong place, a TTL-ordering 400, a missing routing key, uncached tokens reported as total | Unit and integration tiers, every PR |
 | **Provider behaviour** — the provider actually serves our prefix from its cache | Anything the first two can't see: minimum sizes, lookback, TTL, a provider-side rendering difference | Live tier only |
 
-Replay cannot prove the third: recorded fixtures store content and tool calls, not usage, so llmock's replayed usage is synthetic.
+Replay cannot prove the third. llmock records usage for OpenAI-shaped responses but not Anthropic's, and its Anthropic replay emits only `input_tokens` and `output_tokens`, zero unless a fixture overrides them. An upstream aimock change that records and replays Anthropic's `cache_*` fields — modelled on the one that added OpenAI usage — would let the integration tier assert on real recorded cache usage; until then that is the live tier's job.
 
 ### Harness
 
 - **Injectable `fetch`** on `AnthropicProvider` and `OpenAICompatibleProvider`, as `OpenAIVoiceProvider` already takes for record/replay. Production passes the logging fetch it builds today.
 - **`createWireRecorder()`** (`src/test/`) wraps a fetch and records each request's URL, headers and body exactly as sent. It tees the response to keep the usage object: Anthropic's `message_start` usage including the `cache_creation` TTL breakdown, and the OpenAI final chunk's `usage`. An optional request mutator lets the live tier add headers and fields without production code.
-- **`assertAppendOnly(prev, next)`**, with `cache_control` stripped everywhere: `tools` and `system` equal, and `next.messages` starting with every message of `prev` byte-for-byte. A failure names the first diverging path (`system`, `tools[3]`, `messages[7].content[1].input`).
+- **`assertAppendOnly(prev, next)`**, with `cache_control` stripped everywhere: `tools` and `system` equal, and `next.messages` starting with every message of `prev` byte-for-byte. A failure names the first diverging path (`system`, `tools[3]`, `messages[7].content[1].input`). It also counts the positions each request appends — a run of `tool_use` or `tool_result` blocks counting once — and fails past 20, the lookback window.
 
 llmock's request journal can't serve here: it stores its own OpenAI-shaped conversion of an Anthropic request, without `cache_control`, system blocks or the top-level field.
 
@@ -377,3 +382,8 @@ Recorded fixtures match on the last user message (`match: { userMessage }`), whi
 - xAI, Prompt caching — https://docs.x.ai/developers/advanced-api-usage/prompt-caching
 - OpenRouter, Prompt caching — https://openrouter.ai/docs/guides/best-practices/prompt-caching
 - OpenTelemetry GenAI semantic conventions — https://github.com/open-telemetry/semantic-conventions-genai
+- Vercel AI SDK, Anthropic provider — https://ai-sdk.dev/providers/ai-sdk-providers/anthropic
+- Vercel AI SDK 7.0 migration guide (usage shape) — https://ai-sdk.dev/docs/migration-guides/migration-guide-7-0
+- promptcachelint — https://github.com/OsmnvAslan/promptcachelint
+- Zep, "Where you put memory in the prompt can cut your token bill up to 2x" — https://blog.getzep.com/where-you-put-memory-in-the-prompt-can-cut-your-token-bill-up-to-2x/
+- Mastra, Observational memory — https://mastra.ai/docs/memory/observational-memory
