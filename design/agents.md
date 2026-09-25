@@ -163,7 +163,7 @@ steering_rules (
   category          TEXT NOT NULL,            -- 'safety' | 'style' | 'domain' | 'memory'
   active            BOOLEAN NOT NULL,
   source            TEXT NOT NULL,            -- 'manual' | 'correction' | 'signal_pipeline' | 'evolution'
-  priority          INT NOT NULL,             -- ordering in system prompt
+  priority          INT NOT NULL,             -- ordering in system prompt; ties broken by id
   observation_count INT NOT NULL,             -- rule graduation (2+ = promoted)
   profile_id        UUID FK → profiles,       -- nullable: null = applies to all profiles
   channel_type      TEXT,                     -- nullable: null = applies to all channels
@@ -171,7 +171,7 @@ steering_rules (
 );
 ```
 
-Query at prompt assembly: `(profile_id = $p OR profile_id IS NULL) AND (channel_type IN $activeChannels OR channel_type IS NULL) AND active = true`. Cross-channel conversations union rules from all active channels.
+Query at prompt assembly: `(profile_id = $p OR profile_id IS NULL) AND (channel_type IN $activeChannels OR channel_type IS NULL) AND active = true ORDER BY priority, id`. The `id` tie-breaker keeps the rendered rules byte-stable: priorities are shared, and an in-place update moves a row in the heap. Cross-channel conversations union rules from all active channels.
 
 All behavioral instructions — global, profile-scoped, and channel-scoped — live in this one table. Default channel rules (e.g., "avoid tables on Telegram", "prefer concise replies") are seeded when a channel is configured, same pattern as profile seeding. Adapters own only mechanical output rendering (`renderOutput`), not behavioral guidance. See [transport/adapters.md](transport/adapters.md) → Response Rendering.
 

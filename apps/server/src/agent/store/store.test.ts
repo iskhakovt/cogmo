@@ -1071,27 +1071,23 @@ describe("DrizzleAgentStore", () => {
 
     it("keeps tied priorities in id order after one of them is updated", async () => {
       const profileId = await seedProfile();
-      const { steeringRules: sr } = await import("./schema.js");
-      const rule = (text: string) => ({
-        rule: text,
-        category: "style",
-        active: true,
-        source: "correction" as const,
-        priority: 100,
-        observationCount: 2,
-        profileId: null,
-      });
-      const [first] = await db.insert(sr).values(rule("First rule")).returning({ id: sr.id });
-      await db.insert(sr).values(rule("Second rule"));
-      // An in-place update writes a new tuple, which moves the row in the heap.
-      await tx((trx) =>
-        store.upsertCorrection(trx, {
-          rule: "First rule",
-          category: "style",
-          profileId: null,
-          existingRuleId: expectDefined(first, "first rule").id,
-        }),
-      );
+      // Created and graduated the way the Observer does it: each correction is
+      // inserted at the same priority, then promoted by an in-place update that
+      // moves its row in the heap. Graduating the second first leaves the rows
+      // in reverse id order on disk.
+      const observe = (rule: string, existingRuleId?: string) =>
+        tx((trx) =>
+          store.upsertCorrection(trx, {
+            rule,
+            category: "style",
+            profileId: null,
+            ...(existingRuleId !== undefined && { existingRuleId }),
+          }),
+        );
+      const first = await observe("First rule");
+      const second = await observe("Second rule");
+      await observe("Second rule", second.id);
+      await observe("First rule", first.id);
 
       expect(await tx((trx) => store.getActiveRules(trx, profileId, []))).toEqual([
         { rule: "First rule" },
