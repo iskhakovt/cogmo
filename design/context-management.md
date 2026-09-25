@@ -268,6 +268,8 @@ Both terms matter. The starting input for turn `N+1` is turn `N`'s input **plus*
 
 The estimate for new user content can use chars/4 — it only needs to be conservative enough to avoid skipping counting when the conversation is actually near the limit.
 
+The estimate needs `inputTokens` to be the total prompt size. Anthropic's `input_tokens` counts only tokens after the last cache breakpoint, so once the transcript is cached the adapter must add the cache reads and writes back in, or the fast path sees a near-empty conversation and skips the budget strategies — see [prompt-caching.md](prompt-caching.md) → Usage Accounting.
+
 `outputTokens` is stored `NOT NULL` with a sentinel `-1` meaning "unknown, force count" — used on the pre-migration backfill and on non-final rows in a batch insert (tool turns, user rows) that carry no meaningful output count. The fast path treats any non-negative integer as real data and any negative/null value as a force-count signal, so legacy data is always safe.
 
 ## Integration
