@@ -47,6 +47,12 @@ export interface OpenAICompatibleConfig {
   headers?: Record<string, string>;
   /** Add Anthropic-style cache_control hints for OpenRouter routing to Claude models. */
   promptCaching?: boolean;
+  /**
+   * Transport for the SDK's requests — tests pass the wire recorder
+   * (`src/test/wire-recorder.ts`). Wrapped in the failure logger exactly as
+   * the default `globalThis.fetch` is.
+   */
+  fetch?: typeof fetch;
 }
 
 /**
@@ -67,7 +73,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
       apiKey: config.apiKey,
       baseURL: config.baseURL,
       defaultHeaders: config.headers,
-      fetch: withFailureLogging(globalThis.fetch, logger, name),
+      fetch: withFailureLogging(config.fetch ?? globalThis.fetch, logger, name),
     });
   }
 
@@ -153,10 +159,9 @@ export class OpenAICompatibleProvider implements LlmProvider {
       const choice = response.choices[0];
       if (!choice) throw new Error("No choices in response");
 
-      const usage: Usage = {
-        inputTokens: response.usage?.prompt_tokens ?? 0,
-        outputTokens: response.usage?.completion_tokens ?? 0,
-      };
+      const usage: Usage = response.usage
+        ? fromOpenAIUsage(response.usage)
+        : { inputTokens: 0, outputTokens: 0 };
       const stopReason = fromOpenAIFinishReason(choice.finish_reason);
       recordChatUsage(span, this.name, response.model, usage, stopReason);
 
@@ -216,7 +221,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
           });
 
         let model = params.model;
-        const usage: Usage = { inputTokens: 0, outputTokens: 0 };
+        let usage: Usage = { inputTokens: 0, outputTokens: 0 };
         let finishReason: StopReason = "end_turn";
 
         // Accumulate tool call arguments per index (streamed as deltas)
@@ -227,8 +232,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
           // Usage comes in the final chunk (stream_options: include_usage)
           if (chunk.usage) {
-            usage.inputTokens = chunk.usage.prompt_tokens;
-            usage.outputTokens = chunk.usage.completion_tokens;
+            usage = fromOpenAIUsage(chunk.usage);
           }
 
           const delta = chunk.choices[0]?.delta;
@@ -446,6 +450,25 @@ function toOpenAITool(tool: ToolDefinition): OpenAI.ChatCompletionTool {
 }
 
 // --- Response mapping ---
+
+/**
+ * Canonical {@link Usage} from a Chat Completions usage block. `prompt_tokens`
+ * already includes cached tokens, so it stays the total; the cache counts
+ * come from `prompt_tokens_details`, where the server reports them —
+ * `cached_tokens` for reads, and `cache_write_tokens` (OpenRouter, GPT-5.6
+ * and later) for writes.
+ */
+function fromOpenAIUsage(usage: OpenAI.CompletionUsage): Usage {
+  const details = usage.prompt_tokens_details;
+  return {
+    inputTokens: usage.prompt_tokens,
+    outputTokens: usage.completion_tokens,
+    ...(details?.cached_tokens != null && { cacheReadTokens: details.cached_tokens }),
+    ...(details?.cache_write_tokens != null && {
+      cacheCreationTokens: details.cache_write_tokens,
+    }),
+  };
+}
 
 function fromOpenAIMessage(
   message: OpenAI.ChatCompletionMessage,

@@ -357,6 +357,9 @@ export async function runAgenticStage(
       onEvent: (event) => delivery.push(event),
       stepRun: steps.stepRun,
       turnKey: inboundId,
+      // The same intent as a chat turn: stage and chat turns share the run
+      // conversation's transcript.
+      cache: { key: conversationId, retention: "short" },
       turnLogger: log,
     });
     // A degrade drops the iteration that triggered it, so its streamed output

@@ -188,7 +188,7 @@ async function safeReadTextWithLimit(
  * source `Headers` is not mutated. Bearer-style auth headers are replaced
  * wholesale (length doesn't carry diagnostic value).
  */
-function redactHeaders(headers: Headers): Record<string, string> {
+export function redactHeaders(headers: Headers): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [name, value] of headers.entries()) {
     out[name] = REDACTED_HEADERS.has(name.toLowerCase()) ? "[REDACTED]" : value;

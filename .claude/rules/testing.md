@@ -23,8 +23,9 @@
 | **unit** `.test.ts` | PGlite (in-process) | mocked / direct | mocked | Module logic, store queries, contracts |
 | **integration** `.integration.test.ts` | Docker (PG, Redis, Inngest, Hindsight) + llmock | in-process | llmock fixtures | Pipeline orchestration, memory round-trip, event routing |
 | **e2e** `.e2e.test.ts` | Docker (full stack) + llmock | subprocess | llmock fixtures | Binary boots, migrations apply, full stack smoke |
+| **live** `.live.test.ts` | none, or the integration stack | in-process | real provider APIs | Provider behaviour replay can't show — e.g. that prompt caching actually reads (`design/prompt-caching.md` → Live tier) |
 
-Commands: `pnpm test` (unit), `pnpm test:integration`, `pnpm test:e2e`, `pnpm test:all`.
+Commands: `pnpm test` (unit), `pnpm test:integration`, `pnpm test:e2e`, `pnpm test:all`, `pnpm test:live` (skipped unless `LIVE=1` and the provider's key is set; costs real money; never on PRs).
 
 ## Store Tests with PGlite
 

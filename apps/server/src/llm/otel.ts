@@ -37,6 +37,11 @@ export function startChatSpan(provider: string, model: string): Span {
  * Stamp usage attributes on a chat span and increment the token counter.
  * Safe to call multiple times — counter increments would double, so only
  * call once per LLM call.
+ *
+ * `usage.inputTokens` is the whole prompt, cache reads and writes included.
+ * The span's `gen_ai.usage.input_tokens` carries that total, as the GenAI
+ * conventions ask. The counter's `input` type takes only the uncached
+ * remainder, so its four types stay disjoint and each is a billing category.
  */
 export function recordChatUsage(
   span: Span,
@@ -59,7 +64,13 @@ export function recordChatUsage(
   });
 
   const labels = { model: responseModel, provider };
-  llmTokens.add(usage.inputTokens, { ...labels, type: "input" });
+  // Clamped: a provider reporting more cached tokens than prompt tokens would
+  // otherwise hand a monotonic counter a negative increment.
+  const uncachedInput = Math.max(
+    0,
+    usage.inputTokens - (usage.cacheReadTokens ?? 0) - (usage.cacheCreationTokens ?? 0),
+  );
+  llmTokens.add(uncachedInput, { ...labels, type: "input" });
   llmTokens.add(usage.outputTokens, { ...labels, type: "output" });
   if (usage.cacheReadTokens) {
     llmTokens.add(usage.cacheReadTokens, { ...labels, type: "cache_read" });

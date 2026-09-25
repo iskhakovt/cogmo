@@ -18,6 +18,7 @@ export {
 export type { ChatTypedRepair, TypedChatParams, TypedChatResult } from "./typed.js";
 export { chatTyped } from "./typed.js";
 export type {
+  CacheIntent,
   ChatParams,
   ContentBlock,
   JsonSchema,

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ContentBlock, Message, ToolResultBlock, ToolUseBlock } from "../llm/types.js";
+import type { ContentBlock, Message, ToolResultBlock, ToolUseBlock, Usage } from "../llm/types.js";
 import { expectDefined } from "../test/assertions.js";
 import {
   type ContextManagerDeps,
@@ -491,6 +491,25 @@ describe("shouldSkipCounting", () => {
   it("returns true just under the 50% boundary", () => {
     // 40_000 + 10_000 + 199_996/4 = 99_999 < 100_000 → skip
     expect(shouldSkipCounting(40_000, 10_000, 199_996, 200_000)).toBe(true);
+  });
+
+  it("does not skip for a large conversation whose usage is mostly cache reads", () => {
+    // `Usage.inputTokens` is the whole prompt, with cache reads and writes as
+    // subsets. A 120k-token conversation served almost entirely from the
+    // cache is still 120k tokens: fed its uncached remainder instead, the
+    // fast path would skip the budget strategies on a conversation already
+    // past 50% of the window.
+    const usage: Usage = {
+      inputTokens: 120_000,
+      outputTokens: 800,
+      cacheReadTokens: 119_500,
+      cacheCreationTokens: 400,
+    };
+    expect(shouldSkipCounting(usage.inputTokens, usage.outputTokens, 400, 200_000)).toBe(false);
+
+    const uncached =
+      usage.inputTokens - (usage.cacheReadTokens ?? 0) - (usage.cacheCreationTokens ?? 0);
+    expect(shouldSkipCounting(uncached, usage.outputTokens, 400, 200_000)).toBe(true);
   });
 
   it("returns false when either value is the pre-migration -1 sentinel", () => {

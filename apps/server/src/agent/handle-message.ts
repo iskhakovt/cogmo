@@ -1050,6 +1050,11 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           // tool to duplicate. (Not `triggerInboundId`, which a debounce
           // re-fire moves — see `firstInboundId` above.)
           ...(firstInboundId !== "" && { turnKey: firstInboundId }),
+          // Every iteration re-sends the one before it, so the transcript is
+          // cached for the next. Short retention: the system prompt changes
+          // between turns, so the cache is read within a turn and rarely by
+          // the next one (see design/prompt-caching.md → Retention).
+          cache: { key: conversationId, retention: "short" },
           turnLogger,
         });
         // Class C / D degraded off-ramp. The loop exited because a repair

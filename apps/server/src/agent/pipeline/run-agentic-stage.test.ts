@@ -167,6 +167,9 @@ describe("runAgenticStage", () => {
     const loopParams = expectDefined(h.runStreamingAgentLoop.mock.calls[0], "loop call")[0];
     expect(loopParams.turnKey).toBe("inbound-1");
     expect(loopParams.systemPrompt).toBe("SYSTEM PROMPT");
+    // Same intent as a chat turn: stage and chat turns share the run
+    // conversation's transcript.
+    expect(loopParams.cache).toEqual({ key: "conv-1", retention: "short" });
     // Narrowed to the stage allowlist, with the pipeline tool dropped even
     // though the allowlist names it.
     expect(loopParams.tools.snapshot().map((t: { name: string }) => t.name)).toEqual([

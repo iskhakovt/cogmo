@@ -1216,6 +1216,58 @@ describe("createHandleMessage", () => {
     );
   });
 
+  it("gives the agent loop a cache intent keyed on the conversation", async () => {
+    const deps = mockDeps();
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    const loopParams = expectDefined(
+      vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+      "loop call",
+    )[0];
+    expect(loopParams.cache).toEqual({ key: "conv-1", retention: "short" });
+  });
+
+  it("persists the loop's total input when most of it was read from the cache", async () => {
+    // A cached turn reports most of its prompt as cache reads. The persisted
+    // input is the total, so the next turn's fast path still sees the
+    // conversation's real size.
+    const deps = mockDeps({
+      runStreamingAgentLoop: vi.fn().mockResolvedValue({
+        text: "Hello from assistant",
+        messages: [],
+        newMessages: [
+          { role: "assistant", content: [{ type: "text", text: "Hello from assistant" }] },
+        ],
+        usage: {
+          inputTokens: 600_000,
+          outputTokens: 400,
+          cacheReadTokens: 598_000,
+          cacheCreationTokens: 1_900,
+        },
+        model: "mock-model",
+        iterations: 1,
+        streamed: { text: "", toolUseIds: [] },
+      }),
+    });
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(deps.agentStore.insertMessages).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        lastMessageInputTokens: 600_000,
+        lastMessageOutputTokens: 400,
+      }),
+    );
+  });
+
   it("runs compaction when countTokens reports over threshold", async () => {
     // countTokens returns over 60% of budget (926_000 * 0.6 ≈ 555_600)
     // First call: over threshold. Second call (after clearing): under.
