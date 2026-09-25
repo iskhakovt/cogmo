@@ -27,6 +27,7 @@ import { ProviderProtocolError, parseProviderJson } from "./errors.js";
 import { toObjectJsonSchema } from "./json-schema.js";
 import type { LlmProvider } from "./provider.js";
 import type { Message, Usage } from "./types.js";
+import { sumUsage } from "./usage.js";
 
 /**
  * Repair behavior for typed LLM calls.
@@ -122,7 +123,7 @@ export async function chatTyped<T>(params: TypedChatParams<T>): Promise<TypedCha
   const repair: Required<ChatTypedRepair> = { ...DEFAULT_REPAIR, ...params.repair };
   const jsonSchema = toObjectJsonSchema(schema);
   const messages: Message[] = [...params.messages];
-  const totalUsage: Usage = { inputTokens: 0, outputTokens: 0 };
+  let totalUsage: Usage = { inputTokens: 0, outputTokens: 0 };
   let retries = 0;
 
   for (;;) {
@@ -134,8 +135,7 @@ export async function chatTyped<T>(params: TypedChatParams<T>): Promise<TypedCha
       ...(params.maxTokens != null && { maxTokens: params.maxTokens }),
     });
 
-    totalUsage.inputTokens += response.usage.inputTokens;
-    totalUsage.outputTokens += response.usage.outputTokens;
+    totalUsage = sumUsage(totalUsage, response.usage);
 
     const text = extractText(response.content);
 

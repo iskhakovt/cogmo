@@ -29,7 +29,12 @@ export interface WireRequest {
   method: string;
   /** As sent, with credentials redacted. Header names are lower-case. */
   headers: Record<string, string>;
-  /** The JSON body as sent, parsed; `undefined` for a request without one. */
+  /**
+   * The JSON body as sent, parsed; `undefined` for a request without one. A
+   * body that isn't a JSON object is refused before it is sent: the recorder
+   * serves JSON LLM APIs, and recording nothing would let a wire assertion
+   * pass vacuously.
+   */
   body: JsonObject | undefined;
 }
 
@@ -123,12 +128,15 @@ export function createWireRecorder(inner?: typeof fetch, opts?: WireRecorderOpti
       headers: new Headers(original.headers),
       body: structuredClone(originalBody),
     });
-    // Without a mutator the original bytes go out untouched.
-    const sentText = mutated
-      ? mutated.body === undefined
-        ? undefined
-        : JSON.stringify(mutated.body)
-      : originalText;
+    // Without a mutator the original bytes go out untouched. A mutated body
+    // is recorded from its serialized form, which is what the wire carries
+    // (`JSON.stringify` drops `undefined` fields, for one).
+    let sentText = originalText;
+    let sentBody = originalBody;
+    if (mutated) {
+      sentText = mutated.body === undefined ? undefined : JSON.stringify(mutated.body);
+      sentBody = sentText === undefined ? undefined : parseRequestBody(sentText, original.url);
+    }
     const headers = mutated?.headers ?? original.headers;
     const request = new Request(original.url, {
       method: original.method,
@@ -146,7 +154,7 @@ export function createWireRecorder(inner?: typeof fetch, opts?: WireRecorderOpti
         url: original.url,
         method: original.method,
         headers: redactHeaders(headers),
-        body: sentText === undefined ? undefined : parseRequestBody(sentText, original.url),
+        body: sentBody,
       },
       response,
     });

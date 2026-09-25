@@ -14,6 +14,7 @@ import type {
   ToolUseBlock,
   Usage,
 } from "../llm/types.js";
+import { sumUsage } from "../llm/usage.js";
 import { validateHistory } from "./history-invariants.js";
 import {
   canonicalJson,
@@ -164,22 +165,6 @@ export interface AgentLoopResult {
 }
 
 const DEFAULT_MAX_ITERATIONS = 20;
-
-/** Add one call's usage to a running total. A cache field is kept once either side reports it. */
-function sumUsage(total: Usage, next: Usage): Usage {
-  const cacheRead = sumReported(total.cacheReadTokens, next.cacheReadTokens);
-  const cacheCreation = sumReported(total.cacheCreationTokens, next.cacheCreationTokens);
-  return {
-    inputTokens: total.inputTokens + next.inputTokens,
-    outputTokens: total.outputTokens + next.outputTokens,
-    ...(cacheRead !== undefined && { cacheReadTokens: cacheRead }),
-    ...(cacheCreation !== undefined && { cacheCreationTokens: cacheCreation }),
-  };
-}
-
-function sumReported(a: number | undefined, b: number | undefined): number | undefined {
-  return a === undefined && b === undefined ? undefined : (a ?? 0) + (b ?? 0);
-}
 
 /**
  * Run the history invariant validator and log any repairs.

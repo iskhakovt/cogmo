@@ -457,12 +457,16 @@ function toOpenAITool(tool: ToolDefinition): OpenAI.ChatCompletionTool {
  * come from `prompt_tokens_details`, where the server reports them —
  * `cached_tokens` for reads, and `cache_write_tokens` (OpenRouter, GPT-5.6
  * and later) for writes.
+ *
+ * The SDK types both counts as required, but a compatible server can send a
+ * usage block without them; a missing count reads as zero, since the loop
+ * sums these and persists the input as an integer.
  */
 function fromOpenAIUsage(usage: OpenAI.CompletionUsage): Usage {
   const details = usage.prompt_tokens_details;
   return {
-    inputTokens: usage.prompt_tokens,
-    outputTokens: usage.completion_tokens,
+    inputTokens: usage.prompt_tokens ?? 0,
+    outputTokens: usage.completion_tokens ?? 0,
     ...(details?.cached_tokens != null && { cacheReadTokens: details.cached_tokens }),
     ...(details?.cache_write_tokens != null && {
       cacheCreationTokens: details.cache_write_tokens,

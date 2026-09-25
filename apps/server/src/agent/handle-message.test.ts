@@ -1232,9 +1232,12 @@ describe("createHandleMessage", () => {
   });
 
   it("persists the loop's total input when most of it was read from the cache", async () => {
-    // A cached turn reports most of its prompt as cache reads. The persisted
-    // input is the total, so the next turn's fast path still sees the
-    // conversation's real size.
+    // Pins this boundary only: the loop's `inputTokens`, which already counts
+    // cache reads and writes, is persisted as-is rather than reduced to the
+    // uncached remainder, so the next turn's fast path doesn't see a cached
+    // turn as a small one. It is the sum over the turn's iterations, not the
+    // conversation's size. That adapters report the total is pinned in their
+    // own tests (anthropic.test.ts → usage totals).
     const deps = mockDeps({
       runStreamingAgentLoop: vi.fn().mockResolvedValue({
         text: "Hello from assistant",

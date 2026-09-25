@@ -71,12 +71,9 @@ describe("llm/otel", () => {
     return tokenMetric?.dataPoints ?? [];
   }
 
-  async function tokensByType(): Promise<Map<string, number>> {
-    const byType = new Map<string, number>();
-    for (const p of await collectTokenPoints()) {
-      byType.set(String(p.attributes.type), p.value as number);
-    }
-    return byType;
+  async function tokensByType() {
+    const points = await collectTokenPoints();
+    return new Map(points.map((p) => [String(p.attributes.type), p.value]));
   }
 
   it("increments token counters labeled by type, model, provider", async () => {

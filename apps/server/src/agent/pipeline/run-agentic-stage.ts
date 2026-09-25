@@ -57,6 +57,7 @@ import type { Service } from "../service.js";
 import type { AgentStore } from "../store/index.js";
 import { buildSubAgentTools } from "../subagent/sub-agent-tool-builder.js";
 import type { ToolRegistry } from "../tools.js";
+import { turnCacheIntent } from "../turn-cache-intent.js";
 import { buildTurnService } from "../turn-service.js";
 import { asNonRetriable } from "../turn-step-runner.js";
 import { extractStageArtifact } from "./extract-artifact.js";
@@ -359,7 +360,7 @@ export async function runAgenticStage(
       turnKey: inboundId,
       // The same intent as a chat turn: stage and chat turns share the run
       // conversation's transcript.
-      cache: { key: conversationId, retention: "short" },
+      cache: turnCacheIntent(conversationId),
       turnLogger: log,
     });
     // A degrade drops the iteration that triggered it, so its streamed output

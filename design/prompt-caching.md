@@ -272,7 +272,7 @@ interface CacheIntent {
 ### Anthropic specifics `[confirmed]`
 
 - **Breakpoints: three of four slots.** Tools, system, and the automatic tail. The tools and system markers stay because they give read points that survive a messages-level miss (compaction, an image turn) and a system-level miss (a new snapshot epoch) respectively.
-- **Automatic over an explicit tail marker.** The server places the breakpoint on the last cacheable block and walks back past ineligible ones. The explicit fallback, for endpoints without automatic caching, converts a string-content last message to a single text block to carry the marker — safe, since the two cache identically (measured) — and skips empty blocks. See [Open questions](#open-questions).
+- **Automatic over an explicit tail marker.** The server places the breakpoint on the last cacheable block and walks back past ineligible ones. There is no explicit fallback for endpoints without automatic caching; see [Open questions](#open-questions). `[proposed]` If one is needed, it converts a string-content last message to a single text block to carry the marker — safe, since the two cache identically (measured) — and skips empty blocks.
 - **TTL ordering.** A 1-hour automatic tail after a 5-minute tools or system marker is a 400, so all three take the intent's TTL.
 - **Lookback.** An iteration appends roughly 3–4 positions (thinking, text, a `tool_use` run, a `tool_result` run); a turn boundary roughly 5–8 (the final reply plus the next user message). Both are well inside the 20-position window, so the fourth slot stays free. A turn shape that appends more than 20 positions in one request would need an intermediate breakpoint.
 - **`countTokens`** builds its own request and sends no top-level `cache_control`.
@@ -316,7 +316,7 @@ from turns where gap is not null;
 `Usage.inputTokens` is the **total prompt size**. `cacheReadTokens` and `cacheCreationTokens` are subsets of it — the convention the OpenTelemetry GenAI attributes and the AI SDK 7 usage shape share.
 
 - The Anthropic adapter sums its three fields; OpenAI-compatible adapters already report the total and additionally read `prompt_tokens_details.cached_tokens` (and `cache_write_tokens` where present).
-- `messages.input_tokens` keeps its meaning — input tokens billed over the turn — and `shouldSkipCounting` keeps reading it. The fast path's new-content estimate adds the rendered turn context's length to `userContentText.length`: the recalled memories and announcements are new input the previous turn's usage doesn't include.
+- `messages.input_tokens` keeps its meaning — input tokens billed over the turn — and `shouldSkipCounting` keeps reading it. `[proposed]` With the [turn context](#turn-context), the fast path's new-content estimate adds the rendered turn context's length to `userContentText.length`: the recalled memories and announcements are new input the previous turn's usage doesn't include.
 - The `gen_ai.usage.input_tokens` span attribute is the total, per the OpenTelemetry convention.
 - The `cogmo.llm.tokens` counter records `type: "input"` as the uncached remainder (total minus reads minus writes), so its four types stay disjoint and sum to billable categories. For Anthropic that leaves `input` where it is today; for OpenAI-compatible providers it drops the cached share that `prompt_tokens` currently puts there.
 - The loop's turn totals carry the cache fields, so the `agent loop complete` log shows the turn's hit rate.

@@ -23,7 +23,8 @@ import { createWireRecorder, type WireResponse } from "../test/wire-recorder.js"
 import { AnthropicProvider } from "./anthropic.js";
 import type { Message, ToolDefinition, Usage } from "./types.js";
 
-const API_KEY = process.env.LIVE === "1" ? process.env.ANTHROPIC_API_KEY : undefined;
+// An empty `ANTHROPIC_API_KEY=` line in `.env` counts as unset.
+const API_KEY = (process.env.LIVE === "1" && process.env.ANTHROPIC_API_KEY) || undefined;
 
 /** The production chat model. */
 const MODEL = "claude-sonnet-5";

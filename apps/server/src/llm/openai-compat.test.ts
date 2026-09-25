@@ -993,6 +993,51 @@ describe("OpenAICompatibleProvider", () => {
         cacheCreationTokens: 68,
       });
     });
+
+    // The SDK types both counts as required, but a compatible server can send
+    // a usage block without them. A missing count must read as zero: the
+    // loop sums usage across iterations and persists the input as an
+    // integer, where `undefined` would become NaN.
+    it("reads counts a server leaves out of the usage block as zero on a non-streaming response", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        model: "local-model",
+        usage: { total_tokens: 12 },
+      });
+
+      const result = await provider.chat({
+        model: "local-model",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+      });
+
+      expect(result.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
+    });
+
+    it("reads counts a server leaves out of the usage block as zero on a stream", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            model: "local-model",
+            choices: [{ delta: { content: "ok" }, finish_reason: "stop" }],
+            usage: { completion_tokens: 3 },
+          },
+        ]),
+      );
+
+      const { events, response } = provider.chatStream({
+        model: "local-model",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+      });
+      for await (const _ of events) {
+        // drain
+      }
+
+      expect((await response).usage).toEqual({ inputTokens: 0, outputTokens: 3 });
+    });
   });
 
   describe("injected fetch", () => {

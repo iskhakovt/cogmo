@@ -47,6 +47,41 @@ describe("chatTyped", () => {
     expect(result.usage.inputTokens).toBe(10);
   });
 
+  it("sums usage across a feedback retry, cache reads and writes included", async () => {
+    const chat = vi
+      .fn()
+      .mockResolvedValueOnce({
+        content: [{ type: "text", text: '{"name":"Alice"}' }],
+        stopReason: "end_turn",
+        model: "test-model",
+        usage: { inputTokens: 900, outputTokens: 5, cacheReadTokens: 0, cacheCreationTokens: 800 },
+      })
+      .mockResolvedValueOnce({
+        content: [{ type: "text", text: '{"name":"Alice","age":30}' }],
+        stopReason: "end_turn",
+        model: "test-model",
+        usage: { inputTokens: 950, outputTokens: 7, cacheReadTokens: 800, cacheCreationTokens: 40 },
+      });
+    const provider: LlmProvider = { name: "test", chat, chatStream: vi.fn(), countTokens: vi.fn() };
+
+    const result = await chatTyped({
+      provider,
+      model: "test-model",
+      system: "sys",
+      messages: [{ role: "user", content: "Alice is 30" }],
+      schema: PersonSchema,
+      name: "extract_person",
+    });
+
+    expect(result.retries).toBe(1);
+    expect(result.usage).toEqual({
+      inputTokens: 1850,
+      outputTokens: 12,
+      cacheReadTokens: 800,
+      cacheCreationTokens: 840,
+    });
+  });
+
   it("passes responseFormat to provider", async () => {
     const provider = mockProvider([{ text: '{"name":"Bob","age":25}' }]);
 
