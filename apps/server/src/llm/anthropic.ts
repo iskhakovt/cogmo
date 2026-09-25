@@ -5,6 +5,7 @@ import { withFailureLogging } from "./logging-fetch.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
 import type {
+  CacheIntent,
   ChatParams,
   ChatStreamResult,
   ContentBlock,
@@ -19,6 +20,15 @@ import type {
 
 const DEFAULT_MAX_TOKENS = 8192;
 
+export interface AnthropicProviderOptions {
+  /**
+   * Transport for the SDK's requests — tests pass the wire recorder
+   * (`src/test/wire-recorder.ts`). Wrapped in the failure logger exactly as
+   * the default `globalThis.fetch` is.
+   */
+  fetch?: typeof fetch;
+}
+
 /**
  * Anthropic SDK adapter.
  *
@@ -29,11 +39,11 @@ export class AnthropicProvider implements LlmProvider {
   readonly name = "anthropic";
   #client: Anthropic;
 
-  constructor(apiKey: string, baseURL?: string) {
+  constructor(apiKey: string, baseURL?: string, options?: AnthropicProviderOptions) {
     this.#client = new Anthropic({
       apiKey,
       ...(baseURL ? { baseURL } : {}),
-      fetch: withFailureLogging(globalThis.fetch, logger, this.name),
+      fetch: withFailureLogging(options?.fetch ?? globalThis.fetch, logger, this.name),
     });
   }
 
@@ -67,7 +77,7 @@ export class AnthropicProvider implements LlmProvider {
         const thinkingBlocks = new Map<number, { signature: string; chunks: string[] }>();
         let model = "";
         let stopReason: StopReason = "end_turn";
-        const usage: Usage = { inputTokens: 0, outputTokens: 0 };
+        let usage: Usage = { inputTokens: 0, outputTokens: 0 };
         // A tool block whose arguments failed to parse, held until the stream
         // shows whether the output cap cut it off: a response that stops at
         // `max_tokens` with no further block did, and one that goes on to
@@ -86,12 +96,7 @@ export class AnthropicProvider implements LlmProvider {
           switch (event.type) {
             case "message_start":
               model = event.message.model;
-              usage.inputTokens = event.message.usage.input_tokens;
-              usage.outputTokens = event.message.usage.output_tokens;
-              if (event.message.usage.cache_read_input_tokens != null)
-                usage.cacheReadTokens = event.message.usage.cache_read_input_tokens;
-              if (event.message.usage.cache_creation_input_tokens != null)
-                usage.cacheCreationTokens = event.message.usage.cache_creation_input_tokens;
+              usage = fromAnthropicUsage(event.message.usage);
               break;
 
             case "content_block_start":
@@ -224,16 +229,7 @@ export class AnthropicProvider implements LlmProvider {
         buildCreateParams(clampForNonStreaming(params)),
       );
 
-      const usage: Usage = {
-        inputTokens: response.usage.input_tokens,
-        outputTokens: response.usage.output_tokens,
-        ...(response.usage.cache_read_input_tokens != null && {
-          cacheReadTokens: response.usage.cache_read_input_tokens,
-        }),
-        ...(response.usage.cache_creation_input_tokens != null && {
-          cacheCreationTokens: response.usage.cache_creation_input_tokens,
-        }),
-      };
+      const usage = fromAnthropicUsage(response.usage);
 
       const stopReason = fromAnthropicStopReason(response.stop_reason);
       recordChatUsage(span, this.name, response.model, usage, stopReason);
@@ -332,8 +328,28 @@ function dropSamplingParams(params: ChatParams): void {
   );
 }
 
+/** Anthropic's TTL for each {@link CacheIntent} retention. */
+const CACHE_TTL = { short: "5m", long: "1h" } as const satisfies Record<
+  CacheIntent["retention"],
+  Anthropic.CacheControlEphemeral["ttl"]
+>;
+
+/**
+ * The breakpoint marker for a request. Without an intent, the API default
+ * (5 minutes). With one, the intent's TTL — on every marker in the request,
+ * because a longer TTL may not follow a shorter one and the automatic tail
+ * breakpoint comes last: a 1-hour tail after a 5-minute system marker is a 400.
+ */
+function cacheMarker(intent: CacheIntent | undefined): Anthropic.CacheControlEphemeral {
+  return intent ? { type: "ephemeral", ttl: CACHE_TTL[intent.retention] } : { type: "ephemeral" };
+}
+
 function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNonStreaming {
   dropSamplingParams(params);
+
+  // A structured-output call is one-shot — nothing re-sends its transcript —
+  // so it keeps the default markers whatever the intent.
+  const marker = cacheMarker(params.responseFormat ? undefined : params.cache);
 
   // System prompt as content block array with cache_control on the last block.
   // Tools + system are static per conversation — caching saves 90% on reads.
@@ -341,7 +357,7 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
   // content block, and a null-persona sub-agent passes system: "".
   const systemBlocks: Anthropic.TextBlockParam[] =
     params.system.trim().length > 0
-      ? [{ type: "text", text: params.system, cache_control: { type: "ephemeral" } }]
+      ? [{ type: "text", text: params.system, cache_control: marker }]
       : [];
 
   // When responseFormat is set, use the tool_use trick: define a synthetic tool
@@ -369,7 +385,7 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
   const tools = params.tools?.length ? params.tools.map(toAnthropicTool) : undefined;
   if (tools && tools.length > 0) {
     const last = tools[tools.length - 1];
-    if (last) tools[tools.length - 1] = { ...last, cache_control: { type: "ephemeral" } };
+    if (last) tools[tools.length - 1] = { ...last, cache_control: marker };
   }
 
   const maxTokens = params.maxTokens ?? DEFAULT_MAX_TOKENS;
@@ -379,12 +395,36 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
   // depth control belongs in `output_config.effort`, which nothing needs
   // yet. Thinking blocks that come back are translated by
   // `toAnthropicMessage` / `toCanonicalBlock` either way.
+  //
+  // With a cache intent, top-level `cache_control` turns on automatic
+  // caching: the server puts a breakpoint on the last cacheable block and
+  // moves it forward as the transcript grows, so each request reads what the
+  // previous one wrote. It takes the third of four breakpoint slots; the
+  // tools and system markers stay as read points that survive a miss further
+  // down.
   return {
     model: params.model,
     max_tokens: maxTokens,
     ...(systemBlocks.length > 0 && { system: systemBlocks }),
     messages: params.messages.map(toAnthropicMessage),
     ...(tools && { tools }),
+    ...(params.cache && { cache_control: marker }),
+  };
+}
+
+/**
+ * Canonical {@link Usage} from Anthropic's. `input_tokens` counts only the
+ * tokens after the last cache breakpoint; the prompt's total adds back what
+ * was read from and written to the cache.
+ */
+function fromAnthropicUsage(usage: Anthropic.Usage): Usage {
+  const cacheRead = usage.cache_read_input_tokens;
+  const cacheCreation = usage.cache_creation_input_tokens;
+  return {
+    inputTokens: usage.input_tokens + (cacheRead ?? 0) + (cacheCreation ?? 0),
+    outputTokens: usage.output_tokens,
+    ...(cacheRead != null && { cacheReadTokens: cacheRead }),
+    ...(cacheCreation != null && { cacheCreationTokens: cacheCreation }),
   };
 }
 

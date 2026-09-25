@@ -6,6 +6,7 @@ import { ProviderProtocolError, ToolArgsCutOffError } from "../llm/errors.js";
 import { RefusalError } from "../llm/fallback.js";
 import type { LlmProvider } from "../llm/provider.js";
 import type {
+  CacheIntent,
   ContentBlock,
   Message,
   StopReason,
@@ -13,6 +14,7 @@ import type {
   ToolUseBlock,
   Usage,
 } from "../llm/types.js";
+import { sumUsage } from "../llm/usage.js";
 import { validateHistory } from "./history-invariants.js";
 import {
   canonicalJson,
@@ -112,8 +114,11 @@ export interface AgentLoopResult {
   messages: Message[];
   /** Messages produced this invocation (intermediate tool turns + final assistant). */
   newMessages: Message[];
-  /** Aggregated usage across all LLM calls */
-  usage: { inputTokens: number; outputTokens: number };
+  /**
+   * Aggregated usage across all LLM calls. Cache reads and writes are summed
+   * as subsets of the summed input, and present once any call reported them.
+   */
+  usage: Usage;
   /** Which model was used */
   model: string;
   /** Number of LLM calls made */
@@ -202,7 +207,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
   const messages = sanitizeHistory(params.messages, log);
   const initialLength = messages.length;
   const toolDefs = tools.definitions();
-  const totalUsage = { inputTokens: 0, outputTokens: 0 };
+  let totalUsage: Usage = { inputTokens: 0, outputTokens: 0 };
   let iterations = 0;
   let finalModel = model;
 
@@ -221,8 +226,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
     const response = await provider.chat(chatParams);
 
     finalModel = response.model;
-    totalUsage.inputTokens += response.usage.inputTokens;
-    totalUsage.outputTokens += response.usage.outputTokens;
+    totalUsage = sumUsage(totalUsage, response.usage);
 
     // Append assistant response
     messages.push({ role: "assistant", content: response.content });
@@ -616,7 +620,7 @@ function buildResult(
   messages: Message[],
   initialLength: number,
   ephemeralIndices: ReadonlyArray<number>,
-  usage: { inputTokens: number; outputTokens: number },
+  usage: Usage,
   model: string,
   iterations: number,
   streamed: EmittedLedger,
@@ -656,7 +660,7 @@ function buildDegradedResult(
   messages: Message[],
   initialLength: number,
   ephemeralIndices: ReadonlyArray<number>,
-  usage: { inputTokens: number; outputTokens: number },
+  usage: Usage,
   model: string,
   iterations: number,
   reason: string,
@@ -710,6 +714,13 @@ function buildDegradedResult(
 
 export interface StreamingAgentLoopParams extends AgentLoopParams {
   onEvent: (event: StreamEvent) => Promise<void>;
+  /**
+   * Cache intent for the turn's transcript, sent on every iteration — each
+   * iteration re-sends the one before it, extended. The in-step
+   * non-streaming replay reuses the iteration's params and reads the same
+   * cache. Omit for a transcript nothing will send again.
+   */
+  cache?: CacheIntent;
 }
 
 /** What one live execution forwarded to `onEvent`, in order. */
@@ -864,13 +875,14 @@ export async function runStreamingAgentLoop(
     stepRun,
     turnKey,
     maxTokens,
+    cache,
     maxIterations = DEFAULT_MAX_ITERATIONS,
     turnLogger: log,
   } = params;
   const messages = sanitizeHistory(params.messages, log);
   const initialLength = messages.length;
   const toolDefs = tools.definitions();
-  const totalUsage = { inputTokens: 0, outputTokens: 0 };
+  let totalUsage: Usage = { inputTokens: 0, outputTokens: 0 };
   // Tracks messages that exist only in memory for the next iteration —
   // synthetic continuation prompts injected by the repair flow. They feed
   // the model on replay but must NOT be persisted (same convention as
@@ -907,6 +919,7 @@ export async function runStreamingAgentLoop(
       system: systemPrompt,
       messages,
       ...(maxTokens !== undefined && { maxTokens }),
+      ...(cache && { cache }),
     };
     if (toolDefs.length > 0) {
       chatParams.tools = toolDefs;
@@ -951,8 +964,7 @@ export async function runStreamingAgentLoop(
     const iterationContent = iterOutcome.content;
     const iterationStopReason = iterOutcome.stopReason;
     finalModel = iterOutcome.model;
-    totalUsage.inputTokens += iterOutcome.usage.inputTokens;
-    totalUsage.outputTokens += iterOutcome.usage.outputTokens;
+    totalUsage = sumUsage(totalUsage, iterOutcome.usage);
 
     // Append assistant response to messages
     messages.push({ role: "assistant", content: iterationContent });
@@ -1247,7 +1259,7 @@ interface DrainedStream {
   content: ContentBlock[];
   stopReason: StopReason;
   model: string;
-  usage: { inputTokens: number; outputTokens: number };
+  usage: Usage;
 }
 
 /**

@@ -57,6 +57,7 @@ import type { Service } from "./service.js";
 import type { AgentStore } from "./store/index.js";
 import { buildSubAgentTools } from "./subagent/sub-agent-tool-builder.js";
 import type { ToolRegistry } from "./tools.js";
+import { turnCacheIntent } from "./turn-cache-intent.js";
 import { buildTurnService } from "./turn-service.js";
 import { asNonRetriable, createTurnStepRunner } from "./turn-step-runner.js";
 
@@ -1050,6 +1051,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           // tool to duplicate. (Not `triggerInboundId`, which a debounce
           // re-fire moves — see `firstInboundId` above.)
           ...(firstInboundId !== "" && { turnKey: firstInboundId }),
+          cache: turnCacheIntent(conversationId),
           turnLogger,
         });
         // Class C / D degraded off-ramp. The loop exited because a repair

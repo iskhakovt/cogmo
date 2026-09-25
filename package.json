@@ -25,6 +25,7 @@
     "test:record": "pnpm --filter cogmo test:record",
     "test:record:e2e": "pnpm --filter cogmo test:record:e2e",
     "test:e2e": "pnpm --filter cogmo test:e2e",
+    "test:live": "pnpm --filter cogmo test:live",
     "test:all": "pnpm --filter cogmo test:all",
     "test:watch": "pnpm --filter cogmo test:watch",
     "db:generate": "pnpm --filter cogmo db:generate",

@@ -75,6 +75,16 @@ Full deployment-like stack — cogmo runs from its release image, in connect mod
 | Migrations | The app container applies migrations on boot. Verify tables queryable. |
 | Smoke | Emit one event via Inngest API -> assert assistant response in DB |
 
+## Live Tests `[confirmed]`
+
+Real provider APIs, for behaviour a replayed fixture can't show — recorded fixtures carry content, not usage, so replay can't prove a provider actually served a request from its prompt cache.
+
+**Naming:** `.live.test.ts` suffix, the `live` Vitest project. `pnpm test:live`.
+
+- Skipped unless `LIVE=1` and the provider's API key is set; never runs on PRs. The `live` project doesn't load `.env` itself, so export the root `.env` from the repository root and run the tier: `set -a; . ./.env; set +a; LIVE=1 pnpm test:live`.
+- Requests go through the wire recorder (`src/test/wire-recorder.ts`), which captures each request body and the provider's usage block; assertions are on usage, since model output varies.
+- Each run costs real money — keep prompts small and requests few. See `design/prompt-caching.md` → Test Plan → Live tier for the caching scenarios.
+
 ## Skill-Authoring Integration `[proposed]`
 
 Single integration test that exercises the full chat -> delegate_coding -> skill register -> skill invoke flow against `DaytonaMock` + `llmock` + a `gitea` testcontainer hosting the cogmo-skills repo. Proves end-to-end that a user asking for a new skill in chat results in a tool the agent can call on the next turn.

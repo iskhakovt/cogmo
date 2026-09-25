@@ -91,6 +91,7 @@ export default defineConfig({
           exclude: [
             "src/**/*.integration.test.ts",
             "src/**/*.e2e.test.ts",
+            "src/**/*.live.test.ts",
             ...PYODIDE_HEAVY_UNIT_GLOBS,
           ],
           // PGlite `pushSchema` runs in `beforeAll` of every store test file
@@ -152,6 +153,22 @@ export default defineConfig({
             // instead of letting withRetry mask them. See src/util/with-retry.ts.
             RETRY_DISABLED: "true",
             ...GIT_NO_BACKGROUND_MAINTENANCE,
+          },
+        },
+      },
+      {
+        test: {
+          // Real provider endpoints, billed per run: the provider behaviour
+          // that replay can't show (design/prompt-caching.md → Live tier).
+          // Every file skips unless `LIVE=1` and its provider's key are set,
+          // and none of `test`, `test:integration` or `test:e2e` selects this
+          // project. Run with `pnpm test:live`.
+          name: "live",
+          environment: "node",
+          include: ["src/**/*.live.test.ts"],
+          testTimeout: 300_000,
+          env: {
+            NODE_ENV: "test",
           },
         },
       },

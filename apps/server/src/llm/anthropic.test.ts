@@ -1,16 +1,23 @@
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { logger } from "../logger.js";
+import { expectDefined } from "../test/assertions.js";
 import { AnthropicProvider } from "./anthropic.js";
 import { ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
-import type { StreamEvent } from "./types.js";
+import type { CacheIntent, StreamEvent, ToolDefinition } from "./types.js";
 
 // Mock the Anthropic SDK — use a class so `new Anthropic()` works
 const mockCreate = vi.fn();
 const mockCountTokens = vi.fn();
+// Constructor options each client was built with, newest last.
+const clientOptions: Array<{ fetch?: typeof fetch }> = [];
 vi.mock("@anthropic-ai/sdk", () => {
   return {
     default: class MockAnthropic {
       messages = { create: mockCreate, countTokens: mockCountTokens };
+      constructor(opts: { fetch?: typeof fetch }) {
+        clientOptions.push(opts);
+      }
     },
   };
 });
@@ -924,6 +931,290 @@ describe("AnthropicProvider", () => {
 
       expect(result.usage.cacheReadTokens).toBe(5000);
       expect(result.usage.cacheCreationTokens).toBe(0);
+    });
+  });
+
+  // Anthropic's `input_tokens` counts only what follows the last breakpoint.
+  // The canonical `inputTokens` is the whole prompt, with cache reads and
+  // writes as subsets of it — the compaction fast path reads it as the
+  // conversation's size.
+  describe("usage totals", () => {
+    it("adds cache reads and writes into inputTokens on a non-streaming response", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "ok", citations: null }],
+        stop_reason: "end_turn",
+        model: "claude-sonnet-5",
+        usage: {
+          input_tokens: 50,
+          output_tokens: 10,
+          cache_read_input_tokens: 5000,
+          cache_creation_input_tokens: 300,
+        },
+      });
+
+      const result = await provider.chat({
+        model: "claude-sonnet-5",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+      });
+
+      expect(result.usage).toEqual({
+        inputTokens: 5350,
+        outputTokens: 10,
+        cacheReadTokens: 5000,
+        cacheCreationTokens: 300,
+      });
+    });
+
+    it("adds cache reads and writes into inputTokens on a stream", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            type: "message_start",
+            message: {
+              model: "claude-sonnet-5",
+              usage: {
+                input_tokens: 12,
+                output_tokens: 1,
+                cache_read_input_tokens: 7360,
+                cache_creation_input_tokens: 68,
+              },
+            },
+          },
+          {
+            type: "message_delta",
+            delta: { stop_reason: "end_turn" },
+            usage: { output_tokens: 9 },
+          },
+        ]),
+      );
+
+      const { events, response } = provider.chatStream({
+        model: "claude-sonnet-5",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+      });
+      for await (const _ of events) {
+        // drain
+      }
+
+      expect((await response).usage).toEqual({
+        inputTokens: 7440,
+        outputTokens: 9,
+        cacheReadTokens: 7360,
+        cacheCreationTokens: 68,
+      });
+    });
+
+    it("treats null cache fields as zero and leaves them off the usage", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "text", text: "ok", citations: null }],
+        stop_reason: "end_turn",
+        model: "claude-sonnet-5",
+        usage: {
+          input_tokens: 40,
+          output_tokens: 3,
+          cache_read_input_tokens: null,
+          cache_creation_input_tokens: null,
+        },
+      });
+
+      const result = await provider.chat({
+        model: "claude-sonnet-5",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+      });
+
+      expect(result.usage).toEqual({ inputTokens: 40, outputTokens: 3 });
+    });
+  });
+
+  describe("cache intent", () => {
+    const TOOLS: ToolDefinition[] = [
+      { name: "a", description: "first", parameters: { type: "object" } },
+      { name: "b", description: "second", parameters: { type: "object" } },
+    ];
+
+    function okResponse(): unknown {
+      return {
+        content: [{ type: "text", text: "ok", citations: null }],
+        stop_reason: "end_turn",
+        model: "claude-sonnet-5",
+        usage: { input_tokens: 10, output_tokens: 5 },
+      };
+    }
+
+    async function sentWith(cache: CacheIntent | undefined): Promise<Record<string, unknown>> {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(okResponse());
+      await provider.chat({
+        model: "claude-sonnet-5",
+        system: "sys",
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: [{ type: "text", text: "hello" }] },
+          { role: "user", content: [{ type: "text", text: "again" }] },
+        ],
+        tools: TOOLS,
+        ...(cache && { cache }),
+      });
+      return expectDefined(mockCreate.mock.calls[0], "create call")[0];
+    }
+
+    /** Every `cache_control` value in a request body, the top-level field included. */
+    function breakpoints(value: unknown): unknown[] {
+      if (Array.isArray(value)) return value.flatMap(breakpoints);
+      if (typeof value !== "object" || value === null) return [];
+      return Object.entries(value).flatMap(([key, inner]) =>
+        key === "cache_control" ? [inner] : breakpoints(inner),
+      );
+    }
+
+    it("without an intent, marks tools and system at the default TTL and sends no top-level field", async () => {
+      const body = await sentWith(undefined);
+
+      expect(body).not.toHaveProperty("cache_control");
+      expect(body.system).toEqual([
+        { type: "text", text: "sys", cache_control: { type: "ephemeral" } },
+      ]);
+      expect(breakpoints(body.tools)).toEqual([{ type: "ephemeral" }]);
+      expect(breakpoints(body.messages)).toEqual([]);
+    });
+
+    it.each([
+      ["short", "5m"],
+      ["long", "1h"],
+    ] as const)(
+      "a %s intent caches the transcript at %s, with tools and system at the same TTL",
+      async (retention, ttl) => {
+        const body = await sentWith({ key: "conv-1", retention });
+        const marker = { type: "ephemeral", ttl };
+
+        // Top-level automatic caching places the transcript breakpoint.
+        expect(body.cache_control).toEqual(marker);
+        expect(body.system).toEqual([{ type: "text", text: "sys", cache_control: marker }]);
+        const tools = z.array(z.record(z.string(), z.unknown())).parse(body.tools);
+        expect(tools[0]).not.toHaveProperty("cache_control");
+        expect(tools[1]?.cache_control).toEqual(marker);
+        // Nothing in the messages themselves: the server moves the automatic
+        // breakpoint to the last cacheable block.
+        expect(breakpoints(body.messages)).toEqual([]);
+        // Three of the four slots, all at one TTL — a longer TTL after a
+        // shorter one is a 400.
+        const all = breakpoints(body);
+        expect(all.length).toBeLessThanOrEqual(4);
+        expect(all).toEqual([marker, marker, marker]);
+      },
+    );
+
+    it("maps the intent the same way on the streaming path", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        mockStream([
+          {
+            type: "message_start",
+            message: { model: "claude-sonnet-5", usage: { input_tokens: 5, output_tokens: 0 } },
+          },
+          {
+            type: "message_delta",
+            delta: { stop_reason: "end_turn" },
+            usage: { output_tokens: 1 },
+          },
+        ]),
+      );
+
+      const { events } = provider.chatStream({
+        model: "claude-sonnet-5",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+        tools: TOOLS,
+        cache: { key: "conv-1", retention: "long" },
+      });
+      for await (const _ of events) {
+        // drain
+      }
+
+      const body = expectDefined(mockCreate.mock.calls[0], "create call")[0];
+      expect(body.stream).toBe(true);
+      expect(body.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+      expect(breakpoints(body)).toEqual([
+        { type: "ephemeral", ttl: "1h" },
+        { type: "ephemeral", ttl: "1h" },
+        { type: "ephemeral", ttl: "1h" },
+      ]);
+    });
+
+    it("takes no transcript caching on the responseFormat path", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        content: [{ type: "tool_use", id: "tu_1", name: "extract", input: { ok: true } }],
+        stop_reason: "tool_use",
+        model: "claude-sonnet-5",
+        usage: { input_tokens: 10, output_tokens: 5 },
+      });
+
+      await provider.chat({
+        model: "claude-sonnet-5",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+        responseFormat: {
+          type: "json_schema",
+          name: "extract",
+          schema: { type: "object", properties: { ok: { type: "boolean" } } },
+        },
+        cache: { key: "conv-1", retention: "long" },
+      });
+
+      const body = expectDefined(mockCreate.mock.calls[0], "create call")[0];
+      expect(body).not.toHaveProperty("cache_control");
+      expect(breakpoints(body)).toEqual([{ type: "ephemeral" }, { type: "ephemeral" }]);
+    });
+
+    it("takes no cache intent on countTokens, and sends no top-level cache_control if handed one", async () => {
+      const provider = createProvider();
+      mockCountTokens.mockResolvedValueOnce({ input_tokens: 100 });
+
+      await provider.countTokens({
+        model: "claude-sonnet-5",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+        tools: TOOLS,
+        // @ts-expect-error — nothing re-sends a count's transcript, so the type has no intent
+        cache: { key: "conv-1", retention: "long" },
+      });
+
+      const body = expectDefined(mockCountTokens.mock.calls[0], "countTokens call")[0];
+      expect(body).not.toHaveProperty("cache_control");
+    });
+  });
+
+  describe("injected fetch", () => {
+    it("sends requests through the injected fetch, wrapped in the failure logger", async () => {
+      const inner = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => {
+        return new Response('{"type":"error"}', { status: 500 });
+      });
+      const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+      try {
+        new AnthropicProvider("test-key", undefined, { fetch: inner });
+        const sdkFetch = expectDefined(clientOptions.at(-1)?.fetch, "fetch handed to the SDK");
+
+        const res = await sdkFetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          body: "{}",
+        });
+
+        expect(res.status).toBe(500);
+        expect(inner).toHaveBeenCalledOnce();
+        expect(errorSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ providerName: "anthropic", status: 500 }),
+          "llm request failed",
+        );
+      } finally {
+        errorSpy.mockRestore();
+      }
     });
   });
 
