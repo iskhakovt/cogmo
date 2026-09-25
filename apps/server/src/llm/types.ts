@@ -24,10 +24,8 @@ const ToolUseBlockSchema = z.object({
   id: z.string(),
   name: z.string(),
   /**
-   * Parsed into canonical key order. `messages.content` is `jsonb`, which
-   * reorders object keys, and parses through this schema on every read — so a
-   * reload reproduces the bytes the agent loop sent, which it appends in the
-   * same order.
+   * Parsed into canonical key order: `messages.content` is `jsonb`, which
+   * reorders keys, so every reload reproduces the bytes the agent loop sent.
    */
   input: z.unknown().transform(canonicalKeyOrder),
 });

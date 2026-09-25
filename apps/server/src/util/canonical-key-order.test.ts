@@ -211,14 +211,22 @@ describe("canonicalKeyOrder on generated JSON", () => {
     return Object.fromEntries(R.sortBy(entries, (e) => e.rank).map((e) => [e.key, e.member]));
   }
 
+  /** RFC 8785 key order, written independently of the implementation's `sortBy`. */
+  function compareCodeUnits(a: string, b: string): number {
+    for (let i = 0; i < Math.min(a.length, b.length); i++) {
+      const diff = a.charCodeAt(i) - b.charCodeAt(i);
+      if (diff !== 0) return diff;
+    }
+    return a.length - b.length;
+  }
+
   function recursiveSort(value: unknown): unknown {
     if (Array.isArray(value)) return value.map(recursiveSort);
     if (!R.isPlainObject(value)) return value;
     return Object.fromEntries(
-      R.sortBy(Object.entries(value), ([key]) => key).map(([key, member]) => [
-        key,
-        recursiveSort(member),
-      ]),
+      Object.entries(value)
+        .sort(([a], [b]) => compareCodeUnits(a, b))
+        .map(([key, member]) => [key, recursiveSort(member)]),
     );
   }
 
