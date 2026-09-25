@@ -1069,6 +1069,40 @@ describe("DrizzleAgentStore", () => {
       expect(rules).toEqual([{ rule: "Global safety rule" }, { rule: "Be concise" }]);
     });
 
+    it("keeps tied priorities in id order after one of them is updated", async () => {
+      const profileId = await seedProfile();
+      const { steeringRules: sr } = await import("./schema.js");
+      const rule = (text: string) => ({
+        rule: text,
+        category: "style",
+        active: true,
+        source: "correction" as const,
+        priority: 100,
+        observationCount: 2,
+        profileId: null,
+      });
+      const [first] = await db.insert(sr).values(rule("First rule")).returning({ id: sr.id });
+      await db.insert(sr).values(rule("Second rule"));
+      // An in-place update writes a new tuple, which moves the row in the heap.
+      await tx((trx) =>
+        store.upsertCorrection(trx, {
+          rule: "First rule",
+          category: "style",
+          profileId: null,
+          existingRuleId: expectDefined(first, "first rule").id,
+        }),
+      );
+
+      expect(await tx((trx) => store.getActiveRules(trx, profileId, []))).toEqual([
+        { rule: "First rule" },
+        { rule: "Second rule" },
+      ]);
+      expect((await tx((trx) => store.getCorrections(trx, profileId))).map((c) => c.rule)).toEqual([
+        "First rule",
+        "Second rule",
+      ]);
+    });
+
     it("returns empty array when no active rules", async () => {
       const profileId = await seedProfile();
       expect(await tx((trx) => store.getActiveRules(trx, profileId, []))).toEqual([]);
