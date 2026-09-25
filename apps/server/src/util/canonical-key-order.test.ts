@@ -1,4 +1,6 @@
+import * as R from "remeda";
 import { describe, expect, it } from "vitest";
+import { expectDefined } from "../test/assertions.js";
 import { canonicalKeyOrder } from "./canonical-key-order.js";
 
 describe("canonicalKeyOrder", () => {
@@ -138,5 +140,114 @@ describe("canonicalKeyOrder", () => {
     const date = new Date(0);
 
     expect(canonicalKeyOrder({ b: date, a: 1 }).b).toBe(date);
+  });
+});
+
+// Generated JSON against a straightforward recursive sort, at depths the
+// recursion handles. Seeded, so a failure reproduces.
+describe("canonicalKeyOrder on generated JSON", () => {
+  /** mulberry32: a small, well-distributed 32-bit PRNG. */
+  function prng(seed: number): () => number {
+    let state = seed >>> 0;
+    return () => {
+      state = (state + 0x6d2b79f5) >>> 0;
+      let t = state;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function pick<T>(rng: () => number, items: ReadonlyArray<T>): T {
+    return expectDefined(items[Math.floor(rng() * items.length)]);
+  }
+
+  // ASCII case and punctuation, integer-like keys, `__proto__`, the empty
+  // key, and keys on both sides of the surrogate range.
+  const KEYS = [
+    "a",
+    "b",
+    "aa",
+    "Z",
+    "_x",
+    "",
+    "k k",
+    "0",
+    "9",
+    "10",
+    "42",
+    "__proto__",
+    "é",
+    "！",
+    "\u{1F600}",
+    "\u{1F600}a",
+  ];
+
+  function generate(rng: () => number, depth: number): unknown {
+    const roll = rng();
+    if (depth > 0 && roll < 0.35) {
+      const keys = R.unique(Array.from({ length: Math.floor(rng() * 7) }, () => pick(rng, KEYS)));
+      // `fromEntries` defines `__proto__` as an own key, as `JSON.parse` does.
+      return Object.fromEntries(keys.map((key) => [key, generate(rng, depth - 1)]));
+    }
+    if (depth > 0 && roll < 0.55) {
+      return Array.from({ length: Math.floor(rng() * 5) }, () => generate(rng, depth - 1));
+    }
+    if (roll < 0.7) return pick(rng, KEYS) + pick(rng, KEYS);
+    if (roll < 0.85) return Math.round((rng() - 0.5) * 1e6) / 100;
+    if (roll < 0.93) return rng() < 0.5;
+    return null;
+  }
+
+  /** The same data with every object's keys inserted in a random order. */
+  function shuffleKeys(rng: () => number, value: unknown): unknown {
+    if (Array.isArray(value)) return value.map((member) => shuffleKeys(rng, member));
+    if (!R.isPlainObject(value)) return value;
+    const entries = Object.entries(value).map(([key, member]) => ({
+      key,
+      member: shuffleKeys(rng, member),
+      rank: rng(),
+    }));
+    return Object.fromEntries(R.sortBy(entries, (e) => e.rank).map((e) => [e.key, e.member]));
+  }
+
+  function recursiveSort(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map(recursiveSort);
+    if (!R.isPlainObject(value)) return value;
+    return Object.fromEntries(
+      R.sortBy(Object.entries(value), ([key]) => key).map(([key, member]) => [
+        key,
+        recursiveSort(member),
+      ]),
+    );
+  }
+
+  it("matches the recursive sort, ignores insertion order, is idempotent and leaves its input alone", () => {
+    const rng = prng(0x5eed_c0de);
+    const samples = 400;
+    let reordered = 0;
+
+    for (let i = 0; i < samples; i++) {
+      // A tool input: an object with several keys at the top.
+      const keys = R.unique(
+        Array.from({ length: 4 + Math.floor(rng() * 5) }, () => pick(rng, KEYS)),
+      );
+      const value = Object.fromEntries(keys.map((key) => [key, generate(rng, 5)]));
+      const before = JSON.stringify(value);
+      const bytes = JSON.stringify(canonicalKeyOrder(value));
+
+      expect(bytes, `sample ${i}`).toBe(JSON.stringify(recursiveSort(value)));
+      expect(JSON.stringify(value), `sample ${i} mutated`).toBe(before);
+      expect(JSON.stringify(canonicalKeyOrder(canonicalKeyOrder(value))), `sample ${i}`).toBe(
+        bytes,
+      );
+
+      const shuffled = shuffleKeys(rng, value);
+      if (JSON.stringify(shuffled) !== before) reordered++;
+      expect(JSON.stringify(canonicalKeyOrder(shuffled)), `sample ${i} shuffled`).toBe(bytes);
+    }
+
+    // The shuffle has to actually reorder something for invariance to mean anything.
+    expect(reordered).toBeGreaterThan(samples * 0.9);
   });
 });

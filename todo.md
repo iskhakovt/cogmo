@@ -169,6 +169,7 @@
 
 ### Tools & web
 
+- [ ] `p3` Keep author parameter order for MCP and skill tool schemas. `McpRegistry.resolveTools` builds definitions from `pin.schemaSnapshot.inputSchema` and skill tools from `skills.inputs`, both `jsonb` columns, so their `properties` reach the model — and Strategy 0's compaction summaries, which name a call by its first declared string argument — in `jsonb` order (key length, then bytewise) rather than the order the tool author wrote. Stable across turns, so prompt caching is unaffected; the cost is a less natural schema for the model and summaries that name MCP/skill calls by their shortest-named argument. Fix: store the schema snapshots as `json` or text, or keep a parameter-order array beside them.
 - [ ] `p3` fetch_url SSRF hardening — dns.resolve() + IP check before fetch (current check is string-level only)
 - [ ] `p3` Verify Perplexity Sonar citations structure via real OpenRouter API response — may need to adjust parsing
 
