@@ -18,7 +18,7 @@ Verified against the code on 2026-09-23.
 | Input | Where | How often it changes |
 |-|-|-|
 | `Current time: …` at minute resolution | `DefaultPromptSource.assemble` (`src/agent/prompt.ts`) | Every turn that starts in a new minute |
-| `# Recalled Context` | appended to the system prompt in `handle-message.ts` (`fullPrompt`) | Nearly every turn: the default `heuristic` recall mode skips only greetings and acknowledgements (`src/agent/recall-gate.ts`) |
+| `# Recalled Context` | appended to the system prompt in `handle-message.ts` (`fullPrompt`) | Nearly every turn: the default `heuristic` recall mode skips only messages under four characters, greetings, acknowledgements and continuation phrases (`src/agent/recall-gate.ts`) |
 | `# Voice mode` hint | `prompt.ts` | When a conversation alternates voice and text turns |
 | `# User` (core memory blocks) | `getUserContext` in `src/index.ts` | When the agent edits core memory |
 | `# Rules`, `# Tools`, `# Capabilities` | `prompt.ts` | When steering rules, the tool catalog or service guidance change |
@@ -72,7 +72,11 @@ The per-turn state that today sits in the system prompt moves into a **turn cont
 | Recalled memories | the `auto-recall` step, minus memories already rendered in the loaded window | Yes |
 | Voice mode | the per-turn voice decision (`resolveVoiceMode`) | Yes — the settings it derives from can change later |
 
-Every user message carries its own time, so the model also sees a timeline of the conversation — useful for relative references ("what I asked you yesterday"). A user message with no stored context renders the time alone. Rows written before this ships render the same way.
+Every user message carries its own time, so the model also sees a timeline of the conversation — useful for relative references ("what I asked you yesterday"). A user message with no stored context renders the time alone. Rows written before this ships render the same way, so the deploy itself is one full re-write for every live conversation.
+
+- **The time is when the turn was handled**, not when the user sent it: `created_at` is set by `create-user-message`, after debounce and transcription. That is what "current time" means for the reply; after an outage it trails the send time.
+- **The timezone is pinned per deployment.** It comes from process config, so changing it re-renders every past turn once.
+- **The compaction summary carries no time.** `loadTurnHistory` emits it as a synthetic user message with no row behind it.
 
 ### Rendering
 
@@ -97,7 +101,9 @@ The same function renders every turn:
 
 Identical inputs through one function make the current turn's bytes and the next turn's reload identical by construction; a unit test pins that equality.
 
-Every input comes from a step result or the event payload. Voice-mode resolution reads the profile, the conversation and the delivery handle, none of them durable, so its result is frozen in a step; today `assemble-prompt` freezes it implicitly by baking the hint into the prompt text.
+The block ends with a blank line. The OpenAI-compatible adapter sends a text-only user message as its text blocks joined with no separator, so the separation has to be part of the rendered text.
+
+Every input to the block comes from a step result or the event payload. Voice-mode resolution reads the profile, the conversation and the delivery handle, none of them durable, so its result is frozen in a step; today `assemble-prompt` freezes it implicitly by baking the hint into the prompt text.
 
 Recalled memories are data, not instructions, and move from the system prompt — the operator-authority slot — into user content. That also narrows an injection surface: stored memories can carry text that originated in web pages or tool output.
 
@@ -119,7 +125,7 @@ turn_contexts
 
 A side table rather than a column on `messages`: the row is written after the user row exists (see below), so a column would mean updating the user row. It also keeps `messages.content` as "what the user said", which the web UI (through `Transport`) and the Observer read. An Observer extracting facts from the user row must not re-extract the memories recall injected.
 
-**Written in `persist-new-messages`**, in the same transaction as the turn's assistant and tool rows, so a turn's context and its output commit together. The `create-user-message` step returns the new row's id for this. Idempotent under a retry-after-commit via `UNIQUE (message_id)` and `ON CONFLICT DO UPDATE` with a no-op set (see `.claude/rules/inngest.md`).
+**Written in `persist-new-messages`**, in the same transaction as the turn's assistant and tool rows, so a turn's context and its output commit together. The `create-user-message` step returns the new row's id for this. The `turn_contexts` write is idempotent under a retry-after-commit via `UNIQUE (message_id)` and `ON CONFLICT DO UPDATE` with a no-op set (see `.claude/rules/inngest.md`). The step's other write, `insertMessages`, carries no such key; that is outside this design.
 
 **A turn that fails before persisting** leaves its user row without a context row; the next turn renders that message time-only. No assistant output was persisted for it, so no thinking block was bound to the richer version.
 
@@ -219,7 +225,7 @@ from turns where gap is not null;
 - The Anthropic adapter sums its three fields; OpenAI-compatible adapters already report the total and additionally read `prompt_tokens_details.cached_tokens` (and `cache_write_tokens` where present).
 - `shouldSkipCounting` and `messages.input_tokens` keep their meaning — the context the request occupied — with no change at their call sites.
 - The `gen_ai.usage.input_tokens` span attribute is the total, per the OpenTelemetry convention.
-- The `cogmo.llm.tokens` counter records `type: "input"` as the uncached remainder (total minus reads minus writes), so its four types stay disjoint and sum to billable categories.
+- The `cogmo.llm.tokens` counter records `type: "input"` as the uncached remainder (total minus reads minus writes), so its four types stay disjoint and sum to billable categories. For Anthropic that leaves `input` where it is today; for OpenAI-compatible providers it drops the cached share that `prompt_tokens` currently puts there.
 - The loop's turn totals carry the cache fields, so the `agent loop complete` log shows the turn's hit rate.
 
 The persisted per-turn input is the sum across the turn's iterations, which overstates the next turn's starting size on multi-iteration turns. That errs toward counting more often, not less, and stays as it is.
@@ -227,8 +233,8 @@ The persisted per-turn input is the sum across the turn's iterations, which over
 ## Interactions
 
 - **Compaction.** Strategy 0 supersession, Strategy 1 clearing and Strategy 2 summarization rewrite history and invalidate the cache from the first rewritten position — by design, see [context-management.md](context-management.md). The summarization call could itself read the parent's cache by reusing the parent's exact tools, system and messages and appending its instruction; that is a follow-up.
-- **Inngest replays.** Every byte of the prompt derives from step results or the event payload, so a replayed invocation sends the same prefix. No bare-body clock or non-durable read may reach the rendered prompt.
-- **Preserved thinking.** Freezing the system prompt removes the one history edit that happens on every turn. The remaining edits — configuration changes to the system prompt, compaction, the ephemeral `empty_end_turn` continuation prompt, and image turns (below) — are tracked in `todo.md`.
+- **Inngest replays.** Every byte of `system` and `messages` derives from step results or the event payload, so a replayed invocation sends the same prefix; no bare-body clock or non-durable read may reach them. The `tools` array is the exception: each invocation rebuilds it from live reads of the image, skill, sub-agent and MCP catalogs (`handle-message.ts`, `run-agentic-stage.ts`). A catalog edit landing mid-run changes the prefix at position 0 — a full miss for the rest of the turn, and on Opus 5.5 / Fable 5.1 a thinking-block mismatch. Accepted as a concurrent-operator residual, the same class as the `auto-recall` gate; memoizing the definitions in a step is the fix if it ever bites.
+- **Preserved thinking.** Freezing the system prompt removes the one history edit that happens on every turn. The remaining edits — configuration changes to the system prompt, all three compaction strategies (Strategy 0 runs every turn and rewrites an earlier result whenever a same-tool cluster crosses its trigger), the ephemeral `empty_end_turn` continuation prompt, a tool-catalog edit mid-run, and image turns (below) — are tracked in `todo.md`.
 - **Image turns.** The current turn sends resolved image and document blocks; later turns load the row as its persisted JSON string. Anthropic treats added or removed images as a messages-cache invalidation, so the turn after an image turn re-writes from that message on. It is also a preserved-thinking edit. Out of scope here; tracked in `todo.md`.
 - **Model switches.** Caches are per model. A `/model` change or a fallback to another provider starts cold.
 
@@ -241,7 +247,7 @@ The persisted per-turn input is the sum across the turn's iterations, which over
 5. **One live recording run** with real keys: on turn 1's second iteration, `cache_read_input_tokens` covers tools, system and the transcript; on turn 2's first iteration, it covers turn 1. If not, the cache-diagnostics beta (`cache-diagnosis-2026-04-07`) names the section that diverged. The same run on Opus 5.5 with `thinking.block_binding.prefix_mismatch_behavior: "drop_block"` should log no `input_transformations` outside image turns and compaction.
 6. **In production**, the existing per-call cache attributes and counters give a hit ratio of cache reads over total input per model.
 
-Moving the time and recalled memories into the user message changes the text llmock matches on: `normalizeContent` (`test/llmock-setup.ts`) gains a rule for the time line, and the chat cassettes are re-recorded.
+Recorded fixtures match on the last user message (`match: { userMessage }`), which the clock in the system prompt never reached. Moving the time and recalled memories into it makes every chat cassette's key depend on them. `normalizeContent` (`test/llmock-setup.ts`) gains a rule for the time line, applied to string content and to the multipart text parts the OpenAI-compatible adapter sends for image turns, and every chat cassette is re-recorded.
 
 ## Implementation Plan `[proposed]`
 
@@ -254,7 +260,7 @@ Moving the time and recalled memories into the user message changes the text llm
 - **Chat retention.** `"long"` until the reply-gap query says otherwise.
 - **Preserved-thinking enforcement.** Whether the Anthropic account was created on or after 2026-08-31 decides whether the remaining system-prompt edits (core memory, steering rules, tool catalog) are 400s today. On Opus 5 and 5.5 they could become appended `role: "system"` messages; on Sonnet 5 they cannot.
 - **Anthropic-compatible endpoints.** If an Anthropic-protocol `llm_providers` row ever points at a third-party endpoint, check that it accepts top-level `cache_control`, or fall back to an explicit tail marker for that row.
-- **OpenRouter non-Claude routes.** Whether OpenRouter ignores or rejects `cache_control` for upstreams that don't take it — verify with a recorded request before step 3 enables it for every OpenRouter model.
+- **OpenRouter non-Claude routes.** OpenRouter translates a block-level `cache_control` into `prompt_cache_breakpoint` for OpenAI models, dropping the TTL; its docs don't say what other upstreams (xAI, DeepSeek) do with it. Verify with a recorded request before step 3 enables markers for every OpenRouter model.
 
 ## Sources `[research]`
 
