@@ -254,5 +254,9 @@ export interface ChatParams {
 
 // --- Token counting ---
 
-/** Same shape as ChatParams minus maxTokens — if you can chat(), you can count tokens for it. */
-export type CountTokensParams = Omit<ChatParams, "maxTokens">;
+/**
+ * ChatParams minus `maxTokens` and `cache` — if you can chat(), you can count
+ * tokens for it, since a `ChatParams` value still fits. A count is never sent
+ * again, so it takes no cache intent.
+ */
+export type CountTokensParams = Omit<ChatParams, "maxTokens" | "cache">;

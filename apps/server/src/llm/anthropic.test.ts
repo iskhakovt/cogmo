@@ -1173,7 +1173,7 @@ describe("AnthropicProvider", () => {
       expect(breakpoints(body)).toEqual([{ type: "ephemeral" }, { type: "ephemeral" }]);
     });
 
-    it("sends no top-level cache_control from countTokens", async () => {
+    it("takes no cache intent on countTokens, and sends no top-level cache_control if handed one", async () => {
       const provider = createProvider();
       mockCountTokens.mockResolvedValueOnce({ input_tokens: 100 });
 
@@ -1182,6 +1182,7 @@ describe("AnthropicProvider", () => {
         system: "sys",
         messages: [{ role: "user", content: "hi" }],
         tools: TOOLS,
+        // @ts-expect-error — nothing re-sends a count's transcript, so the type has no intent
         cache: { key: "conv-1", retention: "long" },
       });
 

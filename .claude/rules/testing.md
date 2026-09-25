@@ -16,7 +16,7 @@
 - **A red integration run outranks a green one, whichever side it came from.** The bullet above covers local-fail/CI-pass. The mirror case is local-pass/CI-fail, and it is equally not luck: llmock holds one FIFO fixture pool for the whole process while the forks run in parallel, so which suite consumes which fixture follows fork count, and a 10-core workstation interleaves differently from a 2-core runner. A profile-scoping change in `skill-authoring.integration.test.ts` passed the full tier locally, twice, and failed CI twice with ten unmatched fixtures and three suites down — two of them in files it never touched. So neither green clears a change: explain the red run, and never let the green side stand as the explanation. Which side is red tells you where to look — CI-only points at fork count and fixture order, local-only at timing windows a slower runner papers over — and a change touching anything a cassette depends on (the model a profile carries, the order turns are issued, which rows a suite writes) needs the failing configuration reproduced, not a rerun until it agrees with you. Cassette-per-fork isolation and a per-fork database are the fixes; both are filed in `todo.md`.
 - **Framework:** Vitest. See `design/testing.md` for full details.
 
-## Three-Tier Structure
+## Test Tiers
 
 | Tier | Infra | App | LLM | What it proves |
 |-|-|-|-|-|

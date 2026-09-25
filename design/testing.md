@@ -81,7 +81,7 @@ Real provider APIs, for behaviour a replayed fixture can't show — recorded fix
 
 **Naming:** `.live.test.ts` suffix, the `live` Vitest project. `pnpm test:live`.
 
-- Skipped unless `LIVE=1` and the provider's API key is set; never runs on PRs. Run locally with the keys from the root `.env`: `LIVE=1 node --env-file=.env …` or an exported environment.
+- Skipped unless `LIVE=1` and the provider's API key is set; never runs on PRs. The `live` project doesn't load `.env` itself, so export the root `.env` from the repository root and run the tier: `set -a; . ./.env; set +a; LIVE=1 pnpm test:live`.
 - Requests go through the wire recorder (`src/test/wire-recorder.ts`), which captures each request body and the provider's usage block; assertions are on usage, since model output varies.
 - Each run costs real money — keep prompts small and requests few. See `design/prompt-caching.md` → Test Plan → Live tier for the caching scenarios.
 

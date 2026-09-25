@@ -8,8 +8,8 @@
  * `long` cache intent and the wire recorder, and every request must read
  * exactly what the one before it cached.
  *
- * Skipped unless `LIVE=1` and `ANTHROPIC_API_KEY` are set. Costs about a cent:
- * one ~3k-token cache write at the 1-hour rate, then reads.
+ * Skipped unless `LIVE=1` and `ANTHROPIC_API_KEY` are set. Costs a few cents:
+ * one ~5k-token cache write at the 1-hour rate, then reads.
  *
  *   set -a; . ./.env; set +a; LIVE=1 pnpm test:live
  */
@@ -60,8 +60,12 @@ const AnthropicUsageSchema = z.object({
 });
 
 /**
- * A system prompt well above the minimum cacheable prefix (~3k tokens). The
- * nonce comes first, so no earlier run's cache entry can match any of it.
+ * A system prompt well above the minimum cacheable prefix (~5k tokens on
+ * Sonnet 5). The nonce opens it, so no earlier run's entry can match past its
+ * first line. Tools render before the system prompt, and `TOOLS` alone stays
+ * far below the minimum, so the tools marker never writes an entry of its own
+ * for a later run to read. A tool set near the minimum needs the nonce in a
+ * tool description instead.
  */
 function systemPrompt(nonce: string): string {
   const moods = ["calm", "curious", "cheerful", "careful"];
