@@ -23,7 +23,7 @@ Verified against the code on 2026-09-23.
 | `# User` (core memory blocks) | `getUserContext` in `src/index.ts` | When the agent edits core memory |
 | `# Rules`, `# Tools`, `# Capabilities` | `prompt.ts` | When steering rules, the tool catalog or service guidance change |
 
-The first three are per-turn state. The rest look like configuration but aren't all rare: the agent edits core memory during ordinary turns, and channel-scoped rules follow which channel sessions are active, which changes with session expiry and routing. Pipeline runs add a fourth source: stage turns send a narrower `tools` array and their own `# Tools` section in the same conversation as chat turns. Because the transcript renders after the system block, a changed system block invalidates every cached message behind it — so moving the clock alone leaves the transcript uncacheable across turns, because recall changes it on nearly every turn anyway.
+The first three are per-turn state. The rest look like configuration but aren't all rare: the agent edits core memory during ordinary turns, and channel-scoped rules follow which channel sessions are active. Pipeline runs add another source: stage turns send a narrower `tools` array and their own `# Tools` section in the same conversation as chat turns. A changed system block invalidates every cached message behind it, so moving the clock alone isn't enough — recall changes the block on nearly every turn.
 
 **Tool-call inputs come back from the database in a different key order.** The loop appends the model's `tool_use` input as parsed from the stream, in the order the model emitted its keys. `messages.content` is `jsonb`, which stores object keys by length and then bytewise, so the next turn reloads `{"prompt": …, "model": …}` as `{"model": …, "prompt": …}`. Every turn after a tool call re-sends that call with different bytes: the cached prefix breaks at the first reordered input, on Anthropic and on the OpenAI-compatible path (whose `arguments` string is `JSON.stringify(input)`). Measured on Sonnet 5: the reordered history missed its cache from that call on, and cache diagnostics reported `messages_changed`. The preserved-thinking check ignores key order, so this costs cache hits only (see [Validation](#validation)).
 
@@ -45,7 +45,7 @@ Surveyed September 2026.
 | Mid-conversation `role: "system"` messages keep the prefix intact, but are not available on Claude Sonnet 5. User-message text is the only carrier that works on every model we route to. | Anthropic mid-conversation system messages docs |
 | Top-level `cache_control` ("automatic caching") places the breakpoint on the last cacheable block and moves it forward as the conversation grows; accepts `ttl: "1h"`; uses one of the four breakpoint slots; available on every platform except legacy Bedrock. | Anthropic prompt-caching docs |
 | A breakpoint walks back at most 20 positions looking for a prior write; a run of `tool_use` blocks and a run of `tool_result` blocks each count as one position. | Anthropic prompt-caching docs |
-| Longer TTLs must precede shorter ones in a request. Writes cost 1.25× (5 min) or 2× (1 h); reads 0.1×, **0.05× on Opus 5.5**, 0.025× on Fable 5.1 and Mythos 5.1. A read refreshes the entry at no cost. The TTL runs from the start of the request. | Anthropic prompt-caching docs |
+| Longer TTLs must precede shorter ones in a request. Writes cost 1.25× (5 min) or 2× (1 h); reads 0.1×, 0.05× on Opus 5.5, 0.025× on Fable 5.1 and Mythos 5.1. A read refreshes the entry at no cost. The TTL runs from the start of the request. | Anthropic prompt-caching docs |
 | Minimum cacheable prefix: 512 tokens on Opus 5.5 and Opus 5, 1,024 on Sonnet 5, 4,096 on Haiku 4.5. It counts the whole prefix, tools and system included. | Anthropic prompt-caching docs |
 | Use the 1-hour TTL "when storing a long chat conversation where the user may not respond within 5 minutes." | Anthropic prompt-caching docs |
 | Anthropic `input_tokens` is only the tokens after the last breakpoint; total = `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`. | Anthropic prompt-caching docs |
@@ -55,7 +55,7 @@ Surveyed September 2026.
 | No open-source library supplies a provider-neutral cache intent. The Vercel AI SDK covers all four providers, each through its own `providerOptions` (Anthropic `cacheControl` with `ttl`, OpenAI `promptCacheKey`, xAI `promptCacheKey` on the Responses API only), and only behind `generateText` — adopting it for text calls would break the raw-SDK rule. LangChain.js's `anthropicPromptCachingMiddleware` and LiteLLM's `cache_control_injection_points` are single-provider or Python. | AI SDK provider docs; LangChain.js and LiteLLM docs |
 | The AI SDK 7 usage types keep the total inclusive, with cache counts as subsets — the same convention as [Usage Accounting](#usage-accounting). The provider-spec type carries `inputTokens: { total, noCache, cacheRead, cacheWrite }`; the usage `generateText` returns carries `inputTokens` plus `inputTokenDetails.{noCacheTokens, cacheReadTokens, cacheWriteTokens}`. Its own OpenRouter and xAI converters get the arithmetic wrong in different ways. | AI SDK 7.0 migration guide and provider source |
 | promptcachelint (Python, MIT) diffs consecutive requests segment by segment — each tool, system block and message block — with cache markers stripped, and flags a turn that appends more than 20 positions. `assertAppendOnly` follows that design. | github.com/OsmnvAslan/promptcachelint |
-| Zep places a memory block after the last breakpoint and replaces it each turn, measuring 1.3–1.9× lower cost over 18–54 turns — against memory in the system prompt, the layout this design also leaves. Letta is moving memory from the system prompt to mid-conversation system messages; Mastra keeps observational memory append-only "to keep the prompt prefix cacheable". | Zep blog (2026-06-24); letta-code #4551; Mastra docs |
+| Zep places a memory block after the last breakpoint and replaces it each turn, measuring 1.3–1.9× lower cost over 18–54 turns — against memory in the system prompt, the layout this design also leaves. Mastra keeps observational memory append-only "to keep the prompt prefix cacheable". | Zep blog (2026-06-24); Mastra docs |
 | Keep the system prompt and tool list fixed for a session; deliver changes in the next turn's messages and restrict tools without removing them. Claude Code keeps every tool in every request and implements plan mode as tools; Manus masks instead of removing; OpenAI's `allowed_tools` restricts a turn "but not modify the list of tools you pass in, so you can maximize savings from prompt caching"; Letta measured 240 system-prompt variants on one agent at an 83.8% hit rate. | Claude Code blog; Manus blog; OpenAI function-calling guide; letta-code #4551 |
 | OpenRouter passes Anthropic `cache_control` through (per-block, and top-level for the Anthropic, Vertex, Azure and Bedrock providers); `session_id` / `x-session-id` pins sticky routing; usage reports `cached_tokens` and `cache_write_tokens`. | OpenRouter prompt-caching docs |
 
@@ -78,16 +78,16 @@ The per-turn state that today sits in the system prompt moves into a **turn cont
 |-|-|
 | Time | `messages.created_at` of the user row, formatted in the configured user timezone |
 | Recalled memories | the `auto-recall` step, deduplicated (below), inside the untrusted-context envelope |
-| Voice-mode hint | the per-turn voice decision (`resolveVoiceMode`) |
+| Reply modality | `voice` or `text`, from the per-turn voice decision (`resolveVoiceMode`) — data only; the voice-style guidance is a standing section of the system prompt that applies when the modality is `voice` |
 | Delivery channels | the channel types this reply goes to, read inside the render step — data only; the rules for each channel stay in the system prompt |
 | Core-memory changes | blocks changed since the snapshot and not yet announced, with their current content (see [System Prompt Snapshot](#system-prompt-snapshot)) |
 
-Stage prompts carry the time, delivery channels and core-memory changes; they run no auto-recall and no voice.
+Everything in the block is data; instructions live in the system prompt (see [System Prompt Snapshot](#system-prompt-snapshot)). Stage prompts carry the time, delivery channels and core-memory changes; they run no auto-recall and no voice.
 
 Every turn-starting message carries its own time, so the model also sees a timeline of the conversation — useful for relative references ("what I asked you yesterday").
 
 - **The time is when the turn was handled**, not when the user sent it: `created_at` is set by `create-user-message`, after debounce and transcription. That is what "current time" means for the reply; after an outage it trails the send time.
-- **Stored as rendered text.** A later change to the timezone, the format, the voice-hint wording or the envelope applies to new turns only; past turns keep the bytes they were sent with. Re-rendering history instead would make every such change a history-wide edit: a full cache rewrite for every conversation and, where preserved thinking is enforced, a 400 on every later turn.
+- **Stored as rendered text.** A later change to the timezone, the format or the envelope applies to new turns only; past turns keep the bytes they were sent with. Re-rendering history instead would make every such change a history-wide edit: a full cache rewrite for every conversation and, where preserved thinking is enforced, a 400 on every later turn.
 - **Rows from before this ships have no turn context** and render none, so no formatter ever has to reproduce them. The deploy is still one full rewrite per live conversation, because the system prompt changes.
 - **The compaction summary carries no time.** `loadTurnHistory` emits it as a synthetic user message with no row behind it.
 
@@ -103,23 +103,23 @@ Current time: Friday, September 25, 2026, 09:14 (Europe/London)
 …
 </recalled_memories>
 
-This reply will be spoken aloud. Keep it short and natural — …
+Reply modality: voice
 </turn_context>
 ```
 
-The recalled-memories element carries the data-not-instructions header of the untrusted-context envelope (`todo.md`), built in from the first version rather than added later.
+The recalled-memories element carries the data-not-instructions header of the untrusted-context envelope (`todo.md`), built in from the start.
 
 **Rendered once**, by a `render-turn-context` step that runs after compaction (see Deduplication). The step writes the text to `turn_contexts` and returns it; the loop sends that string, and later turns load it from the table. The bytes are identical by construction rather than by re-rendering.
 
 The block ends with a blank line. The OpenAI-compatible adapter sends a text-only user message as its text blocks joined with no separator, so the separation has to be part of the rendered text.
 
-Every input comes from a step result or the event payload. Voice-mode resolution reads the profile, the conversation and the delivery handle, none of them durable, so its result is frozen in a step; today `assemble-prompt` freezes it implicitly by baking the hint into the prompt text. The delivery channels are read inside the render step.
+Every input comes from a step result or the event payload. Voice-mode resolution reads the profile, the conversation and the delivery handle, none of them durable, so its result is frozen in a step. The delivery channels are read inside the render step.
 
 Recalled memories are data, not instructions, and move from the system prompt — the operator-authority slot — into user content. That also narrows an injection surface: stored memories can carry text that originated in web pages or tool output.
 
 ### Deduplication
 
-Auto-recall returns up to ~2,000 tokens per turn. Rendering every result on every turn would grow the transcript by that much each turn. The turn keeps only memories whose content does not appear in a turn context that survives this turn's compaction. Compaction runs first and counts the undeduplicated block — an upper bound, so the kept set can only shrink the request. Deduplicating against the history before compaction would drop a memory because an earlier turn showed it, then lose it when Strategy 2 or 3 summarizes or truncates that turn away. Later turns deduplicate against the stored structured list (below). After a summary moves the window forward, a memory can be recalled again; that is intended.
+Auto-recall returns up to ~2,000 tokens per turn; rendering all of it every turn would grow the transcript by that much each turn. A turn keeps only memories whose content isn't in a turn context that survives this turn's compaction. Compaction runs first and counts the undeduplicated block, an upper bound. Deduplicating before compaction would drop a memory an earlier turn showed, then lose it when Strategy 2 or 3 removes that turn. Later turns compare against the stored structured list (below); once a summary moves the window forward, a memory can be recalled again.
 
 ### Data model
 
@@ -144,8 +144,8 @@ A side table rather than a column on `messages`: the row is written after the us
 |-|-|
 | Time as a trailing block on the latest message only, not persisted | The next turn removes it from an earlier message: a history edit that misses the cache from that message on and invalidates later thinking blocks. |
 | Date-only in the system prompt | Invalidates daily instead of per minute, loses time of day, and leaves recall in place. |
-| Mid-conversation `role: "system"` message | Not available on Sonnet 5, so every call site needs a capability gate and a fallback; a clock and recalled memories don't need operator authority. |
-| Recall as a trailing block after the last breakpoint, replaced each request (Zep's layout) | No schema change, and no accumulation: the memories never enter the transcript. But they are re-sent at the full input rate on every request instead of read at the cache rate, and removing last turn's block is an edit under the thinking blocks that followed it — dropped or a 400 wherever the preserved-thinking check is enforced. This account isn't enforced today (see [Validation](#validation)), so it is viable now, but not on a new account or a model that enforces for everyone. See [Persisted versus trailing memories](#persisted-versus-trailing-memories). |
+| Mid-conversation `role: "system"` message | Not available on Sonnet 5, so every call site needs a capability gate and a fallback; the block's contents are data and don't need operator authority. |
+| Recall as a trailing block after the last breakpoint, replaced each request (Zep's layout) | No schema change and no accumulation, but a history edit under the thinking blocks that followed it — see [Persisted versus trailing memories](#persisted-versus-trailing-memories). |
 | No auto-recall; rely on the `memory_recall` tool | Append-only for free, but adds an iteration and latency to turns that need memory, and reverses auto-recall's design (see [memory.md](memory.md)). |
 | `turn_context` column on `messages` | Requires updating the user row after insert, and puts injected context next to what the user said. |
 
@@ -155,7 +155,7 @@ Both layouts take recalled memories out of the system prompt, which is where mos
 
 **Where trailing memories are better:**
 
-- **Simpler storage.** No `turn_contexts` and no deduplication. The time still comes from `created_at`, which never changes.
+- **Simpler storage.** No `turn_contexts` and no deduplication.
 - **Cleaner context.** The model sees only the memories relevant to the current message; nothing accumulates mid-transcript to dilute attention.
 - **No stale facts.** A fact Hindsight has since updated stays in this design's transcript at the turn that recalled it, next to the newer version. Trailing memories are always current.
 - **Flat cost.** Trailing memories cost the same every turn. Persisted ones are written once, then re-read at the cache rate by every later request, so their cost grows until a compaction summary resets it.
@@ -185,13 +185,14 @@ The deciding factor is the first: the persisted layout's costs are soft and boun
 
 Identity, `# User` (core memory), `# Tools`, `# Capabilities` and `# Rules` stay in the system prompt, which becomes a **snapshot**: rendered and stored when an epoch opens, then sent unchanged by every turn until the next one.
 
-This is the practice across the field: never edit the system prompt mid-session, and deliver what changed in the next turn's messages. Claude Code: "Consider if you can pass in this information via messages in the agent's next turn instead", with changed state in a `system-reminder` in the next user message or tool result. Anthropic's guidance is the same — keep the system prompt frozen and inject dynamic context later in `messages`. Letta measured one agent with 240 distinct system-prompt variants from volatile system-prompt content, at an 83.8% hit rate (letta-code #4551).
+Never editing the system prompt mid-session, and delivering changes in the next turn's messages, is what Claude Code, Anthropic's guidance and Letta's measurements all point to ([Research Base](#research-base)).
 
 What may be announced is limited by authority. An announcement is user content, and neither the model nor this design can let user content supersede a system instruction — nor tell a genuine announcement from text a fetched page or recalled memory imitates. So only data is announced; instructions change by opening an epoch.
 
 - **Core memory is announced.** It is data about the user, and the agent edits it during ordinary turns — its guidance says "Update them as you learn new things" — so re-rendering on every edit would rewrite the prefix every few turns. A block changed since the snapshot, and not yet announced since that change, is announced in the next turn context with its current content. The turn that made the edit already has the tool result in its transcript.
 - **Rules open an epoch.** A rule added, changed or retired changes the system prompt at the next turn, with system authority intact. Rule changes come from the Observer's graduation and from operators, so they are occasional.
 - **Channel-scoped rules stay in the system prompt**, all of them, each labelled with its channel ("On telegram: …"), whether or not that channel is active. The turn context names the channels the reply goes to. Rendering only the active channels' rules would change the system prompt whenever a session expires or opens; moving the rules into user content would demote them, and a channel-scoped rule can be a `safety` rule.
+- **Voice style is standing guidance.** The system prompt always carries the voice-style section, which applies when a turn context says `Reply modality: voice`, so alternating voice and text turns change only data.
 - **Rule order.** Rules sort by priority, then id. `getActiveRules` sorts by priority alone, and correction rules all share priority 100, so ties can come back in a different order after an Observer update.
 
 **An epoch opens** at a conversation's first turn, at a turn whose compaction stored a summary, and at a turn whose configuration digest differs from the snapshot's. The digest covers everything the snapshot renders except core memory: the profile's base prompt or the code-owned identity and onboarding text, the capabilities guidance, the rules, and the tool definitions. A deploy that edits prompt text in `prompt.ts` or the service guidance therefore reaches existing conversations at their next turn, as does a rule change or a new skill. Compaction already rewrites the prefix, so its refresh costs nothing extra; the others are deliberate full rewrites.
@@ -218,14 +219,9 @@ On Opus 5, 5.5 and Fable, a rule change could instead be a mid-conversation `rol
 
 Stage turns instead send the conversation's snapshot and the same frozen tool definitions as chat turns. The allowlist moves into the stage prompt, which already carries the stage's instructions, and is enforced at dispatch: a call to a tool outside it gets an `is_error` result naming the stage's tools, without running.
 
-This is established practice:
+Keeping every tool in every request and restricting at dispatch is what Claude Code (plan mode as tools), Manus ("mask, don't remove"), OpenAI (`allowed_tools`) and Anthropic's guidance describe ([Research Base](#research-base)).
 
-- **Claude Code** keeps "_all_ tools in the request at all times" and implements plan mode as `EnterPlanMode` / `ExitPlanMode` tools plus a message, rather than swapping tool sets.
-- **Manus** masks instead of removing: tool definitions sit near the front of the context, so "any change will invalidate the KV-cache", and a model whose earlier actions name tools no longer defined "gets confused".
-- **OpenAI**'s `allowed_tools` exists to restrict a turn's tools "but not modify the list of tools you pass in, so you can maximize savings from prompt caching".
-- **Anthropic**'s guidance: for modes, don't swap the tool set — record the mode with a tool or pass it as message content.
-
-Anthropic's append-only form is mid-conversation tool changes: the full set stays declared in `tools`, and `tool_addition` / `tool_removal` blocks in a `role: "system"` message withdraw or re-offer a tool from that point on, without touching the cached prefix (beta `inline-tools-2026-09-15` on the Claude API; the older `mid-conversation-tool-changes-2026-07-01` still works for changes that name a tool by reference). It runs on the models that have mid-conversation system messages and not on Sonnet 5, so dispatch enforcement is the path that works everywhere; on Opus 5, 5.5 and Fable a stage turn could also withdraw its non-allowlisted tools this way, so the model isn't offered them at all. Anthropic has no per-request `allowed_tools`, and changing `tool_choice` invalidates the messages cache. On OpenAI routes the adapter can send `allowed_tools` as well.
+Anthropic has no per-request `allowed_tools`, and changing `tool_choice` invalidates the messages cache. Its append-only alternative is mid-conversation tool changes: `tool_addition` / `tool_removal` blocks in a `role: "system"` message withdraw or re-offer a declared tool without touching the cached prefix (beta `inline-tools-2026-09-15`; the older `mid-conversation-tool-changes-2026-07-01` still works by reference). They exist only on models with mid-conversation system messages, not Sonnet 5, so dispatch enforcement is the portable path; on Opus 5, 5.5 and Fable a stage turn can also withdraw its disallowed tools this way. On OpenAI routes the adapter can send `allowed_tools` as well.
 
 ## Canonical Tool Inputs `[proposed]`
 
@@ -252,7 +248,7 @@ interface CacheIntent {
 | Caller | Intent |
 |-|-|
 | `handle-message` → `runStreamingAgentLoop` | `{ key: conversationId, retention: "long" }` (see [Retention](#retention)) |
-| `run-agentic-stage` → `runStreamingAgentLoop` | `{ key: conversationId, retention: "short" }` |
+| `run-agentic-stage` → `runStreamingAgentLoop` | The same as chat — a run conversation's stage and chat turns share one prefix, and a 5-minute entry would expire before the next chat turn |
 | The loop's in-step non-streaming replay | Reuses the iteration's `chatParams`, so it reads the same cache |
 | Summarization, degraded-reply synthesis, sub-agent calls, `typed.ts`, artifact extraction | None — a breakpoint on a tail that is never re-sent is a pure 1.25–2× write surcharge |
 
@@ -261,7 +257,7 @@ interface CacheIntent {
 | Provider | How it caches | What the adapter sends | Usage mapping |
 |-|-|-|-|
 | Anthropic | Only at `cache_control` breakpoints | Last tool and system block marked at the retention TTL, plus top-level `cache_control: { type: "ephemeral", ttl }`. Without an intent: tools and system at 5 minutes, as today. | `inputTokens` = `input_tokens` + `cache_read_input_tokens` + `cache_creation_input_tokens` |
-| OpenRouter | Passes `cache_control` through to Claude and Gemini; accepted without error on xAI, DeepSeek and OpenAI routes, which cache automatically either way (measured) | The same markers on Claude and Gemini models (`anthropic/` and `google/` ids), where they take effect, and none elsewhere — other upstreams cache automatically, and only xAI, DeepSeek via Together and OpenAI were measured to accept them; `session_id: key` on every model for sticky routing | `prompt_tokens`; `prompt_tokens_details.cached_tokens` / `cache_write_tokens` |
+| OpenRouter | Passes `cache_control` through to Claude and Gemini; other upstreams cache automatically and accept the markers without error (measured on xAI, DeepSeek and OpenAI) | Markers on `anthropic/` and `google/` models only — for Gemini an explicit marker on the last block rather than the top-level field, which OpenRouter supports on Vertex but not AI Studio; `session_id: key` on every model | `prompt_tokens`; `prompt_tokens_details.cached_tokens` / `cache_write_tokens` |
 | OpenAI | Automatic from 1,024 tokens; GPT-5.6+ bills writes at 1.25× | `prompt_cache_key: key`; retention ignored (GPT-5.6+ offers only `30m`, earlier models default to extended retention) | `prompt_tokens`; `prompt_tokens_details.cached_tokens` / `cache_write_tokens` (GPT-5.6+) |
 | xAI | Automatic, cached per server | `x-grok-conv-id: key` request header | `prompt_tokens`; `prompt_tokens_details.cached_tokens` |
 | Other OpenAI-compatible (DeepSeek, Groq, vLLM, …) | Automatic prefix caching, where offered | Nothing — strict servers reject unknown fields | Whatever the server reports |
@@ -276,7 +272,7 @@ interface CacheIntent {
 ### Anthropic specifics
 
 - **Breakpoints: three of four slots.** Tools, system, and the automatic tail. The tools and system markers stay because they give read points that survive a messages-level miss (compaction, an image turn) and a system-level miss (a new snapshot epoch) respectively.
-- **Automatic over an explicit tail marker.** The server places the breakpoint on the last cacheable block, walks back past ineligible ones (empty text, thinking), and moves it forward each request. An explicit marker on the last block works on third-party Anthropic-compatible endpoints too. It needs a block to carry the marker, so a last message with string content becomes a single text block — safe, since the two cache identically (measured) — and it walks back past empty blocks. `llm_providers.base_url` is null for Anthropic today — see [Open questions](#open-questions).
+- **Automatic over an explicit tail marker.** The server places the breakpoint on the last cacheable block and walks back past ineligible ones. The explicit fallback, for endpoints without automatic caching, converts a string-content last message to a single text block to carry the marker — safe, since the two cache identically (measured) — and skips empty blocks. See [Open questions](#open-questions).
 - **TTL ordering.** A 1-hour automatic tail after a 5-minute tools or system marker is a 400, so all three take the intent's TTL.
 - **Lookback.** An iteration appends roughly 3–4 positions (thinking, text, a `tool_use` run, a `tool_result` run); a turn boundary roughly 5–8 (the final reply plus the next user message). Both are well inside the 20-position window, so the fourth slot stays free. A turn shape that appends more than 20 positions in one request would need an intermediate breakpoint.
 - **`countTokens`** builds its own request and sends no top-level `cache_control`.
@@ -298,7 +294,7 @@ Illustrative, Sonnet 5 input cost per turn, assuming a 38k-token prefix (8k tool
 - Between 5 and 60 minutes, only the 1-hour TTL reads — the case it exists for.
 - Over an hour, both write the whole prefix; 1 hour pays 2× for it.
 
-Pipeline stages run their iterations back to back, so `"short"` is right there. For chat, `"long"` is the default proposal, to be confirmed against measured reply gaps. The query below measures start-to-start gaps between user-sent turns — pipeline stage prompts and scheduled fires are excluded by their inbound source, since their gaps are machine-driven — which approximates the cache-relevant gap to within one turn's duration:
+For chat, and so for pipeline runs that share its prefix, `"long"` is the default proposal, to be confirmed against measured reply gaps. The query below measures start-to-start gaps between user-sent turns — pipeline stage prompts and scheduled fires are excluded by their inbound source, since their gaps are machine-driven — which approximates the cache-relevant gap to within one turn's duration:
 
 ```sql
 with turns as (
@@ -390,7 +386,7 @@ llmock's request journal can't serve here: it stores its own OpenAI-shaped conve
 
 `src/test/prompt-caching.integration.test.ts` bootstraps the app in-process as `pipeline.integration.test.ts` does, with the chat provider built on the wire recorder and pointed at llmock.
 
-**Anthropic conversation, four turns:**
+**Anthropic conversation:**
 
 1. A tool turn of at least two iterations, calling a tool whose model-emitted key order differs from `jsonb` order — the recorded `generate_image` call (`prompt`, then `model`) is one.
 2. A follow-up with auto-recall returning memories from a seeded bank.
@@ -401,11 +397,11 @@ llmock's request journal can't serve here: it stores its own OpenAI-shaped conve
 **Assertions:**
 
 - `assertAppendOnly` over every consecutive pair of loop requests in the conversation, within turns and across them. The one declared exception is the turn after the image turn, which must diverge exactly at the image message; that pins the known residual instead of tolerating divergence in general.
-- `system` is identical on every request and contains no time, no recalled context and no voice hint; the core-memory edit changes it only at the next epoch.
+- `system` is identical on every request and contains no time and no recalled context; the voice turn changes only the turn context's modality, and the core-memory edit changes the system prompt only at the next epoch.
 - Each turn-starting message opens with its turn context, identical to `turn_contexts.rendered`. The time matches the row's `created_at` in the configured timezone, and a memory recalled on turns 2 and 3 renders once.
 - Every loop request carries top-level `cache_control` at `1h`, with the tools and system markers at `1h`.
 
-**A pipeline run conversation:** chat turns and a stage turn alternate. `assertAppendOnly` holds across each switch — same `tools`, same `system` — and the stage's requests carry `5m`.
+**A pipeline run conversation:** chat turns and a stage turn alternate. `assertAppendOnly` holds across each switch — same `tools`, same `system`, same `1h` TTL.
 
 **OpenAI-compatible:** the recorded xAI-via-OpenRouter route runs a two-turn conversation with a tool call. `assertAppendOnly` holds over the Chat Completions bodies, which catches a reordered `arguments` string, and the dialect's fields are present.
 
@@ -419,7 +415,7 @@ The smoke test's migrations check gains `turn_contexts` and `system_prompt_snaps
 
 `src/test/prompt-caching.live.test.ts`, in a `live` Vitest project run by `pnpm test:live`, skipped unless `LIVE=1` and the provider's key is set. It reuses the integration global setup. Chat providers point at the real endpoints through the wire recorder; Hindsight keeps llmock, recording into a throwaway fixture directory.
 
-**A. Anthropic, the production chat model.** The integration conversation without its image turn, run straight through (well inside the TTL). The image turn is a known divergence, pinned at the integration tier; here it would break both A's exact relation and B's `error` mode. The recorder adds the `diagnostics` object to every request — `previous_message_id: null` on the first, the previous response's id after — since a fingerprint is stored only for requests that include it. Cache diagnostics is GA and needs no header. The set of `anthropic-beta` headers must stay the same across the run, or the comparison reports `unavailable`.
+**A. Anthropic, the production chat model.** The integration conversation, run straight through well inside the TTL, minus its image turn — a known divergence pinned at the integration tier that would break A's exact relation and B's `error` mode. The recorder adds the `diagnostics` object to every request (`previous_message_id: null` first, then the previous response's id), since a fingerprint is stored only for requests that include it, and keeps the `anthropic-beta` header set constant, since a change makes the comparison `unavailable`.
 - Each request reads exactly what the previous one cached: for every request `n` after the first, `cache_read(n) = cache_read(n−1) + cache_creation(n−1)`, within turns and across them. Any failure prints `diagnostics.cache_miss_reason`.
 - The first request's `cache_read + cache_creation` exceeds the model's minimum cacheable prefix, so a pass can't be vacuous.
 - `cache_creation.ephemeral_1h_input_tokens` is non-zero and `ephemeral_5m_input_tokens` is zero on the chat path.
@@ -443,8 +439,8 @@ Recorded fixtures match on the last user message (`match: { userMessage }`), whi
 
 ## Implementation Plan `[proposed]`
 
-1. **Cache intent and usage accounting.** `ChatParams.cache`, the Anthropic mapping, usage totals across adapters, the metric split, loop totals, the injectable `fetch` and wire recorder, and live scenario A's within-turn assertions. Iterations 2 and later of every tool-using turn read the transcript. Until step 2 lands, a transcript read crosses a turn only when the system prompt happens not to change — two turns inside the TTL that start in the same minute with no recalled memories — so a single-iteration turn usually pays 25% more on the transcript it writes; the change nets out cheaper once at most roughly 28% of turns run two or more iterations (`cogmo.agent.iterations` shows the share). Ships with `retention: "short"` everywhere.
-2. **Turn context and canonical tool inputs.** Clock, recall and voice hint out of the system prompt; `turn_contexts` with stored rendered text, the render step after compaction with deduplication and the envelope; the frozen voice decision; per-turn tool definitions frozen in a step; canonical tool inputs; the llmock normalizer and re-record; `retention: "long"` for chat; the integration suite; live scenarios B and C. Reads across turns on every provider, except after a configuration change.
+1. **Cache intent and usage accounting.** `ChatParams.cache`, the Anthropic mapping, usage totals across adapters, the metric split, loop totals, the injectable `fetch` and wire recorder, and live scenario A's within-turn assertions. Iterations 2 and later of every tool-using turn read the transcript. Until step 2, reads rarely cross a turn (only when the system prompt happens not to change), so a single-iteration turn usually pays 25% more on the transcript it writes; the step nets out cheaper once at most ~28% of turns iterate (`cogmo.agent.iterations`). Ships with `retention: "short"` everywhere.
+2. **Turn context and canonical tool inputs.** Clock, recall and voice hint out of the system prompt (voice as a modality in the turn context, its style guidance a standing system-prompt section); `turn_contexts` with stored rendered text, the render step after compaction with deduplication and the envelope; the frozen voice decision; per-turn tool definitions frozen in a step; canonical tool inputs; the llmock normalizer and re-record; `retention: "long"` for chat and pipeline runs; the integration suite; live scenarios B and C. Reads across turns on every provider, except after a configuration change.
 3. **System prompt snapshot and one prefix per conversation.** `system_prompt_snapshots` and epochs keyed on a configuration digest, core-memory announcements, every channel-scoped rule labelled in the snapshot with the delivery channels in the turn context, thinking blocks stripped when an epoch opens, and stage turns on the conversation's snapshot and tool definitions with the allowlist enforced at dispatch ([pipelines.md](pipelines.md) changes with it).
 4. **OpenAI-compatible routing hints.** `attrs.cacheDialect` with its migration and writers, OpenRouter `session_id` and markers, OpenAI `prompt_cache_key`, xAI `x-grok-conv-id`, and live scenario D.
 
