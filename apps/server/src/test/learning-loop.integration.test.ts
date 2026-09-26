@@ -11,8 +11,8 @@
  * 2. Conversation 2 — the same correction again. The Observer reinforces the
  *    rule, which graduates to active.
  * 3. Conversation 3 — the request the model receives carries the core memory
- *    block under `# User`, the rule under `# Rules`, and the dinner under
- *    `# Recalled Context`, recalled from Hindsight.
+ *    block under `# User`, the rule under `# Rules`, and the dinner in the
+ *    turn context's recalled memories, recalled from Hindsight.
  *
  * The user and profile are this file's own. A learned rule is global
  * (`profile_id` null, no user column), so it reaches every other file's
@@ -271,24 +271,30 @@ const ChatBodySchema = z.object({
 });
 
 /**
- * The system prompt of the first request llmock received whose latest user
- * message is `userMessage`: the prompt the model saw for that turn. The
+ * The first request llmock received whose latest user message ends with
+ * `userMessage`: its system prompt, and that user message — the turn context
+ * leading the user's text, joined into one string by llmock's conversion. The
  * journal keeps the last 1000 requests and swaps a body over 64 KB for a
  * truncation marker, so a miss can mean either.
  */
-async function systemPromptSentWith(userMessage: string): Promise<string> {
+async function requestSentWith(userMessage: string): Promise<{ system: string; turn: string }> {
   const res = await fetch(`${inject("llmockBaseUrl")}/__aimock/journal?path=/v1/messages`);
   if (!res.ok) throw new Error(`llmock journal: ${res.status}`);
   const entries = z.array(JournalEntrySchema).parse(await res.json());
   for (const entry of entries) {
     const body = ChatBodySchema.safeParse(entry.body);
     if (!body.success) continue;
-    const users = body.data.messages.filter((m) => m.role === "user");
-    if (users.at(-1)?.content !== userMessage) continue;
+    const turn = body.data.messages.filter((m) => m.role === "user").at(-1)?.content;
+    if (!turn?.endsWith(`</turn_context>\n\n${userMessage}`)) continue;
     const system = body.data.messages.find((m) => m.role === "system");
-    return expectDefined(system?.content, "system prompt");
+    return { system: expectDefined(system?.content, "system prompt"), turn };
   }
   throw new Error(`no request in the llmock journal ends with "${userMessage}"`);
+}
+
+/** The body of a turn context's recalled-memories element, or "" when it has none. */
+function recalledMemories(turn: string): string {
+  return turn.split(/<recalled_memories[^>]*>\n/)[1]?.split("\n</recalled_memories>")[0] ?? "";
 }
 
 /** The body of a system prompt's `# heading` section, or "" when it has none. */
@@ -345,11 +351,11 @@ describe("learning loop", () => {
 
     const third = await startConversation();
     await turn(third, PROBE);
-    const system = await systemPromptSentWith(PROBE);
+    const sent = await requestSentWith(PROBE);
 
     expect(userSection).toMatch(/Lisbon/);
-    expect(section(system, "User")).toBe(userSection);
-    expect(section(system, "Rules").split("\n")).toContain(`- ${rule.rule}`);
-    expect(section(system, "Recalled Context")).toMatch(/Taberna da Rua das Flores/);
+    expect(section(sent.system, "User")).toBe(userSection);
+    expect(section(sent.system, "Rules").split("\n")).toContain(`- ${rule.rule}`);
+    expect(recalledMemories(sent.turn)).toMatch(/Taberna da Rua das Flores/);
   });
 });

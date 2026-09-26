@@ -1,6 +1,7 @@
 import type http from "node:http";
 import { type ChatCompletionRequest, LLMock } from "@copilotkit/aimock";
 import { HAPPENED_IN_RE, normalizeHappenedIn } from "../src/test/llmock-happened-in.js";
+import { normalizeTurnContext } from "../src/test/llmock-turn-context.js";
 
 const FIXTURE_DIR = "./test/fixtures/recorded";
 
@@ -39,7 +40,8 @@ const countTokensHandler = {
  */
 function normalizeContent(text: string): string {
   return (
-    text
+    // The turn context's time line and recalled memories (see its module).
+    normalizeTurnContext(text)
       // ISO 8601 timestamps → [TS]
       .replace(/\d{4}-\d{2}-\d{2}T[\d:.]+(\+[\d:]+|Z)/g, "[TS]")
       // UUIDs → [UUID]
@@ -89,6 +91,16 @@ function requestTransform(req: ChatCompletionRequest): ChatCompletionRequest {
   return {
     ...req,
     messages: req.messages.map((m, i) => {
+      // The OpenAI-compatible adapter sends an image turn as content parts,
+      // its turn context among the text ones.
+      if (Array.isArray(m.content)) {
+        return {
+          ...m,
+          content: m.content.map((part) =>
+            part.type === "text" ? { ...part, text: normalizeContent(part.text) } : part,
+          ),
+        };
+      }
       if (typeof m.content !== "string") return m;
       const content = normalizeContent(m.content);
       return {
