@@ -180,6 +180,103 @@ describe("OpenAICompatibleProvider", () => {
       ]);
     });
 
+    it("maps a response with text and several calls to the text block, then each call in order", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        choices: [
+          {
+            message: {
+              content: "Checking both.",
+              tool_calls: [
+                {
+                  id: "call_1",
+                  type: "function",
+                  function: { name: "search", arguments: '{"q":"a"}' },
+                },
+                {
+                  id: "call_2",
+                  type: "function",
+                  function: { name: "read", arguments: '{"p":"b"}' },
+                },
+              ],
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+        model: "m",
+        usage: { prompt_tokens: 8, completion_tokens: 6 },
+      });
+
+      const result = await provider.chat({
+        model: "m",
+        system: "sys",
+        messages: [{ role: "user", content: "go" }],
+      });
+
+      expect(result.content).toEqual([
+        { type: "text", text: "Checking both." },
+        { type: "tool_use", id: "call_1", name: "search", input: { q: "a" } },
+        { type: "tool_use", id: "call_2", name: "read", input: { p: "b" } },
+      ]);
+    });
+
+    it("maps a transcript: assistant text beside its calls, each tool result before the user's text", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        choices: [{ message: { content: "done" }, finish_reason: "stop" }],
+        model: "m",
+        usage: { prompt_tokens: 10, completion_tokens: 1 },
+      });
+
+      await provider.chat({
+        model: "m",
+        system: "sys",
+        messages: [
+          { role: "user", content: "look both up" },
+          {
+            role: "assistant",
+            content: [
+              { type: "text", text: "Checking." },
+              { type: "tool_use", id: "call_1", name: "search", input: { q: "a" } },
+              { type: "tool_use", id: "call_2", name: "search", input: { q: "b" } },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              { type: "tool_result", toolUseId: "call_1", content: "A" },
+              { type: "tool_result", toolUseId: "call_2", content: "B" },
+              { type: "text", text: "and summarise" },
+            ],
+          },
+        ],
+      });
+
+      expect(firstCreateArgs().messages).toEqual([
+        { role: "system", content: "sys" },
+        { role: "user", content: "look both up" },
+        {
+          role: "assistant",
+          content: "Checking.",
+          tool_calls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: { name: "search", arguments: '{"q":"a"}' },
+            },
+            {
+              id: "call_2",
+              type: "function",
+              function: { name: "search", arguments: '{"q":"b"}' },
+            },
+          ],
+        },
+        { role: "tool", tool_call_id: "call_1", content: "A" },
+        { role: "tool", tool_call_id: "call_2", content: "B" },
+        { role: "user", content: "and summarise" },
+      ]);
+    });
+
     it("sends system as first message", async () => {
       const provider = createProvider();
       mockCreate.mockResolvedValueOnce({
@@ -729,6 +826,44 @@ describe("OpenAICompatibleProvider", () => {
       await expect(
         provider.chat({ model: "m", system: "sys", messages: [{ role: "user", content: "go" }] }),
       ).rejects.toBeInstanceOf(ToolArgsCutOffError);
+    });
+
+    it("does not report a length-capped non-streaming response's earlier unparseable call as cut off", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        model: "m",
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_1",
+                  type: "function",
+                  function: { name: "write", arguments: "}}}]]]" },
+                },
+                {
+                  id: "call_2",
+                  type: "function",
+                  function: { name: "read", arguments: '{"q":"x"}' },
+                },
+              ],
+            },
+            finish_reason: "length",
+          },
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 8 },
+      });
+
+      const error = await provider
+        .chat({ model: "m", system: "sys", messages: [{ role: "user", content: "go" }] })
+        .then(
+          () => undefined,
+          (err: unknown) => err,
+        );
+      expect(error).toBeInstanceOf(ProviderProtocolError);
+      expect(error).not.toBeInstanceOf(ToolArgsCutOffError);
     });
   });
 
