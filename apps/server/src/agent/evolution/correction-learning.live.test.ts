@@ -29,13 +29,14 @@
  *
  *   set -a; . ./.env; set +a; LIVE=1 pnpm test:live src/agent/evolution/correction-learning.live.test.ts
  *
- * `EVAL_CASES` (comma-separated scenario ids) narrows the run; `LIVE_MODEL`
- * overrides the model.
+ * `EVAL_CASES` (comma-separated scenario ids) narrows the run, `EVAL_REPEATS`
+ * samples every scenario that many times, and `LIVE_MODEL` overrides the model.
  */
 
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import * as R from "remeda";
 import { afterAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { AnthropicProvider } from "../../llm/anthropic.js";
@@ -46,12 +47,16 @@ import {
   createUsageMeter,
   EVAL_MODEL,
   EVAL_PROFILE,
+  EVAL_REPEATS,
   EvalCoreMemory,
+  type EvalMetric,
   type EvalTurn,
   LIVE_API_KEY,
   oneLine,
+  rateTable,
   runEvalConversation,
   runEvalTurn,
+  withRepeats,
 } from "../../test/live-eval.js";
 import { createTestDatabase } from "../../test/pglite.js";
 import type { CoreMemoryBlock } from "../service.js";
@@ -116,6 +121,7 @@ interface Probe {
 }
 
 interface Outcome {
+  repeat: number;
   scenario: Scenario;
   extracted: { first: ExtractionResult; second: ExtractionResult };
   /** Correction rows after each extraction. */
@@ -129,9 +135,10 @@ interface Outcome {
   coreWrites: { first: ReadonlyArray<CoreMemoryBlock>; second: ReadonlyArray<CoreMemoryBlock> };
 }
 
-const outcomes = new Map<string, Outcome>();
-/** Scenarios that threw, with the stage they reached. */
-const failures = new Map<string, string>();
+/** Every completed sample of each scenario, by scenario id. */
+const outcomes = new Map<string, Outcome[]>();
+/** Samples that threw, by scenario id, with the stage they reached. */
+const failures = new Map<string, string[]>();
 const usage = createUsageMeter();
 
 function probeOf(turn: EvalTurn, check: Check): Probe {
@@ -142,12 +149,7 @@ function rulesSection(rules: ReadonlyArray<{ rule: string }>): string {
   return `# Rules\n\n${rules.map((r) => `- ${r.rule}`).join("\n")}`;
 }
 
-/** Summary rates: each counts the outcomes in `of` for which `hit` holds. */
-const METRICS: ReadonlyArray<{
-  name: string;
-  of: (o: Outcome) => boolean;
-  hit: (o: Outcome) => boolean;
-}> = [
+const METRICS: ReadonlyArray<EvalMetric<Outcome>> = [
   { name: "extracted from the first", of: () => true, hit: (o) => o.extracted.first.extracted > 0 },
   {
     name: "matched in the second",
@@ -191,42 +193,43 @@ function stored(rows: ReadonlyArray<StoredCorrection>): string {
 }
 
 function report(): void {
-  const rows = SCENARIOS.flatMap((s) => {
-    const o = outcomes.get(s.id);
-    return o ? [o] : [];
-  });
+  const byScenario = SCENARIOS.map((scenario) => ({
+    scenario,
+    samples: R.sortBy(outcomes.get(scenario.id) ?? [], (o) => o.repeat),
+    failed: failures.get(scenario.id) ?? [],
+  }));
+  const rows = byScenario.flatMap((s) => s.samples);
   if (rows.length === 0 && failures.size === 0) return;
 
-  console.log(`\nCorrection → steering rule → followed, on ${EVAL_MODEL}\n`);
-  for (const [id, failure] of failures) console.log(`${id}: FAILED ${failure}`);
-  for (const o of rows) {
-    const follows = (p: Probe | undefined) =>
-      p === undefined ? "n/a" : p.follows ? "follows" : "VIOLATES";
-    console.log(
-      `${o.scenario.id}: rule=${follows(o.withRule)} baseline=${follows(o.baseline)} ` +
-        `rendered=${o.rendered ?? "n/a"}`,
-    );
-    console.log(`  first:  ${counts(o.extracted.first)}`);
-    console.log(`         ${stored(o.stored.first) || "(no corrections)"}`);
-    console.log(`  second: ${counts(o.extracted.second)}`);
-    console.log(`         ${stored(o.stored.second) || "(no corrections)"}`);
-    for (const [conversation, writes] of Object.entries(o.coreWrites)) {
-      for (const w of writes) {
-        console.log(`  core memory (${conversation}): ${w.key} := ${oneLine(w.content, 200)}`);
+  console.log(
+    `\nCorrection → steering rule → followed, on ${EVAL_MODEL}, ${EVAL_REPEATS} sample(s) per scenario\n`,
+  );
+  const follows = (p: Probe | undefined) =>
+    p === undefined ? "n/a" : p.follows ? "follows" : "VIOLATES";
+  for (const { scenario, samples, failed } of byScenario) {
+    const passes = samples.filter((o) => o.withRule?.follows === true).length;
+    console.log(`${passes}/${EVAL_REPEATS} ${scenario.id} (rule active and followed)`);
+    for (const failure of failed) console.log(`  FAILED ${failure}`);
+    for (const o of samples) {
+      console.log(
+        `  #${o.repeat} rule=${follows(o.withRule)} baseline=${follows(o.baseline)} ` +
+          `rendered=${o.rendered ?? "n/a"}`,
+      );
+      console.log(`    first:  ${counts(o.extracted.first)}`);
+      console.log(`           ${stored(o.stored.first) || "(no corrections)"}`);
+      console.log(`    second: ${counts(o.extracted.second)}`);
+      console.log(`           ${stored(o.stored.second) || "(no corrections)"}`);
+      for (const [conversation, writes] of Object.entries(o.coreWrites)) {
+        for (const w of writes) {
+          console.log(`    core memory (${conversation}): ${w.key} := ${oneLine(w.content, 200)}`);
+        }
       }
+      if (o.withRule) console.log(`    reply (rule):     ${oneLine(o.withRule.reply, 200)}`);
+      console.log(`    reply (baseline): ${oneLine(o.baseline.reply, 200)}`);
     }
-    if (o.withRule) console.log(`  reply (rule):     ${oneLine(o.withRule.reply, 200)}`);
-    console.log(`  reply (baseline): ${oneLine(o.baseline.reply, 200)}`);
   }
 
-  console.table(
-    Object.fromEntries(
-      METRICS.map((m) => {
-        const population = rows.filter(m.of);
-        return [m.name, { all: `${population.filter(m.hit).length}/${population.length}` }];
-      }),
-    ),
-  );
+  console.table(rateTable(METRICS, { all: rows }));
   console.log(`Usage: ${usage.summary()}`);
 }
 
@@ -244,9 +247,9 @@ describe.skipIf(LIVE_API_KEY === undefined)(
 
     afterAll(report);
 
-    it.concurrent.each(SCENARIOS)(
-      "$id",
-      async (scenario) => {
+    it.concurrent.each(withRepeats(SCENARIOS))(
+      "$id #$repeat",
+      async ({ repeat, ...scenario }) => {
         const provider = new AnthropicProvider(expectDefined(LIVE_API_KEY, "API key"));
         const db = await createTestDatabase();
         let stage = "";
@@ -307,20 +310,27 @@ describe.skipIf(LIVE_API_KEY === undefined)(
           const probes = withRule ? [withRule, baseline] : [baseline];
           for (const p of probes) usage.add(p.result.usage);
 
-          outcomes.set(scenario.id, {
-            scenario,
-            extracted: { first: first.extracted, second: second.extracted },
-            stored: { first: first.stored, second: second.stored },
-            active,
-            rendered: withRule?.systemPrompt.includes(rulesSection(active)),
-            withRule: withRule && probeOf(withRule, scenario.check),
-            baseline: probeOf(baseline, scenario.check),
-            coreWrites: { first: first.coreWrites, second: second.coreWrites },
-          });
+          outcomes.set(scenario.id, [
+            ...(outcomes.get(scenario.id) ?? []),
+            {
+              repeat,
+              scenario,
+              extracted: { first: first.extracted, second: second.extracted },
+              stored: { first: first.stored, second: second.stored },
+              active,
+              rendered: withRule?.systemPrompt.includes(rulesSection(active)),
+              withRule: withRule && probeOf(withRule, scenario.check),
+              baseline: probeOf(baseline, scenario.check),
+              coreWrites: { first: first.coreWrites, second: second.coreWrites },
+            },
+          ]);
 
           expectCompleted(probes);
         } catch (err) {
-          failures.set(scenario.id, `${stage}: ${oneLine(String(err), 300)}`);
+          failures.set(scenario.id, [
+            ...(failures.get(scenario.id) ?? []),
+            `#${repeat} ${stage}: ${oneLine(String(err), 300)}`,
+          ]);
           throw err;
         } finally {
           await db.close();

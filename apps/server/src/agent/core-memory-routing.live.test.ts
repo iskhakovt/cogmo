@@ -25,8 +25,8 @@
  *
  *   set -a; . ./.env; set +a; LIVE=1 pnpm test:live src/agent/core-memory-routing.live.test.ts
  *
- * `EVAL_CASES` (comma-separated case ids) narrows the run; `LIVE_MODEL`
- * overrides the model.
+ * `EVAL_CASES` (comma-separated case ids) narrows the run, `EVAL_REPEATS`
+ * samples every case that many times, and `LIVE_MODEL` overrides the model.
  */
 
 import { randomUUID } from "node:crypto";
@@ -39,12 +39,17 @@ import { AnthropicProvider } from "../llm/anthropic.js";
 import { expectDefined } from "../test/assertions.js";
 import {
   coreMemoryWrites,
+  createUsageMeter,
   EVAL_MODEL,
+  EVAL_REPEATS,
   EvalCoreMemory,
+  type EvalMetric,
   LIVE_API_KEY,
   memoryCallsByIteration,
   oneLine,
+  rateTable,
   runEvalTurn,
+  withRepeats,
 } from "../test/live-eval.js";
 import type { CoreMemoryBlock } from "./service.js";
 
@@ -119,6 +124,7 @@ const RUNS = STATES.flatMap(({ state, established }) =>
 type Run = (typeof RUNS)[number];
 
 interface Outcome {
+  repeat: number;
   state: string;
   id: string;
   expect: Routing;
@@ -138,7 +144,9 @@ interface Outcome {
   reply: string;
 }
 
-const outcomes = new Map<string, Outcome>();
+/** Every sample of each run, by run name. */
+const outcomes = new Map<string, Outcome[]>();
+const usage = createUsageMeter();
 
 /**
  * A rewritten block keeps an established line while it still names every one
@@ -204,12 +212,7 @@ function labelled(routing: Routing): (o: Outcome) => boolean {
   return (o) => o.expect === routing;
 }
 
-/** Summary rates: each counts the outcomes in `of` for which `hit` holds. */
-const METRICS: ReadonlyArray<{
-  name: string;
-  of: (o: Outcome) => boolean;
-  hit: (o: Outcome) => boolean;
-}> = [
+const METRICS: ReadonlyArray<EvalMetric<Outcome>> = [
   { name: "core recall (turn)", of: labelled("core"), hit: updates },
   { name: "  announced", of: (o) => o.expect === "core" && !o.inPassing, hit: updates },
   { name: "  in passing", of: (o) => o.expect === "core" && o.inPassing, hit: updates },
@@ -251,38 +254,34 @@ function verdict(o: Outcome): string {
 }
 
 function report(): void {
-  const rows = RUNS.flatMap((r) => {
-    const o = outcomes.get(r.name);
-    return o ? [o] : [];
-  });
+  const byRun = RUNS.map((run) => ({
+    run,
+    samples: R.sortBy(outcomes.get(run.name) ?? [], (o) => o.repeat),
+  }));
+  const rows = byRun.flatMap((r) => r.samples);
   if (rows.length === 0) return;
 
-  console.log(`\nCore-memory routing on ${EVAL_MODEL}\n`);
-  for (const o of rows) {
-    const keys = o.coreWrites.map((w) => w.key).join(",");
+  console.log(`\nCore-memory routing on ${EVAL_MODEL}, ${EVAL_REPEATS} sample(s) per case\n`);
+  for (const { run, samples } of byRun) {
+    const passes = samples.filter((o) => verdict(o).trim() === "ok").length;
     console.log(
-      `${verdict(o)} ${o.state.padEnd(11)} ${o.id.padEnd(18)} ${o.expect.padEnd(9)} ` +
-        `first=[${o.first.join(",")}] turn=[${o.turn.join(",")}]` +
-        `${keys ? ` keys=${keys}` : ""}${o.keyOk === false ? " (unexpected block)" : ""}`,
+      `${`${passes}/${EVAL_REPEATS}`.padEnd(5)} ${run.state.padEnd(11)} ${run.id.padEnd(18)} ${run.expect}`,
     );
-    for (const w of o.coreWrites) console.log(`        ${w.key} := ${oneLine(w.content, 400)}`);
-    if (o.lost?.length) console.log(`        lost: ${o.lost.join(" | ")}`);
-    if (o.stale?.length) console.log(`        still holds: ${o.stale.join(", ")}`);
-    console.log(`        reply: ${oneLine(o.reply, 120)}`);
+    for (const o of samples) {
+      const keys = o.coreWrites.map((w) => w.key).join(",");
+      console.log(
+        `  ${verdict(o)} #${o.repeat} first=[${o.first.join(",")}] turn=[${o.turn.join(",")}]` +
+          `${keys ? ` keys=${keys}` : ""}${o.keyOk === false ? " (unexpected block)" : ""}`,
+      );
+      for (const w of o.coreWrites) console.log(`          ${w.key} := ${oneLine(w.content, 400)}`);
+      if (o.lost?.length) console.log(`          lost: ${o.lost.join(" | ")}`);
+      if (o.stale?.length) console.log(`          still holds: ${o.stale.join(", ")}`);
+      console.log(`          reply: ${oneLine(o.reply, 120)}`);
+    }
   }
 
-  const groups = { ...R.groupBy(rows, (o) => o.state), all: rows };
-  console.table(
-    Object.fromEntries(
-      METRICS.map((m) => [
-        m.name,
-        R.mapValues(groups, (group) => {
-          const population = group.filter(m.of);
-          return `${population.filter(m.hit).length}/${population.length}`;
-        }),
-      ]),
-    ),
-  );
+  console.table(rateTable(METRICS, { ...R.groupBy(rows, (o) => o.state), all: rows }));
+  console.log(`Usage: ${usage.summary()}`);
 }
 
 describe.skipIf(LIVE_API_KEY === undefined)(
@@ -292,7 +291,7 @@ describe.skipIf(LIVE_API_KEY === undefined)(
 
     afterAll(report);
 
-    it.concurrent.each(RUNS)("$name", async (run) => {
+    it.concurrent.each(withRepeats(RUNS))("$name #$repeat", async (run) => {
       const { result } = await runEvalTurn({
         provider: new AnthropicProvider(expectDefined(LIVE_API_KEY, "API key")),
         coreMemory: new EvalCoreMemory(run.blocks),
@@ -301,21 +300,26 @@ describe.skipIf(LIVE_API_KEY === undefined)(
         message: run.message,
         cacheKey: `${nonce}-${run.state}`,
       });
+      usage.add(result.usage);
 
       const byIteration = memoryCallsByIteration(result.newMessages);
       const calls = byIteration.flat();
       const coreWrites = coreMemoryWrites(result.newMessages);
-      outcomes.set(run.name, {
-        state: run.state,
-        id: run.id,
-        expect: run.expect,
-        inPassing: run.inPassing ?? false,
-        first: (byIteration[0] ?? []).map((c) => c.name),
-        turn: calls.map((c) => c.name),
-        coreWrites,
-        ...checkWrites(run, coreWrites),
-        reply: result.text,
-      });
+      outcomes.set(run.name, [
+        ...(outcomes.get(run.name) ?? []),
+        {
+          repeat: run.repeat,
+          state: run.state,
+          id: run.id,
+          expect: run.expect,
+          inPassing: run.inPassing ?? false,
+          first: (byIteration[0] ?? []).map((c) => c.name),
+          turn: calls.map((c) => c.name),
+          coreWrites,
+          ...checkWrites(run, coreWrites),
+          reply: result.text,
+        },
+      ]);
 
       expect(result.degraded).toBeUndefined();
       expect(result.text).not.toBe("");

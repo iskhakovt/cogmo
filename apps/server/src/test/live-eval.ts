@@ -10,6 +10,9 @@
  * `EvalCoreMemory`, which the prompt's `# User` section also renders from, so
  * a later turn sees what an earlier one wrote. Every other handler returns a
  * canned result: nothing is persisted and nothing outside the model is called.
+ *
+ * `EVAL_REPEATS` (default 1) runs every case that many times. Summary rates
+ * count every sample, and each repeat's own rate follows in brackets.
  */
 
 import * as R from "remeda";
@@ -36,6 +39,54 @@ export const LIVE_API_KEY =
   (process.env.LIVE === "1" && process.env.ANTHROPIC_API_KEY) || undefined;
 
 export const EVAL_MODEL = process.env.LIVE_MODEL ?? DEFAULT_PROFILE_MODEL;
+
+/** Samples per case. */
+export const EVAL_REPEATS = z.coerce
+  .number()
+  .int()
+  .positive()
+  .default(1)
+  .parse(process.env.EVAL_REPEATS);
+
+/** Every run once per repeat, case by case, tagged with its 0-based repeat. */
+export function withRepeats<T extends object>(
+  runs: ReadonlyArray<T>,
+): Array<T & { repeat: number }> {
+  return runs.flatMap((run) => R.range(0, EVAL_REPEATS).map((repeat) => ({ ...run, repeat })));
+}
+
+/** A summary row: the samples in `of` for which `hit` holds. */
+export interface EvalMetric<O> {
+  name: string;
+  of: (o: O) => boolean;
+  hit: (o: O) => boolean;
+}
+
+/**
+ * Each metric's rate per group, as `hits/samples` over every repeat, followed
+ * by each repeat's own rate in brackets when there is more than one.
+ */
+export function rateTable<O extends { repeat: number }>(
+  metrics: ReadonlyArray<EvalMetric<O>>,
+  groups: Readonly<Record<string, ReadonlyArray<O>>>,
+): Record<string, Record<string, string>> {
+  return Object.fromEntries(
+    metrics.map((m) => [
+      m.name,
+      R.mapValues(groups, (group) => {
+        const rate = (samples: ReadonlyArray<O>) => {
+          const population = samples.filter(m.of);
+          return `${population.filter(m.hit).length}/${population.length}`;
+        };
+        if (EVAL_REPEATS === 1) return rate(group);
+        const perRepeat = R.range(0, EVAL_REPEATS).map((i) =>
+          rate(group.filter((o) => o.repeat === i)),
+        );
+        return `${rate(group)} [${perRepeat.join(" ")}]`;
+      }),
+    ]),
+  );
+}
 
 const EVAL_TIMEZONE = "Europe/London";
 

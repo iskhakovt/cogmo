@@ -22,8 +22,8 @@
  *
  *   set -a; . ./.env; set +a; LIVE=1 pnpm test:live src/agent/core-memory-multiturn.live.test.ts
  *
- * `EVAL_CASES` (comma-separated scenario ids) narrows the run; `LIVE_MODEL`
- * overrides the model.
+ * `EVAL_CASES` (comma-separated scenario ids) narrows the run, `EVAL_REPEATS`
+ * samples every scenario that many times, and `LIVE_MODEL` overrides the model.
  */
 
 import { randomUUID } from "node:crypto";
@@ -39,11 +39,15 @@ import {
   coreMemoryWrites,
   createUsageMeter,
   EVAL_MODEL,
+  EVAL_REPEATS,
   EvalCoreMemory,
+  type EvalMetric,
   LIVE_API_KEY,
   memoryCallsByIteration,
   oneLine,
+  rateTable,
   runEvalConversation,
+  withRepeats,
 } from "../test/live-eval.js";
 import type { CoreMemoryBlock } from "./service.js";
 
@@ -104,6 +108,7 @@ interface TurnRecord {
 }
 
 interface Outcome {
+  repeat: number;
   scenario: Scenario;
   turns: ReadonlyArray<TurnRecord>;
   /** First turn after which the blocks match `expect`. */
@@ -116,13 +121,15 @@ interface Outcome {
   unrelatedWrites: number;
 }
 
-const outcomes = new Map<string, Outcome>();
+/** Every sample of each scenario, by scenario id. */
+const outcomes = new Map<string, Outcome[]>();
 const usage = createUsageMeter();
 
-function outcomeOf(scenario: Scenario, turns: ReadonlyArray<TurnRecord>): Outcome {
+function outcomeOf(scenario: Scenario, repeat: number, turns: ReadonlyArray<TurnRecord>): Outcome {
   const finalBlocks = turns.at(-1)?.blocksAfter ?? [];
   const learned = turns.findIndex((t) => mentions(t.blocksAfter, scenario.expect));
   return {
+    repeat,
     scenario,
     turns,
     learnedAt: learned === -1 ? undefined : learned,
@@ -141,12 +148,7 @@ function verdict(o: Outcome): string {
   return o.learnedAt === o.scenario.factTurn ? "ok  " : "LATE";
 }
 
-/** Summary rates: each counts the outcomes in `of` for which `hit` holds. */
-const METRICS: ReadonlyArray<{
-  name: string;
-  of: (o: Outcome) => boolean;
-  hit: (o: Outcome) => boolean;
-}> = [
+const METRICS: ReadonlyArray<EvalMetric<Outcome>> = [
   {
     name: "fact written in its turn",
     of: () => true,
@@ -173,44 +175,42 @@ const METRICS: ReadonlyArray<{
 ];
 
 function report(): void {
-  const rows = SCENARIOS.flatMap((s) => {
-    const o = outcomes.get(s.id);
-    return o ? [o] : [];
-  });
+  const byScenario = SCENARIOS.map((scenario) => ({
+    scenario,
+    samples: R.sortBy(outcomes.get(scenario.id) ?? [], (o) => o.repeat),
+  }));
+  const rows = byScenario.flatMap((s) => s.samples);
   if (rows.length === 0) return;
 
-  console.log(`\nCore memory over multi-turn conversations on ${EVAL_MODEL}\n`);
-  for (const o of rows) {
-    const { id, category, factTurn } = o.scenario;
-    const perTurn = o.turns
-      .map((t) => {
-        const keys = t.writes.map((w) => w.key).join("+");
-        return `${keys || "-"}${t.retains > 0 ? `/retain×${t.retains}` : ""}`;
-      })
-      .join(" | ");
+  console.log(
+    `\nCore memory over multi-turn conversations on ${EVAL_MODEL}, ${EVAL_REPEATS} sample(s) per scenario\n`,
+  );
+  for (const { scenario, samples } of byScenario) {
+    const { id, category, factTurn } = scenario;
+    const passes = samples.filter((o) => verdict(o).trim() === "ok").length;
     console.log(
-      `${verdict(o)} ${category.padEnd(6)} ${id.padEnd(13)} fact@${factTurn} ` +
-        `learned@${o.learnedAt ?? "-"}${o.stale ? ` old=${o.stale}` : ""} ` +
-        `lost=[${o.lost.join(",")}] unrelated=${o.unrelatedWrites}  turns: ${perTurn}`,
+      `${`${passes}/${EVAL_REPEATS}`.padEnd(5)} ${category.padEnd(6)} ${id} fact@${factTurn}`,
     );
-    o.turns.forEach((t, i) => {
-      for (const w of t.writes) console.log(`       t${i} ${w.key} := ${oneLine(w.content, 300)}`);
-    });
-    console.log(`       reply@${factTurn}: ${oneLine(o.turns[factTurn]?.reply ?? "", 120)}`);
+    for (const o of samples) {
+      const perTurn = o.turns
+        .map((t) => {
+          const keys = t.writes.map((w) => w.key).join("+");
+          return `${keys || "-"}${t.retains > 0 ? `/retain×${t.retains}` : ""}`;
+        })
+        .join(" | ");
+      console.log(
+        `  ${verdict(o)} #${o.repeat} learned@${o.learnedAt ?? "-"}${o.stale ? ` old=${o.stale}` : ""} ` +
+          `lost=[${o.lost.join(",")}] unrelated=${o.unrelatedWrites}  turns: ${perTurn}`,
+      );
+      o.turns.forEach((t, i) => {
+        for (const w of t.writes)
+          console.log(`         t${i} ${w.key} := ${oneLine(w.content, 300)}`);
+      });
+      console.log(`         reply@${factTurn}: ${oneLine(o.turns[factTurn]?.reply ?? "", 120)}`);
+    }
   }
 
-  const groups = { ...R.groupBy(rows, (o) => o.scenario.category), all: rows };
-  console.table(
-    Object.fromEntries(
-      METRICS.map((m) => [
-        m.name,
-        R.mapValues(groups, (group) => {
-          const population = group.filter(m.of);
-          return `${population.filter(m.hit).length}/${population.length}`;
-        }),
-      ]),
-    ),
-  );
+  console.table(rateTable(METRICS, { ...R.groupBy(rows, (o) => o.scenario.category), all: rows }));
   console.log(`Usage: ${usage.summary()}`);
 }
 
@@ -221,9 +221,9 @@ describe.skipIf(LIVE_API_KEY === undefined)(
 
     afterAll(report);
 
-    it.concurrent.each(SCENARIOS)(
-      "$category/$id",
-      async (scenario) => {
+    it.concurrent.each(withRepeats(SCENARIOS))(
+      "$category/$id #$repeat",
+      async ({ repeat, ...scenario }) => {
         const conversation = await runEvalConversation({
           provider: new AnthropicProvider(expectDefined(LIVE_API_KEY, "API key")),
           coreMemory: new EvalCoreMemory(EVAL.established),
@@ -243,7 +243,10 @@ describe.skipIf(LIVE_API_KEY === undefined)(
             reply: t.result.text,
           };
         });
-        outcomes.set(scenario.id, outcomeOf(scenario, turns));
+        outcomes.set(scenario.id, [
+          ...(outcomes.get(scenario.id) ?? []),
+          outcomeOf(scenario, repeat, turns),
+        ]);
 
         for (const t of conversation.turns) {
           expect(t.result.degraded).toBeUndefined();
