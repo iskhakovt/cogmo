@@ -55,7 +55,7 @@ Results on `claude-sonnet-5`, one sample per case. *Baseline* is the guidance be
 | Core writes on Hindsight facts | 0/7 | 0/7 | 0/9 | 0/9 |
 | Core writes on messages worth storing nowhere | 0/7 | 0/7 | 0/8 | 0/3 ¹ |
 
-¹ The run's last five turns, messages worth storing nowhere with established blocks, failed when the API account ran out of credit.
+¹ Five of this cell's cases (`mutex-question`, `thanks`, `tired-today`, `pour-over`, `one-off-format`) are not yet measured on the current wording; run them with `EVAL_CASES=mutex-question,thanks,tired-today,pour-over,one-off-format`.
 
 On the baseline, the agent updated core memory for announced facts once blocks existed but mostly missed facts mentioned in passing. With no blocks, onboarding drew the turn into introductions, and core facts went to `memory_retain` or nowhere. Under the rule, every core fact reaches an expected block once blocks exist, all in the first response, with no established line lost, and 10 of 11 do with no blocks, including every fact mentioned in passing. No Hindsight fact writes core memory, the conference trip and the partner's promotion included. The finished project is a known miss against the rule: the rewrite marks it completed in `active_projects` instead of removing it.
 
