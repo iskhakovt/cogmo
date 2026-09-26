@@ -9,7 +9,7 @@ Even before hitting the hard limit, quality degrades. Research shows accuracy dr
 ## Our Advantages
 
 1. **Hindsight (semantic memory)** — cross-session recall via embedding search. Facts extracted by the Observer survive any in-context compression.
-2. **Core memory blocks** — always injected into system prompt, survive compaction by design.
+2. **Core memory blocks** — always injected into system prompt, survive compaction by design. What belongs there rather than in Hindsight: [memory.md](memory.md) → Core Memory vs Hindsight.
 3. **Auto-recall** — relevant memories re-injected each turn. Aggressive history compression is safer because important past context is recoverable via retrieval.
 
 These mean compaction can be more aggressive than a system without external memory — information isn't permanently lost, just moved to a different tier.
