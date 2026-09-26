@@ -176,7 +176,7 @@ export const skillRuns = pgTable(
      * Caller-supplied deterministic-per-fire token. Set when the run is
      * driven by a context that may retry (cron-fire dispatcher, agent-loop
      * tool call); null when the invocation is one-shot (CLI, ad-hoc
-     * tests). The partial unique index below makes `runner.invoke` safe
+     * tests). The unique constraint below makes `runner.invoke` safe
      * against duplicate fires for the same logical trigger.
      */
     idempotencyKey: text("idempotency_key"),
@@ -197,9 +197,9 @@ export const skillRuns = pgTable(
     // Plain UNIQUE constraint — Postgres treats NULLs as not-equal under
     // default unique semantics, so multiple null-key rows (CLI / tests)
     // coexist freely while non-null keys are constrained to one row.
-    // Concurrent attempts with the same key race here; the loser's
-    // INSERT no-ops via `ON CONFLICT DO NOTHING` and the caller
-    // re-selects the existing row.
+    // Concurrent attempts with the same key race here; the loser lands
+    // in `startOrRecoverRun`'s `ON CONFLICT DO UPDATE` arm and gets the
+    // existing row back.
     unique("uniq_skill_runs_idempotency_key").on(t.idempotencyKey),
   ],
 );

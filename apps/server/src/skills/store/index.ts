@@ -1,4 +1,4 @@
-import { and, asc, eq, isNotNull, lte, sql } from "drizzle-orm";
+import { and, asc, eq, getTableColumns, isNotNull, lte, sql } from "drizzle-orm";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
 import type {
@@ -152,10 +152,9 @@ export interface InsertRunParams {
   trigger: SkillRunTrigger;
   inputs: unknown;
   /**
-   * Optional deterministic token. When provided, the row is inserted with
-   * an `ON CONFLICT DO NOTHING` clause against
-   * `uniq_skill_runs_idempotency_key`; the caller distinguishes "we
-   * inserted" from "someone else holds the row" via
+   * Optional deterministic token, stamped as-is: a taken key throws on
+   * `uniq_skill_runs_idempotency_key`. Callers that need to tell "we
+   * inserted" from "someone else holds the row" use
    * {@link SkillStore.startOrRecoverRun}.
    */
   idempotencyKey?: string;
@@ -390,9 +389,8 @@ export interface SkillStore {
    *     that crashed, or a successful run being replayed). Caller
    *     branches on `row.recoveryPoint`.
    *
-   * Implementation: `INSERT ... ON CONFLICT (idempotency_key) DO NOTHING
-   * RETURNING *`; when zero rows return, follow up with `SELECT ... FOR
-   * UPDATE` so the recovered row is locked for the caller's transition.
+   * Implementation: `INSERT ... ON CONFLICT (idempotency_key) DO UPDATE`
+   * with a no-op SET, `RETURNING (xmax = 0)` to tell the two apart.
    */
   startOrRecoverRun(
     tx: Transaction,
@@ -940,14 +938,11 @@ export class DrizzleSkillStore implements SkillStore {
     if (params.inputs === null || params.inputs === undefined) {
       throw new Error("startOrRecoverRun: inputs must not be null/undefined");
     }
-    // ON CONFLICT DO NOTHING against the `uniq_skill_runs_idempotency_key`
-    // UNIQUE constraint. Postgres default NULL semantics treat nulls as
-    // not-equal in unique constraints, so multiple null-key rows
-    // (CLI / tests) coexist; non-null keys collide and the no-op path
-    // fires. RETURNING yields zero rows on collision; the caller
-    // re-selects with FOR UPDATE to lock the existing row for its own
-    // transition.
-    const inserted = await tx
+    // Keyed on `uniq_skill_runs_idempotency_key`. The no-op SET hands back
+    // the stored row, recovery point and cached payload as the prior
+    // attempt left them. See `CodingStore.insertOrRecoverTask` for how a
+    // concurrent loser resolves and for the `xmax = 0` discriminator.
+    const rows = await tx
       .insert(skillRuns)
       .values({
         skillId: params.skillId,
@@ -956,21 +951,13 @@ export class DrizzleSkillStore implements SkillStore {
         status: "running",
         idempotencyKey: params.idempotencyKey,
       })
-      .onConflictDoNothing({ target: skillRuns.idempotencyKey })
-      .returning();
-    if (inserted.length > 0) {
-      return { kind: "new", row: single(inserted) };
-    }
-    // Recovered: prior attempt holds the row. Lock for our subsequent
-    // UPDATE so concurrent retries serialize on this row instead of
-    // racing.
-    const existing = await tx
-      .select()
-      .from(skillRuns)
-      .where(eq(skillRuns.idempotencyKey, params.idempotencyKey))
-      .limit(1)
-      .for("update");
-    return { kind: "recovered", row: single(existing) };
+      .onConflictDoUpdate({
+        target: skillRuns.idempotencyKey,
+        set: { idempotencyKey: params.idempotencyKey },
+      })
+      .returning({ ...getTableColumns(skillRuns), inserted: sql<boolean>`(xmax = 0)` });
+    const { inserted, ...row } = single(rows);
+    return { kind: inserted ? "new" : "recovered", row };
   }
 
   async transitionToExecuted(
