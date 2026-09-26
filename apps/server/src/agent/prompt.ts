@@ -8,6 +8,11 @@ import type { Profile } from "./store/index.js";
  * prompt. Loading happens upstream, typically via `loadConversationContext`.
  */
 export interface AssembleContext {
+  /**
+   * The conversation's user, whose core memory blocks the `# User` section
+   * renders — the same user `core_memory_update` writes for.
+   */
+  userId: string;
   profile: Profile | undefined;
   rules: ReadonlyArray<{ rule: string }>;
   /**
@@ -48,7 +53,8 @@ Your response will be spoken aloud. Keep it short and natural — one or two sen
 
 export interface PromptSourceConfig {
   timezone?: string;
-  getUserContext?: () => Promise<string | null>;
+  /** The `# User` section body for `userId`, or null to show the onboarding text. */
+  getUserContext?: (userId: string) => Promise<string | null>;
   serviceGuidance?: ReadonlyArray<string>;
 }
 
@@ -71,7 +77,7 @@ export function formatUserContext(blocks: ReadonlyArray<CoreMemoryBlock>): strin
  */
 export class DefaultPromptSource implements PromptSource {
   #timezone: string;
-  #getUserContext: () => Promise<string | null>;
+  #getUserContext: (userId: string) => Promise<string | null>;
   #serviceGuidance: ReadonlyArray<string>;
 
   constructor(config: PromptSourceConfig = {}) {
@@ -81,8 +87,8 @@ export class DefaultPromptSource implements PromptSource {
   }
 
   async assemble(ctx: AssembleContext): Promise<string> {
-    const { profile, rules, voiceMode, toolDefinitions } = ctx;
-    const userContext = await this.#getUserContext();
+    const { userId, profile, rules, voiceMode, toolDefinitions } = ctx;
+    const userContext = await this.#getUserContext(userId);
 
     const parts: string[] = [];
 

@@ -248,6 +248,7 @@ export async function runAgenticStage(
       { conversationId, profile },
     );
     return deps.promptSource.assemble({
+      userId: ctx.userId,
       profile,
       rules: context.rules,
       toolDefinitions: toolDefs,

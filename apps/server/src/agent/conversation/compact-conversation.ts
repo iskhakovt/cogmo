@@ -104,10 +104,10 @@ export async function compactConversation(
     const conversation = await deps.agentStore.getConversation(tx, conversationId);
     if (!conversation) return { missing: "conversation" as const };
     const profile = await deps.agentStore.getProfile(tx, conversation.profileId);
-    return profile ? { profile } : { missing: "profile" as const };
+    return profile ? { profile, userId: conversation.userId } : { missing: "profile" as const };
   });
-  if (!("profile" in loaded)) return { status: "not_found", missing: loaded.missing };
-  const { profile } = loaded;
+  if ("missing" in loaded) return { status: "not_found", missing: loaded.missing };
+  const { profile, userId } = loaded;
 
   const { messages, messageIds } = await loadTurnHistory(
     { runInTx: deps.runInTx, agentStore: deps.agentStore },
@@ -160,7 +160,7 @@ export async function compactConversation(
     },
     { conversationId, profile },
   );
-  const system = await deps.promptSource.assemble({ profile, rules: context.rules });
+  const system = await deps.promptSource.assemble({ userId, profile, rules: context.rules });
 
   const model = profile.summarizationModel ?? profile.model;
   const { provider, limits: rowLimits } = await deps.resolveProvider(model);

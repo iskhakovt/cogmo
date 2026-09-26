@@ -32,6 +32,7 @@ function profile(overrides: Partial<Profile> = {}): Profile {
 describe("DefaultPromptSource", () => {
   it("uses profile base prompt as identity section", async () => {
     const prompt = await new DefaultPromptSource().assemble({
+      userId: "user-1",
       profile: profile({ basePrompt: "You are a coder." }),
       rules: [],
     });
@@ -41,6 +42,7 @@ describe("DefaultPromptSource", () => {
 
   it("uses default identity when profile is undefined", async () => {
     const prompt = await new DefaultPromptSource().assemble({
+      userId: "user-1",
       profile: undefined,
       rules: [],
     });
@@ -50,6 +52,7 @@ describe("DefaultPromptSource", () => {
 
   it("appends rules as bullet list", async () => {
     const prompt = await new DefaultPromptSource().assemble({
+      userId: "user-1",
       profile: undefined,
       rules: [{ rule: "Be concise" }, { rule: "Use formal tone" }],
     });
@@ -61,6 +64,7 @@ describe("DefaultPromptSource", () => {
 
   it("auto-generates tools section from definitions", async () => {
     const prompt = await new DefaultPromptSource().assemble({
+      userId: "user-1",
       profile: undefined,
       rules: [],
       toolDefinitions: testTools,
@@ -74,6 +78,7 @@ describe("DefaultPromptSource", () => {
 
   it("omits tools section when no tools registered", async () => {
     const prompt = await new DefaultPromptSource().assemble({
+      userId: "user-1",
       profile: undefined,
       rules: [],
       toolDefinitions: [],
@@ -84,6 +89,7 @@ describe("DefaultPromptSource", () => {
 
   it("omits tools section when toolDefinitions is undefined", async () => {
     const prompt = await new DefaultPromptSource().assemble({
+      userId: "user-1",
       profile: undefined,
       rules: [],
     });
@@ -94,7 +100,7 @@ describe("DefaultPromptSource", () => {
   it("includes service guidance for active namespaces", async () => {
     const prompt = await new DefaultPromptSource({
       serviceGuidance: ["Test memory guidance.", "Test files guidance."],
-    }).assemble({ profile: undefined, rules: [] });
+    }).assemble({ userId: "user-1", profile: undefined, rules: [] });
 
     expect(prompt).toContain("# Capabilities");
     expect(prompt).toContain("Test memory guidance.");
@@ -103,6 +109,7 @@ describe("DefaultPromptSource", () => {
 
   it("omits capabilities section when no services active", async () => {
     const prompt = await new DefaultPromptSource({ serviceGuidance: [] }).assemble({
+      userId: "user-1",
       profile: undefined,
       rules: [],
     });
@@ -112,6 +119,7 @@ describe("DefaultPromptSource", () => {
 
   it("includes current time with timezone", async () => {
     const prompt = await new DefaultPromptSource({ timezone: "UTC" }).assemble({
+      userId: "user-1",
       profile: undefined,
       rules: [],
     });
@@ -123,7 +131,7 @@ describe("DefaultPromptSource", () => {
   it("shows onboarding prompt when user context is not available", async () => {
     const prompt = await new DefaultPromptSource({
       getUserContext: async () => null,
-    }).assemble({ profile: undefined, rules: [] });
+    }).assemble({ userId: "user-1", profile: undefined, rules: [] });
 
     expect(prompt).toContain("don't know your user yet");
     // Onboarding saves to core memory, so the first block written ends it.
@@ -134,15 +142,31 @@ describe("DefaultPromptSource", () => {
   it("injects user context when available", async () => {
     const prompt = await new DefaultPromptSource({
       getUserContext: async () => "Name: Tim\nTimezone: Europe/Moscow",
-    }).assemble({ profile: undefined, rules: [] });
+    }).assemble({ userId: "user-1", profile: undefined, rules: [] });
 
     expect(prompt).toContain("# User");
     expect(prompt).toContain("Name: Tim");
     expect(prompt).not.toContain("don't know your user yet");
   });
 
+  it("renders the core memory of the user it assembles for", async () => {
+    const contextByUser = new Map([
+      ["user-1", "Name: Ana"],
+      ["user-2", "Name: Ben"],
+    ]);
+    const source = new DefaultPromptSource({
+      getUserContext: async (userId) => contextByUser.get(userId) ?? null,
+    });
+
+    const prompt = await source.assemble({ userId: "user-2", profile: undefined, rules: [] });
+
+    expect(prompt).toContain("Name: Ben");
+    expect(prompt).not.toContain("Name: Ana");
+  });
+
   it("omits rules section when no rules exist", async () => {
     const prompt = await new DefaultPromptSource().assemble({
+      userId: "user-1",
       profile: undefined,
       rules: [],
     });
@@ -156,6 +180,7 @@ describe("DefaultPromptSource", () => {
       serviceGuidance: ["Test memory guidance."],
       getUserContext: async () => "Name: Tim",
     }).assemble({
+      userId: "user-1",
       profile: undefined,
       rules: [{ rule: "Be kind" }],
       toolDefinitions: testTools,
@@ -176,6 +201,7 @@ describe("DefaultPromptSource", () => {
 
   it("appends voice-mode hint when voiceMode is true", async () => {
     const prompt = await new DefaultPromptSource().assemble({
+      userId: "user-1",
       profile: undefined,
       rules: [],
       voiceMode: true,

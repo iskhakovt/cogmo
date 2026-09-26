@@ -397,7 +397,12 @@ describe.skipIf(API_KEY === undefined)(`core-memory routing on ${MODEL} (live ev
       timezone: TIMEZONE,
       serviceGuidance: BUILT_IN_SERVICE_GUIDANCE,
       getUserContext: async () => formatUserContext(run.blocks),
-    }).assemble({ profile: PROFILE, rules: [], toolDefinitions: tools.definitions() });
+    }).assemble({
+      userId: "eval-user",
+      profile: PROFILE,
+      rules: [],
+      toolDefinitions: tools.definitions(),
+    });
 
     const result = await runStreamingAgentLoop({
       provider: new AnthropicProvider(expectDefined(API_KEY, "API key")),

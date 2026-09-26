@@ -218,6 +218,24 @@ describe("runAgenticStage", () => {
     );
   });
 
+  it("assembles the prompt for the run conversation's user", async () => {
+    const h = await harness();
+    vi.mocked(h.agentStore.getConversation).mockResolvedValue({
+      id: "conv-1",
+      userId: "user-2",
+      profileId: "profile-1",
+      isPrivate: true,
+      cooldownState: null,
+      voiceMode: null,
+    });
+
+    await runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+
+    expect(h.deps.promptSource.assemble).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: "user-2" }),
+    );
+  });
+
   it("delivers the stage's reply to batch targets", async () => {
     const h = await harness();
 

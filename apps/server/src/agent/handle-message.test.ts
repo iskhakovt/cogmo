@@ -139,11 +139,36 @@ describe("createHandleMessage", () => {
     // `loadConversationContext` does the loading inside one transaction;
     // the prompt source is a pure formatter.
     expect(deps.promptSource.assemble).toHaveBeenCalledWith({
+      userId: "user-1",
       profile: expect.objectContaining({ id: "profile-1" }),
       rules: [],
       voiceMode: false,
       toolDefinitions: expect.any(Array),
     });
+  });
+
+  it("assembles the prompt for the conversation's user", async () => {
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue({
+          id: "conv-1",
+          userId: "user-2",
+          profileId: "profile-1",
+          isPrivate: true,
+          cooldownState: null,
+          voiceMode: null,
+        }),
+      }),
+    });
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(deps.promptSource.assemble).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: "user-2" }),
+    );
   });
 
   it("uses model from profile", async () => {

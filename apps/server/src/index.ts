@@ -984,9 +984,9 @@ export async function bootstrapRuntime(
   const promptSource = new DefaultPromptSource({
     timezone: env.USER_TIMEZONE,
     serviceGuidance: BUILT_IN_SERVICE_GUIDANCE,
-    getUserContext: async () =>
+    getUserContext: async (userId) =>
       formatUserContext(
-        await core.runInTx((trx) => core.agentStore.getCoreMemoryBlocks(trx, core.user.id)),
+        await core.runInTx((trx) => core.agentStore.getCoreMemoryBlocks(trx, userId)),
       ),
   });
 

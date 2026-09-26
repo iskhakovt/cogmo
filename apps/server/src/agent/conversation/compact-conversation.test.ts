@@ -378,8 +378,16 @@ describe("compactConversation", () => {
     expect(result).toEqual({ status: "skipped", reason: "nothing_new" });
   });
 
-  it("assembles the prompt from the conversation's own steering rules", async () => {
+  it("assembles the prompt for the conversation's user from its own steering rules", async () => {
     const agentStore = storeWith(transcript(10));
+    vi.mocked(agentStore.getConversation).mockResolvedValue({
+      id: CONVERSATION_ID,
+      userId: "user-2",
+      profileId: "p1",
+      isPrivate: true,
+      cooldownState: null,
+      voiceMode: null,
+    });
     vi.mocked(agentStore.getActiveRules).mockResolvedValue([{ rule: "Be terse" }]);
     const promptSource = mock<PromptSource>();
     promptSource.assemble.mockResolvedValue("SYSTEM PROMPT");
@@ -387,6 +395,7 @@ describe("compactConversation", () => {
     await compactConversation(CONVERSATION_ID, deps({ agentStore, promptSource }));
 
     expect(promptSource.assemble).toHaveBeenCalledWith({
+      userId: "user-2",
       profile: profile(),
       rules: [{ rule: "Be terse" }],
     });

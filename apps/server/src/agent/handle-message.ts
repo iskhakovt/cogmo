@@ -610,6 +610,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           { conversationId, profile: profile },
         );
         return promptSource.assemble({
+          userId,
           profile: profile,
           rules: ctx.rules,
           voiceMode: turnInputs.voiceMode,
