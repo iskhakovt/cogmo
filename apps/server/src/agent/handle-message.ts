@@ -791,12 +791,12 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // threshold decisions are pure functions, and `historyMessages`
       // carries resolved image payloads that must not land in Inngest step
       // state, so the pipeline itself can't be a step. Its expensive or
-      // decision-bearing inputs ARE steps: history, auto-recall,
-      // `load-last-tokens` (freezes the skip decision persist-new-messages
-      // would otherwise flip mid-run), each `count-tokens-<n>` round-trip,
-      // and the `summarize-prefix-outcome` LLM call. Every replay therefore walks
-      // the same decision tree over cached values. See
-      // design/crash-recovery.md.
+      // decision-bearing inputs ARE steps: history, auto-recall, the frozen
+      // tool table, `load-last-tokens` (freezes the skip decision
+      // persist-new-messages would otherwise flip mid-run), each
+      // `count-tokens-<n>` round-trip, and the `summarize-prefix-outcome` LLM
+      // call. Every replay therefore walks the same decision tree over cached
+      // values. See design/crash-recovery.md.
 
       const model = snapshot.model;
 
@@ -865,8 +865,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           // schemas + resolved images) — durable so re-invocations replay
           // the integer instead of re-shipping megabytes per boundary. The
           // call sequence is deterministic per run: compaction's inputs are
-          // frozen (durable history, auto-recall, load-last-tokens), so the
-          // counter-keyed ids line up on every replay.
+          // frozen (durable history, auto-recall, the frozen tool table,
+          // load-last-tokens), so the counter-keyed ids line up on every
+          // replay.
           countTokens: (() => {
             let countCall = 0;
             return (params: CountTokensParams) => {

@@ -113,7 +113,7 @@ The recalled-memories element carries the data-not-instructions header of the un
 
 The block ends with a blank line. The OpenAI-compatible adapter sends a text-only user message as its text blocks joined with no separator, so the separation has to be part of the rendered text.
 
-Every input comes from a step result or the event payload. Voice-mode resolution reads the profile and the delivery handle, neither of them durable, so its result is frozen in the `freeze-turn-inputs` step. The delivery channels are read inside the render step.
+Every input comes from a step result or the event payload. Voice-mode resolution reads the profile, the voice config and the delivery handle, none of them durable, so its result is frozen in the `freeze-turn-inputs` step. The delivery channels are read inside the render step.
 
 Recalled memories are data, not instructions, and move from the system prompt — the operator-authority slot — into user content. That also narrows an injection surface: stored memories can carry text that originated in web pages or tool output.
 

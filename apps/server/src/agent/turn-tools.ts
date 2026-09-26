@@ -53,10 +53,10 @@ export function freezeToolTable(registry: ToolRegistry): string {
  * its handler from `live`. Every invocation, the one that ran the step
  * included, parses the same `table`, so each builds identical definitions.
  *
- * A frozen tool missing from `live` keeps its definition and policy, and its
- * handler throws, which the loop reports as an `is_error` tool result — or,
- * for a durable tool whose step already ran, never reaches, since the step
- * replays its result. A live tool the turn didn't freeze is not offered.
+ * A frozen tool missing from `live` keeps its definition and policy and gets a
+ * handler that throws, which the loop reports as an `is_error` result. A
+ * durable one whose step already ran replays that result and never reaches the
+ * handler. A live tool the turn didn't freeze is not offered.
  */
 export function bindFrozenTools(table: string, live: ToolRegistry): ToolRegistry {
   const registry = new ToolRegistry();
