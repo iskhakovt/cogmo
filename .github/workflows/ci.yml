@@ -252,7 +252,7 @@ jobs:
     needs: [changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
     permissions:
       contents: read
       checks: write
@@ -280,9 +280,17 @@ jobs:
           TESTCONTAINERS_RYUK_DISABLED: "true"
       - name: Integration tests
         if: github.event_name != 'push'
-        run: pnpm test:integration
+        # DIAGNOSTIC ONLY: three full runs to catch the pipeline.mcp timeout.
+        run: |
+          rc=0
+          for i in 1 2 3; do
+            echo "=== DIAG integration run $i ==="
+            pnpm test:integration || rc=1
+          done
+          exit $rc
         env:
           TESTCONTAINERS_RYUK_DISABLED: "true"
+          LLMOCK_DEBUG: "1"
       - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         if: always() && github.event_name == 'push'
         with:

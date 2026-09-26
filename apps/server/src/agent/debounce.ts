@@ -1,3 +1,4 @@
+import { diag, diagStep } from "../diag.js";
 import { inngest } from "../inngest/client.js";
 import {
   debounceCancel,
@@ -109,7 +110,9 @@ function createNativeRouter(config: DebounceConfig) {
         key: "event.data.conversationId",
       },
     },
-    async ({ event, step }) => {
+    async ({ event, step: rawStep, runId }) => {
+      diag("debounce invocation", { runId, name: event.name, data: event.data });
+      const step = diagStep(rawStep, `db ${runId}`);
       // Inngest hands us the LAST event in the burst (matching the legacy
       // semantics where the most recent inboundMessageId became triggerInboundId
       // via the idle timer's reset). The orchestrator loads all unbatched
@@ -137,7 +140,9 @@ function createNativeRouter(config: DebounceConfig) {
 function createLegacyStateMachine(config: DebounceConfig) {
   const router = inngest.createFunction(
     { id: "debounce-router", triggers: [inboundArrived] },
-    async ({ event, step }) => {
+    async ({ event, step: rawStep, runId }) => {
+      diag("debounce invocation", { runId, name: event.name, data: event.data });
+      const step = diagStep(rawStep, `db ${runId}`);
       const { conversationId, inboundMessageId } = event.data;
       // biome-ignore lint/suspicious/noExplicitAny: Inngest event types vary
       const events: any[] = [];
@@ -186,7 +191,9 @@ function createLegacyStateMachine(config: DebounceConfig) {
         { event: debounceCancel, match: "data.conversationId" },
       ],
     },
-    async ({ event, step }) => {
+    async ({ event, step: rawStep, runId }) => {
+      diag("debounce invocation", { runId, name: event.name, data: event.data });
+      const step = diagStep(rawStep, `db ${runId}`);
       // Sleep and histogram sample share one millisecond value, and it is a
       // whole number of seconds, so "how long did debounce hold this turn"
       // reads the same on the wire as in the metric. A configured duration
@@ -213,7 +220,9 @@ function createLegacyStateMachine(config: DebounceConfig) {
       triggers: [debounceMaxwait],
       cancelOn: [{ event: debounceCancel, match: "data.conversationId" }],
     },
-    async ({ event, step }) => {
+    async ({ event, step: rawStep, runId }) => {
+      diag("debounce invocation", { runId, name: event.name, data: event.data });
+      const step = diagStep(rawStep, `db ${runId}`);
       const ms = durableSleepMs(event.data.timeoutMs);
       await step.sleep("wait", `${ms}ms`);
       debounceWaitMs.record(ms, { kind: "maxwait" });

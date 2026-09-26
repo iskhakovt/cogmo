@@ -49,6 +49,7 @@ import { createPipelinesService } from "./pipeline/pipelines-service.js";
 import type { PipelineRunStore, PipelineStore } from "./pipeline/store/index.js";
 import { PIPELINE_TOOL_NAMES } from "./pipeline/tools.js";
 import type { PromptSource } from "./prompt.js";
+import { diag, diagStep } from "../diag.js";
 import { shouldSkipRecall } from "./recall-gate.js";
 import { synthesizeDegradedReply } from "./repair.js";
 import { computeRetraction } from "./retraction.js";
@@ -253,8 +254,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         });
       },
     },
-    async ({ event, step, runId }) => {
+    async ({ event, step: rawStep, runId, attempt }) => {
       const { conversationId, triggerInboundId } = event.data;
+      diag("handle-message invocation", { runId, attempt, conversationId });
+      const step = diagStep(rawStep, `hm ${runId} conv=${conversationId}`);
 
       // Per-turn child logger — every emission inside the agent loop inherits
       // `runId` + `conversationId` so the evolution failure-reflector can join
@@ -573,6 +576,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // skills, and MCP tools entirely.
       const imageTools = deps.imageToolsLoader ? await deps.imageToolsLoader.getTools() : [];
       const skillTools = deps.skillRunner ? await buildSkillTools(deps.skillRunner) : [];
+      diag("handle-message skill tools built", { runId, n: skillTools.length });
       // One `subagent__<name>` tool per row, loaded fresh each turn (CLI CRUD
       // takes effect without a restart). The handler closes over the same
       // per-turn `resolveProvider`, so a sub-agent can target any routable
@@ -594,6 +598,13 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         toolSetGlobs: turnToolSetGlobs,
       });
       const toolDefs = turnTools.definitions();
+      diag("handle-message tools composed", {
+        runId,
+        profileId: profile?.id,
+        toolSet: profile?.toolSet,
+        mcp: mcpTools.map((t) => t.name),
+        n: toolDefs.length,
+      });
 
       // Profile passed in from the outer read (`profile`) so
       // voice-mode resolution, `composeTurnTools` globs, and the prompt's

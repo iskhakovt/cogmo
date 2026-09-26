@@ -17,3 +17,10 @@ if (endpoint === undefined) {
 process.env.INNGEST_BASE_URL = endpoint.baseUrl;
 process.env.INNGEST_CONNECT_GATEWAY_URL = endpoint.gatewayUrl;
 process.env.INNGEST_APP_ID = `cogmo-test-${randomUUID()}`;
+
+// DIAGNOSTIC ONLY — branch diag/mcp-pipeline-timeout.
+import { afterAll as diagAfterAll, beforeAll as diagBeforeAll, expect as diagExpect } from "vitest";
+import { diag } from "../src/diag.js";
+
+diagBeforeAll(() => diag("file start", diagExpect.getState().testPath, process.env.INNGEST_BASE_URL));
+diagAfterAll(() => diag("file end", diagExpect.getState().testPath));

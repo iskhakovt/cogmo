@@ -7,6 +7,7 @@ import { conversations, messages } from "../agent/store/schema.js";
 import { db } from "../db/index.js";
 import { bootstrap } from "../index.js";
 import { channelSessions, inboundMessages } from "../transport/store/schema.js";
+import { diag } from "../diag.js";
 import { workerInngestBaseUrl } from "./worker-inngest.js";
 
 /**
@@ -138,6 +139,58 @@ async function waitForFinalAssistantMessage(
   );
 }
 
+// DIAGNOSTIC ONLY — branch diag/mcp-pipeline-timeout.
+async function gql(query: string): Promise<string> {
+  try {
+    const res = await fetch(`${inngestBaseUrl}/v0/gql`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ query }),
+    });
+    return (await res.text()).slice(0, 20_000);
+  } catch (err) {
+    return `gql failed: ${String(err)}`;
+  }
+}
+
+async function dumpDiagnostics(conversationId: string): Promise<void> {
+  diag("DUMP begin", conversationId);
+  const inb = await db
+    .select()
+    .from(inboundMessages)
+    .where(eq(inboundMessages.conversationId, conversationId));
+  diag("DUMP inbound_messages", JSON.stringify(inb));
+  const msgs = await db.select().from(messages).where(eq(messages.conversationId, conversationId));
+  diag("DUMP messages", JSON.stringify(msgs).slice(0, 8000));
+  diag("DUMP apps", await gql("{ apps { name connected functionCount } }"));
+  let events: { id: string; name: string; data?: { conversationId?: string } }[] = [];
+  try {
+    const res = await fetch(`${inngestBaseUrl}/v1/events?limit=100`);
+    events = ((await res.json()) as { data: typeof events }).data;
+  } catch (err) {
+    diag("DUMP events fetch failed", String(err));
+  }
+  diag("DUMP recent event names", JSON.stringify(events.map((e) => [e.name, e.data?.conversationId])));
+  const runIds: string[] = [];
+  for (const e of events.filter((ev) => ev.data?.conversationId === conversationId)) {
+    const out = await gql(
+      `{ event(query:{workspaceId:"local", eventId:"${e.id}"}) { name status pendingRuns totalRuns functionRuns { id status startedAt finishedAt function { slug app { name connected } } } } }`,
+    );
+    diag("DUMP event", e.name, e.id, out);
+    for (const m of out.matchAll(/"id":"([0-9A-Z]{26})"/g)) if (m[1]) runIds.push(m[1]);
+  }
+  for (const runId of runIds) {
+    diag(
+      "DUMP runTrace",
+      runId,
+      await gql(
+        `{ runTrace(runID:"${runId}") { name status queuedAt startedAt endedAt attempts stepOp childrenSpans { name status stepOp queuedAt startedAt endedAt attempts childrenSpans { name status queuedAt startedAt endedAt attempts } } } }`,
+      ),
+    );
+  }
+  diag("DUMP end", conversationId);
+}
+
 function flattenText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -193,17 +246,28 @@ describe("MCP pipeline", () => {
       .returning({ id: inboundMessages.id });
     if (!inbound) throw new Error("inbound insert returned no row");
 
-    await sendEvent("inbound/arrived", {
+    const sent = await sendEvent("inbound/arrived", {
       conversationId: conv.id,
       inboundMessageId: inbound.id,
     });
+    diag("mcp test sent inbound/arrived", conv.id, JSON.stringify(sent), "profile", profile.id);
 
-    const timeoutMs = process.env.RECORD === "1" ? 60_000 : 30_000;
-    const finalMsg = await waitForFinalAssistantMessage(
-      conv.id,
-      (m) => /PIPELINE_OK/.test(flattenText(m.content)),
-      timeoutMs,
-    );
+    const timeoutMs = process.env.DIAG_FORCE_TIMEOUT
+      ? Number(process.env.DIAG_FORCE_TIMEOUT)
+      : process.env.RECORD === "1"
+        ? 60_000
+        : 30_000;
+    let finalMsg: PersistedMessage;
+    try {
+      finalMsg = await waitForFinalAssistantMessage(
+        conv.id,
+        (m) => /PIPELINE_OK/.test(flattenText(m.content)),
+        timeoutMs,
+      );
+    } catch (err) {
+      await dumpDiagnostics(conv.id);
+      throw err;
+    }
 
     // Sanity check that a tool_use / tool_result pair landed in the
     // persisted conversation — proves the MCP dispatch path executed
