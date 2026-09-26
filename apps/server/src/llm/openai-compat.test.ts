@@ -7,7 +7,7 @@ import type { CacheDialect } from "./cache-dialect.js";
 import { ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
 import { isRetriableProviderError, RefusalError } from "./fallback.js";
 import { OpenAICompatibleProvider } from "./openai-compat.js";
-import type { CacheIntent, ChatParams, StreamEvent } from "./types.js";
+import type { CacheIntent, ChatParams, ImageBlock, StreamEvent } from "./types.js";
 
 const mockCreate = vi.fn();
 // Constructor options each client was built with, newest last.
@@ -1573,6 +1573,76 @@ describe("OpenAICompatibleProvider", () => {
       expect(withResult - withoutResult).toBe(messageFraming + contentTokens);
       expect(withResult).toBe(asUserText);
     });
+
+    describe("per-message terms", () => {
+      const base = { model: "gpt-4o", system: "sys" };
+      const image: ImageBlock = {
+        type: "image",
+        source: "base64",
+        data: "aW1n",
+        mediaType: "image/png",
+      };
+
+      function encodedLength(text: string): number {
+        return getEncoding("cl100k_base").encode(text).length;
+      }
+
+      it("counts an image-only user message as its framing plus the flat image estimate", async () => {
+        const provider = createProvider();
+        const empty = await provider.countTokens({ ...base, messages: [] });
+        const emptyUser = await provider.countTokens({
+          ...base,
+          messages: [{ role: "user", content: "" }],
+        });
+        const imageOnly = await provider.countTokens({
+          ...base,
+          messages: [{ role: "user", content: [image] }],
+        });
+
+        const messageFraming = emptyUser - empty;
+        expect(imageOnly - empty).toBe(messageFraming + 85);
+      });
+
+      it("counts an assistant call's name and arguments", async () => {
+        const provider = createProvider();
+        const input = { query: "Lisbon weather tomorrow" };
+        const textOnly = await provider.countTokens({
+          ...base,
+          messages: [{ role: "assistant", content: [{ type: "text", text: "Checking." }] }],
+        });
+        const withCall = await provider.countTokens({
+          ...base,
+          messages: [
+            {
+              role: "assistant",
+              content: [
+                { type: "text", text: "Checking." },
+                { type: "tool_use", id: "call_1", name: "web_search", input },
+              ],
+            },
+          ],
+        });
+
+        expect(withCall - textOnly).toBe(
+          encodedLength("web_search") + encodedLength(JSON.stringify(input)),
+        );
+      });
+
+      it("counts a text part sent beside an image", async () => {
+        const provider = createProvider();
+        const text = "What breed is the dog in this photo?";
+        const imageOnly = await provider.countTokens({
+          ...base,
+          messages: [{ role: "user", content: [image] }],
+        });
+        const textAndImage = await provider.countTokens({
+          ...base,
+          messages: [{ role: "user", content: [{ type: "text", text }, image] }],
+        });
+
+        expect(textAndImage - imageOnly).toBe(encodedLength(text));
+      });
+    });
   });
 
   describe("responseFormat", () => {
@@ -1705,7 +1775,7 @@ describe("OpenAICompatibleProvider", () => {
     });
   });
 
-  describe("document blocks in messages", () => {
+  describe("document and image blocks in messages", () => {
     function setup() {
       const provider = createProvider();
       mockCreate.mockResolvedValueOnce({
@@ -1906,7 +1976,37 @@ describe("OpenAICompatibleProvider", () => {
       expect(parts).toHaveLength(3);
       expect(parts[0]).toEqual({ type: "text", text: "see attached" });
       expect(parts[1]).toEqual({ type: "text", text: "[document: n.txt]\nhi" });
-      expect(parts[2]).toMatchObject({ type: "image_url" });
+      expect(parts[2]).toEqual({
+        type: "image_url",
+        image_url: { url: "data:image/png;base64,aW1n" },
+      });
+    });
+
+    it("sends a base64 image as a data URL and a url image's URL as it is", async () => {
+      const provider = setup();
+      await provider.chat({
+        model: "m",
+        system: "sys",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image", source: "base64", data: "aW1n", mediaType: "image/jpeg" },
+              {
+                type: "image",
+                source: "url",
+                data: "https://example.com/cat.png",
+                mediaType: "image/png",
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(getMessage(firstCreateArgs(), 1).content).toEqual([
+        { type: "image_url", image_url: { url: "data:image/jpeg;base64,aW1n" } },
+        { type: "image_url", image_url: { url: "https://example.com/cat.png" } },
+      ]);
     });
   });
 });

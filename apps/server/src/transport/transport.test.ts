@@ -2771,6 +2771,23 @@ describe("createTransport", () => {
       });
     });
 
+    it("surfaces the newest status in the aggregate, skipping attempts without one", async () => {
+      // A chain can end on a DNS or TLS failure after earlier attempts
+      // returned the statuses that say whether waiting helps.
+      const aggregate = new AllProvidersFailedError([
+        { provider: "primary", error: Object.assign(new Error("rate limited"), { status: 429 }) },
+        { provider: "secondary", error: Object.assign(new Error("unavailable"), { status: 503 }) },
+        { provider: "tertiary", error: new Error("ENOTFOUND") },
+      ]);
+      const driver = vi.fn().mockRejectedValue(aggregate);
+      const { transport } = buildCompactTransport({ ...OWNED, compactConversation: driver });
+      const res = await transport.conversations.compact("h", "addr");
+      expect(res._unsafeUnwrapErr()).toEqual({
+        code: "compaction_failed",
+        reason: "the request failed with HTTP 503",
+      });
+    });
+
     it("surfaces a provider-config message, which names only the model", async () => {
       const driver = vi
         .fn()
