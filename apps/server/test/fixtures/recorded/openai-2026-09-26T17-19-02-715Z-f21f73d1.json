@@ -1,0 +1,33 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Return valid json only.\n\nExtract facts from the following chunk.\n\nChunk: 1/1\nEvent Date: [DATE] ([TS])\nContext: none\nMetadata:\n  source: conversation\n\nContent:\nT recently moved to Lisbon, Portugal.",
+        "model": "gpt-4o-mini",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\n  \"facts\": [\n    {\n      \"what\": \"T recently moved to Lisbon, Portugal.\",\n      \"when\": \"N/A\",\n      \"where\": \"Lisbon, Portugal\",\n      \"who\": \"T\",\n      \"why\": \"N/A\",\n      \"fact_kind\": \"conversation\",\n      \"occurred_start\": \"N/A\",\n      \"occurred_end\": \"N/A\",\n      \"fact_type\": \"world\",\n      \"entities\": [\"T\", \"Lisbon\", \"Portugal\"],\n      \"causal_relations\": null\n    }\n  ]\n}",
+        "usage": {
+          "prompt_tokens": 2907,
+          "completion_tokens": 118,
+          "total_tokens": 3025,
+          "prompt_tokens_details": {
+            "cached_tokens": 2816,
+            "audio_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "audio_tokens": 0,
+            "accepted_prediction_tokens": 0,
+            "rejected_prediction_tokens": 0
+          }
+        }
+      },
+      "metadata": {
+        "systemHash": "a24b0767"
+      }
+    }
+  ]
+}

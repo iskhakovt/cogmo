@@ -30,6 +30,12 @@ declare module "vitest" {
      */
     mcpEchoUrl: string;
     /**
+     * Directory the integration setup creates for skills bare repos; each
+     * test file's `COGMO_SKILLS_PATH` is a fresh directory under it. Absent
+     * for unit/e2e setups.
+     */
+    skillsRoot: string;
+    /**
      * Docker container ID of the running app container. Provided by the
      * e2e setup; absent for unit/integration setups (those don't build
      * the image at all). Tests that need to invoke the bundled binary

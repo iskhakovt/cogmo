@@ -1,0 +1,25 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "[memory-extraction] User: Call me T — I've just moved to Lisbon.\n\nAssistant: Nice to meet you, T — I'm your AI assistant. I'll keep track of things like your projects, preferences, and context so I can be more useful over time.\n\nSince you've just moved to Lisbon, I'll set your timezone to Europe/Lisbon (WEST, UTC+1) unless you tell me otherwise. A couple quick things to help me help you better:\n\n1. What do you do (work/projects)?\n2. Any preference on how I communicate — brief and to the point, more detailed, casual/formal?\n[Tool: core_memory_update({\"content\":\"Name: T. Lives in Lisbon, Portugal (timezone: Europe/Lisbon, WEST/UTC+1).\",\"key\":\"user_profile\"})]\n\nUser: → Core memory block \"user_profile\" updated.\n\nAssistant: Got it, saved. Go ahead and answer those when you have a sec — I'll fill in the rest of your profile as I learn it.\n\nUser: We had dinner at Taberna da Rua das Flores and the bacalhau was the best I've ever had. What other Portuguese dishes should I try?\n\nAssistant: [Tool: memory_retain({\"content\":\"T had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau was the best they've ever had.\",\"context\":\"Casual conversation shortly after T moved to Lisbon\"})]\n\nUser: → Remembered.\n\nAssistant: That place has a great reputation — glad the bacalhau delivered. Since you're newly in Lisbon, here are some classics worth seeking out:\n\n**Seafood & fish**\n- **Bacalhau à Brás** – shredded salt cod with eggs, onions, and shoestring potatoes. Very different from a baked bacalhau, worth trying as contrast.\n- **Amêijoas à Bulhão Pato** – clams in garlic, olive oil, white wine, and coriander.\n- **Sardinhas assadas** – grilled sardines, especially good in summer but available year-round.\n- **Arroz de marisco** – soupy seafood rice, rich and garlicky.\n- **Polvo à lagareiro** – octopus roasted with olive oil and potatoes.\n\n**Meat**\n- **Cozido à portuguesa** – hearty boiled dinner with various meats, sausages, and vegetables.\n- **Bifana** – marinated pork sandwich, great cheap street food.\n- **Francesinha** – if you're ever in Porto, a decadent meat-and-cheese sandwich drowned in sauce — heavy but iconic.\n- **Feijoada** – bean and meat stew.\n\n**Snacks & small plates**\n- **Pastéis de bacalhau** – codfish cakes, common as a petisco.\n- **Alheira** – a distinctive sausage (originally made to disguise its meat-free origins during the Inquisition).\n\n**Sweets**\n- **Pastéis de nata**, obviously — but seek out a good local bakery, not just the touristy ones.\n- **Arroz doce** – Portuguese rice pudding with cinnamon.\n- **Toucinho do céu** – rich almond and egg yolk dessert.\n\nIf you want, I can also flag good spots in Lisbon for any of these, or keep a running list of places you've tried and liked.\n\nUser: Please don't use bullet points with me — just write in plain sentences.\n\nAssistant: [Tool: core_memory_update({\"content\":\"Name: T. Lives in Lisbon, Portugal (timezone: Europe/Lisbon, WEST/UTC+1). Preference: communicate in plain sentences/prose, not bullet points or lists.\",\"key\":\"user_profile\"})]\n\nUser: → Core memory block \"user_profile\" updated.\n\nAssistant: Understood, I'll stick to plain prose from now on. To redo that last answer briefly: beyond bacalhau, you might try bacalhau à Brás (shredded salt cod with egg and potato), grilled sardines, clams in garlic and coriander, octopus roasted with olive oil, and a good pastel de nata from a proper local bakery rather than a touristy one. Happy to suggest specific restaurants for any of these whenever you like.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "memory-extraction",
+            "arguments": "{\"memories\":[{\"fact\":\"User's name is T.\",\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"first-party\"},{\"fact\":\"T recently moved to Lisbon, Portugal.\",\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"first-party\"},{\"fact\":\"T's timezone is Europe/Lisbon (WEST, UTC+1).\",\"network\":\"world\",\"compartment\":\"personal\",\"trust\":\"first-party\"},{\"fact\":\"T had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau was the best they've ever had.\",\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"first-party\"},{\"fact\":\"T prefers communication in plain sentences/prose, not bullet points or lists.\",\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"first-party\"}]}",
+            "id": "toolu_01JTMr7CdJ33XcZkqUo8QmXa"
+          }
+        ]
+      },
+      "metadata": {
+        "systemHash": "94c8d23c",
+        "toolsHash": "9f92809c"
+      }
+    }
+  ]
+}

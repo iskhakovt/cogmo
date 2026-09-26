@@ -120,11 +120,11 @@ export async function setup({ provide, config }: GlobalSetupContext) {
   process.env.SANDBOX_ASKPASS_DIR = askpassPath;
   process.env.SANDBOX_PROXY_SOCKET_DIR = join(askpassPath, "sockets");
 
-  // Skills bare repo lives on the host (not in a container) — bootstrap
-  // initializes it on every boot. Use a tempdir so tests don't try to write
-  // to the production default `/var/lib/cogmo/skills`.
+  // Skills bare repos live on the host (not in a container) — bootstrap
+  // initializes one on every boot. Use a tempdir so tests don't try to write
+  // to the production default `/var/lib/cogmo/skills`. Each test file gets
+  // its own repo under this root: see `integration-setup-per-fork.ts`.
   skillsPath = await mkdtemp(join(tmpdir(), "cogmo-skills-it-"));
-  process.env.COGMO_SKILLS_PATH = skillsPath;
 
   const inngestWorkers = inngestServers.map((server) => ({
     baseUrl: `http://${server.getHost()}:${server.getMappedPort(8288)}`,
@@ -194,6 +194,7 @@ export async function setup({ provide, config }: GlobalSetupContext) {
   provide("defaultUserId", defaultUserId);
   provide("llmockBaseUrl", mock.url);
   provide("mcpEchoUrl", mcpEchoServer.url);
+  provide("skillsRoot", skillsPath);
 
   console.log(`Integration test environment ready — ${JSON.stringify({ ...urls, hindsightUrl })}`);
 }

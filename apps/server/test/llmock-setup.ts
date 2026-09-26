@@ -68,13 +68,34 @@ function normalizeContent(text: string): string {
   );
 }
 
+/**
+ * Structured-output calls that send the same user message under different
+ * system prompts: the Observer's correction and memory extraction both send
+ * the transcript. A fixture key carries no system prompt, so the key gets the
+ * call's name, which the Anthropic adapter sends as the one tool it forces;
+ * without it, one phase would replay the other's reply.
+ */
+const SHARED_INPUT_STRUCTURED_OUTPUTS = new Set(["correction-extraction", "memory-extraction"]);
+
+function structuredOutputName(req: ChatCompletionRequest): string | undefined {
+  const [tool, ...others] = req.tools ?? [];
+  if (tool === undefined || others.length > 0) return undefined;
+  return SHARED_INPUT_STRUCTURED_OUTPUTS.has(tool.function.name) ? tool.function.name : undefined;
+}
+
 function requestTransform(req: ChatCompletionRequest): ChatCompletionRequest {
+  const name = structuredOutputName(req);
+  const lastUser = req.messages.findLastIndex((m) => m.role === "user");
   return {
     ...req,
-    messages: req.messages.map((m) => ({
-      ...m,
-      content: typeof m.content === "string" ? normalizeContent(m.content) : m.content,
-    })),
+    messages: req.messages.map((m, i) => {
+      if (typeof m.content !== "string") return m;
+      const content = normalizeContent(m.content);
+      return {
+        ...m,
+        content: name !== undefined && i === lastUser ? `[${name}] ${content}` : content,
+      };
+    }),
     // Hindsight embeds a fact as `what | When: … | Involving: … | why`; keying
     // on the text before the first " | " keeps the key to the fact itself.
     // aimock joins a request's texts with a space, so a multi-text request

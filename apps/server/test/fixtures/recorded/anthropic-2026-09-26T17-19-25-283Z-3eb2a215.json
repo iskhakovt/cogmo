@@ -1,0 +1,25 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "[correction-extraction] User: Suggest three day trips from Lisbon I could do by train.\n\nAssistant: Here are three solid train day trips from Lisbon, T.\n\nSintra is the classic choice, about 40 minutes from Rossio station, and it's worth it for the palaces like Pena and Quinta da Regaleira along with the cool, forested hills that feel completely different from Lisbon's heat. Just go early since it gets packed with tour buses by mid-morning.\n\nÓbidos is a bit further, roughly an hour by train, and it's a small walled medieval town with cobbled streets, a castle you can walk the ramparts of, and the local cherry liqueur ginjinha often served in a chocolate cup. It's quieter than Sintra and easy to cover in a few hours.\n\nSetúbal is a good option if you want a mix of nature and seafood, about an hour away, with access to the Arrábida natural park's beaches and cliffs plus a reputation for some of the best fried cuttlefish in the country. It's less touristy than the other two and gives you a nice coastal contrast to Lisbon.\n\nIf you want, I can help you check train schedules or timing for any of these once you pick one.\n\nUser: Again, no bullet points or numbered lists with me, please. Plain sentences only.\n\nAssistant: Understood, T — sorry about that, my last reply still came across as a list even though I wrote in sentences. Let me try again properly blended together: Sintra is the easiest and most classic option, just forty minutes from Rossio station, with its hilltop palaces and cool forested hills offering a nice break from Lisbon's heat, though it's best visited early before the tour buses arrive. If you'd rather escape the crowds, Óbidos is about an hour away and gives you a walled medieval town with narrow cobbled streets, castle ramparts you can walk along, and the local cherry liqueur ginjinha served in little chocolate cups, all of which can be comfortably explored in an afternoon. And if you're after something coastal, Setúbal is roughly an hour from Lisbon and combines access to the cliffs and beaches of the Arrábida natural park with some of the best fried cuttlefish you'll find anywhere in Portugal, making it a good change of pace from the more inland, historic feel of the other two. Let me know if you'd like help working out train times for any of them.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "correction-extraction",
+            "arguments": "{\"corrections\":[{\"rule\":\"Communicate in plain sentences/prose; avoid bullet points or lists.\",\"category\":\"style\",\"reasoning\":\"User repeated a prior instruction ('Again, no bullet points or numbered lists with me, please') indicating the assistant failed to follow an existing rule about avoiding lists.\",\"action\":\"reinforce\",\"matchedExistingRuleId\":\"R1\"}]}",
+            "id": "toolu_01X6uvRnPFRX2oPgVAoixFyx"
+          }
+        ]
+      },
+      "metadata": {
+        "systemHash": "ca9fd8df",
+        "toolsHash": "414940e8"
+      }
+    }
+  ]
+}
