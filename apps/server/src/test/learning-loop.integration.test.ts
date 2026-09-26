@@ -38,6 +38,7 @@ import { bootstrap } from "../index.js";
 import { DEFAULT_BASE_PROMPT } from "../setup/seed.js";
 import { channelSessions, inboundMessages } from "../transport/store/schema.js";
 import { expectDefined } from "./assertions.js";
+import { CASSETTE_CHAT_MODEL } from "./cassette-model.js";
 import { createIsolatedUser } from "./isolated-user.js";
 import { workerInngestBaseUrl } from "./worker-inngest.js";
 
@@ -94,7 +95,7 @@ beforeAll(async () => {
       userId,
       name: "learning-loop",
       basePrompt: DEFAULT_BASE_PROMPT,
-      model: "claude-sonnet-5",
+      model: CASSETTE_CHAT_MODEL,
       toolSet: ["core_memory_update", "core_memory_read", "memory_retain"],
     }),
   );

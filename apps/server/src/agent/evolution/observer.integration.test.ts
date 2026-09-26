@@ -75,8 +75,15 @@ afterAll(async () => {
   await pgClient.end();
 });
 
-/** The one correction this file's stub extractor returns. */
-const CHANNEL_SCOPED_RULE = "Avoid markdown headings in chat replies";
+/**
+ * The one correction this file's stub extractor returns. Learned rules are
+ * global, and the Observer labels the rules it lists by priority, then text,
+ * so while this row exists it takes a label in every other file's Observer
+ * run. Starting with "Zero" sorts it after any rule a recorded extraction
+ * names by label (`learning-loop.integration.test.ts` reinforces its "R1"),
+ * so it never shifts theirs.
+ */
+const CHANNEL_SCOPED_RULE = "Zero markdown headings in chat replies";
 /** Every rule text this file writes; cleanup deletes these and nothing else. */
 const SUITE_RULES = [CHANNEL_SCOPED_RULE];
 
