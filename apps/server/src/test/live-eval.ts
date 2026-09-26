@@ -30,7 +30,7 @@ import { createWebTools } from "../agent/web-tools.js";
 import { resolveLimits } from "../llm/models.js";
 import type { LlmProvider } from "../llm/provider.js";
 import type { Message, Usage } from "../llm/types.js";
-import { sumUsage } from "../llm/usage.js";
+import { sumUsage, ZERO_USAGE } from "../llm/usage.js";
 import { logger } from "../logger.js";
 import { DEFAULT_BASE_PROMPT, DEFAULT_PROFILE_MODEL } from "../setup/seed.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
@@ -281,7 +281,7 @@ export interface UsageMeter {
 }
 
 export function createUsageMeter(): UsageMeter {
-  let total: Usage = { inputTokens: 0, outputTokens: 0 };
+  let total: Usage = ZERO_USAGE;
   const meter: UsageMeter = {
     add: (usage) => {
       total = sumUsage(total, usage);
