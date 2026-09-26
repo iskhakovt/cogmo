@@ -18,7 +18,11 @@ import type { AgentStore } from "../agent/store/index.js";
 import type { Transactor } from "../db/index.js";
 import { type CacheDialect, CacheDialectSchema } from "../llm/cache-dialect.js";
 import type { SecretsStore } from "../secrets/store/index.js";
-import { PROVIDER_BASE_URLS, type ProviderType } from "../setup/providers.js";
+import {
+  PROVIDER_BASE_URLS,
+  PROVIDER_CACHE_DIALECTS,
+  type ProviderType,
+} from "../setup/providers.js";
 
 const USAGE = `Usage: cogmo provider <command> [args]
 
@@ -30,8 +34,9 @@ Commands:
                           for the rest (defaults baked in).
                           --cache-dialect (openrouter|openai|xai|none)
                           sets the caching hints an OpenAI-compatible
-                          endpoint takes; the base URL's host decides
-                          when omitted.
+                          endpoint takes. Omitted, type=openrouter
+                          takes openrouter and the rest follow the
+                          base URL's host.
   list                    Show registered providers (name | type | base url).
   remove <name>           Delete a provider (cascades to its model rows).
 `;
@@ -138,6 +143,7 @@ async function addProviderCmd(
     io.err(`type=${providerType} requires a base-url argument`);
     return 2;
   }
+  const dialect = cacheDialect ?? PROVIDER_CACHE_DIALECTS[providerType];
 
   let result: AddProviderResult;
   try {
@@ -146,7 +152,7 @@ async function addProviderCmd(
       type: adapterType,
       ...(baseUrl && { baseUrl }),
       apiKey,
-      ...(cacheDialect && { cacheDialect }),
+      ...(dialect && { cacheDialect: dialect }),
     });
   } catch (err) {
     io.err(`Failed to add provider: ${(err as Error).message}`);

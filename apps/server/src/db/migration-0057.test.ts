@@ -87,10 +87,10 @@ function compat(name: string, baseUrl: string | null, attrs: Record<string, unkn
 describe("migration 0057 — cache dialect", () => {
   it("derives each OpenAI-compatible row's dialect from its base-URL host", async () => {
     await seed([
-      compat("openrouter", "https://openrouter.ai/api/v1", { promptCaching: true }),
+      compat("openrouter", "https://openrouter.ai/api/v1", {}),
       compat("openai", "https://api.openai.com/v1", {}),
       compat("xai", "https://api.x.ai/v1", {}),
-      compat("deepseek", "https://api.deepseek.com/v1", { promptCaching: true }),
+      compat("deepseek", "https://api.deepseek.com/v1", {}),
       compat("no-url", null, {}),
     ]);
 
@@ -105,7 +105,28 @@ describe("migration 0057 — cache dialect", () => {
     });
   });
 
-  it("derives the same dialect as cacheDialectForBaseUrl, which new rows get", async () => {
+  it("keeps OpenRouter markers on a promptCaching: true row whose host implies no dialect", async () => {
+    await seed([
+      compat("gateway-on", "https://gateway.internal/openrouter/v1", { promptCaching: true }),
+      compat("no-url-on", null, { promptCaching: true }),
+      compat("openrouter-on", "https://openrouter.ai/api/v1", { promptCaching: true }),
+      // A host with a known dialect keeps it: OpenAI never gets `session_id`.
+      compat("openai-on", "https://api.openai.com/v1", { promptCaching: true }),
+      compat("xai-on", "https://api.x.ai/v1", { promptCaching: true }),
+    ]);
+
+    await applyMigration();
+
+    expect(await rawAttrs()).toEqual({
+      "gateway-on": { cacheDialect: "openrouter" },
+      "no-url-on": { cacheDialect: "openrouter" },
+      "openrouter-on": { cacheDialect: "openrouter" },
+      "openai-on": { cacheDialect: "openai" },
+      "xai-on": { cacheDialect: "xai" },
+    });
+  });
+
+  it("derives the same dialect as cacheDialectForBaseUrl for a row without promptCaching", async () => {
     const baseUrls = [
       "https://openrouter.ai/api/v1",
       "https://OpenRouter.AI/api/v1",

@@ -41,22 +41,63 @@ beforeEach(() => {
 });
 
 describe("cogmo provider add — cache dialect", () => {
-  it("leaves the dialect to addProvider when no flag is given", async () => {
+  it("leaves a custom provider's dialect to addProvider when no flag is given", async () => {
     const { io } = makeIo();
 
     const code = await runProviderCli(
-      ["add", "openrouter", "or", "sk-or-1234567890"],
+      ["add", "custom", "gateway", "sk-gw-1234567890", "https://gateway.internal/v1"],
       makeDeps(),
       io,
     );
 
     expect(code).toBe(0);
     expect(addProviderSpy).toHaveBeenCalledWith(expect.anything(), {
-      name: "or",
+      name: "gateway",
       type: "openai_compatible",
-      baseUrl: "https://openrouter.ai/api/v1",
-      apiKey: "sk-or-1234567890",
+      baseUrl: "https://gateway.internal/v1",
+      apiKey: "sk-gw-1234567890",
     });
+  });
+
+  it.each([
+    [[], "https://openrouter.ai/api/v1"],
+    [["https://gateway.internal/openrouter/v1"], "https://gateway.internal/openrouter/v1"],
+  ])(
+    "gives the openrouter type the openrouter dialect, whatever its base URL (%j)",
+    async (baseUrlArg, baseUrl) => {
+      const { io } = makeIo();
+
+      const code = await runProviderCli(
+        ["add", "openrouter", "or", "sk-or-1234567890", ...baseUrlArg],
+        makeDeps(),
+        io,
+      );
+
+      expect(code).toBe(0);
+      expect(addProviderSpy).toHaveBeenCalledWith(expect.anything(), {
+        name: "or",
+        type: "openai_compatible",
+        baseUrl,
+        apiKey: "sk-or-1234567890",
+        cacheDialect: "openrouter",
+      });
+    },
+  );
+
+  it("lets --cache-dialect override the openrouter type's dialect", async () => {
+    const { io } = makeIo();
+
+    const code = await runProviderCli(
+      ["add", "openrouter", "or", "sk-or-1234567890", "--cache-dialect", "none"],
+      makeDeps(),
+      io,
+    );
+
+    expect(code).toBe(0);
+    expect(addProviderSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ cacheDialect: "none" }),
+    );
   });
 
   it("passes --cache-dialect through for a custom endpoint", async () => {

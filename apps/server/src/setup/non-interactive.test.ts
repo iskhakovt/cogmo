@@ -288,6 +288,21 @@ describe("runNonInteractive", () => {
       },
       { cacheDialect: "openrouter" },
     ],
+    [
+      {
+        COGMO_LLM_PROVIDER_TYPE: "openrouter",
+        COGMO_LLM_BASE_URL: "https://gateway.internal/openrouter/v1",
+      },
+      { cacheDialect: "openrouter" },
+    ],
+    [
+      {
+        COGMO_LLM_PROVIDER_TYPE: "openrouter",
+        COGMO_LLM_BASE_URL: "https://gateway.internal/openrouter/v1",
+        COGMO_LLM_CACHE_DIALECT: "none",
+      },
+      { cacheDialect: "none" },
+    ],
     [{ COGMO_LLM_PROVIDER_TYPE: "anthropic" }, {}],
   ])("persists %j with attrs %j", async (env, attrs) => {
     await runNonInteractive({

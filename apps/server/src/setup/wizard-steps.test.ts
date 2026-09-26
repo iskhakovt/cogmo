@@ -1068,7 +1068,7 @@ describe("stepConfigureProvider", () => {
     expect(runClackValidate(passCall?.validate, "a long enough api key")).toBeUndefined();
   });
 
-  it("leaves the cache dialect to addProvider", async () => {
+  it("gives the openrouter type the openrouter cache dialect", async () => {
     const deps = buildDeps();
     deps.agentStore.listProviders.mockResolvedValue([]);
     addProviderSpy.mockResolvedValue({ providerId: "p-new", validation: { valid: true } });
@@ -1083,12 +1083,12 @@ describe("stepConfigureProvider", () => {
     await expect(stepConfigureProvider(deps)).rejects.toBeInstanceOf(WizardCancelled);
     expect(vi.mocked(p.text)).toHaveBeenCalledOnce();
 
-    // addProvider derives the dialect from the base URL; the wizard sends none.
     expect(addProviderSpy).toHaveBeenCalledWith(deps, {
       name: "openrouter",
       type: "openai_compatible",
       baseUrl: "https://openrouter.ai/api/v1",
       apiKey: "sk-or-test-1234567890",
+      cacheDialect: "openrouter",
     });
   });
 

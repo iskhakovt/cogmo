@@ -32,7 +32,7 @@ import type { SecretsStore } from "../secrets/store/index.js";
 import type { TransportStore } from "../transport/store/index.js";
 import type { NonInteractiveAnswers } from "./env.js";
 import { parseNonInteractiveEnv, SetupEnvError } from "./env.js";
-import { PROVIDER_BASE_URLS, type ProviderType } from "./providers.js";
+import { PROVIDER_BASE_URLS, PROVIDER_CACHE_DIALECTS, type ProviderType } from "./providers.js";
 import { seedChannelRules, seedDefaults } from "./seed.js";
 import {
   type DaytonaProbeOpts,
@@ -364,12 +364,13 @@ async function persistProvider(deps: PersistDeps, answers: NonInteractiveAnswers
 
   // `validateNonInteractive` checked the key before anything was written, so
   // addProvider takes that result rather than calling the provider again.
+  const cacheDialect = answers.llmCacheDialect ?? PROVIDER_CACHE_DIALECTS[answers.llmProviderType];
   const { providerId } = await addProvider(deps, {
     name: providerName,
     type: adapterType,
     ...(baseUrl && { baseUrl }),
     apiKey: answers.llmApiKey,
-    ...(answers.llmCacheDialect && { cacheDialect: answers.llmCacheDialect }),
+    ...(cacheDialect && { cacheDialect }),
     validation: { valid: true },
   });
 
