@@ -80,6 +80,41 @@ describe("parseNonInteractiveEnv", () => {
     expect(r.error.issues.join("\n")).toMatch(/COGMO_LLM_BASE_URL/);
   });
 
+  it("reads COGMO_LLM_CACHE_DIALECT for an OpenAI-compatible provider", () => {
+    const r = parseNonInteractiveEnv({
+      COGMO_LLM_PROVIDER_TYPE: "custom",
+      COGMO_LLM_API_KEY: "sk-custom-012345",
+      COGMO_LLM_BASE_URL: "https://gateway.internal/v1",
+      COGMO_LLM_CACHE_DIALECT: "openrouter",
+    });
+    if (r.isErr()) throw r.error;
+    expect(r.value.llmCacheDialect).toBe("openrouter");
+  });
+
+  it("rejects an unknown COGMO_LLM_CACHE_DIALECT", () => {
+    const r = parseNonInteractiveEnv({
+      COGMO_LLM_PROVIDER_TYPE: "openai",
+      COGMO_LLM_API_KEY: "sk-openai-012345",
+      COGMO_LLM_CACHE_DIALECT: "anthropic",
+    });
+    expect(r.isErr()).toBe(true);
+    if (!r.isErr()) return;
+    expect(r.error.issues.join("\n")).toMatch(/COGMO_LLM_CACHE_DIALECT/);
+  });
+
+  it("rejects COGMO_LLM_CACHE_DIALECT for an anthropic provider, which takes none", () => {
+    const r = parseNonInteractiveEnv({
+      COGMO_LLM_PROVIDER_TYPE: "anthropic",
+      COGMO_LLM_API_KEY: "sk-ant-0123456789",
+      COGMO_LLM_CACHE_DIALECT: "none",
+    });
+    expect(r.isErr()).toBe(true);
+    if (!r.isErr()) return;
+    expect(r.error.issues.join("\n")).toMatch(
+      /COGMO_LLM_CACHE_DIALECT: applies to OpenAI-compatible providers only/,
+    );
+  });
+
   it("rejects non-numeric Telegram user IDs", () => {
     const r = parseNonInteractiveEnv({
       COGMO_LLM_PROVIDER_TYPE: "anthropic",

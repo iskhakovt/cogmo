@@ -1,12 +1,16 @@
+import type Anthropic from "@anthropic-ai/sdk";
 import { getEncoding, type Tiktoken } from "js-tiktoken";
 import OpenAI from "openai";
 import { logger } from "../logger.js";
+import type { CacheDialect } from "./cache-dialect.js";
+import { cacheMarker } from "./cache-marker.js";
 import { ProviderProtocolError, parseToolArgs, ToolArgsCutOffError } from "./errors.js";
 import { RefusalError } from "./fallback.js";
 import { withFailureLogging } from "./logging-fetch.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
 import type {
+  CacheIntent,
   ChatParams,
   ChatStreamResult,
   ContentBlock,
@@ -45,8 +49,8 @@ export interface OpenAICompatibleConfig {
   apiKey: string;
   baseURL: string;
   headers?: Record<string, string>;
-  /** Add Anthropic-style cache_control hints for OpenRouter routing to Claude models. */
-  promptCaching?: boolean;
+  /** Which hints a request's cache intent puts on the wire — see {@link CacheDialect}. */
+  cacheDialect: CacheDialect;
   /**
    * Transport for the SDK's requests — tests pass the wire recorder
    * (`src/test/wire-recorder.ts`). Wrapped in the failure logger exactly as
@@ -64,11 +68,11 @@ export interface OpenAICompatibleConfig {
 export class OpenAICompatibleProvider implements LlmProvider {
   readonly name: string;
   #client: OpenAI;
-  #promptCaching: boolean;
+  #cacheDialect: CacheDialect;
 
   constructor(name: string, config: OpenAICompatibleConfig) {
     this.name = name;
-    this.#promptCaching = config.promptCaching ?? false;
+    this.#cacheDialect = config.cacheDialect;
     this.#client = new OpenAI({
       apiKey: config.apiKey,
       baseURL: config.baseURL,
@@ -79,7 +83,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
   async countTokens(params: CountTokensParams): Promise<number> {
     const enc = getEncoder();
-    const msgs = buildMessages(params.system, params.messages, this.#promptCaching);
+    const msgs = buildMessages(params.system, params.messages, undefined);
     let tokens = 0;
 
     for (const msg of msgs) {
@@ -127,12 +131,14 @@ export class OpenAICompatibleProvider implements LlmProvider {
       throw new Error("responseFormat and tools are mutually exclusive");
     }
 
+    const hints = cacheHints(this.#cacheDialect, params);
     const span = startChatSpan(this.name, params.model);
     try {
-      const createParams: OpenAI.ChatCompletionCreateParamsNonStreaming = {
+      const createParams: OpenAI.ChatCompletionCreateParamsNonStreaming & CacheHintFields = {
         model: params.model,
         max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
-        messages: buildMessages(params.system, params.messages, this.#promptCaching),
+        messages: buildMessages(params.system, params.messages, hints.systemMarker),
+        ...hints.fields,
       };
 
       if (params.tools?.length) {
@@ -154,7 +160,10 @@ export class OpenAICompatibleProvider implements LlmProvider {
         };
       }
 
-      const response = await this.#client.chat.completions.create(createParams);
+      const response = await this.#client.chat.completions.create(
+        createParams,
+        requestOptions(hints),
+      );
 
       const choice = response.choices[0];
       if (!choice) throw new Error("No choices in response");
@@ -195,7 +204,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
     );
 
     const client = this.#client;
-    const caching = this.#promptCaching;
+    const hints = cacheHints(this.#cacheDialect, params);
     const providerName = this.name;
     const span = startChatSpan(providerName, params.model);
 
@@ -207,15 +216,19 @@ export class OpenAICompatibleProvider implements LlmProvider {
         // narrow Stream<...> type from the streaming overload — a try/catch
         // would widen `stream` to the ChatCompletion|Stream union.
         const stream = await client.chat.completions
-          .create({
-            model: params.model,
-            max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
-            messages: buildMessages(params.system, params.messages, caching),
-            ...(params.tools?.length && { tools: params.tools.map(toOpenAITool) }),
-            ...(params.temperature !== undefined && { temperature: params.temperature }),
-            stream: true,
-            stream_options: { include_usage: true },
-          })
+          .create(
+            {
+              model: params.model,
+              max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
+              messages: buildMessages(params.system, params.messages, hints.systemMarker),
+              ...hints.fields,
+              ...(params.tools?.length && { tools: params.tools.map(toOpenAITool) }),
+              ...(params.temperature !== undefined && { temperature: params.temperature }),
+              stream: true,
+              stream_options: { include_usage: true },
+            },
+            requestOptions(hints),
+          )
           .catch((err: unknown) => {
             throw toRefusalErrorIfMatches(err) ?? err;
           });
@@ -304,12 +317,102 @@ export class OpenAICompatibleProvider implements LlmProvider {
   }
 }
 
+// --- Cache hints ---
+
+/**
+ * The request fields a cache intent can set: OpenAI's `prompt_cache_key`, and
+ * OpenRouter's `session_id` and top-level `cache_control` (Anthropic's
+ * automatic caching, passed through to Claude), which the SDK doesn't type.
+ */
+interface CacheHintFields
+  extends Pick<OpenAI.ChatCompletionCreateParamsNonStreaming, "prompt_cache_key"> {
+  session_id?: string;
+  cache_control?: Anthropic.CacheControlEphemeral;
+}
+
+/** What one request carries for its cache intent, in its endpoint's dialect. */
+interface CacheHints {
+  fields: CacheHintFields;
+  headers: Record<string, string> | undefined;
+  /** The system message's `cache_control`, on models that honour markers. */
+  systemMarker: Anthropic.CacheControlEphemeral | undefined;
+}
+
+const NO_HINTS: CacheHints = { fields: {}, headers: undefined, systemMarker: undefined };
+
+/**
+ * Map a request's cache intent onto its endpoint's dialect (see
+ * design/prompt-caching.md → Adapter mapping). A structured-output call is
+ * one-shot — nothing re-sends its transcript — so it maps as if it had no
+ * intent, as on the Anthropic adapter. Retention reaches Claude only: OpenAI
+ * and xAI keep entries for as long as they choose.
+ */
+function cacheHints(dialect: CacheDialect, params: ChatParams): CacheHints {
+  const intent = params.responseFormat ? undefined : params.cache;
+  switch (dialect) {
+    case "none":
+      return NO_HINTS;
+    case "openai":
+      return intent ? { ...NO_HINTS, fields: { prompt_cache_key: intent.key } } : NO_HINTS;
+    case "xai":
+      return intent ? { ...NO_HINTS, headers: { "x-grok-conv-id": intent.key } } : NO_HINTS;
+    case "openrouter":
+      return openRouterHints(params.model, intent);
+  }
+}
+
+/**
+ * OpenRouter's `session_id` keeps a conversation on one upstream, and so on
+ * one cache, on every model. Markers go only where they take effect. Claude
+ * gets the system marker, and for a transcript the top-level automatic
+ * breakpoint, both at the intent's TTL. Gemini and Qwen get the system marker
+ * alone, with no TTL, as neither takes one; on Gemini a tail marker that moves
+ * every request makes OpenRouter write a new cache each time without reading
+ * the last one.
+ */
+function openRouterHints(model: string, intent: CacheIntent | undefined): CacheHints {
+  const session = intent ? { session_id: intent.key } : {};
+  switch (markerFamily(model)) {
+    case "anthropic": {
+      const marker = cacheMarker(intent);
+      return {
+        fields: { ...session, ...(intent && { cache_control: marker }) },
+        headers: undefined,
+        systemMarker: marker,
+      };
+    }
+    case "google":
+    case "qwen":
+      return { fields: session, headers: undefined, systemMarker: { type: "ephemeral" } };
+    case undefined:
+      return { ...NO_HINTS, fields: session };
+  }
+}
+
+/**
+ * The OpenRouter model families whose upstreams cache at `cache_control`
+ * markers: Claude, Gemini, and Qwen on Alibaba, which caches only at them.
+ * The rest (OpenAI, xAI, DeepSeek, …) cache automatically. A leading `~`
+ * marks a family alias (`~anthropic/claude-sonnet-latest`).
+ */
+function markerFamily(model: string): "anthropic" | "google" | "qwen" | undefined {
+  const slug = model.startsWith("~") ? model.slice(1) : model;
+  if (slug.startsWith("anthropic/")) return "anthropic";
+  if (slug.startsWith("google/")) return "google";
+  if (slug.startsWith("qwen/")) return "qwen";
+  return undefined;
+}
+
+function requestOptions(hints: CacheHints): OpenAI.RequestOptions | undefined {
+  return hints.headers && { headers: hints.headers };
+}
+
 // --- Message building ---
 
 function buildMessages(
   system: string,
   messages: Message[],
-  promptCaching: boolean,
+  systemMarker: Anthropic.CacheControlEphemeral | undefined,
 ): OpenAI.ChatCompletionMessageParam[] {
   // Omit the system message entirely when blank — a null-persona sub-agent
   // passes system: "". An empty system block is rejected downstream by stricter
@@ -317,16 +420,16 @@ function buildMessages(
   // Anthropic itself; mirrors the Anthropic adapter's omit-when-empty behaviour.
   const result: OpenAI.ChatCompletionMessageParam[] = [];
   if (system.trim().length > 0) {
-    // When promptCaching is enabled (OpenRouter → Anthropic), add cache_control
-    // on the system content block. OpenRouter passes it through to Claude.
-    const systemPart: OpenAI.ChatCompletionContentPartText & {
-      cache_control: { type: "ephemeral" };
-    } = { type: "text", text: system, cache_control: { type: "ephemeral" } };
-    result.push(
-      promptCaching
-        ? { role: "system", content: [systemPart] }
-        : { role: "system", content: system },
-    );
+    // A marker needs a content block to sit on, so a marked system prompt
+    // goes as a one-block array.
+    if (systemMarker) {
+      const systemPart: OpenAI.ChatCompletionContentPartText & {
+        cache_control: Anthropic.CacheControlEphemeral;
+      } = { type: "text", text: system, cache_control: systemMarker };
+      result.push({ role: "system", content: [systemPart] });
+    } else {
+      result.push({ role: "system", content: system });
+    }
   }
 
   for (const msg of messages) {

@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import type { CacheDialect } from "../../llm/cache-dialect.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
+import { expectDefined } from "../../test/assertions.js";
 import type { AgentStore } from "../store/index.js";
 import { addProvider } from "./add-provider.js";
 
@@ -80,6 +82,23 @@ describe("addProvider — transaction atomicity", () => {
     expect(deps.runInTx).toHaveBeenCalledTimes(1);
   });
 
+  it("takes a validation the caller already has instead of checking the key live", async () => {
+    const { validateOpenAICompatibleKey } = await import("../../setup/validate.js");
+    const deps = makeDeps();
+
+    const result = await addProvider(deps, {
+      name: "openrouter",
+      type: "openai_compatible",
+      baseUrl: "https://openrouter.ai/api/v1",
+      apiKey: "sk-or-test-1234567890",
+      validation: { valid: true },
+    });
+
+    expect(validateOpenAICompatibleKey).not.toHaveBeenCalled();
+    expect(result.validation).toEqual({ valid: true });
+    expect(deps.markValidated).toHaveBeenCalledWith(FAKE_TX, "openrouter_api_key");
+  });
+
   it("skips markValidated when the live key validation fails", async () => {
     const { validateAnthropicKey } = await import("../../setup/validate.js");
     vi.mocked(validateAnthropicKey).mockResolvedValueOnce({
@@ -98,5 +117,41 @@ describe("addProvider — transaction atomicity", () => {
     // anyway?" semantics live at the caller, not in this domain function.
     expect(deps.putSecret).toHaveBeenCalled();
     expect(deps.createProvider).toHaveBeenCalled();
+  });
+});
+
+describe("addProvider — cache dialect", () => {
+  async function storedAttrs(args: {
+    type: "anthropic" | "openai_compatible";
+    baseUrl?: string;
+    cacheDialect?: CacheDialect;
+  }): Promise<unknown> {
+    const deps = makeDeps();
+    await addProvider(deps, { name: "p", apiKey: "sk-test-1234567890", ...args });
+    const call = expectDefined(deps.createProvider.mock.calls[0], "createProvider call");
+    return call[1].attrs;
+  }
+
+  it.each([
+    ["https://openrouter.ai/api/v1", "openrouter"],
+    ["https://api.openai.com/v1", "openai"],
+    ["https://api.x.ai/v1", "xai"],
+    ["https://api.deepseek.com/v1", "none"],
+  ] as const)("derives %s → %s from the base URL's host", async (baseUrl, cacheDialect) => {
+    expect(await storedAttrs({ type: "openai_compatible", baseUrl })).toEqual({ cacheDialect });
+  });
+
+  it("stores an explicit dialect over the derived one", async () => {
+    expect(
+      await storedAttrs({
+        type: "openai_compatible",
+        baseUrl: "https://gateway.internal/openrouter/v1",
+        cacheDialect: "openrouter",
+      }),
+    ).toEqual({ cacheDialect: "openrouter" });
+  });
+
+  it("gives an anthropic row no dialect", async () => {
+    expect(await storedAttrs({ type: "anthropic" })).toEqual({});
   });
 });

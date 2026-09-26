@@ -242,7 +242,7 @@ describe("runNonInteractive", () => {
     expect(await rowCount(db, secretsTable)).toBe(0);
   });
 
-  it("applies OpenRouter attrs.promptCaching", async () => {
+  it("gives an OpenRouter provider the openrouter cache dialect", async () => {
     const v = validators();
     await runNonInteractive({
       runInTx: tx,
@@ -261,11 +261,65 @@ describe("runNonInteractive", () => {
     expect(rows[0]?.name).toBe("openrouter");
     expect(rows[0]?.type).toBe("openai_compatible");
     expect(rows[0]?.baseUrl).toBe("https://openrouter.ai/api/v1");
-    expect(rows[0]?.attrs).toEqual({ promptCaching: true });
+    expect(rows[0]?.attrs).toEqual({ cacheDialect: "openrouter" });
+    // Validated once, up front — persisting through addProvider checks nothing again.
+    expect(v.llmOpenAICompatible).toHaveBeenCalledOnce();
     expect(v.llmOpenAICompatible).toHaveBeenCalledWith(
       "sk-or-test-0123456789",
       "https://openrouter.ai/api/v1",
     );
+  });
+
+  it.each([
+    [{ COGMO_LLM_PROVIDER_TYPE: "openai" }, { cacheDialect: "openai" }],
+    [
+      { COGMO_LLM_PROVIDER_TYPE: "custom", COGMO_LLM_BASE_URL: "https://api.x.ai/v1" },
+      { cacheDialect: "xai" },
+    ],
+    [
+      { COGMO_LLM_PROVIDER_TYPE: "custom", COGMO_LLM_BASE_URL: "https://my.llm.test/v1" },
+      { cacheDialect: "none" },
+    ],
+    [
+      {
+        COGMO_LLM_PROVIDER_TYPE: "custom",
+        COGMO_LLM_BASE_URL: "https://gateway.internal/v1",
+        COGMO_LLM_CACHE_DIALECT: "openrouter",
+      },
+      { cacheDialect: "openrouter" },
+    ],
+    [
+      {
+        COGMO_LLM_PROVIDER_TYPE: "openrouter",
+        COGMO_LLM_BASE_URL: "https://gateway.internal/openrouter/v1",
+      },
+      { cacheDialect: "openrouter" },
+    ],
+    [
+      {
+        COGMO_LLM_PROVIDER_TYPE: "openrouter",
+        COGMO_LLM_BASE_URL: "https://gateway.internal/openrouter/v1",
+        COGMO_LLM_CACHE_DIALECT: "none",
+      },
+      { cacheDialect: "none" },
+    ],
+    [{ COGMO_LLM_PROVIDER_TYPE: "anthropic" }, {}],
+  ])("persists %j with attrs %j", async (env, attrs) => {
+    await runNonInteractive({
+      runInTx: tx,
+      agentStore,
+      transportStore,
+      secretsStore,
+      env: baseEnv({ COGMO_LLM_API_KEY: "sk-test-0123456789", ...env }),
+      validators: validators(),
+    });
+
+    const rows = await db.select().from(llmProviders);
+    expect(rows.map((r) => r.attrs)).toEqual([attrs]);
+    const secret = await tx((trx) =>
+      secretsStore.getSecretMeta(trx, `${env.COGMO_LLM_PROVIDER_TYPE}_api_key`),
+    );
+    expect(secret?.validatedAt).toBeInstanceOf(Date);
   });
 
   it("uses custom baseUrl when provider type is custom", async () => {

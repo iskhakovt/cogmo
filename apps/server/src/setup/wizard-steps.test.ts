@@ -1068,6 +1068,30 @@ describe("stepConfigureProvider", () => {
     expect(runClackValidate(passCall?.validate, "a long enough api key")).toBeUndefined();
   });
 
+  it("gives the openrouter type the openrouter cache dialect", async () => {
+    const deps = buildDeps();
+    deps.agentStore.listProviders.mockResolvedValue([]);
+    addProviderSpy.mockResolvedValue({ providerId: "p-new", validation: { valid: true } });
+    vi.mocked(p.select).mockResolvedValueOnce("openrouter"); // provider type
+    vi.mocked(p.password).mockResolvedValueOnce("sk-or-test-1234567890");
+    // Discovery finds no models, so the model id is a `p.text` prompt; cancelling it bails out.
+    vi.mocked(p.isCancel)
+      .mockReturnValueOnce(false) // provider type
+      .mockReturnValueOnce(false) // API key
+      .mockReturnValueOnce(true); // model id
+
+    await expect(stepConfigureProvider(deps)).rejects.toBeInstanceOf(WizardCancelled);
+    expect(vi.mocked(p.text)).toHaveBeenCalledOnce();
+
+    expect(addProviderSpy).toHaveBeenCalledWith(deps, {
+      name: "openrouter",
+      type: "openai_compatible",
+      baseUrl: "https://openrouter.ai/api/v1",
+      apiKey: "sk-or-test-1234567890",
+      cacheDialect: "openrouter",
+    });
+  });
+
   it("custom provider: prompts for base URL before API key", async () => {
     const deps = buildDeps();
     deps.agentStore.listProviders.mockResolvedValue([]);

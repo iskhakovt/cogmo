@@ -57,7 +57,7 @@ Surveyed September 2026.
 | promptcachelint (Python, MIT) diffs consecutive requests segment by segment — each tool, system block and message block — with cache markers stripped, and flags a turn that appends more than 20 positions. `assertAppendOnly` follows that design. | github.com/OsmnvAslan/promptcachelint |
 | Zep places a memory block after the last breakpoint and replaces it each turn, measuring 1.3–1.9× lower cost over 18–54 turns — against memory in the system prompt, the layout this design also leaves. Mastra keeps observational memory append-only "to keep the prompt prefix cacheable". | Zep blog (2026-06-24); Mastra docs |
 | Keep the system prompt and tool list fixed for a session; deliver changes in the next turn's messages and restrict tools without removing them. Claude Code keeps every tool in every request and implements plan mode as tools; Manus masks instead of removing; OpenAI's `allowed_tools` restricts a turn "but not modify the list of tools you pass in, so you can maximize savings from prompt caching"; Letta measured 240 system-prompt variants on one agent at an 83.8% hit rate. | Claude Code blog; Manus blog; OpenAI function-calling guide; letta-code #4551 |
-| OpenRouter passes Anthropic `cache_control` through (per-block, and top-level for the Anthropic, Vertex, Azure and Bedrock providers); `session_id` / `x-session-id` pins sticky routing; usage reports `cached_tokens` and `cache_write_tokens`. | OpenRouter prompt-caching docs |
+| OpenRouter passes Anthropic `cache_control` through (per-block, and top-level for Claude on the Anthropic, Vertex, Azure and Bedrock providers); for Gemini it uses only the last per-block breakpoint. `session_id` (body) or `x-session-id` (header), at most 256 characters, pins sticky routing from the first request, with `prompt_cache_key` as the fallback key; usage reports `cached_tokens` and `cache_write_tokens`. | OpenRouter prompt-caching docs |
 
 ## Principles `[proposed]`
 
@@ -252,22 +252,28 @@ interface CacheIntent {
 | The loop's in-step non-streaming replay | Reuses the iteration's `chatParams`, so it reads the same cache |
 | Summarization, degraded-reply synthesis, sub-agent calls, `typed.ts`, artifact extraction | None — a breakpoint on a tail that is never re-sent is a pure 1.25–2× write surcharge |
 
-### Adapter mapping
+### Adapter mapping `[confirmed]`
 
 | Provider | How it caches | What the adapter sends | Usage mapping |
 |-|-|-|-|
 | Anthropic | Only at `cache_control` breakpoints | Last tool and system block marked at the retention TTL, plus top-level `cache_control: { type: "ephemeral", ttl }`. Without an intent: tools and system at 5 minutes, as today. | `inputTokens` = `input_tokens` + `cache_read_input_tokens` + `cache_creation_input_tokens` |
-| OpenRouter | Passes `cache_control` through to Claude and Gemini; other upstreams cache automatically and accept the markers without error (measured on xAI, DeepSeek and OpenAI) | Markers on `anthropic/` and `google/` models only — for Gemini an explicit marker on the last block rather than the top-level field, which OpenRouter supports on Vertex but not AI Studio; `session_id: key` on every model | `prompt_tokens`; `prompt_tokens_details.cached_tokens` / `cache_write_tokens` |
+| OpenRouter | Passes `cache_control` through to Claude, Gemini and Qwen (on Alibaba, which caches only at explicit breakpoints); OpenAI, xAI, DeepSeek and the rest cache automatically and accept the markers without error (measured on xAI, DeepSeek and OpenAI) | `session_id: key` on every model. Markers on `anthropic/`, `google/` and `qwen/` models only (a leading `~` alias counts): Claude gets the system marker and the top-level `cache_control`, both at the retention TTL; Gemini and Qwen get the system marker alone, with no TTL (see [Gemini through OpenRouter](#gemini-through-openrouter)). Without an intent: the system marker alone, Claude's at 5 minutes. | `prompt_tokens`; `prompt_tokens_details.cached_tokens` / `cache_write_tokens` |
 | OpenAI | Automatic from 1,024 tokens; GPT-5.6+ bills writes at 1.25× | `prompt_cache_key: key`; retention ignored (GPT-5.6+ offers only `30m`, earlier models default to extended retention) | `prompt_tokens`; `prompt_tokens_details.cached_tokens` / `cache_write_tokens` (GPT-5.6+) |
-| xAI | Automatic, cached per server | `x-grok-conv-id: key` request header | `prompt_tokens`; `prompt_tokens_details.cached_tokens` |
+| xAI | Automatic, cached per server | `x-grok-conv-id: key` request header (per xAI's docs; unit-tested, not measured — there is no direct xAI key) | `prompt_tokens`; `prompt_tokens_details.cached_tokens` |
 | Other OpenAI-compatible (DeepSeek, Groq, vLLM, …) | Automatic prefix caching, where offered | Nothing — strict servers reject unknown fields | Whatever the server reports |
 
-`retention` maps to Anthropic's 5-minute / 1-hour TTL (directly, or through OpenRouter) and is ignored elsewhere.
+`retention` maps to Anthropic's 5-minute / 1-hour TTL (directly, or through OpenRouter) and is ignored elsewhere. A structured-output call is one-shot, so every adapter maps it as if it had no intent; `countTokens` takes none.
 
-**Which OpenAI-compatible dialect applies** is configuration, not URL sniffing at request time: `llm_providers.attrs.cacheDialect` (`"openrouter" | "openai" | "xai" | "none"`) replaces today's `promptCaching` boolean, which encodes this for OpenRouter only.
+#### Gemini through OpenRouter
 
-- **Writers.** Three callers decide `promptCaching` today: the setup wizard and `cogmo provider add` (`src/cli/provider.ts`), which both persist through the `addProvider` use case (`src/agent/provider/add-provider.ts`), and non-interactive setup (`src/setup/non-interactive.ts`), which calls `createProvider` directly. All three decide the dialect instead, and the default belongs in `addProvider`, with non-interactive setup routed through it so the rule lives in one place. The provider types are `anthropic | openrouter | openai | custom`, with no xAI entry, so each writer takes an explicit dialect for a `custom` row and defaults to `"none"`.
-- **Migration.** The boolean alone can't tell an OpenAI or xAI row from any other `custom` one, so the data migration derives the dialect once from each row's provider type and base-URL host: `openrouter.ai` → `openrouter`, `api.openai.com` → `openai`, `api.x.ai` → `xai`, anything else → `none`.
+OpenRouter builds a Gemini cache from the content up to the last breakpoint. A tail marker moves with every request, so it never names a prefix that was cached before: on Vertex every request wrote a fresh entry and read none of the previous one, costing more than no marker at all, and on AI Studio nothing was cached. The top-level field reached neither. A system marker writes once and is read by every later request while its 5-minute TTL lasts, which a read doesn't extend. The transcript past the system prompt is left to Gemini's implicit caching, which is best-effort: it read nothing on any measured second request, and on a third only in some runs (see [Validation](#validation)).
+
+#### Dialect configuration
+
+**Which OpenAI-compatible dialect applies** is configuration, not URL sniffing at request time: `llm_providers.attrs.cacheDialect` (`"openrouter" | "openai" | "xai" | "none"`, `CacheDialectSchema` in `src/llm/cache-dialect.ts`). Absent reads as `none`; Anthropic rows carry none.
+
+- **Writers.** The setup wizard, `cogmo provider add` and non-interactive setup persist through the `addProvider` use case (`src/agent/provider/add-provider.ts`). An OpenAI-compatible row takes, in order: an explicit dialect (`--cache-dialect`, `COGMO_LLM_CACHE_DIALECT`; the wizard doesn't ask), its provider type's (`defaultCacheDialect`, `src/setup/providers.ts`: `openrouter` at any URL), or its base-URL host's (`cacheDialectForBaseUrl`: `openrouter.ai` → `openrouter`, `api.openai.com` → `openai`, `api.x.ai` → `xai`, each with its subdomains, where the vendors put their regional endpoints; anything else → `none`). The `openai` type has no dialect of its own, since a custom URL there may be a proxy that rejects `prompt_cache_key`.
+- **Migration.** 0057 sets each existing OpenAI-compatible row in SQL and drops `promptCaching` everywhere: `false` → `none`; otherwise the host's dialect (its test holds the SQL to `cacheDialectForBaseUrl`); otherwise `openrouter` if `true`, else `none`. `false` was an operator's opt-out, since no writer set it, and `true` only ever came from the `openrouter` type. `ProviderAttrsSchema` doesn't read the old key: migrations run at boot, before anything reads `llm_providers`. A row that still carries it — written by an older binary — parses with the key dropped and sends no hints rather than failing, and an older binary reading a migrated row drops `cacheDialect` the same way.
 
 ### Anthropic specifics `[confirmed]`
 
@@ -335,7 +341,7 @@ The persisted per-turn input is the sum across the turn's iterations, which over
 
 ## Validation `[confirmed]`
 
-Live measurements, 2026-09-25, from scripts kept outside the repo, each against a fresh ~7k-token system prompt.
+Live measurements, 2026-09-25, from scripts kept outside the repo, each against a fresh ~7k-token system prompt. The Gemini and scenario D rows are from 2026-09-26, against a fresh ~3.5–4.7k-token prompt; scenario D is `src/llm/openai-compat.live.test.ts`.
 
 | Question | Result |
 |-|-|
@@ -350,6 +356,9 @@ Live measurements, 2026-09-25, from scripts kept outside the repo, each against 
 | Do markers change xAI's hit rate through OpenRouter? | No. Over four pairs per variant — top-level and block markers, block only, none — an immediate repeat read 4,864 of 4,897 tokens in 3 or 4 of 4, regardless of markers. |
 | Does a 1-hour entry outlive a gap that expires a 5-minute one? | Yes. After 6.5 minutes the `1h` entry read all 6,875 tokens; the `5m` entry had expired and was written again. |
 | Does OpenAI's `prompt_tokens` include cached tokens? | Yes. The repeat reported `prompt_tokens` 4,711 with `cached_tokens` 3,840 (gpt-5.4-nano, `prompt_cache_key` set). |
+| Does a tail marker cache a Gemini transcript through OpenRouter? (Gemini 2.5 Flash, a ~3.5k-token transcript, three requests) | No. On Vertex every request wrote an entry the size of its prefix and read none of the previous one, reporting the prompt twice over and costing about 40% more than no marker; on AI Studio nothing was written or read. The top-level field wrote nothing either. |
+| Does a system marker cache Gemini through OpenRouter? | Yes, on Vertex and AI Studio alike. The first request wrote the ~3.5k-token system prompt and both follow-ups read all of it, at about a tenth of the unmarked cost. Unmarked, implicit caching read nothing on the second request in either of two runs. OpenRouter reports the writing request's tokens as both `cached_tokens` and `cache_write_tokens`. |
+| Scenario D: does each dialect read the conversation's cache? (`long` intent, three requests) | Yes. OpenRouter → Claude Sonnet 5 read exactly the previous request's read plus write: 0, 4,698, 4,721, after writes of 4,698, 23 and 22. OpenRouter → Grok 4.3 read 3,136 of 3,152 and of 3,171, after one repeated miss. OpenRouter → Gemini 2.5 Flash read its 3,547-token system entry on both follow-ups. OpenAI gpt-4.1-nano with `prompt_cache_key` read 2,816 of 2,972 and of 2,992. |
 
 ## Test Plan `[proposed]`
 
@@ -415,7 +424,7 @@ The smoke test's migrations check gains `turn_contexts` and `system_prompt_snaps
 
 ### Live tier
 
-Step 1 ships the tier with A's relation at two levels: through the adapter (`src/llm/anthropic.live.test.ts`) and across a tool-using turn's iterations through `runStreamingAgentLoop` (`src/agent/loop.live.test.ts`). The full-conversation scenarios below arrive with step 2.
+Step 1 ships the tier with A's relation at two levels: through the adapter (`src/llm/anthropic.live.test.ts`) and across a tool-using turn's iterations through `runStreamingAgentLoop` (`src/agent/loop.live.test.ts`). Step 4 ships D at the adapter level (`src/llm/openai-compat.live.test.ts`): a growing three-request conversation per route, plus a Gemini route that holds each follow-up to reading the system marker's entry. The full-conversation scenarios below arrive with step 2.
 
 Step 2 adds `src/test/prompt-caching.live.test.ts` to the `live` project, reusing the integration global setup: chat providers point at the real endpoints through the wire recorder, and Hindsight keeps llmock, recording into a throwaway fixture directory.
 
@@ -429,7 +438,7 @@ Step 2 adds `src/test/prompt-caching.live.test.ts` to the `live` project, reusin
 
 **C. TTL survival (nightly only).** Turn 1, a six-minute wait, then turn 2, whose first request reads turn 1's whole prefix. Only the 1-hour TTL makes that possible.
 
-**D. OpenAI, xAI, and OpenRouter to Claude.** The same conversation through each dialect; xAI through OpenRouter until a direct xAI key exists. OpenAI and xAI cache best-effort — measured, xAI missed an immediate repeat about one time in eight — so their assertion is tolerant: from the second request on, `cached_tokens` is non-zero and covers most of the previous prompt, with one retry before failing. OpenRouter to Claude reports `cached_tokens` and `cache_write_tokens`, and gets A's relation, allowing one miss if OpenRouter moves the conversation to a different upstream.
+**D. OpenAI, xAI, and OpenRouter to Claude.** The same conversation through each dialect; xAI through OpenRouter until a direct xAI key exists. OpenAI and xAI cache best-effort — measured, xAI missed an immediate repeat about one time in eight — so their assertion is tolerant: from the second request on, `cached_tokens` covers at least 80% of the previous prompt, and a request that misses is repeated once before the test fails. OpenRouter to Claude reports `cached_tokens` and `cache_write_tokens`, and gets A's relation, allowing one miss if OpenRouter moves the conversation to a different upstream.
 
 **Cost and cadence.** A run costs cents, since after the first request almost every input token is a cache read. It runs locally with the keys from the root `.env`, and on a scheduled and manually dispatched GitHub workflow once API-key secrets exist there. It never runs on PRs.
 
@@ -446,7 +455,7 @@ Recorded fixtures match on the last user message (`match: { userMessage }`), whi
 1. **Cache intent and usage accounting** `[confirmed]`. `ChatParams.cache`, the Anthropic mapping, usage totals across adapters, the metric split, loop totals, the injectable `fetch` and wire recorder, and live scenario A's within-turn assertions. Iterations 2 and later of every tool-using turn read the transcript. Until step 2, reads rarely cross a turn (only when the system prompt happens not to change), so a single-iteration turn usually pays 25% more on the transcript it writes; the step nets out cheaper once more than ~28% of turns iterate (`cogmo.agent.iterations`), or fewer where reads do cross a turn. Early data puts the tool-calling share near that line, above it in periods heavy on image generation and below it in chat-heavy ones; it comes from little use, and a low share may reflect bugs as much as usage. Ships with `retention: "short"` everywhere.
 2. **Turn context.** The voice decision and per-turn tool definitions, frozen in the `freeze-turn-inputs` step, have shipped. Remaining: clock, recall and voice hint out of the system prompt (voice as a modality in the turn context, its style guidance a standing system-prompt section); `turn_contexts` with stored rendered text, the render step after compaction with deduplication and the envelope; the llmock normalizer and re-record; `retention: "long"` for chat and pipeline runs; the integration suite; live scenarios B and C. Reads across turns on every provider, except after a configuration change.
 3. **System prompt snapshot and one prefix per conversation.** `system_prompt_snapshots` and epochs keyed on a configuration digest, core-memory announcements, every channel-scoped rule labelled in the snapshot with the delivery channels in the turn context, thinking blocks stripped when an epoch opens, and stage turns on the conversation's snapshot and tool definitions with the allowlist enforced at dispatch ([pipelines.md](pipelines.md) changes with it).
-4. **OpenAI-compatible routing hints.** `attrs.cacheDialect` with its migration and writers, OpenRouter `session_id` and markers, OpenAI `prompt_cache_key`, xAI `x-grok-conv-id`, and live scenario D.
+4. **OpenAI-compatible routing hints** `[confirmed]`. `attrs.cacheDialect` with its migration and writers, OpenRouter `session_id` and markers, OpenAI `prompt_cache_key`, xAI `x-grok-conv-id`, and live scenario D.
 
 ## Open questions
 
@@ -455,6 +464,8 @@ Recorded fixtures match on the last user message (`match: { userMessage }`), whi
 - **Core-memory edit frequency.** Early data shows few edits, but it comes from little use, and a low count may also point to a bug in how the agent uses core memory rather than the rate a working system would see. Check the agent updates core memory when it should, then re-measure edits per conversation-day, before sizing step 3.
 - **Anthropic-compatible endpoints.** If an Anthropic-protocol `llm_providers` row ever points at a third-party endpoint, check that it accepts top-level `cache_control`, or fall back to an explicit tail marker for that row.
 - **Live tier in CI.** The scheduled workflow needs Anthropic, OpenAI and OpenRouter API keys as repository secrets (xAI optional, reached through OpenRouter until a direct key exists); until they exist, the live tier runs locally only.
+- **OpenAI reasoning models.** The OpenAI-compatible adapter sends `max_tokens`, which OpenAI's reasoning models reject in favour of `max_completion_tokens` (gpt-5.4-nano returned a 400), so scenario D runs OpenAI direct on gpt-4.1-nano, and `prompt_cache_key` on GPT-5.6's cache accounting is unmeasured.
+- **The xAI header.** `x-grok-conv-id` goes out as xAI documents it but has never met the real endpoint; a direct xAI key would add an xAI route to scenario D.
 
 ## Sources `[research]`
 
