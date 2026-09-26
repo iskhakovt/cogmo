@@ -254,7 +254,7 @@ The Telegram command resolves the current conversation, calls `transport.evoluti
 | "Give me this one as a bulleted list." | Nothing | A one-off request |
 | "Way too long. What's the short version?" | Nothing in the turn; the Observer may infer a rule | A reaction, not a stated standing instruction |
 
-The [routing table](memory.md#core-memory-vs-hindsight-confirmed) drops "spelling variety" from core memory and sends instructions about replies and conduct to `rule_set`. `CORE_MEMORY_PROMPT_GUIDANCE`, `MEMORY_PROMPT_GUIDANCE`, the `core_memory_update` and `memory_retain` descriptions, and the onboarding text, which asks how the user "prefer[s] to communicate", say the same, as does a rules entry in `# Capabilities`. If [Core Memory Scope by Profile Class](memory.md) lands, its shared `identity` block holds the languages the user speaks, and the language and spelling of replies are rules.
+The [routing table](memory.md#core-memory-vs-hindsight-confirmed) drops "spelling variety" from core memory and sends instructions about replies and conduct to `rule_set`. `CORE_MEMORY_PROMPT_GUIDANCE`, `MEMORY_PROMPT_GUIDANCE`, the `core_memory_update` and `memory_retain` descriptions, and the onboarding text, which asks how the user "prefer[s] to communicate", say the same, as does a rules entry in `# Capabilities`. If [Core Memory Scope by Profile Class](memory.md#core-memory-scope-by-profile-class-proposed) lands, its shared `identity` block holds the languages the user speaks, and the language and spelling of replies are rules.
 
 ### Precedence
 
