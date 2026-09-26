@@ -124,9 +124,8 @@ async function waitForFinalAssistantMessage(
 ): Promise<PersistedMessage> {
   return vi.waitFor(
     async () => {
-      // A turn persists its tool_use, tool_result and reply rows in one insert,
-      // so they share `created_at`; `id` (UUIDv7) carries their order. Unordered,
-      // the shared database returns rows in heap order.
+      // One insert writes the turn's tool_use, tool_result and reply rows, so they
+      // share `created_at`; only `id` (UUIDv7) orders them.
       const [lastAssistant] = await db
         .select()
         .from(messages)
