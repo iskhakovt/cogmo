@@ -209,31 +209,12 @@ export async function ensureSkillsCodingRepo(
     return { kind: "skipped_no_origin", localPath: args.skillsRepoPath };
   }
 
+  // Insert-or-recover rather than read-then-insert: a concurrent bootstrap's
+  // row can be committed after this transaction's snapshot, where no read
+  // sees it. The keyed insert resolves that loser through the transactor's
+  // `40001` retry into the recovered arm.
   return deps.runInTx(async (tx) => {
-    const existing = await deps.codingStore.getRepoByName(tx, SKILLS_CODING_REPO_NAME);
-    if (existing) {
-      if (existing.remoteUrl === remoteUrl) {
-        return {
-          kind: "unchanged",
-          name: existing.name,
-          localPath: existing.localPath,
-          remoteUrl: existing.remoteUrl,
-        };
-      }
-      await deps.codingStore.updateRepoRemoteUrl(tx, existing.id, remoteUrl);
-      log.info(
-        { name: existing.name, previousRemoteUrl: existing.remoteUrl, remoteUrl },
-        "synced skills coding_repos.remote_url from bare repo origin",
-      );
-      return {
-        kind: "updated",
-        name: existing.name,
-        localPath: existing.localPath,
-        remoteUrl,
-        previousRemoteUrl: existing.remoteUrl,
-      };
-    }
-    const row = await deps.codingStore.insertRepo(tx, {
+    const { kind, row } = await deps.codingStore.insertOrRecoverRepo(tx, {
       name: SKILLS_CODING_REPO_NAME,
       localPath: args.skillsRepoPath,
       defaultBranch: "main",
@@ -245,10 +226,32 @@ export async function ensureSkillsCodingRepo(
       taskWallTimeSeconds: 1800,
       maxConcurrentTasks: 1,
     });
+    if (kind === "new") {
+      log.info(
+        { name: row.name, localPath: row.localPath, remoteUrl },
+        "registered skills coding_repos row",
+      );
+      return {
+        kind: "created",
+        name: row.name,
+        localPath: row.localPath,
+        remoteUrl: row.remoteUrl,
+      };
+    }
+    if (row.remoteUrl === remoteUrl) {
+      return { kind: "unchanged", name: row.name, localPath: row.localPath, remoteUrl };
+    }
+    await deps.codingStore.updateRepoRemoteUrl(tx, row.id, remoteUrl);
     log.info(
-      { name: row.name, localPath: row.localPath, remoteUrl },
-      "registered skills coding_repos row",
+      { name: row.name, previousRemoteUrl: row.remoteUrl, remoteUrl },
+      "synced skills coding_repos.remote_url from bare repo origin",
     );
-    return { kind: "created", name: row.name, localPath: row.localPath, remoteUrl: row.remoteUrl };
+    return {
+      kind: "updated",
+      name: row.name,
+      localPath: row.localPath,
+      remoteUrl,
+      previousRemoteUrl: row.remoteUrl,
+    };
   });
 }

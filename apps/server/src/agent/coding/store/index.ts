@@ -80,6 +80,22 @@ export interface CodingRepoRow {
   createdAt: Date;
 }
 
+/** `identityName` and `verifyTimeoutSeconds` fall back to the DB defaults when omitted. */
+export interface InsertRepoParams {
+  name: string;
+  localPath: string;
+  defaultBranch: string;
+  remoteUrl: string;
+  devcontainer: DevcontainerSpec | null;
+  allowedBackends: ReadonlyArray<CodingBackend>;
+  verifyCommand: string;
+  taskTokenBudget: number;
+  taskWallTimeSeconds: number;
+  maxConcurrentTasks: number;
+  identityName?: string;
+  verifyTimeoutSeconds?: number;
+}
+
 export interface InsertTaskParams {
   repoId: string;
   conversationId?: string | null;
@@ -141,23 +157,18 @@ export interface CodingStore {
   /** Insert a new repo. Throws on `name` collision (UNIQUE). `identityName`
    * and `verifyTimeoutSeconds` are optional — omitted callers inherit the
    * DB defaults so single-account setups stay one-line. */
-  insertRepo(
+  insertRepo(tx: Transaction, params: InsertRepoParams): Promise<CodingRepoRow>;
+
+  /**
+   * {@link CodingStore.insertRepo} keyed on `name`: a second call with a
+   * taken name returns `kind: "recovered"` and the stored row, unchanged,
+   * instead of throwing. For auto-managed rows that concurrent bootstraps
+   * may both try to create.
+   */
+  insertOrRecoverRepo(
     tx: Transaction,
-    params: {
-      name: string;
-      localPath: string;
-      defaultBranch: string;
-      remoteUrl: string;
-      devcontainer: DevcontainerSpec | null;
-      allowedBackends: ReadonlyArray<CodingBackend>;
-      verifyCommand: string;
-      taskTokenBudget: number;
-      taskWallTimeSeconds: number;
-      maxConcurrentTasks: number;
-      identityName?: string;
-      verifyTimeoutSeconds?: number;
-    },
-  ): Promise<CodingRepoRow>;
+    params: InsertRepoParams,
+  ): Promise<{ kind: "new" | "recovered"; row: CodingRepoRow }>;
 
   /** Look up a repo by its admin-set name. */
   getRepoByName(tx: Transaction, name: string): Promise<CodingRepoRow | undefined>;
@@ -399,7 +410,27 @@ export interface CodingStore {
   getCodingAutoapproveModeForTask(tx: Transaction, taskId: string): Promise<"off" | "on" | null>;
 }
 
-/** Column values shared by both insert paths. */
+/** Column values shared by both repo insert paths. */
+function repoValues(params: InsertRepoParams) {
+  return {
+    name: params.name,
+    localPath: params.localPath,
+    defaultBranch: params.defaultBranch,
+    remoteUrl: params.remoteUrl,
+    devcontainer: params.devcontainer ?? null,
+    allowedBackends: [...params.allowedBackends],
+    verifyCommand: params.verifyCommand,
+    taskTokenBudget: params.taskTokenBudget,
+    taskWallTimeSeconds: params.taskWallTimeSeconds,
+    maxConcurrentTasks: params.maxConcurrentTasks,
+    ...(params.identityName !== undefined && { identityName: params.identityName }),
+    ...(params.verifyTimeoutSeconds !== undefined && {
+      verifyTimeoutSeconds: params.verifyTimeoutSeconds,
+    }),
+  };
+}
+
+/** Column values shared by both task insert paths. */
 function taskValues(params: InsertTaskParams) {
   return {
     repoId: params.repoId,
@@ -416,45 +447,23 @@ function taskValues(params: InsertTaskParams) {
 export class DrizzleCodingStore implements CodingStore {
   // --- Repos ---
 
-  async insertRepo(
+  async insertRepo(tx: Transaction, params: InsertRepoParams): Promise<CodingRepoRow> {
+    return single(await tx.insert(codingRepos).values(repoValues(params)).returning());
+  }
+
+  async insertOrRecoverRepo(
     tx: Transaction,
-    params: {
-      name: string;
-      localPath: string;
-      defaultBranch: string;
-      remoteUrl: string;
-      devcontainer: DevcontainerSpec | null;
-      allowedBackends: ReadonlyArray<CodingBackend>;
-      verifyCommand: string;
-      taskTokenBudget: number;
-      taskWallTimeSeconds: number;
-      maxConcurrentTasks: number;
-      identityName?: string;
-      verifyTimeoutSeconds?: number;
-    },
-  ): Promise<CodingRepoRow> {
-    const row = single(
-      await tx
-        .insert(codingRepos)
-        .values({
-          name: params.name,
-          localPath: params.localPath,
-          defaultBranch: params.defaultBranch,
-          remoteUrl: params.remoteUrl,
-          devcontainer: params.devcontainer ?? null,
-          allowedBackends: [...params.allowedBackends],
-          verifyCommand: params.verifyCommand,
-          taskTokenBudget: params.taskTokenBudget,
-          taskWallTimeSeconds: params.taskWallTimeSeconds,
-          maxConcurrentTasks: params.maxConcurrentTasks,
-          ...(params.identityName !== undefined && { identityName: params.identityName }),
-          ...(params.verifyTimeoutSeconds !== undefined && {
-            verifyTimeoutSeconds: params.verifyTimeoutSeconds,
-          }),
-        })
-        .returning(),
-    );
-    return row;
+    params: InsertRepoParams,
+  ): Promise<{ kind: "new" | "recovered"; row: CodingRepoRow }> {
+    // The no-op SET leaves a stored row as it was. See `insertOrRecoverTask`
+    // for the conflict-arm semantics and the `xmax = 0` discriminator.
+    const rows = await tx
+      .insert(codingRepos)
+      .values(repoValues(params))
+      .onConflictDoUpdate({ target: codingRepos.name, set: { name: params.name } })
+      .returning({ ...getTableColumns(codingRepos), inserted: sql<boolean>`(xmax = 0)` });
+    const { inserted, ...row } = single(rows);
+    return { kind: inserted ? "new" : "recovered", row };
   }
 
   async getRepoByName(tx: Transaction, name: string): Promise<CodingRepoRow | undefined> {

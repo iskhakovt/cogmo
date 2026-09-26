@@ -28,7 +28,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { fetchFeatureBranch } from "../agent/coding/git-as-transport.js";
 import { DrizzleCodingStore } from "../agent/coding/store/index.js";
@@ -306,6 +306,33 @@ describe("skill authoring bootstrap — boot → fetch → register chain", () =
       expect(second.localPath).toBe(repos.skillsBare);
       expect(second.remoteUrl).toBe(repos.daytonaRemoteBare);
     }
+  });
+
+  it("ensureSkillsCodingRepo lands on a row its snapshot cannot see", async () => {
+    // A concurrent bootstrap's row is committed after this one's snapshot, so
+    // no read inside the transaction can see it. PGlite has one connection, so
+    // reads are stubbed empty to stand in for that snapshot; the write must
+    // still resolve to the existing row rather than fail on
+    // `coding_repos_name_unique`. The two-connection race runs against real
+    // Postgres, where the loser's conflict raises `40001` for the transactor.
+    const first = await ensureSkillsCodingRepo(
+      { runInTx: tx, codingStore },
+      { skillsRepoPath: repos.skillsBare },
+    );
+    expect(first.kind).toBe("created");
+
+    const staleRead = vi.spyOn(codingStore, "getRepoByName").mockResolvedValue(undefined);
+    try {
+      const second = await ensureSkillsCodingRepo(
+        { runInTx: tx, codingStore },
+        { skillsRepoPath: repos.skillsBare },
+      );
+      expect(second.kind).toBe("unchanged");
+    } finally {
+      staleRead.mockRestore();
+    }
+    const rows = await tx((trx) => codingStore.listRepos(trx));
+    expect(rows.filter((r) => r.name === SKILLS_CODING_REPO_NAME)).toHaveLength(1);
   });
 });
 
