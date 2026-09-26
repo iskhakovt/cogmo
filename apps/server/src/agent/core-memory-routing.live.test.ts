@@ -4,15 +4,12 @@
  * design/memory.md → Core Memory vs Hindsight.
  *
  * Each labelled case in `test/fixtures/evals/core-memory-routing.json` is one
- * single-turn conversation through the production prompt (`DefaultPromptSource`
- * with the built-in service guidance and the seeded profile's base prompt),
- * the built-in tool definitions and `runStreamingAgentLoop`, on the seeded
- * profile's model. Every tool handler is a stub returning a canned result, so
- * nothing is persisted and nothing outside the model is called. Each case runs
- * in two core-memory states: empty, where the prompt shows the onboarding
- * text, and established, holding the fixture's blocks. Steering rules,
- * recalled context and the per-turn image, sub-agent, skill and MCP tools are
- * left out. It also checks what a core write says: whether it targets one of
+ * single-turn conversation through the live-eval harness (`src/test/live-eval.ts`):
+ * the production prompt, the built-in tool definitions and the agent loop on
+ * the seeded profile's model, with core memory held in process and every other
+ * tool handler stubbed. Each case runs in two core-memory states: empty, where
+ * the prompt shows the onboarding text, and established, holding the fixture's
+ * blocks. No steering rules. It also checks what a core write says: whether it targets one of
  * the case's expected blocks and, in the established state, which established
  * lines the rewritten block lost and whether it still holds what the case
  * ends.
@@ -24,12 +21,12 @@
  * only when a turn does not complete.
  *
  * Skipped unless `LIVE=1` and `ANTHROPIC_API_KEY` are set. A full run is 57
- * turns on Sonnet 5, on the order of a dollar.
+ * turns on Sonnet 5, about $0.60 per sample of every case.
  *
  *   set -a; . ./.env; set +a; LIVE=1 pnpm test:live src/agent/core-memory-routing.live.test.ts
  *
- * `EVAL_CASES` (comma-separated case ids) narrows the run; `LIVE_MODEL`
- * overrides the model.
+ * `EVAL_CASES` (comma-separated case ids) narrows the run, `EVAL_REPEATS`
+ * samples every case that many times, and `LIVE_MODEL` overrides the model.
  */
 
 import { randomUUID } from "node:crypto";
@@ -37,30 +34,26 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import * as R from "remeda";
 import { afterAll, describe, expect, it } from "vitest";
-import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { AnthropicProvider } from "../llm/anthropic.js";
-import { resolveLimits } from "../llm/models.js";
-import type { Message } from "../llm/types.js";
-import { logger } from "../logger.js";
-import { DEFAULT_BASE_PROMPT, DEFAULT_PROFILE_MODEL } from "../setup/seed.js";
 import { expectDefined } from "../test/assertions.js";
-import type { AttachmentStore } from "../transport/attachment-store.js";
-import { BUILT_IN_SERVICE_GUIDANCE, builtInToolSpecs } from "./built-ins.js";
-import { createDocumentTools } from "./document-tools.js";
-import { runStreamingAgentLoop } from "./loop.js";
-import { DefaultPromptSource, formatUserContext } from "./prompt.js";
-import type { CoreMemoryBlock, Service } from "./service.js";
-import type { Profile } from "./store/index.js";
-import { createDefaultTools, ToolRegistry, type ToolSpec } from "./tools.js";
-import { createWebTools } from "./web-tools.js";
-
-// An empty `ANTHROPIC_API_KEY=` line in `.env` counts as unset.
-const API_KEY = (process.env.LIVE === "1" && process.env.ANTHROPIC_API_KEY) || undefined;
-
-const MODEL = process.env.LIVE_MODEL ?? DEFAULT_PROFILE_MODEL;
-
-const TIMEZONE = "Europe/London";
+import {
+  coreMemoryWrites,
+  createUsageMeter,
+  EVAL_MODEL,
+  EVAL_REPEATS,
+  EvalCoreMemory,
+  type EvalFailure,
+  type EvalMetric,
+  isFailure,
+  LIVE_API_KEY,
+  memoryCallsByIteration,
+  oneLine,
+  rateTable,
+  runEvalTurn,
+  withRepeats,
+} from "../test/live-eval.js";
+import type { CoreMemoryBlock } from "./service.js";
 
 const RoutingSchema = z.enum(["core", "hindsight", "none"]);
 type Routing = z.infer<typeof RoutingSchema>;
@@ -98,16 +91,6 @@ const EvalFileSchema = z.object({
   ),
 });
 
-const CoreMemoryUpdateInputSchema = z.object({ key: z.string(), content: z.string() });
-
-const MEMORY_TOOLS: ReadonlySet<string> = new Set([
-  "core_memory_update",
-  "core_memory_read",
-  "memory_retain",
-  "memory_recall",
-  "memory_reflect",
-]);
-
 const EVAL = EvalFileSchema.parse(
   JSON.parse(
     readFileSync(join(process.cwd(), "test/fixtures/evals/core-memory-routing.json"), "utf8"),
@@ -142,26 +125,8 @@ const RUNS = STATES.flatMap(({ state, established }) =>
 
 type Run = (typeof RUNS)[number];
 
-/** The seeded default profile: every tool, the seeded base prompt. */
-const PROFILE: Profile = {
-  id: "eval-profile",
-  userId: null,
-  name: "assistant",
-  basePrompt: DEFAULT_BASE_PROMPT,
-  model: MODEL,
-  summarizationModel: null,
-  extractionModel: null,
-  autoRecall: "heuristic",
-  voiceMode: "auto",
-  toolSet: ["*"],
-  memoryScope: null,
-  profileClass: null,
-  streamChunkChars: 4000,
-  streamEdits: true,
-  codingAutoapproveMode: "off",
-};
-
 interface Outcome {
+  repeat: number;
   state: string;
   id: string;
   expect: Routing;
@@ -181,60 +146,15 @@ interface Outcome {
   reply: string;
 }
 
-const outcomes = new Map<string, Outcome>();
+type Sample = Outcome | (EvalFailure & { state: string });
 
-/** The production tool definitions, every handler replaced by a canned result. */
-function stubbedTools(blocks: ReadonlyArray<CoreMemoryBlock>): ToolRegistry {
-  const production = createDefaultTools(
-    builtInToolSpecs({
-      webTools: createWebTools(undefined, undefined),
-      documentTools: createDocumentTools(mock<AttachmentStore>()),
-    }),
-    TIMEZONE,
-  );
-  const stubbed = new ToolRegistry();
-  for (const spec of production.snapshot()) {
-    stubbed.register({ ...spec, handler: async (input) => stubResult(spec, input, blocks) });
-  }
-  return stubbed;
-}
+/** Every sample of each run, by run name. */
+const samples = new Map<string, Sample[]>();
 
-function stubResult(
-  spec: ToolSpec,
-  input: Record<string, unknown>,
-  blocks: ReadonlyArray<CoreMemoryBlock>,
-): string {
-  switch (spec.name) {
-    case "core_memory_update":
-      return `Core memory block "${String(input.key)}" updated.`;
-    case "core_memory_read":
-      return formatUserContext(blocks) ?? "No core memory blocks yet.";
-    case "memory_retain":
-      return "Remembered.";
-    case "memory_recall":
-    case "memory_reflect":
-      return "No relevant memories found.";
-    default:
-      return "Unavailable in this environment.";
-  }
+function record(name: string, sample: Sample): void {
+  samples.set(name, [...(samples.get(name) ?? []), sample]);
 }
-
-/** Memory tool calls per assistant message, in iteration order. */
-function memoryCallsByIteration(
-  messages: ReadonlyArray<Message>,
-): Array<Array<{ name: string; input: unknown }>> {
-  return messages
-    .filter((m) => m.role === "assistant")
-    .map((m) =>
-      typeof m.content === "string"
-        ? []
-        : m.content.flatMap((b) =>
-            b.type === "tool_use" && MEMORY_TOOLS.has(b.name)
-              ? [{ name: b.name, input: b.input }]
-              : [],
-          ),
-    );
-}
+const usage = createUsageMeter();
 
 /**
  * A rewritten block keeps an established line while it still names every one
@@ -300,12 +220,7 @@ function labelled(routing: Routing): (o: Outcome) => boolean {
   return (o) => o.expect === routing;
 }
 
-/** Summary rates: each counts the outcomes in `of` for which `hit` holds. */
-const METRICS: ReadonlyArray<{
-  name: string;
-  of: (o: Outcome) => boolean;
-  hit: (o: Outcome) => boolean;
-}> = [
+const METRICS: ReadonlyArray<EvalMetric<Outcome>> = [
   { name: "core recall (turn)", of: labelled("core"), hit: updates },
   { name: "  announced", of: (o) => o.expect === "core" && !o.inPassing, hit: updates },
   { name: "  in passing", of: (o) => o.expect === "core" && o.inPassing, hit: updates },
@@ -346,96 +261,85 @@ function verdict(o: Outcome): string {
   return (o.stale?.length ?? 0) > 0 ? "STALE" : "ok   ";
 }
 
-function oneLine(text: string, max: number): string {
-  const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
-}
-
 function report(): void {
-  const rows = RUNS.flatMap((r) => {
-    const o = outcomes.get(r.name);
-    return o ? [o] : [];
-  });
+  const byRun = RUNS.map((run) => ({
+    run,
+    samples: R.sortBy(samples.get(run.name) ?? [], (o) => o.repeat),
+  }));
+  const rows = byRun.flatMap((r) => r.samples);
   if (rows.length === 0) return;
 
-  console.log(`\nCore-memory routing on ${MODEL}\n`);
-  for (const o of rows) {
-    const keys = o.coreWrites.map((w) => w.key).join(",");
+  console.log(`\nCore-memory routing on ${EVAL_MODEL}, ${EVAL_REPEATS} sample(s) per case\n`);
+  for (const { run, samples: runSamples } of byRun) {
+    const passes = runSamples.filter((o) => !isFailure(o) && verdict(o).trim() === "ok").length;
     console.log(
-      `${verdict(o)} ${o.state.padEnd(11)} ${o.id.padEnd(18)} ${o.expect.padEnd(9)} ` +
-        `first=[${o.first.join(",")}] turn=[${o.turn.join(",")}]` +
-        `${keys ? ` keys=${keys}` : ""}${o.keyOk === false ? " (unexpected block)" : ""}`,
+      `${`${passes}/${EVAL_REPEATS}`.padEnd(5)} ${run.state.padEnd(11)} ${run.id.padEnd(18)} ${run.expect}`,
     );
-    for (const w of o.coreWrites) console.log(`        ${w.key} := ${oneLine(w.content, 400)}`);
-    if (o.lost?.length) console.log(`        lost: ${o.lost.join(" | ")}`);
-    if (o.stale?.length) console.log(`        still holds: ${o.stale.join(", ")}`);
-    console.log(`        reply: ${oneLine(o.reply, 120)}`);
+    for (const o of runSamples) {
+      if (isFailure(o)) {
+        console.log(`  FAILED #${o.repeat} ${o.failure}`);
+        continue;
+      }
+      const keys = o.coreWrites.map((w) => w.key).join(",");
+      console.log(
+        `  ${verdict(o)} #${o.repeat} first=[${o.first.join(",")}] turn=[${o.turn.join(",")}]` +
+          `${keys ? ` keys=${keys}` : ""}${o.keyOk === false ? " (unexpected block)" : ""}`,
+      );
+      for (const w of o.coreWrites) console.log(`          ${w.key} := ${oneLine(w.content, 400)}`);
+      if (o.lost?.length) console.log(`          lost: ${o.lost.join(" | ")}`);
+      if (o.stale?.length) console.log(`          still holds: ${o.stale.join(", ")}`);
+      console.log(`          reply: ${oneLine(o.reply, 120)}`);
+    }
   }
 
-  const groups = { ...R.groupBy(rows, (o) => o.state), all: rows };
-  console.table(
-    Object.fromEntries(
-      METRICS.map((m) => [
-        m.name,
-        R.mapValues(groups, (group) => {
-          const population = group.filter(m.of);
-          return `${population.filter(m.hit).length}/${population.length}`;
-        }),
-      ]),
-    ),
-  );
+  console.table(rateTable(METRICS, { ...R.groupBy(rows, (o) => o.state), all: rows }));
+  console.log(`Usage: ${usage.summary()}`);
 }
 
-describe.skipIf(API_KEY === undefined)(`core-memory routing on ${MODEL} (live eval)`, () => {
-  const nonce = randomUUID();
+describe.skipIf(LIVE_API_KEY === undefined)(
+  `core-memory routing on ${EVAL_MODEL} (live eval)`,
+  () => {
+    const nonce = randomUUID();
 
-  afterAll(report);
+    afterAll(report);
 
-  it.concurrent.each(RUNS)("$name", async (run) => {
-    const tools = stubbedTools(run.blocks);
-    const systemPrompt = await new DefaultPromptSource({
-      timezone: TIMEZONE,
-      serviceGuidance: BUILT_IN_SERVICE_GUIDANCE,
-    }).assemble({
-      profile: PROFILE,
-      rules: [],
-      coreMemory: run.blocks,
-      toolDefinitions: tools.definitions(),
+    it.concurrent.each(withRepeats(RUNS))("$name #$repeat", async (run) => {
+      try {
+        const { result } = await runEvalTurn({
+          provider: new AnthropicProvider(expectDefined(LIVE_API_KEY, "API key")),
+          coreMemory: new EvalCoreMemory(run.blocks),
+          rules: [],
+          history: [],
+          message: run.message,
+          cacheKey: `${nonce}-${run.state}`,
+        });
+        usage.add(result.usage);
+        expect(result.degraded).toBeUndefined();
+        expect(result.text).not.toBe("");
+
+        const byIteration = memoryCallsByIteration(result.newMessages);
+        const calls = byIteration.flat();
+        const coreWrites = coreMemoryWrites(result.newMessages);
+        record(run.name, {
+          repeat: run.repeat,
+          state: run.state,
+          id: run.id,
+          expect: run.expect,
+          inPassing: run.inPassing ?? false,
+          first: (byIteration[0] ?? []).map((c) => c.name),
+          turn: calls.map((c) => c.name),
+          coreWrites,
+          ...checkWrites(run, coreWrites),
+          reply: result.text,
+        });
+      } catch (err) {
+        record(run.name, {
+          repeat: run.repeat,
+          state: run.state,
+          failure: oneLine(String(err), 300),
+        });
+        throw err;
+      }
     });
-
-    const result = await runStreamingAgentLoop({
-      provider: new AnthropicProvider(expectDefined(API_KEY, "API key")),
-      model: MODEL,
-      systemPrompt,
-      messages: [{ role: "user", content: run.message }],
-      tools,
-      service: mock<Service>(),
-      maxTokens: resolveLimits(MODEL).maxOutputTokens,
-      onEvent: async () => {},
-      cache: { key: `${nonce}-${run.state}`, retention: "short" },
-      turnLogger: logger,
-    });
-
-    const byIteration = memoryCallsByIteration(result.newMessages);
-    const calls = byIteration.flat();
-    const coreWrites = calls.flatMap((c) => {
-      if (c.name !== "core_memory_update") return [];
-      const parsed = CoreMemoryUpdateInputSchema.safeParse(c.input);
-      return parsed.success ? [parsed.data] : [{ key: "(unparsed)", content: "" }];
-    });
-    outcomes.set(run.name, {
-      state: run.state,
-      id: run.id,
-      expect: run.expect,
-      inPassing: run.inPassing ?? false,
-      first: (byIteration[0] ?? []).map((c) => c.name),
-      turn: calls.map((c) => c.name),
-      coreWrites,
-      ...checkWrites(run, coreWrites),
-      reply: result.text,
-    });
-
-    expect(result.degraded).toBeUndefined();
-    expect(result.text).not.toBe("");
-  });
-});
+  },
+);
