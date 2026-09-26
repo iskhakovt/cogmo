@@ -11,9 +11,13 @@
  * Observer is the sole writer to Hindsight. The live `memory_retain`
  * tool stages into `pending_memories`; step 3 catches those rows up
  * during the same idle pass.
+ *
+ * The phases are independent: a step that fails after its retries costs
+ * its own phase, which reports an empty result, and the rest of the fire
+ * still runs and records its audit row. See `settlePhase`.
  */
 
-import { NonRetriableError } from "inngest";
+import { NonRetriableError, StepError } from "inngest";
 import type { Transactor } from "../../db/index.js";
 import { inngest } from "../../inngest/client.js";
 import { conversationIdle } from "../../inngest/events.js";
@@ -23,7 +27,11 @@ import type { MemoryProvider } from "../../memory/provider.js";
 import type { TransportStore } from "../../transport/store/index.js";
 import type { AgentStore } from "../store/index.js";
 import { consolidateRules } from "./consolidate-rules.js";
-import { buildRetainItems, classifyPendingMemories } from "./drain-pending-memories.js";
+import {
+  buildRetainItems,
+  classifyPendingMemories,
+  type DrainPendingResult,
+} from "./drain-pending-memories.js";
 import type { EvolutionTrigger } from "./event-schema.js";
 import { extractCorrections } from "./extract-corrections.js";
 import { extractMemories } from "./extract-memories.js";
@@ -91,8 +99,38 @@ export type ObserverResult =
       corrections: Awaited<ReturnType<typeof extractCorrections>>;
       consolidation: Awaited<ReturnType<typeof consolidateRules>> | null;
       memories: Awaited<ReturnType<typeof extractMemories>>;
-      drained: { drained: number; byNetwork: Record<string, number> };
+      drained: DrainPendingResult;
     };
+
+/** The independently failing parts of an Observer fire, as named in its logs. */
+type ObserverPhase = "corrections" | "consolidation" | "memories" | "drain";
+
+/**
+ * Run one phase of the fire so that its permanent failure costs only that
+ * phase. The catch wraps the phase's steps, so each keeps its retries; only
+ * a step that failed after them (`StepError`) is logged and replaced by
+ * `fallback`. Anything else propagates — including every error under the
+ * `/reflect` harness, which has no retries to exhaust and reports a failure
+ * to the user who asked. The fallback depends on nothing but the memoized
+ * failure, so a replay reaches it again and plans the same steps after it.
+ */
+async function settlePhase<T>(
+  phase: ObserverPhase,
+  conversationId: string,
+  fallback: T,
+  run: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    if (!(err instanceof StepError)) throw err;
+    logger.warn(
+      { err, conversationId, phase, stepId: err.stepId },
+      "observer: phase failed after retries — continuing without it",
+    );
+    return fallback;
+  }
+}
 
 /**
  * Pure handler for an Observer fire. Exported so tests can drive it with a
@@ -196,61 +234,88 @@ export async function runObserver(
     throw err;
   }
 
-  const result = await step.run("extract-corrections", async () => {
-    return extractCorrections(history, conv.profileId, {
-      provider,
-      model,
-      runInTx: deps.runInTx,
-      store: agentStore,
-      activeChannelTypes,
-    });
-  });
-
-  const consolidation = result.consolidationNeeded
-    ? await step.run("consolidate-rules", () =>
-        consolidateRules(conv.profileId, {
+  // Phase 1: extract corrections from the transcript into steering rules.
+  // A failed extraction reports nothing found, which also rules out
+  // consolidation for this fire.
+  const result = await settlePhase(
+    "corrections",
+    conversationId,
+    {
+      extracted: 0,
+      reinforced: 0,
+      contradictions: 0,
+      promoted: 0,
+      outOfScopeReinforcementsSkipped: 0,
+      unknownRuleReinforcementsSkipped: 0,
+      consolidationNeeded: false,
+    },
+    () =>
+      step.run("extract-corrections", async () => {
+        return extractCorrections(history, conv.profileId, {
           provider,
           model,
           runInTx: deps.runInTx,
           store: agentStore,
-        }),
+          activeChannelTypes,
+        });
+      }),
+  );
+
+  const consolidation = result.consolidationNeeded
+    ? await settlePhase("consolidation", conversationId, null, () =>
+        step.run("consolidate-rules", () =>
+          consolidateRules(conv.profileId, {
+            provider,
+            model,
+            runInTx: deps.runInTx,
+            store: agentStore,
+          }),
+        ),
       )
     : null;
 
   // Phase 2: extract facts from the transcript into long-term memory.
   // `profile.profileClass` (when non-null) becomes a `profile_class:<class>`
   // tag on every retained memory, supporting speaker-driven isolation.
-  const memoryResult = await step.run("extract-memories", async () => {
-    return extractMemories(history, conv.userId, profile.profileClass, {
-      provider,
-      model,
-      memory: deps.memory,
-      customCompartments,
-    });
-  });
+  const memoryResult = await settlePhase(
+    "memories",
+    conversationId,
+    { extracted: 0, byNetwork: {} },
+    () =>
+      step.run("extract-memories", async () => {
+        return extractMemories(history, conv.userId, profile.profileClass, {
+          provider,
+          model,
+          memory: deps.memory,
+          customCompartments,
+        });
+      }),
+  );
 
   // Phase 3: drain pending_memories — staged live retains and any
   // migration backfill — through the same classifier prompt. Split
   // across multiple step.runs so Inngest memoizes each: a delete
   // failure after a successful retain re-runs only the delete on
-  // retry, not the LLM classifier or the retainBatch write.
-  const pending = await step.run("load-pending-memories", async () => {
-    return deps.runInTx((tx) =>
-      agentStore.getPendingMemories(tx, conv.userId, PENDING_DRAIN_BATCH_SIZE),
-    );
-  });
+  // retry, not the LLM classifier or the retainBatch write. A step
+  // that fails for good ends the drain there, and every row it has not
+  // deleted stays pending for the next fire.
+  const drainResult = await settlePhase(
+    "drain",
+    conversationId,
+    { drained: 0, byNetwork: {} },
+    async (): Promise<DrainPendingResult> => {
+      const pending = await step.run("load-pending-memories", async () => {
+        return deps.runInTx((tx) =>
+          agentStore.getPendingMemories(tx, conv.userId, PENDING_DRAIN_BATCH_SIZE),
+        );
+      });
+      if (pending.length === 0) return { drained: 0, byNetwork: {} };
 
-  let drainResult: { drained: number; byNetwork: Record<string, number> } = {
-    drained: 0,
-    byNetwork: {},
-  };
+      const classified = await step.run("classify-pending-memories", async () => {
+        return classifyPendingMemories(pending, { provider, model, customCompartments });
+      });
+      if (classified.successful.length === 0) return { drained: 0, byNetwork: {} };
 
-  if (pending.length > 0) {
-    const classified = await step.run("classify-pending-memories", async () => {
-      return classifyPendingMemories(pending, { provider, model, customCompartments });
-    });
-
-    if (classified.successful.length > 0) {
       // Each row carries its own staging profile's class (denormalised
       // by `getPendingMemories`'s LEFT JOIN). The drain stamps tags
       // per row, so a batch that mixes rows staged by different
@@ -268,12 +333,9 @@ export async function runObserver(
           ),
         );
       });
-      drainResult = {
-        drained: classified.successful.length,
-        byNetwork: classified.byNetwork,
-      };
-    }
-  }
+      return { drained: classified.successful.length, byNetwork: classified.byNetwork };
+    },
+  );
 
   // Persist the audit row last — once everything above is memoised, a retry
   // here only re-runs the DB insert, not the LLM-bearing steps. Status is

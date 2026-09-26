@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Transactor } from "../../db/index.js";
+import { logger } from "../../logger.js";
+import { expectDefined } from "../../test/assertions.js";
 import { mockProvider } from "../../test/factories.js";
 import { type ConsolidationDeps, consolidateRules } from "./consolidate-rules.js";
 
@@ -12,8 +14,40 @@ interface CorrectionRow {
   category: string;
   active: boolean;
   observationCount: number;
+  priority: number;
   channelType: string | null;
 }
+
+/** Three global rules whose ids look nothing like the labels the prompt gives them. */
+const LABELLED_RULES: CorrectionRow[] = [
+  {
+    id: "rule-a",
+    rule: "Be concise",
+    category: "style",
+    active: true,
+    observationCount: 3,
+    priority: 100,
+    channelType: null,
+  },
+  {
+    id: "rule-b",
+    rule: "Use tables for data",
+    category: "domain",
+    active: true,
+    observationCount: 4,
+    priority: 100,
+    channelType: null,
+  },
+  {
+    id: "rule-c",
+    rule: "Keep replies short",
+    category: "style",
+    active: true,
+    observationCount: 2,
+    priority: 100,
+    channelType: null,
+  },
+];
 
 /**
  * Build deps where each LLM call returns a fixed response. The provider
@@ -44,6 +78,7 @@ function mockConsolidationDeps(
       category: "style",
       active: true,
       observationCount: 3,
+      priority: 100,
       channelType: null,
     },
     {
@@ -52,6 +87,7 @@ function mockConsolidationDeps(
       category: "style",
       active: true,
       observationCount: 2,
+      priority: 100,
       channelType: null,
     },
     {
@@ -60,6 +96,7 @@ function mockConsolidationDeps(
       category: "domain",
       active: true,
       observationCount: 4,
+      priority: 100,
       channelType: null,
     },
   ];
@@ -82,7 +119,7 @@ describe("consolidateRules", () => {
       {
         groups: [
           {
-            originalIds: ["r1", "r2"],
+            originalIds: ["R1", "R2"],
             mergedRule: "Be concise and brief in responses",
             category: "style",
           },
@@ -126,6 +163,7 @@ describe("consolidateRules", () => {
           category: "style",
           active: true,
           observationCount: 1,
+          priority: 100,
           channelType: null,
         },
       ] satisfies CorrectionRow[]),
@@ -138,12 +176,98 @@ describe("consolidateRules", () => {
     expect(deps.provider.chat).not.toHaveBeenCalled();
   });
 
-  it("skips invalid merge groups from LLM", async () => {
+  it("replaces the rules a group's labels name", async () => {
+    const deps = mockConsolidationDeps([
+      {
+        groups: [
+          { originalIds: ["R1", "R2"], mergedRule: "Be brief and concise", category: "style" },
+        ],
+      },
+    ]);
+    vi.mocked(deps.store.getCorrections).mockResolvedValue(LABELLED_RULES);
+
+    const result = await consolidateRules("profile-1", deps);
+
+    expect(result.mergedGroups).toBe(1);
+    expect(deps.store.replaceRules).toHaveBeenCalledWith(expect.anything(), {
+      oldIds: ["rule-a", "rule-c"],
+      newRule: {
+        rule: "Be brief and concise",
+        category: "style",
+        profileId: null,
+        channelType: null,
+        priority: 100,
+        observationCount: 5, // 3 + 2
+      },
+    });
+  });
+
+  it("labels rules by priority, then text, whatever order their ids sort in", async () => {
+    // Ids and creation order differ between runs; labels must not.
+    const rules: CorrectionRow[] = [
+      { ...expectDefined(LABELLED_RULES[0], "rule-a"), rule: "Zebra rule" },
+      { ...expectDefined(LABELLED_RULES[2], "rule-c"), rule: "Alpha rule" },
+      { ...expectDefined(LABELLED_RULES[1], "rule-b"), priority: 50 },
+    ];
+    const deps = mockConsolidationDeps([
+      {
+        groups: [{ originalIds: ["R2", "R3"], mergedRule: "Merged", category: "style" }],
+      },
+    ]);
+    vi.mocked(deps.store.getCorrections).mockResolvedValue(rules);
+
+    await consolidateRules("profile-1", deps);
+
+    const system = expectDefined(vi.mocked(deps.provider.chat).mock.calls[0], "chat call")[0]
+      .system;
+    expect(system).toContain("[R1] (domain, seen 4x) Use tables for data");
+    expect(system).toContain("[R2] (style, seen 2x) Alpha rule");
+    expect(system).toContain("[R3] (style, seen 3x) Zebra rule");
+    expect(deps.store.replaceRules).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ oldIds: ["rule-c", "rule-a"] }),
+    );
+  });
+
+  it("skips a group that names a label outside the list", async () => {
+    const deps = mockConsolidationDeps([
+      {
+        groups: [{ originalIds: ["R1", "R4"], mergedRule: "Off by one", category: "style" }],
+      },
+    ]);
+    vi.mocked(deps.store.getCorrections).mockResolvedValue(LABELLED_RULES);
+    const warn = vi.spyOn(logger, "warn");
+
+    const result = await consolidateRules("profile-1", deps);
+
+    expect(result.mergedGroups).toBe(0);
+    expect(deps.store.replaceRules).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ unknownLabels: ["R4"] }),
+      expect.stringContaining("merge group"),
+    );
+    warn.mockRestore();
+  });
+
+  it("shows the model a label for each rule, never its id", async () => {
+    const deps = mockConsolidationDeps([{ groups: [] }]);
+    vi.mocked(deps.store.getCorrections).mockResolvedValue(LABELLED_RULES);
+
+    await consolidateRules("profile-1", deps);
+
+    const system = expectDefined(vi.mocked(deps.provider.chat).mock.calls[0], "chat call")[0]
+      .system;
+    expect(system).toContain("[R1] (style, seen 3x) Be concise");
+    expect(system).toContain("[R2] (style, seen 2x) Keep replies short");
+    expect(system).not.toContain("rule-a");
+  });
+
+  it("skips a merge group that spans categories", async () => {
     const deps = mockConsolidationDeps([
       {
         groups: [
           {
-            originalIds: ["r1", "unknown-id"],
+            originalIds: ["R1", "R3"],
             mergedRule: "Bad merge",
             category: "style",
           },
@@ -167,6 +291,7 @@ describe("consolidateRules", () => {
           category: "style",
           active: true,
           observationCount: 2,
+          priority: 100,
           channelType: null,
         },
         {
@@ -175,6 +300,7 @@ describe("consolidateRules", () => {
           category: "style",
           active: false,
           observationCount: 1,
+          priority: 100,
           channelType: null,
         },
       ] satisfies CorrectionRow[]),
@@ -193,7 +319,7 @@ describe("consolidateRules", () => {
         {
           groups: [
             {
-              originalIds: ["r1", "r2"],
+              originalIds: ["R1", "R2"],
               mergedRule: "Avoid markdown headings in Telegram replies",
               category: "style",
             },
@@ -208,6 +334,7 @@ describe("consolidateRules", () => {
             category: "style",
             active: true,
             observationCount: 3,
+            priority: 100,
             channelType: "telegram",
           },
           {
@@ -216,6 +343,7 @@ describe("consolidateRules", () => {
             category: "style",
             active: true,
             observationCount: 2,
+            priority: 100,
             channelType: "telegram",
           },
         ] satisfies CorrectionRow[]),
@@ -244,12 +372,12 @@ describe("consolidateRules", () => {
     // The two scopes are consolidated as independent LLM calls, each
     // emitting a `replaceRules` write that preserves its scope's
     // `channelType`. Order between scopes is not part of the contract;
-    // the chat mock dispatches by which rule IDs appear in the prompt
-    // so iteration order can change without breaking the test.
+    // the chat mock dispatches by which rules appear in the prompt, and
+    // each scope labels its own rules from R1.
     const globalResponse = {
       groups: [
         {
-          originalIds: ["g1", "g2"],
+          originalIds: ["R1", "R2"],
           mergedRule: "Be concise globally",
           category: "style",
         },
@@ -258,14 +386,14 @@ describe("consolidateRules", () => {
     const telegramResponse = {
       groups: [
         {
-          originalIds: ["t1", "t2"],
+          originalIds: ["R1", "R2"],
           mergedRule: "Avoid markdown headings on Telegram",
           category: "style",
         },
       ],
     };
     const chatMock = vi.fn(async ({ system }: { system: string }) => {
-      const response = system.includes("[g1]") ? globalResponse : telegramResponse;
+      const response = system.includes("Be concise") ? globalResponse : telegramResponse;
       return {
         content: [{ type: "text" as const, text: JSON.stringify(response) }],
         stopReason: "end_turn" as const,
@@ -286,6 +414,7 @@ describe("consolidateRules", () => {
             category: "style",
             active: true,
             observationCount: 3,
+            priority: 100,
             channelType: null,
           },
           {
@@ -294,6 +423,7 @@ describe("consolidateRules", () => {
             category: "style",
             active: true,
             observationCount: 2,
+            priority: 100,
             channelType: null,
           },
           {
@@ -302,6 +432,7 @@ describe("consolidateRules", () => {
             category: "style",
             active: true,
             observationCount: 4,
+            priority: 100,
             channelType: "telegram",
           },
           {
@@ -310,6 +441,7 @@ describe("consolidateRules", () => {
             category: "style",
             active: true,
             observationCount: 1,
+            priority: 100,
             channelType: "telegram",
           },
         ] satisfies CorrectionRow[]),
@@ -367,7 +499,7 @@ describe("consolidateRules", () => {
         {
           groups: [
             {
-              originalIds: ["g1", "g2"],
+              originalIds: ["R1", "R2"],
               mergedRule: "Be concise globally",
               category: "style",
             },
@@ -382,6 +514,7 @@ describe("consolidateRules", () => {
             category: "style",
             active: true,
             observationCount: 3,
+            priority: 100,
             channelType: null,
           },
           {
@@ -390,6 +523,7 @@ describe("consolidateRules", () => {
             category: "style",
             active: true,
             observationCount: 2,
+            priority: 100,
             channelType: null,
           },
           {
@@ -398,6 +532,7 @@ describe("consolidateRules", () => {
             category: "style",
             active: true,
             observationCount: 4,
+            priority: 100,
             channelType: "telegram",
           },
         ] satisfies CorrectionRow[]),
@@ -420,7 +555,7 @@ describe("consolidateRules", () => {
       content: [
         {
           type: "text",
-          text: '{"groups":[{"originalIds":["r1","r2"],"mergedRule":"Be concise and brief","category":"style",},],}',
+          text: '{"groups":[{"originalIds":["R1","R2"],"mergedRule":"Be concise and brief","category":"style",},],}',
         },
       ],
       stopReason: "end_turn",
@@ -439,6 +574,7 @@ describe("consolidateRules", () => {
             category: "style",
             active: true,
             observationCount: 3,
+            priority: 100,
             channelType: null,
           },
           {
@@ -447,6 +583,7 @@ describe("consolidateRules", () => {
             category: "style",
             active: true,
             observationCount: 2,
+            priority: 100,
             channelType: null,
           },
         ] satisfies CorrectionRow[]),

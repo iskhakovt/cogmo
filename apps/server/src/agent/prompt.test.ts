@@ -34,6 +34,7 @@ describe("DefaultPromptSource", () => {
     const prompt = await new DefaultPromptSource().assemble({
       profile: profile({ basePrompt: "You are a coder." }),
       rules: [],
+      coreMemory: [],
     });
 
     expect(prompt).toContain("You are a coder.");
@@ -43,6 +44,7 @@ describe("DefaultPromptSource", () => {
     const prompt = await new DefaultPromptSource().assemble({
       profile: undefined,
       rules: [],
+      coreMemory: [],
     });
 
     expect(prompt).toContain("personal AI assistant");
@@ -52,6 +54,7 @@ describe("DefaultPromptSource", () => {
     const prompt = await new DefaultPromptSource().assemble({
       profile: undefined,
       rules: [{ rule: "Be concise" }, { rule: "Use formal tone" }],
+      coreMemory: [],
     });
 
     expect(prompt).toContain("# Rules");
@@ -63,6 +66,7 @@ describe("DefaultPromptSource", () => {
     const prompt = await new DefaultPromptSource().assemble({
       profile: undefined,
       rules: [],
+      coreMemory: [],
       toolDefinitions: testTools,
     });
 
@@ -76,6 +80,7 @@ describe("DefaultPromptSource", () => {
     const prompt = await new DefaultPromptSource().assemble({
       profile: undefined,
       rules: [],
+      coreMemory: [],
       toolDefinitions: [],
     });
 
@@ -86,6 +91,7 @@ describe("DefaultPromptSource", () => {
     const prompt = await new DefaultPromptSource().assemble({
       profile: undefined,
       rules: [],
+      coreMemory: [],
     });
 
     expect(prompt).not.toContain("# Tools");
@@ -94,7 +100,7 @@ describe("DefaultPromptSource", () => {
   it("includes service guidance for active namespaces", async () => {
     const prompt = await new DefaultPromptSource({
       serviceGuidance: ["Test memory guidance.", "Test files guidance."],
-    }).assemble({ profile: undefined, rules: [] });
+    }).assemble({ profile: undefined, rules: [], coreMemory: [] });
 
     expect(prompt).toContain("# Capabilities");
     expect(prompt).toContain("Test memory guidance.");
@@ -105,6 +111,7 @@ describe("DefaultPromptSource", () => {
     const prompt = await new DefaultPromptSource({ serviceGuidance: [] }).assemble({
       profile: undefined,
       rules: [],
+      coreMemory: [],
     });
 
     expect(prompt).not.toContain("# Capabilities");
@@ -114,16 +121,19 @@ describe("DefaultPromptSource", () => {
     const prompt = await new DefaultPromptSource({ timezone: "UTC" }).assemble({
       profile: undefined,
       rules: [],
+      coreMemory: [],
     });
 
     expect(prompt).toContain("Current time:");
     expect(prompt).toContain("(UTC)");
   });
 
-  it("shows onboarding prompt when user context is not available", async () => {
-    const prompt = await new DefaultPromptSource({
-      getUserContext: async () => null,
-    }).assemble({ profile: undefined, rules: [] });
+  it("shows onboarding prompt when there are no core memory blocks", async () => {
+    const prompt = await new DefaultPromptSource().assemble({
+      profile: undefined,
+      rules: [],
+      coreMemory: [],
+    });
 
     expect(prompt).toContain("don't know your user yet");
     // Onboarding saves to core memory, so the first block written ends it.
@@ -131,10 +141,12 @@ describe("DefaultPromptSource", () => {
     expect(prompt).not.toContain("memory_retain");
   });
 
-  it("injects user context when available", async () => {
-    const prompt = await new DefaultPromptSource({
-      getUserContext: async () => "Name: Tim\nTimezone: Europe/Moscow",
-    }).assemble({ profile: undefined, rules: [] });
+  it("renders the core memory blocks it is given as the user section", async () => {
+    const prompt = await new DefaultPromptSource().assemble({
+      profile: undefined,
+      rules: [],
+      coreMemory: [{ key: "user_profile", content: "Name: Tim\nTimezone: Europe/Moscow" }],
+    });
 
     expect(prompt).toContain("# User");
     expect(prompt).toContain("Name: Tim");
@@ -145,6 +157,7 @@ describe("DefaultPromptSource", () => {
     const prompt = await new DefaultPromptSource().assemble({
       profile: undefined,
       rules: [],
+      coreMemory: [],
     });
 
     expect(prompt).not.toContain("# Rules");
@@ -154,10 +167,10 @@ describe("DefaultPromptSource", () => {
     const prompt = await new DefaultPromptSource({
       timezone: "UTC",
       serviceGuidance: ["Test memory guidance."],
-      getUserContext: async () => "Name: Tim",
     }).assemble({
       profile: undefined,
       rules: [{ rule: "Be kind" }],
+      coreMemory: [{ key: "user_profile", content: "Name: Tim" }],
       toolDefinitions: testTools,
     });
 
@@ -178,6 +191,7 @@ describe("DefaultPromptSource", () => {
     const prompt = await new DefaultPromptSource().assemble({
       profile: undefined,
       rules: [],
+      coreMemory: [],
       voiceMode: true,
     });
 
