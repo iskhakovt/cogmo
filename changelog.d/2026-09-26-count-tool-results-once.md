@@ -1,1 +1,3 @@
 The OpenAI-compatible token estimate counts each tool result once. It encoded a tool result's content twice, so tool-heavy conversations on OpenAI-compatible providers reached the compaction threshold early. `countTokens` is a sum over per-message estimates, and a regression test pins a tool result's contribution to its framing plus one encoding of its content.
+
+Pure list-building loops are folds and maps: OpenAI-compatible message and response mapping, scoped tool-result extraction, the Pyodide lint, lockfile parsing, the skill AST classifier and `--ratios` parsing. Usage totals start from a shared, frozen `ZERO_USAGE`. Output is unchanged; new tests pin the orderings the refactors had to keep.
