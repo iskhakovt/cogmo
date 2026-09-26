@@ -4,15 +4,12 @@
  * design/memory.md → Core Memory vs Hindsight.
  *
  * Each labelled case in `test/fixtures/evals/core-memory-routing.json` is one
- * single-turn conversation through the production prompt (`DefaultPromptSource`
- * with the built-in service guidance and the seeded profile's base prompt),
- * the built-in tool definitions and `runStreamingAgentLoop`, on the seeded
- * profile's model. Every tool handler is a stub returning a canned result, so
- * nothing is persisted and nothing outside the model is called. Each case runs
- * in two core-memory states: empty, where the prompt shows the onboarding
- * text, and established, holding the fixture's blocks. Steering rules,
- * recalled context and the per-turn image, sub-agent, skill and MCP tools are
- * left out.
+ * single-turn conversation through the live-eval harness (`src/test/live-eval.ts`):
+ * the production prompt, the built-in tool definitions and the agent loop on
+ * the seeded profile's model, with core memory held in process and every other
+ * tool handler stubbed. Each case runs in two core-memory states: empty, where
+ * the prompt shows the onboarding text, and established, holding the fixture's
+ * blocks. No steering rules.
  *
  * It reports rather than asserts. One sample per case on a non-deterministic
  * model makes any threshold either too loose to catch a regression or flaky,
@@ -34,36 +31,26 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import * as R from "remeda";
 import { afterAll, describe, expect, it } from "vitest";
-import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { AnthropicProvider } from "../llm/anthropic.js";
-import { resolveLimits } from "../llm/models.js";
-import type { Message } from "../llm/types.js";
-import { logger } from "../logger.js";
-import { DEFAULT_BASE_PROMPT, DEFAULT_PROFILE_MODEL } from "../setup/seed.js";
 import { expectDefined } from "../test/assertions.js";
-import type { AttachmentStore } from "../transport/attachment-store.js";
-import { BUILT_IN_SERVICE_GUIDANCE, builtInToolSpecs } from "./built-ins.js";
-import { createDocumentTools } from "./document-tools.js";
-import { runStreamingAgentLoop } from "./loop.js";
-import { DefaultPromptSource, formatUserContext } from "./prompt.js";
-import type { CoreMemoryBlock, Service } from "./service.js";
-import type { Profile } from "./store/index.js";
-import { createDefaultTools, ToolRegistry, type ToolSpec } from "./tools.js";
-import { createWebTools } from "./web-tools.js";
-
-// An empty `ANTHROPIC_API_KEY=` line in `.env` counts as unset.
-const API_KEY = (process.env.LIVE === "1" && process.env.ANTHROPIC_API_KEY) || undefined;
-
-const MODEL = process.env.LIVE_MODEL ?? DEFAULT_PROFILE_MODEL;
-
-const TIMEZONE = "Europe/London";
+import {
+  CoreMemoryBlocksSchema,
+  coreMemoryWrites,
+  EVAL_MODEL,
+  EvalCoreMemory,
+  LIVE_API_KEY,
+  memoryCallsByIteration,
+  oneLine,
+  runEvalTurn,
+} from "../test/live-eval.js";
+import type { CoreMemoryBlock } from "./service.js";
 
 const RoutingSchema = z.enum(["core", "hindsight", "none"]);
 type Routing = z.infer<typeof RoutingSchema>;
 
 const EvalFileSchema = z.object({
-  established: z.array(z.object({ key: z.string(), content: z.string() })),
+  established: CoreMemoryBlocksSchema,
   cases: z.array(
     z.object({
       id: z.string(),
@@ -74,16 +61,6 @@ const EvalFileSchema = z.object({
     }),
   ),
 });
-
-const CoreMemoryUpdateInputSchema = z.object({ key: z.string(), content: z.string() });
-
-const MEMORY_TOOLS: ReadonlySet<string> = new Set([
-  "core_memory_update",
-  "core_memory_read",
-  "memory_retain",
-  "memory_recall",
-  "memory_reflect",
-]);
 
 const EVAL = EvalFileSchema.parse(
   JSON.parse(
@@ -104,25 +81,6 @@ const RUNS = STATES.flatMap(({ state, blocks }) =>
     .map((c) => ({ name: `${state}/${c.id}`, state, blocks, ...c })),
 );
 
-/** The seeded default profile: every tool, the seeded base prompt. */
-const PROFILE: Profile = {
-  id: "eval-profile",
-  userId: null,
-  name: "assistant",
-  basePrompt: DEFAULT_BASE_PROMPT,
-  model: MODEL,
-  summarizationModel: null,
-  extractionModel: null,
-  autoRecall: "heuristic",
-  voiceMode: "auto",
-  toolSet: ["*"],
-  memoryScope: null,
-  profileClass: null,
-  streamChunkChars: 4000,
-  streamEdits: true,
-  codingAutoapproveMode: "off",
-};
-
 interface Outcome {
   state: string;
   id: string;
@@ -138,59 +96,6 @@ interface Outcome {
 }
 
 const outcomes = new Map<string, Outcome>();
-
-/** The production tool definitions, every handler replaced by a canned result. */
-function stubbedTools(blocks: ReadonlyArray<CoreMemoryBlock>): ToolRegistry {
-  const production = createDefaultTools(
-    builtInToolSpecs({
-      webTools: createWebTools(undefined, undefined),
-      documentTools: createDocumentTools(mock<AttachmentStore>()),
-    }),
-    TIMEZONE,
-  );
-  const stubbed = new ToolRegistry();
-  for (const spec of production.snapshot()) {
-    stubbed.register({ ...spec, handler: async (input) => stubResult(spec, input, blocks) });
-  }
-  return stubbed;
-}
-
-function stubResult(
-  spec: ToolSpec,
-  input: Record<string, unknown>,
-  blocks: ReadonlyArray<CoreMemoryBlock>,
-): string {
-  switch (spec.name) {
-    case "core_memory_update":
-      return `Core memory block "${String(input.key)}" updated.`;
-    case "core_memory_read":
-      return formatUserContext(blocks) ?? "No core memory blocks yet.";
-    case "memory_retain":
-      return "Remembered.";
-    case "memory_recall":
-    case "memory_reflect":
-      return "No relevant memories found.";
-    default:
-      return "Unavailable in this environment.";
-  }
-}
-
-/** Memory tool calls per assistant message, in iteration order. */
-function memoryCallsByIteration(
-  messages: ReadonlyArray<Message>,
-): Array<Array<{ name: string; input: unknown }>> {
-  return messages
-    .filter((m) => m.role === "assistant")
-    .map((m) =>
-      typeof m.content === "string"
-        ? []
-        : m.content.flatMap((b) =>
-            b.type === "tool_use" && MEMORY_TOOLS.has(b.name)
-              ? [{ name: b.name, input: b.input }]
-              : [],
-          ),
-    );
-}
 
 function updates(o: Outcome): boolean {
   return o.turn.includes("core_memory_update");
@@ -238,11 +143,6 @@ function verdict(o: Outcome): string {
   return updates(o) ? "FP  " : "ok  ";
 }
 
-function oneLine(text: string, max: number): string {
-  const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
-}
-
 function report(): void {
   const rows = RUNS.flatMap((r) => {
     const o = outcomes.get(r.name);
@@ -250,7 +150,7 @@ function report(): void {
   });
   if (rows.length === 0) return;
 
-  console.log(`\nCore-memory routing on ${MODEL}\n`);
+  console.log(`\nCore-memory routing on ${EVAL_MODEL}\n`);
   for (const o of rows) {
     const keys = o.coreWrites.map((w) => w.key).join(",");
     console.log(
@@ -275,50 +175,38 @@ function report(): void {
   );
 }
 
-describe.skipIf(API_KEY === undefined)(`core-memory routing on ${MODEL} (live eval)`, () => {
-  const nonce = randomUUID();
+describe.skipIf(LIVE_API_KEY === undefined)(
+  `core-memory routing on ${EVAL_MODEL} (live eval)`,
+  () => {
+    const nonce = randomUUID();
 
-  afterAll(report);
+    afterAll(report);
 
-  it.concurrent.each(RUNS)("$name", async (run) => {
-    const tools = stubbedTools(run.blocks);
-    const systemPrompt = await new DefaultPromptSource({
-      timezone: TIMEZONE,
-      serviceGuidance: BUILT_IN_SERVICE_GUIDANCE,
-      getUserContext: async () => formatUserContext(run.blocks),
-    }).assemble({ profile: PROFILE, rules: [], toolDefinitions: tools.definitions() });
+    it.concurrent.each(RUNS)("$name", async (run) => {
+      const { result } = await runEvalTurn({
+        provider: new AnthropicProvider(expectDefined(LIVE_API_KEY, "API key")),
+        coreMemory: new EvalCoreMemory(run.blocks),
+        rules: [],
+        history: [],
+        message: run.message,
+        cacheKey: `${nonce}-${run.state}`,
+      });
 
-    const result = await runStreamingAgentLoop({
-      provider: new AnthropicProvider(expectDefined(API_KEY, "API key")),
-      model: MODEL,
-      systemPrompt,
-      messages: [{ role: "user", content: run.message }],
-      tools,
-      service: mock<Service>(),
-      maxTokens: resolveLimits(MODEL).maxOutputTokens,
-      onEvent: async () => {},
-      cache: { key: `${nonce}-${run.state}`, retention: "short" },
-      turnLogger: logger,
+      const byIteration = memoryCallsByIteration(result.newMessages);
+      const calls = byIteration.flat();
+      outcomes.set(run.name, {
+        state: run.state,
+        id: run.id,
+        expect: run.expect,
+        inPassing: run.inPassing ?? false,
+        first: (byIteration[0] ?? []).map((c) => c.name),
+        turn: calls.map((c) => c.name),
+        coreWrites: coreMemoryWrites(result.newMessages),
+        reply: result.text,
+      });
+
+      expect(result.degraded).toBeUndefined();
+      expect(result.text).not.toBe("");
     });
-
-    const byIteration = memoryCallsByIteration(result.newMessages);
-    const calls = byIteration.flat();
-    outcomes.set(run.name, {
-      state: run.state,
-      id: run.id,
-      expect: run.expect,
-      inPassing: run.inPassing ?? false,
-      first: (byIteration[0] ?? []).map((c) => c.name),
-      turn: calls.map((c) => c.name),
-      coreWrites: calls.flatMap((c) => {
-        if (c.name !== "core_memory_update") return [];
-        const parsed = CoreMemoryUpdateInputSchema.safeParse(c.input);
-        return parsed.success ? [parsed.data] : [{ key: "(unparsed)", content: "" }];
-      }),
-      reply: result.text,
-    });
-
-    expect(result.degraded).toBeUndefined();
-    expect(result.text).not.toBe("");
-  });
-});
+  },
+);
