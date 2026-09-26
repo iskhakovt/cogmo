@@ -60,6 +60,14 @@ describe("freezeToolSpecs", () => {
 });
 
 describe("bindFrozenTools", () => {
+  it("serializes the same definitions, byte for byte, as the registry it froze", () => {
+    const live = registryOf(generateImage, echo);
+
+    const bound = bindFrozenTools(freezeToolSpecs(live), live);
+
+    expect(JSON.stringify(bound.definitions())).toBe(JSON.stringify(live.definitions()));
+  });
+
   it("offers exactly the frozen definitions, in frozen order", () => {
     const frozen = freezeToolSpecs(registryOf(generateImage, echo));
     // A later invocation's live build: reordered, one description edited,

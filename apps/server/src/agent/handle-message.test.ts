@@ -2680,6 +2680,27 @@ describe("createHandleMessage", () => {
         expect.objectContaining({ voiceMode: true }),
       );
     });
+
+    it("skips TTS when the session can no longer take voice after the decision was frozen", async () => {
+      const ttsProvider = { name: "openai", tts: vi.fn() };
+      const handle = mockDeliveryHandle({
+        canDeliverVoice: vi.fn().mockReturnValue(false),
+        hasBatchTargets: vi.fn().mockReturnValue(false),
+      });
+      const deps = mockDeps({
+        voiceResolver: mockVoiceResolver(mockVoiceBundle({ tts: ttsProvider })),
+        deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      });
+      const step = directStep({ "freeze-turn-inputs": { voiceMode: true, tools: [] } }, null);
+
+      await expect(
+        invokeInngestFn(createHandleMessage(deps), { event: testEvent, step, runId: testRunId }),
+      ).resolves.toMatchObject({ status: "processed" });
+
+      expect(step.run.mock.calls.map(([id]) => id)).toContain("voice-delivery");
+      expect(ttsProvider.tts).not.toHaveBeenCalled();
+      expect(handle.deliverVoice).not.toHaveBeenCalled();
+    });
   });
 
   it("auto-recall passes the profile's memoryScope through as a tag_groups filter", async () => {

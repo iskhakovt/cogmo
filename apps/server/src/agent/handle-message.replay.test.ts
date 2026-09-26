@@ -694,7 +694,8 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
     expect(requests).toHaveLength(2);
     const [first, second] = requests;
     expect(first?.tools?.map((t) => t.name)).toEqual(["echo"]);
-    expect(second?.tools).toEqual(first?.tools);
+    // Byte-identical, key order included: the cached prefix starts here.
+    expect(JSON.stringify(second?.tools)).toBe(JSON.stringify(first?.tools));
     // The skill ran once, and the follow-up carries its result rather than
     // an error for a tool the model was just offered.
     expect(skillRunner.invoke).toHaveBeenCalledTimes(1);
