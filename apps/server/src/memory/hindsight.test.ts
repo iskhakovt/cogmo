@@ -173,6 +173,24 @@ describe("HindsightMemoryProvider", () => {
     expect(items[0]?.document_id).not.toBe(items[1]?.document_id);
   });
 
+  it("retainBatch sends an item's documentId as its document_id", async () => {
+    const provider = createProvider();
+
+    await provider.retainBatch("bank-1", [
+      { content: "prefers tea", documentId: "019e2900-0000-7000-8000-0000000000aa" },
+      { content: "prefers tea", documentId: "019e2900-0000-7000-8000-0000000000aa" },
+    ]);
+
+    expect(mockRetainBatch).toHaveBeenCalledWith(
+      "bank-1",
+      [
+        { content: "prefers tea", document_id: "019e2900-0000-7000-8000-0000000000aa" },
+        { content: "prefers tea", document_id: "019e2900-0000-7000-8000-0000000000aa" },
+      ],
+      { async: true },
+    );
+  });
+
   it("recall maps response to Memory array", async () => {
     const provider = createProvider();
     mockRecallMemories.mockResolvedValueOnce(

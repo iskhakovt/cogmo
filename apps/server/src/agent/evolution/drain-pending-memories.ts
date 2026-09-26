@@ -15,7 +15,10 @@
  *
  * Failures on a single classification are skipped (row left in the
  * table for the next drain attempt). retainBatch is treated as atomic
- * — a batch failure leaves every row pending and rethrows.
+ * — a batch failure leaves every row pending and rethrows. Each row is
+ * retained as the document named by its id, so a row that was retained
+ * but not deleted replaces its own document when a later drain retains
+ * it again.
  */
 
 import * as R from "remeda";
@@ -132,6 +135,10 @@ export async function classifyPendingMemories(
 export function buildRetainItems(rows: ReadonlyArray<ClassifiedRow>): RetainBatchItem[] {
   return rows.map((r) => ({
     content: r.content,
+    // A row whose delete fails stays pending and is retained again by a later
+    // drain; keyed on the row, that retain replaces the row's document rather
+    // than adding a second copy.
+    documentId: r.id,
     ...(r.context !== null && { context: r.context }),
     tags: [
       `network:${r.tags.network}`,

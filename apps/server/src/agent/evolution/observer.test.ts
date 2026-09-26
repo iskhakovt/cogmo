@@ -1,10 +1,11 @@
+import { randomUUID } from "node:crypto";
 import { StepError } from "inngest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Transactor } from "../../db/index.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import type { ChatParams, LlmResponse, Message } from "../../llm/types.js";
 import { logger } from "../../logger.js";
-import type { MemoryProvider } from "../../memory/provider.js";
+import type { MemoryProvider, RetainBatchItem } from "../../memory/provider.js";
 import {
   mockAgentStore,
   mockProvider,
@@ -121,6 +122,26 @@ function exhaustedRetriesStep(): ObserverStepHarness & { ids: string[] } {
       } catch (err) {
         throw new StepError(id, err);
       }
+    },
+  };
+}
+
+/**
+ * A memory layer that keeps one document per id, as Hindsight does: a retain
+ * naming a document the bank already holds replaces it. An item without an id
+ * lands as a new document, as the provider mints a fresh one for it.
+ */
+function documentBank(): {
+  memory: Pick<MemoryProvider, "retainBatch">;
+  documents: Map<string, RetainBatchItem>;
+} {
+  const documents = new Map<string, RetainBatchItem>();
+  return {
+    documents,
+    memory: {
+      retainBatch: vi.fn(async (_bankId: string, items: RetainBatchItem[]) => {
+        for (const item of items) documents.set(item.documentId ?? randomUUID(), item);
+      }),
     },
   };
 }
@@ -265,6 +286,29 @@ describe("runObserver phase isolation", () => {
     });
     expect(deps.agentStore.deletePendingMemories).not.toHaveBeenCalled();
     expect(deps.agentStore.recordEvolutionEvent).toHaveBeenCalledOnce();
+  });
+
+  it("does not retain a staged row twice when the drain's delete fails for good", async () => {
+    const bank = documentBank();
+    const deletePendingMemories = vi
+      .fn<AgentStore["deletePendingMemories"]>()
+      .mockRejectedValueOnce(new Error("connection reset"))
+      .mockResolvedValue(undefined);
+    const deps = observerDeps({
+      provider: routedProvider(),
+      memory: bank.memory,
+      store: { deletePendingMemories },
+    });
+
+    const first = await runObserver(EVENT, exhaustedRetriesStep(), deps);
+    const second = await runObserver(EVENT, exhaustedRetriesStep(), deps);
+
+    expect(first).toMatchObject({ drained: { drained: 0 } });
+    expect(second).toMatchObject({ drained: { drained: 1 } });
+    const staged = [...bank.documents.values()].filter(
+      (d) => d.content === "Prefers tea over coffee",
+    );
+    expect(staged).toHaveLength(1);
   });
 
   it("propagates a failure that did not come from a step with exhausted retries", async () => {
