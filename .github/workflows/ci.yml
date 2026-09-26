@@ -283,7 +283,7 @@ jobs:
         # DIAGNOSTIC ONLY: three full runs to catch the pipeline.mcp timeout.
         run: |
           rc=0
-          for i in 1 2 3; do
+          for i in 1 2 3 4 5; do
             echo "=== DIAG integration run $i ==="
             # No results cache, so every run orders files by size as CI's first run does.
             rm -rf apps/server/node_modules/.vite

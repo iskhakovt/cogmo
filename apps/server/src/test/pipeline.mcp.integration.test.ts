@@ -1,6 +1,6 @@
 /// <reference path="../../test/vitest.d.ts" />
 
-import { eq } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import { connect } from "inngest/connect";
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
 import { conversations, messages } from "../agent/store/schema.js";
@@ -127,7 +127,8 @@ async function waitForFinalAssistantMessage(
       const rows = await db
         .select()
         .from(messages)
-        .where(eq(messages.conversationId, conversationId));
+        .where(eq(messages.conversationId, conversationId))
+        .orderBy(asc(messages.id));
       const lastAssistant = [...rows].reverse().find((m) => m.role === "assistant");
       if (!lastAssistant || !predicate(lastAssistant)) {
         throw new Error("no matching final assistant message yet");
