@@ -46,7 +46,7 @@ llm_providers (
 
 **`secret_id`** references the `secrets` table (see [infrastructure.md](infrastructure.md) → Secrets). Decoupled from the provider row so the same key can serve multiple providers (e.g., one OpenRouter key for both Claude-via-OpenRouter and GPT-via-OpenRouter).
 
-**`attrs`** JSONB for provider-specific config: `promptCaching`, `headers`, `organization`.
+**`attrs`** JSONB for provider-specific config (`ProviderAttrsSchema`): `cacheDialect`, `headers`, `organization`. `cacheDialect` (`openrouter` \| `openai` \| `xai` \| `none`) says which caching and routing hints an OpenAI-compatible endpoint takes for a cache intent. `addProvider` derives it from the base URL's host when the caller names none; absent reads as `none`, and Anthropic rows carry none. See [prompt-caching.md](prompt-caching.md) → Adapter mapping.
 
 ### Model → Provider routing
 
