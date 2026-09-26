@@ -158,15 +158,15 @@ The `source` enum distinguishes live tool calls from one-off ingestion paths (e.
 
 - **An install that doesn't use classes renders `# User` from the same rows as today**, and `core_memory_update` keeps today's schema in every profile, with no `scope` argument.
 - **Classing one persona isolates it.** A classed coder never renders the unclassed bucket, so the everyday profile needs no class.
-- **Restricted classes fail closed.** A restricted persona never writes the shared block. An identity change learned there (a move, a new name) becomes the class's `identity` override, which holds only the lines that differ and wins where the two conflict. That persona still follows shared changes to every other line; the other personas keep the old value of the changed line until told.
+- **Restricted classes fail closed.** A restricted persona never writes the shared block. An identity change learned there (a move, a new name) becomes the class's `identity` override, which holds only the lines that differ and wins where the two conflict. That persona still follows shared changes to every other line; the other personas keep the old value of the changed line until told. Before any shared `identity` exists every line differs, so an override written then holds them all and shadows later shared changes; the migration's one-off fix writes the shared block first, and on a fresh install the unclassed default profile usually does.
 - **The Service is the ACL boundary.** `buildTurnService` resolves where a write goes from the key and the profile's class and restricted flag, and returns the scope it wrote to for the tool result. The resolution is one use case, shared by the Service and the eval harness.
-- **The turn's class is frozen.** `freeze-turn-inputs` records the profile's class and restricted flag, so a write goes to the scope the prompt rendered even if `/profile class` runs mid-turn. A turn whose profile can't be loaded renders only the shared `identity` and refuses writes.
+- **The turn's scope is frozen.** `freeze-turn-inputs` records the profile's class, restricted flag and trust gate, so a write goes to the scope the prompt rendered even if `/profile class` or `/profile scope` runs mid-turn.
 
 ### Boundaries
 
 - **A class is the only boundary core memory has.** `memory_scope` compartments don't filter blocks: a block is free text that mixes compartments ([Alternatives Considered](#alternatives-considered)). Org profiles can't have a class (`setProfileClass` rejects them), so every org profile renders the unclassed bucket; isolating a persona takes a user profile with a class.
 - **Classes opted in through `memory_scope.profileClasses` are recall-only.** Their blocks don't render, because always-on context would grow with every class opted in. Explicit per-block sharing (Letta-style: attach one block to chosen classes) is a possible later extension.
-- **Third-party profiles get no core memory.** A profile whose `memory_scope.trust` excludes `first-party` sees no block in `# User` or `core_memory_read`, not even `identity`, and the Service refuses its writes. Hindsight treats it the same way, recalling only `trust:any` memories; core memory is written by profiles the user controls.
+- **Third-party profiles get no core memory.** A profile whose `memory_scope.trust` excludes `first-party` gets no block in `# User`, not even `identity`, no onboarding text and no core-memory tools, and the Service refuses its writes as a backstop. Hindsight treats it the same way, recalling only `trust:any` memories; core memory is written by profiles the user controls. A turn whose profile can't be loaded is treated the same.
 - **The transcript is not scoped.** `/profile switch` inside a conversation carries its history across classes, as it does today, and with it the `core_memory_update` inputs, `core_memory_read` results, announcements and compaction summaries it holds: the same residual as the Hindsight recall results already in it.
 
 ### What the Model Sees
@@ -176,7 +176,7 @@ The `source` enum distinguishes live tool calls from one-off ingestion paths (e.
   - "`identity` holds what is true in every persona; a name or form of address for one persona goes in that persona's blocks", so "call me Thorin while we play" stays in the game's class.
 - **Groups in classed profiles.** `# User` and `core_memory_read` put blocks under a shared group and a group for the class; unclassed profiles render flat, as today. Headings stay the bare key, so a key copied from the prompt into a tool call is still the key.
 - **A restricted persona can still save identity changes.** Its shared group says that the persona's own `identity` wins where the two differ, and that an `identity` it saves stays in this persona and holds only what differs. Calling the shared block read-only instead would stop the model saving at all. The tool result says `Saved "identity" for this persona only; other personas keep the shared block. Tell the user it is saved only here.`, so the divergence isn't silent.
-- **Onboarding shows while no block is visible to the turn.** A classed persona that renders the shared `identity` doesn't show it: it knows the basics, and the routing guidance covers the rest.
+- **Onboarding shows while no block is visible to the turn**, except in a third-party profile. A classed persona that renders the shared `identity` doesn't show it: it knows the basics, and the routing guidance covers the rest.
 
 ### Data Model
 
@@ -208,7 +208,7 @@ core_memory_blocks (
 
 ### Interactions
 
-- **Rendering.** `loadConversationContext` loads the conversation user's blocks, and `AssembleContext` carries them to `DefaultPromptSource`, a pure formatter. Scoping passes the turn's frozen class and restricted flag to that load; the trust gate reads the profile the use case already holds.
+- **Rendering.** `loadConversationContext` loads the conversation user's blocks, and `AssembleContext` carries them to `DefaultPromptSource`, a pure formatter. Scoping passes the turn's frozen class, restricted flag and trust gate to that load.
 - **System prompt snapshot** ([prompt-caching.md](prompt-caching.md#system-prompt-snapshot-proposed)):
 
 | Concern | Rule |
@@ -251,8 +251,8 @@ Two commands delete blocks. Both confirm first, in Transport, so every channel g
 ### Implementation Outline
 
 1. **Schema and store:** the column, constraint and FK in one generated migration; the `identity` key as a code constant; the store methods in [Data Model](#data-model). PGlite tests: the shared `identity` returned for every scope, the unclassed bucket absent from a classed read, a restricted class's override after the shared block, the cascade on class delete.
-2. **Service ACL:** the write-resolution use case and `buildTurnService` as in [Behaviour by Profile](#behaviour-by-profile) and [Boundaries](#boundaries): the confined-write result, the frozen class, the trust gate. Tests cover the matrix.
-3. **Rendering and routing:** the frozen class and restricted flag in `loadConversationContext`; grouped `# User` and `core_memory_read` for classed profiles, none for third-party profiles, and only the shared `identity` when the profile can't be loaded; `identity` and the two routing lines in the tool description, the guidance and the onboarding text. Tests: an unclassed profile's `# User` byte-identical to today's for the same rows; a classed profile's renders `identity` and its class's blocks, never the unclassed bucket or another class's.
+2. **Service ACL:** the write-resolution use case and `buildTurnService` as in [Behaviour by Profile](#behaviour-by-profile) and [Boundaries](#boundaries): the confined-write result, the frozen scope, the trust gate. Tests cover the matrix.
+3. **Rendering and routing:** the frozen scope in `loadConversationContext`; grouped `# User` and `core_memory_read` for classed profiles; no core memory, onboarding or core-memory tools for third-party profiles and unloadable ones; `identity` and the two routing lines in the tool description, the guidance and the onboarding text. Tests: an unclassed profile's `# User` byte-identical to today's for the same rows; a classed profile's renders `identity` and its class's blocks, never the unclassed bucket or another class's.
 4. **Class lifecycle:** the confirmations in [Class Lifecycle](#class-lifecycle).
 5. **Eval**, in `core-memory-routing.live.test.ts`, with classed and restricted runs; results under [Evaluation](#evaluation):
    - `call-me-sam`, `moved-lisbon` and `lisbon-day-trip` take `identity` as their expected block, and the established fixture gains an `identity` block;
