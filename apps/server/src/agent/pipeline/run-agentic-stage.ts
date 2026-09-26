@@ -60,7 +60,7 @@ import type { ToolRegistry } from "../tools.js";
 import { turnCacheIntent } from "../turn-cache-intent.js";
 import { buildTurnService } from "../turn-service.js";
 import { asNonRetriable } from "../turn-step-runner.js";
-import { bindFrozenTools, freezeToolSpecs } from "../turn-tools.js";
+import { bindFrozenTools, freezeToolTable } from "../turn-tools.js";
 import { extractStageArtifact } from "./extract-artifact.js";
 import type { StageArtifact, StageOutputs } from "./run-types.js";
 import { buildStagePrompt } from "./stage-prompt.js";
@@ -207,7 +207,7 @@ export async function runAgenticStage(
   // table the stage offers and dispatches on is frozen here, the live build
   // supplying only handlers (see `bindFrozenTools`).
   const turnInputs = await steps.run("freeze-turn-inputs", async () => ({
-    tools: freezeToolSpecs(liveTools),
+    tools: freezeToolTable(liveTools),
   }));
   const stageTools = bindFrozenTools(turnInputs.tools, liveTools);
   const toolDefs = stageTools.definitions();

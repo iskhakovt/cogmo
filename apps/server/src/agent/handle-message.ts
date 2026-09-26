@@ -60,7 +60,7 @@ import type { ToolRegistry } from "./tools.js";
 import { turnCacheIntent } from "./turn-cache-intent.js";
 import { buildTurnService } from "./turn-service.js";
 import { asNonRetriable, createTurnStepRunner } from "./turn-step-runner.js";
-import { bindFrozenTools, freezeToolSpecs } from "./turn-tools.js";
+import { bindFrozenTools, freezeToolTable } from "./turn-tools.js";
 
 export interface HandleMessageDeps {
   runInTx: Transactor;
@@ -579,10 +579,11 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // resolved from non-durable reads (the profile, the delivery handle,
       // the live catalogs), and both reach the LLM request: the voice hint
       // and `# Tools` in the prompt, and the `tools` param on every
-      // iteration. The step pins what its first execution saw; later
-      // invocations bind the frozen table to their own live handlers
-      // (`bindFrozenTools`), so a catalog that changes or fails to load
-      // mid-turn changes neither the request nor the loop's dispatch.
+      // iteration. The step pins what its first execution saw; every
+      // invocation binds the frozen table (JSON text, see `freezeToolTable`)
+      // to its own live handlers (`bindFrozenTools`), so a catalog that
+      // changes or fails to load mid-turn changes neither the request nor
+      // the loop's dispatch.
       const turnInputs = await stepRun("freeze-turn-inputs", async () => ({
         // Decision gates: adapter capability, TTS provider configured,
         // conversation override (NULL = follow profile default), profile
@@ -602,7 +603,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             (b) => b.type === "voice_ref",
           ),
         }),
-        tools: freezeToolSpecs(liveTools),
+        tools: freezeToolTable(liveTools),
       }));
       const turnTools = bindFrozenTools(turnInputs.tools, liveTools);
       const toolDefs = turnTools.definitions();

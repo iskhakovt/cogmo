@@ -16,6 +16,7 @@ import {
   mockMemoryProvider,
   mockTransportStore,
 } from "../../test/factories.js";
+import { canonicalKeyOrder } from "../../util/canonical-key-order.js";
 import type { AgentLoopResult, StepRunner } from "../loop.js";
 import { defineTool, ToolRegistry } from "../tools.js";
 import {
@@ -85,7 +86,8 @@ function recordingSteps() {
 
 /**
  * Step runners that memoize by id across calls, so a second `runAgenticStage`
- * over the same instance behaves as a re-invocation of the same run.
+ * over the same instance behaves as a re-invocation of the same run. `memo`
+ * is exposed so a test can hand a replay what the server would return.
  */
 function memoizingSteps() {
   const memo = new Map<string, unknown>();
@@ -95,7 +97,7 @@ function memoizingSteps() {
     memo.set(id, result);
     return result;
   };
-  return { run: runner, stepRun: runner };
+  return { memo, steps: { run: runner, stepRun: runner } };
 }
 
 function providerReplying(...texts: string[]): LlmProvider {
@@ -284,7 +286,7 @@ describe("runAgenticStage", () => {
       tools: ["web_search", "echo"],
       output: { kind: "text" },
     };
-    const steps = memoizingSteps();
+    const { steps } = memoizingSteps();
 
     await runAgenticStage(h.deps, stageArgs(stage), steps, log);
     await runAgenticStage(h.deps, stageArgs(stage), steps, log);
@@ -294,6 +296,23 @@ describe("runAgenticStage", () => {
     );
     expect(first?.map((d) => d.name)).toEqual(["web_search", "echo"]);
     expect(second).toEqual(first);
+  });
+
+  it("sends byte-identical tools when its frozen table comes back with its keys re-sorted", async () => {
+    // The Inngest server re-encodes memoized step output with object keys
+    // sorted at every depth — the order `canonicalKeyOrder` produces.
+    const h = await harness();
+    const { memo, steps } = memoizingSteps();
+
+    await runAgenticStage(h.deps, stageArgs(), steps, log);
+    memo.set("freeze-turn-inputs", canonicalKeyOrder(memo.get("freeze-turn-inputs")));
+    await runAgenticStage(h.deps, stageArgs(), steps, log);
+
+    const [first, second] = h.runStreamingAgentLoop.mock.calls.map(([params]): string =>
+      JSON.stringify(params.tools.definitions()),
+    );
+    expect(first).toContain('"type":"object","properties"');
+    expect(second).toBe(first);
   });
 
   it("fails the stage when the loop degrades, after persisting what it produced", async () => {

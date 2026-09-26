@@ -12,43 +12,55 @@
  */
 
 import * as R from "remeda";
-import { type ToolHandler, ToolRegistry, type ToolSpec } from "./tools.js";
+import { z } from "zod";
+import type { JsonSchema } from "../llm/types.js";
+import { type ToolHandler, ToolRegistry } from "./tools.js";
 
-const FROZEN_KEYS = [
-  "name",
-  "description",
-  "inputSchema",
-  "durable",
-  "parallelSafe",
-  "sideEffectful",
-  "invocationBudget",
-] as const;
+function isObjectJsonSchema(value: unknown): value is JsonSchema {
+  return R.isPlainObject(value) && value.type === "object";
+}
 
 /**
- * The data half of a {@link ToolSpec}: the definition sent to the provider and
+ * The data half of a `ToolSpec`: the definition sent to the provider and
  * the policy the loop dispatches on (durability, grouping, the Class D flags).
- * JSON-serializable, so it can be a step result.
  */
-export type FrozenToolSpec = Pick<ToolSpec, (typeof FROZEN_KEYS)[number]>;
+const FrozenToolSpecSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  // Checked, not rebuilt: its key order is what the provider sees.
+  inputSchema: z.custom<JsonSchema>(isObjectJsonSchema),
+  durable: z.boolean().exactOptional(),
+  parallelSafe: z.boolean().exactOptional(),
+  sideEffectful: z.boolean().exactOptional(),
+  invocationBudget: z.number().int().positive().exactOptional(),
+});
 
-export function freezeToolSpecs(registry: ToolRegistry): FrozenToolSpec[] {
-  return registry.snapshot().map((spec) => R.pick(spec, FROZEN_KEYS));
+const FROZEN_KEYS = FrozenToolSpecSchema.keyof().options;
+
+/**
+ * The tool table as the step returns it: JSON text. The Inngest server
+ * re-encodes memoized step output with object keys sorted at every depth, so
+ * an object would come back with every schema reordered, and the invocation
+ * that ran the step would send different `tools` bytes from every later one.
+ * A string comes back as it went in.
+ */
+export function freezeToolTable(registry: ToolRegistry): string {
+  return JSON.stringify(registry.snapshot().map((spec) => R.pick(spec, FROZEN_KEYS)));
 }
 
 /**
  * The registry the turn runs on: the frozen specs, in frozen order, each with
- * its handler from `live`. A frozen tool missing from `live` keeps its
- * definition and policy, and its handler throws, which the loop reports as an
- * `is_error` tool result — or, for a durable tool whose step already ran,
- * never reaches, since the step replays its result. A live tool the turn
- * didn't freeze is not offered.
+ * its handler from `live`. Every invocation, the one that ran the step
+ * included, parses the same `table`, so each builds identical definitions.
+ *
+ * A frozen tool missing from `live` keeps its definition and policy, and its
+ * handler throws, which the loop reports as an `is_error` tool result — or,
+ * for a durable tool whose step already ran, never reaches, since the step
+ * replays its result. A live tool the turn didn't freeze is not offered.
  */
-export function bindFrozenTools(
-  frozen: ReadonlyArray<FrozenToolSpec>,
-  live: ToolRegistry,
-): ToolRegistry {
+export function bindFrozenTools(table: string, live: ToolRegistry): ToolRegistry {
   const registry = new ToolRegistry();
-  for (const spec of frozen) {
+  for (const spec of z.array(FrozenToolSpecSchema).parse(JSON.parse(table))) {
     const liveSpec = live.get(spec.name);
     registry.register({
       ...spec,

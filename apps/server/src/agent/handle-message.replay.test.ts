@@ -24,6 +24,7 @@
 import { InngestTestEngine } from "@inngest/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { z } from "zod";
 import { inngest } from "../inngest/client.js";
 import type { ChatParams, ChatStreamResult, StreamEvent } from "../llm/types.js";
 import { agentIterations, memoryRecallFailures } from "../metrics.js";
@@ -44,9 +45,11 @@ import {
   mockVoiceResolver,
   spyOnInngestSend,
 } from "../test/factories.js";
+import { canonicalKeyOrder } from "../util/canonical-key-order.js";
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
 import { runStreamingAgentLoop } from "./loop.js";
+import { defineTool, ToolRegistry } from "./tools.js";
 
 // Stub the singleton Inngest client's private `_send` so step.sendEvent calls
 // inside the function under test don't try to reach a real Inngest dev server.
@@ -708,6 +711,51 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
     ]);
   });
 
+  it("sends byte-identical tools when the cached freeze-turn-inputs comes back with its keys re-sorted", async () => {
+    // The Inngest server re-encodes memoized step output with object keys
+    // sorted at every depth — the order `canonicalKeyOrder` produces. A replay
+    // must build the same `tools` bytes as the invocation that ran the step.
+    const builtIns = new ToolRegistry();
+    builtIns.register(
+      defineTool({
+        name: "draw",
+        description: "Draw a picture",
+        schema: z.object({
+          prompt: z.string().describe("What to draw"),
+          model: z.string().optional(),
+        }),
+        handler: async () => "ok",
+      }),
+    );
+    const sentTools: string[] = [];
+    const chatStream = vi.fn((params: ChatParams) => {
+      sentTools.push(JSON.stringify(params.tools));
+      return stream([{ type: "text_delta", text: "done" }], "end_turn");
+    });
+    const deps = mockDeps({
+      tools: builtIns,
+      resolveProvider: mockResolver(mockProvider({ chatStream })),
+      agentStore: mockAgentStore({ getProfile: vi.fn().mockResolvedValue(profile()) }),
+      runStreamingAgentLoop,
+    });
+    const fn = createHandleMessage(deps);
+
+    await new InngestTestEngine({ function: fn, events: [event] }).execute();
+    const { result: frozen } = await new InngestTestEngine({
+      function: fn,
+      events: [event],
+    }).executeStep("freeze-turn-inputs");
+    await new InngestTestEngine({
+      function: fn,
+      events: [event],
+      steps: [{ id: "freeze-turn-inputs", handler: () => canonicalKeyOrder(frozen) }],
+    }).execute();
+
+    expect(sentTools).toHaveLength(2);
+    expect(sentTools[0]).toContain('"prompt":{"type":"string","description":"What to draw"}');
+    expect(sentTools[1]).toBe(sentTools[0]);
+  });
+
   it("turns on the cached freeze-turn-inputs, not on this invocation's reads", async () => {
     // Live, this turn would have no voice and no tools; the cached step says
     // otherwise, and the cached step is what the prompt and the loop get.
@@ -728,7 +776,12 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
     await new InngestTestEngine({
       function: createHandleMessage(deps),
       events: [event],
-      steps: [{ id: "freeze-turn-inputs", handler: () => ({ voiceMode: true, tools: [echo] }) }],
+      steps: [
+        {
+          id: "freeze-turn-inputs",
+          handler: () => ({ voiceMode: true, tools: JSON.stringify([echo]) }),
+        },
+      ],
     }).execute();
 
     const definitions = [

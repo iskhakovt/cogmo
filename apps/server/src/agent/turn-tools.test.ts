@@ -4,7 +4,7 @@ import { z } from "zod";
 import { expectDefined } from "../test/assertions.js";
 import type { Service } from "./service.js";
 import { defineTool, ToolRegistry, type ToolSpec } from "./tools.js";
-import { bindFrozenTools, freezeToolSpecs } from "./turn-tools.js";
+import { bindFrozenTools, freezeToolTable } from "./turn-tools.js";
 
 const service = mock<Service>();
 
@@ -33,11 +33,11 @@ const echo: ToolSpec = {
   handler: async (input) => `echoed ${JSON.stringify(input)}`,
 };
 
-describe("freezeToolSpecs", () => {
-  it("keeps each spec's definition and dispatch policy, and nothing callable", () => {
-    const frozen = freezeToolSpecs(registryOf(generateImage, echo));
+describe("freezeToolTable", () => {
+  it("keeps each spec's definition and dispatch policy as JSON text, and nothing callable", () => {
+    const table = freezeToolTable(registryOf(generateImage, echo));
 
-    expect(frozen).toEqual([
+    expect(JSON.parse(table)).toEqual([
       {
         name: "generate_image",
         description: "Generate an image",
@@ -54,8 +54,6 @@ describe("freezeToolSpecs", () => {
         durable: true,
       },
     ]);
-    // Survives the JSON round trip of step state unchanged.
-    expect(JSON.parse(JSON.stringify(frozen))).toEqual(frozen);
   });
 });
 
@@ -63,13 +61,20 @@ describe("bindFrozenTools", () => {
   it("serializes the same definitions, byte for byte, as the registry it froze", () => {
     const live = registryOf(generateImage, echo);
 
-    const bound = bindFrozenTools(freezeToolSpecs(live), live);
+    const bound = bindFrozenTools(freezeToolTable(live), live);
 
     expect(JSON.stringify(bound.definitions())).toBe(JSON.stringify(live.definitions()));
   });
 
+  it("rejects a table that isn't a list of frozen specs", () => {
+    const live = registryOf(echo);
+
+    expect(() => bindFrozenTools(JSON.stringify([{ name: "echo" }]), live)).toThrow();
+    expect(() => bindFrozenTools(JSON.stringify({ tools: [] }), live)).toThrow();
+  });
+
   it("offers exactly the frozen definitions, in frozen order", () => {
-    const frozen = freezeToolSpecs(registryOf(generateImage, echo));
+    const frozen = freezeToolTable(registryOf(generateImage, echo));
     // A later invocation's live build: reordered, one description edited,
     // and a tool the turn never offered.
     const extra = { ...echo, name: "extra" };
@@ -82,7 +87,7 @@ describe("bindFrozenTools", () => {
   });
 
   it("dispatches to the live handler and its input normalizer", async () => {
-    const frozen = freezeToolSpecs(registryOf(generateImage));
+    const frozen = freezeToolTable(registryOf(generateImage));
 
     const bound = expectDefined(
       bindFrozenTools(frozen, registryOf(generateImage)).get("generate_image"),
@@ -94,7 +99,7 @@ describe("bindFrozenTools", () => {
   });
 
   it("keeps a tool that didn't load this invocation, with a handler that reports it", async () => {
-    const frozen = freezeToolSpecs(registryOf(generateImage, echo));
+    const frozen = freezeToolTable(registryOf(generateImage, echo));
     const liveHandler = vi.fn();
 
     const bound = bindFrozenTools(frozen, registryOf({ ...generateImage, handler: liveHandler }));
@@ -111,7 +116,7 @@ describe("bindFrozenTools", () => {
   });
 
   it("takes the dispatch policy from the frozen table", () => {
-    const frozen = freezeToolSpecs(registryOf(generateImage));
+    const frozen = freezeToolTable(registryOf(generateImage));
     const drifted = { ...generateImage, invocationBudget: 9, parallelSafe: false };
 
     const bound = expectDefined(

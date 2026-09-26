@@ -1723,7 +1723,10 @@ describe("createHandleMessage", () => {
 
       await invokeInngestFn(createHandleMessage(deps), {
         event: testEvent,
-        step: directStep({ "freeze-turn-inputs": { voiceMode: false, tools: [echo] } }, null),
+        step: directStep(
+          { "freeze-turn-inputs": { voiceMode: false, tools: JSON.stringify([echo]) } },
+          null,
+        ),
         runId: testRunId,
       });
 
@@ -2691,7 +2694,7 @@ describe("createHandleMessage", () => {
         voiceResolver: mockVoiceResolver(mockVoiceBundle({ tts: ttsProvider })),
         deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       });
-      const step = directStep({ "freeze-turn-inputs": { voiceMode: true, tools: [] } }, null);
+      const step = directStep({ "freeze-turn-inputs": { voiceMode: true, tools: "[]" } }, null);
 
       await expect(
         invokeInngestFn(createHandleMessage(deps), { event: testEvent, step, runId: testRunId }),
