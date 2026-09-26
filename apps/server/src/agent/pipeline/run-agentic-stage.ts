@@ -60,6 +60,7 @@ import type { ToolRegistry } from "../tools.js";
 import { turnCacheIntent } from "../turn-cache-intent.js";
 import { buildTurnService } from "../turn-service.js";
 import { asNonRetriable } from "../turn-step-runner.js";
+import { bindFrozenTools, freezeToolTable } from "../turn-tools.js";
 import { extractStageArtifact } from "./extract-artifact.js";
 import type { StageArtifact, StageOutputs } from "./run-types.js";
 import { buildStagePrompt } from "./stage-prompt.js";
@@ -193,7 +194,7 @@ export async function runAgenticStage(
   const mcpTools = deps.mcpRegistry
     ? await deps.mcpRegistry.resolveTools({ toolGlobs: toolSetGlobs })
     : [];
-  const stageTools = restrictToStage(
+  const liveTools = restrictToStage(
     composeTurnTools({
       builtIns: [...deps.tools.snapshot(), ...imageTools, ...subAgentTools],
       skillTools,
@@ -202,6 +203,13 @@ export async function runAgenticStage(
     }),
     stage.tools,
   );
+  // The catalogs above are live reads, re-run on every invocation; the tool
+  // table the stage offers and dispatches on is frozen here, the live build
+  // supplying only handlers (see `bindFrozenTools`).
+  const turnInputs = await steps.run("freeze-turn-inputs", async () => ({
+    tools: freezeToolTable(liveTools),
+  }));
+  const stageTools = bindFrozenTools(turnInputs.tools, liveTools);
   const toolDefs = stageTools.definitions();
 
   const service = await buildTurnService(

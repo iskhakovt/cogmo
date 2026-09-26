@@ -22,6 +22,14 @@ contract**. Design every function for the per-boundary model.
   minutes. "You can't stream out of a step" confuses returning a stream
   (impossible) with emitting from the body (normal, and the suppression on
   replay is usually exactly what you want).
+- **Step results come back with object keys sorted.** The server
+  re-encodes memoized output with keys sorted at every depth (arrays keep
+  their order; strings come back unchanged), so the invocation that ran
+  the body can see a different key order from every replay. If a result's
+  bytes reach an LLM request or other byte-compared output, return it as
+  a string and parse it on every invocation, the first included
+  (`freeze-turn-inputs`), or canonicalize it after the step returns on
+  every invocation (the loop's tool inputs).
 - **Non-determinism upstream of a step breaks memoization.** If a replay
   produces a different number, order, or set of steps than the first pass,
   the executor asks for steps the SDK never creates and the run dies with

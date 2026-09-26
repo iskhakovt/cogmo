@@ -23,8 +23,12 @@
 
 import { InngestTestEngine } from "@inngest/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
+import { z } from "zod";
 import { inngest } from "../inngest/client.js";
+import type { ChatParams, ChatStreamResult, StreamEvent, ToolDefinition } from "../llm/types.js";
 import { agentIterations, memoryRecallFailures } from "../metrics.js";
+import type { SkillRunner } from "../skills/runner.js";
 import { expectDefined } from "../test/assertions.js";
 import {
   fakeRunInTx,
@@ -37,11 +41,15 @@ import {
   mockResolver,
   mockToolRegistry,
   mockTransportStore,
+  mockVoiceBundle,
+  mockVoiceResolver,
   spyOnInngestSend,
 } from "../test/factories.js";
+import { canonicalKeyOrder } from "../util/canonical-key-order.js";
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
 import { runStreamingAgentLoop } from "./loop.js";
+import { defineTool, ToolRegistry } from "./tools.js";
 
 // Stub the singleton Inngest client's private `_send` so step.sendEvent calls
 // inside the function under test don't try to reach a real Inngest dev server.
@@ -607,5 +615,237 @@ describe("handle-message — crash recovery / step replay", () => {
     // Non-vacuity: the bare body reached the recall site on more than one
     // pass. `buildTurnService` reads the profile-class registry just above it.
     expect(vi.mocked(deps.agentStore.listProfileClasses).mock.calls.length).toBeGreaterThan(1);
+  });
+});
+
+describe("handle-message — turn inputs frozen across re-invocations", () => {
+  function profile(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "profile-1",
+      userId: null,
+      name: "assistant",
+      basePrompt: "test",
+      model: "claude-sonnet-4-6",
+      summarizationModel: null,
+      extractionModel: null,
+      autoRecall: "heuristic",
+      voiceMode: "auto",
+      toolSet: ["*"],
+      memoryScope: null,
+      profileClass: null,
+      streamChunkChars: 4000,
+      streamEdits: true,
+      codingAutoapproveMode: "off",
+      ...overrides,
+    };
+  }
+
+  function stream(events: StreamEvent[], stopReason: "tool_use" | "end_turn"): ChatStreamResult {
+    return {
+      events: (async function* () {
+        yield* events;
+      })(),
+      response: Promise.resolve({
+        stopReason,
+        model: "mock-model",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      }),
+    };
+  }
+
+  it("sends the same tools on every iteration when a skill stops loading mid-turn", async () => {
+    // The skill's source becomes unreadable once it has run, so every later
+    // invocation's live catalog drops it — as `listToolDefs` does for a skill
+    // it can't read.
+    let skillLoads = true;
+    const skillRunner = mock<SkillRunner>();
+    skillRunner.listToolDefs.mockImplementation(async () =>
+      skillLoads
+        ? [
+            {
+              name: "echo",
+              description: "echo a number",
+              inputs: { type: "object", properties: { n: { type: "number" } } },
+              tier: "wasm",
+              riskTier: "notify",
+              gitSha: "abc1234",
+            },
+          ]
+        : [],
+    );
+    skillRunner.invoke.mockImplementation(async () => {
+      skillLoads = false;
+      return { runId: "skill-run-1", status: "success", output: 42 };
+    });
+    // Snapshot each request as sent: the loop keeps appending to `messages`.
+    const requests: ChatParams[] = [];
+    const chatStream = vi.fn((params: ChatParams) => {
+      requests.push(structuredClone(params));
+      return requests.length === 1
+        ? stream([{ type: "tool_start", id: "t1", name: "echo", input: { n: 42 } }], "tool_use")
+        : stream([{ type: "text_delta", text: "done" }], "end_turn");
+    });
+    const deps = mockDeps({
+      resolveProvider: mockResolver(mockProvider({ chatStream })),
+      agentStore: mockAgentStore({ getProfile: vi.fn().mockResolvedValue(profile()) }),
+      skillRunner,
+      runStreamingAgentLoop,
+    });
+
+    await new InngestTestEngine({ function: createHandleMessage(deps), events: [event] }).execute();
+
+    expect(requests).toHaveLength(2);
+    const [first, second] = requests;
+    expect(first?.tools?.map((t) => t.name)).toEqual(["echo"]);
+    // Byte-identical, key order included: the cached prefix starts here.
+    expect(JSON.stringify(second?.tools)).toBe(JSON.stringify(first?.tools));
+    // The skill ran once, and the follow-up carries its result rather than
+    // an error for a tool the model was just offered.
+    expect(skillRunner.invoke).toHaveBeenCalledTimes(1);
+    expect(second?.messages.at(-1)?.content).toEqual([
+      {
+        type: "tool_result",
+        toolUseId: "t1",
+        content: JSON.stringify({ ok: true, runId: "skill-run-1", output: 42 }),
+      },
+    ]);
+  });
+
+  it("sends byte-identical tools when replayed from the server's copy of freeze-turn-inputs", async () => {
+    // The server returns memoized step output with object keys sorted at every
+    // depth (as `canonicalKeyOrder` does) and strings unchanged. A table
+    // returned as an object fails this; one returned as JSON text passes.
+    const builtIns = new ToolRegistry();
+    builtIns.register(
+      defineTool({
+        name: "draw",
+        description: "Draw a picture",
+        schema: z.object({
+          prompt: z.string().describe("What to draw"),
+          model: z.string().optional(),
+        }),
+        handler: async () => "ok",
+      }),
+    );
+    const sentTools: ToolDefinition[][] = [];
+    const chatStream = vi.fn((params: ChatParams) => {
+      sentTools.push(structuredClone(params.tools ?? []));
+      return stream([{ type: "text_delta", text: "done" }], "end_turn");
+    });
+    const deps = mockDeps({
+      tools: builtIns,
+      resolveProvider: mockResolver(mockProvider({ chatStream })),
+      agentStore: mockAgentStore({ getProfile: vi.fn().mockResolvedValue(profile()) }),
+      runStreamingAgentLoop,
+    });
+    const fn = createHandleMessage(deps);
+
+    await new InngestTestEngine({ function: fn, events: [event] }).execute();
+    const { result: frozen } = await new InngestTestEngine({
+      function: fn,
+      events: [event],
+    }).executeStep("freeze-turn-inputs");
+    await new InngestTestEngine({
+      function: fn,
+      events: [event],
+      steps: [{ id: "freeze-turn-inputs", handler: () => canonicalKeyOrder(frozen) }],
+    }).execute();
+
+    expect(sentTools).toHaveLength(2);
+    const [first, second] = sentTools;
+    // Non-vacuous: the schemas are not already in the server's key order.
+    const schemas = expectDefined(first, "first run's tools").map((d) => d.parameters);
+    expect(JSON.stringify(canonicalKeyOrder(schemas))).not.toBe(JSON.stringify(schemas));
+    expect(JSON.stringify(second)).toBe(JSON.stringify(first));
+  });
+
+  it("turns on the cached freeze-turn-inputs, not on this invocation's reads", async () => {
+    // Live, this turn has no tools and a profile that never voices; the cached
+    // step offers `echo` and voices the reply. The prompt, the loop and the
+    // voice delivery all follow the cached step.
+    const tts = {
+      name: "openai",
+      tts: vi.fn().mockResolvedValue({ audio: Buffer.from([1]), mediaType: "audio/ogg" }),
+    };
+    const handle = mockDeliveryHandle({
+      canDeliverVoice: vi.fn().mockReturnValue(true),
+      hasBatchTargets: vi.fn().mockReturnValue(false),
+    });
+    const echo = {
+      name: "echo",
+      description: "echo a number",
+      inputSchema: { type: "object", properties: {} },
+      durable: true,
+    };
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        getProfile: vi.fn().mockResolvedValue(profile({ voiceMode: "never" })),
+      }),
+      voiceResolver: mockVoiceResolver(mockVoiceBundle({ tts })),
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+    });
+
+    await new InngestTestEngine({
+      function: createHandleMessage(deps),
+      events: [event],
+      steps: [
+        {
+          id: "freeze-turn-inputs",
+          handler: () => ({ voiceMode: true, batchDelivery: false, tools: JSON.stringify([echo]) }),
+        },
+      ],
+    }).execute();
+
+    const definitions = [
+      { name: "echo", description: "echo a number", parameters: echo.inputSchema },
+    ];
+    expect(deps.promptSource.assemble).toHaveBeenCalledWith(
+      expect.objectContaining({ voiceMode: true, toolDefinitions: definitions }),
+    );
+    const [loopParams] = expectDefined(
+      vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+      "runStreamingAgentLoop call",
+    );
+    expect(loopParams.tools.definitions()).toEqual(definitions);
+    expect(tts.tts).toHaveBeenCalledTimes(1);
+    expect(handle.deliverVoice).toHaveBeenCalledTimes(1);
+  });
+
+  it("delivers the voice reply the prompt was assembled for when the profile changes mid-turn", async () => {
+    // A `/settings` change turns voice off right after the prompt is
+    // assembled with the voice hint; the turn keeps the decision it made.
+    let voiceMode = "always";
+    const tts = {
+      name: "openai",
+      tts: vi.fn().mockResolvedValue({ audio: Buffer.from([1]), mediaType: "audio/ogg" }),
+    };
+    const handle = mockDeliveryHandle({
+      canDeliverVoice: vi.fn().mockReturnValue(true),
+      hasBatchTargets: vi.fn().mockReturnValue(false),
+    });
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        getProfile: vi.fn().mockImplementation(async () => profile({ voiceMode })),
+      }),
+      promptSource: {
+        assemble: vi.fn().mockImplementation(async () => {
+          voiceMode = "never";
+          return "system prompt";
+        }),
+      },
+      voiceResolver: mockVoiceResolver(mockVoiceBundle({ tts })),
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+      transportStore: mockTransportStore({
+        getVoiceMaxReplyChars: vi.fn().mockResolvedValue(700),
+      }),
+    });
+
+    await new InngestTestEngine({ function: createHandleMessage(deps), events: [event] }).execute();
+
+    expect(deps.promptSource.assemble).toHaveBeenCalledWith(
+      expect.objectContaining({ voiceMode: true }),
+    );
+    expect(tts.tts).toHaveBeenCalledTimes(1);
+    expect(handle.deliverVoice).toHaveBeenCalledTimes(1);
   });
 });
