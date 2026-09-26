@@ -633,6 +633,52 @@ describe("createHandleMessage", () => {
     expect(handle.deliverBatch).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { change: "disappear", before: true, after: false },
+    { change: "appear", before: false, after: true },
+  ])(
+    "plans the same steps on a replay when batch targets $change between invocations",
+    async ({ before, after }) => {
+      const hasBatchTargets = vi.fn().mockReturnValue(before);
+      const handle = mockDeliveryHandle({ hasBatchTargets });
+      const fn = createHandleMessage(
+        mockDeps({
+          deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+        }),
+      );
+      const memo: Record<string, unknown> = {};
+      const first = directStep(memo, null);
+      const replay = directStep(memo, null);
+
+      await invokeInngestFn(fn, { event: testEvent, step: first, runId: testRunId });
+      hasBatchTargets.mockReturnValue(after);
+      await invokeInngestFn(fn, { event: testEvent, step: replay, runId: testRunId });
+
+      const stepIds = (step: typeof first) => step.run.mock.calls.map(([id]) => id);
+      expect(stepIds(replay)).toEqual(stepIds(first));
+      expect(handle.deliverBatch).toHaveBeenCalledTimes(before ? 1 : 0);
+    },
+  );
+
+  it("skips batch delivery when the targets it was frozen for are gone", async () => {
+    const handle = mockDeliveryHandle({ hasBatchTargets: vi.fn().mockReturnValue(false) });
+    const deps = mockDeps({
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
+    });
+    const memo: Record<string, unknown> = {
+      "freeze-turn-inputs": { voiceMode: false, batchDelivery: true, tools: "[]" },
+    };
+
+    await invokeInngestFn(createHandleMessage(deps), {
+      event: testEvent,
+      step: directStep(memo, null),
+      runId: testRunId,
+    });
+
+    expect(memo["batch-delivery"]).toEqual({ skipped: "unavailable" });
+    expect(handle.deliverBatch).not.toHaveBeenCalled();
+  });
+
   it("resolves inbound document_ref into a base64 DocumentBlock for the agent loop", async () => {
     const docBytes = Buffer.from("PDF body bytes");
     const deps = mockDeps({
@@ -1724,7 +1770,13 @@ describe("createHandleMessage", () => {
       await invokeInngestFn(createHandleMessage(deps), {
         event: testEvent,
         step: directStep(
-          { "freeze-turn-inputs": { voiceMode: false, tools: JSON.stringify([echo]) } },
+          {
+            "freeze-turn-inputs": {
+              voiceMode: false,
+              batchDelivery: false,
+              tools: JSON.stringify([echo]),
+            },
+          },
           null,
         ),
         runId: testRunId,
@@ -2694,7 +2746,10 @@ describe("createHandleMessage", () => {
         voiceResolver: mockVoiceResolver(mockVoiceBundle({ tts: ttsProvider })),
         deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
       });
-      const step = directStep({ "freeze-turn-inputs": { voiceMode: true, tools: "[]" } }, null);
+      const step = directStep(
+        { "freeze-turn-inputs": { voiceMode: true, batchDelivery: false, tools: "[]" } },
+        null,
+      );
 
       await expect(
         invokeInngestFn(createHandleMessage(deps), { event: testEvent, step, runId: testRunId }),

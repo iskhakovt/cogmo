@@ -26,7 +26,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { inngest } from "../inngest/client.js";
-import type { ChatParams, ChatStreamResult, StreamEvent } from "../llm/types.js";
+import type { ChatParams, ChatStreamResult, StreamEvent, ToolDefinition } from "../llm/types.js";
 import { agentIterations, memoryRecallFailures } from "../metrics.js";
 import type { SkillRunner } from "../skills/runner.js";
 import { expectDefined } from "../test/assertions.js";
@@ -727,9 +727,9 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
         handler: async () => "ok",
       }),
     );
-    const sentTools: string[] = [];
+    const sentTools: ToolDefinition[][] = [];
     const chatStream = vi.fn((params: ChatParams) => {
-      sentTools.push(JSON.stringify(params.tools));
+      sentTools.push(structuredClone(params.tools ?? []));
       return stream([{ type: "text_delta", text: "done" }], "end_turn");
     });
     const deps = mockDeps({
@@ -752,10 +752,11 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
     }).execute();
 
     expect(sentTools).toHaveLength(2);
-    // Non-vacuous: sorted, these definitions serialize differently.
-    const sent = expectDefined(sentTools[0], "first run's tools");
-    expect(JSON.stringify(canonicalKeyOrder(JSON.parse(sent)))).not.toBe(sent);
-    expect(sentTools[1]).toBe(sent);
+    const [first, second] = sentTools;
+    // Non-vacuous: the schemas are not already in the server's key order.
+    const schemas = expectDefined(first, "first run's tools").map((d) => d.parameters);
+    expect(JSON.stringify(canonicalKeyOrder(schemas))).not.toBe(JSON.stringify(schemas));
+    expect(JSON.stringify(second)).toBe(JSON.stringify(first));
   });
 
   it("turns on the cached freeze-turn-inputs, not on this invocation's reads", async () => {
@@ -790,7 +791,7 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
       steps: [
         {
           id: "freeze-turn-inputs",
-          handler: () => ({ voiceMode: true, tools: JSON.stringify([echo]) }),
+          handler: () => ({ voiceMode: true, batchDelivery: false, tools: JSON.stringify([echo]) }),
         },
       ],
     }).execute();

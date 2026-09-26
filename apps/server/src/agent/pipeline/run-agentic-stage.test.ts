@@ -309,13 +309,13 @@ describe("runAgenticStage", () => {
     memo.set("freeze-turn-inputs", canonicalKeyOrder(memo.get("freeze-turn-inputs")));
     await runAgenticStage(h.deps, stageArgs(), steps, log);
 
-    const [first, second] = h.runStreamingAgentLoop.mock.calls.map(([params]): string =>
-      JSON.stringify(params.tools.definitions()),
+    const [first, second] = h.runStreamingAgentLoop.mock.calls.map(([params]): ToolDefinition[] =>
+      params.tools.definitions(),
     );
-    // Non-vacuous: sorted, these definitions serialize differently.
-    const sent = expectDefined(first, "first invocation's tools");
-    expect(JSON.stringify(canonicalKeyOrder(JSON.parse(sent)))).not.toBe(sent);
-    expect(second).toBe(sent);
+    // Non-vacuous: the schemas are not already in the server's key order.
+    const schemas = expectDefined(first, "first invocation's tools").map((d) => d.parameters);
+    expect(JSON.stringify(canonicalKeyOrder(schemas))).not.toBe(JSON.stringify(schemas));
+    expect(JSON.stringify(second)).toBe(JSON.stringify(first));
   });
 
   it("fails the stage when the loop degrades, after persisting what it produced", async () => {

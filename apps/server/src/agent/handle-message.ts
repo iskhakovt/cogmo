@@ -571,20 +571,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         toolSetGlobs: turnToolSetGlobs,
       });
 
-      // In-turn durable boundary wrapper — per-step-kind retry policy lives in
-      // `createTurnStepRunner`.
-      const stepRun = createTurnStepRunner((id, fn) => step.run(id, fn));
-
-      // Frozen for the turn: the voice decision and the tool table. Both are
-      // resolved from non-durable reads (the profile, the delivery handle,
-      // the live catalogs), and both reach the LLM request: the voice hint
-      // and `# Tools` in the prompt, and the `tools` param on every
-      // iteration. The step pins what its first execution saw; every
-      // invocation binds the frozen table (JSON text, see `freezeToolTable`)
-      // to its own live handlers (`bindFrozenTools`), so a catalog that
-      // changes or fails to load mid-turn changes neither the request nor
-      // the loop's dispatch.
-      const turnInputs = await stepRun("freeze-turn-inputs", async () => ({
+      // Frozen for the turn: decisions resolved from non-durable reads (the
+      // profile, the delivery handle, the live catalogs) that shape the LLM
+      // request or the step graph. See `turn-tools.ts` for the tool table.
+      const turnInputs = await step.run("freeze-turn-inputs", async () => ({
         // Decision gates: adapter capability, TTS provider configured,
         // conversation override (NULL = follow profile default), profile
         // mode, modality of the most recent inbound. See design/voice.md.
@@ -603,6 +593,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             (b) => b.type === "voice_ref",
           ),
         }),
+        // Gates `batch-delivery`, so the step exists on every invocation that
+        // reaches it or on none.
+        batchDelivery: delivery.hasBatchTargets(),
         tools: freezeToolTable(liveTools),
       }));
       const turnTools = bindFrozenTools(turnInputs.tools, liveTools);
@@ -733,6 +726,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           pipelines: pipelinesService,
         },
       );
+
+      // In-turn durable boundary wrapper — per-step-kind retry policy lives in
+      // `createTurnStepRunner`.
+      const stepRun = createTurnStepRunner((id, fn) => step.run(id, fn));
 
       // Auto-recall: search memory for context relevant to this message, via
       // the scoped service so the profile's `memoryScope` filter applies.
@@ -1255,11 +1252,16 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // (small counts), so state stays lean — image bytes flow through the
       // step body in memory but never into Inngest state.
       //
-      // Skipped entirely when there are no batch targets (pure-streaming
+      // Skipped entirely when the turn froze no batch targets (pure-streaming
       // setups like Telegram-only): the stream handle already handled
-      // delivery mid-loop, and no S3 downloads are needed.
-      if (delivery.hasBatchTargets()) {
+      // delivery mid-loop, and no S3 downloads are needed. The live targets
+      // are re-checked inside the body.
+      if (turnInputs.batchDelivery) {
         await step.run("batch-delivery", async () => {
+          if (!delivery.hasBatchTargets()) {
+            turnLogger.warn("batch delivery skipped — no batch targets");
+            return { skipped: "unavailable" };
+          }
           const imageRefs = extractGeneratedImages(result.newMessages);
           const documentRefs = extractGeneratedDocuments(result.newMessages);
 
