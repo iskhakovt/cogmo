@@ -74,6 +74,12 @@ describe("staleStatus", () => {
   it("is past when every line naming the value marks it as history", () => {
     expect(staleStatus(block("Location: Porto (moved from Lisbon)"), "Lisbon")).toBe("past");
     expect(staleStatus(block("Role: at Monzo, previously Northwind"), "Northwind")).toBe("past");
+    expect(
+      staleStatus(
+        block("Location: Porto (Europe/Lisbon) — recently relocated from Lisbon"),
+        "(?<!Europe/)Lisbon",
+      ),
+    ).toBe("past");
   });
 
   it("is current when a line names the value without a past marker", () => {

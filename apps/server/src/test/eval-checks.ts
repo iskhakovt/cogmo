@@ -31,7 +31,7 @@ export const REPLY_CHECKS: Record<ReplyCheck, (reply: string) => boolean> = {
 
 /** Words that mark a line as history rather than the current value. */
 const PAST_MARKER =
-  /\b(?:previous(?:ly)?|former(?:ly)?|used to|until|moved from|left|was|before|prior|done|completed?|finished|ex-)(?:\b|(?<=-))/i;
+  /\b(?:previous(?:ly)?|former(?:ly)?|used to|until|(?:moved|relocated) from|left|was|before|prior|done|completed?|finished|ex-)(?:\b|(?<=-))/i;
 
 export type StaleStatus = "absent" | "past" | "current";
 
