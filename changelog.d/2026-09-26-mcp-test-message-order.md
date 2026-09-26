@@ -1,0 +1,1 @@
+`pipeline.mcp.integration.test.ts` reads the turn's last assistant message with `ORDER BY id DESC LIMIT 1`, as `getLastAssistantMessage` does. The turn's `tool_use`, `tool_result` and reply rows come from one insert and share `created_at`, so only the UUIDv7 `id` orders them. Without an `ORDER BY`, the shared integration database can return the `tool_use` row last.
