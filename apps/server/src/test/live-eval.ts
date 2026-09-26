@@ -22,7 +22,7 @@ import { z } from "zod";
 import { BUILT_IN_SERVICE_GUIDANCE, builtInToolSpecs } from "../agent/built-ins.js";
 import { createDocumentTools } from "../agent/document-tools.js";
 import { type AgentLoopResult, runStreamingAgentLoop } from "../agent/loop.js";
-import { DefaultPromptSource, formatUserContext } from "../agent/prompt.js";
+import { DefaultPromptSource } from "../agent/prompt.js";
 import type { CoreMemoryBlock, Service } from "../agent/service.js";
 import type { Profile } from "../agent/store/index.js";
 import { createDefaultTools, ToolRegistry } from "../agent/tools.js";
@@ -180,8 +180,12 @@ export async function runEvalTurn(params: {
   const systemPrompt = await new DefaultPromptSource({
     timezone: EVAL_TIMEZONE,
     serviceGuidance: BUILT_IN_SERVICE_GUIDANCE,
-    getUserContext: async () => formatUserContext(await coreMemory.get()),
-  }).assemble({ profile: EVAL_PROFILE, rules: params.rules, toolDefinitions: tools.definitions() });
+  }).assemble({
+    profile: EVAL_PROFILE,
+    rules: params.rules,
+    coreMemory: await coreMemory.get(),
+    toolDefinitions: tools.definitions(),
+  });
 
   const result = await runStreamingAgentLoop({
     provider: params.provider,

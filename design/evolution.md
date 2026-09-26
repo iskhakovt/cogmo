@@ -193,6 +193,8 @@ Wraps the Observer's existing `ObserverResult` (the `status: "processed"` varian
 
 After the `processed` branch in `runObserver` (`src/agent/evolution/observer.ts`) finishes its existing work, a single `step.run("persist-evolution-event", …)` writes the row via `agentStore.recordEvolutionEvent`. Wrapped in its own `step.run` so the persistence is memoised separately from the LLM-bearing steps — a retry after a successful extraction-and-retain doesn't re-spend tokens, just retries the DB write. `skipped` results don't persist (nothing happened worth surfacing).
 
+**Phases fail independently.** Corrections, consolidation, memory extraction and the pending-memory drain each run inside `settlePhase`. A step keeps its Inngest retries; once one has failed after them, its `StepError` is logged at warn with the conversation, phase and step id, the phase reports an empty result (zero counts, `consolidation: null`), and the fire carries on to the next phase and to `persist-evolution-event`. The fallback depends only on the memoized failure, so replays plan the same steps. A failed drain stops where it failed: rows not yet deleted stay pending for the next fire. The audit row does not yet distinguish a failed phase from one that found nothing; the warn log is the only record. Errors that are not a `StepError` still propagate, so `/reflect`, whose harness has no retries, reports the failure to the user.
+
 The `triggered_by` value is threaded as an optional parameter to `runObserver` (default `"idle"`). The autonomous Inngest function passes nothing; the manual trigger (`/reflect`) passes `"manual"`. The event schema (`conversation/idle`) stays unchanged — this is a runtime detail, not an event-bus contract.
 
 ### Manual trigger (`/reflect`)
