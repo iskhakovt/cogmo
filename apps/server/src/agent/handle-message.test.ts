@@ -134,16 +134,50 @@ describe("createHandleMessage", () => {
       runId: testRunId,
     });
 
-    // assemble now receives pre-loaded data (profile + rules + the per-turn
-    // tool catalog), not a store reference. The use case
+    // assemble receives pre-loaded data (profile, rules, core memory, the
+    // per-turn tool catalog), not a store reference. The use case
     // `loadConversationContext` does the loading inside one transaction;
     // the prompt source is a pure formatter.
     expect(deps.promptSource.assemble).toHaveBeenCalledWith({
       profile: expect.objectContaining({ id: "profile-1" }),
       rules: [],
+      coreMemory: [],
       voiceMode: false,
       toolDefinitions: expect.any(Array),
     });
+  });
+
+  it("renders the core memory of the conversation's user", async () => {
+    const blocksByUser = new Map([
+      ["user-1", [{ key: "user_profile", content: "Name: Ana" }]],
+      ["user-2", [{ key: "user_profile", content: "Name: Ben" }]],
+    ]);
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        getConversation: vi.fn().mockResolvedValue({
+          id: "conv-1",
+          userId: "user-2",
+          profileId: "profile-1",
+          isPrivate: true,
+          cooldownState: null,
+          voiceMode: null,
+        }),
+        getCoreMemoryBlocks: vi
+          .fn()
+          .mockImplementation(
+            async (_tx: unknown, userId: string) => blocksByUser.get(userId) ?? [],
+          ),
+      }),
+    });
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    expect(deps.promptSource.assemble).toHaveBeenCalledWith(
+      expect.objectContaining({ coreMemory: [{ key: "user_profile", content: "Name: Ben" }] }),
+    );
   });
 
   it("uses model from profile", async () => {

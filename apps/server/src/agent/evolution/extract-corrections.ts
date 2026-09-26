@@ -18,6 +18,7 @@ import {
   buildExtractionPrompt,
   CorrectionExtractionSchema,
   type CorrectionItem,
+  labelRules,
 } from "./extraction-schema.js";
 
 const CONSOLIDATION_THRESHOLD = 30;
@@ -73,8 +74,10 @@ export async function extractCorrections(
   }
 
   const existingRules = await deps.runInTx((tx) => deps.store.getCorrections(tx, profileId));
-  const existingRulesById = R.indexBy(existingRules, R.prop("id"));
-  const systemPrompt = buildExtractionPrompt(existingRules, deps.activeChannelTypes);
+  // The prompt lists each rule under a short label rather than its id; the
+  // model's `matchedExistingRuleId` carries the label back.
+  const existingRulesByLabel = labelRules(existingRules);
+  const systemPrompt = buildExtractionPrompt(existingRulesByLabel, deps.activeChannelTypes);
 
   const { data } = await chatTyped({
     provider: deps.provider,
@@ -97,10 +100,23 @@ export async function extractCorrections(
 
   for (const correction of data.corrections) {
     if (correction.action === "contradiction") {
+      const contradictedRule = existingRulesByLabel.get(correction.matchedExistingRuleId);
+      if (contradictedRule === undefined) {
+        logger.warn(
+          {
+            rule: correction.rule,
+            matchedLabel: correction.matchedExistingRuleId,
+            reasoning: correction.reasoning,
+          },
+          "extraction: contradiction names an unknown rule label — skipping",
+        );
+        continue;
+      }
       logger.info(
         {
           rule: correction.rule,
-          matchedId: correction.matchedExistingRuleId,
+          matchedLabel: correction.matchedExistingRuleId,
+          matchedId: contradictedRule.id,
           reasoning: correction.reasoning,
         },
         "correction contradicts existing rule — skipped",
@@ -109,38 +125,39 @@ export async function extractCorrections(
       continue;
     }
 
+    let existingRuleId: string | null = null;
     if (correction.action === "reinforce") {
-      const matchedRule = existingRulesById[correction.matchedExistingRuleId];
+      const matchedRule = existingRulesByLabel.get(correction.matchedExistingRuleId);
       if (matchedRule === undefined) {
         logger.warn(
           {
             rule: correction.rule,
-            matchedId: correction.matchedExistingRuleId,
+            matchedLabel: correction.matchedExistingRuleId,
             activeChannels: [...activeChannelSet],
           },
-          "extraction: reinforce names an unknown rule id — skipping",
+          "extraction: reinforce names an unknown rule label — skipping",
         );
         unknownRuleReinforcementsSkipped++;
         continue;
       }
-      if (
-        !isReinforcementInScope(
-          matchedRule,
-          correction.rule,
-          correction.matchedExistingRuleId,
-          activeChannelSet,
-        )
-      ) {
+      if (!isReinforcementInScope(matchedRule, correction.rule, activeChannelSet)) {
         outOfScopeReinforcementsSkipped++;
         continue;
       }
+      existingRuleId = matchedRule.id;
     }
 
     const channelType =
       correction.action === "new"
         ? coerceChannelType(correction.channelType, activeChannelSet, correction.rule)
         : null;
-    const result = await applyCorrection(correction, channelType, deps.runInTx, deps.store);
+    const result = await applyCorrection(
+      correction,
+      channelType,
+      existingRuleId,
+      deps.runInTx,
+      deps.store,
+    );
     if (correction.action === "new") extracted++;
     if (correction.action === "reinforce") reinforced++;
     if (result.promoted) promoted++;
@@ -181,10 +198,14 @@ export async function extractCorrections(
   };
 }
 
-/** Delegates to the store's upsert; the caller has already gated scope. */
+/**
+ * Delegates to the store's upsert; the caller has already gated scope and
+ * resolved the model's label to `existingRuleId` (null for a new rule).
+ */
 async function applyCorrection(
   correction: CorrectionItem,
   channelType: string | null,
+  existingRuleId: string | null,
   runInTx: Transactor,
   store: Pick<AgentStore, "upsertCorrection">,
 ): Promise<{ promoted: boolean }> {
@@ -194,9 +215,7 @@ async function applyCorrection(
       category: correction.category,
       profileId: null, // global — industry standard for personal assistants
       channelType,
-      ...(correction.matchedExistingRuleId != null && {
-        existingRuleId: correction.matchedExistingRuleId,
-      }),
+      ...(existingRuleId !== null && { existingRuleId }),
     }),
   );
 }
@@ -211,13 +230,12 @@ async function applyCorrection(
  * the DB layer. Channel-scoped rules pass only when their
  * `channelType` is in the active set; out-of-scope matches skip with
  * a structured warning shaped like `coerceChannelType`'s so audit
- * grepping stays uniform. Hallucinated-id rejection happens at the
- * call site (the unknown-rule branch), with its own counter and log.
+ * grepping stays uniform. A label that names no listed rule is rejected
+ * at the call site (the unknown-rule branch), with its own counter and log.
  */
 function isReinforcementInScope(
   matchedRule: { id: string; channelType: string | null },
   ruleText: string,
-  matchedId: string,
   activeChannelSet: ReadonlySet<string>,
 ): boolean {
   // Global rules always pass — the gate catches channel-mismatch, not
@@ -227,7 +245,7 @@ function isReinforcementInScope(
   logger.warn(
     {
       rule: ruleText,
-      matchedId,
+      matchedId: matchedRule.id,
       channelType: matchedRule.channelType,
       activeChannels: [...activeChannelSet],
     },

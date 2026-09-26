@@ -396,8 +396,12 @@ describe.skipIf(API_KEY === undefined)(`core-memory routing on ${MODEL} (live ev
     const systemPrompt = await new DefaultPromptSource({
       timezone: TIMEZONE,
       serviceGuidance: BUILT_IN_SERVICE_GUIDANCE,
-      getUserContext: async () => formatUserContext(run.blocks),
-    }).assemble({ profile: PROFILE, rules: [], toolDefinitions: tools.definitions() });
+    }).assemble({
+      profile: PROFILE,
+      rules: [],
+      coreMemory: run.blocks,
+      toolDefinitions: tools.definitions(),
+    });
 
     const result = await runStreamingAgentLoop({
       provider: new AnthropicProvider(expectDefined(API_KEY, "API key")),

@@ -245,11 +245,12 @@ export async function runAgenticStage(
         agentStore: deps.agentStore,
         transportStore: deps.transportStore,
       },
-      { conversationId, profile },
+      { conversationId, userId: ctx.userId, profile },
     );
     return deps.promptSource.assemble({
       profile,
       rules: context.rules,
+      coreMemory: context.coreMemory,
       toolDefinitions: toolDefs,
     });
   });
