@@ -9,7 +9,10 @@ export const coreMemoryUpdate = defineTool({
     "for who the user is (including who their close family are), their active projects and " +
     "standing preferences and constraints: call it in the same turn the user mentions " +
     "something new or changed about these, even in passing. Replaces the whole block: " +
-    "include everything that still holds. Anything else: memory_retain.",
+    "include everything that still holds, as current facts only. A change replaces the old " +
+    "value without mentioning it, a finished project is removed, and no relative time words " +
+    '("recently", "last month"). Anything else, including a family member\'s details and ' +
+    "what used to be true: memory_retain.",
   // Durable: a DB upsert. The overwrite is idempotent, but exactly-once
   // keeps replays from racing a concurrent same-key update from another
   // turn with stale content.

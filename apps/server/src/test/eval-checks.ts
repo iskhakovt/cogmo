@@ -43,6 +43,18 @@ export function staleStatus(blocks: ReadonlyArray<CoreMemoryBlock>, pattern: str
   return lines.every((line) => PAST_MARKER.test(line)) ? "past" : "current";
 }
 
+/**
+ * Relative time words, which go stale in a block that every later prompt
+ * shows: "recently" still reads as recent months on.
+ */
+const RELATIVE_TIME =
+  /\b(?:recent(?:ly)?|just|today|tonight|yesterday|tomorrow|ago|(?:this|last|next) (?:week(?:end)?|month|year))\b/gi;
+
+/** The relative time words in `content`, lower-cased, in order. */
+export function relativeTimeWords(content: string): string[] {
+  return (content.match(RELATIVE_TIME) ?? []).map((w) => w.toLowerCase());
+}
+
 // --- Summary rates ---
 
 /** A summary row: the completed samples in `of` for which `hit` holds. */

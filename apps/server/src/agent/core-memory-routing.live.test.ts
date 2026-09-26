@@ -10,9 +10,9 @@
  * tool handler stubbed. Each case runs in two core-memory states: empty, where
  * the prompt shows the onboarding text, and established, holding the fixture's
  * blocks. No steering rules. It also checks what a core write says: whether it targets one of
- * the case's expected blocks and, in the established state, which established
- * lines the rewritten block lost and whether it still holds what the case
- * ends.
+ * the case's expected blocks, whether it uses relative time words ("recently",
+ * "last month") and, in the established state, which established lines the
+ * rewritten block lost and whether it still holds what the case ends.
  *
  * It reports rather than asserts. One sample per case on a non-deterministic
  * model makes any threshold either too loose to catch a regression or flaky,
@@ -37,6 +37,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { AnthropicProvider } from "../llm/anthropic.js";
 import { expectDefined } from "../test/assertions.js";
+import { relativeTimeWords } from "../test/eval-checks.js";
 import {
   coreMemoryWrites,
   createUsageMeter,
@@ -143,6 +144,8 @@ interface Outcome {
   lost: string[] | null;
   /** Established state: the case's `drops` a rewritten block still holds. */
   stale: string[] | null;
+  /** Relative time words in the blocks the turn wrote. */
+  relativeTime: string[];
   reply: string;
 }
 
@@ -247,6 +250,11 @@ const METRICS: ReadonlyArray<EvalMetric<Outcome>> = [
     of: (o) => o.lost !== null,
     hit: (o) => (o.lost?.length ?? 0) > 0,
   },
+  {
+    name: "writes with relative time words",
+    of: (o) => o.coreWrites.length > 0,
+    hit: (o) => o.relativeTime.length > 0,
+  },
   { name: "retains, hindsight cases", of: labelled("hindsight"), hit: retains },
   {
     name: "any memory write, none cases",
@@ -288,6 +296,8 @@ function report(): void {
       for (const w of o.coreWrites) console.log(`          ${w.key} := ${oneLine(w.content, 400)}`);
       if (o.lost?.length) console.log(`          lost: ${o.lost.join(" | ")}`);
       if (o.stale?.length) console.log(`          still holds: ${o.stale.join(", ")}`);
+      if (o.relativeTime.length > 0)
+        console.log(`          relative time: ${o.relativeTime.join(", ")}`);
       console.log(`          reply: ${oneLine(o.reply, 120)}`);
     }
   }
@@ -330,6 +340,7 @@ describe.skipIf(LIVE_API_KEY === undefined)(
           turn: calls.map((c) => c.name),
           coreWrites,
           ...checkWrites(run, coreWrites),
+          relativeTime: coreWrites.flatMap((w) => relativeTimeWords(w.content)),
           reply: result.text,
         });
       } catch (err) {

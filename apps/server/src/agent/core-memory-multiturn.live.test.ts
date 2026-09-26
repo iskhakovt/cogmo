@@ -16,8 +16,9 @@
  * marking it as past (`stale`), and whether the established facts survived the
  * whole-block rewrites. Those are one anchor per established line (`anchors`),
  * less any the scenario's `stale` supersedes, plus the scenario's own `keep`.
- * Like the single-turn eval it reports rather than asserts, and fails only
- * when a turn does not complete.
+ * The final blocks are also checked for relative time words ("recently",
+ * "last month"). Like the single-turn eval it reports rather than asserts, and
+ * fails only when a turn does not complete.
  *
  * Skipped unless `LIVE=1` and `ANTHROPIC_API_KEY` are set. A full run is 32
  * turns on Sonnet 5, about $0.40.
@@ -36,7 +37,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { AnthropicProvider } from "../llm/anthropic.js";
 import { expectDefined } from "../test/assertions.js";
-import { type StaleStatus, staleStatus } from "../test/eval-checks.js";
+import { relativeTimeWords, type StaleStatus, staleStatus } from "../test/eval-checks.js";
 import {
   CoreMemoryBlocksSchema,
   coreMemoryWrites,
@@ -110,6 +111,8 @@ interface Outcome {
   stale: StaleStatus | undefined;
   /** Established facts the final blocks no longer match. */
   lost: ReadonlyArray<string>;
+  /** Relative time words in the final blocks. */
+  relativeTime: ReadonlyArray<string>;
   /** Core writes in turns other than the fact turn. */
   otherTurnWrites: number;
 }
@@ -141,6 +144,7 @@ function outcomeOf(scenario: Scenario, repeat: number, turns: ReadonlyArray<Turn
     learnedAt: learned === -1 ? undefined : learned,
     stale: scenario.stale === undefined ? undefined : staleStatus(finalBlocks, scenario.stale),
     lost: kept(scenario).filter((pattern) => !mentions(finalBlocks, pattern)),
+    relativeTime: finalBlocks.flatMap((b) => relativeTimeWords(b.content)),
     otherTurnWrites: R.sumBy(
       turns.filter((_t, i) => i !== scenario.factTurn),
       (t) => t.writes.length,
@@ -170,6 +174,7 @@ const METRICS: ReadonlyArray<EvalMetric<Outcome>> = [
   { name: "old value kept as past", of: updated, hit: (o) => o.stale === "past" },
   { name: "old value still current", of: updated, hit: (o) => o.stale === "current" },
   { name: "established facts kept", of: () => true, hit: (o) => o.lost.length === 0 },
+  { name: "no relative time words", of: () => true, hit: (o) => o.relativeTime.length === 0 },
   {
     name: "no core writes outside the fact turn",
     of: () => true,
@@ -209,7 +214,8 @@ function report(): void {
         .join(" | ");
       console.log(
         `  ${verdict(o)} #${o.repeat} learned@${o.learnedAt ?? "-"}${o.stale ? ` old=${o.stale}` : ""} ` +
-          `lost=[${o.lost.join(",")}] other-turn writes=${o.otherTurnWrites}  turns: ${perTurn}`,
+          `lost=[${o.lost.join(",")}] other-turn writes=${o.otherTurnWrites}` +
+          `${o.relativeTime.length > 0 ? ` relative=[${o.relativeTime.join(",")}]` : ""}  turns: ${perTurn}`,
       );
       o.turns.forEach((t, i) => {
         for (const w of t.writes)

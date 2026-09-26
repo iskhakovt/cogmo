@@ -35,13 +35,13 @@ export interface FileEntry {
 /** Prompt guidance for the memory Service namespace. */
 export const MEMORY_PROMPT_GUIDANCE = `You have persistent memory across conversations. Use it well:
 - **Recall first**: At the start of a conversation or when a topic comes up, check if you already know relevant context.
-- **Retain important things**: Events, details, one-off decisions, commitments, facts about other people. Ask yourself: "would knowing this help me in a future conversation?" Who the user is (including who their close family are), their active projects and standing preferences and constraints go to core memory instead.
+- **Retain important things**: Events, details (including a family member's), one-off decisions, commitments, facts about other people, what used to be true. Ask yourself: "would knowing this help me in a future conversation?" Who the user is (including who their close family are), their active projects and standing preferences and constraints go to core memory instead.
 - **Don't over-retain**: Skip greetings, small talk, information already saved in files, and things the user said are temporary.
 - **Update, don't duplicate**: If you learn something that contradicts a previous memory, retain the new version with context about the change.
 - **Recall vs reflect**: \`memory_recall\` returns raw matching facts — fast, cheap, best for looking something up. \`memory_reflect\` runs an agentic synthesis loop across many memories — slower and more expensive, best for open-ended questions that need multi-hop reasoning (e.g. "summarise what I know about X", "what risks should I watch for on project Y?").`;
 
 /** Prompt guidance for the coreMemory Service namespace. */
-export const CORE_MEMORY_PROMPT_GUIDANCE = `Core memory blocks (the User section) are shown in every conversation. They hold what every conversation needs: who the user is (name, role and employer, home and timezone, who their close family are), their active projects, and standing preferences and constraints. When any of this is new or changes, even in passing, call \`core_memory_update\` in the same turn, rewriting the whole block and keeping what still holds. Everything else (events, details, one-off decisions, facts about other people) goes to long-term memory.`;
+export const CORE_MEMORY_PROMPT_GUIDANCE = `Core memory blocks (the User section) are shown in every conversation. They hold what every conversation needs: who the user is (name, role and employer, home and timezone, who their close family are), their active projects, and standing preferences and constraints. When any of this is new or changes, even in passing, call \`core_memory_update\` in the same turn, rewriting the whole block and keeping what still holds. Blocks state current facts only: a change replaces the old value without mentioning it, a finished project leaves the block, and relative time words ("recently", "last month") stay out, since they go stale. Everything else goes to long-term memory: events, details (including a family member's), one-off decisions, facts about other people, and what used to be true.`;
 
 export interface CoreMemoryBlock {
   key: string;

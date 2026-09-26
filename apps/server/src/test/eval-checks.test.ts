@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   type EvalFailure,
   REPLY_CHECKS,
+  relativeTimeWords,
   staleStatus,
   summariseRates,
   wordCount,
@@ -90,6 +91,25 @@ describe("staleStatus", () => {
     expect(staleStatus(block("Location: Lisbon, leftover boxes"), "Lisbon")).toBe("current");
     expect(staleStatus(block("Location: Lisbon, wasabi fan"), "Lisbon")).toBe("current");
     expect(staleStatus(block("Project: NixOS migration, donee"), "NixOS")).toBe("current");
+  });
+});
+
+describe("relativeTimeWords", () => {
+  it("finds relative time words in order, lower-cased", () => {
+    expect(
+      relativeTimeWords("Location: Porto — Recently moved; left Northwind last month, 2 weeks ago"),
+    ).toEqual(["recently", "last month", "ago"]);
+    expect(relativeTimeWords("Tom visits next weekend; started this week, just")).toEqual([
+      "next weekend",
+      "this week",
+      "just",
+    ]);
+  });
+
+  it("passes absolute dates and words that only contain one", () => {
+    expect(
+      relativeTimeWords("Diagnosed coeliac (Sept 2026); adjusted plans; Justin; weekly review"),
+    ).toEqual([]);
   });
 });
 
