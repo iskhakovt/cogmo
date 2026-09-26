@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { toObjectJsonSchema } from "../../llm/json-schema.js";
 import { expectDefined } from "../../test/assertions.js";
-import { buildExtractionPrompt, CorrectionExtractionSchema } from "./extraction-schema.js";
+import {
+  buildExtractionPrompt,
+  CorrectionExtractionSchema,
+  labelRules,
+} from "./extraction-schema.js";
 
 describe("CorrectionExtractionSchema", () => {
   it("parses valid extraction with corrections", () => {
@@ -191,13 +195,33 @@ describe("CorrectionExtractionSchema", () => {
   });
 });
 
+describe("labelRules", () => {
+  it("orders by priority, then rule text, and breaks an exact tie by id", () => {
+    const labelled = labelRules([
+      { id: "id-3", rule: "Same text", priority: 100 },
+      { id: "id-1", rule: "Same text", priority: 100 },
+      { id: "id-0", rule: "Zebra", priority: 100 },
+      { id: "id-9", rule: "Zebra", priority: 10 },
+      { id: "id-2", rule: "Alpha", priority: 100 },
+    ]);
+
+    expect([...labelled].map(([label, r]) => `${label}=${r.id}`)).toEqual([
+      "R1=id-9",
+      "R2=id-2",
+      "R3=id-1",
+      "R4=id-3",
+      "R5=id-0",
+    ]);
+  });
+});
+
 describe("buildExtractionPrompt", () => {
   it("includes existing rules when provided, each under its label", () => {
     const prompt = buildExtractionPrompt(
-      [
-        { rule: "Be concise", category: "style", channelType: null },
-        { rule: "Use tables", category: "style", channelType: null },
-      ],
+      new Map([
+        ["R1", { rule: "Be concise", category: "style", channelType: null }],
+        ["R2", { rule: "Use tables", category: "style", channelType: null }],
+      ]),
       [],
     );
     expect(prompt).toContain("[R1]");
@@ -208,14 +232,10 @@ describe("buildExtractionPrompt", () => {
 
   it("renders channel scope alongside each existing rule", () => {
     const prompt = buildExtractionPrompt(
-      [
-        { rule: "Be concise", category: "style", channelType: null },
-        {
-          rule: "No long voice notes",
-          category: "style",
-          channelType: "telegram",
-        },
-      ],
+      new Map([
+        ["R1", { rule: "Be concise", category: "style", channelType: null }],
+        ["R2", { rule: "No long voice notes", category: "style", channelType: "telegram" }],
+      ]),
       ["telegram"],
     );
     expect(prompt).toContain("[R1] (style, all channels) Be concise");
@@ -223,26 +243,26 @@ describe("buildExtractionPrompt", () => {
   });
 
   it("handles empty existing rules", () => {
-    const prompt = buildExtractionPrompt([], []);
+    const prompt = buildExtractionPrompt(new Map(), []);
     expect(prompt).toContain("No existing rules");
     expect(prompt).not.toContain("reinforce");
   });
 
   it("includes tool misuse guidance", () => {
-    const prompt = buildExtractionPrompt([], []);
+    const prompt = buildExtractionPrompt(new Map(), []);
     expect(prompt).toContain("Tool misuse");
     expect(prompt).toContain("[Tool:");
   });
 
   it("lists active channel types and instructs the LLM how to scope new rules", () => {
-    const prompt = buildExtractionPrompt([], ["telegram", "direct"]);
+    const prompt = buildExtractionPrompt(new Map(), ["telegram", "direct"]);
     expect(prompt).toContain("`telegram`");
     expect(prompt).toContain("`direct`");
     expect(prompt).toContain("Default to `null` when in doubt");
   });
 
   it("falls back to a no-channels message when no active channel types resolved", () => {
-    const prompt = buildExtractionPrompt([], []);
+    const prompt = buildExtractionPrompt(new Map(), []);
     expect(prompt).toContain("No active channels were resolved");
   });
 });

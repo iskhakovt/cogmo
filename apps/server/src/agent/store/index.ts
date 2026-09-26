@@ -1115,6 +1115,7 @@ export interface AgentStore {
       category: string;
       active: boolean;
       observationCount: number;
+      priority: number;
       channelType: string | null;
     }>
   >;
@@ -2789,6 +2790,7 @@ export class DrizzleAgentStore implements AgentStore {
       category: string;
       active: boolean;
       observationCount: number;
+      priority: number;
       channelType: string | null;
     }>
   > {
@@ -2799,6 +2801,7 @@ export class DrizzleAgentStore implements AgentStore {
         category: steeringRules.category,
         active: steeringRules.active,
         observationCount: steeringRules.observationCount,
+        priority: steeringRules.priority,
         channelType: steeringRules.channelType,
       })
       .from(steeringRules)

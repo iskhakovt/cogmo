@@ -13,7 +13,7 @@ import type { LlmProvider } from "../../llm/provider.js";
 import { chatTyped } from "../../llm/typed.js";
 import { logger } from "../../logger.js";
 import type { AgentStore } from "../store/index.js";
-import { ruleLabel, rulesByLabel } from "./extraction-schema.js";
+import { labelRules } from "./extraction-schema.js";
 
 // --- Consolidation schema ---
 
@@ -36,10 +36,11 @@ export type Consolidation = z.infer<typeof ConsolidationSchema>;
 // --- Consolidation prompt ---
 
 function buildConsolidationPrompt(
-  rules: ReadonlyArray<{ rule: string; category: string; observationCount: number }>,
+  /** The scope's rules keyed by label, as `labelRules` returns them. */
+  rules: ReadonlyMap<string, { rule: string; category: string; observationCount: number }>,
 ): string {
-  const rulesList = rules
-    .map((r, i) => `- [${ruleLabel(i)}] (${r.category}, seen ${r.observationCount}x) ${r.rule}`)
+  const rulesList = [...rules]
+    .map(([label, r]) => `- [${label}] (${r.category}, seen ${r.observationCount}x) ${r.rule}`)
     .join("\n");
 
   return `You are a rule consolidation assistant. You have a list of behavioral rules extracted from conversations with a user. Some rules may be semantically equivalent or overlapping.
@@ -113,11 +114,15 @@ async function consolidateChannelGroup(
     rule: string;
     category: string;
     observationCount: number;
+    priority: number;
   }>,
   channelType: string | null,
   deps: ConsolidationDeps,
 ): Promise<ConsolidationResult> {
-  const systemPrompt = buildConsolidationPrompt(rules);
+  // The prompt lists each rule under a short label rather than its id; a
+  // group's `originalIds` carries labels back.
+  const byLabel = labelRules(rules);
+  const systemPrompt = buildConsolidationPrompt(byLabel);
 
   const { data } = await chatTyped({
     provider: deps.provider,
@@ -132,9 +137,6 @@ async function consolidateChannelGroup(
   let mergedGroups = 0;
   let rulesRemoved = 0;
   const consumedIds = new Set<string>();
-  // The prompt lists each rule under a short label rather than its id; a
-  // group's `originalIds` carries labels back.
-  const byLabel = rulesByLabel(rules);
 
   for (const group of data.groups) {
     const unknownLabels = group.originalIds.filter((label) => !byLabel.has(label));
@@ -145,7 +147,9 @@ async function consolidateChannelGroup(
       );
       continue;
     }
-    const originals = rules.filter((_, i) => group.originalIds.includes(ruleLabel(i)));
+    const originals = [...byLabel]
+      .filter(([label]) => group.originalIds.includes(label))
+      .map(([, rule]) => rule);
     const oldIds = originals.map((r) => r.id);
 
     // Validate: no repeated label, no overlap with an earlier group, category matches

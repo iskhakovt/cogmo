@@ -18,7 +18,7 @@ import {
   buildExtractionPrompt,
   CorrectionExtractionSchema,
   type CorrectionItem,
-  rulesByLabel,
+  labelRules,
 } from "./extraction-schema.js";
 
 const CONSOLIDATION_THRESHOLD = 30;
@@ -76,8 +76,8 @@ export async function extractCorrections(
   const existingRules = await deps.runInTx((tx) => deps.store.getCorrections(tx, profileId));
   // The prompt lists each rule under a short label rather than its id; the
   // model's `matchedExistingRuleId` carries the label back.
-  const existingRulesByLabel = rulesByLabel(existingRules);
-  const systemPrompt = buildExtractionPrompt(existingRules, deps.activeChannelTypes);
+  const existingRulesByLabel = labelRules(existingRules);
+  const systemPrompt = buildExtractionPrompt(existingRulesByLabel, deps.activeChannelTypes);
 
   const { data } = await chatTyped({
     provider: deps.provider,
@@ -100,11 +100,23 @@ export async function extractCorrections(
 
   for (const correction of data.corrections) {
     if (correction.action === "contradiction") {
+      const contradictedRule = existingRulesByLabel.get(correction.matchedExistingRuleId);
+      if (contradictedRule === undefined) {
+        logger.warn(
+          {
+            rule: correction.rule,
+            matchedLabel: correction.matchedExistingRuleId,
+            reasoning: correction.reasoning,
+          },
+          "extraction: contradiction names an unknown rule label — skipping",
+        );
+        continue;
+      }
       logger.info(
         {
           rule: correction.rule,
           matchedLabel: correction.matchedExistingRuleId,
-          matchedId: existingRulesByLabel.get(correction.matchedExistingRuleId)?.id ?? null,
+          matchedId: contradictedRule.id,
           reasoning: correction.reasoning,
         },
         "correction contradicts existing rule — skipped",

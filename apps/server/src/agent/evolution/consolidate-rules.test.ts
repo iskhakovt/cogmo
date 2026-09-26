@@ -14,6 +14,7 @@ interface CorrectionRow {
   category: string;
   active: boolean;
   observationCount: number;
+  priority: number;
   channelType: string | null;
 }
 
@@ -25,6 +26,7 @@ const LABELLED_RULES: CorrectionRow[] = [
     category: "style",
     active: true,
     observationCount: 3,
+    priority: 100,
     channelType: null,
   },
   {
@@ -33,6 +35,7 @@ const LABELLED_RULES: CorrectionRow[] = [
     category: "domain",
     active: true,
     observationCount: 4,
+    priority: 100,
     channelType: null,
   },
   {
@@ -41,6 +44,7 @@ const LABELLED_RULES: CorrectionRow[] = [
     category: "style",
     active: true,
     observationCount: 2,
+    priority: 100,
     channelType: null,
   },
 ];
@@ -74,6 +78,7 @@ function mockConsolidationDeps(
       category: "style",
       active: true,
       observationCount: 3,
+      priority: 100,
       channelType: null,
     },
     {
@@ -82,6 +87,7 @@ function mockConsolidationDeps(
       category: "style",
       active: true,
       observationCount: 2,
+      priority: 100,
       channelType: null,
     },
     {
@@ -90,6 +96,7 @@ function mockConsolidationDeps(
       category: "domain",
       active: true,
       observationCount: 4,
+      priority: 100,
       channelType: null,
     },
   ];
@@ -156,6 +163,7 @@ describe("consolidateRules", () => {
           category: "style",
           active: true,
           observationCount: 1,
+          priority: 100,
           channelType: null,
         },
       ] satisfies CorrectionRow[]),
@@ -172,7 +180,7 @@ describe("consolidateRules", () => {
     const deps = mockConsolidationDeps([
       {
         groups: [
-          { originalIds: ["R1", "R3"], mergedRule: "Be brief and concise", category: "style" },
+          { originalIds: ["R1", "R2"], mergedRule: "Be brief and concise", category: "style" },
         ],
       },
     ]);
@@ -192,6 +200,33 @@ describe("consolidateRules", () => {
         observationCount: 5, // 3 + 2
       },
     });
+  });
+
+  it("labels rules by priority, then text, whatever order their ids sort in", async () => {
+    // Ids and creation order differ between runs; labels must not.
+    const rules: CorrectionRow[] = [
+      { ...expectDefined(LABELLED_RULES[0], "rule-a"), rule: "Zebra rule" },
+      { ...expectDefined(LABELLED_RULES[2], "rule-c"), rule: "Alpha rule" },
+      { ...expectDefined(LABELLED_RULES[1], "rule-b"), priority: 50 },
+    ];
+    const deps = mockConsolidationDeps([
+      {
+        groups: [{ originalIds: ["R2", "R3"], mergedRule: "Merged", category: "style" }],
+      },
+    ]);
+    vi.mocked(deps.store.getCorrections).mockResolvedValue(rules);
+
+    await consolidateRules("profile-1", deps);
+
+    const system = expectDefined(vi.mocked(deps.provider.chat).mock.calls[0], "chat call")[0]
+      .system;
+    expect(system).toContain("[R1] (domain, seen 4x) Use tables for data");
+    expect(system).toContain("[R2] (style, seen 2x) Alpha rule");
+    expect(system).toContain("[R3] (style, seen 3x) Zebra rule");
+    expect(deps.store.replaceRules).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ oldIds: ["rule-c", "rule-a"] }),
+    );
   });
 
   it("skips a group that names a label outside the list", async () => {
@@ -223,7 +258,7 @@ describe("consolidateRules", () => {
     const system = expectDefined(vi.mocked(deps.provider.chat).mock.calls[0], "chat call")[0]
       .system;
     expect(system).toContain("[R1] (style, seen 3x) Be concise");
-    expect(system).toContain("[R3] (style, seen 2x) Keep replies short");
+    expect(system).toContain("[R2] (style, seen 2x) Keep replies short");
     expect(system).not.toContain("rule-a");
   });
 
@@ -256,6 +291,7 @@ describe("consolidateRules", () => {
           category: "style",
           active: true,
           observationCount: 2,
+          priority: 100,
           channelType: null,
         },
         {
@@ -264,6 +300,7 @@ describe("consolidateRules", () => {
           category: "style",
           active: false,
           observationCount: 1,
+          priority: 100,
           channelType: null,
         },
       ] satisfies CorrectionRow[]),
@@ -297,6 +334,7 @@ describe("consolidateRules", () => {
             category: "style",
             active: true,
             observationCount: 3,
+            priority: 100,
             channelType: "telegram",
           },
           {
@@ -305,6 +343,7 @@ describe("consolidateRules", () => {
             category: "style",
             active: true,
             observationCount: 2,
+            priority: 100,
             channelType: "telegram",
           },
         ] satisfies CorrectionRow[]),
@@ -375,6 +414,7 @@ describe("consolidateRules", () => {
             category: "style",
             active: true,
             observationCount: 3,
+            priority: 100,
             channelType: null,
           },
           {
@@ -383,6 +423,7 @@ describe("consolidateRules", () => {
             category: "style",
             active: true,
             observationCount: 2,
+            priority: 100,
             channelType: null,
           },
           {
@@ -391,6 +432,7 @@ describe("consolidateRules", () => {
             category: "style",
             active: true,
             observationCount: 4,
+            priority: 100,
             channelType: "telegram",
           },
           {
@@ -399,6 +441,7 @@ describe("consolidateRules", () => {
             category: "style",
             active: true,
             observationCount: 1,
+            priority: 100,
             channelType: "telegram",
           },
         ] satisfies CorrectionRow[]),
@@ -471,6 +514,7 @@ describe("consolidateRules", () => {
             category: "style",
             active: true,
             observationCount: 3,
+            priority: 100,
             channelType: null,
           },
           {
@@ -479,6 +523,7 @@ describe("consolidateRules", () => {
             category: "style",
             active: true,
             observationCount: 2,
+            priority: 100,
             channelType: null,
           },
           {
@@ -487,6 +532,7 @@ describe("consolidateRules", () => {
             category: "style",
             active: true,
             observationCount: 4,
+            priority: 100,
             channelType: "telegram",
           },
         ] satisfies CorrectionRow[]),
@@ -528,6 +574,7 @@ describe("consolidateRules", () => {
             category: "style",
             active: true,
             observationCount: 3,
+            priority: 100,
             channelType: null,
           },
           {
@@ -536,6 +583,7 @@ describe("consolidateRules", () => {
             category: "style",
             active: true,
             observationCount: 2,
+            priority: 100,
             channelType: null,
           },
         ] satisfies CorrectionRow[]),

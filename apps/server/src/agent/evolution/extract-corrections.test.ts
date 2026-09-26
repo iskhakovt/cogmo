@@ -13,6 +13,19 @@ import {
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
+/** A global style rule as `getCorrections` returns it. */
+function ruleRow(id: string, rule: string) {
+  return {
+    id,
+    rule,
+    category: "style",
+    active: true,
+    observationCount: 1,
+    priority: 100,
+    channelType: null,
+  };
+}
+
 /** Two global rules whose ids look nothing like the labels the prompt gives them. */
 const LABELLED_RULES = [
   {
@@ -21,6 +34,7 @@ const LABELLED_RULES = [
     category: "style",
     active: true,
     observationCount: 2,
+    priority: 100,
     channelType: null,
   },
   {
@@ -29,6 +43,7 @@ const LABELLED_RULES = [
     category: "style",
     active: false,
     observationCount: 1,
+    priority: 100,
     channelType: null,
   },
 ];
@@ -299,6 +314,69 @@ describe("extractCorrections", () => {
     expect(system).not.toContain("rule-b");
   });
 
+  it("labels rules by priority, then text, whatever order their ids sort in", async () => {
+    // Ids and creation order differ between runs; labels must not.
+    const rules = [
+      { ...ruleRow("rule-a", "Zebra rule"), priority: 100 },
+      { ...ruleRow("rule-b", "Alpha rule"), priority: 100 },
+      { ...ruleRow("rule-c", "Yak rule"), priority: 50 },
+    ];
+    const deps = mockExtractionDeps(
+      {
+        corrections: [
+          {
+            rule: "Alpha rule",
+            category: "style",
+            reasoning: "Said again",
+            matchedExistingRuleId: "R2",
+            action: "reinforce",
+          },
+        ],
+      },
+      { getCorrections: vi.fn().mockResolvedValue(rules) },
+    );
+
+    await extractCorrections(sampleHistory, "profile-1", deps);
+
+    const system = expectDefined(vi.mocked(deps.provider.chat).mock.calls[0], "chat call")[0]
+      .system;
+    expect(system).toContain("[R1] (style, all channels) Yak rule");
+    expect(system).toContain("[R2] (style, all channels) Alpha rule");
+    expect(system).toContain("[R3] (style, all channels) Zebra rule");
+    expect(deps.store.upsertCorrection).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ existingRuleId: "rule-b" }),
+    );
+  });
+
+  it("skips a contradiction whose label names no listed rule, without counting it", async () => {
+    const deps = mockExtractionDeps(
+      {
+        corrections: [
+          {
+            rule: "Be verbose",
+            category: "style",
+            reasoning: "Off by one",
+            matchedExistingRuleId: "R3",
+            action: "contradiction",
+          },
+        ],
+      },
+      { getCorrections: vi.fn().mockResolvedValue(LABELLED_RULES) },
+    );
+    const warn = vi.spyOn(logger, "warn");
+
+    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+
+    expect(result.contradictions).toBe(0);
+    expect(deps.store.upsertCorrection).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ matchedLabel: "R3" }),
+      expect.stringContaining("contradiction names an unknown rule"),
+    );
+    warn.mockRestore();
+  });
+
   it("reinforces existing correction", async () => {
     const deps = mockExtractionDeps(
       {
@@ -320,6 +398,7 @@ describe("extractCorrections", () => {
             category: "domain",
             active: true,
             observationCount: 1,
+            priority: 100,
             channelType: null,
           },
         ]),
@@ -339,17 +418,24 @@ describe("extractCorrections", () => {
   });
 
   it("skips contradictions with a log", async () => {
-    const deps = mockExtractionDeps({
-      corrections: [
-        {
-          rule: "Always use web_search for lookups",
-          category: "domain",
-          reasoning: "Contradicts existing fetch_url preference",
-          matchedExistingRuleId: "R1",
-          action: "contradiction",
-        },
-      ],
-    });
+    const deps = mockExtractionDeps(
+      {
+        corrections: [
+          {
+            rule: "Always use web_search for lookups",
+            category: "domain",
+            reasoning: "Contradicts existing fetch_url preference",
+            matchedExistingRuleId: "R1",
+            action: "contradiction",
+          },
+        ],
+      },
+      {
+        getCorrections: vi
+          .fn()
+          .mockResolvedValue([ruleRow("existing-rule-1", "Use fetch_url for lookups")]),
+      },
+    );
 
     const result = await extractCorrections(sampleHistory, "profile-1", deps);
 
@@ -379,6 +465,7 @@ describe("extractCorrections", () => {
             category: "style",
             active: true,
             observationCount: 1,
+            priority: 100,
             channelType: null,
           },
         ]),
@@ -441,6 +528,7 @@ describe("extractCorrections", () => {
         ],
       },
       {
+        // Labelled by text: R1 is the reinforced rule, R2 the contradicted one.
         getCorrections: vi.fn().mockResolvedValue([
           {
             id: "rule-2",
@@ -448,8 +536,10 @@ describe("extractCorrections", () => {
             category: "domain",
             active: true,
             observationCount: 1,
+            priority: 100,
             channelType: null,
           },
+          ruleRow("rule-3", "Search the web first"),
         ]),
       },
     );
@@ -542,6 +632,7 @@ describe("extractCorrections", () => {
             category: "style",
             active: true,
             observationCount: 1,
+            priority: 100,
             channelType: null,
           },
         ]),
@@ -584,6 +675,7 @@ describe("extractCorrections", () => {
             category: "style",
             active: true,
             observationCount: 1,
+            priority: 100,
             channelType: "telegram",
           },
         ]),
@@ -626,6 +718,7 @@ describe("extractCorrections", () => {
             category: "style",
             active: true,
             observationCount: 1,
+            priority: 100,
             channelType: "slack",
           },
         ]),
@@ -679,6 +772,7 @@ describe("extractCorrections", () => {
             category: "style",
             active: true,
             observationCount: 3,
+            priority: 100,
             channelType: null,
           },
           {
@@ -687,6 +781,7 @@ describe("extractCorrections", () => {
             category: "style",
             active: true,
             observationCount: 2,
+            priority: 100,
             channelType: "telegram",
           },
         ]),
@@ -700,8 +795,8 @@ describe("extractCorrections", () => {
     const call = vi.mocked(deps.provider.chat).mock.calls[0]?.[0];
     const system = call?.system ?? "";
     expect(system).toContain("`telegram`");
-    expect(system).toContain("[R1] (style, all channels) Be concise");
-    expect(system).toContain("[R2] (style, channel:telegram) Avoid markdown headings on Telegram");
+    expect(system).toContain("[R1] (style, channel:telegram) Avoid markdown headings on Telegram");
+    expect(system).toContain("[R2] (style, all channels) Be concise");
   });
 
   it("instructs the LLM to default to null when no channels are active", async () => {

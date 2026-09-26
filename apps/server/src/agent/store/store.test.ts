@@ -2194,9 +2194,15 @@ describe("DrizzleAgentStore", () => {
 
       const corrections = await tx((trx) => store.getCorrections(trx, profileId));
       expect(corrections).toHaveLength(2);
-      expect(corrections.map((c) => ({ rule: c.rule, channelType: c.channelType }))).toEqual([
-        { rule: "Be concise", channelType: null },
-        { rule: "No long voice notes", channelType: "telegram" },
+      expect(
+        corrections.map((c) => ({
+          rule: c.rule,
+          channelType: c.channelType,
+          priority: c.priority,
+        })),
+      ).toEqual([
+        { rule: "Be concise", channelType: null, priority: 100 },
+        { rule: "No long voice notes", channelType: "telegram", priority: 100 },
       ]);
     });
 

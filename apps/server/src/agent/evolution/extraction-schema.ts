@@ -6,6 +6,7 @@
  * Results are structured via chatTyped() for reliable parsing.
  */
 
+import * as R from "remeda";
 import { z } from "zod";
 
 // --- Extraction output schema ---
@@ -61,42 +62,61 @@ export type CorrectionExtraction = z.infer<typeof CorrectionExtractionSchema>;
 
 // --- Rule labels ---
 
-/**
- * The label a prompt shows for the rule at `index` in the list it renders,
- * standing in for the rule's id. The model echoes the label back, and the
- * caller maps it to an id through the same list: a short ordinal is easy to
- * copy exactly, and the prompt stays byte-stable across runs whatever ids
- * the rows carry.
- */
-export function ruleLabel(index: number): string {
-  return `R${index + 1}`;
+/** The fields `labelRules` orders rules by. */
+interface LabelOrderKey {
+  id: string;
+  rule: string;
+  priority: number;
 }
 
-/** Map each label `ruleLabel` gives `rules` back to its rule. */
-export function rulesByLabel<T>(rules: ReadonlyArray<T>): ReadonlyMap<string, T> {
-  return new Map(rules.map((rule, i) => [ruleLabel(i), rule]));
+/**
+ * Give each rule the short label a prompt shows in place of its id (`R1`,
+ * `R2`, …), keyed in label order. The prompt renders from this map and the
+ * model's answer resolves through it, so the two cannot disagree. A short
+ * ordinal is easy for the model to copy exactly, where a slip in a UUID
+ * silently drops the match.
+ *
+ * Labels follow priority, then rule text; the id only breaks an exact tie.
+ * Ids and creation order differ between runs, so ordering by them would
+ * relabel the same rules and a recorded prompt would stop matching.
+ * Comparison is by UTF-16 code unit, which no locale changes.
+ */
+export function labelRules<T extends LabelOrderKey>(
+  rules: ReadonlyArray<T>,
+): ReadonlyMap<string, T> {
+  const ordered = R.sortBy(
+    rules,
+    [(r) => r.priority, "asc"],
+    [(r) => r.rule, "asc"],
+    [(r) => r.id, "asc"],
+  );
+  return new Map(ordered.map((rule, i) => [`R${i + 1}`, rule]));
 }
 
 // --- Extraction prompt ---
 
 export function buildExtractionPrompt(
-  existingRules: ReadonlyArray<{
-    rule: string;
-    category: string;
-    channelType: string | null;
-  }>,
+  /** Existing rules keyed by label, as `labelRules` returns them. */
+  existingRules: ReadonlyMap<
+    string,
+    {
+      rule: string;
+      category: string;
+      channelType: string | null;
+    }
+  >,
   activeChannelTypes: ReadonlyArray<string>,
 ): string {
   const rulesSection =
-    existingRules.length > 0
+    existingRules.size > 0
       ? `## Existing Rules
 
 The following rules have already been extracted from previous conversations. Compare each new correction against these to avoid duplicates.
 
-${existingRules
-  .map((r, i) => {
+${[...existingRules]
+  .map(([label, r], i) => {
     const scope = r.channelType ? `channel:${r.channelType}` : "all channels";
-    return `${i + 1}. [${ruleLabel(i)}] (${r.category}, ${scope}) ${r.rule}`;
+    return `${i + 1}. [${label}] (${r.category}, ${scope}) ${r.rule}`;
   })
   .join("\n")}
 
