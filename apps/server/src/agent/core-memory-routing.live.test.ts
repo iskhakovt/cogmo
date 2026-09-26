@@ -43,7 +43,9 @@ import {
   EVAL_MODEL,
   EVAL_REPEATS,
   EvalCoreMemory,
+  type EvalFailure,
   type EvalMetric,
+  isFailure,
   LIVE_API_KEY,
   memoryCallsByIteration,
   oneLine,
@@ -144,8 +146,14 @@ interface Outcome {
   reply: string;
 }
 
+type Sample = Outcome | (EvalFailure & { state: string });
+
 /** Every sample of each run, by run name. */
-const outcomes = new Map<string, Outcome[]>();
+const samples = new Map<string, Sample[]>();
+
+function record(name: string, sample: Sample): void {
+  samples.set(name, [...(samples.get(name) ?? []), sample]);
+}
 const usage = createUsageMeter();
 
 /**
@@ -256,18 +264,22 @@ function verdict(o: Outcome): string {
 function report(): void {
   const byRun = RUNS.map((run) => ({
     run,
-    samples: R.sortBy(outcomes.get(run.name) ?? [], (o) => o.repeat),
+    samples: R.sortBy(samples.get(run.name) ?? [], (o) => o.repeat),
   }));
   const rows = byRun.flatMap((r) => r.samples);
   if (rows.length === 0) return;
 
   console.log(`\nCore-memory routing on ${EVAL_MODEL}, ${EVAL_REPEATS} sample(s) per case\n`);
-  for (const { run, samples } of byRun) {
-    const passes = samples.filter((o) => verdict(o).trim() === "ok").length;
+  for (const { run, samples: runSamples } of byRun) {
+    const passes = runSamples.filter((o) => !isFailure(o) && verdict(o).trim() === "ok").length;
     console.log(
       `${`${passes}/${EVAL_REPEATS}`.padEnd(5)} ${run.state.padEnd(11)} ${run.id.padEnd(18)} ${run.expect}`,
     );
-    for (const o of samples) {
+    for (const o of runSamples) {
+      if (isFailure(o)) {
+        console.log(`  FAILED #${o.repeat} ${o.failure}`);
+        continue;
+      }
       const keys = o.coreWrites.map((w) => w.key).join(",");
       console.log(
         `  ${verdict(o)} #${o.repeat} first=[${o.first.join(",")}] turn=[${o.turn.join(",")}]` +
@@ -292,22 +304,23 @@ describe.skipIf(LIVE_API_KEY === undefined)(
     afterAll(report);
 
     it.concurrent.each(withRepeats(RUNS))("$name #$repeat", async (run) => {
-      const { result } = await runEvalTurn({
-        provider: new AnthropicProvider(expectDefined(LIVE_API_KEY, "API key")),
-        coreMemory: new EvalCoreMemory(run.blocks),
-        rules: [],
-        history: [],
-        message: run.message,
-        cacheKey: `${nonce}-${run.state}`,
-      });
-      usage.add(result.usage);
+      try {
+        const { result } = await runEvalTurn({
+          provider: new AnthropicProvider(expectDefined(LIVE_API_KEY, "API key")),
+          coreMemory: new EvalCoreMemory(run.blocks),
+          rules: [],
+          history: [],
+          message: run.message,
+          cacheKey: `${nonce}-${run.state}`,
+        });
+        usage.add(result.usage);
+        expect(result.degraded).toBeUndefined();
+        expect(result.text).not.toBe("");
 
-      const byIteration = memoryCallsByIteration(result.newMessages);
-      const calls = byIteration.flat();
-      const coreWrites = coreMemoryWrites(result.newMessages);
-      outcomes.set(run.name, [
-        ...(outcomes.get(run.name) ?? []),
-        {
+        const byIteration = memoryCallsByIteration(result.newMessages);
+        const calls = byIteration.flat();
+        const coreWrites = coreMemoryWrites(result.newMessages);
+        record(run.name, {
           repeat: run.repeat,
           state: run.state,
           id: run.id,
@@ -318,11 +331,15 @@ describe.skipIf(LIVE_API_KEY === undefined)(
           coreWrites,
           ...checkWrites(run, coreWrites),
           reply: result.text,
-        },
-      ]);
-
-      expect(result.degraded).toBeUndefined();
-      expect(result.text).not.toBe("");
+        });
+      } catch (err) {
+        record(run.name, {
+          repeat: run.repeat,
+          state: run.state,
+          failure: oneLine(String(err), 300),
+        });
+        throw err;
+      }
     });
   },
 );
