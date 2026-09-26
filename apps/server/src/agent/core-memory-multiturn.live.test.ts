@@ -14,8 +14,9 @@
  * Checks are regexes over the blocks after each turn: whether the fact is
  * there (`expect`), whether a line still states the superseded value without
  * marking it as past (`stale`), and whether the established facts survived the
- * whole-block rewrites (`keep`). Like the single-turn eval it reports rather
- * than asserts, and fails only when a turn does not complete.
+ * whole-block rewrites (`keep`). The final blocks are also checked for
+ * relative time words ("recently", "last month"). Like the single-turn eval it
+ * reports rather than asserts, and fails only when a turn does not complete.
  *
  * Skipped unless `LIVE=1` and `ANTHROPIC_API_KEY` are set. A full run is 32
  * turns on Sonnet 5, about $0.40.
@@ -46,6 +47,7 @@ import {
   memoryCallsByIteration,
   oneLine,
   rateTable,
+  relativeTimeWords,
   runEvalConversation,
   withRepeats,
 } from "../test/live-eval.js";
@@ -117,6 +119,8 @@ interface Outcome {
   stale: StaleStatus | undefined;
   /** `keep` patterns the final blocks no longer match. */
   lost: ReadonlyArray<string>;
+  /** Relative time words in the final blocks. */
+  relativeTime: ReadonlyArray<string>;
   /** Core writes in turns other than the fact turn that don't carry the fact. */
   unrelatedWrites: number;
 }
@@ -135,6 +139,7 @@ function outcomeOf(scenario: Scenario, repeat: number, turns: ReadonlyArray<Turn
     learnedAt: learned === -1 ? undefined : learned,
     stale: scenario.stale === undefined ? undefined : staleStatus(finalBlocks, scenario.stale),
     lost: scenario.keep.filter((pattern) => !mentions(finalBlocks, pattern)),
+    relativeTime: finalBlocks.flatMap((b) => relativeTimeWords(b.content)),
     unrelatedWrites: R.sumBy(
       turns.filter((_t, i) => i !== scenario.factTurn),
       (t) => t.writes.filter((w) => !new RegExp(scenario.expect, "i").test(w.content)).length,
@@ -171,6 +176,7 @@ const METRICS: ReadonlyArray<EvalMetric<Outcome>> = [
     hit: (o) => o.stale === "current",
   },
   { name: "established facts kept", of: () => true, hit: (o) => o.lost.length === 0 },
+  { name: "no relative time words", of: () => true, hit: (o) => o.relativeTime.length === 0 },
   { name: "no unrelated core writes", of: () => true, hit: (o) => o.unrelatedWrites === 0 },
 ];
 
@@ -200,7 +206,8 @@ function report(): void {
         .join(" | ");
       console.log(
         `  ${verdict(o)} #${o.repeat} learned@${o.learnedAt ?? "-"}${o.stale ? ` old=${o.stale}` : ""} ` +
-          `lost=[${o.lost.join(",")}] unrelated=${o.unrelatedWrites}  turns: ${perTurn}`,
+          `lost=[${o.lost.join(",")}] unrelated=${o.unrelatedWrites}` +
+          `${o.relativeTime.length > 0 ? ` relative=[${o.relativeTime.join(",")}]` : ""}  turns: ${perTurn}`,
       );
       o.turns.forEach((t, i) => {
         for (const w of t.writes)

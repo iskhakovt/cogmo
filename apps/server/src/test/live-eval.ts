@@ -268,6 +268,18 @@ export function coreMemoryWrites(messages: ReadonlyArray<Message>): CoreMemoryBl
     });
 }
 
+/**
+ * Relative time words, which go stale in a block that every later prompt
+ * shows: "recently" still reads as recent months on.
+ */
+const RELATIVE_TIME =
+  /\b(?:recent(?:ly)?|just|today|tonight|yesterday|tomorrow|ago|(?:this|last|next) (?:week(?:end)?|month|year))\b/gi;
+
+/** The relative time words in `content`, lower-cased, in order. */
+export function relativeTimeWords(content: string): string[] {
+  return (content.match(RELATIVE_TIME) ?? []).map((w) => w.toLowerCase());
+}
+
 /** Token usage summed across an eval run. */
 export interface UsageMeter {
   add(usage: Usage): void;
