@@ -50,14 +50,12 @@ Results on `claude-sonnet-5`, one sample per case. *Baseline* is the guidance be
 | — in the first response | 0/11 | 5/11 | 2/11 | 12/12 |
 | — to an expected block | — | — | 10/10 | 12/12 |
 | — finished project dropped | — | — | — | 0/1 |
-| Rewrites that lost an established line | — | — | — | 0/12 |
+| Rewrites that lost an established line the case doesn't change | — | — | — | 0/12 |
 | Core facts sent to `memory_retain` only | 2/11 | 2/11 | 0/11 | 0/12 |
 | Core writes on Hindsight facts | 0/7 | 0/7 | 0/9 | 0/9 |
-| Core writes on messages worth storing nowhere | 0/7 | 0/7 | 0/8 | 0/3 ¹ |
+| Core writes on messages worth storing nowhere | 0/7 | 0/7 | 0/8 | 0/8 |
 
-¹ Five of this cell's cases (`mutex-question`, `thanks`, `tired-today`, `pour-over`, `one-off-format`) are not yet measured on the current wording; run them with `EVAL_CASES=mutex-question,thanks,tired-today,pour-over,one-off-format`.
-
-On the baseline, the agent updated core memory for announced facts once blocks existed but mostly missed facts mentioned in passing. With no blocks, onboarding drew the turn into introductions, and core facts went to `memory_retain` or nowhere. Under the rule, every core fact reaches an expected block once blocks exist, all in the first response, with no established line lost, and 10 of 11 do with no blocks, including every fact mentioned in passing. No Hindsight fact writes core memory, the conference trip and the partner's promotion included. The finished project is a known miss against the rule: the rewrite marks it completed in `active_projects` instead of removing it.
+On the baseline, the agent updated core memory for announced facts once blocks existed but mostly missed facts mentioned in passing. With no blocks, onboarding drew the turn into introductions, and core facts went to `memory_retain` or nowhere. Under the rule, every core fact reaches an expected block once blocks exist, all in the first response, and no rewrite loses an established line beyond those the case declares it changes or drops. With no blocks, 10 of 11 core facts reach core memory, including every fact mentioned in passing. No Hindsight fact or other message writes core memory, the conference trip and the partner's promotion included. The finished project is a known miss against the rule: the rewrite marks it completed in `active_projects` instead of removing it.
 
 ## Bank Strategy `[confirmed]`
 
