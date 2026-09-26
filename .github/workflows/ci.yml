@@ -285,6 +285,8 @@ jobs:
           rc=0
           for i in 1 2 3; do
             echo "=== DIAG integration run $i ==="
+            # No results cache, so every run orders files by size as CI's first run does.
+            rm -rf apps/server/node_modules/.vite
             pnpm test:integration || rc=1
           done
           exit $rc
