@@ -1,3 +1,4 @@
+import { getEncoding } from "js-tiktoken";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { logger } from "../logger.js";
@@ -1415,6 +1416,27 @@ describe("OpenAICompatibleProvider", () => {
       });
 
       expect(withLongResult).toBeGreaterThan(withShortResult);
+    });
+
+    it("counts a tool result once: its framing plus one encoding of its content", async () => {
+      const provider = createProvider();
+      const content = "Lisbon: 24°C, sunny, light breeze from the north-west.";
+      const base = { model: "gpt-4o", system: "sys" };
+
+      const withoutResult = await provider.countTokens({ ...base, messages: [] });
+      const withResult = await provider.countTokens({
+        ...base,
+        messages: [{ role: "user", content: [{ type: "tool_result", toolUseId: "t1", content }] }],
+      });
+      const asUserText = await provider.countTokens({
+        ...base,
+        messages: [{ role: "user", content }],
+      });
+
+      const messageFraming = 4;
+      const contentTokens = getEncoding("cl100k_base").encode(content).length;
+      expect(withResult - withoutResult).toBe(messageFraming + contentTokens);
+      expect(withResult).toBe(asUserText);
     });
   });
 

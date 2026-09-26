@@ -1,6 +1,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { getEncoding, type Tiktoken } from "js-tiktoken";
 import OpenAI from "openai";
+import * as R from "remeda";
 import { logger } from "../logger.js";
 import type { CacheDialect } from "./cache-dialect.js";
 import { cacheMarker } from "./cache-marker.js";
@@ -83,47 +84,13 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
   async countTokens(params: CountTokensParams): Promise<number> {
     const enc = getEncoder();
-    const msgs = buildMessages(params.system, params.messages, undefined);
-    let tokens = 0;
-
-    for (const msg of msgs) {
-      tokens += 4; // message framing overhead (role, separators)
-
-      if (typeof msg.content === "string") {
-        tokens += enc.encode(msg.content).length;
-      } else if (Array.isArray(msg.content)) {
-        for (const part of msg.content) {
-          if (part.type === "text" && part.text) {
-            tokens += enc.encode(part.text).length;
-          }
-          // Images: ~85 tokens base for low-detail, more for high-detail.
-          // Conservative estimate since we don't know the detail setting.
-          if (part.type === "image_url") tokens += 85;
-        }
-      }
-
-      if (msg.role === "assistant" && msg.tool_calls) {
-        for (const tc of msg.tool_calls) {
-          if (tc.type !== "function") continue;
-          tokens += enc.encode(tc.function.name).length;
-          tokens += enc.encode(tc.function.arguments).length;
-        }
-      }
-
-      if (msg.role === "tool" && typeof msg.content === "string") {
-        tokens += enc.encode(msg.content).length;
-      }
-    }
-
-    // Tool definitions
-    if (params.tools?.length) {
-      for (const tool of params.tools) {
-        tokens += enc.encode(JSON.stringify(tool)).length;
-      }
-    }
-
-    tokens += 3; // reply priming
-    return tokens;
+    const messages = buildMessages(params.system, params.messages, undefined);
+    const toolDefinitions = R.sumBy(params.tools ?? [], (tool) =>
+      encodedLength(enc, JSON.stringify(tool)),
+    );
+    return (
+      R.sumBy(messages, (msg) => messageTokens(enc, msg)) + toolDefinitions + REPLY_PRIMING_TOKENS
+    );
   }
 
   async chat(params: ChatParams): Promise<LlmResponse> {
@@ -405,6 +372,54 @@ function markerFamily(model: string): "anthropic" | "google" | "qwen" | undefine
 
 function requestOptions(hints: CacheHints): OpenAI.RequestOptions | undefined {
   return hints.headers && { headers: hints.headers };
+}
+
+// --- Token estimation ---
+
+/** Message framing overhead (role, separators). */
+const MESSAGE_FRAMING_TOKENS = 4;
+
+/**
+ * Images: ~85 tokens base for low-detail, more for high-detail.
+ * Conservative estimate since we don't know the detail setting.
+ */
+const IMAGE_TOKENS = 85;
+
+/** Reply priming. */
+const REPLY_PRIMING_TOKENS = 3;
+
+function encodedLength(enc: Tiktoken, text: string): number {
+  return enc.encode(text).length;
+}
+
+/**
+ * One message's estimate: framing, its content, and — on an assistant
+ * message — the name and arguments of each function call. A tool result is a
+ * `tool` message with string content, so the content term covers it.
+ */
+function messageTokens(enc: Tiktoken, msg: OpenAI.ChatCompletionMessageParam): number {
+  const toolCalls =
+    msg.role === "assistant" && msg.tool_calls
+      ? R.sumBy(msg.tool_calls, (tc) =>
+          tc.type === "function"
+            ? encodedLength(enc, tc.function.name) + encodedLength(enc, tc.function.arguments)
+            : 0,
+        )
+      : 0;
+  return MESSAGE_FRAMING_TOKENS + contentTokens(enc, msg.content) + toolCalls;
+}
+
+function contentTokens(
+  enc: Tiktoken,
+  content: OpenAI.ChatCompletionMessageParam["content"],
+): number {
+  if (typeof content === "string") return encodedLength(enc, content);
+  if (!Array.isArray(content)) return 0;
+  return R.sumBy(content, (part) => {
+    if (part.type === "text") return encodedLength(enc, part.text);
+    if (part.type === "image_url") return IMAGE_TOKENS;
+    return 0;
+  });
 }
 
 // --- Message building ---

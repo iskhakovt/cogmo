@@ -1,0 +1,1 @@
+The OpenAI-compatible token estimate counts each tool result once. It encoded a tool result's content twice, so tool-heavy conversations on OpenAI-compatible providers reached the compaction threshold early. `countTokens` is a sum over per-message estimates, and a regression test pins a tool result's contribution to its framing plus one encoding of its content.
