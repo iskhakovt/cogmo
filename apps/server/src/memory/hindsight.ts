@@ -184,9 +184,7 @@ export class HindsightMemoryProvider implements MemoryProvider {
   }
 
   async retainBatch(bankId: string, items: RetainBatchItem[]): Promise<void> {
-    // One document per item. Hindsight upserts on `document_id`: a retain that
-    // names an existing document replaces it, and one whose content is
-    // unchanged only refreshes its tags and metadata. Minted once, outside the
+    // Hindsight upserts on `document_id`. Ids are minted once, outside the
     // retry, so a resend after a lost acknowledgement names the same documents.
     const mapped: MemoryItemInput[] = items.map((item) => ({
       content: item.content,

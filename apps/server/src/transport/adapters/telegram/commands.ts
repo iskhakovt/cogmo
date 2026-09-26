@@ -2578,10 +2578,7 @@ function formatEvolutionDigest(
   return [header, ...lines].join("\n");
 }
 
-/**
- * Whether the event recorded `phase` as failed. A row from before phase
- * outcomes were stored records none, and renders its counts as they are.
- */
+/** Whether the event recorded `phase` as failed; an older row records none. */
 function phaseFailed(event: EvolutionEventEntry, phase: ObserverPhase): boolean {
   return event.payload.failedPhases?.includes(phase) === true;
 }

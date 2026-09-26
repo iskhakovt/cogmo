@@ -305,9 +305,7 @@ export async function runObserver(
   // failure after a successful retain re-runs only the delete on
   // retry, not the LLM classifier or the retainBatch write. A step
   // that fails for good ends the drain there, and every row it has not
-  // deleted stays pending for the next fire. That fire retains such a
-  // row again under the same document id (the row's), which replaces
-  // the document in Hindsight rather than adding a second copy.
+  // deleted stays pending for the next fire.
   const drain = await settlePhase(
     "drain",
     conversationId,

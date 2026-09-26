@@ -116,11 +116,7 @@ export interface EvolutionEventPayload {
   messageCount: number;
   profileId: string;
   durationMs?: number | undefined;
-  /**
-   * Phases that failed after their retries; their counts above are fallbacks.
-   * Absent on rows recorded before phase outcomes were stored — unknown, not
-   * "none failed".
-   */
+  /** Phases that failed after their retries; absent on older rows, where it's unknown. */
   failedPhases?: ObserverPhase[] | undefined;
 }
 

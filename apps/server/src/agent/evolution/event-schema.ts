@@ -75,11 +75,9 @@ export const EvolutionEventPayloadSchema = z.object({
    */
   durationMs: z.number().int().nonnegative().optional(),
   /**
-   * Phases that failed after their step retries, in run order; empty when
-   * every phase that ran completed. A failed phase's counts above are its
-   * empty fallback, not a finding. Absent on rows recorded before the
-   * Observer stored phase outcomes: whether any phase failed there is
-   * unknown, so the reader must not treat absence as "none failed".
+   * Phases that failed after their step retries, in run order; their counts
+   * above are the empty fallback. Absent on older rows, where whether a phase
+   * failed is unknown, so absence doesn't mean none failed.
    */
   failedPhases: z.array(ObserverPhaseSchema).optional(),
 });

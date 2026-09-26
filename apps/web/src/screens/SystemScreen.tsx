@@ -113,10 +113,7 @@ function EvolutionPanel({ onSelect }: { onSelect: (event: EvolutionEventEntry) =
   );
 }
 
-/**
- * The phases a fire recorded as failed. A row from before phase outcomes were
- * stored records none either way, so it shows a dash rather than "ok".
- */
+/** The phases a fire recorded as failed; an older row shows a dash, not "ok". */
 function PhaseOutcome({ failedPhases }: { failedPhases: ObserverPhase[] | undefined }) {
   if (failedPhases === undefined) return <span className="text-faint">—</span>;
   if (failedPhases.length === 0) return <Pill tone="ok">ok</Pill>;
