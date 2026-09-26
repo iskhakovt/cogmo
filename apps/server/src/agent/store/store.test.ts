@@ -3962,3 +3962,163 @@ describe("conversation summaries", () => {
     expect(after.map((m) => m.id)).toEqual([ids[1]]);
   });
 });
+
+describe("turn contexts", () => {
+  const INBOUND = "019d0000-0000-7000-8000-0000000000fe";
+  const CONTEXT = {
+    recalledMemories: ["runs Proxmox"],
+    voiceMode: false,
+    channelTypes: [],
+    announcedCoreMemoryBlocks: [{ profileClass: null, key: "identity" }],
+  };
+
+  async function seedUserRow() {
+    const seeded = await seedConversation();
+    return { ...seeded, row: await insertUserRow(seeded.conversationId, seeded.stamp) };
+  }
+
+  function insertUserRow(conversationId: string, stamp: { profileId: string; model: string }) {
+    return tx((trx) =>
+      store.insertMessage(trx, {
+        conversationId,
+        role: "user",
+        content: "hello",
+        lastInboundMessageId: INBOUND,
+        ...stamp,
+      }),
+    );
+  }
+
+  it("returns the inserted row's created_at alongside its id", async () => {
+    const { row } = await seedUserRow();
+    const [stored] = await tx((trx) =>
+      trx.select({ createdAt: messages.createdAt }).from(messages).where(eq(messages.id, row.id)),
+    );
+    expect(row.createdAt).toBeInstanceOf(Date);
+    expect(row.createdAt).toEqual(expectDefined(stored).createdAt);
+  });
+
+  it("stores a turn context and lists it by message", async () => {
+    const { row } = await seedUserRow();
+
+    const stored = await tx((trx) =>
+      store.insertOrRecoverTurnContext(trx, {
+        messageId: row.id,
+        rendered: "<turn_context>first</turn_context>\n\n",
+        context: CONTEXT,
+      }),
+    );
+
+    expect(stored).toEqual({
+      messageId: row.id,
+      rendered: "<turn_context>first</turn_context>\n\n",
+      context: CONTEXT,
+    });
+    await expect(tx((trx) => store.listTurnContexts(trx, [row.id]))).resolves.toEqual([stored]);
+  });
+
+  it("recovers the stored text when the same message is written twice", async () => {
+    const { row } = await seedUserRow();
+    const first = await tx((trx) =>
+      store.insertOrRecoverTurnContext(trx, {
+        messageId: row.id,
+        rendered: "first attempt",
+        context: CONTEXT,
+      }),
+    );
+
+    const retry = await tx((trx) =>
+      store.insertOrRecoverTurnContext(trx, {
+        messageId: row.id,
+        rendered: "a retry rendered at another minute",
+        context: { ...CONTEXT, recalledMemories: [] },
+      }),
+    );
+
+    expect(retry).toEqual(first);
+    const rows = await tx((trx) => store.listTurnContexts(trx, [row.id]));
+    expect(rows).toHaveLength(1);
+  });
+
+  it("lists only the messages asked for, and nothing for no messages", async () => {
+    const { conversationId, stamp, row: a } = await seedUserRow();
+    const b = await insertUserRow(conversationId, stamp);
+    for (const row of [a, b]) {
+      await tx((trx) =>
+        store.insertOrRecoverTurnContext(trx, {
+          messageId: row.id,
+          rendered: row.id,
+          context: CONTEXT,
+        }),
+      );
+    }
+
+    const listed = await tx((trx) =>
+      store.listTurnContexts(trx, [b.id, "019d0000-0000-7000-8000-000000000999"]),
+    );
+    expect(listed.map((c) => c.messageId)).toEqual([b.id]);
+    await expect(tx((trx) => store.listTurnContexts(trx, []))).resolves.toEqual([]);
+  });
+
+  it("refuses a context for a message that doesn't exist", async () => {
+    await expect(
+      tx((trx) =>
+        store.insertOrRecoverTurnContext(trx, {
+          messageId: "019d0000-0000-7000-8000-000000000999",
+          rendered: "orphan",
+          context: CONTEXT,
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("validates the context at the store boundary, on write and on read", async () => {
+    const { row } = await seedUserRow();
+    await expect(
+      tx((trx) =>
+        store.insertOrRecoverTurnContext(trx, {
+          messageId: row.id,
+          rendered: "bad",
+          context: { recalledMemories: "not a list" } as never,
+        }),
+      ),
+    ).rejects.toThrow();
+
+    // A row written behind the store's back fails when read.
+    await db.execute(
+      sql`INSERT INTO turn_contexts (message_id, rendered, context) VALUES (${row.id}, 'raw', '{"voiceMode": "yes"}'::jsonb)`,
+    );
+    await expect(tx((trx) => store.listTurnContexts(trx, [row.id]))).rejects.toThrow();
+  });
+
+  it("finds a stage prompt's user row by its inbound, in its own conversation", async () => {
+    const { userId, profileId, conversationId, stamp, row } = await seedUserRow();
+    // The reply cursors on the same inbound and must not be the one found.
+    await tx((trx) =>
+      store.insertMessage(trx, {
+        conversationId,
+        role: "assistant",
+        content: "reply",
+        lastInboundMessageId: INBOUND,
+        ...stamp,
+      }),
+    );
+    // Another conversation's row on the same cursor stays out of it.
+    const other = (
+      await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: true }))
+    ).id;
+    const otherRow = await insertUserRow(other, stamp);
+
+    await expect(
+      tx((trx) => store.findUserMessageByInbound(trx, conversationId, INBOUND)),
+    ).resolves.toEqual({ id: row.id, createdAt: row.createdAt });
+    await expect(tx((trx) => store.findUserMessageByInbound(trx, other, INBOUND))).resolves.toEqual(
+      { id: otherRow.id, createdAt: otherRow.createdAt },
+    );
+    await expect(
+      tx((trx) =>
+        store.findUserMessageByInbound(trx, conversationId, "019d0000-0000-7000-8000-000000000999"),
+      ),
+    ).resolves.toBeUndefined();
+  });
+});

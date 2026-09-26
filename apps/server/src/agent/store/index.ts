@@ -23,6 +23,7 @@ import type { EvolutionEventPayload } from "../evolution/event-schema.js";
 import { isCoreCompartment } from "../evolution/memory-extraction-schema.js";
 import { imageModelSlug } from "../image-tools.js";
 import type { AutoRecallMode } from "../recall-gate.js";
+import type { TurnContext } from "../turn-context.js";
 import {
   CustomCompartmentCapExceededError,
   ImageModelSlugCollisionError,
@@ -65,6 +66,7 @@ import {
   subAgents,
   type ToolSet,
   type TtsProviderTypeValue,
+  turnContexts,
   users,
   voiceConfig,
 } from "./schema.js";
@@ -255,6 +257,13 @@ export interface CompactionSummary {
   model: string;
   source: SummarySourceValue;
   createdAt: Date;
+}
+
+/** A row from `turn_contexts`: the block a turn-starting user message was sent with. */
+export interface StoredTurnContext {
+  messageId: string;
+  rendered: string;
+  context: TurnContext;
 }
 
 /**
@@ -479,7 +488,7 @@ export interface AgentStore {
   /** Delete the singleton voice configuration row. No-op when none exists. */
   deleteVoiceConfig(tx: Transaction): Promise<void>;
 
-  /** Insert a message (user or assistant). Returns the new message ID. `profileId` + `model` stamp the turn snapshot (see design/transport/overview.md → Profile and Model Stamping). */
+  /** Insert a message (user or assistant). Returns the new row's id and `created_at`. `profileId` + `model` stamp the turn snapshot (see design/transport/overview.md → Profile and Model Stamping). */
   insertMessage(
     tx: Transaction,
     params: {
@@ -491,7 +500,17 @@ export interface AgentStore {
       lastInboundMessageId: string;
       inputTokens?: number;
     },
-  ): Promise<{ id: string }>;
+  ): Promise<{ id: string; createdAt: Date }>;
+
+  /**
+   * The user row whose cursor is `inboundId`: the message a pipeline stage
+   * wrote for its prompt inbound, which commits with it.
+   */
+  findUserMessageByInbound(
+    tx: Transaction,
+    conversationId: string,
+    inboundId: string,
+  ): Promise<{ id: string; createdAt: Date } | undefined>;
 
   /**
    * Insert multiple messages atomically in a single transaction. Returns the
@@ -547,6 +566,23 @@ export interface AgentStore {
    * it, so fact extraction still sees the complete transcript.
    */
   getLatestSummary(tx: Transaction, conversationId: string): Promise<CompactionSummary | undefined>;
+
+  /**
+   * Store a turn's context, or return the one already stored for this message.
+   * The message id is the idempotency key of the render step: a retry that
+   * re-runs a committed insert gets the first attempt's text back, so the turn
+   * sends the bytes later turns will load.
+   */
+  insertOrRecoverTurnContext(
+    tx: Transaction,
+    params: StoredTurnContext,
+  ): Promise<StoredTurnContext>;
+
+  /** The stored turn contexts of the given messages, in no particular order. */
+  listTurnContexts(
+    tx: Transaction,
+    messageIds: ReadonlyArray<string>,
+  ): Promise<ReadonlyArray<StoredTurnContext>>;
 
   /**
    * Append a summary, or recover the existing row when this
@@ -1551,7 +1587,7 @@ export class DrizzleAgentStore implements AgentStore {
       lastInboundMessageId: string;
       inputTokens?: number;
     },
-  ): Promise<{ id: string }> {
+  ): Promise<{ id: string; createdAt: Date }> {
     return single(
       await tx
         .insert(messages)
@@ -1569,8 +1605,28 @@ export class DrizzleAgentStore implements AgentStore {
           // this row were ever the most-recent assistant (it isn't).
           outputTokens: UNKNOWN_OUTPUT_TOKENS,
         })
-        .returning({ id: messages.id }),
+        .returning({ id: messages.id, createdAt: messages.createdAt }),
     );
+  }
+
+  async findUserMessageByInbound(
+    tx: Transaction,
+    conversationId: string,
+    inboundId: string,
+  ): Promise<{ id: string; createdAt: Date } | undefined> {
+    const rows = await tx
+      .select({ id: messages.id, createdAt: messages.createdAt })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.conversationId, conversationId),
+          eq(messages.lastInboundMessageId, inboundId),
+          eq(messages.role, "user"),
+        ),
+      )
+      .orderBy(desc(messages.id))
+      .limit(1);
+    return rows[0];
   }
 
   async insertMessages(
@@ -1690,6 +1746,45 @@ export class DrizzleAgentStore implements AgentStore {
       });
     const { inserted, ...row } = single(rows);
     return { kind: inserted ? "new" : "recovered", row };
+  }
+
+  async insertOrRecoverTurnContext(
+    tx: Transaction,
+    params: StoredTurnContext,
+  ): Promise<StoredTurnContext> {
+    // DO UPDATE with a no-op SET rather than DO NOTHING — see
+    // `insertOrRecoverTask` for why the concurrent loser needs a write to
+    // raise 40001 instead of silently skipping the tuple. The conflict arm
+    // returns the stored row, so a retry sends the first attempt's text.
+    return single(
+      await tx
+        .insert(turnContexts)
+        .values(params)
+        .onConflictDoUpdate({
+          target: turnContexts.messageId,
+          set: { messageId: params.messageId },
+        })
+        .returning({
+          messageId: turnContexts.messageId,
+          rendered: turnContexts.rendered,
+          context: turnContexts.context,
+        }),
+    );
+  }
+
+  async listTurnContexts(
+    tx: Transaction,
+    messageIds: ReadonlyArray<string>,
+  ): Promise<ReadonlyArray<StoredTurnContext>> {
+    if (messageIds.length === 0) return [];
+    return tx
+      .select({
+        messageId: turnContexts.messageId,
+        rendered: turnContexts.rendered,
+        context: turnContexts.context,
+      })
+      .from(turnContexts)
+      .where(inArray(turnContexts.messageId, [...messageIds]));
   }
 
   async getHistoryAfter(

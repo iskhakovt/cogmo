@@ -22,6 +22,7 @@ import {
   MemoryCompartmentSchema,
   MemoryTrustSchema,
 } from "../evolution/memory-extraction-schema.js";
+import { TurnContextSchema } from "../turn-context.js";
 
 // --- Enums ---
 
@@ -998,4 +999,30 @@ export const conversationSummaries = pgTable(
   (t) => [
     unique("uq_conversation_summaries_conv_through").on(t.conversationId, t.throughMessageId),
   ],
+);
+
+/**
+ * The turn context a turn-starting user row was sent with: the exact block
+ * (`rendered`) and its structured inputs (`context`, `TurnContextSchema`),
+ * kept for deduplicating recalled memories against earlier turns and as
+ * provenance. See design/prompt-caching.md → Turn Context.
+ *
+ * A side table rather than a column on `messages`: it is written after the
+ * user row exists, and `messages.content` stays what the user said, which is
+ * what the web history and the Observer read. Immutable once written; the
+ * unique on `message_id` is the idempotency key for the render step, whose
+ * retry recovers the stored row instead of writing a second one.
+ */
+export const turnContexts = pgTable(
+  "turn_contexts",
+  {
+    id: pk(),
+    messageId: uuid("message_id")
+      .notNull()
+      .references(() => messages.id),
+    rendered: text("rendered").notNull(),
+    context: jsonbZod("context", TurnContextSchema).notNull(),
+    createdAt: ts(),
+  },
+  (t) => [unique("uq_turn_contexts_message").on(t.messageId)],
 );
