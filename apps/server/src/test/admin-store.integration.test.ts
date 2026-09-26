@@ -311,3 +311,63 @@ describe("conversation summaries (real Postgres)", () => {
     expect(rows.map((r) => r.contype)).toEqual(["u"]);
   });
 });
+
+describe("messages.content tool inputs (real Postgres)", () => {
+  // The unit tier round-trips through PGlite's driver. Production writes the
+  // `jsonbZod` text through postgres-js's parameter binder and reads the row
+  // back through its jsonb parser, so this is where a double-encoded write or
+  // a parser that rebuilds objects in some other order would show.
+  it("reads a tool_use input back in canonical key order, byte-identical to the loop's block", async () => {
+    const { id: userId } = await tx((trx) => store.createUser(trx));
+    const { id: profileId } = await tx((trx) =>
+      store.createProfile(trx, {
+        userId,
+        name: name("tool-input-order"),
+        basePrompt: "p",
+        model: TEST_MODEL,
+        toolSet: [],
+      }),
+    );
+    const { id: conversationId } = await tx((trx) =>
+      store.createConversation(trx, { userId, profileId, isPrivate: true }),
+    );
+    // Emission order, unsorted at both depths.
+    const input = {
+      prompt: "a cat",
+      model: "flux",
+      options: { seed: 7, guidance_scale: 3, loras: [{ weight: 1, path: "x" }] },
+      aspect_ratio: "1:1",
+    };
+
+    await tx((trx) =>
+      store.insertMessages(trx, {
+        conversationId,
+        messages: [
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "t1", name: "generate_image", input }],
+          },
+        ],
+        lastInboundMessageId: "019d0000-0000-7000-8000-000000000001",
+        lastMessageOutputTokens: 10,
+        profileId,
+        model: TEST_MODEL,
+      }),
+    );
+
+    // The row holds a real jsonb array (not a JSON string), with the input's
+    // keys in Postgres's own order: length first, then bytewise.
+    const [stored] = await sql<{ type: string; keys: string[] }[]>`
+      SELECT jsonb_typeof(content) AS type,
+             ARRAY(SELECT jsonb_object_keys(content->0->'input')) AS keys
+      FROM messages WHERE conversation_id = ${conversationId}
+    `;
+    expect(stored).toEqual({ type: "array", keys: ["model", "prompt", "options", "aspect_ratio"] });
+
+    const history = await tx((trx) => store.listMessages(trx, conversationId));
+    const block = expectDefined(history[0]?.content[0]);
+    expect(JSON.stringify(block)).toBe(
+      '{"type":"tool_use","id":"t1","name":"generate_image","input":{"aspect_ratio":"1:1","model":"flux","options":{"guidance_scale":3,"loras":[{"path":"x","weight":1}],"seed":7},"prompt":"a cat"}}',
+    );
+  });
+});

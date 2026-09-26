@@ -138,10 +138,14 @@ export async function compactConversation(
   // the summarizer reads a cleaner transcript and a tool-heavy prefix shrinks
   // before it reaches the model. Structural and count-based — no token count
   // needed, which is what lets the manual path run it unconditionally.
+  // No tool definitions here (see below), so a compacted call is named by its
+  // first string argument in key order; its `tool_use` block, which the
+  // summarizer also reads, keeps the full input.
   const prefix = compactSameToolClusters(messages.slice(0, splitIdx), {
     retainRecent: DEFAULT_RETAIN_RECENT,
     retainFirst: DEFAULT_RETAIN_FIRST,
     triggerCount: DEFAULT_TRIGGER_COUNT,
+    tools: undefined,
   }).messages;
 
   // Tool definitions are omitted: resolving the per-turn catalog means

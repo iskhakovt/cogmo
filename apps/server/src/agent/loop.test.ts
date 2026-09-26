@@ -4202,3 +4202,160 @@ describe("volume-cluster trigger", () => {
     expect(volumeWarnings).toHaveLength(0);
   });
 });
+
+// Every turn after the first reloads the transcript from `messages.content`,
+// whose store boundary returns a tool_use input with sorted keys at every
+// depth. The loop has to append the same bytes within the turn, or each later
+// request re-sends that call differently and the prompt cache misses from it
+// on. See design/prompt-caching.md → Canonical Tool Inputs.
+describe("canonical tool inputs", () => {
+  /** The model's emission order, unsorted at both depths. */
+  function emittedInput(): Record<string, unknown> {
+    return {
+      prompt: "a cat",
+      model: "flux",
+      options: { seed: 7, guidance_scale: 3, loras: [{ weight: 1, path: "x" }] },
+      aspect_ratio: "1:1",
+    };
+  }
+  const CANONICAL =
+    '{"aspect_ratio":"1:1","model":"flux","options":{"guidance_scale":3,"loras":[{"path":"x","weight":1}],"seed":7},"prompt":"a cat"}';
+
+  function recordingTool(): { tools: ToolRegistry; received: unknown[] } {
+    const received: unknown[] = [];
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "generate_image",
+        description: "draws",
+        schema: z.record(z.string(), z.unknown()),
+        handler: async (input) => {
+          received.push(input);
+          return "ok";
+        },
+      }),
+    );
+    return { tools, received };
+  }
+
+  /** The first tool_use block's `input`, serialized as it goes on the wire. */
+  function serializedInput(content: Message["content"] | undefined): string {
+    const block = Array.isArray(content) ? content.find((b) => b.type === "tool_use") : undefined;
+    if (block?.type !== "tool_use") throw new Error("expected a tool_use block");
+    return JSON.stringify(block.input);
+  }
+
+  it("streams a tool call into the transcript in canonical key order", async () => {
+    const { provider, streamCalls } = repairStreamProvider([
+      {
+        kind: "stream",
+        events: [{ type: "tool_start", id: "t1", name: "generate_image", input: emittedInput() }],
+        stopReason: "tool_use",
+      },
+      { kind: "stream", events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+    const { tools, received } = recordingTool();
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "draw a cat" }],
+      tools,
+      onEvent: async () => {},
+    });
+
+    // The request that follows the call within the turn, and the message
+    // persisted for every later turn, carry the same canonical bytes.
+    const followUp = expectDefined(streamCalls[1], "follow-up request");
+    expect(serializedInput(followUp.messages[1]?.content)).toBe(CANONICAL);
+    expect(serializedInput(result.newMessages[0]?.content)).toBe(CANONICAL);
+    // The handler gets the transcript's block: the values the model sent, in
+    // canonical key order.
+    expect(received.map((input) => JSON.stringify(input))).toEqual([CANONICAL]);
+  });
+
+  it("puts a tool call recovered by the non-streaming replay in canonical key order", async () => {
+    const { provider, chatCalls, streamCalls } = repairStreamProvider([
+      {
+        kind: "throw",
+        error: new ProviderProtocolError("tool args failed to parse", new SyntaxError("bad")),
+      },
+      {
+        kind: "stream",
+        events: [{ type: "tool_start", id: "t1", name: "generate_image", input: emittedInput() }],
+        stopReason: "tool_use",
+      },
+      { kind: "stream", events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+    const { tools, received } = recordingTool();
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "draw a cat" }],
+      tools,
+      onEvent: async () => {},
+    });
+
+    expect(chatCalls).toHaveLength(1);
+    const followUp = expectDefined(streamCalls[1], "follow-up request");
+    expect(serializedInput(followUp.messages[1]?.content)).toBe(CANONICAL);
+    expect(serializedInput(result.newMessages[0]?.content)).toBe(CANONICAL);
+    expect(received.map((input) => JSON.stringify(input))).toEqual([CANONICAL]);
+  });
+
+  it("puts a memoized iteration's tool call in canonical key order", async () => {
+    // Whatever key order the step state hands back, the transcript built
+    // from it is canonical.
+    const cache = new Map<string, unknown>([
+      [
+        "llm-iter1",
+        {
+          kind: "drained",
+          content: [{ type: "tool_use", id: "t1", name: "generate_image", input: emittedInput() }],
+          stopReason: "tool_use",
+          model: "mock-model",
+          usage: { inputTokens: 10, outputTokens: 5 },
+          repaired: null,
+          emitted: { text: "", toolUseIds: ["t1"] },
+        },
+      ],
+    ]);
+    const stepRun: StepRunner = async <T>(id: string, fn: () => Promise<T>): Promise<T> =>
+      cache.has(id) ? (cache.get(id) as T) : fn();
+    const { provider, streamCalls } = repairStreamProvider([
+      { kind: "stream", events: [{ type: "text_delta", text: "done" }], stopReason: "end_turn" },
+    ]);
+    const { tools, received } = recordingTool();
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "draw a cat" }],
+      tools,
+      onEvent: async () => {},
+      stepRun,
+    });
+
+    const followUp = expectDefined(streamCalls[0], "follow-up request");
+    expect(serializedInput(followUp.messages[1]?.content)).toBe(CANONICAL);
+    expect(serializedInput(result.newMessages[0]?.content)).toBe(CANONICAL);
+    expect(received.map((input) => JSON.stringify(input))).toEqual([CANONICAL]);
+  });
+
+  it("appends a non-streaming tool call in canonical key order", async () => {
+    const provider = mockProvider([
+      toolUseResponse("generate_image", "t1", emittedInput()),
+      textResponse("done"),
+    ]);
+    const { tools, received } = recordingTool();
+
+    const result = await testRunAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "draw a cat" }],
+      tools,
+    });
+
+    const followUp = expectDefined(vi.mocked(provider.chat).mock.calls[1], "follow-up call")[0];
+    expect(serializedInput(followUp.messages[1]?.content)).toBe(CANONICAL);
+    expect(serializedInput(result.newMessages[0]?.content)).toBe(CANONICAL);
+    expect(received.map((input) => JSON.stringify(input))).toEqual([CANONICAL]);
+  });
+});
