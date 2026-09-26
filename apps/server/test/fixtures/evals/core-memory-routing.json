@@ -1,0 +1,172 @@
+{
+  "_comment": "Labelled single-turn cases for src/agent/core-memory-routing.live.test.ts. `expect` is where the fact belongs under design/memory.md → Core Memory vs Hindsight: `core` = core_memory_update this turn, `inPassing` when the fact comes up while the user asks for something else; `hindsight` = retrievable on demand, never core memory; `none` = nothing worth storing. `established` is the core memory the established state starts from; the empty state has no blocks, so the prompt shows the onboarding text instead.",
+  "established": [
+    {
+      "key": "user_profile",
+      "content": "Name: Samuel Carter\nRole: backend engineer at Northwind Logistics\nLocation: London, UK (Europe/London)\nFamily: partner Alex; sister Jo"
+    },
+    {
+      "key": "active_projects",
+      "content": "- Home server migration to NixOS (in progress)"
+    },
+    {
+      "key": "preferences",
+      "content": "- Concise answers; tables for comparisons"
+    }
+  ],
+  "cases": [
+    {
+      "id": "new-job",
+      "expect": "core",
+      "message": "Quick update: I started at Monzo this week. I'm a staff engineer on the payments team now.",
+      "note": "Employer and role."
+    },
+    {
+      "id": "call-me-sam",
+      "expect": "core",
+      "message": "Can you call me Sam from now on? Nobody calls me Samuel.",
+      "note": "Name the agent addresses the user by."
+    },
+    {
+      "id": "moved-lisbon",
+      "expect": "core",
+      "message": "We've officially moved to Lisbon! Finally unpacked the last boxes.",
+      "note": "Location, and with it the timezone."
+    },
+    {
+      "id": "side-project",
+      "expect": "core",
+      "message": "I'm starting a side project called Tidepool, a tide-times app for sailors. I'll probably want your help with it over the next few months.",
+      "note": "Active project."
+    },
+    {
+      "id": "british-english",
+      "expect": "core",
+      "message": "Always answer me in British English, please. The American spellings drive me mad.",
+      "note": "Standing preference on how to work with the user."
+    },
+    {
+      "id": "new-baby",
+      "expect": "core",
+      "message": "Big news: Alex and I had a baby girl yesterday. Her name is Maya.",
+      "note": "Immediate family."
+    },
+    {
+      "id": "vegetarian",
+      "expect": "core",
+      "message": "I've gone vegetarian, so keep that in mind whenever you suggest recipes or restaurants.",
+      "note": "Standing constraint that applies across conversations."
+    },
+    {
+      "id": "fridays-off",
+      "expect": "core",
+      "message": "I've moved to a four-day week, so Fridays are off now. Don't plan anything work-related for a Friday.",
+      "note": "Standing schedule."
+    },
+    {
+      "id": "intro-email",
+      "expect": "core",
+      "inPassing": true,
+      "message": "Can you draft a two-line intro for my new team? I'm joining Monzo's payments team as a staff engineer on Monday.",
+      "note": "Employer and role, mentioned in passing while asking for something else."
+    },
+    {
+      "id": "lisbon-day-trip",
+      "expect": "core",
+      "inPassing": true,
+      "message": "What's a good day trip from Lisbon this weekend? We only moved here last month, so we're still exploring.",
+      "note": "Location, mentioned in passing while asking for something else."
+    },
+    {
+      "id": "meatless-dinner",
+      "expect": "core",
+      "inPassing": true,
+      "message": "Suggest a quick dinner for tonight. Nothing with meat, I stopped eating it a while back.",
+      "note": "Standing constraint, mentioned in passing while asking for something else."
+    },
+    {
+      "id": "restaurant-dinner",
+      "expect": "hindsight",
+      "message": "Had dinner at Taberna da Rua das Flores last night. The octopus was incredible.",
+      "note": "One-off event."
+    },
+    {
+      "id": "friend-job",
+      "expect": "hindsight",
+      "message": "My friend Priya just got a job at DeepMind, she's thrilled.",
+      "note": "Fact about a third party."
+    },
+    {
+      "id": "sister-birthday",
+      "expect": "hindsight",
+      "message": "Jo's birthday is on 14 March, by the way.",
+      "note": "Detail about a family member: who Jo is belongs in core memory, her birthday is looked up when needed."
+    },
+    {
+      "id": "report-chart",
+      "expect": "hindsight",
+      "message": "For the quarterly report I've decided to go with a bar chart instead of the pie chart.",
+      "note": "Decision about a single task."
+    },
+    {
+      "id": "flaky-test",
+      "expect": "hindsight",
+      "message": "Finally fixed that flaky billing test. It was a timezone bug in the date parser.",
+      "note": "One-off work event."
+    },
+    {
+      "id": "book",
+      "expect": "hindsight",
+      "message": "I finished The Dispossessed last week. Loved the ending.",
+      "note": "One-off event and opinion."
+    },
+    {
+      "id": "rent-increase",
+      "expect": "hindsight",
+      "message": "My landlord says the rent goes up to £2,100 a month from October.",
+      "note": "Detail retrievable on demand."
+    },
+    {
+      "id": "greeting",
+      "expect": "none",
+      "message": "Hey, how's it going?",
+      "note": "Small talk."
+    },
+    {
+      "id": "mutex-question",
+      "expect": "none",
+      "message": "What's the difference between a mutex and a semaphore?",
+      "note": "General question."
+    },
+    {
+      "id": "coffee-break",
+      "expect": "none",
+      "message": "Grabbing a coffee, back in ten.",
+      "note": "Temporary plan."
+    },
+    {
+      "id": "unit-conversion",
+      "expect": "none",
+      "message": "What's 72°F in Celsius?",
+      "note": "General question."
+    },
+    {
+      "id": "thanks",
+      "expect": "none",
+      "message": "Thanks, that was really helpful!",
+      "note": "Acknowledgement."
+    },
+    {
+      "id": "tired-today",
+      "expect": "none",
+      "message": "I'm feeling a bit tired today, didn't sleep well.",
+      "note": "Temporary state."
+    },
+    {
+      "id": "pour-over",
+      "expect": "none",
+      "message": "What's a good coffee-to-water ratio for pour-over?",
+      "note": "General question."
+    }
+  ]
+}

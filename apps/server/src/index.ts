@@ -3,6 +3,7 @@ import { hostname } from "node:os";
 import { S3Client } from "@aws-sdk/client-s3";
 import type { Octokit } from "@octokit/rest";
 import Docker from "dockerode";
+import { BUILT_IN_SERVICE_GUIDANCE, builtInToolSpecs } from "./agent/built-ins.js";
 import { createAutoRegisterSkillSubscriber } from "./agent/coding/auto-register-skill.js";
 import { ClaudeCodeBackend } from "./agent/coding/claude.js";
 import { createOrphanRunBranchSweepFunctions } from "./agent/coding/cleanup-orphan-run-branches.js";
@@ -18,36 +19,28 @@ import { createCodingTaskReconcile } from "./agent/coding/reconcile-on-failure.j
 import { createCodingService } from "./agent/coding/service.js";
 import { DrizzleCodingStore } from "./agent/coding/store/index.js";
 import { CodingStreamingRegistry } from "./agent/coding/streaming-registry.js";
-import { DELEGATE_CODING_GUIDANCE, delegateCodingTool } from "./agent/coding/tool.js";
 import { createCodingVerifyOrchestrator } from "./agent/coding/verify-orchestrator.js";
 import { compactConversation } from "./agent/conversation/compact-conversation.js";
-import { coreMemoryTools } from "./agent/core-memory-tools.js";
 import { createDebounceFunctions, type DebounceConfig } from "./agent/debounce.js";
 import { createDocumentTools } from "./agent/document-tools.js";
 import { createObserver, triggerReflection } from "./agent/evolution/index.js";
-import { fileTools } from "./agent/file-tools.js";
-import { createFileService, FILES_PROMPT_GUIDANCE } from "./agent/files.js";
+import { createFileService } from "./agent/files.js";
 import { createHandleMessage } from "./agent/handle-message.js";
 import { createIdleTimer } from "./agent/idle-timer.js";
 import { ImageToolsLoader } from "./agent/image-tools-loader.js";
 import { runStreamingAgentLoop } from "./agent/loop.js";
-import { memoryTools } from "./agent/memory-tools.js";
 import { createPipelineGateResolver } from "./agent/pipeline/gate-resolver.js";
 import { createPipelineGateWaiter } from "./agent/pipeline/gate-waiter.js";
 import { runAgenticStage } from "./agent/pipeline/run-agentic-stage.js";
 import { createPipelineStageRunner } from "./agent/pipeline/stage-runner.js";
 import { DrizzlePipelineRunStore, DrizzlePipelineStore } from "./agent/pipeline/store/index.js";
-import { PIPELINES_PROMPT_GUIDANCE, pipelineTools } from "./agent/pipeline/tools.js";
-import { DefaultPromptSource } from "./agent/prompt.js";
+import { DefaultPromptSource, formatUserContext } from "./agent/prompt.js";
 import { createHandleMessageReconcile } from "./agent/reconcile-on-failure.js";
 import { createRecoverConversation } from "./agent/recover-conversation.js";
 import { createScheduledTaskFireHandler } from "./agent/scheduling/fire-handler.js";
 import { createScheduledTaskTicker } from "./agent/scheduling/ticker.js";
-import { schedulingTools } from "./agent/scheduling/tools.js";
 import type { Service } from "./agent/service.js";
-import { CORE_MEMORY_PROMPT_GUIDANCE, MEMORY_PROMPT_GUIDANCE } from "./agent/service.js";
 import { DrizzleAgentStore } from "./agent/store/index.js";
-import { SUBAGENT_PROMPT_GUIDANCE } from "./agent/subagent/sub-agent-tool-builder.js";
 import { createDefaultTools } from "./agent/tools.js";
 import { createWebTools } from "./agent/web-tools.js";
 import {
@@ -94,7 +87,6 @@ import { createSkillCronTicker } from "./skills/cron-ticker.js";
 import { createSkillDepsReaper } from "./skills/deps-reaper-function.js";
 import { bootstrapSkillsRepo, ensureSkillsCodingRepo } from "./skills/repo.js";
 import { SkillRunnerImpl, type SkillRunnerOptions } from "./skills/runner.js";
-import { registerSkillTool, SKILLS_PROMPT_GUIDANCE } from "./skills/skills-tool.js";
 import { DrizzleSkillStore } from "./skills/store/index.js";
 import { DEFAULT_RESOURCE_LIMITS as SKILLS_DEFAULT_RESOURCE_LIMITS } from "./skills/worker-sysbox/host.js";
 import { adapterModules } from "./transport/adapters/index.js";
@@ -986,37 +978,16 @@ export async function bootstrapRuntime(
   const documentTools = createDocumentTools(core.attachmentStore);
 
   const tools = createDefaultTools(
-    [
-      ...memoryTools,
-      ...webTools,
-      ...fileTools,
-      ...coreMemoryTools,
-      ...documentTools,
-      ...schedulingTools,
-      ...pipelineTools,
-      delegateCodingTool,
-      registerSkillTool,
-    ],
+    builtInToolSpecs({ webTools, documentTools }),
     env.USER_TIMEZONE,
   );
   const promptSource = new DefaultPromptSource({
     timezone: env.USER_TIMEZONE,
-    serviceGuidance: [
-      MEMORY_PROMPT_GUIDANCE,
-      FILES_PROMPT_GUIDANCE,
-      CORE_MEMORY_PROMPT_GUIDANCE,
-      DELEGATE_CODING_GUIDANCE,
-      SKILLS_PROMPT_GUIDANCE,
-      SUBAGENT_PROMPT_GUIDANCE,
-      PIPELINES_PROMPT_GUIDANCE,
-    ],
-    getUserContext: async () => {
-      const blocks = await core.runInTx((trx) =>
-        core.agentStore.getCoreMemoryBlocks(trx, core.user.id),
-      );
-      if (blocks.length === 0) return null;
-      return blocks.map((b) => `## ${b.key}\n${b.content}`).join("\n\n");
-    },
+    serviceGuidance: BUILT_IN_SERVICE_GUIDANCE,
+    getUserContext: async () =>
+      formatUserContext(
+        await core.runInTx((trx) => core.agentStore.getCoreMemoryBlocks(trx, core.user.id)),
+      ),
   });
 
   const idleTimeoutMs = env.SESSION_IDLE_TIMEOUT_MINUTES * 60 * 1000;

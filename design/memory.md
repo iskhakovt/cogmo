@@ -15,6 +15,43 @@
 
 Hindsight is a client-server system. Our app talks to it via HTTP — no direct database access. The server handles storage, embedding, retrieval, and deduplication. We supply the extraction logic (what goes in) and retrieval queries (what comes out).
 
+## Core Memory vs Hindsight `[proposed]`
+
+Two stores hold what the agent knows about its user. **Core memory** is a few keyed blocks (`core_memory_blocks`, one row per user and key) rendered into every system prompt's `# User` section, so it survives compaction and needs no retrieval. Only the agent writes it, through `core_memory_update`. **Hindsight** holds everything else and is searched on demand by auto-recall, `memory_recall` and `memory_reflect`. The Observer fills it from every conversation at idle, whether or not the agent called `memory_retain`.
+
+**Rule.** Core memory holds what every conversation needs. Everything that can be looked up when the topic comes up goes to Hindsight.
+
+| Core memory | Hindsight |
+|-|-|
+| Who the user is: name and what to call them, role and employer, where they live and their timezone, partner, children and close family | Events: a dinner out, a trip, a bug fixed |
+| Active projects and their status | Details: a sister's birthday, the rent, a book finished |
+| Standing preferences on how to work with them: spelling variety, dietary constraints, working days | One-off decisions about a single task: a bar chart for the quarterly report |
+| | Facts about other people: a friend's new job |
+
+The test is whether a reply to an unrelated message could go wrong without the fact. A family member belongs in core memory, and details about them belong in Hindsight. A change replaces the old value (Lisbon replaces London) rather than appending to it; the history is Hindsight's.
+
+**When.** In the turn the fact appears, including when it comes up in passing while the user asks for something else ("we only moved here last month"). `core_memory_update` overwrites the block, so the call rewrites it whole. The Observer writes only Hindsight, so a core fact the agent doesn't write in the turn never reaches a later prompt. Core memory therefore depends on the agent remembering to write in-turn, which is the failure mode the Observer avoids for Hindsight (see [Why Post-Conversation, Not Real-Time](#why-post-conversation-not-real-time-confirmed)). The evaluation below measures how often the agent writes it.
+
+**Prior art.** MemGPT's working context is "a fixed-size read/write block of unstructured text … intended to be used to store key facts, preferences, and other important information about the user", with everything else in archival storage searched through function calls ([Packer et al., 2023](https://arxiv.org/abs/2310.08560)). Letta keeps the split: memory blocks are pinned to the context window ([memory blocks](https://docs.letta.com/guides/core-concepts/memory/memory-blocks)), and archival memory is not for "information that should always be visible" or "frequently changing state" ([archival memory](https://docs.letta.com/guides/core-concepts/memory/archival-memory)). LangMem draws the same line between a *profile*, "a single document that represents the current state" updated in place, and a *collection* of searchable records ([conceptual guide](https://langchain-ai.github.io/langmem/concepts/conceptual_guide/)).
+
+### Evaluation
+
+`src/agent/core-memory-routing.live.test.ts` runs 25 labelled single-turn messages (`test/fixtures/evals/core-memory-routing.json`) through the production prompt, the built-in tool definitions and the agent loop on the seeded profile's model. Tool handlers are stubs, so nothing is persisted. It records which memory tools each turn calls. The 25 are 11 core facts (8 announced, 3 mentioned in passing while asking for something else), 7 Hindsight facts and 7 messages worth storing nowhere. Each runs twice: with no core memory, where the prompt shows the onboarding text, and with established blocks. The eval reports rather than asserts (see [testing.md](testing.md) → Live Tests).
+
+Results on `claude-sonnet-5`, one sample per case:
+
+| Metric | Baseline, empty | Baseline, established |
+|-|-|-|
+| Core facts written to core memory in the turn | 3/11 | 8/11 |
+| — announced | 3/8 | 7/8 |
+| — in passing | 0/3 | 1/3 |
+| — in the first response | 0/11 | 5/11 |
+| Core facts sent to `memory_retain` only | 2/11 | 2/11 |
+| Core writes on Hindsight facts | 0/7 | 0/7 |
+| Core writes on messages worth storing nowhere | 0/7 | 0/7 |
+
+With blocks already in place, the agent updates core memory for announced facts but mostly misses facts mentioned in passing. With no blocks, the onboarding text ("Store what you learn using memory_retain") draws the turn into introductions, and core facts go to `memory_retain` or nowhere. No case wrote core memory when it shouldn't have.
+
 ## Bank Strategy `[confirmed]`
 
 One Hindsight bank per user, tags for memory networks. Networks are **not** separate banks.

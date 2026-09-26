@@ -1,4 +1,5 @@
 import type { ToolDefinition } from "../llm/types.js";
+import type { CoreMemoryBlock } from "./service.js";
 import type { Profile } from "./store/index.js";
 
 /**
@@ -48,7 +49,13 @@ Your response will be spoken aloud. Keep it short and natural — one or two sen
 export interface PromptSourceConfig {
   timezone?: string;
   getUserContext?: () => Promise<string | null>;
-  serviceGuidance?: string[];
+  serviceGuidance?: ReadonlyArray<string>;
+}
+
+/** The `# User` section body for a user's core memory blocks, or null when there are none. */
+export function formatUserContext(blocks: ReadonlyArray<CoreMemoryBlock>): string | null {
+  if (blocks.length === 0) return null;
+  return blocks.map((b) => `## ${b.key}\n${b.content}`).join("\n\n");
 }
 
 /**
@@ -65,7 +72,7 @@ export interface PromptSourceConfig {
 export class DefaultPromptSource implements PromptSource {
   #timezone: string;
   #getUserContext: () => Promise<string | null>;
-  #serviceGuidance: string[];
+  #serviceGuidance: ReadonlyArray<string>;
 
   constructor(config: PromptSourceConfig = {}) {
     this.#timezone = config.timezone ?? "UTC";
