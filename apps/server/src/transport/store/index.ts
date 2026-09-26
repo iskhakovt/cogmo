@@ -126,10 +126,7 @@ export interface TransportStore {
     ReadonlyArray<{ id: string; type: string; credentials: JsonValue; identityMode: string }>
   >;
 
-  /**
-   * Find the oldest channel of a type. `type` is not unique, and ordering by
-   * `id` (UUIDv7) keeps the pick stable across in-place credential rotation.
-   */
+  /** The oldest channel of `type` by `id` (UUIDv7); `type` is not unique. */
   getChannelByType(
     tx: Transaction,
     type: string,

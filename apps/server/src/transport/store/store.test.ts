@@ -102,11 +102,12 @@ describe("DrizzleTransportStore", () => {
       expect(await tx((trx) => store.getChannelByType(trx, "nonexistent"))).toBeUndefined();
     });
 
-    it("getChannelByType stays on the oldest channel of a type after its credentials rotate", async () => {
+    it("getChannelByType stays on the oldest channel of a type after it is updated", async () => {
       const oldest = await seedChannel("telegram");
       await seedChannel("telegram");
-      // An in-place update writes a new row version after the second channel's.
-      await tx((trx) => store.updateChannelCredentials(trx, oldest, { token: "rotated" }));
+      // Adversarial setup: an in-place UPDATE writes a new row version after the
+      // second channel's.
+      await db.execute(sql`UPDATE channels SET identity_mode = identity_mode WHERE id = ${oldest}`);
 
       expect((await tx((trx) => store.getChannelByType(trx, "telegram")))?.id).toBe(oldest);
     });

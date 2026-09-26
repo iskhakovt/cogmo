@@ -584,14 +584,10 @@ export interface AgentStore {
   /** Load a profile by ID. */
   getProfile(tx: Transaction, profileId: string): Promise<Profile | undefined>;
 
-  /**
-   * Get the oldest user (for bootstrapping). This and `getDefaultProfile` order
-   * by `id` (UUIDv7, so creation order). Unordered, Postgres returns whichever
-   * row its plan reaches first, and in-place edits and reused space move it.
-   */
+  /** The oldest user by `id` (UUIDv7): the one setup creates, which bootstrap and the CLI act as. */
   getFirstUser(tx: Transaction): Promise<{ id: string } | undefined>;
 
-  /** Get the oldest profile, the one setup seeds (for bootstrapping). */
+  /** The oldest profile by `id`: the org profile setup seeds. */
   getDefaultProfile(tx: Transaction): Promise<{ id: string } | undefined>;
 
   /** Create a profile and return the full row. `userId: null` = org profile (read-only via Transport); `userId: <id>` = user profile (owned by that user). Throws `UniqueViolationError` on (user_id, name) collision. */
