@@ -40,18 +40,18 @@
       "note": "Units preference. UK answers often give heights in feet."
     },
     {
-      "id": "no-closing-offer",
+      "id": "under-100-words",
       "first": [
-        "What is a Bloom filter?",
-        "You don't need to finish every answer with a question or an offer to help more. Just answer and stop."
+        "How does compound interest work?",
+        "That's far too long. Please keep your answers under 100 words."
       ],
       "second": [
-        "What's the difference between TCP and UDP?",
-        "Again, please drop the follow-up offer at the end. Answer and stop."
+        "What's the difference between a virus and a bacterium?",
+        "Too long again. Under 100 words, always."
       ],
-      "probe": "How does HTTPS keep my traffic private?",
-      "check": "no-closing-offer",
-      "note": "Style preference on how replies end."
+      "probe": "How does a heat pump work?",
+      "check": "max-100-words",
+      "note": "Length preference. The probe's baseline reply ran to 288 words."
     },
     {
       "id": "no-bold",

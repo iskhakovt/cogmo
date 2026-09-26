@@ -58,7 +58,7 @@ import type { CoreMemoryBlock } from "../service.js";
 import { DrizzleAgentStore } from "../store/index.js";
 import { type ExtractionResult, extractCorrections } from "./extract-corrections.js";
 
-const CheckSchema = z.enum(["no-list-lines", "no-imperial-units", "no-closing-offer", "no-bold"]);
+const CheckSchema = z.enum(["no-list-lines", "no-imperial-units", "max-100-words", "no-bold"]);
 type Check = z.infer<typeof CheckSchema>;
 
 const EvalFileSchema = z.object({
@@ -93,25 +93,12 @@ const EXTRACTION_MODEL = EVAL_PROFILE.extractionModel ?? EVAL_PROFILE.model;
 /** The conversation's active channels, as the Observer and the rule lookup see them. */
 const CHANNEL_TYPES = ["telegram"];
 
-function lastLine(reply: string): string {
-  const lines = reply.split("\n").filter((line) => line.trim() !== "");
-  return (lines.at(-1) ?? "").replace(/[*_\s]+$/, "");
-}
-
 /** Whether a reply follows the correction. */
 const CHECKS: Record<Check, (reply: string) => boolean> = {
   "no-list-lines": (reply) => !/^\s*(?:[-*•+]|\d+[.)])\s+\S/m.test(reply),
   "no-imperial-units": (reply) =>
     !/\b(?:miles?|feet|foot|ft|inch(?:es)?|lbs?|mph)\b|°\s?F\b|\bfahrenheit\b/i.test(reply),
-  "no-closing-offer": (reply) => {
-    const last = lastLine(reply);
-    return (
-      !last.endsWith("?") &&
-      !/\b(?:let me know|want me to|would you like|shall I|happy to|if you'd like|if you want)\b/i.test(
-        last,
-      )
-    );
-  },
+  "max-100-words": (reply) => (reply.match(/\S+/g) ?? []).length <= 100,
   "no-bold": (reply) => !/\*\*[^*\n]+\*\*|__[^_\n]+__/.test(reply),
 };
 
