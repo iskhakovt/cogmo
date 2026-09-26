@@ -313,9 +313,8 @@ export interface PipelineRunStore {
    * retry of that call — a step replay, or the re-execution after a crash
    * between commit and Inngest recording the step — returns the existing row
    * as `recovered` instead of opening a second run. `ON CONFLICT DO UPDATE`
-   * with a no-op SET, not `DO NOTHING`, so a concurrent loser under
-   * REPEATABLE READ raises 40001 for the transactor to retry rather than
-   * re-selecting a row its snapshot cannot see.
+   * with a no-op SET: a concurrent loser under REPEATABLE READ raises 40001
+   * for the transactor to retry, and the retry lands in the conflict arm.
    */
   insertOrRecoverRun(
     tx: Transaction,

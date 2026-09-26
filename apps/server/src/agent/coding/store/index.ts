@@ -217,8 +217,8 @@ export interface CodingStore {
    * Idempotent submission against `uniq_coding_tasks_idempotency_key`: a
    * second call with the same key returns `kind: "recovered"` and the
    * original row. Uses `ON CONFLICT DO UPDATE` with a no-op SET and an
-   * `xmax = 0` discriminator — see the implementation for why `DO NOTHING`
-   * cannot resolve a concurrent loser under REPEATABLE READ. Separate from
+   * `xmax = 0` discriminator — see the implementation for how a concurrent
+   * loser resolves under REPEATABLE READ. Separate from
    * {@link CodingStore.insertTask} because this one can decline to insert.
    */
   insertOrRecoverTask(
@@ -523,19 +523,17 @@ export class DrizzleCodingStore implements CodingStore {
     tx: Transaction,
     params: InsertTaskParams & { idempotencyKey: string },
   ): Promise<InsertTaskResult> {
-    // DO UPDATE with a no-op SET, not DO NOTHING. The sequential retry is the
-    // same either way; the concurrent one is not. Under the project's
-    // REPEATABLE READ default, a loser conflicting with a row committed after
-    // its snapshot cannot see that row: DO NOTHING skips the tuple, the
-    // re-SELECT finds nothing, and the call fails deterministically with
-    // nothing for the transactor to retry. DO UPDATE must write the tuple, so
-    // Postgres raises `40001 serialization_failure` instead — which the
-    // transactor retries against a fresh snapshot that does contain the
-    // winner. (`FOR UPDATE` on the re-SELECT would not help: a row absent from
-    // the snapshot is absent from a locking read too.)
+    // ON CONFLICT DO UPDATE with a no-op SET returns the row from either arm
+    // in one statement. Under the project's REPEATABLE READ default, a loser
+    // whose conflict is with a row committed after its snapshot gets `40001
+    // serialization_failure` (Postgres's `ExecCheckTupleVisible`), which the
+    // transactor retries against a snapshot that contains the winner; the
+    // retry lands in the conflict arm. A plain INSERT would raise `23505`
+    // instead, which nothing retries.
     //
     // `xmax = 0` distinguishes the outcomes: zero on a tuple this statement
-    // inserted, the locking xid on one it updated through the conflict arm.
+    // inserted; on one it reached through the conflict arm, the update
+    // carries the arm's own row lock into the new version's xmax.
     const rows = await tx
       .insert(codingTasks)
       .values({ ...taskValues(params), idempotencyKey: params.idempotencyKey })

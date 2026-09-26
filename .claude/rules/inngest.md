@@ -104,17 +104,26 @@ contract**. Design every function for the per-boundary model.
     trigger of the execute orchestrator.
 
   Store under a plain `UNIQUE` and write through `ON CONFLICT DO UPDATE`
-  with a no-op SET — not `DO NOTHING`. Under REPEATABLE READ a concurrent
-  loser cannot see a row committed after its snapshot: `DO NOTHING` skips
-  the tuple and the re-select finds nothing, failing deterministically with
-  nothing to retry, while `DO UPDATE` must write it and so raises `40001`,
-  which the transactor retries against a snapshot that does contain the
-  winner. `RETURNING … (xmax = 0)` separates insert from conflict-update.
+  with a no-op SET, `RETURNING … (xmax = 0)` to separate insert from
+  conflict-update. What makes a concurrent loser safe is the `ON CONFLICT`
+  clause, not which arm. Under REPEATABLE READ a conflict with a row
+  committed after the loser's snapshot raises `40001` for `DO NOTHING` and
+  `DO UPDATE` alike (`ExecCheckTupleVisible` in Postgres's
+  `nodeModifyTable.c`; the isolation docs confine `DO NOTHING`'s silent
+  skip to Read Committed), and the transactor retries it against a
+  snapshot that contains the winner. A plain `INSERT` raises `23505`
+  instead, which nothing retries, so a read-then-insert "create if
+  missing" is the bug. Prefer `DO UPDATE` because one statement returns
+  the row from either arm; `DO NOTHING` plus a re-select is correct too,
+  just two statements and a second shape to review. The `xmax`
+  discriminator works because the conflict arm's update carries its own
+  row lock into the new version's xmax: an implementation detail, which
+  `admin-store.integration.test.ts` pins on the real driver.
   Nulls-distinct leaves callers without retry semantics unaffected.
   Reference: `coding_tasks.idempotency_key` + `insertOrRecoverTask`,
-  `scheduled_tasks.idempotency_key` + `createOrRecoverScheduledTask`.
-  (`SkillStore.startOrRecoverRun` predates this and still uses the
-  `DO NOTHING` shape — tracked in `todo.md`.)
+  `scheduled_tasks.idempotency_key` + `createOrRecoverScheduledTask`,
+  `skill_runs.idempotency_key` + `startOrRecoverRun`, and
+  `coding_repos.name` + `insertOrRecoverRepo` for an auto-managed row.
 - **A step boundary abandons the function; it does not unwind it.** An
   unexecuted step hands the body a promise the SDK never settles, so the
   invocation ends with the async function pending mid-`await`. `finally`
