@@ -1,5 +1,5 @@
 {
-  "_comment": "Scripted multi-turn conversations for src/agent/core-memory-multiturn.live.test.ts. Each starts from `established` and carries core memory across its turns. `factTurn` (0-based) is the turn that states a core fact; the other turns hold nothing core memory should keep. `expect` (case-insensitive regex) matches the blocks once the fact is written. `stale` matches a line that states the superseded value; once the fact is written, such a line should be gone or say it is past. `keep` are established facts every whole-block rewrite should carry over. `buried` facts are new, `update` facts change an established one.",
+  "_comment": "Scripted multi-turn conversations for src/agent/core-memory-multiturn.live.test.ts. Each starts from `established` and carries core memory across its turns. `factTurn` (0-based) is the turn that states a core fact; the other turns hold nothing core memory should keep. `expect` (case-insensitive regex) matches the blocks once the fact is written. `stale` matches a line that states the superseded value; once the fact is written, such a line should be gone or say it is past. `anchors` names one fact per established line; every whole-block rewrite should keep those the scenario's `stale` doesn't supersede, plus the scenario's own `keep`. `buried` facts are new, `update` facts change an established one.",
   "established": [
     {
       "key": "user_profile",
@@ -14,6 +14,7 @@
       "content": "- Concise answers"
     }
   ],
+  "anchors": ["Samuel", "Northwind", "Lisbon", "Alex", "\\bJo\\b", "NixOS", "Concise"],
   "scenarios": [
     {
       "id": "side-project",
@@ -27,7 +28,6 @@
       ],
       "factTurn": 2,
       "expect": "Tidepool",
-      "keep": ["NixOS", "Samuel", "Concise"],
       "note": "Active project, mentioned while asking about DNS. Rewriting active_projects has to keep the NixOS line."
     },
     {
@@ -42,7 +42,6 @@
       ],
       "factTurn": 2,
       "expect": "coeliac|celiac|gluten",
-      "keep": ["Concise", "Samuel"],
       "note": "Standing dietary constraint, mentioned while asking for a recipe."
     },
     {
@@ -57,7 +56,6 @@
       ],
       "factTurn": 2,
       "expect": "\\bTom\\b",
-      "keep": ["Alex", "\\bJo\\b", "Samuel"],
       "note": "Close family, mentioned while planning a visit. Who Tom is belongs in core memory; the visit is an event."
     },
     {
@@ -72,7 +70,6 @@
       ],
       "factTurn": 2,
       "expect": "part[- ]time|Wednesday|Mon[a-z]*\\s*(?:-|–|to)\\s*Wed",
-      "keep": ["Northwind", "Concise"],
       "note": "Standing schedule, mentioned while asking for a draft."
     },
     {
@@ -87,7 +84,7 @@
       "factTurn": 1,
       "expect": "Porto",
       "stale": "(?<!Europe/)Lisbon",
-      "keep": ["Samuel", "Northwind", "Alex"],
+      "keep": ["Europe/Lisbon"],
       "note": "Location changes; the timezone stays Europe/Lisbon."
     },
     {
@@ -102,7 +99,6 @@
       "factTurn": 2,
       "expect": "Monzo",
       "stale": "Northwind",
-      "keep": ["Samuel", "Lisbon", "Alex"],
       "note": "Employer changes, mentioned while asking a Kotlin question."
     },
     {
@@ -117,7 +113,6 @@
       "factTurn": 1,
       "expect": "ESP32|irrigation",
       "stale": "NixOS",
-      "keep": ["Samuel"],
       "note": "One project finishes and another starts. The finished one no longer belongs in active_projects; a NixOS line still in progress is the failure."
     }
   ]

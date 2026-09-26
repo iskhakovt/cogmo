@@ -10,16 +10,21 @@
  * each ending in the same correction worded differently. After each one,
  * `extractCorrections` runs on its transcript on the Observer's model (the
  * profile's extraction model, else its chat model), writing through
- * `DrizzleAgentStore` to a PGlite database of the scenario's own. The second
+ * `DrizzleAgentStore` to a PGlite database of the sample's own. The second
  * extraction sees the first one's rule, so graduation depends on the model
  * matching it. Then a probe message opens a fresh conversation, once with the
- * active rules in the prompt and once without as a baseline, and a
- * deterministic check on each reply says whether it follows the correction.
+ * active rules in the prompt and once without the correction as a baseline,
+ * and a deterministic check on what each reply showed the user says whether it
+ * follows the correction.
  *
- * Every conversation, the probes included, starts from the fixture's
- * established blocks, so the probe measures the rule alone. The agent may also
- * save the correction to core memory as a standing preference; those writes
- * are reported, not carried forward.
+ * The conversation is on Telegram, so each database starts with the channel
+ * rules `seedChannelRules` gives a Telegram setup ("Use bullet lists instead"
+ * of tables among them), and every prompt's `# Rules` carries them as
+ * production's would: the baseline probe has those alone, the other probe
+ * those plus the active corrections. Every conversation, the probes included,
+ * starts from the fixture's established blocks, so the probe measures the
+ * rule alone. The agent may also save the correction to core memory as a
+ * standing preference; those writes are reported, not carried forward.
  *
  * Like the other evals it reports rather than asserts, and fails only when a
  * turn or an extraction does not complete.
@@ -40,7 +45,9 @@ import * as R from "remeda";
 import { afterAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { AnthropicProvider } from "../../llm/anthropic.js";
+import { seedChannelRules } from "../../setup/seed.js";
 import { expectDefined } from "../../test/assertions.js";
+import { REPLY_CHECKS, type ReplyCheck, wordCount } from "../../test/eval-checks.js";
 import {
   CoreMemoryBlocksSchema,
   coreMemoryWrites,
@@ -49,13 +56,16 @@ import {
   EVAL_PROFILE,
   EVAL_REPEATS,
   EvalCoreMemory,
+  type EvalFailure,
   type EvalMetric,
   type EvalTurn,
+  isFailure,
   LIVE_API_KEY,
   oneLine,
   rateTable,
   runEvalConversation,
   runEvalTurn,
+  shownText,
   withRepeats,
 } from "../../test/live-eval.js";
 import { createTestDatabase } from "../../test/pglite.js";
@@ -63,8 +73,12 @@ import type { CoreMemoryBlock } from "../service.js";
 import { DrizzleAgentStore } from "../store/index.js";
 import { type ExtractionResult, extractCorrections } from "./extract-corrections.js";
 
-const CheckSchema = z.enum(["no-list-lines", "no-imperial-units", "max-100-words", "no-bold"]);
-type Check = z.infer<typeof CheckSchema>;
+const CheckSchema = z.enum([
+  "no-list-lines",
+  "no-imperial-units",
+  "max-100-words",
+  "no-bold",
+]) satisfies z.ZodType<ReplyCheck>;
 
 const EvalFileSchema = z.object({
   established: CoreMemoryBlocksSchema,
@@ -95,17 +109,10 @@ const SCENARIOS = EVAL.scenarios.filter((s) => ONLY === undefined || ONLY.includ
 /** The model `runObserver` extracts on for the seeded profile. */
 const EXTRACTION_MODEL = EVAL_PROFILE.extractionModel ?? EVAL_PROFILE.model;
 
-/** The conversation's active channels, as the Observer and the rule lookup see them. */
-const CHANNEL_TYPES = ["telegram"];
+const CHANNEL = "telegram";
 
-/** Whether a reply follows the correction. */
-const CHECKS: Record<Check, (reply: string) => boolean> = {
-  "no-list-lines": (reply) => !/^\s*(?:[-*•+]|\d+[.)])\s+\S/m.test(reply),
-  "no-imperial-units": (reply) =>
-    !/\b(?:miles?|feet|foot|ft|inch(?:es)?|lbs?|mph)\b|°\s?F\b|\bfahrenheit\b/i.test(reply),
-  "max-100-words": (reply) => (reply.match(/\S+/g) ?? []).length <= 100,
-  "no-bold": (reply) => !/\*\*[^*\n]+\*\*|__[^_\n]+__/.test(reply),
-};
+/** The conversation's active channels, as the Observer and the rule lookup see them. */
+const CHANNEL_TYPES = [CHANNEL];
 
 interface StoredCorrection {
   rule: string;
@@ -117,6 +124,7 @@ interface StoredCorrection {
 
 interface Probe {
   follows: boolean;
+  words: number;
   reply: string;
 }
 
@@ -126,8 +134,9 @@ interface Outcome {
   extracted: { first: ExtractionResult; second: ExtractionResult };
   /** Correction rows after each extraction. */
   stored: { first: ReadonlyArray<StoredCorrection>; second: ReadonlyArray<StoredCorrection> };
-  active: ReadonlyArray<{ rule: string }>;
-  /** Whether the probe prompt lists the active rules under `# Rules`; undefined with none. */
+  /** Correction rows active after the second extraction. */
+  activeCorrections: ReadonlyArray<StoredCorrection>;
+  /** Whether the probe's `# Rules` lists every active correction; undefined with none. */
   rendered: boolean | undefined;
   withRule: Probe | undefined;
   baseline: Probe;
@@ -135,18 +144,25 @@ interface Outcome {
   coreWrites: { first: ReadonlyArray<CoreMemoryBlock>; second: ReadonlyArray<CoreMemoryBlock> };
 }
 
-/** Every completed sample of each scenario, by scenario id. */
-const outcomes = new Map<string, Outcome[]>();
-/** Samples that threw, by scenario id, with the stage they reached. */
-const failures = new Map<string, string[]>();
+type Sample = Outcome | (EvalFailure & { scenario: Scenario });
+
+/** Every sample of each scenario, by scenario id. */
+const samples = new Map<string, Sample[]>();
 const usage = createUsageMeter();
 
-function probeOf(turn: EvalTurn, check: Check): Probe {
-  return { follows: CHECKS[check](turn.result.text), reply: turn.result.text };
+function record(sample: Sample): void {
+  samples.set(sample.scenario.id, [...(samples.get(sample.scenario.id) ?? []), sample]);
 }
 
-function rulesSection(rules: ReadonlyArray<{ rule: string }>): string {
-  return `# Rules\n\n${rules.map((r) => `- ${r.rule}`).join("\n")}`;
+function probeOf(turn: EvalTurn, check: ReplyCheck): Probe {
+  const reply = shownText(turn.result);
+  return { follows: REPLY_CHECKS[check](reply), words: wordCount(reply), reply };
+}
+
+/** The `- rule` lines of the prompt's `# Rules` section. */
+function ruleLines(systemPrompt: string): ReadonlyArray<string> {
+  const section = systemPrompt.split("\n\n# ").find((part) => part.startsWith("Rules\n\n"));
+  return section?.split("\n").filter((line) => line.startsWith("- ")) ?? [];
 }
 
 const METRICS: ReadonlyArray<EvalMetric<Outcome>> = [
@@ -156,10 +172,10 @@ const METRICS: ReadonlyArray<EvalMetric<Outcome>> = [
     of: (o) => o.extracted.first.extracted > 0,
     hit: (o) => o.extracted.second.reinforced > 0,
   },
-  { name: "rule active", of: () => true, hit: (o) => o.active.length > 0 },
+  { name: "correction active", of: () => true, hit: (o) => o.activeCorrections.length > 0 },
   {
     name: "rendered under # Rules",
-    of: (o) => o.active.length > 0,
+    of: (o) => o.activeCorrections.length > 0,
     hit: (o) => o.rendered === true,
   },
   {
@@ -189,28 +205,35 @@ function stored(rows: ReadonlyArray<StoredCorrection>): string {
         `[${r.active ? "active" : "learning"} ×${r.observationCount} ${r.category} ` +
         `${r.channelType ?? "all channels"}] ${r.rule}`,
     )
-    .join("\n         ");
+    .join("\n           ");
+}
+
+function follows(p: Probe | undefined): string {
+  if (p === undefined) return "n/a";
+  return `${p.follows ? "follows" : "VIOLATES"} (${p.words} words)`;
 }
 
 function report(): void {
   const byScenario = SCENARIOS.map((scenario) => ({
     scenario,
-    samples: R.sortBy(outcomes.get(scenario.id) ?? [], (o) => o.repeat),
-    failed: failures.get(scenario.id) ?? [],
+    samples: R.sortBy(samples.get(scenario.id) ?? [], (o) => o.repeat),
   }));
   const rows = byScenario.flatMap((s) => s.samples);
-  if (rows.length === 0 && failures.size === 0) return;
+  if (rows.length === 0) return;
 
   console.log(
     `\nCorrection → steering rule → followed, on ${EVAL_MODEL}, ${EVAL_REPEATS} sample(s) per scenario\n`,
   );
-  const follows = (p: Probe | undefined) =>
-    p === undefined ? "n/a" : p.follows ? "follows" : "VIOLATES";
-  for (const { scenario, samples, failed } of byScenario) {
-    const passes = samples.filter((o) => o.withRule?.follows === true).length;
+  for (const { scenario, samples: scenarioSamples } of byScenario) {
+    const passes = scenarioSamples.filter(
+      (o) => !isFailure(o) && o.withRule?.follows === true,
+    ).length;
     console.log(`${passes}/${EVAL_REPEATS} ${scenario.id} (rule active and followed)`);
-    for (const failure of failed) console.log(`  FAILED ${failure}`);
-    for (const o of samples) {
+    for (const o of scenarioSamples) {
+      if (isFailure(o)) {
+        console.log(`  FAILED #${o.repeat} ${o.failure}`);
+        continue;
+      }
       console.log(
         `  #${o.repeat} rule=${follows(o.withRule)} baseline=${follows(o.baseline)} ` +
           `rendered=${o.rendered ?? "n/a"}`,
@@ -252,15 +275,17 @@ describe.skipIf(LIVE_API_KEY === undefined)(
       async ({ repeat, ...scenario }) => {
         const provider = new AnthropicProvider(expectDefined(LIVE_API_KEY, "API key"));
         const db = await createTestDatabase();
-        let stage = "";
+        let stage = "seeding the channel rules";
         try {
           const store = new DrizzleAgentStore();
+          await seedChannelRules(db.tx, store, CHANNEL);
           const activeRules = () =>
             db.tx((tx) => store.getActiveRules(tx, EVAL_PROFILE.id, CHANNEL_TYPES));
           const corrections = async () =>
             (await db.tx((tx) => store.getCorrections(tx, EVAL_PROFILE.id))).map(
               ({ id: _id, ...row }) => row,
             );
+          const channelRules = await activeRules();
 
           /** One correcting conversation, then the Observer's extraction on its transcript. */
           const learnFrom = async (messages: ReadonlyArray<string>, label: string) => {
@@ -291,10 +316,10 @@ describe.skipIf(LIVE_API_KEY === undefined)(
 
           const first = await learnFrom(scenario.first, "first");
           const second = await learnFrom(scenario.second, "second");
-          const active = await activeRules();
+          const activeCorrections = second.stored.filter((r) => r.active);
 
           stage = "in the probes";
-          const probe = (rules: ReadonlyArray<{ rule: string }>, label: string) =>
+          const probe = async (rules: ReadonlyArray<{ rule: string }>, label: string) =>
             runEvalTurn({
               provider,
               coreMemory: new EvalCoreMemory(EVAL.established),
@@ -304,33 +329,27 @@ describe.skipIf(LIVE_API_KEY === undefined)(
               cacheKey: `${nonce}-${scenario.id}-${label}`,
             });
           const [withRule, baseline] = await Promise.all([
-            active.length > 0 ? probe(active, "rule") : undefined,
-            probe([], "baseline"),
+            activeCorrections.length > 0 ? activeRules().then((r) => probe(r, "rule")) : undefined,
+            probe(channelRules, "baseline"),
           ]);
           const probes = withRule ? [withRule, baseline] : [baseline];
           for (const p of probes) usage.add(p.result.usage);
-
-          outcomes.set(scenario.id, [
-            ...(outcomes.get(scenario.id) ?? []),
-            {
-              repeat,
-              scenario,
-              extracted: { first: first.extracted, second: second.extracted },
-              stored: { first: first.stored, second: second.stored },
-              active,
-              rendered: withRule?.systemPrompt.includes(rulesSection(active)),
-              withRule: withRule && probeOf(withRule, scenario.check),
-              baseline: probeOf(baseline, scenario.check),
-              coreWrites: { first: first.coreWrites, second: second.coreWrites },
-            },
-          ]);
-
           expectCompleted(probes);
+
+          const shown = withRule && ruleLines(withRule.systemPrompt);
+          record({
+            repeat,
+            scenario,
+            extracted: { first: first.extracted, second: second.extracted },
+            stored: { first: first.stored, second: second.stored },
+            activeCorrections,
+            rendered: shown && activeCorrections.every((r) => shown.includes(`- ${r.rule}`)),
+            withRule: withRule && probeOf(withRule, scenario.check),
+            baseline: probeOf(baseline, scenario.check),
+            coreWrites: { first: first.coreWrites, second: second.coreWrites },
+          });
         } catch (err) {
-          failures.set(scenario.id, [
-            ...(failures.get(scenario.id) ?? []),
-            `#${repeat} ${stage}: ${oneLine(String(err), 300)}`,
-          ]);
+          record({ repeat, scenario, failure: `${stage}: ${oneLine(String(err), 300)}` });
           throw err;
         } finally {
           await db.close();

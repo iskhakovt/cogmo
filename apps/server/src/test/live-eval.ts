@@ -12,7 +12,8 @@
  * canned result: nothing is persisted and nothing outside the model is called.
  *
  * `EVAL_REPEATS` (default 1) runs every case that many times. Summary rates
- * count every sample, and each repeat's own rate follows in brackets.
+ * count every sample, and each repeat's own rate follows in brackets; the pure
+ * checks and summaries live in `eval-checks.ts`.
  */
 
 import * as R from "remeda";
@@ -33,6 +34,10 @@ import { sumUsage } from "../llm/usage.js";
 import { logger } from "../logger.js";
 import { DEFAULT_BASE_PROMPT, DEFAULT_PROFILE_MODEL } from "../setup/seed.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
+import { type EvalFailure, type EvalMetric, summariseRates } from "./eval-checks.js";
+
+export type { EvalFailure, EvalMetric } from "./eval-checks.js";
+export { isFailure } from "./eval-checks.js";
 
 // An empty `ANTHROPIC_API_KEY=` line in `.env` counts as unset.
 export const LIVE_API_KEY =
@@ -40,13 +45,13 @@ export const LIVE_API_KEY =
 
 export const EVAL_MODEL = process.env.LIVE_MODEL ?? DEFAULT_PROFILE_MODEL;
 
-/** Samples per case. */
+/** Samples per case. An empty `EVAL_REPEATS=` counts as unset. */
 export const EVAL_REPEATS = z.coerce
   .number()
   .int()
   .positive()
   .default(1)
-  .parse(process.env.EVAL_REPEATS);
+  .parse(process.env.EVAL_REPEATS || undefined);
 
 /** Every run once per repeat, case by case, tagged with its 0-based repeat. */
 export function withRepeats<T extends object>(
@@ -55,37 +60,12 @@ export function withRepeats<T extends object>(
   return runs.flatMap((run) => R.range(0, EVAL_REPEATS).map((repeat) => ({ ...run, repeat })));
 }
 
-/** A summary row: the samples in `of` for which `hit` holds. */
-export interface EvalMetric<O> {
-  name: string;
-  of: (o: O) => boolean;
-  hit: (o: O) => boolean;
-}
-
-/**
- * Each metric's rate per group, as `hits/samples` over every repeat, followed
- * by each repeat's own rate in brackets when there is more than one.
- */
+/** `summariseRates` over `EVAL_REPEATS`: a `completed` row, then each metric's rate per group. */
 export function rateTable<O extends { repeat: number }>(
   metrics: ReadonlyArray<EvalMetric<O>>,
-  groups: Readonly<Record<string, ReadonlyArray<O>>>,
+  groups: Readonly<Record<string, ReadonlyArray<O | EvalFailure>>>,
 ): Record<string, Record<string, string>> {
-  return Object.fromEntries(
-    metrics.map((m) => [
-      m.name,
-      R.mapValues(groups, (group) => {
-        const rate = (samples: ReadonlyArray<O>) => {
-          const population = samples.filter(m.of);
-          return `${population.filter(m.hit).length}/${population.length}`;
-        };
-        if (EVAL_REPEATS === 1) return rate(group);
-        const perRepeat = R.range(0, EVAL_REPEATS).map((i) =>
-          rate(group.filter((o) => o.repeat === i)),
-        );
-        return `${rate(group)} [${perRepeat.join(" ")}]`;
-      }),
-    ]),
-  );
+  return summariseRates(metrics, groups, EVAL_REPEATS);
 }
 
 const EVAL_TIMEZONE = "Europe/London";
@@ -123,7 +103,13 @@ const MEMORY_TOOLS: ReadonlySet<string> = new Set([
 
 type CoreMemoryNamespace = Service["coreMemory"];
 
-/** A user's core memory held in process, in the key order the store returns it. */
+/**
+ * A user's core memory held in process. `get` returns blocks in code-unit key
+ * order, which is Postgres `ORDER BY key` under the C collation. A linguistic
+ * collation such as `en_US` skips `_` at first level, so keys like
+ * `work_hours` and `workflow` can swap; the eval fixtures' keys order the
+ * same either way.
+ */
 export class EvalCoreMemory implements CoreMemoryNamespace {
   #blocks: Map<string, string>;
 
@@ -240,6 +226,19 @@ export async function runEvalConversation(params: {
   return { history, turns, blocksAfter };
 }
 
+/** Every assistant text block of the turn, in order: what the user was shown. */
+export function shownText(result: AgentLoopResult): string {
+  return result.newMessages
+    .filter((m) => m.role === "assistant")
+    .flatMap((m) =>
+      typeof m.content === "string"
+        ? [m.content]
+        : m.content.flatMap((b) => (b.type === "text" ? [b.text] : [])),
+    )
+    .filter((text) => text.trim() !== "")
+    .join("\n\n");
+}
+
 /** Memory tool calls per assistant message, in iteration order. */
 export function memoryCallsByIteration(
   messages: ReadonlyArray<Message>,
@@ -266,18 +265,6 @@ export function coreMemoryWrites(messages: ReadonlyArray<Message>): CoreMemoryBl
       const parsed = CoreMemoryUpdateInputSchema.safeParse(c.input);
       return parsed.success ? [parsed.data] : [{ key: "(unparsed)", content: "" }];
     });
-}
-
-/**
- * Relative time words, which go stale in a block that every later prompt
- * shows: "recently" still reads as recent months on.
- */
-const RELATIVE_TIME =
-  /\b(?:recent(?:ly)?|just|today|tonight|yesterday|tomorrow|ago|(?:this|last|next) (?:week(?:end)?|month|year))\b/gi;
-
-/** The relative time words in `content`, lower-cased, in order. */
-export function relativeTimeWords(content: string): string[] {
-  return (content.match(RELATIVE_TIME) ?? []).map((w) => w.toLowerCase());
 }
 
 /** Token usage summed across an eval run. */
