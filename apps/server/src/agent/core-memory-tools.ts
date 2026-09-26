@@ -4,10 +4,12 @@ import { defineTool } from "./tools.js";
 export const coreMemoryUpdate = defineTool({
   name: "core_memory_update",
   description:
-    "Update a core memory block — a structured note that persists across conversations " +
-    "and is always visible in your instructions. Use for important, evolving context: " +
-    "user profile (name, role, preferences), active projects, recurring topics. " +
-    "Blocks are identified by key. Overwrites the entire block content.",
+    "Rewrite a core memory block — a short note visible in your instructions in every " +
+    "conversation. For what every conversation needs: who the user is (name, role, location " +
+    "and timezone, who their close family are), active projects, standing preferences. " +
+    "Call it in the same turn the user mentions a change, even in passing. Not for events, " +
+    "one-off details or facts about other people — use memory_retain. Blocks are identified " +
+    "by key. Overwrites the whole block: include everything that still holds.",
   // Durable: a DB upsert. The overwrite is idempotent, but exactly-once
   // keeps replays from racing a concurrent same-key update from another
   // turn with stale content.

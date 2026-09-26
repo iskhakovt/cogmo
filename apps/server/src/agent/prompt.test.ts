@@ -128,6 +128,15 @@ describe("DefaultPromptSource", () => {
     expect(prompt).toContain("don't know your user yet");
   });
 
+  it("sends what onboarding learns to core memory, which ends onboarding", async () => {
+    const prompt = await new DefaultPromptSource({
+      getUserContext: async () => null,
+    }).assemble({ profile: undefined, rules: [] });
+
+    expect(prompt).toContain("core_memory_update");
+    expect(prompt).not.toContain("memory_retain");
+  });
+
   it("injects user context when available", async () => {
     const prompt = await new DefaultPromptSource({
       getUserContext: async () => "Name: Tim\nTimezone: Europe/Moscow",

@@ -257,7 +257,7 @@ function report(): void {
       `${verdict(o)} ${o.state.padEnd(11)} ${o.id.padEnd(18)} ${o.expect.padEnd(9)} ` +
         `first=[${o.first.join(",")}] turn=[${o.turn.join(",")}]${keys ? ` keys=${keys}` : ""}`,
     );
-    for (const w of o.coreWrites) console.log(`       ${w.key} := ${oneLine(w.content, 160)}`);
+    for (const w of o.coreWrites) console.log(`       ${w.key} := ${oneLine(w.content, 400)}`);
     console.log(`       reply: ${oneLine(o.reply, 120)}`);
   }
 

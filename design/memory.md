@@ -15,7 +15,7 @@
 
 Hindsight is a client-server system. Our app talks to it via HTTP — no direct database access. The server handles storage, embedding, retrieval, and deduplication. We supply the extraction logic (what goes in) and retrieval queries (what comes out).
 
-## Core Memory vs Hindsight `[proposed]`
+## Core Memory vs Hindsight `[confirmed]`
 
 Two stores hold what the agent knows about its user. **Core memory** is a few keyed blocks (`core_memory_blocks`, one row per user and key) rendered into every system prompt's `# User` section, so it survives compaction and needs no retrieval. Only the agent writes it, through `core_memory_update`. **Hindsight** holds everything else and is searched on demand by auto-recall, `memory_recall` and `memory_reflect`. The Observer fills it from every conversation at idle, whether or not the agent called `memory_retain`.
 
@@ -32,25 +32,27 @@ The test is whether a reply to an unrelated message could go wrong without the f
 
 **When.** In the turn the fact appears, including when it comes up in passing while the user asks for something else ("we only moved here last month"). `core_memory_update` overwrites the block, so the call rewrites it whole. The Observer writes only Hindsight, so a core fact the agent doesn't write in the turn never reaches a later prompt. Core memory therefore depends on the agent remembering to write in-turn, which is the failure mode the Observer avoids for Hindsight (see [Why Post-Conversation, Not Real-Time](#why-post-conversation-not-real-time-confirmed)). The evaluation below measures how often the agent writes it.
 
+**Where it lives.** `CORE_MEMORY_PROMPT_GUIDANCE` and `MEMORY_PROMPT_GUIDANCE` (`src/agent/service.ts`) state the rule in every prompt's `# Capabilities` section. The `core_memory_update` and `memory_retain` descriptions repeat it at the point of choice, and the onboarding text (`src/agent/prompt.ts`), shown while no block exists, sends what the agent learns to core memory.
+
 **Prior art.** MemGPT's working context is "a fixed-size read/write block of unstructured text … intended to be used to store key facts, preferences, and other important information about the user", with everything else in archival storage searched through function calls ([Packer et al., 2023](https://arxiv.org/abs/2310.08560)). Letta keeps the split: memory blocks are pinned to the context window ([memory blocks](https://docs.letta.com/guides/core-concepts/memory/memory-blocks)), and archival memory is not for "information that should always be visible" or "frequently changing state" ([archival memory](https://docs.letta.com/guides/core-concepts/memory/archival-memory)). LangMem draws the same line between a *profile*, "a single document that represents the current state" updated in place, and a *collection* of searchable records ([conceptual guide](https://langchain-ai.github.io/langmem/concepts/conceptual_guide/)).
 
 ### Evaluation
 
 `src/agent/core-memory-routing.live.test.ts` runs 25 labelled single-turn messages (`test/fixtures/evals/core-memory-routing.json`) through the production prompt, the built-in tool definitions and the agent loop on the seeded profile's model. Tool handlers are stubs, so nothing is persisted. It records which memory tools each turn calls. The 25 are 11 core facts (8 announced, 3 mentioned in passing while asking for something else), 7 Hindsight facts and 7 messages worth storing nowhere. Each runs twice: with no core memory, where the prompt shows the onboarding text, and with established blocks. The eval reports rather than asserts (see [testing.md](testing.md) → Live Tests).
 
-Results on `claude-sonnet-5`, one sample per case:
+Results on `claude-sonnet-5`, one sample per case. *Baseline* is the guidance before this rule: the core-memory guidance said only "Update them as you learn new things", and onboarding said "Store what you learn using memory_retain". *Rule* is the current guidance.
 
-| Metric | Baseline, empty | Baseline, established |
-|-|-|-|
-| Core facts written to core memory in the turn | 3/11 | 8/11 |
-| — announced | 3/8 | 7/8 |
-| — in passing | 0/3 | 1/3 |
-| — in the first response | 0/11 | 5/11 |
-| Core facts sent to `memory_retain` only | 2/11 | 2/11 |
-| Core writes on Hindsight facts | 0/7 | 0/7 |
-| Core writes on messages worth storing nowhere | 0/7 | 0/7 |
+| Metric | Baseline, empty | Baseline, established | Rule, empty | Rule, established |
+|-|-|-|-|-|
+| Core facts written to core memory in the turn | 3/11 | 8/11 | 9/11 | 11/11 |
+| — announced | 3/8 | 7/8 | 6/8 | 8/8 |
+| — in passing | 0/3 | 1/3 | 3/3 | 3/3 |
+| — in the first response | 0/11 | 5/11 | 0/11 | 9/11 |
+| Core facts sent to `memory_retain` only | 2/11 | 2/11 | 0/11 | 0/11 |
+| Core writes on Hindsight facts | 0/7 | 0/7 | 0/7 | 0/7 |
+| Core writes on messages worth storing nowhere | 0/7 | 0/7 | 0/7 | 0/7 |
 
-With blocks already in place, the agent updates core memory for announced facts but mostly misses facts mentioned in passing. With no blocks, the onboarding text ("Store what you learn using memory_retain") draws the turn into introductions, and core facts go to `memory_retain` or nowhere. No case wrote core memory when it shouldn't have.
+On the baseline, the agent updated core memory for announced facts once blocks existed but mostly missed facts mentioned in passing. With no blocks, onboarding drew the turn into introductions, and core facts went to `memory_retain` or nowhere. Under the rule, every core fact reaches core memory once blocks exist, most in the first response. With no blocks, the first response is always a recall and onboarding still leads the turn. The two misses there (a new project, a new baby) wrote nothing, and the first block written ends onboarding. An intermediate wording ("close family" rather than "who their close family are") once wrote a sister's birthday into `user_profile`; one sample per case can't separate that from noise.
 
 ## Bank Strategy `[confirmed]`
 

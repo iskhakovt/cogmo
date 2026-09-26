@@ -20,8 +20,8 @@ import type { ToolSpec } from "./tools.js";
 /** Service guidance, in the order the `# Capabilities` section renders it. */
 export const BUILT_IN_SERVICE_GUIDANCE: ReadonlyArray<string> = [
   MEMORY_PROMPT_GUIDANCE,
-  FILES_PROMPT_GUIDANCE,
   CORE_MEMORY_PROMPT_GUIDANCE,
+  FILES_PROMPT_GUIDANCE,
   DELEGATE_CODING_GUIDANCE,
   SKILLS_PROMPT_GUIDANCE,
   SUBAGENT_PROMPT_GUIDANCE,

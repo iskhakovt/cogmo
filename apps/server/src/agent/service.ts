@@ -35,13 +35,13 @@ export interface FileEntry {
 /** Prompt guidance for the memory Service namespace. */
 export const MEMORY_PROMPT_GUIDANCE = `You have persistent memory across conversations. Use it well:
 - **Recall first**: At the start of a conversation or when a topic comes up, check if you already know relevant context.
-- **Retain important things**: Facts about the user, their preferences, decisions made, commitments, project context. Ask yourself: "would knowing this help me in a future conversation?"
+- **Retain important things**: Events, decisions, commitments, details about people and projects. Ask yourself: "would knowing this help me in a future conversation?" What every conversation needs (who the user is, active projects, standing preferences) goes in core memory instead.
 - **Don't over-retain**: Skip greetings, small talk, information already saved in files, and things the user said are temporary.
 - **Update, don't duplicate**: If you learn something that contradicts a previous memory, retain the new version with context about the change.
 - **Recall vs reflect**: \`memory_recall\` returns raw matching facts — fast, cheap, best for looking something up. \`memory_reflect\` runs an agentic synthesis loop across many memories — slower and more expensive, best for open-ended questions that need multi-hop reasoning (e.g. "summarise what I know about X", "what risks should I watch for on project Y?").`;
 
 /** Prompt guidance for the coreMemory Service namespace. */
-export const CORE_MEMORY_PROMPT_GUIDANCE = `You have core memory blocks — structured notes about your user and ongoing context that are always visible to you. Update them as you learn new things. Current blocks are shown in the User section of your instructions.`;
+export const CORE_MEMORY_PROMPT_GUIDANCE = `You have core memory blocks — short notes shown in the User section of your instructions in every conversation. Keep in them what every conversation needs: who the user is (name, role and employer, where they live and their timezone, who their close family are), their active projects, and standing preferences on how to work with them. When the user tells you something that adds to or changes any of this, update the block with \`core_memory_update\` in the same turn, even when they mention it in passing while asking for something else. Rewrite the whole block, keeping what still holds. Everything else (events, details, one-off decisions, facts about other people) belongs in long-term memory, not core memory.`;
 
 export interface CoreMemoryBlock {
   key: string;
