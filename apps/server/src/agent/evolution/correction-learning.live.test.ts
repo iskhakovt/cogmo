@@ -143,6 +143,8 @@ interface Outcome {
 }
 
 const outcomes = new Map<string, Outcome>();
+/** Scenarios that threw, with the stage they reached. */
+const failures = new Map<string, string>();
 const usage = createUsageMeter();
 
 function probeOf(turn: EvalTurn, check: Check): Probe {
@@ -206,9 +208,10 @@ function report(): void {
     const o = outcomes.get(s.id);
     return o ? [o] : [];
   });
-  if (rows.length === 0) return;
+  if (rows.length === 0 && failures.size === 0) return;
 
   console.log(`\nCorrection → steering rule → followed, on ${EVAL_MODEL}\n`);
+  for (const [id, failure] of failures) console.log(`${id}: FAILED ${failure}`);
   for (const o of rows) {
     const follows = (p: Probe | undefined) =>
       p === undefined ? "n/a" : p.follows ? "follows" : "VIOLATES";
@@ -259,6 +262,7 @@ describe.skipIf(LIVE_API_KEY === undefined)(
       async (scenario) => {
         const provider = new AnthropicProvider(expectDefined(LIVE_API_KEY, "API key"));
         const db = await createTestDatabase();
+        let stage = "";
         try {
           const store = new DrizzleAgentStore();
           const activeRules = () =>
@@ -270,6 +274,7 @@ describe.skipIf(LIVE_API_KEY === undefined)(
 
           /** One correcting conversation, then the Observer's extraction on its transcript. */
           const learnFrom = async (messages: ReadonlyArray<string>, label: string) => {
+            stage = `in the ${label} conversation`;
             const conversation = await runEvalConversation({
               provider,
               coreMemory: new EvalCoreMemory(EVAL.established),
@@ -279,6 +284,7 @@ describe.skipIf(LIVE_API_KEY === undefined)(
             });
             for (const t of conversation.turns) usage.add(t.result.usage);
             expectCompleted(conversation.turns);
+            stage = `in the ${label} extraction`;
             const extracted = await extractCorrections(conversation.history, EVAL_PROFILE.id, {
               provider: usage.metered(provider),
               model: EXTRACTION_MODEL,
@@ -297,6 +303,7 @@ describe.skipIf(LIVE_API_KEY === undefined)(
           const second = await learnFrom(scenario.second, "second");
           const active = await activeRules();
 
+          stage = "in the probes";
           const probe = (rules: ReadonlyArray<{ rule: string }>, label: string) =>
             runEvalTurn({
               provider,
@@ -325,6 +332,9 @@ describe.skipIf(LIVE_API_KEY === undefined)(
           });
 
           expectCompleted(probes);
+        } catch (err) {
+          failures.set(scenario.id, `${stage}: ${oneLine(String(err), 300)}`);
+          throw err;
         } finally {
           await db.close();
         }
