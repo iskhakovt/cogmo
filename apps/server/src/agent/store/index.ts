@@ -586,8 +586,8 @@ export interface AgentStore {
 
   /**
    * Get the oldest user (for bootstrapping). This and `getDefaultProfile` order
-   * by `id` (UUIDv7, so creation order): unordered, a pick follows heap order,
-   * which in-place edits and reused space change.
+   * by `id` (UUIDv7, so creation order). Unordered, Postgres returns whichever
+   * row its plan reaches first, and in-place edits and reused space move it.
    */
   getFirstUser(tx: Transaction): Promise<{ id: string } | undefined>;
 
