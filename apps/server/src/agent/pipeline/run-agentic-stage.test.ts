@@ -218,6 +218,31 @@ describe("runAgenticStage", () => {
     );
   });
 
+  it("renders the core memory of the run conversation's user", async () => {
+    const h = await harness();
+    vi.mocked(h.agentStore.getConversation).mockResolvedValue({
+      id: "conv-1",
+      userId: "user-2",
+      profileId: "profile-1",
+      isPrivate: true,
+      cooldownState: null,
+      voiceMode: null,
+    });
+    const blocksByUser = new Map([
+      ["user-1", [{ key: "user_profile", content: "Name: Ana" }]],
+      ["user-2", [{ key: "user_profile", content: "Name: Ben" }]],
+    ]);
+    vi.mocked(h.agentStore.getCoreMemoryBlocks).mockImplementation(
+      async (_tx, userId) => blocksByUser.get(userId) ?? [],
+    );
+
+    await runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+
+    expect(h.deps.promptSource.assemble).toHaveBeenCalledWith(
+      expect.objectContaining({ coreMemory: [{ key: "user_profile", content: "Name: Ben" }] }),
+    );
+  });
+
   it("delivers the stage's reply to batch targets", async () => {
     const h = await harness();
 

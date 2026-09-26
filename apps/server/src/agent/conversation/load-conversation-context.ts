@@ -1,13 +1,14 @@
 import type { Transactor } from "../../db/index.js";
 import type { TransportStore } from "../../transport/store/index.js";
+import type { CoreMemoryBlock } from "../service.js";
 import type { AgentStore, Profile } from "../store/index.js";
 
 /**
- * Compose the steering-rule context the prompt assembler needs: the
- * channel types currently delivering the conversation and the steering
- * rules at the intersection of `(profile, channels)`. Two reads share
- * one tx and see a consistent snapshot under the project's REPEATABLE
- * READ default.
+ * Load what the prompt assembler renders: the channel types currently
+ * delivering the conversation, the steering rules at the intersection of
+ * `(profile, channels)`, and the core memory blocks of the conversation's
+ * user. The reads share one tx and see a consistent snapshot under the
+ * project's REPEATABLE READ default.
  *
  * The `Profile` row is NOT re-read here — the orchestrator passes the
  * row it already loaded for voice-mode + tool-catalog resolution, so a
@@ -26,6 +27,8 @@ export interface LoadConversationContextDeps {
 
 export interface LoadConversationContextArgs {
   conversationId: string;
+  /** The conversation's user, whose core memory blocks the prompt renders. */
+  userId: string;
   /**
    * Pre-loaded profile from the orchestrator. `undefined` when the
    * profile row was missing (deleted mid-turn, etc.); in that case the
@@ -37,6 +40,7 @@ export interface LoadConversationContextArgs {
 export interface ConversationContext {
   channelTypes: ReadonlyArray<string>;
   rules: ReadonlyArray<{ rule: string }>;
+  coreMemory: ReadonlyArray<CoreMemoryBlock>;
 }
 
 export async function loadConversationContext(
@@ -48,6 +52,7 @@ export async function loadConversationContext(
     const rules = args.profile
       ? await deps.agentStore.getActiveRules(tx, args.profile.id, channelTypes)
       : [];
-    return { channelTypes, rules };
+    const coreMemory = await deps.agentStore.getCoreMemoryBlocks(tx, args.userId);
+    return { channelTypes, rules, coreMemory };
   });
 }
