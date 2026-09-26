@@ -32,30 +32,30 @@ The test is whether a reply to an unrelated message could go wrong without the f
 
 **When.** In the turn the fact appears, including when it comes up in passing while the user asks for something else ("we only moved here last month"). `core_memory_update` overwrites the block, so the call rewrites it whole. The Observer writes only Hindsight, so a core fact the agent doesn't write in the turn never reaches a later prompt. Core memory therefore depends on the agent remembering to write in-turn, which is the failure mode the Observer avoids for Hindsight (see [Why Post-Conversation, Not Real-Time](#why-post-conversation-not-real-time-confirmed)). The evaluation below measures how often the agent writes it.
 
-**Where it lives.** `CORE_MEMORY_PROMPT_GUIDANCE` and `MEMORY_PROMPT_GUIDANCE` (`src/agent/service.ts`) state the rule in every prompt's `# Capabilities` section. The `core_memory_update` and `memory_retain` descriptions repeat it at the point of choice, and the onboarding text (`src/agent/prompt.ts`), shown while no block exists, sends who the user is, their projects and their preferences to core memory.
+**Where it lives.** `CORE_MEMORY_PROMPT_GUIDANCE` and `MEMORY_PROMPT_GUIDANCE` (`src/agent/service.ts`) state the rule in every prompt's `# Capabilities` section. The `core_memory_update` and `memory_retain` descriptions repeat it at the point of choice, and the onboarding text (`src/agent/prompt.ts`), shown while no block exists, sends what the agent learns about the user, including what they mention in passing, to core memory.
 
 **Prior art.** MemGPT's working context is "a fixed-size read/write block of unstructured text … intended to be used to store key facts, preferences, and other important information about the user", with everything else in archival storage searched through function calls ([Packer et al., 2023](https://arxiv.org/abs/2310.08560)). Letta keeps the split: memory blocks are pinned to the context window ([memory blocks](https://docs.letta.com/guides/core-concepts/memory/memory-blocks)), and archival memory is not for "information that should always be visible" or "frequently changing state" ([archival memory](https://docs.letta.com/guides/core-concepts/memory/archival-memory)). LangMem draws the same line between a *profile*, "a single document that represents the current state" updated in place, and a *collection* of searchable records ([conceptual guide](https://langchain-ai.github.io/langmem/concepts/conceptual_guide/)).
 
 ### Evaluation
 
-`src/agent/core-memory-routing.live.test.ts` runs 25 labelled single-turn messages (`test/fixtures/evals/core-memory-routing.json`) through the production prompt, the built-in tool definitions and the agent loop on the seeded profile's model. Tool handlers are stubs, so nothing is persisted. It records which memory tools each turn calls. The 29 are 12 core facts (9 announced, 3 mentioned in passing while asking for something else), 9 Hindsight facts and 8 messages worth storing nowhere, including boundary cases: a conference trip, a partner's promotion, a one-off format request and a finished project. Each runs twice: with no core memory, where the prompt shows the onboarding text, and with established blocks, in key order as production renders them. The finished project runs only with established blocks. With established blocks the eval also checks each write's content: that it targets the case's expected block, which established lines the rewrite lost, and that a finished project is gone. The eval reports rather than asserts (see [testing.md](testing.md) → Live Tests).
+`src/agent/core-memory-routing.live.test.ts` runs 29 labelled single-turn messages (`test/fixtures/evals/core-memory-routing.json`) through the production prompt, the built-in tool definitions and the agent loop on the seeded profile's model. Tool handlers are stubs, so nothing is persisted. It records which memory tools each turn calls. The 29 are 12 core facts (9 announced, 3 mentioned in passing while asking for something else), 9 Hindsight facts and 8 messages worth storing nowhere, including boundary cases: a conference trip, a partner's promotion, a one-off format request and a finished project. Each runs twice: with no core memory, where the prompt shows the onboarding text, and with established blocks, in key order as production renders them. The finished project runs only with established blocks. With established blocks the eval also checks each write's content: that it targets the case's expected block, which established lines the rewrite lost, and that a finished project is gone. The eval reports rather than asserts (see [testing.md](testing.md) → Live Tests).
 
 Results on `claude-sonnet-5`, one sample per case. *Baseline* is the guidance before this rule: the core-memory guidance said only "Update them as you learn new things", and onboarding said "Store what you learn using memory_retain". It predates the boundary cases and the content checks (—). *Rule* is the current guidance.
 
 | Metric | Baseline, empty | Baseline, established | Rule, empty | Rule, established |
 |-|-|-|-|-|
-| Core facts written to core memory in the turn | 3/11 | 8/11 | 4/11 | 12/12 |
-| — announced | 3/8 | 7/8 | 4/8 | 9/9 |
-| — in passing | 0/3 | 1/3 | 0/3 | 3/3 |
-| — in the first response | 0/11 | 5/11 | 0/11 | 11/12 |
+| Core facts written to core memory in the turn | 3/11 | 8/11 | 7/11 | 12/12 |
+| — announced | 3/8 | 7/8 | 5/8 | 9/9 |
+| — in passing | 0/3 | 1/3 | 2/3 | 3/3 |
+| — in the first response | 0/11 | 5/11 | 0/11 | 10/12 |
 | — to the expected block | — | — | — | 12/12 |
 | — finished project dropped | — | — | — | 0/1 |
 | Rewrites that lost an established line | — | — | — | 0/12 |
-| Core facts sent to `memory_retain` only | 2/11 | 2/11 | 0/11 | 0/12 |
+| Core facts sent to `memory_retain` only | 2/11 | 2/11 | 2/11 | 0/12 |
 | Core writes on Hindsight facts | 0/7 | 0/7 | 0/9 | 0/9 |
 | Core writes on messages worth storing nowhere | 0/7 | 0/7 | 0/8 | 0/8 |
 
-On the baseline, the agent updated core memory for announced facts once blocks existed but mostly missed facts mentioned in passing. With no blocks, onboarding drew the turn into introductions, and core facts went to `memory_retain` or nowhere. Under the rule, once blocks exist every core fact reaches its expected block, nearly all in the first response, with no established line lost, and none of the 17 other messages writes core memory, the conference trip included. A finished project stays in `active_projects`, marked completed. With no blocks, the first response is always a recall and onboarding leads the turn: 4 of 11 core facts reach core memory, none of those mentioned in passing.
+On the baseline, the agent updated core memory for announced facts once blocks existed but mostly missed facts mentioned in passing. With no blocks, onboarding drew the turn into introductions, and core facts went to `memory_retain` or nowhere. Under the rule, once blocks exist every core fact reaches its expected block, nearly all in the first response, with no established line lost, and none of the 17 other messages writes core memory, the conference trip included. A finished project stays in `active_projects` marked completed, a known boundary. With no blocks, the first response is always a recall and onboarding leads the turn: 7 of 11 core facts reach core memory (8 of 11 in a second run of the core cases), and the rest go to `memory_retain` or nowhere.
 
 ## Bank Strategy `[confirmed]`
 
