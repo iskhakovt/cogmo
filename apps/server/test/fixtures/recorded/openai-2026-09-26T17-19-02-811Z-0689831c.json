@@ -1,0 +1,33 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Return valid json only.\n\nExtract facts from the following chunk.\n\nChunk: 1/1\nEvent Date: [DATE] ([TS])\nContext: none\nMetadata:\n  source: conversation\n\nContent:\nT's timezone is Europe/Lisbon (WEST, UTC+1).",
+        "model": "gpt-4o-mini",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\n  \"facts\": [\n    {\n      \"what\": \"T's timezone is Europe/Lisbon (WEST, UTC+1)\",\n      \"when\": \"N/A\",\n      \"where\": \"N/A\",\n      \"who\": \"T\",\n      \"why\": \"N/A\",\n      \"fact_kind\": \"conversation\",\n      \"occurred_start\": null,\n      \"occurred_end\": null,\n      \"fact_type\": \"world\",\n      \"entities\": [\"T\", \"Europe/Lisbon\"],\n      \"causal_relations\": null,\n      \"from_attachments\": null\n    }\n  ]\n}",
+        "usage": {
+          "prompt_tokens": 2914,
+          "completion_tokens": 126,
+          "total_tokens": 3040,
+          "prompt_tokens_details": {
+            "cached_tokens": 1408,
+            "audio_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "audio_tokens": 0,
+            "accepted_prediction_tokens": 0,
+            "rejected_prediction_tokens": 0
+          }
+        }
+      },
+      "metadata": {
+        "systemHash": "a24b0767"
+      }
+    }
+  ]
+}

@@ -1,0 +1,103 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Call me T — I've just moved to Lisbon.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "Nice to meet you, T — I'm your AI assistant. I'll keep track of things like your projects, preferences, and context so I can be more useful over time.\n\nSince you've just moved to Lisbon, I'll set your timezone to Europe/Lisbon (WEST, UTC+1) unless you tell me otherwise. A couple quick things to help me help you better:\n\n1. What do you do (work/projects)?\n2. Any preference on how I communicate — brief and to the point, more detailed, casual/formal?",
+        "toolCalls": [
+          {
+            "name": "core_memory_update",
+            "arguments": "{\"key\": \"user_profile\", \"content\": \"Name: T. Lives in Lisbon, Portugal (timezone: Europe/Lisbon, WEST/UTC+1).\"}",
+            "id": "toolu_01Wrb68Kwz6uwzEmeA29C9mJ"
+          }
+        ]
+      },
+      "recordedTimings": {
+        "ttftMs": 1169,
+        "interChunkDelaysMs": [
+          0,
+          1107,
+          0,
+          0,
+          0,
+          0,
+          0,
+          43,
+          44,
+          56,
+          37,
+          52,
+          37,
+          55,
+          36,
+          46,
+          49,
+          42,
+          47,
+          46,
+          43,
+          45,
+          52,
+          39,
+          49,
+          47,
+          42,
+          62,
+          36,
+          38,
+          47,
+          45,
+          51,
+          39,
+          46,
+          47,
+          61,
+          27,
+          53,
+          40,
+          46,
+          46,
+          50,
+          38,
+          45,
+          46,
+          47,
+          44,
+          187,
+          0,
+          0,
+          256,
+          0,
+          0,
+          0,
+          375,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "totalDurationMs": 4955
+      },
+      "metadata": {
+        "systemHash": "2fbbaf2e",
+        "toolsHash": "837ba743"
+      }
+    }
+  ]
+}

@@ -51,6 +51,7 @@ Docker services + app wired in-process. Tests the orchestration pipeline — deb
 |-|-|
 | Pipeline | `bootstrap()` in-process, emit `inbound/arrived` → assert assistant message in DB |
 | Hindsight round-trip | `retain()` → `recall()` returns the fact (llmock provides instant deterministic responses) |
+| Learning loop | Three conversations through `handle-message` and the Observer → the third turn's request, read from llmock's journal, carries the core-memory block, the rule the first two graduated, and a fact recalled from Hindsight |
 
 ## E2E Tests `[confirmed]`
 

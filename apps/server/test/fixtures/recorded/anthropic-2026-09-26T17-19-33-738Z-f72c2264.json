@@ -1,0 +1,47 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Where was that restaurant with the amazing cod? I want to book it again.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "The restaurant was Taberna da Rua das Flores in Lisbon — that's where you had the bacalhau you said was the best you'd ever had. Want me to help draft a reservation message or look up their contact info/booking process?"
+      },
+      "recordedTimings": {
+        "ttftMs": 1168,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          38,
+          78,
+          49,
+          50,
+          43,
+          46,
+          348,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          13,
+          47,
+          37,
+          3,
+          1,
+          0
+        ],
+        "totalDurationMs": 1921
+      },
+      "metadata": {
+        "systemHash": "9cc8a9f9",
+        "toolsHash": "837ba743"
+      }
+    }
+  ]
+}

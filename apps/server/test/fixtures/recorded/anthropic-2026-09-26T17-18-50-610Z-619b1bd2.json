@@ -1,0 +1,69 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Please don't use bullet points with me — just write in plain sentences.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 4,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "core_memory_update",
+            "arguments": "{\"content\": \"Name: T. Lives in Lisbon, Portugal (timezone: Europe/Lisbon, WEST/UTC+1). Preference: communicate in plain sentences/prose, not bullet points or lists.\", \"key\": \"user_profile\"}",
+            "id": "toolu_016jUrXdCsh55cbKuKQcUdLh"
+          }
+        ]
+      },
+      "recordedTimings": {
+        "ttftMs": 1113,
+        "interChunkDelaysMs": [
+          0,
+          578,
+          0,
+          0,
+          0,
+          0,
+          0,
+          686,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          159,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "totalDurationMs": 2537
+      },
+      "metadata": {
+        "systemHash": "741c4bfb",
+        "toolsHash": "837ba743"
+      }
+    }
+  ]
+}

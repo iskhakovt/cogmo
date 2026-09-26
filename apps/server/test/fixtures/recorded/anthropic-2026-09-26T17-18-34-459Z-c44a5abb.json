@@ -1,0 +1,42 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Call me T — I've just moved to Lisbon.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 1,
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "Got it, saved. Go ahead and answer those when you have a sec — I'll fill in the rest of your profile as I learn it."
+      },
+      "recordedTimings": {
+        "ttftMs": 648,
+        "interChunkDelaysMs": [
+          1,
+          0,
+          0,
+          328,
+          0,
+          0,
+          0,
+          0,
+          17,
+          51,
+          42,
+          45,
+          46,
+          26,
+          0,
+          0,
+          0
+        ],
+        "totalDurationMs": 1204
+      },
+      "metadata": {
+        "systemHash": "2fbbaf2e",
+        "toolsHash": "837ba743"
+      }
+    }
+  ]
+}
