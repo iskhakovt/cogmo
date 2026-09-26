@@ -42,6 +42,7 @@ const RULES = [
     category: "style",
     active: true,
     observationCount: 2,
+    priority: 100,
     channelType: null,
   },
   {
@@ -50,6 +51,7 @@ const RULES = [
     category: "style",
     active: true,
     observationCount: 3,
+    priority: 100,
     channelType: null,
   },
 ];

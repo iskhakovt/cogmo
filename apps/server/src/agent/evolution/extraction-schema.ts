@@ -6,6 +6,7 @@
  * Results are structured via chatTyped() for reliable parsing.
  */
 
+import * as R from "remeda";
 import { z } from "zod";
 
 // --- Extraction output schema ---
@@ -59,32 +60,68 @@ export const CorrectionExtractionSchema = z.object({
 export type CorrectionItem = z.infer<typeof CorrectionItemSchema>;
 export type CorrectionExtraction = z.infer<typeof CorrectionExtractionSchema>;
 
+// --- Rule labels ---
+
+/** The fields `labelRules` orders rules by. */
+interface LabelOrderKey {
+  id: string;
+  rule: string;
+  priority: number;
+}
+
+/**
+ * Give each rule the short label a prompt shows in place of its id (`R1`,
+ * `R2`, …), keyed in label order. The prompt renders from this map and the
+ * model's answer resolves through it, so the two cannot disagree. A short
+ * ordinal is easy for the model to copy exactly, where a slip in a UUID
+ * silently drops the match.
+ *
+ * Labels follow priority, then rule text; the id only breaks an exact tie.
+ * Ids and creation order differ between runs, so ordering by them would
+ * relabel the same rules and a recorded prompt would stop matching.
+ * Comparison is by UTF-16 code unit, which no locale changes.
+ */
+export function labelRules<T extends LabelOrderKey>(
+  rules: ReadonlyArray<T>,
+): ReadonlyMap<string, T> {
+  const ordered = R.sortBy(
+    rules,
+    [(r) => r.priority, "asc"],
+    [(r) => r.rule, "asc"],
+    [(r) => r.id, "asc"],
+  );
+  return new Map(ordered.map((rule, i) => [`R${i + 1}`, rule]));
+}
+
 // --- Extraction prompt ---
 
 export function buildExtractionPrompt(
-  existingRules: ReadonlyArray<{
-    id: string;
-    rule: string;
-    category: string;
-    channelType: string | null;
-  }>,
+  /** Existing rules keyed by label, as `labelRules` returns them. */
+  existingRules: ReadonlyMap<
+    string,
+    {
+      rule: string;
+      category: string;
+      channelType: string | null;
+    }
+  >,
   activeChannelTypes: ReadonlyArray<string>,
 ): string {
   const rulesSection =
-    existingRules.length > 0
+    existingRules.size > 0
       ? `## Existing Rules
 
 The following rules have already been extracted from previous conversations. Compare each new correction against these to avoid duplicates.
 
-${existingRules
-  .map((r, i) => {
+${[...existingRules]
+  .map(([label, r], i) => {
     const scope = r.channelType ? `channel:${r.channelType}` : "all channels";
-    return `${i + 1}. [${r.id}] (${r.category}, ${scope}) ${r.rule}`;
+    return `${i + 1}. [${label}] (${r.category}, ${scope}) ${r.rule}`;
   })
   .join("\n")}
 
-If a correction is semantically equivalent to an existing rule with the same channel scope, set action to "reinforce" and matchedExistingRuleId to the rule's ID.
-If a correction directly contradicts an existing rule, set action to "contradiction" and matchedExistingRuleId to the contradicted rule's ID.
+If a correction is semantically equivalent to an existing rule with the same channel scope, set action to "reinforce" and matchedExistingRuleId to the rule's label (e.g. "R1").
+If a correction directly contradicts an existing rule, set action to "contradiction" and matchedExistingRuleId to the contradicted rule's label.
 A rule that is similar in wording but applies to a different channel scope (e.g. existing rule applies to all channels but the correction is Telegram-specific) is NOT a match — emit it as "new" with the appropriate channelType.`
       : "No existing rules have been extracted yet. All corrections will be new.";
 
