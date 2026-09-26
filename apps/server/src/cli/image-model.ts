@@ -322,16 +322,15 @@ function parseRatios(value: string): NonNullable<ImageModelCapabilities["aspectR
     .split(",")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
-  const validated: ImageAspectRatio[] = [];
-  for (const part of parts) {
+  const validated = parts.map((part): ImageAspectRatio => {
     const match = IMAGE_ALLOWED_ASPECT_RATIOS.find((r) => r === part);
     if (!match) {
       throw new Error(
         `--ratios got "${part}"; expected one of ${IMAGE_ALLOWED_ASPECT_RATIOS.join(", ")}`,
       );
     }
-    validated.push(match);
-  }
+    return match;
+  });
   if (validated.length === 0) {
     throw new Error("--ratios got an empty list");
   }
