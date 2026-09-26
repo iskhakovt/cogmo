@@ -188,7 +188,7 @@ core_memory_blocks (
 
 ### Interactions
 
-- **Per-user rendering.** Blocks render for the conversation's user, which prompt assembly receives as `userId`; scoping adds the turn's profile class. Loading moves into `loadConversationContext`, which already holds the turn's profile, and `AssembleContext` carries the loaded blocks and the class's restricted flag, so `DefaultPromptSource` becomes a pure formatter and `getUserContext` goes away.
+- **Per-user rendering.** `loadConversationContext` loads the conversation user's blocks, and `AssembleContext` carries them to `DefaultPromptSource`, a pure formatter. Scoping adds the turn's profile class to that load (the use case already holds the turn's profile) and the class's restricted flag to the context.
 - **System prompt snapshot** ([prompt-caching.md](prompt-caching.md#system-prompt-snapshot-proposed)). The snapshot's `# User` renders the blocks visible when the epoch opens. Announcements cover only blocks visible to the turn (shared, or the turn's class), so a write in another class's conversation is never announced here. `TurnContextSchema.announcedCoreMemoryKeys` becomes `announcedCoreMemoryBlocks: { profileClass: string | null, key: string }[]`, since a key alone is ambiguous across scopes. The configuration digest adds the profile class and its restricted flag, so a `/profile switch` to another class, `/profile class` or `/classes restrict` opens an epoch and re-renders `# User`. Without that, two classed profiles with the same base prompt and tools would share a snapshot, and a restricted class's blocks would stay in front of an unrestricted persona.
 
 ### Prior Art
@@ -208,7 +208,7 @@ Letta attaches memory blocks to agents. A block created on its own and attached 
 
 1. `p1` Schema and store: the `profile_class` column, the three-column unique constraint and the FK in one generated migration; `getCoreMemoryBlocks` and `upsertCoreMemoryBlock` take the class. PGlite tests: one shared block per key, a class block beside a shared one with the same key, the cascade on class delete, one class's blocks invisible to another.
 2. `p1` Service ACL: `buildTurnService` resolves the write scope as in [Behaviour by Profile](#behaviour-by-profile); tests cover the matrix, including `shared` refused in a restricted profile.
-3. `p1` Tool and rendering: per-turn `core_memory_update` variants; labelled `# User` and `core_memory_read` for classed profiles; blocks loaded in `loadConversationContext`. Tests: an unclassed profile's prompt byte-identical to today's; a classed profile's prompt renders shared blocks and its class's, never another class's.
+3. `p1` Tool and rendering: per-turn `core_memory_update` variants; labelled `# User` and `core_memory_read` for classed profiles; the class added to the load in `loadConversationContext`. Tests: an unclassed profile's prompt byte-identical to today's; a classed profile's prompt renders shared blocks and its class's, never another class's.
 4. `p2` Eval: classed and restricted runs in `core-memory-routing.live.test.ts` (identity basics to shared, everything else to the class), recorded under [Evaluation](#evaluation).
 5. `p2` Prompt caching: the snapshot changes in [Interactions](#interactions), folded into step 3 of [prompt-caching.md](prompt-caching.md#implementation-plan-proposed).
 Docs land with each step: [data-model.md](data-model.md) and the schema above with step 1, the scope split in the routing table with step 3. This section moves to `[confirmed]` with step 4's results.
