@@ -298,9 +298,10 @@ describe("runAgenticStage", () => {
     expect(second).toEqual(first);
   });
 
-  it("sends byte-identical tools when its frozen table comes back with its keys re-sorted", async () => {
-    // The Inngest server re-encodes memoized step output with object keys
-    // sorted at every depth — the order `canonicalKeyOrder` produces.
+  it("sends byte-identical tools when replayed from the server's copy of its frozen table", async () => {
+    // The server returns memoized step output with object keys sorted at every
+    // depth (as `canonicalKeyOrder` does) and strings unchanged. A table
+    // returned as an object fails this; one returned as JSON text passes.
     const h = await harness();
     const { memo, steps } = memoizingSteps();
 
@@ -311,8 +312,10 @@ describe("runAgenticStage", () => {
     const [first, second] = h.runStreamingAgentLoop.mock.calls.map(([params]): string =>
       JSON.stringify(params.tools.definitions()),
     );
-    expect(first).toContain('"type":"object","properties"');
-    expect(second).toBe(first);
+    // Non-vacuous: sorted, these definitions serialize differently.
+    const sent = expectDefined(first, "first invocation's tools");
+    expect(JSON.stringify(canonicalKeyOrder(JSON.parse(sent)))).not.toBe(sent);
+    expect(second).toBe(sent);
   });
 
   it("fails the stage when the loop degrades, after persisting what it produced", async () => {

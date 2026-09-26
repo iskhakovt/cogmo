@@ -205,7 +205,7 @@ The cases:
 7. `auto-recall` cached → no `memory.recall` round trip, cached memories reach the system prompt.
 8. `tool-iter1-0` cached → the durable tool handler body does not run; the cached output flows into the transcript.
 9. `persist-summary` cached → no `insertOrRecoverSummary` call, with the same run uncached asserted to reach the store (non-vacuity check).
-10. `freeze-turn-inputs` cached → the prompt and the loop get the cached voice decision and tool table, not this invocation's reads.
+10. `freeze-turn-inputs` cached → the prompt, the loop and voice delivery follow the cached voice decision and tool table, not this invocation's reads.
 11. `freeze-turn-inputs` cached as the server returns it, object keys sorted at every depth → the replay sends the same `tools` bytes as the run that executed the step.
 
 Two tests run a turn with nothing cached while a live read changes between its invocations: a skill that stops loading once its tool step has run (both LLM requests carry the same `tools`, and the follow-up carries the skill's replayed result), and a profile switched off voice after `assemble-prompt` (the turn still delivers the voice reply its prompt was assembled for).

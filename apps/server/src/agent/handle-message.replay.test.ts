@@ -711,10 +711,10 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
     ]);
   });
 
-  it("sends byte-identical tools when the cached freeze-turn-inputs comes back with its keys re-sorted", async () => {
-    // The Inngest server re-encodes memoized step output with object keys
-    // sorted at every depth — the order `canonicalKeyOrder` produces. A replay
-    // must build the same `tools` bytes as the invocation that ran the step.
+  it("sends byte-identical tools when replayed from the server's copy of freeze-turn-inputs", async () => {
+    // The server returns memoized step output with object keys sorted at every
+    // depth (as `canonicalKeyOrder` does) and strings unchanged. A table
+    // returned as an object fails this; one returned as JSON text passes.
     const builtIns = new ToolRegistry();
     builtIns.register(
       defineTool({
@@ -752,14 +752,24 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
     }).execute();
 
     expect(sentTools).toHaveLength(2);
-    expect(sentTools[0]).toContain('"prompt":{"type":"string","description":"What to draw"}');
-    expect(sentTools[1]).toBe(sentTools[0]);
+    // Non-vacuous: sorted, these definitions serialize differently.
+    const sent = expectDefined(sentTools[0], "first run's tools");
+    expect(JSON.stringify(canonicalKeyOrder(JSON.parse(sent)))).not.toBe(sent);
+    expect(sentTools[1]).toBe(sent);
   });
 
   it("turns on the cached freeze-turn-inputs, not on this invocation's reads", async () => {
-    // Live, this turn would have no voice and no tools; the cached step says
-    // otherwise, and the cached step is what the prompt and the loop get.
-    const canDeliverVoice = vi.fn().mockReturnValue(false);
+    // Live, this turn has no tools and a profile that never voices; the cached
+    // step offers `echo` and voices the reply. The prompt, the loop and the
+    // voice delivery all follow the cached step.
+    const tts = {
+      name: "openai",
+      tts: vi.fn().mockResolvedValue({ audio: Buffer.from([1]), mediaType: "audio/ogg" }),
+    };
+    const handle = mockDeliveryHandle({
+      canDeliverVoice: vi.fn().mockReturnValue(true),
+      hasBatchTargets: vi.fn().mockReturnValue(false),
+    });
     const echo = {
       name: "echo",
       description: "echo a number",
@@ -767,10 +777,11 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
       durable: true,
     };
     const deps = mockDeps({
-      agentStore: mockAgentStore({ getProfile: vi.fn().mockResolvedValue(profile()) }),
-      deliveryRouter: mockDeliveryRouter({
-        prepare: vi.fn().mockResolvedValue(mockDeliveryHandle({ canDeliverVoice })),
+      agentStore: mockAgentStore({
+        getProfile: vi.fn().mockResolvedValue(profile({ voiceMode: "never" })),
       }),
+      voiceResolver: mockVoiceResolver(mockVoiceBundle({ tts })),
+      deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
     });
 
     await new InngestTestEngine({
@@ -795,8 +806,8 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
       "runStreamingAgentLoop call",
     );
     expect(loopParams.tools.definitions()).toEqual(definitions);
-    // The voice decision's reads happen only in the step body.
-    expect(canDeliverVoice).not.toHaveBeenCalled();
+    expect(tts.tts).toHaveBeenCalledTimes(1);
+    expect(handle.deliverVoice).toHaveBeenCalledTimes(1);
   });
 
   it("delivers the voice reply the prompt was assembled for when the profile changes mid-turn", async () => {
