@@ -1,6 +1,6 @@
 /// <reference path="../../test/vitest.d.ts" />
 
-import { eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { connect } from "inngest/connect";
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
 import { conversations, messages } from "../agent/store/schema.js";
@@ -124,11 +124,14 @@ async function waitForFinalAssistantMessage(
 ): Promise<PersistedMessage> {
   return vi.waitFor(
     async () => {
-      const rows = await db
+      // One insert writes the turn's tool_use, tool_result and reply rows, so they
+      // share `created_at`; only `id` (UUIDv7) orders them.
+      const [lastAssistant] = await db
         .select()
         .from(messages)
-        .where(eq(messages.conversationId, conversationId));
-      const lastAssistant = [...rows].reverse().find((m) => m.role === "assistant");
+        .where(and(eq(messages.conversationId, conversationId), eq(messages.role, "assistant")))
+        .orderBy(desc(messages.id))
+        .limit(1);
       if (!lastAssistant || !predicate(lastAssistant)) {
         throw new Error("no matching final assistant message yet");
       }
