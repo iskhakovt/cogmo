@@ -12,7 +12,7 @@ First-class feature from day one. Six stages, each a complete working system. St
 **Consolidation:** When active rule count exceeds 30, LLM merges semantically similar rules via `consolidateRules()`. Observation counts summed on merge.
 **Safety:** Contradictions logged but not applied. Safety-category rules excluded from extraction (manual only). New corrections start at priority 100 (below manual rules).
 **Scope dimensions `[confirmed]`:** Rules are scoped on two independent axes — `profile_id` and `channel_type` — both nullable, where null means "applies everywhere on that axis." Channel scope is assigned at extraction time: the Observer queries the conversation's active channels, passes the set into the extraction prompt, and the LLM tags each `new` correction with `channelType: "telegram"` (or similar) for medium-specific rules and `null` otherwise. See [agents.md](agents.md) → Observation Lineage for the full data model + extraction shape, and [transport/adapters.md](transport/adapters.md) → Response Rendering for how channels render output.
-**Explicit instructions `[proposed]`:** A standing instruction the user states about the agent's behaviour becomes an active rule in the turn, through a tool, and an explicit retraction retires it; inferred corrections keep this graduation path. See [Explicit Instructions](#explicit-instructions-proposed).
+**Explicit instructions `[proposed]`:** A standing instruction the user states about the agent's behaviour becomes an active rule in the turn, through a tool, and an explicit retraction retires it; inferred corrections keep this graduation path, except that a contradiction of a rule still learning retires it rather than only being logged (**Safety** above). See [Explicit Instructions](#explicit-instructions-proposed).
 **Prerequisite:** Full tool invocation history in `messages` table (landed PR #34) — correction extraction inspects `tool_use` blocks, not just text.
 **Evaluation:** `src/agent/evolution/correction-learning.live.test.ts` puts each correction in `test/fixtures/evals/correction-learning.json` through two conversations, runs `extractCorrections` on each transcript against PGlite, then sends a probe message with the active rules under `# Rules` and, as a baseline, without the correction. The conversations are on Telegram, so every prompt also carries the channel rules `seedChannelRules` gives a Telegram setup, "Use bullet lists instead" of tables among them. It reports rather than asserts (see [testing.md](testing.md) → Live Tests). Two samples per scenario on `claude-sonnet-5` on the current guidance (N=2): 7 of 8 samples completed, and in all seven the first extraction produced the rule and the second reinforced it to active. With the rule, the probe reply followed it in 4 of 7: no bold 2 of 2; no bullet points 1 of 1, against the seeded rule asking for bullet lists; metric units 1 of 2, the miss giving Ben Nevis as "1,345 metres (4,411 ft)"; and a 100-word limit 0 of 2, with replies of 193 and 146 words against 340 and 279 without the rule. No reply without the correction followed it. The agent also saved every correction to the `preferences` core-memory block, so a later prompt would carry it twice. Before extraction tolerated the omission, 2 extractions in 44 across this and earlier runs threw, one of them the eighth sample here: the model left out `matchedExistingRuleId` on a `new` correction, and the one feedback retry left it out again.
 
@@ -252,13 +252,14 @@ The Telegram command resolves the current conversation, calls `transport.evoluti
 | "Please stop using bullet points with me." | Rule | The format of replies |
 | "Metric only, I never use imperial units." | Rule | A statement about the user, but its only use is the units in replies |
 | "Give me this one as a bulleted list." | Nothing | A one-off request |
+| "For the rest of this chat, answer in French." | Nothing | Bounded to this chat or a period; the transcript carries it |
 | "Way too long. What's the short version?" | Nothing in the turn; the Observer may infer a rule | A reaction, not a stated standing instruction |
 
 The [routing table](memory.md#core-memory-vs-hindsight-confirmed) drops "spelling variety" from core memory and sends instructions about replies and conduct to `rule_set`. `CORE_MEMORY_PROMPT_GUIDANCE`, `MEMORY_PROMPT_GUIDANCE`, the `core_memory_update` and `memory_retain` descriptions, and the onboarding text, which asks how the user "prefer[s] to communicate", say the same, as does a rules entry in `# Capabilities`. If [Core Memory Scope by Profile Class](memory.md#core-memory-scope-by-profile-class-proposed) lands, its shared `identity` block holds the languages the user speaks, and the language and spelling of replies are rules.
 
 ### Precedence
 
-A user's instruction beats a channel default: a default is the operator's guess about a medium, and the instruction is the user deciding. Operator rules beat both, as deliberate configuration that chat can't change, and `safety` rules are among them. Rules render in sections by authority, earlier sections winning, and the prompt says so. The source decides the section; `priority`, then `id`, order rules within it. Empty sections are left out.
+A user's instruction beats a channel default: a default is the operator's guess about a medium, and the instruction is the user deciding. Operator rules beat both, as deliberate configuration that chat can't change, and `safety` rules are among them. Rules render in sections by authority, earlier sections winning, and the prompt says so. The source decides the section. Within a section, rules order by scope (profile-scoped, then channel-scoped, then everywhere), then `priority`, then `id`, so the narrower of two conflicting rules is listed first. Empty sections are left out.
 
 | Section | Rows |
 |-|-|
@@ -270,7 +271,7 @@ A user's instruction beats a channel default: a default is the operator's guess 
 ```
 # Rules
 
-Standing rules for your replies. Where two conflict, follow the one in the earlier section.
+Standing rules for your replies. Where two conflict, follow the one listed first.
 
 ## Always
 - …
@@ -290,36 +291,36 @@ The channel label ("On telegram: ") is the [snapshot](prompt-caching.md#system-p
 
 ### Tools
 
-`rule_set` and `rule_remove` are built-ins, gated by the profile's `tool_set` like any other. Only a turn whose inbound messages have `source = 'user'`, in a profile whose `memory_scope.trust` admits `first-party`, runs them. Any other turn (a scheduled fire, a pipeline stage, a sub-agent, a third-party profile) refuses the call at dispatch, so the tool set stays the same on every turn ([One Prefix per Conversation](prompt-caching.md#one-prefix-per-conversation-proposed)). Both are `durable: true` (DB writes) and not `parallelSafe`.
+`rule_set` and `rule_remove` are built-ins, gated by the profile's `tool_set` like any other. As with the core-memory tools ([memory.md](memory.md#boundaries)), a profile whose `memory_scope.trust` excludes `first-party` (a null `memory_scope` admits it), or a turn whose profile can't be loaded, isn't offered them; trust is already in the configuration digest, so withholding them keeps [one prefix per conversation](prompt-caching.md#one-prefix-per-conversation-proposed). A turn the user didn't start (inbound `source <> 'user'`: a scheduled fire, a pipeline stage) refuses the call at dispatch, so the tool set doesn't change with the turn. The gate reads the class, restricted flag and trust gate that `freeze-turn-inputs` records ([memory.md](memory.md#behaviour-by-profile)). Both are `durable: true` (DB writes) and not `parallelSafe`.
 
 | Argument | Tool | Meaning |
 |-|-|-|
 | `rule` | `rule_set` | The instruction as a short imperative, general and free of this conversation's details: "Keep replies under 100 words." |
 | `rule` | `rule_remove` | A rule's text, copied from `# Rules` |
 | `category` | `rule_set` | `style`, `domain` or `memory`, as in extraction. `safety` isn't offered. |
-| `scope` | `rule_set` | `everywhere`, or `this_channel` when the user ties the instruction to the channel they're writing on ("on Telegram, keep it short") |
+| `scope` | `rule_set` | `everywhere`, or a channel type when the user ties the instruction to a channel ("on Telegram, keep it short"); for "here", the channel the quoted message arrived on, since a debounced batch can span channels. The Service accepts only a channel type the user has a session on, and otherwise returns an error naming those. The rule's text doesn't name its channel: the label is rendered. |
 | `quote` | both | The user's words that state the instruction or retract it, copied from their messages in this turn |
-| `replaces` | `rule_set`, optional | A rule's text from `# Rules` that the new one changes or contradicts ("make it 150 words"), resolved as `rule_remove` resolves `rule` and retired in the same transaction. A channel default named here stays, outranked by the new rule; an operator rule refuses the call. |
+| `replaces` | `rule_set`, optional | A rule's text from `# Rules` that the new one changes or contradicts ("make it 150 words"), resolved as `rule_remove` resolves `rule`. The matches the new rule's scope covers are retired in the same transaction; a wider rule stays, listed after the new one ("on Telegram, make it 150" leaves the everywhere 100-word rule). A channel default named here stays, outranked by the new rule; an operator rule refuses the call. |
 
 | Column | Value on `rule_set` |
 |-|-|
 | `source` | `instruction` |
 | `active` | `true` |
 | `priority` | 100; the section, not the priority, decides precedence |
-| `observation_count` | 1. The Observer's reinforcements add to it, so a count above 1 means the user had to correct the agent again: the rule isn't sticking. |
+| `observation_count` | 1. The Observer's reinforcements add to it, so a count above 1 usually means the user had to correct the agent again: the rule isn't sticking. A crash-window re-run or a repeated Observer fire can also add one. |
 | `profile_id` | NULL: the user means the assistant, not one persona. In a profile whose class is [restricted](memory.md#memory-access-control-via-tags-confirmed), that profile, so instructions given there stay there. |
-| `channel_type` | NULL for `everywhere`; for `this_channel`, the channel type the turn's messages arrived on |
+| `channel_type` | NULL for `everywhere`, otherwise the `scope` |
 
-- **The quote must appear in the turn's user messages**, compared after normalizing case, whitespace and quote marks; otherwise the error tells the model to quote the user, or not to set a rule if the user stated none. The check tells explicit from inferred at the call and leaves the user's words in the transcript as provenance. It is not a security boundary, since text injected by a fetched page can quote any phrase the user wrote. Injection is limited by what the tools can't do (write `safety`, remove a channel default or operator rule, set or remove a rule beyond a restricted-class profile, run without a user message) and by visibility: the result tells the model to confirm the rule to the user, and `/learned rules` lists it ([Retraction](#retraction)).
-- **Duplicates.** A live (unretired) instruction rule with the same normalized text and scope is left as it is, and the result says it is already set. A rewording is the model's to spot: the description says not to set what `# Rules` already says, and to pass `replaces` to change a rule, including an active learned one the user now states outright.
-- **Result.** `Rule set: "…". Follow it from this reply on, and confirm it to the user in a few words.`
+- **The quote must appear in the turn's user messages**, compared after normalizing case, whitespace and quote marks; otherwise the error tells the model to quote the user, or not to set a rule if the user stated none. The check tells explicit from inferred at the call and leaves the user's words in the transcript as provenance. It is not a security boundary, since text injected by a fetched page can quote any phrase the user wrote. Injection is limited by what the tools can't do (write `safety`, remove a channel default or operator rule, set or remove a rule beyond a restricted-class profile, run without a user message), by size (`rule` is capped at 200 characters in the schema, and each tool has `invocationBudget: 3` per turn) and by visibility that doesn't depend on the model: the channel notice below, and `/learned rules` ([Retraction](#retraction)).
+- **Duplicates.** A live (unretired) instruction rule with the same text ([normalized](#data-model)) and scope is left as it is, and the result says it is already set. A live learned rule with that text and scope is retired in the same transaction: the instruction supersedes it. A rewording is the model's to spot: the description says not to set what `# Rules` already says, and to pass `replaces` to change a rule, including an active learned one the user now states outright.
+- **Result.** `Rule set: "…". Follow it from this reply on, and confirm it to the user in a few words.` Whatever the model replies, the adapter renders a fixed channel notice from a successful `rule_set` or `rule_remove` result ("Rule saved: … · /learned rules"), as the Telegram adapter already renders `generate_image` and `send_document` results. It shows in voice mode too, where `VOICE_MODE_HINT` tells the model to skip "saved" and "noted".
 - **Replay safety.** Both tools are idempotent on their natural key and need no separate idempotency key. A re-run of `rule_set` meets its own row ("already set"), its `replaces` target already retired; a re-run of `rule_remove` finds a retired rule with that text and no live match ("already removed"). Either answer is still true in place of the first attempt's. Concurrent identical sets meet the unique index ([Data Model](#data-model)).
 
 ### Retraction
 
-`rule_remove` matches `rule` against the rules the turn's `# Rules` shows, after normalizing case, whitespace and the channel label. Only `instruction`, `correction` and `evolution` rows are removable, and every visible match is retired: the same text in two scopes means the user meant both. In a restricted-class profile, only rules scoped to that profile are removable; the result says a wider rule is removed outside this persona or through `/learned rules`. With no match, the result lists the removable rules verbatim for a retry.
+`rule_remove` strips any channel label from `rule` and matches the rest against the rules the turn's `# Rules` shows ([normalized](#data-model)). Only `instruction`, `correction` and `evolution` rows are removable, and every visible match is retired: the same text in two scopes means the user meant both. In a restricted-class profile, only rules scoped to that profile are removable; the result says a wider rule can be removed only outside this persona. A rule set there is listed before a wider one it can't remove, so it wins a conflict ([Precedence](#precedence)). With no match, the result lists the removable rules verbatim for a retry.
 
-Retiring sets `active = false` and `retracted_at`, which tells a retired rule from one still learning, so the Observer never reinforces it back to active. The row stays for `/learned rules`, which lists live rules by section plus learning and retired ones, and retires one through the same path as `rule_remove`, via Transport so every channel gets it.
+Retiring sets `active = false` and `retracted_at`, which tells a retired rule from one still learning, so the Observer never reinforces it back to active. The row stays for `/learned rules`, which lists the rules visible to the current profile, live ones by section plus learning and retired ones, and retires one through the same path and scope limits as `rule_remove`, via Transport so every channel gets it.
 
 | The user retracts | What happens |
 |-|-|
@@ -336,12 +337,12 @@ Retiring sets `active = false` and `retracted_at`, which tells a retired rule fr
 |-|-|
 | A correction that a successful `rule_set` or `rule_remove` in the transcript recorded | The extraction prompt treats it as handled and extracts nothing for it |
 | A `rule_set` that returned "already set" | A reinforcement of that rule: the user had to say it again |
-| Live instruction rules | Listed among the existing rules, marked as set by the user. A `new` correction whose normalized text equals one is dropped with a warning, as a backstop. |
-| A reinforcement of an instruction rule | Adds to `observation_count` only |
+| Live instruction rules | Listed among the existing rules, marked as set by the user. A `new` correction whose text matches one ([normalized](#data-model)) is dropped with a warning, as a backstop. |
+| A reinforcement of an instruction rule | Adds to `observation_count`, and is never a promotion, though the row is active when the count reaches 2 |
 | A contradiction of an instruction rule or an active learned rule | Logged, not applied, as today. An explicit rule changes only when the user retracts or replaces it in a turn. |
 | A contradiction of a rule still learning | Retires it |
-| Retired rules | Not listed, so never reinforced. The same reaction later starts a new learning row, which graduates as usual. |
-| Consolidation | Loads `correction` and `evolution` rows only, as `getCorrections` does today. It never merges, rewrites or deletes an instruction rule. |
+| Retired rules | Not listed, and the reinforce UPDATE matches only unretired rows, reporting a target retired meanwhile as skipped. The same reaction later starts a new learning row, which graduates as usual. |
+| Consolidation | Loads `correction` and `evolution` rows only, as `getCorrections` does today. It never merges, rewrites or deletes an instruction rule. Its replace and delete skip rows retired during its LLM call (a guard on `retracted_at IS NULL`), so it never merges a retired rule into a live one. |
 
 ### Prompt Caching
 
@@ -351,32 +352,34 @@ Retiring sets `active = false` and `retracted_at`, which tells a retired rule fr
 
 ### Data Model
 
-- **`source` becomes the pgEnum `steering_rule_source`**: `manual`, `seed`, `instruction`, `correction`, `evolution`. `signal_pipeline` has no writer and returns with Stage 5. The migration backfills `seed` on the rows `seedChannelRules` wrote (`manual`, its three Telegram texts, priority 50), and `seedChannelRules` writes `seed` from then on.
-- **`retracted_at TIMESTAMPTZ`**, nullable, where NULL means not retired. A CHECK keeps a retired rule inactive.
-- **A unique partial index** on the normalized text, `profile_id` and `channel_type` of live instruction rows (`source = 'instruction' AND retracted_at IS NULL`, NULLs not distinct). `rule_set` inserts through `ON CONFLICT DO UPDATE` with a no-op SET ([.claude/rules/inngest.md](../.claude/rules/inngest.md)).
-- One `pnpm db:generate` migration, with the backfill statement added to it. The schema in [agents.md](agents.md) and the row in [data-model.md](data-model.md) change with it.
+- **`source` becomes the pgEnum `steering_rule_source`**: `manual`, `seed`, `instruction`, `correction`, `evolution`. `signal_pipeline` has no writer and returns with Stage 5. The migration that ships with the sectioned rendering creates the type with all five values, backfills `seed` on the rows `seedChannelRules` wrote (`manual`, its three Telegram texts, priority 50) and converts the column with `SET DATA TYPE … USING`; `seedChannelRules` writes `seed` from then on. Creating the type whole avoids an `ADD VALUE` whose value the same transaction uses ([architecture rules](../.claude/rules/architecture-rules.md)).
+- **`retracted_at TIMESTAMPTZ`**, nullable, where NULL means not retired. A CHECK keeps a retired rule inactive and an instruction rule out of learning: `NOT (active AND retracted_at IS NOT NULL) AND (source <> 'instruction' OR active OR retracted_at IS NOT NULL)`.
+- **A unique partial index** on `lower(regexp_replace(btrim(rule), '\s+', ' ', 'g'))`, `COALESCE(profile_id, '00000000-0000-0000-0000-000000000000'::uuid)` and `COALESCE(channel_type, '')`, `WHERE source = 'instruction' AND retracted_at IS NULL`. The COALESCEs stand in for NULLS NOT DISTINCT, which Drizzle's index builder can't emit: only `unique()` constraints have `nullsNotDistinct()`, and those can't be partial or use expressions. The text expression is the one normalization, applied in SQL to every text match (duplicates, `rule_remove`, `replaces`, the Observer's backstop); TS only strips the channel label first. `rule_set` inserts in raw `sql`, the [code-style](../.claude/rules/code-style.md) carve-out, since `onConflictDoUpdate` takes column targets only: `ON CONFLICT DO UPDATE` with a no-op SET and `RETURNING (xmax = 0)` ([.claude/rules/inngest.md](../.claude/rules/inngest.md)).
+- The tools' migration adds `retracted_at`, its CHECK and the index. Both migrations come from `pnpm db:generate`, the backfill added to the first, and the schema in [agents.md](agents.md) and the row in [data-model.md](data-model.md) change with each.
 
 ### Evaluation
 
 **Correction learning** (`correction-learning.live.test.ts`). Like the core-memory tools, `rule_set` and `rule_remove` run their production handlers, against the sample's PGlite store. The harness re-reads rules on every turn, as production assembles them, and every other handler stays canned.
 
-- **Explicit scenarios.** The four current scenarios all state a standing instruction. The rule must be active after the first conversation, before any extraction, and the probe runs then. The extraction on that transcript must add nothing, and the second conversation must find the rule already set.
-- **Inferred scenarios**, new: one-off requests or reactions that state no standing instruction, such as asking for Celsius after a Fahrenheit answer and then kilometres after miles, which should graduate to a metric rule. They expect no `rule_set`, a learning rule after the first extraction and an active one after the second.
-- **Retraction**, new: a third conversation retracts an explicit rule ("Bullet points are fine again"). It expects `rule_remove`, no live rule for it, nothing new from the extraction, and a probe that matches the baseline.
+- **Explicit scenarios.** The four current scenarios all state a standing instruction. The rule must be active after the first conversation, before any extraction, and the probe runs then. The extraction on that transcript must add nothing. The second conversation adds no second instruction row and brings `observation_count` to 2, through an "already set" result or the Observer's reinforcement, since the tool description says not to set what `# Rules` shows.
+- **Inferred scenario**, new: reactions that state no standing instruction, asking for Celsius after a Fahrenheit answer and then, in a second conversation, kilometres after miles, which should graduate to a metric rule. It expects no `rule_set`, a learning rule after the first extraction and an active one after the second.
+- **Retraction**, new: a third conversation retracts an explicit rule ("Bullet points are fine again"), and one in the inferred scenario retracts the graduated metric rule. Each expects `rule_remove` to retire the rule in the turn, no live rule for it, nothing new from the extraction, and a probe that matches the baseline.
+- **Replacement**, new: a third conversation in the 100-word scenario says "make it 150". It expects exactly one live length rule, at 150.
 
-**Core-memory routing** (`core-memory-routing.live.test.ts`). `expect` gains `rule`: `rule_set` in the turn and no core write carrying the instruction. `british-english` moves to `rule`. New `rule` cases: "Please stop using emoji in your replies", and one in passing, "Summarise this article, and from now on keep summaries to three sentences". `call-me-sam`, `vegetarian`, `meatless-dinner` and `fridays-off` stay `core`, and a `rule_set` on them counts as a false rule. The established `preferences` line, "Concise answers; tables for comparisons", is an instruction: it becomes an established rule, replaced in the block by a fact ("Prefers trains to flying"), so the established state also checks that no rewrite copies a rule into core memory.
+**Core-memory routing** (`core-memory-routing.live.test.ts`). `expect` gains `rule`: `rule_set` in the turn and no core write carrying the instruction. `british-english` moves to `rule`. New `rule` cases: "Please stop using emoji in your replies", and one in passing, "Summarise this article, and from now on keep summaries to three sentences". A new `none` case, "For the rest of this chat, answer in French", is bounded to the chat. `call-me-sam`, `vegetarian`, `meatless-dinner` and `fridays-off` stay `core`, and a `rule_set` on them counts as a false rule. The established `preferences` line, "Concise answers; tables for comparisons", is an instruction: it becomes an established rule, replaced in the block by a fact ("Prefers trains to flying"), so the established state also checks that no rewrite copies a rule into core memory.
 
-**Success criteria**, on `claude-sonnet-5` with three samples per case:
+**Success criteria**, on `claude-sonnet-5` with three samples per case. Routing counts span both states, over [memory.md](memory.md#evaluation)'s 29 cases with `british-english` moved to `rule` and the French case added:
 
 | Metric | Target |
 |-|-|
-| Explicit: rule active after the first conversation | ≥ 90% |
-| Explicit: the instruction also written to core memory | At most 1 sample in either eval |
-| Explicit: a duplicate from extraction, or a second instruction row | 0 |
-| Retraction: the rule retired in the turn | ≥ 90% |
-| Inferred: `rule_set` called | ≤ 10% |
-| Routing: `rule` cases reaching `rule_set` in the turn | ≥ 90% |
-| Routing: `rule_set` on `core`, `hindsight` or `none` cases | At most 1 sample per label |
+| Explicit: rule active after the first conversation | At least 11 of 12 |
+| Explicit: the instruction also written to core memory | At most 1 of 12 in correction learning, 1 of 18 in routing |
+| Explicit: a duplicate from extraction, or a second instruction row | 0 of 12 |
+| Retraction: the rule retired in the turn | 6 of 6 |
+| Replacement: one live length rule, at 150 | 3 of 3 |
+| Inferred: `rule_set` called | 0 of 6 conversations |
+| Routing: `rule` cases reaching `rule_set` in the turn | At least 17 of 18 |
+| Routing: `rule_set` on `core`, `hindsight` or `none` cases | At most 1 of 63, 1 of 54 and 1 of 54 |
 | Routing: core-memory metrics | No regression from *Current* in [memory.md](memory.md#evaluation) |
 | Probe follows the rule | Reported per check, against 4 of 7 in [Stage 1](#stage-1-instruction-evolution-confirmed) → Evaluation; the length limit is tracked by "Make learned rules stick" |
 
@@ -394,24 +397,24 @@ This section moves to `[confirmed]` when both evals meet these targets, with the
 | Renumber priorities in a flat list | Order alone doesn't tell the model which rule wins a conflict |
 | No `quote` | Nothing at the call separates a stated instruction from an inference, and a fetched page could set a standing rule without the user's words anywhere in the turn |
 | Explicit rules scoped to the profile by default | The user would restate every rule in each persona |
-| A confirmation step before a rule applies | Adds a round-trip to every instruction. The rule is confirmed in the reply and listed in `/learned rules`, and `rule_remove` undoes it. |
+| A confirmation step before a rule applies | Adds a round-trip to every instruction. The channel notice shows the rule, `/learned rules` lists it, and `rule_remove` undoes it. |
 
 ### Prior Art
 
 - **Letta** separates the *human* block, "information about the user, their preferences, facts about them, and relevant context", from the *persona* block, "the agent's own self-concept, personality traits, and behavioral guidelines" ([memory blocks](https://www.letta.com/blog/memory-blocks/)). In the Letta agent, `/remember always use pnpm in this repo` makes the agent decide "where the lesson belongs" and commit the update, while background "dreaming" consolidates lessons from recent conversations separately ([memory](https://docs.letta.com/letta-agent/memory)).
-- **ChatGPT**: "For explicit information or instructions, you can add it to your Custom Instructions. For information shared via conversations, ChatGPT can remember relevant details for you" ([Help Center](https://help.openai.com/en/articles/8983151-is-memory-different-from-custom-instructions)). Custom instructions are edited by the user in settings rather than written from chat.
-- **Claude Code** splits by author: CLAUDE.md holds "instructions and rules" the user writes, and auto memory holds notes Claude writes "based on your corrections and preferences". Both load every session. An explicit "always use pnpm, not npm" goes to auto memory at once, and to CLAUDE.md only when asked ([memory](https://code.claude.com/docs/en/memory)). The split differs from this one, but an explicit request is committed immediately.
+- **ChatGPT**: custom instructions are guidance the user writes in settings and that applies to every chat, while memory is what ChatGPT picks up from conversations ([custom instructions](https://help.openai.com/en/articles/8096356-chatgpt-custom-instructions), [memory FAQ](https://help.openai.com/en/articles/8590148-memory-faq)).
+- **Claude Code** splits by author: CLAUDE.md holds "instructions and rules" the user writes, and auto memory holds notes Claude writes "based on your corrections and preferences". CLAUDE.md loads in full every session, auto memory only as the first 200 lines of its index, with topic files read on demand. An explicit "always use pnpm, not npm" goes to auto memory at once, and to CLAUDE.md only when asked ([memory](https://code.claude.com/docs/en/memory)). The split differs from this one, but an explicit request is committed immediately.
 - **Cursor**: "Rules provide persistent, reusable context at the prompt level" ([rules](https://cursor.com/docs/rules)). Its Memories were "intentionally removed starting from version 2.1.x", and staff told users to export them into Rules ([forum](https://forum.cursor.com/t/are-my-memories-gone/144057)).
-- **Windsurf Cascade**: rules "tell Cascade *how to behave*", memories are auto-generated and retrieved when relevant, and "for knowledge you want Cascade to reliably reuse, write it as a Rule … rather than relying on auto-generated Memories" ([memories](https://docs.devin.ai/desktop/cascade/memories)).
+- **Windsurf Cascade**: rules "tell Cascade *how to behave*", memories are auto-generated and retrieved when relevant, and "for knowledge you want Cascade to reliably reuse, write it as a Rule or add it to `AGENTS.md` in your repo rather than relying on auto-generated Memories" ([memories](https://docs.devin.ai/desktop/cascade/memories)).
 - **Evidence-tracked rules.** ExpeL gives a new insight an importance count of two, up- and down-voted by later experience and "removed" at zero, because "even successful trajectories can be suboptimal and mislead the generated insights" ([Zhao et al., 2023](https://arxiv.org/html/2308.10144)). In Cui et al.'s architecture, "evidence logs track each rule's reliability across episodes", and on financial forecasting "the same accumulated experience either degrades performance below the zero-shot baseline or dramatically improves accuracy", depending on whether its curation loop is present ([2026](https://arxiv.org/abs/2606.17591)). The inferred path's graduation is stricter than the products above, none of whose pages cited here describes an evidence threshold for what the product infers.
 
 ### Implementation Outline
 
-Step 2 can ship ahead of the tools. Steps 3, 4 and 7 ship together: the Observer must know about the tools, and `/learned rules` is part of the injection limits. Step 8 can follow.
+Step 1 can ship ahead of the tools. Steps 3, 4, 5 and 7 ship together: the Observer must know about the tools, without the guidance every instruction is stored twice, and `/learned rules` is part of the injection limits. Step 8 can follow.
 
-1. **Schema and store.** The `steering_rule_source` enum with the `seed` backfill, `retracted_at` and its CHECK, the instruction index, `seedChannelRules` writing `seed` (`insertManualRule`, whose only caller it is, becomes `insertSeedRule`), and the agents.md and data-model.md updates. Store methods to set, retire and resolve rules by text. `getActiveRules` returns each rule's section, and `getCorrections` skips retired rows. PGlite tests: a set is idempotent, a concurrent set meets the index, retiring is idempotent, defaults can't be retired, and retired rows are never listed or reinforced.
-2. **Precedence rendering.** Sectioned `# Rules` in `DefaultPromptSource`, with `AssembleContext.rules` carrying the section. Needs only step 1's enum and `seed` backfill.
-3. **Tools.** A `rules` Service namespace bound in `buildTurnService` to the turn's user text, channel and profile class. `rule_set` and `rule_remove`, refused at dispatch outside user turns, and added to the durable list and the crash-window table in [crash-recovery.md](crash-recovery.md). Tests cover the quote check, scope defaults, `replaces`, text resolution, the no-match list, the dispatch refusal and re-runs.
+1. **Source enum and precedence rendering.** The first migration in [Data Model](#data-model): the enum with all five values, the `seed` backfill and the column conversion. `seedChannelRules` writes `seed` (`insertManualRule`, whose only caller it is, becomes `insertSeedRule`), `getActiveRules` returns each rule's section, and `DefaultPromptSource` renders the sectioned `# Rules`, with `AssembleContext.rules` carrying the section. [prompt-caching.md](prompt-caching.md#system-prompt-snapshot-proposed)'s `[confirmed]` Rule order (priority, then id) changes with this step.
+2. **Schema and store.** The tools' migration: `retracted_at`, its CHECK and the instruction index. Store methods to set, retire and resolve rules by text; `getCorrections`, the reinforce UPDATE and consolidation's replace and delete skip retired rows. PGlite tests: a set is idempotent, a concurrent set meets the index, retiring is idempotent, defaults can't be retired, and retired rows are never listed, reinforced or merged.
+3. **Tools.** A `rules` Service namespace bound in `buildTurnService` to the turn's user text and channels and to the class, restricted flag and trust gate `freeze-turn-inputs` records ([memory.md](memory.md#behaviour-by-profile)). `rule_set` and `rule_remove`, not offered to third-party or unloadable profiles, refused at dispatch outside user turns, and added to the durable list and the crash-window table in [crash-recovery.md](crash-recovery.md). The channel notice, rendered from the tool result by the Telegram and web UI adapters. Tests cover the quote check, the channel scope, `replaces` and its scope limit, superseding a learned rule, text resolution, the no-match list, the withholding, the dispatch refusal, the notice and re-runs.
 4. **Observer.** Ships with step 3: without it, the Observer extracts every explicit instruction again as a correction and graduates the copy. Instruction rules reach extraction through a read of their own, so consolidation keeps loading `correction` and `evolution` rows only. Extraction tests cover each row of [Observer and Consolidation](#observer-and-consolidation).
 5. **Guidance.** The prompt text and routing table in [The Boundary](#the-boundary).
 6. **Evals.** The fixture and harness changes in [Evaluation](#evaluation), with results recorded.
@@ -422,5 +425,6 @@ Step 2 can ship ahead of the tools. Steps 3, 4 and 7 ship together: the Observer
 
 - **Observer-learned rules in restricted classes** are global (`profileId: null` in `extract-corrections.ts`). Aligning them with the explicit default needs consolidation to keep `profile_id`, the p3 per-profile consolidation entry in `todo.md`.
 - **`steering_rules` has no user axis.** A global rule applies to every user's conversations: fine for one user, but a multi-user install needs `user_id` before explicit rules are safe there.
+- **Restricted-class instructions scope to the profile**, since `steering_rules` has a profile axis but no class axis, while [Core Memory Scope by Profile Class](memory.md#core-memory-scope-by-profile-class-proposed) isolates core memory by class: two personas in one restricted class share core memory but not instructions. A `profile_class` column mirroring `core_memory_blocks.profile_class` is the extension if a restricted class holds several personas.
 - **Operator rules have no writer but SQL** once seeding writes `seed`. An operator surface for `manual` rules (the web UI's admin API) is a separate follow-up.
 - **Instructions about one persona** ("when you're my coding assistant, always write tests first") aren't expressible through the tools, which offer no profile scope. The profile's base prompt covers them for now; revisit if the eval or use shows the need.
