@@ -22,13 +22,20 @@ const CorrectionBaseSchema = z.object({
     .describe("Why this was identified as a correction — for observability, not stored"),
 });
 
+// The two null-valued fields of a `new` correction default to null on
+// parse. The structured-output tool call is not strict, so a model can omit
+// a field whose only meaning is "absent", and repeat the omission on the
+// repair retry. `.default()` keeps both fields required in the JSON Schema
+// the model is given (a transform would make the schema unrepresentable)
+// and leaves the parsed type unchanged.
 export const CorrectionItemSchema = z.discriminatedUnion("action", [
   CorrectionBaseSchema.extend({
     action: z.literal("new"),
-    matchedExistingRuleId: z.null(),
+    matchedExistingRuleId: z.null().default(null),
     channelType: z
       .string()
       .nullable()
+      .default(null)
       .describe(
         "Channel scope for this rule. Set to a channel type (e.g., 'telegram') only when " +
           "the correction is clearly specific to that channel; otherwise null (applies to all channels). " +

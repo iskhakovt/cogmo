@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
+import { toObjectJsonSchema } from "../../llm/json-schema.js";
+import { expectDefined } from "../../test/assertions.js";
 import { buildExtractionPrompt, CorrectionExtractionSchema } from "./extraction-schema.js";
 
 describe("CorrectionExtractionSchema", () => {
@@ -75,7 +78,7 @@ describe("CorrectionExtractionSchema", () => {
     expect(() => CorrectionExtractionSchema.parse(input)).toThrow();
   });
 
-  it("rejects new correction missing channelType", () => {
+  it("parses a new correction that omits channelType as global", () => {
     const input = {
       corrections: [
         {
@@ -87,7 +90,74 @@ describe("CorrectionExtractionSchema", () => {
         },
       ],
     };
+    expect(CorrectionExtractionSchema.parse(input).corrections[0]).toMatchObject({
+      action: "new",
+      channelType: null,
+    });
+  });
+
+  it("parses a new correction that omits matchedExistingRuleId as unmatched", () => {
+    const input = {
+      corrections: [
+        {
+          rule: "test",
+          category: "style",
+          reasoning: "test",
+          action: "new",
+          channelType: "telegram",
+        },
+      ],
+    };
+    expect(CorrectionExtractionSchema.parse(input).corrections[0]).toMatchObject({
+      action: "new",
+      matchedExistingRuleId: null,
+      channelType: "telegram",
+    });
+  });
+
+  it("rejects a new correction that names an existing rule", () => {
+    const input = {
+      corrections: [
+        {
+          rule: "test",
+          category: "style",
+          reasoning: "test",
+          matchedExistingRuleId: "rule-123",
+          action: "new",
+          channelType: null,
+        },
+      ],
+    };
     expect(() => CorrectionExtractionSchema.parse(input)).toThrow();
+  });
+
+  it("still asks the model for every field of a new correction", () => {
+    // The tolerance is parse-side only: the schema the model is handed keeps
+    // both fields required, so omitting them stays off the happy path.
+    const json = toObjectJsonSchema(CorrectionExtractionSchema);
+    const variants = z
+      .object({
+        properties: z.object({
+          corrections: z.object({
+            items: z.object({
+              oneOf: z.array(
+                z.object({
+                  properties: z.object({ action: z.object({ const: z.string() }) }),
+                  required: z.array(z.string()),
+                }),
+              ),
+            }),
+          }),
+        }),
+      })
+      .parse(json).properties.corrections.items.oneOf;
+    const newVariant = expectDefined(
+      variants.find((v) => v.properties.action.const === "new"),
+      "new-correction variant",
+    );
+    expect(newVariant.required).toEqual(
+      expect.arrayContaining(["matchedExistingRuleId", "channelType"]),
+    );
   });
 
   it("rejects reinforce with null matchedExistingRuleId", () => {
