@@ -99,7 +99,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
     try {
       const createParams: OpenAI.ChatCompletionCreateParamsNonStreaming & CacheHintFields = {
         model: params.model,
-        max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
+        ...outputCap(params.model, params.maxTokens ?? DEFAULT_MAX_TOKENS),
         messages: buildMessages(params.system, params.messages, hints.systemMarker),
         ...hints.fields,
       };
@@ -182,7 +182,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
           .create(
             {
               model: params.model,
-              max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
+              ...outputCap(params.model, params.maxTokens ?? DEFAULT_MAX_TOKENS),
               messages: buildMessages(params.system, params.messages, hints.systemMarker),
               ...hints.fields,
               ...(params.tools?.length && { tools: params.tools.map(toOpenAITool) }),
@@ -278,6 +278,31 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
     return { events: generateEvents(), response };
   }
+}
+
+// --- Output cap ---
+
+/** A reply's token cap, in the request field its model reads. */
+type OutputCap = { max_tokens: number } | { max_completion_tokens: number };
+
+/**
+ * OpenAI's reasoning models — the o-series and GPT-5 onward — reject
+ * `max_tokens` and take the cap as `max_completion_tokens`, where it also
+ * bounds reasoning tokens. They match by bare id, as OpenAI names them. Every
+ * other id keeps `max_tokens`, the field every compatible host reads,
+ * including OpenRouter's `openai/…` slugs, which OpenRouter accepts it for.
+ * Pure function — exported for testability.
+ */
+export function outputCap(model: string, maxTokens: number): OutputCap {
+  return takesMaxCompletionTokens(model)
+    ? { max_completion_tokens: maxTokens }
+    : { max_tokens: maxTokens };
+}
+
+function takesMaxCompletionTokens(model: string): boolean {
+  if (/^o\d/.test(model)) return true;
+  const major = /^gpt-(\d+)/.exec(model)?.[1];
+  return major !== undefined && Number(major) >= 5;
 }
 
 // --- Cache hints ---

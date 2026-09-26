@@ -45,6 +45,9 @@ const MIN_CACHEABLE_TOKENS = 1024;
 /** "Most of the previous prompt", for the best-effort caches. */
 const TOLERANT_SHARE = 0.8;
 
+/** Each reply's cap, reasoning included on the routes that reason. */
+const MAX_TOKENS = 300;
+
 const PROMPTS = [
   "Reply with one word: what colour is the sky on a clear day?",
   "Reply with one word: what is frozen water called?",
@@ -207,13 +210,14 @@ const ROUTES: Route[] = [
     dialect: "openai",
     baseURL: "https://api.openai.com/v1",
     apiKey: liveKey("OPENAI_API_KEY"),
-    // The adapter sends `max_tokens`, which OpenAI's reasoning models
-    // (GPT-5 and later) reject; GPT-4.1 takes it and caches from 1,024 tokens.
-    model: "gpt-4.1-nano",
+    // A reasoning model, which takes its cap only as `max_completion_tokens`.
+    model: "gpt-5.4-nano",
     relation: "best-effort",
     expectWire(body, key) {
       expect(body.prompt_cache_key).toBe(key);
       expect(body).not.toHaveProperty("session_id");
+      expect(body.max_completion_tokens).toBe(MAX_TOKENS);
+      expect(body).not.toHaveProperty("max_tokens");
     },
   },
 ];
@@ -257,7 +261,7 @@ describe("OpenAICompatibleProvider cache dialects (live)", () => {
             model: route.model,
             system,
             messages: [...messages],
-            maxTokens: 300,
+            maxTokens: MAX_TOKENS,
             cache: { key, retention: "long" },
           };
           let sent = await send(provider, recorder, params);
