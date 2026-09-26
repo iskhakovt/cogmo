@@ -113,18 +113,13 @@ export type LintResult = Result<void, readonly LintError[]>;
  * code is plausibly Pyodide-safe; `err` lists every rule that fired.
  */
 export function lintWasmCompat(body: string): LintResult {
-  const errors: LintError[] = [];
   const source = collapseParenthesisedImports(body);
-  for (const rule of RULES) {
+  const errors = RULES.flatMap((rule): LintError[] => {
     const match = rule.pattern.exec(source);
-    if (match) {
-      errors.push({
-        rule: rule.name,
-        reason: rule.reason,
-        line: lineNumberAt(source, match.index),
-      });
-    }
-  }
+    return match
+      ? [{ rule: rule.name, reason: rule.reason, line: lineNumberAt(source, match.index) }]
+      : [];
+  });
   return errors.length === 0 ? ok(undefined) : err(errors);
 }
 

@@ -246,6 +246,18 @@ async def run(inputs, ctx):
     expect(log.detected_effects).toContain("sends_email");
   });
 
+  it("checks every name of a multi-name import, aliased and dotted ones included", async () => {
+    const log = await classifyWithAst(
+      manifestWith(),
+      `
+import json, smtplib as mail, stripe.api_resources
+async def run(inputs, ctx):
+    return {"ok": True}
+`,
+    );
+    expect(log.detected_effects.sort()).toEqual(["financial", "sends_email"]);
+  });
+
   it("stripe / plaid imports trigger financial", async () => {
     const log = await classifyWithAst(
       manifestWith(),
