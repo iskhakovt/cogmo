@@ -116,9 +116,9 @@
       ],
       "factTurn": 1,
       "expect": "ESP32|irrigation",
-      "stale": "NixOS.*in progress|in progress.*NixOS",
+      "stale": "NixOS",
       "keep": ["Samuel"],
-      "note": "One project finishes and another starts. Appending the new one while the NixOS line still says in progress is the failure."
+      "note": "One project finishes and another starts. The finished one no longer belongs in active_projects; a NixOS line still in progress is the failure."
     }
   ]
 }

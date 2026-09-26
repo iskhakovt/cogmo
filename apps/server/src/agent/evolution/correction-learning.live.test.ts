@@ -24,8 +24,8 @@
  * Like the other evals it reports rather than asserts, and fails only when a
  * turn or an extraction does not complete.
  *
- * Skipped unless `LIVE=1` and `ANTHROPIC_API_KEY` are set. A full run is 18
- * turns and 6 extractions on Sonnet 5.
+ * Skipped unless `LIVE=1` and `ANTHROPIC_API_KEY` are set. A full run is 24
+ * turns and 8 extractions on Sonnet 5.
  *
  *   set -a; . ./.env; set +a; LIVE=1 pnpm test:live src/agent/evolution/correction-learning.live.test.ts
  *
@@ -58,7 +58,7 @@ import type { CoreMemoryBlock } from "../service.js";
 import { DrizzleAgentStore } from "../store/index.js";
 import { type ExtractionResult, extractCorrections } from "./extract-corrections.js";
 
-const CheckSchema = z.enum(["no-list-lines", "no-imperial-units", "no-closing-offer"]);
+const CheckSchema = z.enum(["no-list-lines", "no-imperial-units", "no-closing-offer", "no-bold"]);
 type Check = z.infer<typeof CheckSchema>;
 
 const EvalFileSchema = z.object({
@@ -112,6 +112,7 @@ const CHECKS: Record<Check, (reply: string) => boolean> = {
       )
     );
   },
+  "no-bold": (reply) => !/\*\*[^*\n]+\*\*|__[^_\n]+__/.test(reply),
 };
 
 interface StoredCorrection {

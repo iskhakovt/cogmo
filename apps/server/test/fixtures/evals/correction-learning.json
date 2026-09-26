@@ -52,6 +52,20 @@
       "probe": "How does HTTPS keep my traffic private?",
       "check": "no-closing-offer",
       "note": "Style preference on how replies end."
+    },
+    {
+      "id": "no-bold",
+      "first": [
+        "What's the difference between an ISA and a pension for long-term saving?",
+        "Please stop putting things in bold. Plain text is fine, the bold just looks shouty."
+      ],
+      "second": [
+        "Can you explain how a heat pump works?",
+        "No bold text please. Just plain sentences."
+      ],
+      "probe": "What should I look for when buying a used car?",
+      "check": "no-bold",
+      "note": "Formatting preference. Replies bold key terms by default."
     }
   ]
 }
