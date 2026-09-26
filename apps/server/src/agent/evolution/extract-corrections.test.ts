@@ -176,6 +176,33 @@ describe("extractCorrections", () => {
     });
   });
 
+  it("inserts a new correction whose output omits matchedExistingRuleId", async () => {
+    // The structured-output tool call is not strict, so the model can drop a
+    // field whose only legal value is null — and repeat the omission on the
+    // repair retry.
+    const deps = mockExtractionDeps({
+      corrections: [
+        {
+          rule: "Use fetch_url for weather lookups",
+          category: "domain",
+          reasoning: "User corrected tool choice",
+          action: "new",
+          channelType: null,
+        },
+      ],
+    });
+
+    const result = await extractCorrections(sampleHistory, "profile-1", deps);
+
+    expect(result.extracted).toBe(1);
+    expect(deps.store.upsertCorrection).toHaveBeenCalledWith(expect.anything(), {
+      rule: "Use fetch_url for weather lookups",
+      category: "domain",
+      profileId: null,
+      channelType: null,
+    });
+  });
+
   it("reinforces existing correction", async () => {
     const deps = mockExtractionDeps(
       {
