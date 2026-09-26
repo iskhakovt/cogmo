@@ -1,0 +1,124 @@
+{
+  "_comment": "Scripted multi-turn conversations for src/agent/core-memory-multiturn.live.test.ts. Each starts from `established` and carries core memory across its turns. `factTurn` (0-based) is the turn that states a core fact; the other turns hold nothing core memory should keep. `expect` (case-insensitive regex) matches the blocks once the fact is written. `stale` matches a line that states the superseded value; once the fact is written, such a line should be gone or say it is past. `keep` are established facts every whole-block rewrite should carry over. `buried` facts are new, `update` facts change an established one.",
+  "established": [
+    {
+      "key": "user_profile",
+      "content": "Name: Samuel Carter\nRole: backend engineer at Northwind Logistics\nLocation: Lisbon, Portugal (Europe/Lisbon)\nFamily: partner Alex; sister Jo"
+    },
+    {
+      "key": "active_projects",
+      "content": "- Home server migration to NixOS (in progress)"
+    },
+    {
+      "key": "preferences",
+      "content": "- Concise answers"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "side-project",
+      "category": "buried",
+      "turns": [
+        "What's the difference between an A record and a CNAME?",
+        "And how long does DNS propagation usually take these days?",
+        "Good to know. I'm building a tide-times app for sailors called Tidepool on weekends and just bought tidepool.app. Should the bare domain or www be the canonical one?",
+        "Do I need to do anything special for HTTPS on a .app domain?",
+        "Great, thanks."
+      ],
+      "factTurn": 2,
+      "expect": "Tidepool",
+      "keep": ["NixOS", "Samuel", "Concise"],
+      "note": "Active project, mentioned while asking about DNS. Rewriting active_projects has to keep the NixOS line."
+    },
+    {
+      "id": "coeliac",
+      "category": "buried",
+      "turns": [
+        "I want to cook more during the week. What are some staples worth keeping in the cupboard?",
+        "How long does cooked rice keep in the fridge?",
+        "Can you suggest a quick weeknight dinner? It has to be gluten-free, I was diagnosed as coeliac last month.",
+        "How should I store the leftovers?",
+        "Perfect, I'll try it tonight."
+      ],
+      "factTurn": 2,
+      "expect": "coeliac|celiac|gluten",
+      "keep": ["Concise", "Samuel"],
+      "note": "Standing dietary constraint, mentioned while asking for a recipe."
+    },
+    {
+      "id": "brother",
+      "category": "buried",
+      "turns": [
+        "What's a good way to spend a rainy Saturday in Lisbon?",
+        "Any museum you'd pick over the others?",
+        "My brother Tom is flying in from Toronto next week, it's his first time in Portugal. What should we definitely do with him?",
+        "Is tram 28 worth the queue?",
+        "Thanks, that's a plan."
+      ],
+      "factTurn": 2,
+      "expect": "\\bTom\\b",
+      "keep": ["Alex", "\\bJo\\b", "Samuel"],
+      "note": "Close family, mentioned while planning a visit. Who Tom is belongs in core memory; the visit is an event."
+    },
+    {
+      "id": "part-time",
+      "category": "buried",
+      "turns": [
+        "What is a Gantt chart actually useful for?",
+        "What tools do people use to make them?",
+        "I've gone part-time, so I only work Monday to Wednesday now. Could you draft a short out-of-office message for Thursdays and Fridays?",
+        "Make it a bit friendlier.",
+        "That's the one, thanks."
+      ],
+      "factTurn": 2,
+      "expect": "part[- ]time|Wednesday|Mon[a-z]*\\s*(?:-|–|to)\\s*Wed",
+      "keep": ["Northwind", "Concise"],
+      "note": "Standing schedule, mentioned while asking for a draft."
+    },
+    {
+      "id": "porto",
+      "category": "update",
+      "turns": [
+        "What's the weather usually like in northern Portugal in October?",
+        "We've just moved from Lisbon up to Porto, so I'll find out soon enough. Which neighbourhoods are nice for a Sunday walk?",
+        "Any good francesinha places near there?",
+        "Brilliant, thanks."
+      ],
+      "factTurn": 1,
+      "expect": "Porto",
+      "stale": "(?<!Europe/)Lisbon",
+      "keep": ["Samuel", "Northwind", "Alex"],
+      "note": "Location changes; the timezone stays Europe/Lisbon."
+    },
+    {
+      "id": "employer",
+      "category": "update",
+      "turns": [
+        "What's the idiomatic way to handle nullable values in Kotlin?",
+        "How do sealed classes compare to enums?",
+        "Useful. I left Northwind last month and I'm at Monzo now, where everything is Kotlin. How do coroutines compare to Python's asyncio?",
+        "What's structured concurrency, in one paragraph?"
+      ],
+      "factTurn": 2,
+      "expect": "Monzo",
+      "stale": "Northwind",
+      "keep": ["Samuel", "Lisbon", "Alex"],
+      "note": "Employer changes, mentioned while asking a Kotlin question."
+    },
+    {
+      "id": "project-done",
+      "category": "update",
+      "turns": [
+        "Is it worth running Home Assistant on a Raspberry Pi?",
+        "The NixOS migration is finally done, everything's running on the new box. Next up is a garden irrigation controller on an ESP32. Which soil moisture sensor should I get?",
+        "How often should it water in summer?",
+        "Thanks, ordering the parts now."
+      ],
+      "factTurn": 1,
+      "expect": "ESP32|irrigation",
+      "stale": "NixOS.*in progress|in progress.*NixOS",
+      "keep": ["Samuel"],
+      "note": "One project finishes and another starts. Appending the new one while the NixOS line still says in progress is the failure."
+    }
+  ]
+}

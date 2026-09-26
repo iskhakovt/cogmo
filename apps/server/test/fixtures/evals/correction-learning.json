@@ -1,0 +1,57 @@
+{
+  "_comment": "Scripted corrections for src/agent/evolution/correction-learning.live.test.ts. `first` and `second` are two conversations in which the user makes the same behavioural correction in different words; each starts from `established`. `probe` opens a fresh conversation where the correction applies, and `check` names the deterministic test its reply must pass to count as following it.",
+  "established": [
+    {
+      "key": "user_profile",
+      "content": "Name: Samuel Carter\nRole: backend engineer at Northwind Logistics\nLocation: London, UK (Europe/London)\nFamily: partner Alex; sister Jo"
+    },
+    {
+      "key": "active_projects",
+      "content": "- Home server migration to NixOS (in progress)"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "no-bullets",
+      "first": [
+        "What are the pros and cons of getting an e-bike for my commute?",
+        "Please stop using bullet points with me. Just write normal paragraphs."
+      ],
+      "second": [
+        "What should I pack for a weekend hiking trip in the Lake District?",
+        "Lists again. I really don't like bullet points, write it as prose please."
+      ],
+      "probe": "What are the main differences between PostgreSQL and MySQL?",
+      "check": "no-list-lines",
+      "note": "Formatting preference. The probe invites a list."
+    },
+    {
+      "id": "metric-units",
+      "first": [
+        "How long is a marathon, and what pace do I need for a four-hour finish?",
+        "Please don't give me miles. Metric only, I never use imperial units."
+      ],
+      "second": [
+        "What's a normal body temperature, and when does it count as a fever?",
+        "Celsius only please, no Fahrenheit. Stick to metric units with me."
+      ],
+      "probe": "How high is Ben Nevis, and how cold does it get at the summit in winter?",
+      "check": "no-imperial-units",
+      "note": "Units preference. UK answers often give heights in feet."
+    },
+    {
+      "id": "no-closing-offer",
+      "first": [
+        "What is a Bloom filter?",
+        "You don't need to finish every answer with a question or an offer to help more. Just answer and stop."
+      ],
+      "second": [
+        "What's the difference between TCP and UDP?",
+        "Again, please drop the follow-up offer at the end. Answer and stop."
+      ],
+      "probe": "How does HTTPS keep my traffic private?",
+      "check": "no-closing-offer",
+      "note": "Style preference on how replies end."
+    }
+  ]
+}
