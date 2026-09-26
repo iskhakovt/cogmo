@@ -1,10 +1,6 @@
 import type { Usage } from "./types.js";
 
-/**
- * Usage before any call has reported — the starting total for a run of
- * {@link sumUsage} calls. Frozen, and safe to share: `sumUsage` returns a
- * new object and never writes to either argument.
- */
+/** The starting total for a run of {@link sumUsage} calls. Frozen: `sumUsage` never writes to its arguments. */
 export const ZERO_USAGE: Readonly<Usage> = Object.freeze({ inputTokens: 0, outputTokens: 0 });
 
 /**

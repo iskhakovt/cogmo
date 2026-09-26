@@ -381,18 +381,13 @@ const MESSAGE_FRAMING_TOKENS = 4;
  */
 const IMAGE_TOKENS = 85;
 
-/** Reply priming. */
 const REPLY_PRIMING_TOKENS = 3;
 
 function encodedLength(enc: Tiktoken, text: string): number {
   return enc.encode(text).length;
 }
 
-/**
- * One message's estimate: framing, its content, and — on an assistant
- * message — the name and arguments of each function call. A tool result is a
- * `tool` message with string content, so the content term covers it.
- */
+/** A tool result is a `tool` message with string content, so the content term covers it. */
 function messageTokens(enc: Tiktoken, msg: OpenAI.ChatCompletionMessageParam): number {
   const toolCalls =
     msg.role === "assistant" && msg.tool_calls

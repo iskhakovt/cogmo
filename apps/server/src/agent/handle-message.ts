@@ -461,11 +461,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       })();
 
       // Per-row text serialization for `messages.content`. After voice→text
-      // substitution above, a text-only row joins on newline (clean
-      // round-trip for next-turn history loads); rows that still carry
-      // image/document blocks JSON-stringify (matches today's behavior for
-      // those attachment types — image-aware history isn't a slice 1
-      // concern).
+      // substitution above, a text-only row joins on newline, so it loads
+      // back cleanly as history; a row that still carries image or document
+      // blocks is JSON-stringified.
       const userContentText = substitutedMessages
         .map(({ content }) => {
           if (typeof content === "string") return content;
