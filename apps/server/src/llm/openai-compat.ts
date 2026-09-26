@@ -286,12 +286,10 @@ export class OpenAICompatibleProvider implements LlmProvider {
 type OutputCap = { max_tokens: number } | { max_completion_tokens: number };
 
 /**
- * OpenAI's reasoning models — the o-series and GPT-5 onward — reject
- * `max_tokens` and take the cap as `max_completion_tokens`, where it also
- * bounds reasoning tokens. They match by bare id, as OpenAI names them. Every
- * other id keeps `max_tokens`, the field every compatible host reads,
- * including OpenRouter's `openai/…` slugs, which OpenRouter accepts it for.
- * Pure function — exported for testability.
+ * OpenAI's reasoning models (the o-series and GPT-5 onward, by bare id) reject
+ * `max_tokens` and take the cap as `max_completion_tokens`, which also bounds
+ * reasoning. Every other id keeps `max_tokens`, which every compatible host
+ * reads, OpenRouter's `openai/…` slugs included.
  */
 export function outputCap(model: string, maxTokens: number): OutputCap {
   return takesMaxCompletionTokens(model)
