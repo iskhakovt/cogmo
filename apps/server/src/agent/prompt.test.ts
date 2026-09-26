@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ToolDefinition } from "../llm/types.js";
-import { DefaultPromptSource } from "./prompt.js";
+import { DefaultPromptSource, formatUserContext } from "./prompt.js";
 import type { Profile } from "./store/index.js";
 
 const testTools: ToolDefinition[] = [
@@ -126,6 +126,9 @@ describe("DefaultPromptSource", () => {
     }).assemble({ profile: undefined, rules: [] });
 
     expect(prompt).toContain("don't know your user yet");
+    // Onboarding saves to core memory, so the first block written ends it.
+    expect(prompt).toContain("core_memory_update");
+    expect(prompt).not.toContain("memory_retain");
   });
 
   it("injects user context when available", async () => {
@@ -180,5 +183,20 @@ describe("DefaultPromptSource", () => {
 
     expect(prompt).toContain("# Voice mode");
     expect(prompt).toContain("spoken aloud");
+  });
+});
+
+describe("formatUserContext", () => {
+  it("is null with no blocks, so the prompt shows the onboarding text", () => {
+    expect(formatUserContext([])).toBeNull();
+  });
+
+  it("renders each block as a keyed subsection, in order", () => {
+    expect(
+      formatUserContext([
+        { key: "user_profile", content: "Name: Sam" },
+        { key: "preferences", content: "- British English" },
+      ]),
+    ).toBe("## user_profile\nName: Sam\n\n## preferences\n- British English");
   });
 });

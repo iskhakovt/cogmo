@@ -1,4 +1,5 @@
 import type { ToolDefinition } from "../llm/types.js";
+import type { CoreMemoryBlock } from "./service.js";
 import type { Profile } from "./store/index.js";
 
 /**
@@ -39,7 +40,7 @@ Be direct and genuine. Skip filler ("Great question!", "I'd be happy to help!").
 
 Be concise when the user wants a quick answer. Be thorough when the topic is complex or the user is exploring. Match their energy.`;
 
-const ONBOARDING = `You don't know your user yet. In your first interaction, introduce yourself briefly and learn about them: their name, what they do, their timezone, and how they prefer to communicate. Store what you learn using memory_retain.`;
+const ONBOARDING = `You don't know your user yet. In your first interaction, introduce yourself briefly and learn about them: their name, what they do, their timezone, and how they prefer to communicate. Save what you learn about them, including anything about them they mention in passing, to core memory with core_memory_update as soon as you learn it.`;
 
 const VOICE_MODE_HINT = `# Voice mode
 
@@ -48,7 +49,13 @@ Your response will be spoken aloud. Keep it short and natural — one or two sen
 export interface PromptSourceConfig {
   timezone?: string;
   getUserContext?: () => Promise<string | null>;
-  serviceGuidance?: string[];
+  serviceGuidance?: ReadonlyArray<string>;
+}
+
+/** The `# User` section body for a user's core memory blocks, or null when there are none. */
+export function formatUserContext(blocks: ReadonlyArray<CoreMemoryBlock>): string | null {
+  if (blocks.length === 0) return null;
+  return blocks.map((b) => `## ${b.key}\n${b.content}`).join("\n\n");
 }
 
 /**
@@ -65,7 +72,7 @@ export interface PromptSourceConfig {
 export class DefaultPromptSource implements PromptSource {
   #timezone: string;
   #getUserContext: () => Promise<string | null>;
-  #serviceGuidance: string[];
+  #serviceGuidance: ReadonlyArray<string>;
 
   constructor(config: PromptSourceConfig = {}) {
     this.#timezone = config.timezone ?? "UTC";
