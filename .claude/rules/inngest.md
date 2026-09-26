@@ -104,20 +104,15 @@ contract**. Design every function for the per-boundary model.
     trigger of the execute orchestrator.
 
   Store under a plain `UNIQUE` and write through `ON CONFLICT DO UPDATE`
-  with a no-op SET, `RETURNING … (xmax = 0)` to separate insert from
-  conflict-update. What makes a concurrent loser safe is the `ON CONFLICT`
-  clause, not which arm. Under REPEATABLE READ a conflict with a row
-  committed after the loser's snapshot raises `40001` for `DO NOTHING` and
-  `DO UPDATE` alike (`ExecCheckTupleVisible` in Postgres's
-  `nodeModifyTable.c`; the isolation docs confine `DO NOTHING`'s silent
-  skip to Read Committed), and the transactor retries it against a
-  snapshot that contains the winner. A plain `INSERT` raises `23505`
-  instead, which nothing retries, so a read-then-insert "create if
-  missing" is the bug. Prefer `DO UPDATE` because one statement returns
-  the row from either arm; `DO NOTHING` plus a re-select is correct too,
-  just two statements and a second shape to review. The `xmax`
-  discriminator works because the conflict arm's update carries its own
-  row lock into the new version's xmax: an implementation detail, which
+  with a no-op SET, and `RETURNING … (xmax = 0)` to tell insert from
+  conflict-update. The `ON CONFLICT` clause is what makes a concurrent
+  loser safe: under REPEATABLE READ, a conflict with a row committed after
+  the loser's snapshot raises `40001` for either arm (`ExecCheckTupleVisible`
+  in Postgres's `nodeModifyTable.c`), which the transactor retries against a
+  snapshot that contains the winner. A plain `INSERT` raises `23505`, which
+  nothing retries, so a read-then-insert "create if missing" is the bug.
+  `DO UPDATE` is preferred because one statement returns the row from either
+  arm. The `xmax` test relies on an implementation detail that
   `admin-store.integration.test.ts` pins on the real driver.
   Nulls-distinct leaves callers without retry semantics unaffected.
   Reference: `coding_tasks.idempotency_key` + `insertOrRecoverTask`,
