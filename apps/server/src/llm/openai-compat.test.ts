@@ -1189,25 +1189,25 @@ describe("OpenAICompatibleProvider", () => {
         expect(hintFields(body)).toEqual([]);
       });
 
-      it("on a google/ model, marks only the system prompt whatever the intent, and pins the session", async () => {
-        const withIntent = await chatWith("openrouter", {
-          model: "google/gemini-2.5-flash",
-          cache: INTENT,
-        });
-        const withoutIntent = await chatWith("openrouter", { model: "google/gemini-2.5-flash" });
+      it.each(["google/gemini-2.5-flash", "qwen/qwen3-max"])(
+        "on %s, marks only the system prompt whatever the intent, and pins the session",
+        async (model) => {
+          const withIntent = await chatWith("openrouter", { model, cache: INTENT });
+          const withoutIntent = await chatWith("openrouter", { model });
 
-        // Gemini takes no TTL, and a tail marker that moves every request
-        // writes a new cache each time without reading the last one.
-        expect(breakpoints(withIntent.body)).toEqual([{ type: "ephemeral" }]);
-        expect(systemContent(withIntent.body)).toEqual([
-          { type: "text", text: "sys", cache_control: { type: "ephemeral" } },
-        ]);
-        expect(hintFields(withIntent.body)).toEqual(["session_id"]);
-        expect(withIntent.body.session_id).toBe("conv-1");
+          // Neither takes a TTL. On Gemini a tail marker that moves every
+          // request writes a new cache each time without reading the last one.
+          expect(breakpoints(withIntent.body)).toEqual([{ type: "ephemeral" }]);
+          expect(systemContent(withIntent.body)).toEqual([
+            { type: "text", text: "sys", cache_control: { type: "ephemeral" } },
+          ]);
+          expect(hintFields(withIntent.body)).toEqual(["session_id"]);
+          expect(withIntent.body.session_id).toBe("conv-1");
 
-        expect(breakpoints(withoutIntent.body)).toEqual([{ type: "ephemeral" }]);
-        expect(hintFields(withoutIntent.body)).toEqual([]);
-      });
+          expect(breakpoints(withoutIntent.body)).toEqual([{ type: "ephemeral" }]);
+          expect(hintFields(withoutIntent.body)).toEqual([]);
+        },
+      );
 
       it("on any other model, pins the session and sends no markers", async () => {
         const { body, options } = await chatWith("openrouter", {

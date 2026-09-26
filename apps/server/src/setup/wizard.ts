@@ -89,7 +89,7 @@ export interface WizardDeps {
 
 // --- Provider UI metadata (canonical types/URLs come from providers.ts) ---
 
-import { PROVIDER_BASE_URLS, PROVIDER_CACHE_DIALECTS, type ProviderType } from "./providers.js";
+import { defaultCacheDialect, PROVIDER_BASE_URLS, type ProviderType } from "./providers.js";
 
 const PROVIDER_OPTIONS: ReadonlyArray<{
   value: ProviderType;
@@ -227,7 +227,7 @@ export async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
   const s = p.spinner();
   s.start("Validating API key...");
 
-  const cacheDialect = PROVIDER_CACHE_DIALECTS[providerType];
+  const cacheDialect = defaultCacheDialect(providerType, undefined);
   const { providerId, validation } = await retryPrompt(
     () =>
       addProvider(deps, {

@@ -60,7 +60,7 @@ export const NonInteractiveAnswersSchema = z
     llmMaxOutputTokens: z.coerce.number().int().positive().optional(),
     /**
      * Which caching hints an OpenAI-compatible endpoint takes. Optional —
-     * omitted, the provider type's dialect applies (`PROVIDER_CACHE_DIALECTS`),
+     * omitted, the provider type's dialect applies (`defaultCacheDialect`),
      * else the base URL's host decides; set it for an endpoint behind a proxy
      * or gateway.
      */

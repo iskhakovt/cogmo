@@ -2,8 +2,8 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { getEncoding, type Tiktoken } from "js-tiktoken";
 import OpenAI from "openai";
 import { logger } from "../logger.js";
-import { cacheMarker } from "./anthropic.js";
 import type { CacheDialect } from "./cache-dialect.js";
+import { cacheMarker } from "./cache-marker.js";
 import { ProviderProtocolError, parseToolArgs, ToolArgsCutOffError } from "./errors.js";
 import { RefusalError } from "./fallback.js";
 import { withFailureLogging } from "./logging-fetch.js";
@@ -320,12 +320,12 @@ export class OpenAICompatibleProvider implements LlmProvider {
 // --- Cache hints ---
 
 /**
- * Request fields a cache intent adds beyond Chat Completions: OpenAI's
- * `prompt_cache_key`, and OpenRouter's `session_id` and top-level
- * `cache_control` (Anthropic's automatic caching, passed through to Claude).
+ * The request fields a cache intent can set: OpenAI's `prompt_cache_key`, and
+ * OpenRouter's `session_id` and top-level `cache_control` (Anthropic's
+ * automatic caching, passed through to Claude), which the SDK doesn't type.
  */
-interface CacheHintFields {
-  prompt_cache_key?: string;
+interface CacheHintFields
+  extends Pick<OpenAI.ChatCompletionCreateParamsNonStreaming, "prompt_cache_key"> {
   session_id?: string;
   cache_control?: Anthropic.CacheControlEphemeral;
 }
@@ -365,9 +365,10 @@ function cacheHints(dialect: CacheDialect, params: ChatParams): CacheHints {
  * OpenRouter's `session_id` keeps a conversation on one upstream, and so on
  * one cache, on every model. Markers go only where they take effect. Claude
  * gets the system marker, and for a transcript the top-level automatic
- * breakpoint, both at the intent's TTL. Gemini gets the system marker alone:
- * it takes no TTL, and a tail marker that moves every request makes OpenRouter
- * write a new Gemini cache each time without reading the last one.
+ * breakpoint, both at the intent's TTL. Gemini and Qwen get the system marker
+ * alone, with no TTL, as neither takes one; on Gemini a tail marker that moves
+ * every request makes OpenRouter write a new cache each time without reading
+ * the last one.
  */
 function openRouterHints(model: string, intent: CacheIntent | undefined): CacheHints {
   const session = intent ? { session_id: intent.key } : {};
@@ -381,6 +382,7 @@ function openRouterHints(model: string, intent: CacheIntent | undefined): CacheH
       };
     }
     case "google":
+    case "qwen":
       return { fields: session, headers: undefined, systemMarker: { type: "ephemeral" } };
     case undefined:
       return { ...NO_HINTS, fields: session };
@@ -388,13 +390,16 @@ function openRouterHints(model: string, intent: CacheIntent | undefined): CacheH
 }
 
 /**
- * The OpenRouter model families that honour `cache_control` markers. A
- * leading `~` marks a family alias (`~anthropic/claude-sonnet-latest`).
+ * The OpenRouter model families whose upstreams cache at `cache_control`
+ * markers: Claude, Gemini, and Qwen on Alibaba, which caches only at them.
+ * The rest (OpenAI, xAI, DeepSeek, …) cache automatically. A leading `~`
+ * marks a family alias (`~anthropic/claude-sonnet-latest`).
  */
-function markerFamily(model: string): "anthropic" | "google" | undefined {
+function markerFamily(model: string): "anthropic" | "google" | "qwen" | undefined {
   const slug = model.startsWith("~") ? model.slice(1) : model;
   if (slug.startsWith("anthropic/")) return "anthropic";
   if (slug.startsWith("google/")) return "google";
+  if (slug.startsWith("qwen/")) return "qwen";
   return undefined;
 }
 

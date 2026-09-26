@@ -88,8 +88,11 @@ describe("migration 0057 — cache dialect", () => {
   it("derives each OpenAI-compatible row's dialect from its base-URL host", async () => {
     await seed([
       compat("openrouter", "https://openrouter.ai/api/v1", {}),
+      compat("openrouter-eu", "https://eu.openrouter.ai/api/v1", {}),
       compat("openai", "https://api.openai.com/v1", {}),
+      compat("openai-eu", "https://eu.api.openai.com/v1", {}),
       compat("xai", "https://api.x.ai/v1", {}),
+      compat("xai-us", "https://us.api.x.ai/v1", {}),
       compat("deepseek", "https://api.deepseek.com/v1", {}),
       compat("no-url", null, {}),
     ]);
@@ -98,8 +101,11 @@ describe("migration 0057 — cache dialect", () => {
 
     expect(await rawAttrs()).toEqual({
       openrouter: { cacheDialect: "openrouter" },
+      "openrouter-eu": { cacheDialect: "openrouter" },
       openai: { cacheDialect: "openai" },
+      "openai-eu": { cacheDialect: "openai" },
       xai: { cacheDialect: "xai" },
+      "xai-us": { cacheDialect: "xai" },
       deepseek: { cacheDialect: "none" },
       "no-url": { cacheDialect: "none" },
     });
@@ -126,6 +132,8 @@ describe("migration 0057 — cache dialect", () => {
     });
   });
 
+  // This pins a frozen migration to a live function: when the host table
+  // grows, the fix is a new migration, not an edit to 0057.
   it("derives the same dialect as cacheDialectForBaseUrl for a row without promptCaching", async () => {
     const baseUrls = [
       "https://openrouter.ai/api/v1",
@@ -141,7 +149,14 @@ describe("migration 0057 — cache dialect", () => {
       "\thttps://api.openai.com/v1",
       "https://openrouter.ai./api/v1",
       "https://eu.openrouter.ai/api/v1",
+      "https://US.OpenRouter.ai/api/v1",
+      "https://eu.api.openai.com/v1",
+      "https://user@kr.api.openai.com:443/v1",
+      "https://us.api.x.ai/v1",
       "https://openrouter.ai.evil.test/v1",
+      "https://evilopenrouter.ai/api/v1",
+      "https://api.openai.com.evil.test/v1",
+      "https://notapi.x.ai/v1",
       "https://evil.test/openrouter.ai/v1",
       "https://api.deepseek.com/v1",
       "http://localhost:8000/v1",

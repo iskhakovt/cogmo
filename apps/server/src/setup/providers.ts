@@ -22,12 +22,23 @@ export const PROVIDER_BASE_URLS: Record<ProviderType, string | undefined> = {
 /**
  * The cache dialect a provider type fixes whatever its base URL — an
  * `openrouter` row behind a proxy still speaks OpenRouter's. Undefined leaves
- * it to the base URL's host (`addProvider`); an operator's explicit dialect
- * wins over both.
+ * it to the base URL's host (`addProvider`). The `openai` type has none: a
+ * custom URL there may be a proxy that rejects `prompt_cache_key`.
  */
-export const PROVIDER_CACHE_DIALECTS: Record<ProviderType, CacheDialect | undefined> = {
+const PROVIDER_CACHE_DIALECTS: Record<ProviderType, CacheDialect | undefined> = {
   anthropic: undefined,
   openrouter: "openrouter",
   openai: undefined,
   custom: undefined,
 };
+
+/**
+ * The dialect a setup path hands `addProvider`: the operator's explicit one,
+ * else the provider type's; undefined leaves it to the base URL's host.
+ */
+export function defaultCacheDialect(
+  providerType: ProviderType,
+  explicit: CacheDialect | undefined,
+): CacheDialect | undefined {
+  return explicit ?? PROVIDER_CACHE_DIALECTS[providerType];
+}

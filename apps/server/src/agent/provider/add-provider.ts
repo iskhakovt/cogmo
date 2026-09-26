@@ -59,7 +59,7 @@ export interface AddProviderDeps {
 export interface AddProviderResult {
   providerId: string;
   secretId: string;
-  /** Result of the live key validation. `valid: false` doesn't block the save. */
+  /** The key's validation, the caller's or the live check's. `valid: false` doesn't block the save. */
   validation: ValidationResult;
 }
 

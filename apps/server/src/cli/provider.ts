@@ -18,11 +18,7 @@ import type { AgentStore } from "../agent/store/index.js";
 import type { Transactor } from "../db/index.js";
 import { type CacheDialect, CacheDialectSchema } from "../llm/cache-dialect.js";
 import type { SecretsStore } from "../secrets/store/index.js";
-import {
-  PROVIDER_BASE_URLS,
-  PROVIDER_CACHE_DIALECTS,
-  type ProviderType,
-} from "../setup/providers.js";
+import { defaultCacheDialect, PROVIDER_BASE_URLS, type ProviderType } from "../setup/providers.js";
 
 const USAGE = `Usage: cogmo provider <command> [args]
 
@@ -143,7 +139,7 @@ async function addProviderCmd(
     io.err(`type=${providerType} requires a base-url argument`);
     return 2;
   }
-  const dialect = cacheDialect ?? PROVIDER_CACHE_DIALECTS[providerType];
+  const dialect = defaultCacheDialect(providerType, cacheDialect);
 
   let result: AddProviderResult;
   try {
