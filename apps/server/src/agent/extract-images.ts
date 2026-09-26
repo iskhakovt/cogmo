@@ -48,18 +48,17 @@ function extractToolResultsByName<T>(
     }
   }
 
-  const out: T[] = [];
-  for (const msg of messages) {
-    if (typeof msg.content === "string") continue;
-    for (const block of msg.content) {
-      if (block.type !== "tool_result") continue;
-      if (toolNames.get(block.toolUseId) !== toolName) continue;
-      if (block.isError) continue;
-      const parsed = parser(block.content);
-      if (parsed) out.push(parsed);
-    }
-  }
-  return out;
+  return messages.flatMap((msg) =>
+    typeof msg.content === "string"
+      ? []
+      : msg.content.flatMap((block) => {
+          if (block.type !== "tool_result") return [];
+          if (toolNames.get(block.toolUseId) !== toolName) return [];
+          if (block.isError) return [];
+          const parsed = parser(block.content);
+          return parsed ? [parsed] : [];
+        }),
+  );
 }
 
 /**
