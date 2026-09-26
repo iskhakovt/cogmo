@@ -21,7 +21,7 @@
  * only when a turn does not complete.
  *
  * Skipped unless `LIVE=1` and `ANTHROPIC_API_KEY` are set. A full run is 57
- * turns on Sonnet 5, on the order of a dollar.
+ * turns on Sonnet 5, about $0.60 per sample of every case.
  *
  *   set -a; . ./.env; set +a; LIVE=1 pnpm test:live src/agent/core-memory-routing.live.test.ts
  *

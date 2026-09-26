@@ -18,7 +18,7 @@
  * than asserts, and fails only when a turn does not complete.
  *
  * Skipped unless `LIVE=1` and `ANTHROPIC_API_KEY` are set. A full run is 32
- * turns on Sonnet 5.
+ * turns on Sonnet 5, about $0.40.
  *
  *   set -a; . ./.env; set +a; LIVE=1 pnpm test:live src/agent/core-memory-multiturn.live.test.ts
  *

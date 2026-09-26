@@ -25,7 +25,7 @@
  * turn or an extraction does not complete.
  *
  * Skipped unless `LIVE=1` and `ANTHROPIC_API_KEY` are set. A full run is 24
- * turns and 8 extractions on Sonnet 5.
+ * turns and 8 extractions on Sonnet 5, about $0.45.
  *
  *   set -a; . ./.env; set +a; LIVE=1 pnpm test:live src/agent/evolution/correction-learning.live.test.ts
  *
