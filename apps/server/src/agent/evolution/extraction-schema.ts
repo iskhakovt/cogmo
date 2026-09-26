@@ -59,11 +59,28 @@ export const CorrectionExtractionSchema = z.object({
 export type CorrectionItem = z.infer<typeof CorrectionItemSchema>;
 export type CorrectionExtraction = z.infer<typeof CorrectionExtractionSchema>;
 
+// --- Rule labels ---
+
+/**
+ * The label a prompt shows for the rule at `index` in the list it renders,
+ * standing in for the rule's id. The model echoes the label back, and the
+ * caller maps it to an id through the same list: a short ordinal is easy to
+ * copy exactly, and the prompt stays byte-stable across runs whatever ids
+ * the rows carry.
+ */
+export function ruleLabel(index: number): string {
+  return `R${index + 1}`;
+}
+
+/** Map each label `ruleLabel` gives `rules` back to its rule. */
+export function rulesByLabel<T>(rules: ReadonlyArray<T>): ReadonlyMap<string, T> {
+  return new Map(rules.map((rule, i) => [ruleLabel(i), rule]));
+}
+
 // --- Extraction prompt ---
 
 export function buildExtractionPrompt(
   existingRules: ReadonlyArray<{
-    id: string;
     rule: string;
     category: string;
     channelType: string | null;
@@ -79,12 +96,12 @@ The following rules have already been extracted from previous conversations. Com
 ${existingRules
   .map((r, i) => {
     const scope = r.channelType ? `channel:${r.channelType}` : "all channels";
-    return `${i + 1}. [${r.id}] (${r.category}, ${scope}) ${r.rule}`;
+    return `${i + 1}. [${ruleLabel(i)}] (${r.category}, ${scope}) ${r.rule}`;
   })
   .join("\n")}
 
-If a correction is semantically equivalent to an existing rule with the same channel scope, set action to "reinforce" and matchedExistingRuleId to the rule's ID.
-If a correction directly contradicts an existing rule, set action to "contradiction" and matchedExistingRuleId to the contradicted rule's ID.
+If a correction is semantically equivalent to an existing rule with the same channel scope, set action to "reinforce" and matchedExistingRuleId to the rule's label (e.g. "R1").
+If a correction directly contradicts an existing rule, set action to "contradiction" and matchedExistingRuleId to the contradicted rule's label.
 A rule that is similar in wording but applies to a different channel scope (e.g. existing rule applies to all channels but the correction is Telegram-specific) is NOT a match — emit it as "new" with the appropriate channelType.`
       : "No existing rules have been extracted yet. All corrections will be new.";
 

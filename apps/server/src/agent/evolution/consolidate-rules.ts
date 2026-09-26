@@ -13,11 +13,12 @@ import type { LlmProvider } from "../../llm/provider.js";
 import { chatTyped } from "../../llm/typed.js";
 import { logger } from "../../logger.js";
 import type { AgentStore } from "../store/index.js";
+import { ruleLabel, rulesByLabel } from "./extraction-schema.js";
 
 // --- Consolidation schema ---
 
 const MergeGroupSchema = z.object({
-  originalIds: z.array(z.string()).min(2).describe("IDs of rules to merge"),
+  originalIds: z.array(z.string()).min(2).describe("Labels of the rules to merge, e.g. R1"),
   mergedRule: z.string().describe("The consolidated rule text"),
   category: z
     .enum(["style", "domain", "memory"])
@@ -35,10 +36,10 @@ export type Consolidation = z.infer<typeof ConsolidationSchema>;
 // --- Consolidation prompt ---
 
 function buildConsolidationPrompt(
-  rules: ReadonlyArray<{ id: string; rule: string; category: string; observationCount: number }>,
+  rules: ReadonlyArray<{ rule: string; category: string; observationCount: number }>,
 ): string {
   const rulesList = rules
-    .map((r) => `- [${r.id}] (${r.category}, seen ${r.observationCount}x) ${r.rule}`)
+    .map((r, i) => `- [${ruleLabel(i)}] (${r.category}, seen ${r.observationCount}x) ${r.rule}`)
     .join("\n");
 
   return `You are a rule consolidation assistant. You have a list of behavioral rules extracted from conversations with a user. Some rules may be semantically equivalent or overlapping.
@@ -131,20 +132,32 @@ async function consolidateChannelGroup(
   let mergedGroups = 0;
   let rulesRemoved = 0;
   const consumedIds = new Set<string>();
+  // The prompt lists each rule under a short label rather than its id; a
+  // group's `originalIds` carries labels back.
+  const byLabel = rulesByLabel(rules);
 
   for (const group of data.groups) {
-    const originals = rules.filter((r) => group.originalIds.includes(r.id));
+    const unknownLabels = group.originalIds.filter((label) => !byLabel.has(label));
+    if (unknownLabels.length > 0) {
+      logger.warn(
+        { group, unknownLabels, channelType },
+        "merge group names a rule label outside the list — skipped",
+      );
+      continue;
+    }
+    const originals = rules.filter((_, i) => group.originalIds.includes(ruleLabel(i)));
+    const oldIds = originals.map((r) => r.id);
 
-    // Validate: all IDs exist, no overlaps, category matches
+    // Validate: no repeated label, no overlap with an earlier group, category matches
     if (
       originals.length !== group.originalIds.length ||
       originals.some((r) => r.category !== group.category) ||
-      group.originalIds.some((id) => consumedIds.has(id))
+      oldIds.some((id) => consumedIds.has(id))
     ) {
       logger.warn({ group, channelType }, "invalid merge group from LLM — skipped");
       continue;
     }
-    for (const id of group.originalIds) {
+    for (const id of oldIds) {
       consumedIds.add(id);
     }
 
@@ -152,7 +165,7 @@ async function consolidateChannelGroup(
 
     await deps.runInTx((tx) =>
       deps.store.replaceRules(tx, {
-        oldIds: group.originalIds,
+        oldIds,
         newRule: {
           rule: group.mergedRule,
           category: group.category,
@@ -165,7 +178,7 @@ async function consolidateChannelGroup(
     );
 
     mergedGroups++;
-    rulesRemoved += group.originalIds.length - 1; // each group replaces N rules with 1
+    rulesRemoved += oldIds.length - 1; // each group replaces N rules with 1
   }
 
   return { mergedGroups, rulesRemoved };

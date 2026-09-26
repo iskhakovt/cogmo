@@ -192,26 +192,25 @@ describe("CorrectionExtractionSchema", () => {
 });
 
 describe("buildExtractionPrompt", () => {
-  it("includes existing rules when provided", () => {
+  it("includes existing rules when provided, each under its label", () => {
     const prompt = buildExtractionPrompt(
       [
-        { id: "r1", rule: "Be concise", category: "style", channelType: null },
-        { id: "r2", rule: "Use tables", category: "style", channelType: null },
+        { rule: "Be concise", category: "style", channelType: null },
+        { rule: "Use tables", category: "style", channelType: null },
       ],
       [],
     );
-    expect(prompt).toContain("[r1]");
+    expect(prompt).toContain("[R1]");
     expect(prompt).toContain("Be concise");
-    expect(prompt).toContain("[r2]");
+    expect(prompt).toContain("[R2]");
     expect(prompt).toContain("reinforce");
   });
 
   it("renders channel scope alongside each existing rule", () => {
     const prompt = buildExtractionPrompt(
       [
-        { id: "r1", rule: "Be concise", category: "style", channelType: null },
+        { rule: "Be concise", category: "style", channelType: null },
         {
-          id: "r2",
           rule: "No long voice notes",
           category: "style",
           channelType: "telegram",
@@ -219,8 +218,8 @@ describe("buildExtractionPrompt", () => {
       ],
       ["telegram"],
     );
-    expect(prompt).toContain("[r1] (style, all channels) Be concise");
-    expect(prompt).toContain("[r2] (style, channel:telegram) No long voice notes");
+    expect(prompt).toContain("[R1] (style, all channels) Be concise");
+    expect(prompt).toContain("[R2] (style, channel:telegram) No long voice notes");
   });
 
   it("handles empty existing rules", () => {
