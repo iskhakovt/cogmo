@@ -8,13 +8,14 @@ import type { Profile } from "./store/index.js";
  * prompt. Loading happens upstream, typically via `loadConversationContext`.
  */
 export interface AssembleContext {
-  /**
-   * The conversation's user, whose core memory blocks the `# User` section
-   * renders — the same user `core_memory_update` writes for.
-   */
-  userId: string;
   profile: Profile | undefined;
   rules: ReadonlyArray<{ rule: string }>;
+  /**
+   * Core memory blocks of the conversation's user — the same user
+   * `core_memory_update` writes for — rendered as the `# User` section.
+   * Empty shows the onboarding text instead.
+   */
+  coreMemory: ReadonlyArray<CoreMemoryBlock>;
   /**
    * True when the orchestrator has resolved this turn's reply will be TTS'd
    * to a voice clip. Drives a voice-style hint appended to the system
@@ -53,8 +54,6 @@ Your response will be spoken aloud. Keep it short and natural — one or two sen
 
 export interface PromptSourceConfig {
   timezone?: string;
-  /** The `# User` section body for `userId`, or null to show the onboarding text. */
-  getUserContext?: (userId: string) => Promise<string | null>;
   serviceGuidance?: ReadonlyArray<string>;
 }
 
@@ -77,18 +76,16 @@ export function formatUserContext(blocks: ReadonlyArray<CoreMemoryBlock>): strin
  */
 export class DefaultPromptSource implements PromptSource {
   #timezone: string;
-  #getUserContext: (userId: string) => Promise<string | null>;
   #serviceGuidance: ReadonlyArray<string>;
 
   constructor(config: PromptSourceConfig = {}) {
     this.#timezone = config.timezone ?? "UTC";
-    this.#getUserContext = config.getUserContext ?? (async () => null);
     this.#serviceGuidance = config.serviceGuidance ?? [];
   }
 
   async assemble(ctx: AssembleContext): Promise<string> {
-    const { userId, profile, rules, voiceMode, toolDefinitions } = ctx;
-    const userContext = await this.#getUserContext(userId);
+    const { profile, rules, coreMemory, voiceMode, toolDefinitions } = ctx;
+    const userContext = formatUserContext(coreMemory);
 
     const parts: string[] = [];
 

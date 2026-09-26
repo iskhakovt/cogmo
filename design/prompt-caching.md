@@ -20,7 +20,7 @@ Verified against the code on 2026-09-23.
 | `Current time: …` at minute resolution | `DefaultPromptSource.assemble` (`src/agent/prompt.ts`) | Every turn that starts in a new minute |
 | `# Recalled Context` | appended to the system prompt in `handle-message.ts` (`fullPrompt`) | Nearly every turn: the default `heuristic` recall mode skips only messages under four characters, greetings, acknowledgements and continuation phrases (`src/agent/recall-gate.ts`) |
 | `# Voice mode` hint | `prompt.ts` | When a conversation alternates voice and text turns |
-| `# User` (core memory blocks) | `getUserContext` in `src/index.ts` | When the agent edits core memory |
+| `# User` (core memory blocks) | loaded by `loadConversationContext` (`src/agent/conversation/`), rendered by `prompt.ts` | When the agent edits core memory |
 | `# Rules`, `# Tools`, `# Capabilities` | `prompt.ts` | When steering rules, the tool catalog or service guidance change |
 
 The first three are per-turn state. The rest look like configuration but aren't all rare: the agent edits core memory during ordinary turns, and channel-scoped rules follow which channel sessions are active. Pipeline runs add another source: stage turns send a narrower `tools` array and their own `# Tools` section in the same conversation as chat turns. A changed system block invalidates every cached message behind it, so moving the clock alone isn't enough — recall changes the block on nearly every turn.

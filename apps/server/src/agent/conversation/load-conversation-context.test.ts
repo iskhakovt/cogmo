@@ -1,7 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+import { randomUUID } from "node:crypto";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Transactor } from "../../db/index.js";
 import { mockAgentStore, mockTransportStore } from "../../test/factories.js";
-import type { Profile } from "../store/index.js";
+import { createTestDatabase } from "../../test/pglite.js";
+import { DrizzleTransportStore } from "../../transport/store/index.js";
+import { DrizzleAgentStore, type Profile } from "../store/index.js";
 import { loadConversationContext } from "./load-conversation-context.js";
 
 const FAKE_TX = { __mockTx: true } as never;
@@ -32,6 +35,7 @@ describe("loadConversationContext", () => {
   it("does not re-read the profile — uses the row passed in by the caller", async () => {
     const agentStore = mockAgentStore({
       getActiveRules: vi.fn().mockResolvedValue([{ rule: "Be concise" }]),
+      getCoreMemoryBlocks: vi.fn().mockResolvedValue([{ key: "user_profile", content: "Sam" }]),
     });
     const transportStore = mockTransportStore({
       getActiveChannelTypes: vi.fn().mockResolvedValue(["telegram"]),
@@ -39,17 +43,19 @@ describe("loadConversationContext", () => {
 
     const result = await loadConversationContext(
       { runInTx: fakeRunInTx, agentStore, transportStore },
-      { conversationId: "c1", profile: profile() },
+      { conversationId: "c1", userId: "u1", profile: profile() },
     );
 
     expect(result).toEqual({
       channelTypes: ["telegram"],
       rules: [{ rule: "Be concise" }],
+      coreMemory: [{ key: "user_profile", content: "Sam" }],
     });
 
     expect(agentStore.getProfile).not.toHaveBeenCalled();
     expect(transportStore.getActiveChannelTypes).toHaveBeenCalledWith(FAKE_TX, "c1");
     expect(agentStore.getActiveRules).toHaveBeenCalledWith(FAKE_TX, "p1", ["telegram"]);
+    expect(agentStore.getCoreMemoryBlocks).toHaveBeenCalledWith(FAKE_TX, "u1");
   });
 
   it("threads channelTypes from transport into agentStore.getActiveRules", async () => {
@@ -62,7 +68,7 @@ describe("loadConversationContext", () => {
 
     await loadConversationContext(
       { runInTx: fakeRunInTx, agentStore, transportStore },
-      { conversationId: "c1", profile: profile() },
+      { conversationId: "c1", userId: "u1", profile: profile() },
     );
 
     expect(agentStore.getActiveRules).toHaveBeenCalledWith(FAKE_TX, "p1", ["telegram", "slack"]);
@@ -78,10 +84,59 @@ describe("loadConversationContext", () => {
 
     const result = await loadConversationContext(
       { runInTx: fakeRunInTx, agentStore, transportStore },
-      { conversationId: "c1", profile: undefined },
+      { conversationId: "c1", userId: "u1", profile: undefined },
     );
 
     expect(result.rules).toEqual([]);
     expect(agentStore.getActiveRules).not.toHaveBeenCalled();
+  });
+});
+
+describe("loadConversationContext core memory (PGlite)", () => {
+  let runInTx: Transactor;
+  let close: () => Promise<void>;
+  const agentStore = new DrizzleAgentStore();
+  const transportStore = new DrizzleTransportStore();
+
+  beforeAll(async () => {
+    ({ tx: runInTx, close } = await createTestDatabase());
+  });
+
+  afterAll(async () => {
+    await close();
+  });
+
+  it("loads the core memory of the user it is given, not another user's", async () => {
+    // The first user created is the one bootstrap resolves as the install's
+    // user; the conversation belongs to the second.
+    const first = await runInTx((tx) => agentStore.createUser(tx));
+    const second = await runInTx((tx) => agentStore.createUser(tx));
+    await runInTx(async (tx) => {
+      await agentStore.upsertCoreMemoryBlock(tx, {
+        userId: first.id,
+        key: "user_profile",
+        content: "Name: Ana",
+      });
+      await agentStore.upsertCoreMemoryBlock(tx, {
+        userId: second.id,
+        key: "user_profile",
+        content: "Name: Ben",
+      });
+      await agentStore.upsertCoreMemoryBlock(tx, {
+        userId: second.id,
+        key: "preferences",
+        content: "Metric units",
+      });
+    });
+
+    const context = await loadConversationContext(
+      { runInTx, agentStore, transportStore },
+      { conversationId: randomUUID(), userId: second.id, profile: undefined },
+    );
+
+    expect(context.coreMemory).toEqual([
+      { key: "preferences", content: "Metric units" },
+      { key: "user_profile", content: "Name: Ben" },
+    ]);
   });
 });

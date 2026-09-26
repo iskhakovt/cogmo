@@ -34,7 +34,7 @@ import { createPipelineGateWaiter } from "./agent/pipeline/gate-waiter.js";
 import { runAgenticStage } from "./agent/pipeline/run-agentic-stage.js";
 import { createPipelineStageRunner } from "./agent/pipeline/stage-runner.js";
 import { DrizzlePipelineRunStore, DrizzlePipelineStore } from "./agent/pipeline/store/index.js";
-import { DefaultPromptSource, formatUserContext } from "./agent/prompt.js";
+import { DefaultPromptSource } from "./agent/prompt.js";
 import { createHandleMessageReconcile } from "./agent/reconcile-on-failure.js";
 import { createRecoverConversation } from "./agent/recover-conversation.js";
 import { createScheduledTaskFireHandler } from "./agent/scheduling/fire-handler.js";
@@ -984,10 +984,6 @@ export async function bootstrapRuntime(
   const promptSource = new DefaultPromptSource({
     timezone: env.USER_TIMEZONE,
     serviceGuidance: BUILT_IN_SERVICE_GUIDANCE,
-    getUserContext: async (userId) =>
-      formatUserContext(
-        await core.runInTx((trx) => core.agentStore.getCoreMemoryBlocks(trx, userId)),
-      ),
   });
 
   const idleTimeoutMs = env.SESSION_IDLE_TIMEOUT_MINUTES * 60 * 1000;

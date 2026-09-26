@@ -158,9 +158,13 @@ export async function compactConversation(
       agentStore: deps.agentStore,
       transportStore: deps.transportStore,
     },
-    { conversationId, profile },
+    { conversationId, userId, profile },
   );
-  const system = await deps.promptSource.assemble({ userId, profile, rules: context.rules });
+  const system = await deps.promptSource.assemble({
+    profile,
+    rules: context.rules,
+    coreMemory: context.coreMemory,
+  });
 
   const model = profile.summarizationModel ?? profile.model;
   const { provider, limits: rowLimits } = await deps.resolveProvider(model);

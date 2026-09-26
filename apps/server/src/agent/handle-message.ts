@@ -607,12 +607,12 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const systemPrompt = await step.run("assemble-prompt", async () => {
         const ctx = await loadConversationContext(
           { runInTx: deps.runInTx, agentStore, transportStore },
-          { conversationId, profile: profile },
+          { conversationId, userId, profile: profile },
         );
         return promptSource.assemble({
-          userId,
           profile: profile,
           rules: ctx.rules,
+          coreMemory: ctx.coreMemory,
           voiceMode: turnInputs.voiceMode,
           toolDefinitions: toolDefs,
         });

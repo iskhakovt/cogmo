@@ -396,11 +396,10 @@ describe.skipIf(API_KEY === undefined)(`core-memory routing on ${MODEL} (live ev
     const systemPrompt = await new DefaultPromptSource({
       timezone: TIMEZONE,
       serviceGuidance: BUILT_IN_SERVICE_GUIDANCE,
-      getUserContext: async () => formatUserContext(run.blocks),
     }).assemble({
-      userId: "eval-user",
       profile: PROFILE,
       rules: [],
+      coreMemory: run.blocks,
       toolDefinitions: tools.definitions(),
     });
 

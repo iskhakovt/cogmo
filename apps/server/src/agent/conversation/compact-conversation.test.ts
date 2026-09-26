@@ -378,7 +378,7 @@ describe("compactConversation", () => {
     expect(result).toEqual({ status: "skipped", reason: "nothing_new" });
   });
 
-  it("assembles the prompt for the conversation's user from its own steering rules", async () => {
+  it("assembles the prompt from the conversation's own steering rules and its user's core memory", async () => {
     const agentStore = storeWith(transcript(10));
     vi.mocked(agentStore.getConversation).mockResolvedValue({
       id: CONVERSATION_ID,
@@ -389,15 +389,22 @@ describe("compactConversation", () => {
       voiceMode: null,
     });
     vi.mocked(agentStore.getActiveRules).mockResolvedValue([{ rule: "Be terse" }]);
+    const blocksByUser = new Map([
+      ["user-1", [{ key: "user_profile", content: "Name: Ana" }]],
+      ["user-2", [{ key: "user_profile", content: "Name: Ben" }]],
+    ]);
+    vi.mocked(agentStore.getCoreMemoryBlocks).mockImplementation(
+      async (_tx, userId) => blocksByUser.get(userId) ?? [],
+    );
     const promptSource = mock<PromptSource>();
     promptSource.assemble.mockResolvedValue("SYSTEM PROMPT");
 
     await compactConversation(CONVERSATION_ID, deps({ agentStore, promptSource }));
 
     expect(promptSource.assemble).toHaveBeenCalledWith({
-      userId: "user-2",
       profile: profile(),
       rules: [{ rule: "Be terse" }],
+      coreMemory: [{ key: "user_profile", content: "Name: Ben" }],
     });
   });
 });
