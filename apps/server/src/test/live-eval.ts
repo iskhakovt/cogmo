@@ -237,7 +237,7 @@ export function shownText(result: AgentLoopResult): string {
     .flatMap((m) =>
       typeof m.content === "string"
         ? [m.content]
-        : m.content.flatMap((b) => (b.type === "text" ? [b.text] : [])),
+        : m.content.filter((b) => b.type === "text").map((b) => b.text),
     )
     .filter((text) => text.trim() !== "")
     .join("\n\n");

@@ -60,7 +60,8 @@ export function computeRetraction(
     R.pipe(
       newMessages,
       R.flatMap((m) => (typeof m.content === "string" ? [] : m.content)),
-      R.flatMap((b) => (b.type === "tool_use" ? [b.id] : [])),
+      R.filter((b) => b.type === "tool_use"),
+      R.map((b) => b.id),
     ),
   );
 

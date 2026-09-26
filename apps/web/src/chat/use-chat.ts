@@ -129,7 +129,8 @@ export function useChat(conversationId: string, tab: string) {
   const onNew = useCallback(
     async (message: AppendMessage): Promise<void> => {
       const text = message.content
-        .flatMap((part) => (part.type === "text" ? [part.text] : []))
+        .filter((part) => part.type === "text")
+        .map((part) => part.text)
         .join("")
         .trim();
       if (text.length === 0) return;

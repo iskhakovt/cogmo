@@ -1162,7 +1162,9 @@ export async function bootstrapRuntime(
     pipelineStore: core.pipelineStore,
     pipelineRunStore: core.pipelineRunStore,
     pipelineGateChannelTypes: new Set(
-      adapterModules.flatMap((module) => (module.pipelineGates ? [module.channelType] : [])),
+      adapterModules
+        .filter((module) => module.pipelineGates === true)
+        .map((module) => module.channelType),
     ),
   });
 

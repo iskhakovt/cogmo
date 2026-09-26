@@ -465,15 +465,12 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // round-trip for next-turn history loads); rows that still carry
       // image/document blocks JSON-stringify (matches today's behavior for
       // those attachment types — image-aware history isn't a slice 1
-      // concern). The type-guarded filter narrows without an `as` cast.
+      // concern).
       const userContentText = substitutedMessages
         .map(({ content }) => {
           if (typeof content === "string") return content;
           if (content.every((b) => b.type === "text")) {
-            return content
-              .filter((b) => b.type === "text")
-              .map((b) => b.text)
-              .join("\n");
+            return content.map((b) => b.text).join("\n");
           }
           return JSON.stringify(content);
         })
@@ -1278,10 +1275,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           );
 
           const fulfilledImages = imageSettled
-            .filter(
-              (r): r is PromiseFulfilledResult<{ data: Buffer; mediaType: string }> =>
-                r.status === "fulfilled",
-            )
+            .filter((r) => r.status === "fulfilled")
             .map((r) => r.value);
 
           for (const [i, r] of imageSettled.entries()) {
@@ -1302,15 +1296,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           );
 
           const fulfilledDocs = docSettled
-            .filter(
-              (
-                r,
-              ): r is PromiseFulfilledResult<{
-                data: Buffer;
-                mediaType: string;
-                name: string;
-              }> => r.status === "fulfilled",
-            )
+            .filter((r) => r.status === "fulfilled")
             .map((r) => r.value);
 
           for (const [i, r] of docSettled.entries()) {

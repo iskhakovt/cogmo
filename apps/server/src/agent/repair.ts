@@ -955,9 +955,7 @@ export function summarizeToolHistory(
     slice,
     R.flatMap((msg) =>
       msg.role === "user" && Array.isArray(msg.content)
-        ? msg.content.filter(
-            (b): b is Extract<ContentBlock, { type: "tool_result" }> => b.type === "tool_result",
-          )
+        ? msg.content.filter((b) => b.type === "tool_result")
         : [],
     ),
     R.flatMap((r) => {

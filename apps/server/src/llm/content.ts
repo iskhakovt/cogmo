@@ -27,5 +27,8 @@ export function canonicalizeToolInputs(content: ReadonlyArray<ContentBlock>): Co
  */
 export function extractText(content: string | ReadonlyArray<ContentBlock>): string {
   if (typeof content === "string") return content;
-  return content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("");
+  return content
+    .filter((b) => b.type === "text")
+    .map((b) => b.text)
+    .join("");
 }
