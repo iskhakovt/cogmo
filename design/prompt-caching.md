@@ -247,8 +247,8 @@ interface CacheIntent {
 
 | Caller | Intent |
 |-|-|
-| `handle-message` → `runStreamingAgentLoop` | `{ key: conversationId, retention: "short" }` (see [Retention](#retention)) |
-| `run-agentic-stage` → `runStreamingAgentLoop` | The same as chat — a run conversation's stage and chat turns share one prefix |
+| `handle-message` → `runStreamingAgentLoop` | `{ key: conversationId, retention: "long" }` (see [Retention](#retention)) |
+| `run-agentic-stage` → `runStreamingAgentLoop` | The same as chat — a run conversation's stage and chat turns share one prefix, and a 5-minute entry would expire before the next chat turn |
 | The loop's in-step non-streaming replay | Reuses the iteration's `chatParams`, so it reads the same cache |
 | Summarization, degraded-reply synthesis, sub-agent calls, `typed.ts`, artifact extraction | None — a breakpoint on a tail that is never re-sent is a pure 1.25–2× write surcharge |
 
@@ -294,7 +294,7 @@ Illustrative, Sonnet 5 input cost per turn, assuming a 38k-token prefix (8k tool
 - Between 5 and 60 minutes, only the 1-hour TTL reads — the case it exists for.
 - Over an hour, both write the whole prefix; 1 hour pays 2× for it.
 
-For chat, and so for pipeline runs that share its prefix, the TTL follows measured reply gaps. The query below measures start-to-start gaps between user-sent turns — pipeline stage prompts and scheduled fires are excluded by their inbound source, since their gaps are machine-driven — which approximates the cache-relevant gap to within one turn's duration:
+For chat, and so for pipeline runs that share its prefix, `"long"` is the default. The query below measures start-to-start gaps between user-sent turns — pipeline stage prompts and scheduled fires are excluded by their inbound source, since their gaps are machine-driven — which approximates the cache-relevant gap to within one turn's duration:
 
 ```sql
 with turns as (
@@ -309,7 +309,7 @@ select count(*) filter (where gap < interval '5 minutes') as under_5m,
 from turns where gap is not null;
 ```
 
-Early data puts most replies inside five minutes and only a small share between five minutes and an hour, so chat and pipeline runs use `"short"`. The data comes from little use so far; re-run the query once use is steady, since a shift toward five-to-sixty-minute gaps is what would favour `"long"`.
+The 1-hour TTL pays 0.75× extra on each turn's newly written tokens and saves a full rewrite of the prefix on every reply that arrives between five minutes and an hour later. It comes out ahead once the share of such replies exceeds roughly 0.65 × (new tokens per turn ÷ prefix tokens), plus a little for replies over an hour, so the bar falls as a conversation grows. Early data, from little use, puts most replies inside five minutes and the five-to-sixty-minute share near that bar for a mid-sized conversation and above it for a long one; slower, more asynchronous use moves it further toward `"long"`. Re-run the query once use is steady.
 
 **Keep-alive pings** — a `max_tokens: 0` request, sent without streaming, shortly before a 5-minute entry expires — are rejected for now. On every model they need a scheduler per idle conversation: a durable timer firing every few minutes up to a fixed horizon, since no timer can know a conversation has gone quiet for good. Whether they also save money is arithmetic. A ping reads the whole prefix at the read rate; the 1-hour TTL instead pays 0.75× extra on each turn's newly written tokens. On a 30k-token prefix with a 4k-token delta, pings break even at about one per gap on Sonnet 5 (reads 0.1×), two on Opus 5.5 (0.05×) and four on Fable 5.1 and Mythos 5.1 (0.025×). A gap needs its first ping after about five minutes and another every four or so, so pings never pay on Sonnet 5, pay on Opus 5.5 only for gaps under about ten minutes, and on Fable 5.1 for gaps under about twenty; the 1-hour TTL is cheaper from there to the hour, and the ratio moves against pings as the prefix grows. If the chat model moves to Fable 5.1, keep-alive with a horizon of about four pings is worth revisiting, with the scheduler as its main cost — it beats the 1-hour TTL only if measured gaps mostly fall inside that horizon, since a gap past it pays a full rewrite the 1-hour TTL would have read.
 
@@ -444,13 +444,13 @@ Recorded fixtures match on the last user message (`match: { userMessage }`), whi
 ## Implementation Plan `[proposed]`
 
 1. **Cache intent and usage accounting** `[confirmed]`. `ChatParams.cache`, the Anthropic mapping, usage totals across adapters, the metric split, loop totals, the injectable `fetch` and wire recorder, and live scenario A's within-turn assertions. Iterations 2 and later of every tool-using turn read the transcript. Until step 2, reads rarely cross a turn (only when the system prompt happens not to change), so a single-iteration turn usually pays 25% more on the transcript it writes; the step nets out cheaper once more than ~28% of turns iterate (`cogmo.agent.iterations`), or fewer where reads do cross a turn. Early data puts the tool-calling share near that line, above it in periods heavy on image generation and below it in chat-heavy ones; it comes from little use, and a low share may reflect bugs as much as usage. Ships with `retention: "short"` everywhere.
-2. **Turn context.** The voice decision and per-turn tool definitions, frozen in the `freeze-turn-inputs` step, have shipped. Remaining: clock, recall and voice hint out of the system prompt (voice as a modality in the turn context, its style guidance a standing system-prompt section); `turn_contexts` with stored rendered text, the render step after compaction with deduplication and the envelope; the llmock normalizer and re-record; the integration suite; live scenarios B and C. Reads across turns on every provider, except after a configuration change.
+2. **Turn context.** The voice decision and per-turn tool definitions, frozen in the `freeze-turn-inputs` step, have shipped. Remaining: clock, recall and voice hint out of the system prompt (voice as a modality in the turn context, its style guidance a standing system-prompt section); `turn_contexts` with stored rendered text, the render step after compaction with deduplication and the envelope; the llmock normalizer and re-record; `retention: "long"` for chat and pipeline runs; the integration suite; live scenarios B and C. Reads across turns on every provider, except after a configuration change.
 3. **System prompt snapshot and one prefix per conversation.** `system_prompt_snapshots` and epochs keyed on a configuration digest, core-memory announcements, every channel-scoped rule labelled in the snapshot with the delivery channels in the turn context, thinking blocks stripped when an epoch opens, and stage turns on the conversation's snapshot and tool definitions with the allowlist enforced at dispatch ([pipelines.md](pipelines.md) changes with it).
 4. **OpenAI-compatible routing hints.** `attrs.cacheDialect` with its migration and writers, OpenRouter `session_id` and markers, OpenAI `prompt_cache_key`, xAI `x-grok-conv-id`, and live scenario D.
 
 ## Open questions
 
-- **Chat retention.** `"short"` on early data from little use; re-run the reply-gap query once use is steady.
+- **Chat retention.** `"long"` from step 2, when reads start crossing turns; re-run the reply-gap query once use is steady.
 - **Preserved-thinking enforcement.** This account is not enforced by default (measured), so the history edits that remain drop nothing today unless a request opts in. They still cost the cache, and they become 400s for a new account or a model that enforces for everyone.
 - **Core-memory edit frequency.** Early data shows few edits, but it comes from little use, and a low count may also point to a bug in how the agent uses core memory rather than the rate a working system would see. Check the agent updates core memory when it should, then re-measure edits per conversation-day, before sizing step 3.
 - **Anthropic-compatible endpoints.** If an Anthropic-protocol `llm_providers` row ever points at a third-party endpoint, check that it accepts top-level `cache_control`, or fall back to an explicit tail marker for that row.
