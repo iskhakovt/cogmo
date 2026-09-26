@@ -99,7 +99,7 @@ beforeAll(async () => {
       type: "openai_compatible",
       baseUrl: `${llmockBaseUrl}/v1`,
       secretId: openaiSecret.id,
-      attrs: { promptCaching: false },
+      attrs: { cacheDialect: "none" },
     }),
   );
   anthropicProviderId = anthropic.id;

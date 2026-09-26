@@ -24,7 +24,6 @@ import type { AgentStore } from "../agent/store/index.js";
 import {
   IMAGE_ALLOWED_ASPECT_RATIOS,
   type ImageAspectRatio,
-  type ProviderAttrs,
   type SttProviderTypeValue,
   type TtsProviderTypeValue,
 } from "../agent/store/schema.js";
@@ -90,7 +89,7 @@ export interface WizardDeps {
 
 // --- Provider UI metadata (canonical types/URLs come from providers.ts) ---
 
-import { PROVIDER_BASE_URLS, type ProviderType } from "./providers.js";
+import { defaultCacheDialect, PROVIDER_BASE_URLS, type ProviderType } from "./providers.js";
 
 const PROVIDER_OPTIONS: ReadonlyArray<{
   value: ProviderType;
@@ -227,9 +226,8 @@ export async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
   // identical to `cogmo provider add`.
   const s = p.spinner();
   s.start("Validating API key...");
-  const attrs: ProviderAttrs = {};
-  if (providerType === "openrouter") attrs.promptCaching = true;
 
+  const cacheDialect = defaultCacheDialect(providerType, undefined);
   const { providerId, validation } = await retryPrompt(
     () =>
       addProvider(deps, {
@@ -237,7 +235,7 @@ export async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
         type: adapterType,
         ...(baseUrl && { baseUrl }),
         apiKey,
-        attrs,
+        ...(cacheDialect && { cacheDialect }),
       }),
     `add provider "${String(providerType)}"`,
   );

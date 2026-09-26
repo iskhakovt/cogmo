@@ -89,6 +89,7 @@ For CI, IaC, or Docker entrypoint scripts. Reads from env vars with the `COGMO_`
 | `COGMO_LLM_MODEL` | Model id to route to this provider. Defaults to the seeded profile's model when omitted, preserving the legacy "wire the provider, leave the model alone" flow. | Optional |
 | `COGMO_LLM_CONTEXT_WINDOW` | Explicit context window override stored on the routing row. Omit to let the resolver fall through to the bundled LiteLLM snapshot → conservative default. | Optional |
 | `COGMO_LLM_MAX_OUTPUT_TOKENS` | Explicit max-output-tokens override on the routing row. Same fallback semantics. | Optional |
+| `COGMO_LLM_CACHE_DIALECT` | Caching hints the endpoint takes (`openrouter` \| `openai` \| `xai` \| `none`), stored as `llm_providers.attrs.cacheDialect`. Omit to take `openrouter` for the `openrouter` type and derive it from the base URL's host otherwise; set it for an endpoint behind a proxy. Rejected for `anthropic`. See [prompt-caching.md](prompt-caching.md) → Adapter mapping. | Optional |
 | `COGMO_TELEGRAM_BOT_TOKEN` (+ `_FILE`) | Telegram bot token | Optional |
 | `COGMO_TELEGRAM_ALLOWED_USERS` | Comma-separated Telegram user IDs | Required with token |
 | `COGMO_TAVILY_API_KEY` (+ `_FILE`) | Tavily API key | Optional |
@@ -114,7 +115,7 @@ Provider and model management after first-run lives in dedicated subcommands so 
 
 | Command | Purpose |
 |-|-|
-| `cogmo provider add <type> <name> <api-key> [base-url]` | Register a new provider. Validates the key the same way the wizard does. |
+| `cogmo provider add <type> <name> <api-key> [base-url] [--cache-dialect <dialect>]` | Register a new provider. Validates the key the same way the wizard does. `--cache-dialect` overrides the default dialect, as `COGMO_LLM_CACHE_DIALECT` does, and is rejected for `anthropic`. |
 | `cogmo provider list` | Show registered providers (name, type, base URL). |
 | `cogmo provider remove <name>` | Delete a provider; cascades to its `model_providers` rows. |
 | `cogmo model add <id> --provider <name> [--context N --max-output N --position N]` | Insert a routing row. `--context` / `--max-output` override the bundled LiteLLM defaults; omit to let the resolver pick. |

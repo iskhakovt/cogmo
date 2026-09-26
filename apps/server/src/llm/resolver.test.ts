@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import type { AgentStore } from "../agent/store/index.js";
+import type { ProviderAttrs } from "../agent/store/schema.js";
 import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { expectDefined } from "../test/assertions.js";
 import { mockProvider } from "../test/factories.js";
 import { FallbackLlmProvider } from "./fallback.js";
 import { constantResolver, createDbProviderResolver, ProviderConfigError } from "./resolver.js";
@@ -15,7 +18,7 @@ type ProviderRow = {
   type: string;
   baseUrl: string | null;
   secretId: string;
-  attrs: { promptCaching?: boolean; headers?: Record<string, string> };
+  attrs: ProviderAttrs;
   contextWindow: number | null;
   maxOutputTokens: number | null;
 };
@@ -91,7 +94,7 @@ describe("createDbProviderResolver — happy path", () => {
           name: "xai-grok",
           type: "openai_compatible",
           baseUrl: "https://api.x.ai/v1",
-          attrs: { promptCaching: true, headers: { "x-test": "1" } },
+          attrs: { cacheDialect: "xai", headers: { "x-test": "1" } },
         }),
       ],
     });
@@ -102,6 +105,69 @@ describe("createDbProviderResolver — happy path", () => {
     // OpenAI-compatible adapter copies `name` from its constructor arg,
     // which we plumb from the DB row.
     expect(provider.name).toBe("xai-grok");
+  });
+
+  describe("an openai_compatible row's cache dialect", () => {
+    /** Send one chat with a cache intent through the resolved provider; return what went out. */
+    async function sendWithIntent(attrs: ProviderAttrs): Promise<Request> {
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+        async () =>
+          new Response(
+            JSON.stringify({
+              id: "c-1",
+              model: "gpt-5.4-nano",
+              choices: [
+                { index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" },
+              ],
+              usage: { prompt_tokens: 1, completion_tokens: 1 },
+            }),
+            { headers: { "content-type": "application/json" } },
+          ),
+      );
+      try {
+        const { agentStore, secretsStore } = makeDeps({
+          rows: [
+            row({
+              name: "openai",
+              type: "openai_compatible",
+              baseUrl: "http://llm.test/v1",
+              attrs,
+            }),
+          ],
+        });
+        const resolve = createDbProviderResolver({
+          runInTx: fakeRunInTx,
+          agentStore,
+          secretsStore,
+        });
+        const { provider } = await resolve("gpt-5.4-nano");
+        await provider.chat({
+          model: "gpt-5.4-nano",
+          system: "sys",
+          messages: [{ role: "user", content: "hi" }],
+          cache: { key: "conv-1", retention: "short" },
+        });
+        const [input, init] = expectDefined(fetchSpy.mock.calls[0], "fetch call");
+        return new Request(input, init);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    }
+
+    it("reaches the adapter", async () => {
+      const request = await sendWithIntent({ cacheDialect: "openai" });
+
+      expect(await request.json()).toMatchObject({ prompt_cache_key: "conv-1" });
+    });
+
+    it("reads as none when the row has none", async () => {
+      const request = await sendWithIntent({});
+
+      const body = z.record(z.string(), z.unknown()).parse(await request.json());
+      expect(Object.keys(body)).not.toContain("prompt_cache_key");
+      expect(Object.keys(body)).not.toContain("session_id");
+      expect(request.headers.get("x-grok-conv-id")).toBeNull();
+    });
   });
 
   it("multi-row chains expose a composite name", async () => {

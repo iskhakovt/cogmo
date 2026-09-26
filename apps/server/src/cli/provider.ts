@@ -8,6 +8,7 @@
  * functions — no business-logic duplication between the two surfaces.
  */
 
+import { err, ok, type Result } from "neverthrow";
 import {
   type AdapterType,
   type AddProviderResult,
@@ -15,17 +16,23 @@ import {
 } from "../agent/provider/add-provider.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { Transactor } from "../db/index.js";
+import { type CacheDialect, CacheDialectSchema } from "../llm/cache-dialect.js";
 import type { SecretsStore } from "../secrets/store/index.js";
-import { PROVIDER_BASE_URLS, type ProviderType } from "../setup/providers.js";
+import { defaultCacheDialect, PROVIDER_BASE_URLS, type ProviderType } from "../setup/providers.js";
 
 const USAGE = `Usage: cogmo provider <command> [args]
 
 Commands:
-  add <type> <name> <api-key> [base-url]
+  add <type> <name> <api-key> [base-url] [--cache-dialect <dialect>]
                           Register a provider. \`type\` is one of:
                           anthropic, openrouter, openai, custom.
                           base-url required for type=custom; optional
                           for the rest (defaults baked in).
+                          --cache-dialect (openrouter|openai|xai|none)
+                          sets the caching hints an OpenAI-compatible
+                          endpoint takes. Omitted, type=openrouter
+                          takes openrouter and the rest follow the
+                          base URL's host.
   list                    Show registered providers (name | type | base url).
   remove <name>           Delete a provider (cascades to its model rows).
 `;
@@ -95,9 +102,20 @@ async function addProviderCmd(
   deps: ProviderCliDeps,
   io: CliIo,
 ): Promise<number> {
-  const [providerTypeArg, name, apiKey, baseUrlArg] = args;
+  const flagAt = args.findIndex((arg) => arg.startsWith("--"));
+  const positional = flagAt === -1 ? args : args.slice(0, flagAt);
+  const flags = parseAddFlags(flagAt === -1 ? [] : args.slice(flagAt));
+  if (flags.isErr()) {
+    io.err(flags.error);
+    return 2;
+  }
+  const { cacheDialect } = flags.value;
+
+  const [providerTypeArg, name, apiKey, baseUrlArg] = positional;
   if (!providerTypeArg || !name || !apiKey) {
-    io.err("Usage: cogmo provider add <type> <name> <api-key> [base-url]");
+    io.err(
+      "Usage: cogmo provider add <type> <name> <api-key> [base-url] [--cache-dialect <dialect>]",
+    );
     return 2;
   }
   if (
@@ -111,14 +129,17 @@ async function addProviderCmd(
   }
   const providerType: ProviderType = providerTypeArg;
   const adapterType: AdapterType = providerType === "anthropic" ? "anthropic" : "openai_compatible";
+  if (adapterType === "anthropic" && cacheDialect) {
+    io.err("--cache-dialect applies to OpenAI-compatible providers only");
+    return 2;
+  }
 
   const baseUrl = baseUrlArg ?? PROVIDER_BASE_URLS[providerType];
   if (adapterType === "openai_compatible" && !baseUrl) {
     io.err(`type=${providerType} requires a base-url argument`);
     return 2;
   }
-
-  const attrs = providerType === "openrouter" ? { promptCaching: true } : {};
+  const dialect = defaultCacheDialect(providerType, cacheDialect);
 
   let result: AddProviderResult;
   try {
@@ -127,7 +148,7 @@ async function addProviderCmd(
       type: adapterType,
       ...(baseUrl && { baseUrl }),
       apiKey,
-      attrs,
+      ...(dialect && { cacheDialect: dialect }),
     });
   } catch (err) {
     io.err(`Failed to add provider: ${(err as Error).message}`);
@@ -141,6 +162,24 @@ async function addProviderCmd(
   io.out(`Added provider "${name}" (id=${result.providerId}).`);
   io.out(`Next: cogmo model add <model-id> --provider ${name}`);
   return 0;
+}
+
+interface AddFlags {
+  cacheDialect?: CacheDialect;
+}
+
+function parseAddFlags(flags: readonly string[]): Result<AddFlags, string> {
+  const [flag, value, ...rest] = flags;
+  if (flag === undefined) return ok({});
+  if (flag !== "--cache-dialect") {
+    return err(`Unknown flag "${flag}". Run \`cogmo provider --help\` for accepted flags.`);
+  }
+  if (value === undefined || value.startsWith("--")) return err("--cache-dialect needs a value");
+  const dialect = CacheDialectSchema.safeParse(value);
+  if (!dialect.success) {
+    return err(`--cache-dialect must be one of ${CacheDialectSchema.options.join(", ")}`);
+  }
+  return parseAddFlags(rest).map((more) => ({ ...more, cacheDialect: dialect.data }));
 }
 
 async function removeProvider(

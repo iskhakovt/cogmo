@@ -1,11 +1,11 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { logger } from "../logger.js";
+import { cacheMarker } from "./cache-marker.js";
 import { ProviderProtocolError, parseToolArgs, ToolArgsCutOffError } from "./errors.js";
 import { withFailureLogging } from "./logging-fetch.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
 import type {
-  CacheIntent,
   ChatParams,
   ChatStreamResult,
   ContentBlock,
@@ -326,22 +326,6 @@ function dropSamplingParams(params: ChatParams): void {
       `parameters, because current models reject them. Control response variance with the ` +
       `prompt, or route this call to an OpenAI-compatible provider.`,
   );
-}
-
-/** Anthropic's TTL for each {@link CacheIntent} retention. */
-const CACHE_TTL = { short: "5m", long: "1h" } as const satisfies Record<
-  CacheIntent["retention"],
-  Anthropic.CacheControlEphemeral["ttl"]
->;
-
-/**
- * The breakpoint marker for a request. Without an intent, the API default
- * (5 minutes). With one, the intent's TTL — on every marker in the request,
- * because a longer TTL may not follow a shorter one and the automatic tail
- * breakpoint comes last: a 1-hour tail after a 5-minute system marker is a 400.
- */
-function cacheMarker(intent: CacheIntent | undefined): Anthropic.CacheControlEphemeral {
-  return intent ? { type: "ephemeral", ttl: CACHE_TTL[intent.retention] } : { type: "ephemeral" };
 }
 
 function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNonStreaming {
