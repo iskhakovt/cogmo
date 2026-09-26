@@ -104,4 +104,18 @@ describe("cogmo provider add — cache dialect", () => {
     expect(err.join("\n")).toMatch(message);
     expect(addProviderSpy).not.toHaveBeenCalled();
   });
+
+  it("rejects --cache-dialect for an anthropic provider, which takes none", async () => {
+    const { io, err } = makeIo();
+
+    const code = await runProviderCli(
+      ["add", "anthropic", "claude", "sk-ant-1234567890", "--cache-dialect", "none"],
+      makeDeps(),
+      io,
+    );
+
+    expect(code).toBe(2);
+    expect(err.join("\n")).toMatch(/--cache-dialect applies to OpenAI-compatible providers only/);
+    expect(addProviderSpy).not.toHaveBeenCalled();
+  });
 });

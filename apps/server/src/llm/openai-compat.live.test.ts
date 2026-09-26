@@ -112,14 +112,16 @@ async function send(
   }
   const { usage: reported } = await response;
 
+  // An attempt that failed below HTTP rejects its exchange; the SDK retried it.
   const attempts = recorder.exchanges.slice(before);
-  const settled = await Promise.all(
-    attempts.map((e) => e.response.then((wire) => ({ request: e.request, wire }))),
-  );
-  const last = expectDefined(
-    settled.findLast(({ wire }) => wire.status === 200),
-    "successful exchange",
-  );
+  const settled = await Promise.allSettled(attempts.map((e) => e.response));
+  const succeeded = attempts.flatMap((e, i) => {
+    const outcome = settled[i];
+    return outcome?.status === "fulfilled" && outcome.value.status === 200
+      ? [{ request: e.request, wire: outcome.value }]
+      : [];
+  });
+  const last = expectDefined(succeeded.at(-1), "successful exchange");
   const usage = ChatUsageSchema.parse(last.wire.usage);
   return {
     text,

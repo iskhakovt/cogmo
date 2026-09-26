@@ -1,6 +1,7 @@
 /**
  * Migration 0057 replaces `llm_providers.attrs.promptCaching` with
- * `cacheDialect`, derived from each OpenAI-compatible row's base-URL host.
+ * `cacheDialect`, derived from each OpenAI-compatible row's base-URL host by
+ * the rule `cacheDialectForBaseUrl` applies to new rows.
  * Runs the raw migration SQL against PGlite over rows seeded in the
  * pre-migration shape (raw SQL, since the store schema no longer writes it)
  * and asserts the rewritten JSONB, then that the store reads it.
@@ -12,6 +13,7 @@ import { asc, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { llmProviders } from "../agent/store/schema.js";
+import { cacheDialectForBaseUrl } from "../llm/cache-dialect.js";
 import { secrets } from "../secrets/store/schema.js";
 import { expectDefined } from "../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
@@ -86,14 +88,9 @@ describe("migration 0057 — cache dialect", () => {
   it("derives each OpenAI-compatible row's dialect from its base-URL host", async () => {
     await seed([
       compat("openrouter", "https://openrouter.ai/api/v1", { promptCaching: true }),
-      compat("openrouter-off", "https://openrouter.ai/api/v1", { promptCaching: false }),
       compat("openai", "https://api.openai.com/v1", {}),
       compat("xai", "https://api.x.ai/v1", {}),
-      compat("xai-upper", "HTTPS://API.X.AI/v1", {}),
-      compat("xai-port-userinfo", "https://user:pw@api.x.ai:443/v1", {}),
       compat("deepseek", "https://api.deepseek.com/v1", { promptCaching: true }),
-      compat("lookalike", "https://openrouter.ai.evil.test/v1", {}),
-      compat("local", "http://localhost:8000/v1", {}),
       compat("no-url", null, {}),
     ]);
 
@@ -101,15 +98,61 @@ describe("migration 0057 — cache dialect", () => {
 
     expect(await rawAttrs()).toEqual({
       openrouter: { cacheDialect: "openrouter" },
-      "openrouter-off": { cacheDialect: "openrouter" },
       openai: { cacheDialect: "openai" },
       xai: { cacheDialect: "xai" },
-      "xai-upper": { cacheDialect: "xai" },
-      "xai-port-userinfo": { cacheDialect: "xai" },
       deepseek: { cacheDialect: "none" },
-      lookalike: { cacheDialect: "none" },
-      local: { cacheDialect: "none" },
       "no-url": { cacheDialect: "none" },
+    });
+  });
+
+  it("derives the same dialect as cacheDialectForBaseUrl, which new rows get", async () => {
+    const baseUrls = [
+      "https://openrouter.ai/api/v1",
+      "https://OpenRouter.AI/api/v1",
+      "https://openrouter.ai?x=1",
+      "https://api.openai.com/v1",
+      "http://api.openai.com:8080/v1",
+      "https://api.x.ai/v1",
+      "https://user:pw@api.x.ai:443/v1",
+      " https://openrouter.ai/api/v1",
+      "https://openrouter.ai/api/v1 ",
+      "https://api.x.ai/v1\n",
+      "\thttps://api.openai.com/v1",
+      "https://openrouter.ai./api/v1",
+      "https://eu.openrouter.ai/api/v1",
+      "https://openrouter.ai.evil.test/v1",
+      "https://evil.test/openrouter.ai/v1",
+      "https://api.deepseek.com/v1",
+      "http://localhost:8000/v1",
+      "http://[::1]:8000/v1",
+      "openrouter.ai/api/v1",
+      "not a url",
+      "",
+    ];
+    await seed(baseUrls.map((baseUrl, i) => compat(`host-${i}`, baseUrl, {})));
+
+    await applyMigration();
+
+    const migrated = await rawAttrs();
+    const disagreements = baseUrls.flatMap((baseUrl, i) => {
+      const expected = cacheDialectForBaseUrl(baseUrl);
+      const actual = migrated[`host-${i}`]?.cacheDialect;
+      return actual === expected ? [] : [{ baseUrl, expected, actual }];
+    });
+    expect(disagreements).toEqual([]);
+  });
+
+  it("gives a row that opted out with promptCaching: false no dialect, whatever its host", async () => {
+    await seed([
+      compat("openrouter-off", "https://openrouter.ai/api/v1", { promptCaching: false }),
+      compat("openai-off", "https://api.openai.com/v1", { promptCaching: false }),
+    ]);
+
+    await applyMigration();
+
+    expect(await rawAttrs()).toEqual({
+      "openrouter-off": { cacheDialect: "none" },
+      "openai-off": { cacheDialect: "none" },
     });
   });
 

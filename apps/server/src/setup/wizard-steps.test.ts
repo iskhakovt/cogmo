@@ -1074,12 +1074,14 @@ describe("stepConfigureProvider", () => {
     addProviderSpy.mockResolvedValue({ providerId: "p-new", validation: { valid: true } });
     vi.mocked(p.select).mockResolvedValueOnce("openrouter"); // provider type
     vi.mocked(p.password).mockResolvedValueOnce("sk-or-test-1234567890");
-    // bail out on the discover/add-model chain
-    vi.mocked(p.select).mockResolvedValueOnce(Symbol.for("clack:cancel") as unknown as string);
-    vi.mocked(p.isCancel).mockReturnValueOnce(false).mockReturnValueOnce(false);
-    vi.mocked(p.isCancel).mockReturnValueOnce(true);
+    // Discovery finds no models, so the model id is a `p.text` prompt; cancelling it bails out.
+    vi.mocked(p.isCancel)
+      .mockReturnValueOnce(false) // provider type
+      .mockReturnValueOnce(false) // API key
+      .mockReturnValueOnce(true); // model id
 
     await expect(stepConfigureProvider(deps)).rejects.toBeInstanceOf(WizardCancelled);
+    expect(vi.mocked(p.text)).toHaveBeenCalledOnce();
 
     // addProvider derives the dialect from the base URL; the wizard sends none.
     expect(addProviderSpy).toHaveBeenCalledWith(deps, {

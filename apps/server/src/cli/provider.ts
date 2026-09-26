@@ -128,6 +128,10 @@ async function addProviderCmd(
   }
   const providerType: ProviderType = providerTypeArg;
   const adapterType: AdapterType = providerType === "anthropic" ? "anthropic" : "openai_compatible";
+  if (adapterType === "anthropic" && cacheDialect) {
+    io.err("--cache-dialect applies to OpenAI-compatible providers only");
+    return 2;
+  }
 
   const baseUrl = baseUrlArg ?? PROVIDER_BASE_URLS[providerType];
   if (adapterType === "openai_compatible" && !baseUrl) {
