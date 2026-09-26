@@ -126,13 +126,7 @@ describe("DefaultPromptSource", () => {
     }).assemble({ profile: undefined, rules: [] });
 
     expect(prompt).toContain("don't know your user yet");
-  });
-
-  it("sends what onboarding learns to core memory, which ends onboarding", async () => {
-    const prompt = await new DefaultPromptSource({
-      getUserContext: async () => null,
-    }).assemble({ profile: undefined, rules: [] });
-
+    // Onboarding saves to core memory, so the first block written ends it.
     expect(prompt).toContain("core_memory_update");
     expect(prompt).not.toContain("memory_retain");
   });

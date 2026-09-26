@@ -23,7 +23,7 @@ Two stores hold what the agent knows about its user. **Core memory** is a few ke
 
 | Core memory | Hindsight |
 |-|-|
-| Who the user is: name and what to call them, role and employer, where they live and their timezone, partner, children and close family | Events: a dinner out, a trip, a bug fixed |
+| Who the user is: name and what to call them, role and employer, where they live and their timezone, who their close family are | Events: a dinner out, a trip, a bug fixed |
 | Active projects and their status | Details: a sister's birthday, the rent, a book finished |
 | Standing preferences on how to work with them: spelling variety, dietary constraints, working days | One-off decisions about a single task: a bar chart for the quarterly report |
 | | Facts about other people: a friend's new job |
