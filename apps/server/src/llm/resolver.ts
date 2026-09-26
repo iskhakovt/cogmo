@@ -151,7 +151,7 @@ async function buildAdapter(row: ProviderRow, deps: DbResolverDeps): Promise<Llm
         apiKey,
         baseURL: row.baseUrl,
         ...(row.attrs.headers && { headers: row.attrs.headers }),
-        promptCaching: row.attrs.promptCaching ?? false,
+        cacheDialect: row.attrs.cacheDialect ?? "none",
       });
     }
   }

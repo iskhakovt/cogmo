@@ -339,8 +339,9 @@ const CACHE_TTL = { short: "5m", long: "1h" } as const satisfies Record<
  * (5 minutes). With one, the intent's TTL — on every marker in the request,
  * because a longer TTL may not follow a shorter one and the automatic tail
  * breakpoint comes last: a 1-hour tail after a 5-minute system marker is a 400.
+ * OpenRouter passes the same marker through to Claude.
  */
-function cacheMarker(intent: CacheIntent | undefined): Anthropic.CacheControlEphemeral {
+export function cacheMarker(intent: CacheIntent | undefined): Anthropic.CacheControlEphemeral {
   return intent ? { type: "ephemeral", ttl: CACHE_TTL[intent.retention] } : { type: "ephemeral" };
 }
 

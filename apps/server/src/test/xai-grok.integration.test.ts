@@ -65,6 +65,7 @@ describe("OpenAICompatibleProvider — xAI Grok 4.3 via OpenRouter (recorded)", 
     const provider = new OpenAICompatibleProvider("openrouter-xai", {
       apiKey: IS_RECORD ? (process.env.OPENROUTER_API_KEY ?? "") : "test-key",
       baseURL: llmockBaseUrl(),
+      cacheDialect: "openrouter",
     });
 
     const response = await provider.chat({
@@ -97,6 +98,7 @@ describe("OpenAICompatibleProvider — xAI Grok 4.3 via OpenRouter (recorded)", 
       const provider = new OpenAICompatibleProvider("openrouter-xai-stream", {
         apiKey: "test-key",
         baseURL: `${inject("llmockBaseUrl")}/v1`,
+        cacheDialect: "openrouter",
       });
 
       const { events, response } = provider.chatStream({

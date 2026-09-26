@@ -2,10 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { logger } from "../logger.js";
 import { expectDefined } from "../test/assertions.js";
+import type { CacheDialect } from "./cache-dialect.js";
 import { ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
 import { isRetriableProviderError, RefusalError } from "./fallback.js";
 import { OpenAICompatibleProvider } from "./openai-compat.js";
-import type { StreamEvent } from "./types.js";
+import type { CacheIntent, ChatParams, StreamEvent } from "./types.js";
 
 const mockCreate = vi.fn();
 // Constructor options each client was built with, newest last.
@@ -63,11 +64,12 @@ function getTool(args: ChatCreateArgs, index: number): unknown {
   return tool;
 }
 
-function createProvider(): OpenAICompatibleProvider {
+function createProvider(cacheDialect: CacheDialect = "none"): OpenAICompatibleProvider {
   mockCreate.mockReset();
   return new OpenAICompatibleProvider("test", {
     apiKey: "test-key",
     baseURL: "http://test",
+    cacheDialect,
   });
 }
 
@@ -211,22 +213,22 @@ describe("OpenAICompatibleProvider", () => {
       expect(getMessage(args, 0).role).toBe("user");
     });
 
-    it("omits the system message when the system prompt is empty (prompt caching)", async () => {
+    it("omits the system message when the system prompt is empty (cache markers)", async () => {
       // A null-persona sub-agent routed via OpenRouter → Anthropic: an empty
       // system text block 400s downstream, so it must be dropped, not sent.
-      mockCreate.mockReset();
-      const provider = new OpenAICompatibleProvider("test", {
-        apiKey: "test-key",
-        baseURL: "http://test",
-        promptCaching: true,
-      });
+      const provider = createProvider("openrouter");
       mockCreate.mockResolvedValueOnce({
         choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
         model: "m",
         usage: { prompt_tokens: 1, completion_tokens: 1 },
       });
 
-      await provider.chat({ model: "m", system: "", messages: [{ role: "user", content: "hi" }] });
+      await provider.chat({
+        model: "anthropic/claude-sonnet-5",
+        system: "",
+        messages: [{ role: "user", content: "hi" }],
+        cache: { key: "conv-1", retention: "long" },
+      });
 
       const args = firstCreateArgs();
       expect(args.messages.some((m) => m.role === "system")).toBe(false);
@@ -1050,6 +1052,7 @@ describe("OpenAICompatibleProvider", () => {
         new OpenAICompatibleProvider("openrouter", {
           apiKey: "test-key",
           baseURL: "http://test",
+          cacheDialect: "openrouter",
           fetch: inner,
         });
         const sdkFetch = expectDefined(clientOptions.at(-1)?.fetch, "fetch handed to the SDK");
@@ -1068,52 +1071,289 @@ describe("OpenAICompatibleProvider", () => {
     });
   });
 
-  describe("prompt caching", () => {
-    it("adds cache_control to system when promptCaching enabled", async () => {
-      mockCreate.mockReset();
-      const provider = new OpenAICompatibleProvider("openrouter", {
-        apiKey: "key",
-        baseURL: "http://test",
-        promptCaching: true,
-      });
-      mockCreate.mockResolvedValueOnce({
+  describe("cache dialects", () => {
+    const INTENT: CacheIntent = { key: "conv-1", retention: "long" };
+
+    const TRANSCRIPT: ChatParams["messages"] = [
+      { role: "user", content: "hi" },
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "call_1", name: "search", input: { q: "x" } }],
+      },
+      { role: "user", content: [{ type: "tool_result", toolUseId: "call_1", content: "found" }] },
+    ];
+
+    function okCompletion(): unknown {
+      return {
         choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
         model: "m",
         usage: { prompt_tokens: 10, completion_tokens: 1 },
+      };
+    }
+
+    const RequestOptionsSchema = z
+      .object({ headers: z.record(z.string(), z.string()).optional() })
+      .optional();
+
+    interface Sent {
+      body: Record<string, unknown>;
+      /** Request options handed to `create` — per-request headers live here. */
+      options: z.infer<typeof RequestOptionsSchema>;
+    }
+
+    function sent(): Sent {
+      const call = expectDefined(mockCreate.mock.calls[0], "create call");
+      return {
+        body: z.record(z.string(), z.unknown()).parse(call[0]),
+        options: RequestOptionsSchema.parse(call[1]),
+      };
+    }
+
+    async function chatWith(
+      dialect: CacheDialect,
+      params: Partial<ChatParams> & Pick<ChatParams, "model">,
+    ): Promise<Sent> {
+      const provider = createProvider(dialect);
+      mockCreate.mockResolvedValueOnce(okCompletion());
+      await provider.chat({ system: "sys", messages: TRANSCRIPT, ...params });
+      return sent();
+    }
+
+    function systemContent(body: Record<string, unknown>): unknown {
+      return getMessage(ChatCreateArgsSchema.parse(body), 0).content;
+    }
+
+    /** Every `cache_control` value in a request body, the top-level field included. */
+    function breakpoints(value: unknown): unknown[] {
+      if (Array.isArray(value)) return value.flatMap(breakpoints);
+      if (typeof value !== "object" || value === null) return [];
+      return Object.entries(value).flatMap(([key, inner]) =>
+        key === "cache_control" ? [inner] : breakpoints(inner),
+      );
+    }
+
+    /** The top-level fields a dialect may add; each appears only when the dialect sends it. */
+    const HINT_FIELDS = [
+      "session_id",
+      "prompt_cache_key",
+      "prompt_cache_retention",
+      "cache_control",
+    ];
+
+    function hintFields(body: Record<string, unknown>): string[] {
+      return HINT_FIELDS.filter((field) => field in body);
+    }
+
+    describe("openrouter", () => {
+      it.each([
+        ["short", "5m"],
+        ["long", "1h"],
+      ] as const)(
+        "on an anthropic/ model, a %s intent marks the system prompt and the tail at %s and pins the session",
+        async (retention, ttl) => {
+          const { body, options } = await chatWith("openrouter", {
+            model: "anthropic/claude-sonnet-5",
+            cache: { key: "conv-1", retention },
+          });
+          const marker = { type: "ephemeral", ttl };
+
+          expect(body.session_id).toBe("conv-1");
+          // Top-level automatic caching places the transcript breakpoint.
+          expect(body.cache_control).toEqual(marker);
+          expect(systemContent(body)).toEqual([
+            { type: "text", text: "sys", cache_control: marker },
+          ]);
+          // Two breakpoints at one TTL: a longer TTL after a shorter one is a 400.
+          expect(breakpoints(body)).toEqual([marker, marker]);
+          expect(hintFields(body)).toEqual(["session_id", "cache_control"]);
+          expect(options?.headers).toBeUndefined();
+        },
+      );
+
+      it("treats a ~anthropic/ alias as an anthropic/ model", async () => {
+        const { body } = await chatWith("openrouter", {
+          model: "~anthropic/claude-sonnet-latest",
+          cache: INTENT,
+        });
+
+        expect(body.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
       });
 
-      await provider.chat({
-        model: "anthropic/claude-sonnet-4",
-        system: "Be helpful",
-        messages: [{ role: "user", content: "hi" }],
+      it("on an anthropic/ model without an intent, marks only the system prompt, at the default TTL", async () => {
+        const { body } = await chatWith("openrouter", { model: "anthropic/claude-sonnet-5" });
+
+        expect(breakpoints(body)).toEqual([{ type: "ephemeral" }]);
+        expect(systemContent(body)).toEqual([
+          { type: "text", text: "sys", cache_control: { type: "ephemeral" } },
+        ]);
+        expect(hintFields(body)).toEqual([]);
       });
 
-      const args = firstCreateArgs();
-      expect(getMessage(args, 0).content).toEqual([
-        expect.objectContaining({
-          type: "text",
-          text: "Be helpful",
-          cache_control: { type: "ephemeral" },
-        }),
-      ]);
+      it("on a google/ model, marks only the system prompt whatever the intent, and pins the session", async () => {
+        const withIntent = await chatWith("openrouter", {
+          model: "google/gemini-2.5-flash",
+          cache: INTENT,
+        });
+        const withoutIntent = await chatWith("openrouter", { model: "google/gemini-2.5-flash" });
+
+        // Gemini takes no TTL, and a tail marker that moves every request
+        // writes a new cache each time without reading the last one.
+        expect(breakpoints(withIntent.body)).toEqual([{ type: "ephemeral" }]);
+        expect(systemContent(withIntent.body)).toEqual([
+          { type: "text", text: "sys", cache_control: { type: "ephemeral" } },
+        ]);
+        expect(hintFields(withIntent.body)).toEqual(["session_id"]);
+        expect(withIntent.body.session_id).toBe("conv-1");
+
+        expect(breakpoints(withoutIntent.body)).toEqual([{ type: "ephemeral" }]);
+        expect(hintFields(withoutIntent.body)).toEqual([]);
+      });
+
+      it("on any other model, pins the session and sends no markers", async () => {
+        const { body, options } = await chatWith("openrouter", {
+          model: "x-ai/grok-4.3",
+          cache: INTENT,
+        });
+
+        expect(body.session_id).toBe("conv-1");
+        expect(breakpoints(body)).toEqual([]);
+        expect(systemContent(body)).toBe("sys");
+        expect(hintFields(body)).toEqual(["session_id"]);
+        expect(options?.headers).toBeUndefined();
+      });
+
+      it("sends nothing to any other model without an intent", async () => {
+        const { body } = await chatWith("openrouter", { model: "x-ai/grok-4.3" });
+
+        expect(breakpoints(body)).toEqual([]);
+        expect(hintFields(body)).toEqual([]);
+      });
     });
 
-    it("sends plain system string when promptCaching disabled", async () => {
-      const provider = createProvider(); // promptCaching defaults to false
-      mockCreate.mockResolvedValueOnce({
-        choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
-        model: "m",
-        usage: { prompt_tokens: 10, completion_tokens: 1 },
+    describe("openai", () => {
+      it("sends the intent's key as prompt_cache_key, and no retention", async () => {
+        const { body, options } = await chatWith("openai", {
+          model: "gpt-5.4-nano",
+          cache: INTENT,
+        });
+
+        expect(body.prompt_cache_key).toBe("conv-1");
+        expect(hintFields(body)).toEqual(["prompt_cache_key"]);
+        expect(breakpoints(body)).toEqual([]);
+        expect(options?.headers).toBeUndefined();
       });
 
-      await provider.chat({
-        model: "m",
-        system: "Be helpful",
-        messages: [{ role: "user", content: "hi" }],
+      it("sends nothing without an intent", async () => {
+        const { body } = await chatWith("openai", { model: "gpt-5.4-nano" });
+
+        expect(hintFields(body)).toEqual([]);
+      });
+    });
+
+    describe("xai", () => {
+      it("sends the intent's key as the x-grok-conv-id header, and nothing in the body", async () => {
+        const { body, options } = await chatWith("xai", { model: "grok-4.3", cache: INTENT });
+
+        expect(options?.headers).toEqual({ "x-grok-conv-id": "conv-1" });
+        expect(hintFields(body)).toEqual([]);
+        expect(breakpoints(body)).toEqual([]);
       });
 
-      const args = firstCreateArgs();
-      expect(getMessage(args, 0).content).toBe("Be helpful");
+      it("sends no header without an intent", async () => {
+        const { options } = await chatWith("xai", { model: "grok-4.3" });
+
+        expect(options?.headers).toBeUndefined();
+      });
+    });
+
+    it("none sends nothing for an intent", async () => {
+      const { body, options } = await chatWith("none", {
+        model: "anthropic/claude-sonnet-5",
+        cache: INTENT,
+      });
+
+      expect(hintFields(body)).toEqual([]);
+      expect(breakpoints(body)).toEqual([]);
+      expect(systemContent(body)).toBe("sys");
+      expect(options?.headers).toBeUndefined();
+    });
+
+    it.each(["openrouter", "openai", "xai"] as const)(
+      "%s takes no transcript caching on the responseFormat path",
+      async (dialect) => {
+        const { body, options } = await chatWith(dialect, {
+          model: "anthropic/claude-sonnet-5",
+          messages: [{ role: "user", content: "hi" }],
+          responseFormat: { type: "json_schema", name: "extract", schema: { type: "object" } },
+          cache: INTENT,
+        });
+
+        // A structured-output call is one-shot, so it maps as if it had no
+        // intent: only the default system marker OpenRouter sends Claude.
+        expect(hintFields(body)).toEqual([]);
+        expect(breakpoints(body)).toEqual(dialect === "openrouter" ? [{ type: "ephemeral" }] : []);
+        expect(options?.headers).toBeUndefined();
+      },
+    );
+
+    it.each([
+      ["openrouter", "anthropic/claude-sonnet-5"],
+      ["xai", "grok-4.3"],
+    ] as const)(
+      "maps the intent the same way on the streaming path (%s)",
+      async (dialect, model) => {
+        const provider = createProvider(dialect);
+        mockCreate.mockResolvedValueOnce(
+          mockStream([
+            {
+              model,
+              choices: [{ delta: {}, finish_reason: "stop" }],
+              usage: { prompt_tokens: 5, completion_tokens: 0 },
+            },
+          ]),
+        );
+
+        const { events } = provider.chatStream({
+          model,
+          system: "sys",
+          messages: TRANSCRIPT,
+          cache: INTENT,
+        });
+        for await (const _ of events) {
+          /* drain */
+        }
+
+        const { body, options } = sent();
+        expect(body.stream).toBe(true);
+        if (dialect === "openrouter") {
+          expect(body.session_id).toBe("conv-1");
+          expect(breakpoints(body)).toEqual([
+            { type: "ephemeral", ttl: "1h" },
+            { type: "ephemeral", ttl: "1h" },
+          ]);
+        } else {
+          expect(options?.headers).toEqual({ "x-grok-conv-id": "conv-1" });
+        }
+      },
+    );
+
+    it("takes no cache intent on countTokens, and counts the same if handed one", async () => {
+      const provider = createProvider("openrouter");
+      const params = {
+        model: "anthropic/claude-sonnet-5",
+        system: "sys",
+        messages: TRANSCRIPT,
+      };
+
+      const plain = await provider.countTokens(params);
+      const handedIntent = await provider.countTokens({
+        ...params,
+        // @ts-expect-error — nothing re-sends a count's transcript, so the type has no intent
+        cache: INTENT,
+      });
+
+      expect(handedIntent).toBe(plain);
+      expect(mockCreate).not.toHaveBeenCalled();
     });
   });
 

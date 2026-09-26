@@ -13,8 +13,8 @@ import {
   CLAUDE_CODE_OAUTH_TOKEN_SECRET,
   CLAUDE_CODE_OAUTH_TOKEN_SECRET_DESCRIPTION,
 } from "../agent/coding/auth.js";
+import { addProvider } from "../agent/provider/add-provider.js";
 import type { AgentStore } from "../agent/store/index.js";
-import type { ProviderAttrs } from "../agent/store/schema.js";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
 import {
@@ -362,29 +362,16 @@ async function persistProvider(deps: PersistDeps, answers: NonInteractiveAnswers
     await deps.runInTx((tx) => deps.agentStore.deleteProvider(tx, prov.id));
   }
 
-  const { id: secretId } = await deps.runInTx((tx) =>
-    deps.secretsStore.putSecret(tx, {
-      name: `${providerName}_api_key`,
-      plaintext: answers.llmApiKey,
-      description: `API key for ${providerName}`,
-    }),
-  );
-  await deps.runInTx((tx) => deps.secretsStore.markValidated(tx, `${providerName}_api_key`));
-
-  const attrs: ProviderAttrs = {};
-  if (answers.llmProviderType === "openrouter") {
-    attrs.promptCaching = true;
-  }
-
-  const { id: providerId } = await deps.runInTx((tx) =>
-    deps.agentStore.createProvider(tx, {
-      name: providerName,
-      type: adapterType,
-      ...(baseUrl && { baseUrl }),
-      secretId,
-      attrs,
-    }),
-  );
+  // `validateNonInteractive` checked the key before anything was written, so
+  // addProvider takes that result rather than calling the provider again.
+  const { providerId } = await addProvider(deps, {
+    name: providerName,
+    type: adapterType,
+    ...(baseUrl && { baseUrl }),
+    apiKey: answers.llmApiKey,
+    ...(answers.llmCacheDialect && { cacheDialect: answers.llmCacheDialect }),
+    validation: { valid: true },
+  });
 
   await deps.runInTx(async (tx) => {
     // Default to the seeded profile's model when COGMO_LLM_MODEL is omitted —

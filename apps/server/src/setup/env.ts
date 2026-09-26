@@ -9,6 +9,7 @@
 
 import { err, ok, type Result } from "neverthrow";
 import { z } from "zod";
+import { CacheDialectSchema } from "../llm/cache-dialect.js";
 import { resolveEnvFile } from "../secrets/env-file.js";
 import { PROVIDER_TYPES } from "./providers.js";
 
@@ -57,6 +58,12 @@ export const NonInteractiveAnswersSchema = z
      */
     llmContextWindow: z.coerce.number().int().positive().optional(),
     llmMaxOutputTokens: z.coerce.number().int().positive().optional(),
+    /**
+     * Which caching hints an OpenAI-compatible endpoint takes. Optional —
+     * `addProvider` derives it from the base URL's host when omitted; set it
+     * for an endpoint behind a proxy or gateway.
+     */
+    llmCacheDialect: CacheDialectSchema.optional(),
     telegramBotToken: z
       .string()
       .regex(/:/, { error: "Telegram token must contain a colon" })
@@ -85,6 +92,13 @@ export const NonInteractiveAnswersSchema = z
         code: "custom",
         path: ["llmBaseUrl"],
         message: "COGMO_LLM_BASE_URL is required when COGMO_LLM_PROVIDER_TYPE=custom",
+      });
+    }
+    if (v.llmProviderType === "anthropic" && v.llmCacheDialect) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["llmCacheDialect"],
+        message: "applies to OpenAI-compatible providers only",
       });
     }
     if (v.telegramBotToken && !v.telegramAllowedUsers) {
@@ -126,6 +140,7 @@ const PLAIN = [
   "COGMO_LLM_MODEL",
   "COGMO_LLM_CONTEXT_WINDOW",
   "COGMO_LLM_MAX_OUTPUT_TOKENS",
+  "COGMO_LLM_CACHE_DIALECT",
   "COGMO_TELEGRAM_ALLOWED_USERS",
 ] as const;
 
@@ -178,6 +193,7 @@ export function parseNonInteractiveEnv(
     llmModel: resolved.COGMO_LLM_MODEL,
     llmContextWindow: resolved.COGMO_LLM_CONTEXT_WINDOW,
     llmMaxOutputTokens: resolved.COGMO_LLM_MAX_OUTPUT_TOKENS,
+    llmCacheDialect: resolved.COGMO_LLM_CACHE_DIALECT,
     telegramBotToken: resolved.COGMO_TELEGRAM_BOT_TOKEN,
     telegramAllowedUsers: resolved.COGMO_TELEGRAM_ALLOWED_USERS,
     tavilyApiKey: resolved.COGMO_TAVILY_API_KEY,
@@ -203,6 +219,7 @@ const FIELD_TO_ENV: Record<string, string> = {
   llmProviderType: "COGMO_LLM_PROVIDER_TYPE",
   llmApiKey: "COGMO_LLM_API_KEY",
   llmBaseUrl: "COGMO_LLM_BASE_URL",
+  llmCacheDialect: "COGMO_LLM_CACHE_DIALECT",
   telegramBotToken: "COGMO_TELEGRAM_BOT_TOKEN",
   telegramAllowedUsers: "COGMO_TELEGRAM_ALLOWED_USERS",
   tavilyApiKey: "COGMO_TAVILY_API_KEY",

@@ -14,6 +14,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { z } from "zod";
 import { jsonbZod, pk, ts } from "../../db/helpers.js";
+import { CacheDialectSchema } from "../../llm/cache-dialect.js";
 import { MessageContentSchema } from "../../llm/types.js";
 import { secrets } from "../../secrets/store/schema.js";
 import { EvolutionEventPayloadSchema } from "../evolution/event-schema.js";
@@ -152,13 +153,15 @@ export type SttProviderTypeValue = (typeof sttProviderType.enumValues)[number];
 // --- JSONB shapes ---
 
 /**
- * `llm_providers.attrs` — adapter-specific knobs. `promptCaching` enables
- * Anthropic-style cache_control hints for OpenRouter routing; `headers` sets
- * extra default headers on the OpenAI SDK client (e.g. `HTTP-Referer` for
- * OpenRouter usage attribution).
+ * `llm_providers.attrs` — adapter-specific knobs, all for OpenAI-compatible
+ * rows. `cacheDialect` says which caching and routing hints the endpoint takes
+ * for a cache intent; absent reads as `none`, and Anthropic rows never carry
+ * it. `headers` sets extra default headers on the OpenAI SDK client (e.g.
+ * `HTTP-Referer` for OpenRouter usage attribution). Unknown keys are dropped
+ * on read, so a stray key never fails a provider lookup.
  */
 export const ProviderAttrsSchema = z.object({
-  promptCaching: z.boolean().optional(),
+  cacheDialect: CacheDialectSchema.optional(),
   headers: z.record(z.string(), z.string()).optional(),
 });
 export type ProviderAttrs = z.infer<typeof ProviderAttrsSchema>;
