@@ -40,6 +40,7 @@ import {
 } from "./context.js";
 import { loadConversationContext } from "./conversation/load-conversation-context.js";
 import { loadTurnHistory, summarizedSpan } from "./conversation/load-turn-history.js";
+import { storeTurnContext } from "./conversation/store-turn-context.js";
 import { buildInCooldownReply, isInCooldown } from "./cooldown.js";
 import type { DebounceConfig } from "./debounce.js";
 import { extractGeneratedDocuments, extractGeneratedImages } from "./extract-images.js";
@@ -58,6 +59,14 @@ import type { AgentStore } from "./store/index.js";
 import { buildSubAgentTools } from "./subagent/sub-agent-tool-builder.js";
 import type { ToolRegistry } from "./tools.js";
 import { turnCacheIntent } from "./turn-cache-intent.js";
+import {
+  findTurnContext,
+  newMemories,
+  renderTurnContext,
+  replaceTurnContext,
+  shownMemories,
+  withTurnContext,
+} from "./turn-context.js";
 import { buildTurnService } from "./turn-service.js";
 import { asNonRetriable, createTurnStepRunner } from "./turn-step-runner.js";
 import { bindFrozenTools, freezeToolTable } from "./turn-tools.js";
@@ -474,8 +483,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         })
         .join("\n");
 
-      await step.run("create-user-message", async () => {
-        await deps.runInTx((tx) =>
+      // Returns the row's id and `created_at`: the turn context is stored
+      // against the id and shows the time the row was written.
+      const userRow = await step.run("create-user-message", async () => {
+        const row = await deps.runInTx((tx) =>
           agentStore.insertMessage(tx, {
             conversationId,
             role: "user",
@@ -485,18 +496,21 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             lastInboundMessageId: maxInboundId,
           }),
         );
+        return { id: row.id, createdAt: row.createdAt.toISOString() };
       });
 
       // The compacted view, not the raw transcript: when the conversation
       // carries a durable summary, the span it covers arrives as one synthetic
-      // message and the rest of the rows follow. `messageIds` rides along so
-      // the persist step below can map a compaction split point back to a
-      // durable cutoff. Inside the step, so a `/compact` landing mid-run can't
-      // shift the history between invocations.
-      const turnHistory = await step.run("load-turn-history", async () => {
+      // message and the rest of the rows follow, earlier turns led by their
+      // stored turn contexts. `messageIds` rides along so the persist step
+      // below can map a compaction split point back to a durable cutoff, and
+      // `turnContexts` so the render step can leave out memories an earlier
+      // turn already shows. Inside the step, so a `/compact` landing mid-run
+      // can't shift the history between invocations.
+      const turnHistory = await step.run("load-turn-transcript", async () => {
         return loadTurnHistory({ runInTx: deps.runInTx, agentStore }, { conversationId });
       });
-      const history = turnHistory.messages;
+      const history: Message[] = turnHistory.messages;
 
       // Load profile up front — its streaming knobs ride into `prepare` so
       // open streams honor the per-profile chunk target and edit mode, and
@@ -596,9 +610,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const turnTools = bindFrozenTools(turnInputs.tools, liveTools);
       const toolDefs = turnTools.definitions();
 
-      // The `# Tools` section and the voice hint render from the frozen turn
-      // inputs — the same table the loop sends as `tools` — and the base
-      // prompt from the outer `profile` read.
+      // The `# Tools` section renders from the frozen turn inputs — the same
+      // table the loop sends as `tools` — and the base prompt from the outer
+      // `profile` read.
       const systemPrompt = await step.run("assemble-prompt", async () => {
         const ctx = await loadConversationContext(
           { runInTx: deps.runInTx, agentStore, transportStore },
@@ -608,7 +622,6 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           profile: profile,
           rules: ctx.rules,
           coreMemory: ctx.coreMemory,
-          voiceMode: turnInputs.voiceMode,
           toolDefinitions: toolDefs,
         });
       });
@@ -736,9 +749,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // path still surfaces hard failures to the model.
       const autoRecallMode = profile?.autoRecall ?? "heuristic";
       // Durable: recall costs an embedding round-trip plus a vector search
-      // per call, and its result feeds the system prompt — caching it keeps
-      // both the spend and the prompt identical across the ~one re-invocation
-      // per step boundary that a tool-calling turn produces. The `.catch`
+      // per call, and its result feeds the turn context — caching it keeps
+      // both the spend and the context identical across the ~one
+      // re-invocation per step boundary that a tool-calling turn produces. The `.catch`
       // stays INSIDE the body so a Hindsight failure degrades to "no
       // memories" instead of failing the step into Inngest retries, and so
       // the failure counts once per failed recall rather than once per
@@ -757,29 +770,39 @@ export function createHandleMessage(deps: HandleMessageDeps) {
               return { memories: [] };
             }),
           );
-      const recalledContext =
-        recallResult.memories.length > 0
-          ? recallResult.memories.map((m) => m.content).join("\n")
-          : null;
-
-      // Append recalled context to system prompt
-      const fullPrompt = recalledContext
-        ? `${systemPrompt}\n\n# Recalled Context\n\n${recalledContext}`
-        : systemPrompt;
-
-      // Build message history, replacing the last user message with resolved content.
-      // Safe because: `load-turn-history` runs after create-user-message (durable
-      // step ordering), and concurrency lock on conversationId prevents concurrent writes.
-      let historyMessages: Message[] = [...history];
+      // This turn's message, led by its turn context. Compaction runs first
+      // and counts the block with every recalled memory, an upper bound; the
+      // `render-turn-context` step then leaves out memories a turn context
+      // surviving compaction already shows, stores the block, and swaps it in.
+      // Every input is a step result or the event payload, so each invocation
+      // builds the same block.
+      const turnIndex = turnHistory.messageIds.lastIndexOf(userRow.id);
+      const turnRow = history[turnIndex];
+      if (turnRow === undefined) {
+        throw new Error(`user message ${userRow.id} is missing from the turn's history`);
+      }
       const hasAttachments = resolvedBlocks.some(
         (b) => b.type === "image" || b.type === "document",
       );
-      if (hasAttachments && historyMessages.length > 0) {
-        const lastIdx = historyMessages.length - 1;
-        if (historyMessages[lastIdx]?.role === "user") {
-          historyMessages[lastIdx] = { role: "user", content: resolvedBlocks };
-        }
-      }
+      const turnContextInput = {
+        handledAt: new Date(userRow.createdAt),
+        timezone: deps.userTimezone,
+        context: {
+          recalledMemories: recallResult.memories.map((m) => m.content),
+          voiceMode: turnInputs.voiceMode,
+          channelTypes: [],
+          announcedCoreMemoryBlocks: [],
+        },
+      };
+      const provisionalTurnContext = renderTurnContext(turnContextInput);
+      // The row's content, or the resolved image and document blocks it names.
+      let historyMessages: Message[] = history.with(
+        turnIndex,
+        withTurnContext(
+          { role: "user", content: hasAttachments ? resolvedBlocks : turnRow.content },
+          provisionalTurnContext,
+        ),
+      );
 
       // ──── Context window compaction ────
       //
@@ -824,10 +847,12 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const lastTokens = await stepRun("load-last-tokens", () =>
         deps.runInTx((tx) => agentStore.getLastTokens(tx, conversationId)),
       );
+      // The turn context is new input too: recalled memories are in no earlier
+      // request's usage.
       const skipBudgetStrategies = shouldSkipCounting(
         lastTokens?.inputTokens ?? null,
         lastTokens?.outputTokens ?? null,
-        userContentText.length,
+        userContentText.length + provisionalTurnContext.length,
         budget,
       );
 
@@ -853,7 +878,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       let summaryTruncated = false;
 
       const compactResult = await compactMessages(
-        fullPrompt,
+        systemPrompt,
         historyMessages,
         toolDefs,
         {
@@ -1016,12 +1041,37 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         }
       }
 
+      // Rendered once and stored; the loop sends the stored text, and later
+      // turns load it (see `loadTurnHistory`). Memories a turn context in the
+      // compacted view already shows are left out — deduplicating before
+      // compaction could drop a memory whose only earlier copy compaction
+      // then removes.
+      const turnPosition = findTurnContext(historyMessages, provisionalTurnContext);
+      if (turnPosition === -1) throw new Error("compaction dropped the turn's own message");
+      const renderedTurnContext = await step.run("render-turn-context", () =>
+        storeTurnContext(
+          { runInTx: deps.runInTx, agentStore },
+          {
+            ...turnContextInput,
+            messageId: userRow.id,
+            context: {
+              ...turnContextInput.context,
+              recalledMemories: newMemories(
+                turnContextInput.context.recalledMemories,
+                shownMemories(historyMessages.toSpliced(turnPosition, 1), turnHistory),
+              ),
+            },
+          },
+        ),
+      );
+      historyMessages = replaceTurnContext(historyMessages, turnPosition, renderedTurnContext);
+
       let result: AgentLoopResult;
       try {
         result = await runStreamingAgentLoop({
           provider,
           model,
-          systemPrompt: fullPrompt,
+          systemPrompt,
           messages: historyMessages,
           tools: turnTools,
           service,

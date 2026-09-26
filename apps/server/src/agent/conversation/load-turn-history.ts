@@ -3,22 +3,25 @@ import type { Transactor } from "../../db/index.js";
 import type { Message } from "../../llm/types.js";
 import { formatSummaryMessage } from "../context.js";
 import type { AgentStore } from "../store/index.js";
+import { type TurnContext, withTurnContext } from "../turn-context.js";
 
 /**
  * Load a conversation's history as the turn should see it: the newest durable
  * summary standing in for everything up to its cutoff, followed by the
- * messages that arrived after.
+ * messages that arrived after, each turn-starting message led by the turn
+ * context it was sent with.
  *
  * This is the compacted view, and it is deliberately not what `listMessages`
  * returns. The Observer and the web history read take the raw transcript, so
  * fact extraction still sees every turn; only the LLM-facing path collapses the
- * prefix.
+ * prefix and carries the turn contexts.
  *
- * `messageIds` is positionally aligned with `messages` — `messageIds[i]` is the
- * `messages` row backing `messages[i]`, or `null` for the synthetic summary
- * entry. Callers that need to map a compaction split point back to a durable
- * cutoff (to persist a summary of their own) walk this array; see
- * `summarizedSpan`.
+ * `messageIds` and `turnContexts` are positionally aligned with `messages` —
+ * `messageIds[i]` is the `messages` row backing `messages[i]`, or `null` for
+ * the synthetic summary entry, and `turnContexts[i]` the structured inputs of
+ * the block leading it, or `null` for a message without one. Callers that need
+ * to map a compaction split point back to a durable cutoff (to persist a
+ * summary of their own) walk `messageIds`; see `summarizedSpan`.
  */
 export interface LoadTurnHistoryDeps {
   runInTx: Transactor;
@@ -28,6 +31,7 @@ export interface LoadTurnHistoryDeps {
 export interface TurnHistory {
   messages: Message[];
   messageIds: (string | null)[];
+  turnContexts: (TurnContext | null)[];
 }
 
 export async function loadTurnHistory(
@@ -39,14 +43,27 @@ export async function loadTurnHistory(
     const rows = summary
       ? await deps.agentStore.getHistoryAfter(tx, args.conversationId, summary.throughMessageId)
       : await deps.agentStore.listMessages(tx, args.conversationId);
+    const stored = new Map(
+      (
+        await deps.agentStore.listTurnContexts(
+          tx,
+          rows.map((row) => row.id),
+        )
+      ).map((c) => [c.messageId, c] as const),
+    );
 
-    const messages = rows.map(({ role, content }): Message => ({ role, content }));
+    const messages = rows.map(({ id, role, content }): Message => {
+      const context = stored.get(id);
+      return context ? withTurnContext({ role, content }, context.rendered) : { role, content };
+    });
     const messageIds = rows.map((row): string | null => row.id);
+    const turnContexts = rows.map((row) => stored.get(row.id)?.context ?? null);
 
-    if (!summary) return { messages, messageIds };
+    if (!summary) return { messages, messageIds, turnContexts };
     return {
       messages: [formatSummaryMessage(summary.summary), ...messages],
       messageIds: [null, ...messageIds],
+      turnContexts: [null, ...turnContexts],
     };
   });
 }

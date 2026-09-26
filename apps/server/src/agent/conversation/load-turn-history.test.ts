@@ -95,6 +95,49 @@ describe("loadTurnHistory", () => {
 
     expect(result.messages[0]?.content).toEqual(blocks);
   });
+
+  it("leads each message that has a stored turn context with its rendered text", async () => {
+    const context = {
+      recalledMemories: ["runs Proxmox"],
+      voiceMode: false,
+      channelTypes: [],
+      announcedCoreMemoryBlocks: [],
+    };
+    const agentStore = mockAgentStore({
+      getLatestSummary: vi.fn().mockResolvedValue(summaryRow()),
+      getHistoryAfter: vi.fn().mockResolvedValue([
+        { id: "m4", role: "user", content: "and then" },
+        { id: "m5", role: "assistant", content: "right" },
+        { id: "m6", role: "user", content: "older row, no context" },
+      ]),
+      listTurnContexts: vi
+        .fn()
+        .mockResolvedValue([
+          { messageId: "m4", rendered: "<turn_context>…</turn_context>\n\n", context },
+        ]),
+    });
+
+    const result = await loadTurnHistory(
+      { runInTx: fakeRunInTx, agentStore },
+      { conversationId: "conv-1" },
+    );
+
+    expect(agentStore.listTurnContexts).toHaveBeenCalledWith(expect.anything(), ["m4", "m5", "m6"]);
+    expect(result.messages.slice(1)).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "<turn_context>…</turn_context>\n\n" },
+          { type: "text", text: "and then" },
+        ],
+      },
+      { role: "assistant", content: "right" },
+      // A row from before turn contexts renders none.
+      { role: "user", content: "older row, no context" },
+    ]);
+    // Aligned with `messages`: null for the summary and for rows without one.
+    expect(result.turnContexts).toEqual([null, context, null, null]);
+  });
 });
 
 describe("summarizedSpan", () => {
