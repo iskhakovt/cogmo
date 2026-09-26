@@ -12,9 +12,9 @@
  * in two core-memory states: empty, where the prompt shows the onboarding
  * text, and established, holding the fixture's blocks. Steering rules,
  * recalled context and the per-turn image, sub-agent, skill and MCP tools are
- * left out. In the established state it also checks what a core write says:
- * whether it targets one of the case's expected blocks, which established
- * lines the rewritten block lost, and whether it still holds what the case
+ * left out. It also checks what a core write says: whether it targets one of
+ * the case's expected blocks and, in the established state, which established
+ * lines the rewritten block lost and whether it still holds what the case
  * ends.
  *
  * It reports rather than asserts. One sample per case on a non-deterministic
@@ -67,8 +67,22 @@ type Routing = z.infer<typeof RoutingSchema>;
 
 const StateSchema = z.enum(["empty", "established"]);
 
+/** An established block, one entry per line. Anchors are the single words that carry the line's fact. */
+const EstablishedBlockSchema = z.object({
+  key: z.string(),
+  lines: z
+    .array(
+      z.object({
+        text: z.string(),
+        anchors: z.array(z.string().regex(/^[A-Za-z0-9]+$/)).nonempty(),
+      }),
+    )
+    .nonempty(),
+});
+type EstablishedBlock = z.infer<typeof EstablishedBlockSchema>;
+
 const EvalFileSchema = z.object({
-  established: z.array(z.object({ key: z.string(), content: z.string() })),
+  established: z.array(EstablishedBlockSchema),
   cases: z.array(
     z.object({
       id: z.string(),
@@ -104,18 +118,26 @@ const ONLY = process.env.EVAL_CASES?.split(",").map((id) => id.trim());
 
 const STATES: ReadonlyArray<{
   state: z.infer<typeof StateSchema>;
-  blocks: ReadonlyArray<CoreMemoryBlock>;
+  established: ReadonlyArray<EstablishedBlock>;
 }> = [
-  { state: "empty", blocks: [] },
+  { state: "empty", established: [] },
   // In key order, as `getCoreMemoryBlocks` returns them.
-  { state: "established", blocks: R.sortBy(EVAL.established, (b) => b.key) },
+  { state: "established", established: R.sortBy(EVAL.established, (b) => b.key) },
 ];
 
-const RUNS = STATES.flatMap(({ state, blocks }) =>
+const RUNS = STATES.flatMap(({ state, established }) =>
   EVAL.cases
     .filter((c) => ONLY === undefined || ONLY.includes(c.id))
     .filter((c) => c.state === undefined || c.state === state)
-    .map((c) => ({ ...c, name: `${state}/${c.id}`, state, blocks })),
+    .map((c) => ({
+      ...c,
+      name: `${state}/${c.id}`,
+      state,
+      established,
+      blocks: established.map(
+        (b): CoreMemoryBlock => ({ key: b.key, content: b.lines.map((l) => l.text).join("\n") }),
+      ),
+    })),
 );
 
 type Run = (typeof RUNS)[number];
@@ -150,7 +172,7 @@ interface Outcome {
   /** Memory tools called anywhere in the turn, in call order. */
   turn: string[];
   coreWrites: ReadonlyArray<CoreMemoryBlock>;
-  /** Established state: every core write targeted one of the case's `keys`. */
+  /** Every core write targeted one of the case's `keys`. */
   keyOk: boolean | null;
   /** Established state: established lines the rewritten blocks lost, beyond the case's `changes`. */
   lost: string[] | null;
@@ -214,63 +236,50 @@ function memoryCallsByIteration(
     );
 }
 
-const STOPWORDS: ReadonlySet<string> = new Set([
-  "a",
-  "an",
-  "and",
-  "at",
-  "for",
-  "in",
-  "of",
-  "on",
-  "or",
-  "the",
-  "to",
-  "with",
-]);
-
-function words(text: string): string[] {
-  return (text.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter((w) => !STOPWORDS.has(w));
-}
-
 /**
- * A rewritten block keeps a line when at least three quarters of the line's
- * words, its `Label:` aside, are still in the block: rephrasing passes, a
- * dropped fact doesn't.
+ * A rewritten block keeps an established line while it still names every one
+ * of the line's anchors: rephrasing around them passes ("London, United
+ * Kingdom"), a dropped fact doesn't.
  */
-function keeps(content: string, line: string): boolean {
-  const have = new Set(words(content));
-  const need = R.unique(words(line.replace(/^\s*(?:[-*]\s*)?(?:\w+:\s*)?/, "")));
-  return need.length === 0 || need.filter((w) => have.has(w)).length / need.length >= 0.75;
+function keeps(content: string, anchors: ReadonlyArray<string>): boolean {
+  const tokens = new Set(content.toLowerCase().match(/[a-z0-9]+/g) ?? []);
+  return anchors.every((a) => tokens.has(a.toLowerCase()));
 }
 
 function mentions(text: string, fragments: ReadonlyArray<string>): boolean {
   return fragments.some((f) => text.toLowerCase().includes(f.toLowerCase()));
 }
 
-/** What the turn's core writes say, checked against the established blocks. */
+/**
+ * What the turn's core writes say: the target block in either state, and
+ * against the established blocks, the lines a rewrite lost and what it still
+ * holds that the case ends.
+ */
 function checkWrites(
   run: Run,
   writes: ReadonlyArray<CoreMemoryBlock>,
 ): Pick<Outcome, "keyOk" | "lost" | "stale"> {
-  if (run.state !== "established" || writes.length === 0) {
-    return { keyOk: null, lost: null, stale: null };
-  }
+  if (writes.length === 0) return { keyOk: null, lost: null, stale: null };
   // The last write to a key is the block the next turn sees.
   const finals = [...new Map(writes.map((w) => [w.key, w])).values()];
-  const exempt = [...(run.changes ?? []), ...(run.drops ?? [])];
-  const rewrites = finals.flatMap((w) => {
-    const block = run.blocks.find((b) => b.key === w.key);
-    return block ? [{ content: w.content, lines: block.content.split("\n") }] : [];
-  });
   const { keys, drops } = run;
+  const keyOk = keys === undefined ? null : finals.every((w) => keys.includes(w.key));
+  if (run.state !== "established") return { keyOk, lost: null, stale: null };
+
+  const exempt = [...(run.changes ?? []), ...(drops ?? [])];
+  const rewrites = finals.flatMap((w) => {
+    const block = run.established.find((b) => b.key === w.key);
+    return block ? [{ content: w.content, lines: block.lines }] : [];
+  });
   return {
-    keyOk: keys === undefined ? null : finals.every((w) => keys.includes(w.key)),
+    keyOk,
     lost:
       rewrites.length === 0
         ? null
         : rewrites.flatMap(({ content, lines }) =>
-            lines.filter((line) => !mentions(line, exempt) && !keeps(content, line)),
+            lines
+              .filter((l) => !mentions(l.text, exempt) && !keeps(content, l.anchors))
+              .map((l) => l.text),
           ),
     stale:
       drops === undefined

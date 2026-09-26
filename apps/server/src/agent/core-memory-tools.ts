@@ -6,8 +6,9 @@ export const coreMemoryUpdate = defineTool({
   name: "core_memory_update",
   description:
     "Rewrite a core memory block, shown in your instructions in every conversation. Only " +
-    "for who the user is, their active projects and standing preferences and constraints: " +
-    "call it in the turn one is new or changes, even in passing. Replaces the whole block: " +
+    "for who the user is (including who their close family are), their active projects and " +
+    "standing preferences and constraints: call it in the same turn the user mentions " +
+    "something new or changed about these, even in passing. Replaces the whole block: " +
     "include everything that still holds. Anything else: memory_retain.",
   // Durable: a DB upsert. The overwrite is idempotent, but exactly-once
   // keeps replays from racing a concurrent same-key update from another

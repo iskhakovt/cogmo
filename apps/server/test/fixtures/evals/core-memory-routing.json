@@ -1,17 +1,58 @@
 {
-  "_comment": "Labelled single-turn cases for src/agent/core-memory-routing.live.test.ts. `expect` is where the fact belongs under design/memory.md → Core Memory vs Hindsight: `core` = core_memory_update this turn; `hindsight` = retrievable on demand, never core memory; `none` = nothing worth storing. `inPassing` marks a core fact that comes up while the user asks for something else. `established` is the core memory the established state starts from; the empty state has no blocks, so the prompt shows the onboarding text instead. `state` limits a case to one state. In the established state, `keys` are the blocks a core write may target, `changes` match the established lines the case may rewrite or remove, and `drops` match lines no rewritten block may still hold.",
+  "_comment": "Labelled single-turn cases for src/agent/core-memory-routing.live.test.ts. `expect` is where the fact belongs under design/memory.md → Core Memory vs Hindsight: `core` = core_memory_update this turn; `hindsight` = retrievable on demand, never core memory; `none` = nothing worth storing. `inPassing` marks a core fact that comes up while the user asks for something else. `established` is the core memory the established state starts from, one entry per line; a line's `anchors` are the words that carry its fact, and a rewrite keeps the line while it names all of them. The empty state has no blocks, so the prompt shows the onboarding text instead. `state` limits a case to one state. `keys` are the blocks a core write may target. In the established state, `changes` match the lines the case may rewrite or remove, and `drops` match lines no rewritten block may still hold.",
   "established": [
     {
       "key": "user_profile",
-      "content": "Name: Samuel Carter\nRole: backend engineer at Northwind Logistics\nLocation: London, UK (Europe/London)\nFamily: partner Alex; sister Jo"
+      "lines": [
+        {
+          "text": "Name: Samuel Carter",
+          "anchors": [
+            "Carter"
+          ]
+        },
+        {
+          "text": "Role: backend engineer at Northwind Logistics",
+          "anchors": [
+            "Northwind"
+          ]
+        },
+        {
+          "text": "Location: London, UK (Europe/London)",
+          "anchors": [
+            "London"
+          ]
+        },
+        {
+          "text": "Family: partner Alex; sister Jo",
+          "anchors": [
+            "Alex",
+            "Jo"
+          ]
+        }
+      ]
     },
     {
       "key": "active_projects",
-      "content": "- Home server migration to NixOS (in progress)"
+      "lines": [
+        {
+          "text": "- Home server migration to NixOS (in progress)",
+          "anchors": [
+            "NixOS"
+          ]
+        }
+      ]
     },
     {
       "key": "preferences",
-      "content": "- Concise answers; tables for comparisons"
+      "lines": [
+        {
+          "text": "- Concise answers; tables for comparisons",
+          "anchors": [
+            "concise",
+            "tables"
+          ]
+        }
+      ]
     }
   ],
   "cases": [

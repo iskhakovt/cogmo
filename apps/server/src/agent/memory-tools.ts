@@ -37,10 +37,10 @@ export const memoryRetain = defineTool({
   name: "memory_retain",
   description:
     "Store a fact in long-term memory, searchable in later conversations: events, details, " +
-    "one-off decisions, commitments, facts about other people. Who the user is, their active " +
-    "projects and standing preferences and constraints go to core memory " +
-    "(core_memory_update) instead. Don't store trivial chat or information already saved " +
-    "in files.",
+    "one-off decisions, commitments, facts about other people. Who the user is (including " +
+    "who their close family are), their active projects and standing preferences and " +
+    "constraints go to core memory (core_memory_update) instead. Don't store trivial chat or " +
+    "information already saved in files.",
   // Durable: stageRetain INSERTs a pending_memories row. Non-durable it
   // re-inserts on every step boundary after the call — the Observer's
   // downstream dedup absorbs the duplicates, but each one costs an LLM
