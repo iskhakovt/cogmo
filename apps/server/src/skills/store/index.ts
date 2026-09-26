@@ -485,7 +485,7 @@ export class DrizzleSkillStore implements SkillStore {
       .selectDistinct({ lockfileHash: skills.lockfileHash })
       .from(skills)
       .where(isNotNull(skills.lockfileHash));
-    return new Set(rows.map((r) => r.lockfileHash).filter((h): h is string => h !== null));
+    return new Set(rows.map((r) => r.lockfileHash).filter((h) => h !== null));
   }
 
   async hasLiveDeployForSkill(

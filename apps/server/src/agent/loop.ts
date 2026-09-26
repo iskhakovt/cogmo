@@ -388,7 +388,7 @@ function computeVolumeClusterInterceptions(
   // emitted in this iteration.
   const blocksByName = R.pipe(
     iterationContent,
-    R.filter((b): b is ToolUseBlock => b.type === "tool_use"),
+    R.filter((b) => b.type === "tool_use"),
     R.groupBy((b) => b.name),
   );
 
@@ -465,7 +465,7 @@ async function executeToolCalls(
   turnKey: string | undefined,
   interceptions?: ReadonlyMap<string, ContentBlock>,
 ): Promise<ContentBlock[]> {
-  const toolUseBlocks = content.filter((b): b is ToolUseBlock => b.type === "tool_use");
+  const toolUseBlocks = content.filter((b) => b.type === "tool_use");
   if (toolUseBlocks.length === 0) return [];
 
   const planned: PlannedCall[] = toolUseBlocks.map((block, position) => ({
@@ -1175,7 +1175,7 @@ export async function runStreamingAgentLoop(
     // side-effect-free; the fingerprint then counts toward both the
     // consecutive and cumulative triggers. See
     // design/agent-resilience.md → Class D.
-    const toolUseBlocks = iterationContent.filter((b): b is ToolUseBlock => b.type === "tool_use");
+    const toolUseBlocks = iterationContent.filter((b) => b.type === "tool_use");
     const hadSideEffect = iterationHadSideEffect(toolUseBlocks, toolResults, tools);
     if (hadSideEffect) {
       // Progress made — reset the consecutive run and do NOT touch

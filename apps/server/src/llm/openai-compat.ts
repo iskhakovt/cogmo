@@ -16,16 +16,12 @@ import type {
   ChatStreamResult,
   ContentBlock,
   CountTokensParams,
-  DocumentBlock,
-  ImageBlock,
   LlmResponse,
   Message,
   StopReason,
   StreamEvent,
   TextBlock,
   ToolDefinition,
-  ToolResultBlock,
-  ToolUseBlock,
   Usage,
 } from "./types.js";
 
@@ -459,8 +455,8 @@ function toOpenAIMessages(msg: Message): OpenAI.ChatCompletionMessageParam[] {
   // Content blocks — handle tool_use and tool_result specially
   if (msg.role === "assistant") {
     // Skip ThinkingBlock — not supported by OpenAI-compatible endpoints
-    const textBlocks = msg.content.filter((b): b is TextBlock => b.type === "text");
-    const toolUseBlocks = msg.content.filter((b): b is ToolUseBlock => b.type === "tool_use");
+    const textBlocks = msg.content.filter((b) => b.type === "text");
+    const toolUseBlocks = msg.content.filter((b) => b.type === "tool_use");
 
     const textContent = textBlocks.map((b) => b.text).join("");
     const toolCalls = toolUseBlocks.map((b) => ({
@@ -490,10 +486,10 @@ function toOpenAIMessages(msg: Message): OpenAI.ChatCompletionMessageParam[] {
   }
 
   // User message — may contain tool_result, text, image, and document blocks
-  const toolResults = msg.content.filter((b): b is ToolResultBlock => b.type === "tool_result");
-  const textBlocks = msg.content.filter((b): b is TextBlock => b.type === "text");
-  const imageBlocks = msg.content.filter((b): b is ImageBlock => b.type === "image");
-  const documentBlocks = msg.content.filter((b): b is DocumentBlock => b.type === "document");
+  const toolResults = msg.content.filter((b) => b.type === "tool_result");
+  const textBlocks = msg.content.filter((b) => b.type === "text");
+  const imageBlocks = msg.content.filter((b) => b.type === "image");
+  const documentBlocks = msg.content.filter((b) => b.type === "document");
 
   // Tool results become separate "tool" role messages
   const toolMessages: OpenAI.ChatCompletionToolMessageParam[] = toolResults.map((tr) => ({

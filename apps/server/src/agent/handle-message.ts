@@ -471,7 +471,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           if (typeof content === "string") return content;
           if (content.every((b) => b.type === "text")) {
             return content
-              .filter((b): b is { type: "text"; text: string } => b.type === "text")
+              .filter((b) => b.type === "text")
               .map((b) => b.text)
               .join("\n");
           }
