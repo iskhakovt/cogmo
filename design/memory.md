@@ -136,33 +136,34 @@ The `source` enum distinguishes live tool calls from one-off ingestion paths (e.
 
 **Problem.** `core_memory_blocks` is keyed on the user alone, and every block renders in every profile's `# User` section. Core memory therefore bypasses the controls Hindsight enforces ([Memory Access Control via Tags](#memory-access-control-via-tags-confirmed)): a fact written in a restricted class's conversation reaches every other persona's prompt, and a coder profile scoped to `work` and `technical` still sees family and diet. [Core Memory vs Hindsight](#core-memory-vs-hindsight-confirmed) routes exactly these personal facts to core memory, so the leak grows as the routing works.
 
-**Direction.** Each block has a scope: **shared**, per user, or **class-scoped**, rendered only in profiles of one profile class. A conversation renders its user's shared blocks plus its profile class's blocks. The class is the isolation unit, as it is for Hindsight's `profile_class:*` tags.
+**Direction.** Scope follows the key and the writing profile's class; the model never chooses it. One block, `identity`, is shared by every profile the user talks to. Every other block belongs to the writing profile's class, or to an unclassed bucket when the profile has no class. A conversation renders the shared `identity` block plus its own scope's blocks.
 
-| Scope | Holds | Rendered in |
-|-|-|-|
-| Shared (`profile_class IS NULL`) | Identity basics every persona needs: name and what to call the user, home and timezone, language and spelling variety | Every profile the user talks to |
-| Class (`profile_class = c`) | Everything else core memory holds: close family, diet and other standing constraints, active projects, preferences | Profiles whose `profile_class` is `c` |
+| Scope | Rows | Holds | Rendered in |
+|-|-|-|-|
+| Shared | `key = 'identity'`, `profile_class IS NULL` | Name and what to call the user, home and timezone, language and spelling variety | Every profile |
+| Unclassed bucket | any other key, `profile_class IS NULL` | Everything else core memory holds (role, close family, diet, projects, preferences), written by unclassed profiles | Unclassed profiles |
+| Class `c` | `profile_class = c` | The same, written by `c`'s profiles; for a restricted `c`, its own `identity` too | Profiles of class `c` |
+
+**Why a new `identity` key.** Today's `user_profile` blocks mix identity basics with role and family (the routing eval's established block holds name, role, home and family). Designating `user_profile` as shared would share role and family. A new key holds only what every persona needs, and a single fixed key keeps "shared" a property of the key, with no column and no model decision.
 
 ### Behaviour by Profile
 
-| Profile | `# User` renders | `core_memory_update` | Writes go to |
+| Turn's profile | `# User` renders | A write of `identity` goes to | Any other write goes to |
 |-|-|-|-|
-| Unclassed (every org profile; user profiles without a class) | Shared blocks, unlabelled, as today | No `scope` argument, as today | Shared |
-| Classed, not restricted | Shared blocks, then the class's, headings labelled `(shared)` / `(c)` | Optional `scope: "class" \| "shared"` | The class, unless `scope: "shared"` |
-| Classed, restricted | As above, shared labelled `(shared, read-only here)` | No `scope` argument | The class; never shared |
+| Unclassed (every org profile; user profiles without a class) | Every `profile_class IS NULL` block, unlabelled, as today | Shared | The unclassed bucket |
+| Classed `c`, not restricted | Shared `identity`, then `c`'s blocks; headings labelled `(shared)` / `(c)` | Shared | `c` |
+| Classed `r`, restricted | As above, with `identity` labelled `(shared, read-only here)` | `r`'s own `identity`, rendered after the shared one; the tool result says so | `r` |
 
-- **Unclassed profiles write shared.** An unclassed profile has no isolation in Hindsight either: its memories carry no `profile_class` tag, so no restricted-class exclusion applies to them. An install that doesn't use classes keeps today's prompt and tool schema byte for byte. The consequence: isolating a persona means classing it *and* the personas that write personal facts, since a coder classed `work` still sees what an unclassed everyday profile wrote.
-- **Classed profiles default to their class.** A wrong default in this direction under-shares: another persona lacks a fact and asks again. A shared default would leak, and unrestricted classes would keep leaking into each other.
-- **Restricted classes fail closed.** Nothing written in a restricted persona reaches shared, whatever the model decides. An identity change learned there (a move, a new name) goes into a class block with the same key, which renders after the shared one, so that persona uses the new value and the others keep the old one until told.
-- **One key may exist in both scopes.** The class block renders after the shared one and refines it for that class.
-- **The Service is the ACL boundary.** `buildTurnService` resolves the write scope from the profile's class and the restricted set it already loads; the tool passes on only what the model chose.
-- **Out of scope.** `memory_scope.profileClasses` opts a profile into *recalling* other classes' Hindsight memories; it does not render their blocks, because always-on context would grow with every class opted in. A conversation's transcript is not scoped: `/profile switch` inside a conversation carries its history across classes, as it does today.
+- **An install that doesn't use classes renders the same `# User` content as today**, from the same rows, and `core_memory_update` keeps today's schema in every profile, with no `scope` argument.
+- **Classing one persona isolates it.** An unclassed everyday profile's family and diet go to the unclassed bucket, which a classed coder never renders, so the everyday profile needs no class.
+- **Restricted classes fail closed.** A restricted persona never writes the shared block. An identity change learned there (a move, a new name) becomes that class's own `identity`, which renders after the shared one, so that persona uses the new value and the others keep the old one until told.
+- **The Service is the ACL boundary.** `buildTurnService` resolves where a write goes from the key, the profile's class and the restricted set it already loads. The tool passes the key and content, as today.
 
 ### What the Model Sees
 
-- `core_memory_update` is built per turn for the profile, as skill and image tools are, so an unclassed profile keeps today's schema and a restricted one is never offered `shared`. The unrestricted description adds: "`scope`: `shared` only for name, what to call the user, home, timezone and language, which every persona sees; everything else `class` (the default), seen only in this class's conversations."
-- Headings in `# User` and `core_memory_read` carry the scope label for classed profiles (`## family (work)`), so the model can tell which block a rewrite replaces.
-- `CORE_MEMORY_PROMPT_GUIDANCE` is process-wide, so it stays scope-free; the scope rule lives in the per-turn description and the labels. The routing table in [Core Memory vs Hindsight](#core-memory-vs-hindsight-confirmed) gains the split: identity basics shared, the rest class-scoped.
+- **One routing change, the same everywhere.** The `core_memory_update` description, `CORE_MEMORY_PROMPT_GUIDANCE` and the onboarding text name `identity` as the block for name, what to call the user, home, timezone and language. Role, family, projects and preferences stay in the other blocks. The [routing table](#core-memory-vs-hindsight-confirmed) gains the split.
+- **Labels in classed profiles.** `# User` headings and `core_memory_read` show each block's scope: `## identity (shared)`, `## user_profile (work)`. Unclassed profiles render without labels, as today.
+- **A confined write is announced.** In a restricted class, a write of `identity` returns `Saved "identity" for this persona only; other personas keep the shared block. Tell the user it is saved only here.` The reply then tells the user, so the divergence isn't silent.
 
 ### Data Model
 
@@ -170,7 +171,7 @@ The `source` enum distinguishes live tool calls from one-off ingestion paths (e.
 core_memory_blocks (
   id             UUIDv7 PK,
   user_id        UUID NOT NULL REFERENCES users(id),
-  profile_class  TEXT,           -- NULL = shared; set = rendered only in profiles of this class
+  profile_class  TEXT,           -- NULL = the unclassed bucket, or the shared block when key = 'identity'; set = that class
   key            TEXT NOT NULL,
   content        TEXT NOT NULL,
   updated_at     TIMESTAMPTZ NOT NULL,
@@ -180,20 +181,35 @@ core_memory_blocks (
 )
 ```
 
-- **One nullable column**, not a scope enum beside a class: the class alone decides the scope, so no half-set state exists. NULL meaning "every profile" follows `steering_rules.profile_id`.
-- **`NULLS NOT DISTINCT`** keeps one shared block per key; the upsert targets `(user_id, profile_class, key)`.
-- **The composite FK** mirrors `profiles(user_id, profile_class)`, and MATCH SIMPLE skips shared rows. `ON DELETE CASCADE` is safe because `/classes rm` already fails while a profile uses the class, so the blocks it drops are ones no profile can render.
-- **Migration:** one `pnpm db:generate` file that adds the column, replaces `uq_core_memory_user_key` with the three-column constraint and adds the FK. **Backfill:** none. Existing rows read NULL and become shared, which is what every profile renders today. An install that already uses restricted classes may have that class's facts in shared blocks; nothing can split a block automatically, so after migrating the user drops them from shared in an unrestricted conversation and restates them in the class's.
-- **Store:** `getCoreMemoryBlocks(tx, userId, profileClass)` returns the shared blocks, then the class's, each in key order; `upsertCoreMemoryBlock` takes `profileClass`.
+- **Three states from one nullable column and one key rule.** Shared is the NULL-class `identity` row, which is necessarily unique per user, so an unclassed `identity` write and a shared one are the same row. A `scope` enum column would also allow a shared `user_profile` or a second NULL-class `identity`, states the design rules out.
+- **`NULLS NOT DISTINCT`** gives one block per key in each scope; the upsert targets `(user_id, profile_class, key)`.
+- **Store:** `getCoreMemoryBlocks(tx, userId, profileClass)` returns the shared `identity`, then the scope's blocks in key order (for an unclassed turn, every NULL-class block in key order, as today). `upsertCoreMemoryBlock` takes the resolved `profileClass`.
+- **The composite FK** mirrors `profiles(user_id, profile_class)`, and MATCH SIMPLE skips NULL-class rows.
+- **Migration:** one `pnpm db:generate` file that adds the column, replaces `uq_core_memory_user_key` with the three-column constraint and adds the FK. **Backfill by key** needs no data statement: every existing row reads NULL, so an `identity` row is shared and every other row is the unclassed bucket, which is what every unclassed profile renders today.
+- **Consequence for existing classed profiles:** they render every block today and, after the migration, only the shared `identity`, which doesn't exist until something writes it. The fix is one-off: in an unclassed conversation, ask the agent to move name, home, timezone and language into `identity`; then restate what each classed persona should keep in that persona, which shows the onboarding text while it renders no block.
 
 ### Interactions
 
-- **Per-user rendering.** `loadConversationContext` loads the conversation user's blocks, and `AssembleContext` carries them to `DefaultPromptSource`, a pure formatter. Scoping adds the turn's profile class to that load (the use case already holds the turn's profile) and the class's restricted flag to the context.
-- **System prompt snapshot** ([prompt-caching.md](prompt-caching.md#system-prompt-snapshot-proposed)). The snapshot's `# User` renders the blocks visible when the epoch opens. Announcements cover only blocks visible to the turn (shared, or the turn's class), so a write in another class's conversation is never announced here. `TurnContextSchema.announcedCoreMemoryKeys` becomes `announcedCoreMemoryBlocks: { profileClass: string | null, key: string }[]`, since a key alone is ambiguous across scopes. The configuration digest adds the profile class and its restricted flag, so a `/profile switch` to another class, `/profile class` or `/classes restrict` opens an epoch and re-renders `# User`. Without that, two classed profiles with the same base prompt and tools would share a snapshot, and a restricted class's blocks would stay in front of an unrestricted persona.
+- **Per-user rendering.** `loadConversationContext` loads the conversation user's blocks and `AssembleContext` carries them to `DefaultPromptSource`, a pure formatter. Scoping adds the turn's profile class to that load (the use case already holds the turn's profile) and the class's restricted flag to the context.
+- **System prompt snapshot** ([prompt-caching.md](prompt-caching.md#system-prompt-snapshot-proposed)). The snapshot's `# User` renders the blocks visible when the epoch opens. Announcements cover only blocks visible to the turn: the shared `identity` and the turn's own scope, so a write in another class's conversation, or in the unclassed bucket when the turn is classed, is never announced here. `TurnContextSchema.announcedCoreMemoryKeys` becomes `announcedCoreMemoryBlocks: { profileClass: string | null, key: string }[]`, since `identity` can exist both shared and as a restricted class's own. The configuration digest adds the profile class and its restricted flag, so a `/profile switch` to another class, `/profile class` or `/classes restrict` opens an epoch and re-renders `# User`. Without that, two profiles with the same base prompt and tools would share a snapshot, and a restricted class's blocks would stay in front of another persona.
+
+### Decisions
+
+| Question | Decision |
+|-|-|
+| Who chooses a block's scope | The Service, from the key and the writing profile's class. The model only picks the key, as today. |
+| Unclassed profiles | A bucket of their own, not shared: see [Alternatives Considered](#alternatives-considered). |
+| Restricted personas and the shared block | Refused. An `identity` write becomes the class's own `identity`, and the tool result tells the model to say so. |
+| A class that loses `restricted` | Its next `identity` write goes to the shared block and deletes the class's own `identity` in the same transaction, so no stale copy keeps overriding the shared one. |
+| Classes opted in through `memory_scope.profileClasses` | Recall only. Their blocks don't render, because always-on context would grow with every class opted in. Explicit per-block sharing (Letta-style: attach one block to chosen classes) is a possible later extension. |
+| Deleting a class | Cascades to its blocks. `/classes rm` on a class that has blocks lists their keys and deletes only on confirmation; a class without blocks deletes at once, as today. `/classes rm` already fails while a profile uses the class. |
+| The transcript | Not scoped. `/profile switch` inside a conversation carries its history across classes, as it does today. |
 
 ### Prior Art
 
-Letta attaches memory blocks to agents. A block created on its own and attached to several agents through `block_ids` is shared, and "when one agent updates the block, all others see the change immediately"; a block created inline with an agent (`memory_blocks`) belongs to that agent alone. Its shared-memory example gives a supervisor and a worker each a private `persona` block plus one shared `organization` block, and `read_only` blocks can be read but not changed by memory tools ([memory blocks](https://docs.letta.com/guides/core-concepts/memory/memory-blocks), [shared memory](https://docs.letta.com/guides/agents/multi-agent-shared-memory/)). A shared block here is Letta's shared block attached to every persona, a class block is one attached to the class's personas, and a restricted persona's view of shared blocks is Letta's `read_only`. Attachment differs: Letta attaches per agent, explicitly, while here it follows from the profile's class, so a new profile in a class starts with the class's blocks.
+- **Letta** attaches memory blocks to agents. A block attached to several agents through `block_ids` is shared, and "when one agent updates the block, all others see the change immediately"; a block created inline with an agent (`memory_blocks`) is that agent's alone. Its example gives a supervisor and a worker each a private `persona` block plus one shared block, and `read_only` blocks can be read but not changed by memory tools ([memory blocks](https://docs.letta.com/guides/core-concepts/memory/memory-blocks), [shared memory](https://docs.letta.com/guides/agents/multi-agent-shared-memory/)). The shared `identity` block is a `human` block attached to every agent; class blocks are private blocks; a restricted persona's view of `identity` is `read_only`. Attachment here follows from the profile's class rather than a per-agent attach step.
+- **Claude** scopes memory by project: "Each project has its own separate memory space and dedicated project summary, so the context within each of your projects is focused, relevant, and separate from other projects or non-project chats" ([Claude help](https://support.claude.com/en/articles/11817273-use-claude-s-chat-search-and-memory-to-build-on-previous-context)). Classes are projects, and the unclassed bucket is the non-project pool.
+- **ChatGPT's** project-only memory lets a project's chats draw only on that project's conversations, set when the project is created ([TechRadar](https://www.techradar.com/ai-platforms-assistants/chatgpt/chatgpt-project-only-memory-is-live-and-it-might-change-how-you-work-with-ai)). A restricted class is the closest match, except that it still reads the shared `identity`.
 
 ### Alternatives Considered
 
@@ -203,21 +219,19 @@ Letta attaches memory blocks to agents. A block created on its own and attached 
 | (b) Withhold `core_memory_update` in restricted profiles | Stops only the outward leak from restricted profiles. Scoped profiles (a coder limited to `work` and `technical`) still see family and diet, unrestricted classes still leak into each other, and restricted personas get no always-on memory. |
 | Per-profile blocks | Identity basics are the same for every persona. Per-profile blocks mean onboarding each profile separately and blocks that diverge (one persona thinks Lisbon, another Porto). Hindsight's isolation unit is the class, not the profile. |
 | Compartment and trust tags on blocks | Blocks are free text rewritten whole, so one block mixes compartments and a filter can only include or exclude whole blocks. Every write depends on the model tagging correctly. The most expressive option and the most error-prone; it can be layered on class scopes later. |
+| Unclassed profiles write shared | An unclassed everyday profile's family and diet would reach every classed persona, so isolating a coder would mean classing every persona that writes personal facts. |
+| A model-chosen `scope` argument | Every write would depend on the model choosing correctly, the tool schema would differ by profile, and single-profile installs would carry a choice that means nothing to them. A fixed key is deterministic and reviewable. |
 
 ### Implementation Outline
 
-1. `p1` Schema and store: the `profile_class` column, the three-column unique constraint and the FK in one generated migration; `getCoreMemoryBlocks` and `upsertCoreMemoryBlock` take the class. PGlite tests: one shared block per key, a class block beside a shared one with the same key, the cascade on class delete, one class's blocks invisible to another.
-2. `p1` Service ACL: `buildTurnService` resolves the write scope as in [Behaviour by Profile](#behaviour-by-profile); tests cover the matrix, including `shared` refused in a restricted profile.
-3. `p1` Tool and rendering: per-turn `core_memory_update` variants; labelled `# User` and `core_memory_read` for classed profiles; the class added to the load in `loadConversationContext`. Tests: an unclassed profile's prompt byte-identical to today's; a classed profile's prompt renders shared blocks and its class's, never another class's.
-4. `p2` Eval: classed and restricted runs in `core-memory-routing.live.test.ts` (identity basics to shared, everything else to the class), recorded under [Evaluation](#evaluation).
-5. `p2` Prompt caching: the snapshot changes in [Interactions](#interactions), folded into step 3 of [prompt-caching.md](prompt-caching.md#implementation-plan-proposed).
-Docs land with each step: [data-model.md](data-model.md) and the schema above with step 1, the scope split in the routing table with step 3. This section moves to `[confirmed]` with step 4's results.
+1. `p1` Schema and store: the `profile_class` column, the three-column unique constraint and the FK in one generated migration; the `identity` key as a code constant; `getCoreMemoryBlocks` and `upsertCoreMemoryBlock` take the class. PGlite tests: the shared `identity` rendered in every scope, the unclassed bucket invisible to a classed turn, a restricted class's own `identity` after the shared one, the cascade on class delete.
+2. `p1` Service ACL: `buildTurnService` resolves each write as in [Behaviour by Profile](#behaviour-by-profile), including the confined-write result and the override removal. Tests cover the matrix.
+3. `p1` Rendering and routing: the class and restricted flag in `loadConversationContext`; labelled `# User` and `core_memory_read` for classed profiles; `identity` named in the tool description, the guidance and the onboarding text. Tests: an unclassed profile's `# User` byte-identical to today's for the same rows; a classed profile's renders `identity` and its class's blocks, never the unclassed bucket or another class's.
+4. `p2` `/classes rm` lists a class's blocks and confirms before deleting, through Transport so every channel gets it.
+5. `p2` Eval: identity basics to `identity` and the rest elsewhere, in `core-memory-routing.live.test.ts`, with classed and restricted runs; results under [Evaluation](#evaluation).
+6. `p2` Prompt caching: the snapshot changes in [Interactions](#interactions), folded into step 3 of [prompt-caching.md](prompt-caching.md#implementation-plan-proposed).
 
-### Open Questions
-
-- **Restricted personas and shared facts.** Proposed: refused, so a move learned in a restricted persona reaches the others only when told there. The alternative allows an explicit `scope: "shared"` from restricted profiles, trading fail-closed for one source of identity basics.
-- **An unclassed bucket.** Proposed: unclassed profiles write shared. Treating unclassed profiles as a class of their own would isolate a classed coder from an unclassed everyday profile without classing the latter, at the cost of a scope column beside the class and a `scope` choice in every profile, a single-profile install's included.
-- **Opted-in classes.** Proposed: `memory_scope.profileClasses` does not render other classes' blocks. Revisit if a persona needs another class's standing facts always in view rather than on recall.
+Docs land with each step: [data-model.md](data-model.md) and the schema above with step 1, the routing table's `identity` split with step 3. This section moves to `[confirmed]` with step 5's results.
 
 ## Four Memory Networks `[confirmed]`
 
