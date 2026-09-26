@@ -584,10 +584,10 @@ export interface AgentStore {
   /** Load a profile by ID. */
   getProfile(tx: Transaction, profileId: string): Promise<Profile | undefined>;
 
-  /** Get the first user (for bootstrapping). */
+  /** The oldest user by `id` (UUIDv7): the one setup creates, which bootstrap and the CLI act as. */
   getFirstUser(tx: Transaction): Promise<{ id: string } | undefined>;
 
-  /** Get the first profile (for bootstrapping). */
+  /** The oldest profile by `id`: the org profile setup seeds. */
   getDefaultProfile(tx: Transaction): Promise<{ id: string } | undefined>;
 
   /** Create a profile and return the full row. `userId: null` = org profile (read-only via Transport); `userId: <id>` = user profile (owned by that user). Throws `UniqueViolationError` on (user_id, name) collision. */
@@ -1730,12 +1730,16 @@ export class DrizzleAgentStore implements AgentStore {
   }
 
   async getFirstUser(tx: Transaction): Promise<{ id: string } | undefined> {
-    const rows = await tx.select({ id: users.id }).from(users).limit(1);
+    const rows = await tx.select({ id: users.id }).from(users).orderBy(asc(users.id)).limit(1);
     return rows[0];
   }
 
   async getDefaultProfile(tx: Transaction): Promise<{ id: string } | undefined> {
-    const rows = await tx.select({ id: profiles.id }).from(profiles).limit(1);
+    const rows = await tx
+      .select({ id: profiles.id })
+      .from(profiles)
+      .orderBy(asc(profiles.id))
+      .limit(1);
     return rows[0];
   }
 

@@ -1,4 +1,18 @@
-import { and, desc, eq, gt, inArray, isNull, lt, lte, ne, notExists, or, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gt,
+  inArray,
+  isNull,
+  lt,
+  lte,
+  ne,
+  notExists,
+  or,
+  sql,
+} from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { JsonValue } from "type-fest";
 // Cross-module read: scheduled-task fire routing needs conversations.{user_id, profile_id}
@@ -112,7 +126,7 @@ export interface TransportStore {
     ReadonlyArray<{ id: string; type: string; credentials: JsonValue; identityMode: string }>
   >;
 
-  /** Find channel by type. */
+  /** The oldest channel of `type` by `id` (UUIDv7); `type` is not unique. */
   getChannelByType(
     tx: Transaction,
     type: string,
@@ -438,6 +452,7 @@ export class DrizzleTransportStore implements TransportStore {
       })
       .from(channels)
       .where(eq(channels.type, type))
+      .orderBy(asc(channels.id))
       .limit(1);
     // `credentials` is opaque ciphertext (raw `jsonb()`, no Zod schema),
     // so Drizzle infers it as `unknown`; cast restores the JsonValue

@@ -82,6 +82,18 @@ describe("DrizzleAgentStore", () => {
     it("returns null when no users exist", async () => {
       expect(await tx((trx) => store.getFirstUser(trx))).toBeUndefined();
     });
+
+    it("getFirstUser returns the oldest user when a newer row reuses a freed slot", async () => {
+      const { id: gone } = await tx((trx) => store.createUser(trx));
+      const { id: oldest } = await tx((trx) => store.createUser(trx));
+      // Adversarial setup: nothing deletes users, but a vacuumed gap at the
+      // front of the heap is where the next insert lands.
+      await db.execute(sql`DELETE FROM users WHERE id = ${gone}`);
+      await db.execute(sql`VACUUM users`);
+      await tx((trx) => store.createUser(trx));
+
+      expect((await tx((trx) => store.getFirstUser(trx)))?.id).toBe(oldest);
+    });
   });
 
   describe("profiles", () => {
@@ -134,6 +146,25 @@ describe("DrizzleAgentStore", () => {
         }),
       );
       expect((await tx((trx) => store.getDefaultProfile(trx)))?.id).toBe(id);
+    });
+
+    it("getDefaultProfile stays on the oldest profile after it is edited", async () => {
+      const create = (name: string) =>
+        tx((trx) =>
+          store.createProfile(trx, {
+            userId: null,
+            name,
+            basePrompt: "prompt",
+            model: "m",
+            toolSet: [],
+          }),
+        );
+      const { id: first } = await create("first");
+      await create("second");
+      // An in-place update writes a new row version after `second`'s.
+      await tx((trx) => store.updateProfile(trx, first, { model: "m2" }));
+
+      expect((await tx((trx) => store.getDefaultProfile(trx)))?.id).toBe(first);
     });
 
     it("enforces unique org profile name (user_id null)", async () => {
