@@ -355,14 +355,10 @@ describe("ClaudeCodeBackend.execute", () => {
     ]);
     expect(kinds).not.toContain("plan_ready");
 
-    const calls = events.filter(
-      (e): e is Extract<CodingEvent, { kind: "tool_call" }> => e.kind === "tool_call",
-    );
+    const calls = events.filter((e) => e.kind === "tool_call");
     expect(calls.map((c) => c.tool)).toEqual(["Read", "Edit", "Bash"]);
 
-    const results = events.filter(
-      (e): e is Extract<CodingEvent, { kind: "tool_result" }> => e.kind === "tool_result",
-    );
+    const results = events.filter((e) => e.kind === "tool_result");
     expect(results.every((r) => r.ok)).toBe(true);
     expect(expectDefined(results[0]).summary).toBe("export function foo() {}");
     // tool_result.tool must be the human-readable name (resolved from the
@@ -560,9 +556,7 @@ describe("ClaudeCodeBackend stream-json schema robustness", () => {
         "sess-tu",
       ),
     );
-    const calls = events.filter(
-      (e): e is Extract<CodingEvent, { kind: "tool_call" }> => e.kind === "tool_call",
-    );
+    const calls = events.filter((e) => e.kind === "tool_call");
     expect(calls).toHaveLength(1);
     expect(expectDefined(calls[0]).tool).toBe("Edit");
   });

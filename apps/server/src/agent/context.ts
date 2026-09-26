@@ -427,7 +427,7 @@ export function compactSameToolClusters(
       R.flatMap((msg) =>
         msg.role === "assistant" && Array.isArray(msg.content) ? msg.content : [],
       ),
-      R.filter((b): b is Extract<ContentBlock, { type: "tool_use" }> => b.type === "tool_use"),
+      R.filter((b) => b.type === "tool_use"),
       R.map((b) => [b.id, { name: b.name, input: b.input }] as const),
     ),
   );

@@ -196,7 +196,7 @@ describe.skip("ClaudeCodeBackend against real Daytona + PTY backend", () => {
         // "wedge detected" rather than "CI was slow".
         expect(elapsedMs).toBeLessThan(4 * 60_000);
 
-        const toolCalls = events.flatMap((e) => (e.kind === "tool_call" ? [e.tool] : []));
+        const toolCalls = events.filter((e) => e.kind === "tool_call").map((e) => e.tool);
         expect(toolCalls).toContain("ExitPlanMode");
 
         console.log(`claude-cli daytona plan-mode events (${elapsedMs}ms): ${kinds.join(" → ")}`);

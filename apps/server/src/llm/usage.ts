@@ -1,5 +1,8 @@
 import type { Usage } from "./types.js";
 
+/** The starting total for a run of {@link sumUsage} calls. Frozen: `sumUsage` never writes to its arguments. */
+export const ZERO_USAGE: Readonly<Usage> = Object.freeze({ inputTokens: 0, outputTokens: 0 });
+
 /**
  * Add one call's usage to a running total — for callers that make several
  * calls and report them as one (the agent loop's turn, `chatTyped`'s

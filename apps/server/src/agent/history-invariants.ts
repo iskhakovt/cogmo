@@ -16,7 +16,7 @@
  * Pure function — does not mutate input.
  */
 
-import type { ContentBlock, Message, ToolResultBlock, ToolUseBlock } from "../llm/types.js";
+import type { ContentBlock, Message, ToolResultBlock } from "../llm/types.js";
 
 /**
  * Discriminated union — `toolUseId` is required exactly when the kind is
@@ -49,14 +49,12 @@ function isEmptyContent(content: Message["content"]): boolean {
 
 function toolUseIdsIn(content: Message["content"]): string[] {
   if (typeof content === "string") return [];
-  return content.filter((b): b is ToolUseBlock => b.type === "tool_use").map((b) => b.id);
+  return content.filter((b) => b.type === "tool_use").map((b) => b.id);
 }
 
 function toolResultIdsIn(content: Message["content"]): Set<string> {
   if (typeof content === "string") return new Set();
-  return new Set(
-    content.filter((b): b is ToolResultBlock => b.type === "tool_result").map((b) => b.toolUseId),
-  );
+  return new Set(content.filter((b) => b.type === "tool_result").map((b) => b.toolUseId));
 }
 
 function synthesizeToolResults(missingIds: ReadonlyArray<string>): ToolResultBlock[] {

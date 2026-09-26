@@ -109,7 +109,7 @@ export async function classifyPendingMemories(
     const results = await Promise.all(chunk.map((p) => classifyOne(p, schema, system, deps)));
     classified.push(...results);
   }
-  const successful = R.filter(classified, (c): c is ClassifiedRow => c !== null);
+  const successful = R.filter(classified, (c) => c !== null);
   const byNetwork = R.countBy(successful, (c) => c.tags.network);
   return { successful, byNetwork };
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sumUsage } from "./usage.js";
+import { sumUsage, ZERO_USAGE } from "./usage.js";
 
 describe("sumUsage", () => {
   it("adds every count, cache reads and writes included", () => {
@@ -29,5 +29,16 @@ describe("sumUsage", () => {
     expect(
       sumUsage({ inputTokens: 10, outputTokens: 5 }, { inputTokens: 20, outputTokens: 1 }),
     ).toEqual({ inputTokens: 30, outputTokens: 6 });
+  });
+
+  it("starts a total from ZERO_USAGE as the identity, and leaves it at zero", () => {
+    const first = { inputTokens: 120, outputTokens: 5, cacheReadTokens: 90 };
+
+    const total = sumUsage(ZERO_USAGE, first);
+
+    expect(total).toEqual(first);
+    expect(total).not.toBe(ZERO_USAGE);
+    expect(ZERO_USAGE).toEqual({ inputTokens: 0, outputTokens: 0 });
+    expect(Object.isFrozen(ZERO_USAGE)).toBe(true);
   });
 });

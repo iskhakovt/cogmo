@@ -209,9 +209,7 @@ export class McpConnectionPool {
       clearInterval(this.#evictionTimer);
       this.#evictionTimer = null;
     }
-    const live = [...this.#entries.values()].filter(
-      (s): s is Extract<EntryState, { kind: "live" }> => s.kind === "live",
-    );
+    const live = [...this.#entries.values()].filter((s) => s.kind === "live");
     await Promise.allSettled(live.map((s) => s.connection.close()));
     this.#entries.clear();
   }

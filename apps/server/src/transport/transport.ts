@@ -2618,9 +2618,10 @@ export function createTransport(deps: {
     // DNS or TLS failure after an earlier candidate returned the 429 that is
     // the reason to surface a status at all.
     const status = candidates
-      .reverse()
-      .flatMap((c) => (c instanceof Error ? (extractStatus(c) ?? []) : []))
-      .at(0);
+      .toReversed()
+      .filter((c) => c instanceof Error)
+      .map(extractStatus)
+      .find((s) => s !== undefined);
     return status === undefined ? null : `the request failed with HTTP ${status}`;
   }
 

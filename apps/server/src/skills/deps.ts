@@ -80,12 +80,10 @@ const LOCKFILE_SPEC_RE = /^([a-z0-9][a-z0-9._-]*?)==([a-zA-Z0-9.+!-]+)/i;
 
 /** Parse `name==version` specs from `uv pip compile --generate-hashes` output. Order preserved. */
 export function parseLockfilePackageSpecs(contents: string): readonly string[] {
-  const specs: string[] = [];
-  for (const rawLine of contents.split("\n")) {
+  return contents.split("\n").flatMap((rawLine) => {
     const match = LOCKFILE_SPEC_RE.exec(rawLine.trim());
-    if (match) specs.push(`${match[1]}==${match[2]}`);
-  }
-  return specs;
+    return match ? [`${match[1]}==${match[2]}`] : [];
+  });
 }
 
 /** `resolver_failed` → uv stderr (yanked / missing / typo). `transport_failed` → everything else. */

@@ -1,6 +1,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { getEncoding, type Tiktoken } from "js-tiktoken";
 import OpenAI from "openai";
+import * as R from "remeda";
 import { logger } from "../logger.js";
 import type { CacheDialect } from "./cache-dialect.js";
 import { cacheMarker } from "./cache-marker.js";
@@ -15,16 +16,12 @@ import type {
   ChatStreamResult,
   ContentBlock,
   CountTokensParams,
-  DocumentBlock,
-  ImageBlock,
   LlmResponse,
   Message,
   StopReason,
   StreamEvent,
   TextBlock,
   ToolDefinition,
-  ToolResultBlock,
-  ToolUseBlock,
   Usage,
 } from "./types.js";
 
@@ -83,47 +80,13 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
   async countTokens(params: CountTokensParams): Promise<number> {
     const enc = getEncoder();
-    const msgs = buildMessages(params.system, params.messages, undefined);
-    let tokens = 0;
-
-    for (const msg of msgs) {
-      tokens += 4; // message framing overhead (role, separators)
-
-      if (typeof msg.content === "string") {
-        tokens += enc.encode(msg.content).length;
-      } else if (Array.isArray(msg.content)) {
-        for (const part of msg.content) {
-          if (part.type === "text" && part.text) {
-            tokens += enc.encode(part.text).length;
-          }
-          // Images: ~85 tokens base for low-detail, more for high-detail.
-          // Conservative estimate since we don't know the detail setting.
-          if (part.type === "image_url") tokens += 85;
-        }
-      }
-
-      if (msg.role === "assistant" && msg.tool_calls) {
-        for (const tc of msg.tool_calls) {
-          if (tc.type !== "function") continue;
-          tokens += enc.encode(tc.function.name).length;
-          tokens += enc.encode(tc.function.arguments).length;
-        }
-      }
-
-      if (msg.role === "tool" && typeof msg.content === "string") {
-        tokens += enc.encode(msg.content).length;
-      }
-    }
-
-    // Tool definitions
-    if (params.tools?.length) {
-      for (const tool of params.tools) {
-        tokens += enc.encode(JSON.stringify(tool)).length;
-      }
-    }
-
-    tokens += 3; // reply priming
-    return tokens;
+    const messages = buildMessages(params.system, params.messages, undefined);
+    const toolDefinitions = R.sumBy(params.tools ?? [], (tool) =>
+      encodedLength(enc, JSON.stringify(tool)),
+    );
+    return (
+      R.sumBy(messages, (msg) => messageTokens(enc, msg)) + toolDefinitions + REPLY_PRIMING_TOKENS
+    );
   }
 
   async chat(params: ChatParams): Promise<LlmResponse> {
@@ -407,6 +370,49 @@ function requestOptions(hints: CacheHints): OpenAI.RequestOptions | undefined {
   return hints.headers && { headers: hints.headers };
 }
 
+// --- Token estimation ---
+
+/** Message framing overhead (role, separators). */
+const MESSAGE_FRAMING_TOKENS = 4;
+
+/**
+ * Images: ~85 tokens base for low-detail, more for high-detail.
+ * Conservative estimate since we don't know the detail setting.
+ */
+const IMAGE_TOKENS = 85;
+
+const REPLY_PRIMING_TOKENS = 3;
+
+function encodedLength(enc: Tiktoken, text: string): number {
+  return enc.encode(text).length;
+}
+
+/** A tool result is a `tool` message with string content, so the content term covers it. */
+function messageTokens(enc: Tiktoken, msg: OpenAI.ChatCompletionMessageParam): number {
+  const toolCalls =
+    msg.role === "assistant" && msg.tool_calls
+      ? R.sumBy(msg.tool_calls, (tc) =>
+          tc.type === "function"
+            ? encodedLength(enc, tc.function.name) + encodedLength(enc, tc.function.arguments)
+            : 0,
+        )
+      : 0;
+  return MESSAGE_FRAMING_TOKENS + contentTokens(enc, msg.content) + toolCalls;
+}
+
+function contentTokens(
+  enc: Tiktoken,
+  content: OpenAI.ChatCompletionMessageParam["content"],
+): number {
+  if (typeof content === "string") return encodedLength(enc, content);
+  if (!Array.isArray(content)) return 0;
+  return R.sumBy(content, (part) => {
+    if (part.type === "text") return encodedLength(enc, part.text);
+    if (part.type === "image_url") return IMAGE_TOKENS;
+    return 0;
+  });
+}
+
 // --- Message building ---
 
 function buildMessages(
@@ -418,7 +424,7 @@ function buildMessages(
   // passes system: "". An empty system block is rejected downstream by stricter
   // servers (vLLM/llama.cpp) and, on the OpenRouter → Anthropic caching path, by
   // Anthropic itself; mirrors the Anthropic adapter's omit-when-empty behaviour.
-  const result: OpenAI.ChatCompletionMessageParam[] = [];
+  const systemMessages: OpenAI.ChatCompletionMessageParam[] = [];
   if (system.trim().length > 0) {
     // A marker needs a content block to sit on, so a marked system prompt
     // goes as a one-block array.
@@ -426,117 +432,126 @@ function buildMessages(
       const systemPart: OpenAI.ChatCompletionContentPartText & {
         cache_control: Anthropic.CacheControlEphemeral;
       } = { type: "text", text: system, cache_control: systemMarker };
-      result.push({ role: "system", content: [systemPart] });
+      systemMessages.push({ role: "system", content: [systemPart] });
     } else {
-      result.push({ role: "system", content: system });
+      systemMessages.push({ role: "system", content: system });
     }
   }
 
-  for (const msg of messages) {
-    if (typeof msg.content === "string") {
-      result.push({ role: msg.role as "user" | "assistant", content: msg.content });
-      continue;
+  return [...systemMessages, ...messages.flatMap(toOpenAIMessages)];
+}
+
+/** The Chat Completions messages one canonical message becomes — none, one, or several. */
+function toOpenAIMessages(msg: Message): OpenAI.ChatCompletionMessageParam[] {
+  if (typeof msg.content === "string") {
+    return [{ role: msg.role, content: msg.content }];
+  }
+
+  // Content blocks — handle tool_use and tool_result specially
+  if (msg.role === "assistant") {
+    // Skip ThinkingBlock — not supported by OpenAI-compatible endpoints
+    const textBlocks = msg.content.filter((b) => b.type === "text");
+    const toolUseBlocks = msg.content.filter((b) => b.type === "tool_use");
+
+    const textContent = textBlocks.map((b) => b.text).join("");
+    const toolCalls = toolUseBlocks.map((b) => ({
+      id: b.id,
+      type: "function" as const,
+      function: {
+        name: b.name,
+        arguments: JSON.stringify(b.input),
+      },
+    }));
+
+    // OpenAI rejects `{role:"assistant", content: null}` with no tool_calls.
+    // An assistant turn whose only content was thinking (now stripped, or
+    // never visible to OpenAI-compatible endpoints) carries no information
+    // the model can use — drop it rather than send a malformed message.
+    if (textContent === "" && toolCalls.length === 0) {
+      return [];
     }
 
-    // Content blocks — handle tool_use and tool_result specially
-    if (msg.role === "assistant") {
-      // Skip ThinkingBlock — not supported by OpenAI-compatible endpoints
-      const textBlocks = msg.content.filter((b): b is TextBlock => b.type === "text");
-      const toolUseBlocks = msg.content.filter((b): b is ToolUseBlock => b.type === "tool_use");
-
-      const textContent = textBlocks.map((b) => b.text).join("");
-      const toolCalls = toolUseBlocks.map((b) => ({
-        id: b.id,
-        type: "function" as const,
-        function: {
-          name: b.name,
-          arguments: JSON.stringify(b.input),
-        },
-      }));
-
-      // OpenAI rejects `{role:"assistant", content: null}` with no tool_calls.
-      // An assistant turn whose only content was thinking (now stripped, or
-      // never visible to OpenAI-compatible endpoints) carries no information
-      // the model can use — drop it rather than send a malformed message.
-      if (textContent === "" && toolCalls.length === 0) {
-        continue;
-      }
-
-      result.push({
+    return [
+      {
         role: "assistant",
         content: textContent || null,
         ...(toolCalls.length > 0 && { tool_calls: toolCalls }),
-      });
-    } else {
-      // User message — may contain tool_result, text, image, and document blocks
-      const toolResults = msg.content.filter((b): b is ToolResultBlock => b.type === "tool_result");
-      const textBlocks = msg.content.filter((b): b is TextBlock => b.type === "text");
-      const imageBlocks = msg.content.filter((b): b is ImageBlock => b.type === "image");
-      const documentBlocks = msg.content.filter((b): b is DocumentBlock => b.type === "document");
-
-      // Tool results become separate "tool" role messages
-      for (const tr of toolResults) {
-        result.push({
-          role: "tool",
-          tool_call_id: tr.toolUseId,
-          content: tr.content,
-        });
-      }
-
-      // Documents: most OpenAI-compatible Chat Completions endpoints don't
-      // accept document content parts. Inline text/* documents into a text
-      // block so the model still sees them; binary documents (PDFs etc.)
-      // get a stub note. Only Anthropic gets the rich `document` block via
-      // its own adapter.
-      const documentTextBlocks: TextBlock[] = documentBlocks.flatMap((d) => {
-        if (d.mediaType.startsWith("text/") && d.source === "base64") {
-          // Pre-decode slice: cap base64 input before allocating its UTF-8
-          // expansion so a 20MB Telegram upload doesn't materialize 30MB of
-          // string memory just to be truncated. base64 ratio is 4 chars per
-          // 3 bytes; round to a multiple of 4 to keep the trailing block
-          // intact (an unaligned slice can produce U+FFFD garbage at the
-          // tail, which ruins the elision marker).
-          const maxBase64 = Math.ceil((MAX_INLINED_DOC_CHARS * 4) / 3 / 4) * 4;
-          const truncated = d.data.length > maxBase64;
-          const slice = truncated ? d.data.slice(0, maxBase64) : d.data;
-          let decoded = Buffer.from(slice, "base64").toString("utf-8");
-          if (decoded.length > MAX_INLINED_DOC_CHARS) {
-            decoded = decoded.slice(0, MAX_INLINED_DOC_CHARS);
-          }
-          if (truncated) {
-            decoded += `\n\n[Content truncated at ${MAX_INLINED_DOC_CHARS} characters]`;
-          }
-          const label = d.name ?? d.mediaType;
-          return [{ type: "text", text: `[document: ${label}]\n${decoded}` }];
-        }
-        return [
-          {
-            type: "text",
-            text: `[document: ${d.name ?? d.mediaType} — binary content not supported on this provider]`,
-          },
-        ];
-      });
-      const allTextBlocks = [...textBlocks, ...documentTextBlocks];
-
-      // Text + images → multipart content array
-      if (allTextBlocks.length > 0 || imageBlocks.length > 0) {
-        const parts: OpenAI.ChatCompletionContentPart[] = [];
-        for (const tb of allTextBlocks) {
-          parts.push({ type: "text", text: tb.text });
-        }
-        for (const ib of imageBlocks) {
-          const url = ib.source === "url" ? ib.data : `data:${ib.mediaType};base64,${ib.data}`;
-          parts.push({ type: "image_url", image_url: { url } });
-        }
-        result.push({
-          role: "user",
-          content: imageBlocks.length > 0 ? parts : allTextBlocks.map((b) => b.text).join(""),
-        });
-      }
-    }
+      },
+    ];
   }
 
-  return result;
+  // User message — may contain tool_result, text, image, and document blocks
+  const toolResults = msg.content.filter((b) => b.type === "tool_result");
+  const textBlocks = msg.content.filter((b) => b.type === "text");
+  const imageBlocks = msg.content.filter((b) => b.type === "image");
+  const documentBlocks = msg.content.filter((b) => b.type === "document");
+
+  // Tool results become separate "tool" role messages
+  const toolMessages: OpenAI.ChatCompletionToolMessageParam[] = toolResults.map((tr) => ({
+    role: "tool",
+    tool_call_id: tr.toolUseId,
+    content: tr.content,
+  }));
+
+  // Documents: most OpenAI-compatible Chat Completions endpoints don't
+  // accept document content parts. Inline text/* documents into a text
+  // block so the model still sees them; binary documents (PDFs etc.)
+  // get a stub note. Only Anthropic gets the rich `document` block via
+  // its own adapter.
+  const documentTextBlocks: TextBlock[] = documentBlocks.flatMap((d) => {
+    if (d.mediaType.startsWith("text/") && d.source === "base64") {
+      // Pre-decode slice: cap base64 input before allocating its UTF-8
+      // expansion so a 20MB Telegram upload doesn't materialize 30MB of
+      // string memory just to be truncated. base64 ratio is 4 chars per
+      // 3 bytes; round to a multiple of 4 to keep the trailing block
+      // intact (an unaligned slice can produce U+FFFD garbage at the
+      // tail, which ruins the elision marker).
+      const maxBase64 = Math.ceil((MAX_INLINED_DOC_CHARS * 4) / 3 / 4) * 4;
+      const truncated = d.data.length > maxBase64;
+      const slice = truncated ? d.data.slice(0, maxBase64) : d.data;
+      let decoded = Buffer.from(slice, "base64").toString("utf-8");
+      if (decoded.length > MAX_INLINED_DOC_CHARS) {
+        decoded = decoded.slice(0, MAX_INLINED_DOC_CHARS);
+      }
+      if (truncated) {
+        decoded += `\n\n[Content truncated at ${MAX_INLINED_DOC_CHARS} characters]`;
+      }
+      const label = d.name ?? d.mediaType;
+      return [{ type: "text", text: `[document: ${label}]\n${decoded}` }];
+    }
+    return [
+      {
+        type: "text",
+        text: `[document: ${d.name ?? d.mediaType} — binary content not supported on this provider]`,
+      },
+    ];
+  });
+  const allTextBlocks = [...textBlocks, ...documentTextBlocks];
+
+  if (allTextBlocks.length === 0 && imageBlocks.length === 0) {
+    return toolMessages;
+  }
+
+  // Text + images → multipart content array
+  const parts: OpenAI.ChatCompletionContentPart[] = [
+    ...allTextBlocks.map(
+      (tb): OpenAI.ChatCompletionContentPartText => ({
+        type: "text",
+        text: tb.text,
+      }),
+    ),
+    ...imageBlocks.map((ib): OpenAI.ChatCompletionContentPartImage => {
+      const url = ib.source === "url" ? ib.data : `data:${ib.mediaType};base64,${ib.data}`;
+      return { type: "image_url", image_url: { url } };
+    }),
+  ];
+  return [
+    ...toolMessages,
+    {
+      role: "user",
+      content: imageBlocks.length > 0 ? parts : allTextBlocks.map((b) => b.text).join(""),
+    },
+  ];
 }
 
 // --- Tool definition mapping ---
@@ -577,15 +592,11 @@ function fromOpenAIMessage(
   message: OpenAI.ChatCompletionMessage,
   stopReason: StopReason,
 ): ContentBlock[] {
-  const blocks: ContentBlock[] = [];
-
-  if (message.content) {
-    blocks.push({ type: "text", text: message.content });
-  }
+  const text: ContentBlock[] = message.content ? [{ type: "text", text: message.content }] : [];
 
   const calls = (message.tool_calls ?? []).filter((tc) => tc.type === "function");
-  for (const [position, tc] of calls.entries()) {
-    blocks.push({
+  const toolUses = calls.map(
+    (tc, position): ContentBlock => ({
       type: "tool_use",
       id: tc.id,
       name: tc.function.name,
@@ -595,10 +606,10 @@ function fromOpenAIMessage(
         "OpenAI-compatible non-streaming tool_calls arguments",
         stopReason === "max_tokens" && position === calls.length - 1,
       ),
-    });
-  }
+    }),
+  );
 
-  return blocks;
+  return [...text, ...toolUses];
 }
 
 /**

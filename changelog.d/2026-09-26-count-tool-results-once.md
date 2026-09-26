@@ -1,0 +1,3 @@
+The OpenAI-compatible token estimate counts each tool result once. It encoded a tool result's content twice, so tool-heavy conversations on OpenAI-compatible providers reached the compaction threshold early.
+
+Pure list-building loops are maps and folds, with unchanged output: OpenAI-compatible message and response mapping, scoped tool-result extraction, the Pyodide lint, lockfile parsing, the skill AST classifier and `--ratios` parsing. Usage totals start from a frozen `ZERO_USAGE`, and filter callbacks rely on inferred type predicates instead of hand-written `x is T` guards. `code-style.md` gains a rule for filtering while mapping.

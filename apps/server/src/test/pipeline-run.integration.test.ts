@@ -53,7 +53,10 @@ function lastUserText(params: ChatParams): string {
   if (last === undefined) return "";
   return typeof last.content === "string"
     ? last.content
-    : last.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
+    : last.content
+        .filter((block) => block.type === "text")
+        .map((block) => block.text)
+        .join("\n");
 }
 
 function replyFor(prompt: string): string {

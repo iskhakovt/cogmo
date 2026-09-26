@@ -14,7 +14,7 @@ import type {
   ToolUseBlock,
   Usage,
 } from "../llm/types.js";
-import { sumUsage } from "../llm/usage.js";
+import { sumUsage, ZERO_USAGE } from "../llm/usage.js";
 import { validateHistory } from "./history-invariants.js";
 import {
   canonicalJson,
@@ -207,7 +207,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
   const messages = sanitizeHistory(params.messages, log);
   const initialLength = messages.length;
   const toolDefs = tools.definitions();
-  let totalUsage: Usage = { inputTokens: 0, outputTokens: 0 };
+  let totalUsage: Readonly<Usage> = ZERO_USAGE;
   let iterations = 0;
   let finalModel = model;
 
@@ -388,7 +388,7 @@ function computeVolumeClusterInterceptions(
   // emitted in this iteration.
   const blocksByName = R.pipe(
     iterationContent,
-    R.filter((b): b is ToolUseBlock => b.type === "tool_use"),
+    R.filter((b) => b.type === "tool_use"),
     R.groupBy((b) => b.name),
   );
 
@@ -465,7 +465,7 @@ async function executeToolCalls(
   turnKey: string | undefined,
   interceptions?: ReadonlyMap<string, ContentBlock>,
 ): Promise<ContentBlock[]> {
-  const toolUseBlocks = content.filter((b): b is ToolUseBlock => b.type === "tool_use");
+  const toolUseBlocks = content.filter((b) => b.type === "tool_use");
   if (toolUseBlocks.length === 0) return [];
 
   const planned: PlannedCall[] = toolUseBlocks.map((block, position) => ({
@@ -884,7 +884,7 @@ export async function runStreamingAgentLoop(
   const messages = sanitizeHistory(params.messages, log);
   const initialLength = messages.length;
   const toolDefs = tools.definitions();
-  let totalUsage: Usage = { inputTokens: 0, outputTokens: 0 };
+  let totalUsage: Readonly<Usage> = ZERO_USAGE;
   // Tracks messages that exist only in memory for the next iteration —
   // synthetic continuation prompts injected by the repair flow. They feed
   // the model on replay but must NOT be persisted (same convention as
@@ -1175,7 +1175,7 @@ export async function runStreamingAgentLoop(
     // side-effect-free; the fingerprint then counts toward both the
     // consecutive and cumulative triggers. See
     // design/agent-resilience.md → Class D.
-    const toolUseBlocks = iterationContent.filter((b): b is ToolUseBlock => b.type === "tool_use");
+    const toolUseBlocks = iterationContent.filter((b) => b.type === "tool_use");
     const hadSideEffect = iterationHadSideEffect(toolUseBlocks, toolResults, tools);
     if (hadSideEffect) {
       // Progress made — reset the consecutive run and do NOT touch

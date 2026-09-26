@@ -386,10 +386,10 @@ function assertNoOrphanedToolResults(messages: ReadonlyArray<Message>): void {
       expect(prev.role).toBe("assistant");
       expect(typeof prev.content).not.toBe("string");
       const toolUseIds = (prev.content as ContentBlock[])
-        .filter((b): b is ToolUseBlock => b.type === "tool_use")
+        .filter((b) => b.type === "tool_use")
         .map((b) => b.id);
       const toolResultIds = (m.content as ContentBlock[])
-        .filter((b): b is ToolResultBlock => b.type === "tool_result")
+        .filter((b) => b.type === "tool_result")
         .map((b) => b.toolUseId);
       for (const id of toolResultIds) {
         expect(toolUseIds).toContain(id);
@@ -772,7 +772,7 @@ describe("compactSameToolClusters", () => {
     const toolUses = result.messages
       .filter((m) => m.role === "assistant" && Array.isArray(m.content))
       .flatMap((m) => m.content as ContentBlock[])
-      .filter((b): b is ToolUseBlock => b.type === "tool_use");
+      .filter((b) => b.type === "tool_use");
     expect(toolUses.map((t) => t.id)).toEqual(["t1", "t2", "t3", "t4", "t5"]);
     expect(toolUses.every((t) => t.name === "web_search")).toBe(true);
     expect(toolUses[1]?.input).toEqual({ query: "beta" });
@@ -791,14 +791,14 @@ describe("compactSameToolClusters", () => {
       result.messages
         .filter((m) => m.role === "assistant" && Array.isArray(m.content))
         .flatMap((m) => m.content as ContentBlock[])
-        .filter((b): b is ToolUseBlock => b.type === "tool_use")
+        .filter((b) => b.type === "tool_use")
         .map((b) => b.id),
     );
     const toolResultIds = new Set(
       result.messages
         .filter((m) => m.role === "user" && Array.isArray(m.content))
         .flatMap((m) => m.content as ContentBlock[])
-        .filter((b): b is ToolResultBlock => b.type === "tool_result")
+        .filter((b) => b.type === "tool_result")
         .map((b) => b.toolUseId),
     );
     expect(toolUseIds).toEqual(toolResultIds);

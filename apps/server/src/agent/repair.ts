@@ -939,7 +939,7 @@ export function summarizeToolHistory(
     R.flatMap((msg, idx) =>
       msg.role === "assistant" && Array.isArray(msg.content)
         ? msg.content
-            .filter((b): b is ToolUseBlock => b.type === "tool_use")
+            .filter((b) => b.type === "tool_use")
             .map((b) => ({ name: b.name, id: b.id, msgIdx: idx }))
         : [],
     ),
@@ -955,9 +955,7 @@ export function summarizeToolHistory(
     slice,
     R.flatMap((msg) =>
       msg.role === "user" && Array.isArray(msg.content)
-        ? msg.content.filter(
-            (b): b is Extract<ContentBlock, { type: "tool_result" }> => b.type === "tool_result",
-          )
+        ? msg.content.filter((b) => b.type === "tool_result")
         : [],
     ),
     R.flatMap((r) => {
@@ -989,9 +987,7 @@ export function summarizeToolHistory(
               successes: results.length - failures.length,
               failures: failures.length,
               failureReasons: R.unique(
-                failures
-                  .map((r) => firstLineSummary(r.content))
-                  .filter((s): s is string => s !== null),
+                failures.map((r) => firstLineSummary(r.content)).filter((s) => s !== null),
               ),
             },
           },

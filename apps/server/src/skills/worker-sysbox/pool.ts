@@ -249,7 +249,7 @@ export class SysboxWorkerPool {
       const settled = await Promise.allSettled(
         Array.from({ length: pool.#opts.min }, () => pool.#spawnOne()),
       );
-      const firstFailure = settled.find((r): r is PromiseRejectedResult => r.status === "rejected");
+      const firstFailure = settled.find((r) => r.status === "rejected");
       if (firstFailure) {
         await pool.dispose();
         throw firstFailure.reason instanceof Error

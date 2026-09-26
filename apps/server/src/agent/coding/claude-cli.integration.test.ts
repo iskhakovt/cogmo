@@ -277,7 +277,7 @@ describe("ClaudeCodeBackend against cogmo-devbase:test", () => {
       // ExitPlanMode must actually have been called. Without this the
       // test would pass against any model that emits text and never
       // exits plan mode (the workspace-empty failure case).
-      const toolCalls = events.flatMap((e) => (e.kind === "tool_call" ? [e.tool] : []));
+      const toolCalls = events.filter((e) => e.kind === "tool_call").map((e) => e.tool);
       expect(toolCalls).toContain("ExitPlanMode");
 
       console.log(`claude-cli plan-mode events (${elapsedMs}ms): ${kinds.join(" → ")}`);
@@ -377,7 +377,7 @@ describe("ClaudeCodeBackend against cogmo-devbase:test", () => {
       // Execute mode should emit at least one tool_call against the
       // planted greet.ts — even a trivial JSDoc addition routes
       // through Read + Edit.
-      const toolCalls = executeEvents.flatMap((e) => (e.kind === "tool_call" ? [e.tool] : []));
+      const toolCalls = executeEvents.filter((e) => e.kind === "tool_call").map((e) => e.tool);
       expect(toolCalls.length).toBeGreaterThan(0);
 
       console.log(`claude-cli execute-mode events (${elapsedMs}ms): ${kinds.join(" → ")}`);
