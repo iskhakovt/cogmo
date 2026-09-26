@@ -296,7 +296,6 @@ function matchesArgPredicate(callNode: Node, predicate: "open_write_mode"): bool
     if (!second) return false;
     if (second.type !== "string") return false;
     const literal = stringLiteralValue(second);
-    if (literal === null) return false;
     // Any of `w`, `a`, `x`, or `+` in the mode string means a write/
     // create/append/read-write open. `b` and `t` are width modifiers
     // and don't imply a write on their own.
@@ -312,7 +311,7 @@ function matchesArgPredicate(callNode: Node, predicate: "open_write_mode"): bool
  * `string_content` text, which is the literal value modulo escape
  * processing — sufficient for "does this contain `w`?" purposes.
  */
-function stringLiteralValue(node: Node): string | null {
+function stringLiteralValue(node: Node): string {
   return node.namedChildren
     .filter((child) => child.type === "string_content")
     .map((child) => child.text)

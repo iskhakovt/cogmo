@@ -449,7 +449,7 @@ function buildMessages(
 /** The Chat Completions messages one canonical message becomes — none, one, or several. */
 function toOpenAIMessages(msg: Message): OpenAI.ChatCompletionMessageParam[] {
   if (typeof msg.content === "string") {
-    return [{ role: msg.role as "user" | "assistant", content: msg.content }];
+    return [{ role: msg.role, content: msg.content }];
   }
 
   // Content blocks — handle tool_use and tool_result specially

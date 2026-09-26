@@ -207,7 +207,7 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<AgentLoopRe
   const messages = sanitizeHistory(params.messages, log);
   const initialLength = messages.length;
   const toolDefs = tools.definitions();
-  let totalUsage: Usage = ZERO_USAGE;
+  let totalUsage: Readonly<Usage> = ZERO_USAGE;
   let iterations = 0;
   let finalModel = model;
 
@@ -884,7 +884,7 @@ export async function runStreamingAgentLoop(
   const messages = sanitizeHistory(params.messages, log);
   const initialLength = messages.length;
   const toolDefs = tools.definitions();
-  let totalUsage: Usage = ZERO_USAGE;
+  let totalUsage: Readonly<Usage> = ZERO_USAGE;
   // Tracks messages that exist only in memory for the next iteration —
   // synthetic continuation prompts injected by the repair flow. They feed
   // the model on replay but must NOT be persisted (same convention as

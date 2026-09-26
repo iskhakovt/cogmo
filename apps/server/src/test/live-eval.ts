@@ -281,7 +281,7 @@ export interface UsageMeter {
 }
 
 export function createUsageMeter(): UsageMeter {
-  let total: Usage = ZERO_USAGE;
+  let total: Readonly<Usage> = ZERO_USAGE;
   const meter: UsageMeter = {
     add: (usage) => {
       total = sumUsage(total, usage);

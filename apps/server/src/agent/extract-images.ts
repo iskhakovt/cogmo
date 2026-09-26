@@ -56,7 +56,7 @@ function extractToolResultsByName<T>(
           if (toolNames.get(block.toolUseId) !== toolName) return [];
           if (block.isError) return [];
           const parsed = parser(block.content);
-          return parsed ? [parsed] : [];
+          return parsed === null ? [] : [parsed];
         }),
   );
 }

@@ -123,7 +123,7 @@ export async function chatTyped<T>(params: TypedChatParams<T>): Promise<TypedCha
   const repair: Required<ChatTypedRepair> = { ...DEFAULT_REPAIR, ...params.repair };
   const jsonSchema = toObjectJsonSchema(schema);
   const messages: Message[] = [...params.messages];
-  let totalUsage: Usage = ZERO_USAGE;
+  let totalUsage: Readonly<Usage> = ZERO_USAGE;
   let retries = 0;
 
   for (;;) {
