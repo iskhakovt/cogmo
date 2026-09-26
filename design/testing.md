@@ -82,9 +82,9 @@ Real provider APIs, for behaviour a replayed fixture can't show — recorded fix
 **Naming:** `.live.test.ts` suffix, the `live` Vitest project. `pnpm test:live`.
 
 - Skipped unless `LIVE=1` and the provider's API key is set; never runs on PRs. The `live` project doesn't load `.env` itself, so export the root `.env` from the repository root and run the tier: `set -a; . ./.env; set +a; LIVE=1 pnpm test:live`.
-- Requests go through the wire recorder (`src/test/wire-recorder.ts`), which captures each request body and the provider's usage block; assertions are on usage, since model output varies.
+- The prompt-caching live tests send requests through the wire recorder (`src/test/wire-recorder.ts`), which captures each request body and the provider's usage block, and assert on usage, since model output varies.
 - Each run costs real money — keep prompts small and requests few. See `design/prompt-caching.md` → Test Plan → Live tier for the caching scenarios.
-- **Evals** measure model behaviour against a labelled fixture set under `test/fixtures/evals/` and report per-case results and summary rates rather than asserting thresholds: one sample per case on a non-deterministic model makes a threshold either too loose to catch a regression or flaky. They fail only when a turn doesn't complete, and the doc that owns the behaviour records the numbers. `core-memory-routing.live.test.ts` is the first ([memory.md](memory.md) → Core Memory vs Hindsight).
+- **Evals** measure model behaviour against a labelled fixture set under `test/fixtures/evals/` and report per-case results and summary rates rather than asserting thresholds: one sample per case on a non-deterministic model makes a threshold either too loose to catch a regression or flaky. They fail only when a turn doesn't complete, and the doc that owns the behaviour records the numbers. `core-memory-routing.live.test.ts` is the first ([memory.md](memory.md) → Core Memory vs Hindsight). Their cases are written by hand; [Evaluation Dataset](#evaluation-dataset-research) is the held-out set built from real conversations.
 
 ## Skill-Authoring Integration `[proposed]`
 

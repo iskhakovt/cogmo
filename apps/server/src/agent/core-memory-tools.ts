@@ -1,15 +1,14 @@
 import { z } from "zod";
+import { formatUserContext } from "./prompt.js";
 import { defineTool } from "./tools.js";
 
 export const coreMemoryUpdate = defineTool({
   name: "core_memory_update",
   description:
-    "Rewrite a core memory block — a short note visible in your instructions in every " +
-    "conversation. For what every conversation needs: who the user is (name, role, location " +
-    "and timezone, who their close family are), active projects, standing preferences. " +
-    "Call it in the same turn the user mentions a change, even in passing. Not for events, " +
-    "one-off details or facts about other people — use memory_retain. Blocks are identified " +
-    "by key. Overwrites the whole block: include everything that still holds.",
+    "Rewrite a core memory block, shown in your instructions in every conversation. Only " +
+    "for who the user is, their active projects and standing preferences and constraints: " +
+    "call it in the turn one is new or changes, even in passing. Replaces the whole block: " +
+    "include everything that still holds. Anything else: memory_retain.",
   // Durable: a DB upsert. The overwrite is idempotent, but exactly-once
   // keeps replays from racing a concurrent same-key update from another
   // turn with stale content.
@@ -38,9 +37,7 @@ export const coreMemoryRead = defineTool({
   sideEffectful: false,
   schema: z.object({}),
   handler: async (_input, service) => {
-    const blocks = await service.coreMemory.get();
-    if (blocks.length === 0) return "No core memory blocks yet.";
-    return blocks.map((b) => `## ${b.key}\n${b.content}`).join("\n\n");
+    return formatUserContext(await service.coreMemory.get()) ?? "No core memory blocks yet.";
   },
 });
 
