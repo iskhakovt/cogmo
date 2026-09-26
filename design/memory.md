@@ -62,18 +62,19 @@ On the baseline, the agent updated core memory for announced facts once blocks e
 
 The current wording keeps recall at or above the rule's and fixes the finished project: every rewrite removes it from `active_projects`. With established blocks, no write uses a relative time word, and of the twelve rewrites for the four cases that change an established value, ten drop the old one and two keep "moved from London" beside Lisbon. One Hindsight sample in 27 still appends to the `Family` line, the partner's promotion. With no blocks, 27 of 33 samples reach core memory, the dietary constraint mentioned in passing in two of three. Two gaps remain on that onboarding path: 6 of 27 writes carry a relative time ("started this week" in all three samples of the new job, "recently" in three samples of the two moves), and 5 pick a block outside the case's expected keys (a new role starting Monday under `active_projects` twice, the dietary constraint under `user_profile` twice, a new daughter under a `family` block).
 
-**Multi-turn.** `src/agent/core-memory-multiturn.live.test.ts` runs seven scripted conversations of four or five turns (`test/fixtures/evals/core-memory-multiturn.json`), starting from established blocks and carrying core memory across turns. In four, a new core fact comes up in passing mid-conversation; in three, a fact changes an established one. After the last turn it checks one anchor per established line, less the value a change supersedes, for facts a whole-block rewrite lost, and the final blocks for relative time words. Two samples per scenario (N=2) on `claude-sonnet-5`, on the rule's first wording and on the current one; counts are over all samples, and the brackets give each run's count where it varies:
+**Multi-turn.** `src/agent/core-memory-multiturn.live.test.ts` runs seven scripted conversations of four or five turns (`test/fixtures/evals/core-memory-multiturn.json`), starting from established blocks and carrying core memory across turns. In four, a new core fact comes up in passing mid-conversation; in three, a fact changes an established one. After the last turn it checks one anchor per established line, less the value a change supersedes, for facts a whole-block rewrite lost, and the final blocks for relative time words. Results on `claude-sonnet-5`, two samples per scenario (N=2); counts are over all samples, and the brackets give each run's count where it varies. *Rule* is the rule's first wording, two runs of N=2 each: the first recorded before the relative-time check (—), the second scored from its logged writes with the current checks. *Current* is the current guidance.
 
-| Metric | Rule | Current |
-|-|-|-|
-| Fact written in the turn it came up | 14/14 | 14/14 |
-| Established facts kept through every rewrite | 14/14 | 14/14 |
-| Core writes in other turns | 0 | 0 |
-| Old value removed | 0/6 | 6/6 |
-| Old value kept in the block as history | 6/6 | 0/6 |
-| Final blocks free of relative time words | 8/14 [3/7, 5/7] | 14/14 |
+| Metric | Rule, run 1 | Rule, run 2 | Current |
+|-|-|-|-|
+| Completed | 14/14 | 14/14 | 14/14 |
+| Fact written in the turn it came up | 13/14 | 14/14 | 14/14 |
+| Established facts kept through every rewrite | 14/14 | 14/14 | 14/14 |
+| No core writes outside the fact turn | 13/14 | 14/14 | 14/14 |
+| Old value removed | 0/6 | 0/6 | 6/6 |
+| Old value kept in the block as history | 6/6 | 6/6 | 0/6 |
+| Final blocks free of relative time words | — | 8/14 [3/7 5/7] | 14/14 |
 
-On the first wording, every change kept the old value as history ("recently moved from Lisbon", "previously at Northwind Logistics, left last month", the NixOS migration marked DONE or completed in `active_projects`), and relative times reached the blocks with it, including a brother's visit "next week" on the `Family` line. On the current wording, every change replaces the old value outright. Seven of the 14 fact turns also call `memory_retain`, for the change, the brother's visit or the diagnosis; no turn did on the first wording.
+On the first wording, the one late fact was a new project written two turns after it came up, at the end of the conversation. Every change kept the old value as history ("relocated from Lisbon", "recently moved from Lisbon", "previously at Northwind Logistics, left last month", the NixOS migration marked DONE or completed in `active_projects`), and relative times reached the blocks with it, including a brother's visit "next week" on the `Family` line. On the current wording, every change replaces the old value outright, and 9 of the 14 fact turns also call `memory_retain`, for the change, the brother's visit or the diagnosis; no fact turn in run 2 of the first wording did.
 
 ## Bank Strategy `[confirmed]`
 
