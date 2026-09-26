@@ -82,6 +82,18 @@ describe("DrizzleAgentStore", () => {
     it("returns null when no users exist", async () => {
       expect(await tx((trx) => store.getFirstUser(trx))).toBeUndefined();
     });
+
+    it("getFirstUser returns the oldest user when a newer row reuses a freed slot", async () => {
+      const { id: gone } = await tx((trx) => store.createUser(trx));
+      const { id: oldest } = await tx((trx) => store.createUser(trx));
+      // Adversarial setup: nothing deletes users, but a vacuumed gap at the
+      // front of the heap is where the next insert lands.
+      await db.execute(sql`DELETE FROM users WHERE id = ${gone}`);
+      await db.execute(sql`VACUUM users`);
+      await tx((trx) => store.createUser(trx));
+
+      expect((await tx((trx) => store.getFirstUser(trx)))?.id).toBe(oldest);
+    });
   });
 
   describe("profiles", () => {

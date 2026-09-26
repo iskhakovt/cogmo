@@ -101,6 +101,15 @@ describe("DrizzleTransportStore", () => {
     it("returns null for unknown channel type", async () => {
       expect(await tx((trx) => store.getChannelByType(trx, "nonexistent"))).toBeUndefined();
     });
+
+    it("getChannelByType stays on the oldest channel of a type after its credentials rotate", async () => {
+      const oldest = await seedChannel("telegram");
+      await seedChannel("telegram");
+      // An in-place update writes a new row version after the second channel's.
+      await tx((trx) => store.updateChannelCredentials(trx, oldest, { token: "rotated" }));
+
+      expect((await tx((trx) => store.getChannelByType(trx, "telegram")))?.id).toBe(oldest);
+    });
   });
 
   describe("sessions", () => {

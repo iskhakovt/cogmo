@@ -584,7 +584,11 @@ export interface AgentStore {
   /** Load a profile by ID. */
   getProfile(tx: Transaction, profileId: string): Promise<Profile | undefined>;
 
-  /** Get the first user (for bootstrapping). */
+  /**
+   * Get the oldest user (for bootstrapping). This and `getDefaultProfile` order
+   * by `id` (UUIDv7, so creation order): unordered, a pick follows heap order,
+   * which in-place edits and reused space change.
+   */
   getFirstUser(tx: Transaction): Promise<{ id: string } | undefined>;
 
   /** Get the oldest profile, the one setup seeds (for bootstrapping). */
@@ -1730,13 +1734,11 @@ export class DrizzleAgentStore implements AgentStore {
   }
 
   async getFirstUser(tx: Transaction): Promise<{ id: string } | undefined> {
-    const rows = await tx.select({ id: users.id }).from(users).limit(1);
+    const rows = await tx.select({ id: users.id }).from(users).orderBy(asc(users.id)).limit(1);
     return rows[0];
   }
 
   async getDefaultProfile(tx: Transaction): Promise<{ id: string } | undefined> {
-    // `id` is UUIDv7, so this is the oldest profile. Without the ORDER BY the
-    // pick follows heap order, which an in-place edit of that profile changes.
     const rows = await tx
       .select({ id: profiles.id })
       .from(profiles)
