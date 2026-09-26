@@ -30,6 +30,10 @@ import type { MemoryExtractionResult } from "./extract-memories.js";
 export const EvolutionTriggerSchema = z.enum(["idle", "manual"]);
 export type EvolutionTrigger = z.infer<typeof EvolutionTriggerSchema>;
 
+/** The parts of an Observer fire that fail independently of each other. */
+export const ObserverPhaseSchema = z.enum(["corrections", "consolidation", "memories", "drain"]);
+export type ObserverPhase = z.infer<typeof ObserverPhaseSchema>;
+
 const ExtractionResultSchema = z.object({
   extracted: z.number().int().nonnegative(),
   reinforced: z.number().int().nonnegative(),
@@ -70,6 +74,14 @@ export const EvolutionEventPayloadSchema = z.object({
    * a backfill.
    */
   durationMs: z.number().int().nonnegative().optional(),
+  /**
+   * Phases that failed after their step retries, in run order; empty when
+   * every phase that ran completed. A failed phase's counts above are its
+   * empty fallback, not a finding. Absent on rows recorded before the
+   * Observer stored phase outcomes: whether any phase failed there is
+   * unknown, so the reader must not treat absence as "none failed".
+   */
+  failedPhases: z.array(ObserverPhaseSchema).optional(),
 });
 export type EvolutionEventPayload = z.infer<typeof EvolutionEventPayloadSchema>;
 

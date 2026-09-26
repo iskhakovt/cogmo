@@ -4276,6 +4276,37 @@ describe("handleLearned", () => {
     expect(reply).toContain("3 memory write(s)");
   });
 
+  it("names the failed phases on a digest line, and nothing on a fire without them", async () => {
+    const transport = transportWith({
+      evolution: {
+        listEvents: vi.fn().mockResolvedValue(
+          ok([
+            {
+              id: EVT_B,
+              conversationId: "c1",
+              triggeredBy: "idle",
+              payload: { ...makePayload(), failedPhases: ["memories", "drain"] },
+              createdAt: new Date("2026-06-01T10:00:00Z"),
+            },
+            {
+              id: EVT_A,
+              conversationId: "c1",
+              triggeredBy: "idle",
+              payload: { ...makePayload(), failedPhases: [] },
+              createdAt: new Date("2026-05-30T08:00:00Z"),
+            },
+          ]),
+        ),
+      },
+    });
+    const ctx = mkCtx();
+    await handleLearned(transport, ctx);
+    const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
+    const [lineB, lineA] = reply.split(/\n(?=\d+\. )/).slice(1);
+    expect(lineB).toContain("failed: memories, drain");
+    expect(lineA).not.toContain("failed");
+  });
+
   it("nudges the user to /reflect when there are no events", async () => {
     const transport = transportWith({
       evolution: { listEvents: vi.fn().mockResolvedValue(ok([])) },
@@ -4654,6 +4685,65 @@ describe("handleLearned detail rendering", () => {
     await handleLearned(transport, ctx);
     const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
     expect(reply).toMatch(/Took: 33s/);
+  });
+
+  it("shows a failed phase as failed instead of its fallback counts", async () => {
+    const transport = transportWith({
+      evolution: {
+        getEvent: vi.fn().mockResolvedValue(
+          ok({
+            id: EVT,
+            conversationId: "c1",
+            triggeredBy: "idle",
+            payload: {
+              ...makePayload({}),
+              corrections: {
+                extracted: 0,
+                reinforced: 0,
+                contradictions: 0,
+                promoted: 0,
+                outOfScopeReinforcementsSkipped: 0,
+                unknownRuleReinforcementsSkipped: 0,
+                consolidationNeeded: false,
+              },
+              failedPhases: ["corrections", "consolidation", "memories", "drain"],
+            },
+            createdAt: new Date("2026-05-30T08:00:00Z"),
+          }),
+        ),
+      },
+    });
+    const ctx = mkCtx(EVT);
+    await handleLearned(transport, ctx);
+    const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
+    expect(reply).toContain("Corrections: failed after retries");
+    expect(reply).toContain("Consolidation: failed after retries");
+    expect(reply).toContain("Memories: failed after retries");
+    expect(reply).toContain("Pending drain: failed after retries");
+    expect(reply).not.toContain("extracted:    0");
+    expect(reply).not.toContain("Memories: 0 extracted");
+  });
+
+  it("renders counts as before for a row without recorded phase outcomes", async () => {
+    const transport = transportWith({
+      evolution: {
+        getEvent: vi.fn().mockResolvedValue(
+          ok({
+            id: EVT,
+            conversationId: "c1",
+            triggeredBy: "idle",
+            payload: makePayload({}),
+            createdAt: new Date("2026-05-30T08:00:00Z"),
+          }),
+        ),
+      },
+    });
+    const ctx = mkCtx(EVT);
+    await handleLearned(transport, ctx);
+    const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
+    expect(reply).toContain("extracted:    1");
+    expect(reply).toContain("Memories: 0 extracted");
+    expect(reply).not.toContain("failed");
   });
 
   it("omits the Took line when durationMs is absent", async () => {

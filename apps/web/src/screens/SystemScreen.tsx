@@ -1,4 +1,4 @@
-import type { EvolutionEventEntry, ScheduledTaskSummary } from "@cogmo/contracts";
+import type { EvolutionEventEntry, ObserverPhase, ScheduledTaskSummary } from "@cogmo/contracts";
 import { useState } from "react";
 import { api } from "../orpc.js";
 import {
@@ -86,10 +86,11 @@ function EvolutionPanel({ onSelect }: { onSelect: (event: EvolutionEventEntry) =
               <th className={th}>Rules ±</th>
               <th className={th}>Memories</th>
               <th className={th}>Messages</th>
+              <th className={th}>Outcome</th>
             </tr>
           </thead>
           <tbody>
-            {events.length === 0 ? <EmptyRow colSpan={5} label="No evolution events yet." /> : null}
+            {events.length === 0 ? <EmptyRow colSpan={6} label="No evolution events yet." /> : null}
             {events.map((e: EvolutionEventEntry) => (
               <tr key={e.id} className={`${trHover} cursor-pointer`} onClick={() => onSelect(e)}>
                 <td className={tdMono}>{fmtDateTime(e.createdAt)}</td>
@@ -100,6 +101,9 @@ function EvolutionPanel({ onSelect }: { onSelect: (event: EvolutionEventEntry) =
                 </td>
                 <td className={tdMono}>{e.payload.memories.extracted}</td>
                 <td className={tdMono}>{e.payload.messageCount}</td>
+                <td className={td}>
+                  <PhaseOutcome failedPhases={e.payload.failedPhases} />
+                </td>
               </tr>
             ))}
           </tbody>
@@ -109,8 +113,20 @@ function EvolutionPanel({ onSelect }: { onSelect: (event: EvolutionEventEntry) =
   );
 }
 
+/**
+ * The phases a fire recorded as failed. A row from before phase outcomes were
+ * stored records none either way, so it shows a dash rather than "ok".
+ */
+function PhaseOutcome({ failedPhases }: { failedPhases: ObserverPhase[] | undefined }) {
+  if (failedPhases === undefined) return <span className="text-faint">—</span>;
+  if (failedPhases.length === 0) return <Pill tone="ok">ok</Pill>;
+  return <Pill tone="bad">failed: {failedPhases.join(", ")}</Pill>;
+}
+
 function EvolutionDetail({ event }: { event: EvolutionEventEntry }) {
   const { corrections: c, consolidation, memories, drained } = event.payload;
+  // A failed phase's counts are its empty fallback, not a finding.
+  const failed = (phase: ObserverPhase) => event.payload.failedPhases?.includes(phase) === true;
   return (
     <dl className="flex flex-col gap-4 font-mono text-xs">
       <Field label="conversation" value={event.conversationId} />
@@ -120,30 +136,56 @@ function EvolutionDetail({ event }: { event: EvolutionEventEntry }) {
         <Field label="duration" value={`${event.payload.durationMs} ms`} />
       ) : null}
       <Group title="corrections">
-        <Field label="extracted" value={c.extracted} />
-        <Field label="reinforced" value={c.reinforced} />
-        <Field label="contradictions" value={c.contradictions} />
-        <Field label="promoted" value={c.promoted} />
-        <Field label="out-of-scope skipped" value={c.outOfScopeReinforcementsSkipped} />
-        <Field label="unknown-rule skipped" value={c.unknownRuleReinforcementsSkipped} />
-        <Field label="consolidation needed" value={String(c.consolidationNeeded)} />
+        {failed("corrections") ? (
+          <PhaseFailed />
+        ) : (
+          <>
+            <Field label="extracted" value={c.extracted} />
+            <Field label="reinforced" value={c.reinforced} />
+            <Field label="contradictions" value={c.contradictions} />
+            <Field label="promoted" value={c.promoted} />
+            <Field label="out-of-scope skipped" value={c.outOfScopeReinforcementsSkipped} />
+            <Field label="unknown-rule skipped" value={c.unknownRuleReinforcementsSkipped} />
+            <Field label="consolidation needed" value={String(c.consolidationNeeded)} />
+          </>
+        )}
       </Group>
-      {consolidation ? (
+      {failed("consolidation") ? (
+        <Group title="consolidation">
+          <PhaseFailed />
+        </Group>
+      ) : consolidation ? (
         <Group title="consolidation">
           <Field label="merged groups" value={consolidation.mergedGroups} />
           <Field label="rules removed" value={consolidation.rulesRemoved} />
         </Group>
       ) : null}
       <Group title="memories">
-        <Field label="extracted" value={memories.extracted} />
-        <NetworkField byNetwork={memories.byNetwork} />
+        {failed("memories") ? (
+          <PhaseFailed />
+        ) : (
+          <>
+            <Field label="extracted" value={memories.extracted} />
+            <NetworkField byNetwork={memories.byNetwork} />
+          </>
+        )}
       </Group>
       <Group title="drained">
-        <Field label="drained" value={drained.drained} />
-        <NetworkField byNetwork={drained.byNetwork} />
+        {failed("drain") ? (
+          <PhaseFailed />
+        ) : (
+          <>
+            <Field label="drained" value={drained.drained} />
+            <NetworkField byNetwork={drained.byNetwork} />
+          </>
+        )}
       </Group>
     </dl>
   );
+}
+
+function PhaseFailed() {
+  return <Field label="outcome" value="failed after retries" />;
 }
 
 function Group({ title, children }: { title: string; children: React.ReactNode }) {

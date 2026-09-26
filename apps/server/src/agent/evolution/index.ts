@@ -8,6 +8,7 @@ export {
   EvolutionEventPayloadSchema,
   type EvolutionTrigger,
   EvolutionTriggerSchema,
+  type ObserverPhase,
 } from "./event-schema.js";
 export {
   type ExtractionDeps,

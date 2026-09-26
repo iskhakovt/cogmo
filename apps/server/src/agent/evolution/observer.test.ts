@@ -6,6 +6,7 @@ import type { LlmProvider } from "../../llm/provider.js";
 import type { ChatParams, LlmResponse, Message } from "../../llm/types.js";
 import { logger } from "../../logger.js";
 import type { MemoryProvider, RetainBatchItem } from "../../memory/provider.js";
+import { expectDefined } from "../../test/assertions.js";
 import {
   mockAgentStore,
   mockProvider,
@@ -320,5 +321,62 @@ describe("runObserver phase isolation", () => {
 
     await expect(runObserver(EVENT, syncStep, deps)).rejects.toThrow(/matchedExistingRuleId/);
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
+  });
+});
+
+describe("runObserver phase outcomes", () => {
+  /** The payload the fire hands to `recordEvolutionEvent`. */
+  function recordedPayload(deps: { agentStore: AgentStore }): unknown {
+    const call = expectDefined(
+      vi.mocked(deps.agentStore.recordEvolutionEvent).mock.calls[0],
+      "recordEvolutionEvent call",
+    );
+    return call[1].payload;
+  }
+
+  it("records no failed phase on a fire where every phase completes", async () => {
+    const deps = observerDeps({ provider: routedProvider() });
+
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps);
+
+    expect(result).toMatchObject({ status: "processed", failedPhases: [] });
+    expect(recordedPayload(deps)).toMatchObject({ failedPhases: [] });
+  });
+
+  it("records a failed correction extraction", async () => {
+    const deps = observerDeps({
+      provider: routedProvider({ corrections: UNPARSEABLE_CORRECTIONS }),
+    });
+
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps);
+
+    expect(result).toMatchObject({ failedPhases: ["corrections"] });
+    expect(recordedPayload(deps)).toMatchObject({ failedPhases: ["corrections"] });
+  });
+
+  it("records each later phase that fails, in run order", async () => {
+    const retainBatch = vi
+      .fn<MemoryProvider["retainBatch"]>()
+      .mockRejectedValueOnce(new Error("hindsight unavailable"))
+      .mockResolvedValue(undefined);
+    const deps = observerDeps({
+      provider: routedProvider({ consolidation: { groups: "not-an-array" } }),
+      store: {
+        getCorrections: vi.fn().mockResolvedValue(RULES),
+        countActiveRules: vi.fn().mockResolvedValue(31),
+        deletePendingMemories: vi.fn().mockRejectedValue(new Error("connection reset")),
+      },
+      memory: { retainBatch },
+    });
+
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps);
+
+    expect(result).toMatchObject({
+      corrections: { consolidationNeeded: true },
+      failedPhases: ["consolidation", "memories", "drain"],
+    });
+    expect(recordedPayload(deps)).toMatchObject({
+      failedPhases: ["consolidation", "memories", "drain"],
+    });
   });
 });

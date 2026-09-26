@@ -8,7 +8,7 @@
  * This module has no runtime effect; it exists solely to be type-checked.
  */
 import type * as C from "@cogmo/contracts";
-import type { EvolutionEventPayload } from "../agent/evolution/event-schema.js";
+import type { EvolutionEventPayload, ObserverPhase } from "../agent/evolution/event-schema.js";
 import type { MemoryTrust } from "../agent/evolution/memory-extraction-schema.js";
 import type { PipelineRunStatus } from "../agent/pipeline/store/index.js";
 import type { AutoRecallMode } from "../agent/recall-gate.js";
@@ -67,6 +67,7 @@ assertParity<Mutual<SkillTier, C.SkillTier>>();
 assertParity<Mutual<SkillRiskTier, C.SkillRiskTier>>();
 assertParity<Mutual<MemoryTrust, C.MemoryTrust>>();
 assertParity<Mutual<EvolutionTriggerValue, C.EvolutionTriggerValue>>();
+assertParity<Mutual<ObserverPhase, C.ObserverPhase>>();
 assertParity<Mutual<McpServerApprovalStatus, C.McpServerApprovalStatus>>();
 assertParity<Mutual<McpTransportKind, C.McpTransportKind>>();
 
@@ -75,6 +76,9 @@ assertParity<Mutual<CooldownState, C.CooldownState>>();
 assertParity<Mutual<ToolSet, C.ToolSet>>();
 assertParity<Mutual<ProfileMemoryScope, C.ProfileMemoryScope>>();
 assertParity<Mutual<EvolutionEventPayload, C.EvolutionEventPayload>>();
+// Mutual assignability lets one side lack an optional field the other has;
+// comparing the `Required` forms catches that.
+assertParity<Mutual<Required<EvolutionEventPayload>, Required<C.EvolutionEventPayload>>>();
 
 // --- entity projections ---
 assertParity<Mutual<Profile, C.Profile>>();

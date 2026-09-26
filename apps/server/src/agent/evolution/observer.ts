@@ -14,7 +14,8 @@
  *
  * The phases are independent: a step that fails after its retries costs
  * its own phase, which reports an empty result, and the rest of the fire
- * still runs and records its audit row. See `settlePhase`.
+ * still runs and records its audit row, which names the failed phases.
+ * See `settlePhase`.
  */
 
 import { NonRetriableError, StepError } from "inngest";
@@ -32,7 +33,7 @@ import {
   classifyPendingMemories,
   type DrainPendingResult,
 } from "./drain-pending-memories.js";
-import type { EvolutionTrigger } from "./event-schema.js";
+import type { EvolutionTrigger, ObserverPhase } from "./event-schema.js";
 import { extractCorrections } from "./extract-corrections.js";
 import { extractMemories } from "./extract-memories.js";
 
@@ -100,35 +101,41 @@ export type ObserverResult =
       consolidation: Awaited<ReturnType<typeof consolidateRules>> | null;
       memories: Awaited<ReturnType<typeof extractMemories>>;
       drained: DrainPendingResult;
+      failedPhases: ObserverPhase[];
     };
 
-/** The independently failing parts of an Observer fire, as named in its logs. */
-type ObserverPhase = "corrections" | "consolidation" | "memories" | "drain";
+/** A phase's result, and whether that result is the fallback for a failure. */
+interface SettledPhase<T> {
+  phase: ObserverPhase;
+  result: T;
+  failed: boolean;
+}
 
 /**
  * Run one phase of the fire so that its permanent failure costs only that
  * phase. The catch wraps the phase's steps, so each keeps its retries; only
  * a step that failed after them (`StepError`) is logged and replaced by
- * `fallback`. Anything else propagates — including every error under the
- * `/reflect` harness, which has no retries to exhaust and reports a failure
- * to the user who asked. The fallback depends on nothing but the memoized
- * failure, so a replay reaches it again and plans the same steps after it.
+ * `fallback`, marked failed. Anything else propagates — including every
+ * error under the `/reflect` harness, which has no retries to exhaust and
+ * reports a failure to the user who asked. The fallback depends on nothing
+ * but the memoized failure, so a replay reaches it again and plans the same
+ * steps after it.
  */
 async function settlePhase<T>(
   phase: ObserverPhase,
   conversationId: string,
   fallback: T,
   run: () => Promise<T>,
-): Promise<T> {
+): Promise<SettledPhase<T>> {
   try {
-    return await run();
+    return { phase, result: await run(), failed: false };
   } catch (err) {
     if (!(err instanceof StepError)) throw err;
     logger.warn(
       { err, conversationId, phase, stepId: err.stepId },
       "observer: phase failed after retries — continuing without it",
     );
-    return fallback;
+    return { phase, result: fallback, failed: true };
   }
 }
 
@@ -237,7 +244,7 @@ export async function runObserver(
   // Phase 1: extract corrections from the transcript into steering rules.
   // A failed extraction reports nothing found, which also rules out
   // consolidation for this fire.
-  const result = await settlePhase(
+  const corrections = await settlePhase(
     "corrections",
     conversationId,
     {
@@ -261,7 +268,7 @@ export async function runObserver(
       }),
   );
 
-  const consolidation = result.consolidationNeeded
+  const consolidation = corrections.result.consolidationNeeded
     ? await settlePhase("consolidation", conversationId, null, () =>
         step.run("consolidate-rules", () =>
           consolidateRules(conv.profileId, {
@@ -277,7 +284,7 @@ export async function runObserver(
   // Phase 2: extract facts from the transcript into long-term memory.
   // `profile.profileClass` (when non-null) becomes a `profile_class:<class>`
   // tag on every retained memory, supporting speaker-driven isolation.
-  const memoryResult = await settlePhase(
+  const memories = await settlePhase(
     "memories",
     conversationId,
     { extracted: 0, byNetwork: {} },
@@ -301,7 +308,7 @@ export async function runObserver(
   // deleted stays pending for the next fire. That fire retains such a
   // row again under the same document id (the row's), which replaces
   // the document in Hindsight rather than adding a second copy.
-  const drainResult = await settlePhase(
+  const drain = await settlePhase(
     "drain",
     conversationId,
     { drained: 0, byNetwork: {} },
@@ -339,6 +346,19 @@ export async function runObserver(
     },
   );
 
+  // Derived from the memoized failures alone, so every replay computes the
+  // same list. Consolidation that never ran is not a phase that failed.
+  const failedPhases = [corrections, consolidation, memories, drain].flatMap((p) =>
+    p?.failed === true ? [p.phase] : [],
+  );
+  const outcome = {
+    corrections: corrections.result,
+    consolidation: consolidation?.result ?? null,
+    memories: memories.result,
+    drained: drain.result,
+    failedPhases,
+  };
+
   // Persist the audit row last — once everything above is memoised, a retry
   // here only re-runs the DB insert, not the LLM-bearing steps. Status is
   // implied (only `processed` fires earn a row), so skipped branches above
@@ -350,10 +370,7 @@ export async function runObserver(
         userId: conv.userId,
         triggeredBy,
         payload: {
-          corrections: result,
-          consolidation,
-          memories: memoryResult,
-          drained: drainResult,
+          ...outcome,
           messageCount: history.length,
           profileId: conv.profileId,
           durationMs: Date.now() - startedAt,
@@ -362,15 +379,7 @@ export async function runObserver(
     );
   });
 
-  return {
-    status: "processed",
-    conversationId,
-    eventId,
-    corrections: result,
-    consolidation,
-    memories: memoryResult,
-    drained: drainResult,
-  };
+  return { status: "processed", conversationId, eventId, ...outcome };
 }
 
 export function createObserver(deps: ObserverDeps) {

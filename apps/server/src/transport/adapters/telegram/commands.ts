@@ -7,7 +7,7 @@
  */
 
 import { match } from "ts-pattern";
-import { MIN_MESSAGES_FOR_EXTRACTION } from "../../../agent/evolution/index.js";
+import { MIN_MESSAGES_FOR_EXTRACTION, type ObserverPhase } from "../../../agent/evolution/index.js";
 import {
   CORE_COMPARTMENTS,
   isCoreCompartment,
@@ -2568,13 +2568,25 @@ function formatEvolutionDigest(
     const ruleDelta = c.extracted + c.reinforced + c.promoted;
     const memoryDelta = m.extracted;
     const tag = e.triggeredBy === "manual" ? " [manual]" : "";
+    const failed = e.payload.failedPhases ?? [];
+    const failedNote = failed.length > 0 ? `; failed: ${failed.join(", ")}` : "";
     return (
       `${i + 1}. ${e.id}${tag}\n` +
-      `   ${formatRelativeTime(e.createdAt, now)} — ${ruleDelta} rule change(s), ${memoryDelta} memory write(s)`
+      `   ${formatRelativeTime(e.createdAt, now)} — ${ruleDelta} rule change(s), ${memoryDelta} memory write(s)${failedNote}`
     );
   });
   return [header, ...lines].join("\n");
 }
+
+/**
+ * Whether the event recorded `phase` as failed. A row from before phase
+ * outcomes were stored records none, and renders its counts as they are.
+ */
+function phaseFailed(event: EvolutionEventEntry, phase: ObserverPhase): boolean {
+  return event.payload.failedPhases?.includes(phase) === true;
+}
+
+const PHASE_FAILED = "failed after retries";
 
 /**
  * Render `/learned <id>` — full breakdown of one event. Mirrors the
@@ -2598,14 +2610,20 @@ function formatEvolutionDetail(event: EvolutionEventEntry, now: Date = new Date(
   if (payload.durationMs !== undefined) {
     lines.push(`Took: ${formatDurationMs(payload.durationMs)}`);
   }
-  lines.push(
-    "",
-    "Corrections:",
-    `  extracted:    ${payload.corrections.extracted}`,
-    `  reinforced:   ${payload.corrections.reinforced}`,
-    `  promoted:     ${payload.corrections.promoted}`,
-    `  contradicted: ${payload.corrections.contradictions}`,
-  );
+  // A failed phase's counts are its empty fallback, so it shows as failed
+  // rather than as a phase that found nothing.
+  if (phaseFailed(event, "corrections")) {
+    lines.push("", `Corrections: ${PHASE_FAILED}`);
+  } else {
+    lines.push(
+      "",
+      "Corrections:",
+      `  extracted:    ${payload.corrections.extracted}`,
+      `  reinforced:   ${payload.corrections.reinforced}`,
+      `  promoted:     ${payload.corrections.promoted}`,
+      `  contradicted: ${payload.corrections.contradictions}`,
+    );
+  }
   // Surface the skipped counters only when non-zero — they're zero on
   // most fires and the silence is the signal. When something WAS
   // skipped, the operator wants to see it spelled out so they can
@@ -2616,16 +2634,24 @@ function formatEvolutionDetail(event: EvolutionEventEntry, now: Date = new Date(
       `  skipped:      ${skipped} (${payload.corrections.outOfScopeReinforcementsSkipped} out-of-scope, ${payload.corrections.unknownRuleReinforcementsSkipped} unknown-rule)`,
     );
   }
-  if (payload.consolidation) {
+  if (phaseFailed(event, "consolidation")) {
+    lines.push("", `Consolidation: ${PHASE_FAILED}`);
+  } else if (payload.consolidation) {
     lines.push("", "Consolidation:");
     lines.push(`  merged groups: ${payload.consolidation.mergedGroups}`);
     lines.push(`  rules removed: ${payload.consolidation.rulesRemoved}`);
   }
-  lines.push("", `Memories: ${payload.memories.extracted} extracted`);
-  for (const [network, count] of Object.entries(payload.memories.byNetwork)) {
-    lines.push(`  ${network}: ${count}`);
+  if (phaseFailed(event, "memories")) {
+    lines.push("", `Memories: ${PHASE_FAILED}`);
+  } else {
+    lines.push("", `Memories: ${payload.memories.extracted} extracted`);
+    for (const [network, count] of Object.entries(payload.memories.byNetwork)) {
+      lines.push(`  ${network}: ${count}`);
+    }
   }
-  if (payload.drained.drained > 0) {
+  if (phaseFailed(event, "drain")) {
+    lines.push("", `Pending drain: ${PHASE_FAILED}; undrained rows stay pending`);
+  } else if (payload.drained.drained > 0) {
     lines.push("", `Pending drained: ${payload.drained.drained}`);
     for (const [network, count] of Object.entries(payload.drained.byNetwork)) {
       lines.push(`  ${network}: ${count}`);
