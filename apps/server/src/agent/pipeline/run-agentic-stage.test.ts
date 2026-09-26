@@ -189,7 +189,7 @@ describe("runAgenticStage", () => {
     expect(loopParams.systemPrompt).toBe("SYSTEM PROMPT");
     // Same intent as a chat turn: stage and chat turns share the run
     // conversation's transcript.
-    expect(loopParams.cache).toEqual({ key: "conv-1", retention: "short" });
+    expect(loopParams.cache).toEqual({ key: "conv-1", retention: "long" });
     // Narrowed to the stage allowlist, with the pipeline tool dropped even
     // though the allowlist names it.
     expect(loopParams.tools.snapshot().map((t: { name: string }) => t.name)).toEqual([

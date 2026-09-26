@@ -1328,7 +1328,7 @@ describe("createHandleMessage", () => {
       vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
       "loop call",
     )[0];
-    expect(loopParams.cache).toEqual({ key: "conv-1", retention: "short" });
+    expect(loopParams.cache).toEqual({ key: "conv-1", retention: "long" });
   });
 
   it("persists the loop's total input when most of it was read from the cache", async () => {
