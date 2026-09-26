@@ -12,7 +12,10 @@
  * in two core-memory states: empty, where the prompt shows the onboarding
  * text, and established, holding the fixture's blocks. Steering rules,
  * recalled context and the per-turn image, sub-agent, skill and MCP tools are
- * left out.
+ * left out. In the established state it also checks what a core write says:
+ * whether it targets one of the case's expected blocks, which established
+ * lines the rewritten block lost, and whether it still holds what the case
+ * ends.
  *
  * It reports rather than asserts. One sample per case on a non-deterministic
  * model makes any threshold either too loose to catch a regression or flaky,
@@ -20,7 +23,7 @@
  * compare against the numbers recorded in design/memory.md. The test fails
  * only when a turn does not complete.
  *
- * Skipped unless `LIVE=1` and `ANTHROPIC_API_KEY` are set. A full run is 50
+ * Skipped unless `LIVE=1` and `ANTHROPIC_API_KEY` are set. A full run is 57
  * turns on Sonnet 5, on the order of a dollar.
  *
  *   set -a; . ./.env; set +a; LIVE=1 pnpm test:live src/agent/core-memory-routing.live.test.ts
@@ -62,6 +65,8 @@ const TIMEZONE = "Europe/London";
 const RoutingSchema = z.enum(["core", "hindsight", "none"]);
 type Routing = z.infer<typeof RoutingSchema>;
 
+const StateSchema = z.enum(["empty", "established"]);
+
 const EvalFileSchema = z.object({
   established: z.array(z.object({ key: z.string(), content: z.string() })),
   cases: z.array(
@@ -69,8 +74,12 @@ const EvalFileSchema = z.object({
       id: z.string(),
       expect: RoutingSchema,
       inPassing: z.boolean().optional(),
+      state: StateSchema.optional(),
       message: z.string(),
       note: z.string(),
+      keys: z.array(z.string()).optional(),
+      changes: z.array(z.string()).optional(),
+      drops: z.array(z.string()).optional(),
     }),
   ),
 });
@@ -93,16 +102,23 @@ const EVAL = EvalFileSchema.parse(
 
 const ONLY = process.env.EVAL_CASES?.split(",").map((id) => id.trim());
 
-const STATES: ReadonlyArray<{ state: string; blocks: ReadonlyArray<CoreMemoryBlock> }> = [
+const STATES: ReadonlyArray<{
+  state: z.infer<typeof StateSchema>;
+  blocks: ReadonlyArray<CoreMemoryBlock>;
+}> = [
   { state: "empty", blocks: [] },
-  { state: "established", blocks: EVAL.established },
+  // In key order, as `getCoreMemoryBlocks` returns them.
+  { state: "established", blocks: R.sortBy(EVAL.established, (b) => b.key) },
 ];
 
 const RUNS = STATES.flatMap(({ state, blocks }) =>
   EVAL.cases
     .filter((c) => ONLY === undefined || ONLY.includes(c.id))
-    .map((c) => ({ name: `${state}/${c.id}`, state, blocks, ...c })),
+    .filter((c) => c.state === undefined || c.state === state)
+    .map((c) => ({ ...c, name: `${state}/${c.id}`, state, blocks })),
 );
+
+type Run = (typeof RUNS)[number];
 
 /** The seeded default profile: every tool, the seeded base prompt. */
 const PROFILE: Profile = {
@@ -133,7 +149,13 @@ interface Outcome {
   first: string[];
   /** Memory tools called anywhere in the turn, in call order. */
   turn: string[];
-  coreWrites: ReadonlyArray<{ key: string; content: string }>;
+  coreWrites: ReadonlyArray<CoreMemoryBlock>;
+  /** Established state: every core write targeted one of the case's `keys`. */
+  keyOk: boolean | null;
+  /** Established state: established lines the rewritten blocks lost, beyond the case's `changes`. */
+  lost: string[] | null;
+  /** Established state: the case's `drops` a rewritten block still holds. */
+  stale: string[] | null;
   reply: string;
 }
 
@@ -192,6 +214,71 @@ function memoryCallsByIteration(
     );
 }
 
+const STOPWORDS: ReadonlySet<string> = new Set([
+  "a",
+  "an",
+  "and",
+  "at",
+  "for",
+  "in",
+  "of",
+  "on",
+  "or",
+  "the",
+  "to",
+  "with",
+]);
+
+function words(text: string): string[] {
+  return (text.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter((w) => !STOPWORDS.has(w));
+}
+
+/**
+ * A rewritten block keeps a line when at least three quarters of the line's
+ * words, its `Label:` aside, are still in the block: rephrasing passes, a
+ * dropped fact doesn't.
+ */
+function keeps(content: string, line: string): boolean {
+  const have = new Set(words(content));
+  const need = R.unique(words(line.replace(/^\s*(?:[-*]\s*)?(?:\w+:\s*)?/, "")));
+  return need.length === 0 || need.filter((w) => have.has(w)).length / need.length >= 0.75;
+}
+
+function mentions(text: string, fragments: ReadonlyArray<string>): boolean {
+  return fragments.some((f) => text.toLowerCase().includes(f.toLowerCase()));
+}
+
+/** What the turn's core writes say, checked against the established blocks. */
+function checkWrites(
+  run: Run,
+  writes: ReadonlyArray<CoreMemoryBlock>,
+): Pick<Outcome, "keyOk" | "lost" | "stale"> {
+  if (run.state !== "established" || writes.length === 0) {
+    return { keyOk: null, lost: null, stale: null };
+  }
+  // The last write to a key is the block the next turn sees.
+  const finals = [...new Map(writes.map((w) => [w.key, w])).values()];
+  const exempt = [...(run.changes ?? []), ...(run.drops ?? [])];
+  const rewrites = finals.flatMap((w) => {
+    const block = run.blocks.find((b) => b.key === w.key);
+    return block ? [{ content: w.content, lines: block.content.split("\n") }] : [];
+  });
+  const { keys, drops } = run;
+  return {
+    keyOk: keys === undefined ? null : finals.every((w) => keys.includes(w.key)),
+    lost:
+      rewrites.length === 0
+        ? null
+        : rewrites.flatMap(({ content, lines }) =>
+            lines.filter((line) => !mentions(line, exempt) && !keeps(content, line)),
+          ),
+    stale:
+      drops === undefined
+        ? null
+        : drops.filter((d) => finals.some((w) => mentions(w.content, [d]))),
+  };
+}
+
 function updates(o: Outcome): boolean {
   return o.turn.includes("core_memory_update");
 }
@@ -213,6 +300,12 @@ const METRICS: ReadonlyArray<{
   { name: "core recall (turn)", of: labelled("core"), hit: updates },
   { name: "  announced", of: (o) => o.expect === "core" && !o.inPassing, hit: updates },
   { name: "  in passing", of: (o) => o.expect === "core" && o.inPassing, hit: updates },
+  { name: "  to an expected block", of: (o) => o.keyOk !== null, hit: (o) => o.keyOk === true },
+  {
+    name: "  dropping what ended",
+    of: (o) => o.stale !== null,
+    hit: (o) => o.stale?.length === 0,
+  },
   {
     name: "core recall (first response)",
     of: labelled("core"),
@@ -225,6 +318,11 @@ const METRICS: ReadonlyArray<{
   },
   { name: "core writes, hindsight cases", of: labelled("hindsight"), hit: updates },
   { name: "core writes, none cases", of: labelled("none"), hit: updates },
+  {
+    name: "rewrites that lost a line",
+    of: (o) => o.lost !== null,
+    hit: (o) => (o.lost?.length ?? 0) > 0,
+  },
   { name: "retains, hindsight cases", of: labelled("hindsight"), hit: retains },
   {
     name: "any memory write, none cases",
@@ -234,8 +332,9 @@ const METRICS: ReadonlyArray<{
 ];
 
 function verdict(o: Outcome): string {
-  if (o.expect === "core") return updates(o) ? "ok  " : "MISS";
-  return updates(o) ? "FP  " : "ok  ";
+  if (o.expect !== "core") return updates(o) ? "FP   " : "ok   ";
+  if (!updates(o)) return "MISS ";
+  return (o.stale?.length ?? 0) > 0 ? "STALE" : "ok   ";
 }
 
 function oneLine(text: string, max: number): string {
@@ -255,10 +354,13 @@ function report(): void {
     const keys = o.coreWrites.map((w) => w.key).join(",");
     console.log(
       `${verdict(o)} ${o.state.padEnd(11)} ${o.id.padEnd(18)} ${o.expect.padEnd(9)} ` +
-        `first=[${o.first.join(",")}] turn=[${o.turn.join(",")}]${keys ? ` keys=${keys}` : ""}`,
+        `first=[${o.first.join(",")}] turn=[${o.turn.join(",")}]` +
+        `${keys ? ` keys=${keys}` : ""}${o.keyOk === false ? " (unexpected block)" : ""}`,
     );
-    for (const w of o.coreWrites) console.log(`       ${w.key} := ${oneLine(w.content, 400)}`);
-    console.log(`       reply: ${oneLine(o.reply, 120)}`);
+    for (const w of o.coreWrites) console.log(`        ${w.key} := ${oneLine(w.content, 400)}`);
+    if (o.lost?.length) console.log(`        lost: ${o.lost.join(" | ")}`);
+    if (o.stale?.length) console.log(`        still holds: ${o.stale.join(", ")}`);
+    console.log(`        reply: ${oneLine(o.reply, 120)}`);
   }
 
   const groups = { ...R.groupBy(rows, (o) => o.state), all: rows };
@@ -303,6 +405,11 @@ describe.skipIf(API_KEY === undefined)(`core-memory routing on ${MODEL} (live ev
 
     const byIteration = memoryCallsByIteration(result.newMessages);
     const calls = byIteration.flat();
+    const coreWrites = calls.flatMap((c) => {
+      if (c.name !== "core_memory_update") return [];
+      const parsed = CoreMemoryUpdateInputSchema.safeParse(c.input);
+      return parsed.success ? [parsed.data] : [{ key: "(unparsed)", content: "" }];
+    });
     outcomes.set(run.name, {
       state: run.state,
       id: run.id,
@@ -310,11 +417,8 @@ describe.skipIf(API_KEY === undefined)(`core-memory routing on ${MODEL} (live ev
       inPassing: run.inPassing ?? false,
       first: (byIteration[0] ?? []).map((c) => c.name),
       turn: calls.map((c) => c.name),
-      coreWrites: calls.flatMap((c) => {
-        if (c.name !== "core_memory_update") return [];
-        const parsed = CoreMemoryUpdateInputSchema.safeParse(c.input);
-        return parsed.success ? [parsed.data] : [{ key: "(unparsed)", content: "" }];
-      }),
+      coreWrites,
+      ...checkWrites(run, coreWrites),
       reply: result.text,
     });
 

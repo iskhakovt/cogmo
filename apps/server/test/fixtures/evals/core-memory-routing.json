@@ -1,5 +1,5 @@
 {
-  "_comment": "Labelled single-turn cases for src/agent/core-memory-routing.live.test.ts. `expect` is where the fact belongs under design/memory.md → Core Memory vs Hindsight: `core` = core_memory_update this turn, `inPassing` when the fact comes up while the user asks for something else; `hindsight` = retrievable on demand, never core memory; `none` = nothing worth storing. `established` is the core memory the established state starts from; the empty state has no blocks, so the prompt shows the onboarding text instead.",
+  "_comment": "Labelled single-turn cases for src/agent/core-memory-routing.live.test.ts. `expect` is where the fact belongs under design/memory.md → Core Memory vs Hindsight: `core` = core_memory_update this turn; `hindsight` = retrievable on demand, never core memory; `none` = nothing worth storing. `inPassing` marks a core fact that comes up while the user asks for something else. `established` is the core memory the established state starts from; the empty state has no blocks, so the prompt shows the onboarding text instead. `state` limits a case to one state. In the established state, `keys` are the blocks a core write may target, `changes` match the established lines the case may rewrite or remove, and `drops` match lines no rewritten block may still hold.",
   "established": [
     {
       "key": "user_profile",
@@ -19,70 +19,132 @@
       "id": "new-job",
       "expect": "core",
       "message": "Quick update: I started at Monzo this week. I'm a staff engineer on the payments team now.",
-      "note": "Employer and role."
+      "note": "Employer and role.",
+      "keys": [
+        "user_profile"
+      ],
+      "changes": [
+        "Northwind"
+      ]
     },
     {
       "id": "call-me-sam",
       "expect": "core",
       "message": "Can you call me Sam from now on? Nobody calls me Samuel.",
-      "note": "Name the agent addresses the user by."
+      "note": "Name the agent addresses the user by.",
+      "keys": [
+        "user_profile"
+      ],
+      "changes": [
+        "Samuel"
+      ]
     },
     {
       "id": "moved-lisbon",
       "expect": "core",
       "message": "We've officially moved to Lisbon! Finally unpacked the last boxes.",
-      "note": "Location, and with it the timezone."
+      "note": "Location, and with it the timezone.",
+      "keys": [
+        "user_profile"
+      ],
+      "changes": [
+        "London"
+      ]
     },
     {
       "id": "side-project",
       "expect": "core",
       "message": "I'm starting a side project called Tidepool, a tide-times app for sailors. I'll probably want your help with it over the next few months.",
-      "note": "Active project."
+      "note": "Active project.",
+      "keys": [
+        "active_projects"
+      ]
     },
     {
       "id": "british-english",
       "expect": "core",
       "message": "Always answer me in British English, please. The American spellings drive me mad.",
-      "note": "Standing preference on how to work with the user."
+      "note": "Standing preference on how to work with the user.",
+      "keys": [
+        "preferences"
+      ]
     },
     {
       "id": "new-baby",
       "expect": "core",
       "message": "Big news: Alex and I had a baby girl yesterday. Her name is Maya.",
-      "note": "Immediate family."
+      "note": "Immediate family.",
+      "keys": [
+        "user_profile"
+      ]
     },
     {
       "id": "vegetarian",
       "expect": "core",
       "message": "I've gone vegetarian, so keep that in mind whenever you suggest recipes or restaurants.",
-      "note": "Standing constraint that applies across conversations."
+      "note": "Standing constraint that applies across conversations.",
+      "keys": [
+        "preferences"
+      ]
     },
     {
       "id": "fridays-off",
       "expect": "core",
       "message": "I've moved to a four-day week, so Fridays are off now. Don't plan anything work-related for a Friday.",
-      "note": "Standing schedule."
+      "note": "Standing schedule.",
+      "keys": [
+        "preferences",
+        "user_profile"
+      ]
     },
     {
       "id": "intro-email",
       "expect": "core",
       "inPassing": true,
       "message": "Can you draft a two-line intro for my new team? I'm joining Monzo's payments team as a staff engineer on Monday.",
-      "note": "Employer and role, mentioned in passing while asking for something else."
+      "note": "Employer and role, mentioned in passing while asking for something else.",
+      "keys": [
+        "user_profile"
+      ],
+      "changes": [
+        "Northwind"
+      ]
     },
     {
       "id": "lisbon-day-trip",
       "expect": "core",
       "inPassing": true,
       "message": "What's a good day trip from Lisbon this weekend? We only moved here last month, so we're still exploring.",
-      "note": "Location, mentioned in passing while asking for something else."
+      "note": "Location, mentioned in passing while asking for something else.",
+      "keys": [
+        "user_profile"
+      ],
+      "changes": [
+        "London"
+      ]
     },
     {
       "id": "meatless-dinner",
       "expect": "core",
       "inPassing": true,
       "message": "Suggest a quick dinner for tonight. Nothing with meat, I stopped eating it a while back.",
-      "note": "Standing constraint, mentioned in passing while asking for something else."
+      "note": "Standing constraint, mentioned in passing while asking for something else.",
+      "keys": [
+        "preferences"
+      ]
+    },
+    {
+      "id": "project-done",
+      "expect": "core",
+      "state": "established",
+      "message": "The NixOS migration is finally done.",
+      "note": "An active project ends, so active_projects drops it.",
+      "keys": [
+        "active_projects"
+      ],
+      "drops": [
+        "NixOS"
+      ]
     },
     {
       "id": "restaurant-dinner",
@@ -127,6 +189,18 @@
       "note": "Detail retrievable on demand."
     },
     {
+      "id": "trip-tokyo",
+      "expect": "hindsight",
+      "message": "I'm in Tokyo for a conference this week.",
+      "note": "A trip, not a move: home and timezone stay as they are."
+    },
+    {
+      "id": "partner-promotion",
+      "expect": "hindsight",
+      "message": "Alex got promoted to head of design.",
+      "note": "Detail about a family member."
+    },
+    {
       "id": "greeting",
       "expect": "none",
       "message": "Hey, how's it going?",
@@ -167,6 +241,12 @@
       "expect": "none",
       "message": "What's a good coffee-to-water ratio for pour-over?",
       "note": "General question."
+    },
+    {
+      "id": "one-off-format",
+      "expect": "none",
+      "message": "Give me this one as a bulleted list.",
+      "note": "One-off formatting request, not a standing preference."
     }
   ]
 }
