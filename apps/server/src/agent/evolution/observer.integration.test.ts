@@ -20,7 +20,17 @@
 import { and, eq, inArray, like } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
-import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  inject,
+  it,
+  vi,
+} from "vitest";
 import type { Database } from "../../db/index.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import type { ChatParams, ChatStreamResult, LlmResponse } from "../../llm/types.js";
@@ -65,7 +75,15 @@ afterAll(async () => {
   await pgClient.end();
 });
 
+/** The one correction this file's stub extractor returns. */
+const CHANNEL_SCOPED_RULE = "Avoid markdown headings in chat replies";
+/** Every rule text this file writes; cleanup deletes these and nothing else. */
+const SUITE_RULES = [CHANNEL_SCOPED_RULE];
+
 beforeEach(cleanupTestState);
+// Also after each test: a learned rule is global, and every Observer run
+// lists it to the extractor, so another file's run would see this one.
+afterEach(cleanupTestState);
 
 // Clean DB state per-test so assertion counts don't drift. Order
 // matters for FKs: channel_sessions → messages → steering_rules →
@@ -88,15 +106,13 @@ async function cleanupTestState(): Promise<void> {
     .delete(channelSessions)
     .where(inArray(channelSessions.conversationId, testConversationIds));
   await db.delete(messages).where(inArray(messages.conversationId, testConversationIds));
-  // Correction/evolution steering rules accumulate across tests via
-  // extractCorrections; manually-seeded rules (source='manual') stay
-  // untouched. Unscoped because these rows have no owner to scope by:
-  // `extract-corrections.ts` writes `profileId: null` deliberately, so a
-  // correction applies to every profile. This file is the only one that
-  // writes those sources, so the reach costs nothing today — but a second
-  // file exercising corrections would need a different answer, since
-  // there is no column to narrow on.
-  await db.delete(steeringRules).where(inArray(steeringRules.source, ["correction", "evolution"]));
+  // A learned rule has no owner column to scope by: `extract-corrections.ts`
+  // writes `profileId: null`, so a correction applies to every profile. The
+  // rule text is the only mark of this file's rows; another file's learned
+  // rules share the table and stay put.
+  await db
+    .delete(steeringRules)
+    .where(and(eq(steeringRules.source, "correction"), inArray(steeringRules.rule, SUITE_RULES)));
   // Drop audit rows before conversations — FK from evolution_events →
   // conversations is `no action`, so a stale row would block deletion of
   // its parent conversation below.
@@ -762,7 +778,7 @@ describe("runObserver — real PG + recording memory mock", () => {
                 text: JSON.stringify({
                   corrections: [
                     {
-                      rule: "Avoid markdown headings in chat replies",
+                      rule: CHANNEL_SCOPED_RULE,
                       category: "style",
                       reasoning: "Telegram-specific formatting preference",
                       matchedExistingRuleId: null,
@@ -810,15 +826,12 @@ describe("runObserver — real PG + recording memory mock", () => {
     expect(result.corrections.extracted).toBe(1);
 
     const rows = await db
-      .select({
-        rule: steeringRules.rule,
-        channelType: steeringRules.channelType,
-        source: steeringRules.source,
-      })
+      .select({ channelType: steeringRules.channelType })
       .from(steeringRules)
-      .where(eq(steeringRules.source, "correction"));
+      .where(
+        and(eq(steeringRules.source, "correction"), eq(steeringRules.rule, CHANNEL_SCOPED_RULE)),
+      );
     expect(rows).toHaveLength(1);
     expect(rows[0]?.channelType).toBe("telegram");
-    expect(rows[0]?.rule).toBe("Avoid markdown headings in chat replies");
   });
 });
