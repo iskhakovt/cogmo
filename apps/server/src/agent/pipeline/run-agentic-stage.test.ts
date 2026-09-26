@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import type { LlmProvider } from "../../llm/provider.js";
+import type { ToolDefinition } from "../../llm/types.js";
 import { logger } from "../../logger.js";
+import type { SkillRunner } from "../../skills/runner.js";
 import { expectDefined } from "../../test/assertions.js";
 import {
   FAKE_TX,
@@ -78,6 +81,21 @@ function recordingSteps() {
     return fn();
   };
   return { ids, steps: { run: runner, stepRun: runner } };
+}
+
+/**
+ * Step runners that memoize by id across calls, so a second `runAgenticStage`
+ * over the same instance behaves as a re-invocation of the same run.
+ */
+function memoizingSteps() {
+  const memo = new Map<string, unknown>();
+  const runner: StepRunner = async <T>(id: string, fn: () => Promise<T>): Promise<T> => {
+    if (memo.has(id)) return memo.get(id) as T;
+    const result = await fn();
+    memo.set(id, result);
+    return result;
+  };
+  return { run: runner, stepRun: runner };
 }
 
 function providerReplying(...texts: string[]): LlmProvider {
@@ -233,6 +251,7 @@ describe("runAgenticStage", () => {
         "load-stage-context",
         "persist-stage-prompt",
         "load-turn-history",
+        "freeze-turn-inputs",
         "assemble-prompt",
         "load-last-tokens",
         "persist-new-messages",
@@ -240,6 +259,41 @@ describe("runAgenticStage", () => {
         "extract-artifact",
       ]),
     );
+  });
+
+  it("sends the tools it froze on every invocation when a skill stops loading", async () => {
+    const h = await harness();
+    const skillRunner = mock<SkillRunner>();
+    skillRunner.listToolDefs
+      .mockResolvedValueOnce([
+        {
+          name: "echo",
+          description: "echo a number",
+          inputs: { type: "object", properties: {} },
+          tier: "wasm",
+          riskTier: "notify",
+          gitSha: "abc1234",
+        },
+      ])
+      .mockResolvedValue([]);
+    h.deps.skillRunner = skillRunner;
+    const stage: Stage = {
+      id: "draft",
+      kind: "agentic",
+      instructions: "Draft a plan.",
+      tools: ["web_search", "echo"],
+      output: { kind: "text" },
+    };
+    const steps = memoizingSteps();
+
+    await runAgenticStage(h.deps, stageArgs(stage), steps, log);
+    await runAgenticStage(h.deps, stageArgs(stage), steps, log);
+
+    const [first, second] = h.runStreamingAgentLoop.mock.calls.map(([params]): ToolDefinition[] =>
+      params.tools.definitions(),
+    );
+    expect(first?.map((d) => d.name)).toEqual(["web_search", "echo"]);
+    expect(second).toEqual(first);
   });
 
   it("fails the stage when the loop degrades, after persisting what it produced", async () => {

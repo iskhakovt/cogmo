@@ -5,13 +5,20 @@ import type { z } from "zod";
 import { conversationTurnConcurrency } from "../inngest/concurrency.js";
 import type { inboundReady } from "../inngest/events.js";
 import { ProviderConfigError } from "../llm/resolver.js";
-import type { Message, StopReason } from "../llm/types.js";
+import type {
+  ChatParams,
+  ChatStreamResult,
+  Message,
+  StopReason,
+  StreamEvent,
+} from "../llm/types.js";
 import { logger } from "../logger.js";
 import type { McpRegistry } from "../mcp/registry.js";
 import { memoryRecallFailures } from "../metrics.js";
 import type { SkillRunner } from "../skills/runner.js";
 import { expectDefined } from "../test/assertions.js";
 import {
+  directStep,
   fakeRunInTx,
   invokeInngestFn,
   invokeInngestOnFailure,
@@ -32,6 +39,7 @@ import {
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
 import type { ImageToolsLoader } from "./image-tools-loader.js";
+import { runStreamingAgentLoop } from "./loop.js";
 import { ToolRegistry } from "./tools.js";
 
 type InboundReadyData = z.infer<typeof inboundReady.schema>;
@@ -1675,6 +1683,64 @@ describe("createHandleMessage", () => {
       const apiNames = toolNames(loopCall.tools.definitions()).sort();
       expect(promptNames).toEqual(apiNames);
       expect(promptNames).toEqual(["mcp__github__create_pr", "memory_recall"]);
+    });
+
+    it("answers a call to a frozen tool that didn't load this invocation with an is_error result", async () => {
+      // An earlier invocation froze `echo`; this one's live catalog has no
+      // such skill. The model is still offered it, and its call gets the
+      // same kind of result as any other failed tool.
+      const requests: ChatParams[] = [];
+      const chatStream = vi.fn((params: ChatParams): ChatStreamResult => {
+        requests.push(structuredClone(params));
+        const events: StreamEvent[] =
+          requests.length === 1
+            ? [{ type: "tool_start", id: "t1", name: "echo", input: { n: 1 } }]
+            : [{ type: "text_delta", text: "done" }];
+        return {
+          events: (async function* () {
+            yield* events;
+          })(),
+          response: Promise.resolve({
+            stopReason: requests.length === 1 ? "tool_use" : "end_turn",
+            model: "mock-model",
+            usage: { inputTokens: 10, outputTokens: 5 },
+          }),
+        };
+      });
+      const echo = {
+        name: "echo",
+        description: "echo a number",
+        inputSchema: { type: "object", properties: { n: { type: "number" } } },
+        durable: true,
+      };
+      const deps = mockDeps({
+        resolveProvider: mockResolver(mockProvider({ chatStream })),
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue(profileWithAllTools()),
+        }),
+        runStreamingAgentLoop,
+      });
+
+      await invokeInngestFn(createHandleMessage(deps), {
+        event: testEvent,
+        step: directStep({ "freeze-turn-inputs": { voiceMode: false, tools: [echo] } }, null),
+        runId: testRunId,
+      });
+
+      expect(firstAssembleArg(deps).toolDefinitions).toEqual([
+        { name: "echo", description: "echo a number", parameters: echo.inputSchema },
+      ]);
+      expect(requests).toHaveLength(2);
+      expect(requests[0]?.tools).toEqual(firstAssembleArg(deps).toolDefinitions);
+      expect(requests[1]?.tools).toEqual(requests[0]?.tools);
+      expect(requests[1]?.messages.at(-1)?.content).toEqual([
+        {
+          type: "tool_result",
+          toolUseId: "t1",
+          content: "Error: the echo tool could not be loaded, so it did not run",
+          isError: true,
+        },
+      ]);
     });
   });
 

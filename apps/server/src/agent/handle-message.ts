@@ -60,6 +60,7 @@ import type { ToolRegistry } from "./tools.js";
 import { turnCacheIntent } from "./turn-cache-intent.js";
 import { buildTurnService } from "./turn-service.js";
 import { asNonRetriable, createTurnStepRunner } from "./turn-step-runner.js";
+import { bindFrozenTools, freezeToolSpecs } from "./turn-tools.js";
 
 export interface HandleMessageDeps {
   runInTx: Transactor;
@@ -531,28 +532,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         }),
       });
 
-      // Resolve per-turn voice mode BEFORE prompt assembly so the
-      // voice-style hint can be injected when TTS is in play. Decision
-      // gates: adapter capability, TTS provider configured, conversation
-      // override (NULL = follow profile default), profile mode, modality of
-      // the most recent inbound. See design/voice.md.
-      const voiceModeForTurn = resolveVoiceMode({
-        adapterSupportsVoice: delivery.canDeliverVoice(),
-        voiceConfigPresent: voiceBundle !== undefined,
-        conversationMode: conv.voiceMode,
-        profileMode: profile?.voiceMode ?? "auto",
-        // Inspect ONLY the most recent inbound message in the debounced
-        // batch — the user's latest intent. If the batch is [voice, text]
-        // (user dictated, then typed a follow-up), they're at the keyboard
-        // now and shouldn't get a voice reply just because the batch
-        // started with voice. Symmetrically, [text, voice] correctly
-        // mirrors voice.
-        lastInboundWasVoice: contentToBlocks(inboundMessages.at(-1)?.content ?? "").some(
-          (b) => b.type === "voice_ref",
-        ),
-      });
-
-      // Per-turn tool registry — built-ins from bootstrap + the live image
+      // Live tool catalog — built-ins from bootstrap + the live image
       // catalog (loaded fresh each turn so wizard / CLI CRUD takes effect
       // without a restart) + one dynamic tool per live skill + MCP tools
       // resolved against the profile's globs. Rebuilt every turn so
@@ -566,11 +546,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // and should win on any name collision with operator-installed
       // extensions, same as memory / web / file tools.
       //
-      // Resolved BEFORE `assemble-prompt` so the catalog renders into the
-      // system prompt's `# Tools` section — otherwise the LLM can't
-      // introspect its own per-turn capabilities and answers "what can you
-      // do?" from the built-ins alone, missing image gen, registered
-      // skills, and MCP tools entirely.
+      // Every invocation builds it, for the handlers; which tools the turn
+      // offers is frozen below.
       const imageTools = deps.imageToolsLoader ? await deps.imageToolsLoader.getTools() : [];
       const skillTools = deps.skillRunner ? await buildSkillTools(deps.skillRunner) : [];
       // One `subagent__<name>` tool per row, loaded fresh each turn (CLI CRUD
@@ -587,12 +564,47 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const mcpTools = deps.mcpRegistry
         ? await deps.mcpRegistry.resolveTools({ toolGlobs: turnToolSetGlobs })
         : [];
-      const turnTools = composeTurnTools({
+      const liveTools = composeTurnTools({
         builtIns: [...tools.snapshot(), ...imageTools, ...subAgentTools],
         skillTools,
         mcpTools,
         toolSetGlobs: turnToolSetGlobs,
       });
+
+      // In-turn durable boundary wrapper — per-step-kind retry policy lives in
+      // `createTurnStepRunner`.
+      const stepRun = createTurnStepRunner((id, fn) => step.run(id, fn));
+
+      // Frozen for the turn: the voice decision and the tool table. Both are
+      // resolved from non-durable reads (the profile, the delivery handle,
+      // the live catalogs), and both reach the LLM request: the voice hint
+      // and `# Tools` in the prompt, and the `tools` param on every
+      // iteration. The step pins what its first execution saw; later
+      // invocations bind the frozen table to their own live handlers
+      // (`bindFrozenTools`), so a catalog that changes or fails to load
+      // mid-turn changes neither the request nor the loop's dispatch.
+      const turnInputs = await stepRun("freeze-turn-inputs", async () => ({
+        // Decision gates: adapter capability, TTS provider configured,
+        // conversation override (NULL = follow profile default), profile
+        // mode, modality of the most recent inbound. See design/voice.md.
+        voiceMode: resolveVoiceMode({
+          adapterSupportsVoice: delivery.canDeliverVoice(),
+          voiceConfigPresent: voiceBundle !== undefined,
+          conversationMode: conv.voiceMode,
+          profileMode: profile?.voiceMode ?? "auto",
+          // Inspect ONLY the most recent inbound message in the debounced
+          // batch — the user's latest intent. If the batch is [voice, text]
+          // (user dictated, then typed a follow-up), they're at the keyboard
+          // now and shouldn't get a voice reply just because the batch
+          // started with voice. Symmetrically, [text, voice] correctly
+          // mirrors voice.
+          lastInboundWasVoice: contentToBlocks(inboundMessages.at(-1)?.content ?? "").some(
+            (b) => b.type === "voice_ref",
+          ),
+        }),
+        tools: freezeToolSpecs(liveTools),
+      }));
+      const turnTools = bindFrozenTools(turnInputs.tools, liveTools);
       const toolDefs = turnTools.definitions();
 
       // Profile passed in from the outer read (`profile`) so
@@ -611,7 +623,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         return promptSource.assemble({
           profile: profile,
           rules: ctx.rules,
-          voiceMode: voiceModeForTurn,
+          voiceMode: turnInputs.voiceMode,
           toolDefinitions: toolDefs,
         });
       });
@@ -725,10 +737,6 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           pipelines: pipelinesService,
         },
       );
-
-      // In-turn durable boundary wrapper — per-step-kind retry policy lives in
-      // `createTurnStepRunner`.
-      const stepRun = createTurnStepRunner((id, fn) => step.run(id, fn));
 
       // Auto-recall: search memory for context relevant to this message, via
       // the scoped service so the profile's `memoryScope` filter applies.
@@ -1339,9 +1347,17 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // just the audio length so step state stays small. Long replies
       // (above the per-channel cap) skip TTS entirely — the cap is a
       // fail-safe; the prompt hint should keep replies short already.
-      if (voiceModeForTurn && delivery.canDeliverVoice() && voiceBundle && result.text.length > 0) {
-        const ttsBundle = voiceBundle.tts;
+      //
+      // Gated on the frozen decision and the reply only, so the step exists
+      // on every invocation that needs it; the live capability checks run
+      // inside the body.
+      if (turnInputs.voiceMode && result.text.length > 0) {
         await step.run("voice-delivery", async () => {
+          const ttsBundle = voiceBundle?.tts;
+          if (ttsBundle === undefined || !delivery.canDeliverVoice()) {
+            turnLogger.warn("voice reply skipped — no TTS provider or voice-capable session");
+            return { skipped: "unavailable" };
+          }
           const cap = await deps.runInTx((tx) =>
             transportStore.getVoiceMaxReplyChars(tx, conversationId),
           );
