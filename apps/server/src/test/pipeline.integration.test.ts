@@ -6,7 +6,7 @@ import type { ResourceMetrics } from "@opentelemetry/sdk-metrics";
 import { sql as drizzleSql, eq } from "drizzle-orm";
 import { connect } from "inngest/connect";
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from "vitest";
-import { conversations, messages, profiles, voiceConfig } from "../agent/store/schema.js";
+import { conversations, messages, voiceConfig } from "../agent/store/schema.js";
 import { db, transactor } from "../db/index.js";
 import { bootstrap } from "../index.js";
 import { directOutbound } from "../inngest/events.js";
@@ -24,6 +24,13 @@ import { workerInngestBaseUrl } from "./worker-inngest.js";
 let inngestBaseUrl: string;
 let connection: Awaited<ReturnType<typeof connect>>;
 let otel: OtelHarness;
+/**
+ * The org profile `bootstrap()` resolves as the default, whose `*` tool set
+ * offers the image tool the cassettes call. Other files add profiles with
+ * narrower tool sets to the shared database, and an unordered pick of a
+ * `profiles` row can land on one of theirs.
+ */
+let profileId: string;
 
 const VOICE_FIXTURE_DIR = "./test/fixtures/voice";
 const INBOUND_OGG_PATH = join(VOICE_FIXTURE_DIR, "inbound.ogg");
@@ -79,11 +86,12 @@ beforeAll(async () => {
   // afterwards has no effect on the running pipeline.
   await seedVoiceConfig();
 
-  const { inngest, functions } = await bootstrap({
+  const { inngest, functions, profile } = await bootstrap({
     providerOverride: provider,
     falFetchOverride,
     voiceFetchOverride,
   });
+  profileId = profile.id;
 
   // Capture directOutbound events for test assertions — same pattern the
   // app uses, just consumed by the test harness instead of a console client.
@@ -304,16 +312,13 @@ describe("message pipeline", () => {
   it("processes inbound/arrived end-to-end", async () => {
     const defaultUserId = inject("defaultUserId");
 
-    const profileRows = await db.select({ id: profiles.id }).from(profiles).limit(1);
     const channelRows = await db
       .select({ id: channels.id })
       .from(channels)
       .where(eq(channels.type, "direct"))
       .limit(1);
-    expect(profileRows.length).toBe(1);
     expect(channelRows.length).toBeGreaterThanOrEqual(1);
 
-    const profileId = profileRows[0]!.id;
     const channelId = channelRows[0]!.id;
 
     const [conv] = await db
@@ -359,7 +364,6 @@ describe("message pipeline", () => {
   it("generates and delivers image end-to-end", async () => {
     const defaultUserId = inject("defaultUserId");
 
-    const [profile] = await db.select({ id: profiles.id }).from(profiles).limit(1);
     // Direct is the batch channel we test against — Telegram's streaming
     // path is exercised in the unit tests (grammy mocks).
     const [channel] = await db
@@ -367,12 +371,12 @@ describe("message pipeline", () => {
       .from(channels)
       .where(eq(channels.type, "direct"))
       .limit(1);
-    if (!profile || !channel) throw new Error("seed incomplete");
+    if (!channel) throw new Error("seed incomplete");
 
     const platformAddress = `img-test-${Date.now()}`;
     const [conv] = await db
       .insert(conversations)
-      .values({ userId: defaultUserId, profileId: profile.id, isPrivate: true })
+      .values({ userId: defaultUserId, profileId, isPrivate: true })
       .returning({ id: conversations.id });
 
     const [session] = await db
@@ -427,20 +431,19 @@ describe("message pipeline", () => {
   it("voice round-trip: STT inbound → text → TTS outbound", async () => {
     const defaultUserId = inject("defaultUserId");
 
-    const [profile] = await db.select({ id: profiles.id }).from(profiles).limit(1);
     const [channel] = await db
       .select({ id: channels.id })
       .from(channels)
       .where(eq(channels.type, "direct"))
       .limit(1);
-    if (!profile || !channel) throw new Error("seed incomplete");
+    if (!channel) throw new Error("seed incomplete");
 
     const platformAddress = `voice-test-${Date.now()}`;
     const [conv] = await db
       .insert(conversations)
       .values({
         userId: defaultUserId,
-        profileId: profile.id,
+        profileId,
         isPrivate: true,
         // Force voice on regardless of inbound modality detection — the
         // integration test asserts the full TTS path lands a voice payload
@@ -521,17 +524,16 @@ describe("message pipeline", () => {
   it("emits gen_ai chat spans + token metrics through the live pipeline", async () => {
     const defaultUserId = inject("defaultUserId");
 
-    const [profile] = await db.select({ id: profiles.id }).from(profiles).limit(1);
     const [channel] = await db
       .select({ id: channels.id })
       .from(channels)
       .where(eq(channels.type, "direct"))
       .limit(1);
-    if (!profile || !channel) throw new Error("seed incomplete");
+    if (!channel) throw new Error("seed incomplete");
 
     const [conv] = await db
       .insert(conversations)
-      .values({ userId: defaultUserId, profileId: profile.id, isPrivate: true })
+      .values({ userId: defaultUserId, profileId, isPrivate: true })
       .returning({ id: conversations.id });
 
     const [session] = await db

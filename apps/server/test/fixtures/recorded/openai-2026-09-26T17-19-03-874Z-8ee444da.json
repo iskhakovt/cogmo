@@ -1,0 +1,33 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Return valid json only.\n\nExtract facts from the following chunk.\n\nChunk: 1/1\nEvent Date: [DATE] ([TS])\nContext: Casual conversation shortly after T moved to Lisbon\nMetadata:\n  source: live_retain\n\nContent:\nT had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau was the best they've ever had.",
+        "model": "gpt-4o-mini",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\n  \"facts\": [\n    {\n      \"what\": \"T had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau was the best they've ever had.\",\n      \"when\": \"on September 26, 2026\",\n      \"where\": \"Taberna da Rua das Flores, Lisbon\",\n      \"who\": \"T\",\n      \"why\": \"N/A\",\n      \"fact_kind\": \"event\",\n      \"occurred_start\": \"2026-09-26T00:00:00Z\",\n      \"occurred_end\": \"2026-09-26T23:59:59Z\",\n      \"fact_type\": \"world\",\n      \"entities\": [\"T\", \"Taberna da Rua das Flores\", \"Lisbon\"],\n      \"causal_relations\": null\n    }\n  ]\n}",
+        "usage": {
+          "prompt_tokens": 2933,
+          "completion_tokens": 172,
+          "total_tokens": 3105,
+          "prompt_tokens_details": {
+            "cached_tokens": 2816,
+            "audio_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "audio_tokens": 0,
+            "accepted_prediction_tokens": 0,
+            "rejected_prediction_tokens": 0
+          }
+        }
+      },
+      "metadata": {
+        "systemHash": "a24b0767"
+      }
+    }
+  ]
+}

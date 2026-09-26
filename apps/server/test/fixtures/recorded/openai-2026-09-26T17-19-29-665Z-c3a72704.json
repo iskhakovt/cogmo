@@ -1,0 +1,33 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Return valid json only.\n\nExtract facts from the following chunk.\n\nChunk: 1/1\nEvent Date: [DATE] ([TS])\nContext: none\nMetadata:\n  source: conversation\n\nContent:\nPrefers responses in plain sentences, not bullet points or numbered lists",
+        "model": "gpt-4o-mini",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "{\n  \"facts\": [\n    {\n      \"what\": \"User prefers responses in plain sentences, not bullet points or numbered lists\",\n      \"when\": \"N/A\",\n      \"where\": \"N/A\",\n      \"who\": \"user\",\n      \"why\": \"N/A\",\n      \"fact_kind\": \"conversation\",\n      \"occurred_start\": null,\n      \"occurred_end\": null,\n      \"fact_type\": \"world\",\n      \"entities\": [\"user\"],\n      \"causal_relations\": null,\n      \"from_attachments\": null\n    }\n  ]\n}",
+        "usage": {
+          "prompt_tokens": 2912,
+          "completion_tokens": 119,
+          "total_tokens": 3031,
+          "prompt_tokens_details": {
+            "cached_tokens": 2816,
+            "audio_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0,
+            "audio_tokens": 0,
+            "accepted_prediction_tokens": 0,
+            "rejected_prediction_tokens": 0
+          }
+        }
+      },
+      "metadata": {
+        "systemHash": "a24b0767"
+      }
+    }
+  ]
+}

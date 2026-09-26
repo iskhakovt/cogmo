@@ -336,7 +336,11 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     // unscoped update is harmless, but it's a smell worth fixing at the
     // source.
     await db.update(profiles).set({ codingAutoapproveMode: "on" });
-    const { conversationId, sessionId } = await seedConversation(db, defaultUserId);
+    const { conversationId, sessionId } = await seedConversation(
+      db,
+      defaultUserId,
+      bootstrapResult.profile.id,
+    );
     await sendInbound(
       db,
       sessionId,
@@ -980,13 +984,17 @@ async function seedSecretsAndProvider(opts: {
   });
 }
 
+/**
+ * `profileId` is the org profile `bootstrap()` resolves as the default: other
+ * files add profiles with narrower tool sets to the shared database, and an
+ * unordered pick of a `profiles` row can land on one of theirs.
+ */
 async function seedConversation(
   db: ReturnType<typeof drizzle<typeof schema>>,
   userId: string,
+  profileId: string,
 ): Promise<{ conversationId: string; sessionId: string }> {
-  const profileRows = await db.select({ id: profiles.id }).from(profiles).limit(1);
   const channelRows = await db.select({ id: channels.id }).from(channels).limit(1);
-  const profileId = expectDefined(profileRows[0]?.id);
   const channelId = expectDefined(channelRows[0]?.id);
   const [conv] = await db
     .insert(conversations)
