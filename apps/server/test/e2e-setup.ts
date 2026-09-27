@@ -7,7 +7,7 @@ import type { GlobalSetupContext } from "vitest/node";
 import * as c from "../dev/containers.js";
 import { CASSETTE_CHAT_MODEL } from "../src/test/cassette-model.js";
 import { repoRoot } from "../src/test/repo-root.js";
-import { createMock } from "./llmock-setup.js";
+import { createMock, E2E_CASSETTE } from "./llmock-setup.js";
 import { loadRootEnv } from "./load-root-env.js";
 
 loadRootEnv();
@@ -107,7 +107,7 @@ async function bakeAppImage(): Promise<void> {
 export async function setup({ provide }: GlobalSetupContext) {
   network = await new Network().start();
 
-  mock = createMock();
+  mock = createMock(E2E_CASSETTE, undefined).mock;
   await mock.start();
   // Must precede every container below — see `exposeHostPort`.
   const llmockBase = await c.exposeHostPort(mock.port);

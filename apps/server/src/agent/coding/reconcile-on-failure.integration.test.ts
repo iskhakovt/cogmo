@@ -116,9 +116,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (connection) await connection.close();
-  // Surgical per-test cleanup — only the rows this file seeded. A broad
-  // `DELETE FROM coding_tasks` would step on every other integration
-  // test sharing the Postgres instance.
+  // Surgical cleanup — only the rows this file seeded.
   for (const taskId of seededTaskIds) {
     await db.delete(codingTasks).where(eq(codingTasks.id, taskId));
   }

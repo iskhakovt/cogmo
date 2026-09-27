@@ -13,24 +13,25 @@
  *   - **Record** (`RECORD=1 OPENROUTER_API_KEY=sk-or-... pnpm test:integration ...`):
  *     this file boots its own one-off llmock with `openai → openrouter.ai/api`
  *     mapping, fires `chat()` against the real upstream, and writes
- *     the captured response into the shared `test/fixtures/recorded/`
- *     dir. Future replay runs pick it up via the shared llmock.
+ *     the captured response into this file's cassette. Replay runs serve
+ *     it from the file's llmock.
  *
  * Why a dedicated llmock for recording: llmock's `RecordProviderKey`
- * is a closed enum. The shared integration llmock already routes
- * `openai → api.openai.com` for Hindsight embeddings; repurposing
- * mid-session would break Hindsight. The private llmock has its own
+ * is a closed enum. The file's llmock already routes
+ * `openai → api.openai.com`; repurposing it would redirect every other
+ * OpenAI-shape call. The private llmock has its own
  * provider table and only lives for the duration of the record call.
  */
 
 import { LLMock } from "@copilotkit/aimock";
-import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { OpenAICompatibleProvider } from "../llm/openai-compat.js";
+import { fileLlmockUrl } from "./integration-file.js";
 
 const PROMPT = "What is the capital of France? Answer with just the city name.";
 const SYSTEM = "You are a helpful assistant. Reply concisely.";
 const MODEL = "x-ai/grok-4.3";
-const FIXTURE_DIR = "./test/fixtures/recorded";
+const FIXTURE_DIR = "./test/fixtures/recorded/suites/xai-grok";
 
 const IS_RECORD = process.env.RECORD === "1" && !!process.env.OPENROUTER_API_KEY;
 
@@ -54,10 +55,10 @@ afterAll(async () => {
   if (recordMock) await recordMock.stop();
 });
 
-/** Pick the llmock URL — private (recording to OpenRouter) or shared (replay). */
+/** Pick the llmock URL — private (recording to OpenRouter) or the file's (replay). */
 function llmockBaseUrl(): string {
   if (recordMock) return `${recordMock.url}/v1`;
-  return `${inject("llmockBaseUrl")}/v1`;
+  return `${fileLlmockUrl()}/v1`;
 }
 
 describe("OpenAICompatibleProvider — xAI Grok 4.3 via OpenRouter (recorded)", () => {
@@ -97,7 +98,7 @@ describe("OpenAICompatibleProvider — xAI Grok 4.3 via OpenRouter (recorded)", 
       // `chatStream` on subsequent replays.
       const provider = new OpenAICompatibleProvider("openrouter-xai-stream", {
         apiKey: "test-key",
-        baseURL: `${inject("llmockBaseUrl")}/v1`,
+        baseURL: `${fileLlmockUrl()}/v1`,
         cacheDialect: "openrouter",
       });
 

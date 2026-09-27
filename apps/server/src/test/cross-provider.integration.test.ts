@@ -19,7 +19,7 @@
 import { randomBytes } from "node:crypto";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
-import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DrizzleAgentStore } from "../agent/store/index.js";
 import { transactor } from "../db/index.js";
 import * as schema from "../db/schemas.js";
@@ -27,18 +27,17 @@ import { FallbackLlmProvider } from "../llm/fallback.js";
 import { createDbProviderResolver } from "../llm/resolver.js";
 import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../secrets/store/index.js";
+import { fileDatabaseUrl, fileLlmockUrl } from "./integration-file.js";
 
 const SUITE = randomBytes(4).toString("hex");
 const tag = (s: string) => `it-${SUITE}-${s}`;
 
 // Suite-tagged so this test stays isolated from any other writer to
-// `model_providers` in the shared integration DB. The resolver only
-// looks up the literal string in the routing table — it doesn't
-// validate against `MODEL_REGISTRY` — so any string works. The
-// `(model, position)` UNIQUE constraint on `model_providers` would
-// otherwise collide with parallel runs of this file (vitest worker
-// retries, suite re-entry) or any future test seeding the same model
-// at position 0.
+// `model_providers`. The resolver only looks up the literal string in the
+// routing table — it doesn't validate against `MODEL_REGISTRY` — so any
+// string works. The `(model, position)` UNIQUE constraint on
+// `model_providers` would otherwise collide with a re-entry of this suite
+// or any future test seeding the same model at position 0.
 const MODEL_ANTHROPIC = tag("anthropic-test-model");
 const MODEL_XAI = tag("openai-test-model");
 
@@ -51,7 +50,7 @@ let anthropicProviderId: string;
 let openaiProviderId: string;
 
 beforeAll(async () => {
-  sql = postgres(inject("databaseUrl"), { max: 4 });
+  sql = postgres(fileDatabaseUrl(), { max: 4 });
   const db = drizzle(sql, { schema });
   tx = transactor(db);
   agentStore = new DrizzleAgentStore();
@@ -65,7 +64,7 @@ beforeAll(async () => {
   secretsStore = new DrizzleSecretsStore(
     deriveMasterKey(parseMasterKey(masterKey), "cogmo/secrets-at-rest/v1"),
   );
-  llmockBaseUrl = inject("llmockBaseUrl");
+  llmockBaseUrl = fileLlmockUrl();
 
   // Two secrets — distinct so we'd notice if the wrong one got decrypted.
   const anthropicSecret = await tx((trx) =>
@@ -126,8 +125,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // Tear down our routing rows so other integration tests in the same
-  // shared DB don't see them. Cascade from llm_providers handles
+  // Tear down our routing rows so later tests in this file don't see
+  // them. Cascade from llm_providers handles
   // model_providers (FK CASCADE on the schema), and `deleteSecret` would
   // be ideal but the DrizzleSecretsStore interface above doesn't expose
   // it; the rows leak harmlessly behind their suite-tagged names.

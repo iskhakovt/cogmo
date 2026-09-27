@@ -29,9 +29,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { InngestFunction } from "inngest";
-import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { bootstrap } from "../index.js";
 import { FakeDaytonaSandboxClient } from "./daytona-sandbox-fake.js";
+import { fileLlmockUrl } from "./integration-file.js";
 
 let bootstrapResult: Awaited<ReturnType<typeof bootstrap>>;
 let fakeSandbox: FakeDaytonaSandboxClient;
@@ -49,7 +50,7 @@ beforeAll(async () => {
   // same Anthropic-shape fixture server. We don't actually fire a turn
   // here, but bootstrapCore validates the resolver wires up.
   const { AnthropicProvider } = await import("../llm/anthropic.js");
-  const provider = new AnthropicProvider("test-key", inject("llmockBaseUrl"));
+  const provider = new AnthropicProvider("test-key", fileLlmockUrl());
 
   bootstrapResult = await bootstrap({
     providerOverride: provider,
