@@ -11,10 +11,11 @@ import { fileURLToPath } from "node:url";
 import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
+import { DrizzleAgentStore } from "../agent/store/index.js";
 import { profiles } from "../agent/store/schema.js";
 import { expectDefined } from "../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
-import type { Database } from "./index.js";
+import type { Database, Transactor } from "./index.js";
 
 const MIGRATION_SQL = await readFile(
   fileURLToPath(new URL("../../migrations/0059_steering_rule_source.sql", import.meta.url)),
@@ -43,10 +44,11 @@ const SourceRowsSchema = z.object({
 });
 
 let db: Database;
+let tx: Transactor;
 let close: () => Promise<void>;
 
 beforeAll(async () => {
-  ({ db, close } = await createTestDatabase());
+  ({ db, tx, close } = await createTestDatabase());
 });
 
 beforeEach(async () => {
@@ -153,5 +155,21 @@ describe("migration 0059 — steering rule source", () => {
       operator: "manual",
       evolution: "evolution",
     });
+  });
+
+  it("leaves rows the store reads into their sections", async () => {
+    await insert({
+      tables: seeded(TABLES, {}),
+      operator: seeded(OPERATOR, { channelType: null, priority: 1 }),
+    });
+
+    await applyMigration();
+
+    const profileId = await seedProfile();
+    const store = new DrizzleAgentStore();
+    expect(await tx((trx) => store.getActiveRules(trx, profileId, ["telegram"]))).toEqual([
+      { rule: OPERATOR, section: "always" },
+      { rule: TABLES, section: "channel_defaults" },
+    ]);
   });
 });

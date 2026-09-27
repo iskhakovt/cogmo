@@ -50,16 +50,85 @@ describe("DefaultPromptSource", () => {
     expect(prompt).toContain("personal AI assistant");
   });
 
-  it("appends rules as bullet list", async () => {
-    const prompt = await new DefaultPromptSource().assemble({
-      profile: undefined,
-      rules: [{ rule: "Be concise" }, { rule: "Use formal tone" }],
-      coreMemory: [],
+  describe("# Rules", () => {
+    const rulesSection = (prompt: string) =>
+      prompt.split("\n\n# ").find((part) => part.startsWith("Rules\n\n"));
+
+    it("renders a section per source, in precedence order, under the conflict line", async () => {
+      const prompt = await new DefaultPromptSource().assemble({
+        profile: undefined,
+        rules: [
+          { rule: "Never share the user's address.", section: "always" },
+          { rule: "Don't use bullet points; write in paragraphs.", section: "from_user" },
+          { rule: "Keep replies under 100 words.", section: "learned" },
+          { rule: "Use metric units.", section: "learned" },
+          { rule: "Avoid tables. Use bullet lists instead.", section: "channel_defaults" },
+        ],
+        coreMemory: [],
+      });
+
+      expect(rulesSection(prompt)).toBe(
+        [
+          "Rules",
+          "",
+          "Standing rules for your replies. Where two rules that apply to this reply conflict, follow the one listed first.",
+          "",
+          "## Always",
+          "- Never share the user's address.",
+          "",
+          "## From your user",
+          "Your user asked for these. They take precedence over your default style and the channel defaults.",
+          "- Don't use bullet points; write in paragraphs.",
+          "",
+          "## Learned from your user",
+          "- Keep replies under 100 words.",
+          "- Use metric units.",
+          "",
+          "## Channel defaults",
+          "- Avoid tables. Use bullet lists instead.",
+        ].join("\n"),
+      );
     });
 
-    expect(prompt).toContain("# Rules");
-    expect(prompt).toContain("- Be concise");
-    expect(prompt).toContain("- Use formal tone");
+    it("omits empty sections", async () => {
+      const prompt = await new DefaultPromptSource().assemble({
+        profile: undefined,
+        rules: [
+          { rule: "Keep replies short.", section: "learned" },
+          { rule: "Avoid tables.", section: "channel_defaults" },
+        ],
+        coreMemory: [],
+      });
+
+      const section = rulesSection(prompt);
+      expect(section).toContain("## Learned from your user\n- Keep replies short.");
+      expect(section).toContain("## Channel defaults\n- Avoid tables.");
+      expect(section).not.toContain("## Always");
+      expect(section).not.toContain("## From your user");
+    });
+
+    it("orders sections by precedence and keeps the given order within one", async () => {
+      const prompt = await new DefaultPromptSource().assemble({
+        profile: undefined,
+        rules: [
+          { rule: "Channel default", section: "channel_defaults" },
+          { rule: "Second learned", section: "learned" },
+          { rule: "Operator", section: "always" },
+          { rule: "First learned", section: "learned" },
+        ],
+        coreMemory: [],
+      });
+
+      const lines = rulesSection(prompt)
+        ?.split("\n")
+        .filter((l) => l.startsWith("- "));
+      expect(lines).toEqual([
+        "- Operator",
+        "- Second learned",
+        "- First learned",
+        "- Channel default",
+      ]);
+    });
   });
 
   it("auto-generates tools section from definitions", async () => {
@@ -126,7 +195,7 @@ describe("DefaultPromptSource", () => {
       const source = new DefaultPromptSource({ serviceGuidance: ["Test memory guidance."] });
       const ctx = {
         profile: undefined,
-        rules: [{ rule: "Be kind" }],
+        rules: [{ rule: "Be kind", section: "learned" as const }],
         coreMemory: [{ key: "user_profile", content: "Name: Tim" }],
         toolDefinitions: testTools,
       };
@@ -193,7 +262,7 @@ describe("DefaultPromptSource", () => {
       serviceGuidance: ["Test memory guidance."],
     }).assemble({
       profile: undefined,
-      rules: [{ rule: "Be kind" }],
+      rules: [{ rule: "Be kind", section: "learned" }],
       coreMemory: [{ key: "user_profile", content: "Name: Tim" }],
       toolDefinitions: testTools,
     });

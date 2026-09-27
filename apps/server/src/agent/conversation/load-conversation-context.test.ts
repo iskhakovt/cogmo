@@ -34,7 +34,7 @@ function profile(overrides: Partial<Profile> = {}): Profile {
 describe("loadConversationContext", () => {
   it("does not re-read the profile — uses the row passed in by the caller", async () => {
     const agentStore = mockAgentStore({
-      getActiveRules: vi.fn().mockResolvedValue([{ rule: "Be concise" }]),
+      getActiveRules: vi.fn().mockResolvedValue([{ rule: "Be concise", section: "learned" }]),
       getCoreMemoryBlocks: vi.fn().mockResolvedValue([{ key: "user_profile", content: "Sam" }]),
     });
     const transportStore = mockTransportStore({
@@ -48,7 +48,7 @@ describe("loadConversationContext", () => {
 
     expect(result).toEqual({
       channelTypes: ["telegram"],
-      rules: [{ rule: "Be concise" }],
+      rules: [{ rule: "Be concise", section: "learned" }],
       coreMemory: [{ key: "user_profile", content: "Sam" }],
     });
 

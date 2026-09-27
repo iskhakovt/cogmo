@@ -23,6 +23,7 @@ import type { EvolutionEventPayload } from "../evolution/event-schema.js";
 import { isCoreCompartment } from "../evolution/memory-extraction-schema.js";
 import { imageModelSlug } from "../image-tools.js";
 import type { AutoRecallMode } from "../recall-gate.js";
+import { RULE_SECTIONS, ruleSection, type SectionedRule } from "../rule-sections.js";
 import type { TurnContext } from "../turn-context.js";
 import {
   CustomCompartmentCapExceededError,
@@ -765,12 +766,15 @@ export interface AgentStore {
     messageId: string,
   ): Promise<{ id: string; role: string; content: string | ContentBlock[] } | undefined>;
 
-  /** Load active steering rules for a profile + active channels, ordered by priority, then id. */
+  /**
+   * Load active steering rules for a profile + active channels, each with its
+   * `# Rules` section, in the order `# Rules` lists them.
+   */
   getActiveRules(
     tx: Transaction,
     profileId: string,
     channelTypes: ReadonlyArray<string>,
-  ): Promise<ReadonlyArray<{ rule: string }>>;
+  ): Promise<ReadonlyArray<SectionedRule>>;
 
   /** Get all core memory blocks for a user, ordered by key. */
   getCoreMemoryBlocks(
@@ -2194,13 +2198,15 @@ export class DrizzleAgentStore implements AgentStore {
     tx: Transaction,
     profileId: string,
     channelTypes: ReadonlyArray<string>,
-  ): Promise<ReadonlyArray<{ rule: string }>> {
-    // `id` breaks priority ties, which are common (corrections share 100, seeded
-    // channel rules 50). An in-place update moves a row in the heap, so without
+  ): Promise<ReadonlyArray<SectionedRule>> {
+    // Within a section: `safety` first (only operators write it), then the
+    // narrower scope, so it is listed before a wider rule it conflicts with.
+    // `id` breaks priority ties, which are common (corrections share 100,
+    // seeded rules 50). An in-place update moves a row in the heap, so without
     // it `# Rules` could reorder, invalidating the cached prompt, with no rule
     // changed.
-    return tx
-      .select({ rule: steeringRules.rule })
+    const rows = await tx
+      .select({ rule: steeringRules.rule, source: steeringRules.source })
       .from(steeringRules)
       .where(
         and(
@@ -2212,7 +2218,15 @@ export class DrizzleAgentStore implements AgentStore {
           ),
         ),
       )
-      .orderBy(asc(steeringRules.priority), asc(steeringRules.id));
+      .orderBy(
+        desc(eq(steeringRules.category, "safety")),
+        asc(isNull(steeringRules.profileId)),
+        asc(isNull(steeringRules.channelType)),
+        asc(steeringRules.priority),
+        asc(steeringRules.id),
+      );
+    const sectioned = rows.map((r) => ({ rule: r.rule, section: ruleSection(r.source) }));
+    return RULE_SECTIONS.flatMap((section) => sectioned.filter((r) => r.section === section));
   }
 
   async getCoreMemoryBlocks(
