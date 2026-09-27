@@ -3,7 +3,14 @@ import { execFileSync } from "node:child_process";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
-import { conversations, messages, profiles, turnContexts, users } from "../agent/store/schema.js";
+import {
+  conversations,
+  messages,
+  profiles,
+  systemPromptSnapshots,
+  turnContexts,
+  users,
+} from "../agent/store/schema.js";
 import * as schema from "../db/schemas.js";
 import { transactor } from "../db/transactor.js";
 import { DrizzleTransportStore } from "../transport/store/index.js";
@@ -35,6 +42,7 @@ describe("e2e smoke", () => {
     expect(await db.select().from(conversations).limit(0)).toEqual([]);
     expect(await db.select().from(messages).limit(0)).toEqual([]);
     expect(await db.select().from(turnContexts).limit(0)).toEqual([]);
+    expect(await db.select().from(systemPromptSnapshots).limit(0)).toEqual([]);
     expect(await db.select().from(channels).limit(0)).toEqual([]);
     expect(await db.select().from(channelSessions).limit(0)).toEqual([]);
     expect(await db.select().from(inboundMessages).limit(0)).toEqual([]);
