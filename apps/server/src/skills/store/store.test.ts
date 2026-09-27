@@ -776,9 +776,7 @@ describe("DrizzleSkillStore", () => {
     });
 
     it("kind='recovered' returns the stored row as it stands, untouched by the retry's params", async () => {
-      // The runner branches on the recovered row's recovery point and cached
-      // payload, so recovery must hand back the row as the prior attempt left
-      // it — not the retry's inputs/trigger, and not the row as first inserted.
+      // The runner branches on the recovered row's recovery point and payload.
       const skill = await seedSkill({ name: "with-key" });
       const key = "skill-tool:turn-1:0:0";
       const first = await tx((trx) =>
@@ -798,6 +796,7 @@ describe("DrizzleSkillStore", () => {
           finishedAt: new Date("2026-06-01T09:00:03Z"),
         }),
       );
+      const stored = await tx((trx) => store.getRun(trx, first.row.id));
 
       const retry = await tx((trx) =>
         store.startOrRecoverRun(trx, {
@@ -809,11 +808,7 @@ describe("DrizzleSkillStore", () => {
       );
 
       expect(retry.kind).toBe("recovered");
-      expect(retry.row).toEqual(await tx((trx) => store.getRun(trx, first.row.id)));
-      expect(retry.row.recoveryPoint).toBe("executed");
-      expect(retry.row.output).toEqual({ echo: 1 });
-      expect(retry.row.trigger).toBe("event");
-      expect(retry.row.inputs).toEqual({ x: 1 });
+      expect(retry.row).toEqual(stored);
     });
 
     it("transitionToExecuted advances recovery_point and writes the payload", async () => {

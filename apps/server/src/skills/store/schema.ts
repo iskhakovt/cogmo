@@ -197,9 +197,6 @@ export const skillRuns = pgTable(
     // Plain UNIQUE constraint — Postgres treats NULLs as not-equal under
     // default unique semantics, so multiple null-key rows (CLI / tests)
     // coexist freely while non-null keys are constrained to one row.
-    // Concurrent attempts with the same key race here; the loser lands
-    // in `startOrRecoverRun`'s `ON CONFLICT DO UPDATE` arm and gets the
-    // existing row back.
     unique("uniq_skill_runs_idempotency_key").on(t.idempotencyKey),
   ],
 );

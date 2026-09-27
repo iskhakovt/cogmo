@@ -1672,10 +1672,7 @@ export class DrizzleAgentStore implements AgentStore {
       source: SummarySourceValue;
     },
   ): Promise<{ kind: "new" | "recovered"; row: CompactionSummary }> {
-    // DO UPDATE with a no-op SET — see `insertOrRecoverTask` for how a
-    // concurrent loser resolves under REPEATABLE READ. `xmax = 0` is zero
-    // on a tuple this statement inserted and the locking xid on one it
-    // reached through the conflict arm.
+    // Keyed insert: see `.claude/rules/inngest.md`.
     const rows = await tx
       .insert(conversationSummaries)
       .values(params)
@@ -3045,8 +3042,7 @@ export class DrizzleAgentStore implements AgentStore {
     },
   ): Promise<{ kind: "new" | "recovered"; row: ScheduledTask }> {
     const key = params.idempotencyKey;
-    // DO UPDATE with a no-op SET — see `CodingStore.insertOrRecoverTask` for
-    // how a concurrent loser resolves under REPEATABLE READ.
+    // Keyed insert: see `.claude/rules/inngest.md`.
     //
     // `xmax = 0` distinguishes the outcomes, so the caller can recover a retry
     // inside the same transaction as its cap check rather than pre-reading in

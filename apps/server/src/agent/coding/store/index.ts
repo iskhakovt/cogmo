@@ -154,9 +154,7 @@ export interface CodingTaskRow {
 export interface CodingStore {
   // --- Repos ---
 
-  /** Insert a new repo. Throws on `name` collision (UNIQUE). `identityName`
-   * and `verifyTimeoutSeconds` are optional — omitted callers inherit the
-   * DB defaults so single-account setups stay one-line. */
+  /** Insert a new repo. Throws on `name` collision (UNIQUE). */
   insertRepo(tx: Transaction, params: InsertRepoParams): Promise<CodingRepoRow>;
 
   /**
@@ -216,10 +214,8 @@ export interface CodingStore {
   /**
    * Idempotent submission against `uniq_coding_tasks_idempotency_key`: a
    * second call with the same key returns `kind: "recovered"` and the
-   * original row. Uses `ON CONFLICT DO UPDATE` with a no-op SET and an
-   * `xmax = 0` discriminator — see the implementation for how a concurrent
-   * loser resolves under REPEATABLE READ. Separate from
-   * {@link CodingStore.insertTask} because this one can decline to insert.
+   * original row. Separate from {@link CodingStore.insertTask} because this
+   * one can decline to insert.
    */
   insertOrRecoverTask(
     tx: Transaction,
@@ -455,8 +451,7 @@ export class DrizzleCodingStore implements CodingStore {
     tx: Transaction,
     params: InsertRepoParams,
   ): Promise<{ kind: "new" | "recovered"; row: CodingRepoRow }> {
-    // The no-op SET leaves a stored row as it was. See `insertOrRecoverTask`
-    // for the conflict-arm semantics and the `xmax = 0` discriminator.
+    // Keyed insert: see `.claude/rules/inngest.md`.
     const rows = await tx
       .insert(codingRepos)
       .values(repoValues(params))
@@ -523,17 +518,7 @@ export class DrizzleCodingStore implements CodingStore {
     tx: Transaction,
     params: InsertTaskParams & { idempotencyKey: string },
   ): Promise<InsertTaskResult> {
-    // ON CONFLICT DO UPDATE with a no-op SET returns the row from either arm
-    // in one statement. Under the project's REPEATABLE READ default, a loser
-    // whose conflict is with a row committed after its snapshot gets `40001
-    // serialization_failure` (Postgres's `ExecCheckTupleVisible`), which the
-    // transactor retries against a snapshot that contains the winner; the
-    // retry lands in the conflict arm. A plain INSERT would raise `23505`
-    // instead, which nothing retries.
-    //
-    // `xmax = 0` distinguishes the outcomes: zero on a tuple this statement
-    // inserted; on one it reached through the conflict arm, the update
-    // carries the arm's own row lock into the new version's xmax.
+    // Keyed insert: see `.claude/rules/inngest.md`.
     const rows = await tx
       .insert(codingTasks)
       .values({ ...taskValues(params), idempotencyKey: params.idempotencyKey })

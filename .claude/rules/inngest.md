@@ -104,16 +104,18 @@ contract**. Design every function for the per-boundary model.
     trigger of the execute orchestrator.
 
   Store under a plain `UNIQUE` and write through `ON CONFLICT DO UPDATE`
-  with a no-op SET, and `RETURNING … (xmax = 0)` to tell insert from
-  conflict-update. The `ON CONFLICT` clause is what makes a concurrent
-  loser safe: under REPEATABLE READ, a conflict with a row committed after
-  the loser's snapshot raises `40001` for either arm (`ExecCheckTupleVisible`
-  in Postgres's `nodeModifyTable.c`), which the transactor retries against a
-  snapshot that contains the winner. A plain `INSERT` raises `23505`, which
-  nothing retries, so a read-then-insert "create if missing" is the bug.
-  `DO UPDATE` is preferred because one statement returns the row from either
-  arm. The `xmax` test relies on an implementation detail that
-  `admin-store.integration.test.ts` pins on the real driver.
+  with a no-op SET, `RETURNING … (xmax = 0)` telling insert from
+  conflict-update. Under REPEATABLE READ, a conflict with a row committed
+  after the loser's snapshot raises `40001` in either `ON CONFLICT` arm
+  (`ExecCheckTupleVisible`, `nodeModifyTable.c`), and the transactor's
+  retry lands on the winner's row. A plain `INSERT` raises `23505`, which
+  the transactor does not retry — so against a unique key, read-then-insert
+  "create if missing" is the bug. `DO UPDATE` over `DO NOTHING` because one
+  statement returns the row from either arm; the cost is a row version and
+  a row lock per recovery. `xmax` is nonzero on the conflict arm because
+  the arm's row lock carries into the new version — an undocumented heap
+  detail `keyed-insert.integration.test.ts` and
+  `admin-store.integration.test.ts` pin on the real driver.
   Nulls-distinct leaves callers without retry semantics unaffected.
   Reference: `coding_tasks.idempotency_key` + `insertOrRecoverTask`,
   `scheduled_tasks.idempotency_key` + `createOrRecoverScheduledTask`,

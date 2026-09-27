@@ -152,10 +152,8 @@ export interface InsertRunParams {
   trigger: SkillRunTrigger;
   inputs: unknown;
   /**
-   * Optional deterministic token, stamped as-is: a taken key throws on
-   * `uniq_skill_runs_idempotency_key`. Callers that need to tell "we
-   * inserted" from "someone else holds the row" use
-   * {@link SkillStore.startOrRecoverRun}.
+   * Plain insert: a taken key throws on `uniq_skill_runs_idempotency_key`.
+   * Keyed callers use {@link SkillStore.startOrRecoverRun}.
    */
   idempotencyKey?: string;
 }
@@ -388,9 +386,6 @@ export interface SkillStore {
    *   - `kind: 'recovered'` — the row existed (either a prior attempt
    *     that crashed, or a successful run being replayed). Caller
    *     branches on `row.recoveryPoint`.
-   *
-   * Implementation: `INSERT ... ON CONFLICT (idempotency_key) DO UPDATE`
-   * with a no-op SET, `RETURNING (xmax = 0)` to tell the two apart.
    */
   startOrRecoverRun(
     tx: Transaction,
@@ -938,10 +933,7 @@ export class DrizzleSkillStore implements SkillStore {
     if (params.inputs === null || params.inputs === undefined) {
       throw new Error("startOrRecoverRun: inputs must not be null/undefined");
     }
-    // Keyed on `uniq_skill_runs_idempotency_key`. The no-op SET hands back
-    // the stored row, recovery point and cached payload as the prior
-    // attempt left them. See `CodingStore.insertOrRecoverTask` for how a
-    // concurrent loser resolves and for the `xmax = 0` discriminator.
+    // Keyed insert: see `.claude/rules/inngest.md`.
     const rows = await tx
       .insert(skillRuns)
       .values({

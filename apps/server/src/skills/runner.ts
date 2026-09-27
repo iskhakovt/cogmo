@@ -1222,9 +1222,8 @@ export class SkillRunnerImpl implements SkillRunner {
     // Keyed path: `startOrRecoverRun` inserts a fresh row with
     // `recovery_point='started'` and returns `kind: 'new'`. If a row with
     // the same key already exists (prior crashed attempt, or a successful
-    // run being replayed), it returns `kind: 'recovered'` with the row as
-    // stored. The transaction ends with the call, so no lock outlives it;
-    // an in-flight row is refused below rather than serialized on.
+    // run being replayed), it returns `kind: 'recovered'` with the stored
+    // row; an in-flight (`started`) row is refused below.
     //
     // Non-keyed path: plain `insertRun` → fresh row every call. No
     // exactly-once semantic; the runner behaves identically to the

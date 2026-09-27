@@ -312,9 +312,8 @@ export interface PipelineRunStore {
    * {@link createRun} keyed on the durable tool call that requested it. A
    * retry of that call — a step replay, or the re-execution after a crash
    * between commit and Inngest recording the step — returns the existing row
-   * as `recovered` instead of opening a second run. `ON CONFLICT DO UPDATE`
-   * with a no-op SET: a concurrent loser under REPEATABLE READ raises 40001
-   * for the transactor to retry, and the retry lands in the conflict arm.
+   * as `recovered` instead of opening a second run. Keyed insert
+   * (`.claude/rules/inngest.md`).
    */
   insertOrRecoverRun(
     tx: Transaction,
