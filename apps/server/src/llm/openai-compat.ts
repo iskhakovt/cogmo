@@ -99,7 +99,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
     try {
       const createParams: OpenAI.ChatCompletionCreateParamsNonStreaming & CacheHintFields = {
         model: params.model,
-        max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
+        ...outputCap(params.model, params.maxTokens ?? DEFAULT_MAX_TOKENS),
         messages: buildMessages(params.system, params.messages, hints.systemMarker),
         ...hints.fields,
       };
@@ -182,7 +182,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
           .create(
             {
               model: params.model,
-              max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
+              ...outputCap(params.model, params.maxTokens ?? DEFAULT_MAX_TOKENS),
               messages: buildMessages(params.system, params.messages, hints.systemMarker),
               ...hints.fields,
               ...(params.tools?.length && { tools: params.tools.map(toOpenAITool) }),
@@ -278,6 +278,29 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
     return { events: generateEvents(), response };
   }
+}
+
+// --- Output cap ---
+
+type OutputCap = { max_tokens: number } | { max_completion_tokens: number };
+
+/**
+ * OpenAI's reasoning models (the o-series and GPT-5 onward, by bare or
+ * fine-tuned id) reject `max_tokens` and take the cap as
+ * `max_completion_tokens`, which also bounds reasoning. Every other id keeps
+ * `max_tokens`, OpenRouter's `openai/…` slugs included.
+ */
+export function outputCap(model: string, maxTokens: number): OutputCap {
+  return takesMaxCompletionTokens(model)
+    ? { max_completion_tokens: maxTokens }
+    : { max_tokens: maxTokens };
+}
+
+function takesMaxCompletionTokens(model: string): boolean {
+  const id = model.replace(/^ft:/, "");
+  if (/^o\d/.test(id)) return true;
+  const major = /^gpt-(\d+)/.exec(id)?.[1];
+  return major !== undefined && Number(major) >= 5;
 }
 
 // --- Cache hints ---

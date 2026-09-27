@@ -1,0 +1,1 @@
+The OpenAI-compatible adapter sends a reply's token cap as `max_completion_tokens` to OpenAI's reasoning models (the o-series and GPT-5 onward, matched by bare or fine-tuned model id), which reject `max_tokens` with a 400. Every other model keeps `max_tokens`, OpenRouter's `openai/…` slugs included. Live scenario D's OpenAI route runs on `gpt-5.4-nano`.

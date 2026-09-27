@@ -136,6 +136,8 @@ Caller-supplied `tags` / `tagsMatch` and `tagGroups` are folded into the same AN
 
 `memory_retain` does not write directly to Hindsight. The tool inserts into a `pending_memories` table; Observer drains pending rows during post-conversation extraction, classifies each (network + compartment + trust) via `chatTyped()`, retains to Hindsight, and deletes the staging row. This guarantees a single classification path — every memory in Hindsight is tagged by the Observer prompt, and live writes cannot bypass policy.
 
+**The drain's retain is keyed on the staging row.** Retain and delete are separate steps with no transaction spanning Hindsight and Postgres, so a delete that fails after its retain leaves the row pending and the next drain retains it again. Each row goes to Hindsight under its id (`RetainBatchItem.documentId` → `document_id`), and Hindsight upserts on `document_id` within a bank. A row's content never changes, so repeating a retain Hindsight has processed finds no changed chunk: it keeps the extracted facts, extracts nothing new, and relabels the document and its facts with the repeat's tags and metadata. One copy of the fact remains. Transcript extraction has no durable id per fact and leaves `documentId` unset, so the adapter mints a fresh one per item.
+
 `pending_memories` is user-scoped (FK to `users`, no `conversation_id`): pending rows survive `/reset` and are drained on any subsequent `conversation/idle` for that user. The trade-off is freshness — a live retain isn't searchable in a *different* conversation until the source conversation goes idle. Acceptable because conversations are typically idle within seconds of the last user turn, and within the source conversation the fact is already in the LLM context.
 
 ```

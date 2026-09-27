@@ -209,46 +209,51 @@ export async function ensureSkillsCodingRepo(
     return { kind: "skipped_no_origin", localPath: args.skillsRepoPath };
   }
 
+  // Read first; on a miss, a keyed insert, so concurrent bootstraps converge
+  // on one row (`.claude/rules/inngest.md`).
   return deps.runInTx(async (tx) => {
     const existing = await deps.codingStore.getRepoByName(tx, SKILLS_CODING_REPO_NAME);
-    if (existing) {
-      if (existing.remoteUrl === remoteUrl) {
-        return {
-          kind: "unchanged",
-          name: existing.name,
-          localPath: existing.localPath,
-          remoteUrl: existing.remoteUrl,
-        };
-      }
-      await deps.codingStore.updateRepoRemoteUrl(tx, existing.id, remoteUrl);
+    const { kind, row } =
+      existing === undefined
+        ? await deps.codingStore.insertOrRecoverRepo(tx, {
+            name: SKILLS_CODING_REPO_NAME,
+            localPath: args.skillsRepoPath,
+            defaultBranch: "main",
+            remoteUrl,
+            devcontainer: null,
+            allowedBackends: ["claude"],
+            verifyCommand: "true",
+            taskTokenBudget: 200_000,
+            taskWallTimeSeconds: 1800,
+            maxConcurrentTasks: 1,
+          })
+        : { kind: "recovered" as const, row: existing };
+    if (kind === "new") {
       log.info(
-        { name: existing.name, previousRemoteUrl: existing.remoteUrl, remoteUrl },
-        "synced skills coding_repos.remote_url from bare repo origin",
+        { name: row.name, localPath: row.localPath, remoteUrl },
+        "registered skills coding_repos row",
       );
       return {
-        kind: "updated",
-        name: existing.name,
-        localPath: existing.localPath,
-        remoteUrl,
-        previousRemoteUrl: existing.remoteUrl,
+        kind: "created",
+        name: row.name,
+        localPath: row.localPath,
+        remoteUrl: row.remoteUrl,
       };
     }
-    const row = await deps.codingStore.insertRepo(tx, {
-      name: SKILLS_CODING_REPO_NAME,
-      localPath: args.skillsRepoPath,
-      defaultBranch: "main",
-      remoteUrl,
-      devcontainer: null,
-      allowedBackends: ["claude"],
-      verifyCommand: "true",
-      taskTokenBudget: 200_000,
-      taskWallTimeSeconds: 1800,
-      maxConcurrentTasks: 1,
-    });
+    if (row.remoteUrl === remoteUrl) {
+      return { kind: "unchanged", name: row.name, localPath: row.localPath, remoteUrl };
+    }
+    await deps.codingStore.updateRepoRemoteUrl(tx, row.id, remoteUrl);
     log.info(
-      { name: row.name, localPath: row.localPath, remoteUrl },
-      "registered skills coding_repos row",
+      { name: row.name, previousRemoteUrl: row.remoteUrl, remoteUrl },
+      "synced skills coding_repos.remote_url from bare repo origin",
     );
-    return { kind: "created", name: row.name, localPath: row.localPath, remoteUrl: row.remoteUrl };
+    return {
+      kind: "updated",
+      name: row.name,
+      localPath: row.localPath,
+      remoteUrl,
+      previousRemoteUrl: row.remoteUrl,
+    };
   });
 }

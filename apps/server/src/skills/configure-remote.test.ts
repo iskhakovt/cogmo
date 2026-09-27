@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import type { Octokit } from "@octokit/rest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
-import type { CodingStore } from "../agent/coding/store/index.js";
+import type { CodingRepoRow, CodingStore, InsertRepoParams } from "../agent/coding/store/index.js";
 import type { Transactor } from "../db/index.js";
 import type { GitHubIdentity } from "../secrets/github.js";
 import { makeEmptyBareRepo, makePopulatedBareRepo } from "../test/skills-bare-repo.js";
@@ -110,10 +110,8 @@ async function readMainSha(repoPath: string): Promise<string | null> {
   }
 }
 
-function setupStoreWithNoRow(): CodingStore {
-  const store = mock<CodingStore>();
-  store.getRepoByName.mockResolvedValue(undefined);
-  store.insertRepo.mockImplementation(async (_tx, params) => ({
+function rowFromParams(params: InsertRepoParams): CodingRepoRow {
+  return {
     id: "00000000-0000-0000-0000-000000000001",
     name: params.name,
     localPath: params.localPath,
@@ -128,6 +126,15 @@ function setupStoreWithNoRow(): CodingStore {
     maxConcurrentTasks: params.maxConcurrentTasks,
     identityName: params.identityName ?? "default",
     createdAt: new Date(),
+  };
+}
+
+function setupStoreWithNoRow(): CodingStore {
+  const store = mock<CodingStore>();
+  store.getRepoByName.mockResolvedValue(undefined);
+  store.insertOrRecoverRepo.mockImplementation(async (_tx, params) => ({
+    kind: "new",
+    row: rowFromParams(params),
   }));
   return store;
 }
@@ -223,7 +230,7 @@ describe("configureSkillsRemote", () => {
     }
     expect(await readOrigin(skillsPath)).toBe(remoteUrl);
     expect(await readMainSha(skillsPath)).not.toBeNull();
-    expect(codingStore.insertRepo).toHaveBeenCalledWith(
+    expect(codingStore.insertOrRecoverRepo).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ name: "skills", remoteUrl }),
     );
@@ -324,35 +331,23 @@ describe("configureSkillsRemote", () => {
     await bootstrapSkillsRepo({ path: skillsPath });
     const remoteUrl = await makePopulatedRemote();
 
-    // Track storedRow in a closure so the second pass sees the inserted row.
-    let storedRow: Awaited<ReturnType<CodingStore["insertRepo"]>> | undefined;
+    // Track storedRow in a closure so the second pass reads the inserted row.
+    let storedRow: CodingRepoRow | undefined;
     const codingStore = mock<CodingStore>();
     codingStore.getRepoByName.mockImplementation(async () => storedRow);
-    codingStore.insertRepo.mockImplementation(async (_tx, params) => {
-      storedRow = {
-        id: "00000000-0000-0000-0000-000000000001",
-        name: params.name,
-        localPath: params.localPath,
-        defaultBranch: params.defaultBranch,
-        remoteUrl: params.remoteUrl,
-        devcontainer: params.devcontainer,
-        allowedBackends: [...params.allowedBackends],
-        verifyCommand: params.verifyCommand,
-        verifyTimeoutSeconds: params.verifyTimeoutSeconds ?? 600,
-        taskTokenBudget: params.taskTokenBudget,
-        taskWallTimeSeconds: params.taskWallTimeSeconds,
-        maxConcurrentTasks: params.maxConcurrentTasks,
-        identityName: params.identityName ?? "default",
-        createdAt: new Date(),
-      };
-      return storedRow;
+    codingStore.insertOrRecoverRepo.mockImplementation(async (_tx, params) => {
+      storedRow = rowFromParams(params);
+      return { kind: "new", row: storedRow };
     });
 
     const first = await configureSkillsRemote(
       { runInTx: fakeRunInTx, codingStore, skillsRepoPath: skillsPath },
       { kind: "own", direction: "adopt", remoteUrl },
     );
-    expect(first.isOk()).toBe(true);
+    expect(first._unsafeUnwrap()).toMatchObject({
+      kind: "configured",
+      ensured: { kind: "created" },
+    });
 
     // Second pass: local now has main matching remote. Adopt still works
     // because fast-forward fetch is a no-op when local already equals
@@ -367,7 +362,6 @@ describe("configureSkillsRemote", () => {
       expect(second.value.originAction).toBe("unchanged");
       expect(second.value.ensured.kind).toBe("unchanged");
     }
-    expect(codingStore.insertRepo).toHaveBeenCalledTimes(1);
     expect(codingStore.updateRepoRemoteUrl).not.toHaveBeenCalled();
   });
 

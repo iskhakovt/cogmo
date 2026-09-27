@@ -45,6 +45,9 @@ const MIN_CACHEABLE_TOKENS = 1024;
 /** "Most of the previous prompt", for the best-effort caches. */
 const TOLERANT_SHARE = 0.8;
 
+/** Room for a one-word reply plus any reasoning. */
+const MAX_TOKENS = 300;
+
 const PROMPTS = [
   "Reply with one word: what colour is the sky on a clear day?",
   "Reply with one word: what is frozen water called?",
@@ -68,7 +71,7 @@ const SystemMessageSchema = z.object({
 const BodySchema = z.object({ messages: z.array(z.unknown()).min(1) }).passthrough();
 
 /**
- * A system prompt well above the minimum cacheable prefix (~4–5k tokens,
+ * A system prompt well above the minimum cacheable prefix (~3–5k tokens,
  * depending on the tokenizer). The nonce opens it, so no earlier run's entry
  * can match past its first line.
  */
@@ -207,13 +210,14 @@ const ROUTES: Route[] = [
     dialect: "openai",
     baseURL: "https://api.openai.com/v1",
     apiKey: liveKey("OPENAI_API_KEY"),
-    // The adapter sends `max_tokens`, which OpenAI's reasoning models
-    // (GPT-5 and later) reject; GPT-4.1 takes it and caches from 1,024 tokens.
-    model: "gpt-4.1-nano",
+    // A reasoning model, to cover `max_completion_tokens`.
+    model: "gpt-5.4-nano",
     relation: "best-effort",
     expectWire(body, key) {
       expect(body.prompt_cache_key).toBe(key);
       expect(body).not.toHaveProperty("session_id");
+      expect(body.max_completion_tokens).toBe(MAX_TOKENS);
+      expect(body).not.toHaveProperty("max_tokens");
     },
   },
 ];
@@ -257,7 +261,7 @@ describe("OpenAICompatibleProvider cache dialects (live)", () => {
             model: route.model,
             system,
             messages: [...messages],
-            maxTokens: 300,
+            maxTokens: MAX_TOKENS,
             cache: { key, retention: "long" },
           };
           let sent = await send(provider, recorder, params);

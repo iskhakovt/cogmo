@@ -13,6 +13,7 @@ import type {
   EvolutionTriggerValue,
   MemoryCompartment,
   MemoryTrust,
+  ObserverPhase,
   ScheduleKind,
   VoiceMode,
 } from "./enums.js";
@@ -115,6 +116,8 @@ export interface EvolutionEventPayload {
   messageCount: number;
   profileId: string;
   durationMs?: number | undefined;
+  /** Phases that failed after their retries; absent on older rows, where it's unknown. */
+  failedPhases?: ObserverPhase[] | undefined;
 }
 
 export interface EvolutionEventRow {
