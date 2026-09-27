@@ -19,7 +19,7 @@ let db: ReturnType<typeof drizzle<typeof schema>>;
 let inngestBaseUrl: string;
 
 beforeAll(() => {
-  const databaseUrl = inject("databaseUrl");
+  const databaseUrl = inject("e2eDatabaseUrl");
   inngestBaseUrl = inject("inngestBaseUrl");
   db = drizzle({ connection: databaseUrl, schema });
 });
@@ -41,7 +41,7 @@ describe("e2e smoke", () => {
   });
 
   it("processes one message end-to-end", async () => {
-    const defaultUserId = inject("defaultUserId");
+    const defaultUserId = inject("e2eDefaultUserId");
     const eventKey = inject("inngestEventKey");
 
     const profileRows = await db.select({ id: profiles.id }).from(profiles).limit(1);
@@ -140,7 +140,7 @@ describe("e2e smoke", () => {
     // before the query leaves the client. Typed operators (`lt`/`gt`/...)
     // apply the column's `mapToDriverValue` (Date → ISO-8601 string) so the
     // bind phase sees a string — this smoke pins that contract.
-    const defaultUserId = inject("defaultUserId");
+    const defaultUserId = inject("e2eDefaultUserId");
     const profileRows = await db.select({ id: profiles.id }).from(profiles).limit(1);
     const channelRows = await db.select({ id: channels.id }).from(channels).limit(1);
     const profileId = profileRows[0]!.id;

@@ -9,7 +9,7 @@ export {};
 declare module "vitest" {
   export interface ProvidedContext {
     /** The e2e stack's database. Integration files each get their own: see `fileDatabaseUrl()`. */
-    databaseUrl: string;
+    e2eDatabaseUrl: string;
     /** The e2e stack's Inngest. Integration workers each get their own: see `inngestWorkers`. */
     inngestBaseUrl: string;
     /**
@@ -22,7 +22,7 @@ declare module "vitest" {
     /** Bearer token the integration/e2e Hindsight container enforces. */
     hindsightApiKey: string;
     /** The e2e stack's seeded user. Integration files each seed their own: see `fileDefaultUserId()`. */
-    defaultUserId: string;
+    e2eDefaultUserId: string;
     /**
      * Integration setup: the Postgres container's maintenance database, from
      * which each test file clones its own (`test/integration-database.ts`).

@@ -278,12 +278,12 @@ export async function setup({ provide }: GlobalSetupContext) {
   containers.push(appContainer);
   console.log("App container ready.");
 
-  provide("databaseUrl", urls.databaseUrl);
+  provide("e2eDatabaseUrl", urls.databaseUrl);
   provide("inngestBaseUrl", urls.inngestBaseUrl);
   provide("inngestEventKey", "test");
   provide("hindsightUrl", hindsightUrl);
   provide("hindsightApiKey", c.HINDSIGHT_TEST_API_KEY);
-  provide("defaultUserId", defaultUserId);
+  provide("e2eDefaultUserId", defaultUserId);
   // Exposed so tests can `docker exec` against the bundled binary — used
   // by the LiteLLM-snapshot smoke check that proves the resolver can find
   // `data/litellm-models.json` after tsup bundling. There's no way to
