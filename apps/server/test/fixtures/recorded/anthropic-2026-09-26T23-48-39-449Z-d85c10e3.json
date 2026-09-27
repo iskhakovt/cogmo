@@ -1,0 +1,42 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: voice\n</turn_context>\n\nHello, this is the voice integration test.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 1,
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "Hi, I'm your AI assistant — nice to meet you over voice. To get started, what should I call you, what do you do, and what timezone are you in?"
+      },
+      "recordedTimings": {
+        "ttftMs": 1040,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          263,
+          11,
+          0,
+          0,
+          0,
+          31,
+          48,
+          47,
+          50,
+          47,
+          34,
+          2,
+          0,
+          0
+        ],
+        "totalDurationMs": 1573
+      },
+      "metadata": {
+        "systemHash": "22d5c167",
+        "toolsHash": "8ae2ba59"
+      }
+    }
+  ]
+}

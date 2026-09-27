@@ -1,0 +1,45 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nThanks!",
+        "model": "claude-sonnet-5",
+        "turnIndex": 5,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "You're welcome! Let me know if you'd like more variations of the lighthouse, or if you want to tell me a bit about yourself when you have a moment — name, timezone, that kind of thing."
+      },
+      "recordedTimings": {
+        "ttftMs": 752,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          299,
+          4,
+          0,
+          0,
+          0,
+          3,
+          45,
+          46,
+          47,
+          44,
+          49,
+          41,
+          1126,
+          0,
+          4,
+          0,
+          0
+        ],
+        "totalDurationMs": 2460
+      },
+      "metadata": {
+        "systemHash": "a479dde7",
+        "toolsHash": "5d271761"
+      }
+    }
+  ]
+}

@@ -3,7 +3,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { ResourceMetrics } from "@opentelemetry/sdk-metrics";
-import { sql as drizzleSql, eq } from "drizzle-orm";
+import { asc, sql as drizzleSql, eq } from "drizzle-orm";
 import { connect } from "inngest/connect";
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from "vitest";
 import { conversations, messages, voiceConfig } from "../agent/store/schema.js";
@@ -513,8 +513,13 @@ describe("message pipeline", () => {
     expect(audioBytes.subarray(0, 4).toString("ascii")).toBe("OggS");
 
     // The stored user message should be the STT transcript text — voice
-    // blocks are substituted to text before persist.
-    const allMsgs = await db.select().from(messages).where(eq(messages.conversationId, conv!.id));
+    // blocks are substituted to text before persist. In id order: the turn's
+    // tool results are later user rows.
+    const allMsgs = await db
+      .select()
+      .from(messages)
+      .where(eq(messages.conversationId, conv!.id))
+      .orderBy(asc(messages.id));
     const userMsg = allMsgs.find((r) => r.role === "user");
     expect(userMsg).toBeDefined();
     expect(typeof userMsg!.content).toBe("string");

@@ -1,6 +1,7 @@
 import type { ToolDefinition } from "../llm/types.js";
 import type { CoreMemoryBlock } from "./service.js";
 import type { Profile } from "./store/index.js";
+import { TURN_CONTEXT_GUIDANCE } from "./turn-context.js";
 
 /**
  * Prompt source interface — the plugin contract for system prompt
@@ -16,14 +17,6 @@ export interface AssembleContext {
    * Empty shows the onboarding text instead.
    */
   coreMemory: ReadonlyArray<CoreMemoryBlock>;
-  /**
-   * True when the orchestrator has resolved this turn's reply will be TTS'd
-   * to a voice clip. Drives a voice-style hint appended to the system
-   * prompt so Claude shapes its response for speech (short sentences, no
-   * markdown, no narration of background ops). See design/voice.md →
-   * "Prompt injection".
-   */
-  voiceMode?: boolean;
   /**
    * Per-turn tool catalog rendered into the `# Tools` section. Passed in by
    * the orchestrator after `composeTurnTools` resolves built-ins + image +
@@ -48,12 +41,7 @@ Be concise when the user wants a quick answer. Be thorough when the topic is com
 
 const ONBOARDING = `You don't know your user yet. In your first interaction, introduce yourself briefly and learn about them: their name, what they do, their timezone, and how they prefer to communicate. Save what you learn about them, including anything about them they mention in passing, to core memory with core_memory_update as soon as you learn it.`;
 
-const VOICE_MODE_HINT = `# Voice mode
-
-Your response will be spoken aloud. Keep it short and natural — one or two sentences when possible. Skip routine acknowledgments ("saved", "noted", "I'll remember") unless the acknowledgment IS the entire answer. Don't narrate background work (memory saves, file writes, web searches) — the user assumes those happened. Avoid markdown, lists, code fences, and tables — they don't translate to speech.`;
-
 export interface PromptSourceConfig {
-  timezone?: string;
   serviceGuidance?: ReadonlyArray<string>;
 }
 
@@ -65,7 +53,11 @@ export function formatUserContext(blocks: ReadonlyArray<CoreMemoryBlock>): strin
 
 /**
  * Default prompt source: identity + user context + tools (auto-generated)
- * + service guidance + steering rules + current time.
+ * + service guidance + steering rules + how to read the turn context.
+ *
+ * Nothing per-turn renders here: the time, recalled memories and reply
+ * modality lead each turn's user message (`turn-context.ts`), so the prompt
+ * changes only when its configuration or core memory does.
  *
  * The `# Tools` section is rendered from the per-turn `toolDefinitions`
  * supplied via `AssembleContext` — the orchestrator passes the same catalog
@@ -75,16 +67,14 @@ export function formatUserContext(blocks: ReadonlyArray<CoreMemoryBlock>): strin
  * string from the implementation file.
  */
 export class DefaultPromptSource implements PromptSource {
-  #timezone: string;
   #serviceGuidance: ReadonlyArray<string>;
 
   constructor(config: PromptSourceConfig = {}) {
-    this.#timezone = config.timezone ?? "UTC";
     this.#serviceGuidance = config.serviceGuidance ?? [];
   }
 
   async assemble(ctx: AssembleContext): Promise<string> {
-    const { profile, rules, coreMemory, voiceMode, toolDefinitions } = ctx;
+    const { profile, rules, coreMemory, toolDefinitions } = ctx;
     const userContext = formatUserContext(coreMemory);
 
     const parts: string[] = [];
@@ -119,32 +109,10 @@ export class DefaultPromptSource implements PromptSource {
       parts.push(`# Rules\n\n${rulesList}`);
     }
 
-    // Voice-mode hint — placed near the end so it isn't drowned out by
-    // earlier identity/tools sections. Shapes the LLM's response style for
-    // TTS even though delivery happens out-of-band post-stream.
-    if (voiceMode) {
-      parts.push(VOICE_MODE_HINT);
-    }
-
-    // Current time
-    parts.push(formatCurrentTime(this.#timezone));
+    // Last, so its voice guidance isn't drowned out by the identity and
+    // tools sections.
+    parts.push(TURN_CONTEXT_GUIDANCE);
 
     return parts.join("\n\n");
   }
-}
-
-function formatCurrentTime(timezone: string): string {
-  const now = new Date();
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: timezone,
-    weekday: "long",
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
-  const parts = Object.fromEntries(formatter.formatToParts(now).map((p) => [p.type, p.value]));
-  return `Current time: ${parts.weekday}, ${parts.month} ${parts.day}, ${parts.year}, ${parts.hour}:${parts.minute} (${timezone})`;
 }

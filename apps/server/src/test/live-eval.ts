@@ -3,8 +3,9 @@
  * runs through the production prompt (`DefaultPromptSource` with the built-in
  * service guidance and the seeded default profile), the built-in tool
  * definitions and `runStreamingAgentLoop`, on the seeded profile's model.
- * Steering rules come from the caller; recalled context and the per-turn
- * image, sub-agent, skill and MCP tools are left out.
+ * Steering rules come from the caller; each user message leads with a turn
+ * context carrying the time and a text reply modality, with no recalled
+ * memories; the per-turn image, sub-agent, skill and MCP tools are left out.
  *
  * The core-memory tools run their production handlers against an in-memory
  * `EvalCoreMemory`, which the prompt's `# User` section also renders from, so
@@ -26,6 +27,7 @@ import { DefaultPromptSource } from "../agent/prompt.js";
 import type { CoreMemoryBlock, Service } from "../agent/service.js";
 import type { Profile } from "../agent/store/index.js";
 import { createDefaultTools, ToolRegistry } from "../agent/tools.js";
+import { renderTurnContext, withTurnContext } from "../agent/turn-context.js";
 import { createWebTools } from "../agent/web-tools.js";
 import { resolveLimits } from "../llm/models.js";
 import type { LlmProvider } from "../llm/provider.js";
@@ -163,6 +165,8 @@ function cannedResult(tool: string): string {
 
 export interface EvalTurn {
   systemPrompt: string;
+  /** The user message as sent: led by its turn context, as production sends it. */
+  userMessage: Message;
   result: AgentLoopResult;
 }
 
@@ -178,7 +182,6 @@ export async function runEvalTurn(params: {
   const { coreMemory } = params;
   const tools = evalTools();
   const systemPrompt = await new DefaultPromptSource({
-    timezone: EVAL_TIMEZONE,
     serviceGuidance: BUILT_IN_SERVICE_GUIDANCE,
   }).assemble({
     profile: EVAL_PROFILE,
@@ -186,12 +189,25 @@ export async function runEvalTurn(params: {
     coreMemory: await coreMemory.get(),
     toolDefinitions: tools.definitions(),
   });
+  const userMessage = withTurnContext(
+    { role: "user", content: params.message },
+    renderTurnContext({
+      handledAt: new Date(),
+      timezone: EVAL_TIMEZONE,
+      context: {
+        recalledMemories: [],
+        voiceMode: false,
+        channelTypes: [],
+        announcedCoreMemoryBlocks: [],
+      },
+    }),
+  );
 
   const result = await runStreamingAgentLoop({
     provider: params.provider,
     model: EVAL_MODEL,
     systemPrompt,
-    messages: [...params.history, { role: "user", content: params.message }],
+    messages: [...params.history, userMessage],
     tools,
     service: { memory: mock<Service["memory"]>(), files: mock<Service["files"]>(), coreMemory },
     maxTokens: resolveLimits(EVAL_MODEL).maxOutputTokens,
@@ -199,7 +215,7 @@ export async function runEvalTurn(params: {
     cache: { key: params.cacheKey, retention: "short" },
     turnLogger: logger,
   });
-  return { systemPrompt, result };
+  return { systemPrompt, userMessage, result };
 }
 
 export interface EvalConversation {
@@ -223,7 +239,7 @@ export async function runEvalConversation(params: {
   const blocksAfter: Array<ReadonlyArray<CoreMemoryBlock>> = [];
   for (const message of params.messages) {
     const turn = await runEvalTurn({ ...params, history, message });
-    history.push({ role: "user", content: message }, ...turn.result.newMessages);
+    history.push(turn.userMessage, ...turn.result.newMessages);
     turns.push(turn);
     blocksAfter.push(await params.coreMemory.get());
   }
