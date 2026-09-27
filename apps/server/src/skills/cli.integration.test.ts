@@ -15,6 +15,7 @@ import { randomBytes } from "node:crypto";
 import postgres from "postgres";
 import { beforeAll, describe, expect, inject, it } from "vitest";
 import { deriveMasterKey, encrypt, parseMasterKey, toBase64 } from "../secrets/encryption.js";
+import { fileDatabaseUrl } from "../test/integration-file.js";
 import { workerInngestBaseUrl } from "../test/worker-inngest.js";
 
 const SUITE = randomBytes(4).toString("hex");
@@ -35,7 +36,7 @@ async function seedStubProvider(): Promise<void> {
   if (!masterKey) throw new Error("COGMO_MASTER_KEY unset");
   const key = deriveMasterKey(parseMasterKey(masterKey), "cogmo/secrets-at-rest/v1");
   const { ciphertext, nonce } = encrypt(key, "stub-key-for-cli-it");
-  const sql = postgres(inject("databaseUrl"), { max: 2 });
+  const sql = postgres(fileDatabaseUrl(), { max: 2 });
   try {
     // Idempotent — repeat runs against the same DB skip the seed.
     const existing = await sql<{ id: string }[]>`
@@ -57,18 +58,9 @@ async function seedStubProvider(): Promise<void> {
       if (!provider) throw new Error("provider insert returned no row");
       const [profile] = await tx<{ model: string }[]>`SELECT model FROM profiles LIMIT 1`;
       if (!profile) throw new Error("default profile not found");
-      // Pick the next free position for this model so a peer integration
-      // file that seeded its own provider at position 0 doesn't trip the
-      // `uq_model_position` constraint. The CLI's skills handler only
-      // needs *some* provider routed for the default model — which slot
-      // it occupies doesn't matter.
-      //
-      // Known race: two forks reading MAX(position) concurrently could
-      // both compute the same `next` value and one would lose the
-      // unique-constraint check. Snapshot isolation doesn't predicate-
-      // lock. Acceptable today because only one integration file runs
-      // this seed; revisit with `pg_advisory_xact_lock(hashtext(model))`
-      // if a second seed-side fork is ever added.
+      // Pick the next free position for this model: the CLI's skills
+      // handler only needs *some* provider routed for the default model,
+      // and a free slot never trips the `uq_model_position` constraint.
       const [next] = await tx<{ pos: number }[]>`
         SELECT COALESCE(MAX(position) + 1, 0)::int AS pos
         FROM model_providers WHERE model = ${profile.model}
@@ -98,7 +90,7 @@ function runCli(
     const proc = spawn("node", ["--import", "tsx", "src/main.ts", "skills", ...args], {
       env: {
         ...process.env,
-        DATABASE_URL: inject("databaseUrl"),
+        DATABASE_URL: fileDatabaseUrl(),
         HINDSIGHT_URL: inject("hindsightUrl"),
         HINDSIGHT_API_KEY: inject("hindsightApiKey"),
         INNGEST_BASE_URL: workerInngestBaseUrl(),
@@ -161,7 +153,7 @@ async function seedSkill(name: string, manifestSource: string, body: string): Pr
     const proc = spawn("node", ["--import", "tsx", "--input-type=module", "-e", seedScript], {
       env: {
         ...process.env,
-        DATABASE_URL: inject("databaseUrl"),
+        DATABASE_URL: fileDatabaseUrl(),
         HINDSIGHT_URL: inject("hindsightUrl"),
         HINDSIGHT_API_KEY: inject("hindsightApiKey"),
         INNGEST_BASE_URL: workerInngestBaseUrl(),

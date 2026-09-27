@@ -39,11 +39,14 @@ Docker services + app wired in-process. Tests the orchestration pipeline — deb
 **Infrastructure:**
 - Testcontainers (PostgreSQL, Redis, Inngest, Hindsight) — started in vitest `globalSetup`, random ports
 - Container definitions in `dev/containers.ts` (shared with `scripts/dev-infra.ts` for local dev)
-- llmock (`@copilotkit/aimock`) runs in-process — serves both Anthropic API (for app) and OpenAI-compatible API (for Hindsight)
-- Hindsight reaches llmock via `host.testcontainers.internal`, published by `exposeHostPort()` in `dev/containers.ts` — not `host-gateway`, which points into the wrong namespace under rootless Docker
+- llmock (`@copilotkit/aimock`) runs in-process: one per test file for the app's calls, replaying that file's cassette, and one in `globalSetup` for Hindsight's
+- Hindsight reaches its llmock via `host.testcontainers.internal`, published by `exposeHostPort()` in `dev/containers.ts` — not `host-gateway`, which points into the wrong namespace under rootless Docker
+- Each test file runs against its own database, cloned from a template `globalSetup` migrates, and its own seeded user — so its own Hindsight bank
 - App modules imported directly — `bootstrap()` from `src/index.ts` wires everything
 
-**Env injection:** `process.env` mutations in `globalSetup` propagate to Vitest test workers. Dynamic container URLs set via `process.env`, static values in `vitest.config.ts` `test.env`. Inngest is per worker: each worker slot has its own dev server, so one fork's events never run in another, and `test/integration-setup-per-fork.ts` points its fork at that server. Test files use normal top-level imports — `createEnv()` in `env.ts` sees all values.
+**Isolation:** `test/integration-setup-per-file.ts` gives each file its own database, seeded user (so its own Hindsight bank), llmock and skills repo, and points it at its worker slot's Inngest dev server — one per slot, so one fork's events never run in another. Hindsight, Redis, RustFS, the Docker daemon and the MCP echo and Telegram mocks stay shared. `.claude/rules/testing.md` → Integration Test Isolation and Cassettes has the detail, the unmatched-request and unused-recording checks included.
+
+**Env injection:** `process.env` mutations in `globalSetup` propagate to Vitest test workers. Dynamic container URLs set via `process.env`, per-file values by the per-file setup, static values in `vitest.config.ts` `test.env`. Test files use normal top-level imports — `createEnv()` in `env.ts` sees all values.
 
 **Naming:** `.integration.test.ts` suffix. `pnpm test:integration`.
 
@@ -122,13 +125,12 @@ Single integration test that exercises the full chat -> delegate_coding -> skill
 
 Cassettes pin the conversation; assertions pin the contract. This is the AgentRR pattern (record/replay derived experience, not raw token streams) — replay the pinned plan + edit sequence, assert structural invariants around it.
 
-**Fixtures.** Three cassettes share the existing `RECORD=1` switch:
+**Fixtures.** Two cassettes share the existing `RECORD=1` switch:
 
 | Fixture | What | Re-record trigger |
 |-|-|-|
-| `test/fixtures/daytona/skill-author.json` | Daytona HTTP + WS (snapshot lifecycle, sandbox create, fs upload, PTY frames, git clone, exec sessions, delete) | New `cogmo-devbase:<v>`, SDK bump |
-| `test/fixtures/recorded/anthropic-skill-author-coding.json` | Anthropic `/v1/messages` for the orchestrator's plan + execute prompts | Coding prompt change, model swap, claude-cli flag change |
-| `test/fixtures/recorded/anthropic-skill-author-agent.json` | Anthropic `/v1/messages` for the agent loop's two turns | Agent prompt change, tool registry change |
+| `test/fixtures/daytona/skill-authoring.json` | Daytona HTTP + WS (snapshot lifecycle, sandbox create, fs upload, PTY frames, git clone, exec sessions, delete) | New `cogmo-devbase:<v>`, SDK bump |
+| `test/fixtures/recorded/suites/skill-authoring/` | Anthropic `/v1/messages` for the orchestrator's plan + execute prompts and the agent loop's two turns | Coding or agent prompt change, model swap, claude-cli flag change, tool registry change |
 
 **Cost envelope.** Replay: zero (standard runner + testcontainers + llmock, same shape as `pipeline.integration.test.ts`). Record: ~$1-2 per refresh (~3-5 min Daytona compute + ~30k Anthropic tokens + one PyPI fetch). Operator-triggered locally, expected cadence ~monthly when releases align.
 
@@ -273,8 +275,8 @@ For evolution Stage 4+, use LLM-as-judge rubrics with held-out test sets. Track 
 
 | Service | Mock strategy |
 |-|-|
-| Anthropic API | llmock — fixture-based HTTP server, supports streaming + tool_use |
-| Ollama (for Hindsight) | llmock — same instance, serves OpenAI-compatible endpoints |
+| Anthropic API | llmock — fixture-based HTTP server, supports streaming + tool_use; the test file's own instance |
+| OpenAI-compatible (Hindsight) | llmock — `globalSetup`'s instance, the one the container reaches |
 | MCP servers | Stub MCP client with fixed tool results |
 | Telegram | grammY `vi.mock` (unit), Test DC + tgintegration (e2e, future) |
 | Gmail/Calendar | Record real responses, replay in tests |

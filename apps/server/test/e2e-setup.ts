@@ -7,7 +7,7 @@ import type { GlobalSetupContext } from "vitest/node";
 import * as c from "../dev/containers.js";
 import { CASSETTE_CHAT_MODEL } from "../src/test/cassette-model.js";
 import { repoRoot } from "../src/test/repo-root.js";
-import { createMock } from "./llmock-setup.js";
+import { createMock, E2E_CASSETTE } from "./llmock-setup.js";
 import { loadRootEnv } from "./load-root-env.js";
 
 loadRootEnv();
@@ -107,7 +107,7 @@ async function bakeAppImage(): Promise<void> {
 export async function setup({ provide }: GlobalSetupContext) {
   network = await new Network().start();
 
-  mock = createMock();
+  mock = createMock(E2E_CASSETTE, undefined).mock;
   await mock.start();
   // Must precede every container below — see `exposeHostPort`.
   const llmockBase = await c.exposeHostPort(mock.port);
@@ -278,12 +278,12 @@ export async function setup({ provide }: GlobalSetupContext) {
   containers.push(appContainer);
   console.log("App container ready.");
 
-  provide("databaseUrl", urls.databaseUrl);
+  provide("e2eDatabaseUrl", urls.databaseUrl);
   provide("inngestBaseUrl", urls.inngestBaseUrl);
   provide("inngestEventKey", "test");
   provide("hindsightUrl", hindsightUrl);
   provide("hindsightApiKey", c.HINDSIGHT_TEST_API_KEY);
-  provide("defaultUserId", defaultUserId);
+  provide("e2eDefaultUserId", defaultUserId);
   // Exposed so tests can `docker exec` against the bundled binary — used
   // by the LiteLLM-snapshot smoke check that proves the resolver can find
   // `data/litellm-models.json` after tsup bundling. There's no way to

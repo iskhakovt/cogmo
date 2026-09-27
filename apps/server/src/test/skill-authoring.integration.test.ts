@@ -69,11 +69,11 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { Daytona, Image } from "@daytona/sdk";
 import { Octokit } from "@octokit/rest";
-import { and, desc, eq, ne } from "drizzle-orm";
+import { and, desc, eq, isNull, ne } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { connect } from "inngest/connect";
 import { ok } from "neverthrow";
-import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { codingTasks } from "../agent/coding/store/schema.js";
 import { conversations, llmProviders, modelProviders, profiles } from "../agent/store/schema.js";
 import * as schema from "../db/schemas.js";
@@ -90,6 +90,7 @@ import { channelSessions, channels, inboundMessages } from "../transport/store/s
 import { expectDefined } from "./assertions.js";
 import { CASSETTE_CHAT_MODEL } from "./cassette-model.js";
 import { DaytonaMock, type DaytonaMockOptions } from "./daytona-mock.js";
+import { fileDatabaseUrl, fileDefaultUserId, fileLlmockUrl } from "./integration-file.js";
 import { repoRoot } from "./repo-root.js";
 import { workerInngestBaseUrl } from "./worker-inngest.js";
 
@@ -150,8 +151,8 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
 
   beforeAll(async () => {
     inngestBaseUrl = workerInngestBaseUrl();
-    const databaseUrl = inject("databaseUrl");
-    defaultUserId = inject("defaultUserId");
+    const databaseUrl = fileDatabaseUrl();
+    defaultUserId = fileDefaultUserId();
     db = drizzle({ connection: databaseUrl, schema });
 
     console.log(`[skill-authoring e2e] TEST_RUN_ID=${TEST_RUN_ID}`);
@@ -233,7 +234,7 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     await seedSecretsAndProvider({
       db,
       anthropicApiKey: RECORDABLE ? expectDefined(process.env.ANTHROPIC_API_KEY) : "test-key",
-      llmockUrl: inject("llmockBaseUrl"),
+      llmockUrl: fileLlmockUrl(),
       identity: {
         pat: ghAuth.pat,
         sshPrivateKey: signingKeypair.privateKey,
@@ -247,7 +248,7 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     // host's missing chat turns whenever `RECORD=1`, so it needs the key even
     // when the Daytona cassette replays.
     const anthropicKey = IS_RECORD ? expectDefined(process.env.ANTHROPIC_API_KEY) : "test-key";
-    const provider = new AnthropicProvider(anthropicKey, inject("llmockBaseUrl"));
+    const provider = new AnthropicProvider(anthropicKey, fileLlmockUrl());
 
     // Auto-approve plans so the orchestrator drives plan -> execute
     // -> commit -> PR without a manual gate.
@@ -953,25 +954,13 @@ async function seedSecretsAndProvider(opts: {
       .returning({ id: llmProviders.id });
     if (!provider) throw new Error("llm_providers insert returned no row");
 
-    // Point every profile at the cassette's model and route that, so the
-    // host agent loop replays against the recorded fixtures.
-    //
-    // The missing WHERE is deliberate. Narrowing it to the org profile
-    // (`user_id IS NULL`) is correct on its face — the tier shares one
-    // Postgres across its forks and a sibling suite's profile is not ours
-    // — but it fails on CI: ten unmatched requests, `pipeline.integration`
-    // and `pipeline.mcp` timing out beside this suite. It passes locally
-    // either way. llmock holds one FIFO fixture pool for the whole
-    // process while the forks run in parallel, so which suite consumes
-    // which fixture depends on fork count and interleaving, and the
-    // runner's differ from a workstation's. Forcing every profile onto
-    // one model is what currently keeps that order deterministic.
-    // Untangling it (cassette-per-suite, per-fork database) is tracked in
-    // `todo.md`; until then this stays blanket and CI is the only
-    // authority on changing it.
+    // Point the seeded org profile, which `bootstrap()` resolves as the
+    // default, at the cassette's model and route that, so the host agent
+    // loop replays against the recorded fixtures.
     const updated = await tx
       .update(profiles)
       .set({ model: CASSETTE_CHAT_MODEL })
+      .where(isNull(profiles.userId))
       .returning({ id: profiles.id });
     expectDefined(updated[0], "Default profile not found");
     await tx
@@ -987,9 +976,8 @@ async function seedSecretsAndProvider(opts: {
 }
 
 /**
- * `profileId` is the org profile `bootstrap()` resolves as the default: other
- * files add profiles with narrower tool sets to the shared database, and an
- * unordered pick of a `profiles` row can land on one of theirs.
+ * `profileId` is the org profile `bootstrap()` resolves as the default, not an
+ * unordered pick of a `profiles` row.
  */
 async function seedConversation(
   db: ReturnType<typeof drizzle<typeof schema>>,

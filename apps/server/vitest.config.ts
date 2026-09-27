@@ -138,7 +138,7 @@ export default defineConfig({
           environment: "node",
           include: ["src/**/*.integration.test.ts"],
           globalSetup: "./test/integration-setup.ts",
-          setupFiles: ["./test/integration-setup-per-fork.ts"],
+          setupFiles: ["./test/integration-setup-per-file.ts"],
           maxWorkers: INTEGRATION_MAX_WORKERS,
           // Its own group: Vitest refuses projects with different `maxWorkers`
           // in one `groupOrder`, which `test:all` would otherwise hit.

@@ -499,8 +499,8 @@ src/test/fal-mock.ts                     # createFalFetch() — record/replay
 test/fixtures/fal/
   fal-ai-flux-dev-{hash}.json            # captured fal response (URL rewritten to mock CDN)
   fal-ai-flux-dev-{hash}.jpg             # captured image bytes
-test/fixtures/recorded/
-  anthropic-image-gen.json               # hand-written llmock fixture (multi-turn)
+test/fixtures/recorded/suites/pipeline/
+  anthropic-*.json                       # llmock cassette: the image turn's tool call and reply
 ```
 
 **Fixture key:** `{model-slug}-{sha256(model:prompt:image_size:seed):12}`. Stable across runs for same input, collision-safe across different inputs. `image_size` is fal's native request field (string preset like `"landscape_16_9"` or `{width, height}` object); we normalize to a stable string before hashing.
@@ -538,7 +538,7 @@ pnpm test:record
 pnpm test:integration
 ```
 
-Commit `test/fixtures/fal/*` and `test/fixtures/recorded/*`. Embedding calls (Hindsight auto-recall) auto-record as OpenAI fixtures.
+Commit `test/fixtures/fal/*` and `test/fixtures/recorded/*`. Hindsight's embedding calls (auto-recall) record into `test/fixtures/recorded/hindsight/`.
 
 ## Dependencies
 

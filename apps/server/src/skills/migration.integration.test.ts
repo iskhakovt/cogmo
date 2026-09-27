@@ -9,12 +9,13 @@
  */
 
 import postgres from "postgres";
-import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { fileDatabaseUrl } from "../test/integration-file.js";
 
 let sql: ReturnType<typeof postgres>;
 
 beforeAll(() => {
-  sql = postgres(inject("databaseUrl"), { max: 2 });
+  sql = postgres(fileDatabaseUrl(), { max: 2 });
 });
 
 afterAll(async () => {
