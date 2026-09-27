@@ -49,6 +49,11 @@ export interface WireResponse {
   usage: unknown;
   /** Anthropic cache diagnostics, when the request opted in. */
   diagnostics: unknown;
+  /**
+   * Anthropic's `input_transformations` — the thinking blocks it dropped —
+   * present when the request sent the thinking-binding-controls beta.
+   */
+  inputTransformations: unknown;
 }
 
 export interface WireExchange {
@@ -83,7 +88,12 @@ export interface WireRecorder {
 
 type Capture = Omit<WireResponse, "status">;
 
-const NOTHING_CAPTURED: Capture = { id: undefined, usage: undefined, diagnostics: undefined };
+const NOTHING_CAPTURED: Capture = {
+  id: undefined,
+  usage: undefined,
+  diagnostics: undefined,
+  inputTransformations: undefined,
+};
 
 const JsonObjectSchema = z.record(z.string(), z.unknown());
 
@@ -92,6 +102,7 @@ const ResponseBodySchema = z.object({
   id: z.string().optional(),
   usage: z.unknown().optional(),
   diagnostics: z.unknown().optional(),
+  input_transformations: z.unknown().optional(),
 });
 
 const MessageStartSchema = z.object({
@@ -100,6 +111,7 @@ const MessageStartSchema = z.object({
     id: z.string(),
     usage: z.unknown(),
     diagnostics: z.unknown().optional(),
+    input_transformations: z.unknown().optional(),
   }),
 });
 
@@ -203,11 +215,16 @@ function captureResponse(text: string, contentType: string | null): Capture {
   if (contentType?.includes("text/event-stream")) return captureStream(text);
   const body = ResponseBodySchema.safeParse(parseJsonOrUndefined(text));
   if (!body.success) return NOTHING_CAPTURED;
-  return { id: body.data.id, usage: body.data.usage, diagnostics: body.data.diagnostics };
+  return {
+    id: body.data.id,
+    usage: body.data.usage,
+    diagnostics: body.data.diagnostics,
+    inputTransformations: body.data.input_transformations,
+  };
 }
 
 /**
- * Anthropic reports the request's id, usage and diagnostics once, on
+ * Anthropic reports the request's id, usage, diagnostics and input transformations once, on
  * `message_start`. OpenAI repeats the id on every chunk and reports usage on
  * the last one (`stream_options.include_usage`), with `usage: null` before it.
  */
@@ -222,8 +239,8 @@ function captureStream(text: string): Capture {
     (capture: Capture, event): Capture => {
       const start = MessageStartSchema.safeParse(event);
       if (start.success) {
-        const { id, usage, diagnostics } = start.data.message;
-        return { id, usage, diagnostics };
+        const { id, usage, diagnostics, input_transformations } = start.data.message;
+        return { id, usage, diagnostics, inputTransformations: input_transformations };
       }
       const chunk = ChatChunkSchema.safeParse(event);
       if (!chunk.success) return capture;

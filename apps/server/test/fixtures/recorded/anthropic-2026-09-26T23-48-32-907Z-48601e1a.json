@@ -1,0 +1,69 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nDraw me a lighthouse on a rocky coast at dusk, for the wall of my study.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 1,
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "Here's your lighthouse scene — hope it suits the study!\n\nSince this is our first chat, I'm your AI assistant — I can chat, generate images, manage tasks/reminders, and more. To help me be more useful going forward: what's your name, what do you do, what timezone are you in, and how do you like to communicate (brief and to the point, or more conversational)?"
+      },
+      "recordedTimings": {
+        "ttftMs": 1086,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          297,
+          10,
+          0,
+          0,
+          0,
+          0,
+          29,
+          47,
+          53,
+          44,
+          41,
+          49,
+          42,
+          44,
+          42,
+          46,
+          48,
+          49,
+          44,
+          48,
+          44,
+          43,
+          54,
+          41,
+          42,
+          399,
+          425,
+          4,
+          2,
+          1,
+          1,
+          2,
+          1,
+          3,
+          26,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0
+        ],
+        "totalDurationMs": 3108
+      },
+      "metadata": {
+        "systemHash": "a479dde7",
+        "toolsHash": "5d271761"
+      }
+    }
+  ]
+}

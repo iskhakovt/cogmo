@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { fakeRunInTx, mockAgentStore } from "../../test/factories.js";
+import { fakeRunInTx, MOCK_MESSAGE_CREATED_AT, mockAgentStore } from "../../test/factories.js";
 import type { CompactionSummary } from "../store/index.js";
-import { loadTurnHistory, summarizedSpan } from "./load-turn-history.js";
+import { loadTurnHistory, summarizedSpan, TurnRowMissingError } from "./load-turn-history.js";
 
 function summaryRow(overrides: Partial<CompactionSummary> = {}): CompactionSummary {
   return {
@@ -29,7 +29,7 @@ describe("loadTurnHistory", () => {
 
     const result = await loadTurnHistory(
       { runInTx: fakeRunInTx, agentStore },
-      { conversationId: "conv-1" },
+      { conversationId: "conv-1", turnInboundId: null },
     );
 
     expect(result.messages).toEqual([
@@ -38,6 +38,7 @@ describe("loadTurnHistory", () => {
     ]);
     expect(result.messageIds).toEqual(["m1", "m2"]);
     expect(agentStore.getHistoryAfter).not.toHaveBeenCalled();
+    expect(agentStore.listTurnContexts).toHaveBeenCalledWith(expect.anything(), "conv-1", null);
   });
 
   it("replaces the covered prefix with one synthetic summary message", async () => {
@@ -51,7 +52,7 @@ describe("loadTurnHistory", () => {
 
     const result = await loadTurnHistory(
       { runInTx: fakeRunInTx, agentStore },
-      { conversationId: "conv-1" },
+      { conversationId: "conv-1", turnInboundId: null },
     );
 
     expect(result.messages).toEqual([
@@ -74,7 +75,7 @@ describe("loadTurnHistory", () => {
 
     const result = await loadTurnHistory(
       { runInTx: fakeRunInTx, agentStore },
-      { conversationId: "conv-1" },
+      { conversationId: "conv-1", turnInboundId: null },
     );
 
     expect(result.messages).toHaveLength(1);
@@ -90,10 +91,96 @@ describe("loadTurnHistory", () => {
 
     const result = await loadTurnHistory(
       { runInTx: fakeRunInTx, agentStore },
-      { conversationId: "conv-1" },
+      { conversationId: "conv-1", turnInboundId: null },
     );
 
     expect(result.messages[0]?.content).toEqual(blocks);
+  });
+
+  it("leads each message that has a stored turn context with its rendered text", async () => {
+    const context = {
+      recalledMemories: ["runs Proxmox"],
+      voiceMode: false,
+      channelTypes: [],
+      announcedCoreMemoryBlocks: [],
+    };
+    const agentStore = mockAgentStore({
+      getLatestSummary: vi.fn().mockResolvedValue(summaryRow()),
+      getHistoryAfter: vi.fn().mockResolvedValue([
+        { id: "m4", role: "user", content: "and then" },
+        { id: "m5", role: "assistant", content: "right" },
+        { id: "m6", role: "user", content: "older row, no context" },
+      ]),
+      listTurnContexts: vi
+        .fn()
+        .mockResolvedValue([
+          { messageId: "m4", rendered: "<turn_context>…</turn_context>\n\n", context },
+        ]),
+    });
+
+    const result = await loadTurnHistory(
+      { runInTx: fakeRunInTx, agentStore },
+      { conversationId: "conv-1", turnInboundId: null },
+    );
+
+    // The same span `getHistoryAfter` reads: the conversation after the cutoff.
+    expect(agentStore.listTurnContexts).toHaveBeenCalledWith(expect.anything(), "conv-1", "m3");
+    expect(result.messages.slice(1)).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "<turn_context>…</turn_context>\n\n" },
+          { type: "text", text: "and then" },
+        ],
+      },
+      { role: "assistant", content: "right" },
+      // A row from before turn contexts renders none.
+      { role: "user", content: "older row, no context" },
+    ]);
+    // Aligned with `messages`: null for the summary and for rows without one.
+    expect(result.turnContexts).toEqual([null, context, null, null]);
+  });
+
+  it("finds the turn's row by the inbound cursor it was written with", async () => {
+    const agentStore = mockAgentStore();
+
+    const result = await loadTurnHistory(
+      { runInTx: fakeRunInTx, agentStore },
+      { conversationId: "conv-1", turnInboundId: "inbound-9" },
+    );
+
+    expect(agentStore.findUserMessageByInbound).toHaveBeenCalledWith(
+      expect.anything(),
+      "conv-1",
+      "inbound-9",
+    );
+    // `created_at` as a string: the result is step state.
+    expect(result.turn).toEqual({ id: "msg-1", createdAt: MOCK_MESSAGE_CREATED_AT.toISOString() });
+  });
+
+  it("fails when the turn's row doesn't exist", async () => {
+    const agentStore = mockAgentStore({
+      findUserMessageByInbound: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await expect(
+      loadTurnHistory(
+        { runInTx: fakeRunInTx, agentStore },
+        { conversationId: "conv-1", turnInboundId: "inbound-9" },
+      ),
+    ).rejects.toThrow(TurnRowMissingError);
+  });
+
+  it("looks up no row without a turn", async () => {
+    const agentStore = mockAgentStore();
+
+    const result = await loadTurnHistory(
+      { runInTx: fakeRunInTx, agentStore },
+      { conversationId: "conv-1", turnInboundId: null },
+    );
+
+    expect(result.turn).toBeNull();
+    expect(agentStore.findUserMessageByInbound).not.toHaveBeenCalled();
   });
 });
 

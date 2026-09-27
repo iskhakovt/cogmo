@@ -6,6 +6,7 @@ import { type Inngest, StepError } from "inngest";
 import { ok } from "neverthrow";
 import { vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import type { HandleMessageDeps } from "../agent/handle-message.js";
 import type { Service } from "../agent/service.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ToolRegistry } from "../agent/tools.js";
@@ -22,6 +23,7 @@ import type { Transport } from "../transport/transport.js";
 import type { Adapter, StreamHandle, StreamingAdapter } from "../transport/types.js";
 import type { VoiceBundle, VoiceProviderResolver } from "../voice/resolver.js";
 import type { SttProvider, TtsProvider } from "../voice/types.js";
+import { expectDefined } from "./assertions.js";
 
 /**
  * Sentinel transaction token for mock-based tests. Assertions on tx args
@@ -40,6 +42,9 @@ export const FAKE_TX = { __mockTx: true } as never;
  * mock-based test imports the same sentinel.
  */
 export const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
+
+/** `created_at` of the turn row `mockAgentStore` finds: 08:14 UTC on a Friday. */
+export const MOCK_MESSAGE_CREATED_AT = new Date("2026-09-25T08:14:00.000Z");
 
 export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
   return {
@@ -61,10 +66,18 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     upsertVoiceConfig: vi.fn().mockResolvedValue({ id: "voice-config-1" }),
     deleteVoiceConfig: vi.fn().mockResolvedValue(undefined),
     insertMessage: vi.fn().mockResolvedValue({ id: "msg-1" }),
+    // The turn's row is the one the default history ends with, so a turn
+    // finds its own message to lead with its turn context.
+    findUserMessageByInbound: vi
+      .fn()
+      .mockResolvedValue({ id: "msg-1", createdAt: MOCK_MESSAGE_CREATED_AT }),
     insertMessages: vi.fn().mockResolvedValue({ id: "msg-1" }),
     getLastAssistantMessage: vi.fn().mockResolvedValue(null),
-    listMessages: vi.fn().mockResolvedValue([]),
+    listMessages: vi.fn().mockResolvedValue([{ id: "msg-1", role: "user", content: "hello" }]),
     getLatestSummary: vi.fn().mockResolvedValue(undefined),
+    // Echoes the insert, as a first attempt does.
+    insertOrRecoverTurnContext: vi.fn().mockImplementation(async (_tx, params) => params),
+    listTurnContexts: vi.fn().mockResolvedValue([]),
     insertOrRecoverSummary: vi.fn().mockResolvedValue({
       kind: "new",
       row: {
@@ -907,4 +920,19 @@ export function asyncIterableThrowing<T>(err: unknown): AsyncIterableIterator<T>
     },
     next: () => Promise.reject(err),
   };
+}
+
+/**
+ * The turn context leading the turn's message in the `call`th agent-loop call
+ * (negative counts from the end).
+ */
+export function turnContextSent(deps: HandleMessageDeps, call = 0): string {
+  const params = expectDefined(
+    vi.mocked(deps.runStreamingAgentLoop).mock.calls.at(call),
+    `agent loop call ${call}`,
+  )[0];
+  const content = expectDefined(params.messages.at(-1), "turn message").content;
+  const [first] = typeof content === "string" ? [] : content;
+  if (first?.type !== "text") throw new Error("the turn's message has no leading text block");
+  return first.text;
 }

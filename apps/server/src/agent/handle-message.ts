@@ -39,7 +39,12 @@ import {
   summarizationRequest,
 } from "./context.js";
 import { loadConversationContext } from "./conversation/load-conversation-context.js";
-import { loadTurnHistory, summarizedSpan } from "./conversation/load-turn-history.js";
+import {
+  loadTurnHistory,
+  summarizedSpan,
+  TurnRowMissingError,
+} from "./conversation/load-turn-history.js";
+import { storeTurnContext } from "./conversation/store-turn-context.js";
 import { buildInCooldownReply, isInCooldown } from "./cooldown.js";
 import type { DebounceConfig } from "./debounce.js";
 import { extractGeneratedDocuments, extractGeneratedImages } from "./extract-images.js";
@@ -58,6 +63,14 @@ import type { AgentStore } from "./store/index.js";
 import { buildSubAgentTools } from "./subagent/sub-agent-tool-builder.js";
 import type { ToolRegistry } from "./tools.js";
 import { turnCacheIntent } from "./turn-cache-intent.js";
+import {
+  findTurnContext,
+  newMemories,
+  renderTurnContext,
+  replaceTurnContext,
+  shownMemories,
+  withTurnContext,
+} from "./turn-context.js";
 import { buildTurnService } from "./turn-service.js";
 import { asNonRetriable, createTurnStepRunner } from "./turn-step-runner.js";
 import { bindFrozenTools, freezeToolTable } from "./turn-tools.js";
@@ -487,16 +500,23 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         );
       });
 
-      // The compacted view, not the raw transcript: when the conversation
-      // carries a durable summary, the span it covers arrives as one synthetic
-      // message and the rest of the rows follow. `messageIds` rides along so
-      // the persist step below can map a compaction split point back to a
-      // durable cutoff. Inside the step, so a `/compact` landing mid-run can't
-      // shift the history between invocations.
-      const turnHistory = await step.run("load-turn-history", async () => {
-        return loadTurnHistory({ runInTx: deps.runInTx, agentStore }, { conversationId });
+      // The compacted view with stored turn contexts, plus the turn's own row
+      // found by its inbound cursor (see `loadTurnHistory`). In a step so a
+      // `/compact` landing mid-run can't shift the history between invocations.
+      const turnHistory = await step.run("load-turn-transcript", async () => {
+        try {
+          return await loadTurnHistory(
+            { runInTx: deps.runInTx, agentStore },
+            { conversationId, turnInboundId: maxInboundId },
+          );
+        } catch (err) {
+          if (err instanceof TurnRowMissingError) throw asNonRetriable(err);
+          throw err;
+        }
       });
-      const history = turnHistory.messages;
+      const history: Message[] = turnHistory.messages;
+      const turn = turnHistory.turn;
+      if (turn === null) throw new Error("load-turn-transcript returned no turn row");
 
       // Load profile up front — its streaming knobs ride into `prepare` so
       // open streams honor the per-profile chunk target and edit mode, and
@@ -596,9 +616,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const turnTools = bindFrozenTools(turnInputs.tools, liveTools);
       const toolDefs = turnTools.definitions();
 
-      // The `# Tools` section and the voice hint render from the frozen turn
-      // inputs — the same table the loop sends as `tools` — and the base
-      // prompt from the outer `profile` read.
+      // The `# Tools` section renders from the frozen turn inputs — the same
+      // table the loop sends as `tools` — and the base prompt from the outer
+      // `profile` read.
       const systemPrompt = await step.run("assemble-prompt", async () => {
         const ctx = await loadConversationContext(
           { runInTx: deps.runInTx, agentStore, transportStore },
@@ -608,7 +628,6 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           profile: profile,
           rules: ctx.rules,
           coreMemory: ctx.coreMemory,
-          voiceMode: turnInputs.voiceMode,
           toolDefinitions: toolDefs,
         });
       });
@@ -736,10 +755,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // path still surfaces hard failures to the model.
       const autoRecallMode = profile?.autoRecall ?? "heuristic";
       // Durable: recall costs an embedding round-trip plus a vector search
-      // per call, and its result feeds the system prompt — caching it keeps
-      // both the spend and the prompt identical across the ~one re-invocation
-      // per step boundary that a tool-calling turn produces. The `.catch`
-      // stays INSIDE the body so a Hindsight failure degrades to "no
+      // per call, and its result feeds the turn context — caching it keeps
+      // both the spend and the context identical across the ~one
+      // re-invocation per step boundary that a tool-calling turn produces.
+      // The `.catch` stays INSIDE the body so a Hindsight failure degrades to "no
       // memories" instead of failing the step into Inngest retries, and so
       // the failure counts once per failed recall rather than once per
       // replay. `bank_id` is the conversation user, who owns the bank
@@ -757,29 +776,36 @@ export function createHandleMessage(deps: HandleMessageDeps) {
               return { memories: [] };
             }),
           );
-      const recalledContext =
-        recallResult.memories.length > 0
-          ? recallResult.memories.map((m) => m.content).join("\n")
-          : null;
-
-      // Append recalled context to system prompt
-      const fullPrompt = recalledContext
-        ? `${systemPrompt}\n\n# Recalled Context\n\n${recalledContext}`
-        : systemPrompt;
-
-      // Build message history, replacing the last user message with resolved content.
-      // Safe because: `load-turn-history` runs after create-user-message (durable
-      // step ordering), and concurrency lock on conversationId prevents concurrent writes.
-      let historyMessages: Message[] = [...history];
+      // This turn's message, led by a provisional block carrying every
+      // recalled memory: compaction counts that upper bound, and
+      // `render-turn-context` swaps in the stored, deduplicated block.
+      const turnIndex = turnHistory.messageIds.lastIndexOf(turn.id);
+      const turnRow = history[turnIndex];
+      if (turnRow === undefined) {
+        throw new Error(`user message ${turn.id} is missing from the turn's history`);
+      }
       const hasAttachments = resolvedBlocks.some(
         (b) => b.type === "image" || b.type === "document",
       );
-      if (hasAttachments && historyMessages.length > 0) {
-        const lastIdx = historyMessages.length - 1;
-        if (historyMessages[lastIdx]?.role === "user") {
-          historyMessages[lastIdx] = { role: "user", content: resolvedBlocks };
-        }
-      }
+      const turnContextInput = {
+        handledAt: new Date(turn.createdAt),
+        timezone: deps.userTimezone,
+        context: {
+          recalledMemories: recallResult.memories.map((m) => m.content),
+          voiceMode: turnInputs.voiceMode,
+          channelTypes: [],
+          announcedCoreMemoryBlocks: [],
+        },
+      };
+      const provisionalTurnContext = renderTurnContext(turnContextInput);
+      // The row's content, or the resolved image and document blocks it names.
+      let historyMessages: Message[] = history.with(
+        turnIndex,
+        withTurnContext(
+          { role: "user", content: hasAttachments ? resolvedBlocks : turnRow.content },
+          provisionalTurnContext,
+        ),
+      );
 
       // ──── Context window compaction ────
       //
@@ -824,10 +850,12 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const lastTokens = await stepRun("load-last-tokens", () =>
         deps.runInTx((tx) => agentStore.getLastTokens(tx, conversationId)),
       );
+      // The turn context is new input too: recalled memories are in no earlier
+      // request's usage.
       const skipBudgetStrategies = shouldSkipCounting(
         lastTokens?.inputTokens ?? null,
         lastTokens?.outputTokens ?? null,
-        userContentText.length,
+        userContentText.length + provisionalTurnContext.length,
         budget,
       );
 
@@ -853,7 +881,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       let summaryTruncated = false;
 
       const compactResult = await compactMessages(
-        fullPrompt,
+        systemPrompt,
         historyMessages,
         toolDefs,
         {
@@ -1016,12 +1044,34 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         }
       }
 
+      // Deduplicated after compaction: before it, a memory whose only earlier
+      // copy compaction then removes would be dropped.
+      const turnPosition = findTurnContext(historyMessages, provisionalTurnContext);
+      if (turnPosition === -1) throw new Error("compaction dropped the turn's own message");
+      const renderedTurnContext = await step.run("render-turn-context", () =>
+        storeTurnContext(
+          { runInTx: deps.runInTx, agentStore },
+          {
+            ...turnContextInput,
+            messageId: turn.id,
+            context: {
+              ...turnContextInput.context,
+              recalledMemories: newMemories(
+                turnContextInput.context.recalledMemories,
+                shownMemories(historyMessages.toSpliced(turnPosition, 1), turnHistory),
+              ),
+            },
+          },
+        ),
+      );
+      historyMessages = replaceTurnContext(historyMessages, turnPosition, renderedTurnContext);
+
       let result: AgentLoopResult;
       try {
         result = await runStreamingAgentLoop({
           provider,
           model,
-          systemPrompt: fullPrompt,
+          systemPrompt,
           messages: historyMessages,
           tools: turnTools,
           service,
@@ -1049,7 +1099,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           // tool to duplicate. (Not `triggerInboundId`, which a debounce
           // re-fire moves — see `firstInboundId` above.)
           ...(firstInboundId !== "" && { turnKey: firstInboundId }),
-          cache: turnCacheIntent(conversationId),
+          cache: turnCacheIntent(conversationId, "chat"),
           turnLogger,
         });
         // Class C / D degraded off-ramp. The loop exited because a repair
@@ -1330,7 +1380,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // result rather than re-charging the TTS provider; cached value is
       // just the audio length so step state stays small. Long replies
       // (above the per-channel cap) skip TTS entirely — the cap is a
-      // fail-safe; the prompt hint should keep replies short already.
+      // fail-safe; the voice guidance should keep replies short already.
       //
       // Gated on the frozen decision and the reply only, so the step exists
       // on every invocation that needs it; the live capability checks run

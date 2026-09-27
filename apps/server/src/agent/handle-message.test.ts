@@ -22,6 +22,7 @@ import {
   fakeRunInTx,
   invokeInngestFn,
   invokeInngestOnFailure,
+  MOCK_MESSAGE_CREATED_AT,
   type MockStep,
   mockAgentStore,
   mockDeliveryHandle,
@@ -35,6 +36,7 @@ import {
   mockTransportStore,
   mockVoiceBundle,
   mockVoiceResolver,
+  turnContextSent,
 } from "../test/factories.js";
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
@@ -142,7 +144,6 @@ describe("createHandleMessage", () => {
       profile: expect.objectContaining({ id: "profile-1" }),
       rules: [],
       coreMemory: [],
-      voiceMode: false,
       toolDefinitions: expect.any(Array),
     });
   });
@@ -458,6 +459,24 @@ describe("createHandleMessage", () => {
     expect(handle.abort).toHaveBeenCalledWith("Bad Request");
   });
 
+  it("fails without retrying when the turn's row isn't on its inbound cursor", async () => {
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        findUserMessageByInbound: vi.fn().mockResolvedValue(undefined),
+      }),
+    });
+
+    const failure = invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    await expect(failure).rejects.toBeInstanceOf(NonRetriableError);
+    await expect(failure).rejects.toThrow("no user row on inbound inbound-1");
+    expect(deps.runStreamingAgentLoop).not.toHaveBeenCalled();
+  });
+
   // Inngest invokes `onFailure` after retries exhaust (or immediately on a
   // NonRetriableError). Without this handler the run dies silently — no user
   // notification, no downstream signal. The handler reaches the user via
@@ -721,7 +740,7 @@ describe("createHandleMessage", () => {
       agentStore: mockAgentStore({
         listMessages: vi
           .fn()
-          .mockResolvedValue([{ id: "m1", role: "user", content: "summarize this document" }]),
+          .mockResolvedValue([{ id: "msg-1", role: "user", content: "summarize this document" }]),
       }),
       transportStore: mockTransportStore({
         getUnbatchedInbound: vi.fn().mockResolvedValue([
@@ -775,7 +794,7 @@ describe("createHandleMessage", () => {
       agentStore: mockAgentStore({
         listMessages: vi
           .fn()
-          .mockResolvedValue([{ id: "m1", role: "user", content: "see attached" }]),
+          .mockResolvedValue([{ id: "msg-1", role: "user", content: "see attached" }]),
       }),
       transportStore: mockTransportStore({
         getUnbatchedInbound: vi.fn().mockResolvedValue([
@@ -1316,7 +1335,7 @@ describe("createHandleMessage", () => {
       vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
       "loop call",
     )[0];
-    expect(loopParams.cache).toEqual({ key: "conv-1", retention: "short" });
+    expect(loopParams.cache).toEqual({ key: "conv-1", retention: "long" });
   });
 
   it("persists the loop's total input when most of it was read from the cache", async () => {
@@ -1415,7 +1434,7 @@ describe("createHandleMessage", () => {
           { id: "m4", role: "assistant", content: "r2" },
           { id: "m5", role: "user", content: "m3" },
           { id: "m6", role: "assistant", content: "r3" },
-          { id: "m7", role: "user", content: "m4" },
+          { id: "msg-1", role: "user", content: "m4" },
           { id: "m8", role: "assistant", content: "r4" },
         ]),
       }),
@@ -1910,7 +1929,7 @@ describe("createHandleMessage", () => {
             { id: "m4", role: "assistant", content: "r2" },
             { id: "m5", role: "user", content: "m3" },
             { id: "m6", role: "assistant", content: "r3" },
-            { id: "m7", role: "user", content: "m4" },
+            { id: "msg-1", role: "user", content: "m4" },
             { id: "m8", role: "assistant", content: "r4" },
           ]),
         }),
@@ -1977,7 +1996,7 @@ describe("createHandleMessage", () => {
             { id: "m4", role: "assistant", content: "r2" },
             { id: "m5", role: "user", content: "m3" },
             { id: "m6", role: "assistant", content: "r3" },
-            { id: "m7", role: "user", content: "m4" },
+            { id: "msg-1", role: "user", content: "m4" },
             { id: "m8", role: "assistant", content: "r4" },
           ]),
         }),
@@ -2060,7 +2079,7 @@ describe("createHandleMessage", () => {
             { id: "m4", role: "assistant", content: "r2" },
             { id: "m5", role: "user", content: "m3" },
             { id: "m6", role: "assistant", content: "r3" },
-            { id: "m7", role: "user", content: "m4" },
+            { id: "msg-1", role: "user", content: "m4" },
             { id: "m8", role: "assistant", content: "r4" },
           ]),
         }),
@@ -2221,7 +2240,7 @@ describe("createHandleMessage", () => {
           insertMessage,
           listMessages: vi
             .fn()
-            .mockResolvedValue([{ id: "m1", role: "user", content: "hello there" }]),
+            .mockResolvedValue([{ id: "msg-1", role: "user", content: "hello there" }]),
         }),
         attachments: {
           upload: vi.fn().mockResolvedValue("inbound/x"),
@@ -2261,7 +2280,9 @@ describe("createHandleMessage", () => {
       const deps = mockDeps({
         voiceResolver: mockVoiceResolver(mockVoiceBundle({ stt: sttProvider })),
         agentStore: mockAgentStore({
-          listMessages: vi.fn().mockResolvedValue([{ id: "m1", role: "user", content: "speak" }]),
+          listMessages: vi
+            .fn()
+            .mockResolvedValue([{ id: "msg-1", role: "user", content: "speak" }]),
         }),
         attachments: {
           upload: vi.fn().mockResolvedValue("inbound/x"),
@@ -2287,10 +2308,13 @@ describe("createHandleMessage", () => {
         vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
         "runStreamingAgentLoop call",
       )[0];
-      // History was rewritten with the resolved trailing user message
-      // because `hasAttachments` is false for voice — but the transcript
-      // already lives in the persisted text via listMessages' mock.
-      expect(callArgs.messages.at(-1)).toEqual({ role: "user", content: "speak" });
+      // The transcript is the persisted row's text, after the turn context.
+      const last = expectDefined(callArgs.messages.at(-1), "turn message");
+      expect(last.role).toBe("user");
+      expect(last.content).toEqual([
+        { type: "text", text: expect.stringMatching(/^<turn_context>\n/) },
+        { type: "text", text: "speak" },
+      ]);
     });
 
     it("delivers TTS voice via deliverVoice when voice mode is on and within the cap", async () => {
@@ -2461,7 +2485,7 @@ describe("createHandleMessage", () => {
           listMessages: vi
             .fn()
             .mockResolvedValue([
-              { id: "m1", role: "user", content: "check this out\nthe meeting was rescheduled" },
+              { id: "msg-1", role: "user", content: "check this out\nthe meeting was rescheduled" },
             ]),
         }),
         attachments: {
@@ -2539,7 +2563,7 @@ describe("createHandleMessage", () => {
           }),
           listMessages: vi
             .fn()
-            .mockResolvedValue([{ id: "m1", role: "user", content: "what's the weather" }]),
+            .mockResolvedValue([{ id: "msg-1", role: "user", content: "what's the weather" }]),
         }),
         attachments: {
           upload: vi.fn().mockResolvedValue("inbound/x"),
@@ -2729,7 +2753,7 @@ describe("createHandleMessage", () => {
       expect(handle.deliverVoice).not.toHaveBeenCalled();
     });
 
-    it("passes voiceMode: true into prompt assembly when voice is on", async () => {
+    it("states a voice reply in the turn context, leaving the system prompt alone", async () => {
       const handle = mockDeliveryHandle({
         canDeliverVoice: vi.fn().mockReturnValue(true),
       });
@@ -2765,8 +2789,13 @@ describe("createHandleMessage", () => {
         runId: testRunId,
       });
 
+      expect(deps.agentStore.insertOrRecoverTurnContext).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ context: expect.objectContaining({ voiceMode: true }) }),
+      );
+      expect(turnContextSent(deps)).toContain("Reply modality: voice");
       expect(deps.promptSource.assemble).toHaveBeenCalledWith(
-        expect.objectContaining({ voiceMode: true }),
+        expect.not.objectContaining({ voiceMode: expect.anything() }),
       );
     });
 
@@ -3070,14 +3099,9 @@ describe("createHandleMessage", () => {
 
       expect(recall).toHaveBeenCalledTimes(2);
       expect(add).not.toHaveBeenCalled();
-      // Non-vacuity: the first turn's memory reached the prompt.
-      const firstLoopArgs = expectDefined(
-        vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
-        "runStreamingAgentLoop call",
-      )[0];
-      expect(firstLoopArgs.systemPrompt).toBe(
-        "system prompt\n\n# Recalled Context\n\nruns Proxmox",
-      );
+      // Non-vacuity: the first turn's memory reached its turn context.
+      expect(turnContextSent(deps, 0)).toContain("\n- runs Proxmox\n");
+      expect(turnContextSent(deps, 1)).not.toContain("<recalled_memories");
     });
   });
 
@@ -3774,6 +3798,11 @@ describe("durable conversation summaries", () => {
     }));
   }
 
+  /** The turn's row is `id`, which the history must hold for the turn context to lead it. */
+  function turnRow(id: string) {
+    return vi.fn().mockResolvedValue({ id, createdAt: MOCK_MESSAGE_CREATED_AT });
+  }
+
   /**
    * Deps whose compaction pipeline reaches Strategy 2: the fast path is off
    * (`getLastTokens` past the threshold), the count reports above 80% of the
@@ -3796,6 +3825,8 @@ describe("durable conversation summaries", () => {
       agentStore: mockAgentStore({
         getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 800_000, outputTokens: 2_000 }),
         listMessages: vi.fn().mockResolvedValue(overrides.messages ?? rows(8)),
+        // The last user row of rows(7) and rows(8).
+        findUserMessageByInbound: turnRow("m7"),
       }),
     });
     return { deps, chat };
@@ -3829,6 +3860,7 @@ describe("durable conversation summaries", () => {
       agentStore: mockAgentStore({
         getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 1_000, outputTokens: 100 }),
         listMessages: vi.fn().mockResolvedValue(rows(8)),
+        findUserMessageByInbound: turnRow("m7"),
       }),
     });
 
@@ -3893,6 +3925,7 @@ describe("durable conversation summaries", () => {
         getHistoryAfter: vi
           .fn()
           .mockResolvedValue([{ id: "m5", role: "user", content: "and then" }]),
+        findUserMessageByInbound: turnRow("m5"),
       }),
     });
 
@@ -3946,6 +3979,10 @@ describe("durable conversation summaries", () => {
       createdAt: new Date(),
     });
     vi.mocked(deps.agentStore.getHistoryAfter).mockResolvedValue(rows(6));
+    vi.mocked(deps.agentStore.findUserMessageByInbound).mockResolvedValue({
+      id: "m5",
+      createdAt: MOCK_MESSAGE_CREATED_AT,
+    });
 
     await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
       event: testEvent,
@@ -4003,5 +4040,113 @@ describe("durable conversation summaries", () => {
       expect.anything(),
       expect.objectContaining({ messagesSummarized: 2, throughMessageId: "m2" }),
     );
+  });
+
+  describe("recalled memories an earlier turn context shows", () => {
+    const MEMORY = "keeps nightly backups on the NAS";
+
+    /** `m1` carries a stored turn context showing `MEMORY`, and recall returns it again. */
+    function recallingAgain(deps: HandleMessageDeps) {
+      vi.mocked(deps.agentStore.listTurnContexts).mockResolvedValue([
+        {
+          messageId: "m1",
+          rendered: `<turn_context>\nCurrent time: earlier\n\n- ${MEMORY}\n</turn_context>\n\n`,
+          context: {
+            recalledMemories: [MEMORY],
+            voiceMode: false,
+            channelTypes: [],
+            announcedCoreMemoryBlocks: [],
+          },
+        },
+      ]);
+      vi.mocked(deps.agentStore.getProfile).mockResolvedValue({
+        id: "profile-1",
+        userId: null,
+        name: "assistant",
+        basePrompt: "test",
+        model: "claude-sonnet-4-6",
+        summarizationModel: null,
+        extractionModel: null,
+        autoRecall: "always",
+        voiceMode: "auto",
+        toolSet: [],
+        memoryScope: null,
+        profileClass: null,
+        streamChunkChars: 4000,
+        streamEdits: true,
+        codingAutoapproveMode: "off",
+      });
+      vi.mocked(deps.memory.recall).mockResolvedValue({
+        memories: [{ type: "world", content: MEMORY }],
+      });
+    }
+
+    function storedMemories(deps: HandleMessageDeps) {
+      const [, stored] = expectDefined(
+        vi.mocked(deps.agentStore.insertOrRecoverTurnContext).mock.calls[0],
+        "insertOrRecoverTurnContext call",
+      );
+      expect(stored.messageId).toBe("m7");
+      return stored.context.recalledMemories;
+    }
+
+    it("shows the memory again once compaction summarizes its only earlier copy away", async () => {
+      const { deps } = summarizingDeps();
+      recallingAgain(deps);
+
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      // m1 and m2 collapse into the summary, taking m1's turn context with them.
+      expect(deps.agentStore.insertOrRecoverSummary).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ throughMessageId: "m2" }),
+      );
+      expect(storedMemories(deps)).toEqual([MEMORY]);
+    });
+
+    it("leaves the memory out while the earlier turn context is still in the transcript", async () => {
+      const deps = mockDeps({
+        resolveProvider: mockResolver(
+          mockProvider({ countTokens: vi.fn().mockResolvedValue(1_000) }),
+        ),
+        agentStore: mockAgentStore({
+          getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 1_000, outputTokens: 100 }),
+          listMessages: vi.fn().mockResolvedValue(rows(8)),
+          findUserMessageByInbound: turnRow("m7"),
+        }),
+      });
+      recallingAgain(deps);
+
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(deps.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
+      expect(deps.memory.recall).toHaveBeenCalled();
+      expect(storedMemories(deps)).toEqual([]);
+      // The block leads the turn's row by id, not the history's last message.
+      const [, stored] = expectDefined(
+        vi.mocked(deps.agentStore.insertOrRecoverTurnContext).mock.calls[0],
+        "insertOrRecoverTurnContext call",
+      );
+      const { messages } = expectDefined(
+        vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+        "agent loop call",
+      )[0];
+      expect(messages[6]).toEqual({
+        role: "user",
+        content: [
+          { type: "text", text: stored.rendered },
+          { type: "text", text: "turn 7" },
+        ],
+      });
+      expect(messages[7]).toEqual({ role: "assistant", content: "turn 8" });
+    });
   });
 });

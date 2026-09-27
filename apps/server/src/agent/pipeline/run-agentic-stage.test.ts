@@ -1,3 +1,4 @@
+import { NonRetriableError } from "inngest";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
@@ -187,8 +188,8 @@ describe("runAgenticStage", () => {
     const loopParams = expectDefined(h.runStreamingAgentLoop.mock.calls[0], "loop call")[0];
     expect(loopParams.turnKey).toBe("inbound-1");
     expect(loopParams.systemPrompt).toBe("SYSTEM PROMPT");
-    // Same intent as a chat turn: stage and chat turns share the run
-    // conversation's transcript.
+    // Keyed like a chat turn, but short: the narrowed tools below leave no
+    // later chat turn a prefix to read.
     expect(loopParams.cache).toEqual({ key: "conv-1", retention: "short" });
     // Narrowed to the stage allowlist, with the pipeline tool dropped even
     // though the allowlist names it.
@@ -263,6 +264,83 @@ describe("runAgenticStage", () => {
     expect(expectDefined(h.runStreamingAgentLoop.mock.calls[0], "loop call")[0].turnKey).toBe(
       "inbound-earlier",
     );
+    // The recovered prompt's message, found by its inbound, still gets its
+    // turn context.
+    expect(h.agentStore.findUserMessageByInbound).toHaveBeenCalledWith(
+      expect.anything(),
+      "conv-1",
+      "inbound-earlier",
+    );
+    expect(h.agentStore.insertOrRecoverTurnContext).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ messageId: "msg-1" }),
+    );
+  });
+
+  it("fails without retrying rather than run a recovered prompt whose message is missing", async () => {
+    const h = await harness({
+      existingInbound: { id: "inbound-earlier", conversationId: "conv-1" },
+    });
+    vi.mocked(h.agentStore.findUserMessageByInbound).mockResolvedValue(undefined);
+
+    const failure = runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+
+    await expect(failure).rejects.toBeInstanceOf(NonRetriableError);
+    await expect(failure).rejects.toThrow("no user row on inbound inbound-earlier");
+    expect(h.runStreamingAgentLoop).not.toHaveBeenCalled();
+  });
+
+  it("runs from the committed prompt row when persist-stage-prompt replays only its inbound id", async () => {
+    // The step's memoized result is `{ inboundId }`; the message id and time
+    // come from the row `load-turn-transcript` finds on that inbound.
+    const h = await harness();
+    const { memo, steps } = memoizingSteps();
+    memo.set("persist-stage-prompt", { inboundId: "inbound-1" });
+
+    const outcome = await runAgenticStage(h.deps, stageArgs(), steps, log);
+
+    expect(outcome).toMatchObject({ kind: "completed" });
+    expect(h.transportStore.persistInbound).not.toHaveBeenCalled();
+    expect(h.agentStore.insertMessage).not.toHaveBeenCalled();
+    expect(h.agentStore.findUserMessageByInbound).toHaveBeenCalledWith(
+      expect.anything(),
+      "conv-1",
+      "inbound-1",
+    );
+    expect(h.agentStore.insertOrRecoverTurnContext).toHaveBeenCalledTimes(1);
+    expect(h.agentStore.insertOrRecoverTurnContext).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ messageId: "msg-1" }),
+    );
+  });
+
+  it("leads the stage's message with a stored turn context: the time and a text reply", async () => {
+    const h = await harness();
+
+    await runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+
+    const [, stored] = expectDefined(
+      vi.mocked(h.agentStore.insertOrRecoverTurnContext).mock.calls[0],
+      "insertOrRecoverTurnContext call",
+    );
+    expect(stored).toEqual({
+      messageId: "msg-1",
+      rendered:
+        "<turn_context>\nCurrent time: Friday, September 25, 2026, 08:14 (UTC)\n\nReply modality: text\n</turn_context>\n\n",
+      context: {
+        recalledMemories: [],
+        voiceMode: false,
+        channelTypes: [],
+        announcedCoreMemoryBlocks: [],
+      },
+    });
+    const loopParams = expectDefined(h.runStreamingAgentLoop.mock.calls[0], "loop call")[0];
+    expect(loopParams.messages.at(-1)?.content).toEqual([
+      { type: "text", text: stored.rendered },
+      { type: "text", text: "hello" },
+    ]);
+    // Stage prompts run no auto-recall.
+    expect(h.deps.memory.recall).not.toHaveBeenCalled();
   });
 
   it("plans the same step ids on every invocation", async () => {
@@ -277,10 +355,11 @@ describe("runAgenticStage", () => {
       expect.arrayContaining([
         "load-stage-context",
         "persist-stage-prompt",
-        "load-turn-history",
+        "load-turn-transcript",
         "freeze-turn-inputs",
         "assemble-prompt",
         "load-last-tokens",
+        "render-turn-context",
         "persist-new-messages",
         "batch-delivery",
         "extract-artifact",

@@ -34,7 +34,7 @@ The minimum useful system: talk to it, it remembers things.
 - [x] Memory: route intention gate — profile-level `auto_recall` setting (`off/always/heuristic/llm`), heuristic gate skips greetings/acks/continuations
 - [x] `memory_recall` and `memory_retain` tools for the agent
 - [x] Core memory blocks — DB table, `core_memory_update`/`core_memory_read` tools, injected into system prompt
-- [x] Auto-recall — embed user message each turn, inject as `# Recalled Context` in system prompt
+- [x] Auto-recall — embed user message each turn, show the memories in the turn's context block (user-role, stored with the turn, deduplicated against earlier turns)
 - [x] Post-conversation Observer — Inngest function triggered by `conversation/idle` event (Stage 1 evolution)
 - [x] Instruction file (Stage 1 evolution) — correction extraction via chatTyped(), persisted to steeringRules with graduation + consolidation
 - [x] Steering rules table in PostgreSQL — injected into system prompt per invocation

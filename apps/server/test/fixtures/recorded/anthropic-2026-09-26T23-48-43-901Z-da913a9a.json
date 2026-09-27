@@ -1,0 +1,54 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nHere's the picture I ended up printing. What's in it?",
+        "model": "claude-sonnet-5",
+        "turnIndex": 4,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "It's a cheerful cartoon-style ginger tabby kitten with big green eyes, wearing a purple top hat with a red band — sitting against a warm golden-orange background. Cute, playful vibe!"
+      },
+      "recordedTimings": {
+        "ttftMs": 853,
+        "interChunkDelaysMs": [
+          0,
+          644,
+          0,
+          0,
+          0,
+          0,
+          0,
+          44,
+          46,
+          43,
+          46,
+          67,
+          32,
+          41,
+          45,
+          47,
+          44,
+          46,
+          45,
+          732,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          8,
+          8,
+          0
+        ],
+        "totalDurationMs": 2791
+      },
+      "metadata": {
+        "systemHash": "a479dde7",
+        "toolsHash": "5d271761"
+      }
+    }
+  ]
+}

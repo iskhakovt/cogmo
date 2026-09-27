@@ -47,7 +47,12 @@ import {
   summarizationRequest,
 } from "../context.js";
 import { loadConversationContext } from "../conversation/load-conversation-context.js";
-import { loadTurnHistory, summarizedSpan } from "../conversation/load-turn-history.js";
+import {
+  loadTurnHistory,
+  summarizedSpan,
+  TurnRowMissingError,
+} from "../conversation/load-turn-history.js";
+import { storeTurnContext } from "../conversation/store-turn-context.js";
 import type { ImageToolsLoader } from "../image-tools-loader.js";
 import type { AgentLoopResult, StepRunner, StreamingAgentLoopParams } from "../loop.js";
 import type { PromptSource } from "../prompt.js";
@@ -58,6 +63,12 @@ import type { AgentStore } from "../store/index.js";
 import { buildSubAgentTools } from "../subagent/sub-agent-tool-builder.js";
 import type { ToolRegistry } from "../tools.js";
 import { turnCacheIntent } from "../turn-cache-intent.js";
+import {
+  findTurnContext,
+  renderTurnContext,
+  replaceTurnContext,
+  withTurnContext,
+} from "../turn-context.js";
 import { buildTurnService } from "../turn-service.js";
 import { asNonRetriable } from "../turn-step-runner.js";
 import { bindFrozenTools, freezeToolTable } from "../turn-tools.js";
@@ -178,8 +189,43 @@ export async function runAgenticStage(
     }),
   );
 
-  const turnHistory = await steps.run("load-turn-history", () =>
-    loadTurnHistory({ runInTx: deps.runInTx, agentStore: deps.agentStore }, { conversationId }),
+  // Finds the stage's prompt row by its inbound (design/crash-recovery.md →
+  // Where the turn's row comes from).
+  const turnHistory = await steps.run("load-turn-transcript", async () => {
+    try {
+      return await loadTurnHistory(
+        { runInTx: deps.runInTx, agentStore: deps.agentStore },
+        { conversationId, turnInboundId: inboundId },
+      );
+    } catch (err) {
+      if (err instanceof TurnRowMissingError) throw asNonRetriable(err);
+      throw err;
+    }
+  });
+  const turn = turnHistory.turn;
+  if (turn === null) throw new Error("load-turn-transcript returned no turn row");
+  // The stage's message, led by its turn context: the time, and a text reply.
+  // A stage runs no auto-recall, so there is nothing to deduplicate, and the
+  // block compaction counts is the one the render step stores.
+  const turnIndex = turnHistory.messageIds.lastIndexOf(turn.id);
+  const turnRow = turnHistory.messages[turnIndex];
+  if (turnRow === undefined) {
+    throw new Error(`stage prompt message ${turn.id} is missing from the turn's history`);
+  }
+  const turnContextInput = {
+    handledAt: new Date(turn.createdAt),
+    timezone: deps.userTimezone,
+    context: {
+      recalledMemories: [],
+      voiceMode: false,
+      channelTypes: [],
+      announcedCoreMemoryBlocks: [],
+    },
+  };
+  const provisionalTurnContext = renderTurnContext(turnContextInput);
+  const history = turnHistory.messages.with(
+    turnIndex,
+    withTurnContext(turnRow, provisionalTurnContext),
   );
 
   const profile = await deps.runInTx((tx) => deps.agentStore.getProfile(tx, ctx.profileId));
@@ -266,7 +312,7 @@ export async function runAgenticStage(
   const skipBudgetStrategies = shouldSkipCounting(
     lastTokens?.inputTokens ?? null,
     lastTokens?.outputTokens ?? null,
-    prompt.length,
+    prompt.length + provisionalTurnContext.length,
     budget,
   );
 
@@ -275,7 +321,7 @@ export async function runAgenticStage(
   let countCall = 0;
   const compacted = await compactMessages(
     systemPrompt,
-    turnHistory.messages,
+    history,
     toolDefs,
     {
       countTokens: (params: CountTokensParams) => {
@@ -340,6 +386,16 @@ export async function runAgenticStage(
     }
   }
 
+  const turnPosition = findTurnContext(compacted.messages, provisionalTurnContext);
+  if (turnPosition === -1) throw new Error("compaction dropped the stage's own message");
+  const renderedTurnContext = await steps.run("render-turn-context", () =>
+    storeTurnContext(
+      { runInTx: deps.runInTx, agentStore: deps.agentStore },
+      { ...turnContextInput, messageId: turn.id },
+    ),
+  );
+  const messages = replaceTurnContext(compacted.messages, turnPosition, renderedTurnContext);
+
   // Broadcast, not source routing: a stage answers no inbound a session sent,
   // so it goes to every session on the run's (private) conversation.
   const delivery = await deps.deliveryRouter.prepare({
@@ -360,14 +416,14 @@ export async function runAgenticStage(
       provider,
       model: ctx.model,
       systemPrompt,
-      messages: compacted.messages,
+      messages,
       tools: stageTools,
       service,
       maxTokens: limits.maxOutputTokens,
       onEvent: (event) => delivery.push(event),
       stepRun: steps.stepRun,
       turnKey: inboundId,
-      cache: turnCacheIntent(conversationId),
+      cache: turnCacheIntent(conversationId, "stage"),
       turnLogger: log,
     });
     // A degrade drops the iteration that triggered it, so its streamed output

@@ -1,0 +1,41 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nPlease call the echotest echo tool with the message 'PIPELINE_OK' and reply with the result.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "mcp__echotest__echo",
+            "arguments": "{\"message\": \"PIPELINE_OK\"}",
+            "id": "toolu_01TW9JuoCzmLtMBMFB6uv3ft"
+          }
+        ]
+      },
+      "recordedTimings": {
+        "ttftMs": 1105,
+        "interChunkDelaysMs": [
+          0,
+          1,
+          0,
+          298,
+          0,
+          0,
+          0,
+          0,
+          2,
+          0
+        ],
+        "totalDurationMs": 1406
+      },
+      "metadata": {
+        "systemHash": "e4399f51",
+        "toolsHash": "a9863f59"
+      }
+    }
+  ]
+}

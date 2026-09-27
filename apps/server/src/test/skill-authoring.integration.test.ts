@@ -243,8 +243,10 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
       },
     });
 
-    // 6. LLM provider override for the host's agent loop.
-    const anthropicKey = RECORDABLE ? expectDefined(process.env.ANTHROPIC_API_KEY) : "test-key";
+    // 6. LLM provider override for the host's agent loop. llmock records the
+    // host's missing chat turns whenever `RECORD=1`, so it needs the key even
+    // when the Daytona cassette replays.
+    const anthropicKey = IS_RECORD ? expectDefined(process.env.ANTHROPIC_API_KEY) : "test-key";
     const provider = new AnthropicProvider(anthropicKey, inject("llmockBaseUrl"));
 
     // Auto-approve plans so the orchestrator drives plan -> execute

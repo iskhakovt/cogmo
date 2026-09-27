@@ -3999,3 +3999,208 @@ describe("conversation summaries", () => {
     expect(after.map((m) => m.id)).toEqual([ids[1]]);
   });
 });
+
+describe("turn contexts", () => {
+  const INBOUND = "019d0000-0000-7000-8000-0000000000fe";
+  const CONTEXT = {
+    recalledMemories: ["runs Proxmox"],
+    voiceMode: false,
+    channelTypes: [],
+    announcedCoreMemoryBlocks: [{ profileClass: null, key: "identity" }],
+  };
+
+  async function seedUserRow() {
+    const seeded = await seedConversation();
+    return { ...seeded, row: await insertUserRow(seeded.conversationId, seeded.stamp) };
+  }
+
+  /** A user row on `INBOUND`, with the `created_at` the database gave it. */
+  async function insertUserRow(
+    conversationId: string,
+    stamp: { profileId: string; model: string },
+  ): Promise<{ id: string; createdAt: Date }> {
+    const { id } = await tx((trx) =>
+      store.insertMessage(trx, {
+        conversationId,
+        role: "user",
+        content: "hello",
+        lastInboundMessageId: INBOUND,
+        ...stamp,
+      }),
+    );
+    const [row] = await tx((trx) =>
+      trx
+        .select({ id: messages.id, createdAt: messages.createdAt })
+        .from(messages)
+        .where(eq(messages.id, id)),
+    );
+    return expectDefined(row, "inserted user row");
+  }
+
+  it("stores a turn context and lists it by message", async () => {
+    const { conversationId, row } = await seedUserRow();
+
+    const stored = await tx((trx) =>
+      store.insertOrRecoverTurnContext(trx, {
+        messageId: row.id,
+        rendered: "<turn_context>first</turn_context>\n\n",
+        context: CONTEXT,
+      }),
+    );
+
+    expect(stored).toEqual({
+      messageId: row.id,
+      rendered: "<turn_context>first</turn_context>\n\n",
+      context: CONTEXT,
+    });
+    await expect(tx((trx) => store.listTurnContexts(trx, conversationId, null))).resolves.toEqual([
+      stored,
+    ]);
+  });
+
+  it("recovers the stored text when the same message is written twice", async () => {
+    const { conversationId, row } = await seedUserRow();
+    const first = await tx((trx) =>
+      store.insertOrRecoverTurnContext(trx, {
+        messageId: row.id,
+        rendered: "first attempt",
+        context: CONTEXT,
+      }),
+    );
+
+    const retry = await tx((trx) =>
+      store.insertOrRecoverTurnContext(trx, {
+        messageId: row.id,
+        rendered: "a retry rendered at another minute",
+        context: { ...CONTEXT, recalledMemories: [] },
+      }),
+    );
+
+    expect(retry).toEqual(first);
+    const rows = await tx((trx) => store.listTurnContexts(trx, conversationId, null));
+    expect(rows).toHaveLength(1);
+  });
+
+  it("lists a conversation's turn contexts after the cutoff, and no other conversation's", async () => {
+    const { userId, profileId, conversationId, stamp, row: a } = await seedUserRow();
+    // A reply in between, which has no turn context.
+    const reply = await tx((trx) =>
+      store.insertMessage(trx, {
+        conversationId,
+        role: "assistant",
+        content: "reply",
+        lastInboundMessageId: INBOUND,
+        ...stamp,
+      }),
+    );
+    const b = await insertUserRow(conversationId, stamp);
+    const other = (
+      await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: true }))
+    ).id;
+    const c = await insertUserRow(other, stamp);
+    for (const row of [a, b, c]) {
+      await tx((trx) =>
+        store.insertOrRecoverTurnContext(trx, {
+          messageId: row.id,
+          rendered: row.id,
+          context: CONTEXT,
+        }),
+      );
+    }
+
+    async function listed(conversation: string, afterMessageId: string | null) {
+      const rows = await tx((trx) => store.listTurnContexts(trx, conversation, afterMessageId));
+      return rows.map((r) => r.messageId).toSorted();
+    }
+    expect(await listed(conversationId, null)).toEqual([a.id, b.id].toSorted());
+    // The cutoff is exclusive, as `getHistoryAfter`'s is.
+    expect(await listed(conversationId, a.id)).toEqual([b.id]);
+    expect(await listed(conversationId, reply.id)).toEqual([b.id]);
+    expect(await listed(conversationId, b.id)).toEqual([]);
+    expect(await listed(other, null)).toEqual([c.id]);
+  });
+
+  it("refuses a context for a message that doesn't exist", async () => {
+    await expect(
+      tx((trx) =>
+        store.insertOrRecoverTurnContext(trx, {
+          messageId: "019d0000-0000-7000-8000-000000000999",
+          rendered: "orphan",
+          context: CONTEXT,
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("validates the context at the store boundary, on write and on read", async () => {
+    const { conversationId, row } = await seedUserRow();
+    await expect(
+      tx((trx) =>
+        store.insertOrRecoverTurnContext(trx, {
+          messageId: row.id,
+          rendered: "bad",
+          context: { recalledMemories: "not a list" } as never,
+        }),
+      ),
+    ).rejects.toThrow();
+
+    // A row written behind the store's back fails when read.
+    await db.execute(
+      sql`INSERT INTO turn_contexts (message_id, rendered, context) VALUES (${row.id}, 'raw', '{"voiceMode": "yes"}'::jsonb)`,
+    );
+    await expect(tx((trx) => store.listTurnContexts(trx, conversationId, null))).rejects.toThrow();
+  });
+
+  it("finds a turn's user row by its inbound, not a later tool result, in its own conversation", async () => {
+    const { userId, profileId, conversationId, stamp, row } = await seedUserRow();
+    // The turn's reply and its tool results cursor on the same inbound, the
+    // tool results as later user rows, and must not be the one found.
+    await tx((trx) =>
+      store.insertMessages(trx, {
+        conversationId,
+        lastInboundMessageId: INBOUND,
+        ...stamp,
+        messages: [
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "t1", name: "web_search", input: {} }],
+          },
+          {
+            role: "user",
+            content: [{ type: "tool_result", toolUseId: "t1", content: "search result" }],
+          },
+          { role: "assistant", content: "reply" },
+        ],
+        lastMessageOutputTokens: 12,
+      }),
+    );
+    // Another conversation's row on the same cursor stays out of it.
+    const other = (
+      await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: true }))
+    ).id;
+    const otherRow = await insertUserRow(other, stamp);
+
+    await expect(
+      tx((trx) => store.findUserMessageByInbound(trx, conversationId, INBOUND)),
+    ).resolves.toEqual({ id: row.id, createdAt: row.createdAt });
+    await expect(tx((trx) => store.findUserMessageByInbound(trx, other, INBOUND))).resolves.toEqual(
+      { id: otherRow.id, createdAt: otherRow.createdAt },
+    );
+    await expect(
+      tx((trx) =>
+        store.findUserMessageByInbound(trx, conversationId, "019d0000-0000-7000-8000-000000000999"),
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("finds the newer of two user rows on one inbound", async () => {
+    // A re-run insert leaves two; the turn that wrote the second is the one
+    // looking.
+    const { conversationId, stamp } = await seedUserRow();
+    const second = await insertUserRow(conversationId, stamp);
+
+    await expect(
+      tx((trx) => store.findUserMessageByInbound(trx, conversationId, INBOUND)),
+    ).resolves.toEqual({ id: second.id, createdAt: second.createdAt });
+  });
+});
