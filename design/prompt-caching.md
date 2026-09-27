@@ -108,7 +108,7 @@ Reply modality: voice
 </turn_context>
 ```
 
-The recalled-memories element is the untrusted-context envelope: the data-not-instructions header, a `trusted="false"` tag, and a closing tag a memory can't forge — a `</recalled_memories` or `</turn_context` inside a memory renders as `<\/…`. It is left out when the turn has no memories to show. The modality line is always there, so a text turn after a voice turn says so rather than leaving the model to infer it.
+The recalled-memories element is the untrusted-context envelope: the data-not-instructions header, a `trusted="false"` tag, and a closing tag a memory can't forge — a `</recalled_memories` or `</turn_context` inside a memory, in any case and with whitespace around the slash, renders with a backslash before the slash (`<\/…`). It is left out when the turn has no memories to show. The modality line is always there, so a text turn after a voice turn says so rather than leaving the model to infer it.
 
 **Rendered once**, by a `render-turn-context` step that runs after compaction (see Deduplication). The step writes the text to `turn_contexts` and returns it; the loop sends that string, and later turns load it from the table. The bytes are identical by construction rather than by re-rendering.
 

@@ -101,10 +101,12 @@ function formatTime(at: Date, timezone: string): string {
 
 /**
  * A memory can hold text from a web page or a tool result, so its content
- * must not be able to close the envelope and speak outside it.
+ * must not be able to close the envelope and speak outside it. Any closing
+ * tag a lenient reader would honor — any case, whitespace around the slash —
+ * gets a backslash before its slash.
  */
 function escapeEnvelope(text: string): string {
-  return text.replace(/<\/(recalled_memories|turn_context)/gi, "<\\/$1");
+  return text.replace(/<(\s*)\/(\s*(?:recalled_memories|turn_context))/gi, "<$1\\/$2");
 }
 
 /** `message` with `rendered` as its leading block, ahead of the user's own content. */
