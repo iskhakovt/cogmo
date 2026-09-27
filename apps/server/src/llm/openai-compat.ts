@@ -10,22 +10,21 @@ import { RefusalError } from "./fallback.js";
 import { withFailureLogging } from "./logging-fetch.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
-import type {
-  CacheIntent,
-  ChatParams,
-  ChatStreamResult,
-  ContentBlock,
-  CountTokensParams,
-  LlmResponse,
-  Message,
-  StopReason,
-  StreamEvent,
-  TextBlock,
-  ToolDefinition,
-  Usage,
+import {
+  type CacheIntent,
+  type ChatParams,
+  type ChatStreamResult,
+  type ContentBlock,
+  type CountTokensParams,
+  DEFAULT_MAX_TOKENS,
+  type LlmResponse,
+  type Message,
+  type StopReason,
+  type StreamEvent,
+  type TextBlock,
+  type ToolDefinition,
+  type Usage,
 } from "./types.js";
-
-const DEFAULT_MAX_TOKENS = 8192;
 
 /**
  * Upper bound on inlined text-document content per document, in characters.

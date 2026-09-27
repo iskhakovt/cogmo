@@ -31,8 +31,15 @@ import {
 } from "./errors.js";
 import { RefusalError } from "./fallback.js";
 import { toObjectJsonSchema } from "./json-schema.js";
+import { lookupLitellm } from "./litellm-data.js";
 import type { LlmProvider } from "./provider.js";
-import type { LlmResponse, Message, StopReason, Usage } from "./types.js";
+import {
+  DEFAULT_MAX_TOKENS,
+  type LlmResponse,
+  type Message,
+  type StopReason,
+  type Usage,
+} from "./types.js";
 import { sumUsage, ZERO_USAGE } from "./usage.js";
 
 /**
@@ -129,13 +136,17 @@ const DEFAULT_REPAIR: Required<ChatTypedRepair> = {
  * handles the throw. A reply that is not the model's whole answer throws
  * the same way before it is parsed: {@link OutputCutOffError} for one cut
  * off by the output cap or the context window, {@link RefusalError} for a
- * refusal.
+ * refusal. The first cut-off at the output cap is re-requested instead, at
+ * twice the cap held to the model's maximum output, spending no feedback
+ * retry; the raised cap stays for the rest of the call.
  */
 export async function chatTyped<T>(params: TypedChatParams<T>): Promise<TypedChatResult<T>> {
   const { provider, model, system, schema, name } = params;
   const repair: Required<ChatTypedRepair> = { ...DEFAULT_REPAIR, ...params.repair };
   const jsonSchema = toObjectJsonSchema(schema);
   const messages: Message[] = [...params.messages];
+  let maxTokens = params.maxTokens;
+  let capRaised = false;
   let totalUsage: Readonly<Usage> = ZERO_USAGE;
   let retries = 0;
 
@@ -149,7 +160,7 @@ export async function chatTyped<T>(params: TypedChatParams<T>): Promise<TypedCha
         system,
         messages,
         responseFormat: { type: "json_schema", name, schema: jsonSchema },
-        ...(params.maxTokens != null && { maxTokens: params.maxTokens }),
+        ...(maxTokens !== undefined && { maxTokens }),
       });
     } catch (err) {
       if (!(err instanceof MissingToolCallError)) throw err;
@@ -167,6 +178,18 @@ export async function chatTyped<T>(params: TypedChatParams<T>): Promise<TypedCha
     }
 
     totalUsage = sumUsage(totalUsage, response.usage);
+    if (response.stopReason === "max_tokens" && !capRaised) {
+      const raised = raisedOutputCap(model, maxTokens ?? DEFAULT_MAX_TOKENS);
+      if (raised !== undefined) {
+        logger.warn(
+          { name, model, maxTokens: raised },
+          "chatTyped: reply cut off at the output cap, re-requesting with a higher cap",
+        );
+        maxTokens = raised;
+        capRaised = true;
+        continue;
+      }
+    }
     assertWholeAnswer(response.stopReason, name);
 
     const text = extractText(response.content);
@@ -201,6 +224,16 @@ export async function chatTyped<T>(params: TypedChatParams<T>): Promise<TypedCha
 
     return { data, usage: totalUsage, model: response.model, retries };
   }
+}
+
+/**
+ * Twice `cap`, held to the model's maximum output where the LiteLLM snapshot
+ * knows it; `undefined` when that leaves no room above `cap`.
+ */
+function raisedOutputCap(model: string, cap: number): number | undefined {
+  const ceiling = lookupLitellm(model)?.maxOutputTokens ?? Number.POSITIVE_INFINITY;
+  const raised = Math.min(cap * 2, ceiling);
+  return raised > cap ? raised : undefined;
 }
 
 /**

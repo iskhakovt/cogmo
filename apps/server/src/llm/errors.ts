@@ -53,8 +53,9 @@ export class ToolArgsCutOffError extends ProviderProtocolError {
 }
 
 /**
- * A structured-output reply the output cap or the context window cut off,
- * which `chatTyped` refuses rather than repairs.
+ * A structured-output reply the context window cut off, or the output cap
+ * even after `chatTyped` raised it, which `chatTyped` refuses rather than
+ * repairs.
  */
 export class OutputCutOffError extends ProviderProtocolError {
   constructor(name: string, stopReason: "max_tokens" | "context_overflow") {

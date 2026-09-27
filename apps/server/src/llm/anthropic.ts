@@ -12,21 +12,20 @@ import {
 import { withFailureLogging } from "./logging-fetch.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
-import type {
-  ChatParams,
-  ChatStreamResult,
-  ContentBlock,
-  CountTokensParams,
-  LlmResponse,
-  Message,
-  ResponseFormat,
-  StopReason,
-  StreamEvent,
-  ToolDefinition,
-  Usage,
+import {
+  type ChatParams,
+  type ChatStreamResult,
+  type ContentBlock,
+  type CountTokensParams,
+  DEFAULT_MAX_TOKENS,
+  type LlmResponse,
+  type Message,
+  type ResponseFormat,
+  type StopReason,
+  type StreamEvent,
+  type ToolDefinition,
+  type Usage,
 } from "./types.js";
-
-const DEFAULT_MAX_TOKENS = 8192;
 
 export interface AnthropicProviderOptions {
   /**

@@ -125,13 +125,36 @@ describe("chatTyped", () => {
     expect(provider.chat).toHaveBeenCalledTimes(1);
   });
 
-  it.each<[string, string, StopReason]>([
+  it.each<[string, string]>([
     // jsonrepair closes this into a Zod-valid value the model never finished.
-    ["that jsonrepair would complete", '{"name":"Alice","age":30', "max_tokens"],
-    ["that fails validation", '{"name":"Alice","ag', "max_tokens"],
-    ["at the context window", '{"name":"Alice","age":30', "context_overflow"],
-  ])("refuses a reply cut off %s, spending no retry", async (_label, text, stopReason) => {
-    const provider = mockProvider([{ text, stopReason }, { text: '{"name":"Alice","age":30}' }]);
+    ["that jsonrepair would complete", '{"name":"Alice","age":30'],
+    ["that fails validation", '{"name":"Alice","ag'],
+  ])("refuses a reply cut off %s at the raised cap too", async (_label, text) => {
+    const provider = mockProvider([
+      { text, stopReason: "max_tokens" },
+      { text, stopReason: "max_tokens" },
+      { text: '{"name":"Alice","age":30}' },
+    ]);
+
+    await expect(
+      chatTyped({
+        provider,
+        model: "test-model",
+        system: "sys",
+        messages: [{ role: "user", content: "Alice is 30" }],
+        schema: PersonSchema,
+        name: "extract_person",
+      }),
+    ).rejects.toBeInstanceOf(OutputCutOffError);
+
+    expect(provider.chat).toHaveBeenCalledTimes(2);
+  });
+
+  it("refuses a reply cut off at the context window, with no retry", async () => {
+    const provider = mockProvider([
+      { text: '{"name":"Alice","age":30', stopReason: "context_overflow" },
+      { text: '{"name":"Alice","age":30}' },
+    ]);
 
     await expect(
       chatTyped({
@@ -145,6 +168,77 @@ describe("chatTyped", () => {
     ).rejects.toBeInstanceOf(OutputCutOffError);
 
     expect(provider.chat).toHaveBeenCalledTimes(1);
+  });
+
+  describe("a reply cut off at the output cap", () => {
+    const CUT_OFF = { text: '{"name":"Alice","age":30', stopReason: "max_tokens" as const };
+    const WHOLE = { text: '{"name":"Alice","age":30}' };
+
+    function call(provider: LlmProvider, extra: { model?: string; maxTokens?: number } = {}) {
+      return chatTyped({
+        provider,
+        model: extra.model ?? "test-model",
+        system: "sys",
+        messages: [{ role: "user", content: "Alice is 30" }],
+        schema: PersonSchema,
+        name: "extract_person",
+        ...(extra.maxTokens !== undefined && { maxTokens: extra.maxTokens }),
+      });
+    }
+
+    function request(provider: LlmProvider, index: number) {
+      return expectDefined(vi.mocked(provider.chat).mock.calls[index], `call ${index}`)[0];
+    }
+
+    it("is re-requested once at twice the default cap, spending no feedback retry", async () => {
+      const provider = mockProvider([CUT_OFF, WHOLE]);
+
+      const result = await call(provider);
+
+      expect(result.data).toEqual({ name: "Alice", age: 30 });
+      expect(result.retries).toBe(0);
+      expect(result.usage).toEqual({ inputTokens: 20, outputTokens: 10 });
+      expect(request(provider, 0)).not.toHaveProperty("maxTokens");
+      expect(request(provider, 1)).toMatchObject({
+        maxTokens: 16_384,
+        messages: [{ role: "user", content: "Alice is 30" }],
+      });
+    });
+
+    it("doubles the caller's cap", async () => {
+      const provider = mockProvider([CUT_OFF, WHOLE]);
+
+      await call(provider, { maxTokens: 2048 });
+
+      expect(request(provider, 0).maxTokens).toBe(2048);
+      expect(request(provider, 1).maxTokens).toBe(4096);
+    });
+
+    it("holds the raised cap to the model's maximum output", async () => {
+      const provider = mockProvider([CUT_OFF, WHOLE]);
+
+      await call(provider, { model: "claude-sonnet-5", maxTokens: 40_000 });
+
+      expect(request(provider, 1).maxTokens).toBe(64_000);
+    });
+
+    it("fails at once when the cap is already the model's maximum output", async () => {
+      const provider = mockProvider([CUT_OFF, WHOLE]);
+
+      await expect(
+        call(provider, { model: "claude-sonnet-5", maxTokens: 64_000 }),
+      ).rejects.toBeInstanceOf(OutputCutOffError);
+      expect(provider.chat).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps the raised cap for a feedback retry", async () => {
+      const provider = mockProvider([CUT_OFF, { text: '{"name":"Alice"}' }, WHOLE]);
+
+      const result = await call(provider);
+
+      expect(result.retries).toBe(1);
+      expect(request(provider, 2).maxTokens).toBe(16_384);
+    });
   });
 
   it("refuses a refusal, even one whose text validates, spending no retry", async () => {
