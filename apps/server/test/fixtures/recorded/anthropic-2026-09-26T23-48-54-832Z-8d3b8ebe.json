@@ -1,0 +1,39 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nAgain, no bullet points or numbered lists with me, please. Plain sentences only.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 1,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "Understood — I'll stick to plain sentences from here on."
+      },
+      "recordedTimings": {
+        "ttftMs": 756,
+        "interChunkDelaysMs": [
+          0,
+          1692,
+          0,
+          1,
+          0,
+          0,
+          0,
+          85,
+          2,
+          3,
+          2,
+          1,
+          2,
+          0
+        ],
+        "totalDurationMs": 2544
+      },
+      "metadata": {
+        "systemHash": "9f41335d",
+        "toolsHash": "837ba743"
+      }
+    }
+  ]
+}

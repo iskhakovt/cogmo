@@ -1,15 +1,11 @@
 /**
- * The cache intent for one agent turn's transcript. Shared by `handle-message`
- * and the pipeline stage turn, which alternate in a run conversation and so
- * must cache it the same way.
- *
- * Short retention: the system prompt changes between turns, so the cache is
- * read within a turn and rarely by the next one (see
- * design/prompt-caching.md → Retention).
+ * A turn's cache intent, keyed by its conversation: 1-hour for chat turns,
+ * 5-minute for stage turns until they share the chat prefix
+ * (design/prompt-caching.md → Retention).
  */
 
 import type { CacheIntent } from "../llm/types.js";
 
-export function turnCacheIntent(conversationId: string): CacheIntent {
-  return { key: conversationId, retention: "short" };
+export function turnCacheIntent(conversationId: string, turn: "chat" | "stage"): CacheIntent {
+  return { key: conversationId, retention: turn === "chat" ? "long" : "short" };
 }

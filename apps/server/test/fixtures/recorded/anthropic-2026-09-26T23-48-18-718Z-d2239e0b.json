@@ -1,0 +1,106 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nDraw me a lighthouse on a rocky coast at dusk, for the wall of my study.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "generate_image",
+            "arguments": "{\"prompt\": \"A tall white lighthouse standing on a rugged rocky coastline at dusk, dramatic sky in deep orange, purple and blue hues, waves crashing against dark wet rocks with sea spray, warm glowing light beaming from the lighthouse lamp, a few distant seabirds, painterly realistic style with rich color grading, moody atmospheric lighting, high detail, wide view suitable for a framed wall print\", \"model\": \"flux-pro-ultra\", \"aspectRatio\": \"4:3\"}",
+            "id": "toolu_011Kw9qBSocp6Bgowhu5hPXU"
+          }
+        ]
+      },
+      "recordedTimings": {
+        "ttftMs": 924,
+        "interChunkDelaysMs": [
+          0,
+          866,
+          0,
+          1,
+          0,
+          0,
+          0,
+          2445,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          224,
+          0,
+          0,
+          0,
+          206,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0
+        ],
+        "totalDurationMs": 4669
+      },
+      "metadata": {
+        "systemHash": "a479dde7",
+        "toolsHash": "5d271761"
+      }
+    }
+  ]
+}

@@ -1,0 +1,93 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\ndraw me a cat in a hat",
+        "model": "claude-sonnet-5",
+        "turnIndex": 1,
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "Here's your cat in a hat!",
+        "toolCalls": [
+          {
+            "name": "generate_image",
+            "arguments": "{\"prompt\": \"A whimsical illustration of a fluffy orange tabby cat wearing a tall red-and-white striped top hat, sitting upright with a curious expression, whiskers twitching, soft studio lighting, warm color palette, playful children's book illustration style, clean background\", \"model\": \"flux-dev\", \"aspectRatio\": \"1:1\"}",
+            "id": "toolu_01DubFJSRznackfp2XRLr27c"
+          }
+        ]
+      },
+      "recordedTimings": {
+        "ttftMs": 672,
+        "interChunkDelaysMs": [
+          341,
+          143,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          131,
+          1,
+          0,
+          1447,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          4,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          84,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0
+        ],
+        "totalDurationMs": 2825
+      },
+      "metadata": {
+        "systemHash": "22d5c167",
+        "toolsHash": "8ae2ba59"
+      }
+    }
+  ]
+}

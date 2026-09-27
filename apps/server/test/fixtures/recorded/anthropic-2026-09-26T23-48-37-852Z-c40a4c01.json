@@ -1,0 +1,51 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: voice\n</turn_context>\n\nHello, this is the voice integration test.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "memory_recall",
+            "arguments": "{\"query\": \"user name, occupation, timezone, communication preferences\"}",
+            "id": "toolu_018KhfM6twTx122Jp7YyBnDN"
+          }
+        ]
+      },
+      "recordedTimings": {
+        "ttftMs": 1053,
+        "interChunkDelaysMs": [
+          0,
+          1080,
+          0,
+          0,
+          0,
+          0,
+          0,
+          107,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0
+        ],
+        "totalDurationMs": 2241
+      },
+      "metadata": {
+        "systemHash": "22d5c167",
+        "toolsHash": "8ae2ba59"
+      }
+    }
+  ]
+}

@@ -71,7 +71,7 @@ Strategy 2 is the exception, because it is the only strategy that costs an LLM c
 
 The table is **append-only**. Re-compaction inserts a new row summarizing the previous summary plus everything that arrived since; the loader reads the newest row per conversation. This preserves the "prefer immutable rows" rule and leaves an audit trail of how often a conversation has been compacted and by which path.
 
-**The raw transcript is never rewritten.** `conversation_summaries` is an overlay: `loadTurnHistory` (`src/agent/conversation/load-turn-history.ts`) reads the widest summary, drops every message at or before its cutoff, and prepends the summary as one user message. The Observer and the web history read keep taking the complete transcript through `listMessages`, so fact extraction is unaffected — the collapse is LLM-facing only. Dropping the table restores full-history behavior with no migration.
+**The raw transcript is never rewritten.** `conversation_summaries` is an overlay: `loadTurnHistory` (`src/agent/conversation/load-turn-history.ts`) reads the widest summary, drops every message at or before its cutoff, and prepends the summary as one user message. It also leads each turn-starting message with the turn context it was sent with ([prompt-caching.md](prompt-caching.md) → Turn Context), so both summarization paths read the prefix as the model saw it. The Observer and the web history read keep taking the complete transcript through `listMessages`, so fact extraction is unaffected — the collapse and the turn contexts are LLM-facing only. Dropping the table restores full-history behavior with no migration.
 
 **One bullet above no longer holds**, and it is the real cost of durability: *"strategy changes take effect immediately without data migration"* is now false for the summarization prompt and model. A stored summary is never re-derived — the raw prefix behind it is never revisited — so improving `SUMMARIZATION_PROMPT` or switching `summarizationModel` can only produce a summary *of the old summary* on spans already compacted, while the old text keeps re-entering the context verbatim. Accepted: re-deriving would mean re-billing every historical span on every prompt tweak, which is the cost the table exists to remove. If a prompt change ever needs to reach old spans, the mechanism is deleting the affected rows so the next turn re-summarizes from the transcript, which is still intact.
 
@@ -97,7 +97,7 @@ What that catches is a turn that committed before the re-read, which covers the 
 
 An empty read-back is neither outcome. The insert committed and this snapshot is taken after that commit, so seeing nothing contradicts it — `nothing_new` would say the summary was discarded and `compacted` would promise a durability the check just failed to confirm. The driver raises instead, which `/compact` surfaces as a failure the user can act on by running it again. Failures become a `compaction_failed` Transport error rather than an escaping rejection: the driver runs inline with no retry budget behind it, so a throw would otherwise leave the user's "Compacting…" ack as the last thing they see.
 
-A `/compact` racing an in-flight turn is safe by construction: the turn froze its history inside the durable `load-turn-history` step, and a manual compaction only ever covers a prefix of what that turn already read.
+A `/compact` racing an in-flight turn is safe by construction: the turn froze its history inside the durable `load-turn-transcript` step, and a manual compaction only ever covers a prefix of what that turn already read.
 
 ## Strategy Pipeline
 
@@ -266,7 +266,7 @@ Before the next turn, estimate: `lastInputTokens + lastOutputTokens + newContent
 
 Both terms matter. The starting input for turn `N+1` is turn `N`'s input **plus** turn `N`'s output — the assistant's reply is persisted into history and becomes part of next turn's context. Tracking input alone underestimates by one response worth of tokens, which is enough to slip past the 50% threshold and skip counting when the conversation is actually close to the limit.
 
-The estimate for new user content can use chars/4 — it only needs to be conservative enough to avoid skipping counting when the conversation is actually near the limit.
+The estimate for new user content can use chars/4 — it only needs to be conservative enough to avoid skipping counting when the conversation is actually near the limit. New content is the user's text plus the turn's context block, recalled memories included, which no earlier request carried.
 
 The estimate needs `inputTokens` to be the total prompt size. Anthropic's `input_tokens` counts only tokens after the last cache breakpoint, so once the transcript is cached the adapter must add the cache reads and writes back in, or the fast path sees a near-empty conversation and skips the budget strategies — see [prompt-caching.md](prompt-caching.md) → Usage Accounting.
 

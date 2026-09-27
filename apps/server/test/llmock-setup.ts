@@ -1,6 +1,7 @@
 import type http from "node:http";
 import { type ChatCompletionRequest, LLMock } from "@copilotkit/aimock";
 import { HAPPENED_IN_RE, normalizeHappenedIn } from "../src/test/llmock-happened-in.js";
+import { normalizeTurnContext } from "../src/test/llmock-turn-context.js";
 
 const FIXTURE_DIR = "./test/fixtures/recorded";
 
@@ -32,6 +33,8 @@ const countTokensHandler = {
   },
 };
 
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+
 /**
  * Strip timestamps, UUIDs, and other dynamic content from LLM prompts for
  * deterministic matching. With requestTransform set, llmock uses exact match
@@ -39,11 +42,12 @@ const countTokensHandler = {
  */
 function normalizeContent(text: string): string {
   return (
-    text
+    // The turn context's time line and recalled memories (see its module).
+    normalizeTurnContext(text)
       // ISO 8601 timestamps → [TS]
       .replace(/\d{4}-\d{2}-\d{2}T[\d:.]+(\+[\d:]+|Z)/g, "[TS]")
       // UUIDs → [UUID]
-      .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "[UUID]")
+      .replace(UUID_RE, "[UUID]")
       // Weekday + long-form dates ("Monday, January 1, 2026") → [DATE]
       .replace(
         /\b(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+\w+\s+\d{1,2},\s+\d{4}\b/g,
@@ -89,6 +93,16 @@ function requestTransform(req: ChatCompletionRequest): ChatCompletionRequest {
   return {
     ...req,
     messages: req.messages.map((m, i) => {
+      // The OpenAI-compatible adapter sends an image turn as content parts,
+      // its turn context among the text ones.
+      if (Array.isArray(m.content)) {
+        return {
+          ...m,
+          content: m.content.map((part) =>
+            part.type === "text" ? { ...part, text: normalizeContent(part.text) } : part,
+          ),
+        };
+      }
       if (typeof m.content !== "string") return m;
       const content = normalizeContent(m.content);
       return {
@@ -99,8 +113,12 @@ function requestTransform(req: ChatCompletionRequest): ChatCompletionRequest {
     // Hindsight embeds a fact as `what | When: … | Involving: … | why`; keying
     // on the text before the first " | " keeps the key to the fact itself.
     // aimock joins a request's texts with a space, so a multi-text request
-    // keys on everything up to the first fact's " | ".
-    embeddingInput: normalizeHappenedIn(req.embeddingInput?.split(" | ")[0]),
+    // keys on everything up to the first fact's " | ". An image turn's recall
+    // query is its inbound blocks as JSON, attachment paths (UUIDs) included.
+    embeddingInput: normalizeHappenedIn(req.embeddingInput?.split(" | ")[0])?.replace(
+      UUID_RE,
+      "[UUID]",
+    ),
   };
 }
 

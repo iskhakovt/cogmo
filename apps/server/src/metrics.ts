@@ -79,10 +79,9 @@ export const agentIterations = {
 };
 
 /**
- * Auto-recall failures, labeled by `bank_id`. The turn degrades to a system
- * prompt with no `# Recalled Context` block rather than failing, so a memory
- * outage otherwise shows up only as an agent that seems to have forgotten
- * things.
+ * Auto-recall failures, labeled by `bank_id`. The turn degrades to a turn
+ * context with no recalled memories rather than failing, so a memory outage
+ * otherwise shows up only as an agent that seems to have forgotten things.
  *
  * Only the auto-recall path counts, because only it fails silently. The
  * `memory_recall` tool hands its failure to the model as an `is_error`
