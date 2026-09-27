@@ -25,17 +25,21 @@ export interface ScopedCoreMemoryBlock {
  * without a class, or the profile's class and its restricted flag.
  */
 export type CoreMemoryScope =
-  | { kind: "none" }
-  | { kind: "unclassed" }
-  | { kind: "classed"; profileClass: string; restricted: boolean };
+  | { readonly kind: "none" }
+  | { readonly kind: "unclassed" }
+  | { readonly kind: "classed"; readonly profileClass: string; readonly restricted: boolean };
 
 /** What one turn sees of core memory: its scope and the blocks visible to it, in render order. */
 export interface CoreMemoryView {
-  scope: CoreMemoryScope;
-  blocks: ReadonlyArray<ScopedCoreMemoryBlock>;
+  readonly scope: CoreMemoryScope;
+  readonly blocks: ReadonlyArray<ScopedCoreMemoryBlock>;
 }
 
-/** The view `scope` has of the user's core memory. */
+/**
+ * The view `scope` has of the user's core memory. An unrestricted class's
+ * own `identity` is left out: a turn frozen restricted can still write one
+ * after `/classes unrestrict` lands, and the command deletes it when re-run.
+ */
 export async function readCoreMemory(
   tx: Transaction,
   store: Pick<AgentStore, "getCoreMemoryBlocks">,
@@ -47,7 +51,14 @@ export async function readCoreMemory(
       return { scope, blocks: [] };
     case "unclassed":
       return { scope, blocks: await store.getCoreMemoryBlocks(tx, userId, null) };
-    case "classed":
-      return { scope, blocks: await store.getCoreMemoryBlocks(tx, userId, scope.profileClass) };
+    case "classed": {
+      const blocks = await store.getCoreMemoryBlocks(tx, userId, scope.profileClass);
+      return {
+        scope,
+        blocks: scope.restricted
+          ? blocks
+          : blocks.filter((b) => b.profileClass === null || b.key !== IDENTITY_BLOCK_KEY),
+      };
+    }
   }
 }
