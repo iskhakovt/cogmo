@@ -1,6 +1,10 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { logger } from "../logger.js";
-import { hasOpenObject, toStructuredOutputSchema } from "./anthropic-output-schema.js";
+import {
+  hasOpenObject,
+  hasRecursiveRef,
+  toStructuredOutputSchema,
+} from "./anthropic-output-schema.js";
 import { cacheMarker } from "./cache-marker.js";
 import { extractText } from "./content.js";
 import {
@@ -425,11 +429,12 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
 
 /**
  * Whether a `responseFormat` request goes through structured outputs. A
- * schema with an open node ({@link hasOpenObject}), which the grammar can't
- * express, takes the tool path: a synthetic tool carrying the schema.
+ * schema the grammar can't express, with an open node ({@link hasOpenObject})
+ * or a recursive `$ref` ({@link hasRecursiveRef}), takes the tool path: a
+ * synthetic tool carrying the schema.
  */
 function takesStructuredOutput(format: ResponseFormat): boolean {
-  return !hasOpenObject(format.schema);
+  return !hasOpenObject(format.schema) && !hasRecursiveRef(format.schema);
 }
 
 /** The tool path's request for its call, in the system prompt and in a re-ask. */
@@ -560,6 +565,10 @@ function toAnthropicTool(tool: ToolDefinition): Anthropic.Tool {
   }
   if (tool.parameters.required !== undefined) {
     inputSchema.required = tool.parameters.required;
+  }
+  // The definitions a `$ref` names, without which the ref dangles.
+  for (const keyword of ["$defs", "definitions"]) {
+    if (tool.parameters[keyword] !== undefined) inputSchema[keyword] = tool.parameters[keyword];
   }
   return {
     name: tool.name,

@@ -37,6 +37,9 @@ const TYPING_KEYWORDS = ["type", "anyOf", "oneOf", "allOf", "$ref", "enum", "con
 /** Keywords whose value maps names to subschemas. */
 const SUBSCHEMA_MAPS: ReadonlySet<string> = new Set(["properties", "$defs", "definitions"]);
 
+/** Keywords that hold definitions for `$ref` to name. */
+const DEFINITIONS: ReadonlySet<string> = new Set(["$defs", "definitions"]);
+
 /** Keywords whose value is a subschema or a list of them. */
 const SUBSCHEMA_LISTS: ReadonlySet<string> = new Set(["anyOf", "oneOf", "allOf", "items"]);
 
@@ -55,6 +58,58 @@ export function hasOpenObject(node: unknown): boolean {
   return Object.entries(node).some(([keyword, value]) =>
     subschemasOf(keyword, value).some(hasOpenObject),
   );
+}
+
+/**
+ * Whether a schema refers to itself: a local `$ref` whose target, followed
+ * through the refs inside it, leads back to itself. Zod emits one for a
+ * schema nested in itself: `$ref: "#"` at the root, a `$defs` entry below
+ * it. The grammar takes neither. A cycle through definitions is a 400; a
+ * root that refers to itself is accepted, but the reply can't contain the
+ * nested value. A ref that resolves nowhere counts as no cycle.
+ */
+export function hasRecursiveRef(schema: JsonSchema): boolean {
+  const explored = new Set<string>();
+  const leadsBack = (pointer: string, path: ReadonlySet<string>): boolean => {
+    if (path.has(pointer)) return true;
+    if (explored.has(pointer)) return false;
+    const target = resolvePointer(schema, pointer);
+    if (target === undefined) return false;
+    const onPath = new Set(path).add(pointer);
+    if (localRefs(target).some((ref) => leadsBack(ref, onPath))) return true;
+    explored.add(pointer);
+    return false;
+  };
+  return leadsBack("#", new Set());
+}
+
+/**
+ * The local refs a node's grammar would expand: those in its own subschemas,
+ * but not in the definitions it holds, which count only where referenced.
+ */
+function localRefs(node: unknown): ReadonlyArray<string> {
+  if (!R.isPlainObject(node)) return [];
+  const own = typeof node.$ref === "string" && node.$ref.startsWith("#") ? [node.$ref] : [];
+  return [
+    ...own,
+    ...Object.entries(node).flatMap(([keyword, value]) =>
+      DEFINITIONS.has(keyword) ? [] : subschemasOf(keyword, value).flatMap(localRefs),
+    ),
+  ];
+}
+
+/** The node a local JSON Pointer ref (`#`, `#/$defs/Name`) names, if any. */
+function resolvePointer(root: unknown, pointer: string): unknown {
+  if (pointer === "#") return root;
+  if (!pointer.startsWith("#/")) return undefined;
+  return pointer
+    .slice(2)
+    .split("/")
+    .map((segment) => segment.replaceAll("~1", "/").replaceAll("~0", "~"))
+    .reduce<unknown>((node, segment) => {
+      if (Array.isArray(node)) return node[Number(segment)];
+      return R.isPlainObject(node) && Object.hasOwn(node, segment) ? node[segment] : undefined;
+    }, root);
 }
 
 /**

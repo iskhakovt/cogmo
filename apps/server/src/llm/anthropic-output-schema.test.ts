@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { hasOpenObject, toStructuredOutputSchema } from "./anthropic-output-schema.js";
+import { z } from "zod";
+import {
+  hasOpenObject,
+  hasRecursiveRef,
+  toStructuredOutputSchema,
+} from "./anthropic-output-schema.js";
+import { toObjectJsonSchema } from "./json-schema.js";
 import type { JsonSchema } from "./types.js";
 
 /** A closed object with one property, `value`, carrying `node`. */
@@ -295,5 +301,120 @@ describe("hasOpenObject", () => {
         }),
       ),
     ).toBe(false);
+  });
+});
+
+describe("hasRecursiveRef", () => {
+  const TreeNode = z.object({
+    name: z.string(),
+    get children() {
+      return z.array(TreeNode);
+    },
+  });
+
+  const Chain = z.object({
+    value: z.string(),
+    get next() {
+      return Chain.optional();
+    },
+  });
+
+  const Id = z.string().meta({ id: "Id" });
+
+  it.each<[string, JsonSchema]>([
+    ["a schema without $ref", wrap({ type: "string" })],
+    [
+      "a $ref to a definition without refs",
+      { ...wrap({ $ref: "#/$defs/S" }), $defs: { S: { type: "string" } } },
+    ],
+    [
+      "one definition referenced twice",
+      {
+        type: "object",
+        properties: { a: { $ref: "#/$defs/S" }, b: { $ref: "#/$defs/S" } },
+        $defs: { S: { type: "string" } },
+      },
+    ],
+    [
+      "a chain of definitions",
+      {
+        ...wrap({ $ref: "#/$defs/A" }),
+        $defs: {
+          A: { type: "object", properties: { b: { $ref: "#/$defs/B" } } },
+          B: { type: "string" },
+        },
+      },
+    ],
+    [
+      "a $ref into a property of the same definition",
+      {
+        ...wrap({ $ref: "#/$defs/A" }),
+        $defs: {
+          A: {
+            type: "object",
+            properties: { x: { type: "string" }, y: { $ref: "#/$defs/A/properties/x" } },
+          },
+        },
+      },
+    ],
+    ["a registered Zod schema used twice", toObjectJsonSchema(z.object({ a: Id, b: Id }))],
+    ["a $ref that resolves nowhere", wrap({ $ref: "#/$defs/Missing" })],
+    ["an external $ref", wrap({ $ref: "https://example.com/schema.json" })],
+  ])("is false for %s", (_label, schema) => {
+    expect(hasRecursiveRef(schema)).toBe(false);
+  });
+
+  it.each<[string, JsonSchema]>([
+    [
+      "a Zod schema that nests itself in a definition",
+      toObjectJsonSchema(z.object({ root: TreeNode })),
+    ],
+    ["a Zod schema that nests itself at the root", toObjectJsonSchema(Chain)],
+    [
+      "a definition that refers to itself",
+      {
+        ...wrap({ $ref: "#/$defs/A" }),
+        $defs: { A: { type: "array", items: { $ref: "#/$defs/A" } } },
+      },
+    ],
+    [
+      "definitions that refer to each other",
+      {
+        ...wrap({ $ref: "#/$defs/A" }),
+        $defs: {
+          A: { type: "object", properties: { b: { $ref: "#/$defs/B" } } },
+          B: { anyOf: [{ $ref: "#/$defs/A" }, { type: "null" }] },
+        },
+      },
+    ],
+    [
+      "a definition that refers back to the root",
+      {
+        ...wrap({ $ref: "#/definitions/Wrapper" }),
+        definitions: { Wrapper: { type: "object", properties: { inner: { $ref: "#" } } } },
+      },
+    ],
+    [
+      "a property that refers to itself",
+      wrap({ type: "object", properties: { self: { $ref: "#/properties/value" } } }),
+    ],
+    [
+      "a definition's property that refers to the definition",
+      {
+        ...wrap({ $ref: "#/$defs/A/properties/x" }),
+        $defs: {
+          A: { type: "object", properties: { x: { allOf: [{ $ref: "#/$defs/A" }] } } },
+        },
+      },
+    ],
+    [
+      "a definition named with an escaped pointer segment",
+      {
+        ...wrap({ $ref: "#/$defs/a~1b" }),
+        $defs: { "a/b": { type: "array", items: { $ref: "#/$defs/a~1b" } } },
+      },
+    ],
+  ])("is true for %s", (_label, schema) => {
+    expect(hasRecursiveRef(schema)).toBe(true);
   });
 });

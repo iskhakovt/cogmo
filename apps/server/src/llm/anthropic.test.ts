@@ -205,6 +205,39 @@ describe("AnthropicProvider", () => {
     expect(callArgs.tools[0].input_schema.properties).toEqual({ x: { type: "string" } });
   });
 
+  it("carries a tool's definitions so its $refs resolve", async () => {
+    const provider = createProvider();
+    mockCreate.mockResolvedValueOnce({
+      content: [{ type: "text", text: "ok", citations: null }],
+      stop_reason: "end_turn",
+      model: "claude-sonnet-4-6",
+      usage: { input_tokens: 10, output_tokens: 5 },
+    });
+    const $defs = { Point: { type: "object", properties: { x: { type: "number" } } } };
+    const definitions = { Size: { type: "integer" } };
+
+    await provider.chat({
+      model: "claude-sonnet-4-6",
+      system: "sys",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [
+        {
+          name: "plot",
+          description: "plots a point",
+          parameters: {
+            type: "object",
+            properties: { at: { $ref: "#/$defs/Point" }, size: { $ref: "#/definitions/Size" } },
+            $defs,
+            definitions,
+          },
+        },
+      ],
+    });
+
+    const tool = expectDefined(mockCreate.mock.calls[0], "create call")[0].tools[0];
+    expect(tool.input_schema).toMatchObject({ $defs, definitions });
+  });
+
   it("translates tool_result blocks correctly", async () => {
     const provider = createProvider();
     mockCreate.mockResolvedValueOnce({
@@ -1852,6 +1885,35 @@ describe("AnthropicProvider", () => {
 
       expect(sentBody()).not.toHaveProperty("output_config");
       expect(sentBody().tools).toHaveLength(1);
+    });
+
+    it("offers the tool, definitions included, for a recursive schema", async () => {
+      const TreeNode = z.object({
+        name: z.string(),
+        get children() {
+          return z.array(TreeNode);
+        },
+      });
+      const schema = toObjectJsonSchema(z.object({ root: TreeNode }));
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        toolReply("claude-opus-5-5", "tree", { root: { name: "a", children: [] } }),
+      );
+
+      await provider.chat({
+        model: "claude-opus-5-5",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+        responseFormat: { type: "json_schema", name: "tree", schema },
+      });
+
+      expect(sentBody()).not.toHaveProperty("output_config");
+      expect(expectDefined(sentBody().tools[0], "tool").input_schema).toEqual({
+        type: "object",
+        properties: schema.properties,
+        required: ["root"],
+        $defs: schema.$defs,
+      });
     });
 
     it.each(["max_tokens", "refusal"])(
