@@ -4141,6 +4141,23 @@ describe("durable conversation summaries", () => {
       expect(deps.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
       expect(deps.memory.recall).toHaveBeenCalled();
       expect(storedMemories(deps)).toEqual([]);
+      // The block leads the turn's row by id, not the history's last message.
+      const [, stored] = expectDefined(
+        vi.mocked(deps.agentStore.insertOrRecoverTurnContext).mock.calls[0],
+        "insertOrRecoverTurnContext call",
+      );
+      const { messages } = expectDefined(
+        vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+        "agent loop call",
+      )[0];
+      expect(messages[6]).toEqual({
+        role: "user",
+        content: [
+          { type: "text", text: stored.rendered },
+          { type: "text", text: "turn 7" },
+        ],
+      });
+      expect(messages[7]).toEqual({ role: "assistant", content: "turn 8" });
     });
   });
 });
