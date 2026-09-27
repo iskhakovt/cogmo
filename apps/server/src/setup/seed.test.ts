@@ -1,7 +1,7 @@
 import { asc, eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { DrizzleAgentStore } from "../agent/store/index.js";
-import { imageModels, steeringRules } from "../agent/store/schema.js";
+import { imageModels, profiles, steeringRules } from "../agent/store/schema.js";
 import type { Database, Transactor } from "../db/index.js";
 import { resolveLimits } from "../llm/models.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../secrets/encryption.js";
@@ -11,6 +11,7 @@ import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { DrizzleTransportStore } from "../transport/store/index.js";
 import {
   DEFAULT_PROFILE_MODEL,
+  ensureDefaultProfile,
   ensureDefaultUser,
   ensureFalImageDefaults,
   ensureWebChannel,
@@ -184,6 +185,35 @@ describe("ensureFalImageDefaults", () => {
     expect(providers).toHaveLength(1);
     const after = await tx((trx) => agentStore.listImageModels(trx));
     expect(after.length).toBe(modelsBefore.length); // back to original count
+  });
+});
+
+describe("ensureDefaultProfile", () => {
+  it("creates the org profile once", async () => {
+    const first = await ensureDefaultProfile(tx, agentStore);
+    const second = await ensureDefaultProfile(tx, agentStore);
+
+    expect(second).toBe(first);
+    const profile = expectDefined(await tx((trx) => agentStore.getProfile(trx, first)), "profile");
+    expect(profile).toMatchObject({
+      userId: null,
+      name: "assistant",
+      model: DEFAULT_PROFILE_MODEL,
+    });
+  });
+
+  it("lands on a profile its snapshot cannot see", async () => {
+    // Stands in for a concurrent seed whose profile this transaction's snapshot
+    // can't see: PGlite has one connection, so the read is stubbed empty.
+    // `seed.integration.test.ts` races two real connections.
+    const first = await ensureDefaultProfile(tx, agentStore);
+    const staleRead = vi.spyOn(agentStore, "getDefaultProfile").mockResolvedValue(undefined);
+    try {
+      expect(await ensureDefaultProfile(tx, agentStore)).toBe(first);
+    } finally {
+      staleRead.mockRestore();
+    }
+    expect(await db.$count(profiles)).toBe(1);
   });
 });
 

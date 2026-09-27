@@ -650,6 +650,22 @@ export interface AgentStore {
     },
   ): Promise<Profile>;
 
+  /**
+   * Keyed insert on `uq_profiles_user_name` (`.claude/rules/inngest.md`): a
+   * repeated `(userId, name)`, including `userId: null`, returns the stored
+   * profile's id as `recovered`, leaving the row as it was.
+   */
+  insertOrRecoverProfile(
+    tx: Transaction,
+    params: {
+      userId: string | null;
+      name: string;
+      basePrompt: string;
+      model: string;
+      toolSet: ToolSet;
+    },
+  ): Promise<{ kind: "new" | "recovered"; id: string }>;
+
   /** List profiles visible to `userId`: org profiles (user_id IS NULL) + the user's own profiles. */
   listProfiles(tx: Transaction, userId: string): Promise<ReadonlyArray<Profile>>;
 
@@ -1906,6 +1922,27 @@ export class DrizzleAgentStore implements AgentStore {
       );
       return row as Profile;
     });
+  }
+
+  async insertOrRecoverProfile(
+    tx: Transaction,
+    params: {
+      userId: string | null;
+      name: string;
+      basePrompt: string;
+      model: string;
+      toolSet: ToolSet;
+    },
+  ): Promise<{ kind: "new" | "recovered"; id: string }> {
+    // Keyed insert: see `.claude/rules/inngest.md`. The constraint is NULLS NOT
+    // DISTINCT, so it arbitrates org profiles (`user_id` null) too.
+    const rows = await tx
+      .insert(profiles)
+      .values(params)
+      .onConflictDoUpdate({ target: [profiles.userId, profiles.name], set: { name: params.name } })
+      .returning({ id: profiles.id, inserted: sql<boolean>`(xmax = 0)` });
+    const { id, inserted } = single(rows);
+    return { kind: inserted ? "new" : "recovered", id };
   }
 
   async listProfiles(tx: Transaction, userId: string): Promise<ReadonlyArray<Profile>> {

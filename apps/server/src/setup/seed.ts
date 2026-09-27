@@ -53,7 +53,12 @@ export async function ensureDefaultUser(
   });
 }
 
-/** Create the default org profile if none exists. Returns the profile ID. Org profiles have `userId: null` — visible to all users, read-only via Transport. */
+/**
+ * Create the default org profile if none exists. Returns the profile ID. Org profiles have `userId: null` — visible to all users, read-only via Transport.
+ *
+ * On a miss, a keyed insert (`.claude/rules/inngest.md`), so a concurrent seed
+ * that also missed converges on one profile.
+ */
 export async function ensureDefaultProfile(
   runInTx: Transactor,
   agentStore: AgentStore,
@@ -61,14 +66,14 @@ export async function ensureDefaultProfile(
   return runInTx(async (tx) => {
     const existing = await agentStore.getDefaultProfile(tx);
     if (existing) return existing.id;
-    const { id } = await agentStore.createProfile(tx, {
+    const { kind, id } = await agentStore.insertOrRecoverProfile(tx, {
       userId: null,
       name: "assistant",
       basePrompt: DEFAULT_BASE_PROMPT,
       model: DEFAULT_PROFILE_MODEL,
       toolSet: DEFAULT_TOOL_SET,
     });
-    logger.info({ profileId: id }, "created default org profile");
+    if (kind === "new") logger.info({ profileId: id }, "created default org profile");
     return id;
   });
 }
