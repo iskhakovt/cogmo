@@ -312,10 +312,8 @@ export interface PipelineRunStore {
    * {@link createRun} keyed on the durable tool call that requested it. A
    * retry of that call — a step replay, or the re-execution after a crash
    * between commit and Inngest recording the step — returns the existing row
-   * as `recovered` instead of opening a second run. `ON CONFLICT DO UPDATE`
-   * with a no-op SET, not `DO NOTHING`, so a concurrent loser under
-   * REPEATABLE READ raises 40001 for the transactor to retry rather than
-   * re-selecting a row its snapshot cannot see.
+   * as `recovered` instead of opening a second run. Keyed insert
+   * (`.claude/rules/inngest.md`).
    */
   insertOrRecoverRun(
     tx: Transaction,
@@ -431,8 +429,7 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
       idempotencyKey: string;
     },
   ): Promise<{ kind: "new" | "recovered"; row: PipelineRunRow }> {
-    // `xmax = 0` is true only on a tuple this statement inserted; the
-    // conflict arm's no-op update stamps the locking xid instead.
+    // Keyed insert: see `.claude/rules/inngest.md`.
     const rows = await tx
       .insert(pipelineRuns)
       .values({
