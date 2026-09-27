@@ -105,7 +105,7 @@ describe("createWireRecorder", () => {
     expect(recorded.headers["anthropic-beta"]).toBe("some-beta-2026-01-01");
   });
 
-  it("captures an Anthropic stream's message_start id, usage and diagnostics, and passes the stream through", async () => {
+  it("captures an Anthropic stream's message_start id, usage, diagnostics and input transformations, and passes the stream through", async () => {
     const events = [
       {
         type: "message_start",
@@ -114,6 +114,7 @@ describe("createWireRecorder", () => {
           model: "claude-sonnet-5",
           usage: ANTHROPIC_USAGE,
           diagnostics: { cache_miss_reason: null },
+          input_transformations: [],
         },
       },
       { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
@@ -131,13 +132,23 @@ describe("createWireRecorder", () => {
       id: "msg_abc",
       usage: ANTHROPIC_USAGE,
       diagnostics: { cache_miss_reason: null },
+      inputTransformations: [],
     });
   });
 
-  it("captures an Anthropic JSON body's id, usage and diagnostics", async () => {
+  it("captures an Anthropic JSON body's id, usage, diagnostics and input transformations", async () => {
+    const dropped = [
+      { type: "thinking_dropped", path: "messages.1.content.0", reason: "prefix_binding_mismatch" },
+    ];
     const recorder = createWireRecorder(
       stubFetch(() =>
-        json({ id: "msg_json", type: "message", usage: ANTHROPIC_USAGE, diagnostics: null }),
+        json({
+          id: "msg_json",
+          type: "message",
+          usage: ANTHROPIC_USAGE,
+          diagnostics: null,
+          input_transformations: dropped,
+        }),
       ).fetch,
     );
 
@@ -148,6 +159,7 @@ describe("createWireRecorder", () => {
       id: "msg_json",
       usage: ANTHROPIC_USAGE,
       diagnostics: null,
+      inputTransformations: dropped,
     });
   });
 

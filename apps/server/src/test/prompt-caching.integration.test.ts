@@ -58,7 +58,7 @@ const HYPERVISOR = "Which hypervisor did I say the homelab runs?";
 const PICTURE = "Here's the picture I ended up printing. What's in it?";
 const THANKS = "Thanks!";
 const FACT = "The user runs a three-node Proxmox cluster in their homelab.";
-const PICTURE_PATH = "./test/fixtures/fal/fal-ai-flux-dev-14d20a0d0c41.jpg";
+const PICTURE_PATH = "./test/fixtures/images/cat-in-a-hat.jpg";
 
 const ONE_HOUR = { type: "ephemeral", ttl: "1h" };
 
@@ -224,11 +224,8 @@ async function loopRequests(firstText: string): Promise<LoopBody[]> {
     if (!e.request.url.endsWith("/v1/messages") || res?.status !== 200) return [];
     const body = LoopBodySchema.safeParse(e.request.body);
     if (!body.success) return [];
-    const first = body.data.messages[0]?.content;
-    const opens =
-      Array.isArray(first) &&
-      JSON.stringify(first).includes(JSON.stringify(firstText).slice(1, -1));
-    return opens ? [body.data] : [];
+    const first = JSON.stringify(body.data.messages[0]?.content ?? null);
+    return first.includes(JSON.stringify(firstText).slice(1, -1)) ? [body.data] : [];
   });
 }
 
@@ -252,24 +249,34 @@ describe("prompt caching", () => {
   }, async () => {
     const conversation = await startConversation();
 
-    await turn(conversation, DRAW);
-    const afterDraw = (await loopRequests(DRAW)).length;
-    await retainFact(FACT);
-    await turn(conversation, HOMELAB);
-    await turn(conversation, HYPERVISOR);
+    // Requests sent by the end of each turn, to name a request's turn.
+    const sentBy: number[] = [];
+    const take = async (content: InboundContent) => {
+      await turn(conversation, content);
+      sentBy.push((await loopRequests(DRAW)).length);
+    };
 
-    const attachments = bootstrapped.attachmentStore;
-    const picture = await attachments.upload(await readFile(PICTURE_PATH), "image/jpeg", "inbound");
-    await turn(conversation, [
+    await take(DRAW);
+    await retainFact(FACT);
+    await take(HOMELAB);
+    await take(HYPERVISOR);
+    const picture = await bootstrapped.attachmentStore.upload(
+      await readFile(PICTURE_PATH),
+      "image/jpeg",
+      "inbound",
+    );
+    await take([
       { type: "image", path: picture, mediaType: "image/jpeg" },
       { type: "text", text: PICTURE },
     ]);
-    const throughPicture = (await loopRequests(DRAW)).length;
-    await turn(conversation, THANKS);
+    await take(THANKS);
 
     const requests = await loopRequests(DRAW);
+    const turnOf = (request: number) => sentBy.findIndex((sent) => request < sent) + 1;
     // Turn 1 is a tool turn: at least two iterations.
-    expect(afterDraw).toBeGreaterThanOrEqual(2);
+    expect(sentBy[0]).toBeGreaterThanOrEqual(2);
+    expect(sentBy).toHaveLength(5);
+    const throughPicture = expectDefined(sentBy[3], "requests through the picture turn");
     expect(requests.length).toBeGreaterThan(throughPicture);
 
     // ── Append-only, request to request, within turns and across them ──
@@ -291,7 +298,12 @@ describe("prompt caching", () => {
         );
         continue;
       }
-      assertAppendOnly(prev, next);
+      try {
+        assertAppendOnly(prev, next);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        throw new Error(`turn ${turnOf(i)}, request ${i + 1} of ${requests.length}: ${reason}`);
+      }
     }
 
     // ── One system prompt, carrying nothing per-turn ──
