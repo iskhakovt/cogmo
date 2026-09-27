@@ -4,34 +4,16 @@
 // so what it puts in `process.env` is what `src/env.ts` reads. Import app
 // modules here only after the variables they read are set.
 //
-// A file's own resources are what keep suites apart. Files sharing a worker
-// run one after another, so anything scoped to the worker would carry one
-// file's rows and recordings into the next:
-// - Database: a clone of the migrated template, seeded like a deployment, so
-//   its default user, and with it that user's Hindsight bank, is the file's
-//   own. Read it through `fileDatabaseUrl()` and `fileDefaultUserId()`.
-// - llmock: serves the file's cassette (`test/llmock-setup.ts`), and fails the
-//   file on a request the cassette cannot answer or, after a complete run, on
-//   an interaction nothing requested. Read it through `fileLlmockUrl()`.
-// - Skills bare repo: every `bootstrap()` brings the repo at
-//   `COGMO_SKILLS_PATH` to its expected state and registers its `origin`.
-//
-// Inngest is the exception, one dev server per worker slot because each is a
-// container. Functions subscribe by event name, so forks sharing a server
-// would run each other's events. `VITEST_POOL_ID` is unique among
-// concurrently running workers, and each file registers under its own app id.
+// Each file gets its own database, llmock and skills repo: files sharing a
+// worker run one after another, so worker-scoped state would carry one file's
+// rows and recordings into the next. Inngest is per worker slot, since each
+// dev server is a container; each file registers under its own app id. See
+// `.claude/rules/testing.md` → Integration Test Isolation.
 
 import { randomUUID } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { basename, join } from "node:path";
-import {
-  afterAll,
-  afterEach,
-  expect,
-  inject,
-  type RunnerTestFile,
-  type RunnerTestSuite,
-} from "vitest";
+import { afterAll, afterEach, expect, inject, type RunnerTestSuite } from "vitest";
 import { cloneDatabase, seedDatabase } from "./integration-database.js";
 import { createMock, suiteCassette } from "./llmock-setup.js";
 
@@ -64,34 +46,37 @@ function missError(): Error | undefined {
   const drained = [...new Set(misses.splice(0))];
   if (drained.length === 0) return undefined;
   return new Error(
-    `llmock: ${drained.length} request(s) matched nothing in ${cassette}\n\n${drained.join("\n\n")}`,
+    `llmock: ${drained.length} distinct request(s) matched nothing in ${cassette}\n\n${drained.join("\n\n")}`,
   );
 }
 
-function passedEveryTest(s: Readonly<RunnerTestFile | RunnerTestSuite>): boolean {
+function passedEveryTest(s: Readonly<RunnerTestSuite>): boolean {
   return s.tasks.every((t) =>
     t.type === "suite" ? passedEveryTest(t) : t.result?.state === "pass",
   );
 }
 
-let file: Readonly<RunnerTestFile> | undefined;
-
 // A miss fails the test that was running when it arrived.
-afterEach(({ task }) => {
-  file = task.file;
+afterEach(() => {
   const err = missError();
   if (err) throw err;
 });
 
 // Registered before the file's own hooks, so this runs after its teardown.
-afterAll(async () => {
+afterAll(async (_ctx, file) => {
   const unused = llmock.unusedFiles();
   await llmock.mock.stop();
   const err = missError();
   if (err) throw err;
+  if (process.env.RECORD === "1") return;
   // Only a file that ran and passed every test has requested everything its
-  // cassette holds, so a skip, a failure or a `-t` filter waives the check.
-  if (process.env.RECORD === "1" || file === undefined || !passedEveryTest(file)) return;
+  // cassette holds, so a skip, a failure or a `-t` filter only warns.
+  if (!passedEveryTest(file)) {
+    if (unused.length > 0) {
+      console.warn(`${cassette}: check waived; nothing requested ${unused.join(", ")}`);
+    }
+    return;
+  }
   if (unused.length > 0) {
     throw new Error(
       `${cassette}: nothing requested ${unused.join(", ")}. A stale or duplicate recording: delete it, or re-record the suite.`,

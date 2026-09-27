@@ -164,7 +164,7 @@ function requestTransform(req: ChatCompletionRequest): ChatCompletionRequest {
 export interface CassetteMock {
   readonly mock: LLMock;
   /** Cassette files no request has matched yet. */
-  unusedFiles(): string[];
+  unusedFiles(): ReadonlyArray<string>;
 }
 
 function loadCassette(mock: LLMock, dir: string): CassetteFixture[] {
@@ -189,7 +189,8 @@ function loadCassette(mock: LLMock, dir: string): CassetteFixture[] {
  * Otherwise strict: a miss is answered 503 with `describeMiss`'s account of
  * it, which is also handed to `onMiss`. The miss handler is a last fixture
  * whose `turnIndex` is out of reach, so aimock's selection prefers any real
- * candidate over it.
+ * candidate over it (aimock's default relaxed `turnIndex`;
+ * `AIMOCK_STRICT_TURN_INDEX=1` disables the handler).
  */
 export function createMock(
   cassette: string,

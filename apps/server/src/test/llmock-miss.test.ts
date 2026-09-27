@@ -63,6 +63,21 @@ describe("describeMiss", () => {
     );
   });
 
+  it("reports a tool the request does not offer and a different endpoint", () => {
+    const req = chat("ping", { tools: [{ type: "function", function: { name: "web_search" } }] });
+    const cassette = [
+      recorded("image.json", {
+        userMessage: "ping",
+        toolName: "generate_image",
+        endpoint: "image",
+      }),
+    ];
+
+    expect(describeMiss(req, cassette).split("\n")[2]).toBe(
+      "  image.json: toolName generate_image; endpoint image",
+    );
+  });
+
   it("accepts a dated model id as its alias, as aimock's matcher does", () => {
     const req = chat("ping", { model: "claude-haiku-4-5-20251001" });
     const cassette = [recorded("haiku.json", { userMessage: "ping", model: "claude-haiku-4-5" })];
@@ -91,6 +106,15 @@ describe("describeMiss", () => {
     expect(describeMiss(chat("ping"), []).split("\n").slice(1)).toEqual([
       "closest of 0 in the cassette:",
       "  the cassette is empty",
+    ]);
+  });
+
+  it("says so when no fixture in the cassette is keyed on text", () => {
+    const cassette = [recorded("tool.json", { toolName: "web_search" })];
+
+    expect(describeMiss(chat("ping"), cassette).split("\n").slice(1)).toEqual([
+      "closest of 1 in the cassette:",
+      "  no fixture in the cassette is keyed on text",
     ]);
   });
 });
