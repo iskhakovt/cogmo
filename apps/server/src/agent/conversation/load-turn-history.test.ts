@@ -38,6 +38,7 @@ describe("loadTurnHistory", () => {
     ]);
     expect(result.messageIds).toEqual(["m1", "m2"]);
     expect(agentStore.getHistoryAfter).not.toHaveBeenCalled();
+    expect(agentStore.listTurnContexts).toHaveBeenCalledWith(expect.anything(), "conv-1", null);
   });
 
   it("replaces the covered prefix with one synthetic summary message", async () => {
@@ -122,7 +123,8 @@ describe("loadTurnHistory", () => {
       { conversationId: "conv-1" },
     );
 
-    expect(agentStore.listTurnContexts).toHaveBeenCalledWith(expect.anything(), ["m4", "m5", "m6"]);
+    // The same span `getHistoryAfter` reads: the conversation after the cutoff.
+    expect(agentStore.listTurnContexts).toHaveBeenCalledWith(expect.anything(), "conv-1", "m3");
     expect(result.messages.slice(1)).toEqual([
       {
         role: "user",

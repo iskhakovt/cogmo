@@ -47,7 +47,8 @@ export async function loadTurnHistory(
       (
         await deps.agentStore.listTurnContexts(
           tx,
-          rows.map((row) => row.id),
+          args.conversationId,
+          summary?.throughMessageId ?? null,
         )
       ).map((c) => [c.messageId, c] as const),
     );

@@ -3999,7 +3999,7 @@ describe("turn contexts", () => {
   });
 
   it("stores a turn context and lists it by message", async () => {
-    const { row } = await seedUserRow();
+    const { conversationId, row } = await seedUserRow();
 
     const stored = await tx((trx) =>
       store.insertOrRecoverTurnContext(trx, {
@@ -4014,11 +4014,13 @@ describe("turn contexts", () => {
       rendered: "<turn_context>first</turn_context>\n\n",
       context: CONTEXT,
     });
-    await expect(tx((trx) => store.listTurnContexts(trx, [row.id]))).resolves.toEqual([stored]);
+    await expect(tx((trx) => store.listTurnContexts(trx, conversationId, null))).resolves.toEqual([
+      stored,
+    ]);
   });
 
   it("recovers the stored text when the same message is written twice", async () => {
-    const { row } = await seedUserRow();
+    const { conversationId, row } = await seedUserRow();
     const first = await tx((trx) =>
       store.insertOrRecoverTurnContext(trx, {
         messageId: row.id,
@@ -4036,14 +4038,28 @@ describe("turn contexts", () => {
     );
 
     expect(retry).toEqual(first);
-    const rows = await tx((trx) => store.listTurnContexts(trx, [row.id]));
+    const rows = await tx((trx) => store.listTurnContexts(trx, conversationId, null));
     expect(rows).toHaveLength(1);
   });
 
-  it("lists only the messages asked for, and nothing for no messages", async () => {
-    const { conversationId, stamp, row: a } = await seedUserRow();
+  it("lists a conversation's turn contexts after the cutoff, and no other conversation's", async () => {
+    const { userId, profileId, conversationId, stamp, row: a } = await seedUserRow();
+    // A reply in between, which has no turn context.
+    const reply = await tx((trx) =>
+      store.insertMessage(trx, {
+        conversationId,
+        role: "assistant",
+        content: "reply",
+        lastInboundMessageId: INBOUND,
+        ...stamp,
+      }),
+    );
     const b = await insertUserRow(conversationId, stamp);
-    for (const row of [a, b]) {
+    const other = (
+      await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: true }))
+    ).id;
+    const c = await insertUserRow(other, stamp);
+    for (const row of [a, b, c]) {
       await tx((trx) =>
         store.insertOrRecoverTurnContext(trx, {
           messageId: row.id,
@@ -4053,11 +4069,16 @@ describe("turn contexts", () => {
       );
     }
 
-    const listed = await tx((trx) =>
-      store.listTurnContexts(trx, [b.id, "019d0000-0000-7000-8000-000000000999"]),
-    );
-    expect(listed.map((c) => c.messageId)).toEqual([b.id]);
-    await expect(tx((trx) => store.listTurnContexts(trx, []))).resolves.toEqual([]);
+    async function listed(conversation: string, afterMessageId: string | null) {
+      const rows = await tx((trx) => store.listTurnContexts(trx, conversation, afterMessageId));
+      return rows.map((r) => r.messageId).toSorted();
+    }
+    expect(await listed(conversationId, null)).toEqual([a.id, b.id].toSorted());
+    // The cutoff is exclusive, as `getHistoryAfter`'s is.
+    expect(await listed(conversationId, a.id)).toEqual([b.id]);
+    expect(await listed(conversationId, reply.id)).toEqual([b.id]);
+    expect(await listed(conversationId, b.id)).toEqual([]);
+    expect(await listed(other, null)).toEqual([c.id]);
   });
 
   it("refuses a context for a message that doesn't exist", async () => {
@@ -4073,7 +4094,7 @@ describe("turn contexts", () => {
   });
 
   it("validates the context at the store boundary, on write and on read", async () => {
-    const { row } = await seedUserRow();
+    const { conversationId, row } = await seedUserRow();
     await expect(
       tx((trx) =>
         store.insertOrRecoverTurnContext(trx, {
@@ -4088,7 +4109,7 @@ describe("turn contexts", () => {
     await db.execute(
       sql`INSERT INTO turn_contexts (message_id, rendered, context) VALUES (${row.id}, 'raw', '{"voiceMode": "yes"}'::jsonb)`,
     );
-    await expect(tx((trx) => store.listTurnContexts(trx, [row.id]))).rejects.toThrow();
+    await expect(tx((trx) => store.listTurnContexts(trx, conversationId, null))).rejects.toThrow();
   });
 
   it("finds a stage prompt's user row by its inbound, in its own conversation", async () => {

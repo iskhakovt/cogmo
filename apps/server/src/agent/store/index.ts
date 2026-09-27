@@ -579,10 +579,15 @@ export interface AgentStore {
     params: StoredTurnContext,
   ): Promise<StoredTurnContext>;
 
-  /** The stored turn contexts of the given messages, in no particular order. */
+  /**
+   * The stored turn contexts of a conversation's messages newer than
+   * `afterMessageId` (every message when `null`), in no particular order: the
+   * contexts of the rows `getHistoryAfter` / `listMessages` return.
+   */
   listTurnContexts(
     tx: Transaction,
-    messageIds: ReadonlyArray<string>,
+    conversationId: string,
+    afterMessageId: string | null,
   ): Promise<ReadonlyArray<StoredTurnContext>>;
 
   /**
@@ -1779,9 +1784,9 @@ export class DrizzleAgentStore implements AgentStore {
 
   async listTurnContexts(
     tx: Transaction,
-    messageIds: ReadonlyArray<string>,
+    conversationId: string,
+    afterMessageId: string | null,
   ): Promise<ReadonlyArray<StoredTurnContext>> {
-    if (messageIds.length === 0) return [];
     return tx
       .select({
         messageId: turnContexts.messageId,
@@ -1789,7 +1794,13 @@ export class DrizzleAgentStore implements AgentStore {
         context: turnContexts.context,
       })
       .from(turnContexts)
-      .where(inArray(turnContexts.messageId, [...messageIds]));
+      .innerJoin(messages, eq(messages.id, turnContexts.messageId))
+      .where(
+        and(
+          eq(messages.conversationId, conversationId),
+          afterMessageId === null ? undefined : gt(messages.id, afterMessageId),
+        ),
+      );
   }
 
   async getHistoryAfter(
