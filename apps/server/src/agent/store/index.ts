@@ -1763,10 +1763,8 @@ export class DrizzleAgentStore implements AgentStore {
     tx: Transaction,
     params: StoredTurnContext,
   ): Promise<StoredTurnContext> {
-    // DO UPDATE with a no-op SET, so one statement returns the stored row from
-    // either arm: a retry gets the first attempt's text back. Under REPEATABLE
-    // READ a concurrent loser gets 40001 with either `ON CONFLICT` arm, and
-    // the transactor's retry lands on the winner's row.
+    // DO UPDATE with a no-op SET so one statement returns the stored row from
+    // either arm (`.claude/rules/inngest.md`).
     return single(
       await tx
         .insert(turnContexts)

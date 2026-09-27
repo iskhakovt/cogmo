@@ -500,17 +500,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         );
       });
 
-      // The compacted view, not the raw transcript: when the conversation
-      // carries a durable summary, the span it covers arrives as one synthetic
-      // message and the rest of the rows follow, earlier turns led by their
-      // stored turn contexts. `messageIds` rides along so the persist step
-      // below can map a compaction split point back to a durable cutoff, and
-      // `turnContexts` so the render step can leave out memories an earlier
-      // turn already shows. Inside the step, so a `/compact` landing mid-run
-      // can't shift the history between invocations. The same read finds the
-      // row `create-user-message` wrote, by the inbound cursor it carries: its
-      // id keys the turn context and its `created_at` is the time the context
-      // shows (design/crash-recovery.md → Where the turn's row comes from).
+      // The compacted view with stored turn contexts, plus the turn's own row
+      // found by its inbound cursor (see `loadTurnHistory`). In a step so a
+      // `/compact` landing mid-run can't shift the history between invocations.
       const turnHistory = await step.run("load-turn-transcript", async () => {
         try {
           return await loadTurnHistory(
@@ -784,12 +776,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
               return { memories: [] };
             }),
           );
-      // This turn's message, led by its turn context. Compaction runs first
-      // and counts the block with every recalled memory, an upper bound; the
-      // `render-turn-context` step then leaves out memories a turn context
-      // surviving compaction already shows, stores the block, and swaps it in.
-      // Every input is a step result or the event payload, so each invocation
-      // builds the same block.
+      // This turn's message, led by a provisional block carrying every
+      // recalled memory: compaction counts that upper bound, and
+      // `render-turn-context` swaps in the stored, deduplicated block.
       const turnIndex = turnHistory.messageIds.lastIndexOf(turn.id);
       const turnRow = history[turnIndex];
       if (turnRow === undefined) {
@@ -1055,11 +1044,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         }
       }
 
-      // Rendered once and stored; the loop sends the stored text, and later
-      // turns load it (see `loadTurnHistory`). Memories a turn context in the
-      // compacted view already shows are left out — deduplicating before
-      // compaction could drop a memory whose only earlier copy compaction
-      // then removes.
+      // Deduplicated after compaction: before it, a memory whose only earlier
+      // copy compaction then removes would be dropped.
       const turnPosition = findTurnContext(historyMessages, provisionalTurnContext);
       if (turnPosition === -1) throw new Error("compaction dropped the turn's own message");
       const renderedTurnContext = await step.run("render-turn-context", () =>
@@ -1394,7 +1380,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // result rather than re-charging the TTS provider; cached value is
       // just the audio length so step state stays small. Long replies
       // (above the per-channel cap) skip TTS entirely — the cap is a
-      // fail-safe; the prompt hint should keep replies short already.
+      // fail-safe; the voice guidance should keep replies short already.
       //
       // Gated on the frozen decision and the reply only, so the step exists
       // on every invocation that needs it; the live capability checks run

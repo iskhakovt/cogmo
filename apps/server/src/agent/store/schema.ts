@@ -1002,16 +1002,9 @@ export const conversationSummaries = pgTable(
 );
 
 /**
- * The turn context a turn-starting user row was sent with: the exact block
- * (`rendered`) and its structured inputs (`context`, `TurnContextSchema`),
- * kept for deduplicating recalled memories against earlier turns and as
- * provenance. See design/prompt-caching.md → Turn Context.
- *
- * A side table rather than a column on `messages`: it is written after the
- * user row exists, and `messages.content` stays what the user said, which is
- * what the web history and the Observer read. Immutable once written; the
- * unique on `message_id` is the idempotency key for the render step, whose
- * retry recovers the stored row instead of writing a second one.
+ * The turn context a turn-starting user row was sent with: the exact block and
+ * its inputs. Immutable; unique on `message_id`, the render step's idempotency
+ * key. See design/prompt-caching.md → Turn Context → Data model.
  */
 export const turnContexts = pgTable(
   "turn_contexts",

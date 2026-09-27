@@ -189,9 +189,8 @@ export async function runAgenticStage(
     }),
   );
 
-  // The same read finds the stage's message by the prompt inbound it cursors
-  // on: its id keys the turn context and its `created_at` is the time the
-  // context shows (design/crash-recovery.md → Where the turn's row comes from).
+  // Finds the stage's prompt row by its inbound (design/crash-recovery.md →
+  // Where the turn's row comes from).
   const turnHistory = await steps.run("load-turn-transcript", async () => {
     try {
       return await loadTurnHistory(
@@ -387,7 +386,6 @@ export async function runAgenticStage(
     }
   }
 
-  // Stored once; the loop sends the stored text and later turns load it.
   const turnPosition = findTurnContext(compacted.messages, provisionalTurnContext);
   if (turnPosition === -1) throw new Error("compaction dropped the stage's own message");
   const renderedTurnContext = await steps.run("render-turn-context", () =>

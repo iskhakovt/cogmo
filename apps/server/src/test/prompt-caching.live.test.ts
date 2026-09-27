@@ -1,31 +1,7 @@
 /**
- * Live: the provider serves a multi-turn conversation from its cache when the
- * conversation is laid out the way `handle-message` lays it out — a system
- * prompt that doesn't change between turns, each turn's user message led by
- * its turn context, and every earlier message re-sent as the store hands it
- * back (design/prompt-caching.md → Test Plan → Live tier).
- *
- * Byte stability of the real pipeline is the integration tier's claim
- * (`prompt-caching.integration.test.ts`); this tier checks what replay can't:
- * that the provider reads the prefix. The conversation runs through
- * `runStreamingAgentLoop` on a real `AnthropicProvider` behind the wire
- * recorder, with the production prompt source, turn-context renderer, turn
- * cache intent and store-boundary parse of each persisted message:
- *
- * 1. A tool turn, the model emitting the tool input's keys out of canonical order.
- * 2. A turn whose context recalls a memory; 3. a follow-up whose context leaves
- *    it out, as deduplication does.
- * 4. A voice turn: only the context's reply modality changes. 5. A plain turn.
- *
- * - **A** — the production chat model (Sonnet 5): each request reads exactly
- *   what the one before it cached, within turns and across them.
- * - **B** — Opus 5.5 with preserved thinking enforced
- *   (`prefix_mismatch_behavior: "error"`), so any edit to the history under a
- *   replayed thinking block is a 400: the conversation completes, and no
- *   response reports an input transformation.
- * - **C** — TTL survival: turn 1, a six-and-a-half-minute wait that outlives a
- *   5-minute entry, then turn 2, whose first request reads turn 1's whole
- *   prefix.
+ * Live scenarios A–C (design/prompt-caching.md → Test Plan → Live tier),
+ * through `runStreamingAgentLoop` on a real `AnthropicProvider` behind the
+ * wire recorder.
  *
  * Skipped unless `LIVE=1` and `ANTHROPIC_API_KEY` are set. A and B cost cents;
  * C takes about seven minutes.

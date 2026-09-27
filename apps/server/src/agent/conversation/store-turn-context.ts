@@ -8,9 +8,8 @@ export interface StoreTurnContextDeps {
 }
 
 /**
- * Render a turn's context and store it against the turn's user message,
- * returning the text the turn sends: the stored row's, so a retry after a
- * committed insert sends what the first attempt stored and later turns load.
+ * Render and store a turn's context; returns the stored row's text (see
+ * `insertOrRecoverTurnContext`).
  */
 export async function storeTurnContext(
   deps: StoreTurnContextDeps,

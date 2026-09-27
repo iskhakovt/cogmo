@@ -2,25 +2,10 @@
 /**
  * Byte stability across a real conversation (design/prompt-caching.md → Test
  * Plan → Integration tier): every request the agent loop sends is the one
- * before it plus what happened since, within turns and across them. Real
- * `handle-message` runs through Inngest against llmock and a real Hindsight;
- * the chat provider sends through the wire recorder, which keeps each request
- * as sent.
+ * before it plus what happened since, within turns and across them.
  *
- * The conversation:
- *
- * 1. A tool turn of two iterations: `generate_image`, whose input the model
- *    emits as `prompt` then `model`, the reverse of `jsonb`'s key order.
- * 2. A turn whose auto-recall returns a memory retained after turn 1.
- * 3. A turn that recalls that memory again: it is shown once.
- * 4. An image turn, then 5. a plain one — the declared exception: the turn
- *    after an image turn reloads the image row as its persisted JSON and
- *    diverges exactly there.
- *
- * The user and profile are this file's own; the profile offers only
- * `generate_image`, so the model has no way to edit core memory, which would
- * change the system prompt at the next turn until the system prompt snapshot
- * announces such edits instead.
+ * The profile offers only `generate_image`, so the model can't edit core
+ * memory, which would change the system prompt.
  */
 
 import { readFile } from "node:fs/promises";
