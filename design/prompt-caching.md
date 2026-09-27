@@ -70,7 +70,7 @@ Surveyed September 2026.
 
 ## Turn Context `[confirmed]`
 
-The per-turn state that used to sit in the system prompt is a **turn context block** on each turn-starting user message: a row created from inbound messages or a stage prompt. Tool-result rows never get one — Anthropic requires `tool_result` blocks to come first in their message. `src/agent/turn-context.ts` owns the schema, the renderer and the placement helpers.
+Per-turn state is a **turn context block** on each turn-starting user message: a row created from inbound messages or a stage prompt. Tool-result rows never get one — Anthropic requires `tool_result` blocks to come first in their message. `src/agent/turn-context.ts` owns the schema, the renderer and the placement helpers.
 
 ### Contents
 
@@ -410,7 +410,7 @@ llmock's request journal can't serve here: it stores its own OpenAI-shaped conve
 
 **Assertions:**
 
-- `assertAppendOnly` over every consecutive pair of loop requests in the conversation, within turns and across them; a failure names the turn and request. The one declared exception is the turn after the image turn, which must diverge exactly at the image message; that pins the known residual instead of tolerating divergence in general. On the pre-step-2 code the suite fails at turn 2's first request, at `system[0].text`.
+- `assertAppendOnly` over every consecutive pair of loop requests in the conversation, within turns and across them; a failure names the turn and request. The one declared exception is the turn after the image turn, which must diverge exactly at the image message; that pins the known residual instead of tolerating divergence in general. A system prompt that carries per-turn state fails the suite at turn 2's first request, at `system[0].text`.
 - `system` is identical on every request and contains no time and no recalled context.
 - Each turn-starting message opens with its turn context, identical to `turn_contexts.rendered`, which re-renders from the row's `created_at` in the configured timezone; turn 2 shows the memory and no memory line appears in two turn contexts.
 - Every loop request carries top-level `cache_control` at `1h`, with the tools and system markers at `1h`.
