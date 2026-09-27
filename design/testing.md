@@ -44,7 +44,7 @@ Docker services + app wired in-process. Tests the orchestration pipeline — deb
 - Each test file runs against its own database, cloned from a template `globalSetup` migrates, and its own seeded user — so its own Hindsight bank
 - App modules imported directly — `bootstrap()` from `src/index.ts` wires everything
 
-**Isolation:** a file shares nothing another file writes, apart from Hindsight, which is partitioned by bank and so by user. `test/integration-setup-per-file.ts` gives each file its database, seeded user, llmock and skills repo, and points it at its worker slot's Inngest dev server — one per slot, so one fork's events never run in another. `.claude/rules/testing.md` → Integration Test Isolation and Cassettes has the detail, the unmatched-request and unused-recording checks included.
+**Isolation:** `test/integration-setup-per-file.ts` gives each file its own database, seeded user (so its own Hindsight bank), llmock and skills repo, and points it at its worker slot's Inngest dev server — one per slot, so one fork's events never run in another. Hindsight, Redis, RustFS, the Docker daemon and the MCP echo and Telegram mocks stay shared. `.claude/rules/testing.md` → Integration Test Isolation and Cassettes has the detail, the unmatched-request and unused-recording checks included.
 
 **Env injection:** `process.env` mutations in `globalSetup` propagate to Vitest test workers. Dynamic container URLs set via `process.env`, per-file values by the per-file setup, static values in `vitest.config.ts` `test.env`. Test files use normal top-level imports — `createEnv()` in `env.ts` sees all values.
 
@@ -125,13 +125,12 @@ Single integration test that exercises the full chat -> delegate_coding -> skill
 
 Cassettes pin the conversation; assertions pin the contract. This is the AgentRR pattern (record/replay derived experience, not raw token streams) — replay the pinned plan + edit sequence, assert structural invariants around it.
 
-**Fixtures.** Three cassettes share the existing `RECORD=1` switch:
+**Fixtures.** Two cassettes share the existing `RECORD=1` switch:
 
 | Fixture | What | Re-record trigger |
 |-|-|-|
-| `test/fixtures/daytona/skill-author.json` | Daytona HTTP + WS (snapshot lifecycle, sandbox create, fs upload, PTY frames, git clone, exec sessions, delete) | New `cogmo-devbase:<v>`, SDK bump |
-| `test/fixtures/recorded/anthropic-skill-author-coding.json` | Anthropic `/v1/messages` for the orchestrator's plan + execute prompts | Coding prompt change, model swap, claude-cli flag change |
-| `test/fixtures/recorded/anthropic-skill-author-agent.json` | Anthropic `/v1/messages` for the agent loop's two turns | Agent prompt change, tool registry change |
+| `test/fixtures/daytona/skill-authoring.json` | Daytona HTTP + WS (snapshot lifecycle, sandbox create, fs upload, PTY frames, git clone, exec sessions, delete) | New `cogmo-devbase:<v>`, SDK bump |
+| `test/fixtures/recorded/suites/skill-authoring/` | Anthropic `/v1/messages` for the orchestrator's plan + execute prompts and the agent loop's two turns | Coding or agent prompt change, model swap, claude-cli flag change, tool registry change |
 
 **Cost envelope.** Replay: zero (standard runner + testcontainers + llmock, same shape as `pipeline.integration.test.ts`). Record: ~$1-2 per refresh (~3-5 min Daytona compute + ~30k Anthropic tokens + one PyPI fetch). Operator-triggered locally, expected cadence ~monthly when releases align.
 
