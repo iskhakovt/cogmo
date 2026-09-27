@@ -230,7 +230,7 @@ TelegramStreamHandle.finish()  // existing flow finishes the streamed text messa
         ↓ bot.api.sendVoice(chatId, new InputFile(audio, "voice.ogg"))
 ```
 
-The cap is a UX/cost fail-safe — the prompt hint should keep replies short already; the cap catches cases where the model ignores it. **No chunked-voice-plus-text-remainder mode** — simpler failure mode, fewer edge cases. 700 chars ≈ 60s of speech at conversational pace.
+The cap is a UX/cost fail-safe — the voice guidance should keep replies short already; the cap catches cases where the model ignores it. **No chunked-voice-plus-text-remainder mode** — simpler failure mode, fewer edge cases. 700 chars ≈ 60s of speech at conversational pace.
 
 For batch delivery (Direct CLI, future channels): same code path inside `deliverBatch`, gated by `adapterSupportsVoice`.
 
@@ -242,7 +242,7 @@ The turn's voice decision (`voiceModeForTurn`, frozen in `freeze-turn-inputs`) i
 When it says "Reply modality: voice", your reply will be spoken aloud. Keep it short and natural — one or two sentences when possible. Skip routine acknowledgments ("saved", "noted", "I'll remember") unless the acknowledgment IS the entire answer. Don't narrate background work (memory saves, file writes, web searches) — the user assumes those happened. Avoid markdown, lists, code fences, and tables — they don't translate to speech.
 ```
 
-`DefaultPromptSource.assemble` takes no voice input, so alternating voice and text turns change only data and never rewrite the system prompt — see [prompt-caching.md](prompt-caching.md) → Turn Context.
+`DefaultPromptSource.assemble` takes no voice input (see [prompt-caching.md](prompt-caching.md) → System Prompt Snapshot).
 
 ### `/voice` Telegram command `[confirmed]`
 
