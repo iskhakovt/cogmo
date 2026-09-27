@@ -81,8 +81,8 @@ export type CompactConversationResult =
  * waiting on the reply, single-user scale means there is no concurrent fire to
  * race, and an LLM or DB error surfaces to the caller rather than disappearing
  * into a retry log. A `/compact` racing an in-flight turn is safe by
- * construction — the turn froze its history inside `load-turn-history`, and this
- * only ever covers a prefix of what that turn already read.
+ * construction — the turn froze its history inside `load-turn-transcript`, and
+ * this only ever covers a prefix of what that turn already read.
  */
 export async function compactConversation(
   conversationId: string,
