@@ -273,7 +273,7 @@ A user's instruction beats a channel default: a default is the operator's guess 
 ```
 # Rules
 
-Standing rules for your replies. Where two rules that apply to this reply conflict, follow the one listed first.
+Standing rules for your replies. Where two rules that apply to this reply conflict, follow the one listed first. A rule that starts with a channel applies only when the turn context lists that channel among its delivery channels.
 
 ## Always
 - …
@@ -289,7 +289,7 @@ Your user asked for these. They take precedence over your default style and the 
 - On telegram: Avoid tables — they don't render on this channel. Use bullet lists instead.
 ```
 
-Every channel's rules render, each labelled with its channel ("On telegram: "), and a line in the preamble says a labelled rule applies only when the turn context lists its channel among the delivery channels ([snapshot](prompt-caching.md#system-prompt-snapshot-confirmed)). The seeded rules keep their wording ([Alternatives](#alternatives-considered)). On this rendering the length limit fails ([Stage 1](#stage-1-instruction-evolution-confirmed) → Evaluation): the base prompt's "Be thorough when the topic is complex" competes with it, and "Make learned rules stick" (`todo.md`) tracks it.
+Every channel's rules render, each labelled with its channel ("On telegram: "), and the preamble's second sentence, present when a labelled rule is, says when one applies ([snapshot](prompt-caching.md#system-prompt-snapshot-confirmed)). The seeded rules keep their wording ([Alternatives](#alternatives-considered)). On this rendering the length limit fails ([Stage 1](#stage-1-instruction-evolution-confirmed) → Evaluation): the base prompt's "Be thorough when the topic is complex" competes with it, and "Make learned rules stick" (`todo.md`) tracks it.
 
 ### Tools
 
