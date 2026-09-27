@@ -194,6 +194,17 @@ This rule avoids two failure modes: yielding duplicated content (the agent sees 
 
 The wrapper does not deduplicate requests, rate-limit transitions, or track health state — it is stateless. A provider that just returned 500 will be tried again on the next turn. This is intentional for the single-user deployment: complexity that pays off at scale (circuit breakers, health checks) is noise here.
 
+## Structured output `[confirmed]`
+
+`ChatParams.responseFormat` asks for JSON matching a schema. A provider may enforce only part of it: `chatTyped` (`src/llm/typed.ts`) validates the reply with Zod and retries with the validation error.
+
+| Adapter | Request |
+|-|-|
+| Anthropic | Structured outputs: `output_config.format`, which constrains decoding to the schema. The schema goes through the SDK's transform, which closes every object and moves the keywords the grammar lacks (length and range bounds, `enum`, `const`) into descriptions. Two cases take the tool path instead: models without structured outputs (Sonnet 4, Opus 4), and schemas with an open object, such as a pipeline stage's JSON output schema (`z.record`), which the transform would narrow to `{}`. The tool path offers one synthetic tool carrying the schema under `tool_choice: auto` and names it in a system block. Forcing the tool is a 400 on Opus 5.5 and Fable 5.1. |
+| OpenAI-compatible | `response_format: { type: "json_schema", strict: true }` with the schema as given. |
+
+Models that think by default (adaptive on Sonnet 5, always on Opus 5.5 and Fable 5.1) think on structured-output calls too, and the thinking counts toward `max_tokens`.
+
 ## Validation
 
 The setup wizard validates each provider by calling `GET /v1/models` (standard across OpenAI-compatible APIs) or Anthropic's equivalent. This is free (no tokens consumed), confirms the API key works, and returns the list of available models — which the wizard uses to auto-populate `model_providers` entries.
