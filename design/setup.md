@@ -152,4 +152,8 @@ The wizard never constructs providers or starts adapters — it only persists co
 Two-layer check, no dedicated marker table:
 
 1. **Migration state:** Drizzle's `__drizzle_migrations` table. `migrate()` is idempotent — always safe to run.
-2. **Bootstrap state:** `SELECT EXISTS(SELECT 1 FROM users)`. If false → fresh install. The wizard's seed step handles this.
+2. **Bootstrap state:** `SELECT EXISTS(SELECT 1 FROM users)`. If false → fresh install. `migrateAndSeed` seeds it before the wizard starts.
+
+## Concurrent runs
+
+`cogmo serve`, `cogmo seed` and `cogmo setup` migrate and seed under one session-level advisory lock (`withBootstrapLock`, `src/db/bootstrap-lock.ts`), taken on a reserved connection before any transaction opens, so concurrent runs migrate once and find each other's user, profile and channels. `cogmo setup` holds it across migrate, `--reset` and the default seed, not the interactive prompts. The default profile's insert is also keyed on `uq_profiles_user_name`.

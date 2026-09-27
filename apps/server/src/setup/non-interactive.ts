@@ -125,17 +125,18 @@ export async function validateNonInteractive(
 }
 
 /**
- * Persist a pre-validated non-interactive setup to the database.
+ * Persist a pre-validated non-interactive setup to the database for the
+ * seeded default user.
  *
- * Caller must have validated via `validateNonInteractive` first.
+ * Caller must have validated via `validateNonInteractive` and seeded the
+ * defaults first.
  */
 export async function persistNonInteractive(
   deps: PersistDeps,
   validated: ValidatedNonInteractive,
+  userId: string,
 ): Promise<void> {
   const { answers, telegramBotUsername, githubLogin, githubUserId } = validated;
-
-  const { userId } = await seedDefaults(deps.runInTx, deps.agentStore, deps.transportStore);
 
   await persistProvider(deps, answers);
 
@@ -241,7 +242,8 @@ export async function persistNonInteractive(
 export async function runNonInteractive(deps: NonInteractiveDeps): Promise<void> {
   const validated = await validateNonInteractive(deps.env, deps.validators ?? defaultValidators);
   if (validated.isErr()) throw validated.error;
-  await persistNonInteractive(deps, validated.value);
+  const { userId } = await seedDefaults(deps.runInTx, deps.agentStore, deps.transportStore);
+  await persistNonInteractive(deps, validated.value, userId);
 }
 
 interface ValidationSummary {

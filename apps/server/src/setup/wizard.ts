@@ -54,7 +54,7 @@ import type { TransportStore } from "../transport/store/index.js";
 import { ElevenLabsTtsProvider } from "../voice/elevenlabs.js";
 import { OpenAIVoiceProvider } from "../voice/openai.js";
 import type { TtsProvider } from "../voice/types.js";
-import { seedChannelRules, seedDefaults } from "./seed.js";
+import { seedChannelRules } from "./seed.js";
 import {
   type DaytonaProbeOpts,
   validateClaudeCodeOauthToken,
@@ -142,14 +142,6 @@ const PROVIDER_HELP: Partial<Record<ProviderType, { url: string; path: string; k
 //
 // Naming convention: matches existing `Exported for unit tests` notes
 // elsewhere in the codebase (e.g., `cleanup-orphan-run-branches.ts:108`).
-
-async function stepSeedDefaults(deps: WizardDeps): Promise<{ userId: string; profileId: string }> {
-  const s = p.spinner();
-  s.start("Checking default user and profile...");
-  const result = await seedDefaults(deps.runInTx, deps.agentStore, deps.transportStore);
-  s.stop("Default user and profile ready.");
-  return result;
-}
 
 export async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
   const existing = await deps.runInTx((tx) => deps.agentStore.listProviders(tx));
@@ -1784,6 +1776,8 @@ export async function runWizard(deps: {
   agentStore: AgentStore;
   transportStore: TransportStore;
   masterKey: string;
+  /** The default user `migrateAndSeed` seeded ahead of the wizard. */
+  userId: string;
 }): Promise<void> {
   const encryptionKey = deriveMasterKey(parseMasterKey(deps.masterKey), "cogmo/secrets-at-rest/v1");
   const tx = transactor(deps.db);
@@ -1798,8 +1792,8 @@ export async function runWizard(deps: {
 
   p.intro("Cogmo Setup");
 
-  // Step 1: Seed defaults
-  const { userId } = await stepSeedDefaults(wizardDeps);
+  // Step 1: defaults, seeded by `migrateAndSeed` before the wizard starts.
+  p.log.success("Default user and profile ready.");
 
   // Step 2: LLM provider (required — loop until configured)
   let hasProvider = false;
@@ -1813,7 +1807,7 @@ export async function runWizard(deps: {
   }
 
   // Step 3: Telegram (optional)
-  const { botUsername } = await stepConfigureTelegram(wizardDeps, userId);
+  const { botUsername } = await stepConfigureTelegram(wizardDeps, deps.userId);
 
   // Step 4: Optional tools (Tavily, fal.ai)
   await stepConfigureOptionalTools(wizardDeps);

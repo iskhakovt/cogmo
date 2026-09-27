@@ -25,16 +25,12 @@
  * give that up so the enum-extension pattern works. In practice cross-
  * file atomicity rarely matters: the prior `migrate()` semantics still
  * left partial state on any failure that triggered a process exit
- * before the outer commit, and Cogmo's deployments are single-instance
- * with no parallel migrator races.
+ * before the outer commit.
  *
- * **No advisory lock.** Stock `migrate()` takes a `pg_advisory_lock` to
- * serialize concurrent migrator runs. This wrapper doesn't, because
- * Cogmo deploys single-instance (one process owns the DB at a time —
- * see CLAUDE.md). If multi-instance deploys ever happen, wrap the loop
- * in `pg_advisory_lock(NUMERIC) / pg_advisory_unlock(NUMERIC)` at the
- * top level — Drizzle's helper hashes "drizzle" into the lock key, the
- * same convention works here.
+ * **Serialization.** The runner takes no lock itself. Its production callers
+ * (`bootstrapCore`, `migrateAndSeed`) run it under the bootstrap advisory
+ * lock (`withBootstrapLock`), so concurrent `cogmo serve` / `cogmo seed` /
+ * `cogmo setup` runs migrate one at a time.
  *
  * **Hash validation.** Before applying any pending migration, the
  * already-applied rows are compared against the on-disk files' hashes.
