@@ -251,6 +251,10 @@ export class AnthropicProvider implements LlmProvider {
             usage,
           };
         }
+        // `tool_choice: auto` lets the model answer in text instead, which
+        // passes through. JSON text parses as a structured-output reply
+        // would; prose reaches `chatTyped` as a JSON string, fails
+        // validation, and spends its feedback retry.
         logger.warn(
           { model: params.model, name: format.name },
           "structured-output reply called no tool; passing its text through",

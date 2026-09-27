@@ -195,6 +195,25 @@ describe("chatTyped", () => {
     expect(feedbackTurn.content).toContain("didn't match the expected format");
   });
 
+  it("spends the feedback retry on a prose reply, which jsonrepair reads as a JSON string", async () => {
+    const provider = mockProvider([
+      { text: "Who do you mean?" },
+      { text: '{"name":"Alice","age":30}' },
+    ]);
+
+    const result = await chatTyped({
+      provider,
+      model: "test-model",
+      system: "sys",
+      messages: [{ role: "user", content: "Alice is 30" }],
+      schema: PersonSchema,
+      name: "extract_person",
+    });
+
+    expect(result.data).toEqual({ name: "Alice", age: 30 });
+    expect(result.retries).toBe(1);
+  });
+
   it("does not persist the synthetic user turn back into the caller's messages array", async () => {
     // The caller passes a messages array — chatTyped must not mutate it. The
     // synthetic feedback turn lives only inside the call's local copy and is

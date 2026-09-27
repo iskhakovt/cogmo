@@ -1892,9 +1892,12 @@ describe("AnthropicProvider", () => {
       ]);
     });
 
-    it("passes a tool-path reply that calls no tool through as its text", async () => {
+    it.each([
+      ["JSON", '{"stageOutput":{}}'],
+      ["prose", "Which feed should the pipeline read?"],
+    ])("passes a tool-path reply of %s text that calls no tool through", async (_kind, text) => {
       const provider = createProvider();
-      mockCreate.mockResolvedValueOnce(textReply("claude-opus-5-5", '{"stageOutput":{}}'));
+      mockCreate.mockResolvedValueOnce(textReply("claude-opus-5-5", text));
 
       const result = await provider.chat({
         model: "claude-opus-5-5",
@@ -1903,7 +1906,8 @@ describe("AnthropicProvider", () => {
         responseFormat: OPEN_FORMAT,
       });
 
-      expect(JSON.parse(extractText(result.content))).toEqual({ stageOutput: {} });
+      expect(extractText(result.content)).toBe(text);
+      expect(result.stopReason).toBe("end_turn");
     });
 
     it("counts a structured-output request with its output format", async () => {
