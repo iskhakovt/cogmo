@@ -12,6 +12,7 @@ import {
   snapToPairBoundary,
   summarizationRequest,
 } from "../context.js";
+import { loadCoreMemoryScope } from "../core-memory/load-core-memory-scope.js";
 import type { PromptSource } from "../prompt.js";
 import type { AgentStore } from "../store/index.js";
 import { loadConversationContext } from "./load-conversation-context.js";
@@ -152,13 +153,17 @@ export async function compactConversation(
   // composing MCP and skill tools, and the summarizer uses the system prompt
   // only to recognise what is already stated elsewhere. A missing `# Tools`
   // section can make it preserve a little more, never less.
+  const coreMemoryScope = await loadCoreMemoryScope(
+    { runInTx: deps.runInTx, agentStore: deps.agentStore },
+    { userId, profile },
+  );
   const context = await loadConversationContext(
     {
       runInTx: deps.runInTx,
       agentStore: deps.agentStore,
       transportStore: deps.transportStore,
     },
-    { conversationId, userId, profile },
+    { conversationId, userId, coreMemoryScope, profile },
   );
   const system = await deps.promptSource.assemble({
     profile,

@@ -4,11 +4,13 @@ import type { Transactor } from "../../db/index.js";
 import { mockAgentStore, mockTransportStore } from "../../test/factories.js";
 import { createTestDatabase } from "../../test/pglite.js";
 import { DrizzleTransportStore } from "../../transport/store/index.js";
+import type { CoreMemoryScope } from "../core-memory/scope.js";
 import { DrizzleAgentStore, type Profile } from "../store/index.js";
 import { loadConversationContext } from "./load-conversation-context.js";
 
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
+const UNCLASSED: CoreMemoryScope = { kind: "unclassed" };
 
 function profile(overrides: Partial<Profile> = {}): Profile {
   return {
@@ -45,7 +47,7 @@ describe("loadConversationContext", () => {
 
     const result = await loadConversationContext(
       { runInTx: fakeRunInTx, agentStore, transportStore },
-      { conversationId: "c1", userId: "u1", profile: profile() },
+      { conversationId: "c1", userId: "u1", coreMemoryScope: UNCLASSED, profile: profile() },
     );
 
     expect(result).toEqual({
@@ -70,7 +72,7 @@ describe("loadConversationContext", () => {
 
     await loadConversationContext(
       { runInTx: fakeRunInTx, agentStore, transportStore },
-      { conversationId: "c1", userId: "u1", profile: profile() },
+      { conversationId: "c1", userId: "u1", coreMemoryScope: UNCLASSED, profile: profile() },
     );
 
     expect(agentStore.getActiveRules).toHaveBeenCalledWith(FAKE_TX, "p1", ["telegram", "slack"]);
@@ -86,11 +88,41 @@ describe("loadConversationContext", () => {
 
     const result = await loadConversationContext(
       { runInTx: fakeRunInTx, agentStore, transportStore },
-      { conversationId: "c1", userId: "u1", profile: undefined },
+      { conversationId: "c1", userId: "u1", coreMemoryScope: UNCLASSED, profile: undefined },
     );
 
     expect(result.rules).toEqual([]);
     expect(agentStore.getActiveRules).not.toHaveBeenCalled();
+  });
+});
+
+describe("loadConversationContext core memory scope", () => {
+  it("reads the frozen class's view", async () => {
+    const agentStore = mockAgentStore();
+
+    await loadConversationContext(
+      { runInTx: fakeRunInTx, agentStore, transportStore: mockTransportStore() },
+      {
+        conversationId: "c1",
+        userId: "u1",
+        coreMemoryScope: { kind: "classed", profileClass: "coder", restricted: false },
+        profile: profile(),
+      },
+    );
+
+    expect(agentStore.getCoreMemoryBlocks).toHaveBeenCalledWith(FAKE_TX, "u1", "coder");
+  });
+
+  it("reads no core memory for a turn without it", async () => {
+    const agentStore = mockAgentStore();
+
+    const result = await loadConversationContext(
+      { runInTx: fakeRunInTx, agentStore, transportStore: mockTransportStore() },
+      { conversationId: "c1", userId: "u1", coreMemoryScope: { kind: "none" }, profile: profile() },
+    );
+
+    expect(result.coreMemory).toEqual([]);
+    expect(agentStore.getCoreMemoryBlocks).not.toHaveBeenCalled();
   });
 });
 
@@ -136,7 +168,12 @@ describe("loadConversationContext core memory (PGlite)", () => {
 
     const context = await loadConversationContext(
       { runInTx, agentStore, transportStore },
-      { conversationId: randomUUID(), userId: second.id, profile: undefined },
+      {
+        conversationId: randomUUID(),
+        userId: second.id,
+        coreMemoryScope: UNCLASSED,
+        profile: undefined,
+      },
     );
 
     expect(context.coreMemory).toEqual([

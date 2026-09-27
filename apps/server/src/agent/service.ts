@@ -1,3 +1,4 @@
+import type { Result } from "neverthrow";
 import type {
   MemoryProvider,
   RecallOptions,
@@ -10,6 +11,11 @@ import type {
 } from "../memory/provider.js";
 import type { SkillsService } from "../skills/skills-service.js";
 import type { CodingService } from "./coding/service.js";
+import type { ScopedCoreMemoryBlock } from "./core-memory/scope.js";
+import type {
+  CoreMemoryUnavailable,
+  CoreMemoryWriteTarget,
+} from "./core-memory/write-core-memory-block.js";
 import type { PipelinesService } from "./pipeline/pipelines-service.js";
 import type { SchedulingService } from "./scheduling/scheduling-service.js";
 import type { ProfileMemoryScope } from "./store/schema.js";
@@ -84,9 +90,15 @@ export interface Service {
     ): Promise<void>;
     list(prefix?: string): Promise<FileEntry[]>;
   };
+  /** The conversation user's core memory, confined to the turn's scope. */
   coreMemory: {
-    get(): Promise<ReadonlyArray<CoreMemoryBlock>>;
-    update(key: string, content: string): Promise<void>;
+    /** The blocks the turn's scope sees, in the order they render. */
+    get(): Promise<ReadonlyArray<ScopedCoreMemoryBlock>>;
+    /** Write a block where the turn's scope sends it (`writeCoreMemoryBlock`). */
+    update(
+      key: string,
+      content: string,
+    ): Promise<Result<CoreMemoryWriteTarget, CoreMemoryUnavailable>>;
   };
   /**
    * Coding-delegation surface. Optional — only present when the sandbox

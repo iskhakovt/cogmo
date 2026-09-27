@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import type { MemoryProvider } from "../memory/provider.js";
 import { expectDefined } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
@@ -8,10 +9,7 @@ import type { ProfileMemoryScope } from "./store/schema.js";
 
 const stubFiles: Service["files"] = mockFilesService();
 
-const stubCoreMemory: Service["coreMemory"] = {
-  get: async () => [],
-  update: async () => {},
-};
+const stubCoreMemory = mock<Service["coreMemory"]>();
 
 const stubStage: Service["memory"]["stageRetain"] = async () => {};
 

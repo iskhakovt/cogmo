@@ -880,6 +880,7 @@ describe("handle-message — replay equality", () => {
     "load-inbound",
     "create-user-message",
     "load-turn-transcript",
+    "freeze-core-memory-scope",
     "freeze-turn-inputs",
     "assemble-prompt",
     "auto-recall",
@@ -1170,5 +1171,133 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
     expect(turnContextSent(deps)).toContain("Reply modality: voice");
     expect(tts.tts).toHaveBeenCalledTimes(1);
     expect(handle.deliverVoice).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("handle-message — core-memory scope frozen across re-invocations", () => {
+  function gameProfile(profileClass: string | null) {
+    return {
+      id: "profile-1",
+      userId: "user-1",
+      name: "game",
+      basePrompt: "test",
+      model: "claude-sonnet-4-6",
+      summarizationModel: null,
+      extractionModel: null,
+      autoRecall: "off",
+      voiceMode: "auto",
+      toolSet: ["*"],
+      memoryScope: null,
+      profileClass,
+      streamChunkChars: 4000,
+      streamEdits: true,
+      codingAutoapproveMode: "off",
+    };
+  }
+
+  /** A turn whose loop saves `identity`, in a profile of a restricted `game` class. */
+  function scopeDeps(profileClass: string | null) {
+    return mockDeps({
+      agentStore: mockAgentStore({
+        getProfile: vi.fn().mockResolvedValue(gameProfile(profileClass)),
+        listProfileClasses: vi.fn().mockResolvedValue([{ name: "game", restricted: true }]),
+      }),
+      runStreamingAgentLoop: vi.fn().mockImplementation(async ({ service }) => {
+        await service.coreMemory.update("identity", "Name: Thorin");
+        return {
+          text: "Saved.",
+          messages: [],
+          newMessages: [{ role: "assistant", content: [{ type: "text", text: "Saved." }] }],
+          usage: { inputTokens: 10, outputTokens: 5 },
+          model: "mock-model",
+          iterations: 1,
+          streamed: { text: "", toolUseIds: [] },
+        };
+      }),
+    });
+  }
+
+  /** The steps a turn of `scopeDeps` plans before its agent loop, in plan order. */
+  const STEPS_BEFORE_LOOP = [
+    "load-conversation",
+    "last-assistant",
+    "load-turn-snapshot",
+    "load-inbound",
+    "create-user-message",
+    "load-turn-transcript",
+    "freeze-core-memory-scope",
+    "freeze-turn-inputs",
+    "assemble-prompt",
+    "load-last-tokens",
+    "render-turn-context",
+  ];
+
+  it("completes a run whose earlier memos predate freeze-core-memory-scope", async () => {
+    // An older build ran every step before the loop; its memos, as the server
+    // returns them, carry no scope step.
+    const source = scopeDeps("game");
+    const steps = [];
+    for (const id of STEPS_BEFORE_LOOP.filter((id) => id !== "freeze-core-memory-scope")) {
+      const { result } = await new InngestTestEngine({
+        function: createHandleMessage(source),
+        events: [event],
+      }).executeStep(id);
+      steps.push({ id, handler: () => canonicalKeyOrder(result) });
+    }
+
+    const resumed = scopeDeps("game");
+    const { error } = await new InngestTestEngine({
+      function: createHandleMessage(resumed),
+      events: [event],
+      steps,
+    }).execute();
+
+    expect(error).toBeUndefined();
+    // The memoized steps stood: nothing before the loop re-ran.
+    expect(resumed.promptSource.assemble).not.toHaveBeenCalled();
+    expect(resumed.agentStore.insertOrRecoverTurnContext).not.toHaveBeenCalled();
+    // The new step ran, and the turn's write followed it.
+    expect(resumed.agentStore.upsertCoreMemoryBlock).toHaveBeenCalledWith(expect.anything(), {
+      userId: "user-1",
+      profileClass: "game",
+      key: "identity",
+      content: "Name: Thorin",
+    });
+    expect(resumed.agentStore.insertMessages).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads and writes the cached scope, not this invocation's profile", async () => {
+    // The profile lost its class after the scope was frozen.
+    const deps = scopeDeps(null);
+
+    await new InngestTestEngine({
+      function: createHandleMessage(deps),
+      events: [event],
+      steps: [
+        {
+          id: "freeze-core-memory-scope",
+          handler: () => ({ kind: "classed", profileClass: "game", restricted: true }),
+        },
+      ],
+    }).execute();
+
+    expect(deps.agentStore.getCoreMemoryBlocks).toHaveBeenCalledWith(
+      expect.anything(),
+      "user-1",
+      "game",
+    );
+    expect(deps.agentStore.upsertCoreMemoryBlock).toHaveBeenCalledWith(expect.anything(), {
+      userId: "user-1",
+      profileClass: "game",
+      key: "identity",
+      content: "Name: Thorin",
+    });
+    // Non-vacuity: live, the same profile writes the shared block.
+    const live = scopeDeps(null);
+    await new InngestTestEngine({ function: createHandleMessage(live), events: [event] }).execute();
+    expect(live.agentStore.upsertCoreMemoryBlock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ profileClass: null, key: "identity" }),
+    );
   });
 });

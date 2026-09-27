@@ -10,7 +10,7 @@ import {
 } from "../test/factories.js";
 import type { PipelinesService } from "./pipeline/pipelines-service.js";
 import type { SchedulingService } from "./scheduling/scheduling-service.js";
-import { buildTurnService } from "./turn-service.js";
+import { buildTurnService, type TurnServiceArgs } from "./turn-service.js";
 
 async function harness() {
   const agentStore = mockAgentStore({
@@ -25,7 +25,8 @@ async function harness() {
   return { deps, agentStore, memory, profile };
 }
 
-const noNamespaces = {
+const noNamespaces: Omit<TurnServiceArgs, "userId" | "profile"> = {
+  coreMemoryScope: { kind: "unclassed" },
   coding: undefined,
   skills: undefined,
   scheduling: undefined,
@@ -43,7 +44,7 @@ describe("buildTurnService", () => {
     expect(memory.retain).toHaveBeenCalledWith("user-7", "fact", undefined);
   });
 
-  it("routes core memory reads and writes to the user", async () => {
+  it("routes core memory reads and writes to the user's unclassed scope", async () => {
     const { deps, agentStore, profile } = await harness();
 
     const service = await buildTurnService(deps, { userId: "user-7", profile, ...noNamespaces });
@@ -57,6 +58,50 @@ describe("buildTurnService", () => {
       key: "persona",
       content: "terse",
     });
+  });
+
+  it("confines core memory to the frozen class, not the profile row's", async () => {
+    const { deps, agentStore, profile } = await harness();
+
+    const service = await buildTurnService(deps, {
+      userId: "user-7",
+      profile: { ...profile, profileClass: null },
+      ...noNamespaces,
+      coreMemoryScope: { kind: "classed", profileClass: "intimate", restricted: true },
+    });
+    await service.coreMemory.get();
+    const written = await service.coreMemory.update("identity", "Name: Thorin");
+
+    expect(agentStore.getCoreMemoryBlocks).toHaveBeenCalledWith(
+      expect.anything(),
+      "user-7",
+      "intimate",
+    );
+    expect(written._unsafeUnwrap()).toEqual({ kind: "override", profileClass: "intimate" });
+    expect(agentStore.upsertCoreMemoryBlock).toHaveBeenCalledWith(expect.anything(), {
+      userId: "user-7",
+      profileClass: "intimate",
+      key: "identity",
+      content: "Name: Thorin",
+    });
+  });
+
+  it("gives a turn without core memory no blocks and refuses its writes", async () => {
+    const { deps, agentStore, profile } = await harness();
+
+    const service = await buildTurnService(deps, {
+      userId: "user-7",
+      profile,
+      ...noNamespaces,
+      coreMemoryScope: { kind: "none" },
+    });
+
+    expect(await service.coreMemory.get()).toEqual([]);
+    expect((await service.coreMemory.update("identity", "x"))._unsafeUnwrapErr()).toEqual({
+      code: "core_memory_unavailable",
+    });
+    expect(agentStore.getCoreMemoryBlocks).not.toHaveBeenCalled();
+    expect(agentStore.upsertCoreMemoryBlock).not.toHaveBeenCalled();
   });
 
   it("stages live retains with the speaking profile's id snapshotted", async () => {

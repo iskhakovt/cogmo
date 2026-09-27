@@ -358,6 +358,7 @@ describe("runAgenticStage", () => {
         "load-stage-context",
         "persist-stage-prompt",
         "load-turn-transcript",
+        "freeze-core-memory-scope",
         "freeze-turn-inputs",
         "assemble-prompt",
         "load-last-tokens",
@@ -367,6 +368,34 @@ describe("runAgenticStage", () => {
         "extract-artifact",
       ]),
     );
+  });
+
+  it("reads and writes core memory in the scope it froze", async () => {
+    const h = await harness();
+    h.runStreamingAgentLoop.mockImplementation(async ({ service }) => {
+      await service.coreMemory.update("preferences", "Dice");
+      return loopResult();
+    });
+    const { memo, steps } = memoizingSteps();
+    memo.set("freeze-core-memory-scope", {
+      kind: "classed",
+      profileClass: "game",
+      restricted: false,
+    });
+
+    await runAgenticStage(h.deps, stageArgs(), steps, log);
+
+    expect(h.agentStore.getCoreMemoryBlocks).toHaveBeenCalledWith(
+      expect.anything(),
+      "user-1",
+      "game",
+    );
+    expect(h.agentStore.upsertCoreMemoryBlock).toHaveBeenCalledWith(expect.anything(), {
+      userId: "user-1",
+      profileClass: "game",
+      key: "preferences",
+      content: "Dice",
+    });
   });
 
   it("sends the tools it froze on every invocation when a skill stops loading", async () => {

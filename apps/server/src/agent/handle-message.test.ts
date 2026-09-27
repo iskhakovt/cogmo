@@ -230,6 +230,7 @@ describe("createHandleMessage", () => {
         extractionModel: null,
         autoRecall: "heuristic" as const,
         toolSet: [],
+        memoryScope: null,
       })
       .mockResolvedValue({
         id: "profile-1",
@@ -241,6 +242,7 @@ describe("createHandleMessage", () => {
         extractionModel: null,
         autoRecall: "heuristic" as const,
         toolSet: [],
+        memoryScope: null,
       });
     const deps = mockDeps({
       agentStore: mockAgentStore({ getProfile }),
@@ -1470,6 +1472,7 @@ describe("createHandleMessage", () => {
           extractionModel: null,
           autoRecall: "heuristic",
           toolSet: ["mcp__github__*", "memory_*"],
+          memoryScope: null,
         }),
       }),
       mcpRegistry: {
@@ -1527,6 +1530,7 @@ describe("createHandleMessage", () => {
           extractionModel: null,
           autoRecall: "heuristic",
           toolSet: ["*"],
+          memoryScope: null,
         }),
       }),
       mcpRegistry: {
@@ -1579,6 +1583,7 @@ describe("createHandleMessage", () => {
           extractionModel: null,
           autoRecall: "heuristic",
           toolSet: [],
+          memoryScope: null,
         }),
       }),
     });
@@ -1621,6 +1626,7 @@ describe("createHandleMessage", () => {
         extractionModel: null,
         autoRecall: "heuristic" as const,
         toolSet: ["*"],
+        memoryScope: null,
       };
     }
 
@@ -2341,6 +2347,7 @@ describe("createHandleMessage", () => {
             autoRecall: "heuristic",
             voiceMode: "always",
             toolSet: [],
+            memoryScope: null,
           }),
         }),
         deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
@@ -2392,6 +2399,7 @@ describe("createHandleMessage", () => {
             autoRecall: "heuristic",
             voiceMode: "always",
             toolSet: [],
+            memoryScope: null,
           }),
         }),
         deliveryRouter: mockDeliveryRouter({
@@ -2437,6 +2445,7 @@ describe("createHandleMessage", () => {
             autoRecall: "heuristic",
             voiceMode: "always",
             toolSet: [],
+            memoryScope: null,
           }),
         }),
         deliveryRouter: mockDeliveryRouter({
@@ -2560,6 +2569,7 @@ describe("createHandleMessage", () => {
             autoRecall: "heuristic",
             voiceMode: "auto",
             toolSet: [],
+            memoryScope: null,
           }),
           listMessages: vi
             .fn()
@@ -2635,6 +2645,7 @@ describe("createHandleMessage", () => {
             autoRecall: "heuristic",
             voiceMode: "auto",
             toolSet: [],
+            memoryScope: null,
           }),
         }),
         attachments: {
@@ -2699,6 +2710,7 @@ describe("createHandleMessage", () => {
             autoRecall: "heuristic",
             voiceMode: "auto",
             toolSet: [],
+            memoryScope: null,
           }),
         }),
         attachments: {
@@ -2778,6 +2790,7 @@ describe("createHandleMessage", () => {
             autoRecall: "heuristic",
             voiceMode: "always",
             toolSet: [],
+            memoryScope: null,
           }),
         }),
         deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),

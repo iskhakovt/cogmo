@@ -1,15 +1,17 @@
 /**
  * Assemble the scoped `Service` one agent turn's tools run against. Shared by
  * `handle-message` and the pipeline stage turn so the memory scoping, the
- * restricted profile-class set and pending-memory staging have one
- * definition; each caller decides which optional namespaces (coding, skills,
- * scheduling, pipelines) its turn exposes.
+ * restricted profile-class set, the core-memory scope and pending-memory
+ * staging have one definition; each caller decides which optional namespaces
+ * (coding, skills, scheduling, pipelines) its turn exposes.
  */
 
 import type { Transactor } from "../db/index.js";
 import type { MemoryProvider } from "../memory/provider.js";
 import type { SkillsService } from "../skills/skills-service.js";
 import type { CodingService } from "./coding/service.js";
+import { createCoreMemoryNamespace } from "./core-memory/core-memory-namespace.js";
+import type { CoreMemoryScope } from "./core-memory/scope.js";
 import type { PipelinesService } from "./pipeline/pipelines-service.js";
 import type { SchedulingService } from "./scheduling/scheduling-service.js";
 import { createService, type Service } from "./service.js";
@@ -29,6 +31,8 @@ export interface TurnServiceArgs {
   /** The conversation's user — the memory bank owner. */
   userId: string;
   profile: Profile | undefined;
+  /** The turn's frozen core-memory scope (`loadCoreMemoryScope`). */
+  coreMemoryScope: CoreMemoryScope;
   coding: CodingService | undefined;
   skills: SkillsService | undefined;
   scheduling: SchedulingService | undefined;
@@ -58,14 +62,6 @@ export async function buildTurnService(
     .runInTx((tx) => deps.agentStore.listProfileClasses(tx, userId))
     .then((classes) => classes.filter((c) => c.restricted).map((c) => c.name));
 
-  const coreMemory: Service["coreMemory"] = {
-    get: () => deps.runInTx((tx) => deps.agentStore.getCoreMemoryBlocks(tx, userId, null)),
-    update: (key, content) =>
-      deps.runInTx((tx) =>
-        deps.agentStore.upsertCoreMemoryBlock(tx, { userId, profileClass: null, key, content }),
-      ),
-  };
-
   return createService(
     deps.memory,
     userId,
@@ -73,7 +69,7 @@ export async function buildTurnService(
     profile?.profileClass ?? null,
     restrictedClassNames,
     deps.fileService,
-    coreMemory,
+    createCoreMemoryNamespace(deps, { userId, scope: args.coreMemoryScope }),
     async (content, opts) => {
       await deps.runInTx((tx) =>
         deps.agentStore.stagePendingMemory(tx, {

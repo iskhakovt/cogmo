@@ -24,8 +24,12 @@ export const coreMemoryUpdate = defineTool({
     content: z.string().describe("Full block content (replaces previous content)"),
   }),
   handler: async (input, service) => {
-    await service.coreMemory.update(input.key, input.content);
-    return `Core memory block "${input.key}" updated.`;
+    const written = await service.coreMemory.update(input.key, input.content);
+    if (written.isErr()) throw new Error("Core memory isn't available in this profile.");
+    return written.value.kind === "override"
+      ? `Saved "${input.key}" for this persona only; other personas keep the shared block. ` +
+          "Tell the user it is saved only here."
+      : `Core memory block "${input.key}" updated.`;
   },
 });
 

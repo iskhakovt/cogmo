@@ -242,7 +242,7 @@ describe.skipIf(LIVE_API_KEY === undefined)(
         try {
           const conversation = await runEvalConversation({
             provider: new AnthropicProvider(expectDefined(LIVE_API_KEY, "API key")),
-            coreMemory: new EvalCoreMemory(EVAL.established),
+            coreMemory: EvalCoreMemory.unclassed(EVAL.established),
             rules: [],
             messages: scenario.turns,
             cacheKey: `${nonce}-${scenario.id}`,

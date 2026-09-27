@@ -317,7 +317,7 @@ describe.skipIf(LIVE_API_KEY === undefined)(
       try {
         const { result } = await runEvalTurn({
           provider: new AnthropicProvider(expectDefined(LIVE_API_KEY, "API key")),
-          coreMemory: new EvalCoreMemory(run.blocks),
+          coreMemory: EvalCoreMemory.unclassed(run.blocks),
           rules: [],
           history: [],
           message: run.message,

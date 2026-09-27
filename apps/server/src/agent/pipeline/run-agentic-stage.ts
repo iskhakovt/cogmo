@@ -53,6 +53,7 @@ import {
   TurnRowMissingError,
 } from "../conversation/load-turn-history.js";
 import { storeTurnContext } from "../conversation/store-turn-context.js";
+import { loadCoreMemoryScope } from "../core-memory/load-core-memory-scope.js";
 import type { ImageToolsLoader } from "../image-tools-loader.js";
 import type { AgentLoopResult, StepRunner, StreamingAgentLoopParams } from "../loop.js";
 import type { PromptSource } from "../prompt.js";
@@ -229,6 +230,13 @@ export async function runAgenticStage(
   );
 
   const profile = await deps.runInTx((tx) => deps.agentStore.getProfile(tx, ctx.profileId));
+  // Frozen for the stage, as in a chat turn (see `handle-message`).
+  const coreMemoryScope = await steps.run("freeze-core-memory-scope", () =>
+    loadCoreMemoryScope(
+      { runInTx: deps.runInTx, agentStore: deps.agentStore },
+      { userId: ctx.userId, profile },
+    ),
+  );
 
   const imageTools = deps.imageToolsLoader ? await deps.imageToolsLoader.getTools() : [];
   const skillTools = deps.skillRunner ? await buildSkillTools(deps.skillRunner) : [];
@@ -268,6 +276,7 @@ export async function runAgenticStage(
     {
       userId: ctx.userId,
       profile,
+      coreMemoryScope,
       coding: deps.codingServiceFactory?.(conversationId),
       skills: deps.skillRunner
         ? createSkillsService({ runner: deps.skillRunner, inngest, conversationId })
@@ -291,7 +300,7 @@ export async function runAgenticStage(
         agentStore: deps.agentStore,
         transportStore: deps.transportStore,
       },
-      { conversationId, userId: ctx.userId, profile },
+      { conversationId, userId: ctx.userId, coreMemoryScope, profile },
     );
     return deps.promptSource.assemble({
       profile,

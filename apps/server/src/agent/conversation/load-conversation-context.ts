@@ -1,14 +1,18 @@
 import type { Transactor } from "../../db/index.js";
 import type { TransportStore } from "../../transport/store/index.js";
-import type { CoreMemoryBlock } from "../service.js";
+import {
+  type CoreMemoryScope,
+  readCoreMemory,
+  type ScopedCoreMemoryBlock,
+} from "../core-memory/scope.js";
 import type { AgentStore, Profile } from "../store/index.js";
 
 /**
  * Load what the prompt assembler renders: the channel types currently
  * delivering the conversation, the steering rules at the intersection of
- * `(profile, channels)`, and the core memory blocks of the conversation's
- * user. The reads share one tx and see a consistent snapshot under the
- * project's REPEATABLE READ default.
+ * `(profile, channels)`, and the conversation user's core memory blocks the
+ * turn's scope sees. The reads share one tx and see a consistent snapshot
+ * under the project's REPEATABLE READ default.
  *
  * The `Profile` row is NOT re-read here — the orchestrator passes the
  * row it already loaded for voice-mode + tool-catalog resolution, so a
@@ -29,6 +33,8 @@ export interface LoadConversationContextArgs {
   conversationId: string;
   /** The conversation's user, whose core memory blocks the prompt renders. */
   userId: string;
+  /** Which of those blocks the turn sees (`loadCoreMemoryScope`, frozen in a turn). */
+  coreMemoryScope: CoreMemoryScope;
   /**
    * Pre-loaded profile from the orchestrator. `undefined` when the
    * profile row was missing (deleted mid-turn, etc.); in that case the
@@ -40,7 +46,7 @@ export interface LoadConversationContextArgs {
 export interface ConversationContext {
   channelTypes: ReadonlyArray<string>;
   rules: ReadonlyArray<{ rule: string }>;
-  coreMemory: ReadonlyArray<CoreMemoryBlock>;
+  coreMemory: ReadonlyArray<ScopedCoreMemoryBlock>;
 }
 
 export async function loadConversationContext(
@@ -52,7 +58,7 @@ export async function loadConversationContext(
     const rules = args.profile
       ? await deps.agentStore.getActiveRules(tx, args.profile.id, channelTypes)
       : [];
-    const coreMemory = await deps.agentStore.getCoreMemoryBlocks(tx, args.userId, null);
+    const coreMemory = await readCoreMemory(tx, deps.agentStore, args.userId, args.coreMemoryScope);
     return { channelTypes, rules, coreMemory };
   });
 }

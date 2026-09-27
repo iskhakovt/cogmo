@@ -292,7 +292,7 @@ describe.skipIf(LIVE_API_KEY === undefined)(
             stage = `in the ${label} conversation`;
             const conversation = await runEvalConversation({
               provider,
-              coreMemory: new EvalCoreMemory(EVAL.established),
+              coreMemory: EvalCoreMemory.unclassed(EVAL.established),
               rules: await activeRules(),
               messages,
               cacheKey: `${nonce}-${scenario.id}-${label}`,
@@ -322,7 +322,7 @@ describe.skipIf(LIVE_API_KEY === undefined)(
           const probe = async (rules: ReadonlyArray<{ rule: string }>, label: string) =>
             runEvalTurn({
               provider,
-              coreMemory: new EvalCoreMemory(EVAL.established),
+              coreMemory: EvalCoreMemory.unclassed(EVAL.established),
               rules,
               history: [],
               message: scenario.probe,

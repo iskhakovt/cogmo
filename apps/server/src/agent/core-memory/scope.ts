@@ -6,6 +6,9 @@
  * that class.
  */
 
+import type { Transaction } from "../../db/index.js";
+import type { AgentStore } from "../store/index.js";
+
 /** The one key a classed profile shares with every persona. */
 export const IDENTITY_BLOCK_KEY = "identity";
 
@@ -14,4 +17,31 @@ export interface ScopedCoreMemoryBlock {
   profileClass: string | null;
   key: string;
   content: string;
+}
+
+/**
+ * Where one turn reads and writes core memory, frozen for the turn: nothing
+ * for a third-party or unloadable profile, the unclassed bucket for a profile
+ * without a class, or the profile's class and its restricted flag.
+ */
+export type CoreMemoryScope =
+  | { kind: "none" }
+  | { kind: "unclassed" }
+  | { kind: "classed"; profileClass: string; restricted: boolean };
+
+/** The blocks `scope` sees, in the order they render. */
+export async function readCoreMemory(
+  tx: Transaction,
+  store: Pick<AgentStore, "getCoreMemoryBlocks">,
+  userId: string,
+  scope: CoreMemoryScope,
+): Promise<ReadonlyArray<ScopedCoreMemoryBlock>> {
+  switch (scope.kind) {
+    case "none":
+      return [];
+    case "unclassed":
+      return store.getCoreMemoryBlocks(tx, userId, null);
+    case "classed":
+      return store.getCoreMemoryBlocks(tx, userId, scope.profileClass);
+  }
 }

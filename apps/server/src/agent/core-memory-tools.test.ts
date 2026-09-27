@@ -1,3 +1,4 @@
+import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mockFilesService } from "../test/factories.js";
 import { coreMemoryRead, coreMemoryUpdate } from "./core-memory-tools.js";
@@ -14,7 +15,7 @@ function mockService(coreOverrides?: Partial<Service["coreMemory"]>): Service {
     files: mockFilesService(),
     coreMemory: {
       get: vi.fn().mockResolvedValue([]),
-      update: vi.fn().mockResolvedValue(undefined),
+      update: vi.fn().mockResolvedValue(ok({ kind: "unclassed" })),
       ...coreOverrides,
     },
   };
@@ -31,6 +32,31 @@ describe("core_memory_update", () => {
     expect(svc.coreMemory.update).toHaveBeenCalledWith("user_profile", "Name: Tim");
     expect(result).toContain("user_profile");
     expect(result).toContain("updated");
+  });
+
+  it("tells the model a restricted persona's identity is saved only there", async () => {
+    const svc = mockService({
+      update: vi.fn().mockResolvedValue(ok({ kind: "override", profileClass: "game" })),
+    });
+    const result = await coreMemoryUpdate.handler(
+      { key: "identity", content: "Name: Thorin" },
+      svc,
+    );
+
+    expect(result).toBe(
+      'Saved "identity" for this persona only; other personas keep the shared block. ' +
+        "Tell the user it is saved only here.",
+    );
+  });
+
+  it("fails the call when the turn has no core memory", async () => {
+    const svc = mockService({
+      update: vi.fn().mockResolvedValue(err({ code: "core_memory_unavailable" })),
+    });
+
+    await expect(
+      coreMemoryUpdate.handler({ key: "identity", content: "Name: Sam" }, svc),
+    ).rejects.toThrow("Core memory isn't available in this profile.");
   });
 });
 

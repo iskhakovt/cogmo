@@ -46,6 +46,7 @@ import {
 } from "./conversation/load-turn-history.js";
 import { storeTurnContext } from "./conversation/store-turn-context.js";
 import { buildInCooldownReply, isInCooldown } from "./cooldown.js";
+import { loadCoreMemoryScope } from "./core-memory/load-core-memory-scope.js";
 import type { DebounceConfig } from "./debounce.js";
 import { extractGeneratedDocuments, extractGeneratedImages } from "./extract-images.js";
 import type { ImageToolsLoader } from "./image-tools-loader.js";
@@ -527,6 +528,15 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // even if profile.model changes mid-turn.
       const profile = await deps.runInTx((tx) => agentStore.getProfile(tx, profileId));
 
+      // Frozen for the turn: the core memory the prompt renders and the tools
+      // read and write, from the profile's class, restricted flag and trust
+      // (design/memory.md → Core Memory Scope by Profile Class). A step of its
+      // own, so `freeze-turn-inputs` returns what it always has, placed before
+      // the catalog reads so the invocation that runs it makes none of them.
+      const coreMemoryScope = await step.run("freeze-core-memory-scope", () =>
+        loadCoreMemoryScope({ runInTx: deps.runInTx, agentStore }, { userId, profile }),
+      );
+
       // Open delivery handles early — needed to resolve voice mode
       // (`canDeliverVoice` reflects which active sessions implement
       // `sendVoice`). Side effect is benign: the streaming adapter just
@@ -622,7 +632,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const systemPrompt = await step.run("assemble-prompt", async () => {
         const ctx = await loadConversationContext(
           { runInTx: deps.runInTx, agentStore, transportStore },
-          { conversationId, userId, profile: profile },
+          { conversationId, userId, coreMemoryScope, profile: profile },
         );
         return promptSource.assemble({
           profile: profile,
@@ -735,6 +745,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         {
           userId,
           profile,
+          coreMemoryScope,
           coding: codingService,
           skills: skillsService,
           scheduling: schedulingService,
