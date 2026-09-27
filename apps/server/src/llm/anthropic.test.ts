@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { CorrectionExtractionSchema } from "../agent/evolution/extraction-schema.js";
 import { logger } from "../logger.js";
 import { expectDefined } from "../test/assertions.js";
 import { AnthropicProvider } from "./anthropic.js";
-import { ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
-import type { CacheIntent, StreamEvent, ToolDefinition } from "./types.js";
+import { extractText } from "./content.js";
+import { MissingToolCallError, ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
+import { toObjectJsonSchema } from "./json-schema.js";
+import type { CacheIntent, ResponseFormat, StreamEvent, ToolDefinition } from "./types.js";
 
 // Mock the Anthropic SDK — use a class so `new Anthropic()` works
 const mockCreate = vi.fn();
@@ -1150,8 +1153,8 @@ describe("AnthropicProvider", () => {
     it("takes no transcript caching on the responseFormat path", async () => {
       const provider = createProvider();
       mockCreate.mockResolvedValueOnce({
-        content: [{ type: "tool_use", id: "tu_1", name: "extract", input: { ok: true } }],
-        stop_reason: "tool_use",
+        content: [{ type: "text", text: '{"ok":true}', citations: null }],
+        stop_reason: "end_turn",
         model: "claude-sonnet-5",
         usage: { input_tokens: 10, output_tokens: 5 },
       });
@@ -1170,7 +1173,7 @@ describe("AnthropicProvider", () => {
 
       const body = expectDefined(mockCreate.mock.calls[0], "create call")[0];
       expect(body).not.toHaveProperty("cache_control");
-      expect(breakpoints(body)).toEqual([{ type: "ephemeral" }, { type: "ephemeral" }]);
+      expect(breakpoints(body)).toEqual([{ type: "ephemeral" }]);
     });
 
     it("takes no cache intent on countTokens, and sends no top-level cache_control if handed one", async () => {
@@ -1667,46 +1670,309 @@ describe("AnthropicProvider", () => {
   });
 
   describe("responseFormat", () => {
-    it("converts responseFormat to tool_use trick", async () => {
-      const provider = createProvider();
-      mockCreate.mockResolvedValueOnce({
-        content: [
-          {
-            type: "tool_use",
-            id: "tu_1",
-            name: "extract_data",
-            input: { name: "Alice", age: 30 },
-          },
-        ],
-        stop_reason: "tool_use",
-        model: "claude-sonnet-4-6",
-        usage: { input_tokens: 50, output_tokens: 20 },
-      });
+    const PersonSchema = z.object({ name: z.string().min(1), age: z.number() });
 
-      const result = await provider.chat({
-        model: "claude-sonnet-4-6",
-        system: "Extract structured data",
-        messages: [{ role: "user", content: "Alice is 30" }],
+    const PERSON_FORMAT: ResponseFormat = {
+      type: "json_schema",
+      name: "extract_data",
+      schema: {
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        type: "object",
+        properties: { name: { type: "string", minLength: 1 }, age: { type: "number" } },
+        required: ["name", "age"],
+        additionalProperties: false,
+      },
+    };
+
+    /** A format whose `stageOutput` admits any keys, as `z.record` emits. */
+    const OPEN_FORMAT: ResponseFormat = {
+      type: "json_schema",
+      name: "pipeline_definition",
+      schema: {
+        type: "object",
+        properties: {
+          stageOutput: {
+            type: "object",
+            propertyNames: { type: "string" },
+            additionalProperties: {},
+          },
+        },
+        required: ["stageOutput"],
+        additionalProperties: false,
+      },
+    };
+
+    function textReply(model: string, text: string) {
+      return {
+        content: [
+          { type: "thinking", thinking: "", signature: "sig" },
+          { type: "text", text, citations: null },
+        ],
+        stop_reason: "end_turn",
+        model,
+        usage: { input_tokens: 50, output_tokens: 20 },
+      };
+    }
+
+    function toolReply(model: string, name: string, input: unknown) {
+      return {
+        content: [{ type: "tool_use", id: "tu_1", name, input }],
+        stop_reason: "tool_use",
+        model,
+        usage: { input_tokens: 50, output_tokens: 20 },
+      };
+    }
+
+    function sentBody() {
+      return expectDefined(mockCreate.mock.calls[0], "create call")[0];
+    }
+
+    it.each(["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5", "claude-haiku-4-5"])(
+      "asks %s for structured output rather than forcing a tool",
+      async (model) => {
+        const provider = createProvider();
+        mockCreate.mockResolvedValueOnce(textReply(model, '{"name":"Alice","age":30}'));
+
+        const result = await provider.chat({
+          model,
+          system: "Extract structured data",
+          messages: [{ role: "user", content: "Alice is 30" }],
+          responseFormat: PERSON_FORMAT,
+        });
+
+        const body = sentBody();
+        expect(body).not.toHaveProperty("tools");
+        expect(body).not.toHaveProperty("tool_choice");
+        expect(body.output_config).toEqual({
+          format: {
+            type: "json_schema",
+            schema: {
+              type: "object",
+              properties: {
+                // The grammar takes no length bounds, so they move into
+                // the description.
+                name: { type: "string", description: "{minLength: 1}" },
+                age: { type: "number" },
+              },
+              additionalProperties: false,
+              required: ["name", "age"],
+            },
+          },
+        });
+        expect(body.system).toEqual([
+          { type: "text", text: "Extract structured data", cache_control: { type: "ephemeral" } },
+        ]);
+
+        expect(result.stopReason).toBe("end_turn");
+        expect(PersonSchema.parse(JSON.parse(extractText(result.content)))).toEqual({
+          name: "Alice",
+          age: 30,
+        });
+      },
+    );
+
+    it("sends the grammar the correction schema's const and enum", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(textReply("claude-opus-5-5", '{"corrections":[]}'));
+
+      await provider.chat({
+        model: "claude-opus-5-5",
+        system: "Extract corrections",
+        messages: [{ role: "user", content: "transcript" }],
         responseFormat: {
           type: "json_schema",
-          name: "extract_data",
-          schema: {
-            type: "object",
-            properties: { name: { type: "string" }, age: { type: "number" } },
-            required: ["name", "age"],
-          },
+          name: "correction-extraction",
+          schema: toObjectJsonSchema(CorrectionExtractionSchema),
         },
       });
 
-      // Response normalized to TextBlock with JSON
-      expect(result.content).toEqual([{ type: "text", text: '{"name":"Alice","age":30}' }]);
-      expect(result.stopReason).toBe("end_turn");
+      const items = sentBody().output_config.format.schema.properties.corrections.items;
+      expect(items).not.toHaveProperty("oneOf");
+      expect(items).toMatchObject({
+        anyOf: ["new", "reinforce", "contradiction"].map((action) => ({
+          properties: {
+            action: { type: "string", const: action },
+            category: { type: "string", enum: ["style", "domain", "memory"] },
+          },
+          additionalProperties: false,
+        })),
+      });
+    });
 
-      // Verify synthetic tool + tool_choice sent to API
-      const callArgs = mockCreate.mock.calls[0]![0];
-      expect(callArgs.tools).toHaveLength(1);
-      expect(callArgs.tools[0].name).toBe("extract_data");
-      expect(callArgs.tool_choice).toEqual({ type: "tool", name: "extract_data" });
+    it("offers an unforced tool named in the system prompt for a schema with an open object", async () => {
+      const provider = createProvider();
+      const input = { stageOutput: { title: { type: "string" } } };
+      mockCreate.mockResolvedValueOnce(toolReply("claude-opus-5-5", "pipeline_definition", input));
+
+      const result = await provider.chat({
+        model: "claude-opus-5-5",
+        system: "Compile the pipeline",
+        messages: [{ role: "user", content: "Summarize the news as JSON" }],
+        responseFormat: OPEN_FORMAT,
+      });
+
+      const body = sentBody();
+      expect(body).not.toHaveProperty("output_config");
+      expect(body).not.toHaveProperty("tool_choice");
+      expect(body.tools).toEqual([
+        {
+          name: "pipeline_definition",
+          description: "Respond with structured data matching the schema.",
+          input_schema: {
+            type: "object",
+            properties: OPEN_FORMAT.schema.properties,
+            required: ["stageOutput"],
+          },
+          cache_control: { type: "ephemeral" },
+        },
+      ]);
+      expect(body.system).toEqual([
+        { type: "text", text: "Compile the pipeline", cache_control: { type: "ephemeral" } },
+        { type: "text", text: "Respond by calling the pipeline_definition tool." },
+      ]);
+
+      expect(result.content).toEqual([{ type: "text", text: JSON.stringify(input) }]);
+      expect(result.stopReason).toBe("end_turn");
+    });
+
+    it("offers the tool for a schema with an untyped node, which admits any value", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(toolReply("claude-opus-5-5", "payload", { data: [1] }));
+
+      await provider.chat({
+        model: "claude-opus-5-5",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+        responseFormat: {
+          type: "json_schema",
+          name: "payload",
+          schema: toObjectJsonSchema(z.object({ data: z.unknown() })),
+        },
+      });
+
+      expect(sentBody()).not.toHaveProperty("output_config");
+      expect(sentBody().tools).toHaveLength(1);
+    });
+
+    it.each(["max_tokens", "refusal"])(
+      "passes a tool-path reply's %s stop through",
+      async (stopReason) => {
+        const provider = createProvider();
+        mockCreate.mockResolvedValueOnce({
+          ...toolReply("claude-opus-5-5", "pipeline_definition", { stageOutput: {} }),
+          stop_reason: stopReason,
+        });
+
+        const result = await provider.chat({
+          model: "claude-opus-5-5",
+          system: "Compile the pipeline",
+          messages: [{ role: "user", content: "hi" }],
+          responseFormat: OPEN_FORMAT,
+        });
+
+        expect(result.stopReason).toBe(stopReason);
+      },
+    );
+
+    it("names the tool in a system prompt of its own when the caller sends none", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        toolReply("claude-opus-5-5", "pipeline_definition", { stageOutput: {} }),
+      );
+
+      await provider.chat({
+        model: "claude-opus-5-5",
+        system: "",
+        messages: [{ role: "user", content: "hi" }],
+        responseFormat: OPEN_FORMAT,
+      });
+
+      expect(sentBody().system).toEqual([
+        { type: "text", text: "Respond by calling the pipeline_definition tool." },
+      ]);
+    });
+
+    it.each([
+      ["JSON", '{"stageOutput":{}}'],
+      ["prose", "Which feed should the pipeline read?"],
+    ])(
+      "throws for a tool-path reply of %s text that calls no tool, naming the tool to re-ask with",
+      async (_kind, text) => {
+        const provider = createProvider();
+        mockCreate.mockResolvedValueOnce(textReply("claude-opus-5-5", text));
+
+        const error = await provider
+          .chat({
+            model: "claude-opus-5-5",
+            system: "Compile the pipeline",
+            messages: [{ role: "user", content: "hi" }],
+            responseFormat: OPEN_FORMAT,
+          })
+          .catch((err: unknown) => err);
+
+        expect(error).toBeInstanceOf(MissingToolCallError);
+        expect(error).toMatchObject({
+          reply: text,
+          instruction: "Respond by calling the pipeline_definition tool.",
+          usage: { inputTokens: 50, outputTokens: 20 },
+        });
+      },
+    );
+
+    it.each([
+      ["max_tokens", "max_tokens"],
+      ["refusal", "refusal"],
+      ["model_context_window_exceeded", "context_overflow"],
+    ])(
+      "passes a tool-path reply stopped at %s before any call through",
+      async (wire, canonical) => {
+        const provider = createProvider();
+        mockCreate.mockResolvedValueOnce({
+          ...textReply("claude-opus-5-5", "Let me think"),
+          stop_reason: wire,
+        });
+
+        const result = await provider.chat({
+          model: "claude-opus-5-5",
+          system: "Compile the pipeline",
+          messages: [{ role: "user", content: "hi" }],
+          responseFormat: OPEN_FORMAT,
+        });
+
+        expect(result.stopReason).toBe(canonical);
+        expect(extractText(result.content)).toBe("Let me think");
+      },
+    );
+
+    it("passes a structured-output reply's text through, whatever it says", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(textReply("claude-opus-5-5", "Who is Alice?"));
+
+      const result = await provider.chat({
+        model: "claude-opus-5-5",
+        system: "Extract structured data",
+        messages: [{ role: "user", content: "Alice is 30" }],
+        responseFormat: PERSON_FORMAT,
+      });
+
+      expect(extractText(result.content)).toBe("Who is Alice?");
+      expect(result.stopReason).toBe("end_turn");
+    });
+
+    it("counts a structured-output request with its output format", async () => {
+      const provider = createProvider();
+      mockCountTokens.mockResolvedValueOnce({ input_tokens: 100 });
+
+      await provider.countTokens({
+        model: "claude-opus-5-5",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+        responseFormat: PERSON_FORMAT,
+      });
+
+      const body = expectDefined(mockCountTokens.mock.calls[0], "countTokens call")[0];
+      expect(body).not.toHaveProperty("tools");
+      expect(body.output_config.format.type).toBe("json_schema");
     });
 
     it("throws when both responseFormat and tools are provided", async () => {

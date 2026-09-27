@@ -281,6 +281,7 @@ OpenRouter builds a Gemini cache from the content up to the last breakpoint. A t
 - **TTL ordering.** A 1-hour automatic tail after a 5-minute tools or system marker is a 400, so all three take the intent's TTL.
 - **Lookback.** An iteration appends roughly 3–4 positions (thinking, text, a `tool_use` run, a `tool_result` run); a turn boundary roughly 5–8 (the final reply plus the next user message). Both are well inside the 20-position window, so the fourth slot stays free. A turn shape that appends more than 20 positions in one request would need an intermediate breakpoint.
 - **`countTokens`** builds its own request and sends no top-level `cache_control`.
+- **Structured output.** `output_config.format` renders a system prompt of its own, and changing the format invalidates the cache. Each callsite sends a fixed schema, so its repeated calls keep one prefix. See [providers.md](providers.md) → Structured output.
 - **Thinking and effort** are not set by the adapter today. Changing either later invalidates the messages cache; they must be pinned per route, never varied per request.
 
 ## Retention `[confirmed]`

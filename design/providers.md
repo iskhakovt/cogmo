@@ -196,6 +196,17 @@ This rule avoids two failure modes: yielding duplicated content (the agent sees 
 
 The wrapper does not deduplicate requests, rate-limit transitions, or track health state — it is stateless. A provider that just returned 500 will be tried again on the next turn. This is intentional for the single-user deployment: complexity that pays off at scale (circuit breakers, health checks) is noise here.
 
+## Structured output `[confirmed]`
+
+`ChatParams.responseFormat` asks for JSON matching a schema. A provider may enforce only part of it, so `chatTyped` (`src/llm/typed.ts`) parses the reply with a `jsonrepair` pre-pass, validates it with Zod, and retries with the validation error. A reply stopped by the output cap is re-requested once at twice the cap, held to the model's maximum output where the LiteLLM snapshot knows it, and spends no feedback retry: a higher cap is Anthropic's documented remedy for a `max_tokens` stop. A reply still cut off, one stopped by the context window (`OutputCutOffError`), or a refusal (`RefusalError`) throws before the parse: `jsonrepair` would close cut-off JSON into a value the model never finished, and a feedback turn would likely meet the same stop.
+
+| Adapter | Request |
+|-|-|
+| Anthropic | Structured outputs (`output_config.format`), which constrain decoding to the schema. `src/llm/anthropic-output-schema.ts` keeps what Anthropic's JSON Schema limitations list as supported, `enum` and `const` included, closes every object and turns `oneOf` into `anyOf`; every other constraint, such as numeric and length bounds, moves into its node's description. A schema the grammar can't express, with an open object (`z.record`, as in a pipeline stage's JSON output schema) or an untyped node (`z.unknown()`), takes the tool path: one synthetic tool carrying the schema, left unforced (`tool_choice: auto`) and named in a system block, since forcing it is a 400 on Opus 5.5 and Fable 5.1. A reply that makes no call (`MissingToolCallError`) spends `chatTyped`'s feedback retry on a re-ask repeating that instruction, as Anthropic advises for an unforced tool. |
+| OpenAI-compatible | `response_format: { type: "json_schema", strict: true }` with the schema as given. |
+
+Models that think by default (adaptive on Sonnet 5, always on Opus 5.5 and Fable 5.1) think on these calls too, and the thinking counts toward `max_tokens`.
+
 ## Validation
 
 The setup wizard validates each provider by calling `GET /v1/models` (standard across OpenAI-compatible APIs) or Anthropic's equivalent. This is free (no tokens consumed), confirms the API key works, and returns the list of available models — which the wizard uses to auto-populate `model_providers` entries.

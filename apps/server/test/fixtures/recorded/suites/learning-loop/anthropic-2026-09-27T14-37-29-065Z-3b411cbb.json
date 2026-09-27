@@ -8,17 +8,10 @@
         "hasToolResult": false
       },
       "response": {
-        "toolCalls": [
-          {
-            "name": "correction-extraction",
-            "arguments": "{\"corrections\":[{\"rule\":\"Do not use bullet points or lists; write responses in plain sentences.\",\"category\":\"style\",\"reasoning\":\"User reiterated a previously stated preference against bullet points or numbered lists, asking for plain sentences only.\",\"action\":\"reinforce\",\"matchedExistingRuleId\":\"R1\"}]}",
-            "id": "toolu_01AnHJWQqh5FSP3tQLc3rpZ2"
-          }
-        ]
+        "content": "{\"corrections\":[{\"rule\":\"Do not use bullet points or lists in responses; write in plain sentences instead.\",\"category\":\"style\",\"reasoning\":\"User explicitly restated the preference for plain sentences over bullet points or numbered lists, which matches an existing rule.\",\"action\":\"reinforce\",\"matchedExistingRuleId\":\"R1\"}]}"
       },
       "metadata": {
-        "systemHash": "7d8102a5",
-        "toolsHash": "414940e8"
+        "systemHash": "a03f80e8"
       }
     }
   ]

@@ -8,17 +8,10 @@
         "hasToolResult": false
       },
       "response": {
-        "toolCalls": [
-          {
-            "name": "pending-memory-classification",
-            "arguments": "{\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"first-party\"}",
-            "id": "toolu_0168C2wmwY5hMnfmJVVW2bSV"
-          }
-        ]
+        "content": "{\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"first-party\"}"
       },
       "metadata": {
-        "systemHash": "cc7ea80c",
-        "toolsHash": "117425de"
+        "systemHash": "cc7ea80c"
       }
     }
   ]

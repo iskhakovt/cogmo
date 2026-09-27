@@ -1,16 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { expectDefined } from "../test/assertions.js";
-import { ProviderProtocolError } from "./errors.js";
+import { MissingToolCallError, OutputCutOffError, ProviderProtocolError } from "./errors.js";
+import { RefusalError } from "./fallback.js";
 import type { LlmProvider } from "./provider.js";
-import { chatTyped } from "./typed.js";
+import { type ChatTypedRepair, chatTyped } from "./typed.js";
+import type { StopReason } from "./types.js";
 
-function mockProvider(responses: Array<{ text: string }>): LlmProvider {
+function mockProvider(responses: Array<{ text: string; stopReason?: StopReason }>): LlmProvider {
   const chatFn = vi.fn();
   for (const r of responses) {
     chatFn.mockResolvedValueOnce({
       content: [{ type: "text", text: r.text }],
-      stopReason: "end_turn",
+      stopReason: r.stopReason ?? "end_turn",
       model: "test-model",
       usage: { inputTokens: 10, outputTokens: 5 },
     });
@@ -123,6 +125,142 @@ describe("chatTyped", () => {
     expect(provider.chat).toHaveBeenCalledTimes(1);
   });
 
+  it.each<[string, string]>([
+    // jsonrepair closes this into a Zod-valid value the model never finished.
+    ["that jsonrepair would complete", '{"name":"Alice","age":30'],
+    ["that fails validation", '{"name":"Alice","ag'],
+  ])("refuses a reply cut off %s at the raised cap too", async (_label, text) => {
+    const provider = mockProvider([
+      { text, stopReason: "max_tokens" },
+      { text, stopReason: "max_tokens" },
+      { text: '{"name":"Alice","age":30}' },
+    ]);
+
+    await expect(
+      chatTyped({
+        provider,
+        model: "test-model",
+        system: "sys",
+        messages: [{ role: "user", content: "Alice is 30" }],
+        schema: PersonSchema,
+        name: "extract_person",
+      }),
+    ).rejects.toBeInstanceOf(OutputCutOffError);
+
+    expect(provider.chat).toHaveBeenCalledTimes(2);
+  });
+
+  it("refuses a reply cut off at the context window, with no retry", async () => {
+    const provider = mockProvider([
+      { text: '{"name":"Alice","age":30', stopReason: "context_overflow" },
+      { text: '{"name":"Alice","age":30}' },
+    ]);
+
+    await expect(
+      chatTyped({
+        provider,
+        model: "test-model",
+        system: "sys",
+        messages: [{ role: "user", content: "Alice is 30" }],
+        schema: PersonSchema,
+        name: "extract_person",
+      }),
+    ).rejects.toBeInstanceOf(OutputCutOffError);
+
+    expect(provider.chat).toHaveBeenCalledTimes(1);
+  });
+
+  describe("a reply cut off at the output cap", () => {
+    const CUT_OFF = { text: '{"name":"Alice","age":30', stopReason: "max_tokens" as const };
+    const WHOLE = { text: '{"name":"Alice","age":30}' };
+
+    function call(provider: LlmProvider, extra: { model?: string; maxTokens?: number } = {}) {
+      return chatTyped({
+        provider,
+        model: extra.model ?? "test-model",
+        system: "sys",
+        messages: [{ role: "user", content: "Alice is 30" }],
+        schema: PersonSchema,
+        name: "extract_person",
+        ...(extra.maxTokens !== undefined && { maxTokens: extra.maxTokens }),
+      });
+    }
+
+    function request(provider: LlmProvider, index: number) {
+      return expectDefined(vi.mocked(provider.chat).mock.calls[index], `call ${index}`)[0];
+    }
+
+    it("is re-requested once at twice the default cap, spending no feedback retry", async () => {
+      const provider = mockProvider([CUT_OFF, WHOLE]);
+
+      const result = await call(provider);
+
+      expect(result.data).toEqual({ name: "Alice", age: 30 });
+      expect(result.retries).toBe(0);
+      expect(result.usage).toEqual({ inputTokens: 20, outputTokens: 10 });
+      expect(request(provider, 0)).not.toHaveProperty("maxTokens");
+      expect(request(provider, 1)).toMatchObject({
+        maxTokens: 16_384,
+        messages: [{ role: "user", content: "Alice is 30" }],
+      });
+    });
+
+    it("doubles the caller's cap", async () => {
+      const provider = mockProvider([CUT_OFF, WHOLE]);
+
+      await call(provider, { maxTokens: 2048 });
+
+      expect(request(provider, 0).maxTokens).toBe(2048);
+      expect(request(provider, 1).maxTokens).toBe(4096);
+    });
+
+    it("holds the raised cap to the model's maximum output", async () => {
+      const provider = mockProvider([CUT_OFF, WHOLE]);
+
+      await call(provider, { model: "claude-sonnet-5", maxTokens: 40_000 });
+
+      expect(request(provider, 1).maxTokens).toBe(64_000);
+    });
+
+    it("fails at once when the cap is already the model's maximum output", async () => {
+      const provider = mockProvider([CUT_OFF, WHOLE]);
+
+      await expect(
+        call(provider, { model: "claude-sonnet-5", maxTokens: 64_000 }),
+      ).rejects.toBeInstanceOf(OutputCutOffError);
+      expect(provider.chat).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps the raised cap for a feedback retry", async () => {
+      const provider = mockProvider([CUT_OFF, { text: '{"name":"Alice"}' }, WHOLE]);
+
+      const result = await call(provider);
+
+      expect(result.retries).toBe(1);
+      expect(request(provider, 2).maxTokens).toBe(16_384);
+    });
+  });
+
+  it("refuses a refusal, even one whose text validates, spending no retry", async () => {
+    const provider = mockProvider([
+      { text: '{"name":"Alice","age":30}', stopReason: "refusal" },
+      { text: '{"name":"Alice","age":30}' },
+    ]);
+
+    await expect(
+      chatTyped({
+        provider,
+        model: "test-model",
+        system: "sys",
+        messages: [{ role: "user", content: "Alice is 30" }],
+        schema: PersonSchema,
+        name: "extract_person",
+      }),
+    ).rejects.toBeInstanceOf(RefusalError);
+
+    expect(provider.chat).toHaveBeenCalledTimes(1);
+  });
+
   it("retries on Zod validation failure with synthetic user turn", async () => {
     const provider = mockProvider([
       { text: '{"name":"Alice"}' }, // missing required 'age'
@@ -149,6 +287,124 @@ describe("chatTyped", () => {
     expect(assistantTurn.role).toBe("assistant");
     expect(feedbackTurn.role).toBe("user");
     expect(feedbackTurn.content).toContain("didn't match the expected format");
+  });
+
+  it("spends the feedback retry on a prose reply, which jsonrepair reads as a JSON string", async () => {
+    const provider = mockProvider([
+      { text: "Who do you mean?" },
+      { text: '{"name":"Alice","age":30}' },
+    ]);
+
+    const result = await chatTyped({
+      provider,
+      model: "test-model",
+      system: "sys",
+      messages: [{ role: "user", content: "Alice is 30" }],
+      schema: PersonSchema,
+      name: "extract_person",
+    });
+
+    expect(result.data).toEqual({ name: "Alice", age: 30 });
+    expect(result.retries).toBe(1);
+  });
+
+  describe("a reply that makes no tool call", () => {
+    const INSTRUCTION = "Respond by calling the extract_person tool.";
+
+    function missedCall(reply: string): MissingToolCallError {
+      return new MissingToolCallError("extract_person", {
+        reply,
+        instruction: INSTRUCTION,
+        usage: { inputTokens: 40, outputTokens: 6 },
+      });
+    }
+
+    function providerWith(chat: LlmProvider["chat"]): LlmProvider {
+      return { name: "test", chat, chatStream: vi.fn(), countTokens: vi.fn() };
+    }
+
+    const VALID = {
+      content: [{ type: "text" as const, text: '{"name":"Alice","age":30}' }],
+      stopReason: "end_turn" as const,
+      model: "test-model",
+      usage: { inputTokens: 10, outputTokens: 5 },
+    };
+
+    function call(provider: LlmProvider, repair?: ChatTypedRepair) {
+      return chatTyped({
+        provider,
+        model: "test-model",
+        system: "sys",
+        messages: [{ role: "user", content: "Alice is 30" }],
+        schema: PersonSchema,
+        name: "extract_person",
+        ...(repair !== undefined && { repair }),
+      });
+    }
+
+    it("is re-asked with the adapter's instruction, spending the feedback retry", async () => {
+      const chat = vi
+        .fn()
+        .mockRejectedValueOnce(missedCall("Alice is thirty."))
+        .mockResolvedValueOnce(VALID);
+
+      const result = await call(providerWith(chat));
+
+      expect(result.data).toEqual({ name: "Alice", age: 30 });
+      expect(result.retries).toBe(1);
+      expect(result.usage).toEqual({ inputTokens: 50, outputTokens: 11 });
+      expect(expectDefined(chat.mock.calls[1], "re-ask")[0].messages).toEqual([
+        { role: "user", content: "Alice is 30" },
+        { role: "assistant", content: "Alice is thirty." },
+        { role: "user", content: INSTRUCTION },
+      ]);
+    });
+
+    it("is re-asked without an assistant turn when the reply had no text", async () => {
+      const chat = vi.fn().mockRejectedValueOnce(missedCall(" ")).mockResolvedValueOnce(VALID);
+
+      await call(providerWith(chat));
+
+      expect(expectDefined(chat.mock.calls[1], "re-ask")[0].messages).toEqual([
+        { role: "user", content: "Alice is 30" },
+        { role: "user", content: INSTRUCTION },
+      ]);
+    });
+
+    it("fails after the one retry when the re-ask makes no tool call either", async () => {
+      const chat = vi
+        .fn()
+        .mockRejectedValueOnce(missedCall("Alice is thirty."))
+        .mockRejectedValueOnce(missedCall("Thirty."))
+        .mockResolvedValueOnce(VALID);
+
+      await expect(call(providerWith(chat))).rejects.toBeInstanceOf(MissingToolCallError);
+      expect(chat).toHaveBeenCalledTimes(2);
+    });
+
+    it("leaves no retry for a Zod failure after the re-ask", async () => {
+      const chat = vi
+        .fn()
+        .mockRejectedValueOnce(missedCall("Alice is thirty."))
+        .mockResolvedValueOnce({ ...VALID, content: [{ type: "text", text: '{"name":"Alice"}' }] })
+        .mockResolvedValueOnce(VALID);
+
+      await expect(call(providerWith(chat))).rejects.toThrow(/age/i);
+      expect(chat).toHaveBeenCalledTimes(2);
+    });
+
+    it.each<[string, ChatTypedRepair]>([
+      ["maxRetries is 0", { maxRetries: 0 }],
+      ["onZodFailure is 'throw'", { onZodFailure: "throw" }],
+    ])("is not re-asked when %s", async (_label, repair) => {
+      const chat = vi
+        .fn()
+        .mockRejectedValueOnce(missedCall("Alice is thirty."))
+        .mockResolvedValueOnce(VALID);
+
+      await expect(call(providerWith(chat), repair)).rejects.toBeInstanceOf(MissingToolCallError);
+      expect(chat).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("does not persist the synthetic user turn back into the caller's messages array", async () => {

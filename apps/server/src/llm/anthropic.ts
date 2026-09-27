@@ -1,24 +1,31 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { logger } from "../logger.js";
+import { hasOpenObject, toStructuredOutputSchema } from "./anthropic-output-schema.js";
 import { cacheMarker } from "./cache-marker.js";
-import { ProviderProtocolError, parseToolArgs, ToolArgsCutOffError } from "./errors.js";
+import { extractText } from "./content.js";
+import {
+  MissingToolCallError,
+  ProviderProtocolError,
+  parseToolArgs,
+  ToolArgsCutOffError,
+} from "./errors.js";
 import { withFailureLogging } from "./logging-fetch.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
-import type {
-  ChatParams,
-  ChatStreamResult,
-  ContentBlock,
-  CountTokensParams,
-  LlmResponse,
-  Message,
-  StopReason,
-  StreamEvent,
-  ToolDefinition,
-  Usage,
+import {
+  type ChatParams,
+  type ChatStreamResult,
+  type ContentBlock,
+  type CountTokensParams,
+  DEFAULT_MAX_TOKENS,
+  type LlmResponse,
+  type Message,
+  type ResponseFormat,
+  type StopReason,
+  type StreamEvent,
+  type ToolDefinition,
+  type Usage,
 } from "./types.js";
-
-const DEFAULT_MAX_TOKENS = 8192;
 
 export interface AnthropicProviderOptions {
   /**
@@ -214,6 +221,7 @@ export class AnthropicProvider implements LlmProvider {
     };
     if (built.system) countParams.system = built.system;
     if (built.tools) countParams.tools = built.tools;
+    if (built.output_config) countParams.output_config = built.output_config;
     const result = await this.#client.messages.countTokens(countParams);
     return result.input_tokens;
   }
@@ -234,27 +242,33 @@ export class AnthropicProvider implements LlmProvider {
       const stopReason = fromAnthropicStopReason(response.stop_reason);
       recordChatUsage(span, this.name, response.model, usage, stopReason);
 
-      // When responseFormat is set, the model is forced to call a synthetic tool.
-      // Normalize: extract tool input as JSON text, set stopReason to end_turn.
-      if (params.responseFormat) {
+      // A tool-path reply carries the JSON as the tool's input. Returned as
+      // text, with `tool_use` read as `end_turn`, it matches a
+      // structured-output reply; any other stop reason passes through.
+      const format = params.responseFormat;
+      const content = response.content.flatMap(fromAnthropicBlock);
+      if (format && !takesStructuredOutput(format)) {
         const toolUse = response.content.find((b) => b.type === "tool_use");
         if (toolUse && toolUse.type === "tool_use") {
           return {
             content: [{ type: "text", text: JSON.stringify(toolUse.input) }],
-            stopReason: "end_turn",
+            stopReason: stopReason === "tool_use" ? "end_turn" : stopReason,
             model: response.model,
             usage,
           };
         }
-        logger.warn("responseFormat set but no tool_use block in response");
+        // `tool_choice: auto` lets the model answer in text instead. A cut-off
+        // or refused reply passes through with its stop reason.
+        if (stopReason === "end_turn") {
+          throw new MissingToolCallError(format.name, {
+            reply: extractText(content),
+            instruction: callInstruction(format.name),
+            usage,
+          });
+        }
       }
 
-      return {
-        content: response.content.flatMap(fromAnthropicBlock),
-        stopReason,
-        model: response.model,
-        usage,
-      };
+      return { content, stopReason, model: response.model, usage };
     } catch (err) {
       failChatSpan(span, err);
       throw err;
@@ -344,24 +358,35 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
       ? [{ type: "text", text: params.system, cache_control: marker }]
       : [];
 
-  // When responseFormat is set, use the tool_use trick: define a synthetic tool
-  // with the schema and force the model to call it via tool_choice.
-  if (params.responseFormat) {
+  const format = params.responseFormat;
+  if (format) {
+    const maxTokens = params.maxTokens ?? DEFAULT_MAX_TOKENS;
+    if (takesStructuredOutput(format)) {
+      return {
+        model: params.model,
+        max_tokens: maxTokens,
+        ...(systemBlocks.length > 0 && { system: systemBlocks }),
+        messages: params.messages.map(toAnthropicMessage),
+        output_config: {
+          format: { type: "json_schema", schema: toStructuredOutputSchema(format.schema) },
+        },
+      };
+    }
+
+    // The system prompt asks for the call: forcing it (`tool_choice` of
+    // type `tool` or `any`) is a 400 on Opus 5.5 and Fable 5.1.
     const syntheticTool = toAnthropicTool({
-      name: params.responseFormat.name,
+      name: format.name,
       description: "Respond with structured data matching the schema.",
-      parameters: params.responseFormat.schema,
+      parameters: format.schema,
     });
     syntheticTool.cache_control = { type: "ephemeral" };
-
-    const maxTokens = params.maxTokens ?? DEFAULT_MAX_TOKENS;
     return {
       model: params.model,
       max_tokens: maxTokens,
-      ...(systemBlocks.length > 0 && { system: systemBlocks }),
+      system: [...systemBlocks, { type: "text", text: callInstruction(format.name) }],
       messages: params.messages.map(toAnthropicMessage),
       tools: [syntheticTool],
-      tool_choice: { type: "tool", name: params.responseFormat.name },
     };
   }
 
@@ -394,6 +419,22 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
     ...(tools && { tools }),
     ...(params.cache && { cache_control: marker }),
   };
+}
+
+// --- Structured output ---
+
+/**
+ * Whether a `responseFormat` request goes through structured outputs. A
+ * schema with an open node ({@link hasOpenObject}), which the grammar can't
+ * express, takes the tool path: a synthetic tool carrying the schema.
+ */
+function takesStructuredOutput(format: ResponseFormat): boolean {
+  return !hasOpenObject(format.schema);
+}
+
+/** The tool path's request for its call, in the system prompt and in a re-ask. */
+function callInstruction(name: string): string {
+  return `Respond by calling the ${name} tool.`;
 }
 
 /**

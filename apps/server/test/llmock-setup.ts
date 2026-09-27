@@ -114,16 +114,22 @@ function normalizeContent(text: string): string {
 /**
  * Structured-output calls that send the same user message under different
  * system prompts: the Observer's correction and memory extraction both send
- * the transcript. A fixture key carries no system prompt, so the key gets the
- * call's name, which the Anthropic adapter sends as the one tool it forces;
- * without it, one phase would replay the other's reply.
+ * the transcript. A fixture key carries neither the system prompt nor
+ * `output_config` (aimock drops it), so the call's name, found by its system
+ * prompt's opening sentence, prefixes the last user message; without it, one
+ * phase would replay the other's reply.
  */
-const SHARED_INPUT_STRUCTURED_OUTPUTS = new Set(["correction-extraction", "memory-extraction"]);
+const SHARED_INPUT_STRUCTURED_OUTPUTS = new Map([
+  ["correction-extraction", "You are a behavioral correction extractor."],
+  ["memory-extraction", "You are a memory extraction engine."],
+]);
 
 function structuredOutputName(req: ChatCompletionRequest): string | undefined {
-  const [tool, ...others] = req.tools ?? [];
-  if (tool === undefined || others.length > 0) return undefined;
-  return SHARED_INPUT_STRUCTURED_OUTPUTS.has(tool.function.name) ? tool.function.name : undefined;
+  const system = req.messages.find((m) => m.role === "system")?.content;
+  if (typeof system !== "string") return undefined;
+  const [name] =
+    [...SHARED_INPUT_STRUCTURED_OUTPUTS].find(([, opening]) => system.startsWith(opening)) ?? [];
+  return name;
 }
 
 function requestTransform(req: ChatCompletionRequest): ChatCompletionRequest {

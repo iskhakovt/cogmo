@@ -219,6 +219,9 @@ export interface ResponseFormat {
 
 // --- Chat params ---
 
+/** The output cap an adapter sends when {@link ChatParams.maxTokens} is unset. */
+export const DEFAULT_MAX_TOKENS = 8192;
+
 /**
  * Says that this request's transcript will be sent again, extended, and is
  * worth caching. Provider-neutral: each adapter decides what it means on the
@@ -239,7 +242,10 @@ export interface ChatParams {
   messages: Message[];
   tools?: ToolDefinition[];
   maxTokens?: number;
-  /** Request structured JSON output. Mutually exclusive with tools. */
+  /**
+   * Request structured JSON output. Mutually exclusive with tools. A provider
+   * may enforce only part of the schema, so callers validate the reply.
+   */
   responseFormat?: ResponseFormat;
   /**
    * Sampling temperature. Provider default when unset (typically 1.0).

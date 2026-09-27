@@ -23,10 +23,23 @@
 import type { ZodType } from "zod";
 import { logger } from "../logger.js";
 import { extractText } from "./content.js";
-import { ProviderProtocolError, parseProviderJson } from "./errors.js";
+import {
+  MissingToolCallError,
+  OutputCutOffError,
+  ProviderProtocolError,
+  parseProviderJson,
+} from "./errors.js";
+import { RefusalError } from "./fallback.js";
 import { toObjectJsonSchema } from "./json-schema.js";
+import { lookupLitellm } from "./litellm-data.js";
 import type { LlmProvider } from "./provider.js";
-import type { Message, Usage } from "./types.js";
+import {
+  DEFAULT_MAX_TOKENS,
+  type LlmResponse,
+  type Message,
+  type StopReason,
+  type Usage,
+} from "./types.js";
 import { sumUsage, ZERO_USAGE } from "./usage.js";
 
 /**
@@ -50,9 +63,10 @@ export interface ChatTypedRepair {
    */
   jsonrepair?: boolean;
   /**
-   * Number of feedback-injection retries permitted on Zod validation failure.
-   * `0` disables retry (one attempt total). Has no effect when
-   * {@link onZodFailure} is `"throw"`.
+   * Number of feedback-injection retries permitted on Zod validation failure
+   * or on a {@link MissingToolCallError}, from one shared budget. `0` disables
+   * retry (one attempt total). Has no effect when {@link onZodFailure} is
+   * `"throw"`.
    *
    * Default: `1`.
    */
@@ -63,7 +77,8 @@ export interface ChatTypedRepair {
    * - `"feedback"`: append the bad assistant turn + a user turn carrying the
    *   validation error, re-call the model with the same schema, count one
    *   retry against {@link maxRetries}.
-   * - `"throw"`: surface the Zod error immediately, no retry.
+   * - `"throw"`: surface the Zod error immediately, no retry. A
+   *   {@link MissingToolCallError} surfaces the same way.
    *
    * Default: `"feedback"`.
    */
@@ -110,32 +125,72 @@ const DEFAULT_REPAIR: Required<ChatTypedRepair> = {
  * the returned text, validates with the provided Zod schema. On Zod failure
  * with `repair.onZodFailure: "feedback"`, appends the failed response plus
  * a validation-error user turn and re-calls the model up to
- * `repair.maxRetries` times.
+ * `repair.maxRetries` times. A {@link MissingToolCallError} spends the same
+ * budget on a re-ask: the reply's text, then the adapter's instruction as
+ * the user turn.
  *
  * {@link ProviderProtocolError} (raised by {@link parseProviderJson} when
  * `jsonrepair` also fails) propagates immediately — no feedback retry, no
  * additional call. The in-loop classifier owns that recovery path for
  * in-loop callsites; for out-of-loop callsites the wrapping Inngest step
- * handles the throw.
+ * handles the throw. A reply that is not the model's whole answer throws
+ * the same way before it is parsed: {@link OutputCutOffError} for one cut
+ * off by the output cap or the context window, {@link RefusalError} for a
+ * refusal. The first cut-off at the output cap is re-requested instead, at
+ * twice the cap held to the model's maximum output, spending no feedback
+ * retry; the raised cap stays for the rest of the call.
  */
 export async function chatTyped<T>(params: TypedChatParams<T>): Promise<TypedChatResult<T>> {
   const { provider, model, system, schema, name } = params;
   const repair: Required<ChatTypedRepair> = { ...DEFAULT_REPAIR, ...params.repair };
   const jsonSchema = toObjectJsonSchema(schema);
   const messages: Message[] = [...params.messages];
+  let maxTokens = params.maxTokens;
+  let capRaised = false;
   let totalUsage: Readonly<Usage> = ZERO_USAGE;
   let retries = 0;
 
+  const canRetry = () => repair.onZodFailure === "feedback" && retries < repair.maxRetries;
+
   for (;;) {
-    const response = await provider.chat({
-      model,
-      system,
-      messages,
-      responseFormat: { type: "json_schema", name, schema: jsonSchema },
-      ...(params.maxTokens != null && { maxTokens: params.maxTokens }),
-    });
+    let response: LlmResponse;
+    try {
+      response = await provider.chat({
+        model,
+        system,
+        messages,
+        responseFormat: { type: "json_schema", name, schema: jsonSchema },
+        ...(maxTokens !== undefined && { maxTokens }),
+      });
+    } catch (err) {
+      if (!(err instanceof MissingToolCallError)) throw err;
+      totalUsage = sumUsage(totalUsage, err.usage);
+      if (!canRetry()) {
+        logger.warn({ name, retries }, "chatTyped: reply made no tool call, no retry budget");
+        throw err;
+      }
+      logger.debug({ name, retry: retries + 1 }, "chatTyped: re-asking for the tool call");
+      // Providers reject a blank assistant turn.
+      if (err.reply.trim() !== "") messages.push({ role: "assistant", content: err.reply });
+      messages.push({ role: "user", content: err.instruction });
+      retries++;
+      continue;
+    }
 
     totalUsage = sumUsage(totalUsage, response.usage);
+    if (response.stopReason === "max_tokens" && !capRaised) {
+      const raised = raisedOutputCap(model, maxTokens ?? DEFAULT_MAX_TOKENS);
+      if (raised !== undefined) {
+        logger.warn(
+          { name, model, maxTokens: raised },
+          "chatTyped: reply cut off at the output cap, re-requesting with a higher cap",
+        );
+        maxTokens = raised;
+        capRaised = true;
+        continue;
+      }
+    }
+    assertWholeAnswer(response.stopReason, name);
 
     const text = extractText(response.content);
 
@@ -145,7 +200,7 @@ export async function chatTyped<T>(params: TypedChatParams<T>): Promise<TypedCha
     try {
       data = schema.parse(parsed);
     } catch (zodErr) {
-      if (repair.onZodFailure === "throw" || retries >= repair.maxRetries) {
+      if (!canRetry()) {
         logger.warn(
           { name, retries, err: zodErr },
           "chatTyped: zod validation failed, no retry budget",
@@ -168,6 +223,30 @@ export async function chatTyped<T>(params: TypedChatParams<T>): Promise<TypedCha
     }
 
     return { data, usage: totalUsage, model: response.model, retries };
+  }
+}
+
+/**
+ * Twice `cap`, held to the model's maximum output where the LiteLLM snapshot
+ * knows it; `undefined` when that leaves no room above `cap`.
+ */
+function raisedOutputCap(model: string, cap: number): number | undefined {
+  const ceiling = lookupLitellm(model)?.maxOutputTokens ?? Number.POSITIVE_INFINITY;
+  const raised = Math.min(cap * 2, ceiling);
+  return raised > cap ? raised : undefined;
+}
+
+/**
+ * Refuse a reply that is not the model's whole answer, before `jsonrepair`
+ * can close cut-off JSON into a schema-valid value (design/providers.md →
+ * Structured output).
+ */
+function assertWholeAnswer(stopReason: StopReason, name: string): void {
+  if (stopReason === "refusal") {
+    throw new RefusalError(`chatTyped: the model refused "${name}"`);
+  }
+  if (stopReason === "max_tokens" || stopReason === "context_overflow") {
+    throw new OutputCutOffError(name, stopReason);
   }
 }
 
