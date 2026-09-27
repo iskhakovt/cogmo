@@ -63,7 +63,8 @@ afterEach(() => {
 });
 
 // Registered before the file's own hooks, so this runs after its teardown.
-afterAll(async (_ctx, file) => {
+// biome-ignore lint/correctness/noEmptyPattern: Vitest parses a hook's first parameter and rejects anything but a destructuring pattern.
+afterAll(async ({}, file) => {
   const unused = llmock.unusedFiles();
   await llmock.mock.stop();
   const err = missError();
