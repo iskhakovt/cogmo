@@ -4038,4 +4038,95 @@ describe("durable conversation summaries", () => {
       expect.objectContaining({ messagesSummarized: 2, throughMessageId: "m2" }),
     );
   });
+
+  describe("recalled memories an earlier turn context shows", () => {
+    const MEMORY = "keeps nightly backups on the NAS";
+
+    /** `m1` carries a stored turn context showing `MEMORY`, and recall returns it again. */
+    function recallingAgain(deps: HandleMessageDeps) {
+      vi.mocked(deps.agentStore.listTurnContexts).mockResolvedValue([
+        {
+          messageId: "m1",
+          rendered: `<turn_context>\nCurrent time: earlier\n\n- ${MEMORY}\n</turn_context>\n\n`,
+          context: {
+            recalledMemories: [MEMORY],
+            voiceMode: false,
+            channelTypes: [],
+            announcedCoreMemoryBlocks: [],
+          },
+        },
+      ]);
+      vi.mocked(deps.agentStore.getProfile).mockResolvedValue({
+        id: "profile-1",
+        userId: null,
+        name: "assistant",
+        basePrompt: "test",
+        model: "claude-sonnet-4-6",
+        summarizationModel: null,
+        extractionModel: null,
+        autoRecall: "always",
+        voiceMode: "auto",
+        toolSet: [],
+        memoryScope: null,
+        profileClass: null,
+        streamChunkChars: 4000,
+        streamEdits: true,
+        codingAutoapproveMode: "off",
+      });
+      vi.mocked(deps.memory.recall).mockResolvedValue({
+        memories: [{ type: "world", content: MEMORY }],
+      });
+    }
+
+    function storedMemories(deps: HandleMessageDeps) {
+      const [, stored] = expectDefined(
+        vi.mocked(deps.agentStore.insertOrRecoverTurnContext).mock.calls[0],
+        "insertOrRecoverTurnContext call",
+      );
+      expect(stored.messageId).toBe("m7");
+      return stored.context.recalledMemories;
+    }
+
+    it("shows the memory again once compaction summarizes its only earlier copy away", async () => {
+      const { deps } = summarizingDeps();
+      recallingAgain(deps);
+
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      // m1 and m2 collapse into the summary, taking m1's turn context with them.
+      expect(deps.agentStore.insertOrRecoverSummary).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ throughMessageId: "m2" }),
+      );
+      expect(storedMemories(deps)).toEqual([MEMORY]);
+    });
+
+    it("leaves the memory out while the earlier turn context is still in the transcript", async () => {
+      const deps = mockDeps({
+        resolveProvider: mockResolver(
+          mockProvider({ countTokens: vi.fn().mockResolvedValue(1_000) }),
+        ),
+        agentStore: mockAgentStore({
+          getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 1_000, outputTokens: 100 }),
+          listMessages: vi.fn().mockResolvedValue(rows(8)),
+          insertMessage: turnRow("m7"),
+        }),
+      });
+      recallingAgain(deps);
+
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(deps.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
+      expect(deps.memory.recall).toHaveBeenCalled();
+      expect(storedMemories(deps)).toEqual([]);
+    });
+  });
 });
