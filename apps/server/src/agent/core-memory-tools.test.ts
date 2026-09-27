@@ -76,7 +76,7 @@ describe("core_memory_update", () => {
     );
   });
 
-  it("says nothing was saved when every line of an override is shared", async () => {
+  it("says nothing was saved when no line of an override differs from the shared block", async () => {
     const svc = mockService({
       update: vi
         .fn()
@@ -88,7 +88,7 @@ describe("core_memory_update", () => {
     );
 
     expect(result).toBe(
-      "Nothing saved for this persona: every line matches the shared identity block, " +
+      "Nothing saved for this persona: no line differs from the shared identity block, " +
         "so this persona follows it.",
     );
   });

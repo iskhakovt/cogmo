@@ -185,13 +185,38 @@ describe("writeCoreMemoryBlock: a restricted class's identity override", () => {
     expect(transactions).toBe(1);
   });
 
-  it("stores the override as written when there is no shared identity", async () => {
-    const content = "Name: Samuel Carter\nLocation: Lisbon\n";
-    const { result, stored, remove } = await writeOverride(content, [
-      { profileClass: "game", key: "preferences", content: "Name: Samuel Carter" },
-    ]);
+  it("lists a left-out line once, however often the override repeats it", async () => {
+    const { result, stored } = await writeOverride(
+      "Name: Samuel Carter\nLocation: Lisbon\nName:  Samuel Carter",
+      [shared(SHARED)],
+    );
 
-    expect(stored).toEqual([content]);
+    expect(stored).toEqual(["Location: Lisbon"]);
+    expect(result).toMatchObject({ leftOut: ["Name: Samuel Carter"] });
+  });
+
+  it.each<[string, ReadonlyArray<ScopedCoreMemoryBlock>]>([
+    ["with a shared identity", [shared(SHARED)]],
+    ["without a shared identity", []],
+  ])("stores nothing and deletes the override for a blank write %s", async (_name, rows) => {
+    const { result, stored, remove } = await writeOverride("  \n\n\t\n", rows);
+
+    expect(result).toEqual({ kind: "override-matches-shared", profileClass: "game" });
+    expect(stored).toEqual([]);
+    expect(remove).toHaveBeenCalledWith(expect.anything(), {
+      userId: "user-1",
+      profileClass: "game",
+      key: "identity",
+    });
+  });
+
+  it("stores every line when there is no shared identity, trimming blank edges", async () => {
+    const { result, stored, remove } = await writeOverride(
+      "\nName: Samuel Carter\nLocation: Lisbon\n",
+      [{ profileClass: "game", key: "preferences", content: "Name: Samuel Carter" }],
+    );
+
+    expect(stored).toEqual(["Name: Samuel Carter\nLocation: Lisbon"]);
     expect(result).toEqual({ kind: "override", profileClass: "game", leftOut: [] });
     expect(remove).not.toHaveBeenCalled();
   });

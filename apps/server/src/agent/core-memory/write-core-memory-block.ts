@@ -1,4 +1,5 @@
 import { err, ok, type Result } from "neverthrow";
+import * as R from "remeda";
 import { match } from "ts-pattern";
 import type { Transaction, Transactor } from "../../db/index.js";
 import type { AgentStore } from "../store/index.js";
@@ -16,8 +17,8 @@ type CoreMemoryWriteTarget =
 
 /**
  * What a core-memory write stored. An override leaves out the lines the
- * shared `identity` holds (`leftOut`, whitespace-normalised); when that is
- * every line, it stores nothing and the class has no override.
+ * shared `identity` holds (`leftOut`, whitespace-normalised, each once); when
+ * only blank lines remain, it stores nothing and the class has no override.
  */
 export type CoreMemoryWrite =
   | Exclude<CoreMemoryWriteTarget, { kind: "override" }>
@@ -78,10 +79,7 @@ async function writeOverride(
   const shared = (await store.getCoreMemoryBlocks(tx, userId, profileClass)).find(
     (b) => b.profileClass === null && b.key === IDENTITY_BLOCK_KEY,
   );
-  const { content, leftOut } =
-    shared === undefined
-      ? { content: args.content, leftOut: [] }
-      : withoutSharedLines(args.content, shared.content);
+  const { content, leftOut } = withoutSharedLines(args.content, shared?.content ?? "");
   const block = { userId, profileClass, key: IDENTITY_BLOCK_KEY };
   if (content === null) {
     await store.deleteCoreMemoryBlock(tx, block);
@@ -94,7 +92,7 @@ async function writeOverride(
 /**
  * `override` without its lines equal to one of `shared`'s, compared trimmed
  * and with internal whitespace collapsed, and without blank lines at either
- * end; null when no other line remains. A blank line never counts as shared.
+ * end; null when only blank lines remain. A blank line never counts as shared.
  */
 function withoutSharedLines(
   override: string,
@@ -108,7 +106,7 @@ function withoutSharedLines(
   const last = kept.findLastIndex((line) => line.trim() !== "");
   return {
     content: first === -1 ? null : kept.slice(first, last + 1).join("\n"),
-    leftOut: lines.filter(isShared).map(normalizeLine),
+    leftOut: R.unique(lines.filter(isShared).map(normalizeLine)),
   };
 }
 

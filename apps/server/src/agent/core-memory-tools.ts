@@ -49,7 +49,7 @@ function writtenText(key: string, written: CoreMemoryWrite): string {
     .with(
       { kind: "override-matches-shared" },
       () =>
-        "Nothing saved for this persona: every line matches the shared identity block, " +
+        "Nothing saved for this persona: no line differs from the shared identity block, " +
         "so this persona follows it.",
     )
     .with({ kind: "override" }, ({ leftOut }) =>
