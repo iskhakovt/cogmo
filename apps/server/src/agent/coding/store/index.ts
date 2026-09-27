@@ -80,6 +80,22 @@ export interface CodingRepoRow {
   createdAt: Date;
 }
 
+/** `identityName` and `verifyTimeoutSeconds` fall back to the DB defaults when omitted. */
+export interface InsertRepoParams {
+  name: string;
+  localPath: string;
+  defaultBranch: string;
+  remoteUrl: string;
+  devcontainer: DevcontainerSpec | null;
+  allowedBackends: ReadonlyArray<CodingBackend>;
+  verifyCommand: string;
+  taskTokenBudget: number;
+  taskWallTimeSeconds: number;
+  maxConcurrentTasks: number;
+  identityName?: string;
+  verifyTimeoutSeconds?: number;
+}
+
 export interface InsertTaskParams {
   repoId: string;
   conversationId?: string | null;
@@ -138,26 +154,19 @@ export interface CodingTaskRow {
 export interface CodingStore {
   // --- Repos ---
 
-  /** Insert a new repo. Throws on `name` collision (UNIQUE). `identityName`
-   * and `verifyTimeoutSeconds` are optional — omitted callers inherit the
-   * DB defaults so single-account setups stay one-line. */
-  insertRepo(
+  /** Insert a new repo. Throws on `name` collision (UNIQUE). */
+  insertRepo(tx: Transaction, params: InsertRepoParams): Promise<CodingRepoRow>;
+
+  /**
+   * {@link CodingStore.insertRepo} keyed on `name`: a second call with a
+   * taken name returns `kind: "recovered"` and the stored row, unchanged,
+   * instead of throwing. For auto-managed rows that concurrent bootstraps
+   * may both try to create.
+   */
+  insertOrRecoverRepo(
     tx: Transaction,
-    params: {
-      name: string;
-      localPath: string;
-      defaultBranch: string;
-      remoteUrl: string;
-      devcontainer: DevcontainerSpec | null;
-      allowedBackends: ReadonlyArray<CodingBackend>;
-      verifyCommand: string;
-      taskTokenBudget: number;
-      taskWallTimeSeconds: number;
-      maxConcurrentTasks: number;
-      identityName?: string;
-      verifyTimeoutSeconds?: number;
-    },
-  ): Promise<CodingRepoRow>;
+    params: InsertRepoParams,
+  ): Promise<{ kind: "new" | "recovered"; row: CodingRepoRow }>;
 
   /** Look up a repo by its admin-set name. */
   getRepoByName(tx: Transaction, name: string): Promise<CodingRepoRow | undefined>;
@@ -205,10 +214,8 @@ export interface CodingStore {
   /**
    * Idempotent submission against `uniq_coding_tasks_idempotency_key`: a
    * second call with the same key returns `kind: "recovered"` and the
-   * original row. Uses `ON CONFLICT DO UPDATE` with a no-op SET and an
-   * `xmax = 0` discriminator — see the implementation for why `DO NOTHING`
-   * cannot resolve a concurrent loser under REPEATABLE READ. Separate from
-   * {@link CodingStore.insertTask} because this one can decline to insert.
+   * original row. Separate from {@link CodingStore.insertTask} because this
+   * one can decline to insert.
    */
   insertOrRecoverTask(
     tx: Transaction,
@@ -399,7 +406,27 @@ export interface CodingStore {
   getCodingAutoapproveModeForTask(tx: Transaction, taskId: string): Promise<"off" | "on" | null>;
 }
 
-/** Column values shared by both insert paths. */
+/** Column values shared by both repo insert paths. */
+function repoValues(params: InsertRepoParams) {
+  return {
+    name: params.name,
+    localPath: params.localPath,
+    defaultBranch: params.defaultBranch,
+    remoteUrl: params.remoteUrl,
+    devcontainer: params.devcontainer ?? null,
+    allowedBackends: [...params.allowedBackends],
+    verifyCommand: params.verifyCommand,
+    taskTokenBudget: params.taskTokenBudget,
+    taskWallTimeSeconds: params.taskWallTimeSeconds,
+    maxConcurrentTasks: params.maxConcurrentTasks,
+    ...(params.identityName !== undefined && { identityName: params.identityName }),
+    ...(params.verifyTimeoutSeconds !== undefined && {
+      verifyTimeoutSeconds: params.verifyTimeoutSeconds,
+    }),
+  };
+}
+
+/** Column values shared by both task insert paths. */
 function taskValues(params: InsertTaskParams) {
   return {
     repoId: params.repoId,
@@ -416,45 +443,22 @@ function taskValues(params: InsertTaskParams) {
 export class DrizzleCodingStore implements CodingStore {
   // --- Repos ---
 
-  async insertRepo(
+  async insertRepo(tx: Transaction, params: InsertRepoParams): Promise<CodingRepoRow> {
+    return single(await tx.insert(codingRepos).values(repoValues(params)).returning());
+  }
+
+  async insertOrRecoverRepo(
     tx: Transaction,
-    params: {
-      name: string;
-      localPath: string;
-      defaultBranch: string;
-      remoteUrl: string;
-      devcontainer: DevcontainerSpec | null;
-      allowedBackends: ReadonlyArray<CodingBackend>;
-      verifyCommand: string;
-      taskTokenBudget: number;
-      taskWallTimeSeconds: number;
-      maxConcurrentTasks: number;
-      identityName?: string;
-      verifyTimeoutSeconds?: number;
-    },
-  ): Promise<CodingRepoRow> {
-    const row = single(
-      await tx
-        .insert(codingRepos)
-        .values({
-          name: params.name,
-          localPath: params.localPath,
-          defaultBranch: params.defaultBranch,
-          remoteUrl: params.remoteUrl,
-          devcontainer: params.devcontainer ?? null,
-          allowedBackends: [...params.allowedBackends],
-          verifyCommand: params.verifyCommand,
-          taskTokenBudget: params.taskTokenBudget,
-          taskWallTimeSeconds: params.taskWallTimeSeconds,
-          maxConcurrentTasks: params.maxConcurrentTasks,
-          ...(params.identityName !== undefined && { identityName: params.identityName }),
-          ...(params.verifyTimeoutSeconds !== undefined && {
-            verifyTimeoutSeconds: params.verifyTimeoutSeconds,
-          }),
-        })
-        .returning(),
-    );
-    return row;
+    params: InsertRepoParams,
+  ): Promise<{ kind: "new" | "recovered"; row: CodingRepoRow }> {
+    // Keyed insert: see `.claude/rules/inngest.md`.
+    const rows = await tx
+      .insert(codingRepos)
+      .values(repoValues(params))
+      .onConflictDoUpdate({ target: codingRepos.name, set: { name: params.name } })
+      .returning({ ...getTableColumns(codingRepos), inserted: sql<boolean>`(xmax = 0)` });
+    const { inserted, ...row } = single(rows);
+    return { kind: inserted ? "new" : "recovered", row };
   }
 
   async getRepoByName(tx: Transaction, name: string): Promise<CodingRepoRow | undefined> {
@@ -514,19 +518,7 @@ export class DrizzleCodingStore implements CodingStore {
     tx: Transaction,
     params: InsertTaskParams & { idempotencyKey: string },
   ): Promise<InsertTaskResult> {
-    // DO UPDATE with a no-op SET, not DO NOTHING. The sequential retry is the
-    // same either way; the concurrent one is not. Under the project's
-    // REPEATABLE READ default, a loser conflicting with a row committed after
-    // its snapshot cannot see that row: DO NOTHING skips the tuple, the
-    // re-SELECT finds nothing, and the call fails deterministically with
-    // nothing for the transactor to retry. DO UPDATE must write the tuple, so
-    // Postgres raises `40001 serialization_failure` instead — which the
-    // transactor retries against a fresh snapshot that does contain the
-    // winner. (`FOR UPDATE` on the re-SELECT would not help: a row absent from
-    // the snapshot is absent from a locking read too.)
-    //
-    // `xmax = 0` distinguishes the outcomes: zero on a tuple this statement
-    // inserted, the locking xid on one it updated through the conflict arm.
+    // Keyed insert: see `.claude/rules/inngest.md`.
     const rows = await tx
       .insert(codingTasks)
       .values({ ...taskValues(params), idempotencyKey: params.idempotencyKey })

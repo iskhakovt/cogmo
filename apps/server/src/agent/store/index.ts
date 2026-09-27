@@ -1760,11 +1760,7 @@ export class DrizzleAgentStore implements AgentStore {
       source: SummarySourceValue;
     },
   ): Promise<{ kind: "new" | "recovered"; row: CompactionSummary }> {
-    // DO UPDATE with a no-op SET rather than DO NOTHING — see
-    // `insertOrRecoverTask` for why the concurrent loser needs a write to
-    // raise 40001 instead of silently skipping the tuple. `xmax = 0` is zero
-    // on a tuple this statement inserted and the locking xid on one it
-    // reached through the conflict arm.
+    // Keyed insert: see `.claude/rules/inngest.md`.
     const rows = await tx
       .insert(conversationSummaries)
       .values(params)
@@ -1784,8 +1780,7 @@ export class DrizzleAgentStore implements AgentStore {
     tx: Transaction,
     params: StoredTurnContext,
   ): Promise<StoredTurnContext> {
-    // DO UPDATE with a no-op SET so one statement returns the stored row from
-    // either arm (`.claude/rules/inngest.md`).
+    // Keyed insert: see `.claude/rules/inngest.md`.
     return single(
       await tx
         .insert(turnContexts)
@@ -3231,16 +3226,7 @@ export class DrizzleAgentStore implements AgentStore {
     },
   ): Promise<{ kind: "new" | "recovered"; row: ScheduledTask }> {
     const key = params.idempotencyKey;
-    // DO UPDATE with a no-op SET, not DO NOTHING. The sequential retry is the
-    // same either way; the concurrent one is not. Under the project's
-    // REPEATABLE READ default, a loser conflicting with a row committed after
-    // its snapshot cannot see that row: DO NOTHING skips the tuple, the
-    // re-SELECT finds nothing, and the call fails deterministically with
-    // nothing for the transactor to retry. DO UPDATE must write the tuple, so
-    // Postgres raises `40001 serialization_failure` instead — which the
-    // transactor retries against a fresh snapshot that does contain the
-    // winner. (`FOR UPDATE` on the re-SELECT would not help: a row absent from
-    // the snapshot is absent from a locking read too.)
+    // Keyed insert: see `.claude/rules/inngest.md`.
     //
     // `xmax = 0` distinguishes the outcomes, so the caller can recover a retry
     // inside the same transaction as its cap check rather than pre-reading in

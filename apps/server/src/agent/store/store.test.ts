@@ -3826,6 +3826,43 @@ describe("DrizzleAgentStore", () => {
       expect(row).toBeUndefined();
     });
 
+    it("round-trips the phases a fire recorded as failed", async () => {
+      const { userId, conversationId } = await seedConversation();
+      const { id } = await tx((trx) =>
+        store.recordEvolutionEvent(trx, {
+          conversationId,
+          userId,
+          triggeredBy: "idle",
+          payload: { ...samplePayload(), failedPhases: ["memories", "drain"] },
+        }),
+      );
+
+      const row = await tx((trx) => store.getEvolutionEvent(trx, userId, id));
+      expect(row?.payload.failedPhases).toEqual(["memories", "drain"]);
+    });
+
+    it("reads a row recorded before phase outcomes without supplying any", async () => {
+      const { userId, conversationId } = await seedConversation();
+      // An older row's payload, written around the store.
+      await db.execute(sql`
+        INSERT INTO evolution_events (conversation_id, user_id, triggered_by, payload)
+        VALUES (${conversationId}, ${userId}, 'idle', ${JSON.stringify(samplePayload())}::jsonb)
+      `);
+
+      const [row] = await tx((trx) => store.listEvolutionEvents(trx, userId));
+      expect(expectDefined(row, "legacy row").payload).not.toHaveProperty("failedPhases");
+    });
+
+    it("rejects a failed phase the Observer does not have", async () => {
+      const { userId, conversationId } = await seedConversation();
+      const payload = { ...samplePayload(), failedPhases: ["reflection"] } as never;
+      await expect(
+        tx((trx) =>
+          store.recordEvolutionEvent(trx, { conversationId, userId, triggeredBy: "idle", payload }),
+        ),
+      ).rejects.toThrow();
+    });
+
     it("rejects writes whose payload doesn't match the schema", async () => {
       const { userId, conversationId } = await seedConversation();
       const bad = {
