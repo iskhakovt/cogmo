@@ -415,12 +415,12 @@ llmock's request journal can't serve here: it stores its own OpenAI-shaped conve
 
 `[proposed]` Still to come:
 
-- **A voice turn** changing only the turn context's modality. `voice_config` is a database singleton that `pipeline.integration.test.ts` deletes and reseeds in the shared database, so a second writer races it; the voice path is covered at the unit tier (the prompt takes no voice input) and live, by scenario A's voice turn.
+- **A voice turn** changing only the turn context's modality. The voice path is covered at the unit tier (the prompt takes no voice input) and live, by scenario A's voice turn.
 - **A core-memory edit**, announced in the next turn's context — step 3. Today an edit changes `# User` at the next turn.
 - **A pipeline run conversation:** chat turns and a stage turn alternate, and `assertAppendOnly` holds across each switch — same `tools`, same `system`, same `1h` TTL. Step 3; today a stage turn narrows `tools` and `# Tools` and caches for 5 minutes.
 - **OpenAI-compatible:** the recorded xAI-via-OpenRouter route runs a two-turn conversation with a tool call. `assertAppendOnly` holds over the Chat Completions bodies, which catches a reordered `arguments` string, and the dialect's fields are present.
 
-The suite follows `.claude/rules/testing.md`: it runs alongside its noisiest peers before it counts as stable, since llmock's fixture pool is shared across forks.
+The suite follows `.claude/rules/testing.md`: it runs alongside its noisiest peers before it counts as stable.
 
 ### E2E tier
 

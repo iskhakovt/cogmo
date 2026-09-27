@@ -39,11 +39,14 @@ Docker services + app wired in-process. Tests the orchestration pipeline — deb
 **Infrastructure:**
 - Testcontainers (PostgreSQL, Redis, Inngest, Hindsight) — started in vitest `globalSetup`, random ports
 - Container definitions in `dev/containers.ts` (shared with `scripts/dev-infra.ts` for local dev)
-- llmock (`@copilotkit/aimock`) runs in-process — serves both Anthropic API (for app) and OpenAI-compatible API (for Hindsight)
-- Hindsight reaches llmock via `host.testcontainers.internal`, published by `exposeHostPort()` in `dev/containers.ts` — not `host-gateway`, which points into the wrong namespace under rootless Docker
+- llmock (`@copilotkit/aimock`) runs in-process: one per test file for the app's calls, replaying that file's cassette, and one in `globalSetup` for Hindsight's
+- Hindsight reaches its llmock via `host.testcontainers.internal`, published by `exposeHostPort()` in `dev/containers.ts` — not `host-gateway`, which points into the wrong namespace under rootless Docker
+- Each test file runs against its own database, cloned from a template `globalSetup` migrates, and its own seeded user — so its own Hindsight bank
 - App modules imported directly — `bootstrap()` from `src/index.ts` wires everything
 
-**Env injection:** `process.env` mutations in `globalSetup` propagate to Vitest test workers. Dynamic container URLs set via `process.env`, static values in `vitest.config.ts` `test.env`. Inngest is per worker: each worker slot has its own dev server, so one fork's events never run in another, and `test/integration-setup-per-fork.ts` points its fork at that server. Test files use normal top-level imports — `createEnv()` in `env.ts` sees all values.
+**Isolation:** a file shares nothing another file writes, apart from Hindsight, which is partitioned by bank and so by user. `test/integration-setup-per-file.ts` gives each file its database, seeded user, llmock and skills repo, and points it at its worker slot's Inngest dev server — one per slot, so one fork's events never run in another. `.claude/rules/testing.md` → Integration Test Isolation and Cassettes has the detail, the unmatched-request and unused-recording checks included.
+
+**Env injection:** `process.env` mutations in `globalSetup` propagate to Vitest test workers. Dynamic container URLs set via `process.env`, per-file values by the per-file setup, static values in `vitest.config.ts` `test.env`. Test files use normal top-level imports — `createEnv()` in `env.ts` sees all values.
 
 **Naming:** `.integration.test.ts` suffix. `pnpm test:integration`.
 
@@ -273,8 +276,8 @@ For evolution Stage 4+, use LLM-as-judge rubrics with held-out test sets. Track 
 
 | Service | Mock strategy |
 |-|-|
-| Anthropic API | llmock — fixture-based HTTP server, supports streaming + tool_use |
-| Ollama (for Hindsight) | llmock — same instance, serves OpenAI-compatible endpoints |
+| Anthropic API | llmock — fixture-based HTTP server, supports streaming + tool_use; the test file's own instance |
+| OpenAI-compatible (Hindsight) | llmock — `globalSetup`'s instance, the one the container reaches |
 | MCP servers | Stub MCP client with fixed tool results |
 | Telegram | grammY `vi.mock` (unit), Test DC + tgintegration (e2e, future) |
 | Gmail/Calendar | Record real responses, replay in tests |
