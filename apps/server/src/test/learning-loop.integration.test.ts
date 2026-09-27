@@ -14,10 +14,11 @@
  *    block under `# User`, the rule under `# Rules`, and the dinner in the
  *    turn context's recalled memories, recalled from Hindsight.
  *
- * The user and profile are this file's own. A learned rule is global
- * (`profile_id` null, no user column), so it reaches every other file's
- * prompts while it is active, and `afterAll` deletes it by id. Everything
- * else stays behind under the private user until the containers go.
+ * The user and profile are this file's own. The Observer writes a learned
+ * rule global (`profile_id` null; rules have no user column), so the test
+ * scopes it to its profile while it is still inactive, and `afterAll` deletes
+ * it by id. Everything else stays behind under the private user until the
+ * containers go.
  */
 
 import { createClient, createConfig, HindsightClient, sdk } from "@vectorize-io/hindsight-client";
@@ -324,6 +325,12 @@ describe("learning loop", () => {
     expect(firstObservation.corrections.extracted).toBeGreaterThanOrEqual(1);
     const learning = await bulletPointRule();
     expect(learning).toMatchObject({ active: false, observationCount: 1, profileId: null });
+    // Scoped to this file's profile while still inactive, so the rule it
+    // graduates to renders only in this file's conversations.
+    await db
+      .update(steeringRules)
+      .set({ profileId: profile.id })
+      .where(eq(steeringRules.id, learning.id));
 
     expect(firstObservation.memories.extracted).toBeGreaterThanOrEqual(1);
     expect((await retainedFacts()).join("\n")).toMatch(/Taberna da Rua das Flores/);
@@ -336,7 +343,12 @@ describe("learning loop", () => {
     const secondObservation = await observe(second);
     expect(secondObservation.corrections.promoted).toBe(1);
     const rule = await bulletPointRule();
-    expect(rule).toMatchObject({ id: learning.id, active: true, observationCount: 2 });
+    expect(rule).toMatchObject({
+      id: learning.id,
+      active: true,
+      observationCount: 2,
+      profileId: profile.id,
+    });
 
     // Conversation 2's own retains land before conversation 3 recalls.
     await retainedFacts();
