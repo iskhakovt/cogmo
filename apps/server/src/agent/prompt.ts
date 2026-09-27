@@ -41,7 +41,7 @@ Be direct and genuine. Skip filler ("Great question!", "I'd be happy to help!").
 
 Be concise when the user wants a quick answer. Be thorough when the topic is complex or the user is exploring. Match their energy.`;
 
-const ONBOARDING = `You don't know your user yet. In your first interaction, introduce yourself briefly and learn about them: their name, what they do, their timezone, and how they prefer to communicate. Save what you learn about them, including anything about them they mention in passing, to core memory with core_memory_update as soon as you learn it: their name, what to call them, their home, timezone and the languages they speak in \`identity\`, and everything else in other blocks.`;
+const ONBOARDING = `You don't know your user yet. In your first interaction, introduce yourself briefly and learn about them: their name, what they do, their timezone, and how they prefer to communicate. Save what you learn about them, including anything about them they mention in passing, to core memory with core_memory_update as soon as you learn it, without waiting to learn the rest: a block can start with one line.`;
 
 /** Leads a classed profile's shared group. */
 const SHARED_GROUP = "Shared by every persona:";
@@ -51,8 +51,10 @@ const SHARED_GROUP = "Shared by every persona:";
  * differs and wins, so the model saves differences rather than a full copy.
  */
 const RESTRICTED_SHARED_GROUP =
-  "Shared by every persona. Where this persona's own `identity` differs, it wins. " +
-  "An `identity` you save here stays in this persona, so give it only the lines that differ from this one:";
+  "Shared by every persona. This persona's own `identity`, if it has one, wins where the two " +
+  "differ, and the lines it leaves out still come from here. An `identity` you save here " +
+  "becomes that one and stays in this persona, so write only the lines that differ from this " +
+  "block, not a copy of it:";
 
 /** Leads a classed profile's own group. */
 const OWN_GROUP = "Only in this persona:";

@@ -173,10 +173,8 @@ describe("DefaultPromptSource", () => {
     // Onboarding saves to core memory, so the first block written ends it.
     expect(prompt).toContain("core_memory_update");
     expect(prompt).not.toContain("memory_retain");
-    // It routes identity basics to the shared block.
-    expect(prompt).toContain(
-      "their name, what to call them, their home, timezone and the languages they speak in `identity`",
-    );
+    // A single fact is worth saving before the agent knows the user's name.
+    expect(prompt).toContain("without waiting to learn the rest");
   });
 
   it("renders an unclassed profile's user section byte for byte as it did before scopes", async () => {
@@ -328,9 +326,10 @@ describe("formatUserContext", () => {
         ],
       }),
     ).toBe(
-      "Shared by every persona. Where this persona's own `identity` differs, it wins. " +
-        "An `identity` you save here stays in this persona, so give it only the lines that " +
-        "differ from this one:\n\n## identity\nName: Sam\nHome: Lisbon\n\n" +
+      "Shared by every persona. This persona's own `identity`, if it has one, wins where the " +
+        "two differ, and the lines it leaves out still come from here. An `identity` you save " +
+        "here becomes that one and stays in this persona, so write only the lines that differ " +
+        "from this block, not a copy of it:\n\n## identity\nName: Sam\nHome: Lisbon\n\n" +
         "Only in this persona:\n\n## identity\nName: Thorin\n\n## active_projects\n- The campaign",
     );
   });

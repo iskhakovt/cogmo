@@ -353,7 +353,7 @@ function checkIdentity(
             )
             .map((l) => l.text),
           toldUser:
-            /\bonly (?:here|in this|for this|within this)|\bthis persona\b|\bnot shared\b/i.test(
+            /\bonly (?:applies )?(?:here|in this|for this|within this)|\bapplies here\b|\bthis persona\b|\bnot shared\b|\bseparately\b/i.test(
               reply,
             ),
         };
