@@ -24,9 +24,9 @@ const CorrectionBaseSchema = z.object({
 });
 
 // The two null-valued fields of a `new` correction default to null on
-// parse. The structured-output tool call is not strict, so a model can omit
-// a field whose only meaning is "absent", and repeat the omission on the
-// repair retry. `.default()` keeps both fields required in the JSON Schema
+// parse. Where output isn't grammar-constrained (the tool fallback, providers
+// without strict schemas), a model can omit a field whose only meaning is
+// "absent", and repeat the omission on the repair retry. `.default()` keeps both fields required in the JSON Schema
 // the model is given (a transform would make the schema unrepresentable)
 // and leaves the parsed type unchanged.
 export const CorrectionItemSchema = z.discriminatedUnion("action", [

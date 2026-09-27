@@ -214,9 +214,8 @@ describe("extractCorrections", () => {
   });
 
   it("inserts a new correction whose output omits matchedExistingRuleId", async () => {
-    // The structured-output tool call is not strict, so the model can drop a
-    // field whose only legal value is null — and repeat the omission on the
-    // repair retry.
+    // Where output isn't grammar-constrained, the model can drop a field whose
+    // only legal value is null, and repeat the omission on the repair retry.
     const deps = mockExtractionDeps({
       corrections: [
         {
