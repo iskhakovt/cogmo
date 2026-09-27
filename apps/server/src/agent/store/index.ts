@@ -1759,8 +1759,7 @@ export class DrizzleAgentStore implements AgentStore {
     tx: Transaction,
     params: StoredTurnContext,
   ): Promise<StoredTurnContext> {
-    // DO UPDATE with a no-op SET so one statement returns the stored row from
-    // either arm (`.claude/rules/inngest.md`).
+    // Keyed insert: see `.claude/rules/inngest.md`.
     return single(
       await tx
         .insert(turnContexts)
