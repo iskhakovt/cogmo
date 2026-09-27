@@ -428,6 +428,13 @@
       "when": 1790515044486,
       "tag": "0060_core_memory_scope",
       "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1790545334033,
+      "tag": "0061_system_prompt_snapshots",
+      "breakpoints": true
     }
   ]
 }

@@ -92,7 +92,10 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
     resolveProvider: mockResolver(),
     tools: mockToolRegistry(),
     memory: mockMemoryProvider(),
-    promptSource: { assemble: vi.fn().mockResolvedValue("system prompt") },
+    promptSource: {
+      assemble: vi.fn().mockResolvedValue("system prompt"),
+      configuration: vi.fn().mockResolvedValue("configuration"),
+    },
     fileService: mockFilesService(),
     attachments: {
       upload: vi.fn().mockResolvedValue("inbound/test.jpg"),
@@ -125,6 +128,12 @@ const event = {
 
 /** The turn's row as `load-turn-transcript` returns it: the history's `msg-1`, its time as a string. */
 const TURN_ROW = { id: "msg-1", createdAt: MOCK_MESSAGE_CREATED_AT.toISOString() };
+
+/** The system prompt the agent loop was given. */
+function loopSystemPrompt(deps: HandleMessageDeps): string {
+  return expectDefined(vi.mocked(deps.runStreamingAgentLoop).mock.calls[0], "agent loop call")[0]
+    .systemPrompt;
+}
 
 describe("handle-message — crash recovery / step replay", () => {
   it("does not re-insert the user message when create-user-message is cached", async () => {
@@ -713,9 +722,67 @@ describe("handle-message — crash recovery / step replay", () => {
 
     expect(turnContextSent(deps)).toBe(stored);
   });
+  it("does not open another epoch when open-system-prompt-epoch is cached", async () => {
+    const cached = {
+      openedBy: "msg-1",
+      historyStart: "msg-1",
+      rendered: "CACHED EPOCH PROMPT",
+      configDigest: "cached digest",
+      openedAt: MOCK_MESSAGE_CREATED_AT.toISOString(),
+    };
+    const deps = mockDeps();
+    const fn = createHandleMessage(deps);
+
+    await new InngestTestEngine({
+      function: fn,
+      events: [event],
+      steps: [{ id: "open-system-prompt-epoch", handler: () => cached }],
+    }).execute();
+
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
+    expect(loopSystemPrompt(deps)).toBe("CACHED EPOCH PROMPT");
+
+    // Non-vacuity: uncached, the conversation's first turn opens its epoch.
+    await new InngestTestEngine({ function: fn, events: [event] }).execute();
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it("decides the epoch from a cached load-system-prompt, not this invocation's reads", async () => {
+    // Live, the conversation has no epoch yet; the cached step found one this
+    // turn continues.
+    const deps = mockDeps();
+
+    await new InngestTestEngine({
+      function: createHandleMessage(deps),
+      events: [event],
+      steps: [
+        {
+          id: "load-system-prompt",
+          handler: () => ({
+            rendered: "RENDERED NOW",
+            configDigest: "digest",
+            snapshot: {
+              openedBy: "msg-1",
+              historyStart: "msg-1",
+              rendered: "CACHED EPOCH PROMPT",
+              configDigest: "digest",
+              openedAt: MOCK_MESSAGE_CREATED_AT.toISOString(),
+            },
+          }),
+        },
+      ],
+    }).execute();
+
+    expect(deps.promptSource.assemble).not.toHaveBeenCalled();
+    expect(deps.agentStore.getLatestSystemPromptSnapshot).not.toHaveBeenCalled();
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
+    expect(loopSystemPrompt(deps)).toBe("CACHED EPOCH PROMPT");
+  });
 });
 
 describe("handle-message — replay equality", () => {
+  const EPOCH_OPENED_AT = new Date("2026-09-25T08:00:00.000Z");
+
   type SseBlock = { text: string } | { toolUse: { id: string; name: string; input: string } };
 
   /**
@@ -779,7 +846,7 @@ describe("handle-message — replay equality", () => {
    * emits in non-canonical key order — on a real `AnthropicProvider` behind the
    * wire recorder, so requests compare as the bytes sent.
    */
-  function replayDeps() {
+  function replayDeps(epoch: { configDigest: string } | null) {
     const recorder = createWireRecorder(async (input, init) => {
       const req = new Request(input, init);
       if (req.url.endsWith("/v1/messages/count_tokens")) {
@@ -849,9 +916,38 @@ describe("handle-message — replay equality", () => {
         }),
         listMessages: vi.fn().mockResolvedValue([
           { id: "m1", role: "user", content: "earlier question" },
-          { id: "m2", role: "assistant", content: [{ type: "text", text: "earlier answer" }] },
+          {
+            id: "m2",
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "", signature: "earlier-signature" },
+              { type: "text", text: "earlier answer" },
+            ],
+          },
           { id: "msg-1", role: "user", content: "tell me about my homelab setup" },
         ]),
+        // A continuing epoch opened by m1, and a core-memory block changed since.
+        ...(epoch !== null && {
+          getLatestSystemPromptSnapshot: vi.fn().mockResolvedValue({
+            id: "snapshot-0",
+            conversationId: "conv-1",
+            openedBy: "m1",
+            historyStart: "m1",
+            rendered: "EPOCH PROMPT",
+            configDigest: epoch.configDigest,
+            createdAt: EPOCH_OPENED_AT,
+          }),
+          getCoreMemoryBlocks: vi
+            .fn()
+            .mockResolvedValue([{ profileClass: null, key: "identity", content: "Home: Lisbon" }]),
+          getCoreMemoryUpdateTimes: vi.fn().mockResolvedValue([
+            {
+              profileClass: null,
+              key: "identity",
+              updatedAt: new Date(EPOCH_OPENED_AT.getTime() + 60_000),
+            },
+          ]),
+        }),
         listTurnContexts: vi.fn().mockResolvedValue([
           {
             messageId: "m1",
@@ -882,18 +978,26 @@ describe("handle-message — replay equality", () => {
     "load-turn-transcript",
     "freeze-core-memory-scope",
     "freeze-turn-inputs",
-    "assemble-prompt",
+    "load-system-prompt",
     "auto-recall",
     "load-last-tokens",
     "count-tokens-1",
+    "open-system-prompt-epoch",
     "render-turn-context",
     "llm-iter1",
     "tool-iter1-0",
     "emit-tool-results-iter1",
   ];
 
-  it("sends llm-iter2 the same bytes whether the earlier steps ran or were replayed", async () => {
-    const fresh = replayDeps();
+  /**
+   * `llm-iter2`'s request body from a fresh run, after asserting a run that
+   * replays `stepIds` as the server returns them sends the same bytes.
+   */
+  async function replayedIter2(
+    epoch: { configDigest: string } | null,
+    stepIds: ReadonlyArray<string>,
+  ): Promise<string> {
+    const fresh = replayDeps(epoch);
     await new InngestTestEngine({
       function: createHandleMessage(fresh.deps),
       events: [event],
@@ -903,9 +1007,9 @@ describe("handle-message — replay equality", () => {
 
     // Each earlier step's output as the server hands it back: keys sorted at
     // every depth, strings untouched.
-    const source = replayDeps();
+    const source = replayDeps(epoch);
     const steps = [];
-    for (const id of STEPS_BEFORE_ITER2) {
+    for (const id of stepIds) {
       const { result } = await new InngestTestEngine({
         function: createHandleMessage(source.deps),
         events: [event],
@@ -913,7 +1017,7 @@ describe("handle-message — replay equality", () => {
       steps.push({ id, handler: () => canonicalKeyOrder(result) });
     }
 
-    const replayed = replayDeps();
+    const replayed = replayDeps(epoch);
     await new InngestTestEngine({
       function: createHandleMessage(replayed.deps),
       events: [event],
@@ -931,14 +1035,43 @@ describe("handle-message — replay equality", () => {
     expect(sent).toBe(
       JSON.stringify(expectDefined(freshRequests[1], "fresh llm-iter2").request.body),
     );
+    return sent;
+  }
+
+  it("sends llm-iter2 the same bytes whether the earlier steps ran or were replayed", async () => {
+    const sent = await replayedIter2(null, STEPS_BEFORE_ITER2);
 
     // Non-vacuity: the request carries what the replay had to reproduce — the
     // earlier turn's stored context, this turn's deduplicated memories, and
-    // the tool input in canonical key order.
+    // the tool input in canonical key order — on the epoch the turn opened,
+    // which strips the earlier turn's thinking.
     expect(sent).toContain("Current time: earlier");
     expect(sent).toContain("- new fact");
     expect(sent.match(/- old fact/g)).toHaveLength(1);
     expect(sent).toContain('"input":{"alpha":"x","zeta":1}');
+    expect(sent).not.toContain("earlier-signature");
+  });
+
+  it("sends llm-iter2 the same bytes on a continuing epoch, announcing a core-memory change", async () => {
+    // The digest this turn renders, so the stored epoch continues.
+    const opening = replayDeps(null);
+    await new InngestTestEngine({
+      function: createHandleMessage(opening.deps),
+      events: [event],
+    }).execute();
+    const [, opened] = expectDefined(
+      vi.mocked(opening.deps.agentStore.insertOrRecoverSystemPromptSnapshot).mock.calls[0],
+      "snapshot insert",
+    );
+
+    const sent = await replayedIter2(
+      { configDigest: opened.configDigest },
+      STEPS_BEFORE_ITER2.filter((id) => id !== "open-system-prompt-epoch"),
+    );
+
+    expect(sent).toContain('"text":"EPOCH PROMPT"');
+    expect(sent).toContain("<core_memory_updates>");
+    expect(sent).toContain("earlier-signature");
   });
 });
 
@@ -1157,6 +1290,7 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
           voiceMode = "never";
           return "system prompt";
         }),
+        configuration: vi.fn().mockResolvedValue("configuration"),
       },
       voiceResolver: mockVoiceResolver(mockVoiceBundle({ tts })),
       deliveryRouter: mockDeliveryRouter({ prepare: vi.fn().mockResolvedValue(handle) }),
@@ -1227,8 +1361,9 @@ describe("handle-message — core-memory scope frozen across re-invocations", ()
     "load-turn-transcript",
     "freeze-core-memory-scope",
     "freeze-turn-inputs",
-    "assemble-prompt",
+    "load-system-prompt",
     "load-last-tokens",
+    "open-system-prompt-epoch",
     "render-turn-context",
   ];
 
@@ -1263,6 +1398,38 @@ describe("handle-message — core-memory scope frozen across re-invocations", ()
       key: "identity",
       content: "Name: Thorin",
     });
+    expect(resumed.agentStore.insertMessages).toHaveBeenCalledTimes(1);
+  });
+
+  it("completes a run whose earlier memos predate the system prompt snapshot", async () => {
+    // An older build assembled the prompt in `assemble-prompt` and ran the rest
+    // of the steps before the loop; neither snapshot step ran.
+    const source = scopeDeps("game");
+    const steps: Array<{ id: string; handler: () => unknown }> = [
+      { id: "assemble-prompt", handler: () => "prompt from the older build" },
+    ];
+    const snapshotSteps = ["load-system-prompt", "open-system-prompt-epoch"];
+    for (const id of STEPS_BEFORE_LOOP.filter((id) => !snapshotSteps.includes(id))) {
+      const { result } = await new InngestTestEngine({
+        function: createHandleMessage(source),
+        events: [event],
+      }).executeStep(id);
+      steps.push({ id, handler: () => canonicalKeyOrder(result) });
+    }
+
+    const resumed = scopeDeps("game");
+    const { error } = await new InngestTestEngine({
+      function: createHandleMessage(resumed),
+      events: [event],
+      steps,
+    }).execute();
+
+    expect(error).toBeUndefined();
+    // The memoized steps stood, and the new ones ran once: the turn opens the
+    // conversation's first epoch and sends it.
+    expect(resumed.agentStore.insertOrRecoverTurnContext).not.toHaveBeenCalled();
+    expect(resumed.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledTimes(1);
+    expect(loopSystemPrompt(resumed)).toBe("system prompt");
     expect(resumed.agentStore.insertMessages).toHaveBeenCalledTimes(1);
   });
 

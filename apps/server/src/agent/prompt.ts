@@ -1,5 +1,5 @@
 import type { ToolDefinition } from "../llm/types.js";
-import type { CoreMemoryView } from "./core-memory/scope.js";
+import { type CoreMemoryView, OWN_GROUP, SHARED_GROUP } from "./core-memory/scope.js";
 import { RULE_SECTIONS, type RuleSection, type SectionedRule } from "./rule-sections.js";
 import type { CoreMemoryBlock } from "./service.js";
 import type { Profile } from "./store/index.js";
@@ -33,6 +33,13 @@ export interface AssembleContext {
 
 export interface PromptSource {
   assemble(ctx: AssembleContext): Promise<string>;
+  /**
+   * What `assemble` renders for `ctx` without the core memory blocks'
+   * content, with the code-owned text that frames them: the part of a system
+   * prompt snapshot whose change opens a new epoch
+   * (design/prompt-caching.md → System Prompt Snapshot).
+   */
+  configuration(ctx: AssembleContext): Promise<string>;
 }
 
 // --- Prompt sections ---
@@ -45,18 +52,22 @@ Be concise when the user wants a quick answer. Be thorough when the topic is com
 
 const ONBOARDING = `You don't know your user yet. In your first interaction, introduce yourself briefly and learn about them: their name, what they do, their timezone, and how they prefer to communicate. Save what you learn about them, including anything about them they mention in passing, to core memory with core_memory_update as soon as you learn it, without waiting to learn the rest: a block can start with one line.`;
 
-const SHARED_GROUP = "Shared by every persona:";
-
 const RESTRICTED_SHARED_GROUP =
   "Shared by every persona. This persona's own `identity`, if it has one, wins where the two " +
   "differ, and the lines it leaves out still come from here. An `identity` you save here " +
   "becomes that one and stays in this persona, so write only the lines that differ from this " +
   "block, not a copy of it:";
 
-const OWN_GROUP = "Only in this persona:";
-
 const RULES_PREAMBLE =
   "Standing rules for your replies. Where two rules that apply to this reply conflict, follow the one listed first.";
+
+export const CHANNEL_RULES_LINE =
+  "A rule that starts with a channel applies only when the turn context lists that channel among its delivery channels.";
+
+/** The code-owned text `# User` frames core memory with, whichever of it shows. */
+const USER_SECTION_TEXT = [ONBOARDING, SHARED_GROUP, RESTRICTED_SHARED_GROUP, OWN_GROUP].join(
+  "\n\n",
+);
 
 const RULE_SECTION_HEADINGS: Readonly<Record<RuleSection, string>> = {
   always: "## Always",
@@ -95,13 +106,23 @@ function formatBlocks(blocks: ReadonlyArray<CoreMemoryBlock>): string {
   return blocks.map((b) => `## ${b.key}\n${b.content}`).join("\n\n");
 }
 
-/** The `# Rules` section body: a subsection per non-empty section, in precedence order. */
+/**
+ * The `# Rules` section body: a subsection per non-empty section, in
+ * precedence order. Every channel's rules render, each labelled with its
+ * channel, so the prompt doesn't change as sessions come and go; the turn
+ * context names the channels a reply goes to.
+ */
 function formatRules(rules: ReadonlyArray<SectionedRule>): string {
   const sections = RULE_SECTIONS.flatMap((section) => {
-    const lines = rules.filter((r) => r.section === section).map((r) => `- ${r.rule}`);
+    const lines = rules
+      .filter((r) => r.section === section)
+      .map((r) => `- ${r.channelType === null ? "" : `On ${r.channelType}: `}${r.rule}`);
     return lines.length > 0 ? [`${RULE_SECTION_HEADINGS[section]}\n${lines.join("\n")}`] : [];
   });
-  return [RULES_PREAMBLE, ...sections].join("\n\n");
+  const preamble = rules.some((r) => r.channelType !== null)
+    ? `${RULES_PREAMBLE} ${CHANNEL_RULES_LINE}`
+    : RULES_PREAMBLE;
+  return [preamble, ...sections].join("\n\n");
 }
 
 /**
@@ -127,6 +148,15 @@ export class DefaultPromptSource implements PromptSource {
   }
 
   async assemble(ctx: AssembleContext): Promise<string> {
+    return this.#render(ctx, formatUserContext(ctx.coreMemory) ?? ONBOARDING);
+  }
+
+  async configuration(ctx: AssembleContext): Promise<string> {
+    return this.#render(ctx, USER_SECTION_TEXT);
+  }
+
+  /** The prompt for `ctx`, with `userSection` as the `# User` body. */
+  #render(ctx: AssembleContext, userSection: string): string {
     const { profile, rules, coreMemory, toolDefinitions } = ctx;
 
     const parts: string[] = [];
@@ -136,7 +166,7 @@ export class DefaultPromptSource implements PromptSource {
 
     // User context or onboarding, unless the turn has no core memory
     if (coreMemory.scope.kind !== "none") {
-      parts.push(`# User\n\n${formatUserContext(coreMemory) ?? ONBOARDING}`);
+      parts.push(`# User\n\n${userSection}`);
     }
 
     // Tools — rendered from the per-turn catalog

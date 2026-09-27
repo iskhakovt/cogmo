@@ -16,7 +16,7 @@ import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
 import { z } from "zod";
 import type { Profile } from "../agent/store/index.js";
 import { messages, turnContexts } from "../agent/store/schema.js";
-import { renderTurnContext } from "../agent/turn-context.js";
+import { NO_CORE_MEMORY_UPDATES, renderTurnContext } from "../agent/turn-context.js";
 import { db } from "../db/index.js";
 import { env } from "../env.js";
 import { bootstrap } from "../index.js";
@@ -341,6 +341,7 @@ describe("prompt caching", () => {
           handledAt: expectDefined(createdAt.get(messageId), "message created_at"),
           timezone: env.USER_TIMEZONE,
           context,
+          coreMemoryUpdates: NO_CORE_MEMORY_UPDATES,
         }),
       );
     }

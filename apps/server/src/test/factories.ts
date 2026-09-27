@@ -46,6 +46,9 @@ export const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 /** `created_at` of the turn row `mockAgentStore` finds: 08:14 UTC on a Friday. */
 export const MOCK_MESSAGE_CREATED_AT = new Date("2026-09-25T08:14:00.000Z");
 
+/** When `mockAgentStore`'s snapshot insert says the epoch opened. */
+export const MOCK_SNAPSHOT_CREATED_AT = new Date("2026-09-25T08:14:01.000Z");
+
 export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
   return {
     createUser: vi.fn().mockResolvedValue({ id: "user-1" }),
@@ -78,6 +81,13 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     // Echoes the insert, as a first attempt does.
     insertOrRecoverTurnContext: vi.fn().mockImplementation(async (_tx, params) => params),
     listTurnContexts: vi.fn().mockResolvedValue([]),
+    listCoreMemoryAnnouncements: vi.fn().mockResolvedValue([]),
+    getLatestSystemPromptSnapshot: vi.fn().mockResolvedValue(undefined),
+    // Echoes the insert as a first attempt stores it.
+    insertOrRecoverSystemPromptSnapshot: vi.fn().mockImplementation(async (_tx, params) => ({
+      kind: "new",
+      row: { id: "snapshot-1", createdAt: MOCK_SNAPSHOT_CREATED_AT, ...params },
+    })),
     insertOrRecoverSummary: vi.fn().mockResolvedValue({
       kind: "new",
       row: {
@@ -130,6 +140,7 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     getActiveRules: vi.fn().mockResolvedValue([]),
     getMessage: vi.fn().mockResolvedValue({ id: "msg-1", role: "assistant", content: "test" }),
     getCoreMemoryBlocks: vi.fn().mockResolvedValue([]),
+    getCoreMemoryUpdateTimes: vi.fn().mockResolvedValue([]),
     upsertCoreMemoryBlock: vi.fn().mockResolvedValue(undefined),
     deleteCoreMemoryBlock: vi.fn().mockResolvedValue(undefined),
     listCoreMemoryKeys: vi.fn().mockResolvedValue([]),

@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ToolDefinition } from "../llm/types.js";
 import type { CoreMemoryScope, CoreMemoryView } from "./core-memory/scope.js";
-import { DefaultPromptSource, formatUserContext } from "./prompt.js";
+import { CHANNEL_RULES_LINE, DefaultPromptSource, formatUserContext } from "./prompt.js";
+import type { SectionedRule } from "./rule-sections.js";
 import type { CoreMemoryBlock } from "./service.js";
 import type { Profile } from "./store/index.js";
 
@@ -67,11 +68,19 @@ describe("DefaultPromptSource", () => {
       const prompt = await new DefaultPromptSource().assemble({
         profile: undefined,
         rules: [
-          { rule: "Never share the user's address.", section: "always" },
-          { rule: "Don't use bullet points; write in paragraphs.", section: "from_user" },
-          { rule: "Keep replies under 100 words.", section: "learned" },
-          { rule: "Use metric units.", section: "learned" },
-          { rule: "Avoid tables. Use bullet lists instead.", section: "channel_defaults" },
+          { rule: "Never share the user's address.", section: "always", channelType: null },
+          {
+            rule: "Don't use bullet points; write in paragraphs.",
+            section: "from_user",
+            channelType: null,
+          },
+          { rule: "Keep replies under 100 words.", section: "learned", channelType: null },
+          { rule: "Use metric units.", section: "learned", channelType: null },
+          {
+            rule: "Avoid tables. Use bullet lists instead.",
+            section: "channel_defaults",
+            channelType: null,
+          },
         ],
         coreMemory: NO_BLOCKS,
       });
@@ -103,8 +112,8 @@ describe("DefaultPromptSource", () => {
       const prompt = await new DefaultPromptSource().assemble({
         profile: undefined,
         rules: [
-          { rule: "Keep replies short.", section: "learned" },
-          { rule: "Avoid tables.", section: "channel_defaults" },
+          { rule: "Keep replies short.", section: "learned", channelType: null },
+          { rule: "Avoid tables.", section: "channel_defaults", channelType: null },
         ],
         coreMemory: NO_BLOCKS,
       });
@@ -120,10 +129,10 @@ describe("DefaultPromptSource", () => {
       const prompt = await new DefaultPromptSource().assemble({
         profile: undefined,
         rules: [
-          { rule: "Channel default", section: "channel_defaults" },
-          { rule: "Second learned", section: "learned" },
-          { rule: "Operator", section: "always" },
-          { rule: "First learned", section: "learned" },
+          { rule: "Channel default", section: "channel_defaults", channelType: null },
+          { rule: "Second learned", section: "learned", channelType: null },
+          { rule: "Operator", section: "always", channelType: null },
+          { rule: "First learned", section: "learned", channelType: null },
         ],
         coreMemory: NO_BLOCKS,
       });
@@ -137,6 +146,66 @@ describe("DefaultPromptSource", () => {
         "- First learned",
         "- Channel default",
       ]);
+    });
+
+    it("labels a channel's rule with its channel and says when it applies", async () => {
+      const assemble = (rules: ReadonlyArray<SectionedRule>) =>
+        new DefaultPromptSource().assemble({ profile: undefined, rules, coreMemory: NO_BLOCKS });
+
+      const section = rulesSection(
+        await assemble([
+          { rule: "Never share the user's address.", section: "always", channelType: "telegram" },
+          { rule: "Avoid tables.", section: "channel_defaults", channelType: "telegram" },
+          { rule: "Keep it short.", section: "channel_defaults", channelType: null },
+        ]),
+      );
+
+      expect(section).toContain("- On telegram: Never share the user's address.");
+      expect(section).toContain("- On telegram: Avoid tables.\n- Keep it short.");
+      expect(section).toContain(CHANNEL_RULES_LINE);
+      expect(
+        rulesSection(
+          await assemble([{ rule: "Keep it short.", section: "learned", channelType: null }]),
+        ),
+      ).not.toContain(CHANNEL_RULES_LINE);
+    });
+  });
+
+  describe("configuration", () => {
+    const source = new DefaultPromptSource({ serviceGuidance: ["Guidance."] });
+    const context = {
+      profile: profile({ basePrompt: "You are a coder." }),
+      rules: [{ rule: "Be kind", section: "learned" as const, channelType: null }],
+      coreMemory: unclassed([{ key: "identity", content: "Name: Tim" }]),
+      toolDefinitions: testTools,
+    };
+
+    it("covers everything the prompt renders but the core memory blocks", async () => {
+      const configuration = await source.configuration(context);
+
+      expect(configuration).not.toContain("Name: Tim");
+      for (const part of ["You are a coder.", "- Be kind", "**web_search**", "Guidance."]) {
+        expect(configuration).toContain(part);
+      }
+      await expect(
+        source.configuration({
+          ...context,
+          coreMemory: unclassed([{ key: "identity", content: "Name: Ada" }]),
+        }),
+      ).resolves.toBe(configuration);
+      await expect(source.configuration({ ...context, coreMemory: NO_BLOCKS })).resolves.toBe(
+        configuration,
+      );
+    });
+
+    it("changes with the code-owned text around core memory, and with its absence", async () => {
+      const configuration = await source.configuration(context);
+
+      expect(configuration).toContain("You don't know your user yet.");
+      expect(configuration).toContain("Shared by every persona");
+      await expect(
+        source.configuration({ ...context, coreMemory: { scope: { kind: "none" }, blocks: [] } }),
+      ).resolves.not.toBe(configuration);
     });
   });
 
@@ -204,7 +273,7 @@ describe("DefaultPromptSource", () => {
       const source = new DefaultPromptSource({ serviceGuidance: ["Test memory guidance."] });
       const ctx = {
         profile: undefined,
-        rules: [{ rule: "Be kind", section: "learned" as const }],
+        rules: [{ rule: "Be kind", section: "learned" as const, channelType: null }],
         coreMemory: unclassed([{ key: "user_profile", content: "Name: Tim" }]),
         toolDefinitions: testTools,
       };
@@ -332,7 +401,7 @@ describe("DefaultPromptSource", () => {
       serviceGuidance: ["Test memory guidance."],
     }).assemble({
       profile: undefined,
-      rules: [{ rule: "Be kind", section: "learned" }],
+      rules: [{ rule: "Be kind", section: "learned", channelType: null }],
       coreMemory: unclassed([{ key: "user_profile", content: "Name: Tim" }]),
       toolDefinitions: testTools,
     });

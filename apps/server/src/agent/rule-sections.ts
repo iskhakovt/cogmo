@@ -21,8 +21,9 @@ export function ruleSection(source: SteeringRuleSourceValue): RuleSection {
   return SECTION_OF_SOURCE[source];
 }
 
-/** An active steering rule and the `# Rules` section it renders in. */
+/** An active steering rule, the `# Rules` section it renders in, and its channel (null: every channel). */
 export interface SectionedRule {
   rule: string;
   section: RuleSection;
+  channelType: string | null;
 }

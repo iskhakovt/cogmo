@@ -1,13 +1,11 @@
 import type { Transactor } from "../../db/index.js";
-import type { TransportStore } from "../../transport/store/index.js";
 import { type CoreMemoryScope, type CoreMemoryView, readCoreMemory } from "../core-memory/scope.js";
 import type { SectionedRule } from "../rule-sections.js";
 import type { AgentStore, Profile } from "../store/index.js";
 
 /**
- * Load what the prompt assembler renders: the channel types currently
- * delivering the conversation, the steering rules at the intersection of
- * `(profile, channels)`, and the conversation user's core memory blocks the
+ * Load what the prompt assembler renders: the profile's steering rules, every
+ * channel's included, and the conversation user's core memory blocks the
  * turn's scope sees. The reads share one tx and see a consistent snapshot
  * under the project's REPEATABLE READ default.
  *
@@ -23,11 +21,9 @@ import type { AgentStore, Profile } from "../store/index.js";
 export interface LoadConversationContextDeps {
   runInTx: Transactor;
   agentStore: AgentStore;
-  transportStore: TransportStore;
 }
 
 export interface LoadConversationContextArgs {
-  conversationId: string;
   /** The conversation's user, whose core memory blocks the prompt renders. */
   userId: string;
   /** Which of those blocks the turn sees (`loadCoreMemoryScope`, frozen in a turn). */
@@ -41,7 +37,6 @@ export interface LoadConversationContextArgs {
 }
 
 export interface ConversationContext {
-  channelTypes: ReadonlyArray<string>;
   rules: ReadonlyArray<SectionedRule>;
   coreMemory: CoreMemoryView;
 }
@@ -51,11 +46,8 @@ export async function loadConversationContext(
   args: LoadConversationContextArgs,
 ): Promise<ConversationContext> {
   return deps.runInTx(async (tx) => {
-    const channelTypes = await deps.transportStore.getActiveChannelTypes(tx, args.conversationId);
-    const rules = args.profile
-      ? await deps.agentStore.getActiveRules(tx, args.profile.id, channelTypes)
-      : [];
+    const rules = args.profile ? await deps.agentStore.getActiveRules(tx, args.profile.id) : [];
     const coreMemory = await readCoreMemory(tx, deps.agentStore, args.userId, args.coreMemoryScope);
-    return { channelTypes, rules, coreMemory };
+    return { rules, coreMemory };
   });
 }

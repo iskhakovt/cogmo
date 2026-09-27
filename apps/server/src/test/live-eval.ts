@@ -34,7 +34,11 @@ import type { SectionedRule } from "../agent/rule-sections.js";
 import type { CoreMemoryBlock, Service } from "../agent/service.js";
 import type { Profile } from "../agent/store/index.js";
 import { createDefaultTools, ToolRegistry } from "../agent/tools.js";
-import { renderTurnContext, withTurnContext } from "../agent/turn-context.js";
+import {
+  NO_CORE_MEMORY_UPDATES,
+  renderTurnContext,
+  withTurnContext,
+} from "../agent/turn-context.js";
 import { createWebTools } from "../agent/web-tools.js";
 import { resolveLimits } from "../llm/models.js";
 import type { LlmProvider } from "../llm/provider.js";
@@ -262,6 +266,7 @@ export async function runEvalTurn(params: {
         channelTypes: [],
         announcedCoreMemoryBlocks: [],
       },
+      coreMemoryUpdates: NO_CORE_MEMORY_UPDATES,
     }),
   );
 

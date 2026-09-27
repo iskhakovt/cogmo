@@ -6,6 +6,7 @@ import {
   eq,
   getTableColumns,
   gt,
+  gte,
   inArray,
   isNotNull,
   isNull,
@@ -67,6 +68,7 @@ import {
   scheduledTasks,
   steeringRules,
   subAgents,
+  systemPromptSnapshots,
   type ToolSet,
   type TtsProviderTypeValue,
   turnContexts,
@@ -267,6 +269,17 @@ export interface StoredTurnContext {
   messageId: string;
   rendered: string;
   context: TurnContext;
+}
+
+/** A row from `system_prompt_snapshots`: one epoch's system prompt. */
+export interface SystemPromptSnapshot {
+  id: string;
+  conversationId: string;
+  openedBy: string;
+  historyStart: string;
+  rendered: string;
+  configDigest: string;
+  createdAt: Date;
 }
 
 /**
@@ -596,6 +609,32 @@ export interface AgentStore {
   ): Promise<ReadonlyArray<StoredTurnContext>>;
 
   /**
+   * The core-memory blocks each stored turn context announced, and when it was
+   * stored, for the conversation's messages from `fromMessageId` on.
+   */
+  listCoreMemoryAnnouncements(
+    tx: Transaction,
+    conversationId: string,
+    fromMessageId: string,
+  ): Promise<ReadonlyArray<{ createdAt: Date; blocks: TurnContext["announcedCoreMemoryBlocks"] }>>;
+
+  /** The conversation's current epoch: the snapshot opened latest in the transcript. */
+  getLatestSystemPromptSnapshot(
+    tx: Transaction,
+    conversationId: string,
+  ): Promise<SystemPromptSnapshot | undefined>;
+
+  /**
+   * Store the snapshot a turn opens, or recover the one already stored for
+   * that turn. `openedBy` is the opening step's idempotency key: a retry that
+   * re-runs a committed insert gets the first attempt's row back.
+   */
+  insertOrRecoverSystemPromptSnapshot(
+    tx: Transaction,
+    params: Omit<SystemPromptSnapshot, "id" | "createdAt">,
+  ): Promise<{ kind: "new" | "recovered"; row: SystemPromptSnapshot }>;
+
+  /**
    * Append a summary, or recover the existing row when this
    * (conversationId, throughMessageId) pair was already written.
    *
@@ -769,14 +808,11 @@ export interface AgentStore {
   ): Promise<{ id: string; role: string; content: string | ContentBlock[] } | undefined>;
 
   /**
-   * Load active steering rules for a profile + active channels, each with its
-   * `# Rules` section, in the order `# Rules` lists them within a section.
+   * Load a profile's active steering rules, every channel's included, each
+   * with its `# Rules` section and channel, in the order `# Rules` lists them
+   * within a section.
    */
-  getActiveRules(
-    tx: Transaction,
-    profileId: string,
-    channelTypes: ReadonlyArray<string>,
-  ): Promise<ReadonlyArray<SectionedRule>>;
+  getActiveRules(tx: Transaction, profileId: string): Promise<ReadonlyArray<SectionedRule>>;
 
   /**
    * The user's core memory blocks visible to one scope. `profileClass: null`
@@ -801,6 +837,12 @@ export interface AgentStore {
     tx: Transaction,
     params: { userId: string; profileClass: string; key: string },
   ): Promise<void>;
+
+  /** When each of the user's core memory blocks last changed, in every scope. */
+  getCoreMemoryUpdateTimes(
+    tx: Transaction,
+    userId: string,
+  ): Promise<ReadonlyArray<{ profileClass: string | null; key: string; updatedAt: Date }>>;
 
   /** The keys of one class's own blocks, in key order. */
   listCoreMemoryKeys(
@@ -1821,6 +1863,55 @@ export class DrizzleAgentStore implements AgentStore {
       );
   }
 
+  async listCoreMemoryAnnouncements(
+    tx: Transaction,
+    conversationId: string,
+    fromMessageId: string,
+  ): Promise<ReadonlyArray<{ createdAt: Date; blocks: TurnContext["announcedCoreMemoryBlocks"] }>> {
+    const rows = await tx
+      .select({ createdAt: turnContexts.createdAt, context: turnContexts.context })
+      .from(turnContexts)
+      .innerJoin(messages, eq(messages.id, turnContexts.messageId))
+      .where(and(eq(messages.conversationId, conversationId), gte(messages.id, fromMessageId)));
+    return rows.map((r) => ({
+      createdAt: r.createdAt,
+      blocks: r.context.announcedCoreMemoryBlocks,
+    }));
+  }
+
+  async getLatestSystemPromptSnapshot(
+    tx: Transaction,
+    conversationId: string,
+  ): Promise<SystemPromptSnapshot | undefined> {
+    const rows = await tx
+      .select()
+      .from(systemPromptSnapshots)
+      .where(eq(systemPromptSnapshots.conversationId, conversationId))
+      .orderBy(desc(systemPromptSnapshots.openedBy))
+      .limit(1);
+    return rows[0];
+  }
+
+  async insertOrRecoverSystemPromptSnapshot(
+    tx: Transaction,
+    params: Omit<SystemPromptSnapshot, "id" | "createdAt">,
+  ): Promise<{ kind: "new" | "recovered"; row: SystemPromptSnapshot }> {
+    // Keyed insert: see `.claude/rules/inngest.md`.
+    const rows = await tx
+      .insert(systemPromptSnapshots)
+      .values(params)
+      .onConflictDoUpdate({
+        target: systemPromptSnapshots.openedBy,
+        set: { openedBy: params.openedBy },
+      })
+      .returning({
+        ...getTableColumns(systemPromptSnapshots),
+        inserted: sql<boolean>`(xmax = 0)`,
+      });
+    const { inserted, ...row } = single(rows);
+    return { kind: inserted ? "new" : "recovered", row };
+  }
+
   async getHistoryAfter(
     tx: Transaction,
     conversationId: string,
@@ -2210,11 +2301,7 @@ export class DrizzleAgentStore implements AgentStore {
     return rows[0];
   }
 
-  async getActiveRules(
-    tx: Transaction,
-    profileId: string,
-    channelTypes: ReadonlyArray<string>,
-  ): Promise<ReadonlyArray<SectionedRule>> {
+  async getActiveRules(tx: Transaction, profileId: string): Promise<ReadonlyArray<SectionedRule>> {
     // Within a section: `safety` first (only operators write it), then the
     // narrower scope, so it is listed before a wider rule it conflicts with.
     // `id` breaks priority ties, which are common (corrections share 100,
@@ -2222,16 +2309,16 @@ export class DrizzleAgentStore implements AgentStore {
     // it `# Rules` could reorder, invalidating the cached prompt, with no rule
     // changed.
     const rows = await tx
-      .select({ rule: steeringRules.rule, source: steeringRules.source })
+      .select({
+        rule: steeringRules.rule,
+        source: steeringRules.source,
+        channelType: steeringRules.channelType,
+      })
       .from(steeringRules)
       .where(
         and(
           eq(steeringRules.active, true),
           or(isNull(steeringRules.profileId), eq(steeringRules.profileId, profileId)),
-          or(
-            isNull(steeringRules.channelType),
-            ...(channelTypes.length > 0 ? [inArray(steeringRules.channelType, channelTypes)] : []),
-          ),
         ),
       )
       .orderBy(
@@ -2241,7 +2328,11 @@ export class DrizzleAgentStore implements AgentStore {
         asc(steeringRules.priority),
         asc(steeringRules.id),
       );
-    return rows.map((r) => ({ rule: r.rule, section: ruleSection(r.source) }));
+    return rows.map((r) => ({
+      rule: r.rule,
+      section: ruleSection(r.source),
+      channelType: r.channelType,
+    }));
   }
 
   async getCoreMemoryBlocks(
@@ -2292,7 +2383,8 @@ export class DrizzleAgentStore implements AgentStore {
       .values(params)
       .onConflictDoUpdate({
         target: [coreMemoryBlocks.userId, coreMemoryBlocks.profileClass, coreMemoryBlocks.key],
-        set: { content: params.content, updatedAt: new Date() },
+        // The database clock, which also times snapshots and turn contexts.
+        set: { content: params.content, updatedAt: sql`now()` },
       });
   }
 
@@ -2309,6 +2401,20 @@ export class DrizzleAgentStore implements AgentStore {
           eq(coreMemoryBlocks.key, params.key),
         ),
       );
+  }
+
+  async getCoreMemoryUpdateTimes(
+    tx: Transaction,
+    userId: string,
+  ): Promise<ReadonlyArray<{ profileClass: string | null; key: string; updatedAt: Date }>> {
+    return tx
+      .select({
+        profileClass: coreMemoryBlocks.profileClass,
+        key: coreMemoryBlocks.key,
+        updatedAt: coreMemoryBlocks.updatedAt,
+      })
+      .from(coreMemoryBlocks)
+      .where(eq(coreMemoryBlocks.userId, userId));
   }
 
   async listCoreMemoryKeys(

@@ -6,6 +6,10 @@ import type { AgentStore } from "../store/index.js";
 /** The one key a classed profile shares with every persona. */
 export const IDENTITY_BLOCK_KEY = "identity";
 
+/** Leads of the groups a classed profile sees its blocks under. */
+export const SHARED_GROUP = "Shared by every persona:";
+export const OWN_GROUP = "Only in this persona:";
+
 /** A stored block with its scope: `profileClass` is null for the shared block and the unclassed bucket. */
 export interface ScopedCoreMemoryBlock {
   profileClass: string | null;

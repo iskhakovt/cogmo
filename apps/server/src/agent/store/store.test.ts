@@ -1,5 +1,6 @@
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { z } from "zod";
 import type { Database, Transactor } from "../../db/index.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../../secrets/store/index.js";
@@ -7,7 +8,12 @@ import { expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { inboundMessages } from "../../transport/store/schema.js";
 import { DrizzleAgentStore } from "./index.js";
-import { conversationSummaries, coreMemoryBlocks, messages } from "./schema.js";
+import {
+  conversationSummaries,
+  coreMemoryBlocks,
+  messages,
+  systemPromptSnapshots,
+} from "./schema.js";
 
 let db: Database;
 let tx: Transactor;
@@ -1136,10 +1142,10 @@ describe("DrizzleAgentStore", () => {
         },
       ]);
 
-      const rules = await tx((trx) => store.getActiveRules(trx, profileId, []));
+      const rules = await tx((trx) => store.getActiveRules(trx, profileId));
       expect(rules).toEqual([
-        { rule: "Global safety rule", section: "always" },
-        { rule: "Be concise", section: "always" },
+        { rule: "Global safety rule", section: "always", channelType: null },
+        { rule: "Be concise", section: "always", channelType: null },
       ]);
     });
 
@@ -1171,7 +1177,7 @@ describe("DrizzleAgentStore", () => {
           rule("Operator", "manual", 200, null),
         ]);
 
-      const rules = await tx((trx) => store.getActiveRules(trx, profileId, ["telegram"]));
+      const rules = await tx((trx) => store.getActiveRules(trx, profileId));
       expect(Object.fromEntries(rules.map((r) => [r.rule, r.section]))).toEqual({
         Operator: "always",
         Stated: "from_user",
@@ -1209,9 +1215,7 @@ describe("DrizzleAgentStore", () => {
           rule("This profile, on telegram", { profileId, channelType: "telegram" }, 100),
         ]);
 
-      expect(
-        (await tx((trx) => store.getActiveRules(trx, profileId, ["telegram"]))).map((r) => r.rule),
-      ).toEqual([
+      expect((await tx((trx) => store.getActiveRules(trx, profileId))).map((r) => r.rule)).toEqual([
         "This profile, on telegram",
         "This profile, all channels",
         "All profiles, on telegram",
@@ -1244,9 +1248,9 @@ describe("DrizzleAgentStore", () => {
         },
       ]);
 
-      expect(await tx((trx) => store.getActiveRules(trx, profileId, []))).toEqual([
-        { rule: "Global safety rule", section: "always" },
-        { rule: "Profile style rule", section: "always" },
+      expect(await tx((trx) => store.getActiveRules(trx, profileId))).toEqual([
+        { rule: "Global safety rule", section: "always", channelType: null },
+        { rule: "Profile style rule", section: "always", channelType: null },
       ]);
     });
 
@@ -1328,9 +1332,9 @@ describe("DrizzleAgentStore", () => {
       await observe("Second rule", second.id);
       await observe("First rule", first.id);
 
-      expect(await tx((trx) => store.getActiveRules(trx, profileId, []))).toEqual([
-        { rule: "First rule", section: "learned" },
-        { rule: "Second rule", section: "learned" },
+      expect(await tx((trx) => store.getActiveRules(trx, profileId))).toEqual([
+        { rule: "First rule", section: "learned", channelType: null },
+        { rule: "Second rule", section: "learned", channelType: null },
       ]);
       expect((await tx((trx) => store.getCorrections(trx, profileId))).map((c) => c.rule)).toEqual([
         "First rule",
@@ -1340,10 +1344,10 @@ describe("DrizzleAgentStore", () => {
 
     it("returns empty array when no active rules", async () => {
       const profileId = await seedProfile();
-      expect(await tx((trx) => store.getActiveRules(trx, profileId, []))).toEqual([]);
+      expect(await tx((trx) => store.getActiveRules(trx, profileId))).toEqual([]);
     });
 
-    it("returns channel-scoped rules when channel is active", async () => {
+    it("returns every channel's rules with their channel, the narrower scope first", async () => {
       const profileId = await seedProfile();
       const { steeringRules: sr } = await import("./schema.js");
       await db.insert(sr).values([
@@ -1379,20 +1383,10 @@ describe("DrizzleAgentStore", () => {
         },
       ]);
 
-      const rules = async (channelTypes: ReadonlyArray<string>) =>
-        (await tx((trx) => store.getActiveRules(trx, profileId, channelTypes))).map((r) => r.rule);
-
-      // No channels active — only null-scoped rules
-      expect(await rules([])).toEqual(["Global rule"]);
-
-      // Telegram active — telegram + global, the narrower scope first
-      expect(await rules(["telegram"])).toEqual(["Telegram rule", "Global rule"]);
-
-      // Both channels — union
-      expect(await rules(["telegram", "slack"])).toEqual([
-        "Telegram rule",
-        "Slack rule",
-        "Global rule",
+      expect(await tx((trx) => store.getActiveRules(trx, profileId))).toEqual([
+        { rule: "Telegram rule", section: "always", channelType: "telegram" },
+        { rule: "Slack rule", section: "always", channelType: "slack" },
+        { rule: "Global rule", section: "always", channelType: null },
       ]);
     });
   });
@@ -1550,6 +1544,54 @@ describe("DrizzleAgentStore", () => {
         store.getCoreMemoryBlocks(trx, "00000000-0000-0000-0000-000000000000", null),
       );
       expect(blocks).toEqual([]);
+    });
+
+    it("stamps a replaced block with its transaction's database time", async () => {
+      // Snapshots and turn contexts are timed by the same clock, so a change
+      // reads as before or after them.
+      const userId = await seedUser();
+      await upsert(userId, null, "identity", "Name: Tim");
+
+      const { updatedAt, now } = await tx(async (trx) => {
+        const {
+          rows: [{ now }],
+        } = z
+          .object({ rows: z.tuple([z.object({ now: z.coerce.date() })]) })
+          .parse(await trx.execute(sql`SELECT now() AS now`));
+        await store.upsertCoreMemoryBlock(trx, {
+          userId,
+          profileClass: null,
+          key: "identity",
+          content: "Name: Tim\nHome: Lisbon",
+        });
+        const [row] = await trx
+          .select({ updatedAt: coreMemoryBlocks.updatedAt })
+          .from(coreMemoryBlocks)
+          .where(eq(coreMemoryBlocks.userId, userId));
+        return { updatedAt: expectDefined(row, "block").updatedAt, now };
+      });
+
+      expect(updatedAt).toEqual(now);
+    });
+
+    it("lists when each of the user's blocks last changed, in every scope", async () => {
+      const userId = await seedUser();
+      const otherUser = await seedUser();
+      await seedClass(userId, "game");
+      await upsert(userId, null, "identity", "Name: Tim");
+      await upsert(userId, "game", "preferences", "Dice");
+      await upsert(otherUser, null, "identity", "Name: Ada");
+
+      const times = await tx((trx) => store.getCoreMemoryUpdateTimes(trx, userId));
+
+      expect(times.map(({ profileClass, key }) => ({ profileClass, key }))).toEqual(
+        expect.arrayContaining([
+          { profileClass: null, key: "identity" },
+          { profileClass: "game", key: "preferences" },
+        ]),
+      );
+      expect(times).toHaveLength(2);
+      expect(times.every((t) => t.updatedAt instanceof Date)).toBe(true);
     });
   });
 
@@ -2833,8 +2875,10 @@ describe("DrizzleAgentStore", () => {
         }),
       );
 
-      const rules = await tx((trx) => store.getActiveRules(trx, profileId, []));
-      expect(rules).toEqual([{ rule: "New consolidated rule", section: "learned" }]);
+      const rules = await tx((trx) => store.getActiveRules(trx, profileId));
+      expect(rules).toEqual([
+        { rule: "New consolidated rule", section: "learned", channelType: null },
+      ]);
     });
   });
 
@@ -4473,5 +4517,144 @@ describe("turn contexts", () => {
     await expect(
       tx((trx) => store.findUserMessageByInbound(trx, conversationId, INBOUND)),
     ).resolves.toEqual({ id: second.id, createdAt: second.createdAt });
+  });
+});
+
+describe("system prompt snapshots", () => {
+  async function userRow(conversationId: string, stamp: { profileId: string; model: string }) {
+    return (
+      await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId,
+          role: "user",
+          content: "hello",
+          lastInboundMessageId: "019d0000-0000-7000-8000-0000000000fe",
+          ...stamp,
+        }),
+      )
+    ).id;
+  }
+
+  function snapshot(conversationId: string, openedBy: string, rendered: string) {
+    return {
+      conversationId,
+      openedBy,
+      historyStart: openedBy,
+      rendered,
+      configDigest: `digest of ${rendered}`,
+    };
+  }
+
+  it("stores the snapshot a turn opens and reads it back as the conversation's latest", async () => {
+    const { conversationId, stamp } = await seedConversation();
+    const opener = await userRow(conversationId, stamp);
+
+    const { kind, row } = await tx((trx) =>
+      store.insertOrRecoverSystemPromptSnapshot(trx, snapshot(conversationId, opener, "first")),
+    );
+
+    expect(kind).toBe("new");
+    expect(row).toMatchObject(snapshot(conversationId, opener, "first"));
+    expect(row.createdAt).toBeInstanceOf(Date);
+    await expect(
+      tx((trx) => store.getLatestSystemPromptSnapshot(trx, conversationId)),
+    ).resolves.toEqual(row);
+  });
+
+  it("recovers the stored row when the same turn opens an epoch twice", async () => {
+    const { conversationId, stamp } = await seedConversation();
+    const opener = await userRow(conversationId, stamp);
+    const first = await tx((trx) =>
+      store.insertOrRecoverSystemPromptSnapshot(trx, snapshot(conversationId, opener, "first")),
+    );
+
+    const retry = await tx((trx) =>
+      store.insertOrRecoverSystemPromptSnapshot(trx, snapshot(conversationId, opener, "retry")),
+    );
+
+    expect(retry).toEqual({ kind: "recovered", row: first.row });
+    const rows = await db.select().from(systemPromptSnapshots);
+    expect(rows).toHaveLength(1);
+  });
+
+  it("returns the epoch opened latest in the transcript, and only the conversation's own", async () => {
+    const { userId, profileId, conversationId, stamp } = await seedConversation();
+    const earlier = await userRow(conversationId, stamp);
+    const later = await userRow(conversationId, stamp);
+    const other = (
+      await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: true }))
+    ).id;
+    const otherRow = await userRow(other, stamp);
+    // Inserted out of transcript order.
+    for (const [conversation, opener, text] of [
+      [conversationId, later, "later"],
+      [conversationId, earlier, "earlier"],
+      [other, otherRow, "other"],
+    ] as const) {
+      await tx((trx) =>
+        store.insertOrRecoverSystemPromptSnapshot(trx, snapshot(conversation, opener, text)),
+      );
+    }
+
+    const latest = await tx((trx) => store.getLatestSystemPromptSnapshot(trx, conversationId));
+    expect(latest?.rendered).toBe("later");
+    const none = (
+      await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: true }))
+    ).id;
+    await expect(
+      tx((trx) => store.getLatestSystemPromptSnapshot(trx, none)),
+    ).resolves.toBeUndefined();
+  });
+
+  it("refuses a snapshot opened by a message that doesn't exist", async () => {
+    const { conversationId } = await seedConversation();
+    await expect(
+      tx((trx) =>
+        store.insertOrRecoverSystemPromptSnapshot(
+          trx,
+          snapshot(conversationId, "019d0000-0000-7000-8000-000000000999", "orphan"),
+        ),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("lists the core-memory blocks each turn context announced from a message on", async () => {
+    const { conversationId, stamp } = await seedConversation();
+    const [before, from, after] = [
+      await userRow(conversationId, stamp),
+      await userRow(conversationId, stamp),
+      await userRow(conversationId, stamp),
+    ];
+    const context = (announced: Array<{ profileClass: string | null; key: string }>) => ({
+      recalledMemories: [],
+      voiceMode: false,
+      channelTypes: [],
+      announcedCoreMemoryBlocks: announced,
+    });
+    for (const [messageId, announced] of [
+      [before, [{ profileClass: null, key: "stale" }]],
+      [from, [{ profileClass: null, key: "identity" }]],
+      [after, [{ profileClass: "game", key: "preferences" }]],
+    ] as const) {
+      await tx((trx) =>
+        store.insertOrRecoverTurnContext(trx, {
+          messageId,
+          rendered: messageId,
+          context: context([...announced]),
+        }),
+      );
+    }
+
+    const listed = await tx((trx) => store.listCoreMemoryAnnouncements(trx, conversationId, from));
+
+    // In no particular order, and without the context before `from`.
+    expect(listed.map((l) => l.blocks)).toHaveLength(2);
+    expect(listed.map((l) => l.blocks)).toEqual(
+      expect.arrayContaining([
+        [{ profileClass: null, key: "identity" }],
+        [{ profileClass: "game", key: "preferences" }],
+      ]),
+    );
+    expect(listed.every((l) => l.createdAt instanceof Date)).toBe(true);
   });
 });
