@@ -219,7 +219,11 @@ describe("ensureWebChannel", () => {
 describe("seedChannelRules", () => {
   const telegramRules = () =>
     db
-      .select({ rule: steeringRules.rule, source: steeringRules.source })
+      .select({
+        rule: steeringRules.rule,
+        source: steeringRules.source,
+        active: steeringRules.active,
+      })
       .from(steeringRules)
       .where(eq(steeringRules.channelType, "telegram"))
       .orderBy(asc(steeringRules.id));
@@ -237,6 +241,17 @@ describe("seedChannelRules", () => {
     await seedChannelRules(tx, agentStore, "telegram");
 
     expect(await telegramRules()).toHaveLength(3);
+  });
+
+  it("doesn't reseed defaults an operator switched off", async () => {
+    await seedChannelRules(tx, agentStore, "telegram");
+    await db.update(steeringRules).set({ active: false });
+
+    await seedChannelRules(tx, agentStore, "telegram");
+
+    const rows = await telegramRules();
+    expect(rows).toHaveLength(3);
+    expect(rows.every((r) => !r.active)).toBe(true);
   });
 
   it("seeds past a rule the user's corrections scoped to the channel", async () => {
