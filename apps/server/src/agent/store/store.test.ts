@@ -3740,8 +3740,7 @@ describe("DrizzleAgentStore", () => {
 
     it("reads a row recorded before phase outcomes without supplying any", async () => {
       const { userId, conversationId } = await seedConversation();
-      // Written around the store, as the payload of a row from before
-      // `failedPhases` existed.
+      // An older row's payload, written around the store.
       await db.execute(sql`
         INSERT INTO evolution_events (conversation_id, user_id, triggered_by, payload)
         VALUES (${conversationId}, ${userId}, 'idle', ${JSON.stringify(samplePayload())}::jsonb)

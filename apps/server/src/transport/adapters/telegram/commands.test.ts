@@ -4706,7 +4706,7 @@ describe("handleLearned detail rendering", () => {
                 unknownRuleReinforcementsSkipped: 0,
                 consolidationNeeded: false,
               },
-              failedPhases: ["corrections", "consolidation", "memories", "drain"],
+              failedPhases: ["corrections", "memories", "drain"],
             },
             createdAt: new Date("2026-05-30T08:00:00Z"),
           }),
@@ -4717,11 +4717,37 @@ describe("handleLearned detail rendering", () => {
     await handleLearned(transport, ctx);
     const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
     expect(reply).toContain("Corrections: failed after retries");
-    expect(reply).toContain("Consolidation: failed after retries");
     expect(reply).toContain("Memories: failed after retries");
     expect(reply).toContain("Pending drain: failed after retries");
     expect(reply).not.toContain("extracted:    0");
     expect(reply).not.toContain("Memories: 0 extracted");
+    expect(reply).not.toContain("Consolidation");
+  });
+
+  it("shows a failed consolidation beside the corrections that asked for it", async () => {
+    const payload = makePayload({});
+    const transport = transportWith({
+      evolution: {
+        getEvent: vi.fn().mockResolvedValue(
+          ok({
+            id: EVT,
+            conversationId: "c1",
+            triggeredBy: "idle",
+            payload: {
+              ...payload,
+              corrections: { ...payload.corrections, consolidationNeeded: true },
+              failedPhases: ["consolidation"],
+            },
+            createdAt: new Date("2026-05-30T08:00:00Z"),
+          }),
+        ),
+      },
+    });
+    const ctx = mkCtx(EVT);
+    await handleLearned(transport, ctx);
+    const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
+    expect(reply).toContain("Consolidation: failed after retries");
+    expect(reply).toContain("extracted:    1");
   });
 
   it("renders counts as before for a row without recorded phase outcomes", async () => {

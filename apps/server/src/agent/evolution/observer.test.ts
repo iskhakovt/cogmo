@@ -127,11 +127,7 @@ function exhaustedRetriesStep(): ObserverStepHarness & { ids: string[] } {
   };
 }
 
-/**
- * A memory layer that keeps one document per id, as Hindsight does: a retain
- * naming a document the bank already holds replaces it. An item without an id
- * lands as a new document, as the provider mints a fresh one for it.
- */
+/** Keeps one document per id, as Hindsight does; an item without one gets a fresh id, as the adapter mints. */
 function documentBank(): {
   memory: Pick<MemoryProvider, "retainBatch">;
   documents: Map<string, RetainBatchItem>;
@@ -289,7 +285,7 @@ describe("runObserver phase isolation", () => {
     expect(deps.agentStore.recordEvolutionEvent).toHaveBeenCalledOnce();
   });
 
-  it("does not retain a staged row twice when the drain's delete fails for good", async () => {
+  it("keeps one copy of a staged row when the drain's delete fails for good", async () => {
     const bank = documentBank();
     const deletePendingMemories = vi
       .fn<AgentStore["deletePendingMemories"]>()
@@ -325,7 +321,6 @@ describe("runObserver phase isolation", () => {
 });
 
 describe("runObserver phase outcomes", () => {
-  /** The payload the fire hands to `recordEvolutionEvent`. */
   function recordedPayload(deps: { agentStore: AgentStore }): unknown {
     const call = expectDefined(
       vi.mocked(deps.agentStore.recordEvolutionEvent).mock.calls[0],
