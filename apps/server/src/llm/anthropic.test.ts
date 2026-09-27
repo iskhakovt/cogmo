@@ -2006,6 +2006,130 @@ describe("AnthropicProvider", () => {
       },
     );
 
+    /** An SDK `APIError` as the grammar's compile limits raise it. */
+    function apiError(status: number, type: string, message: string): Error {
+      const body = { type: "error", error: { type, message }, request_id: "req_1" };
+      return Object.assign(new Error(`${status} ${JSON.stringify(body)}`), {
+        status,
+        error: body,
+      });
+    }
+
+    it.each([
+      ["documented", "Schema is too complex for compilation."],
+      [
+        "grammar-size",
+        "The compiled grammar is too large, which would cause performance issues. Simplify your tool schemas or reduce the number of strict tools.",
+      ],
+      [
+        "optional-parameter",
+        "Schemas contains too many optional parameters (25), which would make grammar compilation inefficient. Reduce the number of optional parameters in your tool schemas (limit: 24).",
+      ],
+      [
+        "union-parameter",
+        "Schemas contains too many parameters with union types (17 parameters with type arrays or anyOf). This causes exponential compilation cost. Reduce the number of nullable or union-typed parameters (limit: 16 parameters with unions).",
+      ],
+      [
+        "pattern",
+        "output_config.format.schema: Unsupported regex feature in pattern field: pattern is too complex for structured output: reduce the {n,m} upper bound, narrow the character class range, or avoid nesting quantified groups",
+      ],
+    ])("retries once on the tool path past the grammar's %s limit", async (_limit, message) => {
+      const provider = createProvider();
+      mockCreate
+        .mockRejectedValueOnce(apiError(400, "invalid_request_error", message))
+        .mockResolvedValueOnce(
+          toolReply("claude-opus-5-5", "extract_data", { name: "Alice", age: 30 }),
+        );
+
+      const result = await provider.chat({
+        model: "claude-opus-5-5",
+        system: "Extract structured data",
+        messages: [{ role: "user", content: "Alice is 30" }],
+        responseFormat: PERSON_FORMAT,
+      });
+
+      expect(mockCreate).toHaveBeenCalledTimes(2);
+      expect(sentBody()).toHaveProperty("output_config");
+      const retry = expectDefined(mockCreate.mock.calls[1], "retry")[0];
+      expect(retry).not.toHaveProperty("output_config");
+      expect(retry.tools).toEqual([expect.objectContaining({ name: "extract_data" })]);
+      expect(result.content).toEqual([{ type: "text", text: '{"name":"Alice","age":30}' }]);
+      expect(result.stopReason).toBe("end_turn");
+    });
+
+    it.each([
+      [
+        "another invalid request",
+        apiError(
+          400,
+          "invalid_request_error",
+          "output_config.format.schema: Invalid schema: Unsupported format 'regex'.",
+        ),
+      ],
+      [
+        "a limit's message on another error type",
+        apiError(400, "api_error", "Schema is too complex for compilation."),
+      ],
+      [
+        "a limit's message on another status",
+        apiError(500, "invalid_request_error", "Schema is too complex for compilation."),
+      ],
+      ["an error without a body", new Error("Schema is too complex for compilation.")],
+    ])("surfaces %s without a retry", async (_label, error) => {
+      const provider = createProvider();
+      mockCreate.mockRejectedValueOnce(error);
+
+      await expect(
+        provider.chat({
+          model: "claude-opus-5-5",
+          system: "Extract structured data",
+          messages: [{ role: "user", content: "Alice is 30" }],
+          responseFormat: PERSON_FORMAT,
+        }),
+      ).rejects.toBe(error);
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it("surfaces a tool-path request's compile error without a retry", async () => {
+      const provider = createProvider();
+      const error = apiError(
+        400,
+        "invalid_request_error",
+        "Schema is too complex for compilation.",
+      );
+      mockCreate.mockRejectedValueOnce(error);
+
+      await expect(
+        provider.chat({
+          model: "claude-opus-5-5",
+          system: "Compile the pipeline",
+          messages: [{ role: "user", content: "hi" }],
+          responseFormat: OPEN_FORMAT,
+        }),
+      ).rejects.toBe(error);
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it("surfaces the tool-path retry's own failure", async () => {
+      const provider = createProvider();
+      const retryError = apiError(529, "overloaded_error", "Overloaded");
+      mockCreate
+        .mockRejectedValueOnce(
+          apiError(400, "invalid_request_error", "Schema is too complex for compilation."),
+        )
+        .mockRejectedValueOnce(retryError);
+
+      await expect(
+        provider.chat({
+          model: "claude-opus-5-5",
+          system: "Extract structured data",
+          messages: [{ role: "user", content: "Alice is 30" }],
+          responseFormat: PERSON_FORMAT,
+        }),
+      ).rejects.toBe(retryError);
+      expect(mockCreate).toHaveBeenCalledTimes(2);
+    });
+
     it("passes a structured-output reply's text through, whatever it says", async () => {
       const provider = createProvider();
       mockCreate.mockResolvedValueOnce(textReply("claude-opus-5-5", "Who is Alice?"));

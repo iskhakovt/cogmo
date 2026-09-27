@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { z } from "zod";
 import { logger } from "../logger.js";
 import {
   hasOpenObject,
@@ -24,7 +25,6 @@ import {
   DEFAULT_MAX_TOKENS,
   type LlmResponse,
   type Message,
-  type ResponseFormat,
   type StopReason,
   type StreamEvent,
   type ToolDefinition,
@@ -63,7 +63,7 @@ export class AnthropicProvider implements LlmProvider {
       throw new Error("responseFormat and tools are mutually exclusive");
     }
 
-    const anthropicParams = buildCreateParams(params);
+    const anthropicParams = buildCreateParams(params, takesToolPath(params));
     let resolveResponse: (v: { stopReason: StopReason; model: string; usage: Usage }) => void;
     let rejectResponse: (err: unknown) => void;
     const response = new Promise<{ stopReason: StopReason; model: string; usage: Usage }>(
@@ -218,7 +218,7 @@ export class AnthropicProvider implements LlmProvider {
   }
 
   async countTokens(params: CountTokensParams): Promise<number> {
-    const built = buildCreateParams({ ...params, maxTokens: 1 });
+    const built = buildCreateParams({ ...params, maxTokens: 1 }, takesToolPath(params));
     const countParams: Anthropic.MessageCountTokensParams = {
       model: built.model,
       messages: built.messages,
@@ -237,9 +237,7 @@ export class AnthropicProvider implements LlmProvider {
 
     const span = startChatSpan(this.name, params.model);
     try {
-      const response = await this.#client.messages.create(
-        buildCreateParams(clampForNonStreaming(params)),
-      );
+      const { response, toolPath } = await this.#create(clampForNonStreaming(params));
 
       const usage = fromAnthropicUsage(response.usage);
 
@@ -251,7 +249,7 @@ export class AnthropicProvider implements LlmProvider {
       // structured-output reply; any other stop reason passes through.
       const format = params.responseFormat;
       const content = response.content.flatMap(fromAnthropicBlock);
-      if (format && !takesStructuredOutput(format)) {
+      if (format && toolPath) {
         const toolUse = response.content.find((b) => b.type === "tool_use");
         if (toolUse && toolUse.type === "tool_use") {
           return {
@@ -278,6 +276,27 @@ export class AnthropicProvider implements LlmProvider {
       throw err;
     } finally {
       span.end();
+    }
+  }
+
+  /**
+   * Send a non-streaming request. A structured-output schema past the
+   * grammar's compile limits ({@link isGrammarLimitError}) goes once more on
+   * the tool path: a pre-check can't foresee the internal grammar-size limit.
+   */
+  async #create(params: ChatParams): Promise<{ response: Anthropic.Message; toolPath: boolean }> {
+    const toolPath = takesToolPath(params);
+    try {
+      const response = await this.#client.messages.create(buildCreateParams(params, toolPath));
+      return { response, toolPath };
+    } catch (err) {
+      if (toolPath || params.responseFormat === undefined || !isGrammarLimitError(err)) throw err;
+      logger.warn(
+        { model: params.model, format: params.responseFormat.name, err },
+        "structured output can't compile the schema, retrying on the tool path",
+      );
+      const response = await this.#client.messages.create(buildCreateParams(params, true));
+      return { response, toolPath: true };
     }
   }
 }
@@ -346,7 +365,14 @@ function dropSamplingParams(params: ChatParams): void {
   );
 }
 
-function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNonStreaming {
+/**
+ * The request for `params`. With `toolPath`, a `responseFormat` goes as a
+ * synthetic tool rather than as structured outputs.
+ */
+function buildCreateParams(
+  params: ChatParams,
+  toolPath: boolean,
+): Anthropic.MessageCreateParamsNonStreaming {
   dropSamplingParams(params);
 
   // A structured-output call is one-shot — nothing re-sends its transcript —
@@ -365,7 +391,7 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
   const format = params.responseFormat;
   if (format) {
     const maxTokens = params.maxTokens ?? DEFAULT_MAX_TOKENS;
-    if (takesStructuredOutput(format)) {
+    if (!toolPath) {
       return {
         model: params.model,
         max_tokens: maxTokens,
@@ -428,13 +454,48 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
 // --- Structured output ---
 
 /**
- * Whether a `responseFormat` request goes through structured outputs. A
- * schema the grammar can't express, with an open node ({@link hasOpenObject})
- * or a recursive `$ref` ({@link hasRecursiveRef}), takes the tool path: a
- * synthetic tool carrying the schema.
+ * Whether a `responseFormat` request takes the tool path, a synthetic tool
+ * carrying the schema, rather than structured outputs: its schema is one the
+ * grammar can't express, with an open node ({@link hasOpenObject}) or a
+ * recursive `$ref` ({@link hasRecursiveRef}).
  */
-function takesStructuredOutput(format: ResponseFormat): boolean {
-  return !hasOpenObject(format.schema) && !hasRecursiveRef(format.schema);
+function takesToolPath(params: ChatParams): boolean {
+  const format = params.responseFormat;
+  return format !== undefined && (hasOpenObject(format.schema) || hasRecursiveRef(format.schema));
+}
+
+/**
+ * What the 400s for a schema past the grammar's compile limits say: the
+ * documented message for the internal grammar-size limit, the one the API
+ * sends for it, the explicit limits on optional and union-typed parameters,
+ * and a `pattern` too costly to compile.
+ */
+const GRAMMAR_LIMIT_MESSAGES = [
+  "Schema is too complex for compilation",
+  "The compiled grammar is too large",
+  "too many optional parameters",
+  "too many parameters with union types",
+  "pattern is too complex for structured output",
+] as const;
+
+/** The body of an Anthropic API error for an invalid request. */
+const InvalidRequestBodySchema = z.object({
+  error: z.object({ type: z.literal("invalid_request_error"), message: z.string() }),
+});
+
+/**
+ * Whether an SDK error is a 400 for a schema past the grammar's compile
+ * limits. Duck-typed on `status` and the parsed body, as the SDK's
+ * `APIError` carries them.
+ */
+function isGrammarLimitError(err: unknown): boolean {
+  if (!(err instanceof Error) || !("status" in err) || err.status !== 400) return false;
+  if (!("error" in err)) return false;
+  const body = InvalidRequestBodySchema.safeParse(err.error);
+  return (
+    body.success &&
+    GRAMMAR_LIMIT_MESSAGES.some((message) => body.data.error.message.includes(message))
+  );
 }
 
 /** The tool path's request for its call, in the system prompt and in a re-ask. */
