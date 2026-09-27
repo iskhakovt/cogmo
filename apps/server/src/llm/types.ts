@@ -239,7 +239,10 @@ export interface ChatParams {
   messages: Message[];
   tools?: ToolDefinition[];
   maxTokens?: number;
-  /** Request structured JSON output. Mutually exclusive with tools. */
+  /**
+   * Request structured JSON output. Mutually exclusive with tools. A provider
+   * may enforce only part of the schema, so callers validate the reply.
+   */
   responseFormat?: ResponseFormat;
   /**
    * Sampling temperature. Provider default when unset (typically 1.0).

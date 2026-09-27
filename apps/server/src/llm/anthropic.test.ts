@@ -3,8 +3,9 @@ import { z } from "zod";
 import { logger } from "../logger.js";
 import { expectDefined } from "../test/assertions.js";
 import { AnthropicProvider } from "./anthropic.js";
+import { extractText } from "./content.js";
 import { ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
-import type { CacheIntent, StreamEvent, ToolDefinition } from "./types.js";
+import type { CacheIntent, ResponseFormat, StreamEvent, ToolDefinition } from "./types.js";
 
 // Mock the Anthropic SDK — use a class so `new Anthropic()` works
 const mockCreate = vi.fn();
@@ -1150,8 +1151,8 @@ describe("AnthropicProvider", () => {
     it("takes no transcript caching on the responseFormat path", async () => {
       const provider = createProvider();
       mockCreate.mockResolvedValueOnce({
-        content: [{ type: "tool_use", id: "tu_1", name: "extract", input: { ok: true } }],
-        stop_reason: "tool_use",
+        content: [{ type: "text", text: '{"ok":true}', citations: null }],
+        stop_reason: "end_turn",
         model: "claude-sonnet-5",
         usage: { input_tokens: 10, output_tokens: 5 },
       });
@@ -1170,7 +1171,7 @@ describe("AnthropicProvider", () => {
 
       const body = expectDefined(mockCreate.mock.calls[0], "create call")[0];
       expect(body).not.toHaveProperty("cache_control");
-      expect(breakpoints(body)).toEqual([{ type: "ephemeral" }, { type: "ephemeral" }]);
+      expect(breakpoints(body)).toEqual([{ type: "ephemeral" }]);
     });
 
     it("takes no cache intent on countTokens, and sends no top-level cache_control if handed one", async () => {
@@ -1667,46 +1668,221 @@ describe("AnthropicProvider", () => {
   });
 
   describe("responseFormat", () => {
-    it("converts responseFormat to tool_use trick", async () => {
-      const provider = createProvider();
-      mockCreate.mockResolvedValueOnce({
-        content: [
-          {
-            type: "tool_use",
-            id: "tu_1",
-            name: "extract_data",
-            input: { name: "Alice", age: 30 },
-          },
-        ],
-        stop_reason: "tool_use",
-        model: "claude-sonnet-4-6",
-        usage: { input_tokens: 50, output_tokens: 20 },
-      });
+    const PersonSchema = z.object({ name: z.string().min(1), age: z.number() });
 
-      const result = await provider.chat({
-        model: "claude-sonnet-4-6",
-        system: "Extract structured data",
-        messages: [{ role: "user", content: "Alice is 30" }],
-        responseFormat: {
-          type: "json_schema",
-          name: "extract_data",
-          schema: {
+    const PERSON_FORMAT: ResponseFormat = {
+      type: "json_schema",
+      name: "extract_data",
+      schema: {
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        type: "object",
+        properties: { name: { type: "string", minLength: 1 }, age: { type: "number" } },
+        required: ["name", "age"],
+        additionalProperties: false,
+      },
+    };
+
+    /** A format whose `stageOutput` admits any keys, as `z.record` emits. */
+    const OPEN_FORMAT: ResponseFormat = {
+      type: "json_schema",
+      name: "pipeline_definition",
+      schema: {
+        type: "object",
+        properties: {
+          stageOutput: {
             type: "object",
-            properties: { name: { type: "string" }, age: { type: "number" } },
-            required: ["name", "age"],
+            propertyNames: { type: "string" },
+            additionalProperties: {},
           },
         },
+        required: ["stageOutput"],
+        additionalProperties: false,
+      },
+    };
+
+    function textReply(model: string, text: string) {
+      return {
+        content: [
+          { type: "thinking", thinking: "", signature: "sig" },
+          { type: "text", text, citations: null },
+        ],
+        stop_reason: "end_turn",
+        model,
+        usage: { input_tokens: 50, output_tokens: 20 },
+      };
+    }
+
+    function toolReply(model: string, name: string, input: unknown) {
+      return {
+        content: [{ type: "tool_use", id: "tu_1", name, input }],
+        stop_reason: "tool_use",
+        model,
+        usage: { input_tokens: 50, output_tokens: 20 },
+      };
+    }
+
+    function sentBody() {
+      return expectDefined(mockCreate.mock.calls[0], "create call")[0];
+    }
+
+    it.each(["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5", "claude-haiku-4-5"])(
+      "asks %s for structured output rather than forcing a tool",
+      async (model) => {
+        const provider = createProvider();
+        mockCreate.mockResolvedValueOnce(textReply(model, '{"name":"Alice","age":30}'));
+
+        const result = await provider.chat({
+          model,
+          system: "Extract structured data",
+          messages: [{ role: "user", content: "Alice is 30" }],
+          responseFormat: PERSON_FORMAT,
+        });
+
+        const body = sentBody();
+        expect(body).not.toHaveProperty("tools");
+        expect(body).not.toHaveProperty("tool_choice");
+        expect(body.output_config).toEqual({
+          format: {
+            type: "json_schema",
+            schema: {
+              type: "object",
+              properties: {
+                // The grammar takes no length bounds: the SDK's transform
+                // moves them into the description.
+                name: { type: "string", description: "{minLength: 1}" },
+                age: { type: "number" },
+              },
+              additionalProperties: false,
+              required: ["name", "age"],
+            },
+          },
+        });
+        expect(body.system).toEqual([
+          { type: "text", text: "Extract structured data", cache_control: { type: "ephemeral" } },
+        ]);
+
+        expect(result.stopReason).toBe("end_turn");
+        expect(PersonSchema.parse(JSON.parse(extractText(result.content)))).toEqual({
+          name: "Alice",
+          age: 30,
+        });
+      },
+    );
+
+    it.each(["claude-sonnet-4-20250514", "claude-opus-4-0"])(
+      "offers %s, which lacks structured outputs, an unforced tool named in the system prompt",
+      async (model) => {
+        const provider = createProvider();
+        mockCreate.mockResolvedValueOnce(
+          toolReply(model, "extract_data", { name: "Alice", age: 30 }),
+        );
+
+        const result = await provider.chat({
+          model,
+          system: "Extract structured data",
+          messages: [{ role: "user", content: "Alice is 30" }],
+          responseFormat: PERSON_FORMAT,
+        });
+
+        const body = sentBody();
+        expect(body).not.toHaveProperty("output_config");
+        expect(body).not.toHaveProperty("tool_choice");
+        expect(body.tools).toEqual([
+          {
+            name: "extract_data",
+            description: "Respond with structured data matching the schema.",
+            input_schema: {
+              type: "object",
+              properties: PERSON_FORMAT.schema.properties,
+              required: ["name", "age"],
+            },
+            cache_control: { type: "ephemeral" },
+          },
+        ]);
+        expect(body.system).toEqual([
+          { type: "text", text: "Extract structured data", cache_control: { type: "ephemeral" } },
+          { type: "text", text: "Respond by calling the extract_data tool." },
+        ]);
+
+        expect(result.content).toEqual([{ type: "text", text: '{"name":"Alice","age":30}' }]);
+        expect(result.stopReason).toBe("end_turn");
+        expect(PersonSchema.parse(JSON.parse(extractText(result.content)))).toEqual({
+          name: "Alice",
+          age: 30,
+        });
+      },
+    );
+
+    it("offers the tool for a schema with an open object, which structured outputs would close", async () => {
+      const provider = createProvider();
+      const input = { stageOutput: { title: { type: "string" } } };
+      mockCreate.mockResolvedValueOnce(toolReply("claude-opus-5-5", "pipeline_definition", input));
+
+      const result = await provider.chat({
+        model: "claude-opus-5-5",
+        system: "Compile the pipeline",
+        messages: [{ role: "user", content: "Summarize the news as JSON" }],
+        responseFormat: OPEN_FORMAT,
       });
 
-      // Response normalized to TextBlock with JSON
-      expect(result.content).toEqual([{ type: "text", text: '{"name":"Alice","age":30}' }]);
-      expect(result.stopReason).toBe("end_turn");
+      const body = sentBody();
+      expect(body).not.toHaveProperty("output_config");
+      expect(body).not.toHaveProperty("tool_choice");
+      expect(body.tools).toHaveLength(1);
+      expect(body.tools[0].input_schema.properties).toEqual(OPEN_FORMAT.schema.properties);
+      expect(body.system.at(-1)).toEqual({
+        type: "text",
+        text: "Respond by calling the pipeline_definition tool.",
+      });
+      expect(JSON.parse(extractText(result.content))).toEqual(input);
+    });
 
-      // Verify synthetic tool + tool_choice sent to API
-      const callArgs = mockCreate.mock.calls[0]![0];
-      expect(callArgs.tools).toHaveLength(1);
-      expect(callArgs.tools[0].name).toBe("extract_data");
-      expect(callArgs.tool_choice).toEqual({ type: "tool", name: "extract_data" });
+    it("names the tool in a system prompt of its own when the caller sends none", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        toolReply("claude-opus-5-5", "pipeline_definition", { stageOutput: {} }),
+      );
+
+      await provider.chat({
+        model: "claude-opus-5-5",
+        system: "",
+        messages: [{ role: "user", content: "hi" }],
+        responseFormat: OPEN_FORMAT,
+      });
+
+      expect(sentBody().system).toEqual([
+        { type: "text", text: "Respond by calling the pipeline_definition tool." },
+      ]);
+    });
+
+    it("passes a tool-path reply that calls no tool through as its text", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(textReply("claude-opus-5-5", '{"stageOutput":{}}'));
+
+      const result = await provider.chat({
+        model: "claude-opus-5-5",
+        system: "Compile the pipeline",
+        messages: [{ role: "user", content: "hi" }],
+        responseFormat: OPEN_FORMAT,
+      });
+
+      expect(JSON.parse(extractText(result.content))).toEqual({ stageOutput: {} });
+    });
+
+    it("counts a structured-output request with its output format", async () => {
+      const provider = createProvider();
+      mockCountTokens.mockResolvedValueOnce({ input_tokens: 100 });
+
+      await provider.countTokens({
+        model: "claude-opus-5-5",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+        responseFormat: PERSON_FORMAT,
+      });
+
+      const body = expectDefined(mockCountTokens.mock.calls[0], "countTokens call")[0];
+      expect(body).not.toHaveProperty("tools");
+      expect(body.output_config.format.type).toBe("json_schema");
     });
 
     it("throws when both responseFormat and tools are provided", async () => {

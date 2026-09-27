@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { transformJSONSchema } from "@anthropic-ai/sdk/lib/transform-json-schema";
 import { logger } from "../logger.js";
 import { cacheMarker } from "./cache-marker.js";
 import { ProviderProtocolError, parseToolArgs, ToolArgsCutOffError } from "./errors.js";
@@ -12,6 +13,7 @@ import type {
   CountTokensParams,
   LlmResponse,
   Message,
+  ResponseFormat,
   StopReason,
   StreamEvent,
   ToolDefinition,
@@ -214,6 +216,7 @@ export class AnthropicProvider implements LlmProvider {
     };
     if (built.system) countParams.system = built.system;
     if (built.tools) countParams.tools = built.tools;
+    if (built.output_config) countParams.output_config = built.output_config;
     const result = await this.#client.messages.countTokens(countParams);
     return result.input_tokens;
   }
@@ -234,9 +237,10 @@ export class AnthropicProvider implements LlmProvider {
       const stopReason = fromAnthropicStopReason(response.stop_reason);
       recordChatUsage(span, this.name, response.model, usage, stopReason);
 
-      // When responseFormat is set, the model is forced to call a synthetic tool.
-      // Normalize: extract tool input as JSON text, set stopReason to end_turn.
-      if (params.responseFormat) {
+      // A tool-path reply carries the JSON as the synthetic tool's input.
+      // Returned as text, it reads like a structured-output reply.
+      const format = params.responseFormat;
+      if (format && !takesStructuredOutput(params.model, format)) {
         const toolUse = response.content.find((b) => b.type === "tool_use");
         if (toolUse && toolUse.type === "tool_use") {
           return {
@@ -246,7 +250,10 @@ export class AnthropicProvider implements LlmProvider {
             usage,
           };
         }
-        logger.warn("responseFormat set but no tool_use block in response");
+        logger.warn(
+          { model: params.model, name: format.name },
+          "structured-output reply called no tool; passing its text through",
+        );
       }
 
       return {
@@ -344,24 +351,36 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
       ? [{ type: "text", text: params.system, cache_control: marker }]
       : [];
 
-  // When responseFormat is set, use the tool_use trick: define a synthetic tool
-  // with the schema and force the model to call it via tool_choice.
-  if (params.responseFormat) {
+  const format = params.responseFormat;
+  if (format) {
+    const maxTokens = params.maxTokens ?? DEFAULT_MAX_TOKENS;
+    if (takesStructuredOutput(params.model, format)) {
+      return {
+        model: params.model,
+        max_tokens: maxTokens,
+        ...(systemBlocks.length > 0 && { system: systemBlocks }),
+        messages: params.messages.map(toAnthropicMessage),
+        output_config: { format: toOutputFormat(format) },
+      };
+    }
+
+    // The tool path asks for the call rather than forcing it: `tool_choice`
+    // of type `tool` or `any` is a 400 on Opus 5.5 and Fable 5.1.
     const syntheticTool = toAnthropicTool({
-      name: params.responseFormat.name,
+      name: format.name,
       description: "Respond with structured data matching the schema.",
-      parameters: params.responseFormat.schema,
+      parameters: format.schema,
     });
     syntheticTool.cache_control = { type: "ephemeral" };
-
-    const maxTokens = params.maxTokens ?? DEFAULT_MAX_TOKENS;
     return {
       model: params.model,
       max_tokens: maxTokens,
-      ...(systemBlocks.length > 0 && { system: systemBlocks }),
+      system: [
+        ...systemBlocks,
+        { type: "text", text: `Respond by calling the ${format.name} tool.` },
+      ],
       messages: params.messages.map(toAnthropicMessage),
       tools: [syntheticTool],
-      tool_choice: { type: "tool", name: params.responseFormat.name },
     };
   }
 
@@ -394,6 +413,57 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
     ...(tools && { tools }),
     ...(params.cache && { cache_control: marker }),
   };
+}
+
+// --- Structured output ---
+
+/**
+ * Served models without structured outputs, both deprecated. Every model
+ * since Sonnet 4.5 and Opus 4.5 takes `output_config.format`, so the set only
+ * shrinks.
+ */
+const MODELS_WITHOUT_STRUCTURED_OUTPUTS: ReadonlySet<string> = new Set([
+  "claude-opus-4-0",
+  "claude-opus-4-20250514",
+  "claude-sonnet-4-0",
+  "claude-sonnet-4-20250514",
+]);
+
+/**
+ * Whether a `responseFormat` request goes through structured outputs, which
+ * constrain decoding to the schema. The alternative is the tool path: a
+ * synthetic tool carrying the schema, which the model is asked to call. It
+ * serves the models without structured outputs, and schemas with an open
+ * object, which the grammar cannot express: it takes only objects closed with
+ * `additionalProperties: false`, so the SDK's transform would narrow a
+ * free-form object to `{}`.
+ */
+function takesStructuredOutput(model: string, format: ResponseFormat): boolean {
+  return !MODELS_WITHOUT_STRUCTURED_OUTPUTS.has(model) && !hasOpenObject(format.schema);
+}
+
+/**
+ * Whether any object in a JSON Schema admits keys beyond its `properties`:
+ * `additionalProperties` set to anything but `false`, as `z.record` emits.
+ */
+function hasOpenObject(schema: unknown): boolean {
+  if (Array.isArray(schema)) return schema.some(hasOpenObject);
+  if (typeof schema !== "object" || schema === null) return false;
+  return Object.entries(schema).some(([key, value]) =>
+    key === "additionalProperties" ? value !== false : hasOpenObject(value),
+  );
+}
+
+/**
+ * The schema as structured outputs take it, through the SDK's transform (the
+ * one behind its `jsonSchemaOutputFormat` helper). It closes every object and
+ * moves the keywords the grammar lacks, such as length and range bounds, into
+ * descriptions; callers validate the reply against the full schema. `$schema`
+ * names the dialect, not a constraint, so it is dropped.
+ */
+function toOutputFormat(format: ResponseFormat): Anthropic.JSONOutputFormat {
+  const { $schema: _dialect, ...schema } = format.schema;
+  return { type: "json_schema", schema: transformJSONSchema(schema) };
 }
 
 /**
