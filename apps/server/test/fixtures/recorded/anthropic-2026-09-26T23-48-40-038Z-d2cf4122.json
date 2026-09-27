@@ -1,0 +1,36 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nWhich hypervisor did I say the homelab runs?",
+        "model": "claude-sonnet-5",
+        "turnIndex": 3,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "You mentioned it's a three-node Proxmox cluster."
+      },
+      "recordedTimings": {
+        "ttftMs": 765,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          488,
+          3,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0
+        ],
+        "totalDurationMs": 1257
+      },
+      "metadata": {
+        "systemHash": "a479dde7",
+        "toolsHash": "5d271761"
+      }
+    }
+  ]
+}

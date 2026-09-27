@@ -1,0 +1,41 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nWhat's bitcoin at?",
+        "model": "claude-sonnet-5",
+        "turnIndex": 3,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "btc-spot",
+            "arguments": "{}",
+            "id": "toolu_013kDC9jT85TuRrCWyDqVAQj"
+          }
+        ]
+      },
+      "recordedTimings": {
+        "ttftMs": 796,
+        "interChunkDelaysMs": [
+          0,
+          695,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6,
+          0,
+          0
+        ],
+        "totalDurationMs": 1497
+      },
+      "metadata": {
+        "systemHash": "9ac6c5d2",
+        "toolsHash": "64f61b9a"
+      }
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nCreate a skill called btc-spot that fetches the current bitcoin USD price from coingecko (https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd) and returns { price: <number> }. Fetch it with `await ctx.http.get(url)`, which returns a dict with 'status' and 'body' — parse the body with json.loads. Do NOT use urllib or any third-party HTTP library, do NOT declare dependencies in SKILL.md, do NOT create a requirements.lock file.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "memory_recall",
+            "arguments": "{\"query\": \"user profile name job timezone communication preference\"}",
+            "id": "toolu_018xhnBASXvVsTFViJF2xvBm"
+          }
+        ]
+      },
+      "recordedTimings": {
+        "ttftMs": 990,
+        "interChunkDelaysMs": [
+          0,
+          2460,
+          0,
+          0,
+          0,
+          0,
+          0,
+          412,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0
+        ],
+        "totalDurationMs": 3863
+      },
+      "metadata": {
+        "systemHash": "22d5c167",
+        "toolsHash": "8ae2ba59"
+      }
+    }
+  ]
+}

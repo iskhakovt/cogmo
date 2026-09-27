@@ -1,0 +1,51 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\ndraw me a cat in a hat",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "memory_recall",
+            "arguments": "{\"query\": \"user name, occupation, timezone, communication preferences\"}",
+            "id": "toolu_01NRXp2ip4ABymceXRJSPn7r"
+          }
+        ]
+      },
+      "recordedTimings": {
+        "ttftMs": 1162,
+        "interChunkDelaysMs": [
+          0,
+          760,
+          0,
+          0,
+          0,
+          0,
+          0,
+          214,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "totalDurationMs": 2136
+      },
+      "metadata": {
+        "systemHash": "22d5c167",
+        "toolsHash": "8ae2ba59"
+      }
+    }
+  ]
+}
