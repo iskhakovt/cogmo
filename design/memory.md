@@ -244,7 +244,7 @@ core_memory_blocks (
 - **Three states from one nullable column and the key rule.** `NULLS NOT DISTINCT` gives one block per key in each scope, and the upsert targets `(user_id, profile_class, key)`. The shared block is the NULL-class `identity` row, so an unclassed `identity` write and a shared one are the same row. A `scope` enum column would also allow a shared `user_profile` or a second NULL-class `identity`, states the design rules out.
 - **The composite FK** mirrors `profiles(user_id, profile_class)`, and MATCH SIMPLE skips NULL-class rows.
 - **Store:** `getCoreMemoryBlocks(tx, userId, profileClass)` returns the shared `identity`, then the class's blocks, an `identity` override first and the rest in key order; for `null`, every NULL-class block in key order. `upsertCoreMemoryBlock` takes the resolved `profileClass`, `deleteCoreMemoryBlock` removes an override, and `listCoreMemoryKeys(tx, userId, profileClass)` lists one class's keys for the confirmations.
-- **Migration:** `0059_core_memory_scope` adds the column, replaces `uq_core_memory_user_key` with the three-column constraint and adds the FK, with no data statement: every row written before it reads NULL, so an `identity` row among them is shared and every other row is in the unclassed bucket, which every unclassed profile renders.
+- **Migration:** `0060_core_memory_scope` adds the column, replaces `uq_core_memory_user_key` with the three-column constraint and adds the FK, with no data statement: every row written before it reads NULL, so an `identity` row among them is shared and every other row is in the unclassed bucket, which every unclassed profile renders.
 
 **Blocks written before the migration record no writer, so isolation holds only for writes after it:**
 
@@ -301,7 +301,7 @@ An `r` turn already running when `/classes unrestrict r` lands has its scope fro
 
 ### Implementation Outline
 
-1. **Scopes** `[confirmed]`: the column, constraint and FK (`0059_core_memory_scope`), the store methods in [Data Model](#data-model), `writeCoreMemoryBlock` and the frozen scope, grouped rendering and the routing lines, the class-lifecycle confirmations, and the classed, restricted and legacy states in the [evaluation](#evaluation).
+1. **Scopes** `[confirmed]`: the column, constraint and FK (`0060_core_memory_scope`), the store methods in [Data Model](#data-model), `writeCoreMemoryBlock` and the frozen scope, grouped rendering and the routing lines, the class-lifecycle confirmations, and the classed, restricted and legacy states in the [evaluation](#evaluation).
 2. **Override content** `[confirmed]`: an override that holds only what differs ([Behaviour by Profile](#behaviour-by-profile)).
 3. **Prompt caching** `[proposed]`: the snapshot rules in [Interactions](#interactions), folded into step 3 of [prompt-caching.md](prompt-caching.md#implementation-plan-proposed).
 
