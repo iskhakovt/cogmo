@@ -45,7 +45,7 @@ const MIN_CACHEABLE_TOKENS = 1024;
 /** "Most of the previous prompt", for the best-effort caches. */
 const TOLERANT_SHARE = 0.8;
 
-/** Each reply's cap, reasoning included on the routes that reason. */
+/** Room for a one-word reply plus any reasoning. */
 const MAX_TOKENS = 300;
 
 const PROMPTS = [
@@ -71,7 +71,7 @@ const SystemMessageSchema = z.object({
 const BodySchema = z.object({ messages: z.array(z.unknown()).min(1) }).passthrough();
 
 /**
- * A system prompt well above the minimum cacheable prefix (~4–5k tokens,
+ * A system prompt well above the minimum cacheable prefix (~3–5k tokens,
  * depending on the tokenizer). The nonce opens it, so no earlier run's entry
  * can match past its first line.
  */
@@ -210,7 +210,7 @@ const ROUTES: Route[] = [
     dialect: "openai",
     baseURL: "https://api.openai.com/v1",
     apiKey: liveKey("OPENAI_API_KEY"),
-    // A reasoning model, which takes its cap only as `max_completion_tokens`.
+    // A reasoning model, to cover `max_completion_tokens`.
     model: "gpt-5.4-nano",
     relation: "best-effort",
     expectWire(body, key) {

@@ -464,7 +464,7 @@ Recorded fixtures match on the last user message (`match: { userMessage }`), whi
 - **Core-memory edit frequency.** Few edits so far, from little use and from the previous guidance, which missed most core facts mentioned in passing ([memory.md](memory.md) → Core Memory vs Hindsight → Evaluation); re-measure edits per conversation-day on data collected under the current guidance before sizing step 3.
 - **Anthropic-compatible endpoints.** If an Anthropic-protocol `llm_providers` row ever points at a third-party endpoint, check that it accepts top-level `cache_control`, or fall back to an explicit tail marker for that row.
 - **Live tier in CI.** The scheduled workflow needs Anthropic, OpenAI and OpenRouter API keys as repository secrets (xAI optional, reached through OpenRouter until a direct key exists); until they exist, the live tier runs locally only.
-- **GPT-5.6 cache accounting.** Scenario D runs OpenAI direct on gpt-5.4-nano, so `prompt_cache_key` on GPT-5.6's cache accounting, which bills writes, is unmeasured.
+- **GPT-5.6 cache accounting.** Scenario D's OpenAI route runs gpt-5.4-nano, so what `prompt_cache_key` does to GPT-5.6's cache accounting, which bills writes, is unmeasured; a GPT-5.6 route would measure it.
 - **The xAI header.** `x-grok-conv-id` goes out as xAI documents it but has never met the real endpoint; a direct xAI key would add an xAI route to scenario D.
 
 ## Sources `[research]`

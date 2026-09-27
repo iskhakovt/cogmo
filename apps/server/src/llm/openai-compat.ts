@@ -282,14 +282,13 @@ export class OpenAICompatibleProvider implements LlmProvider {
 
 // --- Output cap ---
 
-/** A reply's token cap, in the request field its model reads. */
 type OutputCap = { max_tokens: number } | { max_completion_tokens: number };
 
 /**
- * OpenAI's reasoning models (the o-series and GPT-5 onward, by bare id) reject
- * `max_tokens` and take the cap as `max_completion_tokens`, which also bounds
- * reasoning. Every other id keeps `max_tokens`, which every compatible host
- * reads, OpenRouter's `openai/…` slugs included.
+ * OpenAI's reasoning models (the o-series and GPT-5 onward, by bare or
+ * fine-tuned id) reject `max_tokens` and take the cap as
+ * `max_completion_tokens`, which also bounds reasoning. Every other id keeps
+ * `max_tokens`, OpenRouter's `openai/…` slugs included.
  */
 export function outputCap(model: string, maxTokens: number): OutputCap {
   return takesMaxCompletionTokens(model)
@@ -298,8 +297,9 @@ export function outputCap(model: string, maxTokens: number): OutputCap {
 }
 
 function takesMaxCompletionTokens(model: string): boolean {
-  if (/^o\d/.test(model)) return true;
-  const major = /^gpt-(\d+)/.exec(model)?.[1];
+  const id = model.replace(/^ft:/, "");
+  if (/^o\d/.test(id)) return true;
+  const major = /^gpt-(\d+)/.exec(id)?.[1];
   return major !== undefined && Number(major) >= 5;
 }
 

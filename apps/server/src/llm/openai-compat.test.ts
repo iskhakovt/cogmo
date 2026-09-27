@@ -1494,13 +1494,13 @@ describe("OpenAICompatibleProvider", () => {
   });
 
   describe("output cap", () => {
-    /** The request body one call hands to `create`, on the non-streaming or the streaming path. */
     async function capBody(
       path: "chat" | "chatStream",
       model: string,
       maxTokens: number | undefined,
+      dialect: CacheDialect,
     ): Promise<Record<string, unknown>> {
-      const provider = createProvider("openai");
+      const provider = createProvider(dialect);
       const params: ChatParams = {
         model,
         system: "sys",
@@ -1531,7 +1531,7 @@ describe("OpenAICompatibleProvider", () => {
       it.each(["gpt-5.4-nano", "o4-mini"])(
         "sends %s's cap as max_completion_tokens",
         async (model) => {
-          const body = await capBody(path, model, 300);
+          const body = await capBody(path, model, 300, "openai");
 
           expect(body.max_completion_tokens).toBe(300);
           expect(body).not.toHaveProperty("max_tokens");
@@ -1541,7 +1541,7 @@ describe("OpenAICompatibleProvider", () => {
       it.each(["gpt-4.1-nano", "openai/gpt-5.4-nano", "x-ai/grok-4.3"])(
         "sends %s's cap as max_tokens",
         async (model) => {
-          const body = await capBody(path, model, 300);
+          const body = await capBody(path, model, 300, "openrouter");
 
           expect(body.max_tokens).toBe(300);
           expect(body).not.toHaveProperty("max_completion_tokens");
@@ -1549,11 +1549,18 @@ describe("OpenAICompatibleProvider", () => {
       );
 
       it("puts the default cap in the model's field", async () => {
-        const reasoning = await capBody(path, "gpt-5.4-nano", undefined);
-        const other = await capBody(path, "gpt-4.1-nano", undefined);
+        const reasoning = await capBody(path, "gpt-5.4-nano", undefined, "openai");
+        const other = await capBody(path, "gpt-4.1-nano", undefined, "openai");
 
         expect(reasoning.max_completion_tokens).toBe(other.max_tokens);
         expect(reasoning.max_completion_tokens).toEqual(expect.any(Number));
+      });
+
+      it("keys the field on the model, not the host's dialect", async () => {
+        const body = await capBody(path, "gpt-5.4-nano", 300, "none");
+
+        expect(body.max_completion_tokens).toBe(300);
+        expect(body).not.toHaveProperty("max_tokens");
       });
     });
 
@@ -1568,6 +1575,7 @@ describe("OpenAICompatibleProvider", () => {
         "o1",
         "o3-mini",
         "o4-mini-2025-04-16",
+        "ft:o4-mini-2025-04-16:org::id",
       ])("puts %s's cap in max_completion_tokens", (model) => {
         expect(outputCap(model, 1024)).toEqual({ max_completion_tokens: 1024 });
       });
@@ -1578,6 +1586,7 @@ describe("OpenAICompatibleProvider", () => {
         "gpt-4.1-nano",
         "gpt-4.5-preview",
         "gpt-3.5-turbo",
+        "ft:gpt-4.1-nano-2025-04-14:org::id",
         // Open-weight, served by vLLM, Groq and others.
         "gpt-oss-120b",
         // OpenRouter slugs, OpenAI's included.
