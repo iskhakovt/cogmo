@@ -564,11 +564,9 @@ Add `mention_count` and `last_mentioned_at` metadata to Hindsight memories.
 
 ## Auto-Recall and Intention Gate `[confirmed]`
 
-Auto-recall searches Hindsight for memories relevant to the user's message and injects them into the system prompt as `# Recalled Context`. This runs before the agent loop — the agent sees recalled memories as context, not as tool output.
+Auto-recall searches Hindsight for memories relevant to the user's message and shows them in the turn's context block, which leads the turn's user message inside a data-not-instructions envelope and is stored with the turn, so recall never changes the system prompt. This runs before the agent loop — the agent sees recalled memories as context, not as tool output. A memory already shown in a turn context that survives this turn's compaction isn't repeated; content that appears elsewhere in the transcript doesn't count — see [prompt-caching.md](prompt-caching.md) → Turn Context, Deduplication.
 
-`[proposed]` Recalled memories move out of the system prompt into the turn's user message and are stored with the turn, so recall no longer changes the system prompt between turns. A memory already shown in a turn context that survives this turn's compaction isn't repeated; content that appears elsewhere in the transcript doesn't count — see [prompt-caching.md](prompt-caching.md) → Turn Context, Deduplication.
-
-A failed recall degrades to no memories: the turn runs with no `# Recalled Context` block rather than failing into Inngest retries, and `cogmo.memory.recall.failures` counts it against the bank. The failure also logs a warning and puts the `memory.recall` span into ERROR, but the counter is the only signal an alert can watch — see [DEPLOYMENT.md → Hindsight reranker](../DEPLOYMENT.md#hindsight-reranker) for the failover chain that keeps a dead reranker from causing one.
+A failed recall degrades to no memories: the turn's context shows none rather than failing into Inngest retries, and `cogmo.memory.recall.failures` counts it against the bank. The failure also logs a warning and puts the `memory.recall` span into ERROR, but the counter is the only signal an alert can watch — see [DEPLOYMENT.md → Hindsight reranker](../DEPLOYMENT.md#hindsight-reranker) for the failover chain that keeps a dead reranker from causing one.
 
 ### Profile Setting `[confirmed]`
 

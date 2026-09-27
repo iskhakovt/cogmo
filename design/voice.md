@@ -24,7 +24,7 @@ Voice slots into the existing pipeline at four points, each consistent with how 
 | **User preference** | profile default + per-conversation override | `profiles.voice_mode`, nullable `conversations.voice_mode` |
 | **Per-turn resolution** | pure helper called at turn-start | `resolveVoiceMode(...)` |
 
-The agent loop stays modality-agnostic in terms of state, but the prompt-assembly step receives `voiceMode: boolean` and conditionally injects a voice-style hint. Voice mode is decided **once at turn-start** (durable step) and consumed in two places: (a) prompt assembly, (b) delivery-time TTS branching.
+The agent loop stays modality-agnostic in terms of state; the turn's context states the reply modality, and a standing system-prompt section says how to write for voice. Voice mode is decided **once at turn-start** (durable step) and consumed in two places: (a) the turn context, (b) delivery-time TTS branching.
 
 ### Provider interfaces `[confirmed]`
 
@@ -159,7 +159,7 @@ function resolveVoiceMode(input: {
 }
 ```
 
-Decided once per turn at turn-start, fed to prompt assembly AND delivery. The agent sees voice mode (via the injected prompt hint) and shapes its response accordingly; delivery uses the same flag to branch into TTS.
+Decided once per turn at turn-start, fed to the turn context AND delivery. The agent sees voice mode (via `Reply modality: voice` and the standing voice guidance) and shapes its response accordingly; delivery uses the same flag to branch into TTS.
 
 ### Inbound content shape `[confirmed]`
 
@@ -236,16 +236,13 @@ For batch delivery (Direct CLI, future channels): same code path inside `deliver
 
 ### Prompt injection `[confirmed]`
 
-When `voiceModeForTurn === true`, append to the system prompt at `assemblePrompt` time:
+The turn's voice decision (`voiceModeForTurn`, frozen in `freeze-turn-inputs`) is data in the turn's context block: `Reply modality: voice` or `Reply modality: text`, on the turn's user message and stored with it. The style guidance is a standing section of every system prompt (`# Turn context`, `TURN_CONTEXT_GUIDANCE` in `src/agent/turn-context.ts`) that applies when a turn says `voice`:
 
 ```
-# Voice mode
-Your response will be spoken aloud. Keep it short and natural — one or two sentences when possible. Skip routine acknowledgments ("saved", "noted", "I'll remember") unless the acknowledgment IS the entire answer. Don't narrate background work (memory saves, file writes, web searches) — the user assumes those happened. Avoid markdown, lists, code fences, and tables — they don't translate to speech.
+When it says "Reply modality: voice", your reply will be spoken aloud. Keep it short and natural — one or two sentences when possible. Skip routine acknowledgments ("saved", "noted", "I'll remember") unless the acknowledgment IS the entire answer. Don't narrate background work (memory saves, file writes, web searches) — the user assumes those happened. Avoid markdown, lists, code fences, and tables — they don't translate to speech.
 ```
 
-Hooks into `DefaultPromptSource.assemble` — extend the signature with `{ voiceMode: boolean }` so all conditional inputs sit together (channel types, voice mode, recall context). This is the same pattern channel-types use today.
-
-`[proposed]` The hint becomes a standing section of the system prompt that applies when the turn says `Reply modality: voice`, and the modality moves into the turn's user message with the voice decision persisted per turn, so alternating voice and text turns stop rewriting the system prompt — see [prompt-caching.md](prompt-caching.md) → Turn Context.
+`DefaultPromptSource.assemble` takes no voice input, so alternating voice and text turns change only data and never rewrite the system prompt — see [prompt-caching.md](prompt-caching.md) → Turn Context.
 
 ### `/voice` Telegram command `[confirmed]`
 
