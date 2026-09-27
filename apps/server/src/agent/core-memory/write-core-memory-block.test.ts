@@ -195,4 +195,13 @@ describe("writeCoreMemoryBlock: a restricted class's identity override", () => {
     expect(result).toEqual({ kind: "override", profileClass: "game", leftOut: [] });
     expect(remove).not.toHaveBeenCalled();
   });
+
+  it("stores the override as written when only the class's own identity exists", async () => {
+    const content = "Name: Samuel Carter\nLocation: Lisbon";
+    const { stored } = await writeOverride(content, [
+      { profileClass: "game", key: "identity", content: "Name: Samuel Carter" },
+    ]);
+
+    expect(stored).toEqual([content]);
+  });
 });
