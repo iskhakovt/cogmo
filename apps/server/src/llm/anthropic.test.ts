@@ -1799,51 +1799,7 @@ describe("AnthropicProvider", () => {
       });
     });
 
-    it.each(["claude-sonnet-4-20250514", "claude-opus-4-0"])(
-      "offers %s, which lacks structured outputs, an unforced tool named in the system prompt",
-      async (model) => {
-        const provider = createProvider();
-        mockCreate.mockResolvedValueOnce(
-          toolReply(model, "extract_data", { name: "Alice", age: 30 }),
-        );
-
-        const result = await provider.chat({
-          model,
-          system: "Extract structured data",
-          messages: [{ role: "user", content: "Alice is 30" }],
-          responseFormat: PERSON_FORMAT,
-        });
-
-        const body = sentBody();
-        expect(body).not.toHaveProperty("output_config");
-        expect(body).not.toHaveProperty("tool_choice");
-        expect(body.tools).toEqual([
-          {
-            name: "extract_data",
-            description: "Respond with structured data matching the schema.",
-            input_schema: {
-              type: "object",
-              properties: PERSON_FORMAT.schema.properties,
-              required: ["name", "age"],
-            },
-            cache_control: { type: "ephemeral" },
-          },
-        ]);
-        expect(body.system).toEqual([
-          { type: "text", text: "Extract structured data", cache_control: { type: "ephemeral" } },
-          { type: "text", text: "Respond by calling the extract_data tool." },
-        ]);
-
-        expect(result.content).toEqual([{ type: "text", text: '{"name":"Alice","age":30}' }]);
-        expect(result.stopReason).toBe("end_turn");
-        expect(PersonSchema.parse(JSON.parse(extractText(result.content)))).toEqual({
-          name: "Alice",
-          age: 30,
-        });
-      },
-    );
-
-    it("offers the tool for a schema with an open object, which structured outputs would close", async () => {
+    it("offers an unforced tool named in the system prompt for a schema with an open object", async () => {
       const provider = createProvider();
       const input = { stageOutput: { title: { type: "string" } } };
       mockCreate.mockResolvedValueOnce(toolReply("claude-opus-5-5", "pipeline_definition", input));
@@ -1858,13 +1814,25 @@ describe("AnthropicProvider", () => {
       const body = sentBody();
       expect(body).not.toHaveProperty("output_config");
       expect(body).not.toHaveProperty("tool_choice");
-      expect(body.tools).toHaveLength(1);
-      expect(body.tools[0].input_schema.properties).toEqual(OPEN_FORMAT.schema.properties);
-      expect(body.system.at(-1)).toEqual({
-        type: "text",
-        text: "Respond by calling the pipeline_definition tool.",
-      });
-      expect(JSON.parse(extractText(result.content))).toEqual(input);
+      expect(body.tools).toEqual([
+        {
+          name: "pipeline_definition",
+          description: "Respond with structured data matching the schema.",
+          input_schema: {
+            type: "object",
+            properties: OPEN_FORMAT.schema.properties,
+            required: ["stageOutput"],
+          },
+          cache_control: { type: "ephemeral" },
+        },
+      ]);
+      expect(body.system).toEqual([
+        { type: "text", text: "Compile the pipeline", cache_control: { type: "ephemeral" } },
+        { type: "text", text: "Respond by calling the pipeline_definition tool." },
+      ]);
+
+      expect(result.content).toEqual([{ type: "text", text: JSON.stringify(input) }]);
+      expect(result.stopReason).toBe("end_turn");
     });
 
     it("names the tool in a system prompt of its own when the caller sends none", async () => {

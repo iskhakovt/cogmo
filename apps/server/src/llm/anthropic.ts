@@ -240,7 +240,7 @@ export class AnthropicProvider implements LlmProvider {
       // A tool-path reply carries the JSON as the synthetic tool's input.
       // Returned as text, it reads like a structured-output reply.
       const format = params.responseFormat;
-      if (format && !takesStructuredOutput(params.model, format)) {
+      if (format && !takesStructuredOutput(format)) {
         const toolUse = response.content.find((b) => b.type === "tool_use");
         if (toolUse && toolUse.type === "tool_use") {
           return {
@@ -354,7 +354,7 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
   const format = params.responseFormat;
   if (format) {
     const maxTokens = params.maxTokens ?? DEFAULT_MAX_TOKENS;
-    if (takesStructuredOutput(params.model, format)) {
+    if (takesStructuredOutput(format)) {
       return {
         model: params.model,
         max_tokens: maxTokens,
@@ -420,27 +420,12 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
 // --- Structured output ---
 
 /**
- * Served models without structured outputs, both deprecated. Every model
- * since Sonnet 4.5 and Opus 4.5 takes `output_config.format`, so the set only
- * shrinks.
+ * Whether a `responseFormat` request goes through structured outputs. The
+ * grammar takes only closed objects, so a schema with an open one
+ * (`z.record`) takes the tool path: a synthetic tool carrying the schema.
  */
-const MODELS_WITHOUT_STRUCTURED_OUTPUTS: ReadonlySet<string> = new Set([
-  "claude-opus-4-0",
-  "claude-opus-4-20250514",
-  "claude-sonnet-4-0",
-  "claude-sonnet-4-20250514",
-]);
-
-/**
- * Whether a `responseFormat` request goes through structured outputs, which
- * constrain decoding to the schema. The alternative is the tool path: a
- * synthetic tool carrying the schema, which the model is asked to call. It
- * serves the models without structured outputs, and schemas with an open
- * object, which the grammar cannot express: it takes only objects closed with
- * `additionalProperties: false`.
- */
-function takesStructuredOutput(model: string, format: ResponseFormat): boolean {
-  return !MODELS_WITHOUT_STRUCTURED_OUTPUTS.has(model) && !hasOpenObject(format.schema);
+function takesStructuredOutput(format: ResponseFormat): boolean {
+  return !hasOpenObject(format.schema);
 }
 
 /**
