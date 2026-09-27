@@ -237,9 +237,9 @@ export class AnthropicProvider implements LlmProvider {
       const stopReason = fromAnthropicStopReason(response.stop_reason);
       recordChatUsage(span, this.name, response.model, usage, stopReason);
 
-      // A tool-path reply carries the JSON as the synthetic tool's input.
-      // Returned as text, with `tool_use` read as `end_turn`, it reads like a
-      // structured-output reply; a cap or a refusal passes through.
+      // A tool-path reply carries the JSON as the tool's input. Returned as
+      // text, with `tool_use` read as `end_turn`, it matches a
+      // structured-output reply; any other stop reason passes through.
       const format = params.responseFormat;
       if (format && !takesStructuredOutput(format)) {
         const toolUse = response.content.find((b) => b.type === "tool_use");
@@ -251,10 +251,8 @@ export class AnthropicProvider implements LlmProvider {
             usage,
           };
         }
-        // `tool_choice: auto` lets the model answer in text instead, which
-        // passes through. JSON text parses as a structured-output reply
-        // would; prose reaches `chatTyped` as a JSON string, fails
-        // validation, and spends its feedback retry.
+        // Under `tool_choice: auto` the model can answer in text instead,
+        // which passes through for the caller to parse.
         logger.warn(
           { model: params.model, name: format.name },
           "structured-output reply called no tool; passing its text through",
@@ -371,8 +369,8 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
       };
     }
 
-    // The tool path asks for the call rather than forcing it: `tool_choice`
-    // of type `tool` or `any` is a 400 on Opus 5.5 and Fable 5.1.
+    // The system prompt asks for the call: forcing it (`tool_choice` of
+    // type `tool` or `any`) is a 400 on Opus 5.5 and Fable 5.1.
     const syntheticTool = toAnthropicTool({
       name: format.name,
       description: "Respond with structured data matching the schema.",
@@ -425,9 +423,9 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
 // --- Structured output ---
 
 /**
- * Whether a `responseFormat` request goes through structured outputs. The
- * grammar takes only closed objects, so a schema with an open one
- * (`z.record`) takes the tool path: a synthetic tool carrying the schema.
+ * Whether a `responseFormat` request goes through structured outputs. A
+ * schema with an open node ({@link hasOpenObject}), which the grammar can't
+ * express, takes the tool path: a synthetic tool carrying the schema.
  */
 function takesStructuredOutput(format: ResponseFormat): boolean {
   return !hasOpenObject(format.schema);

@@ -114,10 +114,10 @@ function normalizeContent(text: string): string {
 /**
  * Structured-output calls that send the same user message under different
  * system prompts: the Observer's correction and memory extraction both send
- * the transcript. A fixture key carries no system prompt, and aimock drops
- * `output_config`, so the key gets the call's name, read from the opening
- * sentence of its system prompt; without it, one phase would replay the
- * other's reply.
+ * the transcript. A fixture key carries neither the system prompt nor
+ * `output_config` (aimock drops it), so the call's name, found by its system
+ * prompt's opening sentence, prefixes the last user message; without it, one
+ * phase would replay the other's reply.
  */
 const SHARED_INPUT_STRUCTURED_OUTPUTS = new Map([
   ["correction-extraction", "You are a behavioral correction extractor."],

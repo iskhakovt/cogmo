@@ -79,8 +79,8 @@ export class AllProvidersFailedError extends Error {
  * `code: "content_policy_violation"` (or Azure's
  * `responsible_ai_policy_violation`). The success-path equivalent surfaces as
  * `stopReason: "refusal"` on the response; this error class covers refusals
- * that arrive as 400-class HTTP errors instead, and `chatTyped` throws it for
- * a refusal reply, which carries no answer to parse.
+ * that arrive as 400-class HTTP errors instead. `chatTyped` also throws it
+ * for a refusal reply.
  *
  * Class C in `design/agent-resilience.md` treats refusal as non-retriable:
  * fallback to the next provider is the wrong shape (policies differ

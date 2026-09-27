@@ -41,10 +41,11 @@ const SUBSCHEMA_MAPS: ReadonlySet<string> = new Set(["properties", "$defs", "def
 const SUBSCHEMA_LISTS: ReadonlySet<string> = new Set(["anyOf", "oneOf", "allOf", "items"]);
 
 /**
- * Whether any node of a JSON Schema admits an object with keys beyond its
- * `properties`: `additionalProperties` set to anything but `false`, as
- * `z.record` emits, or an untyped node (`{}`, from `z.unknown()` or
- * `z.any()`), which admits any value.
+ * Whether any node of a JSON Schema is open: an object with
+ * `additionalProperties` set to anything but `false`, as `z.record` emits,
+ * or an untyped node (`{}`, from `z.unknown()` or `z.any()`), which admits
+ * any value. An object that leaves `additionalProperties` unset counts as
+ * closed, since {@link toStructuredOutputSchema} closes it.
  */
 export function hasOpenObject(node: unknown): boolean {
   if (typeof node === "boolean") return node;
@@ -58,7 +59,7 @@ export function hasOpenObject(node: unknown): boolean {
 
 /**
  * The schema as the grammar takes it. Every object is closed with
- * `additionalProperties: false`, so a schema with an open object has to go
+ * `additionalProperties: false`, so a schema with an open node has to go
  * elsewhere (see {@link hasOpenObject}). `oneOf` becomes `anyOf`, which admits
  * the same values when the variants are disjoint, as a discriminated union's
  * are. `$schema` names the dialect, not a constraint, and is dropped. Every

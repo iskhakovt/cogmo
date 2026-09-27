@@ -198,14 +198,14 @@ The wrapper does not deduplicate requests, rate-limit transitions, or track heal
 
 ## Structured output `[confirmed]`
 
-`ChatParams.responseFormat` asks for JSON matching a schema. A provider may enforce only part of it: `chatTyped` (`src/llm/typed.ts`) validates the reply with Zod and retries with the validation error. A reply that stopped at the output cap or the context window (`OutputCutOffError`), or a refusal (`RefusalError`), throws before the parse and spends no retry: `jsonrepair` would close cut-off JSON into a value the model never wrote, and the same request meets the same stop.
+`ChatParams.responseFormat` asks for JSON matching a schema. A provider may enforce only part of it, so `chatTyped` (`src/llm/typed.ts`) parses the reply with a `jsonrepair` pre-pass, validates it with Zod, and retries with the validation error. A reply stopped by the output cap or the context window (`OutputCutOffError`), or a refusal (`RefusalError`), throws before the parse and spends no retry: `jsonrepair` would close cut-off JSON into a value the model never finished, and a feedback turn would likely meet the same stop.
 
 | Adapter | Request |
 |-|-|
-| Anthropic | Structured outputs: `output_config.format`, which constrains decoding to the schema. `src/llm/anthropic-output-schema.ts` keeps the keywords Anthropic's JSON Schema limitations list as supported, `enum` and `const` among them, closes every object and turns `oneOf` into `anyOf`; every other keyword (numeric and length bounds, array constraints past `minItems` of 1, formats outside the supported list, patterns with backreferences, lookaround or word boundaries) moves into its node's description. A schema with an open object (`z.record`, as in a pipeline stage's JSON output schema, or an untyped `z.unknown()`) takes the tool path instead: one synthetic tool carrying the schema, offered under `tool_choice: auto` and named in a system block, since forcing it is a 400 on Opus 5.5 and Fable 5.1. A reply that answers in text passes through for `chatTyped` to parse. |
+| Anthropic | Structured outputs (`output_config.format`), which constrain decoding to the schema. `src/llm/anthropic-output-schema.ts` keeps what Anthropic's JSON Schema limitations list as supported, `enum` and `const` included, closes every object and turns `oneOf` into `anyOf`; every other constraint, such as numeric and length bounds, moves into its node's description. A schema the grammar can't express, with an open object (`z.record`, as in a pipeline stage's JSON output schema) or an untyped node (`z.unknown()`), takes the tool path: one synthetic tool carrying the schema, left unforced (`tool_choice: auto`) and named in a system block, since forcing it is a 400 on Opus 5.5 and Fable 5.1. A text reply passes through for `chatTyped` to parse. |
 | OpenAI-compatible | `response_format: { type: "json_schema", strict: true }` with the schema as given. |
 
-Models that think by default (adaptive on Sonnet 5, always on Opus 5.5 and Fable 5.1) think on structured-output calls too, and the thinking counts toward `max_tokens`.
+Models that think by default (adaptive on Sonnet 5, always on Opus 5.5 and Fable 5.1) think on these calls too, and the thinking counts toward `max_tokens`.
 
 ## Validation
 

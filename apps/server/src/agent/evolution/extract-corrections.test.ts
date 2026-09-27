@@ -214,8 +214,8 @@ describe("extractCorrections", () => {
   });
 
   it("inserts a new correction whose output omits matchedExistingRuleId", async () => {
-    // Where output isn't grammar-constrained, the model can drop a field whose
-    // only legal value is null, and repeat the omission on the repair retry.
+    // Where decoding isn't constrained to the schema, the model can drop a
+    // field whose only legal value is null, and drop it again on the retry.
     const deps = mockExtractionDeps({
       corrections: [
         {

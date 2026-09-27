@@ -2,12 +2,11 @@
  * Live: `responseFormat` through `AnthropicProvider` on the real endpoint.
  *
  * Replay can't show this: the API decides which request shapes a model
- * accepts, and a forced `tool_choice` is a 400 on Opus 5.5 and Fable 5.1. Each
- * case sends one small extraction and parses the reply against the schema.
- * The closed schema takes structured outputs; the one with a `z.record` field
- * takes the tool path.
+ * accepts. Each case sends one small extraction and parses the reply against
+ * the schema. The closed schema takes structured outputs; the one with a
+ * `z.record` field takes the tool path.
  *
- * Skipped unless `LIVE=1` and `ANTHROPIC_API_KEY` are set. Costs a few cents.
+ * Skipped unless `LIVE=1` and `ANTHROPIC_API_KEY` are set. Costs under a cent.
  *
  *   set -a; . ./.env; set +a; LIVE=1 pnpm test:live
  */

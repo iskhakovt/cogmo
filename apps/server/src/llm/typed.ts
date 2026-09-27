@@ -119,7 +119,7 @@ const DEFAULT_REPAIR: Required<ChatTypedRepair> = {
  * in-loop callsites; for out-of-loop callsites the wrapping Inngest step
  * handles the throw. A reply that is not the model's whole answer throws
  * the same way before it is parsed: {@link OutputCutOffError} for one cut
- * off at the output cap or the context window, {@link RefusalError} for a
+ * off by the output cap or the context window, {@link RefusalError} for a
  * refusal.
  */
 export async function chatTyped<T>(params: TypedChatParams<T>): Promise<TypedChatResult<T>> {
@@ -177,10 +177,9 @@ export async function chatTyped<T>(params: TypedChatParams<T>): Promise<TypedCha
 }
 
 /**
- * Refuse a reply that is not the model's whole answer. A refusal's text
- * may not follow the schema at all, and a reply cut off at a limit is
- * unfinished JSON that `jsonrepair` could close into a schema-valid value.
- * Neither is worth a feedback retry: the same request meets the same stop.
+ * Refuse a reply that is not the model's whole answer, before `jsonrepair`
+ * can close cut-off JSON into a schema-valid value (design/providers.md →
+ * Structured output).
  */
 function assertWholeAnswer(stopReason: StopReason, name: string): void {
   if (stopReason === "refusal") {
