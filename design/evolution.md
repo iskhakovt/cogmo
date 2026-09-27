@@ -188,7 +188,7 @@ Wraps the Observer's existing `ObserverResult` (the `status: "processed"` varian
 - `drained` — `{drained, byNetwork}` from the pending-memory drain step.
 - `messageCount` — transcript length at fire time (the gating value against `MIN_MESSAGES_FOR_EXTRACTION`).
 - `profileId` — the profile active for the conversation at fire time. Stored so the digest can render "from profile X" without a join.
-- `durationMs` — duration of the fire, optional, from a `Date.now()` taken at the top of `runObserver`. The body re-runs at every step boundary, so it measures the invocation that runs `persist-evolution-event`, and the whole fire only when one request runs every step. Surfaced in the detail view as `Took: 32s`.
+- `durationMs` — duration of the fire, optional: from the clock read by `record-start-time`, the fire's first step, to `persist-evolution-event`. The start is memoized, so the value spans every invocation of the body and every step retry after the first step; queue time before the run is not counted. Surfaced in the detail view as `Took: 32s`.
 - `failedPhases` — the phases (`ObserverPhaseSchema`: `corrections` / `consolidation` / `memories` / `drain`) that failed after their step retries, in run order; `[]` when every phase that ran completed. A listed phase's counts are its empty fallback, not a finding. Optional with no default: older rows lack it and whether their phases failed is unknown, so readers render their counts as they stand. A list rather than a per-phase record because consolidation runs only when corrections ask for it and a phase added later leaves older lists valid.
 
 ### Observer integration

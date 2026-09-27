@@ -159,8 +159,10 @@ export async function runObserver(
 ): Promise<ObserverResult> {
   const { agentStore, resolveProvider } = deps;
   const { conversationId } = event.data;
-  // Restarts on every replay, so `durationMs` covers only the invocation that persists the row.
-  const startedAt = Date.now();
+  // The start of `durationMs`, memoized so every re-invocation of the body reads the first
+  // one's clock. Its own step, not a field of `load-conversation`'s result, so a run in
+  // flight across a deploy keeps the result shape it memoized.
+  const startedAt = await step.run("record-start-time", async () => Date.now());
 
   const conv = await step.run("load-conversation", async () => {
     return deps.runInTx((tx) => agentStore.getConversation(tx, conversationId));
