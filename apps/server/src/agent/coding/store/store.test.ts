@@ -204,6 +204,30 @@ describe("DrizzleCodingStore", () => {
       await expect(seedRepo()).rejects.toThrow();
     });
 
+    it("insertOrRecoverRepo recovers the stored row for a repeated name without overwriting it", async () => {
+      const first = await tx((trx) =>
+        store.insertOrRecoverRepo(trx, {
+          name: "skills",
+          localPath: "/var/lib/cogmo/skills",
+          ...REPO_DEFAULTS,
+        }),
+      );
+      const second = await tx((trx) =>
+        store.insertOrRecoverRepo(trx, {
+          name: "skills",
+          localPath: "/elsewhere/skills",
+          ...REPO_DEFAULTS,
+          remoteUrl: "git@github.com:user/other.git",
+          maxConcurrentTasks: 4,
+        }),
+      );
+
+      expect(first.kind).toBe("new");
+      expect(second.kind).toBe("recovered");
+      expect(second.row).toEqual(first.row);
+      expect(await tx((trx) => store.listRepos(trx))).toHaveLength(1);
+    });
+
     it("stores and round-trips devcontainer JSONB", async () => {
       const row = await tx((trx) =>
         store.insertRepo(trx, {
