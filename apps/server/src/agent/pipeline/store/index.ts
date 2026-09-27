@@ -429,8 +429,7 @@ export class DrizzlePipelineRunStore implements PipelineRunStore {
       idempotencyKey: string;
     },
   ): Promise<{ kind: "new" | "recovered"; row: PipelineRunRow }> {
-    // `xmax = 0` is true only on a tuple this statement inserted; the
-    // conflict arm's no-op update stamps the locking xid instead.
+    // Keyed insert: see `.claude/rules/inngest.md`.
     const rows = await tx
       .insert(pipelineRuns)
       .values({
