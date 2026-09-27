@@ -654,16 +654,16 @@ export interface Transport {
      * in use is the common case (a class becoming sensitive after the
      * fact). `profile_class_not_found` when no row matches the name.
      * Unrestricting deletes the class's `identity` override in the same
-     * transaction, so no unrestricted class shadows the shared block;
-     * without `confirm`, a call that would delete it returns
-     * `profile_class_has_blocks` and changes nothing.
+     * transaction, so no unrestricted class shadows the shared block, and
+     * reports whether there was one; without `confirm`, a call that would
+     * delete it returns `profile_class_has_blocks` and changes nothing.
      */
     setRestricted(
       platformUserHandle: string,
       name: string,
       restricted: boolean,
       opts: { confirm: boolean },
-    ): Promise<Result<void, TransportError>>;
+    ): Promise<Result<{ overrideDeleted: boolean }, TransportError>>;
   };
 
   /**
@@ -1957,7 +1957,7 @@ export function createTransport(deps: {
               key: IDENTITY_BLOCK_KEY,
             });
           }
-          return ok(undefined);
+          return ok({ overrideDeleted: override });
         });
       },
     },

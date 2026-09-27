@@ -450,7 +450,7 @@ export function mockTransport(overrides?: Partial<Transport>): Transport {
         }),
       ),
       delete: vi.fn().mockResolvedValue(ok(undefined)),
-      setRestricted: vi.fn().mockResolvedValue(ok(undefined)),
+      setRestricted: vi.fn().mockResolvedValue(ok({ overrideDeleted: false })),
     },
     compartments: {
       list: vi.fn().mockResolvedValue(ok([])),

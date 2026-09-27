@@ -1981,7 +1981,7 @@ describe("createTransport", () => {
         confirm: true,
       });
 
-      expect(res.isOk()).toBe(true);
+      expect(res._unsafeUnwrap()).toEqual({ overrideDeleted: true });
       expect(setProfileClassRestricted).toHaveBeenCalledWith(
         expect.anything(),
         "user-1",
@@ -2006,7 +2006,7 @@ describe("createTransport", () => {
         confirm: false,
       });
 
-      expect(res.isOk()).toBe(true);
+      expect(res._unsafeUnwrap()).toEqual({ overrideDeleted: false });
       expect(agentStore.deleteCoreMemoryBlock).not.toHaveBeenCalled();
     });
 

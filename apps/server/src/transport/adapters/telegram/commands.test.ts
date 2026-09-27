@@ -1945,7 +1945,7 @@ describe("handleClasses", () => {
   });
 
   it("/classes unrestrict <name> calls profileClasses.setRestricted with false", async () => {
-    const setRestricted = vi.fn().mockResolvedValue(ok(undefined));
+    const setRestricted = vi.fn().mockResolvedValue(ok({ overrideDeleted: false }));
     const transport = transportWith({ profileClasses: { setRestricted } });
     const ctx = mkCtx("unrestrict intimate");
     await handleClasses(transport, ctx);
@@ -1966,11 +1966,16 @@ describe("handleClasses", () => {
     );
   });
 
-  it("/classes unrestrict <name> confirm passes the confirmation", async () => {
-    const setRestricted = vi.fn().mockResolvedValue(ok(undefined));
+  it("/classes unrestrict <name> confirm passes the confirmation and names the deleted override", async () => {
+    const setRestricted = vi.fn().mockResolvedValue(ok({ overrideDeleted: true }));
     const transport = transportWith({ profileClasses: { setRestricted } });
-    await handleClasses(transport, mkCtx("unrestrict game confirm"));
+    const ctx = mkCtx("unrestrict game confirm");
+    await handleClasses(transport, ctx);
     expect(setRestricted).toHaveBeenCalledWith("1", "game", false, { confirm: true });
+    expect(ctx.reply.mock.calls[0]?.[0]).toBe(
+      'Class "game" no longer restricted. Its own identity block was deleted, so it reads the ' +
+        "shared one. Recall returns to open-by-default for this class.",
+    );
   });
 
   it("/classes restrict takes no confirm", async () => {

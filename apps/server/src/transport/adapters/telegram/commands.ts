@@ -1633,8 +1633,11 @@ async function replyClassesSetRestricted(
       `Class "${name}" marked restricted. Readers without an explicit opt-in (or that don't speak as "${name}") won't see its memories.`,
     );
   } else {
+    const deleted = res.value.overrideDeleted
+      ? " Its own identity block was deleted, so it reads the shared one."
+      : "";
     await ctx.reply(
-      `Class "${name}" no longer restricted. Recall returns to open-by-default for this class.`,
+      `Class "${name}" no longer restricted.${deleted} Recall returns to open-by-default for this class.`,
     );
   }
 }
