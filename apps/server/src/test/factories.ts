@@ -179,7 +179,7 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     }),
     deleteCustomCompartment: vi.fn().mockResolvedValue({ deleted: true }),
     hasChannelRules: vi.fn().mockResolvedValue(false),
-    insertManualRule: vi.fn().mockResolvedValue({ id: "rule-1" }),
+    insertSeedRule: vi.fn().mockResolvedValue({ id: "rule-1" }),
     getCorrections: vi.fn().mockResolvedValue([]),
     upsertCorrection: vi.fn().mockResolvedValue({ id: "rule-1", promoted: false }),
     countActiveRules: vi.fn().mockResolvedValue(0),

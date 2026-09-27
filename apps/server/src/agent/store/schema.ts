@@ -129,6 +129,23 @@ export const summarySource = pgEnum("summary_source", ["turn", "manual"]);
 export type SummarySourceValue = (typeof summarySource.enumValues)[number];
 
 /**
+ * `steering_rules.source` — who wrote the rule, which decides its `# Rules`
+ * section (`rule-sections.ts`). `manual` = an operator's insert, the only
+ * source of `safety` rules; `seed` = a channel default from
+ * `seedChannelRules`; `instruction` = a standing instruction the user stated
+ * (design/evolution.md → Explicit Instructions); `correction` = the Observer's
+ * extraction; `evolution` = consolidation's merge.
+ */
+export const steeringRuleSource = pgEnum("steering_rule_source", [
+  "manual",
+  "seed",
+  "instruction",
+  "correction",
+  "evolution",
+]);
+export type SteeringRuleSourceValue = (typeof steeringRuleSource.enumValues)[number];
+
+/**
  * TTS provider adapter discriminator. Maps to which `TtsProvider` class the
  * voice resolver builds (`src/voice/resolver.ts`). `openai` and
  * `openai_compatible` both use `OpenAIVoiceProvider`; the enum split keeps
@@ -827,7 +844,7 @@ export const steeringRules = pgTable("steering_rules", {
   rule: text("rule").notNull(),
   category: text("category").notNull(), // 'safety' | 'style' | 'domain' | 'memory'
   active: boolean("active").notNull(),
-  source: text("source").notNull(), // 'manual' | 'correction' | 'signal_pipeline' | 'evolution'
+  source: steeringRuleSource("source").notNull(),
   priority: integer("priority").notNull(),
   observationCount: integer("observation_count").notNull(),
   profileId: uuid("profile_id").references(() => profiles.id), // NULL = applies to all profiles

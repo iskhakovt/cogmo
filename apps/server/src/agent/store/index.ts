@@ -1133,17 +1133,16 @@ export interface AgentStore {
 
   // --- Evolution: correction extraction ---
 
-  /** Check if any channel-specific rules exist for a given channel type. */
+  /** Whether a channel's defaults have been seeded. */
   hasChannelRules(tx: Transaction, channelType: string): Promise<boolean>;
 
-  /** Insert a manual steering rule (already active). Used by seed/setup. */
-  insertManualRule(
+  /** Insert an active channel default (`source = 'seed'`) for every profile. */
+  insertSeedRule(
     tx: Transaction,
     params: {
       rule: string;
       category: string;
-      profileId?: string | null;
-      channelType?: string | null;
+      channelType: string;
       priority: number;
     },
   ): Promise<{ id: string }>;
@@ -2856,18 +2855,17 @@ export class DrizzleAgentStore implements AgentStore {
     const rows = await tx
       .select({ id: steeringRules.id })
       .from(steeringRules)
-      .where(eq(steeringRules.channelType, channelType))
+      .where(and(eq(steeringRules.channelType, channelType), eq(steeringRules.source, "seed")))
       .limit(1);
     return rows.length > 0;
   }
 
-  async insertManualRule(
+  async insertSeedRule(
     tx: Transaction,
     params: {
       rule: string;
       category: string;
-      profileId?: string | null;
-      channelType?: string | null;
+      channelType: string;
       priority: number;
     },
   ): Promise<{ id: string }> {
@@ -2877,12 +2875,12 @@ export class DrizzleAgentStore implements AgentStore {
         .values({
           rule: params.rule,
           category: params.category,
-          source: "manual",
+          source: "seed",
           active: true,
           priority: params.priority,
           observationCount: 0,
-          profileId: params.profileId ?? null,
-          channelType: params.channelType ?? null,
+          profileId: null,
+          channelType: params.channelType,
         })
         .returning({ id: steeringRules.id }),
     );

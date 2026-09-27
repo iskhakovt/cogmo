@@ -122,7 +122,7 @@ const TELEGRAM_DEFAULT_RULES = [
   "Keep bullet lists to one level of nesting.",
 ];
 
-/** Seed default channel-scoped steering rules. Idempotent — skips if channel-specific rules already exist. */
+/** Seed a channel's default steering rules. Idempotent — skips if its defaults already exist. */
 export async function seedChannelRules(
   runInTx: Transactor,
   agentStore: AgentStore,
@@ -134,7 +134,7 @@ export async function seedChannelRules(
     const rules = channelType === "telegram" ? TELEGRAM_DEFAULT_RULES : [];
 
     for (const rule of rules) {
-      await agentStore.insertManualRule(tx, {
+      await agentStore.insertSeedRule(tx, {
         rule,
         category: "style",
         channelType,

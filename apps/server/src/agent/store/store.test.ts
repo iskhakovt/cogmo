@@ -1140,6 +1140,64 @@ describe("DrizzleAgentStore", () => {
       expect(rules).toEqual([{ rule: "Global safety rule" }, { rule: "Be concise" }]);
     });
 
+    it("insertSeedRule writes an active, global channel default", async () => {
+      const { id } = await tx((trx) =>
+        store.insertSeedRule(trx, {
+          rule: "Avoid tables",
+          category: "style",
+          channelType: "telegram",
+          priority: 50,
+        }),
+      );
+
+      const { steeringRules } = await import("./schema.js");
+      const rows = await db
+        .select({
+          source: steeringRules.source,
+          active: steeringRules.active,
+          profileId: steeringRules.profileId,
+          channelType: steeringRules.channelType,
+          priority: steeringRules.priority,
+          observationCount: steeringRules.observationCount,
+        })
+        .from(steeringRules)
+        .where(eq(steeringRules.id, id));
+      expect(rows).toEqual([
+        {
+          source: "seed",
+          active: true,
+          profileId: null,
+          channelType: "telegram",
+          priority: 50,
+          observationCount: 0,
+        },
+      ]);
+    });
+
+    it("hasChannelRules counts only the channel's seed rules", async () => {
+      const { steeringRules } = await import("./schema.js");
+      const has = () => tx((trx) => store.hasChannelRules(trx, "telegram"));
+      const insert = (source: "manual" | "seed" | "correction", channelType: string) =>
+        db.insert(steeringRules).values({
+          rule: `${source} on ${channelType}`,
+          category: "style",
+          active: true,
+          source,
+          priority: 100,
+          observationCount: 2,
+          profileId: null,
+          channelType,
+        });
+
+      await insert("correction", "telegram");
+      await insert("manual", "telegram");
+      await insert("seed", "slack");
+      expect(await has()).toBe(false);
+
+      await insert("seed", "telegram");
+      expect(await has()).toBe(true);
+    });
+
     it("keeps tied priorities in id order after both corrections are promoted", async () => {
       const profileId = await seedProfile();
       // Created and graduated the way the Observer does it: each correction is

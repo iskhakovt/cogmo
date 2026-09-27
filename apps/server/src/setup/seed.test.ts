@@ -1,7 +1,7 @@
-import { eq } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { DrizzleAgentStore } from "../agent/store/index.js";
-import { imageModels } from "../agent/store/schema.js";
+import { imageModels, steeringRules } from "../agent/store/schema.js";
 import type { Database, Transactor } from "../db/index.js";
 import { resolveLimits } from "../llm/models.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../secrets/encryption.js";
@@ -14,6 +14,7 @@ import {
   ensureDefaultUser,
   ensureFalImageDefaults,
   ensureWebChannel,
+  seedChannelRules,
   seedDefaults,
 } from "./seed.js";
 
@@ -212,6 +213,47 @@ describe("ensureWebChannel", () => {
     await seedDefaults(tx, agentStore, transportStore);
     expect(await tx((trx) => transportStore.getChannelByType(trx, "direct"))).toBeDefined();
     expect(await tx((trx) => transportStore.getChannelByType(trx, "web"))).toBeDefined();
+  });
+});
+
+describe("seedChannelRules", () => {
+  const telegramRules = () =>
+    db
+      .select({ rule: steeringRules.rule, source: steeringRules.source })
+      .from(steeringRules)
+      .where(eq(steeringRules.channelType, "telegram"))
+      .orderBy(asc(steeringRules.id));
+
+  it("writes Telegram's defaults as seed rules", async () => {
+    await seedChannelRules(tx, agentStore, "telegram");
+
+    const rows = await telegramRules();
+    expect(rows).toHaveLength(3);
+    expect(rows.every((r) => r.source === "seed")).toBe(true);
+  });
+
+  it("is idempotent", async () => {
+    await seedChannelRules(tx, agentStore, "telegram");
+    await seedChannelRules(tx, agentStore, "telegram");
+
+    expect(await telegramRules()).toHaveLength(3);
+  });
+
+  it("seeds past a rule the user's corrections scoped to the channel", async () => {
+    await db.insert(steeringRules).values({
+      rule: "Don't use bullet points",
+      category: "style",
+      active: true,
+      source: "correction",
+      priority: 100,
+      observationCount: 2,
+      profileId: null,
+      channelType: "telegram",
+    });
+
+    await seedChannelRules(tx, agentStore, "telegram");
+
+    expect((await telegramRules()).filter((r) => r.source === "seed")).toHaveLength(3);
   });
 });
 
