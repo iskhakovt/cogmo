@@ -1,5 +1,7 @@
+import { match } from "ts-pattern";
 import { z } from "zod";
 import type { CoreMemoryScope } from "./core-memory/scope.js";
+import type { CoreMemoryWrite } from "./core-memory/write-core-memory-block.js";
 import { formatUserContext } from "./prompt.js";
 import { defineTool, type ToolSpec } from "./tools.js";
 
@@ -33,12 +35,32 @@ export const coreMemoryUpdate = defineTool({
   handler: async (input, service) => {
     const written = await service.coreMemory.update(input.key, input.content);
     if (written.isErr()) throw new Error("Core memory isn't available in this profile.");
-    return written.value.kind === "override"
-      ? `Saved "${input.key}" for this persona only; other personas keep the shared block. ` +
-          "Tell the user it is saved only here."
-      : `Core memory block "${input.key}" updated.`;
+    return writtenText(input.key, written.value);
   },
 });
+
+/**
+ * The tool result for a write. It names the lines an override left out, so a
+ * second rewrite in the turn doesn't add them back.
+ */
+function writtenText(key: string, written: CoreMemoryWrite): string {
+  const onlyHere = "Tell the user it is saved only here.";
+  return match(written)
+    .with(
+      { kind: "override-matches-shared" },
+      () =>
+        "Nothing saved for this persona: every line matches the shared identity block, " +
+        "so this persona follows it.",
+    )
+    .with({ kind: "override" }, ({ leftOut }) =>
+      leftOut.length === 0
+        ? `Saved "${key}" for this persona only; other personas keep the shared block. ${onlyHere}`
+        : `Saved "${key}" for this persona only, keeping the lines that differ from the shared ` +
+          `block (left out as shared: ${leftOut.map((l) => JSON.stringify(l)).join(", ")}). ` +
+          onlyHere,
+    )
+    .otherwise(() => `Core memory block "${key}" updated.`);
+}
 
 export const coreMemoryRead = defineTool({
   name: "core_memory_read",

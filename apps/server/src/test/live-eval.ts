@@ -140,6 +140,9 @@ export class EvalCoreMemory implements CoreMemoryNamespace {
             const row = { profileClass, key, content };
             this.#rows.set(EvalCoreMemory.#slot(row), row);
           },
+          deleteCoreMemoryBlock: async (_tx, { profileClass, key }) => {
+            this.#rows.delete(EvalCoreMemory.#slot({ profileClass, key }));
+          },
         },
       },
       { userId: EVAL_USER_ID, scope },
@@ -184,7 +187,7 @@ export class EvalCoreMemory implements CoreMemoryNamespace {
     ];
   }
 
-  static #slot(row: ScopedCoreMemoryBlock): string {
+  static #slot(row: Pick<ScopedCoreMemoryBlock, "profileClass" | "key">): string {
     return JSON.stringify([row.profileClass, row.key]);
   }
 }

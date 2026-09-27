@@ -77,7 +77,11 @@ describe("buildTurnService", () => {
       "user-7",
       "intimate",
     );
-    expect(written._unsafeUnwrap()).toEqual({ kind: "override", profileClass: "intimate" });
+    expect(written._unsafeUnwrap()).toEqual({
+      kind: "override",
+      profileClass: "intimate",
+      leftOut: [],
+    });
     expect(agentStore.upsertCoreMemoryBlock).toHaveBeenCalledWith(expect.anything(), {
       userId: "user-7",
       profileClass: "intimate",

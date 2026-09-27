@@ -21,7 +21,11 @@ export interface TurnServiceDeps {
   runInTx: Transactor;
   agentStore: Pick<
     AgentStore,
-    "listProfileClasses" | "getCoreMemoryBlocks" | "upsertCoreMemoryBlock" | "stagePendingMemory"
+    | "listProfileClasses"
+    | "getCoreMemoryBlocks"
+    | "upsertCoreMemoryBlock"
+    | "deleteCoreMemoryBlock"
+    | "stagePendingMemory"
   >;
   memory: MemoryProvider;
   fileService: Service["files"];

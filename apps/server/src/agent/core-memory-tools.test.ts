@@ -39,7 +39,9 @@ describe("core_memory_update", () => {
 
   it("tells the model a restricted persona's identity is saved only there", async () => {
     const svc = mockService({
-      update: vi.fn().mockResolvedValue(ok({ kind: "override", profileClass: "game" })),
+      update: vi
+        .fn()
+        .mockResolvedValue(ok({ kind: "override", profileClass: "game", leftOut: [] })),
     });
     const result = await coreMemoryUpdate.handler(
       { key: "identity", content: "Name: Thorin" },
@@ -49,6 +51,45 @@ describe("core_memory_update", () => {
     expect(result).toBe(
       'Saved "identity" for this persona only; other personas keep the shared block. ' +
         "Tell the user it is saved only here.",
+    );
+  });
+
+  it("names the lines an override left out as shared", async () => {
+    const svc = mockService({
+      update: vi.fn().mockResolvedValue(
+        ok({
+          kind: "override",
+          profileClass: "game",
+          leftOut: ["Name: Samuel Carter", 'Languages: English, "some" Portuguese'],
+        }),
+      ),
+    });
+    const result = await coreMemoryUpdate.handler(
+      { key: "identity", content: "Name: Samuel Carter\nLocation: Lisbon" },
+      svc,
+    );
+
+    expect(result).toBe(
+      'Saved "identity" for this persona only, keeping the lines that differ from the shared ' +
+        'block (left out as shared: "Name: Samuel Carter", "Languages: English, \\"some\\" ' +
+        'Portuguese"). Tell the user it is saved only here.',
+    );
+  });
+
+  it("says nothing was saved when every line of an override is shared", async () => {
+    const svc = mockService({
+      update: vi
+        .fn()
+        .mockResolvedValue(ok({ kind: "override-matches-shared", profileClass: "game" })),
+    });
+    const result = await coreMemoryUpdate.handler(
+      { key: "identity", content: "Name: Samuel Carter" },
+      svc,
+    );
+
+    expect(result).toBe(
+      "Nothing saved for this persona: every line matches the shared identity block, " +
+        "so this persona follows it.",
     );
   });
 

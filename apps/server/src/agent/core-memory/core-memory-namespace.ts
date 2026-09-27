@@ -11,7 +11,10 @@ import { writeCoreMemoryBlock } from "./write-core-memory-block.js";
 export function createCoreMemoryNamespace(
   deps: {
     runInTx: Transactor;
-    agentStore: Pick<AgentStore, "getCoreMemoryBlocks" | "upsertCoreMemoryBlock">;
+    agentStore: Pick<
+      AgentStore,
+      "getCoreMemoryBlocks" | "upsertCoreMemoryBlock" | "deleteCoreMemoryBlock"
+    >;
   },
   args: { userId: string; scope: CoreMemoryScope },
 ): Service["coreMemory"] {

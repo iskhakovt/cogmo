@@ -14,7 +14,7 @@ import type { CodingService } from "./coding/service.js";
 import type { CoreMemoryView } from "./core-memory/scope.js";
 import type {
   CoreMemoryUnavailable,
-  CoreMemoryWriteTarget,
+  CoreMemoryWrite,
 } from "./core-memory/write-core-memory-block.js";
 import type { PipelinesService } from "./pipeline/pipelines-service.js";
 import type { SchedulingService } from "./scheduling/scheduling-service.js";
@@ -95,10 +95,7 @@ export interface Service {
     /** The turn's scope and the blocks it sees, in the order they render. */
     get(): Promise<CoreMemoryView>;
     /** Write a block where the turn's scope sends it (`writeCoreMemoryBlock`). */
-    update(
-      key: string,
-      content: string,
-    ): Promise<Result<CoreMemoryWriteTarget, CoreMemoryUnavailable>>;
+    update(key: string, content: string): Promise<Result<CoreMemoryWrite, CoreMemoryUnavailable>>;
   };
   /**
    * Coding-delegation surface. Optional — only present when the sandbox
