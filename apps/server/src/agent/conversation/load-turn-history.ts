@@ -5,6 +5,26 @@ import { formatSummaryMessage } from "../context.js";
 import type { AgentStore } from "../store/index.js";
 import { type TurnContext, withTurnContext } from "../turn-context.js";
 
+export interface LoadTurnHistoryDeps {
+  runInTx: Transactor;
+  agentStore: AgentStore;
+}
+
+export interface TurnHistory {
+  messages: Message[];
+  messageIds: (string | null)[];
+  turnContexts: (TurnContext | null)[];
+  turn: { id: string; createdAt: string } | null;
+}
+
+/** The turn's inbound cursor has no user row behind it: the turn can't be served. */
+export class TurnRowMissingError extends Error {
+  constructor(conversationId: string, inboundId: string) {
+    super(`conversation ${conversationId} has no user row on inbound ${inboundId}`);
+    this.name = "TurnRowMissingError";
+  }
+}
+
 /**
  * Load a conversation's history as the turn should see it: the newest durable
  * summary standing in for everything up to its cutoff, followed by the
@@ -30,26 +50,6 @@ import { type TurnContext, withTurnContext } from "../turn-context.js";
  * cursor, as `/compact` does; a cursor with no row behind it throws
  * `TurnRowMissingError`.
  */
-export interface LoadTurnHistoryDeps {
-  runInTx: Transactor;
-  agentStore: AgentStore;
-}
-
-export interface TurnHistory {
-  messages: Message[];
-  messageIds: (string | null)[];
-  turnContexts: (TurnContext | null)[];
-  turn: { id: string; createdAt: string } | null;
-}
-
-/** The turn's inbound cursor has no user row behind it: the turn can't be served. */
-export class TurnRowMissingError extends Error {
-  constructor(conversationId: string, inboundId: string) {
-    super(`conversation ${conversationId} has no user row on inbound ${inboundId}`);
-    this.name = "TurnRowMissingError";
-  }
-}
-
 export async function loadTurnHistory(
   deps: LoadTurnHistoryDeps,
   args: { conversationId: string; turnInboundId: string | null },

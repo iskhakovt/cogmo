@@ -6,6 +6,7 @@ import { type Inngest, StepError } from "inngest";
 import { ok } from "neverthrow";
 import { vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import type { HandleMessageDeps } from "../agent/handle-message.js";
 import type { Service } from "../agent/service.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ToolRegistry } from "../agent/tools.js";
@@ -22,6 +23,7 @@ import type { Transport } from "../transport/transport.js";
 import type { Adapter, StreamHandle, StreamingAdapter } from "../transport/types.js";
 import type { VoiceBundle, VoiceProviderResolver } from "../voice/resolver.js";
 import type { SttProvider, TtsProvider } from "../voice/types.js";
+import { expectDefined } from "./assertions.js";
 
 /**
  * Sentinel transaction token for mock-based tests. Assertions on tx args
@@ -918,4 +920,19 @@ export function asyncIterableThrowing<T>(err: unknown): AsyncIterableIterator<T>
     },
     next: () => Promise.reject(err),
   };
+}
+
+/**
+ * The turn context leading the turn's message in the `call`th agent-loop call
+ * (negative counts from the end).
+ */
+export function turnContextSent(deps: HandleMessageDeps, call = 0): string {
+  const params = expectDefined(
+    vi.mocked(deps.runStreamingAgentLoop).mock.calls.at(call),
+    `agent loop call ${call}`,
+  )[0];
+  const content = expectDefined(params.messages.at(-1), "turn message").content;
+  const [first] = typeof content === "string" ? [] : content;
+  if (first?.type !== "text") throw new Error("the turn's message has no leading text block");
+  return first.text;
 }

@@ -33,7 +33,7 @@ export const RECALLED_MEMORIES_HEADER =
 /** The standing system-prompt section explaining the block, voice guidance included. */
 export const TURN_CONTEXT_GUIDANCE = `# Turn context
 
-Each user message opens with a <turn_context> block the system adds: when the message was handled, memories recalled for it, and how your reply will be delivered. The user didn't write it and doesn't see it.
+Each message the user sends opens with a <turn_context> block the system adds: when the message was handled, memories recalled for it, and how your reply will be delivered. The user didn't write it and doesn't see it.
 
 When it says "Reply modality: voice", your reply will be spoken aloud. Keep it short and natural — one or two sentences when possible. Skip routine acknowledgments ("saved", "noted", "I'll remember") unless the acknowledgment IS the entire answer. Don't narrate background work (memory saves, file writes, web searches) — the user assumes those happened. Avoid markdown, lists, code fences, and tables — they don't translate to speech.`;
 

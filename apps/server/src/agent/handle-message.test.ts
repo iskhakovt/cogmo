@@ -36,6 +36,7 @@ import {
   mockTransportStore,
   mockVoiceBundle,
   mockVoiceResolver,
+  turnContextSent,
 } from "../test/factories.js";
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
@@ -106,18 +107,6 @@ const testEvent: { data: InboundReadyData } = {
 };
 
 const testRunId = "run-123";
-
-/** The turn context leading the turn's message in the `call`th agent-loop call. */
-function turnContextSent(deps: HandleMessageDeps, call = 0): string {
-  const params = expectDefined(
-    vi.mocked(deps.runStreamingAgentLoop).mock.calls[call],
-    `agent loop call ${call}`,
-  )[0];
-  const content = expectDefined(params.messages.at(-1), "turn message").content;
-  const [first] = typeof content === "string" ? [] : content;
-  if (first?.type !== "text") throw new Error("the turn's message has no leading text block");
-  return first.text;
-}
 
 describe("createHandleMessage", () => {
   it("shares the conversation-turn concurrency with pipeline stage turns", () => {

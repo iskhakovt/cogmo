@@ -46,6 +46,7 @@ import {
   mockVoiceBundle,
   mockVoiceResolver,
   spyOnInngestSend,
+  turnContextSent,
 } from "../test/factories.js";
 import { createWireRecorder } from "../test/wire-recorder.js";
 import { canonicalKeyOrder } from "../util/canonical-key-order.js";
@@ -124,21 +125,6 @@ const event = {
 
 /** The turn's row as `load-turn-transcript` returns it: the history's `msg-1`, its time as a string. */
 const TURN_ROW = { id: "msg-1", createdAt: MOCK_MESSAGE_CREATED_AT.toISOString() };
-
-/**
- * The turn context leading the turn's message in the `call`th agent-loop call
- * (negative counts from the end).
- */
-function turnContextSent(deps: HandleMessageDeps, call = 0): string {
-  const params = expectDefined(
-    vi.mocked(deps.runStreamingAgentLoop).mock.calls.at(call),
-    `agent loop call ${call}`,
-  )[0];
-  const content = expectDefined(params.messages.at(-1), "turn message").content;
-  const [first] = typeof content === "string" ? [] : content;
-  if (first?.type !== "text") throw new Error("the turn's message has no leading text block");
-  return first.text;
-}
 
 describe("handle-message — crash recovery / step replay", () => {
   it("does not re-insert the user message when create-user-message is cached", async () => {
