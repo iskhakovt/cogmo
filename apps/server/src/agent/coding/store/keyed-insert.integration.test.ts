@@ -10,11 +10,12 @@ import { randomBytes } from "node:crypto";
 import { like } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
-import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { findPgErrorByCode } from "../../../db/pg-errors.js";
 import * as schema from "../../../db/schemas.js";
 import { type Transaction, transactor } from "../../../db/transactor.js";
 import { assertKind, expectDefined } from "../../../test/assertions.js";
+import { fileDatabaseUrl } from "../../../test/integration-file.js";
 import { DrizzleCodingStore, type InsertRepoParams } from "./index.js";
 import { codingRepos } from "./schema.js";
 
@@ -28,9 +29,9 @@ let loserPid: number;
 
 beforeAll(async () => {
   // One backend per client, so the loser's transaction runs on the pid polled below.
-  winnerSql = postgres(inject("databaseUrl"), { max: 1 });
-  loserSql = postgres(inject("databaseUrl"), { max: 1 });
-  observerSql = postgres(inject("databaseUrl"), { max: 1 });
+  winnerSql = postgres(fileDatabaseUrl(), { max: 1 });
+  loserSql = postgres(fileDatabaseUrl(), { max: 1 });
+  observerSql = postgres(fileDatabaseUrl(), { max: 1 });
   const [row] = await loserSql<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
   loserPid = expectDefined(row, "loser pid").pid;
 });

@@ -1,0 +1,12 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "isolation probe"
+      },
+      "response": {
+        "content": "b"
+      }
+    }
+  ]
+}

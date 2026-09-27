@@ -24,7 +24,7 @@
 import { randomBytes } from "node:crypto";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
-import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Service } from "../agent/service.js";
 import { DrizzleAgentStore } from "../agent/store/index.js";
@@ -35,6 +35,7 @@ import { FallbackLlmProvider } from "../llm/fallback.js";
 import { createDbProviderResolver } from "../llm/resolver.js";
 import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../secrets/store/index.js";
+import { fileDatabaseUrl, fileDefaultUserId, fileLlmockUrl } from "./integration-file.js";
 
 const SUITE = randomBytes(4).toString("hex");
 const tag = (s: string) => `it-${SUITE}-${s}`;
@@ -52,23 +53,21 @@ let tx: ReturnType<typeof transactor>;
 let agentStore: DrizzleAgentStore;
 let secretsStore: DrizzleSecretsStore;
 let userId: string;
-let anthropicProviderId: string;
-let openaiProviderId: string;
 let openaiProviderName: string;
 
 beforeAll(async () => {
-  sql = postgres(inject("databaseUrl"), { max: 4 });
+  sql = postgres(fileDatabaseUrl(), { max: 4 });
   const db = drizzle(sql, { schema });
   tx = transactor(db);
   agentStore = new DrizzleAgentStore();
-  userId = inject("defaultUserId");
+  userId = fileDefaultUserId();
 
   const masterKey = process.env.COGMO_MASTER_KEY;
   if (!masterKey) throw new Error("COGMO_MASTER_KEY missing — set by integration-setup.ts");
   secretsStore = new DrizzleSecretsStore(
     deriveMasterKey(parseMasterKey(masterKey), "cogmo/secrets-at-rest/v1"),
   );
-  const llmockBaseUrl = inject("llmockBaseUrl");
+  const llmockBaseUrl = fileLlmockUrl();
 
   const orchestratorSecret = await tx((trx) =>
     secretsStore.putSecret(trx, { name: tag("orch-key"), plaintext: "test-key" }),
@@ -103,13 +102,11 @@ beforeAll(async () => {
       attrs: { cacheDialect: "none" },
     }),
   );
-  anthropicProviderId = anthropic.id;
-  openaiProviderId = openai.id;
 
   await tx((trx) =>
     agentStore.addModelProvider(trx, {
       model: MODEL_ORCHESTRATOR,
-      providerId: anthropicProviderId,
+      providerId: anthropic.id,
       position: 0,
       userSelectable: true,
     }),
@@ -117,7 +114,7 @@ beforeAll(async () => {
   await tx((trx) =>
     agentStore.addModelProvider(trx, {
       model: MODEL_SPECIALIST,
-      providerId: openaiProviderId,
+      providerId: openai.id,
       position: 0,
       userSelectable: true,
     }),
@@ -135,9 +132,6 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await tx((trx) => agentStore.deleteSubAgent(trx, userId, SUB_AGENT_NAME));
-  if (anthropicProviderId) await tx((trx) => agentStore.deleteProvider(trx, anthropicProviderId));
-  if (openaiProviderId) await tx((trx) => agentStore.deleteProvider(trx, openaiProviderId));
   await sql.end();
 });
 

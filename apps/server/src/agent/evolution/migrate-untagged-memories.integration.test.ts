@@ -4,6 +4,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
 import type { Database } from "../../db/index.js";
+import { fileDatabaseUrl } from "../../test/integration-file.js";
 import { createIsolatedUser } from "../../test/isolated-user.js";
 import { DrizzleAgentStore } from "../store/index.js";
 import {
@@ -27,7 +28,7 @@ let store: DrizzleAgentStore;
 
 beforeAll(async () => {
   const hindsightUrl = inject("hindsightUrl");
-  const databaseUrl = inject("databaseUrl");
+  const databaseUrl = fileDatabaseUrl();
   const apiKey = inject("hindsightApiKey");
   hindsight = new HindsightClient({ baseUrl: hindsightUrl, apiKey });
   sdkClient = createClient(

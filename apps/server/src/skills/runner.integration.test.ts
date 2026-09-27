@@ -21,6 +21,7 @@ import { HindsightMemoryProvider } from "../memory/hindsight.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../secrets/store/index.js";
 import { mockFilesService } from "../test/factories.js";
+import { fileDatabaseUrl } from "../test/integration-file.js";
 import { SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
 
@@ -35,7 +36,7 @@ let tx: ReturnType<typeof transactor>;
 const BANK_ID = `runner-it-${Date.now()}`;
 
 beforeAll(async () => {
-  sql = postgres(inject("databaseUrl"), { max: 4 });
+  sql = postgres(fileDatabaseUrl(), { max: 4 });
   const db = drizzle(sql, { schema });
   tx = transactor(db);
   store = new DrizzleSkillStore();

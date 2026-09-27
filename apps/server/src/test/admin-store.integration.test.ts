@@ -11,19 +11,20 @@
  * NULLS-NOT-DISTINCT uniqueness on `profiles` and the real alias index are along
  * for the ride.
  *
- * Uses the shared integration Postgres (via `DATABASE_URL` from `test/integration-setup.ts`).
- * Every row uses a test-scoped random suffix so we never touch seeded data or other suites.
+ * Uses the file's own integration database (`fileDatabaseUrl()`).
+ * Every row uses a test-scoped random suffix so we never touch seeded data.
  */
 
 import { randomBytes } from "node:crypto";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
-import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { UniqueViolationError } from "../agent/store/errors.js";
 import { DrizzleAgentStore } from "../agent/store/index.js";
 import { transactor } from "../db/index.js";
 import * as schema from "../db/schemas.js";
 import { expectDefined } from "./assertions.js";
+import { fileDatabaseUrl } from "./integration-file.js";
 
 const SUITE = randomBytes(4).toString("hex"); // unique per test run — no collision with seed data
 const name = (tag: string) => `it-${SUITE}-${tag}`;
@@ -34,7 +35,7 @@ let tx: ReturnType<typeof transactor>;
 let store: DrizzleAgentStore;
 
 beforeAll(async () => {
-  sql = postgres(inject("databaseUrl"), { max: 4 });
+  sql = postgres(fileDatabaseUrl(), { max: 4 });
   tx = transactor(drizzle(sql, { schema }));
   store = new DrizzleAgentStore();
 });

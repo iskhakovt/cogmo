@@ -17,6 +17,7 @@ import { channelSessions, channels, inboundMessages } from "../transport/store/s
 import { OpenAIVoiceProvider } from "../voice/openai.js";
 import { expectDefined } from "./assertions.js";
 import { createFalFetch } from "./fal-mock.js";
+import { fileDefaultUserId, fileLlmockUrl } from "./integration-file.js";
 import { createOpenAIVoiceFetch } from "./openai-voice-mock.js";
 import { type OtelHarness, setupOtelHarness } from "./otel-harness.js";
 import { workerInngestBaseUrl } from "./worker-inngest.js";
@@ -24,12 +25,7 @@ import { workerInngestBaseUrl } from "./worker-inngest.js";
 let inngestBaseUrl: string;
 let connection: Awaited<ReturnType<typeof connect>>;
 let otel: OtelHarness;
-/**
- * The org profile `bootstrap()` resolves as the default, whose `*` tool set
- * offers the image tool the cassettes call. Other files add profiles with
- * narrower tool sets to the shared database, and an unordered pick of a
- * `profiles` row can land on one of theirs.
- */
+/** The org profile `bootstrap()` resolves as the default, whose `*` tool set offers the image tool the cassettes call. */
 let profileId: string;
 
 const VOICE_FIXTURE_DIR = "./test/fixtures/voice";
@@ -63,7 +59,7 @@ beforeAll(async () => {
   const { AnthropicProvider } = await import("../llm/anthropic.js");
   const anthropicKey =
     process.env.RECORD === "1" ? (process.env.ANTHROPIC_API_KEY ?? "test-key") : "test-key";
-  const provider = new AnthropicProvider(anthropicKey, inject("llmockBaseUrl"));
+  const provider = new AnthropicProvider(anthropicKey, fileLlmockUrl());
 
   // Scoped fetch wrapper for fal.ai traffic — intercepts fal endpoints only,
   // delegates everything else to global fetch. Passed to the fal provider
@@ -310,7 +306,7 @@ async function waitForOutbound(
 
 describe("message pipeline", () => {
   it("processes inbound/arrived end-to-end", async () => {
-    const defaultUserId = inject("defaultUserId");
+    const defaultUserId = fileDefaultUserId();
 
     const channelRows = await db
       .select({ id: channels.id })
@@ -362,7 +358,7 @@ describe("message pipeline", () => {
   });
 
   it("generates and delivers image end-to-end", async () => {
-    const defaultUserId = inject("defaultUserId");
+    const defaultUserId = fileDefaultUserId();
 
     // Direct is the batch channel we test against — Telegram's streaming
     // path is exercised in the unit tests (grammy mocks).
@@ -429,7 +425,7 @@ describe("message pipeline", () => {
   });
 
   it("voice round-trip: STT inbound → text → TTS outbound", async () => {
-    const defaultUserId = inject("defaultUserId");
+    const defaultUserId = fileDefaultUserId();
 
     const [channel] = await db
       .select({ id: channels.id })
@@ -527,7 +523,7 @@ describe("message pipeline", () => {
   });
 
   it("emits gen_ai chat spans + token metrics through the live pipeline", async () => {
-    const defaultUserId = inject("defaultUserId");
+    const defaultUserId = fileDefaultUserId();
 
     const [channel] = await db
       .select({ id: channels.id })
