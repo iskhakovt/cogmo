@@ -1,10 +1,12 @@
+import { randomUUID } from "node:crypto";
 import { StepError } from "inngest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Transactor } from "../../db/index.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import type { ChatParams, LlmResponse, Message } from "../../llm/types.js";
 import { logger } from "../../logger.js";
-import type { MemoryProvider } from "../../memory/provider.js";
+import type { MemoryProvider, RetainBatchItem } from "../../memory/provider.js";
+import { expectDefined } from "../../test/assertions.js";
 import {
   mockAgentStore,
   mockProvider,
@@ -121,6 +123,22 @@ function exhaustedRetriesStep(): ObserverStepHarness & { ids: string[] } {
       } catch (err) {
         throw new StepError(id, err);
       }
+    },
+  };
+}
+
+/** Keeps one document per id, as Hindsight does; an item without one gets a fresh id, as the adapter mints. */
+function documentBank(): {
+  memory: Pick<MemoryProvider, "retainBatch">;
+  documents: Map<string, RetainBatchItem>;
+} {
+  const documents = new Map<string, RetainBatchItem>();
+  return {
+    documents,
+    memory: {
+      retainBatch: vi.fn(async (_bankId: string, items: RetainBatchItem[]) => {
+        for (const item of items) documents.set(item.documentId ?? randomUUID(), item);
+      }),
     },
   };
 }
@@ -267,6 +285,29 @@ describe("runObserver phase isolation", () => {
     expect(deps.agentStore.recordEvolutionEvent).toHaveBeenCalledOnce();
   });
 
+  it("keeps one copy of a staged row when the drain's delete fails for good", async () => {
+    const bank = documentBank();
+    const deletePendingMemories = vi
+      .fn<AgentStore["deletePendingMemories"]>()
+      .mockRejectedValueOnce(new Error("connection reset"))
+      .mockResolvedValue(undefined);
+    const deps = observerDeps({
+      provider: routedProvider(),
+      memory: bank.memory,
+      store: { deletePendingMemories },
+    });
+
+    const first = await runObserver(EVENT, exhaustedRetriesStep(), deps);
+    const second = await runObserver(EVENT, exhaustedRetriesStep(), deps);
+
+    expect(first).toMatchObject({ drained: { drained: 0 } });
+    expect(second).toMatchObject({ drained: { drained: 1 } });
+    const staged = [...bank.documents.values()].filter(
+      (d) => d.content === "Prefers tea over coffee",
+    );
+    expect(staged).toHaveLength(1);
+  });
+
   it("propagates a failure that did not come from a step with exhausted retries", async () => {
     // `/reflect` runs the Observer through a harness with no retries; its
     // caller surfaces the error to the user instead of reporting zeros.
@@ -276,5 +317,61 @@ describe("runObserver phase isolation", () => {
 
     await expect(runObserver(EVENT, syncStep, deps)).rejects.toThrow(/matchedExistingRuleId/);
     expect(deps.memory.retainBatch).not.toHaveBeenCalled();
+  });
+});
+
+describe("runObserver phase outcomes", () => {
+  function recordedPayload(deps: { agentStore: AgentStore }): unknown {
+    const call = expectDefined(
+      vi.mocked(deps.agentStore.recordEvolutionEvent).mock.calls[0],
+      "recordEvolutionEvent call",
+    );
+    return call[1].payload;
+  }
+
+  it("records no failed phase on a fire where every phase completes", async () => {
+    const deps = observerDeps({ provider: routedProvider() });
+
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps);
+
+    expect(result).toMatchObject({ status: "processed", failedPhases: [] });
+    expect(recordedPayload(deps)).toMatchObject({ failedPhases: [] });
+  });
+
+  it("records a failed correction extraction", async () => {
+    const deps = observerDeps({
+      provider: routedProvider({ corrections: UNPARSEABLE_CORRECTIONS }),
+    });
+
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps);
+
+    expect(result).toMatchObject({ failedPhases: ["corrections"] });
+    expect(recordedPayload(deps)).toMatchObject({ failedPhases: ["corrections"] });
+  });
+
+  it("records each later phase that fails, in run order", async () => {
+    const retainBatch = vi
+      .fn<MemoryProvider["retainBatch"]>()
+      .mockRejectedValueOnce(new Error("hindsight unavailable"))
+      .mockResolvedValue(undefined);
+    const deps = observerDeps({
+      provider: routedProvider({ consolidation: { groups: "not-an-array" } }),
+      store: {
+        getCorrections: vi.fn().mockResolvedValue(RULES),
+        countActiveRules: vi.fn().mockResolvedValue(31),
+        deletePendingMemories: vi.fn().mockRejectedValue(new Error("connection reset")),
+      },
+      memory: { retainBatch },
+    });
+
+    const result = await runObserver(EVENT, exhaustedRetriesStep(), deps);
+
+    expect(result).toMatchObject({
+      corrections: { consolidationNeeded: true },
+      failedPhases: ["consolidation", "memories", "drain"],
+    });
+    expect(recordedPayload(deps)).toMatchObject({
+      failedPhases: ["consolidation", "memories", "drain"],
+    });
   });
 });

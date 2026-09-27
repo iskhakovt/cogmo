@@ -84,6 +84,7 @@ describe("drainPendingMemories", () => {
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
       {
         content: "homelab IP is 10.0.10.10",
+        documentId: "pm-1",
         tags: ["network:world", "compartment:technical", "trust:first-party"],
         metadata: { source: "live_retain" },
         observationScopes: "per_tag",
@@ -105,6 +106,7 @@ describe("drainPendingMemories", () => {
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
       {
         content: "wife's birthday March 15",
+        documentId: "pm-1",
         context: "while planning",
         tags: ["network:bank", "compartment:personal", "trust:first-party"],
         metadata: { source: "live_retain" },
@@ -425,6 +427,11 @@ describe("buildRetainItems", () => {
     void _dropped;
     const items = buildRetainItems([withoutClass as ClassifiedRow]);
     expect(items[0]?.tags).not.toContainEqual(expect.stringMatching(/^profile_class:/));
+  });
+
+  it("keys each item on its pending row id, so a repeat drain of a row replaces its document", () => {
+    const items = buildRetainItems([classified({ id: "pm-a" }), classified({ id: "pm-b" })]);
+    expect(items.map((i) => i.documentId)).toEqual(["pm-a", "pm-b"]);
   });
 
   it("stamps each row with its OWN class — speaker isolation under mixed batches", () => {

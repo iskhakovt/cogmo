@@ -88,6 +88,34 @@ describe("SystemScreen", () => {
     await expect.element(page.getByText("event e1abc234")).not.toBeInTheDocument();
   });
 
+  it("marks the phases a fire recorded as failed, in the row and the detail", async () => {
+    const event = makeEvent();
+    vi.mocked(api.evolution.listEvents).mockResolvedValue([
+      { ...event, payload: { ...event.payload, failedPhases: ["memories", "drain"] } },
+    ]);
+    await render(<SystemScreen />);
+
+    await expect.element(page.getByText("failed: memories, drain")).toBeVisible();
+
+    await page.getByText("manual").click();
+    await expect.element(page.getByText("failed after retries").first()).toBeVisible();
+    // The memories and drained groups; corrections, which completed, keeps its counts.
+    expect(page.getByText("failed after retries").elements()).toHaveLength(2);
+    await expect.element(page.getByText("reinforced")).toBeVisible();
+  });
+
+  it("shows ok for a fire with no failed phase and a dash for a row without outcomes", async () => {
+    const event = makeEvent();
+    vi.mocked(api.evolution.listEvents).mockResolvedValue([
+      { ...event, id: "e-clean", payload: { ...event.payload, failedPhases: [] } },
+      { ...event, id: "e-legacy" },
+    ]);
+    await render(<SystemScreen />);
+
+    await expect.element(page.getByText("ok", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("—", { exact: true })).toBeVisible();
+  });
+
   it("shows empty states when there is nothing scheduled or learned", async () => {
     await render(<SystemScreen />);
     await expect.element(page.getByText("No scheduled tasks.")).toBeVisible();

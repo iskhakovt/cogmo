@@ -184,10 +184,11 @@ export class HindsightMemoryProvider implements MemoryProvider {
   }
 
   async retainBatch(bankId: string, items: RetainBatchItem[]): Promise<void> {
-    // Per-item document_id keeps each item distinguishable in the document graph.
+    // Hindsight upserts on `document_id`. Ids are minted once, outside the
+    // retry, so a resend after a lost acknowledgement names the same documents.
     const mapped: MemoryItemInput[] = items.map((item) => ({
       content: item.content,
-      document_id: randomUUID(),
+      document_id: item.documentId ?? randomUUID(),
       ...(item.context !== undefined && { context: item.context }),
       ...(item.metadata !== undefined && { metadata: item.metadata }),
       ...(item.tags !== undefined && { tags: item.tags }),
