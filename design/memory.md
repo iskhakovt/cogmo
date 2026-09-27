@@ -17,16 +17,21 @@ Hindsight is a client-server system. Our app talks to it via HTTP — no direct 
 
 ## Core Memory vs Hindsight `[confirmed]`
 
-Two stores hold what the agent knows about its user. **Core memory** is a few keyed blocks (`core_memory_blocks`, one row per user and key) rendered into every system prompt's `# User` section, so it survives compaction and needs no retrieval. Only the agent writes it, through `core_memory_update`. **Hindsight** holds everything else and is searched on demand by auto-recall, `memory_recall` and `memory_reflect`. The Observer fills it from every conversation at idle, whether or not the agent called `memory_retain`. Blocks are not scoped by profile; [Core Memory Scope by Profile Class](#core-memory-scope-by-profile-class-proposed) proposes scoping them.
+Two stores hold what the agent knows about its user. **Core memory** is a few keyed blocks (`core_memory_blocks`) rendered into every system prompt's `# User` section, so it survives compaction and needs no retrieval. Only the agent writes it, through `core_memory_update`, and a block's scope follows from its key and the writing profile's class ([Core Memory Scope by Profile Class](#core-memory-scope-by-profile-class-confirmed)). **Hindsight** holds everything else and is searched on demand by auto-recall, `memory_recall` and `memory_reflect`. The Observer fills it from every conversation at idle, whether or not the agent called `memory_retain`.
 
 **Rule.** Core memory holds what every conversation needs. Everything that can be looked up when the topic comes up goes to Hindsight.
 
 | Core memory | Hindsight |
 |-|-|
-| Who the user is: name and what to call them, role and employer, home and timezone, who their close family are | Events: a dinner out, a conference trip, a bug fixed |
-| Active projects and their status | Details: a sister's birthday, the rent, a book finished |
-| Standing preferences and constraints: spelling variety, diet, working days | One-off decisions about a single task: a bar chart for the quarterly report |
-| | Facts about other people: a friend's new job, a partner's promotion |
+| `identity`: name and what to call them, home and timezone, the languages they speak | Events: a dinner out, a conference trip, a bug fixed |
+| The rest of who the user is: role and employer, who their close family are | Details: a sister's birthday, the rent, a book finished |
+| Active projects and their status | One-off decisions about a single task: a bar chart for the quarterly report |
+| Standing preferences and constraints: spelling variety, diet, working days | Facts about other people: a friend's new job, a partner's promotion |
+
+Two routing lines come with `identity`, in `CORE_MEMORY_PROMPT_GUIDANCE` and the `core_memory_update` description:
+
+1. "When you write `identity`, remove from other blocks any line it now holds", so a `user_profile` that states name and home doesn't repeat them ([Evaluation](#evaluation)).
+2. `identity` holds what is true in every persona, since classed profiles share it, so a name or form of address for one persona goes in that persona's other blocks: "call me Thorin while we play" stays in the game's class.
 
 The test is whether a reply to an unrelated message could go wrong without the fact. A family member belongs in core memory, and details about them belong in Hindsight. A trip leaves home and timezone as they are, and a one-off request ("this one as a list") is not a standing preference.
 
@@ -34,17 +39,27 @@ The test is whether a reply to an unrelated message could go wrong without the f
 
 **When.** In the turn the fact appears, including when it comes up in passing while the user asks for something else ("we only moved here last month"). `core_memory_update` overwrites the block, so the call rewrites it whole. The Observer writes only Hindsight, so a core fact the agent doesn't write in the turn never reaches a later prompt. Core memory therefore depends on the agent remembering to write in-turn, which is the failure mode the Observer avoids for Hindsight (see [Why Post-Conversation, Not Real-Time](#why-post-conversation-not-real-time-confirmed)). The evaluation below measures how often the agent writes it.
 
-**Where it lives.** `CORE_MEMORY_PROMPT_GUIDANCE` and `MEMORY_PROMPT_GUIDANCE` (`src/agent/service.ts`) state the rule in every prompt's `# Capabilities` section. The `core_memory_update` and `memory_retain` descriptions repeat it at the point of choice, and the onboarding text (`src/agent/prompt.ts`), shown while no block exists, sends what the agent learns about the user, including what they mention in passing, to core memory.
+**Where it lives.** `CORE_MEMORY_PROMPT_GUIDANCE` and `MEMORY_PROMPT_GUIDANCE` (`src/agent/service.ts`) state the rule in every prompt's `# Capabilities` section. The `core_memory_update` and `memory_retain` descriptions repeat it at the point of choice, and the onboarding text (`src/agent/prompt.ts`), shown while no block is visible to the turn, sends what the agent learns about the user, including what they mention in passing, to core memory as soon as it learns it.
 
 **Prior art.** MemGPT's working context is "a fixed-size read/write block of unstructured text … intended to be used to store key facts, preferences, and other important information about the user", with everything else in archival storage searched through function calls ([Packer et al., 2023](https://arxiv.org/abs/2310.08560)). Letta keeps the split: memory blocks are pinned to the context window ([memory blocks](https://docs.letta.com/guides/core-concepts/memory/memory-blocks)), and archival memory is not for "information that should always be visible" or "frequently changing state" ([archival memory](https://docs.letta.com/guides/core-concepts/memory/archival-memory)). LangMem draws the same line between a *profile*, "a single document that represents the current state" updated in place, and a *collection* of searchable records ([conceptual guide](https://langchain-ai.github.io/langmem/concepts/conceptual_guide/)). Letta Code's memory reflection fixes a contradicted entry "at the source" instead of appending the new version alongside the old, and writes absolute dates, not "today" ([reflection prompt](https://github.com/letta-ai/letta-code/blob/main/src/agent/subagents/builtin/reflection.md)). The history lives in the searchable store: Zep's Graphiti expires an edge a newer episode invalidates rather than deleting it ([Zep](https://blog.getzep.com/beyond-static-knowledge-graphs/)).
 
 ### Evaluation
 
-`src/agent/core-memory-routing.live.test.ts` runs 29 labelled single-turn messages (`test/fixtures/evals/core-memory-routing.json`) through the production prompt, the built-in tool definitions and the agent loop on the seeded profile's model. The core-memory tools run their production handlers against core memory held in process, and every other tool handler is a stub, so nothing is persisted. It records which memory tools each turn calls. The 29 are 12 core facts (9 announced, 3 mentioned in passing while asking for something else), 9 Hindsight facts and 8 messages worth storing nowhere, including boundary cases: a conference trip, a partner's promotion, a one-off format request and a finished project. Each runs twice: with no core memory, where the prompt shows the onboarding text, and with established blocks, in key order as production renders them. The finished project runs only with established blocks. The eval also checks that each write targets one of the case's expected blocks, whether it uses a relative time word and, with established blocks, which established lines a rewrite lost and that a finished project is gone. Each established line names its anchors, the words that carry its fact, and a rewrite keeps the line while it still names them all. `EVAL_REPEATS=N` samples every case N times. The eval reports rather than asserts (see [testing.md](testing.md) → Live Tests).
+`src/agent/core-memory-routing.live.test.ts` runs 29 labelled single-turn messages (`test/fixtures/evals/core-memory-routing.json`) through the production prompt, the built-in tool definitions and the agent loop on the seeded profile's model. The core-memory tools run their production handlers and `coreMemory` namespace over blocks held in process, so writes resolve their scope as a turn's do; every other tool handler is a stub, so nothing is persisted. It records which memory tools each turn calls. The 29 are 12 core facts (9 announced, 3 mentioned in passing while asking for something else), 9 Hindsight facts and 8 messages worth storing nowhere, including boundary cases: a conference trip, a partner's promotion, a one-off format request and a finished project. Each case runs in some of five core-memory states:
 
-Results on `claude-sonnet-5`. *Baseline* is the guidance before this rule: the core-memory guidance said only "Update them as you learn new things", and onboarding said "Store what you learn using memory_retain". It has one sample per case and predates the boundary cases and the content checks (—). *Rule* is the rule's first wording, without [Current facts only](#core-memory-vs-hindsight-confirmed). *Current* is the current guidance. Both have three samples per case (N=3); counts are over all samples, and the parenthesis gives the range across the three runs where it varies. The relative-time check postdates *Rule*.
+| State | Core memory | Cases |
+|-|-|-|
+| Empty | None, so the prompt shows the onboarding text | All but the finished project |
+| Established | The fixture's blocks, `identity` among them, flat in key order | All |
+| Classed | The same, `identity` shared and the rest in an unrestricted class, in groups | All |
+| Legacy | The same facts without `identity`, name and home in `user_profile` | The three whose fact belongs in `identity`: a preferred name and two moves |
+| Restricted | As classed, in a restricted class | The same three |
 
-| Metric | Baseline, empty | Baseline, established | Rule, empty | Rule, established | Current, empty | Current, established |
+Beyond which tools a turn calls, the eval checks each write: that it targets one of the case's expected blocks, relative time words, facts from other blocks in `identity` and, with blocks, established lines a rewrite lost and a finished project left in place. In the legacy state it checks for name and home left in `user_profile` beside a new `identity`; in the restricted state, whether the change is stored as the class's override, whether the written and the stored override repeat an unchanged shared line, verbatim or paraphrased, and whether the reply says the change is saved only in this persona. Each established line names its anchors, the words that carry its fact, and a rewrite keeps the line while it still names them all. `EVAL_REPEATS=N` samples every case N times. The eval reports rather than asserts (see [testing.md](testing.md) → Live Tests).
+
+Results on `claude-sonnet-5`. *Baseline* is the guidance before this rule: the core-memory guidance said only "Update them as you learn new things", and onboarding said "Store what you learn using memory_retain". It has one sample per case and predates the boundary cases and the content checks (—). *Rule* is the rule's first wording, without [Current facts only](#core-memory-vs-hindsight-confirmed). *Current facts* adds it. Both have three samples per case (N=3); counts are over all samples, and the parenthesis gives the range across the three runs where it varies. The relative-time check postdates *Rule*.
+
+| Metric | Baseline, empty | Baseline, established | Rule, empty | Rule, established | Current facts, empty | Current facts, established |
 |-|-|-|-|-|-|-|
 | Core facts written to core memory in the turn | 3/11 | 8/11 | 24/33 (8/11 every run) | 36/36 | 27/33 (8–10/11) | 36/36 |
 | — announced | 3/8 | 7/8 | 19/24 (6–7/8) | 27/27 | 19/24 (5–7/8) | 27/27 |
@@ -60,11 +75,34 @@ Results on `claude-sonnet-5`. *Baseline* is the guidance before this rule: the c
 
 On the baseline, the agent updated core memory for announced facts once blocks existed but mostly missed facts mentioned in passing. With no blocks, onboarding drew the turn into introductions, and core facts went to `memory_retain` or nowhere. Under the rule, every core fact reaches an expected block once blocks exist, almost always in the first response, and no rewrite loses an established line beyond those the case declares it changes or drops. With no blocks, 24 of 33 samples reach core memory, 8 of 11 cases in each run; of the nine misses, four went to `memory_retain` and five wrote nothing. A dietary constraint mentioned in passing ("Nothing with meat, I stopped eating it a while back") never reached core memory with no blocks: all three samples read the empty blocks and answered without writing. No message worth storing nowhere writes core memory. Once blocks exist, 2 of 27 Hindsight samples appended a family member's detail to the `Family` line of `user_profile`, a sister's birthday once and the partner's promotion once; the conference trip never did. Every rewrite marked the finished project completed in `active_projects` instead of removing it.
 
-The current wording keeps recall at or above the rule's and fixes the finished project: every rewrite removes it from `active_projects`. With established blocks, no write uses a relative time word, and of the twelve rewrites for the four cases that change an established value, ten drop the old one and two keep "moved from London" beside Lisbon. One Hindsight sample in 27 still appends to the `Family` line, the partner's promotion. With no blocks, 27 of 33 samples reach core memory, the dietary constraint mentioned in passing in two of three. Two gaps remain on that onboarding path: 6 of 27 writes carry a relative time ("started this week" in all three samples of the new job, "recently" in three samples of the two moves), and 5 pick a block outside the case's expected keys (a new role starting Monday under `active_projects` twice, the dietary constraint under `user_profile` twice, a new daughter under a `family` block).
+The *Current facts* wording keeps recall at or above the rule's and fixes the finished project: every rewrite removes it from `active_projects`. With established blocks, no write uses a relative time word, and of the twelve rewrites for the four cases that change an established value, ten drop the old one and two keep "moved from London" beside Lisbon. One Hindsight sample in 27 still appends to the `Family` line, the partner's promotion. With no blocks, 27 of 33 samples reach core memory, the dietary constraint mentioned in passing in two of three. Two gaps remain on that onboarding path: 6 of 27 writes carry a relative time ("started this week" in all three samples of the new job, "recently" in three samples of the two moves), and 5 pick a block outside the case's expected keys (a new role starting Monday under `active_projects` twice, the dietary constraint under `user_profile` twice, a new daughter under a `family` block).
 
-**Multi-turn.** `src/agent/core-memory-multiturn.live.test.ts` runs seven scripted conversations of four or five turns (`test/fixtures/evals/core-memory-multiturn.json`), starting from established blocks and carrying core memory across turns. In four, a new core fact comes up in passing mid-conversation; in three, a fact changes an established one. After the last turn it checks one anchor per established line, less the value a change supersedes, for facts a whole-block rewrite lost, and the final blocks for relative time words. Results on `claude-sonnet-5`, two samples per scenario (N=2); counts are over all samples, and the brackets give each run's count where it varies. *Rule* is the rule's first wording, two runs of N=2 each: the first recorded before the relative-time check (—), the second scored from its logged writes with the current checks. *Current* is the current guidance.
+**Scopes.** Results on `claude-sonnet-5` for the guidance with `identity` and its two routing lines, on the fixture with an `identity` block, three samples per case (N=3), one run per column. The empty column covers the eleven core cases and two Hindsight boundary cases (the trip and the partner's promotion).
 
-| Metric | Rule, run 1 | Rule, run 2 | Current |
+| Metric | Empty | Established | Classed | Legacy | Restricted |
+|-|-|-|-|-|-|
+| Core facts written to core memory in the turn | 31/33 (10–11/11) | 36/36 | 36/36 | 9/9 | 9/9 |
+| — in passing | 9/9 | 9/9 | 9/9 | 3/3 | 3/3 |
+| — in the first response | 2/33 | 32/36 (10–11/12) | 27/36 (9/12 every run) | 5/9 | 5/9 |
+| — to an expected block | 21/31 | 36/36 | 36/36 | 6/9 | 9/9 |
+| Rewrites that lost an established line the case doesn't change | — | 0/36 | 0/36 | 0/6 | — |
+| Core writes with a relative time word | 2/31 | 0/36 | 0/36 | 0/9 | 0/9 |
+| `identity` writes naming a fact from another block | 0/15 | 0/9 | 0/9 | 0/6 | 0/9 |
+| `identity` writes leaving name or home in `user_profile` | — | — | — | 3/6 | — |
+| Identity changes stored as the class's override | — | — | — | — | 9/9 |
+| — written with a shared line the case doesn't change | — | — | — | — | 9/9 |
+| — stored with one | — | — | — | — | 0/9 |
+| — reply says it is saved only in this persona | — | — | — | — | 7/9 |
+| Core writes on Hindsight facts | 0/6 | 0/27 | 0/27 | — | — |
+| Core writes on messages worth storing nowhere | — | 0/24 | 0/24 | — | — |
+
+With blocks, routing holds in the established and classed states: every core fact reaches an expected block, no rewrite loses a line or uses a relative time word, and no Hindsight fact or message worth storing nowhere writes core memory. Classed turns write in the first response less often (27 of 36 against 32). No `identity` write names a role, a family member, a project or a preference. With no blocks, the routing lines cost recall: 28 of 32 core facts reached core memory without them, and with them 14 of 33 while onboarding named `identity` and 16 of 33 when it didn't, the agent holding off until it knew the user's name. Onboarding that says to save a fact without waiting to learn the rest brings it to 31 of 33, every fact mentioned in passing included. Ten of the 31 writing samples add a block outside the case's keys: eight a timezone read off the turn context into `identity`, the rest a block the agent names itself (`career`, `family`, `work`) or a new role under `active_projects`.
+
+On the legacy blocks, the three identity cases write `identity` in 6 of 9 samples and rewrite `user_profile` in the rest. The first routing line holds after a move, where every `identity` write removes name and home from `user_profile`, and not after a name change, where all three leave them. In a restricted class, every identity change is stored as the class's override. Every written override copies the unchanged shared line verbatim, none paraphrased, and every stored one holds only the changed line (`Name: Samuel Carter (goes by Sam)`, or `Location: Lisbon, Portugal (Europe/Lisbon)` after either move). Seven of the nine replies match the check for saying the change is saved only in this persona, and an eighth says "just for this assistant persona". These passes (the full run, the empty state without the routing lines, two narrower reruns and the restricted state) cost about $5.
+
+**Multi-turn.** `src/agent/core-memory-multiturn.live.test.ts` runs seven scripted conversations of four or five turns (`test/fixtures/evals/core-memory-multiturn.json`), starting from established blocks and carrying core memory across turns. In four, a new core fact comes up in passing mid-conversation; in three, a fact changes an established one. After the last turn it checks one anchor per established line, less the value a change supersedes, for facts a whole-block rewrite lost, and the final blocks for relative time words. Results on `claude-sonnet-5`, two samples per scenario (N=2); counts are over all samples, and the brackets give each run's count where it varies. *Rule* is the rule's first wording, two runs of N=2 each: the first recorded before the relative-time check (—), the second scored from its logged writes with the current checks. *Current facts* is the wording that adds Current facts only, before `identity`.
+
+| Metric | Rule, run 1 | Rule, run 2 | Current facts |
 |-|-|-|-|
 | Completed | 14/14 | 14/14 | 14/14 |
 | Fact written in the turn it came up | 13/14 | 14/14 | 14/14 |
@@ -74,7 +112,7 @@ The current wording keeps recall at or above the rule's and fixes the finished p
 | Old value kept in the block as history | 6/6 | 6/6 | 0/6 |
 | Final blocks free of relative time words | — | 8/14 [3/7 5/7] | 14/14 |
 
-On the first wording, the one late fact was a new project written two turns after it came up, at the end of the conversation. Every change kept the old value as history ("relocated from Lisbon", "recently moved from Lisbon", "previously at Northwind Logistics, left last month", the NixOS migration marked DONE or completed in `active_projects`), and relative times reached the blocks with it, including a brother's visit "next week" on the `Family` line. On the current wording, every change replaces the old value outright, and 9 of the 14 fact turns also call `memory_retain`, for the change, the brother's visit or the diagnosis; no fact turn in run 2 of the first wording did.
+On the first wording, the one late fact was a new project written two turns after it came up, at the end of the conversation. Every change kept the old value as history ("relocated from Lisbon", "recently moved from Lisbon", "previously at Northwind Logistics, left last month", the NixOS migration marked DONE or completed in `active_projects`), and relative times reached the blocks with it, including a brother's visit "next week" on the `Family` line. On the *Current facts* wording, every change replaces the old value outright, and 9 of the 14 fact turns also call `memory_retain`, for the change, the brother's visit or the diagnosis; no fact turn in run 2 of the first wording did.
 
 ## Bank Strategy `[confirmed]`
 
@@ -153,9 +191,9 @@ pending_memories (
 
 The `source` enum distinguishes live tool calls from one-off ingestion paths (e.g. backfilling untagged Hindsight memories through the same classifier). Both flow through the same Observer drain step; the discriminator is informational.
 
-## Core Memory Scope by Profile Class `[proposed]`
+## Core Memory Scope by Profile Class `[confirmed]`
 
-**Problem.** `core_memory_blocks` is keyed on the user alone, and every block renders in every profile's `# User` section. Core memory therefore bypasses the controls Hindsight enforces ([Memory Access Control via Tags](#memory-access-control-via-tags-confirmed)): a fact written in a restricted class's conversation reaches every other persona's prompt, and a coder profile scoped to `work` and `technical` still sees family and diet. [Core Memory vs Hindsight](#core-memory-vs-hindsight-confirmed) routes exactly these personal facts to core memory, so the leak grows as the routing works.
+**Why scope core memory.** A block renders in every system prompt that sees it. Keyed on the user alone, it would bypass the controls Hindsight enforces ([Memory Access Control via Tags](#memory-access-control-via-tags-confirmed)): a fact written in a restricted class's conversation would reach every other persona's prompt, and a coder profile scoped to `work` and `technical` would see family and diet, the personal facts [Core Memory vs Hindsight](#core-memory-vs-hindsight-confirmed) routes to core memory.
 
 **Direction.** A block's scope follows from its key and the writing profile's class; the model never chooses it.
 
@@ -165,37 +203,36 @@ The `source` enum distinguishes live tool calls from one-off ingestion paths (e.
 | Unclassed bucket | any other key, `profile_class IS NULL` | Everything else core memory holds (role, close family, diet, projects, preferences), written by unclassed profiles | Unclassed profiles |
 | Class `c` | `profile_class = c` | The same, written by `c`'s profiles; for a restricted `c`, an `identity` override holding only what differs from the shared block | Profiles of class `c` |
 
-**Why a new `identity` key.** Today's `user_profile` blocks mix identity basics with role and family (the routing eval's established block holds name, role, home and family), so sharing `user_profile` would share role and family. A new key holds only what every persona needs, and one fixed key makes "shared" a property of the key, not of a column or a model decision.
+**Why an `identity` key.** A `user_profile` block mixes identity basics with role and family, so sharing it would share role and family. A key of its own holds only what every persona needs, and one fixed key makes "shared" a property of the key, not of a column or a model decision.
 
 ### Behaviour by Profile
 
 | Turn's profile | `# User` renders | A write of `identity` goes to | Any other write goes to |
 |-|-|-|-|
-| Unclassed (every org profile; user profiles without a class) | Every `profile_class IS NULL` block, flat, as today | Shared | The unclassed bucket |
+| Unclassed (every org profile; user profiles without a class) | Every `profile_class IS NULL` block, flat | Shared | The unclassed bucket |
 | Classed `c`, not restricted | A shared group with `identity`, then a group with `c`'s blocks | Shared | `c` |
 | Classed `r`, restricted | As above, with `r`'s `identity` override at the top of its group | `r`'s override; the tool result says so | `r` |
 
-- **An install that doesn't use classes renders `# User` from the same rows as today**, and `core_memory_update` keeps today's schema in every profile, with no `scope` argument.
+- **An install without classes renders every block flat**, and `core_memory_update` takes no `scope` argument in any profile.
 - **Classing one persona isolates it.** A classed coder never renders the unclassed bucket, so the everyday profile needs no class.
-- **Restricted classes fail closed.** A restricted persona never writes the shared block. An identity change learned there (a move, a new name) becomes the class's `identity` override, which holds only the lines that differ and wins where the two conflict. That persona still follows shared changes to every other line; the other personas keep the old value of the changed line until told. Before any shared `identity` exists every line differs, so an override written then holds them all and shadows later shared changes; the migration's one-off fix writes the shared block first, and on a fresh install the unclassed default profile usually does.
-- **The Service is the ACL boundary.** `buildTurnService` resolves where a write goes from the key and the profile's class and restricted flag, and returns the scope it wrote to for the tool result. The resolution is one use case, shared by the Service and the eval harness.
-- **The turn's scope is frozen.** `freeze-turn-inputs` records the profile's class, restricted flag and trust gate, so a write goes to the scope the prompt rendered even if `/profile class` or `/profile scope` runs mid-turn.
+- **Restricted classes fail closed.** A restricted persona never writes the shared block: an identity change learned there (a move, a new name) goes to the class's `identity` override, which wins where the two conflict, and the other personas keep the old value until told.
+- **The override holds only what differs.** The write reads the shared `identity` in its transaction and leaves out every line equal to a shared one (trimmed, internal whitespace collapsed; a blank line never matches), so the persona follows later shared changes to every line it doesn't change, including one it restated. When only blank lines remain, it stores nothing and deletes the class's override. An override written before any shared `identity` exists holds every line.
+- **The Service is the ACL boundary.** It resolves each write from the key and the turn's scope and returns where the write went, and for an override the lines it left out, for the tool result; a turn without core memory gets an error. The eval harness uses the same `coreMemory` namespace.
+- **The turn's scope is frozen.** `freeze-core-memory-scope` records it: none for a [third-party](#boundaries) or unloadable profile, the unclassed bucket, or the profile's class and its restricted flag. The prompt, the Service and the tool table all read it, so a write goes to the scope the prompt rendered even if `/profile class` or `/profile scope` runs mid-turn ([crash-recovery.md](crash-recovery.md) → Turn inputs are frozen).
 
 ### Boundaries
 
 - **A class is the only boundary core memory has.** `memory_scope` compartments don't filter blocks: a block is free text that mixes compartments ([Alternatives Considered](#alternatives-considered)). Org profiles can't have a class (`setProfileClass` rejects them), so every org profile renders the unclassed bucket; isolating a persona takes a user profile with a class.
 - **Classes opted in through `memory_scope.profileClasses` are recall-only.** Their blocks don't render, because always-on context would grow with every class opted in. Explicit per-block sharing (Letta-style: attach one block to chosen classes) is a possible later extension.
-- **Third-party profiles get no core memory.** A profile whose `memory_scope.trust` excludes `first-party` gets no block in `# User`, not even `identity`, no onboarding text and no core-memory tools, and the Service refuses its writes as a backstop. Hindsight treats it the same way, recalling only `trust:any` memories; core memory is written by profiles the user controls. A turn whose profile can't be loaded is treated the same.
-- **The transcript is not scoped.** `/profile switch` inside a conversation carries its history across classes, as it does today, and with it the `core_memory_update` inputs, `core_memory_read` results, announcements and compaction summaries it holds: the same residual as the Hindsight recall results already in it.
+- **Third-party profiles get no core memory.** A profile whose `memory_scope.trust` excludes `first-party` (a null `memory_scope` admits it), or whose row can't be loaded, gets no `# User` section (no block, not even `identity`, and no onboarding) and no core-memory tools; the Service refuses its writes as a backstop. Core memory is written by profiles the user controls, and Hindsight likewise recalls only `trust:any` memories there. `# Capabilities` is one list for every profile, so it describes core memory there too, as it describes coding delegation to a profile without that tool.
+- **The transcript is not scoped.** `/profile switch` inside a conversation carries its history across classes, and with it the `core_memory_update` inputs, `core_memory_read` results, announcements and compaction summaries it holds: the same residual as the Hindsight recall results already in it.
 
 ### What the Model Sees
 
-- **One routing change, the same everywhere.** The `core_memory_update` description, `CORE_MEMORY_PROMPT_GUIDANCE` and the onboarding text name `identity` as the block for name, what to call the user, home, timezone and the languages they speak; role, family, projects and preferences stay in the other blocks. The [routing table](#core-memory-vs-hindsight-confirmed) gains the split. Two routing lines come with it:
-  - "When you write `identity`, remove from other blocks any line it now holds", so an install whose `user_profile` already holds name and home doesn't state both.
-  - "`identity` holds what is true in every persona; a name or form of address for one persona goes in that persona's blocks", so "call me Thorin while we play" stays in the game's class.
-- **Groups in classed profiles.** `# User` and `core_memory_read` put blocks under a shared group and a group for the class; unclassed profiles render flat, as today. Headings stay the bare key, so a key copied from the prompt into a tool call is still the key.
-- **A restricted persona can still save identity changes.** Its shared group says that the persona's own `identity` wins where the two differ, and that an `identity` it saves stays in this persona and holds only what differs. Calling the shared block read-only instead would stop the model saving at all. The tool result says `Saved "identity" for this persona only; other personas keep the shared block. Tell the user it is saved only here.`, so the divergence isn't silent.
-- **Onboarding shows while no block is visible to the turn**, except in a third-party profile. A classed persona that renders the shared `identity` doesn't show it: it knows the basics, and the routing guidance covers the rest.
+- **One routing change, the same everywhere.** The `core_memory_update` description and `CORE_MEMORY_PROMPT_GUIDANCE` carry the `identity` split and its two routing lines ([Core Memory vs Hindsight](#core-memory-vs-hindsight-confirmed)).
+- **Onboarding shows while no block is visible to the turn**, except in a third-party profile; a classed persona that renders the shared `identity` knows the basics and doesn't show it. It says to save a fact without waiting to learn the rest, since with the routing lines an agent with no blocks held off until it knew the user's name; naming `identity` there made no difference ([Evaluation](#evaluation)).
+- **Groups in classed profiles.** `# User` and `core_memory_read` put blocks under a shared group ("Shared by every persona:") and a group for the class ("Only in this persona:"), leaving out an empty one. Headings are the bare key, so a key copied from the prompt into a tool call is still the key.
+- **A restricted persona saves identity changes.** Its shared group says that the persona's own `identity` wins where the two differ and takes the lines it leaves out from the shared block, and that an `identity` saved there stays in this persona and should hold only the lines that differ; calling the shared block read-only would stop the model saving at all. The tool result says the change is saved for this persona only and to tell the user so, names any lines it left out as shared, and says when no line differed and nothing was saved.
 
 ### Data Model
 
@@ -215,27 +252,27 @@ core_memory_blocks (
 
 - **Three states from one nullable column and the key rule.** `NULLS NOT DISTINCT` gives one block per key in each scope, and the upsert targets `(user_id, profile_class, key)`. The shared block is the NULL-class `identity` row, so an unclassed `identity` write and a shared one are the same row. A `scope` enum column would also allow a shared `user_profile` or a second NULL-class `identity`, states the design rules out.
 - **The composite FK** mirrors `profiles(user_id, profile_class)`, and MATCH SIMPLE skips NULL-class rows.
-- **Store:** `getCoreMemoryBlocks(tx, userId, profileClass)` returns the shared `identity`, then the class's blocks, an `identity` override first and the rest in key order; for an unclassed turn, every NULL-class block in key order, as today. `upsertCoreMemoryBlock` takes the resolved `profileClass`, `deleteCoreMemoryBlock` removes an override, and `listCoreMemoryKeys(tx, userId, profileClass)` feeds the confirmations.
-- **Migration:** one `pnpm db:generate` file that adds the column, replaces `uq_core_memory_user_key` with the three-column constraint and adds the FK. It needs no data statement: every existing row reads NULL, so an existing `identity` row is shared and every other row lands in the unclassed bucket, which is what every unclassed profile renders today.
+- **Render order.** A class sees the shared `identity`, then its own blocks, its `identity` override first and the rest in key order; an unclassed profile sees every NULL-class block in key order.
+- **Migration:** `0060_core_memory_scope` adds the column, replaces `uq_core_memory_user_key` with the three-column constraint and adds the FK, with no data statement: every row written before it reads NULL, so an `identity` row among them is shared and every other row is in the unclassed bucket.
 
-**Existing blocks record no writer, so isolation holds only for writes after the migration:**
+**Blocks written before the migration record no writer, so isolation holds only for writes after it:**
 
 | Install | After the migration | One-off fix |
 |-|-|-|
-| Without classes | `# User` renders as before. `user_profile` still holds name and home, so the first `identity` write can leave both stating them; the first routing line removes the duplicate. | None; the eval measures the duplicate rate. |
+| Without classes | `# User` renders every block flat. A `user_profile` that states name and home can keep them beside the first `identity` write: the first routing line removes them after a move but not after a name change ([Evaluation](#evaluation)). | Ask the agent to move name and home into `identity`. |
 | With classes | Classed profiles render only the shared `identity`, which doesn't exist until something writes it. Facts a restricted persona wrote before the migration stay in every unclassed profile, including the default org profile, and leave that persona. | In an unclassed conversation, ask the agent to move name, home, timezone and languages into `identity` and to remove class-specific facts; then restate those facts in each classed persona. |
 
 ### Interactions
 
-- **Rendering.** `loadConversationContext` loads the conversation user's blocks, and `AssembleContext` carries them to `DefaultPromptSource`, a pure formatter. Scoping passes the turn's frozen class, restricted flag and trust gate to that load.
-- **System prompt snapshot** ([prompt-caching.md](prompt-caching.md#system-prompt-snapshot-proposed)):
+- **Rendering.** The prompt renders the blocks the turn's frozen scope sees. `/compact`, outside a turn, resolves the scope from the profile when it runs.
+- **System prompt snapshot** `[proposed]` ([prompt-caching.md](prompt-caching.md#system-prompt-snapshot-proposed)), landing with [its step 3](prompt-caching.md#implementation-plan-proposed):
 
 | Concern | Rule |
 |-|-|
 | Snapshot | `# User` renders the blocks visible when the epoch opens. |
 | Announcements | Only blocks visible to the turn: the shared `identity` and the turn's own scope. A write in another class's conversation, or in the unclassed bucket when the turn is classed, is never announced here. |
-| Announced set | `TurnContextSchema.announcedCoreMemoryBlocks` records `{ profileClass, key }` pairs, since `identity` can exist shared and as an override. prompt-caching.md specifies this shape from the start, so the validated JSONB never changes shape. |
-| Digest | Includes the profile class, its restricted flag and whether the profile's trust admits `first-party`, so `/profile switch` to another class, `/profile class`, a `/profile scope` that changes trust, and `/classes restrict` / `unrestrict` open an epoch and re-render `# User`. Otherwise two profiles with the same base prompt and tools would share a snapshot, and a restricted class's blocks would stay in front of another persona. |
+| Announced set | `{ profileClass, key }` pairs ([prompt-caching.md](prompt-caching.md#data-model) → Data model). |
+| Digest | Covers the profile class, its restricted flag and whether the profile's trust admits `first-party`, so `/profile switch` to another class, `/profile class`, a `/profile scope` that changes trust, and `/classes restrict` / `unrestrict` open an epoch and re-render `# User`. Otherwise two profiles with the same base prompt and tools would share a snapshot, and a restricted class's blocks would stay in front of another persona. |
 | Removals | A block leaves a turn's view only with a digest change: `/classes unrestrict` changes the restricted flag, and a class can be deleted only once no profile uses it, so every conversation that rendered its blocks has changed class first. An announcement never has to express a removal. |
 
 ### Class Lifecycle
@@ -244,10 +281,12 @@ Two commands delete blocks. Both confirm first, in Transport, so every channel g
 
 | Command | Deletes | Behaviour |
 |-|-|-|
-| `/classes rm c` | `c`'s blocks, through the FK's cascade | Lists their keys and deletes only on confirmation; a class without blocks deletes at once, as today. It already fails while a profile uses the class. |
+| `/classes rm c` | `c`'s blocks, through the FK's cascade | Lists their keys and deletes only on confirmation; a class without blocks deletes at once. It fails while a profile uses the class. |
 | `/classes unrestrict r` | `r`'s `identity` override | Names it and, on confirmation, deletes it in the flag change's transaction, so no unrestricted class shadows the shared block. |
 
-**Confirmation contract.** `profileClasses.delete` and `setRestricted` take `{ confirm: boolean }`. Without it, a call that would delete blocks returns `err({ code: "profile_class_has_blocks", keys })` and changes nothing; Telegram replies with the keys and the command to repeat with `confirm`.
+An `r` turn already running when `/classes unrestrict r` lands has its scope frozen restricted, so it can write an override; an unrestricted class's reads leave that row out, and re-running the command deletes it.
+
+**Confirmation contract.** `profileClasses.delete` and `setRestricted` take `{ confirm }`. Unconfirmed, a call that would delete blocks returns `profile_class_has_blocks` with their keys and changes nothing; a class in use reports `profile_class_in_use` first, since that call deletes nothing. Telegram replies with the keys and the command to repeat with `confirm`, and a confirmed unrestrict names the override it deleted.
 
 ### Prior Art
 
@@ -266,22 +305,8 @@ Two commands delete blocks. Both confirm first, in Transport, so every channel g
 | Unclassed profiles write shared | An unclassed everyday profile's family and diet would reach every classed persona, so isolating a coder would mean classing every persona that writes personal facts. |
 | A model-chosen `scope` argument | Every write would depend on the model choosing correctly, the tool schema would differ by profile, and single-profile installs would carry a choice that means nothing to them. |
 | An override that repeats the whole shared block | `core_memory_update` rewrites a block whole, so a full copy would freeze every shared line in that persona: a later move or new timezone would never reach it. |
-
-### Implementation Outline
-
-1. **Schema and store:** the column, constraint and FK in one generated migration; the `identity` key as a code constant; the store methods in [Data Model](#data-model). PGlite tests: the shared `identity` returned for every scope, the unclassed bucket absent from a classed read, a restricted class's override after the shared block, the cascade on class delete.
-2. **Service ACL:** the write-resolution use case and `buildTurnService` as in [Behaviour by Profile](#behaviour-by-profile) and [Boundaries](#boundaries): the confined-write result, the frozen scope, the trust gate. Tests cover the matrix.
-3. **Rendering and routing:** the frozen scope in `loadConversationContext`; grouped `# User` and `core_memory_read` for classed profiles; no core memory, onboarding or core-memory tools for third-party profiles and unloadable ones; `identity` and the two routing lines in the tool description, the guidance and the onboarding text. Tests: an unclassed profile's `# User` byte-identical to today's for the same rows; a classed profile's renders `identity` and its class's blocks, never the unclassed bucket or another class's.
-4. **Class lifecycle:** the confirmations in [Class Lifecycle](#class-lifecycle).
-5. **Eval**, in `core-memory-routing.live.test.ts`, with classed and restricted runs; results under [Evaluation](#evaluation):
-   - `call-me-sam`, `moved-lisbon` and `lisbon-day-trip` take `identity` as their expected block, and the established fixture gains an `identity` block;
-   - a legacy case (name and home in `user_profile`, no `identity`) measures duplicates;
-   - the leak direction: role, family or preferences written into `identity`;
-   - restricted runs check that an identity change is saved as an override holding only what differs;
-   - the harness resolves writes with the production use case.
-6. **Prompt caching:** the snapshot changes in [Interactions](#interactions), folded into step 3 of [prompt-caching.md](prompt-caching.md#implementation-plan-proposed).
-
-Docs land with each step: the [data-model.md](data-model.md) row moves to `[confirmed]` with step 1; the routing table's `identity` split and [setup.md](setup.md)'s onboarding trigger ("no core-memory block visible to the turn") with step 3. This section moves to `[confirmed]` with step 5's results.
+| Prompt wording alone for the override | The restricted shared group asks for only the lines that differ, yet every evaluated override copied an unchanged one. |
+| Structured `identity` fields with per-field overrides | Changes the tool schema, routing guidance, eval and existing blocks, while every evaluated copy is verbatim, which a line comparison catches. Filed in `todo.md`. |
 
 ## Four Memory Networks `[confirmed]`
 

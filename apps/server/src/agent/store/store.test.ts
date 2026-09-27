@@ -7,7 +7,7 @@ import { expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { inboundMessages } from "../../transport/store/schema.js";
 import { DrizzleAgentStore } from "./index.js";
-import { conversationSummaries, messages } from "./schema.js";
+import { conversationSummaries, coreMemoryBlocks, messages } from "./schema.js";
 
 let db: Database;
 let tx: Transactor;
@@ -1398,53 +1398,156 @@ describe("DrizzleAgentStore", () => {
   });
 
   describe("core memory blocks", () => {
+    async function upsert(
+      userId: string,
+      profileClass: string | null,
+      key: string,
+      content: string,
+    ): Promise<void> {
+      await tx((trx) => store.upsertCoreMemoryBlock(trx, { userId, profileClass, key, content }));
+    }
+
+    async function seedClass(userId: string, name: string): Promise<void> {
+      await tx((trx) => store.createProfileClass(trx, { userId, name, description: name }));
+    }
+
     it("upsert creates a new block", async () => {
       const userId = await seedUser();
-      await tx((trx) =>
-        store.upsertCoreMemoryBlock(trx, { userId, key: "user_profile", content: "Name: Tim" }),
-      );
+      await upsert(userId, null, "user_profile", "Name: Tim");
 
-      const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId));
-      expect(blocks).toEqual([{ key: "user_profile", content: "Name: Tim" }]);
+      const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId, null));
+      expect(blocks).toEqual([{ profileClass: null, key: "user_profile", content: "Name: Tim" }]);
     });
 
-    it("upsert updates existing block", async () => {
+    it("upsert replaces the block in its scope, including the NULL-class scope", async () => {
       const userId = await seedUser();
-      await tx((trx) =>
-        store.upsertCoreMemoryBlock(trx, { userId, key: "user_profile", content: "Name: Tim" }),
-      );
-      await tx((trx) =>
-        store.upsertCoreMemoryBlock(trx, {
-          userId,
-          key: "user_profile",
-          content: "Name: Tim\nRole: Engineer",
-        }),
-      );
+      await upsert(userId, null, "user_profile", "Name: Tim");
+      await upsert(userId, null, "user_profile", "Name: Tim\nRole: Engineer");
 
-      const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId));
-      expect(blocks).toHaveLength(1);
-      expect(blocks[0]!.content).toBe("Name: Tim\nRole: Engineer");
+      const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId, null));
+      expect(blocks).toEqual([
+        { profileClass: null, key: "user_profile", content: "Name: Tim\nRole: Engineer" },
+      ]);
+      const rows = await db
+        .select({ id: coreMemoryBlocks.id })
+        .from(coreMemoryBlocks)
+        .where(eq(coreMemoryBlocks.userId, userId));
+      expect(rows).toHaveLength(1);
     });
 
-    it("returns blocks ordered by key", async () => {
+    it("an unclassed read returns every NULL-class block in key order, identity included", async () => {
       const userId = await seedUser();
+      await seedClass(userId, "game");
+      await upsert(userId, null, "user_profile", "Tim");
+      await upsert(userId, null, "identity", "Name: Tim");
+      await upsert(userId, null, "active_projects", "Assistant");
+      await upsert(userId, "game", "preferences", "Call me Thorin");
+
+      const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId, null));
+      expect(blocks.map((b) => b.key)).toEqual(["active_projects", "identity", "user_profile"]);
+      expect(blocks.every((b) => b.profileClass === null)).toBe(true);
+    });
+
+    it("a class reads the shared identity, then its own blocks, never the unclassed bucket or another class", async () => {
+      const userId = await seedUser();
+      await seedClass(userId, "coder");
+      await seedClass(userId, "game");
+      await upsert(userId, null, "identity", "Name: Tim");
+      await upsert(userId, null, "user_profile", "Family: Alex");
+      await upsert(userId, "coder", "preferences", "TypeScript");
+      await upsert(userId, "coder", "active_projects", "Cogmo");
+      await upsert(userId, "game", "preferences", "Call me Thorin");
+
+      const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId, "coder"));
+      expect(blocks).toEqual([
+        { profileClass: null, key: "identity", content: "Name: Tim" },
+        { profileClass: "coder", key: "active_projects", content: "Cogmo" },
+        { profileClass: "coder", key: "preferences", content: "TypeScript" },
+      ]);
+    });
+
+    it("a class's identity override follows the shared identity and leads the class's blocks", async () => {
+      const userId = await seedUser();
+      await seedClass(userId, "game");
+      await upsert(userId, "game", "active_projects", "Campaign");
+      await upsert(userId, "game", "identity", "Name: Thorin");
+      await upsert(userId, null, "identity", "Name: Tim");
+
+      const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId, "game"));
+      expect(blocks).toEqual([
+        { profileClass: null, key: "identity", content: "Name: Tim" },
+        { profileClass: "game", key: "identity", content: "Name: Thorin" },
+        { profileClass: "game", key: "active_projects", content: "Campaign" },
+      ]);
+    });
+
+    it("a class reads its blocks before any shared identity exists", async () => {
+      const userId = await seedUser();
+      await seedClass(userId, "game");
+      await upsert(userId, "game", "identity", "Name: Thorin");
+
+      const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId, "game"));
+      expect(blocks).toEqual([{ profileClass: "game", key: "identity", content: "Name: Thorin" }]);
+    });
+
+    it("rejects a block for a class the user hasn't registered", async () => {
+      const userId = await seedUser();
+      await expect(upsert(userId, "game", "preferences", "x")).rejects.toThrow();
+    });
+
+    it("deleting a class deletes its blocks and leaves the NULL-class ones", async () => {
+      const userId = await seedUser();
+      await seedClass(userId, "game");
+      await upsert(userId, null, "identity", "Name: Tim");
+      await upsert(userId, "game", "identity", "Name: Thorin");
+      await upsert(userId, "game", "preferences", "Dice");
+
+      await tx((trx) => store.deleteProfileClass(trx, userId, "game"));
+
+      const rows = await db
+        .select({ profileClass: coreMemoryBlocks.profileClass, key: coreMemoryBlocks.key })
+        .from(coreMemoryBlocks)
+        .where(eq(coreMemoryBlocks.userId, userId));
+      expect(rows).toEqual([{ profileClass: null, key: "identity" }]);
+    });
+
+    it("deleteCoreMemoryBlock removes one class's block and nothing in another scope", async () => {
+      const userId = await seedUser();
+      await seedClass(userId, "game");
+      await upsert(userId, null, "identity", "Name: Tim");
+      await upsert(userId, "game", "identity", "Name: Thorin");
+      await upsert(userId, "game", "preferences", "Dice");
+
       await tx((trx) =>
-        store.upsertCoreMemoryBlock(trx, { userId, key: "preferences", content: "Dark mode" }),
-      );
-      await tx((trx) =>
-        store.upsertCoreMemoryBlock(trx, { userId, key: "active_projects", content: "Assistant" }),
-      );
-      await tx((trx) =>
-        store.upsertCoreMemoryBlock(trx, { userId, key: "user_profile", content: "Tim" }),
+        store.deleteCoreMemoryBlock(trx, { userId, profileClass: "game", key: "identity" }),
       );
 
-      const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId));
-      expect(blocks.map((b) => b.key)).toEqual(["active_projects", "preferences", "user_profile"]);
+      const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId, "game"));
+      expect(blocks).toEqual([
+        { profileClass: null, key: "identity", content: "Name: Tim" },
+        { profileClass: "game", key: "preferences", content: "Dice" },
+      ]);
+    });
+
+    it("listCoreMemoryKeys lists one class's own keys", async () => {
+      const userId = await seedUser();
+      await seedClass(userId, "game");
+      await seedClass(userId, "coder");
+      await upsert(userId, null, "identity", "Name: Tim");
+      await upsert(userId, "game", "preferences", "Dice");
+      await upsert(userId, "game", "identity", "Name: Thorin");
+      await upsert(userId, "coder", "active_projects", "Cogmo");
+
+      expect(await tx((trx) => store.listCoreMemoryKeys(trx, userId, "game"))).toEqual([
+        "identity",
+        "preferences",
+      ]);
+      expect(await tx((trx) => store.listCoreMemoryKeys(trx, userId, "unused"))).toEqual([]);
     });
 
     it("returns empty array for unknown user", async () => {
       const blocks = await tx((trx) =>
-        store.getCoreMemoryBlocks(trx, "00000000-0000-0000-0000-000000000000"),
+        store.getCoreMemoryBlocks(trx, "00000000-0000-0000-0000-000000000000", null),
       );
       expect(blocks).toEqual([]);
     });

@@ -5,6 +5,7 @@ import { err, ok, type Result } from "neverthrow";
 import { planGateEmission } from "../agent/coding/plan-gate.js";
 import type { CodingStore } from "../agent/coding/store/index.js";
 import type { CompactConversationResult } from "../agent/conversation/compact-conversation.js";
+import { IDENTITY_BLOCK_KEY } from "../agent/core-memory/scope.js";
 import { isCoreCompartment } from "../agent/evolution/memory-extraction-schema.js";
 import type { TriggerReflectionResult } from "../agent/evolution/trigger-reflection.js";
 import { gateToken } from "../agent/pipeline/gate-keyboard.js";
@@ -290,6 +291,7 @@ export type TransportError =
   | { code: "profile_in_use" }
   | { code: "profile_name_taken" }
   | { code: "profile_class_in_use"; profileRefs: number }
+  | { code: "profile_class_has_blocks"; keys: string[] }
   | { code: "profile_class_not_found"; name: string }
   | { code: "profile_class_name_taken"; name: string }
   | { code: "unknown_profile_class"; name: string }
@@ -635,18 +637,33 @@ export interface Transport {
       platformUserHandle: string,
       input: { name: string; description: string },
     ): Promise<Result<ProfileClass, TransportError>>;
-    delete(platformUserHandle: string, name: string): Promise<Result<void, TransportError>>;
+    /**
+     * Delete a class, and with it the class's core-memory blocks. A call
+     * that would delete blocks without `confirm` returns
+     * `profile_class_has_blocks` with their keys and changes nothing;
+     * `profile_class_in_use` comes first, since that call deletes nothing.
+     */
+    delete(
+      platformUserHandle: string,
+      name: string,
+      opts: { confirm: boolean },
+    ): Promise<Result<void, TransportError>>;
     /**
      * Flip the `restricted` flag on a class. Independent of whether any
      * profile currently references the class — marking restricted while
      * in use is the common case (a class becoming sensitive after the
      * fact). `profile_class_not_found` when no row matches the name.
+     * Unrestricting deletes the class's `identity` override in the same
+     * transaction, so no unrestricted class shadows the shared block, and
+     * reports whether there was one; without `confirm`, a call that would
+     * delete it returns `profile_class_has_blocks` and changes nothing.
      */
     setRestricted(
       platformUserHandle: string,
       name: string,
       restricted: boolean,
-    ): Promise<Result<void, TransportError>>;
+      opts: { confirm: boolean },
+    ): Promise<Result<{ overrideDeleted: boolean }, TransportError>>;
   };
 
   /**
@@ -1883,10 +1900,20 @@ export function createTransport(deps: {
         });
       },
 
-      async delete(platformUserHandle, name) {
+      async delete(platformUserHandle, name, { confirm }) {
         return runInTx(async (tx) => {
           const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
           if (!identity) return err({ code: "identity_rejected" as const });
+          const keys = await agentStore.listCoreMemoryKeys(tx, identity.userId, name);
+          if (keys.length > 0 && !confirm) {
+            // In use first, since that call deletes nothing; the FK stays the
+            // authority at delete time.
+            const refs = (await agentStore.listProfiles(tx, identity.userId)).filter(
+              (p) => p.userId === identity.userId && p.profileClass === name,
+            ).length;
+            if (refs > 0) return err({ code: "profile_class_in_use" as const, profileRefs: refs });
+            return err({ code: "profile_class_has_blocks" as const, keys: [...keys] });
+          }
           try {
             const result = await agentStore.deleteProfileClass(tx, identity.userId, name);
             if (!result.deleted) {
@@ -1902,10 +1929,18 @@ export function createTransport(deps: {
         });
       },
 
-      async setRestricted(platformUserHandle, name, restricted) {
+      async setRestricted(platformUserHandle, name, restricted, { confirm }) {
         return runInTx(async (tx) => {
           const identity = await transportStore.resolveUser(tx, channelId, platformUserHandle);
           if (!identity) return err({ code: "identity_rejected" as const });
+          const override =
+            !restricted &&
+            (await agentStore.listCoreMemoryKeys(tx, identity.userId, name)).includes(
+              IDENTITY_BLOCK_KEY,
+            );
+          if (override && !confirm) {
+            return err({ code: "profile_class_has_blocks" as const, keys: [IDENTITY_BLOCK_KEY] });
+          }
           const result = await agentStore.setProfileClassRestricted(
             tx,
             identity.userId,
@@ -1915,7 +1950,14 @@ export function createTransport(deps: {
           if (!result.updated) {
             return err({ code: "profile_class_not_found" as const, name });
           }
-          return ok(undefined);
+          if (override) {
+            await agentStore.deleteCoreMemoryBlock(tx, {
+              userId: identity.userId,
+              profileClass: name,
+              key: IDENTITY_BLOCK_KEY,
+            });
+          }
+          return ok({ overrideDeleted: override });
         });
       },
     },

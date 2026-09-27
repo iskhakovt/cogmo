@@ -46,6 +46,8 @@ import {
 } from "./conversation/load-turn-history.js";
 import { storeTurnContext } from "./conversation/store-turn-context.js";
 import { buildInCooldownReply, isInCooldown } from "./cooldown.js";
+import { loadCoreMemoryScope } from "./core-memory/load-core-memory-scope.js";
+import { offeredBuiltIns } from "./core-memory-tools.js";
 import type { DebounceConfig } from "./debounce.js";
 import { extractGeneratedDocuments, extractGeneratedImages } from "./extract-images.js";
 import type { ImageToolsLoader } from "./image-tools-loader.js";
@@ -527,6 +529,13 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // even if profile.model changes mid-turn.
       const profile = await deps.runInTx((tx) => agentStore.getProfile(tx, profileId));
 
+      // Which core memory the turn renders, reads and writes. Its own step, and
+      // ahead of the catalog reads: design/crash-recovery.md → Turn inputs are
+      // frozen.
+      const coreMemoryScope = await step.run("freeze-core-memory-scope", () =>
+        loadCoreMemoryScope({ runInTx: deps.runInTx, agentStore }, { userId, profile }),
+      );
+
       // Open delivery handles early — needed to resolve voice mode
       // (`canDeliverVoice` reflects which active sessions implement
       // `sendVoice`). Side effect is benign: the streaming adapter just
@@ -580,7 +589,11 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         ? await deps.mcpRegistry.resolveTools({ toolGlobs: turnToolSetGlobs })
         : [];
       const liveTools = composeTurnTools({
-        builtIns: [...tools.snapshot(), ...imageTools, ...subAgentTools],
+        builtIns: offeredBuiltIns(coreMemoryScope, [
+          ...tools.snapshot(),
+          ...imageTools,
+          ...subAgentTools,
+        ]),
         skillTools,
         mcpTools,
         toolSetGlobs: turnToolSetGlobs,
@@ -622,7 +635,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const systemPrompt = await step.run("assemble-prompt", async () => {
         const ctx = await loadConversationContext(
           { runInTx: deps.runInTx, agentStore, transportStore },
-          { conversationId, userId, profile: profile },
+          { conversationId, userId, coreMemoryScope, profile: profile },
         );
         return promptSource.assemble({
           profile: profile,
@@ -735,6 +748,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         {
           userId,
           profile,
+          coreMemoryScope,
           coding: codingService,
           skills: skillsService,
           scheduling: schedulingService,

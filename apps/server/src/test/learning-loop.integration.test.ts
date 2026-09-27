@@ -26,6 +26,7 @@ import { and, asc, desc, eq, inArray, isNull, notInArray, or } from "drizzle-orm
 import { connect } from "inngest/connect";
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
 import { z } from "zod";
+import type { CoreMemoryScope } from "../agent/core-memory/scope.js";
 import { formatUserContext } from "../agent/prompt.js";
 import type { Profile } from "../agent/store/index.js";
 import {
@@ -45,6 +46,8 @@ import { createIsolatedUser } from "./isolated-user.js";
 import { workerInngestBaseUrl } from "./worker-inngest.js";
 
 const RECORDING = process.env.RECORD === "1";
+/** This file's profile has no class, so it renders the unclassed bucket. */
+const UNCLASSED: CoreMemoryScope = { kind: "unclassed" };
 const TURN_TIMEOUT_MS = RECORDING ? 120_000 : 30_000;
 const OBSERVER_TIMEOUT_MS = RECORDING ? 180_000 : 30_000;
 const HINDSIGHT_TIMEOUT_MS = RECORDING ? 180_000 : 60_000;
@@ -316,7 +319,7 @@ describe("learning loop", () => {
       .from(coreMemoryBlocks)
       .where(eq(coreMemoryBlocks.userId, userId))
       .orderBy(asc(coreMemoryBlocks.key));
-    expect(formatUserContext(blocksAfterFact)).toMatch(/Lisbon/);
+    expect(formatUserContext({ scope: UNCLASSED, blocks: blocksAfterFact })).toMatch(/Lisbon/);
 
     await turn(first, DINNER);
     await turn(first, CORRECTION);
@@ -359,7 +362,10 @@ describe("learning loop", () => {
       .from(coreMemoryBlocks)
       .where(eq(coreMemoryBlocks.userId, userId))
       .orderBy(asc(coreMemoryBlocks.key));
-    const userSection = expectDefined(formatUserContext(blocks), "core memory");
+    const userSection = expectDefined(
+      formatUserContext({ scope: UNCLASSED, blocks }),
+      "core memory",
+    );
 
     const third = await startConversation();
     await turn(third, PROBE);

@@ -1,4 +1,5 @@
 import type { ToolDefinition } from "../llm/types.js";
+import type { CoreMemoryView } from "./core-memory/scope.js";
 import { RULE_SECTIONS, type RuleSection, type SectionedRule } from "./rule-sections.js";
 import type { CoreMemoryBlock } from "./service.js";
 import type { Profile } from "./store/index.js";
@@ -14,11 +15,12 @@ export interface AssembleContext {
   /** Active steering rules, rendered by section in the given order within each. */
   rules: ReadonlyArray<SectionedRule>;
   /**
-   * Core memory blocks of the conversation's user — the same user
-   * `core_memory_update` writes for — rendered as the `# User` section.
-   * Empty shows the onboarding text instead.
+   * The conversation user's core memory as the turn's scope sees it — the
+   * blocks `core_memory_update` writes — rendered as the `# User` section.
+   * No visible block shows the onboarding text instead, and a turn without
+   * core memory has no `# User` section.
    */
-  coreMemory: ReadonlyArray<CoreMemoryBlock>;
+  coreMemory: CoreMemoryView;
   /**
    * Per-turn tool catalog rendered into the `# Tools` section. Passed in by
    * the orchestrator after `composeTurnTools` resolves built-ins + image +
@@ -41,7 +43,17 @@ Be direct and genuine. Skip filler ("Great question!", "I'd be happy to help!").
 
 Be concise when the user wants a quick answer. Be thorough when the topic is complex or the user is exploring. Match their energy.`;
 
-const ONBOARDING = `You don't know your user yet. In your first interaction, introduce yourself briefly and learn about them: their name, what they do, their timezone, and how they prefer to communicate. Save what you learn about them, including anything about them they mention in passing, to core memory with core_memory_update as soon as you learn it.`;
+const ONBOARDING = `You don't know your user yet. In your first interaction, introduce yourself briefly and learn about them: their name, what they do, their timezone, and how they prefer to communicate. Save what you learn about them, including anything about them they mention in passing, to core memory with core_memory_update as soon as you learn it, without waiting to learn the rest: a block can start with one line.`;
+
+const SHARED_GROUP = "Shared by every persona:";
+
+const RESTRICTED_SHARED_GROUP =
+  "Shared by every persona. This persona's own `identity`, if it has one, wins where the two " +
+  "differ, and the lines it leaves out still come from here. An `identity` you save here " +
+  "becomes that one and stays in this persona, so write only the lines that differ from this " +
+  "block, not a copy of it:";
+
+const OWN_GROUP = "Only in this persona:";
 
 const RULES_PREAMBLE =
   "Standing rules for your replies. Where two rules that apply to this reply conflict, follow the one listed first.";
@@ -58,9 +70,28 @@ export interface PromptSourceConfig {
   serviceGuidance?: ReadonlyArray<string>;
 }
 
-/** The `# User` section body for a user's core memory blocks, or null when there are none. */
-export function formatUserContext(blocks: ReadonlyArray<CoreMemoryBlock>): string | null {
+/**
+ * The `# User` section body, or null when the turn sees no block. Every block
+ * is headed by its bare key, so a key copied from the prompt into a tool call
+ * is the key.
+ */
+export function formatUserContext(view: CoreMemoryView): string | null {
+  const { scope, blocks } = view;
   if (blocks.length === 0) return null;
+  if (scope.kind !== "classed") return formatBlocks(blocks);
+  const shared = blocks.filter((b) => b.profileClass === null);
+  const own = blocks.filter((b) => b.profileClass !== null);
+  const groups: Array<[string, ReadonlyArray<CoreMemoryBlock>]> = [
+    [scope.restricted ? RESTRICTED_SHARED_GROUP : SHARED_GROUP, shared],
+    [OWN_GROUP, own],
+  ];
+  return groups
+    .filter(([, group]) => group.length > 0)
+    .map(([lead, group]) => `${lead}\n\n${formatBlocks(group)}`)
+    .join("\n\n");
+}
+
+function formatBlocks(blocks: ReadonlyArray<CoreMemoryBlock>): string {
   return blocks.map((b) => `## ${b.key}\n${b.content}`).join("\n\n");
 }
 
@@ -97,18 +128,15 @@ export class DefaultPromptSource implements PromptSource {
 
   async assemble(ctx: AssembleContext): Promise<string> {
     const { profile, rules, coreMemory, toolDefinitions } = ctx;
-    const userContext = formatUserContext(coreMemory);
 
     const parts: string[] = [];
 
     // Identity — always first
     parts.push(profile?.basePrompt ?? IDENTITY);
 
-    // User context or onboarding
-    if (userContext) {
-      parts.push(`# User\n\n${userContext}`);
-    } else {
-      parts.push(`# User\n\n${ONBOARDING}`);
+    // User context or onboarding, unless the turn has no core memory
+    if (coreMemory.scope.kind !== "none") {
+      parts.push(`# User\n\n${formatUserContext(coreMemory) ?? ONBOARDING}`);
     }
 
     // Tools — rendered from the per-turn catalog

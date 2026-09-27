@@ -89,12 +89,13 @@ const USAGE = {
     `  Compartments: ${CORE_LIST}\n` +
     "  Trust:        first-party, any",
   classes:
-    "Usage: /classes [list|add <name> <description>|rm <name>|restrict <name>|unrestrict <name>]\n" +
+    "Usage: /classes [list|add <name> <description>|rm <name> [confirm]|restrict <name>|unrestrict <name> [confirm]]\n" +
     "  /classes                          → list registered profile classes\n" +
     "  /classes add intimate <desc>      → register a new class for /profile class to reference\n" +
     "  /classes rm intimate              → remove a class (must not be assigned to any profile)\n" +
     "  /classes restrict intimate        → mark a class as restricted (recall fails closed unless opted in)\n" +
-    "  /classes unrestrict intimate      → clear the restricted flag",
+    "  /classes unrestrict intimate      → clear the restricted flag\n" +
+    "  … confirm                         → go ahead when it deletes the class's core-memory blocks",
   compartments:
     "Usage: /compartments [list|add <name> <description>|rm <name>]\n" +
     "  /compartments                     → list registered custom compartments\n" +
@@ -370,21 +371,28 @@ export async function handleClasses(
     case "rm":
     case "remove":
     case "delete": {
-      const name = rest.join(" ").trim();
-      if (!name) {
+      const target = parseConfirmable(rest);
+      if (!target) {
         await ctx.reply(USAGE.classes);
         return;
       }
-      return replyClassesDelete(transport, ctx, handle, name);
+      return replyClassesDelete(transport, ctx, handle, target.name, target.confirm);
     }
     case "restrict":
     case "unrestrict": {
-      const name = rest.join(" ").trim();
-      if (!name) {
+      const target = parseConfirmable(rest);
+      if (!target || (sub === "restrict" && target.confirm)) {
         await ctx.reply(USAGE.classes);
         return;
       }
-      return replyClassesSetRestricted(transport, ctx, handle, name, sub === "restrict");
+      return replyClassesSetRestricted(
+        transport,
+        ctx,
+        handle,
+        target.name,
+        sub === "restrict",
+        target.confirm,
+      );
     }
     default:
       await ctx.reply(USAGE.classes);
@@ -1595,16 +1603,29 @@ async function replyClassesList(
   await ctx.reply(`Profile classes:\n${lines.join("\n")}${legend}`);
 }
 
+/** `<name> [confirm]`, the arguments of the class commands that can delete core-memory blocks. */
+function parseConfirmable(args: ReadonlyArray<string>): { name: string; confirm: boolean } | null {
+  const [name, flag, ...extra] = args;
+  if (name === undefined || extra.length > 0) return null;
+  if (flag === undefined) return { name, confirm: false };
+  return flag === "confirm" ? { name, confirm: true } : null;
+}
+
 async function replyClassesSetRestricted(
   transport: Transport,
   ctx: TelegramCommandContext,
   handle: string,
   name: string,
   restricted: boolean,
+  confirm: boolean,
 ): Promise<void> {
-  const res = await transport.profileClasses.setRestricted(handle, name, restricted);
+  const res = await transport.profileClasses.setRestricted(handle, name, restricted, { confirm });
   if (res.isErr()) {
-    await ctx.reply(errorMessage(res.error));
+    await ctx.reply(
+      res.error.code === "profile_class_has_blocks"
+        ? `Class "${name}" has its own identity block, which unrestricting deletes; the class then reads the shared one. To go ahead: /classes unrestrict ${name} confirm`
+        : errorMessage(res.error),
+    );
     return;
   }
   if (restricted) {
@@ -1612,8 +1633,11 @@ async function replyClassesSetRestricted(
       `Class "${name}" marked restricted. Readers without an explicit opt-in (or that don't speak as "${name}") won't see its memories.`,
     );
   } else {
+    const deleted = res.value.overrideDeleted
+      ? " Its own identity block was deleted, so it reads the shared one."
+      : "";
     await ctx.reply(
-      `Class "${name}" no longer restricted. Recall returns to open-by-default for this class.`,
+      `Class "${name}" no longer restricted.${deleted} Recall returns to open-by-default for this class.`,
     );
   }
 }
@@ -1664,10 +1688,15 @@ async function replyClassesDelete(
   ctx: TelegramCommandContext,
   handle: string,
   name: string,
+  confirm: boolean,
 ): Promise<void> {
-  const res = await transport.profileClasses.delete(handle, name);
+  const res = await transport.profileClasses.delete(handle, name, { confirm });
   if (res.isErr()) {
-    await ctx.reply(errorMessage(res.error));
+    await ctx.reply(
+      res.error.code === "profile_class_has_blocks"
+        ? `Removing class "${name}" deletes its core-memory blocks: ${res.error.keys.join(", ")}. To go ahead: /classes rm ${name} confirm`
+        : errorMessage(res.error),
+    );
     return;
   }
   await ctx.reply(`Class "${name}" removed.`);
@@ -2179,6 +2208,8 @@ function errorMessage(err: TransportError): string {
       return `MCP connection failed: ${err.reason}`;
     case "profile_class_in_use":
       return `Class is referenced by ${err.profileRefs} profile(s). Clear /profile class first.`;
+    case "profile_class_has_blocks":
+      return `This deletes the class's core-memory blocks (${err.keys.join(", ")}). Repeat the command with confirm to go ahead.`;
     case "profile_class_not_found":
       return `No profile class named "${err.name}". Use /classes to list.`;
     case "profile_class_name_taken":

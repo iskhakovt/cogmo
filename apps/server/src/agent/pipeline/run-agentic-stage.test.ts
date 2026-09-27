@@ -230,8 +230,8 @@ describe("runAgenticStage", () => {
       voiceMode: null,
     });
     const blocksByUser = new Map([
-      ["user-1", [{ key: "user_profile", content: "Name: Ana" }]],
-      ["user-2", [{ key: "user_profile", content: "Name: Ben" }]],
+      ["user-1", [{ profileClass: null, key: "user_profile", content: "Name: Ana" }]],
+      ["user-2", [{ profileClass: null, key: "user_profile", content: "Name: Ben" }]],
     ]);
     vi.mocked(h.agentStore.getCoreMemoryBlocks).mockImplementation(
       async (_tx, userId) => blocksByUser.get(userId) ?? [],
@@ -240,7 +240,12 @@ describe("runAgenticStage", () => {
     await runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
 
     expect(h.deps.promptSource.assemble).toHaveBeenCalledWith(
-      expect.objectContaining({ coreMemory: [{ key: "user_profile", content: "Name: Ben" }] }),
+      expect.objectContaining({
+        coreMemory: {
+          scope: { kind: "unclassed" },
+          blocks: [{ profileClass: null, key: "user_profile", content: "Name: Ben" }],
+        },
+      }),
     );
   });
 
@@ -356,6 +361,7 @@ describe("runAgenticStage", () => {
         "load-stage-context",
         "persist-stage-prompt",
         "load-turn-transcript",
+        "freeze-core-memory-scope",
         "freeze-turn-inputs",
         "assemble-prompt",
         "load-last-tokens",
@@ -365,6 +371,50 @@ describe("runAgenticStage", () => {
         "extract-artifact",
       ]),
     );
+  });
+
+  it("reads and writes core memory in the scope it froze", async () => {
+    const h = await harness();
+    h.runStreamingAgentLoop.mockImplementation(async ({ service }) => {
+      await service.coreMemory.update("preferences", "Dice");
+      return loopResult();
+    });
+    const { memo, steps } = memoizingSteps();
+    memo.set("freeze-core-memory-scope", {
+      kind: "classed",
+      profileClass: "game",
+      restricted: false,
+    });
+
+    await runAgenticStage(h.deps, stageArgs(), steps, log);
+
+    expect(h.agentStore.getCoreMemoryBlocks).toHaveBeenCalledWith(
+      expect.anything(),
+      "user-1",
+      "game",
+    );
+    expect(h.agentStore.upsertCoreMemoryBlock).toHaveBeenCalledWith(expect.anything(), {
+      userId: "user-1",
+      profileClass: "game",
+      key: "preferences",
+      content: "Dice",
+    });
+  });
+
+  it("offers no core-memory tools in a stage without core memory", async () => {
+    const h = await harness();
+    h.deps.tools.register(toolNamed("core_memory_update"));
+    const { memo, steps } = memoizingSteps();
+    memo.set("freeze-core-memory-scope", { kind: "none" });
+    // A stage with no allowlist, so only the scope can take the tool away.
+    const build = expectDefined(DEFINITION.stages[1], "build");
+
+    await runAgenticStage(h.deps, stageArgs(build), steps, log);
+
+    const [params] = expectDefined(h.runStreamingAgentLoop.mock.calls[0], "loop call");
+    const offered = params.tools.definitions().map((d: ToolDefinition) => d.name);
+    expect(offered).not.toContain("core_memory_update");
+    expect(offered).toContain("web_search");
   });
 
   it("sends the tools it froze on every invocation when a skill stops loading", async () => {

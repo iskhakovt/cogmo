@@ -21,6 +21,12 @@ import * as R from "remeda";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { BUILT_IN_SERVICE_GUIDANCE, builtInToolSpecs } from "../agent/built-ins.js";
+import { createCoreMemoryNamespace } from "../agent/core-memory/core-memory-namespace.js";
+import {
+  type CoreMemoryScope,
+  IDENTITY_BLOCK_KEY,
+  type ScopedCoreMemoryBlock,
+} from "../agent/core-memory/scope.js";
 import { createDocumentTools } from "../agent/document-tools.js";
 import { type AgentLoopResult, runStreamingAgentLoop } from "../agent/loop.js";
 import { DefaultPromptSource } from "../agent/prompt.js";
@@ -106,29 +112,84 @@ const MEMORY_TOOLS: ReadonlySet<string> = new Set([
 
 type CoreMemoryNamespace = Service["coreMemory"];
 
+/** The conversation user every eval turn runs for. */
+const EVAL_USER_ID = "01999a00-0000-7000-8000-000000000002";
+
+const EVAL_TX = { __evalTx: true } as never;
+
 /**
- * A user's core memory held in process. `get` returns blocks in code-unit key
- * order, which is Postgres `ORDER BY key` under the C collation. A linguistic
- * collation such as `en_US` skips `_` at first level, so keys like
- * `work_hours` and `workflow` can swap; the eval fixtures' keys order the
- * same either way.
+ * A user's core memory held in process, behind the production `coreMemory`
+ * namespace, so reads and writes resolve their scope as a turn's Service
+ * does. The store underneath keeps the rows in
+ * memory and orders keys by code unit, which is Postgres `ORDER BY key` under
+ * the C collation. A linguistic collation such as `en_US` skips `_` at first
+ * level, so keys like `work_hours` and `workflow` can swap; the eval
+ * fixtures' keys order the same either way.
  */
 export class EvalCoreMemory implements CoreMemoryNamespace {
-  #blocks: Map<string, string>;
+  #rows = new Map<string, ScopedCoreMemoryBlock>();
+  #namespace: CoreMemoryNamespace;
 
-  constructor(blocks: ReadonlyArray<CoreMemoryBlock>) {
-    this.#blocks = new Map(blocks.map((b) => [b.key, b.content]));
-  }
-
-  async get(): Promise<ReadonlyArray<CoreMemoryBlock>> {
-    return R.sortBy(
-      [...this.#blocks].map(([key, content]) => ({ key, content })),
-      R.prop("key"),
+  constructor(scope: CoreMemoryScope, rows: ReadonlyArray<ScopedCoreMemoryBlock>) {
+    for (const row of rows) this.#rows.set(EvalCoreMemory.#slot(row), row);
+    this.#namespace = createCoreMemoryNamespace(
+      {
+        runInTx: (callback) => callback(EVAL_TX),
+        agentStore: {
+          getCoreMemoryBlocks: async (_tx, _userId, profileClass) => this.#read(profileClass),
+          upsertCoreMemoryBlock: async (_tx, { profileClass, key, content }) => {
+            const row = { profileClass, key, content };
+            this.#rows.set(EvalCoreMemory.#slot(row), row);
+          },
+          deleteCoreMemoryBlock: async (_tx, { profileClass, key }) => {
+            this.#rows.delete(EvalCoreMemory.#slot({ profileClass, key }));
+          },
+        },
+      },
+      { userId: EVAL_USER_ID, scope },
     );
   }
 
-  async update(key: string, content: string): Promise<void> {
-    this.#blocks.set(key, content);
+  /** Blocks an unclassed profile reads and writes: the NULL-class scope. */
+  static unclassed(blocks: ReadonlyArray<CoreMemoryBlock>): EvalCoreMemory {
+    return new EvalCoreMemory(
+      { kind: "unclassed" },
+      blocks.map((b) => ({ profileClass: null, ...b })),
+    );
+  }
+
+  get(): ReturnType<CoreMemoryNamespace["get"]> {
+    return this.#namespace.get();
+  }
+
+  update(key: string, content: string): ReturnType<CoreMemoryNamespace["update"]> {
+    return this.#namespace.update(key, content);
+  }
+
+  /** Every stored block, in every scope. */
+  rows(): ReadonlyArray<ScopedCoreMemoryBlock> {
+    return [...this.#rows.values()];
+  }
+
+  /** `getCoreMemoryBlocks`: the NULL-class scope in key order, or a class's view. */
+  #read(profileClass: string | null): ReadonlyArray<ScopedCoreMemoryBlock> {
+    const inScope = (c: string | null) =>
+      R.sortBy(
+        this.rows().filter((r) => r.profileClass === c),
+        R.prop("key"),
+      );
+    if (profileClass === null) return inScope(null);
+    const isIdentity = (r: ScopedCoreMemoryBlock) => r.key === IDENTITY_BLOCK_KEY;
+    const own = inScope(profileClass);
+    return [
+      ...inScope(null).filter(isIdentity),
+      ...own.filter(isIdentity),
+      ...own.filter((r) => !isIdentity(r)),
+    ];
+  }
+
+  static #slot(row: Pick<ScopedCoreMemoryBlock, "profileClass" | "key">): string {
+    return JSON.stringify([row.profileClass, row.key]);
   }
 }
 
@@ -242,7 +303,7 @@ export async function runEvalConversation(params: {
     const turn = await runEvalTurn({ ...params, history, message });
     history.push(turn.userMessage, ...turn.result.newMessages);
     turns.push(turn);
-    blocksAfter.push(await params.coreMemory.get());
+    blocksAfter.push((await params.coreMemory.get()).blocks);
   }
   return { history, turns, blocksAfter };
 }
