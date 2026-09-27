@@ -795,6 +795,18 @@ Skills are invoked via Inngest events:
 
 Manual invocations are synchronous from the LLM's perspective — tool result returned before the next turn. Cron invocations are fire-and-forget; skill output is whatever side effects the skill itself emits.
 
+### Run-as identity `[confirmed]`
+
+Every run acts for a user: `ctx.user()` returns them, and `ctx.memory` / `ctx.files` go through a scoped `Service` built for them (`SkillRunner.invoke({ runAs })`). `ctx.memory` gets exactly what the agent's own memory tools get — the profile's `memoryScope`, the restricted-class exclusion, and writes staged in `pending_memories` for the Observer.
+
+| Trigger | Runs as |
+|-|-|
+| Agent tool | The turn's user, through the turn's scoped `Service`. |
+| `cogmo skills run` | The install owner with the default profile. |
+| Cron | `skills.run_as_user_id` / `run_as_profile_id`, built by `resolveSkillRunAs` inside the fire's `dispatch` step. |
+
+The cron identity is set iff `schedule` is, and captured by the deploy that sets or changes the live schedule: the approver's user for an approved deploy, otherwise the install owner, with the default profile. A deploy that keeps the schedule keeps the identity; one that drops it clears it. The profile is the default because no deploy path records a conversation: the approval tap carries only the tapper, auto-register starts from a coding task, and the CLI has none.
+
 ### One tool per skill
 
 Each registered skill appears as its own entry in the LLM's tool list — the skill's `name` is the tool name, its `description` from `SKILL.md` is the tool description, its `inputs` schema is the tool's JSON Schema. No generic `invoke_skill` wrapper. This is what makes progressive disclosure work: the LLM sees `summarize_email` directly with its one-line description and knows to call it.
@@ -812,8 +824,12 @@ async function buildToolList(): Promise<ToolSpec[]> {
     name: s.name,                            // e.g. "summarize_email"
     description: s.tier1Description,          // from SKILL.md header + `description` field
     schema: s.inputsSchema,                   // parsed from manifest, z-compiled
-    handler: async (input) => {
-      const result = await skillRunner.invoke({ name: s.name, inputs: input });
+    handler: async (input, service) => {
+      const result = await skillRunner.invoke({
+        name: s.name,
+        inputs: input,
+        runAs: { userId: turn.userId, service },  // the turn's scoped Service
+      });
       return formatSkillResult(result);
     },
   }));
@@ -869,16 +885,16 @@ def run(inputs: dict, ctx) -> dict:
 | Method | Purpose |
 |-|-|
 | `ctx.secrets.get(name)` | Fetch a declared secret value (manifest-gated) |
-| `ctx.memory.recall(query, ...)` | Semantic memory search |
-| `ctx.memory.remember(content, ...)` | Persist memory |
+| `ctx.memory.recall(query, ...)` | Semantic search of the run's user's memory, under the run's profile scope (see [Run-as identity](#run-as-identity-confirmed)) |
+| `ctx.memory.remember(content, ...)` | Stage a fact in `pending_memories` for the Observer to classify and retain. The skill's name and tags reach the Observer as context, not as memory tags. |
 | `ctx.attachments.upload(data, media_type)` | Upload to `AttachmentStore`, return path |
 | `ctx.attachments.download(path)` | Fetch bytes |
-| `ctx.files.read(path)` | Read UTF-8 text from per-user workspace (see [File workspace](#file-workspace-confirmed)) |
+| `ctx.files.read(path)` | Read UTF-8 text from the workspace (see [File workspace](#file-workspace-confirmed)) |
 | `ctx.files.write(path, content)` | Create or overwrite workspace file |
 | `ctx.files.list(prefix=None)` | List workspace entries |
 | `ctx.llm.complete(prompt, model=...)` | LLM call via Cogmo's provider routing (cost-tracked, provider-fallback, prompt-cache aware) |
 | `ctx.now()` | Canonical time (mockable in tests) |
-| `ctx.user` | User identity object — `id`, `timezone`, `email` where available |
+| `ctx.user` | The run's user — `id`, `timezone`, `email` where available |
 | `ctx.notify(channel, message)` | Send a message to the user via their preferred channel (Telegram in v1) |
 | `ctx.log.info(msg, **fields)` | Structured logging to `skill_runs.logs` |
 | `ctx.http.request(method, url, ...)` | Outbound HTTP performed by the host; `get` / `post` wrap it. Tier 1's only network path — Pyodide has no sockets, so `httpx` and `requests` cannot run there. Present in tier 2 as well, so a skill does not break when adding a dependency moves it across the boundary; tier 2 may use `httpx` directly instead. Returns `{status, headers, body}`; a 4xx/5xx is a value, not an exception. Every destination must appear in the manifest's `network.allow` list, checked on the hostname ahead of resolution — a skill with no `network:` block reaches nothing. `http`/`https` only, capped at 5 MiB, and timed out under the skill's own `wall_clock_s` so a hung request stays catchable. Redirects are not followed — the 3xx comes back with its `location` so the next hop is a fresh, separately-checked call. Destinations resolving to loopback, link-local or private ranges are refused: `fetch` runs in the host process, so without that check a skill would reach internal services (Hindsight takes no auth) that a tier-2 sandbox cannot see. Audited to `skill_context_calls` by origin and path, never the query string. |
@@ -895,7 +911,7 @@ Every RPC: validates against the skill's manifest (allowlists, permission scopes
 
 ### File workspace `[confirmed]`
 
-Skills share files across invocations through a per-user workspace exposed as `ctx.files`. This is the v1 mechanism for skill-to-skill state — one skill writes `notes/draft.md`, the next polishes it. Backed by the same S3-backed `service.files` store the agent's in-process `read_file` / `write_file` / `list_files` tools use, so the LLM and skills see one workspace.
+Skills share files across invocations through a workspace exposed as `ctx.files`. This is the v1 mechanism for skill-to-skill state — one skill writes `notes/draft.md`, the next polishes it. Backed by the same S3-backed `service.files` store the agent's in-process `read_file` / `write_file` / `list_files` tools use, so the LLM and skills see one workspace. That store is one deployment-wide workspace, keyed by the logical path with no user prefix; the per-user prefix below is the design, not yet built.
 
 **Text-only.** The workspace stores UTF-8 text. Binary outputs (images, PDFs, generated artifacts) go through `ctx.attachments`. Two stores, two purposes:
 
@@ -1075,6 +1091,10 @@ skills (
   risk_tier     skill_risk_tier NOT NULL,    -- computed by classifier at deploy
   effects       JSONB NOT NULL,              -- SkillEffectsSchema (declared effects list)
   schedule      TEXT,                        -- nullable: cron expression; null = not scheduled
+  run_as_user_id    UUID REFERENCES users(id) ON DELETE CASCADE,  -- nullable: set iff schedule is
+  run_as_profile_id UUID REFERENCES profiles(id),                 -- nullable: set iff schedule is; RESTRICT
+                                             -- Who a cron fire runs as (chk_skills_run_as_iff_schedule).
+                                             -- See Run-as identity.
   git_sha       TEXT NOT NULL,               -- commit hash of current live version
   lockfile_hash TEXT,                        -- nullable: null when manifest.dependencies is empty.
                                              -- sha256(requirements.lock @ git_sha). Drives venv cache
