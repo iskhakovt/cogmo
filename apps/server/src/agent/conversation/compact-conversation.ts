@@ -149,10 +149,6 @@ export async function compactConversation(
     tools: undefined,
   }).messages;
 
-  // Tool definitions are omitted: resolving the per-turn catalog means
-  // composing MCP and skill tools, and the summarizer uses the system prompt
-  // only to recognise what is already stated elsewhere. A missing `# Tools`
-  // section can make it preserve a little more, never less.
   const coreMemoryScope = await loadCoreMemoryScope(
     { runInTx: deps.runInTx, agentStore: deps.agentStore },
     { userId, profile },
@@ -165,6 +161,10 @@ export async function compactConversation(
     },
     { conversationId, userId, coreMemoryScope, profile },
   );
+  // Tool definitions are omitted: resolving the per-turn catalog means
+  // composing MCP and skill tools, and the summarizer uses the system prompt
+  // only to recognise what is already stated elsewhere. A missing `# Tools`
+  // section can make it preserve a little more, never less.
   const system = await deps.promptSource.assemble({
     profile,
     rules: context.rules,

@@ -46,10 +46,7 @@ const ONBOARDING = `You don't know your user yet. In your first interaction, int
 /** Leads a classed profile's shared group. */
 const SHARED_GROUP = "Shared by every persona:";
 
-/**
- * Leads a restricted class's shared group: its own `identity` holds only what
- * differs and wins, so the model saves differences rather than a full copy.
- */
+/** Leads a restricted class's shared group, where the persona's own `identity` wins. */
 const RESTRICTED_SHARED_GROUP =
   "Shared by every persona. This persona's own `identity`, if it has one, wins where the two " +
   "differ, and the lines it leaves out still come from here. An `identity` you save here " +

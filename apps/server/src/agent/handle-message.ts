@@ -529,11 +529,11 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // even if profile.model changes mid-turn.
       const profile = await deps.runInTx((tx) => agentStore.getProfile(tx, profileId));
 
-      // Frozen for the turn: the core memory the prompt renders and the tools
-      // read and write, from the profile's class, restricted flag and trust
-      // (design/memory.md → Core Memory Scope by Profile Class). A step of its
-      // own, so `freeze-turn-inputs` returns what it always has, placed before
-      // the catalog reads so the invocation that runs it makes none of them.
+      // Frozen for the turn: which core memory the prompt renders and the tools
+      // read and write (design/memory.md → Core Memory Scope by Profile Class).
+      // Its own step, since `freeze-turn-inputs`' memo is a contract with runs in
+      // flight; before the catalog reads, so a non-checkpointed invocation that
+      // executes it makes none of them.
       const coreMemoryScope = await step.run("freeze-core-memory-scope", () =>
         loadCoreMemoryScope({ runInTx: deps.runInTx, agentStore }, { userId, profile }),
       );

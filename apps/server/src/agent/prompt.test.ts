@@ -315,7 +315,7 @@ describe("formatUserContext", () => {
     );
   });
 
-  it("tells a restricted persona its own identity wins, and puts that override first in its group", () => {
+  it("tells a restricted persona its own identity wins, and renders the override in its own group", () => {
     expect(
       formatUserContext({
         scope: { kind: "classed", profileClass: "game", restricted: true },
