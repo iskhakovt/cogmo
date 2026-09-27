@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import type { CodingStore } from "../agent/coding/store/index.js";
@@ -96,18 +97,26 @@ export async function bootstrapSkillsRepo(params: {
 }
 
 /**
- * Atomically write a hook file and chmod it executable. Atomicity (write to
- * `.tmp` + rename) prevents a half-written hook from being executed if the
+ * Atomically write a hook file and chmod it executable. Atomicity (write to a
+ * temp file + rename) prevents a half-written hook from being executed if the
  * process is killed mid-boot — Linux `rename(2)` is atomic on the same
- * filesystem.
+ * filesystem. The temp name is unique per call, so concurrent bootstraps on
+ * one path (boot racing the wizard) each rename their own file and the last
+ * rename wins with identical content. Git runs only exact hook names, so a
+ * temp file a crash leaves behind is inert.
  */
 async function installHook(repoPath: string, name: string, content: string): Promise<void> {
   const hookPath = join(repoPath, "hooks", name);
-  const tmpPath = `${hookPath}.tmp`;
+  const tmpPath = `${hookPath}.${randomUUID()}.tmp`;
   await mkdir(dirname(hookPath), { recursive: true });
-  await writeFile(tmpPath, content, { encoding: "utf8", mode: 0o755 });
-  await chmod(tmpPath, 0o755);
-  await rename(tmpPath, hookPath);
+  try {
+    await writeFile(tmpPath, content, { encoding: "utf8", mode: 0o755 });
+    await chmod(tmpPath, 0o755);
+    await rename(tmpPath, hookPath);
+  } catch (e) {
+    await rm(tmpPath, { force: true });
+    throw e;
+  }
 }
 
 /** Exported for tests so they can assert the hook content matches what was installed. */
