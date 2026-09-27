@@ -16,6 +16,7 @@
  */
 
 import { jsonrepair } from "jsonrepair";
+import type { Usage } from "./types.js";
 
 /**
  * The provider returned a syntactically intact response but its content
@@ -59,6 +60,25 @@ export class OutputCutOffError extends ProviderProtocolError {
   constructor(name: string, stopReason: "max_tokens" | "context_overflow") {
     super(`structured output for "${name}" stopped at ${stopReason}`, undefined);
     this.name = "OutputCutOffError";
+  }
+}
+
+/**
+ * A whole `responseFormat` reply that made none of the tool call the adapter
+ * asked for. It carries what a re-ask needs: the reply's text, the adapter's
+ * instruction naming the tool, and the call's usage.
+ */
+export class MissingToolCallError extends ProviderProtocolError {
+  readonly reply: string;
+  readonly instruction: string;
+  readonly usage: Readonly<Usage>;
+
+  constructor(name: string, miss: { reply: string; instruction: string; usage: Usage }) {
+    super(`structured output for "${name}" made no tool call`, undefined);
+    this.name = "MissingToolCallError";
+    this.reply = miss.reply;
+    this.instruction = miss.instruction;
+    this.usage = miss.usage;
   }
 }
 

@@ -23,11 +23,16 @@
 import type { ZodType } from "zod";
 import { logger } from "../logger.js";
 import { extractText } from "./content.js";
-import { OutputCutOffError, ProviderProtocolError, parseProviderJson } from "./errors.js";
+import {
+  MissingToolCallError,
+  OutputCutOffError,
+  ProviderProtocolError,
+  parseProviderJson,
+} from "./errors.js";
 import { RefusalError } from "./fallback.js";
 import { toObjectJsonSchema } from "./json-schema.js";
 import type { LlmProvider } from "./provider.js";
-import type { Message, StopReason, Usage } from "./types.js";
+import type { LlmResponse, Message, StopReason, Usage } from "./types.js";
 import { sumUsage, ZERO_USAGE } from "./usage.js";
 
 /**
@@ -51,9 +56,10 @@ export interface ChatTypedRepair {
    */
   jsonrepair?: boolean;
   /**
-   * Number of feedback-injection retries permitted on Zod validation failure.
-   * `0` disables retry (one attempt total). Has no effect when
-   * {@link onZodFailure} is `"throw"`.
+   * Number of feedback-injection retries permitted on Zod validation failure
+   * or on a {@link MissingToolCallError}, from one shared budget. `0` disables
+   * retry (one attempt total). Has no effect when {@link onZodFailure} is
+   * `"throw"`.
    *
    * Default: `1`.
    */
@@ -64,7 +70,8 @@ export interface ChatTypedRepair {
    * - `"feedback"`: append the bad assistant turn + a user turn carrying the
    *   validation error, re-call the model with the same schema, count one
    *   retry against {@link maxRetries}.
-   * - `"throw"`: surface the Zod error immediately, no retry.
+   * - `"throw"`: surface the Zod error immediately, no retry. A
+   *   {@link MissingToolCallError} surfaces the same way.
    *
    * Default: `"feedback"`.
    */
@@ -111,7 +118,9 @@ const DEFAULT_REPAIR: Required<ChatTypedRepair> = {
  * the returned text, validates with the provided Zod schema. On Zod failure
  * with `repair.onZodFailure: "feedback"`, appends the failed response plus
  * a validation-error user turn and re-calls the model up to
- * `repair.maxRetries` times.
+ * `repair.maxRetries` times. A {@link MissingToolCallError} spends the same
+ * budget on a re-ask: the reply's text, then the adapter's instruction as
+ * the user turn.
  *
  * {@link ProviderProtocolError} (raised by {@link parseProviderJson} when
  * `jsonrepair` also fails) propagates immediately — no feedback retry, no
@@ -130,14 +139,32 @@ export async function chatTyped<T>(params: TypedChatParams<T>): Promise<TypedCha
   let totalUsage: Readonly<Usage> = ZERO_USAGE;
   let retries = 0;
 
+  const canRetry = () => repair.onZodFailure === "feedback" && retries < repair.maxRetries;
+
   for (;;) {
-    const response = await provider.chat({
-      model,
-      system,
-      messages,
-      responseFormat: { type: "json_schema", name, schema: jsonSchema },
-      ...(params.maxTokens != null && { maxTokens: params.maxTokens }),
-    });
+    let response: LlmResponse;
+    try {
+      response = await provider.chat({
+        model,
+        system,
+        messages,
+        responseFormat: { type: "json_schema", name, schema: jsonSchema },
+        ...(params.maxTokens != null && { maxTokens: params.maxTokens }),
+      });
+    } catch (err) {
+      if (!(err instanceof MissingToolCallError)) throw err;
+      totalUsage = sumUsage(totalUsage, err.usage);
+      if (!canRetry()) {
+        logger.warn({ name, retries }, "chatTyped: reply made no tool call, no retry budget");
+        throw err;
+      }
+      logger.debug({ name, retry: retries + 1 }, "chatTyped: re-asking for the tool call");
+      // Providers reject a blank assistant turn.
+      if (err.reply.trim() !== "") messages.push({ role: "assistant", content: err.reply });
+      messages.push({ role: "user", content: err.instruction });
+      retries++;
+      continue;
+    }
 
     totalUsage = sumUsage(totalUsage, response.usage);
     assertWholeAnswer(response.stopReason, name);
@@ -150,7 +177,7 @@ export async function chatTyped<T>(params: TypedChatParams<T>): Promise<TypedCha
     try {
       data = schema.parse(parsed);
     } catch (zodErr) {
-      if (repair.onZodFailure === "throw" || retries >= repair.maxRetries) {
+      if (!canRetry()) {
         logger.warn(
           { name, retries, err: zodErr },
           "chatTyped: zod validation failed, no retry budget",

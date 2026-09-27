@@ -2,7 +2,13 @@ import Anthropic from "@anthropic-ai/sdk";
 import { logger } from "../logger.js";
 import { hasOpenObject, toStructuredOutputSchema } from "./anthropic-output-schema.js";
 import { cacheMarker } from "./cache-marker.js";
-import { ProviderProtocolError, parseToolArgs, ToolArgsCutOffError } from "./errors.js";
+import { extractText } from "./content.js";
+import {
+  MissingToolCallError,
+  ProviderProtocolError,
+  parseToolArgs,
+  ToolArgsCutOffError,
+} from "./errors.js";
 import { withFailureLogging } from "./logging-fetch.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
@@ -241,6 +247,7 @@ export class AnthropicProvider implements LlmProvider {
       // text, with `tool_use` read as `end_turn`, it matches a
       // structured-output reply; any other stop reason passes through.
       const format = params.responseFormat;
+      const content = response.content.flatMap(fromAnthropicBlock);
       if (format && !takesStructuredOutput(format)) {
         const toolUse = response.content.find((b) => b.type === "tool_use");
         if (toolUse && toolUse.type === "tool_use") {
@@ -251,20 +258,18 @@ export class AnthropicProvider implements LlmProvider {
             usage,
           };
         }
-        // Under `tool_choice: auto` the model can answer in text instead,
-        // which passes through for the caller to parse.
-        logger.warn(
-          { model: params.model, name: format.name },
-          "structured-output reply called no tool; passing its text through",
-        );
+        // `tool_choice: auto` lets the model answer in text instead. A cut-off
+        // or refused reply passes through with its stop reason.
+        if (stopReason === "end_turn") {
+          throw new MissingToolCallError(format.name, {
+            reply: extractText(content),
+            instruction: callInstruction(format.name),
+            usage,
+          });
+        }
       }
 
-      return {
-        content: response.content.flatMap(fromAnthropicBlock),
-        stopReason,
-        model: response.model,
-        usage,
-      };
+      return { content, stopReason, model: response.model, usage };
     } catch (err) {
       failChatSpan(span, err);
       throw err;
@@ -380,10 +385,7 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
     return {
       model: params.model,
       max_tokens: maxTokens,
-      system: [
-        ...systemBlocks,
-        { type: "text", text: `Respond by calling the ${format.name} tool.` },
-      ],
+      system: [...systemBlocks, { type: "text", text: callInstruction(format.name) }],
       messages: params.messages.map(toAnthropicMessage),
       tools: [syntheticTool],
     };
@@ -429,6 +431,11 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
  */
 function takesStructuredOutput(format: ResponseFormat): boolean {
   return !hasOpenObject(format.schema);
+}
+
+/** The tool path's request for its call, in the system prompt and in a re-ask. */
+function callInstruction(name: string): string {
+  return `Respond by calling the ${name} tool.`;
 }
 
 /**

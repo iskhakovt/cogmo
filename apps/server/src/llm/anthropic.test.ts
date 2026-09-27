@@ -5,7 +5,7 @@ import { logger } from "../logger.js";
 import { expectDefined } from "../test/assertions.js";
 import { AnthropicProvider } from "./anthropic.js";
 import { extractText } from "./content.js";
-import { ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
+import { MissingToolCallError, ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
 import { toObjectJsonSchema } from "./json-schema.js";
 import type { CacheIntent, ResponseFormat, StreamEvent, ToolDefinition } from "./types.js";
 
@@ -1895,18 +1895,67 @@ describe("AnthropicProvider", () => {
     it.each([
       ["JSON", '{"stageOutput":{}}'],
       ["prose", "Which feed should the pipeline read?"],
-    ])("passes a tool-path reply of %s text that calls no tool through", async (_kind, text) => {
+    ])(
+      "throws for a tool-path reply of %s text that calls no tool, naming the tool to re-ask with",
+      async (_kind, text) => {
+        const provider = createProvider();
+        mockCreate.mockResolvedValueOnce(textReply("claude-opus-5-5", text));
+
+        const error = await provider
+          .chat({
+            model: "claude-opus-5-5",
+            system: "Compile the pipeline",
+            messages: [{ role: "user", content: "hi" }],
+            responseFormat: OPEN_FORMAT,
+          })
+          .catch((err: unknown) => err);
+
+        expect(error).toBeInstanceOf(MissingToolCallError);
+        expect(error).toMatchObject({
+          reply: text,
+          instruction: "Respond by calling the pipeline_definition tool.",
+          usage: { inputTokens: 50, outputTokens: 20 },
+        });
+      },
+    );
+
+    it.each([
+      ["max_tokens", "max_tokens"],
+      ["refusal", "refusal"],
+      ["model_context_window_exceeded", "context_overflow"],
+    ])(
+      "passes a tool-path reply stopped at %s before any call through",
+      async (wire, canonical) => {
+        const provider = createProvider();
+        mockCreate.mockResolvedValueOnce({
+          ...textReply("claude-opus-5-5", "Let me think"),
+          stop_reason: wire,
+        });
+
+        const result = await provider.chat({
+          model: "claude-opus-5-5",
+          system: "Compile the pipeline",
+          messages: [{ role: "user", content: "hi" }],
+          responseFormat: OPEN_FORMAT,
+        });
+
+        expect(result.stopReason).toBe(canonical);
+        expect(extractText(result.content)).toBe("Let me think");
+      },
+    );
+
+    it("passes a structured-output reply's text through, whatever it says", async () => {
       const provider = createProvider();
-      mockCreate.mockResolvedValueOnce(textReply("claude-opus-5-5", text));
+      mockCreate.mockResolvedValueOnce(textReply("claude-opus-5-5", "Who is Alice?"));
 
       const result = await provider.chat({
         model: "claude-opus-5-5",
-        system: "Compile the pipeline",
-        messages: [{ role: "user", content: "hi" }],
-        responseFormat: OPEN_FORMAT,
+        system: "Extract structured data",
+        messages: [{ role: "user", content: "Alice is 30" }],
+        responseFormat: PERSON_FORMAT,
       });
 
-      expect(extractText(result.content)).toBe(text);
+      expect(extractText(result.content)).toBe("Who is Alice?");
       expect(result.stopReason).toBe("end_turn");
     });
 
