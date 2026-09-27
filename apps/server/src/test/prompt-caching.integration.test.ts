@@ -4,8 +4,9 @@
  * Plan → Integration tier): every request the agent loop sends is the one
  * before it plus what happened since, within turns and across them.
  *
- * The profile offers only `generate_image`, so the model can't edit core
- * memory, which would change the system prompt.
+ * The profile offers `generate_image` and `core_memory_update`. A turn that
+ * saves to core memory leaves the system prompt as it is: the next turn's
+ * context announces the change.
  */
 
 import { readFile } from "node:fs/promises";
@@ -15,8 +16,13 @@ import { connect } from "inngest/connect";
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
 import { z } from "zod";
 import type { Profile } from "../agent/store/index.js";
-import { messages, turnContexts } from "../agent/store/schema.js";
-import { NO_CORE_MEMORY_UPDATES, renderTurnContext } from "../agent/turn-context.js";
+import {
+  coreMemoryBlocks,
+  messages,
+  systemPromptSnapshots,
+  turnContexts,
+} from "../agent/store/schema.js";
+import { renderTurnContext } from "../agent/turn-context.js";
 import { db } from "../db/index.js";
 import { env } from "../env.js";
 import { bootstrap } from "../index.js";
@@ -40,6 +46,7 @@ const HINDSIGHT_TIMEOUT_MS = RECORDING ? 180_000 : 60_000;
 // The user messages key the recorded turns: editing one means re-recording this file.
 const DRAW = "Draw me a lighthouse on a rocky coast at dusk, for the wall of my study.";
 const HOMELAB = "What do you remember about my homelab?";
+const MOVE = "I've just moved to Lisbon. Please save that to my core memory.";
 const HYPERVISOR = "Which hypervisor did I say the homelab runs?";
 const PICTURE = "Here's the picture I ended up printing. What's in it?";
 const THANKS = "Thanks!";
@@ -78,7 +85,16 @@ beforeAll(async () => {
       name: "prompt-caching",
       basePrompt: DEFAULT_BASE_PROMPT,
       model: CASSETTE_CHAT_MODEL,
-      toolSet: ["generate_image"],
+      toolSet: ["generate_image", "core_memory_update"],
+    }),
+  );
+  // A known user, so the prompt carries core memory rather than onboarding.
+  await runInTx((tx) =>
+    agentStore.upsertCoreMemoryBlock(tx, {
+      userId,
+      profileClass: null,
+      key: "identity",
+      content: "Name: Sam",
     }),
   );
   const channel = await runInTx((tx) => transportStore.getChannelByType(tx, "direct"));
@@ -245,6 +261,7 @@ describe("prompt caching", () => {
     await take(DRAW);
     await retainFact(FACT);
     await take(HOMELAB);
+    await take(MOVE);
     await take(HYPERVISOR);
     const picture = await bootstrapped.attachmentStore.upload(
       await readFile(PICTURE_PATH),
@@ -259,10 +276,14 @@ describe("prompt caching", () => {
 
     const requests = await loopRequests(DRAW);
     const turnOf = (request: number) => sentBy.findIndex((sent) => request < sent) + 1;
-    // Turn 1 is a tool turn: at least two iterations.
-    expect(sentBy[0]).toBeGreaterThanOrEqual(2);
-    expect(sentBy).toHaveLength(5);
-    const throughPicture = expectDefined(sentBy[3], "requests through the picture turn");
+    // Turns 1 and 3 are tool turns: at least two iterations each.
+    expect(sentBy).toHaveLength(6);
+    const [throughDraw, throughHomelab, throughMove] = sentBy;
+    expect(throughDraw).toBeGreaterThanOrEqual(2);
+    expect(
+      expectDefined(throughMove, "move") - expectDefined(throughHomelab, "homelab"),
+    ).toBeGreaterThanOrEqual(2);
+    const throughPicture = expectDefined(sentBy[4], "requests through the picture turn");
     expect(requests.length).toBeGreaterThan(throughPicture);
 
     // ── Append-only, request to request, within turns and across them ──
@@ -292,7 +313,7 @@ describe("prompt caching", () => {
       }
     }
 
-    // ── One system prompt, carrying nothing per-turn ──
+    // ── One system prompt, carrying nothing per-turn, across a core-memory edit ──
     const systems = new Set(requests.map((r) => JSON.stringify(r.system)));
     expect(systems.size).toBe(1);
     const system = expectDefined(requests[0], "first request")
@@ -300,6 +321,18 @@ describe("prompt caching", () => {
       .join("");
     expect(system).not.toMatch(/Current time:/);
     expect(system).not.toMatch(/Recalled Context|Proxmox/);
+    expect(system).toContain("Name: Sam");
+    expect(system).not.toMatch(/Lisbon/);
+    const blocks = await db
+      .select({ key: coreMemoryBlocks.key, content: coreMemoryBlocks.content })
+      .from(coreMemoryBlocks)
+      .where(eq(coreMemoryBlocks.userId, userId));
+    expect(blocks.map((b) => b.content).join("\n")).toMatch(/Lisbon/);
+    const snapshots = await db
+      .select({ openedBy: systemPromptSnapshots.openedBy })
+      .from(systemPromptSnapshots)
+      .where(eq(systemPromptSnapshots.conversationId, conversation.id));
+    expect(snapshots).toHaveLength(1);
 
     // ── Every loop request caches for an hour: tools, system and the tail ──
     for (const request of requests) {
@@ -323,9 +356,10 @@ describe("prompt caching", () => {
         ),
       )
       .orderBy(asc(turnContexts.messageId));
-    expect(stored).toHaveLength(5);
+    expect(stored).toHaveLength(6);
     const last = expectDefined(requests.at(-1), "last request");
     expect(turnContextsIn(last)).toEqual(stored.map((s) => s.rendered));
+    for (const { rendered } of stored) expect(rendered).toContain("Delivery channels: direct\n");
     // The time is the row's `created_at`, in the configured timezone.
     const createdAt = new Map(
       (
@@ -335,16 +369,34 @@ describe("prompt caching", () => {
           .where(eq(messages.conversationId, conversation.id))
       ).map((r) => [r.id, r.createdAt]),
     );
+    // No block changes after the turn that announces it, so its content is
+    // the announcement's.
+    const content = new Map(blocks.map((b) => [b.key, b.content]));
     for (const { messageId, rendered, context } of stored) {
       expect(rendered).toBe(
         renderTurnContext({
           handledAt: expectDefined(createdAt.get(messageId), "message created_at"),
           timezone: env.USER_TIMEZONE,
           context,
-          coreMemoryUpdates: NO_CORE_MEMORY_UPDATES,
+          coreMemoryUpdates: {
+            scope: { kind: "unclassed" },
+            blocks: context.announcedCoreMemoryBlocks.map((b) => ({
+              ...b,
+              content: expectDefined(content.get(b.key), `core memory block ${b.key}`),
+            })),
+          },
         }),
       );
     }
+
+    // ── The core-memory edit: announced by the next turn, and only by it ──
+    const announcing = stored.flatMap((s, i) =>
+      s.context.announcedCoreMemoryBlocks.length > 0 ? [i] : [],
+    );
+    expect(announcing).toEqual([3]);
+    expect(expectDefined(stored[3], "turn 4 context").rendered).toMatch(
+      /<core_memory_updates>[\s\S]*Lisbon[\s\S]*<\/core_memory_updates>/,
+    );
 
     // ── Recalled memories: shown by turn 2, never shown twice ──
     const [, homelab] = stored;

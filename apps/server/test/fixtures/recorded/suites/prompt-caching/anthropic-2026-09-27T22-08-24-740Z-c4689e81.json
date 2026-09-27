@@ -1,0 +1,51 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nI've just moved to Lisbon. Please save that to my core memory.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 3,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "core_memory_update",
+            "arguments": "{\"key\": \"identity\", \"content\": \"Name: Sam\\nHome: Lisbon, Portugal\"}",
+            "id": "toolu_01KVLDDokFM7vofgGKoLu3gV"
+          }
+        ]
+      },
+      "recordedTimings": {
+        "ttftMs": 990,
+        "interChunkDelaysMs": [
+          0,
+          1301,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          2,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          3,
+          0
+        ],
+        "totalDurationMs": 2296
+      },
+      "metadata": {
+        "systemHash": "b881c548",
+        "toolsHash": "994a1d95"
+      }
+    }
+  ]
+}

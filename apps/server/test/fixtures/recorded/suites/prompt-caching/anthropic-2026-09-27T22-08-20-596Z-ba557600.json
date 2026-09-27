@@ -1,0 +1,41 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nWhat do you remember about my homelab?",
+        "model": "claude-sonnet-5",
+        "turnIndex": 2,
+        "hasToolResult": false
+      },
+      "response": {
+        "content": "You run a three-node Proxmox cluster in your homelab. That's what I've got on file — anything you'd like to add or update?"
+      },
+      "recordedTimings": {
+        "ttftMs": 1073,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          632,
+          7,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          10,
+          0,
+          0
+        ],
+        "totalDurationMs": 1722
+      },
+      "metadata": {
+        "systemHash": "b881c548",
+        "toolsHash": "994a1d95"
+      }
+    }
+  ]
+}
