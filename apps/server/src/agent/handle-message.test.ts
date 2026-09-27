@@ -44,6 +44,7 @@ import { createHandleMessage } from "./handle-message.js";
 import type { ImageToolsLoader } from "./image-tools-loader.js";
 import { runStreamingAgentLoop } from "./loop.js";
 import { memoryTools } from "./memory-tools.js";
+import { DefaultPromptSource } from "./prompt.js";
 import { ToolRegistry } from "./tools.js";
 
 type InboundReadyData = z.infer<typeof inboundReady.schema>;
@@ -4298,28 +4299,56 @@ describe("system prompt snapshot", () => {
     });
   });
 
+  /** The stored turn context leading m1, which announced `identity`. */
+  const M1_CONTEXT = {
+    messageId: "m1",
+    rendered: "<turn_context>\nm1 announced identity\n</turn_context>\n\n",
+    context: {
+      recalledMemories: [],
+      voiceMode: false,
+      channelTypes: [],
+      announcedCoreMemoryBlocks: [{ profileClass: null, key: "identity" }],
+    },
+  };
+
+  /** `identity` changed a minute into the epoch; `announcedAt` minutes in, m1's context announced it. */
+  function identityChanged(configDigest: string, announcedAt: number | null) {
+    return {
+      getLatestSystemPromptSnapshot: vi.fn().mockResolvedValue(snapshot({ configDigest })),
+      getCoreMemoryBlocks: vi
+        .fn()
+        .mockResolvedValue([{ profileClass: null, key: "identity", content: "Home: Lisbon" }]),
+      getCoreMemoryUpdateTimes: vi.fn().mockResolvedValue([
+        {
+          profileClass: null,
+          key: "identity",
+          updatedAt: new Date(OPENED_AT.getTime() + 60_000),
+        },
+      ]),
+      listTurnContexts: vi.fn().mockResolvedValue(announcedAt === null ? [] : [M1_CONTEXT]),
+      listCoreMemoryAnnouncements: vi.fn().mockResolvedValue(
+        announcedAt === null
+          ? []
+          : [
+              {
+                messageId: "m1",
+                createdAt: new Date(OPENED_AT.getTime() + announcedAt * 60_000),
+                blocks: M1_CONTEXT.context.announcedCoreMemoryBlocks,
+              },
+            ],
+      ),
+    };
+  }
+
   it("announces a core-memory change once, in the next turn context, with its content", async () => {
     const configDigest = await defaultDigest();
-    const changed = (announcements: ReadonlyArray<{ createdAt: Date; blocks: unknown[] }>) =>
-      mockDeps({
-        agentStore: mockAgentStore({
-          listMessages: vi.fn().mockResolvedValue(HISTORY),
-          getLatestSystemPromptSnapshot: vi.fn().mockResolvedValue(snapshot({ configDigest })),
-          getCoreMemoryBlocks: vi
-            .fn()
-            .mockResolvedValue([{ profileClass: null, key: "identity", content: "Home: Lisbon" }]),
-          getCoreMemoryUpdateTimes: vi.fn().mockResolvedValue([
-            {
-              profileClass: null,
-              key: "identity",
-              updatedAt: new Date(OPENED_AT.getTime() + 60_000),
-            },
-          ]),
-          listCoreMemoryAnnouncements: vi.fn().mockResolvedValue(announcements),
-        }),
-      });
+    const next = mockDeps({
+      agentStore: mockAgentStore({
+        listMessages: vi.fn().mockResolvedValue(HISTORY),
+        ...identityChanged(configDigest, null),
+      }),
+    });
 
-    const next = changed([]);
     await run(next);
 
     expect(turnContextSent(next)).toContain("<core_memory_updates>");
@@ -4338,20 +4367,102 @@ describe("system prompt snapshot", () => {
       "m1",
     );
 
-    const after = changed([
-      {
-        createdAt: new Date(OPENED_AT.getTime() + 120_000),
-        blocks: [{ profileClass: null, key: "identity" }],
-      },
-    ]);
+    // m1's context, still in the transcript, announced it after the change.
+    const after = mockDeps({
+      agentStore: mockAgentStore({
+        listMessages: vi.fn().mockResolvedValue(HISTORY),
+        ...identityChanged(configDigest, 2),
+      }),
+    });
     await run(after);
     expect(turnContextSent(after)).not.toContain("<core_memory_updates>");
+  });
+
+  it("counts the delivery channels and every candidate announcement in compaction", async () => {
+    // The final block announces nothing (m1 still shows the change), but the
+    // count compaction runs includes the change, so it bounds what is sent.
+    const configDigest = await defaultDigest();
+    const countTokens = vi.fn().mockResolvedValue(1_000);
+    const deps = mockDeps({
+      resolveProvider: mockResolver(mockProvider({ countTokens })),
+      transportStore: mockTransportStore({
+        getActiveChannelTypes: vi.fn().mockResolvedValue(["telegram"]),
+      }),
+      agentStore: mockAgentStore({
+        getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 800_000, outputTokens: 2_000 }),
+        listMessages: vi.fn().mockResolvedValue(HISTORY),
+        ...identityChanged(configDigest, 2),
+      }),
+    });
+
+    await run(deps);
+
+    const [counted] = expectDefined(countTokens.mock.calls[0], "count-tokens call");
+    const countedTurn = JSON.stringify(counted.messages.at(-1));
+    expect(countedTurn).toContain("Home: Lisbon");
+    expect(countedTurn).toContain("Delivery channels: telegram");
+    expect(turnContextSent(deps)).not.toContain("<core_memory_updates>");
+    expect(turnContextSent(deps)).toContain("Delivery channels: telegram");
+  });
+
+  it("strips the thinking before the turn when the epoch's opening row is not in its history", async () => {
+    // A concurrent turn opened the epoch after this turn's history was loaded.
+    const configDigest = await defaultDigest();
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        listMessages: vi.fn().mockResolvedValue(HISTORY),
+        getLatestSystemPromptSnapshot: vi
+          .fn()
+          .mockResolvedValue({ ...snapshot({ configDigest }), openedBy: "m-concurrent" }),
+      }),
+    });
+
+    await run(deps);
+
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
+    const { systemPrompt, messages } = loopParams(deps);
+    expect(systemPrompt).toBe("EPOCH PROMPT");
+    expect(messages[1]).toEqual({ role: "assistant", content: [{ type: "text", text: "reply" }] });
+  });
+
+  it("opens an epoch at a new user's first core-memory write, ending onboarding", async () => {
+    const promptSource = new DefaultPromptSource();
+    const first = mockDeps({ promptSource });
+    await run(first);
+    const [, opened] = expectDefined(
+      vi.mocked(first.agentStore.insertOrRecoverSystemPromptSnapshot).mock.calls[0],
+      "first epoch",
+    );
+    expect(opened.rendered).toContain("You don't know your user yet.");
+
+    // Turn 1 saved `identity`.
+    const next = mockDeps({
+      promptSource,
+      agentStore: mockAgentStore({
+        listMessages: vi.fn().mockResolvedValue(HISTORY),
+        getLatestSystemPromptSnapshot: vi.fn().mockResolvedValue({
+          ...snapshot({ configDigest: opened.configDigest }),
+          rendered: opened.rendered,
+        }),
+        getCoreMemoryBlocks: vi
+          .fn()
+          .mockResolvedValue([{ profileClass: null, key: "identity", content: "Name: Sam" }]),
+      }),
+    });
+    await run(next);
+
+    expect(next.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ openedBy: "msg-1" }),
+    );
+    expect(loopParams(next).systemPrompt).toContain("## identity\nName: Sam");
+    expect(loopParams(next).systemPrompt).not.toContain("You don't know your user yet.");
   });
 
   it("names the delivery channels in the turn context", async () => {
     const deps = mockDeps({
       transportStore: mockTransportStore({
-        getActiveChannelTypes: vi.fn().mockResolvedValue(["web", "telegram"]),
+        getActiveChannelTypes: vi.fn().mockResolvedValue(["telegram", "web"]),
       }),
     });
 
@@ -4467,6 +4578,24 @@ describe("system prompt snapshot", () => {
       const { messages } = loopParams(deps);
       expect(JSON.stringify(messages.slice(0, -2))).not.toContain('"thinking"');
       expect(messages.at(-1)?.content).toEqual([thinking, { type: "text", text: "turn 8" }]);
+    });
+
+    it("announces again a change whose announcement an unstored summary took out of view", async () => {
+      // m1's context announced `identity`; this turn's summary, cut at its
+      // output cap and not stored, replaces m1, so the request no longer shows it.
+      const configDigest = await defaultDigest();
+      const deps = summarizingDeps(configDigest, "max_tokens");
+      Object.assign(deps.agentStore, identityChanged(configDigest, 2));
+
+      await run(deps);
+
+      expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
+      const [, stored] = expectDefined(
+        vi.mocked(deps.agentStore.insertOrRecoverTurnContext).mock.calls[0],
+        "stored turn context",
+      );
+      expect(stored.rendered).toContain("<core_memory_updates>");
+      expect(stored.rendered).toContain("Home: Lisbon");
     });
 
     it("keeps the epoch when compaction stored no summary", async () => {

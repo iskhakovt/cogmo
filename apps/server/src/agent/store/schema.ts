@@ -1079,9 +1079,9 @@ export const systemPromptSnapshots = pgTable(
     configDigest: text("config_digest").notNull(),
     createdAt: ts(),
   },
-  (t) => [
-    unique("uq_system_prompt_snapshots_opened_by").on(t.openedBy),
-    // The latest epoch is the one opened latest in the transcript.
-    index("idx_system_prompt_snapshots_conv_opened_by").on(t.conversationId, t.openedBy),
-  ],
+  // `opened_by` alone identifies an epoch, since a message belongs to one
+  // conversation; pairing it with the conversation makes the unique double as
+  // the read path: scanned backwards, it serves "the epoch opened latest in the
+  // transcript". No second index needed.
+  (t) => [unique("uq_system_prompt_snapshots_conv_opened_by").on(t.conversationId, t.openedBy)],
 );

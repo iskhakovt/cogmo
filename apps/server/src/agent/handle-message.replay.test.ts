@@ -129,6 +129,24 @@ const event = {
 /** The turn's row as `load-turn-transcript` returns it: the history's `msg-1`, its time as a string. */
 const TURN_ROW = { id: "msg-1", createdAt: MOCK_MESSAGE_CREATED_AT.toISOString() };
 
+/** An epoch the turn's own row opened, as `open-system-prompt-epoch` returns it. */
+const EPOCH = {
+  openedBy: "msg-1",
+  historyStart: "msg-1",
+  rendered: "system prompt",
+  configDigest: "digest",
+};
+
+/** A `load-system-prompt` result continuing `EPOCH`, with nothing to announce. */
+const LOADED_SYSTEM_PROMPT = {
+  rendered: "system prompt",
+  configDigest: "digest",
+  snapshot: EPOCH,
+  channelTypes: [],
+  coreMemoryChanges: [],
+  announcements: [],
+};
+
 /** The system prompt the agent loop was given. */
 function loopSystemPrompt(deps: HandleMessageDeps): string {
   return expectDefined(vi.mocked(deps.runStreamingAgentLoop).mock.calls[0], "agent loop call")[0]
@@ -394,7 +412,11 @@ describe("handle-message — crash recovery / step replay", () => {
             turn: TURN_ROW,
           }),
         },
-        { id: "assemble-prompt", handler: () => "system prompt" },
+        {
+          id: "load-system-prompt",
+          handler: () => ({ ...LOADED_SYSTEM_PROMPT, snapshot: null }),
+        },
+        { id: "open-system-prompt-epoch", handler: () => EPOCH },
         // `summarize-prefix-outcome` is conditional — only created when compaction
         // decides to summarize. The default mock countTokens stays under
         // threshold, so the step is never invoked here and we don't list it.
@@ -420,6 +442,7 @@ describe("handle-message — crash recovery / step replay", () => {
     expect(loopCallCount).toBeLessThan(10);
     // No DB writes happened — every persist step was cached.
     expect(deps.agentStore.insertMessage).not.toHaveBeenCalled();
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
     expect(deps.agentStore.insertOrRecoverTurnContext).not.toHaveBeenCalled();
     expect(deps.agentStore.insertMessages).not.toHaveBeenCalled();
     // The loop sends the cached turn context.
@@ -723,13 +746,7 @@ describe("handle-message — crash recovery / step replay", () => {
     expect(turnContextSent(deps)).toBe(stored);
   });
   it("does not open another epoch when open-system-prompt-epoch is cached", async () => {
-    const cached = {
-      openedBy: "msg-1",
-      historyStart: "msg-1",
-      rendered: "CACHED EPOCH PROMPT",
-      configDigest: "cached digest",
-      openedAt: MOCK_MESSAGE_CREATED_AT.toISOString(),
-    };
+    const cached = { ...EPOCH, rendered: "CACHED EPOCH PROMPT" };
     const deps = mockDeps();
     const fn = createHandleMessage(deps);
 
@@ -759,15 +776,9 @@ describe("handle-message — crash recovery / step replay", () => {
         {
           id: "load-system-prompt",
           handler: () => ({
+            ...LOADED_SYSTEM_PROMPT,
             rendered: "RENDERED NOW",
-            configDigest: "digest",
-            snapshot: {
-              openedBy: "msg-1",
-              historyStart: "msg-1",
-              rendered: "CACHED EPOCH PROMPT",
-              configDigest: "digest",
-              openedAt: MOCK_MESSAGE_CREATED_AT.toISOString(),
-            },
+            snapshot: { ...EPOCH, rendered: "CACHED EPOCH PROMPT" },
           }),
         },
       ],

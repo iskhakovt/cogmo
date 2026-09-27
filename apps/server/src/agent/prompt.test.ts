@@ -180,32 +180,51 @@ describe("DefaultPromptSource", () => {
       toolDefinitions: testTools,
     };
 
-    it("covers everything the prompt renders but the core memory blocks", async () => {
+    it("covers everything the prompt renders but the blocks' keys and content", async () => {
       const configuration = await source.configuration(context);
 
       expect(configuration).not.toContain("Name: Tim");
+      expect(configuration).not.toContain("## identity");
       for (const part of ["You are a coder.", "- Be kind", "**web_search**", "Guidance."]) {
         expect(configuration).toContain(part);
       }
       await expect(
         source.configuration({
           ...context,
-          coreMemory: unclassed([{ key: "identity", content: "Name: Ada" }]),
+          coreMemory: unclassed([
+            { key: "identity", content: "Name: Ada" },
+            { key: "preferences", content: "Metric units" },
+          ]),
         }),
       ).resolves.toBe(configuration);
-      await expect(source.configuration({ ...context, coreMemory: NO_BLOCKS })).resolves.toBe(
-        configuration,
-      );
     });
 
-    it("changes with the code-owned text around core memory, and with its absence", async () => {
-      const configuration = await source.configuration(context);
+    it("changes with the shape of # User: onboarding, or which group leads render", async () => {
+      const shape = (coreMemory: CoreMemoryView) =>
+        source.configuration({ ...context, coreMemory });
+      const restricted: CoreMemoryScope = {
+        kind: "classed",
+        profileClass: "game",
+        restricted: true,
+      };
+      const own = { profileClass: "game", key: "preferences", content: "Dice" };
+      const shared = { profileClass: null, key: "identity", content: "Name: Tim" };
 
-      expect(configuration).toContain("You don't know your user yet.");
-      expect(configuration).toContain("Shared by every persona");
-      await expect(
-        source.configuration({ ...context, coreMemory: { scope: { kind: "none" }, blocks: [] } }),
-      ).resolves.not.toBe(configuration);
+      // A new user's first write ends onboarding.
+      expect(await shape(NO_BLOCKS)).toContain("You don't know your user yet.");
+      expect(await shape(NO_BLOCKS)).not.toBe(await shape(context.coreMemory));
+      // A restricted persona's first shared `identity` adds the shared group's lead.
+      const ownOnly = await shape({ scope: restricted, blocks: [own] });
+      const withShared = await shape({ scope: restricted, blocks: [shared, own] });
+      expect(withShared).not.toBe(ownOnly);
+      expect(withShared).toContain("This persona's own `identity`");
+      expect(ownOnly).not.toContain("This persona's own `identity`");
+      // The same blocks under an unrestricted class render another lead.
+      expect(
+        await shape({ scope: { ...restricted, restricted: false }, blocks: [shared, own] }),
+      ).not.toBe(withShared);
+      // No core memory, no `# User`.
+      expect(await shape({ scope: { kind: "none" }, blocks: [] })).not.toContain("# User");
     });
   });
 
@@ -308,7 +327,8 @@ describe("DefaultPromptSource", () => {
     });
 
     expect(prompt).toContain("don't know your user yet");
-    // Onboarding saves to core memory, so the first block written ends it.
+    // Onboarding saves to core memory. The first block written ends it at the
+    // next turn, whose configuration digest the new shape of `# User` changes.
     expect(prompt).toContain("core_memory_update");
     expect(prompt).not.toContain("memory_retain");
     // A single fact is worth saving before the agent knows the user's name.

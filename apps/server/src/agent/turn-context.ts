@@ -6,12 +6,8 @@
 import * as R from "remeda";
 import { z } from "zod";
 import type { ContentBlock, Message } from "../llm/types.js";
-import {
-  type CoreMemoryView,
-  OWN_GROUP,
-  type ScopedCoreMemoryBlock,
-  SHARED_GROUP,
-} from "./core-memory/scope.js";
+import { blockGroups, formatBlockGroups } from "./core-memory/groups.js";
+import type { CoreMemoryView, ScopedCoreMemoryBlock } from "./core-memory/scope.js";
 
 /**
  * A stored turn context's inputs. `recalledMemories` is what the block shows,
@@ -95,20 +91,11 @@ export function renderTurnContext({
   return `<turn_context>\n${sections.join("\n\n")}\n</turn_context>\n\n`;
 }
 
-/** The updates element: blocks under bare keys, grouped for a classed turn as `# User` groups them. */
-function formatCoreMemoryUpdates({ scope, blocks }: CoreMemoryView): string {
-  const format = (group: ReadonlyArray<ScopedCoreMemoryBlock>) =>
-    group.map((b) => `## ${b.key}\n${escapeEnvelope(b.content)}`).join("\n\n");
-  const body =
-    scope.kind === "classed"
-      ? [
-          [SHARED_GROUP, blocks.filter((b) => b.profileClass === null)] as const,
-          [OWN_GROUP, blocks.filter((b) => b.profileClass !== null)] as const,
-        ]
-          .filter(([, group]) => group.length > 0)
-          .map(([lead, group]) => `${lead}\n\n${format(group)}`)
-          .join("\n\n")
-      : format(blocks);
+/** The updates element: blocks under their bare keys, in the groups `# User` puts them in. */
+function formatCoreMemoryUpdates(view: CoreMemoryView): string {
+  const format = (blocks: ReadonlyArray<ScopedCoreMemoryBlock>) =>
+    blocks.map((b) => `## ${escapeEnvelope(b.key)}\n${escapeEnvelope(b.content)}`).join("\n\n");
+  const body = formatBlockGroups(blockGroups(view), format);
   return `<core_memory_updates>\n${CORE_MEMORY_UPDATES_HEADER}\n\n${body}\n</core_memory_updates>`;
 }
 
@@ -216,6 +203,35 @@ export function shownMemories(
       return (
         (rendered === undefined ? undefined : byRendered.get(rendered))?.recalledMemories ?? []
       );
+    }),
+  );
+}
+
+/**
+ * The ids of the rows whose stored turn context is still in `view`, the
+ * transcript after this turn's compaction, identified as `shownMemories`
+ * identifies them.
+ */
+export function turnContextsInView(
+  view: ReadonlyArray<Message>,
+  history: {
+    messages: ReadonlyArray<Message>;
+    messageIds: ReadonlyArray<string | null>;
+    turnContexts: ReadonlyArray<TurnContext | null>;
+  },
+): ReadonlySet<string> {
+  const byRendered = new Map<string, string[]>();
+  for (const [i, message] of history.messages.entries()) {
+    const id = history.messageIds[i];
+    const rendered = leadingText(message);
+    if (history.turnContexts[i] && id && rendered !== undefined) {
+      byRendered.set(rendered, [...(byRendered.get(rendered) ?? []), id]);
+    }
+  }
+  return new Set(
+    view.flatMap((m) => {
+      const rendered = leadingText(m);
+      return (rendered === undefined ? undefined : byRendered.get(rendered)) ?? [];
     }),
   );
 }

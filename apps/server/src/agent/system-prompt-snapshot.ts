@@ -16,13 +16,12 @@ import {
 } from "./core-memory/scope.js";
 import type { SystemPromptSnapshot } from "./store/index.js";
 
-/** An epoch's snapshot as a step returns it: `openedAt` is the row's `created_at` as ISO text. */
+/** An epoch's snapshot as a step returns it. */
 export interface EpochSnapshot {
   openedBy: string;
   historyStart: string;
   rendered: string;
   configDigest: string;
-  openedAt: string;
 }
 
 export function epochOf(row: SystemPromptSnapshot): EpochSnapshot {
@@ -31,8 +30,19 @@ export function epochOf(row: SystemPromptSnapshot): EpochSnapshot {
     historyStart: row.historyStart,
     rendered: row.rendered,
     configDigest: row.configDigest,
-    openedAt: row.createdAt.toISOString(),
   };
+}
+
+/** A block the turn sees that changed after its snapshot was rendered; `updatedAt` as ISO text. */
+export interface CoreMemoryChange extends ScopedCoreMemoryBlock {
+  updatedAt: string;
+}
+
+/** The blocks one turn context announced, and when it was stored (ISO text). */
+export interface Announcement {
+  messageId: string;
+  createdAt: string;
+  blocks: ReadonlyArray<{ profileClass: string | null; key: string }>;
 }
 
 /**
@@ -112,27 +122,44 @@ export function stripThinkingBefore(messages: ReadonlyArray<Message>, end: numbe
   );
 }
 
-/**
- * The blocks a turn announces: those it sees that changed after the epoch's
- * snapshot was rendered and that no turn context of the epoch has announced
- * since they changed, with their current content. A block is the pair
- * `(profileClass, key)`, since `identity` can exist shared and as a class's.
- */
-export function coreMemoryToAnnounce(args: {
-  view: CoreMemoryView;
-  updateTimes: ReadonlyArray<{ profileClass: string | null; key: string; updatedAt: Date }>;
-  epochOpenedAt: Date;
-  announcements: ReadonlyArray<{
-    createdAt: Date;
-    blocks: ReadonlyArray<{ profileClass: string | null; key: string }>;
-  }>;
-}): CoreMemoryView {
-  const same = (a: { profileClass: string | null; key: string }) => (b: typeof a) =>
+/** A block is the pair `(profileClass, key)`, since `identity` can exist shared and as a class's. */
+function sameBlock(a: { profileClass: string | null; key: string }) {
+  return (b: { profileClass: string | null; key: string }) =>
     a.profileClass === b.profileClass && a.key === b.key;
-  const changed = (block: ScopedCoreMemoryBlock): boolean => {
-    const updatedAt = args.updateTimes.find(same(block))?.updatedAt;
-    if (updatedAt === undefined || updatedAt < args.epochOpenedAt) return false;
-    return !args.announcements.some((a) => a.createdAt > updatedAt && a.blocks.some(same(block)));
-  };
-  return { scope: args.view.scope, blocks: args.view.blocks.filter(changed) };
+}
+
+/**
+ * The blocks in `view` changed at or after `since` — when the epoch's snapshot
+ * read core memory — with their current content: the most a turn of the
+ * epoch can announce.
+ */
+export function coreMemoryChangesSince(
+  view: CoreMemoryView,
+  updateTimes: ReadonlyArray<{ profileClass: string | null; key: string; updatedAt: Date }>,
+  since: Date,
+): CoreMemoryChange[] {
+  return view.blocks.flatMap((block) => {
+    const updatedAt = updateTimes.find(sameBlock(block))?.updatedAt;
+    return updatedAt === undefined || updatedAt < since
+      ? []
+      : [{ ...block, updatedAt: updatedAt.toISOString() }];
+  });
+}
+
+/**
+ * The changes no announcement in `announcements` covers: a block is covered by
+ * one stored after its change. Pass the announcements the turn's request still
+ * shows, so one that compaction dropped is made again.
+ */
+export function unannounced(
+  changes: ReadonlyArray<CoreMemoryChange>,
+  announcements: ReadonlyArray<Announcement>,
+): ScopedCoreMemoryBlock[] {
+  return changes.flatMap(({ updatedAt, ...block }) =>
+    announcements.some(
+      (a) => Date.parse(a.createdAt) > Date.parse(updatedAt) && a.blocks.some(sameBlock(block)),
+    )
+      ? []
+      : [block],
+  );
 }

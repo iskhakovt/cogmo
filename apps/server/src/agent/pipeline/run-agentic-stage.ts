@@ -402,21 +402,23 @@ export async function runAgenticStage(
   if (turnPosition === -1) throw new Error("compaction dropped the stage's own message");
   // The stage sends its own system prompt, not the conversation's snapshot,
   // so it announces no core memory.
-  const renderedTurnContext = await steps.run("render-turn-context", () =>
+  const renderedTurnContext = await steps.run("render-turn-context", async () =>
     storeTurnContext(
+      { runInTx: deps.runInTx, agentStore: deps.agentStore },
       {
-        runInTx: deps.runInTx,
-        agentStore: deps.agentStore,
-        transportStore: deps.transportStore,
-      },
-      {
-        conversationId,
         messageId: turn.id,
         handledAt: turnContextInput.handledAt,
         timezone: turnContextInput.timezone,
-        recalledMemories: [],
-        voiceMode: false,
-        epoch: null,
+        context: {
+          recalledMemories: [],
+          voiceMode: false,
+          channelTypes: [
+            ...(await deps.runInTx((tx) =>
+              deps.transportStore.getActiveChannelTypes(tx, conversationId),
+            )),
+          ],
+        },
+        coreMemoryUpdates: NO_CORE_MEMORY_UPDATES,
       },
     ),
   );

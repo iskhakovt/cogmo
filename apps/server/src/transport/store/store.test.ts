@@ -736,6 +736,22 @@ describe("DrizzleTransportStore", () => {
     });
   });
 
+  describe("getActiveChannelTypes", () => {
+    it("lists each active session's channel type once, in name order", async () => {
+      const { conversationId } = await seedConversation();
+      const web = await seedChannel("web");
+      const telegram = await seedChannel("telegram");
+      await seedSession(web, conversationId, "web-1");
+      await seedSession(telegram, conversationId, "tg-1");
+      await seedSession(web, conversationId, "web-2");
+
+      await expect(tx((trx) => store.getActiveChannelTypes(trx, conversationId))).resolves.toEqual([
+        "telegram",
+        "web",
+      ]);
+    });
+  });
+
   describe("getVoiceMaxReplyChars", () => {
     it("returns null when the conversation has no active sessions", async () => {
       const { conversationId } = await seedConversation();

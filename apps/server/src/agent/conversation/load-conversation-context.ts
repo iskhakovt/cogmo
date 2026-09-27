@@ -1,4 +1,4 @@
-import type { Transactor } from "../../db/index.js";
+import type { Transaction, Transactor } from "../../db/index.js";
 import { type CoreMemoryScope, type CoreMemoryView, readCoreMemory } from "../core-memory/scope.js";
 import type { SectionedRule } from "../rule-sections.js";
 import type { AgentStore, Profile } from "../store/index.js";
@@ -45,9 +45,16 @@ export async function loadConversationContext(
   deps: LoadConversationContextDeps,
   args: LoadConversationContextArgs,
 ): Promise<ConversationContext> {
-  return deps.runInTx(async (tx) => {
-    const rules = args.profile ? await deps.agentStore.getActiveRules(tx, args.profile.id) : [];
-    const coreMemory = await readCoreMemory(tx, deps.agentStore, args.userId, args.coreMemoryScope);
-    return { rules, coreMemory };
-  });
+  return deps.runInTx((tx) => readConversationContext(tx, deps.agentStore, args));
+}
+
+/** The same reads in a caller's transaction. */
+export async function readConversationContext(
+  tx: Transaction,
+  agentStore: AgentStore,
+  args: LoadConversationContextArgs,
+): Promise<ConversationContext> {
+  const rules = args.profile ? await agentStore.getActiveRules(tx, args.profile.id) : [];
+  const coreMemory = await readCoreMemory(tx, agentStore, args.userId, args.coreMemoryScope);
+  return { rules, coreMemory };
 }

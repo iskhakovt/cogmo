@@ -1,5 +1,5 @@
 {
-  "id": "a9a7a71c-ffe3-4536-b06d-cb4218b90023",
+  "id": "4f736435-428c-4164-b382-8d7391e51131",
   "prevId": "f6897efa-6e9c-444e-93eb-7ac49e3eed1a",
   "version": "7",
   "dialect": "postgresql",
@@ -2181,29 +2181,7 @@
           "default": "now()"
         }
       },
-      "indexes": {
-        "idx_system_prompt_snapshots_conv_opened_by": {
-          "name": "idx_system_prompt_snapshots_conv_opened_by",
-          "columns": [
-            {
-              "expression": "conversation_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "opened_by",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
+      "indexes": {},
       "foreignKeys": {
         "system_prompt_snapshots_conversation_id_conversations_id_fk": {
           "name": "system_prompt_snapshots_conversation_id_conversations_id_fk",
@@ -2235,10 +2213,10 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
-        "uq_system_prompt_snapshots_opened_by": {
-          "name": "uq_system_prompt_snapshots_opened_by",
+        "uq_system_prompt_snapshots_conv_opened_by": {
+          "name": "uq_system_prompt_snapshots_conv_opened_by",
           "nullsNotDistinct": false,
-          "columns": ["opened_by"]
+          "columns": ["conversation_id", "opened_by"]
         }
       },
       "policies": {},

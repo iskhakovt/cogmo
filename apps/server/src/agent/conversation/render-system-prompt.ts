@@ -1,11 +1,14 @@
-import type { Transaction } from "../../db/index.js";
+import type { Transaction, Transactor } from "../../db/index.js";
 import type { ToolDefinition } from "../../llm/types.js";
-import { type CoreMemoryScope, readCoreMemory } from "../core-memory/scope.js";
+import type { CoreMemoryScope, CoreMemoryView } from "../core-memory/scope.js";
 import type { PromptSource } from "../prompt.js";
 import type { AgentStore, Profile } from "../store/index.js";
 import { configDigest, hasIdentityOverride } from "../system-prompt-snapshot.js";
+import { readConversationContext } from "./load-conversation-context.js";
 
-export interface RenderSystemPromptDeps {
+/** What loading and opening a chat turn's system prompt epoch need. */
+export interface SystemPromptDeps {
+  runInTx: Transactor;
   agentStore: AgentStore;
   promptSource: PromptSource;
 }
@@ -25,15 +28,15 @@ export interface RenderSystemPromptArgs {
 
 /**
  * A chat turn's system prompt as it renders now, from `tx`'s snapshot of the
- * steering rules and core memory, and its configuration digest.
+ * steering rules and core memory; its configuration digest; and the core
+ * memory it shows.
  */
 export async function renderSystemPrompt(
   tx: Transaction,
-  deps: RenderSystemPromptDeps,
+  deps: Pick<SystemPromptDeps, "agentStore" | "promptSource">,
   args: RenderSystemPromptArgs,
-): Promise<{ rendered: string; configDigest: string }> {
-  const rules = args.profile ? await deps.agentStore.getActiveRules(tx, args.profile.id) : [];
-  const coreMemory = await readCoreMemory(tx, deps.agentStore, args.userId, args.coreMemoryScope);
+): Promise<{ rendered: string; configDigest: string; coreMemory: CoreMemoryView }> {
+  const { rules, coreMemory } = await readConversationContext(tx, deps.agentStore, args);
   const context = {
     profile: args.profile,
     rules,
@@ -48,5 +51,6 @@ export async function renderSystemPrompt(
       scope: args.coreMemoryScope,
       identityOverride: hasIdentityOverride(coreMemory),
     }),
+    coreMemory,
   };
 }

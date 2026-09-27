@@ -4549,11 +4549,10 @@ describe("system prompt snapshots", () => {
     const { conversationId, stamp } = await seedConversation();
     const opener = await userRow(conversationId, stamp);
 
-    const { kind, row } = await tx((trx) =>
+    const row = await tx((trx) =>
       store.insertOrRecoverSystemPromptSnapshot(trx, snapshot(conversationId, opener, "first")),
     );
 
-    expect(kind).toBe("new");
     expect(row).toMatchObject(snapshot(conversationId, opener, "first"));
     expect(row.createdAt).toBeInstanceOf(Date);
     await expect(
@@ -4572,7 +4571,7 @@ describe("system prompt snapshots", () => {
       store.insertOrRecoverSystemPromptSnapshot(trx, snapshot(conversationId, opener, "retry")),
     );
 
-    expect(retry).toEqual({ kind: "recovered", row: first.row });
+    expect(retry).toEqual(first);
     const rows = await db.select().from(systemPromptSnapshots);
     expect(rows).toHaveLength(1);
   });
@@ -4648,11 +4647,11 @@ describe("system prompt snapshots", () => {
     const listed = await tx((trx) => store.listCoreMemoryAnnouncements(trx, conversationId, from));
 
     // In no particular order, and without the context before `from`.
-    expect(listed.map((l) => l.blocks)).toHaveLength(2);
-    expect(listed.map((l) => l.blocks)).toEqual(
+    expect(listed).toHaveLength(2);
+    expect(listed.map(({ messageId, blocks }) => ({ messageId, blocks }))).toEqual(
       expect.arrayContaining([
-        [{ profileClass: null, key: "identity" }],
-        [{ profileClass: "game", key: "preferences" }],
+        { messageId: from, blocks: [{ profileClass: null, key: "identity" }] },
+        { messageId: after, blocks: [{ profileClass: "game", key: "preferences" }] },
       ]),
     );
     expect(listed.every((l) => l.createdAt instanceof Date)).toBe(true);

@@ -271,6 +271,13 @@ export interface StoredTurnContext {
   context: TurnContext;
 }
 
+/** The core-memory blocks one turn context announced, and when it was stored. */
+export interface CoreMemoryAnnouncement {
+  messageId: string;
+  createdAt: Date;
+  blocks: TurnContext["announcedCoreMemoryBlocks"];
+}
+
 /** A row from `system_prompt_snapshots`: one epoch's system prompt. */
 export interface SystemPromptSnapshot {
   id: string;
@@ -616,7 +623,7 @@ export interface AgentStore {
     tx: Transaction,
     conversationId: string,
     fromMessageId: string,
-  ): Promise<ReadonlyArray<{ createdAt: Date; blocks: TurnContext["announcedCoreMemoryBlocks"] }>>;
+  ): Promise<ReadonlyArray<CoreMemoryAnnouncement>>;
 
   /** The conversation's current epoch: the snapshot opened latest in the transcript. */
   getLatestSystemPromptSnapshot(
@@ -625,14 +632,14 @@ export interface AgentStore {
   ): Promise<SystemPromptSnapshot | undefined>;
 
   /**
-   * Store the snapshot a turn opens, or recover the one already stored for
-   * that turn. `openedBy` is the opening step's idempotency key: a retry that
-   * re-runs a committed insert gets the first attempt's row back.
+   * Store the snapshot a turn opens, or return the one already stored for that
+   * turn. `(conversationId, openedBy)` is the opening step's idempotency key: a
+   * retry that re-runs a committed insert gets the first attempt's row back.
    */
   insertOrRecoverSystemPromptSnapshot(
     tx: Transaction,
     params: Omit<SystemPromptSnapshot, "id" | "createdAt">,
-  ): Promise<{ kind: "new" | "recovered"; row: SystemPromptSnapshot }>;
+  ): Promise<SystemPromptSnapshot>;
 
   /**
    * Append a summary, or recover the existing row when this
@@ -1867,13 +1874,18 @@ export class DrizzleAgentStore implements AgentStore {
     tx: Transaction,
     conversationId: string,
     fromMessageId: string,
-  ): Promise<ReadonlyArray<{ createdAt: Date; blocks: TurnContext["announcedCoreMemoryBlocks"] }>> {
+  ): Promise<ReadonlyArray<CoreMemoryAnnouncement>> {
     const rows = await tx
-      .select({ createdAt: turnContexts.createdAt, context: turnContexts.context })
+      .select({
+        messageId: turnContexts.messageId,
+        createdAt: turnContexts.createdAt,
+        context: turnContexts.context,
+      })
       .from(turnContexts)
       .innerJoin(messages, eq(messages.id, turnContexts.messageId))
       .where(and(eq(messages.conversationId, conversationId), gte(messages.id, fromMessageId)));
     return rows.map((r) => ({
+      messageId: r.messageId,
       createdAt: r.createdAt,
       blocks: r.context.announcedCoreMemoryBlocks,
     }));
@@ -1895,21 +1907,18 @@ export class DrizzleAgentStore implements AgentStore {
   async insertOrRecoverSystemPromptSnapshot(
     tx: Transaction,
     params: Omit<SystemPromptSnapshot, "id" | "createdAt">,
-  ): Promise<{ kind: "new" | "recovered"; row: SystemPromptSnapshot }> {
+  ): Promise<SystemPromptSnapshot> {
     // Keyed insert: see `.claude/rules/inngest.md`.
-    const rows = await tx
-      .insert(systemPromptSnapshots)
-      .values(params)
-      .onConflictDoUpdate({
-        target: systemPromptSnapshots.openedBy,
-        set: { openedBy: params.openedBy },
-      })
-      .returning({
-        ...getTableColumns(systemPromptSnapshots),
-        inserted: sql<boolean>`(xmax = 0)`,
-      });
-    const { inserted, ...row } = single(rows);
-    return { kind: inserted ? "new" : "recovered", row };
+    return single(
+      await tx
+        .insert(systemPromptSnapshots)
+        .values(params)
+        .onConflictDoUpdate({
+          target: [systemPromptSnapshots.conversationId, systemPromptSnapshots.openedBy],
+          set: { openedBy: params.openedBy },
+        })
+        .returning(),
+    );
   }
 
   async getHistoryAfter(

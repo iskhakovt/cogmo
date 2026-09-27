@@ -85,8 +85,9 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     getLatestSystemPromptSnapshot: vi.fn().mockResolvedValue(undefined),
     // Echoes the insert as a first attempt stores it.
     insertOrRecoverSystemPromptSnapshot: vi.fn().mockImplementation(async (_tx, params) => ({
-      kind: "new",
-      row: { id: "snapshot-1", createdAt: MOCK_SNAPSHOT_CREATED_AT, ...params },
+      id: "snapshot-1",
+      createdAt: MOCK_SNAPSHOT_CREATED_AT,
+      ...params,
     })),
     insertOrRecoverSummary: vi.fn().mockResolvedValue({
       kind: "new",

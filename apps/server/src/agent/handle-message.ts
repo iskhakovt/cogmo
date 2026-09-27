@@ -64,16 +64,21 @@ import { createSchedulingService } from "./scheduling/scheduling-service.js";
 import type { Service } from "./service.js";
 import type { AgentStore } from "./store/index.js";
 import { buildSubAgentTools } from "./subagent/sub-agent-tool-builder.js";
-import { continuesEpoch, historyStart, stripThinkingBefore } from "./system-prompt-snapshot.js";
+import {
+  continuesEpoch,
+  historyStart,
+  stripThinkingBefore,
+  unannounced,
+} from "./system-prompt-snapshot.js";
 import type { ToolRegistry } from "./tools.js";
 import { turnCacheIntent } from "./turn-cache-intent.js";
 import {
   findTurnContext,
-  NO_CORE_MEMORY_UPDATES,
   newMemories,
   renderTurnContext,
   replaceTurnContext,
   shownMemories,
+  turnContextsInView,
   withTurnContext,
 } from "./turn-context.js";
 import { buildTurnService } from "./turn-service.js";
@@ -646,7 +651,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       };
       const systemPromptDeps = { runInTx: deps.runInTx, agentStore, promptSource };
       const loadedSystemPrompt = await step.run("load-system-prompt", () =>
-        loadSystemPrompt(systemPromptDeps, systemPromptArgs),
+        loadSystemPrompt({ ...systemPromptDeps, transportStore }, systemPromptArgs),
       );
 
       // ──── Streaming section: bare-body glue + in-loop durable steps ────
@@ -807,16 +812,24 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       );
       const handledAt = new Date(turn.createdAt);
       const recalledMemories = recallResult.memories.map((m) => m.content);
+      const { channelTypes, coreMemoryChanges } = loadedSystemPrompt;
+      // An upper bound on the stored block, which compaction counts: every
+      // recalled memory and every core-memory change since the snapshot. The
+      // stored block leaves out what earlier turns still in view show.
+      const candidateUpdates = coreMemoryChanges.map(({ updatedAt: _, ...block }) => block);
       const provisionalTurnContext = renderTurnContext({
         handledAt,
         timezone: deps.userTimezone,
         context: {
           recalledMemories,
           voiceMode: turnInputs.voiceMode,
-          channelTypes: [],
-          announcedCoreMemoryBlocks: [],
+          channelTypes,
+          announcedCoreMemoryBlocks: candidateUpdates.map(({ profileClass, key }) => ({
+            profileClass,
+            key,
+          })),
         },
-        coreMemoryUpdates: NO_CORE_MEMORY_UPDATES,
+        coreMemoryUpdates: { scope: coreMemoryScope, blocks: candidateUpdates },
       });
 
       // The epoch continues unless the configuration or the summary the history
@@ -1025,7 +1038,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // among them, while the column stores `span.messageCount`.
       const splitIdx = compactResult.event?.messagesSummarized ?? 0;
       const span = splitIdx > 0 ? summarizedSpan(turnHistory.messageIds, splitIdx) : null;
-      /** The cutoff of the summary this turn stored, which later turns' history starts after. */
+      // The cutoff of the summary this turn stored, which later turns' history starts after.
       let storedCutoff: string | null = null;
       if (summaryText !== null && span !== null && !summaryTruncated) {
         // `text` needs the local because `summaryText` is a `let` whose
@@ -1107,27 +1120,35 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         historyMessages = stripThinkingBefore(historyMessages, turnPosition);
       }
 
-      // Deduplicated after compaction: before it, a memory whose only earlier
-      // copy compaction then removes would be dropped.
+      // Deduplicated after compaction: before it, a memory or an announcement
+      // whose only earlier copy compaction then removes would be dropped. An
+      // opening turn's snapshot shows core memory as it is, so it announces
+      // nothing.
+      const earlierInView = historyMessages.toSpliced(turnPosition, 1);
+      const visibleContexts = turnContextsInView(earlierInView, turnHistory);
+      const announced =
+        epoch.openedBy === turn.id
+          ? []
+          : unannounced(
+              coreMemoryChanges,
+              loadedSystemPrompt.announcements.filter((a) => visibleContexts.has(a.messageId)),
+            );
       const renderedTurnContext = await step.run("render-turn-context", () =>
         storeTurnContext(
-          { runInTx: deps.runInTx, agentStore, transportStore },
+          { runInTx: deps.runInTx, agentStore },
           {
-            conversationId,
             messageId: turn.id,
             handledAt,
             timezone: deps.userTimezone,
-            recalledMemories: newMemories(
-              recalledMemories,
-              shownMemories(historyMessages.toSpliced(turnPosition, 1), turnHistory),
-            ),
-            voiceMode: turnInputs.voiceMode,
-            epoch: {
-              userId,
-              coreMemoryScope,
-              openedBy: epoch.openedBy,
-              openedAt: new Date(epoch.openedAt),
+            context: {
+              recalledMemories: newMemories(
+                recalledMemories,
+                shownMemories(earlierInView, turnHistory),
+              ),
+              voiceMode: turnInputs.voiceMode,
+              channelTypes,
             },
+            coreMemoryUpdates: { scope: coreMemoryScope, blocks: announced },
           },
         ),
       );

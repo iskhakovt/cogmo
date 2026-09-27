@@ -5,17 +5,18 @@ import type { CoreMemoryScope, CoreMemoryView } from "./core-memory/scope.js";
 import {
   configDigest,
   continuesEpoch,
-  coreMemoryToAnnounce,
+  coreMemoryChangesSince,
   hasIdentityOverride,
   historyStart,
   stripThinkingBefore,
+  unannounced,
 } from "./system-prompt-snapshot.js";
 
 describe("configDigest", () => {
-  const base = {
+  const base: Parameters<typeof configDigest>[0] = {
     configuration: "You are a coder.\n\n# Rules\n\n- Be kind",
     toolTable: '[{"name":"web_search"}]',
-    scope: { kind: "classed", profileClass: "game", restricted: true } as CoreMemoryScope,
+    scope: { kind: "classed", profileClass: "game", restricted: true },
     identityOverride: false,
   };
 
@@ -120,7 +121,7 @@ describe("stripThinkingBefore", () => {
   });
 });
 
-describe("coreMemoryToAnnounce", () => {
+describe("coreMemoryChangesSince / unannounced", () => {
   const OPENED_AT = new Date("2026-09-27T10:00:00Z");
   const at = (minute: number) => new Date(OPENED_AT.getTime() + minute * 60_000);
   const view: CoreMemoryView = {
@@ -137,57 +138,57 @@ describe("coreMemoryToAnnounce", () => {
       key: b.key,
       updatedAt: at(times[`${b.profileClass}/${b.key}`] ?? -60),
     }));
-  const announce = (
-    times: Record<string, number>,
-    announcements: Array<{
-      minute: number;
-      blocks: Array<{ profileClass: string | null; key: string }>;
-    }>,
-  ) =>
-    coreMemoryToAnnounce({
-      view,
-      updateTimes: updates(times),
-      epochOpenedAt: OPENED_AT,
-      announcements: announcements.map((a) => ({ createdAt: at(a.minute), blocks: a.blocks })),
-    });
-
-  it("announces nothing the snapshot already shows", () => {
-    expect(announce({}, [])).toEqual({ scope: view.scope, blocks: [] });
+  const changes = (times: Record<string, number>) =>
+    coreMemoryChangesSince(view, updates(times), OPENED_AT);
+  const announcement = (
+    minute: number,
+    blocks: Array<{ profileClass: string | null; key: string }>,
+  ) => ({
+    messageId: `m${minute}`,
+    createdAt: at(minute).toISOString(),
+    blocks,
   });
 
-  it("announces a block changed since the snapshot, with its current content and scope", () => {
-    expect(announce({ "game/identity": 5 }, [])).toEqual({
-      scope: view.scope,
-      blocks: [{ profileClass: "game", key: "identity", content: "Name: Thorin" }],
-    });
+  it("finds nothing the snapshot already shows", () => {
+    expect(changes({})).toEqual([]);
   });
 
-  it("announces a change once, and again after a later change", () => {
-    const announced = [{ minute: 6, blocks: [{ profileClass: "game", key: "identity" }] }];
-    expect(announce({ "game/identity": 5 }, announced).blocks).toEqual([]);
-    expect(announce({ "game/identity": 7 }, announced).blocks.map((b) => b.key)).toEqual([
-      "identity",
+  it("finds a block changed since the snapshot, with its current content and change time", () => {
+    expect(changes({ "game/identity": 5 })).toEqual([
+      {
+        profileClass: "game",
+        key: "identity",
+        content: "Name: Thorin",
+        updatedAt: at(5).toISOString(),
+      },
     ]);
   });
 
-  it("tells the shared block from a class's block of the same key", () => {
-    const announced = [{ minute: 6, blocks: [{ profileClass: null, key: "identity" }] }];
-    expect(announce({ "game/identity": 5 }, announced).blocks).toEqual([
-      { profileClass: "game", key: "identity", content: "Name: Thorin" },
-    ]);
-  });
-
-  it("announces only blocks the turn sees", () => {
-    const result = coreMemoryToAnnounce({
+  it("finds only blocks the turn sees", () => {
+    const found = coreMemoryChangesSince(
       view,
-      updateTimes: [
+      [
         ...updates({}),
         { profileClass: null, key: "user_profile", updatedAt: at(5) },
         { profileClass: "work", key: "preferences", updatedAt: at(5) },
       ],
-      epochOpenedAt: OPENED_AT,
-      announcements: [],
-    });
-    expect(result.blocks).toEqual([]);
+      OPENED_AT,
+    );
+    expect(found).toEqual([]);
+  });
+
+  it("announces a change once, and again after a later change", () => {
+    const announced = [announcement(6, [{ profileClass: "game", key: "identity" }])];
+    expect(unannounced(changes({ "game/identity": 5 }), announced)).toEqual([]);
+    expect(unannounced(changes({ "game/identity": 7 }), announced)).toEqual([
+      { profileClass: "game", key: "identity", content: "Name: Thorin" },
+    ]);
+  });
+
+  it("tells the shared block from a class's block of the same key", () => {
+    const announced = [announcement(6, [{ profileClass: null, key: "identity" }])];
+    expect(unannounced(changes({ "game/identity": 5 }), announced)).toEqual([
+      { profileClass: "game", key: "identity", content: "Name: Thorin" },
+    ]);
   });
 });

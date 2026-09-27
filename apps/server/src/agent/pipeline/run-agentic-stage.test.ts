@@ -353,7 +353,7 @@ describe("runAgenticStage", () => {
 
   it("names the delivery channels, and announces no core memory in its own system prompt", async () => {
     const h = await harness();
-    vi.mocked(h.transportStore.getActiveChannelTypes).mockResolvedValue(["web", "telegram"]);
+    vi.mocked(h.transportStore.getActiveChannelTypes).mockResolvedValue(["telegram", "web"]);
     vi.mocked(h.agentStore.getCoreMemoryUpdateTimes).mockResolvedValue([
       { profileClass: null, key: "identity", updatedAt: new Date() },
     ]);
