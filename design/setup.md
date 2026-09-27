@@ -8,7 +8,7 @@ A fresh cogmo deployment requires configuring LLM provider credentials, optional
 
 ## Scope split
 
-The wizard handles **infrastructure** only — providers, channels, credentials. User facts (name, timezone, preferences) are handled by the agent's existing `ONBOARDING` prompt, which shows while no core-memory block is visible to the turn ([memory.md](memory.md#core-memory-scope-by-profile-class-proposed) → What the Model Sees; a third-party profile gets neither). This follows the ecosystem consensus (OpenClaw, Letta, GPT Builder): wizards configure infrastructure, agents learn about users through conversation.
+The wizard handles **infrastructure** only — providers, channels, credentials. User facts (name, timezone, preferences) are handled by the agent's existing `ONBOARDING` prompt, which shows while no core-memory block is visible to the turn ([memory.md](memory.md#core-memory-scope-by-profile-class-confirmed) → What the Model Sees; a third-party profile gets neither). This follows the ecosystem consensus (OpenClaw, Letta, GPT Builder): wizards configure infrastructure, agents learn about users through conversation.
 
 ## UX contract
 
