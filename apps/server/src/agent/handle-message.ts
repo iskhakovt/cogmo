@@ -56,7 +56,7 @@ import { createPipelinesService } from "./pipeline/pipelines-service.js";
 import type { PipelineRunStore, PipelineStore } from "./pipeline/store/index.js";
 import { PIPELINE_TOOL_NAMES } from "./pipeline/tools.js";
 import type { PromptSource } from "./prompt.js";
-import { shouldSkipRecall } from "./recall-gate.js";
+import { recallQueryText, shouldSkipRecall } from "./recall-gate.js";
 import { synthesizeDegradedReply } from "./repair.js";
 import { computeRetraction } from "./retraction.js";
 import { createSchedulingService } from "./scheduling/scheduling-service.js";
@@ -781,10 +781,11 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // settings change mid-turn can flip the step's existence between
       // invocations — same accepted hazard as `summarize-prefix-outcome`,
       // see design/crash-recovery.md.
-      const recallResult = shouldSkipRecall(autoRecallMode, userContentText)
+      const recallQuery = recallQueryText(substitutedMessages);
+      const recallResult = shouldSkipRecall(autoRecallMode, recallQuery)
         ? { memories: [] }
         : await stepRun("auto-recall", async () =>
-            service.memory.recall(userContentText, { maxTokens: 2000 }).catch((err: unknown) => {
+            service.memory.recall(recallQuery, { maxTokens: 2000 }).catch((err: unknown) => {
               turnLogger.warn({ err }, "auto-recall failed, proceeding without recalled context");
               memoryRecallFailures.add(1, { bank_id: userId });
               return { memories: [] };
