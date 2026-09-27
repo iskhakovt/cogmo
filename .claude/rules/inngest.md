@@ -30,6 +30,13 @@ contract**. Design every function for the per-boundary model.
   a string and parse it on every invocation, the first included
   (`freeze-turn-inputs`), or canonicalize it after the step returns on
   every invocation (the loop's tool inputs).
+- **A memoized result is a contract with runs in flight.** A deploy
+  mid-run replays each step's stored result into the new code, so an
+  existing step keeps returning what it returned. Read new data in a new
+  or renamed step, which a run in flight executes fresh, from committed
+  rows rather than from an earlier step's return value
+  (`load-turn-transcript` finds the turn's user row by its inbound cursor;
+  `create-user-message` returns nothing).
 - **Non-determinism upstream of a step breaks memoization.** If a replay
   produces a different number, order, or set of steps than the first pass,
   the executor asks for steps the SDK never creates and the run dies with
