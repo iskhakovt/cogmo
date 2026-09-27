@@ -1,16 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { expectDefined } from "../test/assertions.js";
-import { ProviderProtocolError } from "./errors.js";
+import { OutputCutOffError, ProviderProtocolError } from "./errors.js";
+import { RefusalError } from "./fallback.js";
 import type { LlmProvider } from "./provider.js";
 import { chatTyped } from "./typed.js";
+import type { StopReason } from "./types.js";
 
-function mockProvider(responses: Array<{ text: string }>): LlmProvider {
+function mockProvider(responses: Array<{ text: string; stopReason?: StopReason }>): LlmProvider {
   const chatFn = vi.fn();
   for (const r of responses) {
     chatFn.mockResolvedValueOnce({
       content: [{ type: "text", text: r.text }],
-      stopReason: "end_turn",
+      stopReason: r.stopReason ?? "end_turn",
       model: "test-model",
       usage: { inputTokens: 10, outputTokens: 5 },
     });
@@ -120,6 +122,48 @@ describe("chatTyped", () => {
 
     expect(result.data).toEqual({ name: "Alice", age: 30 });
     expect(result.retries).toBe(0);
+    expect(provider.chat).toHaveBeenCalledTimes(1);
+  });
+
+  it.each<[string, string, StopReason]>([
+    // jsonrepair closes this into a Zod-valid value the model never finished.
+    ["that jsonrepair would complete", '{"name":"Alice","age":30', "max_tokens"],
+    ["that fails validation", '{"name":"Alice","ag', "max_tokens"],
+    ["at the context window", '{"name":"Alice","age":30', "context_overflow"],
+  ])("refuses a reply cut off %s, spending no retry", async (_label, text, stopReason) => {
+    const provider = mockProvider([{ text, stopReason }, { text: '{"name":"Alice","age":30}' }]);
+
+    await expect(
+      chatTyped({
+        provider,
+        model: "test-model",
+        system: "sys",
+        messages: [{ role: "user", content: "Alice is 30" }],
+        schema: PersonSchema,
+        name: "extract_person",
+      }),
+    ).rejects.toBeInstanceOf(OutputCutOffError);
+
+    expect(provider.chat).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a refusal, even one whose text validates, spending no retry", async () => {
+    const provider = mockProvider([
+      { text: '{"name":"Alice","age":30}', stopReason: "refusal" },
+      { text: '{"name":"Alice","age":30}' },
+    ]);
+
+    await expect(
+      chatTyped({
+        provider,
+        model: "test-model",
+        system: "sys",
+        messages: [{ role: "user", content: "Alice is 30" }],
+        schema: PersonSchema,
+        name: "extract_person",
+      }),
+    ).rejects.toBeInstanceOf(RefusalError);
+
     expect(provider.chat).toHaveBeenCalledTimes(1);
   });
 

@@ -238,14 +238,15 @@ export class AnthropicProvider implements LlmProvider {
       recordChatUsage(span, this.name, response.model, usage, stopReason);
 
       // A tool-path reply carries the JSON as the synthetic tool's input.
-      // Returned as text, it reads like a structured-output reply.
+      // Returned as text, with `tool_use` read as `end_turn`, it reads like a
+      // structured-output reply; a cap or a refusal passes through.
       const format = params.responseFormat;
       if (format && !takesStructuredOutput(format)) {
         const toolUse = response.content.find((b) => b.type === "tool_use");
         if (toolUse && toolUse.type === "tool_use") {
           return {
             content: [{ type: "text", text: JSON.stringify(toolUse.input) }],
-            stopReason: "end_turn",
+            stopReason: stopReason === "tool_use" ? "end_turn" : stopReason,
             model: response.model,
             usage,
           };

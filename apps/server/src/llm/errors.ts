@@ -52,6 +52,19 @@ export class ToolArgsCutOffError extends ProviderProtocolError {
 }
 
 /**
+ * A structured-output reply the output cap or the context window cut off.
+ * Its JSON is unfinished, and `jsonrepair` would close it into a value the
+ * model never wrote. The same request meets the same limit, so `chatTyped`
+ * spends no retry on it.
+ */
+export class OutputCutOffError extends ProviderProtocolError {
+  constructor(name: string, stopReason: "max_tokens" | "context_overflow") {
+    super(`structured output for "${name}" stopped at ${stopReason}`, undefined);
+    this.name = "OutputCutOffError";
+  }
+}
+
+/**
  * Parse a JSON payload streamed by a provider (e.g. buffered tool-use
  * argument chunks). Try `JSON.parse` first; on failure, run `jsonrepair`
  * (handles trailing commas, unclosed strings within reason, missing

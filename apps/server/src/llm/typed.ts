@@ -23,10 +23,11 @@
 import type { ZodType } from "zod";
 import { logger } from "../logger.js";
 import { extractText } from "./content.js";
-import { ProviderProtocolError, parseProviderJson } from "./errors.js";
+import { OutputCutOffError, ProviderProtocolError, parseProviderJson } from "./errors.js";
+import { RefusalError } from "./fallback.js";
 import { toObjectJsonSchema } from "./json-schema.js";
 import type { LlmProvider } from "./provider.js";
-import type { Message, Usage } from "./types.js";
+import type { Message, StopReason, Usage } from "./types.js";
 import { sumUsage, ZERO_USAGE } from "./usage.js";
 
 /**
@@ -116,7 +117,10 @@ const DEFAULT_REPAIR: Required<ChatTypedRepair> = {
  * `jsonrepair` also fails) propagates immediately — no feedback retry, no
  * additional call. The in-loop classifier owns that recovery path for
  * in-loop callsites; for out-of-loop callsites the wrapping Inngest step
- * handles the throw.
+ * handles the throw. A reply that is not the model's whole answer throws
+ * the same way before it is parsed: {@link OutputCutOffError} for one cut
+ * off at the output cap or the context window, {@link RefusalError} for a
+ * refusal.
  */
 export async function chatTyped<T>(params: TypedChatParams<T>): Promise<TypedChatResult<T>> {
   const { provider, model, system, schema, name } = params;
@@ -136,6 +140,7 @@ export async function chatTyped<T>(params: TypedChatParams<T>): Promise<TypedCha
     });
 
     totalUsage = sumUsage(totalUsage, response.usage);
+    assertWholeAnswer(response.stopReason, name);
 
     const text = extractText(response.content);
 
@@ -168,6 +173,21 @@ export async function chatTyped<T>(params: TypedChatParams<T>): Promise<TypedCha
     }
 
     return { data, usage: totalUsage, model: response.model, retries };
+  }
+}
+
+/**
+ * Refuse a reply that is not the model's whole answer. A refusal's text
+ * may not follow the schema at all, and a reply cut off at a limit is
+ * unfinished JSON that `jsonrepair` could close into a schema-valid value.
+ * Neither is worth a feedback retry: the same request meets the same stop.
+ */
+function assertWholeAnswer(stopReason: StopReason, name: string): void {
+  if (stopReason === "refusal") {
+    throw new RefusalError(`chatTyped: the model refused "${name}"`);
+  }
+  if (stopReason === "max_tokens" || stopReason === "context_overflow") {
+    throw new OutputCutOffError(name, stopReason);
   }
 }
 

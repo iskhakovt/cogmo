@@ -1835,6 +1835,26 @@ describe("AnthropicProvider", () => {
       expect(result.stopReason).toBe("end_turn");
     });
 
+    it.each(["max_tokens", "refusal"])(
+      "passes a tool-path reply's %s stop through",
+      async (stopReason) => {
+        const provider = createProvider();
+        mockCreate.mockResolvedValueOnce({
+          ...toolReply("claude-opus-5-5", "pipeline_definition", { stageOutput: {} }),
+          stop_reason: stopReason,
+        });
+
+        const result = await provider.chat({
+          model: "claude-opus-5-5",
+          system: "Compile the pipeline",
+          messages: [{ role: "user", content: "hi" }],
+          responseFormat: OPEN_FORMAT,
+        });
+
+        expect(result.stopReason).toBe(stopReason);
+      },
+    );
+
     it("names the tool in a system prompt of its own when the caller sends none", async () => {
       const provider = createProvider();
       mockCreate.mockResolvedValueOnce(
