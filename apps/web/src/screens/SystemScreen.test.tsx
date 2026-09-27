@@ -104,6 +104,18 @@ describe("SystemScreen", () => {
     await expect.element(page.getByText("reinforced")).toBeVisible();
   });
 
+  it("shows ok for a fire with no failed phase and a dash for a row without outcomes", async () => {
+    const event = makeEvent();
+    vi.mocked(api.evolution.listEvents).mockResolvedValue([
+      { ...event, id: "e-clean", payload: { ...event.payload, failedPhases: [] } },
+      { ...event, id: "e-legacy" },
+    ]);
+    await render(<SystemScreen />);
+
+    await expect.element(page.getByText("ok", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("—", { exact: true })).toBeVisible();
+  });
+
   it("shows empty states when there is nothing scheduled or learned", async () => {
     await render(<SystemScreen />);
     await expect.element(page.getByText("No scheduled tasks.")).toBeVisible();
