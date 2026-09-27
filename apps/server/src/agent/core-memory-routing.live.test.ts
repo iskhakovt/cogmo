@@ -77,6 +77,7 @@ import {
   IDENTITY_BLOCK_KEY,
   type ScopedCoreMemoryBlock,
 } from "./core-memory/scope.js";
+import { normalizeLine } from "./core-memory/write-core-memory-block.js";
 import type { CoreMemoryBlock } from "./service.js";
 
 const RoutingSchema = z.enum(["core", "hindsight", "none"]);
@@ -246,11 +247,6 @@ const usage = createUsageMeter();
 function keeps(text: string, anchors: ReadonlyArray<string>): boolean {
   const tokens = new Set(text.toLowerCase().match(/[a-z0-9]+/g) ?? []);
   return anchors.every((a) => tokens.has(a.toLowerCase()));
-}
-
-/** A line as the override dedupe compares it: trimmed, internal whitespace collapsed. */
-function normalizeLine(line: string): string {
-  return line.trim().replace(/\s+/g, " ");
 }
 
 /** `text`'s non-blank lines, normalised. */

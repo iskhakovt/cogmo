@@ -67,8 +67,8 @@ export async function writeCoreMemoryBlock(
 /**
  * Store a restricted class's `identity` override without the lines the
  * shared block holds, so the persona keeps following shared changes to them.
- * Reading the shared block in the write's transaction keeps the result a
- * function of committed rows, so a retried tool step stores the same content.
+ * A retried tool step re-reads the shared block, so it stores the same
+ * content unless that block changed in between.
  */
 async function writeOverride(
   tx: Transaction,
@@ -110,7 +110,8 @@ function withoutSharedLines(
   };
 }
 
-function normalizeLine(line: string): string {
+/** A line as the override dedupe compares it: trimmed, internal whitespace collapsed. */
+export function normalizeLine(line: string): string {
   return line.trim().replace(/\s+/g, " ");
 }
 

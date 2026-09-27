@@ -20,9 +20,9 @@ export const coreMemoryUpdate = defineTool({
     "value without mentioning it, a finished project is removed, and no relative time words " +
     '("recently", "last month"). Anything else, including a family member\'s details and ' +
     "what used to be true: memory_retain.",
-  // Durable: a DB upsert. The overwrite is idempotent, but exactly-once
-  // keeps replays from racing a concurrent same-key update from another
-  // turn with stale content.
+  // Durable: a DB write (an upsert, or deleting a restricted class's override).
+  // The overwrite is idempotent, but exactly-once keeps replays from racing a
+  // concurrent same-key update from another turn with stale content.
   durable: true,
   schema: z.object({
     key: z
@@ -39,10 +39,7 @@ export const coreMemoryUpdate = defineTool({
   },
 });
 
-/**
- * The tool result for a write. It names the lines an override left out, so a
- * second rewrite in the turn doesn't add them back.
- */
+/** The tool result for a write; for an override, it names the lines left out as shared. */
 function writtenText(key: string, written: CoreMemoryWrite): string {
   const onlyHere = "Tell the user it is saved only here.";
   return match(written)
