@@ -1762,10 +1762,10 @@ export class DrizzleAgentStore implements AgentStore {
     tx: Transaction,
     params: StoredTurnContext,
   ): Promise<StoredTurnContext> {
-    // DO UPDATE with a no-op SET rather than DO NOTHING — see
-    // `insertOrRecoverTask` for why the concurrent loser needs a write to
-    // raise 40001 instead of silently skipping the tuple. The conflict arm
-    // returns the stored row, so a retry sends the first attempt's text.
+    // DO UPDATE with a no-op SET, so one statement returns the stored row from
+    // either arm: a retry gets the first attempt's text back. Under REPEATABLE
+    // READ a concurrent loser gets 40001 with either `ON CONFLICT` arm, and
+    // the transactor's retry lands on the winner's row.
     return single(
       await tx
         .insert(turnContexts)
