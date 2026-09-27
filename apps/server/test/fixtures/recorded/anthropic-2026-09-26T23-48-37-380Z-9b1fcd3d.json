@@ -1,0 +1,40 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nPlease don't use bullet points with me — just write in plain sentences.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 5,
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "Let me know if you'd like restaurant recommendations for any of these, or if you want me to keep a running list of dishes and places you've tried."
+      },
+      "recordedTimings": {
+        "ttftMs": 705,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          226,
+          2,
+          0,
+          0,
+          24,
+          45,
+          44,
+          45,
+          37,
+          1,
+          0,
+          0
+        ],
+        "totalDurationMs": 1129
+      },
+      "metadata": {
+        "systemHash": "59627f43",
+        "toolsHash": "837ba743"
+      }
+    }
+  ]
+}

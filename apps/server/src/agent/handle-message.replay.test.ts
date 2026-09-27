@@ -26,12 +26,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
 import { inngest } from "../inngest/client.js";
+import { AnthropicProvider } from "../llm/anthropic.js";
 import type { ChatParams, ChatStreamResult, StreamEvent, ToolDefinition } from "../llm/types.js";
 import { agentIterations, memoryRecallFailures } from "../metrics.js";
 import type { SkillRunner } from "../skills/runner.js";
 import { expectDefined } from "../test/assertions.js";
 import {
   fakeRunInTx,
+  MOCK_MESSAGE_CREATED_AT,
   mockAgentStore,
   mockDeliveryHandle,
   mockDeliveryRouter,
@@ -44,7 +46,9 @@ import {
   mockVoiceBundle,
   mockVoiceResolver,
   spyOnInngestSend,
+  turnContextSent,
 } from "../test/factories.js";
+import { createWireRecorder } from "../test/wire-recorder.js";
 import { canonicalKeyOrder } from "../util/canonical-key-order.js";
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
@@ -118,6 +122,9 @@ const event = {
   name: "inbound/ready",
   data: { conversationId: "conv-1", triggerInboundId: "inbound-1" },
 } as const;
+
+/** The turn's row as `load-turn-transcript` returns it: the history's `msg-1`, its time as a string. */
+const TURN_ROW = { id: "msg-1", createdAt: MOCK_MESSAGE_CREATED_AT.toISOString() };
 
 describe("handle-message — crash recovery / step replay", () => {
   it("does not re-insert the user message when create-user-message is cached", async () => {
@@ -200,7 +207,7 @@ describe("handle-message — crash recovery / step replay", () => {
           { id: "m4", role: "assistant", content: "r2" },
           { id: "m5", role: "user", content: "m3" },
           { id: "m6", role: "assistant", content: "r3" },
-          { id: "m7", role: "user", content: "m4" },
+          { id: "msg-1", role: "user", content: "m4" },
           { id: "m8", role: "assistant", content: "r4" },
         ]),
       }),
@@ -269,6 +276,10 @@ describe("handle-message — crash recovery / step replay", () => {
             content: `turn ${i + 1}`,
           })),
         ),
+        // The turn's row: the last user row above.
+        findUserMessageByInbound: vi
+          .fn()
+          .mockResolvedValue({ id: "m7", createdAt: MOCK_MESSAGE_CREATED_AT }),
       }),
     });
     const fn = createHandleMessage(deps);
@@ -365,11 +376,20 @@ describe("handle-message — crash recovery / step replay", () => {
         { id: "last-assistant", handler: () => null },
         { id: "load-inbound", handler: () => [{ id: "inbound-1", content: "hi" }] },
         { id: "create-user-message", handler: () => undefined },
-        { id: "load-turn-history", handler: () => ({ messages: [], messageIds: [] }) },
+        {
+          id: "load-turn-transcript",
+          handler: () => ({
+            messages: [{ role: "user", content: "hi" }],
+            messageIds: ["msg-1"],
+            turnContexts: [null],
+            turn: TURN_ROW,
+          }),
+        },
         { id: "assemble-prompt", handler: () => "system prompt" },
         // `summarize-prefix-outcome` is conditional — only created when compaction
         // decides to summarize. The default mock countTokens stays under
         // threshold, so the step is never invoked here and we don't list it.
+        { id: "render-turn-context", handler: () => "<turn_context>cached</turn_context>\n\n" },
         { id: "persist-new-messages", handler: () => ({ id: "asst-1" }) },
       ],
     });
@@ -391,7 +411,42 @@ describe("handle-message — crash recovery / step replay", () => {
     expect(loopCallCount).toBeLessThan(10);
     // No DB writes happened — every persist step was cached.
     expect(deps.agentStore.insertMessage).not.toHaveBeenCalled();
+    expect(deps.agentStore.insertOrRecoverTurnContext).not.toHaveBeenCalled();
     expect(deps.agentStore.insertMessages).not.toHaveBeenCalled();
+    // The loop sends the cached turn context.
+    expect(turnContextSent(deps)).toBe("<turn_context>cached</turn_context>\n\n");
+  });
+
+  it("serves a turn whose create-user-message result is empty from the row it committed", async () => {
+    // The row is found by its inbound cursor inside `load-turn-transcript`, so
+    // the turn needs nothing from `create-user-message`'s result: an empty one
+    // replays into the same turn as a fresh run.
+    const deps = mockDeps();
+
+    const { result } = await new InngestTestEngine({
+      function: createHandleMessage(deps),
+      events: [event],
+      steps: [{ id: "create-user-message", handler: () => null }],
+    }).execute();
+
+    expect(result).toMatchObject({ status: "processed" });
+    expect(deps.agentStore.insertMessage).not.toHaveBeenCalled();
+    expect(deps.agentStore.findUserMessageByInbound).toHaveBeenCalledWith(
+      expect.anything(),
+      "conv-1",
+      "inbound-1",
+    );
+    // The reply is persisted once, as on a fresh run.
+    expect(deps.agentStore.insertMessages).toHaveBeenCalledTimes(1);
+    const [, stored] = expectDefined(
+      vi.mocked(deps.agentStore.insertOrRecoverTurnContext).mock.calls[0],
+      "insertOrRecoverTurnContext call",
+    );
+    expect(stored.messageId).toBe("msg-1");
+    // The row's `created_at`, as the turn context shows it.
+    expect(turnContextSent(deps)).toContain(
+      "Current time: Friday, September 25, 2026, 08:14 (UTC)",
+    );
   });
 
   it("does not call the provider when the llm-iter1 step is cached", async () => {
@@ -552,8 +607,8 @@ describe("handle-message — crash recovery / step replay", () => {
 
   it("does not re-run the recall round trip when auto-recall is cached", async () => {
     // Auto-recall costs an embedding round trip per execution and feeds the
-    // system prompt; the cached result must be reused on replay so the
-    // prompt stays identical across invocations and Hindsight isn't
+    // turn context; the cached result must be reused on replay so the
+    // context stays identical across invocations and Hindsight isn't
     // re-queried at every boundary.
     const recall = vi.fn();
     const deps = mockDeps({
@@ -582,10 +637,8 @@ describe("handle-message — crash recovery / step replay", () => {
     await engine.execute();
 
     expect(recall).not.toHaveBeenCalled();
-    // Non-vacuity: the cached memories reached the agent loop's prompt.
-    const loopCalls = (deps.runStreamingAgentLoop as ReturnType<typeof vi.fn>).mock.calls;
-    const systemPrompt = loopCalls[0]?.[0]?.systemPrompt as string;
-    expect(systemPrompt).toContain("cached homelab memory");
+    // Non-vacuity: the cached memories reached the turn's context.
+    expect(turnContextSent(deps)).toContain("- cached homelab memory");
   });
 
   it("counts a failed auto-recall once per turn, not once per re-invocation", async () => {
@@ -615,6 +668,276 @@ describe("handle-message — crash recovery / step replay", () => {
     // Non-vacuity: the bare body reached the recall site on more than one
     // pass. `buildTurnService` reads the profile-class registry just above it.
     expect(vi.mocked(deps.agentStore.listProfileClasses).mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it("sends the cached turn context and does not store another when render-turn-context is cached", async () => {
+    const cached =
+      "<turn_context>\nCurrent time: cached\n\nReply modality: text\n</turn_context>\n\n";
+    const deps = mockDeps();
+    const fn = createHandleMessage(deps);
+
+    await new InngestTestEngine({
+      function: fn,
+      events: [event],
+      steps: [{ id: "render-turn-context", handler: () => cached }],
+    }).execute();
+
+    expect(deps.agentStore.insertOrRecoverTurnContext).not.toHaveBeenCalled();
+    expect(turnContextSent(deps)).toBe(cached);
+
+    // Non-vacuity: uncached, the same run stores the context it sends.
+    await new InngestTestEngine({ function: fn, events: [event] }).execute();
+    expect(deps.agentStore.insertOrRecoverTurnContext).toHaveBeenCalledTimes(1);
+    const [, stored] = expectDefined(
+      vi.mocked(deps.agentStore.insertOrRecoverTurnContext).mock.calls[0],
+      "insertOrRecoverTurnContext call",
+    );
+    expect(stored.messageId).toBe("msg-1");
+    expect(turnContextSent(deps, -1)).toBe(stored.rendered);
+  });
+
+  it("sends the text a retried render step recovers, not the text it rendered", async () => {
+    // A crash after the insert commits re-runs the step body; the conflict arm
+    // hands back the row the first attempt stored, and that is what goes out.
+    const stored = "<turn_context>\nstored by the first attempt\n</turn_context>\n\n";
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        insertOrRecoverTurnContext: vi.fn().mockImplementation(async (_tx, params) => ({
+          ...params,
+          rendered: stored,
+        })),
+      }),
+    });
+
+    await new InngestTestEngine({ function: createHandleMessage(deps), events: [event] }).execute();
+
+    expect(turnContextSent(deps)).toBe(stored);
+  });
+});
+
+describe("handle-message — replay equality", () => {
+  type SseBlock = { text: string } | { toolUse: { id: string; name: string; input: string } };
+
+  /**
+   * Anthropic's streaming response for one iteration, as the SDK parses it. A
+   * tool input is the JSON text the model streams, so its key order is the
+   * model's.
+   */
+  function anthropicStream(id: string, blocks: ReadonlyArray<SseBlock>, stopReason: string) {
+    const events = [
+      {
+        type: "message_start",
+        message: {
+          id,
+          type: "message",
+          role: "assistant",
+          model: "claude-sonnet-4-6",
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 10, output_tokens: 1 },
+        },
+      },
+      ...blocks.flatMap((block, index) => [
+        "text" in block
+          ? { type: "content_block_start", index, content_block: { type: "text", text: "" } }
+          : {
+              type: "content_block_start",
+              index,
+              content_block: {
+                type: "tool_use",
+                id: block.toolUse.id,
+                name: block.toolUse.name,
+                input: {},
+              },
+            },
+        "text" in block
+          ? { type: "content_block_delta", index, delta: { type: "text_delta", text: block.text } }
+          : {
+              type: "content_block_delta",
+              index,
+              delta: { type: "input_json_delta", partial_json: block.toolUse.input },
+            },
+        { type: "content_block_stop", index },
+      ]),
+      {
+        type: "message_delta",
+        delta: { stop_reason: stopReason, stop_sequence: null },
+        usage: { output_tokens: 5 },
+      },
+      { type: "message_stop" },
+    ];
+    return new Response(
+      events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(""),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+  }
+
+  /**
+   * A turn with an earlier turn context in its history, recalled memories one
+   * of which that context already shows, and a tool call whose input the model
+   * emits in non-canonical key order — on a real `AnthropicProvider` behind the
+   * wire recorder, so requests compare as the bytes sent.
+   */
+  function replayDeps() {
+    const recorder = createWireRecorder(async (input, init) => {
+      const req = new Request(input, init);
+      if (req.url.endsWith("/v1/messages/count_tokens")) {
+        return new Response(JSON.stringify({ input_tokens: 100 }), {
+          headers: { "content-type": "application/json" },
+        });
+      }
+      const body = z.object({ messages: z.array(z.unknown()) }).parse(await req.json());
+      // The follow-up carries the tool result: two more messages than the first request.
+      return body.messages.length === 3
+        ? anthropicStream(
+            "msg_iter1",
+            [{ toolUse: { id: "toolu_1", name: "echo", input: '{"zeta": 1, "alpha": "x"}' } }],
+            "tool_use",
+          )
+        : anthropicStream("msg_iter2", [{ text: "done" }], "end_turn");
+    });
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "echo",
+        description: "Echo the input",
+        schema: z.object({ zeta: z.number(), alpha: z.string() }),
+        durable: true,
+        handler: async ({ alpha }) => `echoed ${alpha}`,
+      }),
+    );
+    const earlierContext =
+      "<turn_context>\nCurrent time: earlier\n\n<recalled_memories>\n- old fact\n</recalled_memories>\n\nReply modality: text\n</turn_context>\n\n";
+    const deps = mockDeps({
+      tools,
+      resolveProvider: mockResolver(
+        new AnthropicProvider("test-key", "http://anthropic.test", { fetch: recorder.fetch }),
+      ),
+      memory: mockMemoryProvider({
+        recall: vi.fn().mockResolvedValue({
+          memories: [
+            { type: "world", content: "old fact" },
+            { type: "world", content: "new fact" },
+          ],
+        }),
+      }),
+      transportStore: mockTransportStore({
+        getUnbatchedInbound: vi
+          .fn()
+          .mockResolvedValue([
+            { id: "inbound-1", content: "tell me about my homelab setup", source: "user" },
+          ]),
+      }),
+      agentStore: mockAgentStore({
+        getProfile: vi.fn().mockResolvedValue({
+          id: "profile-1",
+          userId: null,
+          name: "assistant",
+          basePrompt: "test",
+          model: "claude-sonnet-4-6",
+          summarizationModel: null,
+          extractionModel: null,
+          autoRecall: "always",
+          voiceMode: "auto",
+          toolSet: ["*"],
+          memoryScope: null,
+          profileClass: null,
+          streamChunkChars: 4000,
+          streamEdits: true,
+          codingAutoapproveMode: "off",
+        }),
+        listMessages: vi.fn().mockResolvedValue([
+          { id: "m1", role: "user", content: "earlier question" },
+          { id: "m2", role: "assistant", content: [{ type: "text", text: "earlier answer" }] },
+          { id: "msg-1", role: "user", content: "tell me about my homelab setup" },
+        ]),
+        listTurnContexts: vi.fn().mockResolvedValue([
+          {
+            messageId: "m1",
+            rendered: earlierContext,
+            context: {
+              recalledMemories: ["old fact"],
+              voiceMode: false,
+              channelTypes: [],
+              announcedCoreMemoryBlocks: [],
+            },
+          },
+        ]),
+      }),
+      runStreamingAgentLoop,
+    });
+    const messageRequests = () =>
+      recorder.exchanges.filter((e) => e.request.url.endsWith("/v1/messages"));
+    return { deps, messageRequests };
+  }
+
+  /** Every step the turn plans before its second model call, in plan order. */
+  const STEPS_BEFORE_ITER2 = [
+    "load-conversation",
+    "last-assistant",
+    "load-turn-snapshot",
+    "load-inbound",
+    "create-user-message",
+    "load-turn-transcript",
+    "freeze-turn-inputs",
+    "assemble-prompt",
+    "auto-recall",
+    "load-last-tokens",
+    "count-tokens-1",
+    "render-turn-context",
+    "llm-iter1",
+    "tool-iter1-0",
+    "emit-tool-results-iter1",
+  ];
+
+  it("sends llm-iter2 the same bytes whether the earlier steps ran or were replayed", async () => {
+    const fresh = replayDeps();
+    await new InngestTestEngine({
+      function: createHandleMessage(fresh.deps),
+      events: [event],
+    }).execute();
+    const freshRequests = fresh.messageRequests();
+    expect(freshRequests).toHaveLength(2);
+
+    // Each earlier step's output as the server hands it back: keys sorted at
+    // every depth, strings untouched.
+    const source = replayDeps();
+    const steps = [];
+    for (const id of STEPS_BEFORE_ITER2) {
+      const { result } = await new InngestTestEngine({
+        function: createHandleMessage(source.deps),
+        events: [event],
+      }).executeStep(id);
+      steps.push({ id, handler: () => canonicalKeyOrder(result) });
+    }
+
+    const replayed = replayDeps();
+    await new InngestTestEngine({
+      function: createHandleMessage(replayed.deps),
+      events: [event],
+      steps,
+    }).execute();
+    const replayedRequests = replayed.messageRequests();
+
+    // Only llm-iter2 ran: nothing before it re-executed.
+    expect(replayedRequests).toHaveLength(1);
+    expect(replayed.deps.memory.recall).not.toHaveBeenCalled();
+    expect(replayed.deps.agentStore.insertOrRecoverTurnContext).not.toHaveBeenCalled();
+    const sent = JSON.stringify(
+      expectDefined(replayedRequests[0], "replayed llm-iter2").request.body,
+    );
+    expect(sent).toBe(
+      JSON.stringify(expectDefined(freshRequests[1], "fresh llm-iter2").request.body),
+    );
+
+    // Non-vacuity: the request carries what the replay had to reproduce — the
+    // earlier turn's stored context, this turn's deduplicated memories, and
+    // the tool input in canonical key order.
+    expect(sent).toContain("Current time: earlier");
+    expect(sent).toContain("- new fact");
+    expect(sent.match(/- old fact/g)).toHaveLength(1);
+    expect(sent).toContain('"input":{"alpha":"x","zeta":1}');
   });
 });
 
@@ -761,8 +1084,8 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
 
   it("turns on the cached freeze-turn-inputs, not on this invocation's reads", async () => {
     // Live, this turn has no tools and a profile that never voices; the cached
-    // step offers `echo` and voices the reply. The prompt, the loop and the
-    // voice delivery all follow the cached step.
+    // step offers `echo` and voices the reply. The prompt, the turn context,
+    // the loop and the voice delivery all follow the cached step.
     const tts = {
       name: "openai",
       tts: vi.fn().mockResolvedValue({ audio: Buffer.from([1]), mediaType: "audio/ogg" }),
@@ -800,8 +1123,9 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
       { name: "echo", description: "echo a number", parameters: echo.inputSchema },
     ];
     expect(deps.promptSource.assemble).toHaveBeenCalledWith(
-      expect.objectContaining({ voiceMode: true, toolDefinitions: definitions }),
+      expect.objectContaining({ toolDefinitions: definitions }),
     );
+    expect(turnContextSent(deps)).toContain("Reply modality: voice");
     const [loopParams] = expectDefined(
       vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
       "runStreamingAgentLoop call",
@@ -811,9 +1135,9 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
     expect(handle.deliverVoice).toHaveBeenCalledTimes(1);
   });
 
-  it("delivers the voice reply the prompt was assembled for when the profile changes mid-turn", async () => {
+  it("delivers the voice reply its turn context announced when the profile changes mid-turn", async () => {
     // A `/settings` change turns voice off right after the prompt is
-    // assembled with the voice hint; the turn keeps the decision it made.
+    // assembled; the turn keeps the decision it made.
     let voiceMode = "always";
     const tts = {
       name: "openai",
@@ -842,9 +1166,8 @@ describe("handle-message — turn inputs frozen across re-invocations", () => {
 
     await new InngestTestEngine({ function: createHandleMessage(deps), events: [event] }).execute();
 
-    expect(deps.promptSource.assemble).toHaveBeenCalledWith(
-      expect.objectContaining({ voiceMode: true }),
-    );
+    expect(deps.promptSource.assemble).toHaveBeenCalled();
+    expect(turnContextSent(deps)).toContain("Reply modality: voice");
     expect(tts.tts).toHaveBeenCalledTimes(1);
     expect(handle.deliverVoice).toHaveBeenCalledTimes(1);
   });

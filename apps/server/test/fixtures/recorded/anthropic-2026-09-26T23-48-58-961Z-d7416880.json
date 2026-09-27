@@ -1,0 +1,25 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "[memory-extraction] User: Suggest three day trips from Lisbon I could do by train.\n\nAssistant: Sintra is the classic pick, about 40 minutes by train from Rossio station, with the Pena Palace and Moorish Castle up in the hills plus a charming old town below.\n\nCascais is another easy one, roughly 40 minutes from Cais do Sodré, right on the coast with beaches, a nice waterfront promenade, and good seafood.\n\nSetúbal takes a bit longer, around an hour from Roma-Areeiro, and gives you a smaller riverside town known for its own version of grilled fish, plus it's a good jumping-off point for the Arrábida hills or dolphin-watching in the Sado estuary.\n\nUser: Again, no bullet points or numbered lists with me, please. Plain sentences only.\n\nAssistant: Understood — I'll stick to plain sentences from here on.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "memory-extraction",
+            "arguments": "{\"memories\":[{\"fact\":\"Prefers responses in plain sentences, not bullet points or numbered lists\",\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"first-party\"}]}",
+            "id": "toolu_015KbGNEyUheFnVujrcwCWrQ"
+          }
+        ]
+      },
+      "metadata": {
+        "systemHash": "94c8d23c",
+        "toolsHash": "9f92809c"
+      }
+    }
+  ]
+}

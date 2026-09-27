@@ -1,0 +1,18 @@
+{
+  "images": [
+    {
+      "url": "https://fal.media-mock.test/fal-ai-flux-dev-1be544b3081f.jpg",
+      "width": 1024,
+      "height": 1024,
+      "content_type": "image/jpeg"
+    }
+  ],
+  "timings": {
+    "inference": 3.960233157966286
+  },
+  "seed": 1766080197,
+  "has_nsfw_concepts": [
+    false
+  ],
+  "prompt": "A whimsical illustration of a fluffy orange tabby cat wearing a tall red-and-white striped top hat, sitting upright with a curious expression, whiskers twitching, soft studio lighting, warm color palette, playful children's book illustration style, clean background"
+}

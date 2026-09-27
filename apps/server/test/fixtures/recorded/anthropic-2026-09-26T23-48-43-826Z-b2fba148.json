@@ -1,0 +1,25 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "Fact: T had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau there was the best they've ever had.\nContext: Casual conversation about Lisbon food, Sept 2026",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "pending-memory-classification",
+            "arguments": "{\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"first-party\"}",
+            "id": "toolu_0168C2wmwY5hMnfmJVVW2bSV"
+          }
+        ]
+      },
+      "metadata": {
+        "systemHash": "cc7ea80c",
+        "toolsHash": "117425de"
+      }
+    }
+  ]
+}

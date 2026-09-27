@@ -1,0 +1,54 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\ndraw me a cat in a hat",
+        "model": "claude-sonnet-5",
+        "turnIndex": 2,
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "Since this is our first chat — I'm your AI assistant. I'd love to get to know you a bit: what's your name, what do you do, what timezone are you in, and how do you like to communicate (quick and casual, or more detailed)?"
+      },
+      "recordedTimings": {
+        "ttftMs": 873,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          213,
+          4,
+          0,
+          0,
+          0,
+          10,
+          55,
+          44,
+          53,
+          47,
+          48,
+          46,
+          43,
+          48,
+          45,
+          46,
+          45,
+          47,
+          43,
+          46,
+          45,
+          45,
+          32,
+          0,
+          0,
+          0
+        ],
+        "totalDurationMs": 1878
+      },
+      "metadata": {
+        "systemHash": "22d5c167",
+        "toolsHash": "8ae2ba59"
+      }
+    }
+  ]
+}

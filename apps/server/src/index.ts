@@ -982,7 +982,6 @@ export async function bootstrapRuntime(
     env.USER_TIMEZONE,
   );
   const promptSource = new DefaultPromptSource({
-    timezone: env.USER_TIMEZONE,
     serviceGuidance: BUILT_IN_SERVICE_GUIDANCE,
   });
 

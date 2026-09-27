@@ -1,0 +1,34 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nWhat's bitcoin at?",
+        "model": "claude-sonnet-5",
+        "turnIndex": 4,
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "Bitcoin is at **$64,725 USD** right now."
+      },
+      "recordedTimings": {
+        "ttftMs": 908,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          97,
+          3,
+          6,
+          6,
+          1,
+          0
+        ],
+        "totalDurationMs": 1021
+      },
+      "metadata": {
+        "systemHash": "9ac6c5d2",
+        "toolsHash": "64f61b9a"
+      }
+    }
+  ]
+}

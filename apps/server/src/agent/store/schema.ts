@@ -22,6 +22,7 @@ import {
   MemoryCompartmentSchema,
   MemoryTrustSchema,
 } from "../evolution/memory-extraction-schema.js";
+import { TurnContextSchema } from "../turn-context.js";
 
 // --- Enums ---
 
@@ -998,4 +999,23 @@ export const conversationSummaries = pgTable(
   (t) => [
     unique("uq_conversation_summaries_conv_through").on(t.conversationId, t.throughMessageId),
   ],
+);
+
+/**
+ * The turn context a turn-starting user row was sent with: the exact block and
+ * its inputs. Immutable; unique on `message_id`, the render step's idempotency
+ * key. See design/prompt-caching.md → Turn Context → Data model.
+ */
+export const turnContexts = pgTable(
+  "turn_contexts",
+  {
+    id: pk(),
+    messageId: uuid("message_id")
+      .notNull()
+      .references(() => messages.id),
+    rendered: text("rendered").notNull(),
+    context: jsonbZod("context", TurnContextSchema).notNull(),
+    createdAt: ts(),
+  },
+  (t) => [unique("uq_turn_contexts_message").on(t.messageId)],
 );

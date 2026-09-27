@@ -1,0 +1,25 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "[memory-extraction] User: Call me T — I've just moved to Lisbon.\n\nAssistant: Hey T, nice to meet you! I'm your personal assistant — I'll keep track of context across our chats so you don't have to repeat yourself.\n\nSince you just moved to Lisbon, I'll assume you're on Western European Time (WET/WEST) unless you tell me otherwise. A couple quick things to help me help you better:\n\n- What do you do (work/projects)?\n- Any preference on how I communicate — brief and to the point, more detailed, casual, formal?\n[Tool: core_memory_update({\"content\":\"Name/nickname: T. Lives in Lisbon, Portugal (likely timezone: WET/WEST, UTC+0/+1).\",\"key\":\"user_profile\"})]\n\nUser: → Core memory block \"user_profile\" updated.\n\nAssistant: I've noted that you're in Lisbon. Let me know your work and communication preferences whenever you get a chance!\n\nUser: We had dinner at Taberna da Rua das Flores and the bacalhau was the best I've ever had. What other Portuguese dishes should I try?\n\nAssistant: [Tool: memory_retain({\"content\":\"T had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau there was the best they've ever had.\",\"context\":\"Casual conversation about Lisbon food, Sept 2026\"})]\n\nUser: → Remembered.\n\nAssistant: Glad you found a great spot! Since you're loving bacalhau, here are some other Portuguese classics worth trying in Lisbon:\n\n- **Bacalhau à Brás** – shredded cod with eggs, onions, and crispy potato strips (different from the traditional roasted version)\n- **Bifana** – a simple but addictive pork sandwich, great as a snack\n- **Caldo Verde** – kale and potato soup with chouriço, especially good now that it's getting cooler\n- **Polvo à Lagareiro** – octopus roasted with olive oil and garlic, often with smashed potatoes\n- **Arroz de Marisco** – a rich, soupy seafood rice\n- **Pastéis de Nata** – you've probably had these, but seek out Manteigaria or the original Pastéis de Belém for the best versions\n- **Sardinhas Assadas** – grilled sardines, a Lisbon staple especially in summer (Festas de Lisboa season)\n- **Feijoada à Transmontana** – hearty bean and pork stew if you want something more rustic\n- **Amêijoas à Bulhão Pato** – clams in garlic, olive oil, and coriander, simple and delicious\n\nIf you want, I can help you find restaurants known for specific dishes, or track favorites as you try them so you build up your own Lisbon food map.\n\nUser: Please don't use bullet points with me — just write in plain sentences.\n\nAssistant: Got it — no more bullet points, I'll write in plain sentences from now on.\n\nTo continue where we left off: beyond the bacalhau, you should try bacalhau à Brás, which is shredded cod tossed with eggs, onions, and crispy potato strips, quite different from the roasted version you just had. A bifana, a simple pork sandwich, is great as a quick bite, and caldo verde, a kale and potato soup with chouriço, is perfect now that the weather's cooling down. For seafood, look for polvo à Lagareiro (octopus roasted in olive oil and garlic) or arroz de marisco, a rich seafood rice. And of course, don't miss pastéis de nata — Manteigaria or the original Pastéis de Belém are usually considered the best in the city.\n[Tool: core_memory_update({\"content\":\"Communication style: plain sentences only, no bullet points or lists.\",\"key\":\"preferences\"})]\n\nUser: → Core memory block \"preferences\" updated.\n\nAssistant: Let me know if you'd like restaurant recommendations for any of these, or if you want me to keep a running list of dishes and places you've tried.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "memory-extraction",
+            "arguments": "{\"memories\":[{\"fact\":\"User goes by the nickname T.\",\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"first-party\"},{\"fact\":\"User recently moved to Lisbon, Portugal.\",\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"first-party\"},{\"fact\":\"T had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau there was the best they've ever had.\",\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"first-party\",\"context\":\"Casual conversation about Lisbon food, Sept 2026\"},{\"fact\":\"User prefers communication in plain sentences, no bullet points or lists.\",\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"first-party\"}]}",
+            "id": "toolu_01HG5JvDDevqrB2YcRuT6hdA"
+          }
+        ]
+      },
+      "metadata": {
+        "systemHash": "94c8d23c",
+        "toolsHash": "9f92809c"
+      }
+    }
+  ]
+}

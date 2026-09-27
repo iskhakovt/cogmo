@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ToolDefinition } from "../llm/types.js";
 import { DefaultPromptSource, formatUserContext } from "./prompt.js";
 import type { Profile } from "./store/index.js";
@@ -117,15 +117,40 @@ describe("DefaultPromptSource", () => {
     expect(prompt).not.toContain("# Capabilities");
   });
 
-  it("includes current time with timezone", async () => {
-    const prompt = await new DefaultPromptSource({ timezone: "UTC" }).assemble({
-      profile: undefined,
-      rules: [],
-      coreMemory: [],
+  describe("per-turn state", () => {
+    afterEach(() => {
+      vi.useRealTimers();
     });
 
-    expect(prompt).toContain("Current time:");
-    expect(prompt).toContain("(UTC)");
+    it("renders the same prompt at two different minutes", async () => {
+      const source = new DefaultPromptSource({ serviceGuidance: ["Test memory guidance."] });
+      const ctx = {
+        profile: undefined,
+        rules: [{ rule: "Be kind" }],
+        coreMemory: [{ key: "user_profile", content: "Name: Tim" }],
+        toolDefinitions: testTools,
+      };
+
+      vi.useFakeTimers({ now: new Date("2026-09-25T09:14:00Z") });
+      const first = await source.assemble(ctx);
+      vi.setSystemTime(new Date("2026-09-26T17:45:00Z"));
+      const second = await source.assemble(ctx);
+
+      expect(second).toBe(first);
+      expect(first).not.toContain("Current time:");
+    });
+
+    it("always carries the voice guidance, keyed to the turn context's reply modality", async () => {
+      const prompt = await new DefaultPromptSource().assemble({
+        profile: undefined,
+        rules: [],
+        coreMemory: [],
+      });
+
+      expect(prompt).toContain("# Turn context");
+      expect(prompt).toContain('When it says "Reply modality: voice"');
+      expect(prompt).toContain("spoken aloud");
+    });
   });
 
   it("shows onboarding prompt when there are no core memory blocks", async () => {
@@ -165,7 +190,6 @@ describe("DefaultPromptSource", () => {
 
   it("assembles sections in correct order", async () => {
     const prompt = await new DefaultPromptSource({
-      timezone: "UTC",
       serviceGuidance: ["Test memory guidance."],
     }).assemble({
       profile: undefined,
@@ -178,25 +202,13 @@ describe("DefaultPromptSource", () => {
     const toolsIdx = prompt.indexOf("# Tools");
     const capsIdx = prompt.indexOf("# Capabilities");
     const rulesIdx = prompt.indexOf("# Rules");
-    const timeIdx = prompt.indexOf("Current time:");
+    const turnContextIdx = prompt.indexOf("# Turn context");
 
     expect(userIdx).toBeGreaterThan(0);
     expect(toolsIdx).toBeGreaterThan(userIdx);
     expect(capsIdx).toBeGreaterThan(toolsIdx);
     expect(rulesIdx).toBeGreaterThan(capsIdx);
-    expect(timeIdx).toBeGreaterThan(rulesIdx);
-  });
-
-  it("appends voice-mode hint when voiceMode is true", async () => {
-    const prompt = await new DefaultPromptSource().assemble({
-      profile: undefined,
-      rules: [],
-      coreMemory: [],
-      voiceMode: true,
-    });
-
-    expect(prompt).toContain("# Voice mode");
-    expect(prompt).toContain("spoken aloud");
+    expect(turnContextIdx).toBeGreaterThan(rulesIdx);
   });
 });
 
