@@ -98,17 +98,13 @@ export class OpenAICompatibleProvider implements LlmProvider {
     try {
       const createParams: OpenAI.ChatCompletionCreateParamsNonStreaming & CacheHintFields = {
         model: params.model,
-        ...outputCap(params.model, params.maxTokens ?? DEFAULT_MAX_TOKENS),
+        ...modelFamilyParams(params.model, params),
         messages: buildMessages(params.system, params.messages, hints.systemMarker),
         ...hints.fields,
       };
 
       if (params.tools?.length) {
         createParams.tools = params.tools.map(toOpenAITool);
-      }
-
-      if (params.temperature !== undefined) {
-        createParams.temperature = params.temperature;
       }
 
       if (params.responseFormat) {
@@ -181,11 +177,10 @@ export class OpenAICompatibleProvider implements LlmProvider {
           .create(
             {
               model: params.model,
-              ...outputCap(params.model, params.maxTokens ?? DEFAULT_MAX_TOKENS),
+              ...modelFamilyParams(params.model, params),
               messages: buildMessages(params.system, params.messages, hints.systemMarker),
               ...hints.fields,
               ...(params.tools?.length && { tools: params.tools.map(toOpenAITool) }),
-              ...(params.temperature !== undefined && { temperature: params.temperature }),
               stream: true,
               stream_options: { include_usage: true },
             },
@@ -279,27 +274,65 @@ export class OpenAICompatibleProvider implements LlmProvider {
   }
 }
 
-// --- Output cap ---
+// --- Model-family parameters ---
 
-type OutputCap = { max_tokens: number } | { max_completion_tokens: number };
+/** The request fields whose accepted form depends on the model's family. */
+type FamilyParams = ({ max_tokens: number } | { max_completion_tokens: number }) & {
+  reasoning_effort?: "none";
+  temperature?: number;
+};
 
 /**
  * OpenAI's reasoning models (the o-series and GPT-5 onward, by bare or
- * fine-tuned id) reject `max_tokens` and take the cap as
- * `max_completion_tokens`, which also bounds reasoning. Every other id keeps
- * `max_tokens`, OpenRouter's `openai/…` slugs included.
+ * fine-tuned id) take the output cap as `max_completion_tokens`, which also
+ * bounds reasoning, and accept a `temperature` other than 1 only at reasoning
+ * effort `none`. From GPT-5.5, Chat Completions takes function tools only at
+ * `none`, so a request with tools to those models runs at `none` and keeps
+ * its temperature; every other reasoning request drops it, as the Anthropic
+ * adapter does. Other ids keep `max_tokens` and their temperature,
+ * OpenRouter's `openai/…` slugs included.
  */
-export function outputCap(model: string, maxTokens: number): OutputCap {
-  return takesMaxCompletionTokens(model)
-    ? { max_completion_tokens: maxTokens }
-    : { max_tokens: maxTokens };
+export function modelFamilyParams(
+  model: string,
+  request: Pick<ChatParams, "maxTokens" | "temperature" | "tools">,
+): FamilyParams {
+  const cap = request.maxTokens ?? DEFAULT_MAX_TOKENS;
+  const temperature = request.temperature === undefined ? {} : { temperature: request.temperature };
+  const family = openAIFamily(model);
+  if (family === "other") return { max_tokens: cap, ...temperature };
+  if (family === "tools-without-reasoning" && request.tools?.length) {
+    return { max_completion_tokens: cap, reasoning_effort: "none", ...temperature };
+  }
+  if (request.temperature !== undefined) warnDroppedTemperature(model, request.temperature);
+  return { max_completion_tokens: cap };
 }
 
-function takesMaxCompletionTokens(model: string): boolean {
+/**
+ * `reasoning` for OpenAI's reasoning models, and `tools-without-reasoning`
+ * for those of them, GPT-5.5 onward, that take function tools on Chat
+ * Completions only at reasoning effort `none`.
+ */
+function openAIFamily(model: string): "other" | "reasoning" | "tools-without-reasoning" {
   const id = model.replace(/^ft:/, "");
-  if (/^o\d/.test(id)) return true;
-  const major = /^gpt-(\d+)/.exec(id)?.[1];
-  return major !== undefined && Number(major) >= 5;
+  if (/^o\d/.test(id)) return "reasoning";
+  const version = /^gpt-(\d+)(?:\.(\d+))?/.exec(id);
+  if (!version) return "other";
+  const major = Number(version[1]);
+  const minor = Number(version[2] ?? 0);
+  if (major < 5) return "other";
+  return major > 5 || minor >= 5 ? "tools-without-reasoning" : "reasoning";
+}
+
+const warnedTemperatureModels = new Set<string>();
+
+function warnDroppedTemperature(model: string, temperature: number): void {
+  if (warnedTemperatureModels.has(model)) return;
+  warnedTemperatureModels.add(model);
+  logger.warn(
+    { model, temperature },
+    `dropping temperature for "${model}" — OpenAI's reasoning models accept one only at ` +
+      `reasoning effort "none".`,
+  );
 }
 
 // --- Cache hints ---

@@ -17,7 +17,10 @@ Two provider adapters exist:
 
 Both implement `LlmProvider` — the agent loop and orchestrator are provider-agnostic.
 
-`OpenAICompatibleProvider` sends the output cap as `max_completion_tokens` to OpenAI's reasoning models (the o-series and GPT-5 onward, matched by bare or fine-tuned model id on any host) and as `max_tokens` to every other id.
+`OpenAICompatibleProvider` sends the output cap as `max_completion_tokens` to OpenAI's reasoning models (the o-series and GPT-5 onward, matched by bare or fine-tuned model id on any host) and as `max_tokens` to every other id. Two more of their parameters depend on reasoning effort:
+
+- **Tools.** From GPT-5.5, Chat Completions takes function tools only at `reasoning_effort: "none"` (a 400 otherwise, and GPT-5.6 onward reason by default), so a request with tools to those models goes at `none`: tool turns run without reasoning. OpenAI's other documented route, the Responses API, keeps reasoning on tool calls but is a separate wire protocol this adapter doesn't speak. GPT-6 Astra has no `none` effort and takes tools only on Responses, so it can't serve chat turns here.
+- **Temperature.** Reasoning models accept a `temperature` other than 1 only at `none`. The adapter keeps it on a request it sends at `none` and drops it, warning once per model, from every other request to them — the degraded-reply synthesis's `temperature: 0` among them.
 
 ## Data Model
 
