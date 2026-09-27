@@ -4093,14 +4093,25 @@ describe("turn contexts", () => {
 
   it("finds a stage prompt's user row by its inbound, in its own conversation", async () => {
     const { userId, profileId, conversationId, stamp, row } = await seedUserRow();
-    // The reply cursors on the same inbound and must not be the one found.
+    // The stage's reply and its tool results cursor on the same inbound, the
+    // tool results as later user rows, and must not be the one found.
     await tx((trx) =>
-      store.insertMessage(trx, {
+      store.insertMessages(trx, {
         conversationId,
-        role: "assistant",
-        content: "reply",
         lastInboundMessageId: INBOUND,
         ...stamp,
+        messages: [
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "t1", name: "web_search", input: {} }],
+          },
+          {
+            role: "user",
+            content: [{ type: "tool_result", toolUseId: "t1", content: "search result" }],
+          },
+          { role: "assistant", content: "reply" },
+        ],
+        lastMessageOutputTokens: 12,
       }),
     );
     // Another conversation's row on the same cursor stays out of it.
