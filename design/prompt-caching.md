@@ -249,7 +249,7 @@ interface CacheIntent {
 | Caller | Intent |
 |-|-|
 | `handle-message` → `runStreamingAgentLoop` | `{ key: conversationId, retention: "long" }` (`turnCacheIntent`; see [Retention](#retention-confirmed)) |
-| `run-agentic-stage` → `runStreamingAgentLoop` | The same as chat — a run conversation's stage and chat turns share one prefix, and a 5-minute entry would expire before the next chat turn |
+| `run-agentic-stage` → `runStreamingAgentLoop` | `{ key: conversationId, retention: "short" }` — a stage narrows `tools` and `# Tools` to its allowlist, so the run conversation's chat turns don't share its prefix and can't read its cache. It takes the chat intent in step 3, with [One Prefix per Conversation](#one-prefix-per-conversation-proposed) |
 | The loop's in-step non-streaming replay | Reuses the iteration's `chatParams`, so it reads the same cache |
 | Summarization, degraded-reply synthesis, sub-agent calls, `typed.ts`, artifact extraction | None — a breakpoint on a tail that is never re-sent is a pure 1.25–2× write surcharge |
 
@@ -301,7 +301,7 @@ Illustrative, Sonnet 5 input cost per turn, assuming a 38k-token prefix (8k tool
 - Between 5 and 60 minutes, only the 1-hour TTL reads — the case it exists for.
 - Over an hour, both write the whole prefix; 1 hour pays 2× for it.
 
-For chat, and so for pipeline runs that share its prefix, `"long"` is the default. The query below measures start-to-start gaps between user-sent turns — pipeline stage prompts and scheduled fires are excluded by their inbound source, since their gaps are machine-driven — which approximates the cache-relevant gap to within one turn's duration:
+For chat, `"long"` is the default. Pipeline stage turns stay `"short"` until they share the chat prefix (step 3): a stage narrows `tools` to its allowlist, so the chat turns that come after a human reply gap can't read its cache. The query below measures start-to-start gaps between user-sent turns — pipeline stage prompts and scheduled fires are excluded by their inbound source, since their gaps are machine-driven — which approximates the cache-relevant gap to within one turn's duration:
 
 ```sql
 with turns as (
@@ -419,7 +419,7 @@ llmock's request journal can't serve here: it stores its own OpenAI-shaped conve
 
 - **A voice turn** changing only the turn context's modality. `voice_config` is a database singleton that `pipeline.integration.test.ts` deletes and reseeds in the shared database, so a second writer races it; the voice path is covered at the unit tier (the prompt takes no voice input) and live, by scenario A's voice turn.
 - **A core-memory edit**, announced in the next turn's context — step 3. Today an edit changes `# User` at the next turn.
-- **A pipeline run conversation:** chat turns and a stage turn alternate, and `assertAppendOnly` holds across each switch — same `tools`, same `system`, same `1h` TTL. Step 3; today a stage turn narrows `tools` and `# Tools`.
+- **A pipeline run conversation:** chat turns and a stage turn alternate, and `assertAppendOnly` holds across each switch — same `tools`, same `system`, same `1h` TTL. Step 3; today a stage turn narrows `tools` and `# Tools` and caches for 5 minutes.
 - **OpenAI-compatible:** the recorded xAI-via-OpenRouter route runs a two-turn conversation with a tool call. `assertAppendOnly` holds over the Chat Completions bodies, which catches a reordered `arguments` string, and the dialect's fields are present.
 
 The suite follows `.claude/rules/testing.md`: it runs alongside its noisiest peers before it counts as stable, since llmock's fixture pool is shared across forks.
@@ -459,8 +459,8 @@ Recorded fixtures match on the last user message (`match: { userMessage }`), whi
 ## Implementation Plan `[proposed]`
 
 1. **Cache intent and usage accounting** `[confirmed]`. `ChatParams.cache`, the Anthropic mapping, usage totals across adapters, the metric split, loop totals, the injectable `fetch` and wire recorder, and live scenario A's within-turn assertions. Iterations 2 and later of every tool-using turn read the transcript. Until step 2, reads rarely cross a turn (only when the system prompt happens not to change), so a single-iteration turn usually pays 25% more on the transcript it writes; the step nets out cheaper once more than ~28% of turns iterate (`cogmo.agent.iterations`), or fewer where reads do cross a turn. Early data puts the tool-calling share near that line, above it in periods heavy on image generation and below it in chat-heavy ones; it comes from little use, and a low share may reflect bugs as much as usage. Ships with `retention: "short"` everywhere.
-2. **Turn context** `[confirmed]`. The voice decision and per-turn tool definitions frozen in the `freeze-turn-inputs` step; clock, recall and voice hint out of the system prompt (voice as a modality in the turn context, its style guidance a standing system-prompt section); `turn_contexts` with stored rendered text, the `render-turn-context` step after compaction with deduplication and the envelope, in chat and stage turns; the llmock normalizer and re-record; `retention: "long"` for chat and pipeline runs; the integration suite with `assertAppendOnly`; the replay-equality unit test; live scenarios A, B and C at the loop. Reads across turns on every provider, except after a configuration change — which today includes a core-memory edit and a switch between chat and stage turns, both step 3's.
-3. **System prompt snapshot and one prefix per conversation.** `system_prompt_snapshots` and epochs keyed on a configuration digest, core-memory announcements, every channel-scoped rule labelled in the snapshot with the delivery channels in the turn context, thinking blocks stripped when an epoch opens, and stage turns on the conversation's snapshot and tool definitions with the allowlist enforced at dispatch ([pipelines.md](pipelines.md) changes with it).
+2. **Turn context** `[confirmed]`. The voice decision and per-turn tool definitions frozen in the `freeze-turn-inputs` step; clock, recall and voice hint out of the system prompt (voice as a modality in the turn context, its style guidance a standing system-prompt section); `turn_contexts` with stored rendered text, the `render-turn-context` step after compaction with deduplication and the envelope, in chat and stage turns; the llmock normalizer and re-record; `retention: "long"` for chat turns (stage turns stay `"short"`); the integration suite with `assertAppendOnly`; the replay-equality unit test; live scenarios A, B and C at the loop. Reads across turns on every provider, except after a configuration change — which today includes a core-memory edit and a switch between chat and stage turns, both step 3's.
+3. **System prompt snapshot and one prefix per conversation.** `system_prompt_snapshots` and epochs keyed on a configuration digest, core-memory announcements, every channel-scoped rule labelled in the snapshot with the delivery channels in the turn context, thinking blocks stripped when an epoch opens, and stage turns on the conversation's snapshot and tool definitions with the allowlist enforced at dispatch ([pipelines.md](pipelines.md) changes with it), and on chat's `"long"` retention.
 4. **OpenAI-compatible routing hints** `[confirmed]`. `attrs.cacheDialect` with its migration and writers, OpenRouter `session_id` and markers, OpenAI `prompt_cache_key`, xAI `x-grok-conv-id`, and live scenario D.
 
 ## Open questions

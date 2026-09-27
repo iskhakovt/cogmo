@@ -222,7 +222,7 @@ async function converse(params: {
       service: mock<Service>(),
       maxTokens: 16000,
       onEvent: async () => {},
-      cache: turnCacheIntent(nonce),
+      cache: turnCacheIntent(nonce, "chat"),
       turnLogger: logger,
     });
     expect(result.degraded, `turn ${i + 1} degraded`).toBeUndefined();

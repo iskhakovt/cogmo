@@ -1099,7 +1099,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           // tool to duplicate. (Not `triggerInboundId`, which a debounce
           // re-fire moves — see `firstInboundId` above.)
           ...(firstInboundId !== "" && { turnKey: firstInboundId }),
-          cache: turnCacheIntent(conversationId),
+          cache: turnCacheIntent(conversationId, "chat"),
           turnLogger,
         });
         // Class C / D degraded off-ramp. The loop exited because a repair

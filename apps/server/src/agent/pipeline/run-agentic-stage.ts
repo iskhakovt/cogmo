@@ -425,7 +425,7 @@ export async function runAgenticStage(
       onEvent: (event) => delivery.push(event),
       stepRun: steps.stepRun,
       turnKey: inboundId,
-      cache: turnCacheIntent(conversationId),
+      cache: turnCacheIntent(conversationId, "stage"),
       turnLogger: log,
     });
     // A degrade drops the iteration that triggered it, so its streamed output
