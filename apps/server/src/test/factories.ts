@@ -178,7 +178,7 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
       createdAt: new Date("2026-05-09T12:00:00Z"),
     }),
     deleteCustomCompartment: vi.fn().mockResolvedValue({ deleted: true }),
-    hasChannelRules: vi.fn().mockResolvedValue(false),
+    hasChannelDefaults: vi.fn().mockResolvedValue(false),
     insertSeedRule: vi.fn().mockResolvedValue({ id: "rule-1" }),
     getCorrections: vi.fn().mockResolvedValue([]),
     upsertCorrection: vi.fn().mockResolvedValue({ id: "rule-1", promoted: false }),

@@ -293,7 +293,7 @@ Each adapter picks the rendering path that suits its platform:
 A conversation can have sessions on multiple channels simultaneously (e.g., Telegram DM + web UI). Two implications:
 
 1. **Output** — `DeliveryRouter` calls each adapter's `renderOutput` per session. Same canonical markdown, different renders per channel. No special logic needed in the orchestrator.
-2. **Prompt** — Steering rules for all active channel types are unioned via the query's `IN` clause and rendered by section, channel defaults last, so a conflicting user or learned rule wins.
+2. **Prompt** — Steering rules for all active channel types are unioned via the query's `IN` clause and rendered by section ([Channel-specific instructions](#channel-specific-instructions)).
 
 ### Why this design
 

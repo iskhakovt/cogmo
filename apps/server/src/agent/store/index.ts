@@ -1138,7 +1138,7 @@ export interface AgentStore {
   // --- Evolution: correction extraction ---
 
   /** Whether a channel's defaults have been seeded. */
-  hasChannelRules(tx: Transaction, channelType: string): Promise<boolean>;
+  hasChannelDefaults(tx: Transaction, channelType: string): Promise<boolean>;
 
   /** Insert an active channel default (`source = 'seed'`) for every profile. */
   insertSeedRule(
@@ -2859,7 +2859,7 @@ export class DrizzleAgentStore implements AgentStore {
     return { deleted: deleted.length > 0 };
   }
 
-  async hasChannelRules(tx: Transaction, channelType: string): Promise<boolean> {
+  async hasChannelDefaults(tx: Transaction, channelType: string): Promise<boolean> {
     const rows = await tx
       .select({ id: steeringRules.id })
       .from(steeringRules)

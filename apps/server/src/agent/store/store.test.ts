@@ -1081,7 +1081,7 @@ describe("DrizzleAgentStore", () => {
   });
 
   describe("steering rules", () => {
-    it("returns active rules for profile + global, ordered by priority", async () => {
+    it("returns active rules for profile + global, safety first", async () => {
       const profileId = await seedProfile();
       const otherProfileId = (
         await tx((trx) =>
@@ -1284,9 +1284,9 @@ describe("DrizzleAgentStore", () => {
       ]);
     });
 
-    it("hasChannelRules counts only the channel's seed rules", async () => {
+    it("hasChannelDefaults counts only the channel's seed rules", async () => {
       const { steeringRules } = await import("./schema.js");
-      const has = () => tx((trx) => store.hasChannelRules(trx, "telegram"));
+      const has = () => tx((trx) => store.hasChannelDefaults(trx, "telegram"));
       const insert = (source: "manual" | "seed" | "correction", channelType: string) =>
         db.insert(steeringRules).values({
           rule: `${source} on ${channelType}`,

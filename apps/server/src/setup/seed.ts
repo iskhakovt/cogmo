@@ -129,7 +129,7 @@ export async function seedChannelRules(
   channelType: string,
 ): Promise<void> {
   await runInTx(async (tx) => {
-    if (await agentStore.hasChannelRules(tx, channelType)) return;
+    if (await agentStore.hasChannelDefaults(tx, channelType)) return;
 
     const rules = channelType === "telegram" ? TELEGRAM_DEFAULT_RULES : [];
 
