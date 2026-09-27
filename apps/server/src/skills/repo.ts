@@ -198,6 +198,14 @@ export interface EnsureSkillsCodingRepoArgs {
  *     `coding_repos` table; see `CodingStore.updateRepoRemoteUrl`.
  *   - `unchanged` — row present and in sync.
  *
+ * The row is read before `origin`, both inside the transaction. That first
+ * read fixes the REPEATABLE READ snapshot, and every `remote_url` was itself
+ * read from `origin` inside its writer's transaction, so any row this call
+ * sees came from an `origin` read earlier than its own: a boot racing the
+ * wizard never writes an older URL over a newer one. A write committed after
+ * the snapshot fails this call's own write with `40001`, and the transactor's
+ * retry re-reads both.
+ *
  * Defaults on first insert match the per-repo knobs `Transport.repos.add`
  * uses for user-added repos. `maxConcurrentTasks: 1` is intentional — register
  * is single-writer on `refs/heads/main` and parallel skill-author tasks would
@@ -207,21 +215,20 @@ export async function ensureSkillsCodingRepo(
   deps: EnsureSkillsCodingRepoDeps,
   args: EnsureSkillsCodingRepoArgs,
 ): Promise<EnsureSkillsCodingRepoResult> {
-  const remoteUrl = await readOriginUrl(args.skillsRepoPath);
-
-  if (!remoteUrl) {
-    log.warn(
-      { localPath: args.skillsRepoPath },
-      "skills bare repo has no `origin` configured — `delegate_coding({repo:'skills'})` " +
-        "will fail until the wizard or `cogmo migrate-skills-remote` runs",
-    );
-    return { kind: "skipped_no_origin", localPath: args.skillsRepoPath };
-  }
-
-  // Read first; on a miss, a keyed insert, so concurrent bootstraps converge
-  // on one row (`.claude/rules/inngest.md`).
   return deps.runInTx(async (tx) => {
     const existing = await deps.codingStore.getRepoByName(tx, SKILLS_CODING_REPO_NAME);
+    const remoteUrl = await readOriginUrl(args.skillsRepoPath);
+    if (!remoteUrl) {
+      log.warn(
+        { localPath: args.skillsRepoPath },
+        "skills bare repo has no `origin` configured — `delegate_coding({repo:'skills'})` " +
+          "will fail until the wizard or `cogmo migrate-skills-remote` runs",
+      );
+      return { kind: "skipped_no_origin", localPath: args.skillsRepoPath };
+    }
+
+    // On a miss, a keyed insert, so concurrent bootstraps converge on one row
+    // (`.claude/rules/inngest.md`).
     const { kind, row } =
       existing === undefined
         ? await deps.codingStore.insertOrRecoverRepo(tx, {

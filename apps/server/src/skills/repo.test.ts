@@ -371,8 +371,8 @@ describe("ensureSkillsCodingRepo", () => {
     if (result.kind === "skipped_no_origin") {
       expect(result.localPath).toBe(repoPath);
     }
-    expect(codingStore.getRepoByName).not.toHaveBeenCalled();
     expect(codingStore.insertOrRecoverRepo).not.toHaveBeenCalled();
+    expect(codingStore.updateRepoRemoteUrl).not.toHaveBeenCalled();
   });
 
   it("inserts a `skills` row with the bare repo's origin URL on first run", async () => {
@@ -480,6 +480,38 @@ describe("ensureSkillsCodingRepo", () => {
     );
   });
 
+  it("keeps an origin the wizard committed just before this call's snapshot", async () => {
+    const oldUrl = "git@github.com:user/old-skills.git";
+    const newUrl = "git@github.com:user/new-skills.git";
+    const repoPath = await skillsRepoWithOrigin(oldUrl);
+    // One `skills` row that reads and writes go through, standing in for the table.
+    let row = storedSkillsRow(repoPath, oldUrl);
+    const codingStore = mock<CodingStore>();
+    codingStore.getRepoByName.mockImplementation(async () => row);
+    codingStore.updateRepoRemoteUrl.mockImplementation(async (_tx, _id, remoteUrl) => {
+      row = { ...row, remoteUrl };
+    });
+    // The boot's first read is where its snapshot is taken. The wizard runs to
+    // completion just ahead of it: re-point origin, then sync the row, as
+    // `configureSkillsRemote` does.
+    codingStore.getRepoByName.mockImplementationOnce(async () => {
+      await execFileP("git", ["-C", repoPath, "remote", "set-url", "origin", newUrl]);
+      await ensureSkillsCodingRepo(
+        { runInTx: fakeRunInTx, codingStore },
+        { skillsRepoPath: repoPath },
+      );
+      return row;
+    });
+
+    const result = await ensureSkillsCodingRepo(
+      { runInTx: fakeRunInTx, codingStore },
+      { skillsRepoPath: repoPath },
+    );
+
+    expect(result).toMatchObject({ kind: "unchanged", remoteUrl: newUrl });
+    expect(row.remoteUrl).toBe(newUrl);
+  });
+
   it("propagates unexpected git failures (not just missing origin)", async () => {
     const codingStore = mock<CodingStore>();
 
@@ -491,6 +523,7 @@ describe("ensureSkillsCodingRepo", () => {
         { skillsRepoPath: join(workDir, "does-not-exist") },
       ),
     ).rejects.toThrow();
-    expect(codingStore.getRepoByName).not.toHaveBeenCalled();
+    expect(codingStore.insertOrRecoverRepo).not.toHaveBeenCalled();
+    expect(codingStore.updateRepoRemoteUrl).not.toHaveBeenCalled();
   });
 });
