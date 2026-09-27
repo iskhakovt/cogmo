@@ -1,5 +1,6 @@
 import type { ToolDefinition } from "../llm/types.js";
 import type { CoreMemoryView } from "./core-memory/scope.js";
+import { RULE_SECTIONS, type RuleSection, type SectionedRule } from "./rule-sections.js";
 import type { CoreMemoryBlock } from "./service.js";
 import type { Profile } from "./store/index.js";
 import { TURN_CONTEXT_GUIDANCE } from "./turn-context.js";
@@ -11,7 +12,8 @@ import { TURN_CONTEXT_GUIDANCE } from "./turn-context.js";
  */
 export interface AssembleContext {
   profile: Profile | undefined;
-  rules: ReadonlyArray<{ rule: string }>;
+  /** Active steering rules, rendered by section in the given order within each. */
+  rules: ReadonlyArray<SectionedRule>;
   /**
    * The conversation user's core memory as the turn's scope sees it — the
    * blocks `core_memory_update` writes — rendered as the `# User` section.
@@ -56,6 +58,17 @@ const RESTRICTED_SHARED_GROUP =
 /** Leads a classed profile's own group. */
 const OWN_GROUP = "Only in this persona:";
 
+const RULES_PREAMBLE =
+  "Standing rules for your replies. Where two rules that apply to this reply conflict, follow the one listed first.";
+
+const RULE_SECTION_HEADINGS: Readonly<Record<RuleSection, string>> = {
+  always: "## Always",
+  from_user:
+    "## From your user\nYour user asked for these. They take precedence over your default style and the channel defaults.",
+  learned: "## Learned from your user",
+  channel_defaults: "## Channel defaults",
+};
+
 export interface PromptSourceConfig {
   serviceGuidance?: ReadonlyArray<string>;
 }
@@ -84,6 +97,15 @@ export function formatUserContext(view: CoreMemoryView): string | null {
 
 function formatBlocks(blocks: ReadonlyArray<CoreMemoryBlock>): string {
   return blocks.map((b) => `## ${b.key}\n${b.content}`).join("\n\n");
+}
+
+/** The `# Rules` section body: a subsection per non-empty section, in precedence order. */
+function formatRules(rules: ReadonlyArray<SectionedRule>): string {
+  const sections = RULE_SECTIONS.flatMap((section) => {
+    const lines = rules.filter((r) => r.section === section).map((r) => `- ${r.rule}`);
+    return lines.length > 0 ? [`${RULE_SECTION_HEADINGS[section]}\n${lines.join("\n")}`] : [];
+  });
+  return [RULES_PREAMBLE, ...sections].join("\n\n");
 }
 
 /**
@@ -137,8 +159,7 @@ export class DefaultPromptSource implements PromptSource {
 
     // Steering rules from DB
     if (rules.length > 0) {
-      const rulesList = rules.map((r) => `- ${r.rule}`).join("\n");
-      parts.push(`# Rules\n\n${rulesList}`);
+      parts.push(`# Rules\n\n${formatRules(rules)}`);
     }
 
     // Last, so its voice guidance isn't drowned out by the identity and

@@ -1081,7 +1081,7 @@ describe("DrizzleAgentStore", () => {
   });
 
   describe("steering rules", () => {
-    it("returns active rules for profile + global, ordered by priority", async () => {
+    it("returns active rules for profile + global, safety first", async () => {
       const profileId = await seedProfile();
       const otherProfileId = (
         await tx((trx) =>
@@ -1137,7 +1137,175 @@ describe("DrizzleAgentStore", () => {
       ]);
 
       const rules = await tx((trx) => store.getActiveRules(trx, profileId, []));
-      expect(rules).toEqual([{ rule: "Global safety rule" }, { rule: "Be concise" }]);
+      expect(rules).toEqual([
+        { rule: "Global safety rule", section: "always" },
+        { rule: "Be concise", section: "always" },
+      ]);
+    });
+
+    it("sections each rule by its source", async () => {
+      const profileId = await seedProfile();
+      const { steeringRules } = await import("./schema.js");
+      const rule = (
+        text: string,
+        source: "manual" | "seed" | "instruction" | "correction" | "evolution",
+        priority: number,
+        channelType: string | null,
+      ) => ({
+        rule: text,
+        category: "style",
+        active: true,
+        source,
+        priority,
+        observationCount: 2,
+        profileId: null,
+        channelType,
+      });
+      await db
+        .insert(steeringRules)
+        .values([
+          rule("Channel default", "seed", 50, "telegram"),
+          rule("Learned", "correction", 100, null),
+          rule("Merged", "evolution", 100, null),
+          rule("Stated", "instruction", 100, null),
+          rule("Operator", "manual", 200, null),
+        ]);
+
+      const rules = await tx((trx) => store.getActiveRules(trx, profileId, ["telegram"]));
+      expect(Object.fromEntries(rules.map((r) => [r.rule, r.section]))).toEqual({
+        Operator: "always",
+        Stated: "from_user",
+        Learned: "learned",
+        Merged: "learned",
+        "Channel default": "channel_defaults",
+      });
+    });
+
+    it("orders a section by profile scope, then channel scope, then priority", async () => {
+      const profileId = await seedProfile();
+      const { steeringRules } = await import("./schema.js");
+      const rule = (
+        text: string,
+        scope: { profileId: string | null; channelType: string | null },
+        priority: number,
+      ) => ({
+        rule: text,
+        category: "style",
+        active: true,
+        source: "correction" as const,
+        priority,
+        observationCount: 2,
+        ...scope,
+      });
+      const everywhere = { profileId: null, channelType: null };
+      // Inserted widest first, so id order is the reverse of the expected one.
+      await db
+        .insert(steeringRules)
+        .values([
+          rule("Everywhere, priority 100", everywhere, 100),
+          rule("Everywhere, priority 90", everywhere, 90),
+          rule("All profiles, on telegram", { profileId: null, channelType: "telegram" }, 10),
+          rule("This profile, all channels", { profileId, channelType: null }, 10),
+          rule("This profile, on telegram", { profileId, channelType: "telegram" }, 100),
+        ]);
+
+      expect(
+        (await tx((trx) => store.getActiveRules(trx, profileId, ["telegram"]))).map((r) => r.rule),
+      ).toEqual([
+        "This profile, on telegram",
+        "This profile, all channels",
+        "All profiles, on telegram",
+        "Everywhere, priority 90",
+        "Everywhere, priority 100",
+      ]);
+    });
+
+    it("lists safety rules first in Always, whatever their scope and priority", async () => {
+      const profileId = await seedProfile();
+      const { steeringRules } = await import("./schema.js");
+      await db.insert(steeringRules).values([
+        {
+          rule: "Profile style rule",
+          category: "style",
+          active: true,
+          source: "manual",
+          priority: 1,
+          observationCount: 0,
+          profileId,
+        },
+        {
+          rule: "Global safety rule",
+          category: "safety",
+          active: true,
+          source: "manual",
+          priority: 500,
+          observationCount: 0,
+          profileId: null,
+        },
+      ]);
+
+      expect(await tx((trx) => store.getActiveRules(trx, profileId, []))).toEqual([
+        { rule: "Global safety rule", section: "always" },
+        { rule: "Profile style rule", section: "always" },
+      ]);
+    });
+
+    it("insertSeedRule writes an active, global channel default", async () => {
+      const { id } = await tx((trx) =>
+        store.insertSeedRule(trx, {
+          rule: "Avoid tables",
+          category: "style",
+          channelType: "telegram",
+          priority: 50,
+        }),
+      );
+
+      const { steeringRules } = await import("./schema.js");
+      const rows = await db
+        .select({
+          source: steeringRules.source,
+          active: steeringRules.active,
+          profileId: steeringRules.profileId,
+          channelType: steeringRules.channelType,
+          priority: steeringRules.priority,
+          observationCount: steeringRules.observationCount,
+        })
+        .from(steeringRules)
+        .where(eq(steeringRules.id, id));
+      expect(rows).toEqual([
+        {
+          source: "seed",
+          active: true,
+          profileId: null,
+          channelType: "telegram",
+          priority: 50,
+          observationCount: 0,
+        },
+      ]);
+    });
+
+    it("hasChannelDefaults counts only the channel's seed rules", async () => {
+      const { steeringRules } = await import("./schema.js");
+      const has = () => tx((trx) => store.hasChannelDefaults(trx, "telegram"));
+      const insert = (source: "manual" | "seed" | "correction", channelType: string) =>
+        db.insert(steeringRules).values({
+          rule: `${source} on ${channelType}`,
+          category: "style",
+          active: true,
+          source,
+          priority: 100,
+          observationCount: 2,
+          profileId: null,
+          channelType,
+        });
+
+      await insert("correction", "telegram");
+      await insert("manual", "telegram");
+      await insert("seed", "slack");
+      expect(await has()).toBe(false);
+
+      await insert("seed", "telegram");
+      expect(await has()).toBe(true);
     });
 
     it("keeps tied priorities in id order after both corrections are promoted", async () => {
@@ -1161,8 +1329,8 @@ describe("DrizzleAgentStore", () => {
       await observe("First rule", first.id);
 
       expect(await tx((trx) => store.getActiveRules(trx, profileId, []))).toEqual([
-        { rule: "First rule" },
-        { rule: "Second rule" },
+        { rule: "First rule", section: "learned" },
+        { rule: "Second rule", section: "learned" },
       ]);
       expect((await tx((trx) => store.getCorrections(trx, profileId))).map((c) => c.rule)).toEqual([
         "First rule",
@@ -1211,21 +1379,21 @@ describe("DrizzleAgentStore", () => {
         },
       ]);
 
-      // No channels active — only null-scoped rules
-      expect(await tx((trx) => store.getActiveRules(trx, profileId, []))).toEqual([
-        { rule: "Global rule" },
-      ]);
+      const rules = async (channelTypes: ReadonlyArray<string>) =>
+        (await tx((trx) => store.getActiveRules(trx, profileId, channelTypes))).map((r) => r.rule);
 
-      // Telegram active — global + telegram
-      expect(await tx((trx) => store.getActiveRules(trx, profileId, ["telegram"]))).toEqual([
-        { rule: "Global rule" },
-        { rule: "Telegram rule" },
-      ]);
+      // No channels active — only null-scoped rules
+      expect(await rules([])).toEqual(["Global rule"]);
+
+      // Telegram active — telegram + global, the narrower scope first
+      expect(await rules(["telegram"])).toEqual(["Telegram rule", "Global rule"]);
 
       // Both channels — union
-      expect(
-        await tx((trx) => store.getActiveRules(trx, profileId, ["telegram", "slack"])),
-      ).toEqual([{ rule: "Global rule" }, { rule: "Telegram rule" }, { rule: "Slack rule" }]);
+      expect(await rules(["telegram", "slack"])).toEqual([
+        "Telegram rule",
+        "Slack rule",
+        "Global rule",
+      ]);
     });
   });
 
@@ -2666,7 +2834,7 @@ describe("DrizzleAgentStore", () => {
       );
 
       const rules = await tx((trx) => store.getActiveRules(trx, profileId, []));
-      expect(rules).toEqual([{ rule: "New consolidated rule" }]);
+      expect(rules).toEqual([{ rule: "New consolidated rule", section: "learned" }]);
     });
   });
 
