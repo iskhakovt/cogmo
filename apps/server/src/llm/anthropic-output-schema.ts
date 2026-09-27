@@ -31,6 +31,9 @@ const SUPPORTED_FORMATS: ReadonlySet<string> = new Set([
 /** Regex features the grammar lacks: backreferences, lookaround, word boundaries. */
 const UNSUPPORTED_REGEX = /\\[1-9bB]|\(\?<?[=!]/;
 
+/** Keywords that decide what a node admits. A node with none admits any value. */
+const TYPING_KEYWORDS = ["type", "anyOf", "oneOf", "allOf", "$ref", "enum", "const"] as const;
+
 /** Keywords whose value maps names to subschemas. */
 const SUBSCHEMA_MAPS: ReadonlySet<string> = new Set(["properties", "$defs", "definitions"]);
 
@@ -38,12 +41,15 @@ const SUBSCHEMA_MAPS: ReadonlySet<string> = new Set(["properties", "$defs", "def
 const SUBSCHEMA_LISTS: ReadonlySet<string> = new Set(["anyOf", "oneOf", "allOf", "items"]);
 
 /**
- * Whether any object in a JSON Schema admits keys beyond its `properties`:
- * `additionalProperties` set to anything but `false`, as `z.record` emits.
+ * Whether any node of a JSON Schema admits an object with keys beyond its
+ * `properties`: `additionalProperties` set to anything but `false`, as
+ * `z.record` emits, or an untyped node (`{}`, from `z.unknown()` or
+ * `z.any()`), which admits any value.
  */
 export function hasOpenObject(node: unknown): boolean {
   if (typeof node === "boolean") return node;
   if (!R.isPlainObject(node)) return false;
+  if (!TYPING_KEYWORDS.some((keyword) => keyword in node)) return true;
   if ("additionalProperties" in node && node.additionalProperties !== false) return true;
   return Object.entries(node).some(([keyword, value]) =>
     subschemasOf(keyword, value).some(hasOpenObject),

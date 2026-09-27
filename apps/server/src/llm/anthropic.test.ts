@@ -1835,6 +1835,25 @@ describe("AnthropicProvider", () => {
       expect(result.stopReason).toBe("end_turn");
     });
 
+    it("offers the tool for a schema with an untyped node, which admits any value", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(toolReply("claude-opus-5-5", "payload", { data: [1] }));
+
+      await provider.chat({
+        model: "claude-opus-5-5",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+        responseFormat: {
+          type: "json_schema",
+          name: "payload",
+          schema: toObjectJsonSchema(z.object({ data: z.unknown() })),
+        },
+      });
+
+      expect(sentBody()).not.toHaveProperty("output_config");
+      expect(sentBody().tools).toHaveLength(1);
+    });
+
     it.each(["max_tokens", "refusal"])(
       "passes a tool-path reply's %s stop through",
       async (stopReason) => {

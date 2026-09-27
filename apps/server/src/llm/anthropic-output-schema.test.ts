@@ -238,6 +238,14 @@ describe("hasOpenObject", () => {
     ["an object closed with additionalProperties: false", wrap({ type: "string" })],
     ["an object with no additionalProperties", { type: "object", properties: {} }],
     ["a scalar", { type: "string" }],
+    ["a node typed only by enum", wrap({ enum: ["a", "b"] })],
+    ["a node typed only by const", wrap({ const: 1 })],
+    ["a node typed only by anyOf", wrap({ anyOf: [{ type: "string" }, { type: "null" }] })],
+    ["a node typed only by allOf", wrap({ allOf: [{ type: "string" }] })],
+    [
+      "a node typed only by $ref",
+      { ...wrap({ $ref: "#/$defs/S" }), $defs: { S: { type: "string" } } },
+    ],
     ["the false schema", false],
   ])("is false for %s", (_label, schema) => {
     expect(hasOpenObject(schema)).toBe(false);
@@ -268,6 +276,10 @@ describe("hasOpenObject", () => {
         $defs: { R: { type: "object", additionalProperties: {} } },
       },
     ],
+    ["an untyped property, as z.unknown() and z.any() emit", wrap({})],
+    ["an untyped node with only a description", wrap({ description: "anything" })],
+    ["untyped array items", wrap({ type: "array", items: {} })],
+    ["an untyped anyOf variant", wrap({ anyOf: [{}, { type: "null" }] })],
     ["the true schema", true],
   ])("is true for %s", (_label, schema) => {
     expect(hasOpenObject(schema)).toBe(true);
