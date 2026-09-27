@@ -1699,6 +1699,50 @@ describe("createHandleMessage", () => {
       expect(toolNames(firstAssembleArg(deps).toolDefinitions ?? [])).toContain("echo");
     });
 
+    it("runs a skill tool as the conversation's user, through the turn's scoped service", async () => {
+      const skillRunner = mock<SkillRunner>();
+      skillRunner.listToolDefs.mockResolvedValue([
+        {
+          name: "echo",
+          description: "echo a number",
+          inputs: { type: "object", properties: {} },
+          tier: "wasm",
+          riskTier: "notify",
+          gitSha: "abc1234",
+        },
+      ]);
+      skillRunner.invoke.mockResolvedValue({ runId: "run-1", status: "success", output: {} });
+      const deps = mockDeps({
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue(profileWithAllTools()),
+          getConversation: vi.fn().mockResolvedValue({
+            id: "conv-1",
+            userId: "user-2",
+            profileId: "profile-1",
+            isPrivate: true,
+            cooldownState: null,
+            voiceMode: null,
+          }),
+        }),
+        skillRunner,
+      });
+
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+      const loop = expectDefined(
+        vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+        "runStreamingAgentLoop call",
+      )[0];
+      await expectDefined(loop.tools.get("echo"), "echo tool").handler({}, loop.service);
+
+      expect(skillRunner.invoke).toHaveBeenCalledWith(
+        expect.objectContaining({ runAs: { userId: "user-2", service: loop.service } }),
+      );
+    });
+
     it("surfaces MCP tools in the toolDefinitions arg", async () => {
       const mcpRegistry = mock<McpRegistry>();
       mcpRegistry.resolveTools.mockResolvedValue([
