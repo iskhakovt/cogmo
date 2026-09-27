@@ -230,8 +230,8 @@ describe("runAgenticStage", () => {
       voiceMode: null,
     });
     const blocksByUser = new Map([
-      ["user-1", [{ key: "user_profile", content: "Name: Ana" }]],
-      ["user-2", [{ key: "user_profile", content: "Name: Ben" }]],
+      ["user-1", [{ profileClass: null, key: "user_profile", content: "Name: Ana" }]],
+      ["user-2", [{ profileClass: null, key: "user_profile", content: "Name: Ben" }]],
     ]);
     vi.mocked(h.agentStore.getCoreMemoryBlocks).mockImplementation(
       async (_tx, userId) => blocksByUser.get(userId) ?? [],
@@ -240,7 +240,9 @@ describe("runAgenticStage", () => {
     await runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
 
     expect(h.deps.promptSource.assemble).toHaveBeenCalledWith(
-      expect.objectContaining({ coreMemory: [{ key: "user_profile", content: "Name: Ben" }] }),
+      expect.objectContaining({
+        coreMemory: [{ profileClass: null, key: "user_profile", content: "Name: Ben" }],
+      }),
     );
   });
 

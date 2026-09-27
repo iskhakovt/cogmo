@@ -390,8 +390,8 @@ describe("compactConversation", () => {
     });
     vi.mocked(agentStore.getActiveRules).mockResolvedValue([{ rule: "Be terse" }]);
     const blocksByUser = new Map([
-      ["user-1", [{ key: "user_profile", content: "Name: Ana" }]],
-      ["user-2", [{ key: "user_profile", content: "Name: Ben" }]],
+      ["user-1", [{ profileClass: null, key: "user_profile", content: "Name: Ana" }]],
+      ["user-2", [{ profileClass: null, key: "user_profile", content: "Name: Ben" }]],
     ]);
     vi.mocked(agentStore.getCoreMemoryBlocks).mockImplementation(
       async (_tx, userId) => blocksByUser.get(userId) ?? [],
@@ -404,7 +404,7 @@ describe("compactConversation", () => {
     expect(promptSource.assemble).toHaveBeenCalledWith({
       profile: profile(),
       rules: [{ rule: "Be terse" }],
-      coreMemory: [{ key: "user_profile", content: "Name: Ben" }],
+      coreMemory: [{ profileClass: null, key: "user_profile", content: "Name: Ben" }],
     });
   });
 });

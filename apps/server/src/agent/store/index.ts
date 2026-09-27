@@ -7,6 +7,7 @@ import {
   getTableColumns,
   gt,
   inArray,
+  isNotNull,
   isNull,
   lte,
   ne,
@@ -19,6 +20,7 @@ import type { Transaction } from "../../db/index.js";
 import type { ContentBlock, Message } from "../../llm/types.js";
 import { inboundMessages } from "../../transport/store/schema.js";
 import { truncate } from "../../util/string.js";
+import { IDENTITY_BLOCK_KEY, type ScopedCoreMemoryBlock } from "../core-memory/scope.js";
 import type { EvolutionEventPayload } from "../evolution/event-schema.js";
 import { isCoreCompartment } from "../evolution/memory-extraction-schema.js";
 import { imageModelSlug } from "../image-tools.js";
@@ -772,17 +774,36 @@ export interface AgentStore {
     channelTypes: ReadonlyArray<string>,
   ): Promise<ReadonlyArray<{ rule: string }>>;
 
-  /** Get all core memory blocks for a user, ordered by key. */
+  /**
+   * The user's core memory blocks visible to one scope. `profileClass: null`
+   * reads every NULL-class block in key order. A class reads the shared
+   * `identity`, then the class's blocks: its `identity` override first, the
+   * rest in key order.
+   */
   getCoreMemoryBlocks(
     tx: Transaction,
     userId: string,
-  ): Promise<ReadonlyArray<{ key: string; content: string }>>;
+    profileClass: string | null,
+  ): Promise<ReadonlyArray<ScopedCoreMemoryBlock>>;
 
-  /** Upsert a core memory block. Creates if key doesn't exist, updates if it does. */
+  /** Create or replace the block at `(userId, profileClass, key)`. */
   upsertCoreMemoryBlock(
     tx: Transaction,
-    params: { userId: string; key: string; content: string },
+    params: { userId: string; profileClass: string | null; key: string; content: string },
   ): Promise<void>;
+
+  /** Delete the block at `(userId, profileClass, key)`, if any. */
+  deleteCoreMemoryBlock(
+    tx: Transaction,
+    params: { userId: string; profileClass: string; key: string },
+  ): Promise<void>;
+
+  /** The keys of one class's own blocks, in key order. */
+  listCoreMemoryKeys(
+    tx: Transaction,
+    userId: string,
+    profileClass: string,
+  ): Promise<ReadonlyArray<string>>;
 
   /** Get the timestamp of the most recent message in a conversation (any role). `undefined` when no messages. */
   getLastMessageTime(tx: Transaction, conversationId: string): Promise<Date | undefined>;
@@ -2219,29 +2240,83 @@ export class DrizzleAgentStore implements AgentStore {
   async getCoreMemoryBlocks(
     tx: Transaction,
     userId: string,
-  ): Promise<ReadonlyArray<{ key: string; content: string }>> {
+    profileClass: string | null,
+  ): Promise<ReadonlyArray<ScopedCoreMemoryBlock>> {
+    const columns = {
+      profileClass: coreMemoryBlocks.profileClass,
+      key: coreMemoryBlocks.key,
+      content: coreMemoryBlocks.content,
+    };
+    if (profileClass === null) {
+      return tx
+        .select(columns)
+        .from(coreMemoryBlocks)
+        .where(and(eq(coreMemoryBlocks.userId, userId), isNull(coreMemoryBlocks.profileClass)))
+        .orderBy(asc(coreMemoryBlocks.key));
+    }
     return tx
-      .select({ key: coreMemoryBlocks.key, content: coreMemoryBlocks.content })
+      .select(columns)
       .from(coreMemoryBlocks)
-      .where(eq(coreMemoryBlocks.userId, userId))
-      .orderBy(asc(coreMemoryBlocks.key));
+      .where(
+        and(
+          eq(coreMemoryBlocks.userId, userId),
+          or(
+            and(
+              isNull(coreMemoryBlocks.profileClass),
+              eq(coreMemoryBlocks.key, IDENTITY_BLOCK_KEY),
+            ),
+            eq(coreMemoryBlocks.profileClass, profileClass),
+          ),
+        ),
+      )
+      .orderBy(
+        asc(isNotNull(coreMemoryBlocks.profileClass)),
+        asc(ne(coreMemoryBlocks.key, IDENTITY_BLOCK_KEY)),
+        asc(coreMemoryBlocks.key),
+      );
   }
 
   async upsertCoreMemoryBlock(
     tx: Transaction,
-    params: {
-      userId: string;
-      key: string;
-      content: string;
-    },
+    params: { userId: string; profileClass: string | null; key: string; content: string },
   ): Promise<void> {
     await tx
       .insert(coreMemoryBlocks)
       .values(params)
       .onConflictDoUpdate({
-        target: [coreMemoryBlocks.userId, coreMemoryBlocks.key],
+        target: [coreMemoryBlocks.userId, coreMemoryBlocks.profileClass, coreMemoryBlocks.key],
         set: { content: params.content, updatedAt: new Date() },
       });
+  }
+
+  async deleteCoreMemoryBlock(
+    tx: Transaction,
+    params: { userId: string; profileClass: string; key: string },
+  ): Promise<void> {
+    await tx
+      .delete(coreMemoryBlocks)
+      .where(
+        and(
+          eq(coreMemoryBlocks.userId, params.userId),
+          eq(coreMemoryBlocks.profileClass, params.profileClass),
+          eq(coreMemoryBlocks.key, params.key),
+        ),
+      );
+  }
+
+  async listCoreMemoryKeys(
+    tx: Transaction,
+    userId: string,
+    profileClass: string,
+  ): Promise<ReadonlyArray<string>> {
+    const rows = await tx
+      .select({ key: coreMemoryBlocks.key })
+      .from(coreMemoryBlocks)
+      .where(
+        and(eq(coreMemoryBlocks.userId, userId), eq(coreMemoryBlocks.profileClass, profileClass)),
+      )
+      .orderBy(asc(coreMemoryBlocks.key));
+    return rows.map((r) => r.key);
   }
 
   async getLastTokens(

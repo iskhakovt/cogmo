@@ -59,9 +59,11 @@ export async function buildTurnService(
     .then((classes) => classes.filter((c) => c.restricted).map((c) => c.name));
 
   const coreMemory: Service["coreMemory"] = {
-    get: () => deps.runInTx((tx) => deps.agentStore.getCoreMemoryBlocks(tx, userId)),
+    get: () => deps.runInTx((tx) => deps.agentStore.getCoreMemoryBlocks(tx, userId, null)),
     update: (key, content) =>
-      deps.runInTx((tx) => deps.agentStore.upsertCoreMemoryBlock(tx, { userId, key, content })),
+      deps.runInTx((tx) =>
+        deps.agentStore.upsertCoreMemoryBlock(tx, { userId, profileClass: null, key, content }),
+      ),
   };
 
   return createService(

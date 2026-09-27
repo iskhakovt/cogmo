@@ -35,7 +35,9 @@ describe("loadConversationContext", () => {
   it("does not re-read the profile — uses the row passed in by the caller", async () => {
     const agentStore = mockAgentStore({
       getActiveRules: vi.fn().mockResolvedValue([{ rule: "Be concise" }]),
-      getCoreMemoryBlocks: vi.fn().mockResolvedValue([{ key: "user_profile", content: "Sam" }]),
+      getCoreMemoryBlocks: vi
+        .fn()
+        .mockResolvedValue([{ profileClass: null, key: "user_profile", content: "Sam" }]),
     });
     const transportStore = mockTransportStore({
       getActiveChannelTypes: vi.fn().mockResolvedValue(["telegram"]),
@@ -49,13 +51,13 @@ describe("loadConversationContext", () => {
     expect(result).toEqual({
       channelTypes: ["telegram"],
       rules: [{ rule: "Be concise" }],
-      coreMemory: [{ key: "user_profile", content: "Sam" }],
+      coreMemory: [{ profileClass: null, key: "user_profile", content: "Sam" }],
     });
 
     expect(agentStore.getProfile).not.toHaveBeenCalled();
     expect(transportStore.getActiveChannelTypes).toHaveBeenCalledWith(FAKE_TX, "c1");
     expect(agentStore.getActiveRules).toHaveBeenCalledWith(FAKE_TX, "p1", ["telegram"]);
-    expect(agentStore.getCoreMemoryBlocks).toHaveBeenCalledWith(FAKE_TX, "u1");
+    expect(agentStore.getCoreMemoryBlocks).toHaveBeenCalledWith(FAKE_TX, "u1", null);
   });
 
   it("threads channelTypes from transport into agentStore.getActiveRules", async () => {
@@ -114,16 +116,19 @@ describe("loadConversationContext core memory (PGlite)", () => {
     await runInTx(async (tx) => {
       await agentStore.upsertCoreMemoryBlock(tx, {
         userId: first.id,
+        profileClass: null,
         key: "user_profile",
         content: "Name: Ana",
       });
       await agentStore.upsertCoreMemoryBlock(tx, {
         userId: second.id,
+        profileClass: null,
         key: "user_profile",
         content: "Name: Ben",
       });
       await agentStore.upsertCoreMemoryBlock(tx, {
         userId: second.id,
+        profileClass: null,
         key: "preferences",
         content: "Metric units",
       });
@@ -135,8 +140,8 @@ describe("loadConversationContext core memory (PGlite)", () => {
     );
 
     expect(context.coreMemory).toEqual([
-      { key: "preferences", content: "Metric units" },
-      { key: "user_profile", content: "Name: Ben" },
+      { profileClass: null, key: "preferences", content: "Metric units" },
+      { profileClass: null, key: "user_profile", content: "Name: Ben" },
     ]);
   });
 });

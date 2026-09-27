@@ -52,7 +52,7 @@ export async function loadConversationContext(
     const rules = args.profile
       ? await deps.agentStore.getActiveRules(tx, args.profile.id, channelTypes)
       : [];
-    const coreMemory = await deps.agentStore.getCoreMemoryBlocks(tx, args.userId);
+    const coreMemory = await deps.agentStore.getCoreMemoryBlocks(tx, args.userId, null);
     return { channelTypes, rules, coreMemory };
   });
 }

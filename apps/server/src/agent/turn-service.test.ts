@@ -50,9 +50,10 @@ describe("buildTurnService", () => {
     await service.coreMemory.get();
     await service.coreMemory.update("persona", "terse");
 
-    expect(agentStore.getCoreMemoryBlocks).toHaveBeenCalledWith(expect.anything(), "user-7");
+    expect(agentStore.getCoreMemoryBlocks).toHaveBeenCalledWith(expect.anything(), "user-7", null);
     expect(agentStore.upsertCoreMemoryBlock).toHaveBeenCalledWith(expect.anything(), {
       userId: "user-7",
+      profileClass: null,
       key: "persona",
       content: "terse",
     });
