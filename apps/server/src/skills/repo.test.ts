@@ -309,14 +309,14 @@ describe("ensureSkillsCodingRepo", () => {
     if (result.kind === "skipped_no_origin") {
       expect(result.localPath).toBe(repoPath);
     }
-    // Critically: we don't touch the DB when origin is missing — the
-    // missing origin alone is enough to short-circuit.
+    expect(codingStore.getRepoByName).not.toHaveBeenCalled();
     expect(codingStore.insertOrRecoverRepo).not.toHaveBeenCalled();
   });
 
   it("inserts a `skills` row with the bare repo's origin URL on first run", async () => {
     const repoPath = await skillsRepoWithOrigin("git@github.com:operator/cogmo-skills.git");
     const codingStore = mock<CodingStore>();
+    codingStore.getRepoByName.mockResolvedValue(undefined);
     codingStore.insertOrRecoverRepo.mockImplementation(async (_tx, params) => ({
       kind: "new",
       row: storedSkillsRow(params.localPath, params.remoteUrl),
@@ -347,13 +347,12 @@ describe("ensureSkillsCodingRepo", () => {
     expect(codingStore.updateRepoRemoteUrl).not.toHaveBeenCalled();
   });
 
-  it("returns unchanged when the recovered row matches bare repo origin", async () => {
+  it("returns unchanged without writing when the row matches bare repo origin", async () => {
     const repoPath = await skillsRepoWithOrigin("git@github.com:user/skills.git");
     const codingStore = mock<CodingStore>();
-    codingStore.insertOrRecoverRepo.mockResolvedValue({
-      kind: "recovered",
-      row: storedSkillsRow(repoPath, "git@github.com:user/skills.git"),
-    });
+    codingStore.getRepoByName.mockResolvedValue(
+      storedSkillsRow(repoPath, "git@github.com:user/skills.git"),
+    );
 
     const result = await ensureSkillsCodingRepo(
       { runInTx: fakeRunInTx, codingStore },
@@ -364,16 +363,16 @@ describe("ensureSkillsCodingRepo", () => {
     if (result.kind === "unchanged") {
       expect(result.remoteUrl).toBe("git@github.com:user/skills.git");
     }
+    expect(codingStore.insertOrRecoverRepo).not.toHaveBeenCalled();
     expect(codingStore.updateRepoRemoteUrl).not.toHaveBeenCalled();
   });
 
-  it("updates a recovered row's stale remote_url when bare repo origin changes", async () => {
+  it("updates stale remote_url when bare repo origin changes", async () => {
     const repoPath = await skillsRepoWithOrigin("git@github.com:user/new-skills.git");
     const codingStore = mock<CodingStore>();
-    codingStore.insertOrRecoverRepo.mockResolvedValue({
-      kind: "recovered",
-      row: storedSkillsRow(repoPath, "git@github.com:user/old-skills.git"),
-    });
+    codingStore.getRepoByName.mockResolvedValue(
+      storedSkillsRow(repoPath, "git@github.com:user/old-skills.git"),
+    );
 
     const result = await ensureSkillsCodingRepo(
       { runInTx: fakeRunInTx, codingStore },
@@ -385,6 +384,33 @@ describe("ensureSkillsCodingRepo", () => {
       expect(result.remoteUrl).toBe("git@github.com:user/new-skills.git");
       expect(result.previousRemoteUrl).toBe("git@github.com:user/old-skills.git");
     }
+    expect(codingStore.updateRepoRemoteUrl).toHaveBeenCalledWith(
+      expect.anything(),
+      "00000000-0000-0000-0000-000000000001",
+      "git@github.com:user/new-skills.git",
+    );
+    expect(codingStore.insertOrRecoverRepo).not.toHaveBeenCalled();
+  });
+
+  it("syncs a row a concurrent bootstrap inserted after the read missed", async () => {
+    const repoPath = await skillsRepoWithOrigin("git@github.com:user/new-skills.git");
+    const codingStore = mock<CodingStore>();
+    codingStore.getRepoByName.mockResolvedValue(undefined);
+    codingStore.insertOrRecoverRepo.mockResolvedValue({
+      kind: "recovered",
+      row: storedSkillsRow(repoPath, "git@github.com:user/old-skills.git"),
+    });
+
+    const result = await ensureSkillsCodingRepo(
+      { runInTx: fakeRunInTx, codingStore },
+      { skillsRepoPath: repoPath },
+    );
+
+    expect(result).toMatchObject({
+      kind: "updated",
+      remoteUrl: "git@github.com:user/new-skills.git",
+      previousRemoteUrl: "git@github.com:user/old-skills.git",
+    });
     expect(codingStore.updateRepoRemoteUrl).toHaveBeenCalledWith(
       expect.anything(),
       "00000000-0000-0000-0000-000000000001",
@@ -403,6 +429,6 @@ describe("ensureSkillsCodingRepo", () => {
         { skillsRepoPath: join(workDir, "does-not-exist") },
       ),
     ).rejects.toThrow();
-    expect(codingStore.insertOrRecoverRepo).not.toHaveBeenCalled();
+    expect(codingStore.getRepoByName).not.toHaveBeenCalled();
   });
 });

@@ -331,12 +331,11 @@ describe("configureSkillsRemote", () => {
     await bootstrapSkillsRepo({ path: skillsPath });
     const remoteUrl = await makePopulatedRemote();
 
-    // Track storedRow in a closure so the second pass recovers the inserted row.
+    // Track storedRow in a closure so the second pass reads the inserted row.
     let storedRow: CodingRepoRow | undefined;
     const codingStore = mock<CodingStore>();
     codingStore.getRepoByName.mockImplementation(async () => storedRow);
     codingStore.insertOrRecoverRepo.mockImplementation(async (_tx, params) => {
-      if (storedRow) return { kind: "recovered", row: storedRow };
       storedRow = rowFromParams(params);
       return { kind: "new", row: storedRow };
     });
@@ -345,7 +344,10 @@ describe("configureSkillsRemote", () => {
       { runInTx: fakeRunInTx, codingStore, skillsRepoPath: skillsPath },
       { kind: "own", direction: "adopt", remoteUrl },
     );
-    expect(first.isOk()).toBe(true);
+    expect(first._unsafeUnwrap()).toMatchObject({
+      kind: "configured",
+      ensured: { kind: "created" },
+    });
 
     // Second pass: local now has main matching remote. Adopt still works
     // because fast-forward fetch is a no-op when local already equals

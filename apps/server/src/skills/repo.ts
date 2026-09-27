@@ -209,23 +209,25 @@ export async function ensureSkillsCodingRepo(
     return { kind: "skipped_no_origin", localPath: args.skillsRepoPath };
   }
 
-  // Insert-or-recover rather than read-then-insert: a concurrent bootstrap's
-  // row can be committed after this transaction's snapshot, where no read
-  // sees it. The keyed insert resolves that loser through the transactor's
-  // `40001` retry into the recovered arm.
+  // Read first; on a miss, a keyed insert, so concurrent bootstraps converge
+  // on one row (`.claude/rules/inngest.md`).
   return deps.runInTx(async (tx) => {
-    const { kind, row } = await deps.codingStore.insertOrRecoverRepo(tx, {
-      name: SKILLS_CODING_REPO_NAME,
-      localPath: args.skillsRepoPath,
-      defaultBranch: "main",
-      remoteUrl,
-      devcontainer: null,
-      allowedBackends: ["claude"],
-      verifyCommand: "true",
-      taskTokenBudget: 200_000,
-      taskWallTimeSeconds: 1800,
-      maxConcurrentTasks: 1,
-    });
+    const existing = await deps.codingStore.getRepoByName(tx, SKILLS_CODING_REPO_NAME);
+    const { kind, row } =
+      existing === undefined
+        ? await deps.codingStore.insertOrRecoverRepo(tx, {
+            name: SKILLS_CODING_REPO_NAME,
+            localPath: args.skillsRepoPath,
+            defaultBranch: "main",
+            remoteUrl,
+            devcontainer: null,
+            allowedBackends: ["claude"],
+            verifyCommand: "true",
+            taskTokenBudget: 200_000,
+            taskWallTimeSeconds: 1800,
+            maxConcurrentTasks: 1,
+          })
+        : { kind: "recovered" as const, row: existing };
     if (kind === "new") {
       log.info(
         { name: row.name, localPath: row.localPath, remoteUrl },
