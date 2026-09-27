@@ -6,7 +6,6 @@ import Docker from "dockerode";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { Transactor } from "../db/index.js";
-import type { MemoryProvider } from "../memory/provider.js";
 import {
   CogmoSocketProxy,
   LocalDockerSandboxClient,
@@ -17,18 +16,21 @@ import { LABEL_INSTANCE, LABEL_MANAGED } from "../sandbox/supervisor.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase } from "../test/pglite.js";
+import type { SkillRunAs, SkillRunServices } from "./run-as.js";
 import { SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
-
-function stubMemory(): MemoryProvider {
-  return mock<MemoryProvider>();
-}
 
 function stubSecrets(): SecretsStore {
   return mock<SecretsStore>();
 }
 
-const noopFiles = mockFilesService();
+const RUN_AS: SkillRunAs = {
+  userId: "u-1",
+  service: { memory: mock<SkillRunServices["memory"]>(), files: mockFilesService() },
+};
+
+/** No skill here is scheduled, so the identity never reaches a row. */
+const DEFAULT_RUN_AS = { userId: "u-1", profileId: "p-1" };
 
 /**
  * End-to-end tier-2 worker test against a real sysbox container running
@@ -193,13 +195,11 @@ describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl tier-2 (sysbox runtime, GHA only)"
     const runner = await SkillRunnerImpl.create({
       runInTx: tx,
       store: skillStore,
-      memory: stubMemory(),
       secretsStore: stubSecrets(),
-      files: noopFiles,
       sandbox,
       tier2Image: SKILLS_IMAGE,
-      user: { id: "u-1", timezone: "UTC" },
-      memoryBankId: "bank-1",
+      userTimezone: "UTC",
+      defaultRunAs: DEFAULT_RUN_AS,
     });
 
     await runner.__registerForTests({
@@ -208,7 +208,7 @@ describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl tier-2 (sysbox runtime, GHA only)"
       body: NOW_BODY,
     });
 
-    const result = await runner.invoke({ name: "tier2-now", inputs: { x: 7 } });
+    const result = await runner.invoke({ name: "tier2-now", inputs: { x: 7 }, runAs: RUN_AS });
     expect(result.status).toBe("success");
     expect(result.output).toMatchObject({ echoed: 8 });
     // ctx.now returns an ISO-8601 string from the host's clock.
@@ -219,13 +219,11 @@ describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl tier-2 (sysbox runtime, GHA only)"
     const runner = await SkillRunnerImpl.create({
       runInTx: tx,
       store: skillStore,
-      memory: stubMemory(),
       secretsStore: stubSecrets(),
-      files: noopFiles,
       sandbox,
       tier2Image: SKILLS_IMAGE,
-      user: { id: "u-1", timezone: "UTC" },
-      memoryBankId: "bank-1",
+      userTimezone: "UTC",
+      defaultRunAs: DEFAULT_RUN_AS,
     });
 
     const slowManifest = `---
@@ -246,7 +244,7 @@ resources:
     });
 
     const start = Date.now();
-    const result = await runner.invoke({ name: "tier2-sleep", inputs: {} });
+    const result = await runner.invoke({ name: "tier2-sleep", inputs: {}, runAs: RUN_AS });
     const elapsedMs = Date.now() - start;
     expect(result.status).toBe("error");
     expect(result.error).toBe("wall_clock_exceeded");
@@ -261,13 +259,11 @@ resources:
     const runner = await SkillRunnerImpl.create({
       runInTx: tx,
       store: skillStore,
-      memory: stubMemory(),
       secretsStore: stubSecrets(),
-      files: noopFiles,
       sandbox,
       tier2Image: SKILLS_IMAGE,
-      user: { id: "u-1", timezone: "UTC" },
-      memoryBankId: "bank-1",
+      userTimezone: "UTC",
+      defaultRunAs: DEFAULT_RUN_AS,
       // Default min=1: the runner.create call eagerly spawns one worker
       // before the first invoke, so both invokes run on a warm container.
       // Tighter idle/recycle caps don't matter for a two-task test.
@@ -279,8 +275,8 @@ resources:
       body: HOSTNAME_BODY,
     });
 
-    const r1 = await runner.invoke({ name: "tier2-host", inputs: {} });
-    const r2 = await runner.invoke({ name: "tier2-host", inputs: {} });
+    const r1 = await runner.invoke({ name: "tier2-host", inputs: {}, runAs: RUN_AS });
+    const r2 = await runner.invoke({ name: "tier2-host", inputs: {}, runAs: RUN_AS });
     expect(r1.status).toBe("success");
     expect(r2.status).toBe("success");
     const o1 = r1.output as { host: string; ppid: number };
@@ -341,13 +337,11 @@ async def run(inputs, ctx):
     const runner = await SkillRunnerImpl.create({
       runInTx: tx,
       store: skillStore,
-      memory: stubMemory(),
       secretsStore: stubSecrets(),
-      files: noopFiles,
       sandbox,
       tier2Image: SKILLS_IMAGE,
-      user: { id: "u-1", timezone: "UTC" },
-      memoryBankId: "bank-1",
+      userTimezone: "UTC",
+      defaultRunAs: DEFAULT_RUN_AS,
       depsCacheVolumeName,
     });
     try {
@@ -358,7 +352,7 @@ async def run(inputs, ctx):
         lockfileContents: idnaLockfile,
       });
 
-      const result = await runner.invoke({ name: "tier2-with-deps", inputs: {} });
+      const result = await runner.invoke({ name: "tier2-with-deps", inputs: {}, runAs: RUN_AS });
       expect(result.status, JSON.stringify(result)).toBe("success");
       // Pass `result` as the assertion-failure label so a mismatch
       // surfaces the whole row (error string, runId, etc.) rather than
@@ -387,13 +381,11 @@ async def run(inputs, ctx):
     const runner = await SkillRunnerImpl.create({
       runInTx: tx,
       store: skillStore,
-      memory: stubMemory(),
       secretsStore: stubSecrets(),
-      files: noopFiles,
       sandbox,
       tier2Image: SKILLS_IMAGE,
-      user: { id: "u-1", timezone: "UTC" },
-      memoryBankId: "bank-1",
+      userTimezone: "UTC",
+      defaultRunAs: DEFAULT_RUN_AS,
     });
 
     await runner.__registerForTests({
@@ -402,8 +394,8 @@ async def run(inputs, ctx):
       body: STATE_LEAK_BODY,
     });
 
-    const r1 = await runner.invoke({ name: "tier2-leak", inputs: {} });
-    const r2 = await runner.invoke({ name: "tier2-leak", inputs: {} });
+    const r1 = await runner.invoke({ name: "tier2-leak", inputs: {}, runAs: RUN_AS });
+    const r2 = await runner.invoke({ name: "tier2-leak", inputs: {}, runAs: RUN_AS });
     expect(r1.status).toBe("success");
     expect(r2.status).toBe("success");
     // Task 1 sets `sys.modules["_cogmo_test_marker"]`. Task 2 runs in a

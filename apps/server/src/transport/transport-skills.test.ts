@@ -30,12 +30,16 @@ const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 const KNOWN_HANDLE = "tg-987";
 const UNKNOWN_HANDLE = "tg-impostor";
 const USER_ID = "019d0000-0000-7000-8000-000000000001";
+const IDENTITY_ID = "019d0000-0000-7000-8000-000000000011";
 
 function makeTransportStore(): TransportStore {
   const ts = mockTransportStore();
   // Allowlist `KNOWN_HANDLE` only; impostors fall through to `undefined`.
   vi.mocked(ts.resolveUser).mockImplementation(async (_tx, _channelId, handle) =>
     handle === KNOWN_HANDLE ? { userId: USER_ID } : undefined,
+  );
+  vi.mocked(ts.resolveIdentity).mockImplementation(async (_tx, _channelId, handle) =>
+    handle === KNOWN_HANDLE ? { identityId: IDENTITY_ID, userId: USER_ID } : undefined,
   );
   return ts;
 }
@@ -291,9 +295,11 @@ describe("Transport.skills.approveDeploy", () => {
       skillName: "echo",
       gitSha: "1111111111111111111111111111111111111111",
     });
+    // The tapper's identity row and user: `approved_by` references
+    // `user_identities`, and a schedule this approval sets runs as the user.
     expect(runner.approveDeploy).toHaveBeenCalledWith({
       pendingId: PENDING_ID,
-      approvedBy: KNOWN_HANDLE,
+      approvedBy: { identityId: IDENTITY_ID, userId: USER_ID },
     });
   });
 

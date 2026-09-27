@@ -1,7 +1,7 @@
 import type { Inngest } from "inngest";
 import { skillsDeployApprovalRequested } from "../inngest/events.js";
 import { logger } from "../logger.js";
-import type { RegisterResult, SkillRunner } from "./runner.js";
+import type { RegisterResult, SkillApprover, SkillRunner } from "./runner.js";
 
 const log = logger.child({ component: "skills.service" });
 
@@ -22,7 +22,7 @@ const log = logger.child({ component: "skills.service" });
  */
 export interface SkillsService {
   register(opts: { branch: string }): Promise<RegisterResult>;
-  approveDeploy(opts: { pendingId: string; approvedBy?: string }): Promise<RegisterResult>;
+  approveDeploy(opts: { pendingId: string; approvedBy?: SkillApprover }): Promise<RegisterResult>;
   denyDeploy(opts: { pendingId: string; reason?: string }): Promise<void>;
   rollback(opts: { name: string; toGitSha: string }): Promise<RegisterResult>;
 }

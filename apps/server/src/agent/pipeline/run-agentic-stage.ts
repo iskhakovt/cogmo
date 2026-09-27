@@ -240,7 +240,9 @@ export async function runAgenticStage(
   );
 
   const imageTools = deps.imageToolsLoader ? await deps.imageToolsLoader.getTools() : [];
-  const skillTools = deps.skillRunner ? await buildSkillTools(deps.skillRunner) : [];
+  const skillTools = deps.skillRunner
+    ? await buildSkillTools(deps.skillRunner, { userId: ctx.userId })
+    : [];
   const subAgentTools = buildSubAgentTools(
     await deps.runInTx((tx) => deps.agentStore.listSubAgents(tx, ctx.userId)),
     deps.resolveProvider,

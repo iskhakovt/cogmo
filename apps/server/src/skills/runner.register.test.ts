@@ -7,15 +7,18 @@ import { sql } from "drizzle-orm";
 import { err, ok } from "neverthrow";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { profiles, users } from "../agent/store/schema.js";
 import type { Database, Transactor } from "../db/index.js";
-import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { expectDefined } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { makePopulatedBareRepo } from "../test/skills-bare-repo.js";
+import { channels, userIdentities } from "../transport/store/schema.js";
 import { bootstrapSkillsRepo } from "./repo.js";
-import { SkillRunnerImpl } from "./runner.js";
-import { DrizzleSkillStore } from "./store/index.js";
+import type { SkillRunAs, SkillRunServices } from "./run-as.js";
+import { type SkillApprover, SkillRunnerImpl } from "./runner.js";
+import { DrizzleSkillStore, type SkillRunIdentity } from "./store/index.js";
 
 const execFileP = promisify(execFile);
 
@@ -37,11 +40,16 @@ afterAll(async () => {
   await close();
 });
 
-function makeMockMemory(): MemoryProvider {
-  const memory = mock<MemoryProvider>();
-  memory.recall.mockResolvedValue({ memories: [] });
-  return memory;
-}
+/** Owner + default profile; only a scheduled skill writes them to a row. */
+const DEFAULT_RUN_AS = {
+  userId: "019d0000-0000-7000-8000-0000000000a1",
+  profileId: "019d0000-0000-7000-8000-0000000000b1",
+};
+
+const RUN_AS: SkillRunAs = {
+  userId: "user-1",
+  service: { memory: mock<SkillRunServices["memory"]>(), files: mockFilesService() },
+};
 
 function makeMockSecrets(): SecretsStore {
   return mock<SecretsStore>();
@@ -192,11 +200,9 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
     return SkillRunnerImpl.create({
       store,
       runInTx: tx,
-      memory: makeMockMemory(),
       secretsStore: makeMockSecrets(),
-      files: mockFilesService(),
-      user: { id: "user-1", timezone: "UTC" },
-      memoryBankId: "bank-1",
+      userTimezone: "UTC",
+      defaultRunAs: DEFAULT_RUN_AS,
       skillsRepoPath: repo.bare,
       ...overrides,
     });
@@ -518,7 +524,7 @@ tier: wasm
     });
     await runner.register({ branch: "skill/echo" });
 
-    const result = await runner.invoke({ name: "echo", inputs: { x: 7 } });
+    const result = await runner.invoke({ name: "echo", inputs: { x: 7 }, runAs: RUN_AS });
     expect(result.status).toBe("success");
     expect(result.output).toEqual({ echo: 8 });
   });
@@ -537,7 +543,7 @@ tier: wasm
     await r1.register({ branch: "skill/echo" });
 
     const r2 = await makeRunner();
-    const result = await r2.invoke({ name: "echo", inputs: { x: 7 } });
+    const result = await r2.invoke({ name: "echo", inputs: { x: 7 }, runAs: RUN_AS });
     expect(result.status).toBe("success");
     expect(result.output).toEqual({ echo: 8 });
   });
@@ -551,7 +557,7 @@ tier: wasm
       body: ECHO_BODY_BAD_OUTPUT,
     });
     await runner.register({ branch: "skill/bad-out" });
-    const result = await runner.invoke({ name: "bad-out", inputs: { x: 1 } });
+    const result = await runner.invoke({ name: "bad-out", inputs: { x: 1 }, runAs: RUN_AS });
     expect(result.status).toBe("error");
     expect(result.error).toMatch(/output failed schema/);
   });
@@ -713,6 +719,97 @@ tier: wasm
       await expect(
         runner.denyDeploy({ pendingId: "00000000-0000-0000-0000-000000000000" }),
       ).resolves.toBeUndefined();
+    });
+  });
+
+  describe("schedule run-as", () => {
+    const scheduledManifest = (effects: string) => `---
+name: briefing
+description: a scheduled skill
+tier: wasm
+inputs:
+  type: object
+  properties: {}
+triggers: [manual, cron]
+schedule: "0 9 * * *"
+${effects}
+---
+`;
+
+    async function seedUser(): Promise<string> {
+      const [row] = await db.insert(users).values({}).returning({ id: users.id });
+      return expectDefined(row, "user").id;
+    }
+
+    async function seedOwner(): Promise<SkillRunIdentity> {
+      const userId = await seedUser();
+      const [profile] = await db
+        .insert(profiles)
+        .values({ userId: null, name: "default", basePrompt: "", model: "m", toolSet: [] })
+        .returning({ id: profiles.id });
+      return { userId, profileId: expectDefined(profile, "profile").id };
+    }
+
+    async function seedApprover(): Promise<SkillApprover> {
+      const userId = await seedUser();
+      const [channel] = await db
+        .insert(channels)
+        .values({ type: "telegram", credentials: {}, identityMode: "mapped" })
+        .returning({ id: channels.id });
+      const [identity] = await db
+        .insert(userIdentities)
+        .values({
+          userId,
+          channelId: expectDefined(channel, "channel").id,
+          platformHandle: "tg-987",
+          isWildcard: false,
+          autoCreated: false,
+        })
+        .returning({ id: userIdentities.id });
+      return { identityId: expectDefined(identity, "identity").id, userId };
+    }
+
+    it("a scheduled register runs as the install owner with the default profile", async () => {
+      const owner = await seedOwner();
+      const runner = await makeRunner({ defaultRunAs: owner });
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/briefing",
+        manifest: scheduledManifest(""),
+        body: ECHO_BODY,
+      });
+
+      expect((await runner.register({ branch: "skill/briefing" })).status).toBe("live");
+
+      const row = await tx((trx) => store.getSkillByName(trx, "briefing"));
+      expect([row?.runAsUserId, row?.runAsProfileId]).toEqual([owner.userId, owner.profileId]);
+    });
+
+    it("an approved scheduled deploy runs as the approver with the default profile", async () => {
+      const owner = await seedOwner();
+      const approver = await seedApprover();
+      const runner = await makeRunner({ defaultRunAs: owner });
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/briefing",
+        manifest: scheduledManifest("effects:\n  - sends_message"),
+        body: ECHO_BODY,
+      });
+      const reg = await runner.register({ branch: "skill/briefing" });
+      if (reg.status !== "pending_approval" || !reg.pendingId) {
+        throw new Error(`expected pending_approval, got ${reg.status}`);
+      }
+
+      const approved = await runner.approveDeploy({
+        pendingId: reg.pendingId,
+        approvedBy: approver,
+      });
+
+      expect(approved.status).toBe("live");
+      const row = await tx((trx) => store.getSkillByName(trx, "briefing"));
+      expect([row?.runAsUserId, row?.runAsProfileId]).toEqual([approver.userId, owner.profileId]);
+      const deploy = await tx((trx) => store.getDeployById(trx, reg.pendingId ?? ""));
+      expect(deploy?.approvedBy).toBe(approver.identityId);
     });
   });
 
@@ -1448,6 +1545,7 @@ effects:
             effects: [],
             schedule: null,
             scheduleNextRunAt: null,
+            runAs: DEFAULT_RUN_AS,
             branchTipSha: "0000000000000000000000000000000000000abc",
             lockfileHash: null,
             inputs: { type: "object", properties: {} },
@@ -1516,11 +1614,9 @@ effects:
         const runner = await SkillRunnerImpl.create({
           store,
           runInTx: tx,
-          memory: makeMockMemory(),
           secretsStore: makeMockSecrets(),
-          files: mockFilesService(),
-          user: { id: "user-1", timezone: "UTC" },
-          memoryBankId: "bank-1",
+          userTimezone: "UTC",
+          defaultRunAs: DEFAULT_RUN_AS,
           skillsRepoPath: repoWithRemote.bare,
         });
 
@@ -1766,11 +1862,9 @@ effects:
       return SkillRunnerImpl.create({
         store,
         runInTx: tx,
-        memory: makeMockMemory(),
         secretsStore: makeMockSecrets(),
-        files: mockFilesService(),
-        user: { id: "user-1", timezone: "UTC" },
-        memoryBankId: "bank-1",
+        userTimezone: "UTC",
+        defaultRunAs: DEFAULT_RUN_AS,
         skillsRepoPath,
       });
     }

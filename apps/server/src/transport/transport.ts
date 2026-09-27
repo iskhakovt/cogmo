@@ -2301,8 +2301,10 @@ export function createTransport(deps: {
     skills: {
       async approveDeploy(pendingId, tapperPlatformHandle) {
         if (!skillRunner || !skillStore) return err({ code: "skills_disabled" as const });
-        const identityCheck = await checkSkillsTapper(tapperPlatformHandle);
-        if (identityCheck.isErr()) return err(identityCheck.error);
+        const approver = await runInTx((tx) =>
+          transportStore.resolveIdentity(tx, channelId, tapperPlatformHandle),
+        );
+        if (!approver) return err({ code: "identity_rejected" as const });
 
         // Pre-check the deploy's status so we can return a precise error
         // code when it's already resolved (avoids the `runner.approveDeploy
@@ -2321,10 +2323,7 @@ export function createTransport(deps: {
           });
         }
 
-        const result = await skillRunner.approveDeploy({
-          pendingId,
-          approvedBy: tapperPlatformHandle,
-        });
+        const result = await skillRunner.approveDeploy({ pendingId, approvedBy: approver });
         if (result.status === "live") {
           return ok({
             pendingId,

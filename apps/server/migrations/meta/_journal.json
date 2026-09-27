@@ -428,6 +428,13 @@
       "when": 1790515044486,
       "tag": "0060_core_memory_scope",
       "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1790545830757,
+      "tag": "0061_skills_run_as",
+      "breakpoints": true
     }
   ]
 }

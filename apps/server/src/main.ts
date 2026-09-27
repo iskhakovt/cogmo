@@ -62,9 +62,22 @@ async function dispatch(cmd: string): Promise<number> {
       // sandbox and will throw at call time; tier-1 skills + every admin
       // subcommand (list / register / approve / deny / rollback /
       // deregister) run fine.
+      const { resolveSkillRunAs } = await import("./skills/run-as.js");
       const core = await bootstrapCore();
       const { skillRunner } = await bootstrapSkillRunner(core, NO_SANDBOX);
-      return runSkillsCli(process.argv.slice(3), skillRunner);
+      return runSkillsCli(process.argv.slice(3), {
+        runner: skillRunner,
+        ownerRunAs: () =>
+          resolveSkillRunAs(
+            {
+              runInTx: core.runInTx,
+              agentStore: core.agentStore,
+              memory: core.memory,
+              fileService: core.fileService,
+            },
+            { userId: core.user.id, profileId: core.profile.id },
+          ),
+      });
     }
     case "provider": {
       const { runProviderCli } = await import("./cli/provider.js");

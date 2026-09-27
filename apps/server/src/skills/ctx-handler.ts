@@ -1,11 +1,10 @@
 import { lookup } from "node:dns/promises";
 import { z } from "zod";
-import type { Service } from "../agent/service.js";
 import type { Transactor } from "../db/index.js";
 import { logger } from "../logger.js";
-import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { CtxError, type CtxHandler } from "./dispatcher.js";
+import type { SkillRunServices } from "./run-as.js";
 import type { SkillManifest } from "./types.js";
 import { DEFAULT_WALL_CLOCK_S } from "./wall-clock.js";
 
@@ -39,18 +38,17 @@ export interface DefaultCtxHandlerOptions {
   manifest: SkillManifest;
   /** `skill_runs.id` — every persisted ctx_call is scoped to this row. */
   runId: string;
+  /** The user the run acts for — what `ctx.user()` returns. */
   user: CtxUser;
-  /** Memory bank id — typically the user's bank. */
-  memoryBankId: string;
   secretsStore: SecretsStore;
   runInTx: Transactor;
-  memory: MemoryProvider;
   /**
-   * The agent's per-user file workspace. Same surface the in-process
-   * `read_file` / `write_file` / `list_files` tools use — one workspace,
-   * two callers. Skills only see paths their own host service exposes.
+   * The run's scoped services. `ctx.memory` gets the scoping the agent's own
+   * memory tools get — the profile's `memoryScope`, the restricted-class
+   * exclusion, and writes staged for the Observer; `ctx.files` is the same
+   * workspace the agent's file tools use.
    */
-  files: Service["files"];
+  service: SkillRunServices;
   /**
    * Persists the call to `skill_context_calls` (target name only — never
    * value). Injected as a function so the handler doesn't require the full
@@ -334,11 +332,10 @@ export class DefaultCtxHandler implements CtxHandler {
   #manifest: SkillManifest;
   #runId: string;
   #user: CtxUser;
-  #memoryBankId: string;
   #secretsStore: SecretsStore;
   #runInTx: Transactor;
-  #memory: MemoryProvider;
-  #files: Service["files"];
+  #memory: SkillRunServices["memory"];
+  #files: SkillRunServices["files"];
   #recordContextCall: DefaultCtxHandlerOptions["recordContextCall"];
   #now: () => string;
   #resolveHost: NonNullable<DefaultCtxHandlerOptions["resolveHost"]>;
@@ -350,11 +347,10 @@ export class DefaultCtxHandler implements CtxHandler {
     this.#manifest = opts.manifest;
     this.#runId = opts.runId;
     this.#user = opts.user;
-    this.#memoryBankId = opts.memoryBankId;
     this.#secretsStore = opts.secretsStore;
     this.#runInTx = opts.runInTx;
-    this.#memory = opts.memory;
-    this.#files = opts.files;
+    this.#memory = opts.service.memory;
+    this.#files = opts.service.files;
     this.#recordContextCall = opts.recordContextCall;
     this.#now = opts.now ?? (() => new Date().toISOString());
     this.#resolveHost = opts.resolveHost ?? ((hostname) => lookup(hostname, { all: true }));
@@ -436,7 +432,7 @@ export class DefaultCtxHandler implements CtxHandler {
         "memory.recall requires effects: [reads_memory] in SKILL.md",
       );
     }
-    const result = await this.#memory.recall(this.#memoryBankId, parsed.data.query, {});
+    const result = await this.#memory.recall(parsed.data.query);
     // Hindsight's RecallOptions takes `maxTokens`, not a per-item count.
     // The Python-facing `limit` is "max number of memories" — apply it
     // client-side after the recall returns. This also caps payload size
@@ -465,8 +461,13 @@ export class DefaultCtxHandler implements CtxHandler {
         "memory.remember requires effects: [writes_memory] in SKILL.md",
       );
     }
-    await this.#memory.retain(this.#memoryBankId, parsed.data.content, {
-      ...(parsed.data.tags && { tags: parsed.data.tags }),
+    // Staged like the agent's `memory_retain`: the Observer classifies the
+    // fact and tags it. The skill's own tags reach it only as context, beside
+    // the skill's name, so a fact a skill fetched is not read as the user's.
+    const tags = parsed.data.tags ?? [];
+    const source = `from skill '${this.#manifest.name}'`;
+    await this.#memory.stageRetain(parsed.data.content, {
+      context: tags.length > 0 ? `${source}, tagged ${tags.join(", ")}` : source,
     });
     await this.#audit("memory.remember", null, true, null);
     return null;

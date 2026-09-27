@@ -2,13 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import { type MockProxy, mock } from "vitest-mock-extended";
 import type { Service } from "../agent/service.js";
 import type { Transactor } from "../db/index.js";
-import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { mockFilesService } from "../test/factories.js";
 import type { DefaultCtxHandlerOptions } from "./ctx-handler.js";
 import { DefaultCtxHandler } from "./ctx-handler.js";
 import { CtxError } from "./dispatcher.js";
 import { parseManifest } from "./manifest.js";
+import type { SkillRunServices } from "./run-as.js";
 import type { SkillManifest } from "./types.js";
 
 const FAKE_TX = { __mockTx: true } as never;
@@ -53,13 +53,13 @@ function httpManifest(overrides: string = ""): SkillManifest {
 
 interface Deps {
   secretsStore: MockProxy<SecretsStore>;
-  memory: MockProxy<MemoryProvider>;
+  memory: MockProxy<SkillRunServices["memory"]>;
   files: Service["files"];
   recordContextCall: DefaultCtxHandlerOptions["recordContextCall"];
 }
 
 function deps(overrides?: Partial<Deps>): Deps {
-  const memory = mock<MemoryProvider>();
+  const memory = mock<SkillRunServices["memory"]>();
   memory.recall.mockResolvedValue({ memories: [] });
   return {
     secretsStore: mock<SecretsStore>(),
@@ -84,11 +84,9 @@ function makeHandler(
     manifest: m,
     runId: "run-1",
     user: { id: "user-1", timezone: "UTC" },
-    memoryBankId: "bank-1",
     secretsStore: d.secretsStore,
     runInTx: fakeRunInTx,
-    memory: d.memory,
-    files: d.files,
+    service: { memory: d.memory, files: d.files },
     recordContextCall: d.recordContextCall,
     now: () => "2026-01-01T00:00:00.000Z",
   });
@@ -848,6 +846,8 @@ describe("DefaultCtxHandler", () => {
 
       const value = await h.handle({ method: "memory.recall", args: { query: "hello" } });
       expect(value).toEqual({ memories: [{ content: "fact", type: "world" }] });
+      // Through the run's scoped service, which folds in the profile's scope.
+      expect(d.memory.recall).toHaveBeenCalledWith("hello");
       expect(d.recordContextCall).toHaveBeenCalledWith({
         runId: "run-1",
         method: "memory.recall",
@@ -867,17 +867,17 @@ describe("DefaultCtxHandler", () => {
       ).rejects.toMatchObject({ kind: "missing_effect" });
     });
 
-    it("remember calls retain when effect is declared", async () => {
+    it("remember stages the fact for the Observer, naming the skill and its tags", async () => {
       const m = manifest("effects:\n  - writes_memory");
       const d = deps();
       const h = makeHandler(m, d);
 
       await h.handle({
         method: "memory.remember",
-        args: { content: "remember this", tags: ["world"] },
+        args: { content: "remember this", tags: ["world", "work"] },
       });
-      expect(d.memory.retain).toHaveBeenCalledWith("bank-1", "remember this", {
-        tags: ["world"],
+      expect(d.memory.stageRetain).toHaveBeenCalledWith("remember this", {
+        context: "from skill 'test-skill', tagged world, work",
       });
     });
   });
@@ -1158,12 +1158,14 @@ describe("DefaultCtxHandler", () => {
       ).rejects.toMatchObject({ kind: "invalid_args" });
     });
 
-    it("memory.remember without tags omits the tags field on retain", async () => {
+    it("memory.remember without tags names only the skill", async () => {
       const m = manifest("effects:\n  - writes_memory");
       const d = deps();
       const h = makeHandler(m, d);
       await h.handle({ method: "memory.remember", args: { content: "x" } });
-      expect(d.memory.retain).toHaveBeenCalledWith("bank-1", "x", {});
+      expect(d.memory.stageRetain).toHaveBeenCalledWith("x", {
+        context: "from skill 'test-skill'",
+      });
     });
 
     it("log.info accepts structured fields and emits them on the pino child", async () => {
@@ -1202,14 +1204,14 @@ describe("DefaultCtxHandler", () => {
       expect(d.memory.recall).not.toHaveBeenCalled();
     });
 
-    it("missing_effect on memory.remember does NOT call retain", async () => {
+    it("missing_effect on memory.remember does NOT stage", async () => {
       const m = manifest();
       const d = deps();
       const h = makeHandler(m, d);
       await expect(
         h.handle({ method: "memory.remember", args: { content: "x" } }),
       ).rejects.toMatchObject({ kind: "missing_effect" });
-      expect(d.memory.retain).not.toHaveBeenCalled();
+      expect(d.memory.stageRetain).not.toHaveBeenCalled();
     });
 
     it("unknown_method audit row carries the original method string", async () => {

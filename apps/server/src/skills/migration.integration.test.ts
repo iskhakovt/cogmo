@@ -75,6 +75,8 @@ describe("migration 0017_tough_bedlam (skills foundation)", () => {
     ["skill_runs", "skill_id", "skills", "id"],
     ["skill_context_calls", "run_id", "skill_runs", "id"],
     ["skill_deploys", "approved_by", "user_identities", "id"],
+    ["skills", "run_as_user_id", "users", "id"],
+    ["skills", "run_as_profile_id", "profiles", "id"],
   ] as const)("%s.%s → %s.%s FK", async (fromTable, fromCol, toTable, toCol) => {
     // Verify the FK actually points where it should — column AND target,
     // not just "an FK exists somewhere on this column".

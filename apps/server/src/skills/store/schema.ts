@@ -10,6 +10,7 @@ import {
   unique,
   uuid,
 } from "drizzle-orm/pg-core";
+import { profiles, users } from "../../agent/store/schema.js";
 import { jsonbZod, pk, ts } from "../../db/helpers.js";
 import { userIdentities } from "../../transport/store/schema.js";
 import {
@@ -93,6 +94,16 @@ export const skills = pgTable(
      * invariant is enforced by `chk_skills_next_run_at_iff_schedule` below.
      */
     nextRunAt: timestamp("next_run_at", { withTimezone: true }),
+    /**
+     * Who a cron fire runs as: the user and profile its `ctx.memory` is
+     * scoped to. Set iff `schedule` is (`chk_skills_run_as_iff_schedule`),
+     * captured by the deploy that sets or changes the live schedule — the
+     * approver's user when one signed it off, otherwise the install owner,
+     * with the default profile.
+     */
+    runAsUserId: uuid("run_as_user_id").references(() => users.id, { onDelete: "cascade" }),
+    // RESTRICT — deleting a profile fails while a schedule runs as it.
+    runAsProfileId: uuid("run_as_profile_id").references(() => profiles.id),
     /** Last fire timestamp. Null = never fired. */
     lastFiredAt: timestamp("last_fired_at", { withTimezone: true }),
     gitSha: text("git_sha").notNull(),
@@ -119,6 +130,10 @@ export const skills = pgTable(
     check(
       "chk_skills_next_run_at_iff_schedule",
       sql`(${t.schedule} IS NULL) = (${t.nextRunAt} IS NULL)`,
+    ),
+    check(
+      "chk_skills_run_as_iff_schedule",
+      sql`(${t.schedule} IS NULL) = (${t.runAsUserId} IS NULL) AND (${t.schedule} IS NULL) = (${t.runAsProfileId} IS NULL)`,
     ),
   ],
 );

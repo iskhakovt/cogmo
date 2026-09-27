@@ -1,17 +1,15 @@
 import { Ajv, type ValidateFunction } from "ajv";
 import { err, ok, type Result } from "neverthrow";
 import { computeNextRun } from "../agent/scheduling/cron.js";
-import type { Service } from "../agent/service.js";
 import type { Transactor } from "../db/index.js";
 import { defaultSkillsImage } from "../env.js";
 import { logger } from "../logger.js";
-import type { MemoryProvider } from "../memory/provider.js";
 import type { SandboxClient } from "../sandbox/index.js";
 import { runGit, withGitAskpass } from "../secrets/git-askpass.js";
 import { DEFAULT_GITHUB_IDENTITY_NAME, resolveGitHubIdentity } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { classifyManifest, STUB_CLASSIFIER_VERSION } from "./classifier.js";
-import { type CtxUser, DefaultCtxHandler, type DefaultCtxHandlerOptions } from "./ctx-handler.js";
+import { DefaultCtxHandler, type DefaultCtxHandlerOptions } from "./ctx-handler.js";
 import {
   hashLockfileContents,
   type LockfileCompiler,
@@ -31,11 +29,13 @@ import {
 import { parseManifest } from "./manifest.js";
 import { checkPyodideCompat, formatPyodideCompatIssues } from "./pyodide-compat.js";
 import { readOriginUrl } from "./repo.js";
+import type { SkillRunAs } from "./run-as.js";
 import type {
   ExecuteRegisterResult,
   InsertSkillParams,
   SkillRiskTier,
   SkillRow,
+  SkillRunIdentity,
   SkillRunRecoveryPoint,
   SkillRunStatus,
   SkillRunTrigger,
@@ -173,6 +173,12 @@ export type DeregisterResult =
   | { kind: "deregistered"; name: string }
   | { kind: "rejected"; name: string; reason: DeregisterFailureReason };
 
+/** Who signed off an approve-tier deploy: their `user_identities` row and its user. */
+export interface SkillApprover {
+  identityId: string;
+  userId: string;
+}
+
 /**
  * Public contract for the skills runtime. P3.3 fills in the deployment-pipeline
  * RPCs (`register` / `approveDeploy` / `denyDeploy` / `rollback` / `deregister`)
@@ -181,7 +187,7 @@ export type DeregisterResult =
  */
 export interface SkillRunner {
   register(opts: { branch: string }): Promise<RegisterResult>;
-  approveDeploy(opts: { pendingId: string; approvedBy?: string }): Promise<RegisterResult>;
+  approveDeploy(opts: { pendingId: string; approvedBy?: SkillApprover }): Promise<RegisterResult>;
   denyDeploy(opts: { pendingId: string; reason?: string }): Promise<void>;
   rollback(opts: { name: string; toGitSha: string }): Promise<RegisterResult>;
   /**
@@ -234,6 +240,8 @@ export interface SkillRunner {
      * See design/skills.md → Exactly-once invocation.
      */
     idempotencyKey?: string;
+    /** Who the run acts for: `ctx.user()`, and the services `ctx.memory` / `ctx.files` reach. */
+    runAs: SkillRunAs;
   }): Promise<SkillRunResult>;
 }
 
@@ -274,12 +282,13 @@ export interface SkillRunnerOptions {
   store: SkillStore;
   runInTx: Transactor;
   secretsStore: SecretsStore;
-  memory: MemoryProvider;
-  /** File workspace passed to ctx.files.* — same surface as the agent's file tools. */
-  files: Service["files"];
-  user: CtxUser;
-  /** Memory bank id passed to ctx.memory.* — typically the user's bank. */
-  memoryBankId: string;
+  /** IANA timezone: `ctx.user().timezone`, and the zone manifest schedules fire in. */
+  userTimezone: string;
+  /**
+   * The install owner with the default profile — who a schedule runs as when
+   * the deploy that sets it had no approver.
+   */
+  defaultRunAs: SkillRunIdentity;
   /**
    * Path to the bare skills repo (`$COGMO_SKILLS_PATH`). Required for the
    * register / rollback flows that read SKILL.md from git and advance
@@ -408,10 +417,8 @@ export class SkillRunnerImpl implements SkillRunner {
   #store: SkillStore;
   #runInTx: Transactor;
   #secretsStore: SecretsStore;
-  #memory: MemoryProvider;
-  #files: Service["files"];
-  #user: CtxUser;
-  #memoryBankId: string;
+  #userTimezone: string;
+  #defaultRunAs: SkillRunIdentity;
   #skillsRepoPath: string | undefined;
   #pyodidePackageCacheDir: string | undefined;
   #sandbox: SandboxClient | undefined;
@@ -455,10 +462,8 @@ export class SkillRunnerImpl implements SkillRunner {
     this.#store = opts.store;
     this.#runInTx = opts.runInTx;
     this.#secretsStore = opts.secretsStore;
-    this.#memory = opts.memory;
-    this.#files = opts.files;
-    this.#user = opts.user;
-    this.#memoryBankId = opts.memoryBankId;
+    this.#userTimezone = opts.userTimezone;
+    this.#defaultRunAs = opts.defaultRunAs;
     this.#skillsRepoPath = opts.skillsRepoPath;
     this.#pyodidePackageCacheDir = opts.pyodidePackageCacheDir;
     this.#sandbox = opts.sandbox;
@@ -502,15 +507,13 @@ export class SkillRunnerImpl implements SkillRunner {
 
   /**
    * Compute the first occurrence of the manifest's `schedule` after the
-   * current clock tick, using the user's timezone. Returns null when the
-   * manifest has no schedule — preserves the all-or-none invariant on
-   * `(schedule, scheduleNextRunAt)`. The timezone is sourced from
-   * `this.#user.timezone` (single source of truth — the bootstrap path
-   * sets it from `env.USER_TIMEZONE`).
+   * current clock tick, in `userTimezone`. Returns null when the manifest
+   * has no schedule — preserves the all-or-none invariant on
+   * `(schedule, scheduleNextRunAt)`.
    */
   #computeScheduleNextRunAt(schedule: string | null): Date | null {
     if (schedule === null) return null;
-    return computeNextRun(schedule, this.#user.timezone, this.#clock());
+    return computeNextRun(schedule, this.#userTimezone, this.#clock());
   }
 
   /**
@@ -770,6 +773,7 @@ export class SkillRunnerImpl implements SkillRunner {
         inputs: manifest.inputs,
         outputs: manifest.outputs ?? null,
         classifierLog,
+        runAs: this.#defaultRunAs,
         applyFilesystem: async () => {
           await updateRef(repoPath, "refs/heads/main", branchSha, mainSha ?? ZERO_SHA);
           await deleteRef(repoPath, `refs/heads/${opts.branch}`);
@@ -795,7 +799,10 @@ export class SkillRunnerImpl implements SkillRunner {
     });
   }
 
-  async approveDeploy(opts: { pendingId: string; approvedBy?: string }): Promise<RegisterResult> {
+  async approveDeploy(opts: {
+    pendingId: string;
+    approvedBy?: SkillApprover;
+  }): Promise<RegisterResult> {
     const repoPath = this.#requireRepoPath("approveDeploy");
 
     const deploy = await this.#runInTx((tx) => this.#store.getDeployById(tx, opts.pendingId));
@@ -876,7 +883,7 @@ export class SkillRunnerImpl implements SkillRunner {
     const result = await this.#runInTx((tx) =>
       this.#store.executeApprove(tx, {
         pendingId: opts.pendingId,
-        approvedBy: opts.approvedBy ?? null,
+        approvedBy: opts.approvedBy?.identityId ?? null,
         tier: manifest.tier,
         // Preserve the deploy row's classified tier (which is what the user
         // approved). Re-classifying here could promote an `approve` deploy to a
@@ -888,6 +895,10 @@ export class SkillRunnerImpl implements SkillRunner {
         lockfileHash: lockfile?.hash ?? null,
         inputs: manifest.inputs,
         outputs: manifest.outputs ?? null,
+        runAs: {
+          userId: opts.approvedBy?.userId ?? this.#defaultRunAs.userId,
+          profileId: this.#defaultRunAs.profileId,
+        },
         applyFilesystem: async () => {
           await updateRef(repoPath, "refs/heads/main", deploy.gitSha, mainSha ?? ZERO_SHA);
         },
@@ -1029,6 +1040,7 @@ export class SkillRunnerImpl implements SkillRunner {
         inputs: manifest.inputs,
         outputs: manifest.outputs ?? null,
         classifierLog,
+        runAs: this.#defaultRunAs,
         applyFilesystem: async () => {
           // Rollback rewrites main backward — pre-receive hook would normally
           // reject this, but `update-ref` bypasses hooks by design (see
@@ -1175,6 +1187,7 @@ export class SkillRunnerImpl implements SkillRunner {
     inputs: unknown;
     trigger?: SkillRunTrigger;
     idempotencyKey?: string;
+    runAs: SkillRunAs;
   }): Promise<SkillRunResult> {
     // --- Pre-flight (cheap, idempotent reads; re-runs freely on retry) ---
     // Typed-error throws here happen *before* any DB write. The cron-fire
@@ -1300,12 +1313,10 @@ export class SkillRunnerImpl implements SkillRunner {
       const ctxHandler = new DefaultCtxHandler({
         manifest: cached.manifest,
         runId,
-        user: this.#user,
-        memoryBankId: this.#memoryBankId,
+        user: { id: opts.runAs.userId, timezone: this.#userTimezone },
         secretsStore: this.#secretsStore,
         runInTx: this.#runInTx,
-        memory: this.#memory,
-        files: this.#files,
+        service: opts.runAs.service,
         recordContextCall: (call) => this.#runInTx((tx) => this.#store.recordContextCall(tx, call)),
         // Named fields, not a spread: a wider object is assignable to the
         // option's type, and anything else it carried would override the
@@ -1504,6 +1515,7 @@ export class SkillRunnerImpl implements SkillRunner {
       effects: manifest.effects,
       schedule,
       scheduleNextRunAt: this.#computeScheduleNextRunAt(schedule),
+      scheduleRunAs: schedule === null ? null : this.#defaultRunAs,
       gitSha,
       lockfileHash: lockfileSnapshot?.hash ?? null,
       inputs: manifest.inputs,

@@ -573,7 +573,9 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // Every invocation builds it, for the handlers; which tools the turn
       // offers is frozen below.
       const imageTools = deps.imageToolsLoader ? await deps.imageToolsLoader.getTools() : [];
-      const skillTools = deps.skillRunner ? await buildSkillTools(deps.skillRunner) : [];
+      const skillTools = deps.skillRunner
+        ? await buildSkillTools(deps.skillRunner, { userId })
+        : [];
       // One `subagent__<name>` tool per row, loaded fresh each turn (CLI CRUD
       // takes effect without a restart). The handler closes over the same
       // per-turn `resolveProvider`, so a sub-agent can target any routable

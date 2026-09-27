@@ -24,6 +24,39 @@ function assertScheduleInvariant(schedule: string | null, scheduleNextRunAt: Dat
   }
 }
 
+/**
+ * The user and profile a scheduled skill runs as. Stored on the skills row
+ * (`run_as_user_id`, `run_as_profile_id`) iff `schedule` is set.
+ */
+export interface SkillRunIdentity {
+  userId: string;
+  profileId: string;
+}
+
+/**
+ * The run-as columns a deploy leaves on the row. A deploy that sets the live
+ * schedule (the row was absent or disabled) or changes it captures
+ * `deployRunAs`; one that keeps it keeps the stored identity; no schedule, no
+ * identity.
+ */
+function nextRunAs(
+  current: SkillRow | undefined,
+  schedule: string | null,
+  deployRunAs: SkillRunIdentity,
+): { runAsUserId: string | null; runAsProfileId: string | null } {
+  if (schedule === null) return { runAsUserId: null, runAsProfileId: null };
+  if (
+    current !== undefined &&
+    !current.disabled &&
+    current.schedule === schedule &&
+    current.runAsUserId !== null &&
+    current.runAsProfileId !== null
+  ) {
+    return { runAsUserId: current.runAsUserId, runAsProfileId: current.runAsProfileId };
+  }
+  return { runAsUserId: deployRunAs.userId, runAsProfileId: deployRunAs.profileId };
+}
+
 export type SkillTier = "wasm" | "container";
 export type SkillRiskTier = "auto" | "notify" | "approve";
 export type SkillRunStatus = "running" | "success" | "error";
@@ -45,6 +78,9 @@ export interface SkillRow {
    * The ticker queries this column.
    */
   nextRunAt: Date | null;
+  /** Who a cron fire runs as. Both set iff `schedule` is (`chk_skills_run_as_iff_schedule`). */
+  runAsUserId: string | null;
+  runAsProfileId: string | null;
   /** Last fire timestamp. Null = never fired. */
   lastFiredAt: Date | null;
   gitSha: string;
@@ -131,6 +167,8 @@ export interface InsertSkillParams {
    * mismatch as a clear TypeError instead of a Postgres CHECK violation.
    */
   scheduleNextRunAt: Date | null;
+  /** Non-null iff `schedule` is non-null — `chk_skills_run_as_iff_schedule`. */
+  scheduleRunAs: SkillRunIdentity | null;
   gitSha: string;
   /** sha256 of `requirements.lock` at `gitSha`, or null when no deps. */
   lockfileHash: string | null;
@@ -195,6 +233,8 @@ export interface ExecuteRegisterParams {
   inputs: SkillInputs;
   outputs: SkillIo | null;
   classifierLog: ClassifierLog;
+  /** Who the schedule runs as if this deploy sets or changes it. */
+  runAs: SkillRunIdentity;
   /**
    * Called inside the register transaction *after* DB rows are written and
    * *before* the transaction commits. Throw to abort the register — the DB
@@ -248,6 +288,8 @@ export interface ExecuteApproveParams {
   lockfileHash: string | null;
   inputs: SkillInputs;
   outputs: SkillIo | null;
+  /** Who the schedule runs as if this deploy sets or changes it. */
+  runAs: SkillRunIdentity;
   applyFilesystem(): Promise<void>;
 }
 
@@ -271,6 +313,8 @@ export interface ExecuteRollbackParams {
   inputs: SkillInputs;
   outputs: SkillIo | null;
   classifierLog: ClassifierLog;
+  /** Who the schedule runs as if this deploy sets or changes it. */
+  runAs: SkillRunIdentity;
   applyFilesystem(): Promise<void>;
 }
 
@@ -436,6 +480,9 @@ export class DrizzleSkillStore implements SkillStore {
 
   async insertSkill(tx: Transaction, params: InsertSkillParams): Promise<SkillRow> {
     assertScheduleInvariant(params.schedule, params.scheduleNextRunAt);
+    if ((params.schedule === null) !== (params.scheduleRunAs === null)) {
+      throw new TypeError("schedule and scheduleRunAs must agree on null-ness");
+    }
     return single(
       await tx
         .insert(skills)
@@ -446,6 +493,8 @@ export class DrizzleSkillStore implements SkillStore {
           effects: params.effects,
           schedule: params.schedule,
           nextRunAt: params.scheduleNextRunAt,
+          runAsUserId: params.scheduleRunAs?.userId ?? null,
+          runAsProfileId: params.scheduleRunAs?.profileId ?? null,
           gitSha: params.gitSha,
           lockfileHash: params.lockfileHash,
           inputs: params.inputs,
@@ -619,6 +668,7 @@ export class DrizzleSkillStore implements SkillStore {
             effects: params.effects,
             schedule: params.schedule,
             nextRunAt: params.scheduleNextRunAt,
+            ...nextRunAs(existing, params.schedule, params.runAs),
             gitSha: params.branchTipSha,
             lockfileHash: params.lockfileHash,
             inputs: params.inputs,
@@ -647,6 +697,7 @@ export class DrizzleSkillStore implements SkillStore {
           effects: params.effects,
           schedule: params.schedule,
           nextRunAt: params.scheduleNextRunAt,
+          ...nextRunAs(undefined, params.schedule, params.runAs),
           gitSha: params.branchTipSha,
           lockfileHash: params.lockfileHash,
           inputs: params.inputs,
@@ -732,6 +783,7 @@ export class DrizzleSkillStore implements SkillStore {
         effects: params.effects,
         schedule: params.schedule,
         nextRunAt: params.scheduleNextRunAt,
+        ...nextRunAs(skill, params.schedule, params.runAs),
         inputs: params.inputs,
         outputs: params.outputs,
       })
@@ -825,6 +877,7 @@ export class DrizzleSkillStore implements SkillStore {
         effects: params.effects,
         schedule: params.schedule,
         nextRunAt: params.scheduleNextRunAt,
+        ...nextRunAs(existing, params.schedule, params.runAs),
         inputs: params.inputs,
         outputs: params.outputs,
       })

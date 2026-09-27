@@ -1,16 +1,18 @@
 /**
  * Fire-handler unit tests via `InngestTestEngine`. Covers the dispatch
  * branch matrix: success, runner-side error (run row persisted, no retry),
- * the four skipped reasons (skill_not_found / skill_disabled /
- * invalid_inputs / sandbox_unavailable), and the replay-safety contract
- * on the `dispatch` step.
+ * the skipped reasons (skill_not_found / not_scheduled / skill_disabled /
+ * invalid_inputs / sandbox_unavailable), the run-as identity read from the
+ * skill row, and the replay-safety contract on the `dispatch` step.
  */
 
 import { InngestTestEngine } from "@inngest/test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { inngest } from "../inngest/client.js";
-import { createSkillCronFireHandler } from "./cron-fire-handler.js";
+import { fakeRunInTx, mockFilesService } from "../test/factories.js";
+import { createSkillCronFireHandler, type SkillCronFireDeps } from "./cron-fire-handler.js";
+import type { SkillRunAs, SkillRunServices } from "./run-as.js";
 import {
   InputValidationError,
   SandboxUnavailableError,
@@ -18,6 +20,7 @@ import {
   SkillNotFoundError,
   type SkillRunner,
 } from "./runner.js";
+import type { SkillRow, SkillStore } from "./store/index.js";
 
 const baseEvent = {
   name: "skills/cron.fire",
@@ -33,6 +36,44 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+const RUN_AS_USER = "019d0000-0000-7000-8000-0000000000a7";
+const RUN_AS_PROFILE = "019d0000-0000-7000-8000-0000000000b7";
+
+function skillRow(overrides: Partial<SkillRow> = {}): SkillRow {
+  return {
+    id: "skill-1",
+    name: "morning-brief",
+    tier: "wasm",
+    riskTier: "auto",
+    effects: [],
+    schedule: "0 9 * * *",
+    nextRunAt: new Date("2026-06-02T09:00:00Z"),
+    runAsUserId: RUN_AS_USER,
+    runAsProfileId: RUN_AS_PROFILE,
+    lastFiredAt: null,
+    gitSha: baseEvent.data.gitSha,
+    lockfileHash: null,
+    inputs: { type: "object", properties: {} },
+    outputs: null,
+    disabled: false,
+    createdAt: new Date("2026-05-01T00:00:00Z"),
+    ...overrides,
+  };
+}
+
+const RUN_AS: SkillRunAs = {
+  userId: RUN_AS_USER,
+  service: { memory: mock<SkillRunServices["memory"]>(), files: mockFilesService() },
+};
+
+/** Deps around `runner`, with the skill row stored as `row` (absent when null). */
+function deps(runner: SkillRunner, row: SkillRow | null = skillRow()) {
+  const store = mock<SkillStore>();
+  store.getSkillById.mockResolvedValue(row ?? undefined);
+  const resolveRunAs = vi.fn<SkillCronFireDeps["resolveRunAs"]>().mockResolvedValue(RUN_AS);
+  return { runner, runInTx: fakeRunInTx, store, resolveRunAs };
+}
+
 describe("createSkillCronFireHandler", () => {
   it("invokes the runner with empty inputs and trigger='cron', returns completed/success", async () => {
     const runner = mock<SkillRunner>();
@@ -41,7 +82,7 @@ describe("createSkillCronFireHandler", () => {
       status: "success",
       output: { message: "ok" },
     });
-    const fn = createSkillCronFireHandler({ runner }, inngest);
+    const fn = createSkillCronFireHandler(deps(runner), inngest);
 
     const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
 
@@ -55,7 +96,50 @@ describe("createSkillCronFireHandler", () => {
       // resolves to the same run row in `runner.invoke`'s
       // recovery_point branch.
       idempotencyKey: `skill-cron:${baseEvent.data.skillId}:${baseEvent.data.scheduledFor}`,
+      runAs: RUN_AS,
     });
+  });
+
+  it("runs as the identity stored on the skill, with that identity's scoped services", async () => {
+    const runner = mock<SkillRunner>();
+    runner.invoke.mockResolvedValue({ runId: "run-8", status: "success", output: {} });
+    const d = deps(runner);
+    const fn = createSkillCronFireHandler(d, inngest);
+
+    await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
+
+    expect(d.store.getSkillById).toHaveBeenCalledWith(expect.anything(), "skill-1");
+    expect(d.resolveRunAs).toHaveBeenCalledWith({
+      userId: RUN_AS_USER,
+      profileId: RUN_AS_PROFILE,
+    });
+    expect(runner.invoke).toHaveBeenCalledWith(expect.objectContaining({ runAs: RUN_AS }));
+  });
+
+  it("skips with reason 'not_scheduled' when the schedule was dropped between tick and fire", async () => {
+    const runner = mock<SkillRunner>();
+    const d = deps(
+      runner,
+      skillRow({ schedule: null, nextRunAt: null, runAsUserId: null, runAsProfileId: null }),
+    );
+    const fn = createSkillCronFireHandler(d, inngest);
+
+    const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
+
+    expect(result).toMatchObject({ status: "skipped", reason: "not_scheduled" });
+    expect(d.resolveRunAs).not.toHaveBeenCalled();
+    expect(runner.invoke).not.toHaveBeenCalled();
+  });
+
+  it("skips with reason 'skill_not_found' when the row is gone before its identity is read", async () => {
+    const runner = mock<SkillRunner>();
+    const d = deps(runner, null);
+    const fn = createSkillCronFireHandler(d, inngest);
+
+    const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
+
+    expect(result).toMatchObject({ status: "skipped", reason: "skill_not_found" });
+    expect(runner.invoke).not.toHaveBeenCalled();
   });
 
   it("returns completed/error when the skill itself fails — does NOT throw, doesn't burn retries", async () => {
@@ -63,7 +147,7 @@ describe("createSkillCronFireHandler", () => {
     // it back as runStatus='error' so the cron continues firing tomorrow.
     const runner = mock<SkillRunner>();
     runner.invoke.mockResolvedValue({ runId: "run-err", status: "error", error: "boom" });
-    const fn = createSkillCronFireHandler({ runner }, inngest);
+    const fn = createSkillCronFireHandler(deps(runner), inngest);
 
     const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
 
@@ -73,7 +157,7 @@ describe("createSkillCronFireHandler", () => {
   it("skips with reason 'skill_not_found' when the row was deregistered between tick and fire", async () => {
     const runner = mock<SkillRunner>();
     runner.invoke.mockRejectedValue(new SkillNotFoundError("morning-brief"));
-    const fn = createSkillCronFireHandler({ runner }, inngest);
+    const fn = createSkillCronFireHandler(deps(runner), inngest);
 
     const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
 
@@ -83,7 +167,7 @@ describe("createSkillCronFireHandler", () => {
   it("skips with reason 'skill_disabled' when the row was disabled between tick and fire", async () => {
     const runner = mock<SkillRunner>();
     runner.invoke.mockRejectedValue(new SkillDisabledError("morning-brief"));
-    const fn = createSkillCronFireHandler({ runner }, inngest);
+    const fn = createSkillCronFireHandler(deps(runner), inngest);
 
     const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
 
@@ -96,7 +180,7 @@ describe("createSkillCronFireHandler", () => {
     // tick for a condition that won't self-heal between attempts.
     const runner = mock<SkillRunner>();
     runner.invoke.mockRejectedValue(new SandboxUnavailableError("morning-brief"));
-    const fn = createSkillCronFireHandler({ runner }, inngest);
+    const fn = createSkillCronFireHandler(deps(runner), inngest);
 
     const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
 
@@ -110,7 +194,7 @@ describe("createSkillCronFireHandler", () => {
     // counts.
     const runner = mock<SkillRunner>();
     runner.invoke.mockRejectedValue(new Error("registry lookup failed: skill not found in cache"));
-    const fn = createSkillCronFireHandler({ runner }, inngest);
+    const fn = createSkillCronFireHandler(deps(runner), inngest);
 
     const { error } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
     expect((error as { message?: string } | undefined)?.message).toMatch(/registry lookup failed/);
@@ -124,7 +208,7 @@ describe("createSkillCronFireHandler", () => {
     runner.invoke.mockRejectedValue(
       new InputValidationError("inputs failed schema validation: missing required field 'x'"),
     );
-    const fn = createSkillCronFireHandler({ runner }, inngest);
+    const fn = createSkillCronFireHandler(deps(runner), inngest);
 
     const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
 
@@ -134,7 +218,7 @@ describe("createSkillCronFireHandler", () => {
   it("propagates unknown errors so Inngest's retry budget catches transient failures", async () => {
     const runner = mock<SkillRunner>();
     runner.invoke.mockRejectedValue(new Error("docker daemon unreachable"));
-    const fn = createSkillCronFireHandler({ runner }, inngest);
+    const fn = createSkillCronFireHandler(deps(runner), inngest);
 
     const { error } = await new InngestTestEngine({
       function: fn,
@@ -149,7 +233,7 @@ describe("createSkillCronFireHandler", () => {
   });
 
   it("pins the function configuration (event trigger, retries, concurrency)", () => {
-    const fn = createSkillCronFireHandler({ runner: mock<SkillRunner>() }, inngest);
+    const fn = createSkillCronFireHandler(deps(mock<SkillRunner>()), inngest);
     expect(fn.opts.id).toBe("skill-cron-fire");
     expect(fn.opts.retries).toBe(2);
     expect(fn.opts.concurrency).toEqual({ limit: 1, key: "event.data.skillId" });
@@ -160,7 +244,8 @@ describe("createSkillCronFireHandler", () => {
   it("does NOT re-run dispatch when Inngest replays with a cached step result", async () => {
     const runner = mock<SkillRunner>();
     runner.invoke.mockRejectedValue(new Error("must not run"));
-    const fn = createSkillCronFireHandler({ runner }, inngest);
+    const d = deps(runner);
+    const fn = createSkillCronFireHandler(d, inngest);
 
     await new InngestTestEngine({
       function: fn,
@@ -174,5 +259,8 @@ describe("createSkillCronFireHandler", () => {
     }).execute();
 
     expect(runner.invoke).not.toHaveBeenCalled();
+    // The identity read and service build live inside the step too.
+    expect(d.store.getSkillById).not.toHaveBeenCalled();
+    expect(d.resolveRunAs).not.toHaveBeenCalled();
   });
 });

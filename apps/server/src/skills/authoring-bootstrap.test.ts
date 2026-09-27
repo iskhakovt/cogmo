@@ -33,10 +33,8 @@ import { mock } from "vitest-mock-extended";
 import { fetchFeatureBranch } from "../agent/coding/git-as-transport.js";
 import { DrizzleCodingStore } from "../agent/coding/store/index.js";
 import type { Database, Transactor } from "../db/index.js";
-import type { MemoryProvider } from "../memory/provider.js";
 import type { GitHubIdentity } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
-import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { bootstrapSkillsRepo, ensureSkillsCodingRepo, SKILLS_CODING_REPO_NAME } from "./repo.js";
 import { SkillRunnerImpl } from "./runner.js";
@@ -261,11 +259,10 @@ describe("skill authoring bootstrap — boot → fetch → register chain", () =
     const runner = await SkillRunnerImpl.create({
       store: skillStore,
       runInTx: tx,
-      memory: makeMockMemory(),
       secretsStore: mock<SecretsStore>(),
-      files: mockFilesService(),
-      user: { id: "user-1", timezone: "UTC" },
-      memoryBankId: "bank-1",
+      userTimezone: "UTC",
+      // Unscheduled skill: the identity never reaches a row.
+      defaultRunAs: { userId: "user-1", profileId: "profile-1" },
       skillsRepoPath: repos.skillsBare,
     });
 
@@ -334,9 +331,3 @@ describe("skill authoring bootstrap — boot → fetch → register chain", () =
     expect(rows.filter((r) => r.name === SKILLS_CODING_REPO_NAME)).toHaveLength(1);
   });
 });
-
-function makeMockMemory(): MemoryProvider {
-  const memory = mock<MemoryProvider>();
-  memory.recall.mockResolvedValue({ memories: [] });
-  return memory;
-}

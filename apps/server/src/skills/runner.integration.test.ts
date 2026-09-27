@@ -2,19 +2,22 @@
 
 /**
  * Skill runner against the integration stack — real Postgres (postgres-js),
- * real Hindsight (slim image + llmock), real DrizzleSecretsStore with AES-GCM
- * round-trips, real Pyodide worker. The unit `runner.test.ts` uses PGlite +
- * mocked services; this tier verifies:
+ * real DrizzleSecretsStore with AES-GCM round-trips, real Pyodide worker, and
+ * a run-as identity built by `resolveSkillRunAs` over the real agent store.
+ * The unit `runner.test.ts` uses PGlite + mocked services; this tier verifies:
  *   • JSONB columns survive postgres-js (catches PGlite-vs-real divergence).
- *   • ctx.memory.remember actually persists into Hindsight and recalls back.
+ *   • ctx.memory.remember stages into `pending_memories` under the run's user.
  *   • ctx.secrets.get decrypts a real AES-GCM-encrypted secret.
  *   • Concurrent invocations don't corrupt rows or cross-leak handlers.
  */
 
 import { randomBytes } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
+import { DrizzleAgentStore } from "../agent/store/index.js";
+import { pendingMemories } from "../agent/store/schema.js";
 import { transactor } from "../db/index.js";
 import * as schema from "../db/schemas.js";
 import { HindsightMemoryProvider } from "../memory/hindsight.js";
@@ -22,6 +25,7 @@ import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../secrets/e
 import { DrizzleSecretsStore } from "../secrets/store/index.js";
 import { mockFilesService } from "../test/factories.js";
 import { fileDatabaseUrl } from "../test/integration-file.js";
+import { resolveSkillRunAs, type SkillRunAs } from "./run-as.js";
 import { SkillRunnerImpl } from "./runner.js";
 import { DrizzleSkillStore } from "./store/index.js";
 
@@ -29,28 +33,45 @@ const SUITE = randomBytes(4).toString("hex");
 const skillName = (tag: string) => `it-${SUITE}-${tag}`;
 
 let sql: ReturnType<typeof postgres>;
+let db: ReturnType<typeof drizzle<typeof schema>>;
 let store: DrizzleSkillStore;
 let secretsStore: DrizzleSecretsStore;
-let memory: HindsightMemoryProvider;
 let tx: ReturnType<typeof transactor>;
-const BANK_ID = `runner-it-${Date.now()}`;
+/** A user and profile of this file's own, which every invocation runs as. */
+let runAs: SkillRunAs;
 
 beforeAll(async () => {
   sql = postgres(fileDatabaseUrl(), { max: 4 });
-  const db = drizzle(sql, { schema });
+  db = drizzle(sql, { schema });
   tx = transactor(db);
   store = new DrizzleSkillStore();
 
   const key = deriveMasterKey(parseMasterKey(generateMasterKey()), "cogmo/secrets-at-rest/v1");
   secretsStore = new DrizzleSecretsStore(key);
 
-  const hindsightUrl = inject("hindsightUrl");
-  const apiKey = inject("hindsightApiKey");
-  memory = new HindsightMemoryProvider(hindsightUrl, { apiKey });
-
-  const { HindsightClient } = await import("@vectorize-io/hindsight-client");
-  const client = new HindsightClient({ baseUrl: hindsightUrl, apiKey });
-  await client.createBank(BANK_ID);
+  const agentStore = new DrizzleAgentStore();
+  const identity = await tx(async (trx) => {
+    const user = await agentStore.createUser(trx);
+    const profile = await agentStore.createProfile(trx, {
+      userId: user.id,
+      name: `runner-it-${SUITE}`,
+      basePrompt: "",
+      model: "m",
+      toolSet: [],
+    });
+    return { userId: user.id, profileId: profile.id };
+  });
+  runAs = await resolveSkillRunAs(
+    {
+      runInTx: tx,
+      agentStore,
+      memory: new HindsightMemoryProvider(inject("hindsightUrl"), {
+        apiKey: inject("hindsightApiKey"),
+      }),
+      fileService: mockFilesService(),
+    },
+    identity,
+  );
 }, 60_000);
 
 afterAll(async () => {
@@ -62,10 +83,9 @@ async function makeRunner() {
     store,
     runInTx: tx,
     secretsStore,
-    memory,
-    files: mockFilesService(),
-    user: { id: "it-user", timezone: "UTC" },
-    memoryBankId: BANK_ID,
+    userTimezone: "UTC",
+    // No skill here is scheduled, so the identity never reaches a row.
+    defaultRunAs: { userId: "it-owner", profileId: "it-profile" },
   });
 }
 
@@ -97,7 +117,7 @@ describe("SkillRunnerImpl (integration)", { timeout: 60_000 }, () => {
       manifestSource: echoManifest(name),
       body: ECHO_BODY,
     });
-    const result = await runner.invoke({ name, inputs: { x: 7 } });
+    const result = await runner.invoke({ name, inputs: { x: 7 }, runAs });
     expect(result.status).toBe("success");
     expect(result.output).toEqual({ echo: 8 });
 
@@ -137,7 +157,7 @@ async def run(inputs, ctx):
     const runner = await makeRunner();
     await runner.__registerForTests({ name, manifestSource: manifest, body });
 
-    const result = await runner.invoke({ name, inputs: {} });
+    const result = await runner.invoke({ name, inputs: {}, runAs });
     expect(result.status).toBe("success");
     expect(result.output).toEqual({ len: "sk-real-secret-value".length, starts_with: "sk-re" });
 
@@ -150,12 +170,7 @@ async def run(inputs, ctx):
     expect(JSON.stringify(get)).not.toContain("sk-real-secret-value");
   });
 
-  it("ctx.memory.remember reaches the real Hindsight retain endpoint", async () => {
-    // We don't poll for recall here — that would require LLM/embedding
-    // fixtures (`memory.integration.test.ts` covers retain→recall round-trip
-    // explicitly). This test verifies the runner→ctx→Hindsight HTTP path
-    // works end-to-end by asserting (a) the skill ran successfully and
-    // (b) the audit row records `memory.remember` ok=true.
+  it("ctx.memory.remember stages into pending_memories under the run's user", async () => {
     const name = skillName("remember");
     const manifest = `---
 name: ${name}
@@ -181,12 +196,20 @@ async def run(inputs, ctx):
     await runner.__registerForTests({ name, manifestSource: manifest, body });
 
     const fact = `integration-fact-${SUITE}`;
-    const result = await runner.invoke({ name, inputs: { fact } });
+    const result = await runner.invoke({ name, inputs: { fact }, runAs });
     expect(result.status).toBe("success");
 
     const calls = await tx((trx) => store.listContextCallsForRun(trx, result.runId));
     const remember = calls.find((c) => c.method === "memory.remember");
     expect(remember?.ok).toBe(true);
+
+    const staged = await db
+      .select()
+      .from(pendingMemories)
+      .where(eq(pendingMemories.userId, runAs.userId));
+    expect(staged).toMatchObject([
+      { content: fact, context: `from skill '${name}', tagged test`, source: "live_retain" },
+    ]);
   });
 
   it("captures a Python exception against the real DB", async () => {
@@ -207,7 +230,7 @@ async def run(inputs, ctx):
     const runner = await makeRunner();
     await runner.__registerForTests({ name, manifestSource: manifest, body });
 
-    const result = await runner.invoke({ name, inputs: {} });
+    const result = await runner.invoke({ name, inputs: {}, runAs });
     expect(result.status).toBe("error");
     expect(result.error).toContain("integration kaboom");
 
@@ -228,7 +251,7 @@ async def run(inputs, ctx):
       });
     }
     const results = await Promise.all(
-      names.map((name, i) => runner.invoke({ name, inputs: { x: i } })),
+      names.map((name, i) => runner.invoke({ name, inputs: { x: i }, runAs })),
     );
     expect(results.every((r) => r.status === "success")).toBe(true);
     expect(results.map((r) => r.output)).toEqual([{ echo: 1 }, { echo: 2 }, { echo: 3 }]);
@@ -255,7 +278,7 @@ async def run(inputs, ctx):
     const runner = await makeRunner();
     await runner.__registerForTests({ name, manifestSource: manifest, body });
 
-    const result = await runner.invoke({ name, inputs: {} });
+    const result = await runner.invoke({ name, inputs: {}, runAs });
     expect(result.status).toBe("error");
     // CtxError encodes the kind as `kind=<kind>:` in the message so it
     // survives the JS→Python JsException conversion.
