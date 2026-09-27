@@ -27,8 +27,9 @@
  * lines a rewritten block lost and whether it still holds what the case ends.
  * In the legacy state it checks whether name and home stay in `user_profile`
  * beside a new `identity`; in the restricted state, whether an identity change
- * is stored as an override holding only the lines that differ, and whether the
- * reply tells the user it is saved only in this persona.
+ * is stored as an override holding only the lines that differ, how the written
+ * override copies unchanged shared lines (verbatim or paraphrased), and whether
+ * the reply tells the user it is saved only in this persona.
  *
  * It reports rather than asserts. One sample per case on a non-deterministic
  * model makes any threshold either too loose to catch a regression or flaky,
@@ -211,9 +212,16 @@ interface Outcome {
   duplicate: string[] | null;
   /** Restricted, when the turn wrote `identity`: what the override did. */
   override: {
-    stored: boolean;
-    /** Shared lines the case doesn't change that the override repeats. */
+    /** The class's `identity` after the turn; null when it has none. */
+    stored: string | null;
+    /** Shared lines the case doesn't change that the written override repeats. */
     repeats: string[];
+    /** Written lines equal to a shared line, whitespace-normalised. */
+    verbatim: string[];
+    /** `repeats` with no verbatim copy in the write: what a line-level dedupe can't catch. */
+    paraphrased: string[];
+    /** Shared lines the case doesn't change that the stored override still repeats. */
+    storedRepeats: string[];
     /** The reply tells the user the change is saved only in this persona. */
     toldUser: boolean;
   } | null;
@@ -238,6 +246,16 @@ const usage = createUsageMeter();
 function keeps(text: string, anchors: ReadonlyArray<string>): boolean {
   const tokens = new Set(text.toLowerCase().match(/[a-z0-9]+/g) ?? []);
   return anchors.every((a) => tokens.has(a.toLowerCase()));
+}
+
+/** A line as the override dedupe compares it: trimmed, internal whitespace collapsed. */
+function normalizeLine(line: string): string {
+  return line.trim().replace(/\s+/g, " ");
+}
+
+/** `text`'s non-blank lines, normalised. */
+function normalizedLines(text: string): string[] {
+  return text.split("\n").map(normalizeLine).filter(Boolean);
 }
 
 function mentions(text: string, fragments: ReadonlyArray<string>): boolean {
@@ -345,18 +363,28 @@ function checkIdentity(
   const override =
     run.state !== "restricted" || shared === undefined
       ? null
-      : {
-          stored: stored.some((r) => r.profileClass === EVAL_CLASS && r.key === IDENTITY_BLOCK_KEY),
-          repeats: shared.lines
-            .filter(
-              (l) => !mentions(l.text, run.changes ?? []) && keeps(identity.content, l.anchors),
-            )
-            .map((l) => l.text),
-          toldUser:
-            /\bonly (?:applies )?(?:here|in this|for this|within this)|\bapplies here\b|\bthis persona\b|\bnot shared\b|\bseparately\b/i.test(
-              reply,
-            ),
-        };
+      : (() => {
+          const unchanged = shared.lines.filter((l) => !mentions(l.text, run.changes ?? []));
+          const repeatedIn = (text: string) =>
+            unchanged.filter((l) => keeps(text, l.anchors)).map((l) => l.text);
+          const sharedLines = new Set(normalizedLines(content(shared)));
+          const written = normalizedLines(identity.content);
+          const repeats = repeatedIn(identity.content);
+          const storedOverride =
+            stored.find((r) => r.profileClass === EVAL_CLASS && r.key === IDENTITY_BLOCK_KEY)
+              ?.content ?? null;
+          return {
+            stored: storedOverride,
+            repeats,
+            verbatim: written.filter((l) => sharedLines.has(l)),
+            paraphrased: repeats.filter((l) => !written.includes(normalizeLine(l))),
+            storedRepeats: storedOverride === null ? [] : repeatedIn(storedOverride),
+            toldUser:
+              /\bonly (?:applies )?(?:here|in this|for this|within this)|\bapplies here\b|\bthis persona\b|\bnot shared\b|\bseparately\b/i.test(
+                reply,
+              ),
+          };
+        })();
   return { leak, duplicate, override };
 }
 
@@ -421,12 +449,27 @@ const METRICS: ReadonlyArray<EvalMetric<Outcome>> = [
   {
     name: "identity changes stored as the override",
     of: (o) => o.override !== null,
-    hit: (o) => o.override?.stored === true,
+    hit: (o) => (o.override?.stored ?? null) !== null,
   },
   {
-    name: "  repeating unchanged shared lines",
+    name: "  written with unchanged shared lines",
     of: (o) => o.override !== null,
     hit: (o) => (o.override?.repeats.length ?? 0) > 0,
+  },
+  {
+    name: "    any as a verbatim copy",
+    of: (o) => o.override !== null,
+    hit: (o) => (o.override?.verbatim.length ?? 0) > 0,
+  },
+  {
+    name: "    any paraphrased",
+    of: (o) => o.override !== null,
+    hit: (o) => (o.override?.paraphrased.length ?? 0) > 0,
+  },
+  {
+    name: "  stored with unchanged shared lines",
+    of: (o) => o.override !== null,
+    hit: (o) => (o.override?.storedRepeats.length ?? 0) > 0,
   },
   {
     name: "  told the user it is saved only here",
@@ -480,9 +523,16 @@ function report(): void {
       if (o.duplicate?.length)
         console.log(`          left in user_profile: ${o.duplicate.join(" | ")}`);
       if (o.override !== null) {
+        const { stored, repeats, verbatim, paraphrased, storedRepeats, toldUser } = o.override;
+        const list = (label: string, lines: ReadonlyArray<string>) =>
+          lines.length ? ` ${label}: ${lines.join(" | ")}` : "";
         console.log(
-          `          override stored=${o.override.stored} told=${o.override.toldUser}` +
-            `${o.override.repeats.length ? ` repeats: ${o.override.repeats.join(" | ")}` : ""}`,
+          `          override told=${toldUser} verbatim=${verbatim.length}` +
+            `${list("repeats", repeats)}${list("paraphrased", paraphrased)}`,
+        );
+        console.log(
+          `          stored := ${stored === null ? "(none)" : oneLine(stored, 400)}` +
+            `${list("still repeats", storedRepeats)}`,
         );
       }
       console.log(`          reply: ${oneLine(o.reply, 160)}`);
