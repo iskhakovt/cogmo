@@ -1822,7 +1822,7 @@ describe("createTransport", () => {
         deleteProfileClass: vi.fn().mockResolvedValue({ deleted: false }),
       });
       const { transport } = setup({ agentStore });
-      const res = await transport.profileClasses.delete("handle", "no-such");
+      const res = await transport.profileClasses.delete("handle", "no-such", { confirm: false });
       expect(res._unsafeUnwrapErr()).toEqual({
         code: "profile_class_not_found",
         name: "no-such",
@@ -1835,7 +1835,7 @@ describe("createTransport", () => {
         deleteProfileClass: vi.fn().mockRejectedValue(new ProfileClassInUseError(2)),
       });
       const { transport } = setup({ agentStore });
-      const res = await transport.profileClasses.delete("handle", "intimate");
+      const res = await transport.profileClasses.delete("handle", "intimate", { confirm: false });
       expect(res._unsafeUnwrapErr()).toEqual({ code: "profile_class_in_use", profileRefs: 2 });
     });
 
@@ -1843,16 +1843,72 @@ describe("createTransport", () => {
       const deleteProfileClass = vi.fn().mockResolvedValue({ deleted: true });
       const agentStore = mockAgentStore({ deleteProfileClass });
       const { transport } = setup({ agentStore });
-      const res = await transport.profileClasses.delete("handle", "intimate");
+      const res = await transport.profileClasses.delete("handle", "intimate", { confirm: false });
       expect(res.isOk()).toBe(true);
       expect(deleteProfileClass).toHaveBeenCalledWith(expect.anything(), "user-1", "intimate");
+    });
+
+    it("delete lists the core-memory blocks it would delete and changes nothing unconfirmed", async () => {
+      const deleteProfileClass = vi.fn().mockResolvedValue({ deleted: true });
+      const agentStore = mockAgentStore({
+        deleteProfileClass,
+        listCoreMemoryKeys: vi.fn().mockResolvedValue(["identity", "preferences"]),
+      });
+      const { transport } = setup({ agentStore });
+
+      const res = await transport.profileClasses.delete("handle", "game", { confirm: false });
+
+      expect(res._unsafeUnwrapErr()).toEqual({
+        code: "profile_class_has_blocks",
+        keys: ["identity", "preferences"],
+      });
+      expect(agentStore.listCoreMemoryKeys).toHaveBeenCalledWith(
+        expect.anything(),
+        "user-1",
+        "game",
+      );
+      expect(deleteProfileClass).not.toHaveBeenCalled();
+    });
+
+    it("delete reports a class in use before its blocks, since that call deletes nothing", async () => {
+      const deleteProfileClass = vi.fn();
+      const agentStore = mockAgentStore({
+        deleteProfileClass,
+        listCoreMemoryKeys: vi.fn().mockResolvedValue(["preferences"]),
+        listProfiles: vi.fn().mockResolvedValue([
+          { id: "p-org", userId: null, profileClass: null },
+          { id: "p-1", userId: "user-1", profileClass: "game" },
+        ]),
+      });
+      const { transport } = setup({ agentStore });
+
+      const res = await transport.profileClasses.delete("handle", "game", { confirm: false });
+
+      expect(res._unsafeUnwrapErr()).toEqual({ code: "profile_class_in_use", profileRefs: 1 });
+      expect(deleteProfileClass).not.toHaveBeenCalled();
+    });
+
+    it("delete with confirm deletes a class that has blocks", async () => {
+      const deleteProfileClass = vi.fn().mockResolvedValue({ deleted: true });
+      const agentStore = mockAgentStore({
+        deleteProfileClass,
+        listCoreMemoryKeys: vi.fn().mockResolvedValue(["preferences"]),
+      });
+      const { transport } = setup({ agentStore });
+
+      const res = await transport.profileClasses.delete("handle", "game", { confirm: true });
+
+      expect(res.isOk()).toBe(true);
+      expect(deleteProfileClass).toHaveBeenCalledWith(expect.anything(), "user-1", "game");
     });
 
     it("setRestricted forwards (userId, name, restricted) and returns ok on success", async () => {
       const setProfileClassRestricted = vi.fn().mockResolvedValue({ updated: true });
       const agentStore = mockAgentStore({ setProfileClassRestricted });
       const { transport } = setup({ agentStore });
-      const res = await transport.profileClasses.setRestricted("handle", "intimate", true);
+      const res = await transport.profileClasses.setRestricted("handle", "intimate", true, {
+        confirm: false,
+      });
       expect(res.isOk()).toBe(true);
       expect(setProfileClassRestricted).toHaveBeenCalledWith(
         expect.anything(),
@@ -1867,7 +1923,9 @@ describe("createTransport", () => {
         setProfileClassRestricted: vi.fn().mockResolvedValue({ updated: false }),
       });
       const { transport } = setup({ agentStore });
-      const res = await transport.profileClasses.setRestricted("handle", "no-such", true);
+      const res = await transport.profileClasses.setRestricted("handle", "no-such", true, {
+        confirm: false,
+      });
       expect(res._unsafeUnwrapErr()).toEqual({
         code: "profile_class_not_found",
         name: "no-such",
@@ -1883,10 +1941,87 @@ describe("createTransport", () => {
         transportStore,
         agentStore: mockAgentStore({ setProfileClassRestricted }),
       });
-      const res = await transport.profileClasses.setRestricted("handle", "intimate", true);
+      const res = await transport.profileClasses.setRestricted("handle", "intimate", true, {
+        confirm: false,
+      });
       expect(res._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
       // Identity check fires before the store call — agent store stays untouched.
       expect(setProfileClassRestricted).not.toHaveBeenCalled();
+    });
+
+    it("unrestricting a class with an identity override names it and changes nothing unconfirmed", async () => {
+      const setProfileClassRestricted = vi.fn().mockResolvedValue({ updated: true });
+      const agentStore = mockAgentStore({
+        setProfileClassRestricted,
+        listCoreMemoryKeys: vi.fn().mockResolvedValue(["identity", "preferences"]),
+      });
+      const { transport } = setup({ agentStore });
+
+      const res = await transport.profileClasses.setRestricted("handle", "game", false, {
+        confirm: false,
+      });
+
+      expect(res._unsafeUnwrapErr()).toEqual({
+        code: "profile_class_has_blocks",
+        keys: ["identity"],
+      });
+      expect(setProfileClassRestricted).not.toHaveBeenCalled();
+      expect(agentStore.deleteCoreMemoryBlock).not.toHaveBeenCalled();
+    });
+
+    it("unrestricting with confirm clears the flag and deletes only the identity override", async () => {
+      const setProfileClassRestricted = vi.fn().mockResolvedValue({ updated: true });
+      const agentStore = mockAgentStore({
+        setProfileClassRestricted,
+        listCoreMemoryKeys: vi.fn().mockResolvedValue(["identity", "preferences"]),
+      });
+      const { transport } = setup({ agentStore });
+
+      const res = await transport.profileClasses.setRestricted("handle", "game", false, {
+        confirm: true,
+      });
+
+      expect(res.isOk()).toBe(true);
+      expect(setProfileClassRestricted).toHaveBeenCalledWith(
+        expect.anything(),
+        "user-1",
+        "game",
+        false,
+      );
+      expect(agentStore.deleteCoreMemoryBlock).toHaveBeenCalledTimes(1);
+      expect(agentStore.deleteCoreMemoryBlock).toHaveBeenCalledWith(expect.anything(), {
+        userId: "user-1",
+        profileClass: "game",
+        key: "identity",
+      });
+    });
+
+    it("unrestricting a class without an override needs no confirmation", async () => {
+      const agentStore = mockAgentStore({
+        listCoreMemoryKeys: vi.fn().mockResolvedValue(["preferences"]),
+      });
+      const { transport } = setup({ agentStore });
+
+      const res = await transport.profileClasses.setRestricted("handle", "game", false, {
+        confirm: false,
+      });
+
+      expect(res.isOk()).toBe(true);
+      expect(agentStore.deleteCoreMemoryBlock).not.toHaveBeenCalled();
+    });
+
+    it("restricting a class never deletes a block", async () => {
+      const agentStore = mockAgentStore({
+        listCoreMemoryKeys: vi.fn().mockResolvedValue(["identity"]),
+      });
+      const { transport } = setup({ agentStore });
+
+      const res = await transport.profileClasses.setRestricted("handle", "game", true, {
+        confirm: false,
+      });
+
+      expect(res.isOk()).toBe(true);
+      expect(agentStore.deleteCoreMemoryBlock).not.toHaveBeenCalled();
     });
   });
 

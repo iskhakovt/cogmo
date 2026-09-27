@@ -247,7 +247,7 @@ Two commands delete blocks. Both confirm first, in Transport, so every channel g
 | `/classes rm c` | `c`'s blocks, through the FK's cascade | Lists their keys and deletes only on confirmation; a class without blocks deletes at once, as today. It already fails while a profile uses the class. |
 | `/classes unrestrict r` | `r`'s `identity` override | Names it and, on confirmation, deletes it in the flag change's transaction, so no unrestricted class shadows the shared block. |
 
-**Confirmation contract.** `profileClasses.delete` and `setRestricted` take `{ confirm: boolean }`. Without it, a call that would delete blocks returns `err({ code: "profile_class_has_blocks", keys })` and changes nothing; Telegram replies with the keys and the command to repeat with `confirm`.
+**Confirmation contract.** `profileClasses.delete` and `setRestricted` take `{ confirm: boolean }`. Without it, a call that would delete blocks returns `err({ code: "profile_class_has_blocks", keys })` and changes nothing; a class still in use reports `profile_class_in_use` first, since that call deletes nothing. Telegram replies with the keys and the command to repeat: `/classes rm c confirm`, `/classes unrestrict r confirm`.
 
 ### Prior Art
 
