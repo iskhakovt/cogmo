@@ -35,7 +35,16 @@ export function describeIsolationProbe(name: string): void {
     it("sees only its own global steering rule", async () => {
       const store = new DrizzleAgentStore();
       await runInTx((tx) =>
-        store.insertManualRule(tx, { rule: `${PROBE} ${name}`, category: "style", priority: 50 }),
+        tx.insert(schema.steeringRules).values({
+          rule: `${PROBE} ${name}`,
+          category: "style",
+          active: true,
+          source: "manual",
+          priority: 50,
+          observationCount: 0,
+          profileId: null,
+          channelType: null,
+        }),
       );
       const rules = await runInTx((tx) => store.getActiveRules(tx, randomUUID(), []));
       expect(rules.map((r) => r.rule).filter((r) => r.startsWith(PROBE))).toEqual([

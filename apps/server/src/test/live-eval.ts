@@ -24,6 +24,7 @@ import { BUILT_IN_SERVICE_GUIDANCE, builtInToolSpecs } from "../agent/built-ins.
 import { createDocumentTools } from "../agent/document-tools.js";
 import { type AgentLoopResult, runStreamingAgentLoop } from "../agent/loop.js";
 import { DefaultPromptSource } from "../agent/prompt.js";
+import type { SectionedRule } from "../agent/rule-sections.js";
 import type { CoreMemoryBlock, Service } from "../agent/service.js";
 import type { Profile } from "../agent/store/index.js";
 import { createDefaultTools, ToolRegistry } from "../agent/tools.js";
@@ -174,7 +175,7 @@ export interface EvalTurn {
 export async function runEvalTurn(params: {
   provider: LlmProvider;
   coreMemory: EvalCoreMemory;
-  rules: ReadonlyArray<{ rule: string }>;
+  rules: ReadonlyArray<SectionedRule>;
   history: ReadonlyArray<Message>;
   message: string;
   cacheKey: string;
@@ -230,7 +231,7 @@ export interface EvalConversation {
 export async function runEvalConversation(params: {
   provider: LlmProvider;
   coreMemory: EvalCoreMemory;
-  rules: ReadonlyArray<{ rule: string }>;
+  rules: ReadonlyArray<SectionedRule>;
   messages: ReadonlyArray<string>;
   cacheKey: string;
 }): Promise<EvalConversation> {

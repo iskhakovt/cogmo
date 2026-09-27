@@ -1,4 +1,5 @@
 import type { ToolDefinition } from "../llm/types.js";
+import { RULE_SECTIONS, type RuleSection, type SectionedRule } from "./rule-sections.js";
 import type { CoreMemoryBlock } from "./service.js";
 import type { Profile } from "./store/index.js";
 import { TURN_CONTEXT_GUIDANCE } from "./turn-context.js";
@@ -10,7 +11,8 @@ import { TURN_CONTEXT_GUIDANCE } from "./turn-context.js";
  */
 export interface AssembleContext {
   profile: Profile | undefined;
-  rules: ReadonlyArray<{ rule: string }>;
+  /** Active steering rules, rendered by section in the given order within each. */
+  rules: ReadonlyArray<SectionedRule>;
   /**
    * Core memory blocks of the conversation's user — the same user
    * `core_memory_update` writes for — rendered as the `# User` section.
@@ -41,6 +43,17 @@ Be concise when the user wants a quick answer. Be thorough when the topic is com
 
 const ONBOARDING = `You don't know your user yet. In your first interaction, introduce yourself briefly and learn about them: their name, what they do, their timezone, and how they prefer to communicate. Save what you learn about them, including anything about them they mention in passing, to core memory with core_memory_update as soon as you learn it.`;
 
+const RULES_PREAMBLE =
+  "Standing rules for your replies. Where two rules that apply to this reply conflict, follow the one listed first.";
+
+const RULE_SECTION_HEADINGS: Readonly<Record<RuleSection, string>> = {
+  always: "## Always",
+  from_user:
+    "## From your user\nYour user asked for these. They take precedence over your default style and the channel defaults.",
+  learned: "## Learned from your user",
+  channel_defaults: "## Channel defaults",
+};
+
 export interface PromptSourceConfig {
   serviceGuidance?: ReadonlyArray<string>;
 }
@@ -49,6 +62,15 @@ export interface PromptSourceConfig {
 export function formatUserContext(blocks: ReadonlyArray<CoreMemoryBlock>): string | null {
   if (blocks.length === 0) return null;
   return blocks.map((b) => `## ${b.key}\n${b.content}`).join("\n\n");
+}
+
+/** The `# Rules` section body: a subsection per non-empty section, in precedence order. */
+function formatRules(rules: ReadonlyArray<SectionedRule>): string {
+  const sections = RULE_SECTIONS.flatMap((section) => {
+    const lines = rules.filter((r) => r.section === section).map((r) => `- ${r.rule}`);
+    return lines.length > 0 ? [`${RULE_SECTION_HEADINGS[section]}\n${lines.join("\n")}`] : [];
+  });
+  return [RULES_PREAMBLE, ...sections].join("\n\n");
 }
 
 /**
@@ -105,8 +127,7 @@ export class DefaultPromptSource implements PromptSource {
 
     // Steering rules from DB
     if (rules.length > 0) {
-      const rulesList = rules.map((r) => `- ${r.rule}`).join("\n");
-      parts.push(`# Rules\n\n${rulesList}`);
+      parts.push(`# Rules\n\n${formatRules(rules)}`);
     }
 
     // Last, so its voice guidance isn't drowned out by the identity and

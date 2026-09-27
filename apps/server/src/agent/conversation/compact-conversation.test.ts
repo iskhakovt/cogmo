@@ -388,7 +388,9 @@ describe("compactConversation", () => {
       cooldownState: null,
       voiceMode: null,
     });
-    vi.mocked(agentStore.getActiveRules).mockResolvedValue([{ rule: "Be terse" }]);
+    vi.mocked(agentStore.getActiveRules).mockResolvedValue([
+      { rule: "Be terse", section: "learned" },
+    ]);
     const blocksByUser = new Map([
       ["user-1", [{ key: "user_profile", content: "Name: Ana" }]],
       ["user-2", [{ key: "user_profile", content: "Name: Ben" }]],
@@ -403,7 +405,7 @@ describe("compactConversation", () => {
 
     expect(promptSource.assemble).toHaveBeenCalledWith({
       profile: profile(),
-      rules: [{ rule: "Be terse" }],
+      rules: [{ rule: "Be terse", section: "learned" }],
       coreMemory: [{ key: "user_profile", content: "Name: Ben" }],
     });
   });

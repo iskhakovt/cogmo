@@ -1,5 +1,6 @@
 import type { Transactor } from "../../db/index.js";
 import type { TransportStore } from "../../transport/store/index.js";
+import type { SectionedRule } from "../rule-sections.js";
 import type { CoreMemoryBlock } from "../service.js";
 import type { AgentStore, Profile } from "../store/index.js";
 
@@ -39,7 +40,7 @@ export interface LoadConversationContextArgs {
 
 export interface ConversationContext {
   channelTypes: ReadonlyArray<string>;
-  rules: ReadonlyArray<{ rule: string }>;
+  rules: ReadonlyArray<SectionedRule>;
   coreMemory: ReadonlyArray<CoreMemoryBlock>;
 }
 

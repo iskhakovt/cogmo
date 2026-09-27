@@ -23,6 +23,7 @@ import type { EvolutionEventPayload } from "../evolution/event-schema.js";
 import { isCoreCompartment } from "../evolution/memory-extraction-schema.js";
 import { imageModelSlug } from "../image-tools.js";
 import type { AutoRecallMode } from "../recall-gate.js";
+import { ruleSection, type SectionedRule } from "../rule-sections.js";
 import type { TurnContext } from "../turn-context.js";
 import {
   CustomCompartmentCapExceededError,
@@ -765,12 +766,15 @@ export interface AgentStore {
     messageId: string,
   ): Promise<{ id: string; role: string; content: string | ContentBlock[] } | undefined>;
 
-  /** Load active steering rules for a profile + active channels, ordered by priority, then id. */
+  /**
+   * Load active steering rules for a profile + active channels, each with its
+   * `# Rules` section, in the order `# Rules` lists them within a section.
+   */
   getActiveRules(
     tx: Transaction,
     profileId: string,
     channelTypes: ReadonlyArray<string>,
-  ): Promise<ReadonlyArray<{ rule: string }>>;
+  ): Promise<ReadonlyArray<SectionedRule>>;
 
   /** Get all core memory blocks for a user, ordered by key. */
   getCoreMemoryBlocks(
@@ -1133,17 +1137,16 @@ export interface AgentStore {
 
   // --- Evolution: correction extraction ---
 
-  /** Check if any channel-specific rules exist for a given channel type. */
-  hasChannelRules(tx: Transaction, channelType: string): Promise<boolean>;
+  /** Whether a channel's defaults have been seeded. */
+  hasChannelDefaults(tx: Transaction, channelType: string): Promise<boolean>;
 
-  /** Insert a manual steering rule (already active). Used by seed/setup. */
-  insertManualRule(
+  /** Insert an active channel default (`source = 'seed'`) for every profile. */
+  insertSeedRule(
     tx: Transaction,
     params: {
       rule: string;
       category: string;
-      profileId?: string | null;
-      channelType?: string | null;
+      channelType: string;
       priority: number;
     },
   ): Promise<{ id: string }>;
@@ -2190,13 +2193,15 @@ export class DrizzleAgentStore implements AgentStore {
     tx: Transaction,
     profileId: string,
     channelTypes: ReadonlyArray<string>,
-  ): Promise<ReadonlyArray<{ rule: string }>> {
-    // `id` breaks priority ties, which are common (corrections share 100, seeded
-    // channel rules 50). An in-place update moves a row in the heap, so without
+  ): Promise<ReadonlyArray<SectionedRule>> {
+    // Within a section: `safety` first (only operators write it), then the
+    // narrower scope, so it is listed before a wider rule it conflicts with.
+    // `id` breaks priority ties, which are common (corrections share 100,
+    // seeded rules 50). An in-place update moves a row in the heap, so without
     // it `# Rules` could reorder, invalidating the cached prompt, with no rule
     // changed.
-    return tx
-      .select({ rule: steeringRules.rule })
+    const rows = await tx
+      .select({ rule: steeringRules.rule, source: steeringRules.source })
       .from(steeringRules)
       .where(
         and(
@@ -2208,7 +2213,14 @@ export class DrizzleAgentStore implements AgentStore {
           ),
         ),
       )
-      .orderBy(asc(steeringRules.priority), asc(steeringRules.id));
+      .orderBy(
+        desc(eq(steeringRules.category, "safety")),
+        asc(isNull(steeringRules.profileId)),
+        asc(isNull(steeringRules.channelType)),
+        asc(steeringRules.priority),
+        asc(steeringRules.id),
+      );
+    return rows.map((r) => ({ rule: r.rule, section: ruleSection(r.source) }));
   }
 
   async getCoreMemoryBlocks(
@@ -2847,22 +2859,21 @@ export class DrizzleAgentStore implements AgentStore {
     return { deleted: deleted.length > 0 };
   }
 
-  async hasChannelRules(tx: Transaction, channelType: string): Promise<boolean> {
+  async hasChannelDefaults(tx: Transaction, channelType: string): Promise<boolean> {
     const rows = await tx
       .select({ id: steeringRules.id })
       .from(steeringRules)
-      .where(eq(steeringRules.channelType, channelType))
+      .where(and(eq(steeringRules.channelType, channelType), eq(steeringRules.source, "seed")))
       .limit(1);
     return rows.length > 0;
   }
 
-  async insertManualRule(
+  async insertSeedRule(
     tx: Transaction,
     params: {
       rule: string;
       category: string;
-      profileId?: string | null;
-      channelType?: string | null;
+      channelType: string;
       priority: number;
     },
   ): Promise<{ id: string }> {
@@ -2872,12 +2883,12 @@ export class DrizzleAgentStore implements AgentStore {
         .values({
           rule: params.rule,
           category: params.category,
-          source: "manual",
+          source: "seed",
           active: true,
           priority: params.priority,
           observationCount: 0,
-          profileId: params.profileId ?? null,
-          channelType: params.channelType ?? null,
+          profileId: null,
+          channelType: params.channelType,
         })
         .returning({ id: steeringRules.id }),
     );
