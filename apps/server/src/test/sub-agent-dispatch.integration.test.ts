@@ -53,8 +53,6 @@ let tx: ReturnType<typeof transactor>;
 let agentStore: DrizzleAgentStore;
 let secretsStore: DrizzleSecretsStore;
 let userId: string;
-let anthropicProviderId: string;
-let openaiProviderId: string;
 let openaiProviderName: string;
 
 beforeAll(async () => {
@@ -104,13 +102,11 @@ beforeAll(async () => {
       attrs: { cacheDialect: "none" },
     }),
   );
-  anthropicProviderId = anthropic.id;
-  openaiProviderId = openai.id;
 
   await tx((trx) =>
     agentStore.addModelProvider(trx, {
       model: MODEL_ORCHESTRATOR,
-      providerId: anthropicProviderId,
+      providerId: anthropic.id,
       position: 0,
       userSelectable: true,
     }),
@@ -118,7 +114,7 @@ beforeAll(async () => {
   await tx((trx) =>
     agentStore.addModelProvider(trx, {
       model: MODEL_SPECIALIST,
-      providerId: openaiProviderId,
+      providerId: openai.id,
       position: 0,
       userSelectable: true,
     }),
@@ -136,9 +132,6 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await tx((trx) => agentStore.deleteSubAgent(trx, userId, SUB_AGENT_NAME));
-  if (anthropicProviderId) await tx((trx) => agentStore.deleteProvider(trx, anthropicProviderId));
-  if (openaiProviderId) await tx((trx) => agentStore.deleteProvider(trx, openaiProviderId));
   await sql.end();
 });
 

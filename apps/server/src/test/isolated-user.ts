@@ -4,11 +4,11 @@ import type { Database } from "../db/index.js";
 /**
  * Create a `users` row private to the caller.
  *
- * Each integration file has its own database, but inside it the seeded user
- * (`fileDefaultUserId()`) is the owner `bootstrap()` resolves, so inbound
- * turns and the file's other tests attach rows, and Hindsight memories (the
- * bank id is the user id), to it. A row-count assertion or a
- * `DELETE ... WHERE user_id = $1` cleanup stays exact on a user of its own.
+ * Each integration file has its own database, but within it the seeded user
+ * (`fileDefaultUserId()`) is the owner `bootstrap()` resolves: inbound turns
+ * attach their rows to it, and its id is the Hindsight bank. A row-count
+ * assertion or a `DELETE ... WHERE user_id = $1` cleanup stays exact only on
+ * a user of its own.
  *
  * Reach for the seeded user only when a test is genuinely about it —
  * `pending_memories`, `custom_compartments` and friends only need *a*

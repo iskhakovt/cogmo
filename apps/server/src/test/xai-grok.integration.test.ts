@@ -5,8 +5,8 @@
  *
  * Same `RECORD=1` shape as `fal-mock` / `openai-voice-mock` / `daytona-mock`:
  *
- *   - **Replay** (default, free in CI): the integration tier's shared
- *     `llmock` serves `test/fixtures/recorded/openai-*.json` to our
+ *   - **Replay** (default, free in CI): the file's llmock serves its
+ *     cassette, `test/fixtures/recorded/suites/xai-grok/`, to our
  *     `OpenAICompatibleProvider`. llmock matches fixtures by user
  *     message content — keep `PROMPT` constant or the test loses its
  *     fixture.

@@ -25,12 +25,7 @@ import { workerInngestBaseUrl } from "./worker-inngest.js";
 let inngestBaseUrl: string;
 let connection: Awaited<ReturnType<typeof connect>>;
 let otel: OtelHarness;
-/**
- * The org profile `bootstrap()` resolves as the default, whose `*` tool set
- * offers the image tool the cassettes call. Other files add profiles with
- * narrower tool sets to the shared database, and an unordered pick of a
- * `profiles` row can land on one of theirs.
- */
+/** The org profile `bootstrap()` resolves as the default, whose `*` tool set offers the image tool the cassettes call. */
 let profileId: string;
 
 const VOICE_FIXTURE_DIR = "./test/fixtures/voice";
