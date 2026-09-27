@@ -167,7 +167,10 @@ async function converse(params: {
       codingAutoapproveMode: "off",
     },
     rules: [],
-    coreMemory: [{ key: "user_profile", content: "Name: Sam. Lives in Lisbon." }],
+    coreMemory: {
+      scope: { kind: "unclassed" },
+      blocks: [{ profileClass: null, key: "user_profile", content: "Name: Sam. Lives in Lisbon." }],
+    },
     toolDefinitions: tools.definitions(),
   });
 

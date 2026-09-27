@@ -29,19 +29,25 @@ export type CoreMemoryScope =
   | { kind: "unclassed" }
   | { kind: "classed"; profileClass: string; restricted: boolean };
 
-/** The blocks `scope` sees, in the order they render. */
+/** What one turn sees of core memory: its scope and the blocks visible to it, in render order. */
+export interface CoreMemoryView {
+  scope: CoreMemoryScope;
+  blocks: ReadonlyArray<ScopedCoreMemoryBlock>;
+}
+
+/** The view `scope` has of the user's core memory. */
 export async function readCoreMemory(
   tx: Transaction,
   store: Pick<AgentStore, "getCoreMemoryBlocks">,
   userId: string,
   scope: CoreMemoryScope,
-): Promise<ReadonlyArray<ScopedCoreMemoryBlock>> {
+): Promise<CoreMemoryView> {
   switch (scope.kind) {
     case "none":
-      return [];
+      return { scope, blocks: [] };
     case "unclassed":
-      return store.getCoreMemoryBlocks(tx, userId, null);
+      return { scope, blocks: await store.getCoreMemoryBlocks(tx, userId, null) };
     case "classed":
-      return store.getCoreMemoryBlocks(tx, userId, scope.profileClass);
+      return { scope, blocks: await store.getCoreMemoryBlocks(tx, userId, scope.profileClass) };
   }
 }

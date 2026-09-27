@@ -96,7 +96,7 @@ describe("buildTurnService", () => {
       coreMemoryScope: { kind: "none" },
     });
 
-    expect(await service.coreMemory.get()).toEqual([]);
+    expect(await service.coreMemory.get()).toEqual({ scope: { kind: "none" }, blocks: [] });
     expect((await service.coreMemory.update("identity", "x"))._unsafeUnwrapErr()).toEqual({
       code: "core_memory_unavailable",
     });

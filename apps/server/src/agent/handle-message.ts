@@ -47,6 +47,7 @@ import {
 import { storeTurnContext } from "./conversation/store-turn-context.js";
 import { buildInCooldownReply, isInCooldown } from "./cooldown.js";
 import { loadCoreMemoryScope } from "./core-memory/load-core-memory-scope.js";
+import { offeredBuiltIns } from "./core-memory-tools.js";
 import type { DebounceConfig } from "./debounce.js";
 import { extractGeneratedDocuments, extractGeneratedImages } from "./extract-images.js";
 import type { ImageToolsLoader } from "./image-tools-loader.js";
@@ -590,7 +591,11 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         ? await deps.mcpRegistry.resolveTools({ toolGlobs: turnToolSetGlobs })
         : [];
       const liveTools = composeTurnTools({
-        builtIns: [...tools.snapshot(), ...imageTools, ...subAgentTools],
+        builtIns: offeredBuiltIns(coreMemoryScope, [
+          ...tools.snapshot(),
+          ...imageTools,
+          ...subAgentTools,
+        ]),
         skillTools,
         mcpTools,
         toolSetGlobs: turnToolSetGlobs,

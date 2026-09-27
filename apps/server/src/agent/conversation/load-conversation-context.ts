@@ -1,10 +1,6 @@
 import type { Transactor } from "../../db/index.js";
 import type { TransportStore } from "../../transport/store/index.js";
-import {
-  type CoreMemoryScope,
-  readCoreMemory,
-  type ScopedCoreMemoryBlock,
-} from "../core-memory/scope.js";
+import { type CoreMemoryScope, type CoreMemoryView, readCoreMemory } from "../core-memory/scope.js";
 import type { AgentStore, Profile } from "../store/index.js";
 
 /**
@@ -46,7 +42,7 @@ export interface LoadConversationContextArgs {
 export interface ConversationContext {
   channelTypes: ReadonlyArray<string>;
   rules: ReadonlyArray<{ rule: string }>;
-  coreMemory: ReadonlyArray<ScopedCoreMemoryBlock>;
+  coreMemory: CoreMemoryView;
 }
 
 export async function loadConversationContext(

@@ -38,10 +38,12 @@ import {
   mockVoiceResolver,
   turnContextSent,
 } from "../test/factories.js";
+import { coreMemoryTools } from "./core-memory-tools.js";
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
 import type { ImageToolsLoader } from "./image-tools-loader.js";
 import { runStreamingAgentLoop } from "./loop.js";
+import { memoryTools } from "./memory-tools.js";
 import { ToolRegistry } from "./tools.js";
 
 type InboundReadyData = z.infer<typeof inboundReady.schema>;
@@ -143,7 +145,7 @@ describe("createHandleMessage", () => {
     expect(deps.promptSource.assemble).toHaveBeenCalledWith({
       profile: expect.objectContaining({ id: "profile-1" }),
       rules: [],
-      coreMemory: [],
+      coreMemory: { scope: { kind: "unclassed" }, blocks: [] },
       toolDefinitions: expect.any(Array),
     });
   });
@@ -177,7 +179,12 @@ describe("createHandleMessage", () => {
     });
 
     expect(deps.promptSource.assemble).toHaveBeenCalledWith(
-      expect.objectContaining({ coreMemory: [{ key: "user_profile", content: "Name: Ben" }] }),
+      expect.objectContaining({
+        coreMemory: {
+          scope: { kind: "unclassed" },
+          blocks: [{ key: "user_profile", content: "Name: Ben" }],
+        },
+      }),
     );
   });
 
@@ -1788,6 +1795,37 @@ describe("createHandleMessage", () => {
       const apiNames = toolNames(loopCall.tools.definitions()).sort();
       expect(promptNames).toEqual(apiNames);
       expect(promptNames).toEqual(["mcp__github__create_pr", "memory_recall"]);
+    });
+
+    it("offers a third-party profile no core memory and no core-memory tools", async () => {
+      const builtIns = new ToolRegistry();
+      for (const spec of [...coreMemoryTools, ...memoryTools]) builtIns.register(spec);
+      const thirdParty = {
+        ...profileWithAllTools(),
+        memoryScope: { compartments: ["work"], trust: ["any"] },
+      };
+      const deps = mockDeps({
+        tools: builtIns,
+        agentStore: mockAgentStore({ getProfile: vi.fn().mockResolvedValue(thirdParty) }),
+      });
+
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      const [loopCall] = expectDefined(
+        vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+        "runStreamingAgentLoop call",
+      );
+      const offered = toolNames(loopCall.tools.definitions());
+      expect(offered).not.toContain("core_memory_update");
+      expect(offered).not.toContain("core_memory_read");
+      // Non-vacuity: the profile's other memory tools stay.
+      expect(offered).toContain("memory_recall");
+      expect(firstAssembleArg(deps).coreMemory).toEqual({ scope: { kind: "none" }, blocks: [] });
+      expect(deps.agentStore.getCoreMemoryBlocks).not.toHaveBeenCalled();
     });
 
     it("answers a call to a frozen tool that didn't load this invocation with an is_error result", async () => {

@@ -404,7 +404,10 @@ describe("compactConversation", () => {
     expect(promptSource.assemble).toHaveBeenCalledWith({
       profile: profile(),
       rules: [{ rule: "Be terse" }],
-      coreMemory: [{ profileClass: null, key: "user_profile", content: "Name: Ben" }],
+      coreMemory: {
+        scope: { kind: "unclassed" },
+        blocks: [{ profileClass: null, key: "user_profile", content: "Name: Ben" }],
+      },
     });
   });
 

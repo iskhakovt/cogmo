@@ -1,6 +1,7 @@
 import { z } from "zod";
+import type { CoreMemoryScope } from "./core-memory/scope.js";
 import { formatUserContext } from "./prompt.js";
-import { defineTool } from "./tools.js";
+import { defineTool, type ToolSpec } from "./tools.js";
 
 export const coreMemoryUpdate = defineTool({
   name: "core_memory_update",
@@ -8,7 +9,11 @@ export const coreMemoryUpdate = defineTool({
     "Rewrite a core memory block, shown in your instructions in every conversation. Only " +
     "for who the user is (including who their close family are), their active projects and " +
     "standing preferences and constraints: call it in the same turn the user mentions " +
-    "something new or changed about these, even in passing. Replaces the whole block: " +
+    "something new or changed about these, even in passing. `identity` holds their name " +
+    "and what to call them, home, timezone and the languages they speak, as true in every " +
+    "persona; a name or form of address for one persona goes in that persona's other blocks, " +
+    "as do role, family, projects and preferences. When you write `identity`, remove from " +
+    "other blocks any line it now holds. Replaces the whole block: " +
     "include everything that still holds, as current facts only. A change replaces the old " +
     "value without mentioning it, a finished project is removed, and no relative time words " +
     '("recently", "last month"). Anything else, including a family member\'s details and ' +
@@ -20,7 +25,9 @@ export const coreMemoryUpdate = defineTool({
   schema: z.object({
     key: z
       .string()
-      .describe("Block identifier (e.g. 'user_profile', 'active_projects', 'preferences')"),
+      .describe(
+        "Block identifier (e.g. 'identity', 'user_profile', 'active_projects', 'preferences')",
+      ),
     content: z.string().describe("Full block content (replaces previous content)"),
   }),
   handler: async (input, service) => {
@@ -50,3 +57,15 @@ export const coreMemoryRead = defineTool({
 });
 
 export const coreMemoryTools = [coreMemoryUpdate, coreMemoryRead];
+
+const CORE_MEMORY_TOOL_NAMES: ReadonlySet<string> = new Set(coreMemoryTools.map((t) => t.name));
+
+/** The built-ins a turn offers: without the core-memory tools when its scope has no core memory. */
+export function offeredBuiltIns(
+  scope: CoreMemoryScope,
+  builtIns: ReadonlyArray<ToolSpec>,
+): ReadonlyArray<ToolSpec> {
+  return scope.kind === "none"
+    ? builtIns.filter((t) => !CORE_MEMORY_TOOL_NAMES.has(t.name))
+    : builtIns;
+}

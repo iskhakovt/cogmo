@@ -11,7 +11,7 @@ import type {
 } from "../memory/provider.js";
 import type { SkillsService } from "../skills/skills-service.js";
 import type { CodingService } from "./coding/service.js";
-import type { ScopedCoreMemoryBlock } from "./core-memory/scope.js";
+import type { CoreMemoryView } from "./core-memory/scope.js";
 import type {
   CoreMemoryUnavailable,
   CoreMemoryWriteTarget,
@@ -47,7 +47,7 @@ export const MEMORY_PROMPT_GUIDANCE = `You have persistent memory across convers
 - **Recall vs reflect**: \`memory_recall\` returns raw matching facts — fast, cheap, best for looking something up. \`memory_reflect\` runs an agentic synthesis loop across many memories — slower and more expensive, best for open-ended questions that need multi-hop reasoning (e.g. "summarise what I know about X", "what risks should I watch for on project Y?").`;
 
 /** Prompt guidance for the coreMemory Service namespace. */
-export const CORE_MEMORY_PROMPT_GUIDANCE = `Core memory blocks (the User section) are shown in every conversation. They hold what every conversation needs: who the user is (name, role and employer, home and timezone, who their close family are), their active projects, and standing preferences and constraints. When any of this is new or changes, even in passing, call \`core_memory_update\` in the same turn, rewriting the whole block and keeping what still holds. Blocks state current facts only: a change replaces the old value without mentioning it, a finished project leaves the block, and relative time words ("recently", "last month") stay out, since they go stale. Everything else goes to long-term memory: events, details (including a family member's), one-off decisions, facts about other people, and what used to be true.`;
+export const CORE_MEMORY_PROMPT_GUIDANCE = `Core memory blocks (the User section) are shown in every conversation. They hold what every conversation needs: who the user is (name, role and employer, home and timezone, who their close family are), their active projects, and standing preferences and constraints. The \`identity\` block holds their name and what to call them, their home and timezone, and the languages they speak, as true in every persona; a name or form of address for one persona goes in that persona's other blocks, as do role and employer, family, projects and preferences. When you write \`identity\`, remove from other blocks any line it now holds. When any of this is new or changes, even in passing, call \`core_memory_update\` in the same turn, rewriting the whole block and keeping what still holds. Blocks state current facts only: a change replaces the old value without mentioning it, a finished project leaves the block, and relative time words ("recently", "last month") stay out, since they go stale. Everything else goes to long-term memory: events, details (including a family member's), one-off decisions, facts about other people, and what used to be true.`;
 
 export interface CoreMemoryBlock {
   key: string;
@@ -92,8 +92,8 @@ export interface Service {
   };
   /** The conversation user's core memory, confined to the turn's scope. */
   coreMemory: {
-    /** The blocks the turn's scope sees, in the order they render. */
-    get(): Promise<ReadonlyArray<ScopedCoreMemoryBlock>>;
+    /** The turn's scope and the blocks it sees, in the order they render. */
+    get(): Promise<CoreMemoryView>;
     /** Write a block where the turn's scope sends it (`writeCoreMemoryBlock`). */
     update(
       key: string,

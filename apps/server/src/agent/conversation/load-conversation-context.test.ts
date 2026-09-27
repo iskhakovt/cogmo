@@ -53,7 +53,10 @@ describe("loadConversationContext", () => {
     expect(result).toEqual({
       channelTypes: ["telegram"],
       rules: [{ rule: "Be concise" }],
-      coreMemory: [{ profileClass: null, key: "user_profile", content: "Sam" }],
+      coreMemory: {
+        scope: UNCLASSED,
+        blocks: [{ profileClass: null, key: "user_profile", content: "Sam" }],
+      },
     });
 
     expect(agentStore.getProfile).not.toHaveBeenCalled();
@@ -121,7 +124,7 @@ describe("loadConversationContext core memory scope", () => {
       { conversationId: "c1", userId: "u1", coreMemoryScope: { kind: "none" }, profile: profile() },
     );
 
-    expect(result.coreMemory).toEqual([]);
+    expect(result.coreMemory).toEqual({ scope: { kind: "none" }, blocks: [] });
     expect(agentStore.getCoreMemoryBlocks).not.toHaveBeenCalled();
   });
 });
@@ -176,7 +179,7 @@ describe("loadConversationContext core memory (PGlite)", () => {
       },
     );
 
-    expect(context.coreMemory).toEqual([
+    expect(context.coreMemory.blocks).toEqual([
       { profileClass: null, key: "preferences", content: "Metric units" },
       { profileClass: null, key: "user_profile", content: "Name: Ben" },
     ]);

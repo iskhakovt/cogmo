@@ -54,6 +54,7 @@ import {
 } from "../conversation/load-turn-history.js";
 import { storeTurnContext } from "../conversation/store-turn-context.js";
 import { loadCoreMemoryScope } from "../core-memory/load-core-memory-scope.js";
+import { offeredBuiltIns } from "../core-memory-tools.js";
 import type { ImageToolsLoader } from "../image-tools-loader.js";
 import type { AgentLoopResult, StepRunner, StreamingAgentLoopParams } from "../loop.js";
 import type { PromptSource } from "../prompt.js";
@@ -250,7 +251,11 @@ export async function runAgenticStage(
     : [];
   const liveTools = restrictToStage(
     composeTurnTools({
-      builtIns: [...deps.tools.snapshot(), ...imageTools, ...subAgentTools],
+      builtIns: offeredBuiltIns(coreMemoryScope, [
+        ...deps.tools.snapshot(),
+        ...imageTools,
+        ...subAgentTools,
+      ]),
       skillTools,
       mcpTools,
       toolSetGlobs,

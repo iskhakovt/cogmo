@@ -17,16 +17,18 @@ Hindsight is a client-server system. Our app talks to it via HTTP — no direct 
 
 ## Core Memory vs Hindsight `[confirmed]`
 
-Two stores hold what the agent knows about its user. **Core memory** is a few keyed blocks (`core_memory_blocks`, one row per user and key) rendered into every system prompt's `# User` section, so it survives compaction and needs no retrieval. Only the agent writes it, through `core_memory_update`. **Hindsight** holds everything else and is searched on demand by auto-recall, `memory_recall` and `memory_reflect`. The Observer fills it from every conversation at idle, whether or not the agent called `memory_retain`. Blocks are not scoped by profile; [Core Memory Scope by Profile Class](#core-memory-scope-by-profile-class-proposed) proposes scoping them.
+Two stores hold what the agent knows about its user. **Core memory** is a few keyed blocks (`core_memory_blocks`) rendered into every system prompt's `# User` section, so it survives compaction and needs no retrieval. Only the agent writes it, through `core_memory_update`, and a block's scope follows from its key and the writing profile's class ([Core Memory Scope by Profile Class](#core-memory-scope-by-profile-class-proposed)). **Hindsight** holds everything else and is searched on demand by auto-recall, `memory_recall` and `memory_reflect`. The Observer fills it from every conversation at idle, whether or not the agent called `memory_retain`.
 
 **Rule.** Core memory holds what every conversation needs. Everything that can be looked up when the topic comes up goes to Hindsight.
 
 | Core memory | Hindsight |
 |-|-|
-| Who the user is: name and what to call them, role and employer, home and timezone, who their close family are | Events: a dinner out, a conference trip, a bug fixed |
-| Active projects and their status | Details: a sister's birthday, the rent, a book finished |
-| Standing preferences and constraints: spelling variety, diet, working days | One-off decisions about a single task: a bar chart for the quarterly report |
-| | Facts about other people: a friend's new job, a partner's promotion |
+| `identity`: name and what to call them, home and timezone, the languages they speak | Events: a dinner out, a conference trip, a bug fixed |
+| The rest of who the user is: role and employer, who their close family are | Details: a sister's birthday, the rent, a book finished |
+| Active projects and their status | One-off decisions about a single task: a bar chart for the quarterly report |
+| Standing preferences and constraints: spelling variety, diet, working days | Facts about other people: a friend's new job, a partner's promotion |
+
+`identity` holds what is true in every persona, since classed profiles share it; a name or form of address for one persona goes in that persona's other blocks. When the agent writes `identity`, the guidance has it remove from other blocks any line `identity` now holds, so an install whose `user_profile` already states name and home doesn't keep stating them twice; the evaluation measures how often it does.
 
 The test is whether a reply to an unrelated message could go wrong without the fact. A family member belongs in core memory, and details about them belong in Hindsight. A trip leaves home and timezone as they are, and a one-off request ("this one as a list") is not a standing preference.
 
@@ -34,7 +36,7 @@ The test is whether a reply to an unrelated message could go wrong without the f
 
 **When.** In the turn the fact appears, including when it comes up in passing while the user asks for something else ("we only moved here last month"). `core_memory_update` overwrites the block, so the call rewrites it whole. The Observer writes only Hindsight, so a core fact the agent doesn't write in the turn never reaches a later prompt. Core memory therefore depends on the agent remembering to write in-turn, which is the failure mode the Observer avoids for Hindsight (see [Why Post-Conversation, Not Real-Time](#why-post-conversation-not-real-time-confirmed)). The evaluation below measures how often the agent writes it.
 
-**Where it lives.** `CORE_MEMORY_PROMPT_GUIDANCE` and `MEMORY_PROMPT_GUIDANCE` (`src/agent/service.ts`) state the rule in every prompt's `# Capabilities` section. The `core_memory_update` and `memory_retain` descriptions repeat it at the point of choice, and the onboarding text (`src/agent/prompt.ts`), shown while no block exists, sends what the agent learns about the user, including what they mention in passing, to core memory.
+**Where it lives.** `CORE_MEMORY_PROMPT_GUIDANCE` and `MEMORY_PROMPT_GUIDANCE` (`src/agent/service.ts`) state the rule in every prompt's `# Capabilities` section. The `core_memory_update` and `memory_retain` descriptions repeat it at the point of choice, and the onboarding text (`src/agent/prompt.ts`), shown while no block is visible to the turn, sends what the agent learns about the user, including what they mention in passing, to core memory, identity basics to `identity`.
 
 **Prior art.** MemGPT's working context is "a fixed-size read/write block of unstructured text … intended to be used to store key facts, preferences, and other important information about the user", with everything else in archival storage searched through function calls ([Packer et al., 2023](https://arxiv.org/abs/2310.08560)). Letta keeps the split: memory blocks are pinned to the context window ([memory blocks](https://docs.letta.com/guides/core-concepts/memory/memory-blocks)), and archival memory is not for "information that should always be visible" or "frequently changing state" ([archival memory](https://docs.letta.com/guides/core-concepts/memory/archival-memory)). LangMem draws the same line between a *profile*, "a single document that represents the current state" updated in place, and a *collection* of searchable records ([conceptual guide](https://langchain-ai.github.io/langmem/concepts/conceptual_guide/)). Letta Code's memory reflection fixes a contradicted entry "at the source" instead of appending the new version alongside the old, and writes absolute dates, not "today" ([reflection prompt](https://github.com/letta-ai/letta-code/blob/main/src/agent/subagents/builtin/reflection.md)). The history lives in the searchable store: Zep's Graphiti expires an edge a newer episode invalidates rather than deleting it ([Zep](https://blog.getzep.com/beyond-static-knowledge-graphs/)).
 

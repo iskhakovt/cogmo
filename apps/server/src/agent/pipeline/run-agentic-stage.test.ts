@@ -241,7 +241,10 @@ describe("runAgenticStage", () => {
 
     expect(h.deps.promptSource.assemble).toHaveBeenCalledWith(
       expect.objectContaining({
-        coreMemory: [{ profileClass: null, key: "user_profile", content: "Name: Ben" }],
+        coreMemory: {
+          scope: { kind: "unclassed" },
+          blocks: [{ profileClass: null, key: "user_profile", content: "Name: Ben" }],
+        },
       }),
     );
   });
@@ -396,6 +399,22 @@ describe("runAgenticStage", () => {
       key: "preferences",
       content: "Dice",
     });
+  });
+
+  it("offers no core-memory tools in a stage without core memory", async () => {
+    const h = await harness();
+    h.deps.tools.register(toolNamed("core_memory_update"));
+    const { memo, steps } = memoizingSteps();
+    memo.set("freeze-core-memory-scope", { kind: "none" });
+    // A stage with no allowlist, so only the scope can take the tool away.
+    const build = expectDefined(DEFINITION.stages[1], "build");
+
+    await runAgenticStage(h.deps, stageArgs(build), steps, log);
+
+    const [params] = expectDefined(h.runStreamingAgentLoop.mock.calls[0], "loop call");
+    const offered = params.tools.definitions().map((d: ToolDefinition) => d.name);
+    expect(offered).not.toContain("core_memory_update");
+    expect(offered).toContain("web_search");
   });
 
   it("sends the tools it froze on every invocation when a skill stops loading", async () => {

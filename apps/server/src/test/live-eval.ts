@@ -299,7 +299,7 @@ export async function runEvalConversation(params: {
     const turn = await runEvalTurn({ ...params, history, message });
     history.push(turn.userMessage, ...turn.result.newMessages);
     turns.push(turn);
-    blocksAfter.push(await params.coreMemory.get());
+    blocksAfter.push((await params.coreMemory.get()).blocks);
   }
   return { history, turns, blocksAfter };
 }
