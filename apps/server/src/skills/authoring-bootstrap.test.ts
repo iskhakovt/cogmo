@@ -290,7 +290,7 @@ describe("skill authoring bootstrap — boot → fetch → register chain", () =
     // Simulates two boots of the cogmo daemon against the same DB. The
     // second call must not throw a UNIQUE-violation on `coding_repos.name`
     // and, when the bare repo's origin hasn't changed, must report
-    // `unchanged` without updating the row.
+    // `unchanged` and leave the row's values as they were.
     const first = await ensureSkillsCodingRepo(
       { runInTx: tx, codingStore },
       { skillsRepoPath: repos.skillsBare },
@@ -309,12 +309,11 @@ describe("skill authoring bootstrap — boot → fetch → register chain", () =
   });
 
   it("ensureSkillsCodingRepo lands on a row its snapshot cannot see", async () => {
-    // A concurrent bootstrap's row is committed after this one's snapshot, so
-    // no read inside the transaction can see it. PGlite has one connection, so
-    // reads are stubbed empty to stand in for that snapshot; the write must
-    // still resolve to the existing row rather than fail on
-    // `coding_repos_name_unique`. The two-connection race runs against real
-    // Postgres, where the loser's conflict raises `40001` for the transactor.
+    // Stands in for a concurrent bootstrap whose row this transaction's
+    // snapshot can't see: PGlite has one connection, so the read is stubbed
+    // empty. The write must land on the existing row, not fail on
+    // `coding_repos_name_unique`; `keyed-insert.integration.test.ts` races two
+    // real connections.
     const first = await ensureSkillsCodingRepo(
       { runInTx: tx, codingStore },
       { skillsRepoPath: repos.skillsBare },
