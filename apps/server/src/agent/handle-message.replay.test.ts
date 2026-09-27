@@ -1195,7 +1195,7 @@ describe("handle-message — core-memory scope frozen across re-invocations", ()
     };
   }
 
-  /** A turn whose loop saves `identity`, in a profile of a restricted `game` class. */
+  /** A turn whose loop saves `identity`, for a profile of `profileClass`; the user's `game` class is restricted. */
   function scopeDeps(profileClass: string | null) {
     return mockDeps({
       agentStore: mockAgentStore({

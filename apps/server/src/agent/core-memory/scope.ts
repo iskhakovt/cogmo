@@ -1,10 +1,4 @@
-/**
- * Core memory scopes (design/memory.md → Core Memory Scope by Profile Class).
- * A block's scope follows from its key and the writing profile's class: the
- * `identity` block with no class is shared by every persona, any other block
- * with no class is the unclassed bucket, and a block with a class belongs to
- * that class.
- */
+/** Core memory scopes: design/memory.md → Core Memory Scope by Profile Class. */
 
 import type { Transaction } from "../../db/index.js";
 import type { AgentStore } from "../store/index.js";
@@ -36,9 +30,9 @@ export interface CoreMemoryView {
 }
 
 /**
- * The view `scope` has of the user's core memory. An unrestricted class's
- * own `identity` is left out: a turn frozen restricted can still write one
- * after `/classes unrestrict` lands, and the command deletes it when re-run.
+ * Leaves out an unrestricted class's own `identity`, which a turn frozen
+ * restricted can write after `/classes unrestrict` lands (design/memory.md →
+ * Class Lifecycle).
  */
 export async function readCoreMemory(
   tx: Transaction,

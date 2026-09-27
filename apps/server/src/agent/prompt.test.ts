@@ -246,7 +246,7 @@ describe("DefaultPromptSource", () => {
     expect(prompt).toContain("without waiting to learn the rest");
   });
 
-  it("renders an unclassed profile's user section byte for byte as it did before scopes", async () => {
+  it("renders an unclassed profile's blocks flat, with no group lead", async () => {
     const prompt = await new DefaultPromptSource().assemble({
       profile: undefined,
       rules: [],
@@ -258,12 +258,11 @@ describe("DefaultPromptSource", () => {
       toolDefinitions: testTools,
     });
 
-    // Rendered by the formatter as it stood before core memory had scopes.
-    const before =
+    const flat =
       "# User\n\n## active_projects\n- Tidepool, a tide-times app\n\n## identity\n" +
       "Name: Sam Carter\nHome: Lisbon (Europe/Lisbon)\n\n## user_profile\n" +
       "Role: staff engineer at Monzo\nFamily: partner Alex\n\n# Tools";
-    expect(prompt).toContain(before);
+    expect(prompt).toContain(flat);
   });
 
   it("shows onboarding to a classed profile that sees no block", async () => {

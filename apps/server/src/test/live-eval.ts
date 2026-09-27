@@ -119,8 +119,8 @@ const EVAL_TX = { __evalTx: true } as never;
 
 /**
  * A user's core memory held in process, behind the production `coreMemory`
- * namespace (`createCoreMemoryNamespace`), so reads and writes resolve their
- * scope as a turn's Service does. The store underneath keeps the rows in
+ * namespace, so reads and writes resolve their scope as a turn's Service
+ * does. The store underneath keeps the rows in
  * memory and orders keys by code unit, which is Postgres `ORDER BY key` under
  * the C collation. A linguistic collation such as `en_US` skips `_` at first
  * level, so keys like `work_hours` and `workflow` can swap; the eval

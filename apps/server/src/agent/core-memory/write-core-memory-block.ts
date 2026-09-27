@@ -5,10 +5,6 @@ import type { Transaction, Transactor } from "../../db/index.js";
 import type { AgentStore } from "../store/index.js";
 import { type CoreMemoryScope, IDENTITY_BLOCK_KEY } from "./scope.js";
 
-/**
- * Where a core-memory write lands: the shared `identity`, the unclassed
- * bucket, the turn's class, or a restricted class's `identity` override.
- */
 type CoreMemoryWriteTarget =
   | { kind: "shared" }
   | { kind: "unclassed" }
@@ -16,9 +12,10 @@ type CoreMemoryWriteTarget =
   | { kind: "override"; profileClass: string };
 
 /**
- * What a core-memory write stored. An override leaves out the lines the
- * shared `identity` holds (`leftOut`, whitespace-normalised, each once); when
- * only blank lines remain, it stores nothing and the class has no override.
+ * What a write stored, for the tool result. `leftOut` lists an override's
+ * lines the shared `identity` holds, normalised, each once;
+ * `override-matches-shared` means no line differed, so the class has no
+ * override.
  */
 export type CoreMemoryWrite =
   | Exclude<CoreMemoryWriteTarget, { kind: "override" }>
@@ -34,13 +31,7 @@ type CoreMemoryWriteStore = Pick<
   "getCoreMemoryBlocks" | "upsertCoreMemoryBlock" | "deleteCoreMemoryBlock"
 >;
 
-/**
- * Write one block where the turn's scope sends it (design/memory.md →
- * Behaviour by Profile). The model never picks the scope: `identity` is
- * shared unless the class is restricted, when it becomes the class's
- * override, and every other key stays in the class or the unclassed bucket.
- * A turn with no core memory writes nothing.
- */
+/** Write one block where the turn's scope sends it (design/memory.md → Behaviour by Profile). */
 export async function writeCoreMemoryBlock(
   deps: { runInTx: Transactor; agentStore: CoreMemoryWriteStore },
   args: { userId: string; scope: CoreMemoryScope; key: string; content: string },
@@ -90,9 +81,9 @@ async function writeOverride(
 }
 
 /**
- * `override` without its lines equal to one of `shared`'s, compared trimmed
- * and with internal whitespace collapsed, and without blank lines at either
- * end; null when only blank lines remain. A blank line never counts as shared.
+ * `override` without the lines `shared` holds (by `normalizeLine`) or its
+ * blank edge lines; null when only blank lines remain. A blank line never
+ * counts as shared.
  */
 function withoutSharedLines(
   override: string,

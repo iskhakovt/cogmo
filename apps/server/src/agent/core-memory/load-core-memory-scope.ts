@@ -3,11 +3,9 @@ import type { AgentStore, Profile } from "../store/index.js";
 import type { CoreMemoryScope } from "./scope.js";
 
 /**
- * The core-memory scope a profile's turn gets. A profile whose trust excludes
- * `first-party` (a null `memory_scope` admits it) or that can't be loaded gets
- * none: core memory is written by profiles the user controls. Otherwise the
- * profile's class decides, with the restricted flag read from the
- * conversation user's registry.
+ * None for a profile whose trust excludes `first-party` or that can't be
+ * loaded: core memory is written by profiles the user controls
+ * (design/memory.md → Boundaries).
  */
 export async function loadCoreMemoryScope(
   deps: { runInTx: Transactor; agentStore: Pick<AgentStore, "listProfileClasses"> },

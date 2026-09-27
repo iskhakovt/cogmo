@@ -1906,8 +1906,8 @@ export function createTransport(deps: {
           if (!identity) return err({ code: "identity_rejected" as const });
           const keys = await agentStore.listCoreMemoryKeys(tx, identity.userId, name);
           if (keys.length > 0 && !confirm) {
-            // In use first: that call would delete nothing, so there is
-            // nothing to confirm. The FK stays the authority at delete time.
+            // In use first, since that call deletes nothing; the FK stays the
+            // authority at delete time.
             const refs = (await agentStore.listProfiles(tx, identity.userId)).filter(
               (p) => p.userId === identity.userId && p.profileClass === name,
             ).length;

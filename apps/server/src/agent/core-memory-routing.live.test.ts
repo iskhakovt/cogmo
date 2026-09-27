@@ -14,22 +14,14 @@
  *
  * - empty: an unclassed profile with no blocks, so the prompt shows onboarding;
  * - established: an unclassed profile with the fixture's blocks, `identity` among them;
- * - legacy: the same facts before `identity`, name and home in `user_profile`;
+ * - legacy: the same facts without `identity`, name and home in `user_profile`;
  * - classed: a profile of an unrestricted class, rendering the shared `identity`
  *   and the class's own blocks;
  * - restricted: the same in a restricted class, where an `identity` write is the
  *   class's override.
  *
- * It also checks what a core write says: whether it targets one of the case's
- * expected blocks, whether it uses relative time words ("recently", "last
- * month"), whether an `identity` write pulls in a fact that belongs elsewhere
- * (role, family, projects, preferences), and, with blocks, which established
- * lines a rewritten block lost and whether it still holds what the case ends.
- * In the legacy state it checks whether name and home stay in `user_profile`
- * beside a new `identity`; in the restricted state, whether an identity change
- * is stored as an override holding only the lines that differ, how the written
- * override copies unchanged shared lines (verbatim or paraphrased), and whether
- * the reply tells the user it is saved only in this persona.
+ * It also checks what each core write says (`Outcome`; design/memory.md →
+ * Evaluation).
  *
  * It reports rather than asserts. One sample per case on a non-deterministic
  * model makes any threshold either too loose to catch a regression or flaky,

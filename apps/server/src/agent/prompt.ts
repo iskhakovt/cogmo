@@ -45,17 +45,14 @@ Be concise when the user wants a quick answer. Be thorough when the topic is com
 
 const ONBOARDING = `You don't know your user yet. In your first interaction, introduce yourself briefly and learn about them: their name, what they do, their timezone, and how they prefer to communicate. Save what you learn about them, including anything about them they mention in passing, to core memory with core_memory_update as soon as you learn it, without waiting to learn the rest: a block can start with one line.`;
 
-/** Leads a classed profile's shared group. */
 const SHARED_GROUP = "Shared by every persona:";
 
-/** Leads a restricted class's shared group, where the persona's own `identity` wins. */
 const RESTRICTED_SHARED_GROUP =
   "Shared by every persona. This persona's own `identity`, if it has one, wins where the two " +
   "differ, and the lines it leaves out still come from here. An `identity` you save here " +
   "becomes that one and stays in this persona, so write only the lines that differ from this " +
   "block, not a copy of it:";
 
-/** Leads a classed profile's own group. */
 const OWN_GROUP = "Only in this persona:";
 
 const RULES_PREAMBLE =
@@ -74,10 +71,9 @@ export interface PromptSourceConfig {
 }
 
 /**
- * The `# User` section body for what a turn sees of core memory, or null when
- * it sees no block. An unclassed profile's blocks render flat; a classed
- * profile's render as the shared group, then its own, each block headed by
- * its bare key.
+ * The `# User` section body, or null when the turn sees no block. Every block
+ * is headed by its bare key, so a key copied from the prompt into a tool call
+ * is the key.
  */
 export function formatUserContext(view: CoreMemoryView): string | null {
   const { scope, blocks } = view;
