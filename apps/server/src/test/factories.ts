@@ -138,6 +138,7 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     createProvider: vi.fn().mockResolvedValue({ id: "provider-1" }),
     getProvider: vi.fn().mockResolvedValue(null),
     listProviders: vi.fn().mockResolvedValue([]),
+    setProviderCacheDialect: vi.fn().mockResolvedValue(true),
     deleteProvider: vi.fn().mockResolvedValue(undefined),
     addModelProvider: vi.fn().mockResolvedValue({ id: "mp-1" }),
     listProvidersForModel: vi.fn().mockResolvedValue([]),

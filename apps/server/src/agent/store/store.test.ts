@@ -1,13 +1,15 @@
 import { eq, sql } from "drizzle-orm";
+import * as R from "remeda";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
+import type { CacheDialect } from "../../llm/cache-dialect.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../../secrets/store/index.js";
 import { expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { inboundMessages } from "../../transport/store/schema.js";
 import { DrizzleAgentStore } from "./index.js";
-import { conversationSummaries, coreMemoryBlocks, messages } from "./schema.js";
+import { conversationSummaries, coreMemoryBlocks, messages, type ProviderAttrs } from "./schema.js";
 
 let db: Database;
 let tx: Transactor;
@@ -1665,6 +1667,93 @@ describe("DrizzleAgentStore", () => {
       await seedProvider("p2");
       const list = await tx((trx) => store.listProviders(trx));
       expect(list.map((p) => p.name).sort()).toEqual(["p1", "p2"]);
+    });
+
+    async function seedGateway(attrs: ProviderAttrs) {
+      const { id: secretId } = await tx((trx) =>
+        secretsStore.putSecret(trx, { name: "gateway_key", plaintext: "sk-test" }),
+      );
+      return tx((trx) =>
+        store.createProvider(trx, {
+          name: "gateway",
+          type: "openai_compatible",
+          baseUrl: "https://gateway.internal/v1",
+          secretId,
+          attrs,
+        }),
+      );
+    }
+
+    it("lists each provider's base URL and attrs", async () => {
+      await seedProvider("claude");
+      await seedGateway({ cacheDialect: "openrouter" });
+
+      const list = await tx((trx) => store.listProviders(trx));
+
+      expect(R.sortBy(list, (p) => p.name)).toEqual([
+        expect.objectContaining({ name: "claude", type: "anthropic", baseUrl: null, attrs: {} }),
+        expect.objectContaining({
+          name: "gateway",
+          type: "openai_compatible",
+          baseUrl: "https://gateway.internal/v1",
+          attrs: { cacheDialect: "openrouter" },
+        }),
+      ]);
+    });
+
+    describe("setProviderCacheDialect", () => {
+      it("sets the dialect and keeps the provider's other attrs", async () => {
+        const { id } = await seedGateway({
+          cacheDialect: "openrouter",
+          headers: { "HTTP-Referer": "https://cogmo.example" },
+        });
+
+        const updated = await tx((trx) => store.setProviderCacheDialect(trx, id, "none"));
+
+        expect(updated).toBe(true);
+        const provider = await tx((trx) => store.getProvider(trx, id));
+        expect(provider?.attrs).toEqual({
+          cacheDialect: "none",
+          headers: { "HTTP-Referer": "https://cogmo.example" },
+        });
+      });
+
+      it("adds a dialect to a row that has none", async () => {
+        const { id } = await seedGateway({});
+
+        await tx((trx) => store.setProviderCacheDialect(trx, id, "openai"));
+
+        const provider = await tx((trx) => store.getProvider(trx, id));
+        expect(provider?.attrs).toEqual({ cacheDialect: "openai" });
+      });
+
+      it("leaves other providers alone", async () => {
+        const { id } = await seedGateway({ cacheDialect: "openrouter" });
+        const { id: otherId } = await seedProvider("claude");
+
+        await tx((trx) => store.setProviderCacheDialect(trx, id, "none"));
+
+        const other = await tx((trx) => store.getProvider(trx, otherId));
+        expect(other?.attrs).toEqual({});
+      });
+
+      it("returns false when no provider has the id", async () => {
+        const updated = await tx((trx) =>
+          store.setProviderCacheDialect(trx, "01900000-0000-7000-8000-000000000000", "none"),
+        );
+
+        expect(updated).toBe(false);
+      });
+
+      it("rejects a dialect outside the schema", async () => {
+        const { id } = await seedGateway({ cacheDialect: "openrouter" });
+
+        await expect(
+          tx((trx) => store.setProviderCacheDialect(trx, id, "bogus" as unknown as CacheDialect)),
+        ).rejects.toThrow();
+        const provider = await tx((trx) => store.getProvider(trx, id));
+        expect(provider?.attrs).toEqual({ cacheDialect: "openrouter" });
+      });
     });
 
     it("deleteProvider cascades to model_providers", async () => {

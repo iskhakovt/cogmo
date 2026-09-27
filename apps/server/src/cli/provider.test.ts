@@ -160,3 +160,148 @@ describe("cogmo provider add — cache dialect", () => {
     expect(addProviderSpy).not.toHaveBeenCalled();
   });
 });
+
+const CLAUDE = {
+  id: "p-claude",
+  name: "claude",
+  type: "anthropic",
+  baseUrl: null,
+  attrs: {},
+} as const;
+const GATEWAY = {
+  id: "p-gateway",
+  name: "gateway",
+  type: "openai_compatible",
+  baseUrl: "https://gateway.internal/v1",
+  attrs: { cacheDialect: "openrouter" },
+} as const;
+// No `cacheDialect` in its attrs, which reads as `none`.
+const LEGACY = {
+  id: "p-legacy",
+  name: "legacy",
+  type: "openai_compatible",
+  baseUrl: "https://llm.internal/v1",
+  attrs: {},
+} as const;
+
+describe("cogmo provider list", () => {
+  it("shows each provider's base URL and cache dialect", async () => {
+    const deps = makeDeps();
+    deps.agentStore.listProviders.mockResolvedValue([CLAUDE, GATEWAY, LEGACY]);
+    const { io, out } = makeIo();
+
+    const code = await runProviderCli(["list"], deps, io);
+
+    expect(code).toBe(0);
+    expect(out).toEqual([
+      "name\ttype\tbase_url\tcache_dialect",
+      "claude\tanthropic\t-\t-",
+      "gateway\topenai_compatible\thttps://gateway.internal/v1\topenrouter",
+      "legacy\topenai_compatible\thttps://llm.internal/v1\tnone",
+    ]);
+  });
+
+  it("says so when no provider is registered", async () => {
+    const deps = makeDeps();
+    deps.agentStore.listProviders.mockResolvedValue([]);
+    const { io, out } = makeIo();
+
+    const code = await runProviderCli(["list"], deps, io);
+
+    expect(code).toBe(0);
+    expect(out).toEqual(["(no providers registered)"]);
+  });
+});
+
+describe("cogmo provider set", () => {
+  function depsWith(...providers: Array<typeof CLAUDE | typeof GATEWAY | typeof LEGACY>) {
+    const deps = makeDeps();
+    deps.agentStore.listProviders.mockResolvedValue(providers);
+    deps.agentStore.setProviderCacheDialect.mockResolvedValue(true);
+    return deps;
+  }
+
+  it("sets an OpenAI-compatible provider's cache dialect", async () => {
+    const deps = depsWith(CLAUDE, GATEWAY);
+    const { io, out } = makeIo();
+
+    const code = await runProviderCli(["set", "gateway", "--cache-dialect", "none"], deps, io);
+
+    expect(code).toBe(0);
+    expect(deps.agentStore.setProviderCacheDialect).toHaveBeenCalledWith(
+      expect.anything(),
+      "p-gateway",
+      "none",
+    );
+    expect(out.join("\n")).toMatch(/Set "gateway" cache dialect: openrouter → none/);
+    expect(out.join("\n")).toMatch(/Restart `cogmo serve`/);
+  });
+
+  it("reads a provider without a dialect as none", async () => {
+    const deps = depsWith(LEGACY);
+    const { io, out } = makeIo();
+
+    const code = await runProviderCli(["set", "legacy", "--cache-dialect", "openai"], deps, io);
+
+    expect(code).toBe(0);
+    expect(out.join("\n")).toMatch(/Set "legacy" cache dialect: none → openai/);
+  });
+
+  it.each([
+    [["set"], /Usage: cogmo provider set <name> --cache-dialect <dialect>/],
+    [["set", "gateway"], /Usage: cogmo provider set <name> --cache-dialect <dialect>/],
+    [
+      ["set", "--cache-dialect", "none"],
+      /Usage: cogmo provider set <name> --cache-dialect <dialect>/,
+    ],
+    [
+      ["set", "gateway", "--cache-dialect", "bogus"],
+      /--cache-dialect must be one of openrouter, openai, xai, none/,
+    ],
+    [["set", "gateway", "--cache-dialect"], /--cache-dialect needs a value/],
+    [["set", "gateway", "--verbose"], /Unknown flag "--verbose"/],
+  ])("rejects %j with exit 2 and changes nothing", async (argv, message) => {
+    const deps = depsWith(GATEWAY);
+    const { io, err } = makeIo();
+
+    const code = await runProviderCli(argv, deps, io);
+
+    expect(code).toBe(2);
+    expect(err.join("\n")).toMatch(message);
+    expect(deps.agentStore.setProviderCacheDialect).not.toHaveBeenCalled();
+  });
+
+  it("rejects an anthropic provider, which takes no dialect", async () => {
+    const deps = depsWith(CLAUDE);
+    const { io, err } = makeIo();
+
+    const code = await runProviderCli(["set", "claude", "--cache-dialect", "none"], deps, io);
+
+    expect(code).toBe(2);
+    expect(err.join("\n")).toMatch(/--cache-dialect applies to OpenAI-compatible providers only/);
+    expect(deps.agentStore.setProviderCacheDialect).not.toHaveBeenCalled();
+  });
+
+  it("exits 1 for an unknown provider", async () => {
+    const deps = depsWith(GATEWAY);
+    const { io, err } = makeIo();
+
+    const code = await runProviderCli(["set", "nope", "--cache-dialect", "none"], deps, io);
+
+    expect(code).toBe(1);
+    expect(err.join("\n")).toMatch(/No provider named "nope"/);
+    expect(deps.agentStore.setProviderCacheDialect).not.toHaveBeenCalled();
+  });
+
+  it("exits 1 when the provider is gone by the time it writes", async () => {
+    const deps = depsWith(GATEWAY);
+    deps.agentStore.setProviderCacheDialect.mockResolvedValue(false);
+    const { io, err, out } = makeIo();
+
+    const code = await runProviderCli(["set", "gateway", "--cache-dialect", "none"], deps, io);
+
+    expect(code).toBe(1);
+    expect(err.join("\n")).toMatch(/No provider named "gateway"/);
+    expect(out).toEqual([]);
+  });
+});
