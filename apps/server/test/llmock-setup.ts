@@ -115,10 +115,10 @@ function normalizeContent(text: string): string {
  * Structured-output calls that send the same user message under different
  * system prompts: the Observer's correction and memory extraction both send
  * the transcript. A fixture key carries no system prompt, so the key gets the
- * call's name; without it, one phase would replay the other's reply. The
- * Anthropic adapter's tool path offers one tool, named for the call.
- * Structured outputs offer none, and aimock drops their `output_config`, so
- * there the name comes from the opening sentence of the call's system prompt.
+ * call's name, read from the opening sentence of its system prompt; without
+ * it, one phase would replay the other's reply. The system prompt is the one
+ * marker both Anthropic paths send: aimock drops structured outputs'
+ * `output_config`, and the tool path appends its instruction after it.
  */
 const SHARED_INPUT_STRUCTURED_OUTPUTS = new Map([
   ["correction-extraction", "You are a behavioral correction extractor."],
@@ -126,11 +126,6 @@ const SHARED_INPUT_STRUCTURED_OUTPUTS = new Map([
 ]);
 
 function structuredOutputName(req: ChatCompletionRequest): string | undefined {
-  const [tool, ...others] = req.tools ?? [];
-  if (tool !== undefined) {
-    const name = tool.function.name;
-    return others.length === 0 && SHARED_INPUT_STRUCTURED_OUTPUTS.has(name) ? name : undefined;
-  }
   const system = req.messages.find((m) => m.role === "system")?.content;
   if (typeof system !== "string") return undefined;
   const [name] =
