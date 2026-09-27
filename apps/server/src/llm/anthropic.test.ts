@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { CorrectionExtractionSchema } from "../agent/evolution/extraction-schema.js";
 import { logger } from "../logger.js";
 import { expectDefined } from "../test/assertions.js";
 import { AnthropicProvider } from "./anthropic.js";
 import { extractText } from "./content.js";
 import { ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
+import { toObjectJsonSchema } from "./json-schema.js";
 import type { CacheIntent, ResponseFormat, StreamEvent, ToolDefinition } from "./types.js";
 
 // Mock the Anthropic SDK — use a class so `new Anthropic()` works
@@ -1747,8 +1749,8 @@ describe("AnthropicProvider", () => {
             schema: {
               type: "object",
               properties: {
-                // The grammar takes no length bounds: the SDK's transform
-                // moves them into the description.
+                // The grammar takes no length bounds, so they move into
+                // the description.
                 name: { type: "string", description: "{minLength: 1}" },
                 age: { type: "number" },
               },
@@ -1768,6 +1770,34 @@ describe("AnthropicProvider", () => {
         });
       },
     );
+
+    it("sends the grammar the correction schema's const and enum", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(textReply("claude-opus-5-5", '{"corrections":[]}'));
+
+      await provider.chat({
+        model: "claude-opus-5-5",
+        system: "Extract corrections",
+        messages: [{ role: "user", content: "transcript" }],
+        responseFormat: {
+          type: "json_schema",
+          name: "correction-extraction",
+          schema: toObjectJsonSchema(CorrectionExtractionSchema),
+        },
+      });
+
+      const items = sentBody().output_config.format.schema.properties.corrections.items;
+      expect(items).not.toHaveProperty("oneOf");
+      expect(items).toMatchObject({
+        anyOf: ["new", "reinforce", "contradiction"].map((action) => ({
+          properties: {
+            action: { type: "string", const: action },
+            category: { type: "string", enum: ["style", "domain", "memory"] },
+          },
+          additionalProperties: false,
+        })),
+      });
+    });
 
     it.each(["claude-sonnet-4-20250514", "claude-opus-4-0"])(
       "offers %s, which lacks structured outputs, an unforced tool named in the system prompt",

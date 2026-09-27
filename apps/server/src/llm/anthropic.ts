@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { transformJSONSchema } from "@anthropic-ai/sdk/lib/transform-json-schema";
 import { logger } from "../logger.js";
+import { hasOpenObject, toStructuredOutputSchema } from "./anthropic-output-schema.js";
 import { cacheMarker } from "./cache-marker.js";
 import { ProviderProtocolError, parseToolArgs, ToolArgsCutOffError } from "./errors.js";
 import { withFailureLogging } from "./logging-fetch.js";
@@ -360,7 +360,9 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
         max_tokens: maxTokens,
         ...(systemBlocks.length > 0 && { system: systemBlocks }),
         messages: params.messages.map(toAnthropicMessage),
-        output_config: { format: toOutputFormat(format) },
+        output_config: {
+          format: { type: "json_schema", schema: toStructuredOutputSchema(format.schema) },
+        },
       };
     }
 
@@ -435,35 +437,10 @@ const MODELS_WITHOUT_STRUCTURED_OUTPUTS: ReadonlySet<string> = new Set([
  * synthetic tool carrying the schema, which the model is asked to call. It
  * serves the models without structured outputs, and schemas with an open
  * object, which the grammar cannot express: it takes only objects closed with
- * `additionalProperties: false`, so the SDK's transform would narrow a
- * free-form object to `{}`.
+ * `additionalProperties: false`.
  */
 function takesStructuredOutput(model: string, format: ResponseFormat): boolean {
   return !MODELS_WITHOUT_STRUCTURED_OUTPUTS.has(model) && !hasOpenObject(format.schema);
-}
-
-/**
- * Whether any object in a JSON Schema admits keys beyond its `properties`:
- * `additionalProperties` set to anything but `false`, as `z.record` emits.
- */
-function hasOpenObject(schema: unknown): boolean {
-  if (Array.isArray(schema)) return schema.some(hasOpenObject);
-  if (typeof schema !== "object" || schema === null) return false;
-  return Object.entries(schema).some(([key, value]) =>
-    key === "additionalProperties" ? value !== false : hasOpenObject(value),
-  );
-}
-
-/**
- * The schema as structured outputs take it, through the SDK's transform (the
- * one behind its `jsonSchemaOutputFormat` helper). It closes every object and
- * moves the keywords the grammar lacks, such as length and range bounds, into
- * descriptions; callers validate the reply against the full schema. `$schema`
- * names the dialect, not a constraint, so it is dropped.
- */
-function toOutputFormat(format: ResponseFormat): Anthropic.JSONOutputFormat {
-  const { $schema: _dialect, ...schema } = format.schema;
-  return { type: "json_schema", schema: transformJSONSchema(schema) };
 }
 
 /**
