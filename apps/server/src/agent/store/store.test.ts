@@ -4112,9 +4112,9 @@ describe("turn contexts", () => {
     await expect(tx((trx) => store.listTurnContexts(trx, conversationId, null))).rejects.toThrow();
   });
 
-  it("finds a stage prompt's user row by its inbound, in its own conversation", async () => {
+  it("finds a turn's user row by its inbound, not a later tool result, in its own conversation", async () => {
     const { userId, profileId, conversationId, stamp, row } = await seedUserRow();
-    // The stage's reply and its tool results cursor on the same inbound, the
+    // The turn's reply and its tool results cursor on the same inbound, the
     // tool results as later user rows, and must not be the one found.
     await tx((trx) =>
       store.insertMessages(trx, {
@@ -4152,5 +4152,16 @@ describe("turn contexts", () => {
         store.findUserMessageByInbound(trx, conversationId, "019d0000-0000-7000-8000-000000000999"),
       ),
     ).resolves.toBeUndefined();
+  });
+
+  it("finds the newer of two user rows on one inbound", async () => {
+    // A re-run insert leaves two; the turn that wrote the second is the one
+    // looking.
+    const { conversationId, stamp } = await seedUserRow();
+    const second = await insertUserRow(conversationId, stamp);
+
+    await expect(
+      tx((trx) => store.findUserMessageByInbound(trx, conversationId, INBOUND)),
+    ).resolves.toEqual({ id: second.id, createdAt: second.createdAt });
   });
 });

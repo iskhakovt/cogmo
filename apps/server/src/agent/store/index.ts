@@ -503,9 +503,11 @@ export interface AgentStore {
   ): Promise<{ id: string; createdAt: Date }>;
 
   /**
-   * The first user row with string content whose cursor is `inboundId`: the
-   * message a pipeline stage wrote for its prompt inbound, which commits with
-   * it, and not one of the stage's tool results on the same cursor.
+   * The turn-starting user row whose cursor is `inboundId`: the newest user
+   * row with string content. A turn's tool results are later user rows on the
+   * same cursor, with block-array content. Newest, because an insert re-run
+   * after its commit leaves two string rows on one cursor, and the turn that
+   * looks is the one that wrote the last.
    */
   findUserMessageByInbound(
     tx: Transaction,
@@ -1620,9 +1622,8 @@ export class DrizzleAgentStore implements AgentStore {
     conversationId: string,
     inboundId: string,
   ): Promise<{ id: string; createdAt: Date } | undefined> {
-    // The stage's tool results cursor on the same inbound as later user rows;
-    // their content is a block array where the prompt's is a string. Drizzle
-    // has no operator for a JSONB value's type, so `jsonb_typeof` is raw.
+    // Drizzle has no operator for a JSONB value's type, so `jsonb_typeof` is
+    // raw.
     const rows = await tx
       .select({ id: messages.id, createdAt: messages.createdAt })
       .from(messages)
@@ -1634,7 +1635,7 @@ export class DrizzleAgentStore implements AgentStore {
           eq(sql`jsonb_typeof(${messages.content})`, "string"),
         ),
       )
-      .orderBy(asc(messages.id))
+      .orderBy(desc(messages.id))
       .limit(1);
     return rows[0];
   }
