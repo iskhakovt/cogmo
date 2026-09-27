@@ -47,8 +47,9 @@ import type {
   TriggerReflectionOutcome,
 } from "../transport/transport.js";
 
-/** `true` only when A and B are mutually assignable (structurally equal). */
-type Mutual<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+/** `true` only when A and B are mutually assignable, optional fields included. */
+type Mutual<A, B> = Same<A, B> extends true ? Same<Required<A>, Required<B>> : false;
+type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 
 /** Fails to type-check when the witness is not exactly `true`. */
 function assertParity<_T extends true>(): void {}
@@ -76,9 +77,6 @@ assertParity<Mutual<CooldownState, C.CooldownState>>();
 assertParity<Mutual<ToolSet, C.ToolSet>>();
 assertParity<Mutual<ProfileMemoryScope, C.ProfileMemoryScope>>();
 assertParity<Mutual<EvolutionEventPayload, C.EvolutionEventPayload>>();
-// Mutual assignability lets one side lack an optional field the other has;
-// comparing the `Required` forms catches that.
-assertParity<Mutual<Required<EvolutionEventPayload>, Required<C.EvolutionEventPayload>>>();
 
 // --- entity projections ---
 assertParity<Mutual<Profile, C.Profile>>();
