@@ -122,8 +122,8 @@ const event = {
   data: { conversationId: "conv-1", triggerInboundId: "inbound-1" },
 } as const;
 
-/** `create-user-message` as the step returns it: the history's `msg-1`, its time as a string. */
-const CACHED_USER_ROW = { id: "msg-1", createdAt: MOCK_MESSAGE_CREATED_AT.toISOString() };
+/** The turn's row as `load-turn-transcript` returns it: the history's `msg-1`, its time as a string. */
+const TURN_ROW = { id: "msg-1", createdAt: MOCK_MESSAGE_CREATED_AT.toISOString() };
 
 /**
  * The turn context leading the turn's message in the `call`th agent-loop call
@@ -149,8 +149,9 @@ describe("handle-message — crash recovery / step replay", () => {
       function: fn,
       events: [event],
       // Simulate: a prior attempt completed `create-user-message` already.
-      // The handler returns the cached value: the row's id and `created_at`.
-      steps: [{ id: "create-user-message", handler: () => CACHED_USER_ROW }],
+      // The handler returns the cached value (void in this case — the step
+      // body returns nothing).
+      steps: [{ id: "create-user-message", handler: () => undefined }],
     });
 
     await engine.execute();
@@ -290,7 +291,9 @@ describe("handle-message — crash recovery / step replay", () => {
           })),
         ),
         // The turn's row: the last user row above.
-        insertMessage: vi.fn().mockResolvedValue({ id: "m7", createdAt: MOCK_MESSAGE_CREATED_AT }),
+        findUserMessageByInbound: vi
+          .fn()
+          .mockResolvedValue({ id: "m7", createdAt: MOCK_MESSAGE_CREATED_AT }),
       }),
     });
     const fn = createHandleMessage(deps);
@@ -386,13 +389,14 @@ describe("handle-message — crash recovery / step replay", () => {
         },
         { id: "last-assistant", handler: () => null },
         { id: "load-inbound", handler: () => [{ id: "inbound-1", content: "hi" }] },
-        { id: "create-user-message", handler: () => CACHED_USER_ROW },
+        { id: "create-user-message", handler: () => undefined },
         {
           id: "load-turn-transcript",
           handler: () => ({
             messages: [{ role: "user", content: "hi" }],
             messageIds: ["msg-1"],
             turnContexts: [null],
+            turn: TURN_ROW,
           }),
         },
         { id: "assemble-prompt", handler: () => "system prompt" },
@@ -425,6 +429,38 @@ describe("handle-message — crash recovery / step replay", () => {
     expect(deps.agentStore.insertMessages).not.toHaveBeenCalled();
     // The loop sends the cached turn context.
     expect(turnContextSent(deps)).toBe("<turn_context>cached</turn_context>\n\n");
+  });
+
+  it("serves a turn whose create-user-message result is empty from the row it committed", async () => {
+    // The row is found by its inbound cursor inside `load-turn-transcript`, so
+    // the turn needs nothing from `create-user-message`'s result: an empty one
+    // replays into the same turn as a fresh run.
+    const deps = mockDeps();
+
+    const { result } = await new InngestTestEngine({
+      function: createHandleMessage(deps),
+      events: [event],
+      steps: [{ id: "create-user-message", handler: () => null }],
+    }).execute();
+
+    expect(result).toMatchObject({ status: "processed" });
+    expect(deps.agentStore.insertMessage).not.toHaveBeenCalled();
+    expect(deps.agentStore.findUserMessageByInbound).toHaveBeenCalledWith(
+      expect.anything(),
+      "conv-1",
+      "inbound-1",
+    );
+    // The reply is persisted once, as on a fresh run.
+    expect(deps.agentStore.insertMessages).toHaveBeenCalledTimes(1);
+    const [, stored] = expectDefined(
+      vi.mocked(deps.agentStore.insertOrRecoverTurnContext).mock.calls[0],
+      "insertOrRecoverTurnContext call",
+    );
+    expect(stored.messageId).toBe("msg-1");
+    // The row's `created_at`, as the turn context shows it.
+    expect(turnContextSent(deps)).toContain(
+      "Current time: Friday, September 25, 2026, 08:14 (UTC)",
+    );
   });
 
   it("does not call the provider when the llm-iter1 step is cached", async () => {

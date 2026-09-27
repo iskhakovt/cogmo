@@ -470,6 +470,24 @@ describe("createHandleMessage", () => {
     expect(handle.abort).toHaveBeenCalledWith("Bad Request");
   });
 
+  it("fails without retrying when the turn's row isn't on its inbound cursor", async () => {
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        findUserMessageByInbound: vi.fn().mockResolvedValue(undefined),
+      }),
+    });
+
+    const failure = invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+
+    await expect(failure).rejects.toBeInstanceOf(NonRetriableError);
+    await expect(failure).rejects.toThrow("no user row on inbound inbound-1");
+    expect(deps.runStreamingAgentLoop).not.toHaveBeenCalled();
+  });
+
   // Inngest invokes `onFailure` after retries exhaust (or immediately on a
   // NonRetriableError). Without this handler the run dies silently — no user
   // notification, no downstream signal. The handler reaches the user via
@@ -2226,9 +2244,7 @@ describe("createHandleMessage", () => {
     it("transcribes inbound voice blocks via stt provider before persisting the user message", async () => {
       const stt = vi.fn().mockResolvedValue({ text: "hello there" });
       const sttProvider = { name: "openai", stt };
-      const insertMessage = vi
-        .fn()
-        .mockResolvedValue({ id: "msg-1", createdAt: MOCK_MESSAGE_CREATED_AT });
+      const insertMessage = vi.fn().mockResolvedValue({ id: "msg-1" });
       const deps = mockDeps({
         voiceResolver: mockVoiceResolver(mockVoiceBundle({ stt: sttProvider })),
         agentStore: mockAgentStore({
@@ -2472,9 +2488,7 @@ describe("createHandleMessage", () => {
         name: "openai",
         stt: vi.fn().mockResolvedValue({ text: "the meeting was rescheduled" }),
       };
-      const insertMessage = vi
-        .fn()
-        .mockResolvedValue({ id: "msg-1", createdAt: MOCK_MESSAGE_CREATED_AT });
+      const insertMessage = vi.fn().mockResolvedValue({ id: "msg-1" });
       const deps = mockDeps({
         voiceResolver: mockVoiceResolver(mockVoiceBundle({ stt: sttProvider })),
         agentStore: mockAgentStore({
@@ -3795,7 +3809,7 @@ describe("durable conversation summaries", () => {
     }));
   }
 
-  /** The turn writes `id`, which the history must hold for the turn context to lead it. */
+  /** The turn's row is `id`, which the history must hold for the turn context to lead it. */
   function turnRow(id: string) {
     return vi.fn().mockResolvedValue({ id, createdAt: MOCK_MESSAGE_CREATED_AT });
   }
@@ -3823,7 +3837,7 @@ describe("durable conversation summaries", () => {
         getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 800_000, outputTokens: 2_000 }),
         listMessages: vi.fn().mockResolvedValue(overrides.messages ?? rows(8)),
         // The last user row of rows(7) and rows(8).
-        insertMessage: turnRow("m7"),
+        findUserMessageByInbound: turnRow("m7"),
       }),
     });
     return { deps, chat };
@@ -3857,7 +3871,7 @@ describe("durable conversation summaries", () => {
       agentStore: mockAgentStore({
         getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 1_000, outputTokens: 100 }),
         listMessages: vi.fn().mockResolvedValue(rows(8)),
-        insertMessage: turnRow("m7"),
+        findUserMessageByInbound: turnRow("m7"),
       }),
     });
 
@@ -3922,7 +3936,7 @@ describe("durable conversation summaries", () => {
         getHistoryAfter: vi
           .fn()
           .mockResolvedValue([{ id: "m5", role: "user", content: "and then" }]),
-        insertMessage: turnRow("m5"),
+        findUserMessageByInbound: turnRow("m5"),
       }),
     });
 
@@ -3976,7 +3990,7 @@ describe("durable conversation summaries", () => {
       createdAt: new Date(),
     });
     vi.mocked(deps.agentStore.getHistoryAfter).mockResolvedValue(rows(6));
-    vi.mocked(deps.agentStore.insertMessage).mockResolvedValue({
+    vi.mocked(deps.agentStore.findUserMessageByInbound).mockResolvedValue({
       id: "m5",
       createdAt: MOCK_MESSAGE_CREATED_AT,
     });
@@ -4113,7 +4127,7 @@ describe("durable conversation summaries", () => {
         agentStore: mockAgentStore({
           getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 1_000, outputTokens: 100 }),
           listMessages: vi.fn().mockResolvedValue(rows(8)),
-          insertMessage: turnRow("m7"),
+          findUserMessageByInbound: turnRow("m7"),
         }),
       });
       recallingAgain(deps);

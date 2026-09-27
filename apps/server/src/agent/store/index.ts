@@ -488,7 +488,7 @@ export interface AgentStore {
   /** Delete the singleton voice configuration row. No-op when none exists. */
   deleteVoiceConfig(tx: Transaction): Promise<void>;
 
-  /** Insert a message (user or assistant). Returns the new row's id and `created_at`. `profileId` + `model` stamp the turn snapshot (see design/transport/overview.md → Profile and Model Stamping). */
+  /** Insert a message (user or assistant). Returns the new message ID. `profileId` + `model` stamp the turn snapshot (see design/transport/overview.md → Profile and Model Stamping). */
   insertMessage(
     tx: Transaction,
     params: {
@@ -500,7 +500,7 @@ export interface AgentStore {
       lastInboundMessageId: string;
       inputTokens?: number;
     },
-  ): Promise<{ id: string; createdAt: Date }>;
+  ): Promise<{ id: string }>;
 
   /**
    * The turn-starting user row whose cursor is `inboundId`: the newest user
@@ -1595,7 +1595,7 @@ export class DrizzleAgentStore implements AgentStore {
       lastInboundMessageId: string;
       inputTokens?: number;
     },
-  ): Promise<{ id: string; createdAt: Date }> {
+  ): Promise<{ id: string }> {
     return single(
       await tx
         .insert(messages)
@@ -1613,7 +1613,7 @@ export class DrizzleAgentStore implements AgentStore {
           // this row were ever the most-recent assistant (it isn't).
           outputTokens: UNKNOWN_OUTPUT_TOKENS,
         })
-        .returning({ id: messages.id, createdAt: messages.createdAt }),
+        .returning({ id: messages.id }),
     );
   }
 

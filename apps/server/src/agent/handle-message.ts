@@ -39,7 +39,11 @@ import {
   summarizationRequest,
 } from "./context.js";
 import { loadConversationContext } from "./conversation/load-conversation-context.js";
-import { loadTurnHistory, summarizedSpan } from "./conversation/load-turn-history.js";
+import {
+  loadTurnHistory,
+  summarizedSpan,
+  TurnRowMissingError,
+} from "./conversation/load-turn-history.js";
 import { storeTurnContext } from "./conversation/store-turn-context.js";
 import { buildInCooldownReply, isInCooldown } from "./cooldown.js";
 import type { DebounceConfig } from "./debounce.js";
@@ -483,10 +487,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         })
         .join("\n");
 
-      // Returns the row's id and `created_at`: the turn context is stored
-      // against the id and shows the time the row was written.
-      const userRow = await step.run("create-user-message", async () => {
-        const row = await deps.runInTx((tx) =>
+      await step.run("create-user-message", async () => {
+        await deps.runInTx((tx) =>
           agentStore.insertMessage(tx, {
             conversationId,
             role: "user",
@@ -496,7 +498,6 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             lastInboundMessageId: maxInboundId,
           }),
         );
-        return { id: row.id, createdAt: row.createdAt.toISOString() };
       });
 
       // The compacted view, not the raw transcript: when the conversation
@@ -506,11 +507,24 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // below can map a compaction split point back to a durable cutoff, and
       // `turnContexts` so the render step can leave out memories an earlier
       // turn already shows. Inside the step, so a `/compact` landing mid-run
-      // can't shift the history between invocations.
+      // can't shift the history between invocations. The same read finds the
+      // row `create-user-message` wrote, by the inbound cursor it carries: its
+      // id keys the turn context and its `created_at` is the time the context
+      // shows (design/crash-recovery.md → Where the turn's row comes from).
       const turnHistory = await step.run("load-turn-transcript", async () => {
-        return loadTurnHistory({ runInTx: deps.runInTx, agentStore }, { conversationId });
+        try {
+          return await loadTurnHistory(
+            { runInTx: deps.runInTx, agentStore },
+            { conversationId, turnInboundId: maxInboundId },
+          );
+        } catch (err) {
+          if (err instanceof TurnRowMissingError) throw asNonRetriable(err);
+          throw err;
+        }
       });
       const history: Message[] = turnHistory.messages;
+      const turn = turnHistory.turn;
+      if (turn === null) throw new Error("load-turn-transcript returned no turn row");
 
       // Load profile up front — its streaming knobs ride into `prepare` so
       // open streams honor the per-profile chunk target and edit mode, and
@@ -776,16 +790,16 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // surviving compaction already shows, stores the block, and swaps it in.
       // Every input is a step result or the event payload, so each invocation
       // builds the same block.
-      const turnIndex = turnHistory.messageIds.lastIndexOf(userRow.id);
+      const turnIndex = turnHistory.messageIds.lastIndexOf(turn.id);
       const turnRow = history[turnIndex];
       if (turnRow === undefined) {
-        throw new Error(`user message ${userRow.id} is missing from the turn's history`);
+        throw new Error(`user message ${turn.id} is missing from the turn's history`);
       }
       const hasAttachments = resolvedBlocks.some(
         (b) => b.type === "image" || b.type === "document",
       );
       const turnContextInput = {
-        handledAt: new Date(userRow.createdAt),
+        handledAt: new Date(turn.createdAt),
         timezone: deps.userTimezone,
         context: {
           recalledMemories: recallResult.memories.map((m) => m.content),
@@ -1053,7 +1067,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           { runInTx: deps.runInTx, agentStore },
           {
             ...turnContextInput,
-            messageId: userRow.id,
+            messageId: turn.id,
             context: {
               ...turnContextInput.context,
               recalledMemories: newMemories(

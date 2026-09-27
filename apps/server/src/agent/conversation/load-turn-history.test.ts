@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { fakeRunInTx, mockAgentStore } from "../../test/factories.js";
+import { fakeRunInTx, MOCK_MESSAGE_CREATED_AT, mockAgentStore } from "../../test/factories.js";
 import type { CompactionSummary } from "../store/index.js";
-import { loadTurnHistory, summarizedSpan } from "./load-turn-history.js";
+import { loadTurnHistory, summarizedSpan, TurnRowMissingError } from "./load-turn-history.js";
 
 function summaryRow(overrides: Partial<CompactionSummary> = {}): CompactionSummary {
   return {
@@ -29,7 +29,7 @@ describe("loadTurnHistory", () => {
 
     const result = await loadTurnHistory(
       { runInTx: fakeRunInTx, agentStore },
-      { conversationId: "conv-1" },
+      { conversationId: "conv-1", turnInboundId: null },
     );
 
     expect(result.messages).toEqual([
@@ -52,7 +52,7 @@ describe("loadTurnHistory", () => {
 
     const result = await loadTurnHistory(
       { runInTx: fakeRunInTx, agentStore },
-      { conversationId: "conv-1" },
+      { conversationId: "conv-1", turnInboundId: null },
     );
 
     expect(result.messages).toEqual([
@@ -75,7 +75,7 @@ describe("loadTurnHistory", () => {
 
     const result = await loadTurnHistory(
       { runInTx: fakeRunInTx, agentStore },
-      { conversationId: "conv-1" },
+      { conversationId: "conv-1", turnInboundId: null },
     );
 
     expect(result.messages).toHaveLength(1);
@@ -91,7 +91,7 @@ describe("loadTurnHistory", () => {
 
     const result = await loadTurnHistory(
       { runInTx: fakeRunInTx, agentStore },
-      { conversationId: "conv-1" },
+      { conversationId: "conv-1", turnInboundId: null },
     );
 
     expect(result.messages[0]?.content).toEqual(blocks);
@@ -120,7 +120,7 @@ describe("loadTurnHistory", () => {
 
     const result = await loadTurnHistory(
       { runInTx: fakeRunInTx, agentStore },
-      { conversationId: "conv-1" },
+      { conversationId: "conv-1", turnInboundId: null },
     );
 
     // The same span `getHistoryAfter` reads: the conversation after the cutoff.
@@ -139,6 +139,48 @@ describe("loadTurnHistory", () => {
     ]);
     // Aligned with `messages`: null for the summary and for rows without one.
     expect(result.turnContexts).toEqual([null, context, null, null]);
+  });
+
+  it("finds the turn's row by the inbound cursor it was written with", async () => {
+    const agentStore = mockAgentStore();
+
+    const result = await loadTurnHistory(
+      { runInTx: fakeRunInTx, agentStore },
+      { conversationId: "conv-1", turnInboundId: "inbound-9" },
+    );
+
+    expect(agentStore.findUserMessageByInbound).toHaveBeenCalledWith(
+      expect.anything(),
+      "conv-1",
+      "inbound-9",
+    );
+    // `created_at` as a string: the result is step state.
+    expect(result.turn).toEqual({ id: "msg-1", createdAt: MOCK_MESSAGE_CREATED_AT.toISOString() });
+  });
+
+  it("fails when the turn's row doesn't exist", async () => {
+    const agentStore = mockAgentStore({
+      findUserMessageByInbound: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await expect(
+      loadTurnHistory(
+        { runInTx: fakeRunInTx, agentStore },
+        { conversationId: "conv-1", turnInboundId: "inbound-9" },
+      ),
+    ).rejects.toThrow(TurnRowMissingError);
+  });
+
+  it("looks up no row without a turn", async () => {
+    const agentStore = mockAgentStore();
+
+    const result = await loadTurnHistory(
+      { runInTx: fakeRunInTx, agentStore },
+      { conversationId: "conv-1", turnInboundId: null },
+    );
+
+    expect(result.turn).toBeNull();
+    expect(agentStore.findUserMessageByInbound).not.toHaveBeenCalled();
   });
 });
 

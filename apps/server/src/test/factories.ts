@@ -41,7 +41,7 @@ export const FAKE_TX = { __mockTx: true } as never;
  */
 export const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
 
-/** `created_at` of the rows `mockAgentStore` inserts: 08:14 UTC on a Friday. */
+/** `created_at` of the turn row `mockAgentStore` finds: 08:14 UTC on a Friday. */
 export const MOCK_MESSAGE_CREATED_AT = new Date("2026-09-25T08:14:00.000Z");
 
 export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
@@ -63,9 +63,9 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     getVoiceConfig: vi.fn().mockResolvedValue(undefined),
     upsertVoiceConfig: vi.fn().mockResolvedValue({ id: "voice-config-1" }),
     deleteVoiceConfig: vi.fn().mockResolvedValue(undefined),
-    // The row a turn writes is the one the default history ends with, so a
-    // turn finds its own message to lead with its turn context.
-    insertMessage: vi.fn().mockResolvedValue({ id: "msg-1", createdAt: MOCK_MESSAGE_CREATED_AT }),
+    insertMessage: vi.fn().mockResolvedValue({ id: "msg-1" }),
+    // The turn's row is the one the default history ends with, so a turn
+    // finds its own message to lead with its turn context.
     findUserMessageByInbound: vi
       .fn()
       .mockResolvedValue({ id: "msg-1", createdAt: MOCK_MESSAGE_CREATED_AT }),

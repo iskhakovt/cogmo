@@ -47,7 +47,11 @@ import {
   summarizationRequest,
 } from "../context.js";
 import { loadConversationContext } from "../conversation/load-conversation-context.js";
-import { loadTurnHistory, summarizedSpan } from "../conversation/load-turn-history.js";
+import {
+  loadTurnHistory,
+  summarizedSpan,
+  TurnRowMissingError,
+} from "../conversation/load-turn-history.js";
 import { storeTurnContext } from "../conversation/store-turn-context.js";
 import type { ImageToolsLoader } from "../image-tools-loader.js";
 import type { AgentLoopResult, StepRunner, StreamingAgentLoopParams } from "../loop.js";
@@ -160,25 +164,12 @@ export async function runAgenticStage(
   );
 
   // The prompt row and its user message commit together, so a retry that
-  // finds the inbound already there also finds the message. The message's id
-  // and `created_at` are the turn context's key and time.
-  const { inboundId, messageId, createdAt } = await steps.run("persist-stage-prompt", () =>
+  // finds the inbound already there also finds the message.
+  const { inboundId } = await steps.run("persist-stage-prompt", () =>
     deps.runInTx(async (tx) => {
       const key = stageInboundKey(runId, stageId, iteration);
       const existing = await deps.transportStore.findInboundByIdempotencyKey(tx, key);
-      if (existing) {
-        const message = await deps.agentStore.findUserMessageByInbound(
-          tx,
-          conversationId,
-          existing.id,
-        );
-        if (!message) throw new Error(`stage prompt ${existing.id} has no user message`);
-        return {
-          inboundId: existing.id,
-          messageId: message.id,
-          createdAt: message.createdAt.toISOString(),
-        };
-      }
+      if (existing) return { inboundId: existing.id };
       const inbound = await deps.transportStore.persistInbound(tx, {
         source: "pipeline",
         idempotencyKey: key,
@@ -186,7 +177,7 @@ export async function runAgenticStage(
         content: prompt,
         platformTs: new Date(),
       });
-      const message = await deps.agentStore.insertMessage(tx, {
+      await deps.agentStore.insertMessage(tx, {
         conversationId,
         role: "user",
         content: prompt,
@@ -194,27 +185,36 @@ export async function runAgenticStage(
         model: ctx.model,
         lastInboundMessageId: inbound.id,
       });
-      return {
-        inboundId: inbound.id,
-        messageId: message.id,
-        createdAt: message.createdAt.toISOString(),
-      };
+      return { inboundId: inbound.id };
     }),
   );
 
-  const turnHistory = await steps.run("load-turn-transcript", () =>
-    loadTurnHistory({ runInTx: deps.runInTx, agentStore: deps.agentStore }, { conversationId }),
-  );
+  // The same read finds the stage's message by the prompt inbound it cursors
+  // on: its id keys the turn context and its `created_at` is the time the
+  // context shows (design/crash-recovery.md → Where the turn's row comes from).
+  const turnHistory = await steps.run("load-turn-transcript", async () => {
+    try {
+      return await loadTurnHistory(
+        { runInTx: deps.runInTx, agentStore: deps.agentStore },
+        { conversationId, turnInboundId: inboundId },
+      );
+    } catch (err) {
+      if (err instanceof TurnRowMissingError) throw asNonRetriable(err);
+      throw err;
+    }
+  });
+  const turn = turnHistory.turn;
+  if (turn === null) throw new Error("load-turn-transcript returned no turn row");
   // The stage's message, led by its turn context: the time, and a text reply.
   // A stage runs no auto-recall, so there is nothing to deduplicate, and the
   // block compaction counts is the one the render step stores.
-  const turnIndex = turnHistory.messageIds.lastIndexOf(messageId);
+  const turnIndex = turnHistory.messageIds.lastIndexOf(turn.id);
   const turnRow = turnHistory.messages[turnIndex];
   if (turnRow === undefined) {
-    throw new Error(`stage prompt message ${messageId} is missing from the turn's history`);
+    throw new Error(`stage prompt message ${turn.id} is missing from the turn's history`);
   }
   const turnContextInput = {
-    handledAt: new Date(createdAt),
+    handledAt: new Date(turn.createdAt),
     timezone: deps.userTimezone,
     context: {
       recalledMemories: [],
@@ -393,7 +393,7 @@ export async function runAgenticStage(
   const renderedTurnContext = await steps.run("render-turn-context", () =>
     storeTurnContext(
       { runInTx: deps.runInTx, agentStore: deps.agentStore },
-      { ...turnContextInput, messageId },
+      { ...turnContextInput, messageId: turn.id },
     ),
   );
   const messages = replaceTurnContext(compacted.messages, turnPosition, renderedTurnContext);

@@ -3977,8 +3977,12 @@ describe("turn contexts", () => {
     return { ...seeded, row: await insertUserRow(seeded.conversationId, seeded.stamp) };
   }
 
-  function insertUserRow(conversationId: string, stamp: { profileId: string; model: string }) {
-    return tx((trx) =>
+  /** A user row on `INBOUND`, with the `created_at` the database gave it. */
+  async function insertUserRow(
+    conversationId: string,
+    stamp: { profileId: string; model: string },
+  ): Promise<{ id: string; createdAt: Date }> {
+    const { id } = await tx((trx) =>
       store.insertMessage(trx, {
         conversationId,
         role: "user",
@@ -3987,16 +3991,14 @@ describe("turn contexts", () => {
         ...stamp,
       }),
     );
-  }
-
-  it("returns the inserted row's created_at alongside its id", async () => {
-    const { row } = await seedUserRow();
-    const [stored] = await tx((trx) =>
-      trx.select({ createdAt: messages.createdAt }).from(messages).where(eq(messages.id, row.id)),
+    const [row] = await tx((trx) =>
+      trx
+        .select({ id: messages.id, createdAt: messages.createdAt })
+        .from(messages)
+        .where(eq(messages.id, id)),
     );
-    expect(row.createdAt).toBeInstanceOf(Date);
-    expect(row.createdAt).toEqual(expectDefined(stored).createdAt);
-  });
+    return expectDefined(row, "inserted user row");
+  }
 
   it("stores a turn context and lists it by message", async () => {
     const { conversationId, row } = await seedUserRow();

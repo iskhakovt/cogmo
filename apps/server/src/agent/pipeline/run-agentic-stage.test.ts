@@ -1,3 +1,4 @@
+import { NonRetriableError } from "inngest";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
@@ -263,7 +264,8 @@ describe("runAgenticStage", () => {
     expect(expectDefined(h.runStreamingAgentLoop.mock.calls[0], "loop call")[0].turnKey).toBe(
       "inbound-earlier",
     );
-    // The recovered prompt's message still gets its turn context.
+    // The recovered prompt's message, found by its inbound, still gets its
+    // turn context.
     expect(h.agentStore.findUserMessageByInbound).toHaveBeenCalledWith(
       expect.anything(),
       "conv-1",
@@ -275,16 +277,41 @@ describe("runAgenticStage", () => {
     );
   });
 
-  it("fails rather than run a recovered prompt whose message is missing", async () => {
+  it("fails without retrying rather than run a recovered prompt whose message is missing", async () => {
     const h = await harness({
       existingInbound: { id: "inbound-earlier", conversationId: "conv-1" },
     });
     vi.mocked(h.agentStore.findUserMessageByInbound).mockResolvedValue(undefined);
 
-    await expect(runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log)).rejects.toThrow(
-      "stage prompt inbound-earlier has no user message",
-    );
+    const failure = runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+
+    await expect(failure).rejects.toBeInstanceOf(NonRetriableError);
+    await expect(failure).rejects.toThrow("no user row on inbound inbound-earlier");
     expect(h.runStreamingAgentLoop).not.toHaveBeenCalled();
+  });
+
+  it("runs from the committed prompt row when persist-stage-prompt replays only its inbound id", async () => {
+    // The step's memoized result is `{ inboundId }`; the message id and time
+    // come from the row `load-turn-transcript` finds on that inbound.
+    const h = await harness();
+    const { memo, steps } = memoizingSteps();
+    memo.set("persist-stage-prompt", { inboundId: "inbound-1" });
+
+    const outcome = await runAgenticStage(h.deps, stageArgs(), steps, log);
+
+    expect(outcome).toMatchObject({ kind: "completed" });
+    expect(h.transportStore.persistInbound).not.toHaveBeenCalled();
+    expect(h.agentStore.insertMessage).not.toHaveBeenCalled();
+    expect(h.agentStore.findUserMessageByInbound).toHaveBeenCalledWith(
+      expect.anything(),
+      "conv-1",
+      "inbound-1",
+    );
+    expect(h.agentStore.insertOrRecoverTurnContext).toHaveBeenCalledTimes(1);
+    expect(h.agentStore.insertOrRecoverTurnContext).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ messageId: "msg-1" }),
+    );
   });
 
   it("leads the stage's message with a stored turn context: the time and a text reply", async () => {

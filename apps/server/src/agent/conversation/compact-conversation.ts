@@ -111,7 +111,7 @@ export async function compactConversation(
 
   const { messages, messageIds } = await loadTurnHistory(
     { runInTx: deps.runInTx, agentStore: deps.agentStore },
-    { conversationId },
+    { conversationId, turnInboundId: null },
   );
 
   // Same split the budget-triggered strategy would pick, so a manual

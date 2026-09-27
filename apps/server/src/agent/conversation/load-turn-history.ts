@@ -1,5 +1,5 @@
 import * as R from "remeda";
-import type { Transactor } from "../../db/index.js";
+import type { Transaction, Transactor } from "../../db/index.js";
 import type { Message } from "../../llm/types.js";
 import { formatSummaryMessage } from "../context.js";
 import type { AgentStore } from "../store/index.js";
@@ -22,6 +22,13 @@ import { type TurnContext, withTurnContext } from "../turn-context.js";
  * the block leading it, or `null` for a message without one. Callers that need
  * to map a compaction split point back to a durable cutoff (to persist a
  * summary of their own) walk `messageIds`; see `summarizedSpan`.
+ *
+ * `turn` is the row the running turn wrote, found in the same read by the
+ * inbound cursor it was written with (`findUserMessageByInbound`): its id keys
+ * the turn context and its `created_at`, as an ISO string since the result is
+ * step state, is the time the context shows. `null` when the caller passes no
+ * cursor, as `/compact` does; a cursor with no row behind it throws
+ * `TurnRowMissingError`.
  */
 export interface LoadTurnHistoryDeps {
   runInTx: Transactor;
@@ -32,13 +39,23 @@ export interface TurnHistory {
   messages: Message[];
   messageIds: (string | null)[];
   turnContexts: (TurnContext | null)[];
+  turn: { id: string; createdAt: string } | null;
+}
+
+/** The turn's inbound cursor has no user row behind it: the turn can't be served. */
+export class TurnRowMissingError extends Error {
+  constructor(conversationId: string, inboundId: string) {
+    super(`conversation ${conversationId} has no user row on inbound ${inboundId}`);
+    this.name = "TurnRowMissingError";
+  }
 }
 
 export async function loadTurnHistory(
   deps: LoadTurnHistoryDeps,
-  args: { conversationId: string },
+  args: { conversationId: string; turnInboundId: string | null },
 ): Promise<TurnHistory> {
   return deps.runInTx(async (tx) => {
+    const turn = await findTurn(tx, deps.agentStore, args.conversationId, args.turnInboundId);
     const summary = await deps.agentStore.getLatestSummary(tx, args.conversationId);
     const rows = summary
       ? await deps.agentStore.getHistoryAfter(tx, args.conversationId, summary.throughMessageId)
@@ -60,13 +77,26 @@ export async function loadTurnHistory(
     const messageIds = rows.map((row): string | null => row.id);
     const turnContexts = rows.map((row) => stored.get(row.id)?.context ?? null);
 
-    if (!summary) return { messages, messageIds, turnContexts };
+    if (!summary) return { messages, messageIds, turnContexts, turn };
     return {
       messages: [formatSummaryMessage(summary.summary), ...messages],
       messageIds: [null, ...messageIds],
       turnContexts: [null, ...turnContexts],
+      turn,
     };
   });
+}
+
+async function findTurn(
+  tx: Transaction,
+  agentStore: AgentStore,
+  conversationId: string,
+  inboundId: string | null,
+): Promise<TurnHistory["turn"]> {
+  if (inboundId === null) return null;
+  const row = await agentStore.findUserMessageByInbound(tx, conversationId, inboundId);
+  if (row === undefined) throw new TurnRowMissingError(conversationId, inboundId);
+  return { id: row.id, createdAt: row.createdAt.toISOString() };
 }
 
 /**

@@ -114,7 +114,7 @@ The recalled-memories element is the untrusted-context envelope: the data-not-in
 
 The block ends with a blank line. The OpenAI-compatible adapter sends a text-only user message as its text blocks joined with no separator, so the separation has to be part of the rendered text. An empty user text is left out rather than sent as an empty block, which Anthropic rejects.
 
-Every input comes from a step result or the event payload: the time from `create-user-message` (or the stage's `persist-stage-prompt`), which returns the row's id and `created_at`; the memories from `auto-recall`; the modality from the voice decision frozen in `freeze-turn-inputs`, since resolving it reads the profile, the voice config and the delivery handle, none of them durable.
+Every input comes from a step result or the event payload: the time from the turn row's `created_at`, which `load-turn-transcript` reads with the history, finding the row by the inbound cursor it was written with ([crash-recovery.md](crash-recovery.md) → Where the turn's row comes from); the memories from `auto-recall`; the modality from the voice decision frozen in `freeze-turn-inputs`, since resolving it reads the profile, the voice config and the delivery handle, none of them durable.
 
 Recalled memories are data, not instructions, and sit in user content rather than the system prompt — the operator-authority slot. That also narrows an injection surface: stored memories can carry text that originated in web pages or tool output.
 
@@ -137,7 +137,7 @@ turn_contexts
 
 A side table rather than a column on `messages`: the row is written after the user row exists, so a column would mean updating the user row. It also keeps `messages.content` as "what the user said", which the web UI (through `Transport`) and the Observer read. An Observer extracting facts from the user row must not re-extract the memories recall injected.
 
-**Written by the render step, before the agent loop.** The insert (`insertOrRecoverTurnContext`) is `ON CONFLICT (message_id) DO UPDATE` with a no-op set, returning the stored row, so a retried step returns the first attempt's text (see `.claude/rules/inngest.md`). A turn that fails later keeps its context, and the next turn sends the same bytes the failed turn did. A stage whose `persist-stage-prompt` step re-runs after its commit recovers the message by its inbound cursor (`findUserMessageByInbound`).
+**Written by the render step, before the agent loop.** The insert (`insertOrRecoverTurnContext`) is `ON CONFLICT (message_id) DO UPDATE` with a no-op set, returning the stored row, so a retried step returns the first attempt's text (see `.claude/rules/inngest.md`). A turn that fails later keeps its context, and the next turn sends the same bytes the failed turn did.
 
 ### Alternatives considered
 
