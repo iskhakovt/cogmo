@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
+import { CorrectionExtractionSchema } from "../agent/evolution/extraction-schema.js";
 import {
   hasOpenObject,
   hasRecursiveRef,
+  restoreLiteralCasing,
   toStructuredOutputSchema,
 } from "./anthropic-output-schema.js";
 import { toObjectJsonSchema } from "./json-schema.js";
@@ -416,5 +418,98 @@ describe("hasRecursiveRef", () => {
     ],
   ])("is true for %s", (_label, schema) => {
     expect(hasRecursiveRef(schema)).toBe(true);
+  });
+});
+
+describe("restoreLiteralCasing", () => {
+  const TOPICS = wrap({
+    type: "string",
+    enum: ["Conversation Topic 1", "Conversation Topic 2", "Conversation topic 3"],
+  });
+
+  it("restores an enum value that differs only in capitalization", () => {
+    expect(restoreLiteralCasing(TOPICS, { value: "Conversation Topic 3" })).toEqual({
+      value: "Conversation topic 3",
+    });
+  });
+
+  it("restores a const value", () => {
+    expect(restoreLiteralCasing(wrap({ type: "string", const: "new" }), { value: "New" })).toEqual({
+      value: "new",
+    });
+  });
+
+  it("restores a discriminator and the enums of the variant it selects", () => {
+    const schema = toObjectJsonSchema(CorrectionExtractionSchema);
+    const reply = {
+      corrections: [
+        {
+          rule: "Be brief",
+          category: "Style",
+          reasoning: "The user asked twice",
+          action: "Reinforce",
+          matchedExistingRuleId: "rule-1",
+        },
+        {
+          rule: "Answer in French",
+          category: "domain",
+          reasoning: "The user switched language",
+          action: "new",
+          matchedExistingRuleId: null,
+          channelType: null,
+        },
+      ],
+    };
+
+    const restored = restoreLiteralCasing(schema, reply);
+
+    expect(restored).toEqual({
+      corrections: [
+        { ...reply.corrections[0], category: "style", action: "reinforce" },
+        reply.corrections[1],
+      ],
+    });
+    expect(CorrectionExtractionSchema.safeParse(restored).success).toBe(true);
+  });
+
+  it("follows $ref, items and anyOf", () => {
+    const schema: JsonSchema = {
+      type: "object",
+      properties: {
+        tags: { type: "array", items: { $ref: "#/$defs/Tag" } },
+        maybe: { anyOf: [{ $ref: "#/$defs/Tag" }, { type: "null" }] },
+      },
+      required: ["tags", "maybe"],
+      $defs: { Tag: { type: "string", enum: ["alpha", "beta"] } },
+    };
+
+    expect(restoreLiteralCasing(schema, { tags: ["Alpha", "beta"], maybe: "BETA" })).toEqual({
+      tags: ["alpha", "beta"],
+      maybe: "beta",
+    });
+  });
+
+  it("returns the value itself when every literal matches", () => {
+    const value = { value: "Conversation Topic 1" };
+
+    expect(restoreLiteralCasing(TOPICS, value)).toBe(value);
+  });
+
+  it.each<[string, JsonSchema, unknown]>([
+    [
+      "a value two members match",
+      wrap({ type: "string", enum: ["Draft", "draft"] }),
+      { value: "DRAFT" },
+    ],
+    ["a value no member matches", TOPICS, { value: "Conversation Topic 4" }],
+    [
+      "a value another variant admits",
+      wrap({ anyOf: [{ type: "string", enum: ["low", "high"] }, { type: "string" }] }),
+      { value: "High" },
+    ],
+    ["a property the schema doesn't name", TOPICS, { other: "conversation topic 1" }],
+    ["a value of another type", wrap({ type: "string", enum: ["1"] }), { value: 1 }],
+  ])("leaves %s as it is", (_label, schema, value) => {
+    expect(restoreLiteralCasing(schema, value)).toBe(value);
   });
 });

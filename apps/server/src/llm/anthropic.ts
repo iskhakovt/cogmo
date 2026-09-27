@@ -4,6 +4,7 @@ import { logger } from "../logger.js";
 import {
   hasOpenObject,
   hasRecursiveRef,
+  restoreLiteralCasing,
   toStructuredOutputSchema,
 } from "./anthropic-output-schema.js";
 import { cacheMarker } from "./cache-marker.js";
@@ -23,6 +24,7 @@ import {
   type ContentBlock,
   type CountTokensParams,
   DEFAULT_MAX_TOKENS,
+  type JsonSchema,
   type LlmResponse,
   type Message,
   type StopReason,
@@ -270,7 +272,15 @@ export class AnthropicProvider implements LlmProvider {
         }
       }
 
-      return { content, stopReason, model: response.model, usage };
+      return {
+        content:
+          format && !toolPath
+            ? content.map((block) => withLiteralCasing(block, format.schema))
+            : content,
+        stopReason,
+        model: response.model,
+        usage,
+      };
     } catch (err) {
       failChatSpan(span, err);
       throw err;
@@ -496,6 +506,26 @@ function isGrammarLimitError(err: unknown): boolean {
     body.success &&
     GRAMMAR_LIMIT_MESSAGES.some((message) => body.data.error.message.includes(message))
   );
+}
+
+/**
+ * A structured-output text block with its `enum` and `const` values in the
+ * schema's capitalization ({@link restoreLiteralCasing}). Text that isn't
+ * JSON, as in a cut-off or refused reply, passes through for the caller to
+ * judge.
+ */
+function withLiteralCasing(block: ContentBlock, schema: JsonSchema): ContentBlock {
+  if (block.type !== "text") return block;
+  let reply: unknown;
+  try {
+    reply = JSON.parse(block.text);
+  } catch {
+    return block;
+  }
+  const restored = restoreLiteralCasing(schema, reply);
+  if (restored === reply) return block;
+  logger.debug("restored the capitalization of enum or const values in a structured-output reply");
+  return { ...block, text: JSON.stringify(restored) };
 }
 
 /** The tool path's request for its call, in the system prompt and in a re-ask. */

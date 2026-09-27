@@ -98,6 +98,162 @@ function localRefs(node: unknown): ReadonlyArray<string> {
   ];
 }
 
+/**
+ * The value with its string `enum` and `const` values in the schema's
+ * capitalization. Structured outputs don't guarantee it: a reply can differ
+ * from a member in capitalization alone, and Anthropic's advice is to
+ * compare case-insensitively (platform docs, Structured outputs → Invalid
+ * outputs). A string that matches no member exactly and one member
+ * case-insensitively takes that member. In an `anyOf` or `oneOf`, a variant
+ * that admits the value as it is wins over one that restores it. Returns
+ * `value` itself when nothing changes. The schema must pass
+ * {@link hasRecursiveRef}.
+ */
+export function restoreLiteralCasing(schema: JsonSchema, value: unknown): unknown {
+  return restore(schema, value, schema).value;
+}
+
+/** A value after {@link restore}, with whether its node admits it. */
+interface Restored {
+  value: unknown;
+  /** Whether the node's types, literals and required properties admit the value. */
+  fits: boolean;
+  changed: boolean;
+}
+
+type RestoreStep = (value: unknown) => Restored;
+
+/** `value` restored against every keyword of `node`: all must admit it. */
+function restore(node: unknown, value: unknown, root: JsonSchema): Restored {
+  if (!R.isPlainObject(node)) return { value, fits: node !== false, changed: false };
+  return chain(
+    [
+      (current) => restoreRef(node.$ref, current, root),
+      (current) => ({ value: current, fits: admitsType(node.type, current), changed: false }),
+      (current) => restoreLiteral("const" in node ? [node.const] : undefined, current),
+      (current) => restoreLiteral(Array.isArray(node.enum) ? node.enum : undefined, current),
+      (current) => restoreProperties(node, current, root),
+      (current) => restoreItems(node.items, current, root),
+      (current) => restoreVariant([node.anyOf, node.oneOf].flatMap(asList), current, root),
+      ...asList(node.allOf).map(
+        (member): RestoreStep =>
+          (current) =>
+            restore(member, current, root),
+      ),
+    ],
+    value,
+  );
+}
+
+/** `value` through each step in turn, fitting only if every step admits it. */
+function chain(steps: ReadonlyArray<RestoreStep>, value: unknown): Restored {
+  return steps.reduce<Restored>((acc, step) => {
+    const next = step(acc.value);
+    return {
+      value: next.value,
+      fits: acc.fits && next.fits,
+      changed: acc.changed || next.changed,
+    };
+  }, kept(value));
+}
+
+function restoreRef(ref: unknown, value: unknown, root: JsonSchema): Restored {
+  const target = typeof ref === "string" ? resolvePointer(root, ref) : undefined;
+  return target === undefined ? kept(value) : restore(target, value, root);
+}
+
+function restoreLiteral(members: ReadonlyArray<unknown> | undefined, value: unknown): Restored {
+  if (members === undefined || members.some((member) => R.isDeepEqual(member, value))) {
+    return kept(value);
+  }
+  const matches =
+    typeof value === "string"
+      ? members.filter(
+          (member) => typeof member === "string" && member.toLowerCase() === value.toLowerCase(),
+        )
+      : [];
+  return matches.length === 1
+    ? { value: matches[0], fits: true, changed: true }
+    : { value, fits: false, changed: false };
+}
+
+function restoreProperties(
+  node: Readonly<Record<string, unknown>>,
+  value: unknown,
+  root: JsonSchema,
+): Restored {
+  if (!R.isPlainObject(value)) return kept(value);
+  const properties = R.isPlainObject(node.properties) ? node.properties : {};
+  const entries = Object.entries(value).map(
+    ([key, member]) =>
+      [
+        key,
+        Object.hasOwn(properties, key) ? restore(properties[key], member, root) : kept(member),
+      ] as const,
+  );
+  const required = asList(node.required);
+  const changed = entries.some(([, restored]) => restored.changed);
+  return {
+    value: changed ? Object.fromEntries(entries.map(([key, r]) => [key, r.value])) : value,
+    fits:
+      entries.every(([, restored]) => restored.fits) &&
+      required.every((key) => typeof key === "string" && Object.hasOwn(value, key)),
+    changed,
+  };
+}
+
+function restoreItems(items: unknown, value: unknown, root: JsonSchema): Restored {
+  if (items === undefined || !Array.isArray(value)) return kept(value);
+  const restored = value.map((item) => restore(items, item, root));
+  const changed = restored.some((r) => r.changed);
+  return {
+    value: changed ? restored.map((r) => r.value) : value,
+    fits: restored.every((r) => r.fits),
+    changed,
+  };
+}
+
+function restoreVariant(
+  variants: ReadonlyArray<unknown>,
+  value: unknown,
+  root: JsonSchema,
+): Restored {
+  if (variants.length === 0) return kept(value);
+  const restored = variants.map((variant) => restore(variant, value, root));
+  return (
+    restored.find((r) => r.fits && !r.changed) ??
+    restored.find((r) => r.fits) ?? { value, fits: false, changed: false }
+  );
+}
+
+/** Predicates for the JSON Schema type names. */
+const TYPE_TESTS: ReadonlyMap<string, (value: unknown) => boolean> = new Map([
+  ["null", (value: unknown) => value === null],
+  ["boolean", (value: unknown) => typeof value === "boolean"],
+  ["string", (value: unknown) => typeof value === "string"],
+  ["number", (value: unknown) => typeof value === "number"],
+  ["integer", (value: unknown) => Number.isInteger(value)],
+  ["array", (value: unknown) => Array.isArray(value)],
+  ["object", (value: unknown) => R.isPlainObject(value)],
+]);
+
+/** Whether `type`, one name or a list, admits the value. An unknown name admits anything. */
+function admitsType(type: unknown, value: unknown): boolean {
+  if (type === undefined) return true;
+  return asList(type).some(
+    (name) => typeof name !== "string" || (TYPE_TESTS.get(name)?.(value) ?? true),
+  );
+}
+
+function kept(value: unknown): Restored {
+  return { value, fits: true, changed: false };
+}
+
+function asList(value: unknown): ReadonlyArray<unknown> {
+  if (value === undefined) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
 /** The node a local JSON Pointer ref (`#`, `#/$defs/Name`) names, if any. */
 function resolvePointer(root: unknown, pointer: string): unknown {
   if (pointer === "#") return root;

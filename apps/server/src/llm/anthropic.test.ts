@@ -2130,6 +2130,42 @@ describe("AnthropicProvider", () => {
       expect(mockCreate).toHaveBeenCalledTimes(2);
     });
 
+    it("restores the capitalization of a structured-output reply's enum and const values", async () => {
+      const provider = createProvider();
+      const correction = {
+        rule: "Be brief",
+        category: "Style",
+        reasoning: "The user asked twice",
+        action: "New",
+        matchedExistingRuleId: null,
+        channelType: null,
+      };
+      mockCreate.mockResolvedValueOnce(
+        textReply("claude-opus-5-5", JSON.stringify({ corrections: [correction] })),
+      );
+
+      const result = await provider.chat({
+        model: "claude-opus-5-5",
+        system: "Extract corrections",
+        messages: [{ role: "user", content: "transcript" }],
+        responseFormat: {
+          type: "json_schema",
+          name: "correction-extraction",
+          schema: toObjectJsonSchema(CorrectionExtractionSchema),
+        },
+      });
+
+      expect(result.content).toEqual([
+        { type: "thinking", thinking: "", signature: "sig" },
+        {
+          type: "text",
+          text: JSON.stringify({
+            corrections: [{ ...correction, category: "style", action: "new" }],
+          }),
+        },
+      ]);
+    });
+
     it("passes a structured-output reply's text through, whatever it says", async () => {
       const provider = createProvider();
       mockCreate.mockResolvedValueOnce(textReply("claude-opus-5-5", "Who is Alice?"));
