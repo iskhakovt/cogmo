@@ -23,7 +23,7 @@ import type { EvolutionEventPayload } from "../evolution/event-schema.js";
 import { isCoreCompartment } from "../evolution/memory-extraction-schema.js";
 import { imageModelSlug } from "../image-tools.js";
 import type { AutoRecallMode } from "../recall-gate.js";
-import { RULE_SECTIONS, ruleSection, type SectionedRule } from "../rule-sections.js";
+import { ruleSection, type SectionedRule } from "../rule-sections.js";
 import type { TurnContext } from "../turn-context.js";
 import {
   CustomCompartmentCapExceededError,
@@ -768,7 +768,7 @@ export interface AgentStore {
 
   /**
    * Load active steering rules for a profile + active channels, each with its
-   * `# Rules` section, in the order `# Rules` lists them.
+   * `# Rules` section, in the order `# Rules` lists them within a section.
    */
   getActiveRules(
     tx: Transaction,
@@ -2220,8 +2220,7 @@ export class DrizzleAgentStore implements AgentStore {
         asc(steeringRules.priority),
         asc(steeringRules.id),
       );
-    const sectioned = rows.map((r) => ({ rule: r.rule, section: ruleSection(r.source) }));
-    return RULE_SECTIONS.flatMap((section) => sectioned.filter((r) => r.section === section));
+    return rows.map((r) => ({ rule: r.rule, section: ruleSection(r.source) }));
   }
 
   async getCoreMemoryBlocks(

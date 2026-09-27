@@ -1143,7 +1143,7 @@ describe("DrizzleAgentStore", () => {
       ]);
     });
 
-    it("sections each rule by its source, in precedence order", async () => {
+    it("sections each rule by its source", async () => {
       const profileId = await seedProfile();
       const { steeringRules } = await import("./schema.js");
       const rule = (
@@ -1161,7 +1161,6 @@ describe("DrizzleAgentStore", () => {
         profileId: null,
         channelType,
       });
-      // Priorities alone would put the channel default first.
       await db
         .insert(steeringRules)
         .values([
@@ -1172,13 +1171,14 @@ describe("DrizzleAgentStore", () => {
           rule("Operator", "manual", 200, null),
         ]);
 
-      expect(await tx((trx) => store.getActiveRules(trx, profileId, ["telegram"]))).toEqual([
-        { rule: "Operator", section: "always" },
-        { rule: "Stated", section: "from_user" },
-        { rule: "Learned", section: "learned" },
-        { rule: "Merged", section: "learned" },
-        { rule: "Channel default", section: "channel_defaults" },
-      ]);
+      const rules = await tx((trx) => store.getActiveRules(trx, profileId, ["telegram"]));
+      expect(Object.fromEntries(rules.map((r) => [r.rule, r.section]))).toEqual({
+        Operator: "always",
+        Stated: "from_user",
+        Learned: "learned",
+        Merged: "learned",
+        "Channel default": "channel_defaults",
+      });
     });
 
     it("orders a section by profile scope, then channel scope, then priority", async () => {

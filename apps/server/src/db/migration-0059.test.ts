@@ -176,9 +176,10 @@ describe("migration 0059 — steering rule source", () => {
 
     const profileId = await seedProfile();
     const store = new DrizzleAgentStore();
-    expect(await tx((trx) => store.getActiveRules(trx, profileId, ["telegram"]))).toEqual([
-      { rule: OPERATOR, section: "always" },
-      { rule: TABLES, section: "channel_defaults" },
-    ]);
+    const rules = await tx((trx) => store.getActiveRules(trx, profileId, ["telegram"]));
+    expect(Object.fromEntries(rules.map((r) => [r.rule, r.section]))).toEqual({
+      [OPERATOR]: "always",
+      [TABLES]: "channel_defaults",
+    });
   });
 });
