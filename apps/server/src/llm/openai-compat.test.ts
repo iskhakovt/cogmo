@@ -6,7 +6,7 @@ import { expectDefined } from "../test/assertions.js";
 import type { CacheDialect } from "./cache-dialect.js";
 import { ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
 import { isRetriableProviderError, RefusalError } from "./fallback.js";
-import { OpenAICompatibleProvider } from "./openai-compat.js";
+import { OpenAICompatibleProvider, outputCap } from "./openai-compat.js";
 import type { CacheIntent, ChatParams, ImageBlock, StreamEvent } from "./types.js";
 
 const mockCreate = vi.fn();
@@ -1490,6 +1490,116 @@ describe("OpenAICompatibleProvider", () => {
 
       expect(handedIntent).toBe(plain);
       expect(mockCreate).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("output cap", () => {
+    async function capBody(
+      path: "chat" | "chatStream",
+      model: string,
+      maxTokens: number | undefined,
+      dialect: CacheDialect,
+    ): Promise<Record<string, unknown>> {
+      const provider = createProvider(dialect);
+      const params: ChatParams = {
+        model,
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+        ...(maxTokens !== undefined && { maxTokens }),
+      };
+      if (path === "chat") {
+        mockCreate.mockResolvedValueOnce({
+          choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+          model,
+          usage: { prompt_tokens: 5, completion_tokens: 1 },
+        });
+        await provider.chat(params);
+      } else {
+        mockCreate.mockResolvedValueOnce(
+          mockStream([{ model, choices: [{ delta: {}, finish_reason: "stop" }] }]),
+        );
+        const { events } = provider.chatStream(params);
+        for await (const _ of events) {
+          /* drain */
+        }
+      }
+      const call = expectDefined(mockCreate.mock.calls[0], "create call");
+      return z.record(z.string(), z.unknown()).parse(call[0]);
+    }
+
+    describe.each(["chat", "chatStream"] as const)("%s", (path) => {
+      it.each(["gpt-5.4-nano", "o4-mini"])(
+        "sends %s's cap as max_completion_tokens",
+        async (model) => {
+          const body = await capBody(path, model, 300, "openai");
+
+          expect(body.max_completion_tokens).toBe(300);
+          expect(body).not.toHaveProperty("max_tokens");
+        },
+      );
+
+      it.each(["gpt-4.1-nano", "openai/gpt-5.4-nano", "x-ai/grok-4.3"])(
+        "sends %s's cap as max_tokens",
+        async (model) => {
+          const body = await capBody(path, model, 300, "openrouter");
+
+          expect(body.max_tokens).toBe(300);
+          expect(body).not.toHaveProperty("max_completion_tokens");
+        },
+      );
+
+      it("puts the default cap in the model's field", async () => {
+        const reasoning = await capBody(path, "gpt-5.4-nano", undefined, "openai");
+        const other = await capBody(path, "gpt-4.1-nano", undefined, "openai");
+
+        expect(reasoning.max_completion_tokens).toBe(other.max_tokens);
+        expect(reasoning.max_completion_tokens).toEqual(expect.any(Number));
+      });
+
+      it("keys the field on the model, not the host's dialect", async () => {
+        const body = await capBody(path, "gpt-5.4-nano", 300, "none");
+
+        expect(body.max_completion_tokens).toBe(300);
+        expect(body).not.toHaveProperty("max_tokens");
+      });
+    });
+
+    describe("outputCap", () => {
+      it.each([
+        "gpt-5",
+        "gpt-5-nano",
+        "gpt-5-nano-2025-08-07",
+        "gpt-5.4-nano",
+        "gpt-5.6-luna",
+        "gpt-6-luna",
+        "o1",
+        "o3-mini",
+        "o4-mini-2025-04-16",
+        "ft:o4-mini-2025-04-16:org::id",
+      ])("puts %s's cap in max_completion_tokens", (model) => {
+        expect(outputCap(model, 1024)).toEqual({ max_completion_tokens: 1024 });
+      });
+
+      it.each([
+        // OpenAI models before the reasoning line.
+        "gpt-4o-mini",
+        "gpt-4.1-nano",
+        "gpt-4.5-preview",
+        "gpt-3.5-turbo",
+        "ft:gpt-4.1-nano-2025-04-14:org::id",
+        // Open-weight, served by vLLM, Groq and others.
+        "gpt-oss-120b",
+        // OpenRouter slugs, OpenAI's included.
+        "openai/gpt-5.4-nano",
+        "openai/o4-mini",
+        "anthropic/claude-sonnet-5",
+        // Other hosts' own ids.
+        "grok-4.3",
+        "deepseek-chat",
+        "llama-3.3-70b-versatile",
+      ])("puts %s's cap in max_tokens", (model) => {
+        expect(outputCap(model, 1024)).toEqual({ max_tokens: 1024 });
+      });
     });
   });
 

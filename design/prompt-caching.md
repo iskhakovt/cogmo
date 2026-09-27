@@ -340,7 +340,7 @@ The persisted per-turn input is the sum across the turn's iterations, which over
 
 ## Validation `[confirmed]`
 
-Live measurements, 2026-09-25, from scripts kept outside the repo, each against a fresh ~7k-token system prompt. The Gemini and scenario D rows are from 2026-09-26, against a fresh ~3.5–4.7k-token prompt; scenario D is `src/llm/openai-compat.live.test.ts`. The conversation-level A–C rows are from 2026-09-27, `src/test/prompt-caching.live.test.ts`, whose five-turn conversation starts from a ~3.1k-token prefix.
+Live measurements, 2026-09-25, from scripts kept outside the repo, each against a fresh ~7k-token system prompt. The Gemini and scenario D rows are from 2026-09-26, against a fresh ~3–4.7k-token prompt; scenario D is `src/llm/openai-compat.live.test.ts`. The conversation-level A–C rows are from 2026-09-27, `src/test/prompt-caching.live.test.ts`, whose five-turn conversation starts from a ~3.1k-token prefix.
 
 | Question | Result |
 |-|-|
@@ -360,7 +360,7 @@ Live measurements, 2026-09-25, from scripts kept outside the repo, each against 
 | Scenario A: with the turn context, does each request of a conversation read exactly what the previous one cached, across turns? (Sonnet 5, five turns, six requests) | Yes. `cache_read` went 0, 3,115, 3,258, 3,473, 3,601, 3,682 after writes of 3,115, 143, 215, 128, 81 and 83, all 1-hour; the voice turn and the turn whose context left a memory out read like the rest. |
 | Scenario B: does replaying every earlier turn pass with preserved thinking enforced? (Opus 5.5, `prefix_mismatch_behavior: "error"`) | Yes. All six requests returned 200 with `input_transformations: []`, the last replaying two thinking blocks from earlier turns, and reads followed A's relation: 0, 3,052, 3,210, 3,469, 3,604, 3,755. |
 | Scenario C: does the next turn read the prefix after a gap a 5-minute entry wouldn't survive? (Sonnet 5, 6.5 minutes) | Yes. Turn 2's first request read 3,260 tokens, turn 1's last read plus write (3,114 + 146). |
-| Scenario D: does each dialect read the conversation's cache? (`long` intent, three requests) | Yes. OpenRouter → Claude Sonnet 5 read exactly the previous request's read plus write: 0, 4,698, 4,721, after writes of 4,698, 23 and 22. OpenRouter → Grok 4.3 read 3,136 of 3,152 and of 3,171, after one repeated miss. OpenRouter → Gemini 2.5 Flash read its 3,547-token system entry on both follow-ups. OpenAI gpt-4.1-nano with `prompt_cache_key` read 2,816 of 2,972 and of 2,992. |
+| Scenario D: does each dialect read the conversation's cache? (`long` intent, three requests) | Yes. OpenRouter → Claude Sonnet 5 read exactly the previous request's read plus write: 0, 4,698, 4,721, after writes of 4,698, 23 and 22. OpenRouter → Grok 4.3 read 3,136 of 3,152 and of 3,171, after one repeated miss. OpenRouter → Gemini 2.5 Flash read its 3,547-token system entry on both follow-ups. OpenAI with `prompt_cache_key` read 2,816 of 2,972 and of 2,992 on gpt-4.1-nano, and 2,816 of 2,969 and of 2,990 on gpt-5.4-nano. |
 
 ## Test Plan `[proposed]`
 
@@ -467,7 +467,7 @@ Recorded fixtures match on the last user message (`match: { userMessage }`), so 
 - **Core-memory edit frequency.** Few edits so far, from little use and from the previous guidance, which missed most core facts mentioned in passing ([memory.md](memory.md) → Core Memory vs Hindsight → Evaluation); re-measure edits per conversation-day on data collected under the current guidance before sizing step 3.
 - **Anthropic-compatible endpoints.** If an Anthropic-protocol `llm_providers` row ever points at a third-party endpoint, check that it accepts top-level `cache_control`, or fall back to an explicit tail marker for that row.
 - **Live tier in CI.** The scheduled workflow needs Anthropic, OpenAI and OpenRouter API keys as repository secrets (xAI optional, reached through OpenRouter until a direct key exists); until they exist, the live tier runs locally only.
-- **OpenAI reasoning models.** The OpenAI-compatible adapter sends `max_tokens`, which OpenAI's reasoning models reject in favour of `max_completion_tokens` (gpt-5.4-nano returned a 400), so scenario D runs OpenAI direct on gpt-4.1-nano, and `prompt_cache_key` on GPT-5.6's cache accounting is unmeasured.
+- **GPT-5.6 cache accounting.** Scenario D's OpenAI route runs gpt-5.4-nano, so what `prompt_cache_key` does to GPT-5.6's cache accounting, which bills writes, is unmeasured; a GPT-5.6 route would measure it.
 - **The xAI header.** `x-grok-conv-id` goes out as xAI documents it but has never met the real endpoint; a direct xAI key would add an xAI route to scenario D.
 
 ## Sources `[research]`
