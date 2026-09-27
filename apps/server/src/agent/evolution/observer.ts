@@ -159,10 +159,7 @@ export async function runObserver(
 ): Promise<ObserverResult> {
   const { agentStore, resolveProvider } = deps;
   const { conversationId } = event.data;
-  // Stamp the wall-clock duration of the fire into the audit row. Captured
-  // outside any step.run so retries don't reset the clock to the retry's
-  // wall time; the recorded value is meaningful as "how long the operator
-  // waited", not "how long the LLM calls took on the successful attempt".
+  // Restarts on every replay, so `durationMs` covers only the invocation that persists the row.
   const startedAt = Date.now();
 
   const conv = await step.run("load-conversation", async () => {

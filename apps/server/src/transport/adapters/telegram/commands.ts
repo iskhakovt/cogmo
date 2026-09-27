@@ -2553,9 +2553,9 @@ export async function handleCompact(
 }
 
 /**
- * Render the `/learned` digest — one line per event, newest first. Keeps
- * each entry under ~120 chars so a 10-event list fits well under
- * Telegram's 4096-char message cap with room for the header.
+ * Render the `/learned` digest — one line per event, newest first. Entries
+ * stay short so a 10-event list fits well under Telegram's 4096-char
+ * message cap with room for the header.
  */
 function formatEvolutionDigest(
   events: ReadonlyArray<EvolutionEventEntry>,
@@ -2578,7 +2578,7 @@ function formatEvolutionDigest(
   return [header, ...lines].join("\n");
 }
 
-/** Whether the event recorded `phase` as failed; an older row records none. */
+/** False on an older row, which recorded no phase outcomes. */
 function phaseFailed(event: EvolutionEventEntry, phase: ObserverPhase): boolean {
   return event.payload.failedPhases?.includes(phase) === true;
 }
@@ -2607,8 +2607,7 @@ function formatEvolutionDetail(event: EvolutionEventEntry, now: Date = new Date(
   if (payload.durationMs !== undefined) {
     lines.push(`Took: ${formatDurationMs(payload.durationMs)}`);
   }
-  // A failed phase's counts are its empty fallback, so it shows as failed
-  // rather than as a phase that found nothing.
+  // A failed phase's counts are fallback zeros, not findings.
   if (phaseFailed(event, "corrections")) {
     lines.push("", `Corrections: ${PHASE_FAILED}`);
   } else {

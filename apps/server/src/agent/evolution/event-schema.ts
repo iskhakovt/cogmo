@@ -74,11 +74,7 @@ export const EvolutionEventPayloadSchema = z.object({
    * a backfill.
    */
   durationMs: z.number().int().nonnegative().optional(),
-  /**
-   * Phases that failed after their step retries, in run order; their counts
-   * above are the empty fallback. Absent on older rows, where whether a phase
-   * failed is unknown, so absence doesn't mean none failed.
-   */
+  /** Phases that failed after their step retries, in run order; their counts above are the empty fallback. Absent on older rows: unknown, not `[]`. */
   failedPhases: z.array(ObserverPhaseSchema).optional(),
 });
 export type EvolutionEventPayload = z.infer<typeof EvolutionEventPayloadSchema>;

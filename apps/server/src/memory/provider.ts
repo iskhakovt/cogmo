@@ -28,11 +28,7 @@ export interface RetainOptions {
 
 export interface RetainBatchItem {
   content: string;
-  /**
-   * The item's document id. Retaining an id the bank already holds replaces
-   * that document, so content with a durable id can be retained again safely.
-   * Omitted, each item becomes a new document.
-   */
+  /** Retaining an id the bank already holds replaces that document, so a durable id makes a repeat retain safe. Omitted, the item becomes a new document. */
   documentId?: string;
   context?: string;
   metadata?: Record<string, string>;

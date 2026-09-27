@@ -122,7 +122,6 @@ function PhaseOutcome({ failedPhases }: { failedPhases: ObserverPhase[] | undefi
 
 function EvolutionDetail({ event }: { event: EvolutionEventEntry }) {
   const { corrections: c, consolidation, memories, drained } = event.payload;
-  // A failed phase's counts are its empty fallback, not a finding.
   const failed = (phase: ObserverPhase) => event.payload.failedPhases?.includes(phase) === true;
   return (
     <dl className="flex flex-col gap-4 font-mono text-xs">
