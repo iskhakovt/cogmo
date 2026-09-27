@@ -8,17 +8,10 @@
         "hasToolResult": false
       },
       "response": {
-        "toolCalls": [
-          {
-            "name": "memory-extraction",
-            "arguments": "{\"memories\":[{\"fact\":\"Prefers responses in plain sentences, not bullet points or numbered lists\",\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"first-party\"}]}",
-            "id": "toolu_015KbGNEyUheFnVujrcwCWrQ"
-          }
-        ]
+        "content": "{\"memories\":[{\"fact\":\"Prefers plain sentences without bullet points or numbered lists in responses\",\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"any\",\"context\":\"User explicitly requested this formatting preference during a conversation about Lisbon day trips\"}]}"
       },
       "metadata": {
-        "systemHash": "94c8d23c",
-        "toolsHash": "9f92809c"
+        "systemHash": "94c8d23c"
       }
     }
   ]

@@ -8,17 +8,10 @@
         "hasToolResult": false
       },
       "response": {
-        "toolCalls": [
-          {
-            "name": "memory-extraction",
-            "arguments": "{\"memories\":[{\"fact\":\"User goes by the nickname T.\",\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"first-party\"},{\"fact\":\"User recently moved to Lisbon, Portugal.\",\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"first-party\"},{\"fact\":\"T had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau there was the best they've ever had.\",\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"first-party\",\"context\":\"Casual conversation about Lisbon food, Sept 2026\"},{\"fact\":\"User prefers communication in plain sentences, no bullet points or lists.\",\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"first-party\"}]}",
-            "id": "toolu_01HG5JvDDevqrB2YcRuT6hdA"
-          }
-        ]
+        "content": "{\"memories\":[{\"fact\":\"User goes by the nickname T.\",\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"first-party\",\"context\":\"User introduced themselves at start of conversation\"},{\"fact\":\"User recently moved to Lisbon, Portugal.\",\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"first-party\",\"context\":\"User introduced themselves at start of conversation\"},{\"fact\":\"User had dinner at Taberna da Rua das Flores in Lisbon and said the bacalhau there was the best they've ever had.\",\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"first-party\",\"context\":\"Casual conversation about Lisbon food\"},{\"fact\":\"User prefers responses written in plain sentences, without bullet points or lists.\",\"network\":\"bank\",\"compartment\":\"personal\",\"trust\":\"first-party\",\"context\":\"User explicitly requested this communication style\"}]}"
       },
       "metadata": {
-        "systemHash": "94c8d23c",
-        "toolsHash": "9f92809c"
+        "systemHash": "94c8d23c"
       }
     }
   ]

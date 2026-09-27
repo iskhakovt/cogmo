@@ -2,7 +2,7 @@
   "fixtures": [
     {
       "match": {
-        "userMessage": "Return valid json only.\n\nExtract facts from the following chunk.\n\nChunk: 1/1\nEvent Date: [DATE] ([TS])\nContext: none\nMetadata:\n  source: conversation\n\nContent:\nUser recently moved to Lisbon, Portugal.",
+        "userMessage": "Return valid json only.\n\nExtract facts from the following chunk.\n\nChunk: 1/1\nEvent Date: [DATE] ([TS])\nContext: User introduced themselves at start of conversation\nMetadata:\n  source: conversation\n\nContent:\nUser recently moved to Lisbon, Portugal.",
         "model": "gpt-4o-mini",
         "turnIndex": 0,
         "hasToolResult": false
@@ -10,9 +10,9 @@
       "response": {
         "content": "{\n  \"facts\": [\n    {\n      \"what\": \"User recently moved to Lisbon, Portugal.\",\n      \"when\": \"N/A\",\n      \"where\": \"Lisbon, Portugal\",\n      \"who\": \"user\",\n      \"why\": \"N/A\",\n      \"fact_kind\": \"conversation\",\n      \"occurred_start\": null,\n      \"occurred_end\": null,\n      \"fact_type\": \"world\",\n      \"entities\": [\"user\", \"Lisbon\", \"Portugal\"],\n      \"causal_relations\": null,\n      \"from_attachments\": null\n    }\n  ]\n}",
         "usage": {
-          "prompt_tokens": 2907,
+          "prompt_tokens": 2913,
           "completion_tokens": 122,
-          "total_tokens": 3029,
+          "total_tokens": 3035,
           "prompt_tokens_details": {
             "cached_tokens": 2816,
             "audio_tokens": 0
