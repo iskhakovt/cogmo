@@ -3,23 +3,15 @@
 /**
  * Cross-provider integration coverage — proves the per-turn resolver
  * actually wires "two profiles, two providers, two upstream URLs" through
- * a real Postgres + a real secrets store. The original silent mis-routing
- * bug (bootstrap-resolved one provider, reused for every model) would
- * trip the path-routing assertion below: an OpenAI-compatible adapter
- * sending its request to `/v1/messages` (or vice versa) returns 404 from
- * llmock instead of the expected 503/strict-mismatch.
- *
- * llmock is shared across the integration suite — we pin our assertions
- * to the path llmock saw last, not to fixture content. No fixtures are
- * registered for these requests; the chat call itself is expected to
- * fail (strict mode → 503), which is fine because what we're verifying
- * is the URL the adapter dispatched to.
+ * a real Postgres + a real secrets store. A resolver that reused one
+ * provider for every model, or built the wrong adapter for a row, fails
+ * the tests below.
  */
 
 import { randomBytes } from "node:crypto";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
-import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DrizzleAgentStore } from "../agent/store/index.js";
 import { transactor } from "../db/index.js";
 import * as schema from "../db/schemas.js";
@@ -27,18 +19,17 @@ import { FallbackLlmProvider } from "../llm/fallback.js";
 import { createDbProviderResolver } from "../llm/resolver.js";
 import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../secrets/store/index.js";
+import { fileDatabaseUrl, fileLlmockUrl } from "./integration-file.js";
 
 const SUITE = randomBytes(4).toString("hex");
 const tag = (s: string) => `it-${SUITE}-${s}`;
 
 // Suite-tagged so this test stays isolated from any other writer to
-// `model_providers` in the shared integration DB. The resolver only
-// looks up the literal string in the routing table — it doesn't
-// validate against `MODEL_REGISTRY` — so any string works. The
-// `(model, position)` UNIQUE constraint on `model_providers` would
-// otherwise collide with parallel runs of this file (vitest worker
-// retries, suite re-entry) or any future test seeding the same model
-// at position 0.
+// `model_providers`. The resolver only looks up the literal string in the
+// routing table — it doesn't validate against `MODEL_REGISTRY` — so any
+// string works. The `(model, position)` UNIQUE constraint on
+// `model_providers` would otherwise collide with a re-entry of this suite
+// or any future test seeding the same model at position 0.
 const MODEL_ANTHROPIC = tag("anthropic-test-model");
 const MODEL_XAI = tag("openai-test-model");
 
@@ -47,11 +38,9 @@ let tx: ReturnType<typeof transactor>;
 let agentStore: DrizzleAgentStore;
 let secretsStore: DrizzleSecretsStore;
 let llmockBaseUrl: string;
-let anthropicProviderId: string;
-let openaiProviderId: string;
 
 beforeAll(async () => {
-  sql = postgres(inject("databaseUrl"), { max: 4 });
+  sql = postgres(fileDatabaseUrl(), { max: 4 });
   const db = drizzle(sql, { schema });
   tx = transactor(db);
   agentStore = new DrizzleAgentStore();
@@ -65,7 +54,7 @@ beforeAll(async () => {
   secretsStore = new DrizzleSecretsStore(
     deriveMasterKey(parseMasterKey(masterKey), "cogmo/secrets-at-rest/v1"),
   );
-  llmockBaseUrl = inject("llmockBaseUrl");
+  llmockBaseUrl = fileLlmockUrl();
 
   // Two secrets — distinct so we'd notice if the wrong one got decrypted.
   const anthropicSecret = await tx((trx) =>
@@ -102,15 +91,13 @@ beforeAll(async () => {
       attrs: { cacheDialect: "none" },
     }),
   );
-  anthropicProviderId = anthropic.id;
-  openaiProviderId = openai.id;
 
   // Route each model to its provider. Position 0 = primary (no fallback
   // chain — single-row FallbackLlmProvider is a no-op pass-through).
   await tx((trx) =>
     agentStore.addModelProvider(trx, {
       model: MODEL_ANTHROPIC,
-      providerId: anthropicProviderId,
+      providerId: anthropic.id,
       position: 0,
       userSelectable: true,
     }),
@@ -118,7 +105,7 @@ beforeAll(async () => {
   await tx((trx) =>
     agentStore.addModelProvider(trx, {
       model: MODEL_XAI,
-      providerId: openaiProviderId,
+      providerId: openai.id,
       position: 0,
       userSelectable: true,
     }),
@@ -126,13 +113,6 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // Tear down our routing rows so other integration tests in the same
-  // shared DB don't see them. Cascade from llm_providers handles
-  // model_providers (FK CASCADE on the schema), and `deleteSecret` would
-  // be ideal but the DrizzleSecretsStore interface above doesn't expose
-  // it; the rows leak harmlessly behind their suite-tagged names.
-  if (anthropicProviderId) await tx((trx) => agentStore.deleteProvider(trx, anthropicProviderId));
-  if (openaiProviderId) await tx((trx) => agentStore.deleteProvider(trx, openaiProviderId));
   await sql.end();
 });
 
@@ -174,9 +154,9 @@ describe("createDbProviderResolver — DB-backed cross-provider routing", () => 
   });
 
   // The next two tests exercise the full network path through each adapter
-  // type. llmock has a default chat-completion response that matches any
-  // request, so we get a parsed response back instead of an error — but
-  // each SDK posts to its OWN URL (Anthropic SDK → `<base>/v1/messages`,
+  // type. The file's cassette answers `ping` on either endpoint, so we get a
+  // parsed response back instead of an error — but each SDK posts to its OWN
+  // URL (Anthropic SDK → `<base>/v1/messages`,
   // OpenAI SDK → `<base>/v1/chat/completions`) and parses the response
   // through its OWN schema. A wrong-adapter construction would either
   // 404 against llmock's path-routing or fail the response-shape parse.

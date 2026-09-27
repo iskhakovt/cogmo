@@ -1860,8 +1860,39 @@ describe("handleClasses", () => {
     const transport = transportWith({ profileClasses: { delete: del } });
     const ctx = mkCtx("rm intimate");
     await handleClasses(transport, ctx);
-    expect(del).toHaveBeenCalledWith("1", "intimate");
+    expect(del).toHaveBeenCalledWith("1", "intimate", { confirm: false });
     expect(ctx.reply.mock.calls[0]?.[0]).toContain('"intimate" removed');
+  });
+
+  it("/classes rm lists the blocks it would delete and the command that confirms", async () => {
+    const del = vi
+      .fn()
+      .mockResolvedValue(
+        err({ code: "profile_class_has_blocks", keys: ["identity", "preferences"] }),
+      );
+    const transport = transportWith({ profileClasses: { delete: del } });
+    const ctx = mkCtx("rm game");
+    await handleClasses(transport, ctx);
+    expect(ctx.reply.mock.calls[0]?.[0]).toBe(
+      'Removing class "game" deletes its core-memory blocks: identity, preferences. ' +
+        "To go ahead: /classes rm game confirm",
+    );
+  });
+
+  it("/classes rm <name> confirm passes the confirmation", async () => {
+    const del = vi.fn().mockResolvedValue(ok(undefined));
+    const transport = transportWith({ profileClasses: { delete: del } });
+    await handleClasses(transport, mkCtx("rm game confirm"));
+    expect(del).toHaveBeenCalledWith("1", "game", { confirm: true });
+  });
+
+  it("/classes rm with a word other than confirm replies with usage", async () => {
+    const del = vi.fn();
+    const transport = transportWith({ profileClasses: { delete: del } });
+    const ctx = mkCtx("rm game now");
+    await handleClasses(transport, ctx);
+    expect(del).not.toHaveBeenCalled();
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain("Usage: /classes");
   });
 
   it("/classes remove and /classes delete both alias to rm", async () => {
@@ -1909,17 +1940,51 @@ describe("handleClasses", () => {
     const transport = transportWith({ profileClasses: { setRestricted } });
     const ctx = mkCtx("restrict intimate");
     await handleClasses(transport, ctx);
-    expect(setRestricted).toHaveBeenCalledWith("1", "intimate", true);
+    expect(setRestricted).toHaveBeenCalledWith("1", "intimate", true, { confirm: false });
     expect(ctx.reply.mock.calls[0]?.[0]).toContain("marked restricted");
   });
 
   it("/classes unrestrict <name> calls profileClasses.setRestricted with false", async () => {
-    const setRestricted = vi.fn().mockResolvedValue(ok(undefined));
+    const setRestricted = vi.fn().mockResolvedValue(ok({ overrideDeleted: false }));
     const transport = transportWith({ profileClasses: { setRestricted } });
     const ctx = mkCtx("unrestrict intimate");
     await handleClasses(transport, ctx);
-    expect(setRestricted).toHaveBeenCalledWith("1", "intimate", false);
+    expect(setRestricted).toHaveBeenCalledWith("1", "intimate", false, { confirm: false });
     expect(ctx.reply.mock.calls[0]?.[0]).toContain("no longer restricted");
+  });
+
+  it("/classes unrestrict names the identity block it would delete and the command that confirms", async () => {
+    const setRestricted = vi
+      .fn()
+      .mockResolvedValue(err({ code: "profile_class_has_blocks", keys: ["identity"] }));
+    const transport = transportWith({ profileClasses: { setRestricted } });
+    const ctx = mkCtx("unrestrict game");
+    await handleClasses(transport, ctx);
+    expect(ctx.reply.mock.calls[0]?.[0]).toBe(
+      'Class "game" has its own identity block, which unrestricting deletes; the class then ' +
+        "reads the shared one. To go ahead: /classes unrestrict game confirm",
+    );
+  });
+
+  it("/classes unrestrict <name> confirm passes the confirmation and names the deleted override", async () => {
+    const setRestricted = vi.fn().mockResolvedValue(ok({ overrideDeleted: true }));
+    const transport = transportWith({ profileClasses: { setRestricted } });
+    const ctx = mkCtx("unrestrict game confirm");
+    await handleClasses(transport, ctx);
+    expect(setRestricted).toHaveBeenCalledWith("1", "game", false, { confirm: true });
+    expect(ctx.reply.mock.calls[0]?.[0]).toBe(
+      'Class "game" no longer restricted. Its own identity block was deleted, so it reads the ' +
+        "shared one. Recall returns to open-by-default for this class.",
+    );
+  });
+
+  it("/classes restrict takes no confirm", async () => {
+    const setRestricted = vi.fn();
+    const transport = transportWith({ profileClasses: { setRestricted } });
+    const ctx = mkCtx("restrict game confirm");
+    await handleClasses(transport, ctx);
+    expect(setRestricted).not.toHaveBeenCalled();
+    expect(ctx.reply.mock.calls[0]?.[0]).toContain("Usage: /classes");
   });
 
   it("/classes restrict with no name replies with usage", async () => {
@@ -4276,6 +4341,37 @@ describe("handleLearned", () => {
     expect(reply).toContain("3 memory write(s)");
   });
 
+  it("names the failed phases on a digest line, and nothing on a fire without them", async () => {
+    const transport = transportWith({
+      evolution: {
+        listEvents: vi.fn().mockResolvedValue(
+          ok([
+            {
+              id: EVT_B,
+              conversationId: "c1",
+              triggeredBy: "idle",
+              payload: { ...makePayload(), failedPhases: ["memories", "drain"] },
+              createdAt: new Date("2026-06-01T10:00:00Z"),
+            },
+            {
+              id: EVT_A,
+              conversationId: "c1",
+              triggeredBy: "idle",
+              payload: { ...makePayload(), failedPhases: [] },
+              createdAt: new Date("2026-05-30T08:00:00Z"),
+            },
+          ]),
+        ),
+      },
+    });
+    const ctx = mkCtx();
+    await handleLearned(transport, ctx);
+    const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
+    const [lineB, lineA] = reply.split(/\n(?=\d+\. )/).slice(1);
+    expect(lineB).toContain("failed: memories, drain");
+    expect(lineA).not.toContain("failed");
+  });
+
   it("nudges the user to /reflect when there are no events", async () => {
     const transport = transportWith({
       evolution: { listEvents: vi.fn().mockResolvedValue(ok([])) },
@@ -4654,6 +4750,91 @@ describe("handleLearned detail rendering", () => {
     await handleLearned(transport, ctx);
     const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
     expect(reply).toMatch(/Took: 33s/);
+  });
+
+  it("shows a failed phase as failed instead of its fallback counts", async () => {
+    const transport = transportWith({
+      evolution: {
+        getEvent: vi.fn().mockResolvedValue(
+          ok({
+            id: EVT,
+            conversationId: "c1",
+            triggeredBy: "idle",
+            payload: {
+              ...makePayload({}),
+              corrections: {
+                extracted: 0,
+                reinforced: 0,
+                contradictions: 0,
+                promoted: 0,
+                outOfScopeReinforcementsSkipped: 0,
+                unknownRuleReinforcementsSkipped: 0,
+                consolidationNeeded: false,
+              },
+              failedPhases: ["corrections", "memories", "drain"],
+            },
+            createdAt: new Date("2026-05-30T08:00:00Z"),
+          }),
+        ),
+      },
+    });
+    const ctx = mkCtx(EVT);
+    await handleLearned(transport, ctx);
+    const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
+    expect(reply).toContain("Corrections: failed after retries");
+    expect(reply).toContain("Memories: failed after retries");
+    expect(reply).toContain("Pending drain: failed after retries");
+    expect(reply).not.toContain("extracted:    0");
+    expect(reply).not.toContain("Memories: 0 extracted");
+    expect(reply).not.toContain("Consolidation");
+  });
+
+  it("shows a failed consolidation beside the corrections that asked for it", async () => {
+    const payload = makePayload({});
+    const transport = transportWith({
+      evolution: {
+        getEvent: vi.fn().mockResolvedValue(
+          ok({
+            id: EVT,
+            conversationId: "c1",
+            triggeredBy: "idle",
+            payload: {
+              ...payload,
+              corrections: { ...payload.corrections, consolidationNeeded: true },
+              failedPhases: ["consolidation"],
+            },
+            createdAt: new Date("2026-05-30T08:00:00Z"),
+          }),
+        ),
+      },
+    });
+    const ctx = mkCtx(EVT);
+    await handleLearned(transport, ctx);
+    const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
+    expect(reply).toContain("Consolidation: failed after retries");
+    expect(reply).toContain("extracted:    1");
+  });
+
+  it("renders counts as before for a row without recorded phase outcomes", async () => {
+    const transport = transportWith({
+      evolution: {
+        getEvent: vi.fn().mockResolvedValue(
+          ok({
+            id: EVT,
+            conversationId: "c1",
+            triggeredBy: "idle",
+            payload: makePayload({}),
+            createdAt: new Date("2026-05-30T08:00:00Z"),
+          }),
+        ),
+      },
+    });
+    const ctx = mkCtx(EVT);
+    await handleLearned(transport, ctx);
+    const reply = (ctx.reply.mock.calls[0]?.[0] ?? "") as string;
+    expect(reply).toContain("extracted:    1");
+    expect(reply).toContain("Memories: 0 extracted");
+    expect(reply).not.toContain("failed");
   });
 
   it("omits the Took line when durationMs is absent", async () => {

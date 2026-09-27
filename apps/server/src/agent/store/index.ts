@@ -7,6 +7,7 @@ import {
   getTableColumns,
   gt,
   inArray,
+  isNotNull,
   isNull,
   lte,
   ne,
@@ -19,10 +20,12 @@ import type { Transaction } from "../../db/index.js";
 import type { ContentBlock, Message } from "../../llm/types.js";
 import { inboundMessages } from "../../transport/store/schema.js";
 import { truncate } from "../../util/string.js";
+import { IDENTITY_BLOCK_KEY, type ScopedCoreMemoryBlock } from "../core-memory/scope.js";
 import type { EvolutionEventPayload } from "../evolution/event-schema.js";
 import { isCoreCompartment } from "../evolution/memory-extraction-schema.js";
 import { imageModelSlug } from "../image-tools.js";
 import type { AutoRecallMode } from "../recall-gate.js";
+import { ruleSection, type SectionedRule } from "../rule-sections.js";
 import type { TurnContext } from "../turn-context.js";
 import {
   CustomCompartmentCapExceededError,
@@ -765,24 +768,46 @@ export interface AgentStore {
     messageId: string,
   ): Promise<{ id: string; role: string; content: string | ContentBlock[] } | undefined>;
 
-  /** Load active steering rules for a profile + active channels, ordered by priority, then id. */
+  /**
+   * Load active steering rules for a profile + active channels, each with its
+   * `# Rules` section, in the order `# Rules` lists them within a section.
+   */
   getActiveRules(
     tx: Transaction,
     profileId: string,
     channelTypes: ReadonlyArray<string>,
-  ): Promise<ReadonlyArray<{ rule: string }>>;
+  ): Promise<ReadonlyArray<SectionedRule>>;
 
-  /** Get all core memory blocks for a user, ordered by key. */
+  /**
+   * The user's core memory blocks visible to one scope. `profileClass: null`
+   * reads every NULL-class block in key order. A class reads the shared
+   * `identity`, then the class's blocks: its `identity` override first, the
+   * rest in key order.
+   */
   getCoreMemoryBlocks(
     tx: Transaction,
     userId: string,
-  ): Promise<ReadonlyArray<{ key: string; content: string }>>;
+    profileClass: string | null,
+  ): Promise<ReadonlyArray<ScopedCoreMemoryBlock>>;
 
-  /** Upsert a core memory block. Creates if key doesn't exist, updates if it does. */
+  /** Create or replace the block at `(userId, profileClass, key)`. */
   upsertCoreMemoryBlock(
     tx: Transaction,
-    params: { userId: string; key: string; content: string },
+    params: { userId: string; profileClass: string | null; key: string; content: string },
   ): Promise<void>;
+
+  /** Delete the block at `(userId, profileClass, key)`, if any. */
+  deleteCoreMemoryBlock(
+    tx: Transaction,
+    params: { userId: string; profileClass: string; key: string },
+  ): Promise<void>;
+
+  /** The keys of one class's own blocks, in key order. */
+  listCoreMemoryKeys(
+    tx: Transaction,
+    userId: string,
+    profileClass: string,
+  ): Promise<ReadonlyArray<string>>;
 
   /** Get the timestamp of the most recent message in a conversation (any role). `undefined` when no messages. */
   getLastMessageTime(tx: Transaction, conversationId: string): Promise<Date | undefined>;
@@ -1133,17 +1158,16 @@ export interface AgentStore {
 
   // --- Evolution: correction extraction ---
 
-  /** Check if any channel-specific rules exist for a given channel type. */
-  hasChannelRules(tx: Transaction, channelType: string): Promise<boolean>;
+  /** Whether a channel's defaults have been seeded. */
+  hasChannelDefaults(tx: Transaction, channelType: string): Promise<boolean>;
 
-  /** Insert a manual steering rule (already active). Used by seed/setup. */
-  insertManualRule(
+  /** Insert an active channel default (`source = 'seed'`) for every profile. */
+  insertSeedRule(
     tx: Transaction,
     params: {
       rule: string;
       category: string;
-      profileId?: string | null;
-      channelType?: string | null;
+      channelType: string;
       priority: number;
     },
   ): Promise<{ id: string }>;
@@ -1739,11 +1763,7 @@ export class DrizzleAgentStore implements AgentStore {
       source: SummarySourceValue;
     },
   ): Promise<{ kind: "new" | "recovered"; row: CompactionSummary }> {
-    // DO UPDATE with a no-op SET rather than DO NOTHING — see
-    // `insertOrRecoverTask` for why the concurrent loser needs a write to
-    // raise 40001 instead of silently skipping the tuple. `xmax = 0` is zero
-    // on a tuple this statement inserted and the locking xid on one it
-    // reached through the conflict arm.
+    // Keyed insert: see `.claude/rules/inngest.md`.
     const rows = await tx
       .insert(conversationSummaries)
       .values(params)
@@ -1763,8 +1783,7 @@ export class DrizzleAgentStore implements AgentStore {
     tx: Transaction,
     params: StoredTurnContext,
   ): Promise<StoredTurnContext> {
-    // DO UPDATE with a no-op SET so one statement returns the stored row from
-    // either arm (`.claude/rules/inngest.md`).
+    // Keyed insert: see `.claude/rules/inngest.md`.
     return single(
       await tx
         .insert(turnContexts)
@@ -2195,13 +2214,15 @@ export class DrizzleAgentStore implements AgentStore {
     tx: Transaction,
     profileId: string,
     channelTypes: ReadonlyArray<string>,
-  ): Promise<ReadonlyArray<{ rule: string }>> {
-    // `id` breaks priority ties, which are common (corrections share 100, seeded
-    // channel rules 50). An in-place update moves a row in the heap, so without
+  ): Promise<ReadonlyArray<SectionedRule>> {
+    // Within a section: `safety` first (only operators write it), then the
+    // narrower scope, so it is listed before a wider rule it conflicts with.
+    // `id` breaks priority ties, which are common (corrections share 100,
+    // seeded rules 50). An in-place update moves a row in the heap, so without
     // it `# Rules` could reorder, invalidating the cached prompt, with no rule
     // changed.
-    return tx
-      .select({ rule: steeringRules.rule })
+    const rows = await tx
+      .select({ rule: steeringRules.rule, source: steeringRules.source })
       .from(steeringRules)
       .where(
         and(
@@ -2213,35 +2234,96 @@ export class DrizzleAgentStore implements AgentStore {
           ),
         ),
       )
-      .orderBy(asc(steeringRules.priority), asc(steeringRules.id));
+      .orderBy(
+        desc(eq(steeringRules.category, "safety")),
+        asc(isNull(steeringRules.profileId)),
+        asc(isNull(steeringRules.channelType)),
+        asc(steeringRules.priority),
+        asc(steeringRules.id),
+      );
+    return rows.map((r) => ({ rule: r.rule, section: ruleSection(r.source) }));
   }
 
   async getCoreMemoryBlocks(
     tx: Transaction,
     userId: string,
-  ): Promise<ReadonlyArray<{ key: string; content: string }>> {
+    profileClass: string | null,
+  ): Promise<ReadonlyArray<ScopedCoreMemoryBlock>> {
+    const columns = {
+      profileClass: coreMemoryBlocks.profileClass,
+      key: coreMemoryBlocks.key,
+      content: coreMemoryBlocks.content,
+    };
+    if (profileClass === null) {
+      return tx
+        .select(columns)
+        .from(coreMemoryBlocks)
+        .where(and(eq(coreMemoryBlocks.userId, userId), isNull(coreMemoryBlocks.profileClass)))
+        .orderBy(asc(coreMemoryBlocks.key));
+    }
     return tx
-      .select({ key: coreMemoryBlocks.key, content: coreMemoryBlocks.content })
+      .select(columns)
       .from(coreMemoryBlocks)
-      .where(eq(coreMemoryBlocks.userId, userId))
-      .orderBy(asc(coreMemoryBlocks.key));
+      .where(
+        and(
+          eq(coreMemoryBlocks.userId, userId),
+          or(
+            and(
+              isNull(coreMemoryBlocks.profileClass),
+              eq(coreMemoryBlocks.key, IDENTITY_BLOCK_KEY),
+            ),
+            eq(coreMemoryBlocks.profileClass, profileClass),
+          ),
+        ),
+      )
+      .orderBy(
+        asc(isNotNull(coreMemoryBlocks.profileClass)),
+        asc(ne(coreMemoryBlocks.key, IDENTITY_BLOCK_KEY)),
+        asc(coreMemoryBlocks.key),
+      );
   }
 
   async upsertCoreMemoryBlock(
     tx: Transaction,
-    params: {
-      userId: string;
-      key: string;
-      content: string;
-    },
+    params: { userId: string; profileClass: string | null; key: string; content: string },
   ): Promise<void> {
     await tx
       .insert(coreMemoryBlocks)
       .values(params)
       .onConflictDoUpdate({
-        target: [coreMemoryBlocks.userId, coreMemoryBlocks.key],
+        target: [coreMemoryBlocks.userId, coreMemoryBlocks.profileClass, coreMemoryBlocks.key],
         set: { content: params.content, updatedAt: new Date() },
       });
+  }
+
+  async deleteCoreMemoryBlock(
+    tx: Transaction,
+    params: { userId: string; profileClass: string; key: string },
+  ): Promise<void> {
+    await tx
+      .delete(coreMemoryBlocks)
+      .where(
+        and(
+          eq(coreMemoryBlocks.userId, params.userId),
+          eq(coreMemoryBlocks.profileClass, params.profileClass),
+          eq(coreMemoryBlocks.key, params.key),
+        ),
+      );
+  }
+
+  async listCoreMemoryKeys(
+    tx: Transaction,
+    userId: string,
+    profileClass: string,
+  ): Promise<ReadonlyArray<string>> {
+    const rows = await tx
+      .select({ key: coreMemoryBlocks.key })
+      .from(coreMemoryBlocks)
+      .where(
+        and(eq(coreMemoryBlocks.userId, userId), eq(coreMemoryBlocks.profileClass, profileClass)),
+      )
+      .orderBy(asc(coreMemoryBlocks.key));
+    return rows.map((r) => r.key);
   }
 
   async getLastTokens(
@@ -2852,22 +2934,21 @@ export class DrizzleAgentStore implements AgentStore {
     return { deleted: deleted.length > 0 };
   }
 
-  async hasChannelRules(tx: Transaction, channelType: string): Promise<boolean> {
+  async hasChannelDefaults(tx: Transaction, channelType: string): Promise<boolean> {
     const rows = await tx
       .select({ id: steeringRules.id })
       .from(steeringRules)
-      .where(eq(steeringRules.channelType, channelType))
+      .where(and(eq(steeringRules.channelType, channelType), eq(steeringRules.source, "seed")))
       .limit(1);
     return rows.length > 0;
   }
 
-  async insertManualRule(
+  async insertSeedRule(
     tx: Transaction,
     params: {
       rule: string;
       category: string;
-      profileId?: string | null;
-      channelType?: string | null;
+      channelType: string;
       priority: number;
     },
   ): Promise<{ id: string }> {
@@ -2877,12 +2958,12 @@ export class DrizzleAgentStore implements AgentStore {
         .values({
           rule: params.rule,
           category: params.category,
-          source: "manual",
+          source: "seed",
           active: true,
           priority: params.priority,
           observationCount: 0,
-          profileId: params.profileId ?? null,
-          channelType: params.channelType ?? null,
+          profileId: null,
+          channelType: params.channelType,
         })
         .returning({ id: steeringRules.id }),
     );
@@ -3156,16 +3237,7 @@ export class DrizzleAgentStore implements AgentStore {
     },
   ): Promise<{ kind: "new" | "recovered"; row: ScheduledTask }> {
     const key = params.idempotencyKey;
-    // DO UPDATE with a no-op SET, not DO NOTHING. The sequential retry is the
-    // same either way; the concurrent one is not. Under the project's
-    // REPEATABLE READ default, a loser conflicting with a row committed after
-    // its snapshot cannot see that row: DO NOTHING skips the tuple, the
-    // re-SELECT finds nothing, and the call fails deterministically with
-    // nothing for the transactor to retry. DO UPDATE must write the tuple, so
-    // Postgres raises `40001 serialization_failure` instead — which the
-    // transactor retries against a fresh snapshot that does contain the
-    // winner. (`FOR UPDATE` on the re-SELECT would not help: a row absent from
-    // the snapshot is absent from a locking read too.)
+    // Keyed insert: see `.claude/rules/inngest.md`.
     //
     // `xmax = 0` distinguishes the outcomes, so the caller can recover a retry
     // inside the same transaction as its cap check rather than pre-reading in

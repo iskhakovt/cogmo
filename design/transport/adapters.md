@@ -261,7 +261,7 @@ All behavioral instructions — global, profile-scoped, and channel-scoped — l
 
 Query at prompt assembly: `(profile_id = $p OR IS NULL) AND (channel_type IN $activeChannels OR IS NULL) AND active = true`. Cross-channel conversations union rules from all active channels.
 
-Default channel rules are seeded when a channel is configured (setup wizard, same pattern as profile seeding). Observer can later modify, graduate, and consolidate them like any other rule — single evolution surface for all behavioral instructions.
+Default channel rules are seeded when a channel is configured (setup wizard, same pattern as profile seeding), with `source = 'seed'`. They render last in `# Rules`, under Channel defaults, so a user's instruction or learned rule outranks them ([evolution.md](../evolution.md) → Explicit Instructions → Precedence); the Observer and consolidation leave them alone.
 
 ### Output rendering (format-level)
 
@@ -293,7 +293,7 @@ Each adapter picks the rendering path that suits its platform:
 A conversation can have sessions on multiple channels simultaneously (e.g., Telegram DM + web UI). Two implications:
 
 1. **Output** — `DeliveryRouter` calls each adapter's `renderOutput` per session. Same canonical markdown, different renders per channel. No special logic needed in the orchestrator.
-2. **Prompt** — Steering rules for all active channel types are unioned via the query's `IN` clause. Rules are written to be additive and non-conflicting (channel-specific guidance scoped by `channel_type`, general guidance left null).
+2. **Prompt** — Steering rules for all active channel types are unioned via the query's `IN` clause and rendered by section ([Channel-specific instructions](#channel-specific-instructions)).
 
 ### Why this design
 

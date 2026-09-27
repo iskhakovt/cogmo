@@ -17,6 +17,7 @@ export const TransportErrorSchema = z.discriminatedUnion("code", [
   z.object({ code: z.literal("profile_in_use") }),
   z.object({ code: z.literal("profile_name_taken") }),
   z.object({ code: z.literal("profile_class_in_use"), profileRefs: z.number() }),
+  z.object({ code: z.literal("profile_class_has_blocks"), keys: z.array(z.string()) }),
   z.object({ code: z.literal("profile_class_not_found"), name: z.string() }),
   z.object({ code: z.literal("profile_class_name_taken"), name: z.string() }),
   z.object({ code: z.literal("unknown_profile_class"), name: z.string() }),

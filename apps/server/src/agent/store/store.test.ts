@@ -7,7 +7,7 @@ import { expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { inboundMessages } from "../../transport/store/schema.js";
 import { DrizzleAgentStore } from "./index.js";
-import { conversationSummaries, messages } from "./schema.js";
+import { conversationSummaries, coreMemoryBlocks, messages } from "./schema.js";
 
 let db: Database;
 let tx: Transactor;
@@ -1081,7 +1081,7 @@ describe("DrizzleAgentStore", () => {
   });
 
   describe("steering rules", () => {
-    it("returns active rules for profile + global, ordered by priority", async () => {
+    it("returns active rules for profile + global, safety first", async () => {
       const profileId = await seedProfile();
       const otherProfileId = (
         await tx((trx) =>
@@ -1137,7 +1137,175 @@ describe("DrizzleAgentStore", () => {
       ]);
 
       const rules = await tx((trx) => store.getActiveRules(trx, profileId, []));
-      expect(rules).toEqual([{ rule: "Global safety rule" }, { rule: "Be concise" }]);
+      expect(rules).toEqual([
+        { rule: "Global safety rule", section: "always" },
+        { rule: "Be concise", section: "always" },
+      ]);
+    });
+
+    it("sections each rule by its source", async () => {
+      const profileId = await seedProfile();
+      const { steeringRules } = await import("./schema.js");
+      const rule = (
+        text: string,
+        source: "manual" | "seed" | "instruction" | "correction" | "evolution",
+        priority: number,
+        channelType: string | null,
+      ) => ({
+        rule: text,
+        category: "style",
+        active: true,
+        source,
+        priority,
+        observationCount: 2,
+        profileId: null,
+        channelType,
+      });
+      await db
+        .insert(steeringRules)
+        .values([
+          rule("Channel default", "seed", 50, "telegram"),
+          rule("Learned", "correction", 100, null),
+          rule("Merged", "evolution", 100, null),
+          rule("Stated", "instruction", 100, null),
+          rule("Operator", "manual", 200, null),
+        ]);
+
+      const rules = await tx((trx) => store.getActiveRules(trx, profileId, ["telegram"]));
+      expect(Object.fromEntries(rules.map((r) => [r.rule, r.section]))).toEqual({
+        Operator: "always",
+        Stated: "from_user",
+        Learned: "learned",
+        Merged: "learned",
+        "Channel default": "channel_defaults",
+      });
+    });
+
+    it("orders a section by profile scope, then channel scope, then priority", async () => {
+      const profileId = await seedProfile();
+      const { steeringRules } = await import("./schema.js");
+      const rule = (
+        text: string,
+        scope: { profileId: string | null; channelType: string | null },
+        priority: number,
+      ) => ({
+        rule: text,
+        category: "style",
+        active: true,
+        source: "correction" as const,
+        priority,
+        observationCount: 2,
+        ...scope,
+      });
+      const everywhere = { profileId: null, channelType: null };
+      // Inserted widest first, so id order is the reverse of the expected one.
+      await db
+        .insert(steeringRules)
+        .values([
+          rule("Everywhere, priority 100", everywhere, 100),
+          rule("Everywhere, priority 90", everywhere, 90),
+          rule("All profiles, on telegram", { profileId: null, channelType: "telegram" }, 10),
+          rule("This profile, all channels", { profileId, channelType: null }, 10),
+          rule("This profile, on telegram", { profileId, channelType: "telegram" }, 100),
+        ]);
+
+      expect(
+        (await tx((trx) => store.getActiveRules(trx, profileId, ["telegram"]))).map((r) => r.rule),
+      ).toEqual([
+        "This profile, on telegram",
+        "This profile, all channels",
+        "All profiles, on telegram",
+        "Everywhere, priority 90",
+        "Everywhere, priority 100",
+      ]);
+    });
+
+    it("lists safety rules first in Always, whatever their scope and priority", async () => {
+      const profileId = await seedProfile();
+      const { steeringRules } = await import("./schema.js");
+      await db.insert(steeringRules).values([
+        {
+          rule: "Profile style rule",
+          category: "style",
+          active: true,
+          source: "manual",
+          priority: 1,
+          observationCount: 0,
+          profileId,
+        },
+        {
+          rule: "Global safety rule",
+          category: "safety",
+          active: true,
+          source: "manual",
+          priority: 500,
+          observationCount: 0,
+          profileId: null,
+        },
+      ]);
+
+      expect(await tx((trx) => store.getActiveRules(trx, profileId, []))).toEqual([
+        { rule: "Global safety rule", section: "always" },
+        { rule: "Profile style rule", section: "always" },
+      ]);
+    });
+
+    it("insertSeedRule writes an active, global channel default", async () => {
+      const { id } = await tx((trx) =>
+        store.insertSeedRule(trx, {
+          rule: "Avoid tables",
+          category: "style",
+          channelType: "telegram",
+          priority: 50,
+        }),
+      );
+
+      const { steeringRules } = await import("./schema.js");
+      const rows = await db
+        .select({
+          source: steeringRules.source,
+          active: steeringRules.active,
+          profileId: steeringRules.profileId,
+          channelType: steeringRules.channelType,
+          priority: steeringRules.priority,
+          observationCount: steeringRules.observationCount,
+        })
+        .from(steeringRules)
+        .where(eq(steeringRules.id, id));
+      expect(rows).toEqual([
+        {
+          source: "seed",
+          active: true,
+          profileId: null,
+          channelType: "telegram",
+          priority: 50,
+          observationCount: 0,
+        },
+      ]);
+    });
+
+    it("hasChannelDefaults counts only the channel's seed rules", async () => {
+      const { steeringRules } = await import("./schema.js");
+      const has = () => tx((trx) => store.hasChannelDefaults(trx, "telegram"));
+      const insert = (source: "manual" | "seed" | "correction", channelType: string) =>
+        db.insert(steeringRules).values({
+          rule: `${source} on ${channelType}`,
+          category: "style",
+          active: true,
+          source,
+          priority: 100,
+          observationCount: 2,
+          profileId: null,
+          channelType,
+        });
+
+      await insert("correction", "telegram");
+      await insert("manual", "telegram");
+      await insert("seed", "slack");
+      expect(await has()).toBe(false);
+
+      await insert("seed", "telegram");
+      expect(await has()).toBe(true);
     });
 
     it("keeps tied priorities in id order after both corrections are promoted", async () => {
@@ -1161,8 +1329,8 @@ describe("DrizzleAgentStore", () => {
       await observe("First rule", first.id);
 
       expect(await tx((trx) => store.getActiveRules(trx, profileId, []))).toEqual([
-        { rule: "First rule" },
-        { rule: "Second rule" },
+        { rule: "First rule", section: "learned" },
+        { rule: "Second rule", section: "learned" },
       ]);
       expect((await tx((trx) => store.getCorrections(trx, profileId))).map((c) => c.rule)).toEqual([
         "First rule",
@@ -1211,72 +1379,175 @@ describe("DrizzleAgentStore", () => {
         },
       ]);
 
-      // No channels active — only null-scoped rules
-      expect(await tx((trx) => store.getActiveRules(trx, profileId, []))).toEqual([
-        { rule: "Global rule" },
-      ]);
+      const rules = async (channelTypes: ReadonlyArray<string>) =>
+        (await tx((trx) => store.getActiveRules(trx, profileId, channelTypes))).map((r) => r.rule);
 
-      // Telegram active — global + telegram
-      expect(await tx((trx) => store.getActiveRules(trx, profileId, ["telegram"]))).toEqual([
-        { rule: "Global rule" },
-        { rule: "Telegram rule" },
-      ]);
+      // No channels active — only null-scoped rules
+      expect(await rules([])).toEqual(["Global rule"]);
+
+      // Telegram active — telegram + global, the narrower scope first
+      expect(await rules(["telegram"])).toEqual(["Telegram rule", "Global rule"]);
 
       // Both channels — union
-      expect(
-        await tx((trx) => store.getActiveRules(trx, profileId, ["telegram", "slack"])),
-      ).toEqual([{ rule: "Global rule" }, { rule: "Telegram rule" }, { rule: "Slack rule" }]);
+      expect(await rules(["telegram", "slack"])).toEqual([
+        "Telegram rule",
+        "Slack rule",
+        "Global rule",
+      ]);
     });
   });
 
   describe("core memory blocks", () => {
+    async function upsert(
+      userId: string,
+      profileClass: string | null,
+      key: string,
+      content: string,
+    ): Promise<void> {
+      await tx((trx) => store.upsertCoreMemoryBlock(trx, { userId, profileClass, key, content }));
+    }
+
+    async function seedClass(userId: string, name: string): Promise<void> {
+      await tx((trx) => store.createProfileClass(trx, { userId, name, description: name }));
+    }
+
     it("upsert creates a new block", async () => {
       const userId = await seedUser();
-      await tx((trx) =>
-        store.upsertCoreMemoryBlock(trx, { userId, key: "user_profile", content: "Name: Tim" }),
-      );
+      await upsert(userId, null, "user_profile", "Name: Tim");
 
-      const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId));
-      expect(blocks).toEqual([{ key: "user_profile", content: "Name: Tim" }]);
+      const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId, null));
+      expect(blocks).toEqual([{ profileClass: null, key: "user_profile", content: "Name: Tim" }]);
     });
 
-    it("upsert updates existing block", async () => {
+    it("upsert replaces the block in its scope, including the NULL-class scope", async () => {
       const userId = await seedUser();
-      await tx((trx) =>
-        store.upsertCoreMemoryBlock(trx, { userId, key: "user_profile", content: "Name: Tim" }),
-      );
-      await tx((trx) =>
-        store.upsertCoreMemoryBlock(trx, {
-          userId,
-          key: "user_profile",
-          content: "Name: Tim\nRole: Engineer",
-        }),
-      );
+      await upsert(userId, null, "user_profile", "Name: Tim");
+      await upsert(userId, null, "user_profile", "Name: Tim\nRole: Engineer");
 
-      const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId));
-      expect(blocks).toHaveLength(1);
-      expect(blocks[0]!.content).toBe("Name: Tim\nRole: Engineer");
+      const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId, null));
+      expect(blocks).toEqual([
+        { profileClass: null, key: "user_profile", content: "Name: Tim\nRole: Engineer" },
+      ]);
+      const rows = await db
+        .select({ id: coreMemoryBlocks.id })
+        .from(coreMemoryBlocks)
+        .where(eq(coreMemoryBlocks.userId, userId));
+      expect(rows).toHaveLength(1);
     });
 
-    it("returns blocks ordered by key", async () => {
+    it("an unclassed read returns every NULL-class block in key order, identity included", async () => {
       const userId = await seedUser();
+      await seedClass(userId, "game");
+      await upsert(userId, null, "user_profile", "Tim");
+      await upsert(userId, null, "identity", "Name: Tim");
+      await upsert(userId, null, "active_projects", "Assistant");
+      await upsert(userId, "game", "preferences", "Call me Thorin");
+
+      const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId, null));
+      expect(blocks.map((b) => b.key)).toEqual(["active_projects", "identity", "user_profile"]);
+      expect(blocks.every((b) => b.profileClass === null)).toBe(true);
+    });
+
+    it("a class reads the shared identity, then its own blocks, never the unclassed bucket or another class", async () => {
+      const userId = await seedUser();
+      await seedClass(userId, "coder");
+      await seedClass(userId, "game");
+      await upsert(userId, null, "identity", "Name: Tim");
+      await upsert(userId, null, "user_profile", "Family: Alex");
+      await upsert(userId, "coder", "preferences", "TypeScript");
+      await upsert(userId, "coder", "active_projects", "Cogmo");
+      await upsert(userId, "game", "preferences", "Call me Thorin");
+
+      const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId, "coder"));
+      expect(blocks).toEqual([
+        { profileClass: null, key: "identity", content: "Name: Tim" },
+        { profileClass: "coder", key: "active_projects", content: "Cogmo" },
+        { profileClass: "coder", key: "preferences", content: "TypeScript" },
+      ]);
+    });
+
+    it("a class's identity override follows the shared identity and leads the class's blocks", async () => {
+      const userId = await seedUser();
+      await seedClass(userId, "game");
+      await upsert(userId, "game", "active_projects", "Campaign");
+      await upsert(userId, "game", "identity", "Name: Thorin");
+      await upsert(userId, null, "identity", "Name: Tim");
+
+      const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId, "game"));
+      expect(blocks).toEqual([
+        { profileClass: null, key: "identity", content: "Name: Tim" },
+        { profileClass: "game", key: "identity", content: "Name: Thorin" },
+        { profileClass: "game", key: "active_projects", content: "Campaign" },
+      ]);
+    });
+
+    it("a class reads its blocks before any shared identity exists", async () => {
+      const userId = await seedUser();
+      await seedClass(userId, "game");
+      await upsert(userId, "game", "identity", "Name: Thorin");
+
+      const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId, "game"));
+      expect(blocks).toEqual([{ profileClass: "game", key: "identity", content: "Name: Thorin" }]);
+    });
+
+    it("rejects a block for a class the user hasn't registered", async () => {
+      const userId = await seedUser();
+      await expect(upsert(userId, "game", "preferences", "x")).rejects.toThrow();
+    });
+
+    it("deleting a class deletes its blocks and leaves the NULL-class ones", async () => {
+      const userId = await seedUser();
+      await seedClass(userId, "game");
+      await upsert(userId, null, "identity", "Name: Tim");
+      await upsert(userId, "game", "identity", "Name: Thorin");
+      await upsert(userId, "game", "preferences", "Dice");
+
+      await tx((trx) => store.deleteProfileClass(trx, userId, "game"));
+
+      const rows = await db
+        .select({ profileClass: coreMemoryBlocks.profileClass, key: coreMemoryBlocks.key })
+        .from(coreMemoryBlocks)
+        .where(eq(coreMemoryBlocks.userId, userId));
+      expect(rows).toEqual([{ profileClass: null, key: "identity" }]);
+    });
+
+    it("deleteCoreMemoryBlock removes one class's block and nothing in another scope", async () => {
+      const userId = await seedUser();
+      await seedClass(userId, "game");
+      await upsert(userId, null, "identity", "Name: Tim");
+      await upsert(userId, "game", "identity", "Name: Thorin");
+      await upsert(userId, "game", "preferences", "Dice");
+
       await tx((trx) =>
-        store.upsertCoreMemoryBlock(trx, { userId, key: "preferences", content: "Dark mode" }),
-      );
-      await tx((trx) =>
-        store.upsertCoreMemoryBlock(trx, { userId, key: "active_projects", content: "Assistant" }),
-      );
-      await tx((trx) =>
-        store.upsertCoreMemoryBlock(trx, { userId, key: "user_profile", content: "Tim" }),
+        store.deleteCoreMemoryBlock(trx, { userId, profileClass: "game", key: "identity" }),
       );
 
-      const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId));
-      expect(blocks.map((b) => b.key)).toEqual(["active_projects", "preferences", "user_profile"]);
+      const blocks = await tx((trx) => store.getCoreMemoryBlocks(trx, userId, "game"));
+      expect(blocks).toEqual([
+        { profileClass: null, key: "identity", content: "Name: Tim" },
+        { profileClass: "game", key: "preferences", content: "Dice" },
+      ]);
+    });
+
+    it("listCoreMemoryKeys lists one class's own keys", async () => {
+      const userId = await seedUser();
+      await seedClass(userId, "game");
+      await seedClass(userId, "coder");
+      await upsert(userId, null, "identity", "Name: Tim");
+      await upsert(userId, "game", "preferences", "Dice");
+      await upsert(userId, "game", "identity", "Name: Thorin");
+      await upsert(userId, "coder", "active_projects", "Cogmo");
+
+      expect(await tx((trx) => store.listCoreMemoryKeys(trx, userId, "game"))).toEqual([
+        "identity",
+        "preferences",
+      ]);
+      expect(await tx((trx) => store.listCoreMemoryKeys(trx, userId, "unused"))).toEqual([]);
     });
 
     it("returns empty array for unknown user", async () => {
       const blocks = await tx((trx) =>
-        store.getCoreMemoryBlocks(trx, "00000000-0000-0000-0000-000000000000"),
+        store.getCoreMemoryBlocks(trx, "00000000-0000-0000-0000-000000000000", null),
       );
       expect(blocks).toEqual([]);
     });
@@ -2563,7 +2834,7 @@ describe("DrizzleAgentStore", () => {
       );
 
       const rules = await tx((trx) => store.getActiveRules(trx, profileId, []));
-      expect(rules).toEqual([{ rule: "New consolidated rule" }]);
+      expect(rules).toEqual([{ rule: "New consolidated rule", section: "learned" }]);
     });
   });
 
@@ -3721,6 +3992,43 @@ describe("DrizzleAgentStore", () => {
       // Probing as the other user must not leak existence.
       const row = await tx((trx) => store.getEvolutionEvent(trx, otherUserId, id));
       expect(row).toBeUndefined();
+    });
+
+    it("round-trips the phases a fire recorded as failed", async () => {
+      const { userId, conversationId } = await seedConversation();
+      const { id } = await tx((trx) =>
+        store.recordEvolutionEvent(trx, {
+          conversationId,
+          userId,
+          triggeredBy: "idle",
+          payload: { ...samplePayload(), failedPhases: ["memories", "drain"] },
+        }),
+      );
+
+      const row = await tx((trx) => store.getEvolutionEvent(trx, userId, id));
+      expect(row?.payload.failedPhases).toEqual(["memories", "drain"]);
+    });
+
+    it("reads a row recorded before phase outcomes without supplying any", async () => {
+      const { userId, conversationId } = await seedConversation();
+      // An older row's payload, written around the store.
+      await db.execute(sql`
+        INSERT INTO evolution_events (conversation_id, user_id, triggered_by, payload)
+        VALUES (${conversationId}, ${userId}, 'idle', ${JSON.stringify(samplePayload())}::jsonb)
+      `);
+
+      const [row] = await tx((trx) => store.listEvolutionEvents(trx, userId));
+      expect(expectDefined(row, "legacy row").payload).not.toHaveProperty("failedPhases");
+    });
+
+    it("rejects a failed phase the Observer does not have", async () => {
+      const { userId, conversationId } = await seedConversation();
+      const payload = { ...samplePayload(), failedPhases: ["reflection"] } as never;
+      await expect(
+        tx((trx) =>
+          store.recordEvolutionEvent(trx, { conversationId, userId, triggeredBy: "idle", payload }),
+        ),
+      ).rejects.toThrow();
     });
 
     it("rejects writes whose payload doesn't match the schema", async () => {

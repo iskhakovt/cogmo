@@ -1,5 +1,5 @@
-import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { globSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +9,8 @@ import { Network } from "testcontainers";
 import type { GlobalSetupContext } from "vitest/node";
 import * as c from "../dev/containers.js";
 import { startMcpEchoHttpServer } from "../src/test/mcp-http-echo-server.js";
-import { createMock } from "./llmock-setup.js";
+import { prepareTemplate, withDatabase } from "./integration-database.js";
+import { checkSuiteCassettes, createMock, HINDSIGHT_CASSETTE } from "./llmock-setup.js";
 import { loadRootEnv } from "./load-root-env.js";
 import { startTelegramMockServer, type TelegramMockServer } from "./telegram-mock.js";
 
@@ -25,25 +26,21 @@ let mcpEchoServer: Awaited<ReturnType<typeof startMcpEchoHttpServer>> | null = n
 let skillsPath: string | null = null;
 let askpassPath: string | null = null;
 
-/**
- * Bot token for the seeded integration-test Telegram channel. Format matches
- * BotFather's `<bot_id>:<random>` shape so grammY's URL builder produces a
- * well-formed path. Never sent to real Telegram — every request is intercepted
- * by `telegramMock`.
- */
-const TELEGRAM_TEST_BOT_TOKEN = "1234567890:fake-test-token";
-
 export async function setup({ provide, config }: GlobalSetupContext) {
+  checkSuiteCassettes(globSync("src/**/*.integration.test.ts"));
+
   network = await new Network().start();
 
-  mock = createMock();
+  // Hindsight's llmock. Test files each start their own for their own calls
+  // (`integration-setup-per-file.ts`); a container reaches only this one.
+  mock = createMock(HINDSIGHT_CASSETTE, undefined).mock;
   await mock.start();
   // Must precede every container below — see `exposeHostPort`.
   const llmockBase = await c.exposeHostPort(mock.port);
   console.log(`llmock at ${mock.url}, reachable from containers at ${llmockBase}`);
 
   console.log("Starting containers...");
-  // One Inngest per worker slot — see `integration-setup-per-fork.ts`.
+  // One Inngest per worker slot — see `integration-setup-per-file.ts`.
   const [pg, _rd, rfs, ...inngestServers] = await Promise.all([
     c.postgres(network).start(),
     c.redis(network).start(),
@@ -84,8 +81,11 @@ export async function setup({ provide, config }: GlobalSetupContext) {
 
   await c.ensureFilesBucket(s3Endpoint);
 
+  // Migrated once here; every test file gets a clone (`integration-database.ts`).
+  const postgresAdminUrl = withDatabase(urls.databaseUrl, "postgres");
+  await prepareTemplate(postgresAdminUrl);
+
   // Set process.env — propagates to Vitest test workers.
-  process.env.DATABASE_URL = urls.databaseUrl;
   // Master key for secrets store — tests use providerOverride so no real
   // credentials are stored, but bootstrap requires the key unconditionally.
   process.env.COGMO_MASTER_KEY = "bSK9MVRqsqWnRcp4oNTQLQ+LmKJT+BvUvzytD5LH4AE="; // 32 bytes base64 (test-only)
@@ -123,7 +123,7 @@ export async function setup({ provide, config }: GlobalSetupContext) {
   // Skills bare repos live on the host (not in a container) — bootstrap
   // initializes one on every boot. Use a tempdir so tests don't try to write
   // to the production default `/var/lib/cogmo/skills`. Each test file gets
-  // its own repo under this root: see `integration-setup-per-fork.ts`.
+  // its own repo under this root: see `integration-setup-per-file.ts`.
   skillsPath = await mkdtemp(join(tmpdir(), "cogmo-skills-it-"));
 
   const inngestWorkers = inngestServers.map((server) => ({
@@ -131,11 +131,12 @@ export async function setup({ provide, config }: GlobalSetupContext) {
     gatewayUrl: `ws://${server.getHost()}:${server.getMappedPort(8289)}/v0/connect`,
   }));
 
-  // Telegram Bot API mock — listens on 127.0.0.1:<random>. Seeded into the
-  // `channels` row's `apiRoot` credential below so every grammY API call from
-  // the in-process bot AND any subprocess that boots `bootstrap()` (e.g.
-  // `cli.integration.test.ts`'s seed/CLI subprocesses) lands here instead of
-  // real Telegram. No env var needed — the URL travels through the DB row.
+  // Telegram Bot API mock — listens on 127.0.0.1:<random>. Each file's seed
+  // writes it into the `channels` row's `apiRoot` credential, so every grammY
+  // API call from the in-process bot AND any subprocess that boots
+  // `bootstrap()` (e.g. `cli.integration.test.ts`'s CLI subprocesses) lands
+  // here instead of real Telegram. No env var needed — the URL travels
+  // through the DB row.
   telegramMock = await startTelegramMockServer();
   console.log(`telegram-mock at ${telegramMock.url}`);
 
@@ -146,53 +147,12 @@ export async function setup({ provide, config }: GlobalSetupContext) {
   mcpEchoServer = await startMcpEchoHttpServer();
   console.log(`mcp-echo at ${mcpEchoServer.url}`);
 
-  console.log("Running seed...");
-  execSync("tsx src/main.ts seed", { stdio: "inherit" });
-  console.log("Seed complete.");
-
-  // Drizzle handle so the channels insert below uses typed inserts +
-  // JSONB schema validation, not raw `${sql.json(...)}` interpolation.
-  // Same project-wide rule as the e2e setup's seed step.
-  const { drizzle } = await import("drizzle-orm/postgres-js");
-  const { eq } = await import("drizzle-orm");
-  const dbSchema = await import("../src/db/schemas.js");
-  const { users } = dbSchema;
-  const { channels } = await import("../src/transport/store/schema.js");
-  const postgres = (await import("postgres")).default;
-  const sql = postgres(urls.databaseUrl);
-  const db = drizzle({ client: sql, schema: dbSchema });
-
-  const userRows = await db.select({ id: users.id }).from(users).limit(1);
-  const defaultUserId = userRows[0]?.id;
-  if (!defaultUserId) throw new Error("Default user not found after seed");
-
-  // Telegram channel fixture — `bootstrap()` iterates every channel row
-  // through `startChannels`, which constructs a grammY `Bot` with these
-  // credentials. The `apiRoot` field is consumed by the Telegram adapter's
-  // `setup()` and routes all bot API calls to the mock above. Insert is
-  // gated on "telegram channel not already present" so re-runs of the
-  // integration setup don't duplicate the row.
-  const existing = await db
-    .select({ id: channels.id })
-    .from(channels)
-    .where(eq(channels.type, "telegram"))
-    .limit(1);
-  if (!existing[0]) {
-    await db.insert(channels).values({
-      type: "telegram",
-      credentials: { token: TELEGRAM_TEST_BOT_TOKEN, apiRoot: telegramMock.url },
-      identityMode: "create",
-    });
-  }
-  await sql.end();
-
-  provide("databaseUrl", urls.databaseUrl);
+  provide("postgresAdminUrl", postgresAdminUrl);
   provide("inngestWorkers", inngestWorkers);
   provide("inngestEventKey", "test");
   provide("hindsightUrl", hindsightUrl);
   provide("hindsightApiKey", c.HINDSIGHT_TEST_API_KEY);
-  provide("defaultUserId", defaultUserId);
-  provide("llmockBaseUrl", mock.url);
+  provide("telegramMockUrl", telegramMock.url);
   provide("mcpEchoUrl", mcpEchoServer.url);
   provide("skillsRoot", skillsPath);
 

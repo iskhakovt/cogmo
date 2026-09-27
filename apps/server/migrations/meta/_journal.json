@@ -414,6 +414,20 @@
       "when": 1790465083000,
       "tag": "0058_turn_contexts",
       "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1790501827001,
+      "tag": "0059_steering_rule_source",
+      "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1790515044486,
+      "tag": "0060_core_memory_scope",
+      "breakpoints": true
     }
   ]
 }

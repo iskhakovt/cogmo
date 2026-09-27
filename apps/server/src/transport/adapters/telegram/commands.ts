@@ -7,7 +7,7 @@
  */
 
 import { match } from "ts-pattern";
-import { MIN_MESSAGES_FOR_EXTRACTION } from "../../../agent/evolution/index.js";
+import { MIN_MESSAGES_FOR_EXTRACTION, type ObserverPhase } from "../../../agent/evolution/index.js";
 import {
   CORE_COMPARTMENTS,
   isCoreCompartment,
@@ -89,12 +89,13 @@ const USAGE = {
     `  Compartments: ${CORE_LIST}\n` +
     "  Trust:        first-party, any",
   classes:
-    "Usage: /classes [list|add <name> <description>|rm <name>|restrict <name>|unrestrict <name>]\n" +
+    "Usage: /classes [list|add <name> <description>|rm <name> [confirm]|restrict <name>|unrestrict <name> [confirm]]\n" +
     "  /classes                          → list registered profile classes\n" +
     "  /classes add intimate <desc>      → register a new class for /profile class to reference\n" +
     "  /classes rm intimate              → remove a class (must not be assigned to any profile)\n" +
     "  /classes restrict intimate        → mark a class as restricted (recall fails closed unless opted in)\n" +
-    "  /classes unrestrict intimate      → clear the restricted flag",
+    "  /classes unrestrict intimate      → clear the restricted flag\n" +
+    "  … confirm                         → go ahead when it deletes the class's core-memory blocks",
   compartments:
     "Usage: /compartments [list|add <name> <description>|rm <name>]\n" +
     "  /compartments                     → list registered custom compartments\n" +
@@ -370,21 +371,28 @@ export async function handleClasses(
     case "rm":
     case "remove":
     case "delete": {
-      const name = rest.join(" ").trim();
-      if (!name) {
+      const target = parseConfirmable(rest);
+      if (!target) {
         await ctx.reply(USAGE.classes);
         return;
       }
-      return replyClassesDelete(transport, ctx, handle, name);
+      return replyClassesDelete(transport, ctx, handle, target.name, target.confirm);
     }
     case "restrict":
     case "unrestrict": {
-      const name = rest.join(" ").trim();
-      if (!name) {
+      const target = parseConfirmable(rest);
+      if (!target || (sub === "restrict" && target.confirm)) {
         await ctx.reply(USAGE.classes);
         return;
       }
-      return replyClassesSetRestricted(transport, ctx, handle, name, sub === "restrict");
+      return replyClassesSetRestricted(
+        transport,
+        ctx,
+        handle,
+        target.name,
+        sub === "restrict",
+        target.confirm,
+      );
     }
     default:
       await ctx.reply(USAGE.classes);
@@ -1595,16 +1603,29 @@ async function replyClassesList(
   await ctx.reply(`Profile classes:\n${lines.join("\n")}${legend}`);
 }
 
+/** `<name> [confirm]`, the arguments of the class commands that can delete core-memory blocks. */
+function parseConfirmable(args: ReadonlyArray<string>): { name: string; confirm: boolean } | null {
+  const [name, flag, ...extra] = args;
+  if (name === undefined || extra.length > 0) return null;
+  if (flag === undefined) return { name, confirm: false };
+  return flag === "confirm" ? { name, confirm: true } : null;
+}
+
 async function replyClassesSetRestricted(
   transport: Transport,
   ctx: TelegramCommandContext,
   handle: string,
   name: string,
   restricted: boolean,
+  confirm: boolean,
 ): Promise<void> {
-  const res = await transport.profileClasses.setRestricted(handle, name, restricted);
+  const res = await transport.profileClasses.setRestricted(handle, name, restricted, { confirm });
   if (res.isErr()) {
-    await ctx.reply(errorMessage(res.error));
+    await ctx.reply(
+      res.error.code === "profile_class_has_blocks"
+        ? `Class "${name}" has its own identity block, which unrestricting deletes; the class then reads the shared one. To go ahead: /classes unrestrict ${name} confirm`
+        : errorMessage(res.error),
+    );
     return;
   }
   if (restricted) {
@@ -1612,8 +1633,11 @@ async function replyClassesSetRestricted(
       `Class "${name}" marked restricted. Readers without an explicit opt-in (or that don't speak as "${name}") won't see its memories.`,
     );
   } else {
+    const deleted = res.value.overrideDeleted
+      ? " Its own identity block was deleted, so it reads the shared one."
+      : "";
     await ctx.reply(
-      `Class "${name}" no longer restricted. Recall returns to open-by-default for this class.`,
+      `Class "${name}" no longer restricted.${deleted} Recall returns to open-by-default for this class.`,
     );
   }
 }
@@ -1664,10 +1688,15 @@ async function replyClassesDelete(
   ctx: TelegramCommandContext,
   handle: string,
   name: string,
+  confirm: boolean,
 ): Promise<void> {
-  const res = await transport.profileClasses.delete(handle, name);
+  const res = await transport.profileClasses.delete(handle, name, { confirm });
   if (res.isErr()) {
-    await ctx.reply(errorMessage(res.error));
+    await ctx.reply(
+      res.error.code === "profile_class_has_blocks"
+        ? `Removing class "${name}" deletes its core-memory blocks: ${res.error.keys.join(", ")}. To go ahead: /classes rm ${name} confirm`
+        : errorMessage(res.error),
+    );
     return;
   }
   await ctx.reply(`Class "${name}" removed.`);
@@ -2179,6 +2208,8 @@ function errorMessage(err: TransportError): string {
       return `MCP connection failed: ${err.reason}`;
     case "profile_class_in_use":
       return `Class is referenced by ${err.profileRefs} profile(s). Clear /profile class first.`;
+    case "profile_class_has_blocks":
+      return `This deletes the class's core-memory blocks (${err.keys.join(", ")}). Repeat the command with confirm to go ahead.`;
     case "profile_class_not_found":
       return `No profile class named "${err.name}". Use /classes to list.`;
     case "profile_class_name_taken":
@@ -2553,9 +2584,9 @@ export async function handleCompact(
 }
 
 /**
- * Render the `/learned` digest — one line per event, newest first. Keeps
- * each entry under ~120 chars so a 10-event list fits well under
- * Telegram's 4096-char message cap with room for the header.
+ * Render the `/learned` digest — one line per event, newest first. Entries
+ * stay short so a 10-event list fits well under Telegram's 4096-char
+ * message cap with room for the header.
  */
 function formatEvolutionDigest(
   events: ReadonlyArray<EvolutionEventEntry>,
@@ -2568,13 +2599,22 @@ function formatEvolutionDigest(
     const ruleDelta = c.extracted + c.reinforced + c.promoted;
     const memoryDelta = m.extracted;
     const tag = e.triggeredBy === "manual" ? " [manual]" : "";
+    const failed = e.payload.failedPhases ?? [];
+    const failedNote = failed.length > 0 ? `; failed: ${failed.join(", ")}` : "";
     return (
       `${i + 1}. ${e.id}${tag}\n` +
-      `   ${formatRelativeTime(e.createdAt, now)} — ${ruleDelta} rule change(s), ${memoryDelta} memory write(s)`
+      `   ${formatRelativeTime(e.createdAt, now)} — ${ruleDelta} rule change(s), ${memoryDelta} memory write(s)${failedNote}`
     );
   });
   return [header, ...lines].join("\n");
 }
+
+/** False on an older row, which recorded no phase outcomes. */
+function phaseFailed(event: EvolutionEventEntry, phase: ObserverPhase): boolean {
+  return event.payload.failedPhases?.includes(phase) === true;
+}
+
+const PHASE_FAILED = "failed after retries";
 
 /**
  * Render `/learned <id>` — full breakdown of one event. Mirrors the
@@ -2598,14 +2638,19 @@ function formatEvolutionDetail(event: EvolutionEventEntry, now: Date = new Date(
   if (payload.durationMs !== undefined) {
     lines.push(`Took: ${formatDurationMs(payload.durationMs)}`);
   }
-  lines.push(
-    "",
-    "Corrections:",
-    `  extracted:    ${payload.corrections.extracted}`,
-    `  reinforced:   ${payload.corrections.reinforced}`,
-    `  promoted:     ${payload.corrections.promoted}`,
-    `  contradicted: ${payload.corrections.contradictions}`,
-  );
+  // A failed phase's counts are fallback zeros, not findings.
+  if (phaseFailed(event, "corrections")) {
+    lines.push("", `Corrections: ${PHASE_FAILED}`);
+  } else {
+    lines.push(
+      "",
+      "Corrections:",
+      `  extracted:    ${payload.corrections.extracted}`,
+      `  reinforced:   ${payload.corrections.reinforced}`,
+      `  promoted:     ${payload.corrections.promoted}`,
+      `  contradicted: ${payload.corrections.contradictions}`,
+    );
+  }
   // Surface the skipped counters only when non-zero — they're zero on
   // most fires and the silence is the signal. When something WAS
   // skipped, the operator wants to see it spelled out so they can
@@ -2616,16 +2661,24 @@ function formatEvolutionDetail(event: EvolutionEventEntry, now: Date = new Date(
       `  skipped:      ${skipped} (${payload.corrections.outOfScopeReinforcementsSkipped} out-of-scope, ${payload.corrections.unknownRuleReinforcementsSkipped} unknown-rule)`,
     );
   }
-  if (payload.consolidation) {
+  if (phaseFailed(event, "consolidation")) {
+    lines.push("", `Consolidation: ${PHASE_FAILED}`);
+  } else if (payload.consolidation) {
     lines.push("", "Consolidation:");
     lines.push(`  merged groups: ${payload.consolidation.mergedGroups}`);
     lines.push(`  rules removed: ${payload.consolidation.rulesRemoved}`);
   }
-  lines.push("", `Memories: ${payload.memories.extracted} extracted`);
-  for (const [network, count] of Object.entries(payload.memories.byNetwork)) {
-    lines.push(`  ${network}: ${count}`);
+  if (phaseFailed(event, "memories")) {
+    lines.push("", `Memories: ${PHASE_FAILED}`);
+  } else {
+    lines.push("", `Memories: ${payload.memories.extracted} extracted`);
+    for (const [network, count] of Object.entries(payload.memories.byNetwork)) {
+      lines.push(`  ${network}: ${count}`);
+    }
   }
-  if (payload.drained.drained > 0) {
+  if (phaseFailed(event, "drain")) {
+    lines.push("", `Pending drain: ${PHASE_FAILED}; undrained rows stay pending`);
+  } else if (payload.drained.drained > 0) {
     lines.push("", `Pending drained: ${payload.drained.drained}`);
     for (const [network, count] of Object.entries(payload.drained.byNetwork)) {
       lines.push(`  ${network}: ${count}`);

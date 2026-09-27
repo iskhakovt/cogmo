@@ -17,6 +17,8 @@ Two provider adapters exist:
 
 Both implement `LlmProvider` — the agent loop and orchestrator are provider-agnostic.
 
+`OpenAICompatibleProvider` sends the output cap as `max_completion_tokens` to OpenAI's reasoning models (the o-series and GPT-5 onward, matched by bare or fine-tuned model id on any host) and as `max_tokens` to every other id.
+
 ## Data Model
 
 Three concerns, three tables:

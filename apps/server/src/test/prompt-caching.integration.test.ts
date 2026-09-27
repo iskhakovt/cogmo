@@ -28,6 +28,7 @@ import { assertAppendOnly, compareRequests } from "./append-only.js";
 import { expectDefined } from "./assertions.js";
 import { CASSETTE_CHAT_MODEL } from "./cassette-model.js";
 import { createFalFetch } from "./fal-mock.js";
+import { fileLlmockUrl } from "./integration-file.js";
 import { createIsolatedUser } from "./isolated-user.js";
 import { createWireRecorder, type WireRecorder } from "./wire-recorder.js";
 import { workerInngestBaseUrl } from "./worker-inngest.js";
@@ -59,7 +60,7 @@ beforeAll(async () => {
   const anthropicKey = RECORDING ? (process.env.ANTHROPIC_API_KEY ?? "test-key") : "test-key";
   recorder = createWireRecorder();
   bootstrapped = await bootstrap({
-    providerOverride: new AnthropicProvider(anthropicKey, inject("llmockBaseUrl"), {
+    providerOverride: new AnthropicProvider(anthropicKey, fileLlmockUrl(), {
       fetch: recorder.fetch,
     }),
     falFetchOverride: createFalFetch({

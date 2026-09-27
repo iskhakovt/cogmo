@@ -388,10 +388,12 @@ describe("compactConversation", () => {
       cooldownState: null,
       voiceMode: null,
     });
-    vi.mocked(agentStore.getActiveRules).mockResolvedValue([{ rule: "Be terse" }]);
+    vi.mocked(agentStore.getActiveRules).mockResolvedValue([
+      { rule: "Be terse", section: "learned" },
+    ]);
     const blocksByUser = new Map([
-      ["user-1", [{ key: "user_profile", content: "Name: Ana" }]],
-      ["user-2", [{ key: "user_profile", content: "Name: Ben" }]],
+      ["user-1", [{ profileClass: null, key: "user_profile", content: "Name: Ana" }]],
+      ["user-2", [{ profileClass: null, key: "user_profile", content: "Name: Ben" }]],
     ]);
     vi.mocked(agentStore.getCoreMemoryBlocks).mockImplementation(
       async (_tx, userId) => blocksByUser.get(userId) ?? [],
@@ -403,8 +405,34 @@ describe("compactConversation", () => {
 
     expect(promptSource.assemble).toHaveBeenCalledWith({
       profile: profile(),
-      rules: [{ rule: "Be terse" }],
-      coreMemory: [{ key: "user_profile", content: "Name: Ben" }],
+      rules: [{ rule: "Be terse", section: "learned" }],
+      coreMemory: {
+        scope: { kind: "unclassed" },
+        blocks: [{ profileClass: null, key: "user_profile", content: "Name: Ben" }],
+      },
     });
+  });
+
+  it("reads the core memory the profile's class sees", async () => {
+    const agentStore = storeWith(transcript(10));
+    vi.mocked(agentStore.getProfile).mockResolvedValue(profile({ profileClass: "coder" }));
+    vi.mocked(agentStore.listProfileClasses).mockResolvedValue([
+      {
+        id: "class-1",
+        userId: "user-1",
+        name: "coder",
+        description: "work",
+        restricted: false,
+        createdAt: new Date("2026-09-01T00:00:00Z"),
+      },
+    ]);
+
+    await compactConversation(CONVERSATION_ID, deps({ agentStore }));
+
+    expect(agentStore.getCoreMemoryBlocks).toHaveBeenCalledWith(
+      expect.anything(),
+      "user-1",
+      "coder",
+    );
   });
 });

@@ -6,7 +6,7 @@
  * Pins our `buildImageProvider` + `createImageTools` handler against an
  * actual recorded OpenAI Images API response. Same shape as
  * `src/test/xai-grok.integration.test.ts` (PR #219) — the request is
- * routed through the shared llmock (`inject("llmockBaseUrl")`) which already
+ * routed through the file's llmock (`fileLlmockUrl()`) which already
  * supports `/v1/images/generations` natively (see
  * `@copilotkit/aimock/dist/images.cjs`). No new mock infrastructure needed.
  *
@@ -19,7 +19,7 @@
  *
  * llmock's `record.providers.openai` mapping proxies through to
  * `https://api.openai.com` and journals the response to
- * `test/fixtures/recorded/openai-*.json`. Subsequent CI runs replay against
+ * `test/fixtures/recorded/suites/openai-image-gen/`. Subsequent CI runs replay against
  * the captured fixture — no API key, no cost, no network.
  *
  * Scope: the *response* half of the wire contract — that
@@ -31,7 +31,7 @@
  * a captured `fetch`.
  */
 
-import { describe, expect, inject, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createImageTools,
   type GeneratedImagePayload,
@@ -43,6 +43,7 @@ import { buildImageProvider } from "../llm/image-providers.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { fakeRunInTx } from "./factories.js";
+import { fileLlmockUrl } from "./integration-file.js";
 
 /**
  * Keep this prompt stable across re-records — llmock matches fixtures by
@@ -72,7 +73,7 @@ const PROVIDER_ID = "test-provider-openai-images";
 
 describe("openai-compatible image gen — OpenAI dall-e-3 (recorded)", () => {
   it("generates an image end-to-end through buildImageProvider → llmock fixture", async () => {
-    const llmockBaseUrl = inject("llmockBaseUrl");
+    const llmockBaseUrl = fileLlmockUrl();
     // Real key forwarded only in record mode — replay never touches the
     // network. Same convention as `pipeline.integration.test.ts`'s voice +
     // anthropic key handling.
@@ -86,8 +87,8 @@ describe("openai-compatible image gen — OpenAI dall-e-3 (recorded)", () => {
       id: PROVIDER_ID,
       name: "openai",
       type: "openai_compatible",
-      // llmock URLs end with `/v1` — the shared integration setup wires the
-      // suffix on so OpenAI-shape SDKs hit `/v1/images/generations` directly.
+      // OpenAI-shape SDKs expect the `/v1` suffix on the base URL, so
+      // requests hit `/v1/images/generations` directly.
       baseUrl: `${llmockBaseUrl}/v1`,
       secretId: "sec-test",
       attrs: {},

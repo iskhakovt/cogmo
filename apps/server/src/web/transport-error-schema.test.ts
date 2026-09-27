@@ -8,6 +8,7 @@ const SAMPLES: TransportError[] = [
   { code: "identity_rejected" },
   { code: "session_not_found", sessionId: "s1" },
   { code: "profile_class_in_use", profileRefs: 2 },
+  { code: "profile_class_has_blocks", keys: ["identity", "preferences"] },
   { code: "compartment_cap_exceeded", limit: 5, current: 5 },
   { code: "repo_in_use", name: "r", activeTasks: 1 },
   { code: "mcp_tool_not_found", serverId: "srv", toolName: "t" },

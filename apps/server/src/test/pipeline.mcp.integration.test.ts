@@ -7,6 +7,7 @@ import { conversations, messages } from "../agent/store/schema.js";
 import { db } from "../db/index.js";
 import { bootstrap } from "../index.js";
 import { channelSessions, inboundMessages } from "../transport/store/schema.js";
+import { fileDefaultUserId, fileLlmockUrl } from "./integration-file.js";
 import { workerInngestBaseUrl } from "./worker-inngest.js";
 
 /**
@@ -52,7 +53,7 @@ beforeAll(async () => {
   const { AnthropicProvider } = await import("../llm/anthropic.js");
   const anthropicKey =
     process.env.RECORD === "1" ? (process.env.ANTHROPIC_API_KEY ?? "test-key") : "test-key";
-  const provider = new AnthropicProvider(anthropicKey, inject("llmockBaseUrl"));
+  const provider = new AnthropicProvider(anthropicKey, fileLlmockUrl());
 
   bootstrapped = await bootstrap({ providerOverride: provider });
   const { inngest, functions } = bootstrapped;
@@ -152,7 +153,7 @@ function flattenText(content: unknown): string {
 
 describe("MCP pipeline", () => {
   it("LLM invokes an MCP tool end-to-end and the echoed value lands in the reply", async () => {
-    const defaultUserId = inject("defaultUserId");
+    const defaultUserId = fileDefaultUserId();
     const { transportStore, runInTx, profile } = bootstrapped;
 
     mcpServerId = await seedEchoServer();

@@ -26,6 +26,7 @@ import { and, asc, desc, eq, inArray, isNull, notInArray, or } from "drizzle-orm
 import { connect } from "inngest/connect";
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
 import { z } from "zod";
+import type { CoreMemoryScope } from "../agent/core-memory/scope.js";
 import { formatUserContext } from "../agent/prompt.js";
 import type { Profile } from "../agent/store/index.js";
 import {
@@ -40,10 +41,13 @@ import { DEFAULT_BASE_PROMPT } from "../setup/seed.js";
 import { channelSessions, inboundMessages } from "../transport/store/schema.js";
 import { expectDefined } from "./assertions.js";
 import { CASSETTE_CHAT_MODEL } from "./cassette-model.js";
+import { fileLlmockUrl } from "./integration-file.js";
 import { createIsolatedUser } from "./isolated-user.js";
 import { workerInngestBaseUrl } from "./worker-inngest.js";
 
 const RECORDING = process.env.RECORD === "1";
+/** This file's profile has no class, so it renders the unclassed bucket. */
+const UNCLASSED: CoreMemoryScope = { kind: "unclassed" };
 const TURN_TIMEOUT_MS = RECORDING ? 120_000 : 30_000;
 const OBSERVER_TIMEOUT_MS = RECORDING ? 180_000 : 30_000;
 const HINDSIGHT_TIMEOUT_MS = RECORDING ? 180_000 : 60_000;
@@ -78,7 +82,7 @@ beforeAll(async () => {
   const { AnthropicProvider } = await import("../llm/anthropic.js");
   const anthropicKey = RECORDING ? (process.env.ANTHROPIC_API_KEY ?? "test-key") : "test-key";
   bootstrapped = await bootstrap({
-    providerOverride: new AnthropicProvider(anthropicKey, inject("llmockBaseUrl")),
+    providerOverride: new AnthropicProvider(anthropicKey, fileLlmockUrl()),
   });
   const { inngest, functions, runInTx, agentStore, transportStore } = bootstrapped;
   connection = await connect({ apps: [{ client: inngest, functions }] });
@@ -209,9 +213,8 @@ async function observe(conversation: Conversation) {
 }
 
 /**
- * Rules the Observer learned during this file. Another file's learned rule is
- * global too, so this narrows to the scopes this file's conversations allow:
- * every channel, or the direct channel.
+ * Rules the Observer learned during this file, narrowed to the scopes this
+ * file's conversations allow: every channel, or the direct channel.
  */
 async function learnedRules(before: ReadonlyArray<string>) {
   return db
@@ -279,7 +282,7 @@ const ChatBodySchema = z.object({
  * truncation marker, so a miss can mean either.
  */
 async function requestSentWith(userMessage: string): Promise<{ system: string; turn: string }> {
-  const res = await fetch(`${inject("llmockBaseUrl")}/__aimock/journal?path=/v1/messages`);
+  const res = await fetch(`${fileLlmockUrl()}/__aimock/journal?path=/v1/messages`);
   if (!res.ok) throw new Error(`llmock journal: ${res.status}`);
   const entries = z.array(JournalEntrySchema).parse(await res.json());
   for (const entry of entries) {
@@ -316,7 +319,7 @@ describe("learning loop", () => {
       .from(coreMemoryBlocks)
       .where(eq(coreMemoryBlocks.userId, userId))
       .orderBy(asc(coreMemoryBlocks.key));
-    expect(formatUserContext(blocksAfterFact)).toMatch(/Lisbon/);
+    expect(formatUserContext({ scope: UNCLASSED, blocks: blocksAfterFact })).toMatch(/Lisbon/);
 
     await turn(first, DINNER);
     await turn(first, CORRECTION);
@@ -359,7 +362,10 @@ describe("learning loop", () => {
       .from(coreMemoryBlocks)
       .where(eq(coreMemoryBlocks.userId, userId))
       .orderBy(asc(coreMemoryBlocks.key));
-    const userSection = expectDefined(formatUserContext(blocks), "core memory");
+    const userSection = expectDefined(
+      formatUserContext({ scope: UNCLASSED, blocks }),
+      "core memory",
+    );
 
     const third = await startConversation();
     await turn(third, PROBE);

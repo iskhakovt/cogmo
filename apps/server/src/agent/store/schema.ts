@@ -129,6 +129,23 @@ export const summarySource = pgEnum("summary_source", ["turn", "manual"]);
 export type SummarySourceValue = (typeof summarySource.enumValues)[number];
 
 /**
+ * `steering_rules.source` — who wrote the rule, which decides its `# Rules`
+ * section (`rule-sections.ts`). `manual` = an operator's insert, the only
+ * source of `safety` rules; `seed` = a channel default from
+ * `seedChannelRules`; `instruction` = a standing instruction the user stated
+ * (design/evolution.md → Explicit Instructions); `correction` = the Observer's
+ * extraction; `evolution` = consolidation's merge.
+ */
+export const steeringRuleSource = pgEnum("steering_rule_source", [
+  "manual",
+  "seed",
+  "instruction",
+  "correction",
+  "evolution",
+]);
+export type SteeringRuleSourceValue = (typeof steeringRuleSource.enumValues)[number];
+
+/**
  * TTS provider adapter discriminator. Maps to which `TtsProvider` class the
  * voice resolver builds (`src/voice/resolver.ts`). `openai` and
  * `openai_compatible` both use `OpenAIVoiceProvider`; the enum split keeps
@@ -724,12 +741,28 @@ export const coreMemoryBlocks = pgTable(
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id),
-    key: text("key").notNull(), // 'user_profile', 'active_projects', etc.
+    /**
+     * NULL = the unclassed bucket, or the shared block when `key` is
+     * `identity`; set = that class's block. See design/memory.md → Core
+     * Memory Scope by Profile Class.
+     */
+    profileClass: text("profile_class"),
+    key: text("key").notNull(), // 'identity', 'user_profile', 'active_projects', etc.
     content: text("content").notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     createdAt: ts(),
   },
-  (t) => [unique("uq_core_memory_user_key").on(t.userId, t.key)],
+  (t) => [
+    // One block per key in each scope; NULLS NOT DISTINCT makes the NULL
+    // class one scope rather than a new one per row.
+    unique("uq_core_memory_user_class_key").on(t.userId, t.profileClass, t.key).nullsNotDistinct(),
+    // A class's blocks go with the class. MATCH SIMPLE skips NULL-class rows.
+    foreignKey({
+      columns: [t.userId, t.profileClass],
+      foreignColumns: [profileClasses.userId, profileClasses.name],
+      name: "fk_core_memory_profile_class",
+    }).onDelete("cascade"),
+  ],
 );
 
 /**
@@ -827,7 +860,7 @@ export const steeringRules = pgTable("steering_rules", {
   rule: text("rule").notNull(),
   category: text("category").notNull(), // 'safety' | 'style' | 'domain' | 'memory'
   active: boolean("active").notNull(),
-  source: text("source").notNull(), // 'manual' | 'correction' | 'signal_pipeline' | 'evolution'
+  source: steeringRuleSource("source").notNull(),
   priority: integer("priority").notNull(),
   observationCount: integer("observation_count").notNull(),
   profileId: uuid("profile_id").references(() => profiles.id), // NULL = applies to all profiles

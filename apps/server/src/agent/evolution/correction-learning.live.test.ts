@@ -69,6 +69,7 @@ import {
   withRepeats,
 } from "../../test/live-eval.js";
 import { createTestDatabase } from "../../test/pglite.js";
+import type { SectionedRule } from "../rule-sections.js";
 import type { CoreMemoryBlock } from "../service.js";
 import { DrizzleAgentStore } from "../store/index.js";
 import { type ExtractionResult, extractCorrections } from "./extract-corrections.js";
@@ -292,7 +293,7 @@ describe.skipIf(LIVE_API_KEY === undefined)(
             stage = `in the ${label} conversation`;
             const conversation = await runEvalConversation({
               provider,
-              coreMemory: new EvalCoreMemory(EVAL.established),
+              coreMemory: EvalCoreMemory.unclassed(EVAL.established),
               rules: await activeRules(),
               messages,
               cacheKey: `${nonce}-${scenario.id}-${label}`,
@@ -319,10 +320,10 @@ describe.skipIf(LIVE_API_KEY === undefined)(
           const activeCorrections = second.stored.filter((r) => r.active);
 
           stage = "in the probes";
-          const probe = async (rules: ReadonlyArray<{ rule: string }>, label: string) =>
+          const probe = async (rules: ReadonlyArray<SectionedRule>, label: string) =>
             runEvalTurn({
               provider,
-              coreMemory: new EvalCoreMemory(EVAL.established),
+              coreMemory: EvalCoreMemory.unclassed(EVAL.established),
               rules,
               history: [],
               message: scenario.probe,

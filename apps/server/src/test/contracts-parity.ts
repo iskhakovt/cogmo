@@ -8,7 +8,7 @@
  * This module has no runtime effect; it exists solely to be type-checked.
  */
 import type * as C from "@cogmo/contracts";
-import type { EvolutionEventPayload } from "../agent/evolution/event-schema.js";
+import type { EvolutionEventPayload, ObserverPhase } from "../agent/evolution/event-schema.js";
 import type { MemoryTrust } from "../agent/evolution/memory-extraction-schema.js";
 import type { PipelineRunStatus } from "../agent/pipeline/store/index.js";
 import type { AutoRecallMode } from "../agent/recall-gate.js";
@@ -47,8 +47,9 @@ import type {
   TriggerReflectionOutcome,
 } from "../transport/transport.js";
 
-/** `true` only when A and B are mutually assignable (structurally equal). */
-type Mutual<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+/** `true` only when A and B are mutually assignable, optional fields included. */
+type Mutual<A, B> = Same<A, B> extends true ? Same<Required<A>, Required<B>> : false;
+type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 
 /** Fails to type-check when the witness is not exactly `true`. */
 function assertParity<_T extends true>(): void {}
@@ -67,6 +68,7 @@ assertParity<Mutual<SkillTier, C.SkillTier>>();
 assertParity<Mutual<SkillRiskTier, C.SkillRiskTier>>();
 assertParity<Mutual<MemoryTrust, C.MemoryTrust>>();
 assertParity<Mutual<EvolutionTriggerValue, C.EvolutionTriggerValue>>();
+assertParity<Mutual<ObserverPhase, C.ObserverPhase>>();
 assertParity<Mutual<McpServerApprovalStatus, C.McpServerApprovalStatus>>();
 assertParity<Mutual<McpTransportKind, C.McpTransportKind>>();
 

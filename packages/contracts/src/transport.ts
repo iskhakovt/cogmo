@@ -31,6 +31,7 @@ export type TransportError =
   | { code: "profile_in_use" }
   | { code: "profile_name_taken" }
   | { code: "profile_class_in_use"; profileRefs: number }
+  | { code: "profile_class_has_blocks"; keys: string[] }
   | { code: "profile_class_not_found"; name: string }
   | { code: "profile_class_name_taken"; name: string }
   | { code: "unknown_profile_class"; name: string }
