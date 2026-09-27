@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "uq_channels_fixed_type" ON "channels" USING btree ("type") WHERE identity_mode = 'fixed';

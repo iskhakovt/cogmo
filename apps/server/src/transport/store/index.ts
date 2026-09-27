@@ -142,6 +142,16 @@ export interface TransportStore {
     },
   ): Promise<{ id: string }>;
 
+  /**
+   * Keyed insert of a single-owner (`fixed`) channel of `type` on
+   * `uq_channels_fixed_type` (`.claude/rules/inngest.md`): a repeated `type`
+   * returns the stored channel's id as `recovered`.
+   */
+  insertOrRecoverFixedChannel(
+    tx: Transaction,
+    type: string,
+  ): Promise<{ kind: "new" | "recovered"; id: string }>;
+
   /** Find the active session for a platform address (not closed, not expired). */
   resolveSession(
     tx: Transaction,
@@ -469,6 +479,24 @@ export class DrizzleTransportStore implements TransportStore {
     },
   ): Promise<{ id: string }> {
     return single(await tx.insert(channels).values(params).returning({ id: channels.id }));
+  }
+
+  async insertOrRecoverFixedChannel(
+    tx: Transaction,
+    type: string,
+  ): Promise<{ kind: "new" | "recovered"; id: string }> {
+    // Keyed insert: see `.claude/rules/inngest.md`.
+    const rows = await tx
+      .insert(channels)
+      .values({ type, credentials: {}, identityMode: "fixed" })
+      .onConflictDoUpdate({
+        target: channels.type,
+        targetWhere: sql`identity_mode = 'fixed'`,
+        set: { type },
+      })
+      .returning({ id: channels.id, inserted: sql<boolean>`(xmax = 0)` });
+    const { id, inserted } = single(rows);
+    return { kind: inserted ? "new" : "recovered", id };
   }
 
   async resolveSession(

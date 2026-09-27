@@ -9,6 +9,7 @@ import { DrizzleSecretsStore } from "../secrets/store/index.js";
 import { expectDefined } from "../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { DrizzleTransportStore } from "../transport/store/index.js";
+import { channels, userIdentities } from "../transport/store/schema.js";
 import {
   DEFAULT_PROFILE_MODEL,
   ensureDefaultProfile,
@@ -237,6 +238,22 @@ describe("ensureWebChannel", () => {
     await ensureWebChannel(tx, transportStore, userId);
     await ensureWebChannel(tx, transportStore, userId);
     expect(await tx((trx) => transportStore.getChannelByType(trx, "web"))).toBeDefined();
+  });
+
+  it("lands on a channel its snapshot cannot see", async () => {
+    // Stands in for a concurrent run whose channel this transaction's snapshot
+    // can't see: PGlite has one connection, so the read is stubbed empty.
+    // `seed.integration.test.ts` races two real connections.
+    const userId = await ensureDefaultUser(tx, agentStore);
+    await ensureWebChannel(tx, transportStore, userId);
+    const staleRead = vi.spyOn(transportStore, "getChannelByType").mockResolvedValue(undefined);
+    try {
+      await ensureWebChannel(tx, transportStore, userId);
+    } finally {
+      staleRead.mockRestore();
+    }
+    expect(await db.$count(channels, eq(channels.type, "web"))).toBe(1);
+    expect(await db.$count(userIdentities)).toBe(1);
   });
 
   it("seedDefaults provisions both the direct and web channels", async () => {

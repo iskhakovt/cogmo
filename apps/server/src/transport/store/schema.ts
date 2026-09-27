@@ -45,25 +45,33 @@ export const inboundMessageSource = pgEnum("inbound_message_source", [
 ]);
 export type InboundMessageSource = (typeof inboundMessageSource.enumValues)[number];
 
-export const channels = pgTable("channels", {
-  id: pk(),
-  type: text("type").notNull(), // 'telegram' | 'cli' | 'slack' | 'web'
-  // OPAQUE — encrypted ciphertext or plaintext credentials handed back to the
-  // adapter SDK unchanged (Telegram bot token, OAuth bundle, etc.). Cogmo
-  // never inspects the contents, so it stays raw `jsonb` rather than being
-  // gated by a Zod schema (CLAUDE.md JSONB rule explicitly exempts opaque
-  // payloads).
-  credentials: jsonb("credentials").notNull(),
-  identityMode: text("identity_mode").notNull(), // 'fixed' | 'mapped' | 'create'
-  /**
-   * Per-channel cap on TTS reply length. Above the cap, the orchestrator
-   * skips TTS and sends a "(too long for voice)" follow-up note instead;
-   * the streamed text reply is unaffected. Default 700 chars ≈ 60s of
-   * speech at conversational pace. See design/voice.md.
-   */
-  voiceMaxReplyChars: integer("voice_max_reply_chars").notNull().default(700),
-  createdAt: ts(),
-});
+export const channels = pgTable(
+  "channels",
+  {
+    id: pk(),
+    type: text("type").notNull(), // 'telegram' | 'cli' | 'slack' | 'web'
+    // OPAQUE — encrypted ciphertext or plaintext credentials handed back to the
+    // adapter SDK unchanged (Telegram bot token, OAuth bundle, etc.). Cogmo
+    // never inspects the contents, so it stays raw `jsonb` rather than being
+    // gated by a Zod schema (CLAUDE.md JSONB rule explicitly exempts opaque
+    // payloads).
+    credentials: jsonb("credentials").notNull(),
+    identityMode: text("identity_mode").notNull(), // 'fixed' | 'mapped' | 'create'
+    /**
+     * Per-channel cap on TTS reply length. Above the cap, the orchestrator
+     * skips TTS and sends a "(too long for voice)" follow-up note instead;
+     * the streamed text reply is unaffected. Default 700 chars ≈ 60s of
+     * speech at conversational pace. See design/voice.md.
+     */
+    voiceMaxReplyChars: integer("voice_max_reply_chars").notNull().default(700),
+    createdAt: ts(),
+  },
+  (t) => [
+    // One row per single-owner (`fixed`) channel type: the key
+    // `insertOrRecoverFixedChannel` inserts on.
+    uniqueIndex("uq_channels_fixed_type").on(t.type).where(sql`identity_mode = 'fixed'`),
+  ],
+);
 
 export const channelSessions = pgTable(
   "channel_sessions",

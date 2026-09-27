@@ -268,6 +268,7 @@ export function mockTransportStore(overrides?: Partial<TransportStore>): Transpo
     getAllChannels: vi.fn().mockResolvedValue([]),
     getChannelByType: vi.fn().mockResolvedValue(null),
     createChannel: vi.fn().mockResolvedValue({ id: "ch-1" }),
+    insertOrRecoverFixedChannel: vi.fn().mockResolvedValue({ kind: "new", id: "ch-1" }),
     resolveSession: vi.fn().mockResolvedValue(null),
     createSession: vi.fn().mockResolvedValue({ id: "session-1" }),
     closeSession: vi.fn().mockResolvedValue(undefined),

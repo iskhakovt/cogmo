@@ -83,6 +83,10 @@ export async function ensureDefaultProfile(
  * identity if none exists. Both the direct (CLI) and web channels are
  * single-owner with the same fixed/wildcard wiring; a future single-owner
  * channel type reuses this directly.
+ *
+ * On a miss, a keyed insert (`.claude/rules/inngest.md`), so a concurrent run
+ * that also missed converges on one channel; only the inserting run creates
+ * the wildcard identity.
  */
 async function ensureFixedChannel(
   runInTx: Transactor,
@@ -93,11 +97,8 @@ async function ensureFixedChannel(
   await runInTx(async (tx) => {
     const existing = await transportStore.getChannelByType(tx, type);
     if (existing) return;
-    const { id: channelId } = await transportStore.createChannel(tx, {
-      type,
-      credentials: {},
-      identityMode: "fixed",
-    });
+    const { kind, id: channelId } = await transportStore.insertOrRecoverFixedChannel(tx, type);
+    if (kind === "recovered") return;
     await transportStore.createWildcardIdentity(tx, { userId, channelId });
     logger.info({ channelId, type }, "created fixed-identity channel");
   });
