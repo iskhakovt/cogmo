@@ -755,9 +755,9 @@ export interface AgentStore {
    * REPEATABLE READ (the project default) doesn't catch this predicate
    * race — snapshot isolation doesn't predicate-lock. At single-user
    * scale + UI-only writes the residual race (concurrent inserts both
-   * seeing count=N-1) is acceptable; when multi-tenant lands, prefer
-   * `pg_advisory_xact_lock(user_id)` or a unique partial index over
-   * SERIALIZABLE — predicate races want prevention, not retry.
+   * seeing count=N-1) is acceptable; when multi-tenant lands, prevent it
+   * with an advisory lock taken before the snapshot, not SERIALIZABLE —
+   * see `.claude/rules/store-pattern.md`.
    */
   createCustomCompartment(
     tx: Transaction,

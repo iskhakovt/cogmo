@@ -197,15 +197,14 @@ export class DrizzlePipelineStore implements PipelineStore {
     | { kind: "already_active"; name: string; version: number }
     | { kind: "not_found" }
   > {
-    // Advisory xact lock on (userId, name-space) so concurrent activations
-    // of sibling versions serialize fully. A per-row FOR UPDATE is too
-    // narrow here: two txs activating v1 and v2 lock different rows, and
-    // the loser surfaces a non-retried 23505 from the partial unique index
-    // instead of queueing. Advisory lock over SERIALIZABLE per
-    // .claude/rules/store-pattern.md — this race wants prevention, not
-    // retry-on-detection. Keyed on userId alone (not name) to avoid a
-    // pre-lock read of the row's name; per-user serialization of
-    // activations is more than fine at this scale.
+    // The per-user advisory lock queues concurrent activations but does not
+    // refresh the loser's snapshot: under REPEATABLE READ the lock statement
+    // takes it, before the winner commits (`.claude/rules/store-pattern.md`).
+    // A loser converges only by writing a row the winner changed — the same
+    // version (FOR UPDATE below) or the version the winner deactivated —
+    // which raises 40001 for the transactor to retry. With no version active,
+    // activations of two different versions touch disjoint rows and the
+    // loser fails with 23505 on `uq_pipeline_definitions_active`.
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${userId}))`);
     const rows = await tx
       .select()
