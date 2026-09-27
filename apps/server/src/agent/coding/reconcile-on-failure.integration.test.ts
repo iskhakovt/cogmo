@@ -36,7 +36,7 @@ import { codingTaskFailed } from "../../inngest/events.js";
 import { workerInngestBaseUrl } from "../../test/worker-inngest.js";
 import { createCodingTaskReconcile } from "./reconcile-on-failure.js";
 import { DrizzleCodingStore } from "./store/index.js";
-import { codingRepos, codingTasks } from "./store/schema.js";
+import { codingTasks } from "./store/schema.js";
 
 let connection: Awaited<ReturnType<typeof connect>>;
 let testInngest: Inngest;
@@ -50,8 +50,6 @@ let testInngest: Inngest;
 // the explicit `toBeDefined` assertion below with a clear diagnostic
 // rather than a misleading regex mismatch on an empty string.
 const capturedFailedEvents: Array<{ id: string | undefined; taskId: string; reason: string }> = [];
-const seededRepoIds: string[] = [];
-const seededTaskIds: string[] = [];
 
 beforeAll(async () => {
   // Match the app's client id — the `inngest/function.failed` system event
@@ -116,15 +114,6 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (connection) await connection.close();
-  // Surgical per-test cleanup — only the rows this file seeded. A broad
-  // `DELETE FROM coding_tasks` would step on every other integration
-  // test sharing the Postgres instance.
-  for (const taskId of seededTaskIds) {
-    await db.delete(codingTasks).where(eq(codingTasks.id, taskId));
-  }
-  for (const repoId of seededRepoIds) {
-    await db.delete(codingRepos).where(eq(codingRepos.id, repoId));
-  }
 });
 
 async function seedRepoAndTask(initialStatus: "planning" | "executing" | "failed") {
@@ -156,8 +145,6 @@ async function seedRepoAndTask(initialStatus: "planning" | "executing" | "failed
   );
   // Insert returns the row in `queued` — bump to the requested status.
   await tx((trx) => store.updateTaskStatus(trx, { id: task.id, status: initialStatus }));
-  seededRepoIds.push(repo.id);
-  seededTaskIds.push(task.id);
   return { taskId: task.id, repoId: repo.id };
 }
 
@@ -299,7 +286,4 @@ describe("coding-task-reconcile — Inngest integration", () => {
     // Row unchanged — reconcile filtered the function id out.
     expect(rows[0]?.status).toBe("planning");
   });
-
-  // Per-test row isolation via random repo names + surgical afterAll
-  // cleanup (above) keeps reruns idempotent without per-test truncate.
 });

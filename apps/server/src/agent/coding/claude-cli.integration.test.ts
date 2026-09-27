@@ -18,12 +18,13 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Docker from "dockerode";
-import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Transactor } from "../../db/index.js";
 import { LocalDockerSandboxClient } from "../../sandbox/index.js";
 import { DrizzleSandboxStore } from "../../sandbox/store/index.js";
 import { LABEL_INSTANCE, LABEL_MANAGED } from "../../sandbox/supervisor.js";
 import type { ResourceLimits } from "../../sandbox/types.js";
+import { fileLlmockUrl } from "../../test/integration-file.js";
 import { createTestDatabase } from "../../test/pglite.js";
 import type { CodingEvent } from "./backend.js";
 import { ClaudeCodeBackend } from "./claude.js";
@@ -134,7 +135,7 @@ function uniqueName(prefix: string): string {
 // Swap llmock's loopback host for the docker bridge gateway and strip
 // the trailing /v1 — Anthropic's SDK appends /v1/messages back on.
 function llmockUrlForContainer(): string {
-  const llmockBaseUrl = inject("llmockBaseUrl");
+  const llmockBaseUrl = fileLlmockUrl();
   const parsed = new URL(llmockBaseUrl);
   if (!bridgeGateway) throw new Error("bridgeGateway not resolved — beforeAll skipped?");
   parsed.hostname = bridgeGateway;

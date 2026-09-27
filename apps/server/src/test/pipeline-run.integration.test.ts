@@ -149,8 +149,7 @@ beforeAll(async () => {
     apps: [{ client: app.inngest, functions: [...app.functions, ...captures] }],
   });
 
-  // Private user: the integration tier runs files in parallel against one
-  // Postgres, and every row this file asserts on hangs off this user.
+  // Private user: every row this file asserts on hangs off this user.
   userId = await createIsolatedUser(db);
   const channelIdOf = async (type: "direct" | "telegram") =>
     expectDefined(

@@ -20,22 +20,13 @@
 import { and, eq, inArray, like } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
-import {
-  afterAll,
-  afterEach,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  inject,
-  it,
-  vi,
-} from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database } from "../../db/index.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import type { ChatParams, ChatStreamResult, LlmResponse } from "../../llm/types.js";
 import type { MemoryProvider, RetainBatchItem } from "../../memory/provider.js";
 import { expectDefined } from "../../test/assertions.js";
+import { fileDatabaseUrl } from "../../test/integration-file.js";
 import { createIsolatedUser } from "../../test/isolated-user.js";
 import { DrizzleTransportStore } from "../../transport/store/index.js";
 import { channelSessions, channels } from "../../transport/store/schema.js";
@@ -59,15 +50,14 @@ let transportStore: DrizzleTransportStore;
 let userId: string;
 
 beforeAll(async () => {
-  const databaseUrl = inject("databaseUrl");
+  const databaseUrl = fileDatabaseUrl();
   pgClient = postgres(databaseUrl);
   db = drizzle(pgClient);
   store = new DrizzleAgentStore();
   transportStore = new DrizzleTransportStore();
-  // Private to this file: the cleanup and count assertions below are
-  // scoped by `user_id`, and the integration tier runs files in parallel
-  // against one Postgres. A real row because `custom_compartments` and
-  // `pending_memories` carry an FK to `users.id`.
+  // The cleanup and count assertions below are scoped by `user_id`. A real
+  // row because `custom_compartments` and `pending_memories` carry an FK to
+  // `users.id`.
   userId = await createIsolatedUser(db);
 });
 
@@ -75,27 +65,17 @@ afterAll(async () => {
   await pgClient.end();
 });
 
-/**
- * The one correction this file's stub extractor returns. Learned rules are
- * global, and the Observer labels the rules it lists by priority, then text,
- * so while this row exists it takes a label in every other file's Observer
- * run. Starting with "Zero" sorts it after any rule a recorded extraction
- * names by label (`learning-loop.integration.test.ts` reinforces its "R1"),
- * so it never shifts theirs.
- */
+/** The one correction this file's stub extractor returns. */
 const CHANNEL_SCOPED_RULE = "Zero markdown headings in chat replies";
 /** Every rule text this file writes; cleanup deletes these and nothing else. */
 const SUITE_RULES = [CHANNEL_SCOPED_RULE];
 
 beforeEach(cleanupTestState);
-// Also after each test: a learned rule is global, and every Observer run
-// lists it to the extractor, so another file's run would see this one.
-afterEach(cleanupTestState);
 
 // Clean DB state per-test so assertion counts don't drift. Order
 // matters for FKs: channel_sessions → messages → steering_rules →
 // conversations → test profiles → profile_classes. Channels are
-// seeded once by `test/integration-setup.ts` and outlive every test;
+// seeded with the file's database and outlive every test;
 // channel_sessions are per-test and cleared here. Everything else is
 // scoped to this file's own user, and test profiles additionally by
 // name so seeded fixtures for that user stay put.
@@ -115,8 +95,7 @@ async function cleanupTestState(): Promise<void> {
   await db.delete(messages).where(inArray(messages.conversationId, testConversationIds));
   // A learned rule has no owner column to scope by: `extract-corrections.ts`
   // writes `profileId: null`, so a correction applies to every profile. The
-  // rule text is the only mark of this file's rows; another file's learned
-  // rules share the table and stay put.
+  // rule text is the only mark of this file's rows.
   await db
     .delete(steeringRules)
     .where(and(eq(steeringRules.source, "correction"), inArray(steeringRules.rule, SUITE_RULES)));

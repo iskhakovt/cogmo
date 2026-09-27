@@ -1,0 +1,51 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nHello integration test",
+        "model": "claude-sonnet-5",
+        "turnIndex": 0,
+        "hasToolResult": false
+      },
+      "response": {
+        "toolCalls": [
+          {
+            "name": "memory_recall",
+            "arguments": "{\"query\": \"user profile name job timezone communication preferences\"}",
+            "id": "toolu_01FxyyAwG1hf8DShiApMqqZ6"
+          }
+        ]
+      },
+      "recordedTimings": {
+        "ttftMs": 989,
+        "interChunkDelaysMs": [
+          0,
+          803,
+          0,
+          0,
+          0,
+          0,
+          0,
+          61,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "totalDurationMs": 1853
+      },
+      "metadata": {
+        "systemHash": "e4399f51",
+        "toolsHash": "a9863f59"
+      }
+    }
+  ]
+}

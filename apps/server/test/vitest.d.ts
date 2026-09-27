@@ -8,7 +8,8 @@ export {};
 
 declare module "vitest" {
   export interface ProvidedContext {
-    databaseUrl: string;
+    /** The e2e stack's database. Integration files each get their own: see `fileDatabaseUrl()`. */
+    e2eDatabaseUrl: string;
     /** The e2e stack's Inngest. Integration workers each get their own: see `inngestWorkers`. */
     inngestBaseUrl: string;
     /**
@@ -20,8 +21,18 @@ declare module "vitest" {
     hindsightUrl: string;
     /** Bearer token the integration/e2e Hindsight container enforces. */
     hindsightApiKey: string;
-    defaultUserId: string;
-    llmockBaseUrl: string;
+    /** The e2e stack's seeded user. Integration files each seed their own: see `fileDefaultUserId()`. */
+    e2eDefaultUserId: string;
+    /**
+     * Integration setup: the Postgres container's maintenance database, from
+     * which each test file clones its own (`test/integration-database.ts`).
+     */
+    postgresAdminUrl: string;
+    /**
+     * Integration setup: the Telegram Bot API mock each file's seeded
+     * `telegram` channel points at.
+     */
+    telegramMockUrl: string;
     /**
      * URL of the in-process MCP echo server (Streamable HTTP, stateless).
      * Provided by the integration setup; absent for unit/e2e setups.

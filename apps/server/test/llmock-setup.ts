@@ -1,9 +1,48 @@
+import { existsSync, readdirSync } from "node:fs";
 import type http from "node:http";
+import { basename, join } from "node:path";
 import { type ChatCompletionRequest, LLMock } from "@copilotkit/aimock";
 import { HAPPENED_IN_RE, normalizeHappenedIn } from "../src/test/llmock-happened-in.js";
+import { type CassetteFixture, describeMiss } from "../src/test/llmock-miss.js";
 import { normalizeTurnContext } from "../src/test/llmock-turn-context.js";
 
-const FIXTURE_DIR = "./test/fixtures/recorded";
+/**
+ * Recorded fixtures, one directory (cassette) per consumer:
+ * - `suites/<file>/` — one integration test file's own calls, `<file>` being
+ *   its name without `.integration.test.ts`. Served by that file's llmock.
+ * - `hindsight/` — the shared Hindsight container's embedding and extraction
+ *   calls. Served by `globalSetup`'s llmock, the only one a container reaches.
+ * - `e2e/` — the e2e stack, app and Hindsight alike.
+ */
+const FIXTURE_ROOT = "./test/fixtures/recorded";
+export const HINDSIGHT_CASSETTE = join(FIXTURE_ROOT, "hindsight");
+export const E2E_CASSETTE = join(FIXTURE_ROOT, "e2e");
+const SUITES_DIR = join(FIXTURE_ROOT, "suites");
+const INTEGRATION_SUFFIX = ".integration.test.ts";
+
+export function suiteCassette(testFile: string): string {
+  return join(SUITES_DIR, basename(testFile, INTEGRATION_SUFFIX));
+}
+
+/**
+ * Throws when two integration files would share a cassette, or a cassette has
+ * no file left to consume it (a renamed or deleted suite).
+ */
+export function checkSuiteCassettes(testFiles: ReadonlyArray<string>): void {
+  const names = testFiles.map((f) => basename(f, INTEGRATION_SUFFIX));
+  const clash = names.find((n, i) => names.indexOf(n) !== i);
+  if (clash !== undefined) {
+    throw new Error(`two integration test files are named ${clash}; their cassettes would collide`);
+  }
+  const orphans = existsSync(SUITES_DIR)
+    ? readdirSync(SUITES_DIR).filter((dir) => !names.includes(dir))
+    : [];
+  if (orphans.length > 0) {
+    throw new Error(
+      `cassettes with no integration test file: ${orphans.join(", ")} in ${SUITES_DIR}`,
+    );
+  }
+}
 
 /**
  * Stub handler for Anthropic's /v1/messages/count_tokens endpoint.
@@ -122,13 +161,41 @@ function requestTransform(req: ChatCompletionRequest): ChatCompletionRequest {
   };
 }
 
+export interface CassetteMock {
+  readonly mock: LLMock;
+  /** Cassette files no request has matched yet. */
+  unusedFiles(): ReadonlyArray<string>;
+}
+
+function loadCassette(mock: LLMock, dir: string): CassetteFixture[] {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((name) => name.endsWith(".json"))
+    .toSorted()
+    .flatMap((file) => {
+      const before = mock.getFixtures().length;
+      mock.loadFixtureFile(join(dir, file));
+      return mock
+        .getFixtures()
+        .slice(before)
+        .map((fixture) => ({ fixture, file }));
+    });
+}
+
 /**
- * Create a configured LLMock instance.
+ * An llmock serving one cassette directory.
  *
- * RECORD=1: replay existing fixtures, proxy + save new ones.
- * Default (CI): strict mode — 503 on unmatched requests, no API calls.
+ * RECORD=1: replay the cassette, proxy misses upstream and save them into it.
+ * Otherwise strict: a miss is answered 503 with `describeMiss`'s account of
+ * it, which is also handed to `onMiss`. The miss handler is a last fixture
+ * whose `turnIndex` is out of reach, so aimock's selection prefers any real
+ * candidate over it (aimock's default relaxed `turnIndex`;
+ * `AIMOCK_STRICT_TURN_INDEX=1` disables the handler).
  */
-export function createMock(): LLMock {
+export function createMock(
+  cassette: string,
+  onMiss: ((description: string) => void) | undefined,
+): CassetteMock {
   const recording = process.env.RECORD === "1";
 
   const mock = new LLMock({
@@ -143,13 +210,34 @@ export function createMock(): LLMock {
           openai: "https://api.openai.com",
           anthropic: "https://api.anthropic.com",
         },
-        fixturePath: FIXTURE_DIR,
+        fixturePath: cassette,
       },
     }),
   });
 
-  mock.loadFixtureDir(FIXTURE_DIR);
+  const fixtures = loadCassette(mock, cassette);
+  if (!recording) {
+    mock.addFixture({
+      match: { predicate: () => true, turnIndex: Number.MAX_SAFE_INTEGER },
+      response: (req) => {
+        const description = describeMiss(requestTransform(req), fixtures);
+        onMiss?.(description);
+        return {
+          error: { message: `llmock (${cassette}): ${description}`, type: "invalid_request_error" },
+          status: 503,
+        };
+      },
+    });
+  }
   mock.mount("/v1/messages/count_tokens", countTokensHandler);
 
-  return mock;
+  return {
+    mock,
+    unusedFiles: () => {
+      const counts = mock.journal.fixtureMatchCounts;
+      return [
+        ...new Set(fixtures.filter((f) => (counts.get(f.fixture) ?? 0) === 0).map((f) => f.file)),
+      ];
+    },
+  };
 }

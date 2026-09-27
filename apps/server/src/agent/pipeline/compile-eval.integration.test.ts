@@ -15,9 +15,10 @@
  */
 
 import picomatch from "picomatch";
-import { describe, expect, inject, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { AnthropicProvider } from "../../llm/anthropic.js";
 import { expectDefined } from "../../test/assertions.js";
+import { fileLlmockUrl } from "../../test/integration-file.js";
 import { compilePipeline } from "./compile.js";
 import type { PipelineDefinition } from "./types.js";
 import { MAX_DURATION_MS, parseDurationMs } from "./types.js";
@@ -38,7 +39,7 @@ const AVAILABLE_TOOLS = [
 
 function compile(sourceText: string) {
   const apiKey = process.env.RECORD === "1" ? process.env.ANTHROPIC_API_KEY : undefined;
-  const provider = new AnthropicProvider(apiKey ?? "test-key", inject("llmockBaseUrl"));
+  const provider = new AnthropicProvider(apiKey ?? "test-key", fileLlmockUrl());
   return compilePipeline(
     {
       provider,

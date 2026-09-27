@@ -2,14 +2,13 @@ import { DrizzleAgentStore } from "../agent/store/index.js";
 import type { Database } from "../db/index.js";
 
 /**
- * Create a `users` row owned by one test file.
+ * Create a `users` row private to the caller.
  *
- * Integration files run in parallel forks against one Postgres, so any
- * state keyed on `inject("defaultUserId")` is shared with every other
- * file. A row-count assertion or a `DELETE ... WHERE user_id = $1`
- * cleanup written against that id reaches another file's rows, and the
- * result depends on interleaving: both pass alone, both pass as a pair,
- * and the failure needs the timing skew of the full tier.
+ * Each integration file has its own database, but within it the seeded user
+ * (`fileDefaultUserId()`) is the owner `bootstrap()` resolves: inbound turns
+ * attach their rows to it, and its id is the Hindsight bank. A row-count
+ * assertion or a `DELETE ... WHERE user_id = $1` cleanup stays exact only on
+ * a user of its own.
  *
  * Reach for the seeded user only when a test is genuinely about it —
  * `pending_memories`, `custom_compartments` and friends only need *a*
