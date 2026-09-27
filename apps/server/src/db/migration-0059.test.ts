@@ -3,7 +3,8 @@
  * enum and moves the channel defaults `seedChannelRules` wrote as `manual` to
  * `seed`. Runs the raw migration SQL against PGlite over rows written in the
  * pre-migration shape (the column put back to text first, since the pushed
- * schema already has the enum) and asserts which rows become `seed`.
+ * schema already has the enum) and asserts which rows become `seed`, and that
+ * a source outside the enum fails the cast.
  */
 
 import { readFile } from "node:fs/promises";
@@ -154,6 +155,14 @@ describe("migration 0059 — steering rule source", () => {
       correction: "correction",
       operator: "manual",
       evolution: "evolution",
+    });
+  });
+
+  it("rejects a source outside the enum", async () => {
+    await insert({ legacy: seeded(OPERATOR, { source: "signal_pipeline", channelType: null }) });
+
+    await expect(applyMigration()).rejects.toMatchObject({
+      cause: { message: expect.stringMatching(/invalid input value for enum/) },
     });
   });
 
