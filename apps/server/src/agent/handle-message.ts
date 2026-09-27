@@ -751,8 +751,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // Durable: recall costs an embedding round-trip plus a vector search
       // per call, and its result feeds the turn context — caching it keeps
       // both the spend and the context identical across the ~one
-      // re-invocation per step boundary that a tool-calling turn produces. The `.catch`
-      // stays INSIDE the body so a Hindsight failure degrades to "no
+      // re-invocation per step boundary that a tool-calling turn produces.
+      // The `.catch` stays INSIDE the body so a Hindsight failure degrades to "no
       // memories" instead of failing the step into Inngest retries, and so
       // the failure counts once per failed recall rather than once per
       // replay. `bank_id` is the conversation user, who owns the bank
