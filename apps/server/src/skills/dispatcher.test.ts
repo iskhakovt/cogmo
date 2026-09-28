@@ -692,6 +692,25 @@ describe("Dispatcher", () => {
       worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: null });
       worker.postMessage({ type: "task_exited", id: "other" });
       await expect(promise).rejects.toThrow(/task_exited id mismatch/);
+      // The delivered result survives the mismatch.
+      await expect(promise).rejects.toBeInstanceOf(ExitUnconfirmedError);
+      await expect(promise).rejects.toMatchObject({
+        result: { type: "task_result", id: "task-1", ok: true, output: null },
+      });
+      d.close();
+    });
+
+    it("keeps a delivered result when a second task_result names another task", async () => {
+      const { host, worker } = makeTransportPair();
+      const d = onExit(host);
+      const promise = d.invoke(INVOKE, { ctxHandler: noopHandler() });
+      worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: "mine" });
+      worker.postMessage({ type: "task_result", id: "other", ok: true, output: "forged" });
+      await expect(promise).rejects.toThrow(/task_result id mismatch/);
+      await expect(promise).rejects.toBeInstanceOf(ExitUnconfirmedError);
+      await expect(promise).rejects.toMatchObject({
+        result: { type: "task_result", id: "task-1", ok: true, output: "mine" },
+      });
       d.close();
     });
 

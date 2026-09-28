@@ -418,6 +418,67 @@ describe("SysboxWorkerPool", () => {
     await pool.dispose();
   });
 
+  it("hands a replenishing spawn to an acquire that queued behind it", async () => {
+    // Every invoke holds its worker until released; the third spawn (the
+    // sweep's replacement) completes only when the test says so.
+    const releases: Array<() => void> = [];
+    const spawned: WorkerHandle[] = [];
+    let finishReplacement: () => void = () => {};
+    const replacementGate = new Promise<void>((r) => {
+      finishReplacement = r;
+    });
+    const sweeps: Array<() => void> = [];
+    const pool = await SysboxWorkerPool.create({
+      sandbox: mock<SandboxClient>(),
+      image: "fake:test",
+      ...DEFAULT_POOL_OPTIONS,
+      min: 2,
+      max: 2,
+      createWorker: async ({ workerId }) => {
+        if (spawned.length === 2) await replacementGate;
+        const w = makeFakeWorker(workerId);
+        const held: WorkerHandle = {
+          ...w,
+          get state() {
+            return w.state;
+          },
+          get taskCount() {
+            return w.taskCount;
+          },
+          invoke: async (params) => {
+            await new Promise<void>((r) => releases.push(r));
+            return w.invoke(params);
+          },
+        };
+        spawned.push(held);
+        return held;
+      },
+      setInterval: (cb: () => void): unknown => {
+        sweeps.push(cb);
+        return {};
+      },
+      clearInterval: () => {},
+    });
+
+    const long = pool.invoke(invokeParams("t-long"));
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    expectDefined(spawned[1], "second worker").markPoisoned();
+    for (const sweep of sweeps) sweep();
+    // The replacement is in flight and counts toward max, so this queues.
+    const queued = pool.invoke(invokeParams("t-queued"));
+    await vi.waitFor(() => expect(pool.stats()).toMatchObject({ queued: 1 }));
+
+    finishReplacement();
+
+    // The queued task starts on the replacement while the long one still runs.
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    expect(pool.stats()).toMatchObject({ total: 2, busy: 2, queued: 0 });
+    for (const release of releases) release();
+    await expect(queued).resolves.toMatchObject({ ok: true });
+    await expect(long).resolves.toMatchObject({ ok: true });
+    await pool.dispose();
+  });
+
   it("sweeps idle workers above `min` after idleShutdownMs", async () => {
     const h = buildPoolHarness({
       poolOptions: {

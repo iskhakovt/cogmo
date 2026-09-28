@@ -459,9 +459,10 @@ export class SysboxWorkerPool {
 
   #replenishToMin(): void {
     if (!this.#disposed && this.#workers.length + this.#pendingSpawns < this.#opts.min) {
-      // Don't await — replacement happens in background; the next invoke
-      // either picks up this spawn or spawns its own up to max.
-      void this.#spawnOne().catch((e: unknown) => {
+      // Don't await — replacement happens in background. An acquire that
+      // queued meanwhile (this spawn counts toward `max`) gets the new
+      // worker; with nobody queued it stays idle for the next invoke.
+      void this.#spawnAndHandToQueue().catch((e: unknown) => {
         if (e instanceof PoolDisposedDuringSpawnError) return;
         log.warn(
           { err: e instanceof Error ? e.message : String(e) },

@@ -322,9 +322,12 @@ export class SysboxSkillWorker {
   }
 
   /**
-   * The supervisor's channel failed. A busy worker learns it from its
-   * in-flight task and is poisoned by `invoke()`; an idle one is poisoned
-   * here, so the pool retires it instead of handing it the next task.
+   * The supervisor's channel failed. An idle worker is poisoned here, so
+   * the pool retires it instead of handing it the next task. A busy one is
+   * left to `invoke()`, which poisons it on the way out: its in-flight task
+   * is rejected, or — if the channel failed during `ensureVenvPopulated`,
+   * before any task was sent — the send finds the dispatcher closed and the
+   * task fails with `worker_dispatch_failed`.
    */
   #onSupervisorLost(): void {
     if (this.#state !== "idle") return;
