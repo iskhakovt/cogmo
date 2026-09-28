@@ -84,13 +84,14 @@ contract**. Design every function for the per-boundary model.
   `is_error` tool_result. Rethrowing a `StepError` out of the function is
   also special: never wrap it — the engine's non-retriable detection
   needs its identity and serialized name intact.
-- **`ToolSpec.durable` policy: side-effectful or billable ⇒ durable.** A
-  non-durable tool handler re-executes once per remaining step boundary of
-  the turn — a DB-writing tool inserts duplicates, a paid API re-bills.
-  Only cheap idempotent reads whose output may be large (`read_file`,
-  `list_*`) stay non-durable; accept that their persisted `tool_result` is
-  whatever the last invocation returned. Justify both sides of the flag in
-  the PR.
+- **`ToolSpec.durable` policy: side-effectful, billable, or output that
+  can change within the turn ⇒ durable.** A non-durable handler
+  re-executes once per remaining step boundary — a DB write duplicates, a
+  paid API re-bills, a read after a same-turn write returns output the
+  model never saw. Only a handler whose output is a pure function of its
+  input stays non-durable. Justify both sides of the flag in the PR. The
+  read tools that are still non-durable move with step 2 of
+  design/prompt-caching.md → Append-only Transcript → Rollout.
 - **`durable: true` buys replay-safety, not exactly-once.** A crash after
   the side effect commits but before Inngest records the step result
   leaves no evidence the step ran, so the retry re-runs it — and no

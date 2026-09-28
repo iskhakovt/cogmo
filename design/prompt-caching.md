@@ -58,11 +58,18 @@ Surveyed September 2026.
 | Zep places a memory block after the last breakpoint and replaces it each turn, measuring 1.3–1.9× lower cost over 18–54 turns — against memory in the system prompt, the layout this design also leaves. Mastra keeps observational memory append-only "to keep the prompt prefix cacheable". | Zep blog (2026-06-24); Mastra docs |
 | Keep the system prompt and tool list fixed for a session; deliver changes in the next turn's messages and restrict tools without removing them. Claude Code keeps every tool in every request and implements plan mode as tools; Manus masks instead of removing; OpenAI's `allowed_tools` restricts a turn "but not modify the list of tools you pass in, so you can maximize savings from prompt caching"; Letta measured 240 system-prompt variants on one agent at an 83.8% hit rate. | Claude Code blog; Manus blog; OpenAI function-calling guide; letta-code #4551 |
 | OpenRouter passes Anthropic `cache_control` through (per-block, and top-level for Claude on the Anthropic, Vertex, Azure and Bedrock providers); for Gemini it uses only the last per-block breakpoint. `session_id` (body) or `x-session-id` (header), at most 256 characters, pins sticky routing from the first request, with `prompt_cache_key` as the fallback key; usage reports `cached_tokens` and `cache_write_tokens`. | OpenRouter prompt-caching docs |
+| A thinking block is bound to `system`, the tool set and every earlier message. Thinking may be removed from the start, from the end, or entirely, but not from the middle, and a removed block must stay out. Images are bound by their bytes. Server-side context editing and compaction are not edits, and client-side keep-tail compaction fails unless the kept turns' thinking is stripped. Fixes are append-only forms: freeze `system` and `tools`, "put changing context in the newest turn", trim on the server. | Anthropic preserved-thinking docs; migration guide (Fable 5.1, Opus 5.5) |
+| `drop_block` drops the first failing block and every later one, for that request only; `input_transformations` lists each drop. The docs say to set the field explicitly, and to count and alert on `prefix_binding_mismatch`. The field without the beta header is a 400. | Anthropic preserved-thinking docs; migration guide three-step check |
+| With context editing, "your client application maintains the full, unmodified conversation history", and "server-side context management never invalidates thinking blocks". Clearing tool results invalidates the cache from the cleared point; `clear_at_least` makes each clearing worth its write. Token counting accepts the same edits. | Anthropic context-editing docs |
+| On-demand compaction (`compact-2026-09-04`; Sonnet 5 included; not Bedrock) returns a signed block that summarizes on the request's model. A kept tail's thinking stays valid when the summary ran on a preserved-thinking model with unchanged `system` and `tools`. | Anthropic compaction docs |
+| An empty `end_turn` is recovered with "a continuation prompt in a new user message". A fork has to keep the conversation's `tools`: "breaking change 3 means you can't drop them for one request". | Anthropic stop-reasons docs; migration guide |
+| Claude Code's transcript is append-only JSONL. Harness-injected user messages are stored and replayed as entries flagged `isMeta`, and a compaction writes a `compact_boundary` entry. | Claude Code JSONL format reference |
+| OpenAI's Responses API returns reasoning items, encrypted with `store: false`, which are passed back on every later request. Its server-side compaction returns an opaque item, and items before it may be dropped. | OpenAI reasoning and compaction guides |
 
 ## Principles `[proposed]`
 
 1. **The system prompt is a stored snapshot.** It is rendered once per conversation epoch and sent unchanged until the next one. Nothing per-turn goes in it. Core memory that changes during an epoch is announced in the next turn; a change to instructions — rules, prompt text, tools — starts a new epoch, so instructions always carry system authority.
-2. **The transcript is append-only.** What the model saw on one request, it sees again byte-identical on every later request, until compaction deliberately rewrites it. That includes key order inside tool-call inputs.
+2. **The transcript is append-only within an epoch.** What the model saw on one request, it sees again byte-identical on every later request. The only rewrite is an epoch transition ([Append-only Transcript](#append-only-transcript-proposed)). Byte-identical includes key order inside tool-call inputs.
 3. **Per-turn state belongs to its turn.** It is rendered once, stored as the exact text sent, and re-sent as those bytes on every later request.
 4. **One prefix per conversation.** Every turn in a conversation — chat or pipeline stage — sends the same `tools` and system prompt. Modes are expressed in messages and enforced at dispatch, never by changing what the request advertises.
 5. **Cache intent is provider-neutral; wire format is the adapter's.** Domain code says "this transcript will be re-sent"; adapters decide what that means on the wire.
@@ -203,7 +210,7 @@ What may be announced is limited by authority. An announcement is user content, 
 - **Voice style is standing guidance.** The system prompt always carries the voice-style section, which applies when a turn context says `Reply modality: voice`, so alternating voice and text turns change only data.
 - **Rule order** `[confirmed]`. `# Rules` lists rules by section, and within a section by scope, then priority, then id ([evolution.md](evolution.md#precedence-confirmed) → Precedence). The id keeps correction rules, which all share priority 100, in their order across the in-place updates the Observer makes.
 
-**An epoch opens** at a conversation's first chat turn, at a turn whose configuration digest differs from the snapshot's, and at a turn whose history starts after a different summary than the snapshot's — one this turn's compaction stored, or one `/compact` stored between turns. `src/agent/system-prompt-snapshot.ts` holds the rules:
+**An epoch opens** at a conversation's first chat turn, at a turn whose configuration digest differs from the snapshot's, and at a turn whose history starts after a different summary than the snapshot's — one this turn's compaction stored, or one `/compact` stored between turns. `[proposed]` It also opens at a turn whose Strategy 3 or unstored summary rewrote its history, and at a turn whose history fails the [head check](#head-check-proposed) or follows a non-intact head. `src/agent/system-prompt-snapshot.ts` holds the rules:
 
 - **The digest** covers everything the snapshot renders except the blocks' keys and content: the prompt source's `configuration()` — the base prompt or code-owned identity, the shape of `# User` (onboarding, or which group leads render), `# Tools`, the capabilities guidance, the rules and the turn-context guidance — and the frozen tool table, whose `tools` every turn of the epoch sends. It also covers the core-memory scope: the profile class, its restricted flag and whether the profile's trust admits `first-party`, which decide which blocks `# User` renders; and whether a restricted class has its own `identity`, since a write deletes that block when no line differs from the shared one and an announcement can't express a removal. The shape is in the digest so the snapshot never keeps what `# User` no longer shows: a new user's first write ends onboarding at the next turn, and a restricted persona's first shared `identity` brings in its shared group's lead. A deploy that edits prompt text reaches existing conversations at their next turn, as does a rule change or a new skill.
 - **The history's start** is the first message the loaded history holds after the conversation's latest summary. The snapshot records it (`history_start`), so a stored summary opens an epoch on the turn that stored it, or after `/compact` on the next turn. Compaction already rewrites the prefix, so its refresh costs nothing extra; the others are deliberate full rewrites.
@@ -214,7 +221,12 @@ What may be announced is limited by authority. An announcement is user content, 
 
 **Announcement tracking** compares a block's `updated_at` (set by `now()` on every write) with the snapshot's `created_at` and with the versions turn contexts announced. A block is announced when it changed at or after the snapshot read core memory and no turn context the request still shows — one still leading its message after this turn's compaction — announced that version or a later one, so an announcement a truncation or an unstored summary drops is made again, and so is a version written while the announcing turn ran. An opening turn announces nothing, since its snapshot shows core memory as it is. A write from another conversation whose transaction starts before an opening turn's render and commits after the render's read goes unannounced until the next epoch: the snapshot doesn't show it, and its `updated_at` precedes the snapshot's `created_at`.
 
-**Residuals.** A turn whose `persist-summary` recovers a row `/compact` stored for the same span sends its own summary while later turns load `/compact`'s, with the same history start: the next turn misses the cache from the summary on, and the turn's thinking blocks don't match its replay where preserved thinking is enforced. Closing it means returning the stored text from `persist-summary`, whose memo is a contract with runs in flight, for a race that needs `/compact` on the same span mid-turn. A kept tail under an unstored summary or Strategy 3 truncation keeps its thinking blocks under a rewritten prefix, as `todo.md`'s preserved-thinking audit tracks.
+**Residuals.** Two cases replay thinking blocks under a rewritten prefix:
+
+- A turn whose `persist-summary` recovers a row `/compact` stored for the same span sends its own summary, while later turns load `/compact`'s with the same history start.
+- A kept tail under an unstored summary or Strategy 3 truncation keeps its thinking blocks.
+
+[Append-only Transcript](#append-only-transcript-proposed) closes both: the head check the first; the compaction epoch, then the head check, the second.
 
 ```
 system_prompt_snapshots
@@ -224,11 +236,14 @@ system_prompt_snapshots
   history_start    UUID NOT NULL REFERENCES messages(id)         -- the first message after the latest summary
   rendered         TEXT NOT NULL                                 -- the exact system prompt sent
   config_digest    TEXT NOT NULL                                 -- digest of everything rendered but core memory
+  reason           system_prompt_epoch_reason NOT NULL           -- first_turn | configuration | summary | compaction | prefix_violation  [proposed]
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now()            -- when the core memory it shows was read
   UNIQUE (conversation_id, opened_by)
 ```
 
 `opened_by` alone identifies an epoch, since a message belongs to one conversation; pairing it with the conversation makes the unique both the insert's conflict target and the read path for the current epoch, the snapshot opened latest in the transcript. Rows are immutable. Owned by `agent/store/`.
+
+`[proposed]` `reason` is a `pgEnum` ([Head check](#head-check-proposed) → Epoch rule). The migration that adds it fills existing rows from their order: a conversation's first snapshot gets `first_turn`, a later one whose `history_start` differs from its predecessor's gets `summary`, and the rest get `configuration`.
 
 On Opus 5, 5.5 and Fable, a rule change could instead be a mid-conversation `role: "system"` message, which has operator authority and avoids the rewrite. Sonnet 5 has none, so an epoch is the one path that works on every model.
 
@@ -250,6 +265,101 @@ A `tool_use` block's `input` is put into canonical key order — keys sorted by 
 - **At the store boundary**: `ToolUseBlockSchema.input` parses into canonical order, and `messages.content` parses through it on every read, so a reload reproduces the bytes the loop sent.
 
 The model never sees its own emission order again, only the canonical one, and that is safe: iteration 1's cache entry ends at the user message, and the preserved-thinking check ignores key order (measured, see [Validation](#validation-confirmed)). Handlers receive the same values; only key order changes.
+
+## Append-only Transcript `[proposed]`
+
+A thinking block on Opus 5.5 and Fable 5.1 is bound to `system`, `tools` and every earlier message; where the check is enforced, an edited history is a 400 on every later turn. This account isn't enforced ([Validation](#validation-confirmed)), so each edit below costs cache hits here and is an outage on a new key or organization. The snapshot and frozen tool definitions remove the edits configuration causes; this section removes the rest and detects new ones.
+
+### Invariant `[confirmed]`
+
+Within an epoch, a request's `system`, `tools` and `messages` extend the previous request's unchanged. A sent message is only ever replayed. An epoch transition is the one rewrite: it re-renders, and strips every thinking block before its opening row as a leading run.
+
+What the check allows, per Anthropic's preserved-thinking docs, with measured cases marked:
+
+- Appending messages, harness-authored ones included. Measured: a kept continuation prompt passes; a dropped one is a 400.
+- Removing thinking blocks from the start, from the end, or all of them. Never from the middle, and a removed block never comes back.
+- Changing parameters outside `system`, `tools` and `messages`: `tool_choice`, `max_tokens`, effort, cache markers, `context_management`.
+- Server-side context editing and compaction, since the check compares the conversation as sent.
+- Blocks added after the model's own content in an assistant turn before that turn is first replayed. Measured: the truncation notice passes.
+
+A model switch is not an edit. A model that can't read a block drops it unbilled (`model_binding_mismatch`), and the block is readable again when the conversation returns to its model. Blocks go back unchanged either way.
+
+### Sources and fixes
+
+| | Source | Fix | Cost | Marker |
+|-|-|-|-|-|
+| a | The `empty_end_turn` repair drops its continuation prompt before persisting | Persist the prompt, tagged harness-authored ([agent-resilience.md](agent-resilience.md#per-subtype-repair)) | None | `[proposed]`: data model |
+| b | Compaction that rewrites without storing a summary: Strategy 3, a capped or unpersisted summary, or a span `/compact` stored first | A turn whose Strategy 3 or unstored summary rewrote its history opens an epoch; a later turn that can't reproduce that view fails the [head check](#head-check-proposed) and opens another | Thinking, and the messages cache from the first stripped block, on turns that already rewrote from the cut | `[proposed]` |
+| c | Strategy 1 clears tool results client-side, a set that moves as the conversation grows | A request-level edit intent. Anthropic clears server-side (`clear_tool_uses_20250919`). The OpenAI-compatible adapter clears on the wire, since those routes replay no reasoning | A cache write from each newly cleared result; thinking kept | `[proposed]` |
+| d | An image or document turn sends resolved blocks; later turns reload the row as a JSON string | The turn row stores attachment reference blocks, and every request renders them the same way: base64 of the write-once object | Image tokens stay as cache reads until a summary; one object read per attachment per invocation, until the per-run memo | `[proposed]`: data model |
+| e | Strategy 0 rewrites an earlier `tool_result` whenever a same-tool cluster crosses its trigger | Retired from turns and `/compact` | Clusters stay verbatim until clearing or a summary | `[proposed]` |
+| f | Stage turns send a narrower tool set | [One Prefix per Conversation](#one-prefix-per-conversation-proposed) | Nothing | `[proposed]` |
+| g | Non-durable tools re-execute on every invocation. `get_current_time` returns a new millisecond timestamp, and a read re-run after a same-turn write returns the written state. Later iterations and the persisted row carry output the model never saw | Every tool whose output can change during the turn is durable, which is every tool ([crash-recovery.md](crash-recovery.md#tool-durability-policy)) | A step boundary per call; outputs in step state, bounded by each tool's cap | `[confirmed]` |
+| h | Forks, meaning the summarization call and degraded-reply synthesis, replay the conversation's thinking without its `system` or `tools` | A fork on the conversation's model sends the snapshot `system` and the frozen `tools` with `tool_choice: none` (a new `ChatParams.toolChoice`) and appends its instruction as a user message. On another model it passes the blocks unchanged | The fork's messages miss the cache: `tool_choice: none` invalidates it | `[proposed]`; the 400 without `tools` and the 200 with `tool_choice: none` are measured |
+
+- **(b)** While summarization keeps failing, every truncating turn opens an epoch ([Strategy 3](context-management.md#strategy-3-truncate-trigger-95)).
+- **(d)** This is also a quality fix: later turns see the image, not a JSON string naming its object path. Anthropic's Files API (`file_id`) would avoid re-sending the bytes; that is `[research]` and Anthropic-only.
+- **(e)** Decision and open alternative: [Retirement](context-management.md#retirement-proposed).
+
+### One renderer `[proposed]`
+
+A request is the epoch's snapshot, the frozen tool table and durable rows, each rendered by one function (content, stored turn context, resolved attachments, history sanitization), with the epoch's summary overlay and thinking strip on top. The turn's own message and every message the loop appends render from their rows to the bytes sent, so compaction and the head check see the request.
+
+### Transcript type `[proposed]`
+
+The loop and the orchestrator pass around a `Transcript`, not a `Message[]`:
+
+- `openTranscript(epoch, rows)` renders the view.
+- `append(message)` adds a message.
+- `amendUnsent(…)` and `discardUnsent()` touch only the last message, and only before any request carried it: the truncation notice, an empty `end_turn`, a degraded iteration. Both throw once it has been sent.
+- `request()` returns the readonly `{ system, tools, messages }` and its head, and records what was sent.
+
+No method edits a sent message. Compaction returns the view unchanged or a rewrite, and only an epoch opening accepts a rewrite. A loader rendering a row differently from how a turn built it, and a replay rebuilding a request the step never sent, are the head check's.
+
+### Head check `[proposed]`
+
+A digest chain runs over the provider-neutral request: `h₀ = H(system, tools)`, `hᵢ = H(hᵢ₋₁, H(messageᵢ))`, each part as canonical JSON. Key order is the byte-level tests' concern ([Canonical Tool Inputs](#canonical-tool-inputs-confirmed)). A request's head is `(length, hₙ)`. Hashing is incremental, one pass per message per invocation.
+
+- **In a turn.** `llm-iter<N>` computes the head of the request it sends inside its body and returns it in the memoized outcome. Every invocation compares that head with the head of the request it rebuilds for the iteration. A difference means a replay rebuilt input the provider never saw.
+- **Across turns.** Each assistant row a turn writes stores `transcript_head`: `{ length, base, digest, intact }`, validated by `TranscriptHeadSchema`. `base` is `h₀`, the prompt and tools the head was built under. The digest is the memoized head of the row's request, extended by every message the loop appended after that request, the row included. `intact` is false when the turn saw an in-turn difference or a server-reported drop. `load-turn-transcript` returns the latest head. Before the epoch decision, the turn checks that its rendered history, under the snapshot's prompt and the frozen tools, has `digest` at position `length` of its chain.
+- **Stage turns and degraded replies.** A stage turn's rows carry a head under its own prompt and tools; until [One Prefix per Conversation](#one-prefix-per-conversation-proposed) the next chat turn opens an epoch, recorded as `configuration`, not `prefix_violation`: a head whose `base` differs from the turn's is a configuration change, and only a matching `base` with a diverging digest is a violation. A degraded reply, which no loop request produced, takes the last loop request's head extended by the persisted rows after it.
+- **Epoch rule.** A turn continues its epoch when the configuration digest and history start match, the last head is intact, and the check passes. Otherwise it opens a new epoch and records why in `system_prompt_snapshots.reason`: `first_turn`, `configuration` (prompt text, rules including `rule_set`/`rule_remove`, tools or scope), `summary`, `compaction` (Strategy 3 or an unstored summary) or `prefix_violation`. When several apply, the first in this list is recorded; the head check runs on every turn with a head and counts a violation regardless. A row written before the column has no head and skips the check.
+- **Replay safety.** Every input is memoized or derived from memoized values: the iteration outcomes, `load-turn-transcript`, the frozen tool table and the snapshot. `persist-new-messages` writes the head, and the verdict gates `open-system-prompt-epoch` on memoized state alone. The only bare-body cost is re-running the hash.
+
+`transcript_head` is a nullable JSONB column on `messages` (`TranscriptHeadSchema`), set on assistant rows as they are written.
+
+**On a violation:**
+
+| Where | Production | Tests |
+|-|-|-|
+| Across turns | Open an epoch (`prefix_violation`), count `cogmo.prompt.prefix_violations{site: "turn"}`, and log a warning naming the first diverging message | Throw `PrefixViolationError` |
+| In a turn | Store the head with `intact: false` so the next turn opens an epoch, and count `site: "iteration"`. The request proceeds, and `drop_block` drops the blocks it invalidates | Throw |
+| Server-reported `prefix_binding_mismatch` | Count `cogmo.prompt.thinking_dropped{reason}` and store `intact: false` | `prefix_mismatch_behavior: "error"` makes it a 400 that fails the test |
+
+The policy is injected as `prefixViolation: "reopen" | "throw"`. Production wiring passes `reopen`; the unit factories and the integration bootstrap pass `throw`.
+
+### Server-side `drop_block` `[proposed]`
+
+The adapter also sets the server-side behaviour explicitly, as the last layer and the ground truth:
+
+- The guard sees cogmo's canonical request. What the provider binds is checked only server-side: the adapter's serialization, attachment bytes, and what counts as an edit.
+- An explicit setting makes behaviour independent of account age. Unset, this account records mismatches and drops nothing, while a new key or organization would return a 400 on any missed edit, on every later turn of that conversation.
+- `input_transformations` is the signal Anthropic says to count and alert on, and it closes the loop above.
+- It costs one beta header and one field. Models that don't enforce the check, such as Sonnet 5, accept it and report only model drops, so one request body serves every Claude model.
+
+Decision: on first-party routes, the Anthropic adapter sends `thinking-binding-controls-2026-08-01` and `prefix_mismatch_behavior: "drop_block"` on every request; the integration and live tiers send `"error"`. Anthropic-compatible third-party endpoints get neither, because the field without the header is a 400 and they may reject an unknown beta. Every request carries the header from the first one, which keeps the beta set constant for cache diagnostics.
+
+### Rollout
+
+1. **The edit intent for Strategy 1 (c), and Strategy 0 retired (e).** Both reapply to the raw rows every turn, so they go first: otherwise a compacted conversation reopens an epoch on every turn once the head check lands.
+2. **Durable reads (g).**
+3. **Head check.** Request heads in `llm-iter<N>` outcomes, `messages.transcript_head`, `system_prompt_snapshots.reason`, both checks, metrics and logs, with `reopen` in production and `throw` in unit tests. `drop_block` and `input_transformations` in the Anthropic adapter. Until (d) lands, the turn after an image turn reopens an epoch.
+4. **Compaction opens an epoch (b).**
+5. **Forks keep the prefix (h).**
+6. **The continuation prompt is persisted (a)**, with the harness tag.
+7. **Attachments as reference blocks (d)**, with one renderer and the per-run memo.
+8. **The `Transcript` type.**
+9. **Strict mode everywhere**, after [One Prefix per Conversation](#one-prefix-per-conversation-proposed): `throw` in the integration tier, no declared exceptions, and live scenario B extended.
 
 ## Cache Intent `[confirmed]`
 
@@ -353,15 +463,14 @@ The persisted per-turn input is the sum across the turn's iterations, which over
 
 ## Interactions `[proposed]`
 
-- **Compaction.** Strategy 0 supersession, Strategy 1 clearing, Strategy 2 summarization and Strategy 3 emergency truncation rewrite history and invalidate the cache from the first rewritten position — by design, see [context-management.md](context-management.md). The summarization call could itself read the parent's cache by reusing the parent's exact tools, system and messages and appending its instruction; that is a follow-up.
+- **Compaction.** Strategies 2 and 3 rewrite history and invalidate the cache from the first rewritten position ([context-management.md](context-management.md)). A stored summary opens an epoch; the rest is [Append-only Transcript](#append-only-transcript-proposed).
 - **Inngest replays.** Every byte of `system` and `messages` derives from step results or the event payload, so a replayed invocation sends the same prefix; no bare-body clock or non-durable read may reach them. The turn context's inputs are listed under [Rendering](#rendering); `handle-message.replay.test.ts` holds `llm-iter2`'s request bytes equal between a fresh run and one replaying every earlier step as the server returns it. The `tools` array is built from live reads of the image, skill, sub-agent and MCP catalogs, which a catalog edit mid-run — or a transient failure, since `buildSkillTools` catches a skill-list error and returns `[]` — can change between invocations, moving position 0 for the rest of the turn. Each turn's tool definitions and dispatch policy are therefore frozen in the `freeze-turn-inputs` step, in chat and stage turns alike; the bare body still builds the handlers and binds them to the frozen table (`src/agent/turn-tools.ts`), and a call to a tool whose handler didn't load on this invocation returns an `is_error` result. Between turns, a changed catalog starts a new snapshot epoch.
-- **Preserved thinking.** Freezing the system prompt removes the one history edit that happens on every turn. The snapshot announces core-memory changes and opens an epoch for instruction changes and for a new summary, stripping the thinking blocks bound to the old prompt or history, the keep-tail turns' included; frozen tool definitions remove the mid-turn catalog change; one prefix per conversation will remove the stage switch. The remaining edits — Strategies 0, 1 and 3 (Strategy 0 runs every turn and rewrites an earlier result whenever a same-tool cluster crosses its trigger), the ephemeral `empty_end_turn` continuation prompt, and image turns (below) — are tracked in `todo.md`.
-- **Image turns.** The current turn sends resolved image and document blocks; later turns load the row as its persisted JSON string. Anthropic treats added or removed images as a messages-cache invalidation, so the turn after an image turn re-writes from that message on. It is also a preserved-thinking edit. Out of scope here; tracked in `todo.md`.
+- **Preserved thinking and image turns.** See [Append-only Transcript](#append-only-transcript-proposed).
 - **Model switches.** Caches are per model. A `/model` change or a fallback to another provider starts cold.
 
 ## Validation `[confirmed]`
 
-Live measurements, 2026-09-25, from scripts kept outside the repo, each against a fresh ~7k-token system prompt. The Gemini and scenario D rows are from 2026-09-26, against a fresh ~3–4.7k-token prompt; scenario D is `src/llm/openai-compat.live.test.ts`. The conversation-level A–C rows are from 2026-09-27, `src/test/prompt-caching.live.test.ts`, whose five-turn conversation starts from a ~3.1k-token prefix.
+Live measurements, 2026-09-25, from scripts kept outside the repo, each against a fresh ~7k-token system prompt. The Gemini and scenario D rows are from 2026-09-26, against a fresh ~3–4.7k-token prompt; scenario D is `src/llm/openai-compat.live.test.ts`. The conversation-level A–C rows are from 2026-09-27, `src/test/prompt-caching.live.test.ts`, whose five-turn conversation starts from a ~3.1k-token prefix. The last three rows are from 2026-09-28: a script outside the repo on Opus 5.5 with `prefix_mismatch_behavior: "error"`, over two-turn conversations.
 
 | Question | Result |
 |-|-|
@@ -382,6 +491,9 @@ Live measurements, 2026-09-25, from scripts kept outside the repo, each against 
 | Scenario B: does replaying every earlier turn pass with preserved thinking enforced? (Opus 5.5, `prefix_mismatch_behavior: "error"`) | Yes. All six requests returned 200 with `input_transformations: []`, the last replaying two thinking blocks from earlier turns, and reads followed A's relation: 0, 3,052, 3,210, 3,469, 3,604, 3,755. |
 | Scenario C: does the next turn read the prefix after a gap a 5-minute entry wouldn't survive? (Sonnet 5, 6.5 minutes) | Yes. Turn 2's first request read 3,260 tokens, turn 1's last read plus write (3,114 + 146). |
 | Scenario D: does each dialect read the conversation's cache? (`long` intent, three requests) | Yes. OpenRouter → Claude Sonnet 5 read exactly the previous request's read plus write: 0, 4,698, 4,721, after writes of 4,698, 23 and 22. OpenRouter → Grok 4.3 read 3,136 of 3,152 and of 3,171, after one repeated miss. OpenRouter → Gemini 2.5 Flash read its 3,547-token system entry on both follow-ups. OpenAI with `prompt_cache_key` read 2,816 of 2,972 and of 2,992 on gpt-4.1-nano, and 2,816 of 2,969 and of 2,990 on gpt-5.4-nano. |
+| Is a text block appended after the model's content in a replayed assistant turn a binding mismatch? (the truncation notice) | No. The request returned 200 with `input_transformations: []`. The control, one changed word in the first user message, was a 400 whose message names the first changed path (`messages.0.content.0`). A trailing space in that message was not a mismatch, so it can't serve as a control. |
+| Does dropping an ephemeral continuation prompt break the reply's thinking? | Yes. The next turn with the prompt kept returned 200; with it dropped, a 400 on the reply's thinking block. |
+| Does a fork that drops the conversation's `tools` break its thinking? | Yes. The fork without `tools` was a 400 naming the `tools` list. With the same `tools` and `tool_choice: none` it returned 200 with a text-only reply. |
 
 ## Test Plan `[proposed]`
 
@@ -400,6 +512,7 @@ Replay cannot prove the third. llmock records usage for OpenAI-shaped responses 
 - **Injectable `fetch`** on `AnthropicProvider` and `OpenAICompatibleProvider`, as `OpenAIVoiceProvider` already takes for record/replay. Production passes the logging fetch it builds today.
 - **`createWireRecorder()`** (`src/test/`) wraps a fetch and records each request's URL, headers and body exactly as sent. It tees the response to keep the usage object: Anthropic's `message_start` usage including the `cache_creation` TTL breakdown, and the OpenAI final chunk's `usage`. An optional request mutator lets the live tier add headers and fields without production code.
 - **`assertAppendOnly(prev, next)`**, with `cache_control` stripped everywhere: `tools` and `system` equal, and `next.messages` starting with every message of `prev` byte-for-byte. A failure names the first diverging path (`system`, `tools[3]`, `messages[7].content[1].input`). It also counts the positions each request appends — a run of `tool_use` or `tool_result` blocks counting once — and fails past 20, the lookback window.
+- **`assertEpochOpening(prev, next, opener)`** `[proposed]`, for a pair that crosses a declared epoch opening: `next` carries no thinking block from before the opening row. Over a whole conversation, `assertThinkingNeverReturns(requests)` fails when a thinking block missing from one request appears in a later one. A pair is either append-only or a declared opening; nothing else passes.
 
 llmock's request journal can't serve here: it stores its own OpenAI-shaped conversion of an Anthropic request, without `cache_control`, system blocks or the top-level field.
 
@@ -421,6 +534,15 @@ llmock's request journal can't serve here: it stores its own OpenAI-shaped conve
 - OpenAI-compatible adapter, per dialect: `prompt_cache_key`, the `x-grok-conv-id` header, OpenRouter's `session_id` and markers, and nothing for `none`; usage from `prompt_tokens_details`.
 - The loop passes the caller's intent on every iteration and to the in-step replay; summarization, degraded-reply synthesis, sub-agents and `chatTyped` send none.
 - `shouldSkipCounting` does not skip for a large conversation whose usage is mostly cache reads.
+- `[proposed]` The append-only transcript (`transcript.test.ts`, `system-prompt-snapshot.test.ts`, `loop.test.ts`, `handle-message.replay.test.ts`):
+  - the chain ignores key order, changes with any content, and keeps positions;
+  - the epoch rule continues on a matching head, opens with `prefix_violation` on a diverging or non-intact one naming the first diverging message, and skips the check for a row without a head;
+  - `amendUnsent` and `discardUnsent` throw once a request carried the message, and a rewrite reaches a request only through an epoch opening;
+  - every message the loop appends — the continuation prompt, the truncation notice, an attachment turn — renders from its persisted row to the message sent;
+  - a replay whose rebuilt request differs from the memoized head stores `intact: false`, and a read tool whose output changes between invocations leaves the output the model saw in every later request and in the row;
+  - a turn whose compaction truncates opens an epoch, and so does the next one when it can't reproduce the view; a chat turn after a stage turn records `configuration`;
+  - the summarization and degraded-reply requests carry the snapshot `system` and the frozen `tools` with `tool_choice: none`, and a summarization on a turn that opens an epoch carries no thinking block;
+  - under `throw`, each of the above fails the test at the request that diverges.
 
 ### Integration tier (replay, every PR)
 
@@ -446,6 +568,7 @@ llmock's request journal can't serve here: it stores its own OpenAI-shaped conve
 - **A voice turn** changing only the turn context's modality. The voice path is covered at the unit tier (the prompt takes no voice input) and live, by scenario A's voice turn.
 - **A pipeline run conversation:** chat turns and a stage turn alternate, and `assertAppendOnly` holds across each switch — same `tools`, same `system`, same `1h` TTL. Step 5; a stage turn narrows `tools` and `# Tools` and caches for 5 minutes until then.
 - **OpenAI-compatible:** the recorded xAI-via-OpenRouter route runs a two-turn conversation with a tool call. `assertAppendOnly` holds over the Chat Completions bodies, which catches a reordered `arguments` string, and the dialect's fields are present.
+- **The append-only transcript** ([Append-only Transcript](#append-only-transcript-proposed) → Rollout). The suite runs under `throw`, and the image turn's declared exception goes with source (d). New turns cover the remaining sources: a `get_current_time` call followed by another iteration; an empty `end_turn` from a fixture, so the continuation prompt is replayed on the next turn; a budget small enough to truncate, where the pair after it is a declared opening and the turn after that extends it; and a `/compact` between turns. Every request carries `context_management`, whose trigger is the clearing threshold, and `drop_block`, each with its beta header.
 
 The suite follows `.claude/rules/testing.md`: it runs alongside its noisiest peers before it counts as stable.
 
@@ -465,7 +588,7 @@ Step 2 adds `src/test/prompt-caching.live.test.ts` `[confirmed]`: a five-turn co
 - `cache_creation.ephemeral_1h_input_tokens` is non-zero and `ephemeral_5m_input_tokens` is zero on the chat path.
 - `input_tokens` covers only the tail after the last breakpoint.
 
-**B. Opus 5.5 with preserved thinking enforced.** The same conversation as A. The recorder adds `thinking-binding-controls-2026-08-01` and `thinking.block_binding.prefix_mismatch_behavior: "error"`, so any history edit is a 400. The conversation completes, `input_transformations` (which the wire recorder captures) stays empty, and the last request replays thinking blocks from earlier turns, so the check isn't vacuous. Key order needs no check here: the binding ignores it, and A's exact relation already fails on a reordered input.
+**B. Opus 5.5 with preserved thinking enforced.** The same conversation as A. The recorder adds `thinking-binding-controls-2026-08-01` and `thinking.block_binding.prefix_mismatch_behavior: "error"`, so any history edit is a 400. The conversation completes, `input_transformations` (which the wire recorder captures) stays empty, and the last request replays thinking blocks from earlier turns, so the check isn't vacuous. Key order needs no check here: the binding ignores it, and A's exact relation already fails on a reordered input. `[proposed]` B grows an image turn and a summarization fork once sources (d) and (h) land, and a turn over server-side tool-result clearing with (c).
 
 **C. TTL survival (nightly only).** Turn 1, a six-and-a-half-minute wait, then turn 2, whose first request reads turn 1's whole prefix. Only the 1-hour TTL makes that possible.
 
@@ -488,10 +611,10 @@ Recorded fixtures match on the last user message (`match: { userMessage }`), so 
 3. **System prompt snapshot** `[confirmed]`. `system_prompt_snapshots` and epochs keyed on a configuration digest and the history's start, the `load-system-prompt` and `open-system-prompt-epoch` steps, core-memory announcements, every channel-scoped rule labelled in the snapshot with the delivery channels in the turn context, and thinking blocks stripped when an epoch opens. A core-memory edit leaves the system prompt as it is. Chat turns only: a switch between chat and stage turns still rewrites the prefix.
 4. **OpenAI-compatible routing hints** `[confirmed]`. `attrs.cacheDialect` with its migration and writers, OpenRouter `session_id` and markers, OpenAI `prompt_cache_key`, xAI `x-grok-conv-id`, and live scenario D.
 5. **One prefix per conversation.** Stage turns on the conversation's snapshot and full tool definitions, with the allowlist stated in the stage prompt and enforced at dispatch ([pipelines.md](pipelines.md) changes with it), and on chat's `"long"` retention.
+6. **Append-only transcript.** The head check, the remaining sources' fixes and strict mode, in the order under [Append-only Transcript → Rollout](#rollout).
 
 ## Open questions
 
-- **Preserved-thinking enforcement.** This account is not enforced by default (measured), so the history edits that remain drop nothing today unless a request opts in. They still cost the cache, and they become 400s for a new account or a model that enforces for everyone.
 - **Core-memory edit frequency.** Few edits so far, from little use and from the previous guidance, which missed most core facts mentioned in passing ([memory.md](memory.md) → Core Memory vs Hindsight → Evaluation); re-measure edits per conversation-day on data collected under the current guidance to size what the snapshot saves.
 - **Anthropic-compatible endpoints.** If an Anthropic-protocol `llm_providers` row ever points at a third-party endpoint, check that it accepts top-level `cache_control`, or fall back to an explicit tail marker for that row.
 - **Live tier in CI.** The scheduled workflow needs Anthropic, OpenAI and OpenRouter API keys as repository secrets (xAI optional, reached through OpenRouter until a direct key exists); until they exist, the live tier runs locally only.
@@ -517,3 +640,11 @@ Recorded fixtures match on the last user message (`match: { userMessage }`), so 
 - promptcachelint — https://github.com/OsmnvAslan/promptcachelint
 - Zep, "Where you put memory in the prompt can cut your token bill up to 2x" — https://blog.getzep.com/where-you-put-memory-in-the-prompt-can-cut-your-token-bill-up-to-2x/
 - Mastra, Observational memory — https://mastra.ai/docs/memory/observational-memory
+- Anthropic, Preserved thinking — https://platform.claude.com/docs/en/build-with-claude/preserved-thinking
+- Anthropic, Migration guide (Fable 5.1, Opus 5.5) — https://platform.claude.com/docs/en/about-claude/models/migration-guide
+- Anthropic, Context editing — https://platform.claude.com/docs/en/build-with-claude/context-editing
+- Anthropic, Compaction on demand, and compaction and preserved thinking — https://platform.claude.com/docs/en/build-with-claude/compaction-on-demand, https://platform.claude.com/docs/en/build-with-claude/compaction-thinking-blocks
+- Anthropic, Handling stop reasons — https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons
+- Claude Code JSONL transcript format — https://claude-dev.tools/docs/jsonl-format
+- OpenAI, Reasoning models — https://developers.openai.com/api/docs/guides/reasoning
+- OpenAI, Compaction — https://developers.openai.com/api/docs/guides/compaction

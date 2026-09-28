@@ -26,7 +26,7 @@ Two stores hold what the agent knows about its user. **Core memory** is a few ke
 | `identity`: name and what to call them, home and timezone, the languages they speak | Events: a dinner out, a conference trip, a bug fixed |
 | The rest of who the user is: role and employer, who their close family are | Details: a sister's birthday, the rent, a book finished |
 | Active projects and their status | One-off decisions about a single task: a bar chart for the quarterly report |
-| Standing preferences and constraints: spelling variety, diet, working days | Facts about other people: a friend's new job, a partner's promotion |
+| Standing preferences and constraints about their life: diet, working days | Facts about other people: a friend's new job, a partner's promotion |
 
 Two routing lines come with `identity`, in `CORE_MEMORY_PROMPT_GUIDANCE` and the `core_memory_update` description:
 
@@ -34,6 +34,8 @@ Two routing lines come with `identity`, in `CORE_MEMORY_PROMPT_GUIDANCE` and the
 2. `identity` holds what is true in every persona, since classed profiles share it, so a name or form of address for one persona goes in that persona's other blocks: "call me Thorin while we play" stays in the game's class.
 
 The test is whether a reply to an unrelated message could go wrong without the fact. A family member belongs in core memory, and details about them belong in Hindsight. A trip leaves home and timezone as they are, and a one-off request ("this one as a list") is not a standing preference.
+
+**Instructions are rules** `[proposed]`. A standing instruction about how the agent replies or conducts itself goes to `rule_set`, in neither store ([evolution.md](evolution.md#the-boundary) → The Boundary). Core memory keeps the facts a rule depends on: `identity` holds the languages the user speaks, and the language of replies is a rule.
 
 **Current facts only.** A block states what holds now. A change replaces the old value without mentioning it: the location reads Lisbon, not "Lisbon, moved from London". A finished project leaves `active_projects`. A block carries no relative time words ("recently", "last month", "this week"): every later prompt shows the block, so a relative time goes stale while the block stays. What used to be true goes to Hindsight, as do the details about a family member.
 
@@ -55,7 +57,7 @@ The test is whether a reply to an unrelated message could go wrong without the f
 | Legacy | The same facts without `identity`, name and home in `user_profile` | The three whose fact belongs in `identity`: a preferred name and two moves |
 | Restricted | As classed, in a restricted class | The same three |
 
-Beyond which tools a turn calls, the eval checks each write: that it targets one of the case's expected blocks, relative time words, facts from other blocks in `identity` and, with blocks, established lines a rewrite lost and a finished project left in place. In the legacy state it checks for name and home left in `user_profile` beside a new `identity`; in the restricted state, whether the change is stored as the class's override, whether the written and the stored override repeat an unchanged shared line, verbatim or paraphrased, and whether the reply says the change is saved only in this persona. Each established line names its anchors, the words that carry its fact, and a rewrite keeps the line while it still names them all. `EVAL_REPEATS=N` samples every case N times. The eval reports rather than asserts (see [testing.md](testing.md) → Live Tests).
+Beyond which tools a turn calls, the eval checks each write: that it targets one of the case's expected blocks, relative time words, facts from other blocks in `identity` and, with blocks, established lines a rewrite lost and a finished project left in place. In the legacy state it checks for name and home left in `user_profile` beside a new `identity`; in the restricted state, whether the change is stored as the class's override, whether the written and the stored override repeat an unchanged shared line, verbatim or paraphrased, and whether the reply says the change is saved only in this persona. Each established line names its anchors, the words that carry its fact, and a rewrite keeps the line while it still names them all. `EVAL_REPEATS=N` samples every case N times. The eval reports rather than asserts (see [testing.md](testing.md) → Live Tests). With the rule tools, the fixture gains a `rule` label (`british-english` moves to it, three cases join), a `none` case and a legacy-preferences state, specified with their targets in [evolution.md](evolution.md#evaluation) → Evaluation.
 
 Results on `claude-sonnet-5`. *Baseline* is the guidance before this rule: the core-memory guidance said only "Update them as you learn new things", and onboarding said "Store what you learn using memory_retain". It has one sample per case and predates the boundary cases and the content checks (—). *Rule* is the rule's first wording, without [Current facts only](#core-memory-vs-hindsight-confirmed). *Current facts* adds it. Both have three samples per case (N=3); counts are over all samples, and the parenthesis gives the range across the three runs where it varies. The relative-time check postdates *Rule*.
 
