@@ -1,7 +1,63 @@
 import { describe, expect, it } from "vitest";
-import { shouldSkipRecall } from "./recall-gate.js";
+import { recallQueryText, shouldSkipRecall } from "./recall-gate.js";
+
+describe("recallQueryText", () => {
+  it("returns a text-only turn's rows as they are, joined by newline", () => {
+    expect(
+      recallQueryText([
+        { content: "tell me about my homelab" },
+        {
+          content: [
+            { type: "text", text: "the one in the loft" },
+            { type: "text", text: "with the rack" },
+          ],
+        },
+      ]),
+    ).toBe("tell me about my homelab\nthe one in the loft\nwith the rack");
+  });
+
+  it("takes the caption of an image or document, not its block", () => {
+    expect(
+      recallQueryText([
+        {
+          content: [
+            { type: "image", path: "inbound/cat.jpg", mediaType: "image/jpeg" },
+            { type: "text", text: "what breed is this?" },
+          ],
+        },
+        {
+          content: [
+            {
+              type: "document",
+              path: "inbound/a.pdf",
+              mediaType: "application/pdf",
+              name: "a.pdf",
+            },
+          ],
+        },
+        { content: "and summarize the report" },
+      ]),
+    ).toBe("what breed is this?\nand summarize the report");
+  });
+
+  it("is empty for a turn with no text", () => {
+    expect(
+      recallQueryText([
+        { content: [{ type: "image", path: "inbound/cat.jpg", mediaType: "image/jpeg" }] },
+      ]),
+    ).toBe("");
+  });
+});
 
 describe("shouldSkipRecall", () => {
+  it.each(["off", "always", "heuristic", "llm"] as const)(
+    "skips a message with no text in %s mode",
+    (mode) => {
+      expect(shouldSkipRecall(mode, "")).toBe(true);
+      expect(shouldSkipRecall(mode, " \n ")).toBe(true);
+    },
+  );
+
   describe("off mode", () => {
     it("always skips", () => {
       expect(shouldSkipRecall("off", "what's my API key?")).toBe(true);
@@ -10,15 +66,14 @@ describe("shouldSkipRecall", () => {
   });
 
   describe("always mode", () => {
-    it("never skips", () => {
+    it("never skips a message with text", () => {
       expect(shouldSkipRecall("always", "hi")).toBe(false);
       expect(shouldSkipRecall("always", "ok")).toBe(false);
-      expect(shouldSkipRecall("always", "")).toBe(false);
     });
   });
 
   describe("llm mode (stub)", () => {
-    it("falls through to always — never skips", () => {
+    it("falls through to always — never skips a message with text", () => {
       expect(shouldSkipRecall("llm", "hi")).toBe(false);
       expect(shouldSkipRecall("llm", "ok")).toBe(false);
     });
