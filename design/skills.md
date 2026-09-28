@@ -217,7 +217,7 @@ $COGMO_SKILLS_PATH/                # default /var/lib/cogmo/skills (configurable
 ```
 
 - Path configured via env var or `settings.local.json`.
-- Cogmo initializes the bare repo on first boot if the path doesn't exist; `HEAD = refs/heads/main` and the `pre-receive` hook are reconciled on every boot so upgrades take effect. Concurrent bootstraps on one path (boot racing the wizard) are safe: each writes the hook to its own temp file and renames it into place.
+- Cogmo initializes the bare repo on first boot if the path doesn't exist; `HEAD = refs/heads/main` and the `pre-receive` hook are reconciled on every boot so upgrades take effect. The callers that can create it, boot and the setup wizard, hold the bootstrap lock ([setup.md → Concurrent runs](setup.md#concurrent-runs)): two first-time `git init --bare` on one path can fail on git's config lock. Reconciling the hook is safe concurrently: each call writes its own temp file and renames it into place.
 - **A remote is required.** Any user-owned git URL (private GitHub repo, self-hosted Gitea, Forgejo, etc.) works — Cogmo treats `coding_repos.remote_url` as opaque transport material. Setup collects the URL via one of three operator choices:
   - **Use my own remote** — operator pastes a pre-created URL they've granted Cogmo's credentials access to. Validated via `git ls-remote` before persisting.
   - **Auto-provision on GitHub** — Cogmo calls `octokit.repos.createForAuthenticatedUser({ name: "cogmo-skills", private: true, auto_init: true })` and attaches the result as origin. Only available when a GitHub identity is already configured; gated to that one provider because the convenience lives in the wizard only — no permanent provider-specific surface.

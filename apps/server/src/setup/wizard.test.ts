@@ -2,6 +2,7 @@ import * as p from "@clack/prompts";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { AgentStore } from "../agent/store/index.js";
+import type { BootstrapLock } from "../db/bootstrap-lock.js";
 import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import type { TransportStore } from "../transport/store/index.js";
@@ -55,6 +56,7 @@ interface TestDeps {
   secretsStore: ReturnType<typeof mock<SecretsStore>>;
   transportStore: ReturnType<typeof mock<TransportStore>>;
   runInTx: Transactor;
+  bootstrapLock: BootstrapLock;
 }
 
 function buildDeps(): TestDeps {
@@ -68,7 +70,13 @@ function buildDeps(): TestDeps {
   let nextSecretId = 1;
   secretsStore.putSecret.mockImplementation(async () => ({ id: `secret-${nextSecretId++}` }));
   secretsStore.markValidated.mockResolvedValue(undefined);
-  return { agentStore, secretsStore, transportStore, runInTx: fakeRunInTx };
+  return {
+    agentStore,
+    secretsStore,
+    transportStore,
+    runInTx: fakeRunInTx,
+    bootstrapLock: (fn) => fn(),
+  };
 }
 
 describe("stepConfigureVoice", () => {

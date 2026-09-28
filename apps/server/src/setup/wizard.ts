@@ -27,6 +27,7 @@ import {
   type SttProviderTypeValue,
   type TtsProviderTypeValue,
 } from "../agent/store/schema.js";
+import type { BootstrapLock } from "../db/bootstrap-lock.js";
 import { type Transactor, transactor } from "../db/transactor.js";
 import { env } from "../env.js";
 import {
@@ -85,6 +86,7 @@ export interface WizardDeps {
   agentStore: AgentStore;
   transportStore: TransportStore;
   secretsStore: SecretsStore;
+  bootstrapLock: BootstrapLock;
 }
 
 // --- Provider UI metadata (canonical types/URLs come from providers.ts) ---
@@ -1653,8 +1655,10 @@ export async function stepConfigureSkillsRemote(deps: WizardDeps): Promise<void>
   const skillsRepoPath = env.COGMO_SKILLS_PATH;
 
   // Bootstrap the bare repo so we have something to attach `origin` to.
-  // Idempotent — no-op when the repo already exists.
-  const skillsRepo = await bootstrapSkillsRepo({ path: skillsRepoPath });
+  // Idempotent — no-op when the repo already exists. Under the bootstrap lock,
+  // like `cogmo serve`'s: two first-time inits on one path can fail on git's
+  // config lock.
+  const skillsRepo = await deps.bootstrapLock(() => bootstrapSkillsRepo({ path: skillsRepoPath }));
   if (skillsRepo.initialized) {
     p.log.info(`Initialized bare skills repo at ${skillsRepoPath}`);
   }
@@ -1778,6 +1782,7 @@ export async function runWizard(deps: {
   masterKey: string;
   /** The default user `migrateAndSeed` seeded ahead of the wizard. */
   userId: string;
+  bootstrapLock: BootstrapLock;
 }): Promise<void> {
   const encryptionKey = deriveMasterKey(parseMasterKey(deps.masterKey), "cogmo/secrets-at-rest/v1");
   const tx = transactor(deps.db);
@@ -1788,6 +1793,7 @@ export async function runWizard(deps: {
     agentStore: deps.agentStore,
     transportStore: deps.transportStore,
     secretsStore,
+    bootstrapLock: deps.bootstrapLock,
   };
 
   p.intro("Cogmo Setup");

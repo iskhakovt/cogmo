@@ -156,4 +156,4 @@ Two-layer check, no dedicated marker table:
 
 ## Concurrent runs
 
-`cogmo serve`, `cogmo seed` and `cogmo setup` migrate and seed under one session-level advisory lock (`bootstrapLock`, `src/db/bootstrap-lock.ts`), taken on a reserved connection before any transaction opens, so concurrent runs migrate once and find each other's user, profile and channels. `cogmo setup` holds it across migrate, `--reset` and the default seed, not the interactive prompts. The default profile's insert is also keyed on `uq_profiles_user_name`, and the direct and web channels' on `uq_channels_fixed_type`.
+`cogmo serve`, `cogmo seed` and `cogmo setup` migrate and seed under one session-level advisory lock (`bootstrapLock`, `src/db/bootstrap-lock.ts`), taken on a reserved connection before any transaction opens, so concurrent runs migrate once and find each other's user, profile and channels. `cogmo setup` holds it across migrate, `--reset` and the default seed, and again around the wizard's skills-repo init, not across the interactive prompts. The default profile's insert is also keyed on `uq_profiles_user_name`, and the direct and web channels' on `uq_channels_fixed_type`.

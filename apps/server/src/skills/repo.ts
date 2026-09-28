@@ -65,7 +65,9 @@ export interface BootstrapSkillsRepoResult {
  * Idempotently bring the skills bare repo to its expected state. Safe to call
  * on every boot — the hook is rewritten unconditionally so a Cogmo upgrade
  * that tightens the policy takes effect on existing deployments. The repo
- * itself is only created on first call.
+ * itself is only created on first call, which callers serialize with the
+ * bootstrap lock: two first-time `git init --bare` on one path can fail on
+ * git's config lock. The hook install is safe concurrently.
  *
  * HEAD is pinned to `refs/heads/main` unconditionally via `symbolic-ref`.
  * `git init` honours the host's `init.defaultBranch` config (still `master`

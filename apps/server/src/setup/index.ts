@@ -89,7 +89,7 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
       return;
     }
 
-    await runWizard({ db, agentStore, transportStore, masterKey, userId });
+    await runWizard({ db, agentStore, transportStore, masterKey, userId, bootstrapLock: lock });
   } catch (err) {
     if (err instanceof WizardCancelled) {
       logger.info("setup cancelled by user");
