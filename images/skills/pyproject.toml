@@ -29,7 +29,10 @@ build-backend = "hatchling.build"
 
 [tool.uv]
 package = true
-cache-keys = [{ file = "pyproject.toml" }]
+# The image build syncs through a persistent uv cache mount; without the
+# sources in the key, a rebuild after a source-only change reuses the
+# previously built wheel.
+cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.py" }]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cogmo_skills_runtime"]
