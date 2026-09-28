@@ -968,7 +968,8 @@ ${effects}
         origin: { kind: "user", actor: enabler, conversation: null },
       });
 
-      expect(result.kind).toBe("enabled");
+      // The schedule is returned so the reply can say it now runs as the enabler.
+      expect(result).toMatchObject({ kind: "enabled", schedule: "0 9 * * *" });
       expect(await runAsOfBriefing()).toEqual([enabler.userId, owner.profileId]);
     });
 

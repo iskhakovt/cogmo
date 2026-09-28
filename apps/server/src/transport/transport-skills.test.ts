@@ -193,22 +193,32 @@ describe("Transport.skills.disable", () => {
 });
 
 describe("Transport.skills.enable", () => {
-  it("maps runner.enable=enabled → ok({alreadyEnabled:false})", async () => {
+  it("maps runner.enable=enabled → ok({alreadyEnabled:false}) with the schedule it now runs", async () => {
     const runner = mock<SkillRunner>();
     runner.enable.mockResolvedValue({
       kind: "enabled",
       name: "echo",
       gitSha: "abc",
+      schedule: "0 9 * * *",
     } satisfies EnableResult);
     const transport = makeTransport({ runner, store: mock<SkillStore>() });
 
     const result = await transport.skills.enable(KNOWN_HANDLE, "echo", CHAT);
-    expect(result._unsafeUnwrap()).toEqual({ name: "echo", alreadyEnabled: false });
+    expect(result._unsafeUnwrap()).toEqual({
+      name: "echo",
+      alreadyEnabled: false,
+      schedule: "0 9 * * *",
+    });
   });
 
   it("enables as the caller, with the chat's conversation when it is theirs", async () => {
     const runner = mock<SkillRunner>();
-    runner.enable.mockResolvedValue({ kind: "enabled", name: "echo", gitSha: "abc" });
+    runner.enable.mockResolvedValue({
+      kind: "enabled",
+      name: "echo",
+      gitSha: "abc",
+      schedule: null,
+    });
     const transportStore = makeTransportStore();
     vi.mocked(transportStore.resolveSession).mockResolvedValue(chatSession("conv-9"));
     const agentStore = mockAgentStore({

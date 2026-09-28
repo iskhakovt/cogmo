@@ -601,7 +601,7 @@ inputs:
     expect((await runner.listAll()).find((s) => s.name === "echo")?.disabled).toBe(true);
 
     const result = await runner.enable({ name: "echo", origin: { kind: "owner" } });
-    expect(result).toEqual({ kind: "enabled", name: "echo", gitSha: row.gitSha });
+    expect(result).toEqual({ kind: "enabled", name: "echo", gitSha: row.gitSha, schedule: null });
     expect((await runner.list()).map((s) => s.name)).toContain("echo");
   });
 

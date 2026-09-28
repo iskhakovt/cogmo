@@ -2128,7 +2128,12 @@ export async function handleEnable(
   if (res.value.alreadyEnabled) {
     await ctx.reply(`Skill "${res.value.name}" is already enabled.`);
   } else {
-    await ctx.reply(`Skill "${res.value.name}" enabled.`);
+    // Enabling moves a schedule onto the enabler; say so, as the approval prompt does.
+    const runAs =
+      res.value.schedule === undefined
+        ? ""
+        : ` Its schedule ${res.value.schedule} now runs as you.`;
+    await ctx.reply(`Skill "${res.value.name}" enabled.${runAs}`);
   }
 }
 

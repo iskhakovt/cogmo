@@ -818,13 +818,15 @@ export interface Transport {
      * `gitSha` (denied-on-first-deploy guard — see {@link SkillRunner.enable}).
      * Idempotent on already-enabled rows. Like an approval, the caller and
      * the conversation in `platformAddress` are the origin a schedule it
-     * puts live runs as.
+     * puts live runs as; `schedule` is that schedule, when there is one.
      */
     enable(
       platformUserHandle: string,
       name: string,
       platformAddress: string,
-    ): Promise<Result<{ name: string; alreadyEnabled: boolean }, TransportError>>;
+    ): Promise<
+      Result<{ name: string; alreadyEnabled: boolean; schedule?: string }, TransportError>
+    >;
   };
 
   /**
@@ -2416,7 +2418,11 @@ export function createTransport(deps: {
         const result = await skillRunner.enable({ name, origin });
         switch (result.kind) {
           case "enabled":
-            return ok({ name: result.name, alreadyEnabled: false });
+            return ok({
+              name: result.name,
+              alreadyEnabled: false,
+              ...(result.schedule !== null && { schedule: result.schedule }),
+            });
           case "already_enabled":
             return ok({ name: result.name, alreadyEnabled: true });
           case "rejected":

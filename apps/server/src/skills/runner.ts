@@ -158,7 +158,8 @@ export interface SkillToolDef {
 export type EnableFailureReason = "not_found" | "no_live_deploy";
 
 export type EnableResult =
-  | { kind: "enabled"; name: string; gitSha: string }
+  /** `schedule`: the schedule this enable put live, now running as its origin. */
+  | { kind: "enabled"; name: string; gitSha: string; schedule: string | null }
   | { kind: "already_enabled"; name: string; gitSha: string }
   | { kind: "rejected"; name: string; reason: EnableFailureReason };
 
@@ -1188,7 +1189,12 @@ export class SkillRunnerImpl implements SkillRunner {
         id: skill.id,
         runAs: deployRunAs(this.#defaultRunAs, opts.origin),
       });
-      return { kind: "enabled", name: skill.name, gitSha: skill.gitSha } as const;
+      return {
+        kind: "enabled",
+        name: skill.name,
+        gitSha: skill.gitSha,
+        schedule: skill.schedule,
+      } as const;
     });
   }
 

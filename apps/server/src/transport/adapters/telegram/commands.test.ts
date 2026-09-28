@@ -4045,6 +4045,18 @@ describe("handleEnable", () => {
     expect(ctx.reply).toHaveBeenCalledWith('Skill "echo" enabled.');
   });
 
+  it("says a scheduled skill now runs as the enabler", async () => {
+    const enable = vi
+      .fn()
+      .mockResolvedValue(ok({ name: "echo", alreadyEnabled: false, schedule: "0 9 * * *" }));
+    const transport = transportWith({ skills: { enable } });
+    const ctx = mkCtx("echo");
+    await handleEnable(transport, ctx);
+    expect(ctx.reply).toHaveBeenCalledWith(
+      'Skill "echo" enabled. Its schedule 0 9 * * * now runs as you.',
+    );
+  });
+
   it("reports idempotent already-enabled state without re-enabling", async () => {
     const enable = vi.fn().mockResolvedValue(ok({ name: "echo", alreadyEnabled: true }));
     const transport = transportWith({ skills: { enable } });
