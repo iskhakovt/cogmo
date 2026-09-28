@@ -1916,6 +1916,27 @@ describe("AnthropicProvider", () => {
       });
     });
 
+    it("offers the tool for a schema with a tuple", async () => {
+      const schema = toObjectJsonSchema(z.object({ pair: z.tuple([z.string(), z.number()]) }));
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        toolReply("claude-opus-5-5", "point", { pair: ["east", 7] }),
+      );
+
+      const result = await provider.chat({
+        model: "claude-opus-5-5",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+        responseFormat: { type: "json_schema", name: "point", schema },
+      });
+
+      expect(sentBody()).not.toHaveProperty("output_config");
+      expect(expectDefined(sentBody().tools[0], "tool").input_schema.properties).toEqual(
+        schema.properties,
+      );
+      expect(extractText(result.content)).toBe('{"pair":["east",7]}');
+    });
+
     it.each(["max_tokens", "refusal"])(
       "passes a tool-path reply's %s stop through",
       async (stopReason) => {

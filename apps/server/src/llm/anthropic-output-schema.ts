@@ -8,7 +8,8 @@
  * fixed list of string formats, `pattern` without backreferences, lookaround
  * or word boundaries, and `minItems` of 0 or 1. Numeric bounds, length bounds
  * and every other array constraint are unsupported, as is an object not
- * closed with `additionalProperties: false`; sending one is a 400.
+ * closed with `additionalProperties: false`; sending one is a 400. Nor can it
+ * express a recursive schema or a tuple (`prefixItems`).
  */
 
 import * as R from "remeda";
@@ -57,6 +58,19 @@ export function hasOpenObject(node: unknown): boolean {
   if ("additionalProperties" in node && node.additionalProperties !== false) return true;
   return Object.entries(node).some(([keyword, value]) =>
     subschemasOf(keyword, value).some(hasOpenObject),
+  );
+}
+
+/**
+ * Whether any node of a JSON Schema is a tuple: `prefixItems`, or draft-07's
+ * array-form `items`. The grammar rejects `prefixItems` with a 400 and reads
+ * the `items: false` Zod emits beside it as admitting any value.
+ */
+export function hasTuple(node: unknown): boolean {
+  if (!R.isPlainObject(node)) return false;
+  if ("prefixItems" in node || Array.isArray(node.items)) return true;
+  return Object.entries(node).some(([keyword, value]) =>
+    subschemasOf(keyword, value).some(hasTuple),
   );
 }
 

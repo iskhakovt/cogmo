@@ -4,6 +4,7 @@ import { logger } from "../logger.js";
 import {
   hasOpenObject,
   hasRecursiveRef,
+  hasTuple,
   restoreLiteralCasing,
   toStructuredOutputSchema,
 } from "./anthropic-output-schema.js";
@@ -466,12 +467,14 @@ function buildCreateParams(
 /**
  * Whether a `responseFormat` request takes the tool path, a synthetic tool
  * carrying the schema, rather than structured outputs: its schema is one the
- * grammar can't express, with an open node ({@link hasOpenObject}) or a
- * recursive `$ref` ({@link hasRecursiveRef}).
+ * grammar can't express, with an open node ({@link hasOpenObject}), a
+ * recursive `$ref` ({@link hasRecursiveRef}) or a tuple ({@link hasTuple}).
  */
 function takesToolPath(params: ChatParams): boolean {
-  const format = params.responseFormat;
-  return format !== undefined && (hasOpenObject(format.schema) || hasRecursiveRef(format.schema));
+  const schema = params.responseFormat?.schema;
+  return (
+    schema !== undefined && (hasOpenObject(schema) || hasRecursiveRef(schema) || hasTuple(schema))
+  );
 }
 
 /**

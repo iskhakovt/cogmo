@@ -4,6 +4,7 @@ import { CorrectionExtractionSchema } from "../agent/evolution/extraction-schema
 import {
   hasOpenObject,
   hasRecursiveRef,
+  hasTuple,
   restoreLiteralCasing,
   toStructuredOutputSchema,
 } from "./anthropic-output-schema.js";
@@ -303,6 +304,45 @@ describe("hasOpenObject", () => {
         }),
       ),
     ).toBe(false);
+  });
+});
+
+describe("hasTuple", () => {
+  const Pair = z.tuple([z.string(), z.number()]);
+
+  it.each<[string, unknown]>([
+    ["a tuple property", toObjectJsonSchema(z.object({ pair: Pair }))],
+    [
+      "a tuple with rest items",
+      toObjectJsonSchema(z.object({ t: z.tuple([z.string()], z.number()) })),
+    ],
+    ["a tuple in array items", toObjectJsonSchema(z.object({ pairs: z.array(Pair) }))],
+    ["a tuple variant", toObjectJsonSchema(z.object({ v: z.union([Pair, z.null()]) }))],
+    [
+      "a tuple in a definition",
+      {
+        ...wrap({ $ref: "#/$defs/Pair" }),
+        $defs: { Pair: { type: "array", prefixItems: [{ type: "string" }], items: false } },
+      },
+    ],
+    ["draft-07 array-form items", wrap({ type: "array", items: [{ type: "string" }] })],
+  ])("is true for %s", (_label, schema) => {
+    expect(hasTuple(schema)).toBe(true);
+  });
+
+  it.each<[string, unknown]>([
+    ["an array", toObjectJsonSchema(z.object({ list: z.array(z.string()) }))],
+    ["a schema without arrays", wrap({ type: "string" })],
+    [
+      "a property named prefixItems",
+      wrap({
+        type: "object",
+        properties: { prefixItems: { type: "string" } },
+        additionalProperties: false,
+      }),
+    ],
+  ])("is false for %s", (_label, schema) => {
+    expect(hasTuple(schema)).toBe(false);
   });
 });
 
