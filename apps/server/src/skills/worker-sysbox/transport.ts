@@ -1,4 +1,5 @@
-import { addAbortSignal, type Readable, type Writable } from "node:stream";
+import { on } from "node:events";
+import { pipeline, type Readable, type Writable } from "node:stream";
 import { Result } from "neverthrow";
 import split2 from "split2";
 import { describeError } from "../../util/describe-error.js";
@@ -44,14 +45,27 @@ const parseJson = Result.fromThrowable(
  */
 export function createNdjsonTransport(stdin: Writable, stdout: Readable): WorkerTransport {
   const closed = new AbortController();
-  // Closing aborts the stream, so nothing read after close() reaches the
-  // host: its task and ctx services may already be gone.
-  const lines = addAbortSignal(closed.signal, stdout.pipe(split2({ maxLength: MAX_BUFFER_BYTES })));
-  closed.signal.addEventListener("abort", () => stdin.end(), { once: true });
+  const lines = split2({ maxLength: MAX_BUFFER_BYTES });
+  // Unlike `pipe`, `pipeline` carries an error on `stdout` itself into
+  // `lines`, where the message stream reports it; its callback has nothing
+  // left to do.
+  pipeline(stdout, lines, () => {});
+  // Nothing read after close() reaches the host: its task and ctx services
+  // may already be gone.
+  closed.signal.addEventListener(
+    "abort",
+    () => {
+      lines.destroy();
+      stdin.end();
+    },
+    { once: true },
+  );
 
   async function* messages(): AsyncGenerator<WorkerFrame> {
     try {
-      for await (const line of lines) {
+      // `on` yields every line split2 produced before failing, and only then
+      // throws — a frame ahead of an overflow in the same write arrives.
+      for await (const [line] of on(lines, "data", { close: ["end"], signal: closed.signal })) {
         const frame = typeof line === "string" && line.length > 0 ? toFrame(line) : undefined;
         if (frame !== undefined) yield frame;
       }

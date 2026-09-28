@@ -168,4 +168,35 @@ describe("createNdjsonTransport", () => {
     // pending task at once rather than on the wall clock.
     expect(received).toEqual([]);
   });
+
+  it("delivers the frames read before the buffer overflowed, then fails", async () => {
+    const { stdin, stdout } = pair();
+    const t = createNdjsonTransport(stdin, stdout);
+    // Already reading, as the dispatcher is.
+    const drained = drain(t.messages());
+    await new Promise((r) => setImmediate(r));
+
+    // One write: a whole frame, then an unterminated flood.
+    stdout.write(`${line(RESULT)}${"x".repeat(MAX_BUFFER_BYTES + 1024)}`);
+
+    expect(await drained).toEqual({
+      received: [RESULT],
+      error: new Error("transport: maximum buffer reached"),
+    });
+  });
+
+  it("fails the stream when the worker's output errors", async () => {
+    const { stdin, stdout } = pair();
+    const t = createNdjsonTransport(stdin, stdout);
+    const drained = drain(t.messages());
+
+    stdout.write(line(RESULT));
+    // What the sandbox does to stdout when the exec's socket fails.
+    stdout.destroy(new Error("socket hang up"));
+
+    expect(await drained).toEqual({
+      received: [RESULT],
+      error: new Error("transport: socket hang up"),
+    });
+  });
 });
