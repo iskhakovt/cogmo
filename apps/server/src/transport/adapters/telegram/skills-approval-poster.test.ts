@@ -54,7 +54,11 @@ function makeSkillStore(opts: FakeSkillStoreOpts = {}): SkillStore {
 }
 
 /** Post into a Telegram session and return the text sent. */
-async function postedText(args: { skillStore: SkillStore; schedule?: string }): Promise<string> {
+/** `schedule` absent models an event queued before the field existed. */
+async function postedText(args: {
+  skillStore: SkillStore;
+  schedule?: string | null;
+}): Promise<string> {
   const transportStore = mockTransportStore({
     getActiveSessionsForConversation: vi.fn().mockResolvedValue([
       {
@@ -72,7 +76,7 @@ async function postedText(args: { skillStore: SkillStore; schedule?: string }): 
       skillName: "notifier",
       gitSha: "abcdef0123456789",
       conversationId: CONV_ID,
-      schedule: args.schedule ?? null,
+      ...(args.schedule !== undefined && { schedule: args.schedule }),
     },
     channelId: "ch-telegram",
     runInTx: fakeRunInTx,
@@ -189,6 +193,27 @@ describe("postSkillsApprovalKeyboard", () => {
 
     expect(text).toContain("Schedule: 0 9 * * *");
     expect(text).toContain("run as whoever approves");
+  });
+
+  it("still discloses the run-as rule for an event that carries no schedule field", async () => {
+    const skillStore = makeSkillStore({
+      deploy: { id: DEPLOY_ID, skillId: SKILL_ID, effects: [] },
+    });
+
+    const text = await postedText({ skillStore });
+
+    expect(text).toContain("If it runs on a schedule, its runs will run as whoever approves.");
+    expect(text).not.toContain("undefined");
+  });
+
+  it("says nothing about run-as for an unscheduled skill", async () => {
+    const skillStore = makeSkillStore({
+      deploy: { id: DEPLOY_ID, skillId: SKILL_ID, effects: [] },
+    });
+
+    const text = await postedText({ skillStore, schedule: null });
+
+    expect(text).not.toContain("run as");
   });
 
   it("falls back to '(none declared)' when the deploy is missing", async () => {

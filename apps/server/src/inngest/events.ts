@@ -581,9 +581,9 @@ export const codingRunBranchSweepRepo = eventType("coding/run-branch-sweep/repo"
  * (the runner already returned).
  *
  * `pendingId` is the `skill_deploys.id` UUID; the per-channel Telegram
- * function fetches the manifest-derived details (declared effects, risk
- * tier, classifier log) from `skill_deploys` + `skills` at post time —
- * keeps the event payload minimal and avoids data duplication.
+ * function reads the pending deploy's declared effects from its
+ * `skill_deploys` row at post time. The pending manifest's schedule is
+ * recorded nowhere the poster can read, so it travels on the event.
  */
 export const skillsDeployApprovalRequested = eventType("skills/deploy/approval-requested", {
   schema: z.object({
@@ -591,8 +591,11 @@ export const skillsDeployApprovalRequested = eventType("skills/deploy/approval-r
     skillName: z.string(),
     gitSha: z.string(),
     conversationId: z.string(),
-    /** The pending manifest's cron schedule; the prompt says who it will run as. */
-    schedule: z.string().nullable(),
+    /**
+     * The pending manifest's cron schedule, or null; the prompt says who it
+     * will run as. Absent on events queued before the field existed.
+     */
+    schedule: z.string().nullable().optional(),
   }),
 });
 

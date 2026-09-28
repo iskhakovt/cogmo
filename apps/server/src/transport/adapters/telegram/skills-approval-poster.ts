@@ -15,12 +15,16 @@ function buildApprovalText(args: {
   skillName: string;
   effects: string;
   gitSha: string;
-  schedule: string | null;
+  schedule: string | null | undefined;
 }): string {
+  // `undefined`: an event older than the field, so whether it is scheduled
+  // is unknown; the rule is still stated.
   const runAs =
     args.schedule === null
       ? ""
-      : `Schedule: ${args.schedule} — its runs will run as whoever approves.\n`;
+      : args.schedule === undefined
+        ? "If it runs on a schedule, its runs will run as whoever approves.\n"
+        : `Schedule: ${args.schedule} — its runs will run as whoever approves.\n`;
   return (
     `🛡️ Skill deploy awaiting approval: ${args.skillName}\n\n` +
     `Declared effects: ${args.effects}\n` +
@@ -36,8 +40,8 @@ export interface PostSkillsApprovalKeyboardEvent {
   skillName: string;
   gitSha: string;
   conversationId: string;
-  /** The pending manifest's cron schedule, or null. */
-  schedule: string | null;
+  /** The pending manifest's cron schedule, or null; absent on older events. */
+  schedule?: string | null | undefined;
 }
 
 export type SkillsApprovalSendMessage = (
