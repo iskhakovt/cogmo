@@ -1081,7 +1081,7 @@ describe("SysboxWorkerPool", () => {
 
   it("disposes a worker spawned mid-flight when the pool is disposed during spawn", async () => {
     // Gate the spawn so `dispose()` runs while `createWorker` is still
-    // awaiting. Without the guard inside `#runSpawn`, the new worker
+    // awaiting. Without the guard in `#admit`, the new worker
     // would be pushed into `#workers` *after* dispose spliced it empty,
     // and its container would never be torn down.
     const spawnedWorkers: FakeWorker[] = [];
@@ -1105,8 +1105,8 @@ describe("SysboxWorkerPool", () => {
 
     // Race dispose against the spawn: dispose first, then unblock the
     // spawn. The spawn resolves into a disposed pool — its worker must be
-    // disposed by `#runSpawn`'s post-await guard, not pushed into the
-    // (already-empty) `#workers` array.
+    // disposed by `#admit`, not pushed into the (already-empty) `#workers`
+    // array.
     const disposePromise = pool.dispose();
     spawn.open();
     await disposePromise;
@@ -1150,8 +1150,8 @@ describe("SysboxWorkerPool", () => {
   });
 
   it("rejects the queued waiter when the replacement spawn fails", async () => {
-    // Pool at max=1, A busy with a non-reusable result, B queued. The
-    // recycle path tries to spawn a replacement for the queued waiter; if
+    // Pool at max=1, A busy with a non-reusable result, B queued. The slot
+    // the dead worker frees spawns a replacement for the queued waiter; if
     // that spawn fails, the waiter must reject — otherwise B hangs forever.
     const first = gate();
     let spawnIndex = 0;

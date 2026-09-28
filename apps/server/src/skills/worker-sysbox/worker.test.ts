@@ -439,10 +439,9 @@ describe("SysboxSkillWorker", () => {
     });
 
     it("supervisor-emitted error keeps the worker reusable (supervisor still alive)", async () => {
-      // In B.2 the supervisor handles wall-clock kill internally and emits
-      // the wall_clock_exceeded task_result; the supervisor process itself
-      // stays alive and ready for the next task. This is a behaviour
-      // change from B.1 where wall-clock killed the whole container.
+      // The supervisor handles a wall-clock kill itself and emits the
+      // wall_clock_exceeded task_result; the supervisor process stays alive
+      // and ready for the next task.
       const bundle = buildFakeSandbox();
       autoRespond(bundle, { ok: false, error: "wall_clock_exceeded" });
       const w = await SysboxSkillWorker.create({
@@ -848,7 +847,7 @@ describe("SysboxSkillWorker", () => {
       expect(handlerB.handle).not.toHaveBeenCalled();
     });
 
-    it("host watchdog fires when supervisor never replies (retires worker)", async () => {
+    it("host watchdog fires when supervisor never replies (the worker dies)", async () => {
       // Supervisor stub never writes a task_result. The host-side watchdog
       // (= wallClockS + 10s grace) fires; worker reports
       // `supervisor_unresponsive` and dies.

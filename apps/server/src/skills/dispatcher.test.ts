@@ -329,7 +329,7 @@ describe("Dispatcher", () => {
 
     const outcome = d.invoke(INVOKE, { ctxHandler: noopHandler(), deadline: NEVER });
     // The worker is in an inconsistent state (sent the wrong task id).
-    // Failing now surfaces it; waiting would hang until the deadline.
+    // Failing at once surfaces it; waiting would hang until the deadline.
     ch.emit(result(null, "wrong"));
 
     expect(await outcome).toEqual(failed(expect.stringMatching(/task_result id mismatch/)));
@@ -426,8 +426,8 @@ describe("Dispatcher", () => {
   });
 
   it("fails a pending task at once when the worker's stream fails", async () => {
-    // A failed stream means the worker is gone: the task fails now rather
-    // than on its deadline.
+    // A failed stream means the worker is gone: the task fails at once,
+    // not on its deadline.
     const ch = channel();
     const d = await leased(ch);
     const outcome = d.invoke(INVOKE, { ctxHandler: noopHandler(), deadline: NEVER });

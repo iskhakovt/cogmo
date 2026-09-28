@@ -29,16 +29,21 @@ import type {
  *  - a ctx call is served only in `running`, and only when it names the running task;
  *  - only the task's own `task_exited` takes a worker with a task on it back to
  *    `leased`, and only `leased` can be released to `idle`;
- *  - only `idle` can be acquired and only `leased` can take a task; `dead` is final;
+ *  - only `idle` can be acquired and only `leased` runs a task (a `dead` one
+ *    fails it as a value); `dead` is final;
  *  - a dead worker becomes disposable only once no caller holds it.
  */
 
-/** What the machine reads of a task: its id. The rest belongs to the shell. */
+/**
+ * A task as the machine sees it. Worker frames match it by id; ctx replies
+ * and deadlines match the task object itself, so a stale task reusing an id
+ * never passes for the running one.
+ */
 export interface TaskRef {
   readonly id: string;
 }
 
-/** A frame that is JSON but no worker message. */
+/** A frame that parsed but is no worker message. */
 interface MalformedFrame {
   type: "malformed";
   issues: string[];
@@ -114,8 +119,9 @@ export type Command<T extends TaskRef> =
   | { type: "invoke"; task: T; message: TaskInvoke };
 
 /**
- * What happens to a worker: its frames as they arrive, what becomes of its
- * channel, and the host closing it. Every state takes every fact.
+ * What happens to a worker: its frames as they arrive, a ctx reply ready to
+ * send, a deadline passing, its channel failing, and the host closing it.
+ * Every state takes every fact.
  */
 export type Fact<T extends TaskRef> =
   | WorkerFrame
@@ -231,9 +237,7 @@ export function observe<T extends TaskRef>(state: WorkerState<T>, fact: Fact<T>)
 
 /**
  * A ctx call naming another task is refused and harms nothing: it goes
- * unanswered and the running task is untouched. A `task_result` or
- * `task_exited` naming another task would settle or release the wrong
- * task, so that kills the worker.
+ * unanswered and the running task is untouched.
  */
 function onCtxCall<T extends TaskRef>(state: Started<T>, call: CtxCall): Transition<T> {
   return match<Started<T>, Transition<T>>(state)
@@ -435,7 +439,11 @@ function accept<T extends TaskRef>(
   );
 }
 
-/** The worker named a task other than the one on it: it is in an inconsistent state. */
+/**
+ * The worker named a task other than the one on it: it is in an
+ * inconsistent state. A `task_result` or `task_exited` naming another task
+ * would settle or release the wrong task, so it kills the worker.
+ */
 function mismatch<T extends TaskRef>(
   state: WithTask<T>,
   frame: "task_result" | "task_exited",

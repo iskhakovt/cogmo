@@ -91,8 +91,9 @@ export type TaskInvoke = z.infer<typeof TaskInvokeSchema>;
  * unset because `getrusage` is process-wide and would inflate under
  * concurrent workers. Synthesised outcomes — the relay's `task_result`
  * (wall-clock kill, task process died) and the state machine's
- * `exited_without_result` — also leave it unset. The host fills in `wallClockMs` separately and
- * writes the combined blob to `skill_runs.resource_usage`.
+ * `exited_without_result` — also leave it unset. The host fills in
+ * `wallClockMs` separately and writes the combined blob to
+ * `skill_runs.resource_usage`.
  *
  * Boundary translation: this protocol schema uses `.optional()` (field
  * may be absent on the wire) while the storage schema
@@ -159,9 +160,10 @@ export const CtxResultSchema = z.union([CtxResultOkSchema, CtxResultErrSchema]);
 export type CtxResult = z.infer<typeof CtxResultSchema>;
 
 /**
- * Tier 2 only: the supervisor has killed and reaped every process the task
- * started. Sent after the task's `task_result` (or in place of one, when
- * the task's relay died first); the worker is reusable only after it.
+ * Every process the task started has been killed and reaped; the worker is
+ * reusable only after it. The tier-2 supervisor sends it after the task's
+ * `task_result`, or in place of one when the task's relay died first. Tier 1
+ * never sends it: its port transport yields one after each `task_result`.
  */
 export const TaskExitedSchema = z.object({
   type: z.literal("task_exited"),

@@ -93,9 +93,9 @@ async function runTask(invoke: { id: string; inputs: unknown }): Promise<TaskRes
   // The bridge module gives Python access to host RPCs.
   py.registerJsModule("__cogmo_bridge__", { bridge: bridgeFor(invoke.id) });
 
-  // Materialize ctx SDK + skill body into module-level globals. Each worker
-  // is one-shot in this slice (warm pool with per-task reset lands in P3.2),
-  // so module-level globals are safe.
+  // Materialize ctx SDK + skill body into module-level globals. One task
+  // runs per thread — the port transport's synthetic `task_exited` relies
+  // on it — so module-level globals are safe.
   await py.runPythonAsync(CTX_PY);
   await py.runPythonAsync(
     "from __cogmo_bridge__ import bridge as __cogmo_bridge\n_ctx = _build_ctx(__cogmo_bridge)\n",
@@ -125,9 +125,8 @@ async function runTask(invoke: { id: string; inputs: unknown }): Promise<TaskRes
   // Only the top-level PyProxy is destroyed explicitly. If `run()` returned
   // a nested dict, `toJs` recursively converts but the inner PyProxies
   // aren't tracked individually — they leak until the worker thread exits.
-  // Acceptable because workers are one-shot in P3.1; revisit when P3.2's
-  // warm pool reuses workers across tasks (would need deep-walk + destroy,
-  // or `pyodide.ffi.create_proxy` discipline in ctx.py).
+  // Acceptable because one task runs per thread, and the thread exits after
+  // it.
 
   return { type: "task_result", id: invoke.id, ok: true, output };
 }

@@ -42,10 +42,10 @@ export interface RunOnWorkerParams {
    * Absent / empty array → stdlib + Pyodide built-ins only.
    *
    * Install runs via Pyodide's `micropip` (Node fetch under the hood),
-   * with results cached in `packageCacheDir` when configured.
-   * Pyodide-incompatible wheels surface as a `fatal` worker init
-   * error — the runner re-raises as the task's `error` and the
-   * worker exits.
+   * with results cached in `packageCacheDir` when configured. A
+   * Pyodide-incompatible wheel makes the worker send `fatal` in place of
+   * `ready`: the handshake refuses it, and the task fails with
+   * `worker init failed: …`.
    */
   packageSpecs?: readonly string[];
   ctxHandler: CtxHandler;
@@ -58,10 +58,9 @@ export interface RunOnWorkerResult {
   /** Set when ok=false. */
   error?: string;
   /**
-   * Per-task rusage from the runtime when present. Tier 1 (Pyodide WASM)
-   * doesn't fill this — `getrusage` is process-wide and would inflate
-   * under concurrent workers — but the host still propagates it when the
-   * supervisor surfaces one in the future.
+   * The rusage the task's `task_result` carried, if any. The Pyodide worker
+   * sends none: `getrusage` is process-wide and would inflate under
+   * concurrent workers.
    */
   rusage?: RuntimeRusage;
 }

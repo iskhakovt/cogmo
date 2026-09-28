@@ -111,7 +111,7 @@ export class Dispatcher {
   #transport: WorkerTransport;
   #state: WorkerState<PendingTask>;
   #log: typeof log;
-  /** Aborted on death; removes every listener the dispatcher holds. */
+  /** Aborted on death; removes the handshake-deadline and `signal` listeners. */
   #alive = new AbortController();
 
   private constructor(opts: DispatcherOptions) {

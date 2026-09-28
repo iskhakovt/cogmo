@@ -50,8 +50,9 @@ export interface SysboxWorkerPoolOptions {
   recycleAfterTasks: number;
   /**
    * Wall-clock ceiling on a worker's age. Workers older than this are
-   * drained even if they haven't hit `recycleAfterTasks`. Catches the long-
-   * idle case (worker sat warm for days, libc state stale).
+   * retired when their next task returns, even if they haven't hit
+   * `recycleAfterTasks`. Catches the long-idle case (worker sat warm for
+   * days, libc state stale).
    */
   recycleAfterMs: number;
   /**
@@ -142,11 +143,9 @@ const CRASH_LOOP_DEATHS = 3;
 const CRASH_LOOP_WINDOW_MS = 60_000;
 
 /**
- * Internal sentinel for `dispose()` racing an in-flight `#spawnOne()`. Caller
- * paths (eager `create()`, on-demand acquire, replacement on death) all unwind
- * uniformly: foreground awaits surface it; background `void.catch` paths
- * recognise it and stay silent. Not exported — callers see it as a thrown
- * `Error` instance, not as a typed branch in their own logic.
+ * A spawn that `dispose()` cut short. `create()` and a foreground acquire
+ * surface it; `#spawnForQueue` drops it silently. Not exported: callers see
+ * a plain `Error`.
  */
 class PoolDisposedDuringSpawnError extends Error {
   constructor() {
@@ -174,7 +173,7 @@ export const DEFAULT_POOL_OPTIONS = {
  * Concurrency model:
  *  - `invoke` first tries to acquire an existing idle worker.
  *  - If none and the pool hasn't hit `max`, spawn a new worker and acquire it.
- *  - If at `max`, queue and wait. The next worker to release wakes the queue.
+ *  - If at `max`, queue and wait for a worker released idle or a freed slot.
  *
  * Lifecycle:
  *  - The pool subscribes to each worker's `dead` and `disposable` as it
@@ -190,7 +189,8 @@ export const DEFAULT_POOL_OPTIONS = {
  *  - The pool retires a worker after its task once taskCount ≥
  *    `recycleAfterTasks` or age ≥ `recycleAfterMs`.
  *  - An interval sweep retires idle workers above `min` after `idleShutdownMs`,
- *    and spawns back up to `min` when a replacement failed.
+ *    and spawns back up to `min`: a replacement that failed, or one the
+ *    crash-loop cap left to it.
  *  - `dispose()` aborts the signal every worker was created with: a live
  *    worker's channel closes, and a spawn stops at its next step. It then
  *    cancels the sweep, rejects all queued waiters, tears down every
@@ -303,7 +303,8 @@ export class SysboxWorkerPool {
 
   /**
    * Run one task. Acquires an idle worker (spawning if needed and below
-   * `max`), invokes the task, releases or recycles the worker, and returns.
+   * `max`), invokes the task, retires the worker at a recycle cap and
+   * releases it, and returns.
    */
   async invoke(params: InvokeParams): Promise<InvokeResult> {
     if (this.#lifetime.signal.aborted) {
@@ -420,7 +421,7 @@ export class SysboxWorkerPool {
     worker.retire();
   }
 
-  /** Below `max`, counting in-flight spawns and every live container. */
+  /** Below `max`, counting spawns under way and every worker not yet tearing down. */
   #hasRoom(): boolean {
     return this.#workers.length + this.#spawns.size < this.#opts.max;
   }
@@ -485,14 +486,11 @@ export class SysboxWorkerPool {
   }
 
   /**
-   * Give a worker back once its task returns: retired first at a recycle
-   * threshold, then released — a live worker goes idle and passes to a
-   * queued waiter, a dead one becomes disposable. The age check fires only
-   * on task return — a workers-of-min that ages past recycleAfterMs with no
-   * active tasks is *not* swept by `#sweepIdle` (sweep refuses to drop below
-   * `min`), so it lives until the next invocation. That's intentional: idle
-   * staleness doesn't grow without active work; the reaper backstops the
-   * pathological "crashed and never came back" case.
+   * Give a worker back once its task returns: retire it at a recycle cap,
+   * then release it — a live one goes idle and to the head of the queue, a
+   * dead one becomes disposable. The age cap is checked only here: the sweep
+   * never goes below `min`, so a worker within `min` that ages out idle lives
+   * until its next task; the reaper backstops a crashed host.
    */
   #postInvoke(worker: WorkerHandle): void {
     if (worker.state === "busy") {
@@ -510,10 +508,7 @@ export class SysboxWorkerPool {
     }
     const released = worker.release();
     if (released.isErr()) {
-      log.warn(
-        { workerId: worker.workerId, reason: released.error },
-        "released a worker no task held",
-      );
+      log.warn({ workerId: worker.workerId, reason: released.error }, "worker release refused");
     }
     // A worker released idle goes to the head of the queue; a dead one can't be leased.
     const waiter = this.#queue[0];

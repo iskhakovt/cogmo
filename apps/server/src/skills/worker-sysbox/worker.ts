@@ -31,7 +31,7 @@ const SUPERVISOR_CMD = ["python3", "-u", "-m", "cogmo_skills_runtime"] as const;
 
 const log = logger.child({ component: "skills.worker.sysbox" });
 
-/** A worker as the pool sees it: its channel's state, plus whether its container is gone. */
+/** A worker as the pool sees it: its channel's state, or `disposed` once its teardown has started. */
 export type WorkerStatus = "idle" | "busy" | "dead" | "disposed";
 
 export interface SysboxSkillWorkerOptions {
@@ -193,9 +193,7 @@ export interface InvokeResult {
  *
  * `state` is the channel's state (`worker-state.ts`) as the pool sees it:
  * `idle`; `busy` while leased or running a task; `dead`; `disposed` once
- * its container is torn down. `dead` resolves the moment it can run no
- * further task, whatever the cause; `disposable` once, dead, no caller
- * holds it any more.
+ * its teardown has started.
  */
 export class SysboxSkillWorker {
   readonly workerId: string;
