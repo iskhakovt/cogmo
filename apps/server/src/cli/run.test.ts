@@ -1,13 +1,7 @@
 import { command, optional, positional, string, subcommands } from "cmd-ts";
 import { describe, expect, it, vi } from "vitest";
-import { type CliIo, EXIT_USAGE, loadCommandGroups, runCli } from "./run.js";
-
-function makeIo() {
-  const out: string[] = [];
-  const err: string[] = [];
-  const io: CliIo = { out: (line) => out.push(line), err: (line) => err.push(line) };
-  return { io, out, err };
-}
+import { captureIo } from "../test/factories.js";
+import { EXIT_USAGE, loadCommandGroups, runCli } from "./run.js";
 
 function exitWith(code: number) {
   return command({
@@ -19,7 +13,7 @@ function exitWith(code: number) {
 
 describe("runCli", () => {
   it("resolves to a command's exit code", async () => {
-    const { io } = makeIo();
+    const { io } = captureIo();
 
     expect(await runCli(exitWith(3), [], io)).toBe(3);
   });
@@ -32,7 +26,7 @@ describe("runCli", () => {
         ok: exitWith(0),
       },
     });
-    const { io } = makeIo();
+    const { io } = captureIo();
 
     expect(await runCli(cli, ["outer", "inner"], io)).toBe(1);
     expect(await runCli(cli, ["ok"], io)).toBe(0);
@@ -44,7 +38,7 @@ describe("runCli", () => {
       name: "cogmo",
       cmds: { go: command({ name: "go", description: "Go somewhere.", args: {}, handler }) },
     });
-    const { io, out, err } = makeIo();
+    const { io, out, err } = captureIo();
 
     expect(await runCli(cli, ["--help"], io)).toBe(0);
     expect(await runCli(cli, [], io)).toBe(0);
@@ -62,7 +56,7 @@ describe("runCli", () => {
       args: { name: positional({ displayName: "name" }) },
       handler,
     });
-    const { io, out, err } = makeIo();
+    const { io, out, err } = captureIo();
 
     expect(await runCli(cli, [], io)).toBe(EXIT_USAGE);
     expect(await runCli(cli, ["ada", "--loud"], io)).toBe(EXIT_USAGE);
@@ -75,7 +69,7 @@ describe("runCli", () => {
 
   it("rejects an unknown subcommand with the usage exit code and a suggestion", async () => {
     const cli = subcommands({ name: "cogmo", cmds: { provider: exitWith(0) } });
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
 
     expect(await runCli(cli, ["provder"], io)).toBe(EXIT_USAGE);
     expect(err.join("\n")).toContain("Not a valid subcommand name");
@@ -94,7 +88,7 @@ describe("runCli", () => {
         },
         handler,
       });
-      const { io, err } = makeIo();
+      const { io, err } = captureIo();
 
       expect(await runCli(cli, argv, io)).toBe(EXIT_USAGE);
       expect(err.join("\n")).toMatch(/argument \d is empty/);
@@ -111,7 +105,7 @@ describe("runCli", () => {
     });
 
     it("is refused when cmd-ts would read it as flags including -h", async () => {
-      const { io, out, err } = makeIo();
+      const { io, out, err } = captureIo();
 
       expect(await runCli(cli, ["-q8hZ"], io)).toBe(EXIT_USAGE);
       expect(err.join("\n")).toContain('"-q8hZ" reads as short flags, -h among them');
@@ -120,7 +114,7 @@ describe("runCli", () => {
     });
 
     it("reaches the handler after --", async () => {
-      const { io } = makeIo();
+      const { io } = captureIo();
 
       expect(await runCli(cli, ["--", "-q8hZ"], io)).toBe(0);
       expect(handler).toHaveBeenCalledWith({ apiKey: "-q8hZ" });
@@ -135,14 +129,14 @@ describe("runCli", () => {
         throw new Error("store unreachable");
       },
     });
-    const { io } = makeIo();
+    const { io } = captureIo();
 
     await expect(runCli(cli, [], io)).rejects.toThrow("store unreachable");
   });
 
   it("throws when a handler resolves to something other than an exit code", async () => {
     const cli = command({ name: "void", args: {}, handler: async () => undefined });
-    const { io } = makeIo();
+    const { io } = captureIo();
 
     await expect(runCli(cli, [], io)).rejects.toThrow(
       "CLI handler resolved to undefined instead of an exit code",
@@ -174,7 +168,7 @@ describe("loadCommandGroups", () => {
     expect(load.provider).toHaveBeenCalledOnce();
     expect(load.model).not.toHaveBeenCalled();
     expect(Object.keys(cmds)).toEqual(["gen-key", "provider", "model"]);
-    const { io } = makeIo();
+    const { io } = captureIo();
     expect(await runCli(subcommands({ name: "cogmo", cmds }), ["provider", "list"], io)).toBe(0);
   });
 
@@ -196,7 +190,7 @@ describe("loadCommandGroups", () => {
 
       expect(load.provider).toHaveBeenCalledOnce();
       expect(load.model).toHaveBeenCalledOnce();
-      const { io, out, err } = makeIo();
+      const { io, out, err } = captureIo();
       await runCli(subcommands({ name: "cogmo", cmds }), argv, io);
       expect([...out, ...err].join("\n")).toMatch(/Manage models\.|Did you mean provider\?/);
     },
@@ -216,7 +210,7 @@ describe("loadCommandGroups", () => {
 
   it("registers every group's name, a placeholder standing in for each unloaded one", async () => {
     const cmds = await loadCommandGroups(["provider"], builtIns, groups());
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
 
     await expect(runCli(subcommands({ name: "cogmo", cmds }), ["model"], io)).rejects.toThrow(
       "`model` ran without its command group loaded",

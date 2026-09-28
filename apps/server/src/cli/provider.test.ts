@@ -3,6 +3,7 @@ import { mock } from "vitest-mock-extended";
 import type { AgentStore } from "../agent/store/index.js";
 import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { captureIo } from "../test/factories.js";
 import type { ProviderCliDeps } from "./provider.js";
 import { type CliIo, runCli } from "./run.js";
 
@@ -31,16 +32,6 @@ function makeDeps() {
   };
 }
 
-function makeIo() {
-  const out: string[] = [];
-  const err: string[] = [];
-  return {
-    io: { out: (line: string) => out.push(line), err: (line: string) => err.push(line) },
-    out,
-    err,
-  };
-}
-
 beforeEach(() => {
   addProviderSpy.mockReset();
   addProviderSpy.mockResolvedValue({
@@ -52,7 +43,7 @@ beforeEach(() => {
 
 describe("cogmo provider add — cache dialect", () => {
   it("leaves a custom provider's dialect to addProvider when no flag is given", async () => {
-    const { io } = makeIo();
+    const { io } = captureIo();
 
     const code = await run(
       ["add", "custom", "gateway", "sk-gw-1234567890", "https://gateway.internal/v1"],
@@ -75,7 +66,7 @@ describe("cogmo provider add — cache dialect", () => {
   ])(
     "gives the openrouter type the openrouter dialect, whatever its base URL (%j)",
     async (baseUrlArg, baseUrl) => {
-      const { io } = makeIo();
+      const { io } = captureIo();
 
       const code = await run(
         ["add", "openrouter", "or", "sk-or-1234567890", ...baseUrlArg],
@@ -95,7 +86,7 @@ describe("cogmo provider add — cache dialect", () => {
   );
 
   it("lets --cache-dialect override the openrouter type's dialect", async () => {
-    const { io } = makeIo();
+    const { io } = captureIo();
 
     const code = await run(
       ["add", "openrouter", "or", "sk-or-1234567890", "--cache-dialect", "none"],
@@ -111,7 +102,7 @@ describe("cogmo provider add — cache dialect", () => {
   });
 
   it("passes --cache-dialect through for a custom endpoint", async () => {
-    const { io } = makeIo();
+    const { io } = captureIo();
 
     const code = await run(
       [
@@ -146,7 +137,7 @@ describe("cogmo provider add — cache dialect", () => {
     [["--cache-dialect", "--other"], /Invalid value '--other'/],
     [["--verbose"], /--verbose\n\s+\^ Unknown arguments/],
   ])("rejects %j with exit 2 and adds nothing", async (flags, message) => {
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
 
     const code = await run(
       ["add", "custom", "gateway", "sk-gw-1234567890", "https://gateway.internal/v1", ...flags],
@@ -160,7 +151,7 @@ describe("cogmo provider add — cache dialect", () => {
   });
 
   it("rejects --cache-dialect for an anthropic provider, which takes none", async () => {
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
 
     const code = await run(
       ["add", "anthropic", "claude", "sk-ant-1234567890", "--cache-dialect", "none"],
@@ -175,7 +166,7 @@ describe("cogmo provider add — cache dialect", () => {
 
   it("reports addProvider's failure as a failed add, exit 1", async () => {
     addProviderSpy.mockRejectedValue(new Error("duplicate provider name"));
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
 
     const code = await run(["add", "openrouter", "or", "sk-or-1234567890"], makeDeps(), io);
 
@@ -184,7 +175,7 @@ describe("cogmo provider add — cache dialect", () => {
   });
 
   it("lets a bootstrap failure propagate instead of reporting a failed add", async () => {
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
     const cli = providerCli(io, async () => {
       throw new Error("DATABASE_URL unreachable");
     });
@@ -224,7 +215,7 @@ describe("cogmo provider list", () => {
   it("shows each provider's base URL and cache dialect", async () => {
     const deps = makeDeps();
     deps.agentStore.listProviders.mockResolvedValue([CLAUDE, GATEWAY, LEGACY]);
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
 
     const code = await run(["list"], deps, io);
 
@@ -240,7 +231,7 @@ describe("cogmo provider list", () => {
   it("says so when no provider is registered", async () => {
     const deps = makeDeps();
     deps.agentStore.listProviders.mockResolvedValue([]);
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
 
     const code = await run(["list"], deps, io);
 
@@ -259,7 +250,7 @@ describe("cogmo provider set", () => {
 
   it("sets an OpenAI-compatible provider's cache dialect", async () => {
     const deps = depsWith(CLAUDE, GATEWAY);
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
 
     const code = await run(["set", "gateway", "--cache-dialect", "none"], deps, io);
 
@@ -275,7 +266,7 @@ describe("cogmo provider set", () => {
 
   it("reads a provider without a dialect as none", async () => {
     const deps = depsWith(LEGACY);
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
 
     const code = await run(["set", "legacy", "--cache-dialect", "openai"], deps, io);
 
@@ -292,7 +283,7 @@ describe("cogmo provider set", () => {
     [["set", "gateway", "--verbose"], /--verbose\n\s+\^ Unknown arguments/],
   ])("rejects %j with exit 2 and changes nothing", async (argv, message) => {
     const deps = depsWith(GATEWAY);
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
 
     const code = await run(argv, deps, io);
 
@@ -303,7 +294,7 @@ describe("cogmo provider set", () => {
 
   it("rejects an anthropic provider, which takes no dialect", async () => {
     const deps = depsWith(CLAUDE);
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
 
     const code = await run(["set", "claude", "--cache-dialect", "none"], deps, io);
 
@@ -314,7 +305,7 @@ describe("cogmo provider set", () => {
 
   it("exits 1 for an unknown provider", async () => {
     const deps = depsWith(GATEWAY);
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
 
     const code = await run(["set", "nope", "--cache-dialect", "none"], deps, io);
 
@@ -326,7 +317,7 @@ describe("cogmo provider set", () => {
   it("exits 1 when the provider is gone by the time it writes", async () => {
     const deps = depsWith(GATEWAY);
     deps.agentStore.setProviderCacheDialect.mockResolvedValue(false);
-    const { io, err, out } = makeIo();
+    const { io, err, out } = captureIo();
 
     const code = await run(["set", "gateway", "--cache-dialect", "none"], deps, io);
 

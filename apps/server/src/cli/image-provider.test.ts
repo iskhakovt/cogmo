@@ -4,6 +4,7 @@ import { InvalidProviderConfigError } from "../agent/store/errors.js";
 import type { AgentStore, ImageProviderRow } from "../agent/store/index.js";
 import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { captureIo } from "../test/factories.js";
 import { type ImageProviderCliDeps, imageProviderCli } from "./image-provider.js";
 import { type CliIo, runCli } from "./run.js";
 
@@ -29,16 +30,6 @@ function makeDeps() {
   return deps;
 }
 
-function makeIo() {
-  const out: string[] = [];
-  const err: string[] = [];
-  return {
-    io: { out: (line: string) => out.push(line), err: (line: string) => err.push(line) },
-    out,
-    err,
-  };
-}
-
 function makeProviderRow(overrides: Partial<ImageProviderRow> = {}): ImageProviderRow {
   return {
     id: "p-1",
@@ -55,7 +46,7 @@ const VENICE = ["add", "venice", "venice", "sk-venice", "https://api.venice.ai/a
 
 describe("cogmo image-provider — command line", () => {
   it("prints help and exits 0 when given no command", async () => {
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
 
     const code = await run([], makeDeps(), io);
 
@@ -64,7 +55,7 @@ describe("cogmo image-provider — command line", () => {
   });
 
   it("answers --help on a subcommand without loading dependencies", async () => {
-    const { io, out, err } = makeIo();
+    const { io, out, err } = captureIo();
     const loadDeps = vi.fn(async () => makeDeps());
 
     const code = await runCli(imageProviderCli(io, loadDeps), ["add", "--help"], io);
@@ -77,7 +68,7 @@ describe("cogmo image-provider — command line", () => {
   });
 
   it("rejects an unknown command with exit 2", async () => {
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
 
     const code = await run(["bogosity"], makeDeps(), io);
 
@@ -88,7 +79,7 @@ describe("cogmo image-provider — command line", () => {
   it("lets an unexpected store failure propagate to the caller", async () => {
     const deps = makeDeps();
     deps.agentStore.listImageProviders.mockRejectedValue(new Error("db gone"));
-    const { io } = makeIo();
+    const { io } = captureIo();
 
     await expect(run(["list"], deps, io)).rejects.toThrow("db gone");
   });
@@ -105,7 +96,7 @@ describe("cogmo image-provider list", () => {
         baseUrl: "https://api.venice.ai/api/v1",
       }),
     ]);
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
 
     const code = await run(["list"], deps, io);
 
@@ -120,7 +111,7 @@ describe("cogmo image-provider list", () => {
   it('reports "no providers" when the catalog is empty', async () => {
     const deps = makeDeps();
     deps.agentStore.listImageProviders.mockResolvedValue([]);
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
 
     const code = await run(["list"], deps, io);
 
@@ -134,7 +125,7 @@ describe("cogmo image-provider add", () => {
     const deps = makeDeps();
     deps.secretsStore.putSecret.mockResolvedValue({ id: "sec-fal" });
     deps.agentStore.createImageProvider.mockResolvedValue({ id: "p-fal" });
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
 
     const code = await run(["add", "fal", "fal", "sk-fal"], deps, io);
 
@@ -159,7 +150,7 @@ describe("cogmo image-provider add", () => {
 
   it("creates a venice provider with safe_mode off", async () => {
     const deps = makeDeps();
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
 
     const code = await run([...VENICE, "--safe-mode", "false"], deps, io);
 
@@ -180,7 +171,7 @@ describe("cogmo image-provider add", () => {
     // The wizard docs and image-generation.md point operators at these four
     // options; this pins that each one lands in the row.
     const deps = makeDeps();
-    const { io } = makeIo();
+    const { io } = captureIo();
 
     const code = await run(
       [
@@ -216,7 +207,7 @@ describe("cogmo image-provider add", () => {
 
   it("accepts the --option=value form", async () => {
     const deps = makeDeps();
-    const { io } = makeIo();
+    const { io } = captureIo();
 
     const code = await run([...VENICE, "--cfg-scale=0", "--hide-watermark=false"], deps, io);
 
@@ -256,7 +247,7 @@ describe("cogmo image-provider add", () => {
     [[...VENICE, "--safe-mode", "true", "--safe-mode", "false"], /Too many times provided/],
   ])("rejects %j with exit 2 and writes nothing", async (argv, message) => {
     const deps = makeDeps();
-    const { io, out, err } = makeIo();
+    const { io, out, err } = captureIo();
 
     const code = await run(argv, deps, io);
 
@@ -268,7 +259,7 @@ describe("cogmo image-provider add", () => {
   });
 
   it("rejects venice extras for a non-venice type before loading dependencies", async () => {
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
     const loadDeps = vi.fn(async () => makeDeps());
 
     const code = await runCli(
@@ -289,7 +280,7 @@ describe("cogmo image-provider add", () => {
     deps.agentStore.createImageProvider.mockRejectedValue(
       new InvalidProviderConfigError("not allowed here"),
     );
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
 
     const code = await run(["add", "fal", "fal", "sk"], deps, io);
 
@@ -300,7 +291,7 @@ describe("cogmo image-provider add", () => {
   it("maps generic creation failures to exit code 1", async () => {
     const deps = makeDeps();
     deps.agentStore.createImageProvider.mockRejectedValue(new Error("upstream timeout"));
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
 
     const code = await run(["add", "fal", "fal", "sk"], deps, io);
 
@@ -313,7 +304,7 @@ describe("cogmo image-provider remove", () => {
   it("removes a provider by name", async () => {
     const deps = makeDeps();
     deps.agentStore.findImageProviderByName.mockResolvedValue(makeProviderRow({ name: "fal" }));
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
 
     const code = await run(["remove", "fal"], deps, io);
 
@@ -326,7 +317,7 @@ describe("cogmo image-provider remove", () => {
   it("reports not-found when removing an unknown provider", async () => {
     const deps = makeDeps();
     deps.agentStore.findImageProviderByName.mockResolvedValue(undefined);
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
 
     const code = await run(["remove", "ghost"], deps, io);
 
@@ -340,7 +331,7 @@ describe("cogmo image-provider remove", () => {
     [["remove", "fal", "extra"], /extra\n\s+\^ Unknown arguments/],
   ])("rejects %j with exit 2 and deletes nothing", async (argv, message) => {
     const deps = makeDeps();
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
 
     const code = await run(argv, deps, io);
 

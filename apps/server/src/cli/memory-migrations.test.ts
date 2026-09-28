@@ -3,7 +3,8 @@ import { mock } from "vitest-mock-extended";
 import type { AgentStore } from "../agent/store/index.js";
 import type { Transactor } from "../db/index.js";
 import { expectDefined } from "../test/assertions.js";
-import { type CliIo, runCli } from "./run.js";
+import { captureIo } from "../test/factories.js";
+import { runCli } from "./run.js";
 
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
@@ -79,9 +80,7 @@ async function runTree(
   argv: readonly string[],
   deps: Deps,
 ) {
-  const out: string[] = [];
-  const err: string[] = [];
-  const io: CliIo = { out: (l) => out.push(l), err: (l) => err.push(l) };
+  const { io, out, err } = captureIo();
   const loadDeps = vi.fn(async () => deps);
   const code = await runCli(cli(loadDeps), argv, io);
   return { code, out: out.join("\n"), err: err.join("\n"), loadDeps };

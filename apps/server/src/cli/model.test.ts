@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { AgentStore } from "../agent/store/index.js";
-import { fakeRunInTx } from "../test/factories.js";
+import { captureIo, fakeRunInTx } from "../test/factories.js";
 import { type ModelCliDeps, modelCli } from "./model.js";
 import { type CliIo, type LoadDeps, runCli } from "./run.js";
 
@@ -60,22 +60,12 @@ function makeDeps(
   return { runInTx: fakeRunInTx, agentStore };
 }
 
-function makeIo() {
-  const out: string[] = [];
-  const err: string[] = [];
-  return {
-    io: { out: (line: string) => out.push(line), err: (line: string) => err.push(line) },
-    out,
-    err,
-  };
-}
-
 describe("cogmo model — usage", () => {
   it.each([[[]], [["--help"]], [["add", "--help"]], [["list", "--help"]], [["remove", "--help"]]])(
     "prints help for %j on stdout, exits 0, and loads nothing",
     async (argv) => {
       const loadDeps = vi.fn<LoadDeps<ModelCliDeps>>(async () => makeDeps());
-      const { io, out, err } = makeIo();
+      const { io, out, err } = captureIo();
 
       const code = await runCli(modelCli(io, loadDeps), argv, io);
 
@@ -87,7 +77,7 @@ describe("cogmo model — usage", () => {
   );
 
   it("documents every add option", async () => {
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
 
     await run(["add", "--help"], makeDeps(), io);
 
@@ -100,7 +90,7 @@ describe("cogmo model — usage", () => {
 describe("cogmo model add", () => {
   it("rejects when --provider is missing", async () => {
     const loadDeps = vi.fn<LoadDeps<ModelCliDeps>>(async () => makeDeps());
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
 
     const code = await runCli(modelCli(io, loadDeps), ["add", "x-ai/grok-4.3"], io);
 
@@ -110,7 +100,7 @@ describe("cogmo model add", () => {
   });
 
   it("rejects when the provider is not registered", async () => {
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
     const code = await run(["add", "x-ai/grok-4.3", "--provider", "missing"], makeDeps(), io);
     expect(code).toBe(1);
     expect(err.join("\n")).toMatch(/No provider named "missing"/);
@@ -118,7 +108,7 @@ describe("cogmo model add", () => {
 
   it("inserts a row and reports effective limits sourced from LiteLLM when no overrides given", async () => {
     const deps = makeDeps({ providers: [provider("p1", "openrouter")] });
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
     const code = await run(["add", "x-ai/grok-4.3", "--provider", "openrouter"], deps, io);
     expect(code).toBe(0);
     // Resolver finds x-ai/grok-4.3 in the bundled LiteLLM snapshot.
@@ -138,7 +128,7 @@ describe("cogmo model add", () => {
 
   it("threads --context and --max-output as explicit overrides", async () => {
     const deps = makeDeps({ providers: [provider("p1", "vllm")] });
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
     const code = await run(
       [
         "add",
@@ -169,7 +159,7 @@ describe("cogmo model add", () => {
 
   it("accepts --position 0, the primary routing slot", async () => {
     const deps = makeDeps({ providers: [provider("p1", "vllm")] });
-    const { io } = makeIo();
+    const { io } = captureIo();
     const code = await run(["add", "m", "--provider", "vllm", "--position", "0"], deps, io);
     expect(code).toBe(0);
     expect(deps.agentStore.addModelProvider).toHaveBeenCalledWith(
@@ -180,7 +170,7 @@ describe("cogmo model add", () => {
 
   it("`--position N` round-trips into addModelRouting", async () => {
     const deps = makeDeps({ providers: [provider("p1", "openrouter")] });
-    const { io } = makeIo();
+    const { io } = captureIo();
     const code = await run(["add", "m", "--provider", "openrouter", "--position", "3"], deps, io);
     expect(code).toBe(0);
     expect(deps.agentStore.addModelProvider).toHaveBeenCalledWith(
@@ -192,7 +182,7 @@ describe("cogmo model add", () => {
   it("surfaces addModelRouting errors as exit code 1", async () => {
     const deps = makeDeps({ providers: [provider("p1", "openrouter")] });
     deps.agentStore.addModelProvider.mockRejectedValue(new Error("conflicting position"));
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
     const code = await run(["add", "m", "--provider", "openrouter"], deps, io);
     expect(code).toBe(1);
     expect(err.join("\n")).toMatch(/Failed to add model routing: conflicting position/);
@@ -201,7 +191,7 @@ describe("cogmo model add", () => {
 
 describe("cogmo model list", () => {
   it("prints (no model routing rows) when empty", async () => {
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
     const code = await run(["list"], makeDeps(), io);
     expect(code).toBe(0);
     expect(out).toContain("(no model routing rows)");
@@ -211,7 +201,7 @@ describe("cogmo model list", () => {
     const deps = makeDeps({
       rowsByModel: { "claude-sonnet-4-6": [routingRow("r1", "anthropic", 0)] },
     });
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
     await run(["list"], deps, io);
     // Header + one row.
     expect(out.length).toBe(2);
@@ -229,7 +219,7 @@ describe("cogmo model list", () => {
         "claude-sonnet-4-6": [routingRow("r1", "anthropic", 0, { maxOutputTokens: 8_000 })],
       },
     });
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
     await run(["list"], deps, io);
     expect(out[1]).toMatch(/^claude-sonnet-4-6\tanthropic\t0\t1000000\t8000\tcw=litellm,mo=db$/);
   });
@@ -237,7 +227,7 @@ describe("cogmo model list", () => {
   it("displays the stored position, not the array index, when positions are non-sequential", async () => {
     // A lone row at position 5: the array index would render 0.
     const deps = makeDeps({ rowsByModel: { m: [routingRow("r1", "p", 5)] } });
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
     await run(["list"], deps, io);
     expect(out[1]).toMatch(/^m\tp\t5\t/);
   });
@@ -250,7 +240,7 @@ describe("cogmo model list", () => {
         m3: [routingRow("r3", "p", 0)],
       },
     });
-    const { io } = makeIo();
+    const { io } = captureIo();
     await run(["list"], deps, io);
     expect(deps.agentStore.listAllModelProviders).toHaveBeenCalledTimes(1);
     expect(deps.agentStore.listProvidersForModel).not.toHaveBeenCalled();
@@ -260,7 +250,7 @@ describe("cogmo model list", () => {
     const deps = makeDeps({
       rowsByModel: { a: [routingRow("r1", "p1", 0)], b: [routingRow("r2", "p2", 0)] },
     });
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
     await run(["list", "--model", "a", "--provider", "p1"], deps, io);
     expect(out.join("\n")).toContain("a\tp1");
     expect(out.join("\n")).not.toContain("b\tp2");
@@ -272,7 +262,7 @@ describe("cogmo model remove", () => {
     const deps = makeDeps({
       rowsByModel: { m: [routingRow("r1", "p1", 0), routingRow("r2", "p2", 1)] },
     });
-    const { io } = makeIo();
+    const { io } = captureIo();
     const code = await run(["remove", "m", "--provider", "p2"], deps, io);
     expect(code).toBe(0);
     expect(deps.agentStore.removeModelProvider).toHaveBeenCalledTimes(1);
@@ -284,7 +274,7 @@ describe("cogmo model remove", () => {
       rowsByModel: { m: [routingRow("r1", "p1", 0), routingRow("r2", "p2", 1)] },
     });
     const runInTx = vi.spyOn(deps, "runInTx");
-    const { io } = makeIo();
+    const { io } = captureIo();
     const code = await run(["remove", "m"], deps, io);
     expect(code).toBe(0);
     expect(deps.agentStore.removeModelProvider).toHaveBeenCalledTimes(2);
@@ -294,7 +284,7 @@ describe("cogmo model remove", () => {
   });
 
   it("returns 1 when the model has no routing rows", async () => {
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
     const code = await run(["remove", "ghost"], makeDeps(), io);
     expect(code).toBe(1);
     expect(err.join("\n")).toMatch(/No routing rows for model "ghost"/);
@@ -302,7 +292,7 @@ describe("cogmo model remove", () => {
 
   it("returns 1 when the model isn't routed via --provider", async () => {
     const deps = makeDeps({ rowsByModel: { m: [routingRow("r1", "p1", 0)] } });
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
     const code = await run(["remove", "m", "--provider", "p-other"], deps, io);
     expect(code).toBe(1);
     expect(err.join("\n")).toMatch(/not routed via provider "p-other"/);
@@ -350,7 +340,7 @@ describe("cogmo model — rejected command lines", () => {
     ],
   ])("rejects %j with exit 2 before loading anything", async (argv, message) => {
     const loadDeps = vi.fn<LoadDeps<ModelCliDeps>>(async () => makeDeps());
-    const { io, out, err } = makeIo();
+    const { io, out, err } = captureIo();
 
     const code = await runCli(modelCli(io, loadDeps), argv, io);
 
@@ -366,7 +356,7 @@ describe("cogmo model — rejected command lines", () => {
       // A zero limit describes no model: `addModelRouting` refuses it and
       // the resolver ignores one already stored.
       const deps = makeDeps({ providers: [provider("p1", "vllm")] });
-      const { io, err } = makeIo();
+      const { io, err } = captureIo();
       const code = await run(["add", "m", "--provider", "vllm", flag, "0"], deps, io);
       expect(code).toBe(2);
       expect(err.join("\n")).toMatch(

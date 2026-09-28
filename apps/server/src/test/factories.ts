@@ -10,6 +10,7 @@ import type { HandleMessageDeps } from "../agent/handle-message.js";
 import type { Service } from "../agent/service.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { ToolRegistry } from "../agent/tools.js";
+import type { CliIo } from "../cli/run.js";
 import type { Transactor } from "../db/transactor.js";
 import type { StepRun, StepSendEvent } from "../inngest/index.js";
 import type { LlmProvider } from "../llm/provider.js";
@@ -952,4 +953,11 @@ export function turnContextSent(deps: HandleMessageDeps, call = 0): string {
   const [first] = typeof content === "string" ? [] : content;
   if (first?.type !== "text") throw new Error("the turn's message has no leading text block");
   return first.text;
+}
+
+/** A `CliIo` that records every line, for asserting on a CLI's output. */
+export function captureIo(): { io: CliIo; out: string[]; err: string[] } {
+  const out: string[] = [];
+  const err: string[] = [];
+  return { io: { out: (line) => out.push(line), err: (line) => err.push(line) }, out, err };
 }

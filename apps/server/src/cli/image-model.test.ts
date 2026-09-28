@@ -7,6 +7,7 @@ import type {
   ImageProviderRow,
 } from "../agent/store/index.js";
 import type { Transactor } from "../db/index.js";
+import { captureIo } from "../test/factories.js";
 import { type ImageModelCliDeps, imageModelCli } from "./image-model.js";
 import { type CliIo, runCli } from "./run.js";
 
@@ -26,16 +27,6 @@ function makeDeps() {
   deps.agentStore.findImageProviderByName.mockResolvedValue(fakeProvider());
   deps.agentStore.createImageModel.mockResolvedValue({ id: "m-new" });
   return deps;
-}
-
-function makeIo() {
-  const out: string[] = [];
-  const err: string[] = [];
-  return {
-    io: { out: (line: string) => out.push(line), err: (line: string) => err.push(line) },
-    out,
-    err,
-  };
 }
 
 function fakeProvider(overrides: Partial<ImageProviderRow> = {}): ImageProviderRow {
@@ -72,7 +63,7 @@ const ADD = ["add", "fal/x", "--provider", "fal", "--model-string", "f", "--desc
 
 describe("cogmo image-model — command line", () => {
   it("prints help and exits 0 when given no command", async () => {
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
 
     const code = await run([], makeDeps(), io);
 
@@ -83,7 +74,7 @@ describe("cogmo image-model — command line", () => {
   it.each([["add"], ["list"], ["remove"]])(
     "answers `%s --help` without loading dependencies",
     async (subcommand) => {
-      const { io, out, err } = makeIo();
+      const { io, out, err } = captureIo();
       const loadDeps = vi.fn(async () => makeDeps());
 
       const code = await runCli(imageModelCli(io, loadDeps), [subcommand, "--help"], io);
@@ -96,7 +87,7 @@ describe("cogmo image-model — command line", () => {
   );
 
   it("rejects an unknown command with exit 2", async () => {
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
 
     const code = await run(["foo"], makeDeps(), io);
 
@@ -108,7 +99,7 @@ describe("cogmo image-model — command line", () => {
 describe("cogmo image-model add", () => {
   it("creates a model with parsed capabilities", async () => {
     const deps = makeDeps();
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
 
     const code = await run(
       [
@@ -143,7 +134,7 @@ describe("cogmo image-model add", () => {
 
   it("stores no capabilities when none are given", async () => {
     const deps = makeDeps();
-    const { io } = makeIo();
+    const { io } = captureIo();
 
     const code = await run(ADD, deps, io);
 
@@ -156,7 +147,7 @@ describe("cogmo image-model add", () => {
 
   it("honours --no-selectable", async () => {
     const deps = makeDeps();
-    const { io } = makeIo();
+    const { io } = captureIo();
 
     const code = await run([...ADD, "--no-selectable"], deps, io);
 
@@ -169,7 +160,7 @@ describe("cogmo image-model add", () => {
 
   it("accepts --image-input required and writes it into capabilities", async () => {
     const deps = makeDeps();
-    const { io } = makeIo();
+    const { io } = captureIo();
 
     const code = await run([...ADD, "--image-input", "required"], deps, io);
 
@@ -185,7 +176,7 @@ describe("cogmo image-model add", () => {
     deps.agentStore.findImageProviderByName.mockResolvedValue(
       fakeProvider({ name: "venice", type: "venice" }),
     );
-    const { io } = makeIo();
+    const { io } = captureIo();
 
     const code = await run(
       [
@@ -212,7 +203,7 @@ describe("cogmo image-model add", () => {
 
   it("takes a description that starts with a dash as text", async () => {
     const deps = makeDeps();
-    const { io } = makeIo();
+    const { io } = captureIo();
 
     const code = await run(
       ["add", "fal/x", "--provider", "fal", "--model-string", "f", "--description", "-fast-"],
@@ -255,7 +246,7 @@ describe("cogmo image-model add", () => {
     [[...ADD, "--seed", "--seed"], /Expected 1 occurence, got 2/],
   ])("rejects %j with exit 2 and writes nothing", async (argv, message) => {
     const deps = makeDeps();
-    const { io, out, err } = makeIo();
+    const { io, out, err } = captureIo();
 
     const code = await run(argv, deps, io);
 
@@ -268,7 +259,7 @@ describe("cogmo image-model add", () => {
   it("reports an unknown provider with exit code 1", async () => {
     const deps = makeDeps();
     deps.agentStore.findImageProviderByName.mockResolvedValue(undefined);
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
 
     const code = await run(
       ["add", "fal/x", "--provider", "ghost", "--model-string", "f", "--description", "d"],
@@ -284,7 +275,7 @@ describe("cogmo image-model add", () => {
   it("surfaces createImageModel failures as exit code 1", async () => {
     const deps = makeDeps();
     deps.agentStore.createImageModel.mockRejectedValue(new Error("duplicate name"));
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
 
     const code = await run(ADD, deps, io);
 
@@ -317,7 +308,7 @@ describe("cogmo image-model list", () => {
 
   it("lists the selectable models by default", async () => {
     const deps = depsWithCatalog();
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
 
     const code = await run(["list"], deps, io);
 
@@ -334,7 +325,7 @@ describe("cogmo image-model list", () => {
 
   it("includes hidden models with --all", async () => {
     const deps = depsWithCatalog();
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
 
     const code = await run(["list", "--all"], deps, io);
 
@@ -345,7 +336,7 @@ describe("cogmo image-model list", () => {
 
   it("filters by --provider", async () => {
     const deps = depsWithCatalog();
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
 
     const code = await run(["list", "--provider", "venice", "--all"], deps, io);
 
@@ -357,7 +348,7 @@ describe("cogmo image-model list", () => {
   it("prints (no image models) when nothing matches", async () => {
     const deps = makeDeps();
     deps.agentStore.listImageModelsWithProvider.mockResolvedValue([]);
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
 
     const code = await run(["list"], deps, io);
 
@@ -370,7 +361,7 @@ describe("cogmo image-model list", () => {
     [["list", "--provider", "--all"], /got the flag "--all"/],
     [["list", "--verbose"], /--verbose\n\s+\^ Unknown arguments/],
   ])("rejects %j with exit 2 and lists nothing", async (argv, message) => {
-    const { io, out, err } = makeIo();
+    const { io, out, err } = captureIo();
     const loadDeps = vi.fn(async () => depsWithCatalog());
 
     const code = await runCli(imageModelCli(io, loadDeps), argv, io);
@@ -386,7 +377,7 @@ describe("cogmo image-model remove", () => {
   it("removes a model by name", async () => {
     const deps = makeDeps();
     deps.agentStore.listImageModels.mockResolvedValue([fakeModel({ name: "fal/flux-dev" })]);
-    const { io, out } = makeIo();
+    const { io, out } = captureIo();
 
     const code = await run(["remove", "fal/flux-dev"], deps, io);
 
@@ -398,7 +389,7 @@ describe("cogmo image-model remove", () => {
   it("reports not-found when removing an unknown model", async () => {
     const deps = makeDeps();
     deps.agentStore.listImageModels.mockResolvedValue([]);
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
 
     const code = await run(["remove", "ghost"], deps, io);
 
@@ -409,7 +400,7 @@ describe("cogmo image-model remove", () => {
 
   it("rejects a missing name with exit 2", async () => {
     const deps = makeDeps();
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
 
     const code = await run(["remove"], deps, io);
 

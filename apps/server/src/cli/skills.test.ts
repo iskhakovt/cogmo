@@ -2,20 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { SkillRunAs, SkillRunServices } from "../skills/run-as.js";
 import type { SkillRunner } from "../skills/runner.js";
-import { mockFilesService } from "../test/factories.js";
+import { captureIo, mockFilesService } from "../test/factories.js";
 import { type CliIo, runCli } from "./run.js";
 import { type SkillsCliDeps, skillsCli } from "./skills.js";
-
-function makeIo(): CliIo & { stdout: string[]; stderr: string[] } {
-  const stdout: string[] = [];
-  const stderr: string[] = [];
-  return {
-    out: (l) => stdout.push(l),
-    err: (l) => stderr.push(l),
-    stdout,
-    stderr,
-  };
-}
 
 function makeRunner(overrides: Partial<SkillRunner> = {}): SkillRunner {
   return mock<SkillRunner>({ list: vi.fn().mockResolvedValue([]), ...overrides });
@@ -41,34 +30,34 @@ function run(argv: readonly string[], deps: SkillsCliDeps, io: CliIo): Promise<n
 
 describe("skillsCli", () => {
   it("prints help when no command given", async () => {
-    const io = makeIo();
+    const { io, out } = captureIo();
     const code = await run([], depsFor(makeRunner()), io);
     expect(code).toBe(0);
-    expect(io.stdout.join("\n")).toMatch(/skills <subcommand>/);
+    expect(out.join("\n")).toMatch(/skills <subcommand>/);
   });
 
   it.each([["--help"], ["-h"], ["run", "--help"]])(
     "answers %j with help on stdout, exit 0, and no dependencies loaded",
     async (...argv) => {
-      const io = makeIo();
+      const { io, out, err } = captureIo();
       const loadDeps = vi.fn(async () => depsFor(makeRunner()));
       const code = await runCli(skillsCli(io, loadDeps), argv, io);
       expect(code).toBe(0);
-      expect(io.stdout.join("\n")).toMatch(/skills/);
-      expect(io.stderr).toEqual([]);
+      expect(out.join("\n")).toMatch(/skills/);
+      expect(err).toEqual([]);
       expect(loadDeps).not.toHaveBeenCalled();
     },
   );
 
   it("prints (no enabled skills) when list is empty", async () => {
-    const io = makeIo();
+    const { io, out } = captureIo();
     const code = await run(["list"], depsFor(makeRunner()), io);
     expect(code).toBe(0);
-    expect(io.stdout.join("\n")).toContain("(no enabled skills)");
+    expect(out.join("\n")).toContain("(no enabled skills)");
   });
 
   it("prints a tab-separated row per skill", async () => {
-    const io = makeIo();
+    const { io, out } = captureIo();
     const runner = makeRunner({
       list: vi.fn().mockResolvedValue([
         {
@@ -82,36 +71,36 @@ describe("skillsCli", () => {
     });
     const code = await run(["list"], depsFor(runner), io);
     expect(code).toBe(0);
-    const out = io.stdout.join("\n");
-    expect(out).toContain("name\ttier\trisk\tdisabled\tgit_sha");
-    expect(out).toContain("echo\twasm\tauto\tno\tabc12345");
+    const printed = out.join("\n");
+    expect(printed).toContain("name\ttier\trisk\tdisabled\tgit_sha");
+    expect(printed).toContain("echo\twasm\tauto\tno\tabc12345");
   });
 
   it("rejects `run` without a name", async () => {
-    const io = makeIo();
+    const { io, err } = captureIo();
     const code = await run(["run"], depsFor(makeRunner()), io);
     expect(code).toBe(2);
-    expect(io.stderr.join("\n")).toMatch(/No value provided for name/);
+    expect(err.join("\n")).toMatch(/No value provided for name/);
   });
 
   it("rejects `run` with a name but no inputs", async () => {
-    const io = makeIo();
+    const { io, err } = captureIo();
     const code = await run(["run", "echo"], depsFor(makeRunner()), io);
     expect(code).toBe(2);
-    expect(io.stderr.join("\n")).toMatch(/No value provided for jsonInputs/);
+    expect(err.join("\n")).toMatch(/No value provided for jsonInputs/);
   });
 
   it("rejects `run` with non-JSON inputs before loading dependencies", async () => {
-    const io = makeIo();
+    const { io, err } = captureIo();
     const loadDeps = vi.fn(async () => depsFor(makeRunner()));
     const code = await runCli(skillsCli(io, loadDeps), ["run", "echo", "{not json"], io);
     expect(code).toBe(2);
-    expect(io.stderr.join("\n")).toMatch(/invalid JSON inputs/);
+    expect(err.join("\n")).toMatch(/invalid JSON inputs/);
     expect(loadDeps).not.toHaveBeenCalled();
   });
 
   it("invokes the runner and prints success result with exit 0", async () => {
-    const io = makeIo();
+    const { io, out } = captureIo();
     const runner = makeRunner({
       invoke: vi.fn().mockResolvedValue({
         runId: "run-1",
@@ -127,19 +116,19 @@ describe("skillsCli", () => {
       trigger: "manual",
       runAs: OWNER_RUN_AS,
     });
-    const out = io.stdout.join("\n");
-    expect(out).toContain('"status": "success"');
-    expect(out).toContain('"echo": 2');
+    const printed = out.join("\n");
+    expect(printed).toContain('"status": "success"');
+    expect(printed).toContain('"echo": 2');
   });
 
   it("resolves the owner's identity only for `run`", async () => {
     const deps = depsFor(makeRunner());
-    await run(["list"], deps, makeIo());
+    await run(["list"], deps, captureIo().io);
     expect(deps.ownerRunAs).not.toHaveBeenCalled();
   });
 
   it("returns exit 1 when the run errors", async () => {
-    const io = makeIo();
+    const { io } = captureIo();
     const runner = makeRunner({
       invoke: vi.fn().mockResolvedValue({
         runId: "run-2",
@@ -152,21 +141,21 @@ describe("skillsCli", () => {
   });
 
   it("returns exit 2 on unknown command", async () => {
-    const io = makeIo();
+    const { io, err } = captureIo();
     const code = await run(["nonsense"], depsFor(makeRunner()), io);
     expect(code).toBe(2);
-    expect(io.stderr.join("\n")).toMatch(/Not a valid subcommand name/);
+    expect(err.join("\n")).toMatch(/Not a valid subcommand name/);
   });
 
   it("returns exit 2 on an unknown flag", async () => {
-    const io = makeIo();
+    const { io, err } = captureIo();
     const code = await run(["list", "--verbose"], depsFor(makeRunner()), io);
     expect(code).toBe(2);
-    expect(io.stderr.join("\n")).toMatch(/--verbose\n\s+\^ Unknown arguments/);
+    expect(err.join("\n")).toMatch(/--verbose\n\s+\^ Unknown arguments/);
   });
 
   it("accepts a JSON array as inputs (validation deferred to runner)", async () => {
-    const io = makeIo();
+    const { io } = captureIo();
     const runner = makeRunner({
       invoke: vi.fn().mockResolvedValue({ runId: "r", status: "success", output: null }),
     });
@@ -181,18 +170,18 @@ describe("skillsCli", () => {
   });
 
   it("catches a runner.invoke exception and exits 1 with stderr", async () => {
-    const io = makeIo();
+    const { io, err } = captureIo();
     const runner = makeRunner({
       invoke: vi.fn().mockRejectedValue(new Error("not found")),
     });
     const code = await run(["run", "echo", "{}"], depsFor(runner), io);
     expect(code).toBe(1);
-    expect(io.stderr.join("\n")).toMatch(/invoke failed: not found/);
+    expect(err.join("\n")).toMatch(/invoke failed: not found/);
   });
 
   describe("register / approve / deny / rollback / deregister subcommands", () => {
     it("`register <branch>` calls runner.register and exits 0 on live", async () => {
-      const io = makeIo();
+      const { io, out } = captureIo();
       const register = vi.fn().mockResolvedValue({
         name: "echo",
         riskTier: "notify",
@@ -202,11 +191,11 @@ describe("skillsCli", () => {
       const code = await run(["register", "skill/echo"], depsFor(makeRunner({ register })), io);
       expect(register).toHaveBeenCalledWith({ branch: "skill/echo", origin: { kind: "owner" } });
       expect(code).toBe(0);
-      expect(io.stdout.join("\n")).toContain('"status": "live"');
+      expect(out.join("\n")).toContain('"status": "live"');
     });
 
     it("`register` exits 1 on rejected", async () => {
-      const io = makeIo();
+      const { io } = captureIo();
       const register = vi.fn().mockResolvedValue({
         name: "",
         riskTier: "notify",
@@ -219,14 +208,14 @@ describe("skillsCli", () => {
     });
 
     it("`register` without branch exits 2", async () => {
-      const io = makeIo();
+      const { io, err } = captureIo();
       const code = await run(["register"], depsFor(makeRunner()), io);
       expect(code).toBe(2);
-      expect(io.stderr.join("\n")).toMatch(/No value provided for branch/);
+      expect(err.join("\n")).toMatch(/No value provided for branch/);
     });
 
     it("`approve <pendingId>` calls runner.approveDeploy and exits 0 on live", async () => {
-      const io = makeIo();
+      const { io } = captureIo();
       const approveDeploy = vi.fn().mockResolvedValue({
         name: "echo",
         riskTier: "approve",
@@ -242,7 +231,7 @@ describe("skillsCli", () => {
     });
 
     it("`deny <pendingId> reason words` joins reason and exits 0", async () => {
-      const io = makeIo();
+      const { io, out } = captureIo();
       const denyDeploy = vi.fn().mockResolvedValue(undefined);
       const code = await run(
         ["deny", "deploy-1", "looks", "sketchy"],
@@ -254,11 +243,11 @@ describe("skillsCli", () => {
         reason: "looks sketchy",
       });
       expect(code).toBe(0);
-      expect(io.stdout.join("\n")).toContain('"reason": "looks sketchy"');
+      expect(out.join("\n")).toContain('"reason": "looks sketchy"');
     });
 
     it("`rollback <name> <sha>` calls runner.rollback", async () => {
-      const io = makeIo();
+      const { io } = captureIo();
       const rollback = vi.fn().mockResolvedValue({
         name: "echo",
         riskTier: "notify",
@@ -275,27 +264,27 @@ describe("skillsCli", () => {
     });
 
     it("`deregister <name>` calls runner.deregister and surfaces the disabled status", async () => {
-      const io = makeIo();
+      const { io, out } = captureIo();
       const deregister = vi.fn().mockResolvedValue({ kind: "deregistered", name: "echo" });
       const code = await run(["deregister", "echo"], depsFor(makeRunner({ deregister })), io);
       expect(deregister).toHaveBeenCalledWith({ name: "echo" });
       expect(code).toBe(0);
-      expect(io.stdout.join("\n")).toContain('"status": "disabled"');
+      expect(out.join("\n")).toContain('"status": "disabled"');
     });
 
     it("`deregister <name>` exits 1 on rejected:not_found", async () => {
-      const io = makeIo();
+      const { io, err } = captureIo();
       const deregister = vi
         .fn()
         .mockResolvedValue({ kind: "rejected", name: "ghost", reason: "not_found" });
       const code = await run(["deregister", "ghost"], depsFor(makeRunner({ deregister })), io);
       expect(code).toBe(1);
-      expect(io.stderr.join("\n")).toContain("skill not found: ghost");
+      expect(err.join("\n")).toContain("skill not found: ghost");
     });
   });
 
   it("printed JSON output is valid (round-trips through JSON.parse)", async () => {
-    const io = makeIo();
+    const { io, out } = captureIo();
     const runner = makeRunner({
       invoke: vi.fn().mockResolvedValue({
         runId: "r",
@@ -304,29 +293,29 @@ describe("skillsCli", () => {
       }),
     });
     await run(["run", "echo", "{}"], depsFor(runner), io);
-    const last = io.stdout.join("\n");
+    const last = out.join("\n");
     // The pretty-printed JSON spans multiple lines; reparse.
     expect(() => JSON.parse(last)).not.toThrow();
   });
 
   it("`approve` without pendingId exits 2 naming the missing argument", async () => {
-    const io = makeIo();
+    const { io, err } = captureIo();
     const code = await run(["approve"], depsFor(makeRunner()), io);
     expect(code).toBe(2);
-    expect(io.stderr.join("\n")).toMatch(/No value provided for pendingId/);
+    expect(err.join("\n")).toMatch(/No value provided for pendingId/);
   });
 
   it("`approve` refuses a flag in place of the pendingId", async () => {
-    const io = makeIo();
+    const { io, err } = captureIo();
     const approveDeploy = vi.fn();
     const code = await run(["approve", "--", "--all"], depsFor(makeRunner({ approveDeploy })), io);
     expect(code).toBe(2);
-    expect(io.stderr.join("\n")).toMatch(/expected a value, got the flag "--all"/);
+    expect(err.join("\n")).toMatch(/expected a value, got the flag "--all"/);
     expect(approveDeploy).not.toHaveBeenCalled();
   });
 
   it("`approve` exits 1 when runner.approveDeploy returns rejected", async () => {
-    const io = makeIo();
+    const { io } = captureIo();
     const approveDeploy = vi
       .fn()
       .mockResolvedValue({ status: "rejected", reason: "schema_mismatch" });
@@ -335,46 +324,46 @@ describe("skillsCli", () => {
   });
 
   it("`deny` without pendingId exits 2 naming the missing argument", async () => {
-    const io = makeIo();
+    const { io, err } = captureIo();
     const code = await run(["deny"], depsFor(makeRunner()), io);
     expect(code).toBe(2);
-    expect(io.stderr.join("\n")).toMatch(/No value provided for pendingId/);
+    expect(err.join("\n")).toMatch(/No value provided for pendingId/);
   });
 
   it("`deny` without reason words emits reason=null in the JSON", async () => {
-    const io = makeIo();
+    const { io, out } = captureIo();
     const denyDeploy = vi.fn().mockResolvedValue(undefined);
     const code = await run(["deny", "p-1"], depsFor(makeRunner({ denyDeploy })), io);
     expect(code).toBe(0);
     expect(denyDeploy).toHaveBeenCalledWith({ pendingId: "p-1" });
-    expect(io.stdout.join("\n")).toContain('"reason": null');
+    expect(out.join("\n")).toContain('"reason": null');
   });
 
   it("`rollback` without args exits 2 naming the missing argument", async () => {
-    const io = makeIo();
+    const { io, err } = captureIo();
     const code = await run(["rollback"], depsFor(makeRunner()), io);
     expect(code).toBe(2);
-    expect(io.stderr.join("\n")).toMatch(/No value provided for name/);
+    expect(err.join("\n")).toMatch(/No value provided for name/);
   });
 
   it("`rollback` with only one arg exits 2", async () => {
-    const io = makeIo();
+    const { io, err } = captureIo();
     const code = await run(["rollback", "echo"], depsFor(makeRunner()), io);
     expect(code).toBe(2);
-    expect(io.stderr.join("\n")).toMatch(/No value provided for toGitSha/);
+    expect(err.join("\n")).toMatch(/No value provided for toGitSha/);
   });
 
   it("`rollback` exits 1 when runner.rollback returns rejected", async () => {
-    const io = makeIo();
+    const { io } = captureIo();
     const rollback = vi.fn().mockResolvedValue({ status: "rejected", reason: "git_sha_not_known" });
     const code = await run(["rollback", "echo", "sha"], depsFor(makeRunner({ rollback })), io);
     expect(code).toBe(1);
   });
 
   it("`deregister` without name exits 2 naming the missing argument", async () => {
-    const io = makeIo();
+    const { io, err } = captureIo();
     const code = await run(["deregister"], depsFor(makeRunner()), io);
     expect(code).toBe(2);
-    expect(io.stderr.join("\n")).toMatch(/No value provided for name/);
+    expect(err.join("\n")).toMatch(/No value provided for name/);
   });
 });

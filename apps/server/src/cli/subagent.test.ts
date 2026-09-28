@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { UniqueViolationError } from "../agent/store/errors.js";
 import type { SubAgent } from "../agent/store/index.js";
-import { fakeRunInTx, mockAgentStore } from "../test/factories.js";
+import { captureIo, fakeRunInTx, mockAgentStore } from "../test/factories.js";
 import { type CliIo, type LoadDeps, runCli } from "./run.js";
 import { type SubAgentCliDeps, subAgentCli } from "./subagent.js";
 
@@ -11,16 +11,6 @@ function run(argv: readonly string[], deps: SubAgentCliDeps, io: CliIo): Promise
     argv,
     io,
   );
-}
-
-function makeIo() {
-  const out: string[] = [];
-  const err: string[] = [];
-  return {
-    io: { out: (line: string) => out.push(line), err: (line: string) => err.push(line) },
-    out,
-    err,
-  };
 }
 
 function deps(overrides?: Parameters<typeof mockAgentStore>[0]) {
@@ -34,7 +24,7 @@ describe("subAgentCli", () => {
     "prints help for %j on stdout, exits 0, and loads nothing",
     async (argv) => {
       const loadDeps = vi.fn<LoadDeps<SubAgentCliDeps>>(async () => deps());
-      const { io, out, err } = makeIo();
+      const { io, out, err } = captureIo();
 
       const code = await runCli(subAgentCli(io, loadDeps), argv, io);
 
@@ -46,14 +36,14 @@ describe("subAgentCli", () => {
   );
 
   it.each([["frobnicate"], ["help"]])("rejects %s as a subcommand (exit 2)", async (word) => {
-    const { io, err } = makeIo();
+    const { io, err } = captureIo();
     expect(await run([word], deps(), io)).toBe(2);
     expect(err.join("\n")).toMatch(new RegExp(`${word}\\n\\s+\\^ Not a valid subcommand name`));
   });
 
   describe("add", () => {
     it("registers a sub-agent against a routable model", async () => {
-      const { io, out } = makeIo();
+      const { io, out } = captureIo();
       const d = deps(routable);
       const code = await run(
         ["add", "writer", "--model", "claude-test", "--description", "long-form prose"],
@@ -73,7 +63,7 @@ describe("subAgentCli", () => {
     });
 
     it("passes through an optional --system-prompt", async () => {
-      const { io } = makeIo();
+      const { io } = captureIo();
       const d = deps(routable);
       await run(
         ["add", "writer", "--model", "m", "--description", "d", "--system-prompt", "Be terse."],
@@ -88,7 +78,7 @@ describe("subAgentCli", () => {
 
     it("reports an unknown model with a pointer to `cogmo model`", async () => {
       // Default mockAgentStore → listProvidersForModel returns [] (not routable).
-      const { io, err } = makeIo();
+      const { io, err } = captureIo();
       const code = await run(
         ["add", "writer", "--model", "ghost", "--description", "d"],
         deps(),
@@ -100,7 +90,7 @@ describe("subAgentCli", () => {
     });
 
     it("reports a duplicate name", async () => {
-      const { io, err } = makeIo();
+      const { io, err } = captureIo();
       const code = await run(
         ["add", "writer", "--model", "claude-test", "--description", "d"],
         deps({
@@ -116,7 +106,7 @@ describe("subAgentCli", () => {
     });
 
     it("accepts the --flag=value form", async () => {
-      const { io } = makeIo();
+      const { io } = captureIo();
       const d = deps(routable);
       const code = await run(
         ["add", "writer", "--model=claude-test", "--description=long-form prose"],
@@ -137,7 +127,7 @@ describe("subAgentCli", () => {
         const code = await run(
           ["add", "writer", "--model=m", "--description=d", ...flag],
           d,
-          makeIo().io,
+          captureIo().io,
         );
         expect(code).toBe(0);
         expect(d.agentStore.createSubAgent).toHaveBeenCalledWith(
@@ -177,7 +167,7 @@ describe("subAgentCli", () => {
       ],
     ])("rejects add %j with exit 2 before loading anything", async (args, message) => {
       const loadDeps = vi.fn<LoadDeps<SubAgentCliDeps>>(async () => deps(routable));
-      const { io, out, err } = makeIo();
+      const { io, out, err } = captureIo();
 
       const code = await runCli(subAgentCli(io, loadDeps), ["add", ...args], io);
 
@@ -190,7 +180,7 @@ describe("subAgentCli", () => {
 
   describe("list", () => {
     it("prints an empty marker when there are none", async () => {
-      const { io, out } = makeIo();
+      const { io, out } = captureIo();
       expect(await run(["list"], deps(), io)).toBe(0);
       expect(out.join("\n")).toContain("(no sub-agents)");
     });
@@ -205,7 +195,7 @@ describe("subAgentCli", () => {
           model: "claude-test",
         },
       ];
-      const { io, out } = makeIo();
+      const { io, out } = captureIo();
       await run(["list"], deps({ listSubAgents: vi.fn().mockResolvedValue(rows) }), io);
       const text = out.join("\n");
       expect(text).toContain("subagent__writer");
@@ -215,13 +205,13 @@ describe("subAgentCli", () => {
 
   describe("remove", () => {
     it("removes an existing sub-agent", async () => {
-      const { io, out } = makeIo();
+      const { io, out } = captureIo();
       expect(await run(["remove", "writer"], deps(), io)).toBe(0);
       expect(out.join("\n")).toContain("Removed sub-agent");
     });
 
     it("reports a missing sub-agent (exit 1)", async () => {
-      const { io, err } = makeIo();
+      const { io, err } = captureIo();
       const code = await run(
         ["remove", "ghost"],
         deps({ deleteSubAgent: vi.fn().mockResolvedValue({ deleted: false }) }),
@@ -236,7 +226,7 @@ describe("subAgentCli", () => {
       [["--all"], /--all\n\s+\^ Unknown arguments/],
     ])("rejects remove %j with exit 2 before loading anything", async (args, message) => {
       const loadDeps = vi.fn<LoadDeps<SubAgentCliDeps>>(async () => deps());
-      const { io, err } = makeIo();
+      const { io, err } = captureIo();
 
       const code = await runCli(subAgentCli(io, loadDeps), ["remove", ...args], io);
 
