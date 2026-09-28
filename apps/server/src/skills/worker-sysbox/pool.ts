@@ -22,8 +22,8 @@ export interface SysboxWorkerPoolOptions {
   /**
    * Always-warm worker count. ≥ 1 keeps interactive latency at the steady-
    * state ~300ms (fresh `python3 -u -c` exec on a live container) instead of
-   * cold-start ~1-2 s (container create + boot). Pool replenishes lazily
-   * back to `min` on the next invocation after a worker is drained.
+   * cold-start ~1-2 s (container create + boot). The pool replaces a
+   * worker as soon as it dies, back up to `min`.
    */
   min: number;
   /**
@@ -34,7 +34,7 @@ export interface SysboxWorkerPoolOptions {
   max: number;
   /**
    * Recycle policy. After a worker has run `recycleAfterTasks` tasks it's
-   * drained and replaced lazily on the next invoke. Bounds drift in the
+   * retired and replaced. Bounds drift in the
    * shared container (sys.modules accumulation, allocator fragmentation,
    * tmpfs growth) independent of per-task python-process restart.
    */
@@ -63,6 +63,8 @@ export interface SysboxWorkerPoolOptions {
     resourceLimits?: Partial<ResourceLimits>;
     expiresAt: Date;
     depsCacheVolumeName?: string;
+    /** Aborted when the pool is disposed; the worker dies with it. */
+    signal: AbortSignal;
   }) => Promise<WorkerHandle>;
 
   /** Test seam — replace the timer source. Defaults to `setInterval` / `clearInterval`. */
@@ -82,6 +84,8 @@ export interface WorkerHandle {
   readonly workerId: string;
   readonly state: "idle" | "busy" | "draining" | "disposed";
   readonly taskCount: number;
+  /** Resolves with the reason once the worker can run no further task, whatever the cause. */
+  readonly dead: Promise<string>;
   idleMs(now: number): number;
   ageMs(now: number): number;
   tryAcquire(): boolean;
@@ -143,15 +147,16 @@ export const DEFAULT_POOL_OPTIONS = {
  *  - If at `max`, queue and wait. The next worker to release wakes the queue.
  *
  * Lifecycle:
- *  - Workers are recycled (drained + disposed + replaced lazily) when
- *    taskCount ≥ `recycleAfterTasks`, age ≥ `recycleAfterMs`, or `markPoisoned`
- *    is called by `invoke` after a non-reusable result.
- *  - A worker that went draining while idle (its supervisor died) is
- *    removed on the next acquire, which spawns into its slot, or on the
- *    next sweep, which replaces it up to `min`.
- *  - An interval sweep drops idle workers above `min` after `idleShutdownMs`.
- *  - `dispose()` cancels the sweep, rejects all queued waiters, and tears
- *    down every worker. Idempotent.
+ *  - The pool subscribes to each worker's `dead` as it spawns it. The
+ *    moment a worker dies — its supervisor went away, a task left it
+ *    unreusable, or the pool retired it — the pool removes and disposes it
+ *    and spawns a replacement: for a queued acquirer first, then up to `min`.
+ *  - The pool retires a worker after its task once taskCount ≥
+ *    `recycleAfterTasks` or age ≥ `recycleAfterMs`.
+ *  - An interval sweep retires idle workers above `min` after `idleShutdownMs`.
+ *  - `dispose()` aborts the signal every worker was created with, which
+ *    closes each supervisor's channel, then cancels the sweep, rejects all
+ *    queued waiters, and tears down every container. Idempotent.
  */
 export class SysboxWorkerPool {
   #sandbox: SandboxClient;
@@ -172,6 +177,8 @@ export class SysboxWorkerPool {
   #workers: WorkerHandle[] = [];
   #queue: PendingWaiter[] = [];
   #disposed = false;
+  /** Every worker is created with its signal; disposal aborts it. */
+  #lifetime = new AbortController();
   #createWorker: NonNullable<SysboxWorkerPoolOptions["createWorker"]>;
   #setInterval: (cb: () => void, ms: number) => unknown;
   #clearInterval: (handle: unknown) => void;
@@ -215,6 +222,7 @@ export class SysboxWorkerPool {
           ...(o.depsCacheVolumeName !== undefined && {
             depsCacheVolumeName: o.depsCacheVolumeName,
           }),
+          signal: o.signal,
         }));
     this.#setInterval =
       opts.setInterval ??
@@ -278,10 +286,9 @@ export class SysboxWorkerPool {
       this.#postInvoke(worker);
       return result;
     } catch (e) {
-      // worker.invoke catches its own errors and returns ok=false — this
-      // path is for synchronous bugs (precondition asserts, etc.). Drain.
+      // worker.invoke returns its failures as ok=false — this path is for
+      // bugs (precondition asserts, etc.). Retire the worker.
       worker.markPoisoned();
-      this.#postInvoke(worker);
       throw e;
     }
   }
@@ -302,6 +309,7 @@ export class SysboxWorkerPool {
   async dispose(): Promise<void> {
     if (this.#disposed) return;
     this.#disposed = true;
+    this.#lifetime.abort(new Error("SysboxWorkerPool: disposed"));
     if (this.#sweepHandle !== null) {
       this.#clearInterval(this.#sweepHandle);
       this.#sweepHandle = null;
@@ -322,7 +330,6 @@ export class SysboxWorkerPool {
   // --- internals ---
 
   async #acquire(): Promise<WorkerHandle> {
-    this.#removeDead();
     // Fast path: an existing idle worker.
     for (const w of this.#workers) {
       if (w.tryAcquire()) {
@@ -390,6 +397,10 @@ export class SysboxWorkerPool {
         ...(this.#depsCacheVolumeName !== undefined && {
           depsCacheVolumeName: this.#depsCacheVolumeName,
         }),
+        signal: this.#lifetime.signal,
+      }).catch((e: unknown) => {
+        // A spawn that disposal cut short fails as one, like any other.
+        throw this.#disposed ? new PoolDisposedDuringSpawnError() : e;
       });
       // `createWorker` is async; `dispose()` may have run while we were
       // awaiting it. Pushing the new worker into `#workers` now would leak
@@ -406,53 +417,52 @@ export class SysboxWorkerPool {
         throw new PoolDisposedDuringSpawnError();
       }
       this.#workers.push(w);
+      void w.dead.then((reason) => this.#onDead(w, reason));
       return w;
     } finally {
       this.#pendingSpawns -= 1;
     }
   }
 
+  /**
+   * Release a worker whose task is done, or retire it at a recycle
+   * threshold. A worker that died under its task is `#onDead`'s to retire.
+   * The age check fires only on task return — a workers-of-min that ages
+   * past recycleAfterMs with no active tasks is *not* swept by `#sweepIdle`
+   * (sweep refuses to drop below `min`), so it lives until the next
+   * invocation. That's intentional: idle staleness doesn't grow without
+   * active work; the reaper backstops the pathological "crashed and never
+   * came back" case.
+   */
   #postInvoke(worker: WorkerHandle): void {
-    // Promote to draining if we've crossed a recycle threshold. The worker
-    // either set itself draining via markPoisoned (non-reusable result) or
-    // we set it now based on age / task count. The age check fires only on
-    // task return — a workers-of-min that ages past recycleAfterMs with no
-    // active tasks is *not* swept by `#sweepIdle` (sweep refuses to drop
-    // below `min`), so it lives until the next invocation. That's
-    // intentional: idle staleness doesn't grow without active work; the
-    // reaper backstops the pathological "crashed and never came back" case.
-    if (worker.state === "busy") {
-      const taskCap = worker.taskCount >= this.#opts.recycleAfterTasks;
-      const ageCap = worker.ageMs(this.#now()) >= this.#opts.recycleAfterMs;
-      if (taskCap || ageCap) {
-        log.debug(
-          { workerId: worker.workerId, taskCount: worker.taskCount, taskCap, ageCap },
-          "recycling worker — cap reached",
-        );
-        worker.markPoisoned();
-      } else {
-        worker.release();
-      }
+    if (worker.state !== "busy") return;
+    const taskCap = worker.taskCount >= this.#opts.recycleAfterTasks;
+    const ageCap = worker.ageMs(this.#now()) >= this.#opts.recycleAfterMs;
+    if (taskCap || ageCap) {
+      log.debug(
+        { workerId: worker.workerId, taskCount: worker.taskCount, taskCap, ageCap },
+        "recycling worker — cap reached",
+      );
+      worker.markPoisoned();
+      return;
     }
-    // Now reconcile pool state.
-    if (worker.state === "draining") {
-      this.#retire(worker);
-    } else if (worker.state === "idle") {
-      // Hand the just-released worker to a queued waiter, if any.
-      const waiter = this.#queue.shift();
-      if (waiter) {
-        if (worker.tryAcquire()) {
-          waiter.resolve(worker);
-        } else {
-          // Shouldn't happen — we just released it. Re-queue defensively.
-          this.#queue.unshift(waiter);
-        }
+    worker.release();
+    // Hand the just-released worker to a queued waiter, if any.
+    const waiter = this.#queue.shift();
+    if (waiter) {
+      if (worker.tryAcquire()) {
+        waiter.resolve(worker);
+      } else {
+        // Shouldn't happen — we just released it. Re-queue defensively.
+        this.#queue.unshift(waiter);
       }
     }
   }
 
-  /** Remove and dispose a draining worker, then replace it lazily up to `min`. */
-  #retire(worker: WorkerHandle): void {
+  /** Remove a worker the moment it dies, and replace it. */
+  #onDead(worker: WorkerHandle, reason: string): void {
+    if (this.#disposed) return;
+    log.debug({ workerId: worker.workerId, reason }, "retiring a dead worker");
     this.#removeAndDispose(worker);
     this.#replenishToMin();
   }
@@ -469,21 +479,6 @@ export class SysboxWorkerPool {
           "replacement worker spawn failed; pool below min until next invoke",
         );
       });
-    }
-  }
-
-  /**
-   * Remove workers that went draining between tasks — a worker whose
-   * supervisor died while idle poisons itself, and nothing else would
-   * remove it. A worker poisoned by its own `invoke()` is retired by
-   * `#postInvoke`; removing it here first is harmless, since removal and
-   * disposal are both idempotent. Callers decide whether to replenish: an
-   * acquire spawns on demand into the freed slot.
-   */
-  #removeDead(): void {
-    for (const w of this.#workers.filter((w) => w.state === "draining")) {
-      log.debug({ workerId: w.workerId }, "removing a worker that died while idle");
-      this.#removeAndDispose(w);
     }
   }
 
@@ -522,23 +517,22 @@ export class SysboxWorkerPool {
     }
   }
 
+  /**
+   * Retire idle workers above `min` that have sat past `idleShutdownMs`.
+   * Each dies on retirement, and `#onDead` removes it.
+   */
   #sweepIdle(): void {
     if (this.#disposed) return;
-    this.#removeDead();
-    this.#replenishToMin();
     const now = this.#now();
-    // Idle workers in excess of `min` that have sat past `idleShutdownMs`.
     const candidates = this.#workers.filter(
       (w) => w.state === "idle" && w.idleMs(now) >= this.#opts.idleShutdownMs,
     );
     // Keep at least `min` workers alive; only sweep the surplus.
     const idleCount = this.#workers.filter((w) => w.state === "idle").length;
     const surplus = Math.max(0, idleCount - this.#opts.min);
-    const toSweep = candidates.slice(0, surplus);
-    for (const w of toSweep) {
+    for (const w of candidates.slice(0, surplus)) {
       log.debug({ workerId: w.workerId, idleMs: w.idleMs(now) }, "sweeping idle worker");
       w.markPoisoned();
-      this.#removeAndDispose(w);
     }
   }
 }

@@ -44,8 +44,8 @@ export const TaskInvokeSchema = z.object({
   body: z.string().optional(),
   /**
    * Per-task isolation hint from the manifest. Tier 1 ignores it (single-
-   * heap WASM). Tier 2 uses `recycle` to mark the worker non-reusable
-   * after the task — pool replaces it on next acquire. `subinterpreter`
+   * heap WASM). Tier 2 retires the worker after a `recycle` task, and the
+   * pool replaces it. `subinterpreter`
    * is reserved for a future runtime; it behaves like the default
    * process-per-task isolation.
    */

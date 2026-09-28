@@ -801,6 +801,52 @@ describe("SysboxSkillWorker", () => {
     });
   });
 
+  describe("death", () => {
+    it("resolves dead the moment its supervisor goes away", async () => {
+      const bundle = buildFakeSandbox();
+      const w = await SysboxSkillWorker.create({
+        workerId: "w-dead",
+        sandbox: bundle.sandbox,
+        image: "cogmo-skills:test",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      bundle.stdout.end();
+      await expect(w.dead).resolves.toMatch(/worker closed its output/);
+    });
+
+    it("dies when its signal aborts, closing the supervisor's stdin", async () => {
+      const bundle = buildFakeSandbox();
+      const lifetime = new AbortController();
+      const w = await SysboxSkillWorker.create({
+        workerId: "w-signal",
+        sandbox: bundle.sandbox,
+        image: "cogmo-skills:test",
+        expiresAt: new Date(Date.now() + 60_000),
+        signal: lifetime.signal,
+      });
+      lifetime.abort(new Error("pool disposed"));
+      await expect(w.dead).resolves.toBe("pool disposed");
+      expect(w.state).toBe("draining");
+      expect(bundle.stdin.writableEnded).toBe(true);
+    });
+
+    it("refuses to start once its signal has aborted", async () => {
+      const bundle = buildFakeSandbox();
+      const lifetime = new AbortController();
+      lifetime.abort(new Error("pool disposed"));
+      await expect(
+        SysboxSkillWorker.create({
+          workerId: "w-aborted",
+          sandbox: bundle.sandbox,
+          image: "cogmo-skills:test",
+          expiresAt: new Date(Date.now() + 60_000),
+          signal: lifetime.signal,
+        }),
+      ).rejects.toThrow(/pool disposed/);
+      expect(bundle.sandbox.delete).toHaveBeenCalledWith(bundle.session);
+    });
+  });
+
   describe("clocks", () => {
     it("idleMs and ageMs clamp at zero for clocks that go backwards", async () => {
       const { sandbox } = buildFakeSandbox();

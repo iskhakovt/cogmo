@@ -57,6 +57,8 @@ export interface SysboxSkillWorkerOptions {
    * container-local cache (overlay FS, lost on recycle).
    */
   depsCacheVolumeName?: string;
+  /** Aborting it closes the supervisor's channel, and the worker dies. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -131,8 +133,8 @@ export interface InvokeParams {
   /**
    * Manifest's isolation declaration. Threaded through to the supervisor
    * (via `task_invoke.isolation`) so the task process knows; on the host side, a
-   * `recycle` task poisons the worker after completion regardless of the
-   * task's success — pool replaces it on next acquire.
+   * `recycle` task retires the worker once it completes, whatever its
+   * outcome, and the pool replaces it.
    */
   isolation?: "subinterpreter" | "recycle";
   /**
@@ -187,10 +189,13 @@ export interface InvokeResult {
  *
  * `state` is the channel's state (`worker-state.ts`) as the pool sees it:
  * `idle`; `busy` while leased; `draining` once dead; `disposed` once its
- * container is torn down.
+ * container is torn down. `dead` resolves the moment it can run no
+ * further task, whatever the cause.
  */
 export class SysboxSkillWorker {
   readonly workerId: string;
+  /** Resolves with the reason once the worker can run no further task. */
+  readonly dead: Promise<string>;
   #sandbox: SandboxClient;
   #session: SandboxSession;
   #exec: ExecStreamingHandle;
@@ -212,6 +217,7 @@ export class SysboxSkillWorker {
     this.#session = opts.session;
     this.#exec = opts.exec;
     this.#dispatcher = opts.dispatcher;
+    this.dead = opts.dispatcher.dead;
     const now = Date.now();
     this.#lastUsedAtMs = now;
     this.#createdAtMs = now;
@@ -270,6 +276,7 @@ export class SysboxSkillWorker {
       transport: createNdjsonTransport(exec.stdin, exec.stdout),
       handshake: acceptSupervisorReady,
       handshakeDeadline: timeoutSignal(SUPERVISOR_READY_TIMEOUT_MS),
+      ...(opts.signal !== undefined && { signal: opts.signal }),
       logContext: { workerId: opts.workerId },
     });
     const started = await dispatcher.started;
