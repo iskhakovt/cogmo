@@ -501,16 +501,9 @@ export class SysboxWorkerPool {
       !this.#lifetime.signal.aborted &&
       this.#workers.length + this.#pendingSpawns < this.#opts.min
     ) {
-      // Don't await — replacement happens in background. An acquire that
-      // queued meanwhile (this spawn counts toward `max`) gets the new
-      // worker; with nobody queued it stays idle for the next invoke.
-      void this.#spawnAndHandToQueue().catch((e: unknown) => {
-        if (e instanceof PoolDisposedDuringSpawnError) return;
-        log.warn(
-          { err: e instanceof Error ? e.message : String(e) },
-          "replacement worker spawn failed; pool below min until the next sweep or invoke",
-        );
-      });
+      // An acquire that queued meanwhile (this spawn counts toward `max`)
+      // gets the new worker; with nobody queued it stays idle.
+      this.#spawnForQueue();
     }
   }
 
@@ -532,24 +525,40 @@ export class SysboxWorkerPool {
       this.#queue.length > 0 &&
       this.#workers.length + this.#pendingSpawns < this.#opts.max
     ) {
-      void this.#spawnAndHandToQueue().catch((e: unknown) => {
-        if (e instanceof PoolDisposedDuringSpawnError) return;
-        const waiter = this.#queue.shift();
-        waiter?.reject(e instanceof Error ? e : new Error(String(e)));
-      });
+      this.#spawnForQueue();
     }
   }
 
-  async #spawnAndHandToQueue(): Promise<void> {
-    const w = await this.#spawnOne();
-    const waiter = this.#queue.shift();
-    if (!waiter) return;
-    if (this.#lease(w)) {
-      waiter.resolve(w);
-    } else {
-      // Lost the race to another acquirer; back into the queue.
-      this.#queue.unshift(waiter);
-    }
+  /**
+   * Spawn a worker in the background and hand it to the head of the queue,
+   * or leave it idle. A spawn that fails fails the head waiter, which would
+   * otherwise wait on a worker that is never coming.
+   */
+  #spawnForQueue(): void {
+    void this.#spawnOne().then(
+      (w) => {
+        const waiter = this.#queue.shift();
+        if (!waiter) return;
+        if (this.#lease(w)) {
+          waiter.resolve(w);
+        } else {
+          // Lost the race to another acquirer; back into the queue.
+          this.#queue.unshift(waiter);
+        }
+      },
+      (e: unknown) => {
+        if (e instanceof PoolDisposedDuringSpawnError) return;
+        const waiter = this.#queue.shift();
+        if (waiter) {
+          waiter.reject(e instanceof Error ? e : new Error(String(e)));
+          return;
+        }
+        log.warn(
+          { err: e instanceof Error ? e.message : String(e) },
+          "replacement worker spawn failed; pool below min until the next sweep or invoke",
+        );
+      },
+    );
   }
 
   /**

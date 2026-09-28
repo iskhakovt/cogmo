@@ -571,6 +571,42 @@ describe("SysboxWorkerPool", () => {
     await pool.dispose();
   });
 
+  it("rejects an acquire queued behind a replacement spawn that fails", async () => {
+    let failReplacement: () => void = () => {};
+    const replacementGate = new Promise<void>((r) => {
+      failReplacement = r;
+    });
+    const spawned: WorkerHandle[] = [];
+    const pool = await SysboxWorkerPool.create({
+      sandbox: mock<SandboxClient>(),
+      image: "fake:test",
+      ...DEFAULT_POOL_OPTIONS,
+      min: 1,
+      max: 1,
+      createWorker: async ({ workerId }) => {
+        if (spawned.length === 1) {
+          await replacementGate;
+          throw new Error("replacement spawn failed");
+        }
+        const w = makeFakeWorker(workerId);
+        spawned.push(w);
+        return w;
+      },
+      setInterval: (): unknown => ({}),
+      clearInterval: () => {},
+    });
+    expectDefined(spawned[0], "eager worker").retire();
+    // The replacement is in flight and fills the pool's one slot, so this queues.
+    await vi.waitFor(() => expect(pool.stats()).toMatchObject({ total: 0 }));
+    const queued = pool.invoke(invokeParams("t-queued"));
+    await vi.waitFor(() => expect(pool.stats()).toMatchObject({ queued: 1 }));
+
+    failReplacement();
+
+    await expect(queued).rejects.toThrow(/replacement spawn failed/);
+    await pool.dispose();
+  });
+
   it("retries a failed replacement spawn on the next sweep", async () => {
     const h = buildPoolHarness({
       scripts: [{ invokes: [{ ok: true, output: null, workerReusable: false }] }],
