@@ -21,6 +21,15 @@ export function identifier(displayName: string): Type<string, string> {
   });
 }
 
+/** Free text: may start with `-`, but not blank. */
+export const text: Type<string, string> = extendType(string, {
+  displayName: "text",
+  async from(value) {
+    if (value.trim() === "") throw new Error(`expected text, got "${value}"`);
+    return value;
+  },
+});
+
 /** An integer no lower than `min`, with no trailing characters. */
 export function intAtLeast(min: number): Type<string, number> {
   return extendType(string, {

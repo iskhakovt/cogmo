@@ -7,7 +7,7 @@
  * profile's tool set.
  */
 
-import { command, extendType, option, positional, string, subcommands } from "cmd-ts";
+import { command, extendType, option, positional, subcommands } from "cmd-ts";
 import {
   InvalidNameError,
   UniqueViolationError,
@@ -17,7 +17,7 @@ import type { AgentStore } from "../agent/store/index.js";
 import { createSubAgent } from "../agent/subagent/create-sub-agent.js";
 import { SUB_AGENT_NAME_RE, subAgentToolName } from "../agent/subagent/sub-agent-tool-builder.js";
 import type { Transactor } from "../db/index.js";
-import { identifier, optionalOption } from "./args.js";
+import { identifier, optionalOption, text } from "./args.js";
 import type { CliIo, LoadDeps } from "./run.js";
 
 export interface SubAgentCliDeps {
@@ -30,15 +30,6 @@ const subAgentName = extendType(identifier("name"), {
   async from(name) {
     if (!SUB_AGENT_NAME_RE.test(name)) throw new InvalidNameError(name, "sub_agent");
     return name;
-  },
-});
-
-/** The routing signal the orchestrator reads; blank text gives it nothing to route on. */
-const routingSignal = extendType(string, {
-  displayName: "text",
-  async from(text) {
-    if (text.trim().length === 0) throw new Error("expected the routing signal, got blank text");
-    return text;
   },
 });
 
@@ -65,12 +56,12 @@ export function subAgentCli(io: CliIo, loadDeps: LoadDeps<SubAgentCliDeps>) {
           }),
           description: option({
             long: "description",
-            type: routingSignal,
+            type: text,
             description: "The routing signal: when the orchestrator should delegate to it.",
           }),
           systemPrompt: optionalOption({
             long: "system-prompt",
-            type: { ...string, displayName: "text" },
+            type: text,
             description: "A standing persona. Omitted, it is a pure model-as-tool.",
           }),
         },

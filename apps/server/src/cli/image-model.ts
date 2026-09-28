@@ -11,140 +11,174 @@
  * the `generate_image` tool's `model` enum.
  */
 
+import { command, extendType, flag, oneOf, option, positional, string, subcommands } from "cmd-ts";
 import type { AgentStore } from "../agent/store/index.js";
 import {
   IMAGE_ALLOWED_ASPECT_RATIOS,
   type ImageAspectRatio,
   type ImageModelCapabilities,
+  ImageModelCapabilitiesSchema,
 } from "../agent/store/schema.js";
 import type { Transactor } from "../db/index.js";
-
-const USAGE = `Usage: cogmo image-model <command> [args]
-
-Commands:
-  add <name> --provider <name> --model-string <id> --description "<text>"
-              [--ratios 1:1,16:9,...] [--seed]
-              [--image-input required|optional] [--negative-prompt]
-              [--no-selectable]
-
-              Register an image model. \`name\` is the LLM-facing key
-              (must be globally unique — convention: <provider>/<slug>).
-              \`model-string\` is what's sent to the provider API.
-              \`description\` shows up in the tool's per-model hint line.
-              \`ratios\` is a comma-separated list of supported aspect
-              ratios; omit for fixed-size models. \`--seed\` advertises
-              that this model honors the seed parameter.
-              \`--image-input\` advertises that this model accepts a
-              reference image — \`required\` for edit-only models like
-              fal/flux-kontext, \`optional\` for models that accept one but
-              don't require it. Only supported for fal providers.
-              \`--negative-prompt\` advertises that this model accepts a
-              free-form negative prompt; the field is then forwarded to
-              fal (via providerOptions.fal.negative_prompt) or venice
-              (native body field). openai-compatible models typically
-              don't accept one — leave the flag off.
-
-  list [--provider <name>] [--all]
-              Show catalog rows. Default lists user-selectable models only;
-              \`--all\` includes hidden rows.
-
-  remove <name>
-              Delete a single image model by its LLM-facing name.
-`;
-
-export interface CliIo {
-  out(line: string): void;
-  err(line: string): void;
-}
-
-const CONSOLE_IO: CliIo = {
-  out: (line) => console.log(line),
-  err: (line) => console.error(line),
-};
+import { identifier, optionalOption, text } from "./args.js";
+import type { CliIo, LoadDeps } from "./run.js";
 
 export interface ImageModelCliDeps {
   runInTx: Transactor;
   agentStore: AgentStore;
 }
 
-export async function runImageModelCli(
-  argv: readonly string[],
-  deps: ImageModelCliDeps,
-  io: CliIo = CONSOLE_IO,
-): Promise<number> {
-  const [command, ...rest] = argv;
-  try {
-    switch (command) {
-      case undefined:
-      case "help":
-      case "--help":
-      case "-h":
-        io.out(USAGE);
-        return 0;
-      case "add":
-        return await addModelCmd(rest, deps, io);
-      case "list":
-        return await listModels(rest, deps, io);
-      case "remove":
-        return await removeModel(rest, deps, io);
-      default:
-        io.err(`Unknown command: ${command}\n`);
-        io.err(USAGE);
-        return 1;
-    }
-  } catch (err) {
-    io.err(`Error: ${(err as Error).message}`);
-    return 2;
-  }
+const ASPECT_RATIOS = IMAGE_ALLOWED_ASPECT_RATIOS.join(", ");
+
+const aspectRatios = extendType(string, {
+  displayName: "ratios",
+  async from(value): Promise<ImageAspectRatio[]> {
+    const parts = value
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    if (parts.length === 0) throw new Error(`expected at least one aspect ratio, got "${value}"`);
+    return parts.map((part) => {
+      const ratio = IMAGE_ALLOWED_ASPECT_RATIOS.find((r) => r === part);
+      if (!ratio) {
+        throw new Error(`unknown aspect ratio "${part}"; expected one of ${ASPECT_RATIOS}`);
+      }
+      return ratio;
+    });
+  },
+});
+
+const imageInputMode = {
+  ...oneOf(ImageModelCapabilitiesSchema.shape.imageInput.unwrap().options),
+  displayName: "mode",
+};
+
+export function imageModelCli(io: CliIo, loadDeps: LoadDeps<ImageModelCliDeps>) {
+  return subcommands({
+    name: "image-model",
+    description: "Manage the image model catalog (image_models rows).",
+    cmds: {
+      add: command({
+        name: "add",
+        description: "Register an image model on an image provider.",
+        args: {
+          name: positional({
+            type: identifier("name"),
+            displayName: "name",
+            description:
+              "What the LLM picks it by; unique across providers, by convention <provider>/<slug>.",
+          }),
+          provider: option({
+            long: "provider",
+            type: identifier("provider"),
+            description: "The image provider serving it.",
+          }),
+          modelString: option({
+            long: "model-string",
+            type: identifier("id"),
+            description: "The model id sent to the provider API.",
+          }),
+          description: option({
+            long: "description",
+            type: text,
+            description: "Its hint line in the generate_image tool, read by the LLM every turn.",
+          }),
+          ratios: optionalOption({
+            long: "ratios",
+            type: aspectRatios,
+            description: `Supported aspect ratios, comma-separated, from ${ASPECT_RATIOS}. Omit for a fixed-size model.`,
+          }),
+          seed: flag({ long: "seed", description: "It honors the seed parameter." }),
+          imageInput: optionalOption({
+            long: "image-input",
+            type: imageInputMode,
+            description:
+              "It takes a reference image: required for edit-only models like fal/flux-kontext, optional when one is accepted. fal providers only.",
+          }),
+          negativePrompt: flag({
+            long: "negative-prompt",
+            description:
+              "It takes a negative prompt, forwarded to fal (providerOptions.fal.negative_prompt) or venice (native body field). OpenAI-compatible models typically don't.",
+          }),
+          noSelectable: flag({
+            long: "no-selectable",
+            description:
+              "Keep it out of the generate_image tool's model list, to stage an experimental or deprecated model.",
+          }),
+        },
+        examples: [
+          {
+            description: "A fal model with aspect ratios and seed support",
+            command:
+              'cogmo image-model add fal/flux-dev --provider fal --model-string fal-ai/flux/dev --description "Balanced quality and speed" --ratios 1:1,16:9,9:16 --seed',
+          },
+          {
+            description: "An edit-only model",
+            command:
+              'cogmo image-model add fal/flux-kontext --provider fal --model-string fal-ai/flux-pro/kontext --description "Edits a reference image" --image-input required',
+          },
+        ],
+        handler: async (args) => addModelCmd(args, await loadDeps(), io),
+      }),
+      list: command({
+        name: "list",
+        description: "Show the image models the LLM can pick.",
+        args: {
+          provider: optionalOption({
+            long: "provider",
+            type: identifier("provider"),
+            description: "Only this image provider's models.",
+          }),
+          all: flag({ long: "all", description: "Include models hidden with --no-selectable." }),
+        },
+        handler: async (args) => listModels(args, await loadDeps(), io),
+      }),
+      remove: command({
+        name: "remove",
+        description: "Delete an image model.",
+        args: {
+          name: positional({
+            type: identifier("name"),
+            displayName: "name",
+            description: "Its LLM-facing name.",
+          }),
+        },
+        handler: async (args) => removeModel(args, await loadDeps(), io),
+      }),
+    },
+  });
 }
 
-async function addModelCmd(
-  args: readonly string[],
-  deps: ImageModelCliDeps,
-  io: CliIo,
-): Promise<number> {
-  const [name, ...flagArgs] = args;
-  if (!name) {
-    io.err("Usage: cogmo image-model add <name> --provider <name> --model-string <id> ...");
-    return 2;
-  }
-  const opts = parseFlags(flagArgs);
-  // Narrow required flag values into local consts so downstream call sites
-  // don't need `!` non-null assertions (Biome lints `noNonNullAssertion` in
-  // non-test files). Each check exits early before subsequent uses.
-  const providerName = opts.provider;
-  if (!providerName) {
-    io.err("--provider is required");
-    return 2;
-  }
-  const modelString = opts.modelString;
-  if (!modelString) {
-    io.err("--model-string is required");
-    return 2;
-  }
-  const description = opts.description;
-  if (!description) {
-    io.err("--description is required (the LLM reads this at every turn)");
-    return 2;
-  }
+interface AddArgs {
+  name: string;
+  provider: string;
+  modelString: string;
+  description: string;
+  ratios: ImageAspectRatio[] | undefined;
+  seed: boolean;
+  imageInput: ImageModelCapabilities["imageInput"];
+  negativePrompt: boolean;
+  noSelectable: boolean;
+}
 
+async function addModelCmd(args: AddArgs, deps: ImageModelCliDeps, io: CliIo): Promise<number> {
+  const { name, modelString, description } = args;
   const provider = await deps.runInTx((tx) =>
-    deps.agentStore.findImageProviderByName(tx, providerName),
+    deps.agentStore.findImageProviderByName(tx, args.provider),
   );
   if (!provider) {
     io.err(
-      `No image provider named "${providerName}". Run \`cogmo image-provider list\` to see options.`,
+      `No image provider named "${args.provider}". Run \`cogmo image-provider list\` to see options.`,
     );
     return 1;
   }
 
-  // Build capabilities — only include fields the operator opted into so the
-  // Zod validator on the JSONB column doesn't store empty arrays.
+  // Only the capabilities the operator opted into, so the JSONB row holds no empty arrays.
   const capabilities: ImageModelCapabilities = {
-    ...(opts.ratios && { aspectRatios: opts.ratios }),
-    ...(opts.seed === true && { seed: true }),
-    ...(opts.imageInput && { imageInput: opts.imageInput }),
-    ...(opts.negativePrompt === true && { negativePrompt: true }),
+    ...(args.ratios && { aspectRatios: args.ratios }),
+    ...(args.seed && { seed: true }),
+    ...(args.imageInput && { imageInput: args.imageInput }),
+    ...(args.negativePrompt && { negativePrompt: true }),
   };
 
   try {
@@ -155,7 +189,7 @@ async function addModelCmd(
         modelString,
         description,
         capabilities,
-        userSelectable: opts.userSelectable,
+        userSelectable: !args.noSelectable,
       }),
     );
     io.out(`Added image model "${name}" (id=${id}, provider=${provider.name}).`);
@@ -167,20 +201,15 @@ async function addModelCmd(
 }
 
 async function listModels(
-  args: readonly string[],
+  args: { provider: string | undefined; all: boolean },
   deps: ImageModelCliDeps,
   io: CliIo,
 ): Promise<number> {
-  const opts = parseFlags(args);
+  // Without `--all`, the same filter the bootstrap applies: the catalog the LLM sees.
   const rows = await deps.runInTx((tx) =>
-    deps.agentStore.listImageModelsWithProvider(tx, {
-      // `--all` switches to "show every row including hidden ones"; default
-      // matches the bootstrap filter so operators see the same catalog the
-      // LLM does unless they ask otherwise.
-      userSelectableOnly: !opts.all,
-    }),
+    deps.agentStore.listImageModelsWithProvider(tx, { userSelectableOnly: !args.all }),
   );
-  const filtered = opts.provider ? rows.filter((r) => r.provider.name === opts.provider) : rows;
+  const filtered = args.provider ? rows.filter((r) => r.provider.name === args.provider) : rows;
   if (filtered.length === 0) {
     io.out("(no image models)");
     return 0;
@@ -208,15 +237,11 @@ async function listModels(
 }
 
 async function removeModel(
-  args: readonly string[],
+  args: { name: string },
   deps: ImageModelCliDeps,
   io: CliIo,
 ): Promise<number> {
-  const [name] = args;
-  if (!name) {
-    io.err("Usage: cogmo image-model remove <name>");
-    return 2;
-  }
+  const { name } = args;
   const rows = await deps.runInTx((tx) => deps.agentStore.listImageModels(tx));
   const target = rows.find((r) => r.name === name);
   if (!target) {
@@ -226,113 +251,4 @@ async function removeModel(
   await deps.runInTx((tx) => deps.agentStore.deleteImageModel(tx, target.id));
   io.out(`Removed image model "${name}".`);
   return 0;
-}
-
-interface ParsedFlags {
-  provider: string | undefined;
-  modelString: string | undefined;
-  description: string | undefined;
-  ratios: NonNullable<ImageModelCapabilities["aspectRatios"]> | undefined;
-  seed: boolean | undefined;
-  imageInput: NonNullable<ImageModelCapabilities["imageInput"]> | undefined;
-  negativePrompt: boolean | undefined;
-  userSelectable: boolean;
-  all: boolean;
-}
-
-function parseFlags(args: readonly string[]): ParsedFlags {
-  const out: ParsedFlags = {
-    provider: undefined,
-    modelString: undefined,
-    description: undefined,
-    ratios: undefined,
-    seed: undefined,
-    imageInput: undefined,
-    negativePrompt: undefined,
-    userSelectable: true,
-    all: false,
-  };
-  for (let i = 0; i < args.length; i++) {
-    const flag = args[i];
-    switch (flag) {
-      case "--provider":
-        out.provider = takeValue(args, i, flag);
-        i++;
-        break;
-      case "--model-string":
-        out.modelString = takeValue(args, i, flag);
-        i++;
-        break;
-      case "--description":
-        out.description = takeValue(args, i, flag);
-        i++;
-        break;
-      case "--ratios":
-        out.ratios = parseRatios(takeValue(args, i, flag));
-        i++;
-        break;
-      case "--seed":
-        out.seed = true;
-        break;
-      case "--negative-prompt":
-        out.negativePrompt = true;
-        break;
-      case "--image-input": {
-        const value = takeValue(args, i, flag);
-        if (value !== "required" && value !== "optional") {
-          throw new Error(`--image-input got "${value}"; expected required or optional`);
-        }
-        out.imageInput = value;
-        i++;
-        break;
-      }
-      case "--no-selectable":
-        out.userSelectable = false;
-        break;
-      case "--all":
-        out.all = true;
-        break;
-      default:
-        // Unknown flag — throw rather than swallow. `--ratio` (singular)
-        // silently dropping would register a fixed-size model that the
-        // operator expected to support ratios; the surprise is bad enough
-        // to outweigh shell-level forgiveness. Caught by the outer
-        // try/catch in `runImageModelCli` → rc=2.
-        throw new Error(
-          `Unknown flag "${flag}". Run \`cogmo image-model --help\` for accepted flags.`,
-        );
-    }
-  }
-  return out;
-}
-
-function takeValue(args: readonly string[], i: number, flag: string | undefined): string {
-  const next = args[i + 1];
-  if (next === undefined) {
-    throw new Error(`${flag ?? "flag"} requires a value`);
-  }
-  if (next.startsWith("--")) {
-    throw new Error(`${flag ?? "flag"} requires a value (got next flag "${next}" instead)`);
-  }
-  return next;
-}
-
-function parseRatios(value: string): NonNullable<ImageModelCapabilities["aspectRatios"]> {
-  const parts = value
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  const validated = parts.map((part): ImageAspectRatio => {
-    const match = IMAGE_ALLOWED_ASPECT_RATIOS.find((r) => r === part);
-    if (!match) {
-      throw new Error(
-        `--ratios got "${part}"; expected one of ${IMAGE_ALLOWED_ASPECT_RATIOS.join(", ")}`,
-      );
-    }
-    return match;
-  });
-  if (validated.length === 0) {
-    throw new Error("--ratios got an empty list");
-  }
-  return validated;
 }

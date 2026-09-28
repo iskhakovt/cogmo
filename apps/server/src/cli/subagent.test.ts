@@ -151,7 +151,7 @@ describe("subAgentCli", () => {
       [["writer", "--description", "d"], /No value provided for --model/],
       [["writer", "--model", "m"], /No value provided for --description/],
       [["writer", "--model"], /No value provided for --model/],
-      [["writer", "--model", "m", "--description", "  "], /expected the routing signal/],
+      [["writer", "--model", "m", "--description", "  "], /expected text, got " {2}"/],
       [
         ["Writer", "--model", "m", "--description", "d"],
         /invalid sub_agent name "Writer": must be lowercase/,

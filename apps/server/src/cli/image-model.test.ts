@@ -1,14 +1,32 @@
 import { describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import type {
   AgentStore,
   ImageModelRow,
   ImageModelWithProvider,
   ImageProviderRow,
 } from "../agent/store/index.js";
-import { runImageModelCli } from "./image-model.js";
+import type { Transactor } from "../db/index.js";
+import { type ImageModelCliDeps, imageModelCli } from "./image-model.js";
+import { type CliIo, runCli } from "./run.js";
+
+function run(argv: readonly string[], deps: ImageModelCliDeps, io: CliIo): Promise<number> {
+  return runCli(
+    imageModelCli(io, async () => deps),
+    argv,
+    io,
+  );
+}
 
 const FAKE_TX = { __mockTx: true } as never;
-const tx = ((cb: (t: never) => Promise<unknown>) => cb(FAKE_TX)) as never;
+const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
+
+function makeDeps() {
+  const deps = { runInTx: fakeRunInTx, agentStore: mock<AgentStore>() };
+  deps.agentStore.findImageProviderByName.mockResolvedValue(fakeProvider());
+  deps.agentStore.createImageModel.mockResolvedValue({ id: "m-new" });
+  return deps;
+}
 
 function makeIo() {
   const out: string[] = [];
@@ -49,43 +67,50 @@ function fakeModel(
   };
 }
 
-describe("runImageModelCli", () => {
-  it("prints USAGE on no command", async () => {
+/** `add` with every required argument, for tests about the optional ones. */
+const ADD = ["add", "fal/x", "--provider", "fal", "--model-string", "f", "--description", "d"];
+
+describe("cogmo image-model — command line", () => {
+  it("prints help and exits 0 when given no command", async () => {
     const { io, out } = makeIo();
-    const agentStore = {} as AgentStore;
-    const rc = await runImageModelCli([], { runInTx: tx, agentStore }, io);
-    expect(rc).toBe(0);
-    expect(out.join("\n")).toMatch(/Usage: cogmo image-model/);
+
+    const code = await run([], makeDeps(), io);
+
+    expect(code).toBe(0);
+    expect(out.join("\n")).toMatch(/image-model <subcommand>/);
   });
 
-  it("rejects `add` without --provider", async () => {
+  it.each([["add"], ["list"], ["remove"]])(
+    "answers `%s --help` without loading dependencies",
+    async (subcommand) => {
+      const { io, out, err } = makeIo();
+      const loadDeps = vi.fn(async () => makeDeps());
+
+      const code = await runCli(imageModelCli(io, loadDeps), [subcommand, "--help"], io);
+
+      expect(code).toBe(0);
+      expect(out.join("\n")).toMatch(new RegExp(`image-model ${subcommand}`));
+      expect(err).toEqual([]);
+      expect(loadDeps).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects an unknown command with exit 2", async () => {
     const { io, err } = makeIo();
-    const agentStore = {} as AgentStore;
-    const rc = await runImageModelCli(["add", "fal/x"], { runInTx: tx, agentStore }, io);
-    expect(rc).toBe(2);
-    expect(err.join("\n")).toMatch(/--provider is required/);
-  });
 
-  it("rejects `add` without --model-string or --description", async () => {
-    const { io, err } = makeIo();
-    const agentStore = {} as AgentStore;
-    const rc = await runImageModelCli(
-      ["add", "fal/x", "--provider", "fal"],
-      { runInTx: tx, agentStore },
-      io,
-    );
-    expect(rc).toBe(2);
-    expect(err.join("\n")).toMatch(/--model-string is required/);
-  });
+    const code = await run(["foo"], makeDeps(), io);
 
+    expect(code).toBe(2);
+    expect(err.join("\n")).toMatch(/foo\n\s+\^ Not a valid subcommand name/);
+  });
+});
+
+describe("cogmo image-model add", () => {
   it("creates a model with parsed capabilities", async () => {
+    const deps = makeDeps();
     const { io, out } = makeIo();
-    const createImageModel = vi.fn().mockResolvedValue({ id: "m-new" });
-    const agentStore = {
-      findImageProviderByName: vi.fn().mockResolvedValue(fakeProvider()),
-      createImageModel,
-    } as unknown as AgentStore;
-    const rc = await runImageModelCli(
+
+    const code = await run(
       [
         "add",
         "fal/custom",
@@ -96,94 +121,73 @@ describe("runImageModelCli", () => {
         "--description",
         "test row",
         "--ratios",
-        "1:1,16:9",
+        "1:1, 16:9",
         "--seed",
       ],
-      { runInTx: tx, agentStore },
+      deps,
       io,
     );
-    expect(rc).toBe(0);
-    expect(createImageModel).toHaveBeenCalledWith(
+
+    expect(code).toBe(0);
+    expect(deps.agentStore.findImageProviderByName).toHaveBeenCalledWith(FAKE_TX, "fal");
+    expect(deps.agentStore.createImageModel).toHaveBeenCalledWith(FAKE_TX, {
+      providerId: "p-1",
+      name: "fal/custom",
+      modelString: "fal-ai/custom",
+      description: "test row",
+      capabilities: { aspectRatios: ["1:1", "16:9"], seed: true },
+      userSelectable: true,
+    });
+    expect(out).toEqual(['Added image model "fal/custom" (id=m-new, provider=fal).']);
+  });
+
+  it("stores no capabilities when none are given", async () => {
+    const deps = makeDeps();
+    const { io } = makeIo();
+
+    const code = await run(ADD, deps, io);
+
+    expect(code).toBe(0);
+    expect(deps.agentStore.createImageModel).toHaveBeenCalledWith(
       FAKE_TX,
-      expect.objectContaining({
-        providerId: "p-1",
-        name: "fal/custom",
-        modelString: "fal-ai/custom",
-        description: "test row",
-        capabilities: { aspectRatios: ["1:1", "16:9"], seed: true },
-        userSelectable: true,
-      }),
+      expect.objectContaining({ capabilities: {}, userSelectable: true }),
     );
-    expect(out.join("\n")).toMatch(/Added image model "fal\/custom"/);
   });
 
   it("honours --no-selectable", async () => {
+    const deps = makeDeps();
     const { io } = makeIo();
-    const createImageModel = vi.fn().mockResolvedValue({ id: "m-hidden" });
-    const agentStore = {
-      findImageProviderByName: vi.fn().mockResolvedValue(fakeProvider()),
-      createImageModel,
-    } as unknown as AgentStore;
-    await runImageModelCli(
-      [
-        "add",
-        "fal/hidden",
-        "--provider",
-        "fal",
-        "--model-string",
-        "fal-ai/hidden",
-        "--description",
-        "experimental",
-        "--no-selectable",
-      ],
-      { runInTx: tx, agentStore },
-      io,
-    );
-    expect(createImageModel).toHaveBeenCalledWith(
+
+    const code = await run([...ADD, "--no-selectable"], deps, io);
+
+    expect(code).toBe(0);
+    expect(deps.agentStore.createImageModel).toHaveBeenCalledWith(
       FAKE_TX,
       expect.objectContaining({ userSelectable: false }),
     );
   });
 
   it("accepts --image-input required and writes it into capabilities", async () => {
+    const deps = makeDeps();
     const { io } = makeIo();
-    const createImageModel = vi.fn().mockResolvedValue({ id: "m-edit" });
-    const agentStore = {
-      findImageProviderByName: vi.fn().mockResolvedValue(fakeProvider()),
-      createImageModel,
-    } as unknown as AgentStore;
-    await runImageModelCli(
-      [
-        "add",
-        "fal/edit",
-        "--provider",
-        "fal",
-        "--model-string",
-        "fal-ai/edit",
-        "--description",
-        "edits an image",
-        "--image-input",
-        "required",
-      ],
-      { runInTx: tx, agentStore },
-      io,
-    );
-    expect(createImageModel).toHaveBeenCalledWith(
+
+    const code = await run([...ADD, "--image-input", "required"], deps, io);
+
+    expect(code).toBe(0);
+    expect(deps.agentStore.createImageModel).toHaveBeenCalledWith(
       FAKE_TX,
-      expect.objectContaining({
-        capabilities: { imageInput: "required" },
-      }),
+      expect.objectContaining({ capabilities: { imageInput: "required" } }),
     );
   });
 
   it("writes capabilities.negativePrompt=true when --negative-prompt is passed", async () => {
+    const deps = makeDeps();
+    deps.agentStore.findImageProviderByName.mockResolvedValue(
+      fakeProvider({ name: "venice", type: "venice" }),
+    );
     const { io } = makeIo();
-    const createImageModel = vi.fn().mockResolvedValue({ id: "m-np" });
-    const agentStore = {
-      findImageProviderByName: vi.fn().mockResolvedValue(fakeProvider({ type: "venice" })),
-      createImageModel,
-    } as unknown as AgentStore;
-    await runImageModelCli(
+
+    const code = await run(
       [
         "add",
         "venice/flux-dev",
@@ -195,234 +199,222 @@ describe("runImageModelCli", () => {
         "Venice",
         "--negative-prompt",
       ],
-      { runInTx: tx, agentStore },
+      deps,
       io,
     );
-    expect(createImageModel).toHaveBeenCalledWith(
+
+    expect(code).toBe(0);
+    expect(deps.agentStore.createImageModel).toHaveBeenCalledWith(
       FAKE_TX,
-      expect.objectContaining({
-        capabilities: { negativePrompt: true },
-      }),
+      expect.objectContaining({ capabilities: { negativePrompt: true } }),
     );
   });
 
-  it("rejects --image-input with an unknown value", async () => {
-    const { io, err } = makeIo();
-    const agentStore = {} as AgentStore;
-    const rc = await runImageModelCli(
-      [
-        "add",
-        "fal/edit",
-        "--provider",
-        "fal",
-        "--model-string",
-        "fal-ai/edit",
-        "--description",
-        "x",
-        "--image-input",
-        "kinda",
-      ],
-      { runInTx: tx, agentStore },
+  it("takes a description that starts with a dash as text", async () => {
+    const deps = makeDeps();
+    const { io } = makeIo();
+
+    const code = await run(
+      ["add", "fal/x", "--provider", "fal", "--model-string", "f", "--description", "-fast-"],
+      deps,
       io,
     );
-    expect(rc).toBe(2);
-    expect(err.join("\n")).toMatch(/--image-input got "kinda"/);
-  });
 
-  it("rejects an unknown aspect ratio in --ratios", async () => {
-    const { io, err } = makeIo();
-    const agentStore = {} as AgentStore;
-    const rc = await runImageModelCli(
-      [
-        "add",
-        "fal/x",
-        "--provider",
-        "fal",
-        "--model-string",
-        "fal-ai/x",
-        "--description",
-        "x",
-        "--ratios",
-        "horizontal",
-      ],
-      { runInTx: tx, agentStore },
-      io,
+    expect(code).toBe(0);
+    expect(deps.agentStore.createImageModel).toHaveBeenCalledWith(
+      FAKE_TX,
+      expect.objectContaining({ description: "-fast-" }),
     );
-    expect(rc).toBe(2);
-    expect(err.join("\n")).toMatch(/Error: --ratios got "horizontal"/);
   });
 
-  it("lists models with --all and provider filter", async () => {
-    const { io, out } = makeIo();
-    const agentStore = {
-      listImageModelsWithProvider: vi.fn().mockImplementation(async (_t, opts) => {
-        // Hidden row only appears when userSelectableOnly is false (--all).
-        if (opts?.userSelectableOnly) {
-          return [fakeModel({ name: "fal/visible" })];
-        }
-        return [
-          fakeModel({ name: "fal/visible" }),
-          fakeModel({ name: "fal/hidden", userSelectable: false }),
-        ];
-      }),
-    } as unknown as AgentStore;
-    const rc = await runImageModelCli(["list", "--all"], { runInTx: tx, agentStore }, io);
-    expect(rc).toBe(0);
-    expect(out.join("\n")).toMatch(/fal\/visible/);
-    expect(out.join("\n")).toMatch(/fal\/hidden/);
-  });
-
-  it("removes a model by name", async () => {
-    const { io, out } = makeIo();
-    const deleteImageModel = vi.fn().mockResolvedValue(undefined);
-    const agentStore = {
-      listImageModels: vi.fn().mockResolvedValue([fakeModel({ name: "fal/flux-dev" })]),
-      deleteImageModel,
-    } as unknown as AgentStore;
-    const rc = await runImageModelCli(["remove", "fal/flux-dev"], { runInTx: tx, agentStore }, io);
-    expect(rc).toBe(0);
-    expect(deleteImageModel).toHaveBeenCalledWith(FAKE_TX, "m-1");
-    expect(out.join("\n")).toMatch(/Removed image model "fal\/flux-dev"/);
-  });
-
-  it("reports not-found when removing an unknown model", async () => {
-    const { io, err } = makeIo();
-    const agentStore = {
-      listImageModels: vi.fn().mockResolvedValue([]),
-    } as unknown as AgentStore;
-    const rc = await runImageModelCli(["remove", "ghost"], { runInTx: tx, agentStore }, io);
-    expect(rc).toBe(1);
-    expect(err.join("\n")).toMatch(/No image model named "ghost"/);
-  });
-
-  it("rejects unknown commands with exit code 1 and the usage banner", async () => {
-    const { io, err } = makeIo();
-    const rc = await runImageModelCli(["foo"], { runInTx: tx, agentStore: {} as AgentStore }, io);
-    expect(rc).toBe(1);
-    expect(err.join("\n")).toMatch(/Unknown command: foo/);
-    expect(err.join("\n")).toMatch(/Usage: cogmo image-model/);
-  });
-
-  it("`image-model add` with no name returns 2 and prints usage", async () => {
-    const { io, err } = makeIo();
-    const rc = await runImageModelCli(["add"], { runInTx: tx, agentStore: {} as AgentStore }, io);
-    expect(rc).toBe(2);
-    expect(err.join("\n")).toMatch(/Usage: cogmo image-model add/);
-  });
-
-  it("rejects `add` without --description (matches usage hint)", async () => {
-    const { io, err } = makeIo();
-    const rc = await runImageModelCli(
+  it.each([
+    [["add"], /No value provided for name/],
+    [["add", "fal/x"], /No value provided for --provider/],
+    [["add", "fal/x", "--provider", "fal"], /No value provided for --model-string/],
+    [
       ["add", "fal/x", "--provider", "fal", "--model-string", "f"],
-      { runInTx: tx, agentStore: {} as AgentStore },
-      io,
-    );
-    expect(rc).toBe(2);
-    expect(err.join("\n")).toMatch(/--description is required/);
+      /No value provided for --description/,
+    ],
+    [["add", "fal/x", "--provider"], /No value provided for --provider/],
+    [
+      ["add", "fal/x", "--provider", "--model-string", "f", "--description", "d"],
+      /got the flag "--model-string"/,
+    ],
+    [[...ADD.slice(0, -1), "", "--seed"], /expected text, got ""/],
+    [[...ADD.slice(0, -1), "  ", "--seed"], /expected text, got " {2}"/],
+    [[...ADD, "--bogus"], /--bogus\n\s+\^ Unknown arguments/],
+    [[...ADD, "--ratios", "horizontal"], /unknown aspect ratio "horizontal"; expected one of 1:1/],
+    [[...ADD, "--ratios", " , ,"], /expected at least one aspect ratio, got " , ,"/],
+    [[...ADD, "--ratios"], /--ratios\n\s+\^ Expected to get a value, found a flag/],
+    [[...ADD, "--ratios", "--seed"], /unknown aspect ratio "--seed"/],
+    [
+      [...ADD, "--image-input", "kinda"],
+      /Invalid value 'kinda'. Expected one of: 'required', 'optional'/,
+    ],
+    [[...ADD, "--image-input"], /--image-input\n\s+\^ Expected to get a value, found a flag/],
+    [[...ADD, "--seed", "--seed"], /Expected 1 occurence, got 2/],
+  ])("rejects %j with exit 2 and writes nothing", async (argv, message) => {
+    const deps = makeDeps();
+    const { io, out, err } = makeIo();
+
+    const code = await run(argv, deps, io);
+
+    expect(code).toBe(2);
+    expect(err.join("\n")).toMatch(message);
+    expect(out).toEqual([]);
+    expect(deps.agentStore.createImageModel).not.toHaveBeenCalled();
   });
 
-  it("reports unknown provider with exit code 1", async () => {
+  it("reports an unknown provider with exit code 1", async () => {
+    const deps = makeDeps();
+    deps.agentStore.findImageProviderByName.mockResolvedValue(undefined);
     const { io, err } = makeIo();
-    const agentStore = {
-      findImageProviderByName: vi.fn().mockResolvedValue(undefined),
-    } as unknown as AgentStore;
-    const rc = await runImageModelCli(
+
+    const code = await run(
       ["add", "fal/x", "--provider", "ghost", "--model-string", "f", "--description", "d"],
-      { runInTx: tx, agentStore },
+      deps,
       io,
     );
-    expect(rc).toBe(1);
+
+    expect(code).toBe(1);
     expect(err.join("\n")).toMatch(/No image provider named "ghost"/);
+    expect(deps.agentStore.createImageModel).not.toHaveBeenCalled();
   });
 
   it("surfaces createImageModel failures as exit code 1", async () => {
+    const deps = makeDeps();
+    deps.agentStore.createImageModel.mockRejectedValue(new Error("duplicate name"));
     const { io, err } = makeIo();
-    const agentStore = {
-      findImageProviderByName: vi.fn().mockResolvedValue(fakeProvider()),
-      createImageModel: vi.fn().mockRejectedValue(new Error("duplicate name")),
-    } as unknown as AgentStore;
-    const rc = await runImageModelCli(
-      ["add", "fal/x", "--provider", "fal", "--model-string", "f", "--description", "d"],
-      { runInTx: tx, agentStore },
-      io,
-    );
-    expect(rc).toBe(1);
+
+    const code = await run(ADD, deps, io);
+
+    expect(code).toBe(1);
     expect(err.join("\n")).toMatch(/Failed to add image model: duplicate name/);
   });
+});
 
-  it("`image-model list` with no rows prints (no image models)", async () => {
+describe("cogmo image-model list", () => {
+  function depsWithCatalog() {
+    const deps = makeDeps();
+    deps.agentStore.listImageModelsWithProvider.mockImplementation(async (_tx, opts) => {
+      // The hidden row only comes back when userSelectableOnly is false (--all).
+      const visible = [
+        fakeModel({ name: "fal/visible" }),
+        fakeModel(
+          {
+            name: "venice/visible",
+            capabilities: { imageInput: "optional", negativePrompt: true },
+          },
+          { name: "venice", type: "venice" },
+        ),
+      ];
+      return opts?.userSelectableOnly
+        ? visible
+        : [...visible, fakeModel({ name: "fal/hidden", userSelectable: false })];
+    });
+    return deps;
+  }
+
+  it("lists the selectable models by default", async () => {
+    const deps = depsWithCatalog();
     const { io, out } = makeIo();
-    const agentStore = {
-      listImageModelsWithProvider: vi.fn().mockResolvedValue([]),
-    } as unknown as AgentStore;
-    const rc = await runImageModelCli(["list"], { runInTx: tx, agentStore }, io);
-    expect(rc).toBe(0);
-    expect(out.join("\n")).toMatch(/no image models/);
+
+    const code = await run(["list"], deps, io);
+
+    expect(code).toBe(0);
+    expect(deps.agentStore.listImageModelsWithProvider).toHaveBeenCalledWith(FAKE_TX, {
+      userSelectableOnly: true,
+    });
+    expect(out).toEqual([
+      "name\tprovider\tmodel_string\tratios\tseed\timage_input\tneg_prompt\tselectable",
+      "fal/visible\tfal\tfal-ai/flux/dev\t1:1\tyes\t-\tno\tyes",
+      "venice/visible\tvenice\tfal-ai/flux/dev\t-\tno\toptional\tyes\tyes",
+    ]);
   });
 
-  it("`image-model remove` with no name returns 2", async () => {
-    const { io, err } = makeIo();
-    const rc = await runImageModelCli(
-      ["remove"],
-      { runInTx: tx, agentStore: {} as AgentStore },
-      io,
-    );
-    expect(rc).toBe(2);
-    expect(err.join("\n")).toMatch(/Usage: cogmo image-model remove/);
+  it("includes hidden models with --all", async () => {
+    const deps = depsWithCatalog();
+    const { io, out } = makeIo();
+
+    const code = await run(["list", "--all"], deps, io);
+
+    expect(code).toBe(0);
+    expect(out.join("\n")).toMatch(/fal\/visible/);
+    expect(out.join("\n")).toMatch(/fal\/hidden\t.*\tno$/m);
   });
 
-  it("rejects an unknown flag in `add`", async () => {
-    const { io, err } = makeIo();
-    const agentStore = {} as AgentStore;
-    const rc = await runImageModelCli(["add", "fal/x", "--bogus"], { runInTx: tx, agentStore }, io);
-    expect(rc).toBe(2);
-    expect(err.join("\n")).toMatch(/Unknown flag "--bogus"/);
+  it("filters by --provider", async () => {
+    const deps = depsWithCatalog();
+    const { io, out } = makeIo();
+
+    const code = await run(["list", "--provider", "venice", "--all"], deps, io);
+
+    expect(code).toBe(0);
+    expect(out).toHaveLength(2);
+    expect(out[1]).toMatch(/^venice\/visible\tvenice\t/);
   });
 
-  it("rejects --provider followed by another flag (takeValue: next-is-flag)", async () => {
-    const { io, err } = makeIo();
-    const agentStore = {} as AgentStore;
-    const rc = await runImageModelCli(
-      ["add", "fal/x", "--provider", "--model-string", "f"],
-      { runInTx: tx, agentStore },
-      io,
-    );
-    expect(rc).toBe(2);
-    expect(err.join("\n")).toMatch(/--provider requires a value \(got next flag/);
+  it("prints (no image models) when nothing matches", async () => {
+    const deps = makeDeps();
+    deps.agentStore.listImageModelsWithProvider.mockResolvedValue([]);
+    const { io, out } = makeIo();
+
+    const code = await run(["list"], deps, io);
+
+    expect(code).toBe(0);
+    expect(out).toEqual(["(no image models)"]);
   });
 
-  it("rejects --provider with no following value (takeValue: missing)", async () => {
-    const { io, err } = makeIo();
-    const agentStore = {} as AgentStore;
-    const rc = await runImageModelCli(
-      ["add", "fal/x", "--provider"],
-      { runInTx: tx, agentStore },
-      io,
-    );
-    expect(rc).toBe(2);
-    expect(err.join("\n")).toMatch(/--provider requires a value/);
+  it.each([
+    [["list", "--provider"], /--provider\n\s+\^ Expected to get a value, found a flag/],
+    [["list", "--provider", "--all"], /got the flag "--all"/],
+    [["list", "--verbose"], /--verbose\n\s+\^ Unknown arguments/],
+  ])("rejects %j with exit 2 and lists nothing", async (argv, message) => {
+    const { io, out, err } = makeIo();
+    const loadDeps = vi.fn(async () => depsWithCatalog());
+
+    const code = await runCli(imageModelCli(io, loadDeps), argv, io);
+
+    expect(code).toBe(2);
+    expect(err.join("\n")).toMatch(message);
+    expect(out).toEqual([]);
+    expect(loadDeps).not.toHaveBeenCalled();
+  });
+});
+
+describe("cogmo image-model remove", () => {
+  it("removes a model by name", async () => {
+    const deps = makeDeps();
+    deps.agentStore.listImageModels.mockResolvedValue([fakeModel({ name: "fal/flux-dev" })]);
+    const { io, out } = makeIo();
+
+    const code = await run(["remove", "fal/flux-dev"], deps, io);
+
+    expect(code).toBe(0);
+    expect(deps.agentStore.deleteImageModel).toHaveBeenCalledWith(FAKE_TX, "m-1");
+    expect(out).toEqual(['Removed image model "fal/flux-dev".']);
   });
 
-  it("rejects --ratios with an empty list (all whitespace)", async () => {
+  it("reports not-found when removing an unknown model", async () => {
+    const deps = makeDeps();
+    deps.agentStore.listImageModels.mockResolvedValue([]);
     const { io, err } = makeIo();
-    const agentStore = {} as AgentStore;
-    const rc = await runImageModelCli(
-      [
-        "add",
-        "fal/x",
-        "--provider",
-        "fal",
-        "--model-string",
-        "f",
-        "--description",
-        "d",
-        "--ratios",
-        " , ,",
-      ],
-      { runInTx: tx, agentStore },
-      io,
-    );
-    expect(rc).toBe(2);
-    expect(err.join("\n")).toMatch(/--ratios got an empty list/);
+
+    const code = await run(["remove", "ghost"], deps, io);
+
+    expect(code).toBe(1);
+    expect(err.join("\n")).toMatch(/No image model named "ghost"/);
+    expect(deps.agentStore.deleteImageModel).not.toHaveBeenCalled();
+  });
+
+  it("rejects a missing name with exit 2", async () => {
+    const deps = makeDeps();
+    const { io, err } = makeIo();
+
+    const code = await run(["remove"], deps, io);
+
+    expect(code).toBe(2);
+    expect(err.join("\n")).toMatch(/No value provided for name/);
+    expect(deps.agentStore.deleteImageModel).not.toHaveBeenCalled();
   });
 });
