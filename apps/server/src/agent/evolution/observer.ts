@@ -159,9 +159,7 @@ export async function runObserver(
 ): Promise<ObserverResult> {
   const { agentStore, resolveProvider } = deps;
   const { conversationId } = event.data;
-  // The start of `durationMs`, memoized so every re-invocation of the body reads the first
-  // one's clock. Its own step, not a field of `load-conversation`'s result, so a run in
-  // flight across a deploy keeps the result shape it memoized.
+  // Memoized, so every re-invocation measures `durationMs` from the fire's first step.
   const startedAt = await step.run("record-start-time", async () => Date.now());
 
   const conv = await step.run("load-conversation", async () => {
