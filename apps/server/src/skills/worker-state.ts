@@ -20,7 +20,8 @@ import type {
  *  starting ─handshake─► idle ─acquire─► leased ─invoke─► running ─task_result─► awaiting_exit
  *                         ▲                │  ▲              │                        │
  *                         └────release─────┘  └─task_exited──┴──────task_exited───────┘
- *  any state ─ channel ends · deadline · close · id mismatch ─► dead
+ *  any state ─ handshake refused / timed out · channel ends · send fails · deadline
+ *              · id mismatch · close ─► dead
  * ```
  *
  * Invariants the table enforces:
@@ -49,6 +50,17 @@ export type WorkerState<T extends TaskRef> =
   | { kind: "dead"; reason: string };
 
 export type WorkerStateKind = WorkerState<TaskRef>["kind"];
+
+type StateOf<T extends TaskRef, K extends WorkerStateKind> = Extract<WorkerState<T>, { kind: K }>;
+/** Past the handshake and not dead. */
+type Live<T extends TaskRef> = StateOf<T, "idle" | "leased" | "running" | "awaiting_exit">;
+type Alive<T extends TaskRef> = StateOf<T, Exclude<WorkerStateKind, "dead">>;
+type WithTask<T extends TaskRef> = StateOf<T, "running" | "awaiting_exit">;
+
+const LIVE = P.union("idle", "leased", "running", "awaiting_exit");
+const ALIVE = P.union("starting", "idle", "leased", "running", "awaiting_exit");
+const WITH_TASK = P.union("running", "awaiting_exit");
+const BETWEEN_TASKS = P.union("idle", "leased");
 
 /** Whether every process the task started is known to be gone. */
 export type ExitOutcome = { kind: "confirmed" } | { kind: "unconfirmed"; reason: string };
@@ -85,6 +97,9 @@ export type HostEvent<T extends TaskRef> =
 
 export type WorkerEvent<T extends TaskRef> = WorkerMessage | HostEvent<T>;
 
+const HANDSHAKE_FRAMES = ["supervisor_ready", "ready", "fatal"] as const;
+const TASK_FRAMES = ["ctx_call", "task_result", "task_exited"] as const;
+
 export type Effect<T extends TaskRef> =
   | { type: "send"; message: HostMessage }
   | { type: "serve"; task: T; call: CtxCall }
@@ -105,63 +120,104 @@ export function transition<T extends TaskRef>(
   state: WorkerState<T>,
   event: WorkerEvent<T>,
 ): Transition<T> {
-  return match<WorkerEvent<T>, Transition<T>>(event)
-    .with({ type: P.union("supervisor_ready", "ready", "fatal") }, (frame) =>
-      onHandshakeFrame(state, frame),
+  return match<[WorkerState<T>, WorkerEvent<T>], Transition<T>>([state, event])
+    .with([{ kind: "dead" }, P._], ([s, e]) => whileDead(s, e))
+    .with(
+      [{ kind: "starting" }, { type: P.union(...HANDSHAKE_FRAMES, ...TASK_FRAMES) }],
+      ([s, first]) => accept(s, first),
     )
-    .with({ type: "ctx_call" }, (call) => onCtxCall(state, call))
-    .with({ type: "task_result" }, (result) => onTaskResult(state, result))
-    .with({ type: "task_exited" }, (exited) => onTaskExited(state, exited))
-    .with({ type: "acquire" }, () => onAcquire(state))
-    .with({ type: "release" }, () => onRelease(state))
-    .with({ type: "invoke" }, ({ task, message }) => onInvoke(state, task, message))
-    .with({ type: "ctx_replied" }, ({ task, reply }) => onCtxReplied(state, task, reply))
-    .with({ type: "send_failed" }, ({ reason }) => onChannelLost(state, reason))
-    .with({ type: "deadline_passed" }, ({ task }) => onDeadlinePassed(state, task))
-    .with({ type: "handshake_timed_out" }, () => onHandshakeTimedOut(state))
-    .with({ type: "channel_ended" }, ({ reason }) => onChannelLost(state, reason))
-    .with({ type: "close" }, ({ reason }) => onClose(state, reason))
+    .with([{ kind: LIVE }, { type: P.union(...HANDSHAKE_FRAMES) }], ([s, frame]) =>
+      stayAndLog(s, "warn", "handshake frame after the handshake — ignoring", { type: frame.type }),
+    )
+    .with([{ kind: LIVE }, { type: "ctx_call" }], ([s, call]) => onCtxCall(s, call))
+    .with([{ kind: LIVE }, { type: "task_result" }], ([s, result]) => onTaskResult(s, result))
+    .with([{ kind: LIVE }, { type: "task_exited" }], ([s, exited]) => onTaskExited(s, exited))
+    .with([{ kind: ALIVE }, { type: "acquire" }], ([s]) => onAcquire(s))
+    .with([{ kind: ALIVE }, { type: "release" }], ([s]) => onRelease(s))
+    .with([{ kind: ALIVE }, { type: "invoke" }], ([s, { task, message }]) =>
+      onInvoke(s, task, message),
+    )
+    .with([{ kind: ALIVE }, { type: "ctx_replied" }], ([s, { task, reply }]) =>
+      onCtxReplied(s, task, reply),
+    )
+    .with([{ kind: ALIVE }, { type: "deadline_passed" }], ([s, { task }]) =>
+      onDeadlinePassed(s, task),
+    )
+    .with([{ kind: ALIVE }, { type: "handshake_timed_out" }], ([s]) => onHandshakeTimedOut(s))
+    .with([{ kind: ALIVE }, { type: P.union("send_failed", "channel_ended") }], ([s, { reason }]) =>
+      onChannelLost(s, reason),
+    )
+    .with([{ kind: ALIVE }, { type: "close" }], ([s, { reason }]) => die(s, reason, "lost", []))
+    .exhaustive();
+}
+
+/**
+ * `dead` is final. A task handed to it fails as a value — the worker can
+ * die between its lease and its task, which is an expected race — lease
+ * commands are refused, and everything else is ignored.
+ */
+function whileDead<T extends TaskRef>(
+  state: StateOf<T, "dead">,
+  event: WorkerEvent<T>,
+): Transition<T> {
+  return match<WorkerEvent<T>, Transition<T>>(event)
+    .with({ type: "invoke" }, ({ task }) => ({
+      state,
+      effects: [
+        {
+          type: "settle",
+          task,
+          outcome: err({ kind: "failed", reason: `worker is dead: ${state.reason}` }),
+        },
+      ],
+    }))
+    .with({ type: P.union("acquire", "release") }, () => refuse(state, "the worker is dead"))
+    .with(
+      {
+        type: P.union(
+          ...HANDSHAKE_FRAMES,
+          ...TASK_FRAMES,
+          "ctx_replied",
+          "send_failed",
+          "deadline_passed",
+          "handshake_timed_out",
+          "channel_ended",
+          "close",
+        ),
+      },
+      () => stay(state),
+    )
     .exhaustive();
 }
 
 // --- worker frames ---
 
-function onHandshakeFrame<T extends TaskRef>(
-  state: WorkerState<T>,
-  frame: WorkerMessage,
-): Transition<T> {
-  return match<WorkerState<T>, Transition<T>>(state)
-    .with({ kind: "starting" }, (s) => accept(s, frame))
-    .with({ kind: P.union("idle", "leased", "running", "awaiting_exit") }, (s) =>
-      log(s, "warn", "handshake frame after the handshake — ignoring", { type: frame.type }),
-    )
-    .with({ kind: "dead" }, (s) => stay(s))
-    .exhaustive();
-}
-
-function onCtxCall<T extends TaskRef>(state: WorkerState<T>, call: CtxCall): Transition<T> {
-  const refuseCall = (s: WorkerState<T>): Transition<T> =>
-    log(s, "warn", "refusing ctx_call from a task that is not running", {
-      ctxId: call.id,
-      method: call.method,
-      taskId: call.taskId,
-      running: s.kind === "running" ? s.task.id : null,
-    });
-  return match<WorkerState<T>, Transition<T>>(state)
-    .with({ kind: "starting" }, (s) => accept(s, call))
+/**
+ * A ctx call naming another task is refused and harms nothing: it goes
+ * unanswered and the running task is untouched. A `task_result` or
+ * `task_exited` naming another task would settle or release the wrong
+ * task, so that kills the worker.
+ */
+function onCtxCall<T extends TaskRef>(state: Live<T>, call: CtxCall): Transition<T> {
+  return match<Live<T>, Transition<T>>(state)
     .with(
       { kind: "running" },
       (s) => s.task.id === call.taskId,
       (s) => ({ state: s, effects: [{ type: "serve", task: s.task, call }] }),
     )
-    .with({ kind: P.union("idle", "leased", "running", "awaiting_exit") }, refuseCall)
-    .with({ kind: "dead" }, (s) => stay(s))
+    .with({ kind: LIVE }, (s) =>
+      stayAndLog(s, "warn", "refusing ctx_call from a task that is not running", {
+        ctxId: call.id,
+        method: call.method,
+        taskId: call.taskId,
+        running: s.kind === "running" ? s.task.id : null,
+      }),
+    )
     .exhaustive();
 }
 
-function onTaskResult<T extends TaskRef>(state: WorkerState<T>, result: TaskResult): Transition<T> {
-  return match<WorkerState<T>, Transition<T>>(state)
-    .with({ kind: "starting" }, (s) => accept(s, result))
+function onTaskResult<T extends TaskRef>(state: Live<T>, result: TaskResult): Transition<T> {
+  return match<Live<T>, Transition<T>>(state)
     .with(
       { kind: "running" },
       (s) => s.task.id === result.id,
@@ -170,15 +226,12 @@ function onTaskResult<T extends TaskRef>(state: WorkerState<T>, result: TaskResu
     .with(
       { kind: "awaiting_exit" },
       (s) => s.task.id === result.id,
-      (s) => log(s, "warn", "duplicate task_result — keeping the first", { id: result.id }),
+      (s) => stayAndLog(s, "warn", "duplicate task_result — keeping the first", { id: result.id }),
     )
-    .with({ kind: P.union("running", "awaiting_exit") }, (s) =>
-      mismatch(s, "task_result", s.task.id, result.id),
+    .with({ kind: WITH_TASK }, (s) => mismatch(s, "task_result", result.id))
+    .with({ kind: BETWEEN_TASKS }, (s) =>
+      stayAndLog(s, "warn", "task_result with no task in flight — ignoring", { id: result.id }),
     )
-    .with({ kind: P.union("idle", "leased") }, (s) =>
-      log(s, "warn", "task_result with no task in flight — ignoring", { id: result.id }),
-    )
-    .with({ kind: "dead" }, (s) => stay(s))
     .exhaustive();
 }
 
@@ -187,9 +240,8 @@ function onTaskResult<T extends TaskRef>(state: WorkerState<T>, result: TaskResu
  * forwarding one. Its processes are gone all the same, so the worker stays
  * reusable.
  */
-function onTaskExited<T extends TaskRef>(state: WorkerState<T>, exited: TaskExited): Transition<T> {
-  return match<WorkerState<T>, Transition<T>>(state)
-    .with({ kind: "starting" }, (s) => accept(s, exited))
+function onTaskExited<T extends TaskRef>(state: Live<T>, exited: TaskExited): Transition<T> {
+  return match<Live<T>, Transition<T>>(state)
     .with(
       { kind: "awaiting_exit" },
       (s) => s.task.id === exited.id,
@@ -206,75 +258,46 @@ function onTaskExited<T extends TaskRef>(state: WorkerState<T>, exited: TaskExit
           error: "task_exited_without_result",
         }),
     )
-    .with({ kind: P.union("running", "awaiting_exit") }, (s) =>
-      mismatch(s, "task_exited", s.task.id, exited.id),
+    .with({ kind: WITH_TASK }, (s) => mismatch(s, "task_exited", exited.id))
+    .with({ kind: BETWEEN_TASKS }, (s) =>
+      stayAndLog(s, "warn", "task_exited with no task awaiting it — ignoring", { id: exited.id }),
     )
-    .with({ kind: P.union("idle", "leased") }, (s) =>
-      log(s, "warn", "task_exited with no task awaiting it — ignoring", { id: exited.id }),
-    )
-    .with({ kind: "dead" }, (s) => stay(s))
     .exhaustive();
 }
 
 // --- host commands ---
 
-function onAcquire<T extends TaskRef>(state: WorkerState<T>): Transition<T> {
-  return match<WorkerState<T>, Transition<T>>(state)
+function onAcquire<T extends TaskRef>(state: Alive<T>): Transition<T> {
+  return match<Alive<T>, Transition<T>>(state)
     .with({ kind: "idle" }, () => ({ state: { kind: "leased" }, effects: [] }))
-    .with({ kind: P.union("starting", "leased", "running", "awaiting_exit", "dead") }, (s) =>
+    .with({ kind: P.union("starting", "leased", "running", "awaiting_exit") }, (s) =>
       refuse(s, `cannot acquire a worker that is ${s.kind}`),
     )
     .exhaustive();
 }
 
-function onRelease<T extends TaskRef>(state: WorkerState<T>): Transition<T> {
-  return match<WorkerState<T>, Transition<T>>(state)
+function onRelease<T extends TaskRef>(state: Alive<T>): Transition<T> {
+  return match<Alive<T>, Transition<T>>(state)
     .with({ kind: "leased" }, () => ({ state: { kind: "idle" }, effects: [] }))
-    .with({ kind: P.union("starting", "idle", "running", "awaiting_exit", "dead") }, (s) =>
-      refuse(s, `cannot release a worker that is ${s.kind}`),
-    )
+    .with({ kind: P.union("starting", "idle", "running", "awaiting_exit") }, (s) => {
+      const reason = `cannot release a worker that is ${s.kind}`;
+      return {
+        state: s,
+        effects: [{ type: "refused", reason }, logEffect("warn", `${reason} — ignoring`, {})],
+      };
+    })
     .exhaustive();
 }
 
-/**
- * A worker can die between its lease and its task — its supervisor exits
- * during a venv populate, say. That race is expected, so the task fails as
- * a value; every other refusal is a caller bug.
- */
-function onInvoke<T extends TaskRef>(
-  state: WorkerState<T>,
-  task: T,
-  message: TaskInvoke,
-): Transition<T> {
-  return match<WorkerState<T>, Transition<T>>(state)
+function onInvoke<T extends TaskRef>(state: Alive<T>, task: T, message: TaskInvoke): Transition<T> {
+  return match<Alive<T>, Transition<T>>(state)
     .with({ kind: "leased" }, () => ({
       state: { kind: "running", task },
       effects: [{ type: "send", message }],
     }))
-    .with({ kind: "dead" }, (s) => ({
-      state: s,
-      effects: [
-        {
-          type: "settle",
-          task,
-          outcome: err({ kind: "failed", reason: `worker is dead: ${s.reason}` }),
-        },
-      ],
-    }))
-    .with({ kind: P.union("running", "awaiting_exit") }, (s) =>
-      refuse(s, "a task is already in-flight — one task at a time"),
-    )
+    .with({ kind: WITH_TASK }, (s) => refuse(s, "a task is already in-flight — one task at a time"))
     .with({ kind: P.union("starting", "idle") }, (s) =>
       refuse(s, `cannot invoke on a worker that is ${s.kind}: acquire it first`),
-    )
-    .exhaustive();
-}
-
-function onClose<T extends TaskRef>(state: WorkerState<T>, reason: string): Transition<T> {
-  return match<WorkerState<T>, Transition<T>>(state)
-    .with({ kind: "dead" }, (s) => stay(s))
-    .with({ kind: P.union("starting", "idle", "leased", "running", "awaiting_exit") }, (s) =>
-      die(s, reason, "lost", []),
     )
     .exhaustive();
 }
@@ -282,71 +305,71 @@ function onClose<T extends TaskRef>(state: WorkerState<T>, reason: string): Tran
 // --- channel facts ---
 
 function onCtxReplied<T extends TaskRef>(
-  state: WorkerState<T>,
+  state: Alive<T>,
   task: T,
   reply: CtxResult,
 ): Transition<T> {
-  return match<WorkerState<T>, Transition<T>>(state)
+  return match<Alive<T>, Transition<T>>(state)
     .with(
       { kind: "running" },
       (s) => s.task === task,
       (s) => ({ state: s, effects: [{ type: "send", message: reply }] }),
     )
-    .with({ kind: P.union("starting", "idle", "leased", "running", "awaiting_exit") }, (s) =>
-      log(s, "debug", "dropping ctx_result for a task that is no longer running", {
+    .with({ kind: ALIVE }, (s) =>
+      stayAndLog(s, "debug", "dropping ctx_result for a task that is no longer running", {
         ctxId: reply.id,
         taskId: task.id,
       }),
     )
-    .with({ kind: "dead" }, (s) => stay(s))
     .exhaustive();
 }
 
 /** The channel failed, from either end: the stream ended or a send threw. */
-function onChannelLost<T extends TaskRef>(state: WorkerState<T>, reason: string): Transition<T> {
-  return match<WorkerState<T>, Transition<T>>(state)
+function onChannelLost<T extends TaskRef>(state: Alive<T>, reason: string): Transition<T> {
+  return match<Alive<T>, Transition<T>>(state)
     .with({ kind: "starting" }, (s) => die(s, reason, "lost", []))
-    .with({ kind: P.union("idle", "leased") }, (s) =>
-      die(s, reason, "lost", [warn("worker channel lost between tasks — retiring it", { reason })]),
-    )
-    .with({ kind: P.union("running", "awaiting_exit") }, (s) =>
+    .with({ kind: BETWEEN_TASKS }, (s) =>
       die(s, reason, "lost", [
-        warn("worker channel lost with a task in flight", { reason, taskId: s.task.id }),
+        logEffect("warn", "worker channel lost between tasks — retiring it", { reason }),
       ]),
     )
-    .with({ kind: "dead" }, (s) => stay(s))
+    .with({ kind: WITH_TASK }, (s) =>
+      die(s, reason, "lost", [
+        logEffect("warn", "worker channel lost with a task in flight", {
+          reason,
+          taskId: s.task.id,
+        }),
+      ]),
+    )
     .exhaustive();
 }
 
 /** Only the deadline of the task on the worker counts; one for a settled task is ignored. */
-function onDeadlinePassed<T extends TaskRef>(state: WorkerState<T>, task: T): Transition<T> {
-  return match<WorkerState<T>, Transition<T>>(state)
+function onDeadlinePassed<T extends TaskRef>(state: Alive<T>, task: T): Transition<T> {
+  return match<Alive<T>, Transition<T>>(state)
     .with(
-      { kind: P.union("running", "awaiting_exit") },
+      { kind: WITH_TASK },
       (s) => s.task === task,
       (s) =>
         die(s, "task deadline passed", "timed_out", [
-          warn("task deadline passed — retiring the worker", { taskId: task.id }),
+          logEffect("warn", "task deadline passed — retiring the worker", { taskId: task.id }),
         ]),
     )
-    .with(
-      { kind: P.union("starting", "idle", "leased", "running", "awaiting_exit", "dead") },
-      (s) => stay(s),
-    )
+    .with({ kind: ALIVE }, (s) => stay(s))
     .exhaustive();
 }
 
-function onHandshakeTimedOut<T extends TaskRef>(state: WorkerState<T>): Transition<T> {
-  return match<WorkerState<T>, Transition<T>>(state)
+function onHandshakeTimedOut<T extends TaskRef>(state: Alive<T>): Transition<T> {
+  return match<Alive<T>, Transition<T>>(state)
     .with({ kind: "starting" }, (s) => die(s, "no handshake before its deadline", "timed_out", []))
-    .with({ kind: P.union("idle", "leased", "running", "awaiting_exit", "dead") }, (s) => stay(s))
+    .with({ kind: LIVE }, (s) => stay(s))
     .exhaustive();
 }
 
 // --- helpers ---
 
 function accept<T extends TaskRef>(
-  state: Extract<WorkerState<T>, { kind: "starting" }>,
+  state: StateOf<T, "starting">,
   first: WorkerMessage,
 ): Transition<T> {
   return state.handshake(first).match<Transition<T>>(
@@ -357,14 +380,14 @@ function accept<T extends TaskRef>(
 
 /** The worker named a task other than the one on it: it is in an inconsistent state. */
 function mismatch<T extends TaskRef>(
-  state: WorkerState<T>,
+  state: WithTask<T>,
   frame: "task_result" | "task_exited",
-  expected: string,
   got: string,
 ): Transition<T> {
+  const expected = state.task.id;
   const reason = `${frame} id mismatch (expected ${expected}, got ${got})`;
   return die(state, reason, "lost", [
-    warn(`${frame} names another task — retiring the worker`, { expected, got }),
+    logEffect("warn", `${frame} names another task — retiring the worker`, { expected, got }),
   ]);
 }
 
@@ -381,7 +404,7 @@ function released<T extends TaskRef>(task: T, result: TaskResult): Transition<T>
  * still starting reports why it never became ready.
  */
 function die<T extends TaskRef>(
-  state: WorkerState<T>,
+  state: Alive<T>,
   reason: string,
   cause: "lost" | "timed_out" | "refused",
   logs: ReadonlyArray<Effect<T>>,
@@ -393,7 +416,7 @@ function die<T extends TaskRef>(
     .with("timed_out", () => ({ kind: "timed_out" }) as const)
     .with("refused", () => ({ kind: "refused", reason }) as const)
     .exhaustive();
-  const settled = match<WorkerState<T>, ReadonlyArray<Effect<T>>>(state)
+  const settled = match<Alive<T>, ReadonlyArray<Effect<T>>>(state)
     .with({ kind: "starting" }, () => [{ type: "started", outcome: err(startFailure) }])
     .with({ kind: "running" }, (s) => [{ type: "settle", task: s.task, outcome: err(failure) }])
     .with({ kind: "awaiting_exit" }, (s) => [
@@ -403,7 +426,7 @@ function die<T extends TaskRef>(
         outcome: ok({ result: s.result, exit: { kind: "unconfirmed", reason } }),
       },
     ])
-    .with({ kind: P.union("idle", "leased", "dead") }, () => [])
+    .with({ kind: BETWEEN_TASKS }, () => [])
     .exhaustive();
   return {
     state: { kind: "dead", reason },
@@ -419,15 +442,20 @@ function refuse<T extends TaskRef>(state: WorkerState<T>, reason: string): Trans
   return { state, effects: [{ type: "refused", reason }] };
 }
 
-function warn<T extends TaskRef>(message: string, fields: Record<string, unknown>): Effect<T> {
-  return { type: "log", level: "warn", message, fields };
-}
-
-function log<T extends TaskRef>(
+/** Stay in `state`, logging. */
+function stayAndLog<T extends TaskRef>(
   state: WorkerState<T>,
   level: "warn" | "debug",
   message: string,
   fields: Record<string, unknown>,
 ): Transition<T> {
-  return { state, effects: [{ type: "log", level, message, fields }] };
+  return { state, effects: [logEffect(level, message, fields)] };
+}
+
+function logEffect<T extends TaskRef>(
+  level: "warn" | "debug",
+  message: string,
+  fields: Record<string, unknown>,
+): Effect<T> {
+  return { type: "log", level, message, fields };
 }

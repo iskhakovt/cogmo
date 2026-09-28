@@ -1,4 +1,4 @@
-import type { Result } from "neverthrow";
+import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
 import { logger } from "../logger.js";
 import { describeError } from "../util/describe-error.js";
@@ -134,7 +134,7 @@ export class Dispatcher {
 
   /** Lease an idle worker for one task. False unless it is idle. */
   tryAcquire(): boolean {
-    return !this.#dispatch({ type: "acquire" }).some((e) => e.type === "refused");
+    return this.#dispatch({ type: "acquire" }).isOk();
   }
 
   /** Return a leased worker to idle. A worker with a task on it stays held. */
@@ -158,10 +158,8 @@ export class Dispatcher {
       ctxHandler: opts.ctxHandler,
       settle: outcome.resolve,
     };
-    const refusal = this.#dispatch({ type: "invoke", task, message }).find(
-      (e) => e.type === "refused",
-    );
-    if (refusal) throw new Error(`dispatcher: ${refusal.reason}`);
+    const accepted = this.#dispatch({ type: "invoke", task, message });
+    if (accepted.isErr()) throw new Error(`dispatcher: ${accepted.error}`);
     this.#whenAborted(opts.deadline, () => this.#dispatch({ type: "deadline_passed", task }));
     return outcome.promise;
   }
@@ -180,15 +178,19 @@ export class Dispatcher {
     for await (const message of this.#transport.messages()) this.#dispatch(message);
   }
 
-  /** Run `event` through the machine and carry out its effects; returns them. */
-  #dispatch(event: WorkerEvent<PendingTask>): ReadonlyArray<Effect<PendingTask>> {
+  /**
+   * Run `event` through the machine and carry out its effects. Errs with
+   * the reason when the event is a host command the state refuses.
+   */
+  #dispatch(event: WorkerEvent<PendingTask>): Result<void, string> {
     const { state, effects } = transition(this.#state, event);
     this.#state = state;
     // Effects run in order; events they raise go through the machine after.
     const raised: WorkerEvent<PendingTask>[] = [];
     for (const effect of effects) raised.push(...this.#execute(effect));
     for (const next of raised) this.#dispatch(next);
-    return effects;
+    const refusal = effects.find((e) => e.type === "refused");
+    return refusal ? err(refusal.reason) : ok(undefined);
   }
 
   #execute(effect: Effect<PendingTask>): ReadonlyArray<WorkerEvent<PendingTask>> {
