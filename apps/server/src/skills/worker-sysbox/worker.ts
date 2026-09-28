@@ -287,6 +287,12 @@ export class SysboxSkillWorker {
     exec.stderr.on("data", (chunk: string) => {
       log.debug({ workerId: opts.workerId }, chunk.trimEnd());
     });
+    // A failing exec fails stderr along with stdout. Stdout's failure ends
+    // the channel and settles any task; stderr's must not go unhandled, or
+    // it crashes the process.
+    exec.stderr.on("error", (e: Error) => {
+      log.warn({ workerId: opts.workerId, err: e.message }, "supervisor stderr failed");
+    });
 
     const opened = await Dispatcher.open({
       transport: createNdjsonTransport(exec.stdin, exec.stdout),

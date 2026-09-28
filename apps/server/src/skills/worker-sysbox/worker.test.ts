@@ -23,6 +23,7 @@ interface FakeSandboxBundle {
   /** stdin we hand to the worker; the test pushes mock task_result lines into stdout. */
   stdin: PassThrough;
   stdout: PassThrough;
+  stderr: PassThrough;
   /** exec.dispose call count — the worker calls dispose during teardown. */
   execDisposeCalls: { count: number };
   /** Calls captured for assertion. */
@@ -97,7 +98,7 @@ function buildFakeSandbox(): FakeSandboxBundle {
     shutdown: vi.fn(),
   };
 
-  return { sandbox, session, stdin, stdout, execDisposeCalls, calls };
+  return { sandbox, session, stdin, stdout, stderr, execDisposeCalls, calls };
 }
 
 const noopCtx: CtxHandler = { handle: async () => null };
@@ -744,6 +745,37 @@ describe("SysboxSkillWorker", () => {
         workerReusable: false,
       });
       expect(w.state).toBe("dead");
+    });
+
+    it("fails the task as a value when its exec's socket fails, with nothing left unhandled", async () => {
+      const uncaught = vi.fn();
+      process.on("uncaughtException", uncaught);
+      try {
+        const bundle = buildFakeSandbox();
+        const w = await SysboxSkillWorker.create({
+          workerId: "w-socket-error",
+          sandbox: bundle.sandbox,
+          image: "cogmo-skills:test",
+          expiresAt: new Date(Date.now() + 60_000),
+        });
+        w.tryAcquire();
+        const pending = w.invoke(invokeParams("t-socket-error"));
+        await new Promise((r) => setImmediate(r));
+        // The sandbox forwards an exec socket error to both demuxed streams.
+        const reset = new Error("read ECONNRESET");
+        bundle.stdout.destroy(reset);
+        bundle.stderr.destroy(reset);
+
+        await expect(pending).resolves.toMatchObject({
+          ok: false,
+          error: expect.stringMatching(/read ECONNRESET/),
+          workerReusable: false,
+        });
+        await new Promise((r) => setImmediate(r));
+        expect(uncaught).not.toHaveBeenCalled();
+      } finally {
+        process.off("uncaughtException", uncaught);
+      }
     });
 
     it("keeps a delivered result when the host watchdog fires before task_exited", async () => {

@@ -418,6 +418,14 @@ export async function ensureVenvPopulated(
   // surface (hash mismatch, yanked wheel, etc.) we surface back to
   // the host.
   const stderrChunks: string[] = [];
+  // Unhandled stream `'error'` events crash the host process.
+  let streamError: Error | undefined;
+  const captureError = (e: Error): void => {
+    streamError ??= e;
+  };
+  handle.stdout.on("error", captureError);
+  handle.stderr.on("error", captureError);
+  handle.stdin.on("error", captureError);
   handle.stdout.on("data", () => {
     // Drain — script is `--quiet`. Any bytes here are uv-version
     // diagnostic noise we don't bubble up.
@@ -436,6 +444,9 @@ export async function ensureVenvPopulated(
       kind: "transport_failed",
       message: e instanceof Error ? e.message : String(e),
     });
+  }
+  if (streamError) {
+    return err({ kind: "transport_failed", message: `stream error: ${streamError.message}` });
   }
   if (exitCode !== 0) {
     return err({

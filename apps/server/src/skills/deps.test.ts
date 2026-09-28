@@ -511,6 +511,63 @@ describe("ensureVenvPopulated", () => {
     expect(result.error.message).toMatch(/connection reset/);
   });
 
+  it("returns transport_failed when the exec's socket fails, leaving no stream error unhandled", async () => {
+    const uncaught = vi.fn();
+    process.on("uncaughtException", uncaught);
+    try {
+      const exec = makeFakeExec();
+      const session = mock<SandboxSession>();
+      session.execStreaming.mockResolvedValue(exec.handle);
+
+      const promise = ensureVenvPopulated({
+        session,
+        lockfileHash: "abc123",
+        lockfileContents: "httpx==0.27.0\n",
+        workerId: "worker-1",
+      });
+
+      await new Promise((r) => setImmediate(r));
+      // The sandbox forwards a socket error to both demuxed streams and to wait().
+      const reset = new Error("read ECONNRESET");
+      exec.stdoutSource.destroy(reset);
+      exec.stderrSource.destroy(reset);
+      exec.waitReject(reset);
+      const result = await promise;
+
+      expect(result.isErr()).toBe(true);
+      if (!result.isErr()) return;
+      expect(result.error.kind).toBe("transport_failed");
+      expect(result.error.message).toMatch(/read ECONNRESET/);
+      await new Promise((r) => setImmediate(r));
+      expect(uncaught).not.toHaveBeenCalled();
+    } finally {
+      process.off("uncaughtException", uncaught);
+    }
+  });
+
+  it("returns transport_failed when a stream fails though the script exits 0", async () => {
+    const exec = makeFakeExec();
+    const session = mock<SandboxSession>();
+    session.execStreaming.mockResolvedValue(exec.handle);
+
+    const promise = ensureVenvPopulated({
+      session,
+      lockfileHash: "abc123",
+      lockfileContents: "httpx==0.27.0\n",
+      workerId: "worker-1",
+    });
+
+    await new Promise((r) => setImmediate(r));
+    exec.stderrSource.emit("error", new Error("backend socket reset"));
+    exec.waitResolve(0);
+    const result = await promise;
+
+    expect(result.isErr()).toBe(true);
+    if (!result.isErr()) return;
+    expect(result.error.kind).toBe("transport_failed");
+    expect(result.error.message).toMatch(/backend socket reset/);
+  });
+
   it("returns transport_failed when execStreaming itself throws", async () => {
     const session = mock<SandboxSession>();
     session.execStreaming.mockRejectedValue(new Error("docker daemon unreachable"));
