@@ -1934,8 +1934,7 @@ export class DrizzleAgentStore implements AgentStore {
       toolSet: ToolSet;
     },
   ): Promise<{ kind: "new" | "recovered"; id: string }> {
-    // Keyed insert: see `.claude/rules/inngest.md`. The constraint is NULLS NOT
-    // DISTINCT, so it arbitrates org profiles (`user_id` null) too.
+    // Keyed insert: see `.claude/rules/inngest.md`.
     const rows = await tx
       .insert(profiles)
       .values(params)

@@ -200,13 +200,9 @@ export interface EnsureSkillsCodingRepoArgs {
  *     `coding_repos` table; see `CodingStore.updateRepoRemoteUrl`.
  *   - `unchanged` — row present and in sync.
  *
- * The row is read before `origin`, both inside the transaction. That first
- * read fixes the REPEATABLE READ snapshot, and every `remote_url` was itself
- * read from `origin` inside its writer's transaction, so any row this call
- * sees came from an `origin` read earlier than its own: a boot racing the
- * wizard never writes an older URL over a newer one. A write committed after
- * the snapshot fails this call's own write with `40001`, and the transactor's
- * retry re-reads both.
+ * Reads the row, then `origin`, in one transaction: the snapshot predates the
+ * `origin` read, so a boot racing the wizard can't write an older URL back; a
+ * concurrent write fails this one with `40001`, and the retry re-reads both.
  *
  * Defaults on first insert match the per-repo knobs `Transport.repos.add`
  * uses for user-added repos. `maxConcurrentTasks: 1` is intentional — register

@@ -23,9 +23,8 @@
  * atomicity is gone — a failure in file N leaves files <N committed.
  * Drizzle's stock migrate() makes cross-file atomicity available; we
  * give that up so the enum-extension pattern works. In practice cross-
- * file atomicity rarely matters: the prior `migrate()` semantics still
- * left partial state on any failure that triggered a process exit
- * before the outer commit.
+ * file atomicity rarely matters: stock `migrate()` leaves the same partial
+ * state when the process exits before its outer commit.
  *
  * **Serialization.** The runner takes no lock itself. Its production callers
  * (`bootstrapCore`, `migrateAndSeed`) run it under the bootstrap advisory

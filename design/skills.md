@@ -534,7 +534,7 @@ cogmo skills register --branch skill/summarize-email-<date>
 
 The `register` RPC:
 
-1. **Acquire advisory lock** `pg_advisory_xact_lock(hashtext("skill_register:" + name))`. Serializes concurrent registers on the same skill name.
+1. **Acquire advisory lock** `pg_advisory_xact_lock(hashtext("skill_register:" + name))`. Queues concurrent registers on the same skill name, but under REPEATABLE READ the checks below can still read state from before the winner's commit ([store-pattern rule](../.claude/rules/store-pattern.md); audit filed in `todo.md`).
 2. **Fast-forward check.** Verify `main` is an ancestor of the branch tip. If not → return `{ status: "rejected", errors: ["main has advanced; rebase branch and retry"] }`.
 3. **No-op check.** If `current skills.git_sha == branch tip sha` → return `{ status: "live", … }` with no side effects (idempotent).
 4. **Pending-approval check.** If any `skill_deploys` row for this skill has `status = 'pending_approval'` → return `{ status: "rejected", errors: ["pending deploy exists; approve or deny first"] }`.
@@ -588,7 +588,7 @@ type EnableResult =
 
 - **Branch ≠ deploy.** Agent can push any feature branch freely. Only `register` advances `main`.
 - **`main` is authoritative.** `refs/heads/main` in the bare repo and `skills.git_sha` in the DB always agree — both are written together inside the register transaction.
-- **No race via direct push.** Pre-receive hook rejects non-Cogmo writes to `main`; advisory lock serializes Cogmo's own writes.
+- **No race via direct push.** Pre-receive hook rejects non-Cogmo writes to `main`; Cogmo's own registers queue on the advisory lock, with the snapshot caveat in register step 1.
 - **Idempotent.** Registering a branch whose tip is already `main` is a no-op. Safe to retry on network timeouts.
 - **Git push is orthogonal.** Pushing branches to a user-configured remote (backup, multi-machine) neither triggers nor depends on registration.
 
@@ -1229,7 +1229,7 @@ interface SkillRunner {
 | Review model | Risk-tiered auto-apply (`auto` / `notify` / `approve`) | Review-everything is friction. Classifier makes the "what's safe to auto-apply" function explicit; matches evolution graduation model and integrations.md permission tiers. |
 | Classifier execution | Branch + `register` RPC | No repo-watching. Branch ≠ deploy. Atomic, synchronous, authoritative. Pre-commit hook deferred unless ~30s feedback lag becomes painful. |
 | Who advances `main` | Only Cogmo's `register` RPC | Pre-receive hook rejects direct pushes to `main`. Makes "live on main" atomic with "classified and approved"; collapses transient "committed-but-rejected" states; structurally prevents force push. |
-| Concurrency on register | Advisory lock + pending-deploy check | `pg_advisory_xact_lock` per skill name serializes concurrent registers. Refuse if a pending-approval deploy exists. Idempotent for no-op SHAs. Standard DB-backed state-machine pattern. |
+| Concurrency on register | Advisory lock + pending-deploy check | `pg_advisory_xact_lock` per skill name queues concurrent registers; it doesn't refresh the loser's snapshot (audit filed in `todo.md`). Refuse if a pending-approval deploy exists. Idempotent for no-op SHAs. Standard DB-backed state-machine pattern. |
 | LLM tool surface | One tool per skill (dynamic per-turn tool list) | Matches progressive disclosure — skills appear in the tool list with their own name + description. No `invoke_skill` wrapper (would break discovery). Orchestrator rebuilds tool list each turn from `SkillRunner.list()`. |
 | Manifest | Single `SkillManifestSchema` (Zod) parsed from `SKILL.md` frontmatter | Five consumers read it: register RPC, classifier, dependency populator, dispatcher, tool registrar. One schema prevents field drift. Superset of Anthropic SKILL.md. |
 | State reset | Subinterpreter per task (3.13+), per-skill `recycle` opt-out | Fresh interpreter ≈ no state leakage, ~50ms. Opt-out handles C-extension hostile libraries. Flip default to `recycle` system-wide if widespread breakage. |

@@ -197,14 +197,11 @@ export class DrizzlePipelineStore implements PipelineStore {
     | { kind: "already_active"; name: string; version: number }
     | { kind: "not_found" }
   > {
-    // The per-user advisory lock queues concurrent activations but does not
-    // refresh the loser's snapshot: under REPEATABLE READ the lock statement
-    // takes it, before the winner commits (`.claude/rules/store-pattern.md`).
-    // A loser converges only by writing a row the winner changed — the same
-    // version (FOR UPDATE below) or the version the winner deactivated —
-    // which raises 40001 for the transactor to retry. With no version active,
-    // activations of two different versions touch disjoint rows and the
-    // loser fails with 23505 on `uq_pipeline_definitions_active`.
+    // The lock queues activations but can't refresh the loser's snapshot
+    // (`.claude/rules/store-pattern.md`). A loser retries on 40001 only when it
+    // writes a row the winner changed — this version (FOR UPDATE) or the one
+    // the winner deactivated. With no version active the loser gets 23505 on
+    // `uq_pipeline_definitions_active` (todo.md).
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${userId}))`);
     const rows = await tx
       .select()
