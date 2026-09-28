@@ -99,7 +99,7 @@ Per-skill caps on memory, CPU, wall-clock. Enforced at runtime, declared in `SKI
 | Tier | Memory | Wall-clock | CPU | Mechanism |
 |-|-|-|-|-|
 | **WASM** | 128 MB | 30 s | n/a (single-threaded isolate) | V8 isolate heap limit at creation; host-side wall-clock timer terminates the isolate on timeout. **Known limit:** a tight CPU loop inside the WASM Python runtime may not yield to the V8 interrupt mechanism cleanly — the host timer will fire, but termination depends on hitting a JS↔WASM boundary. Hard fallback: kill the Node worker thread hosting the isolate. |
-| **Container** | 512 MB | 60 s | 1 CPU share | Per-run cgroup slice under [sandbox.md](sandbox.md)'s cgroup parent pattern — same mechanism as coding delegation's per-task budgets. Dispatcher SIGKILL on wall-clock exceeded. |
+| **Container** | 512 MB | 60 s | 1 CPU share | Per-run cgroup slice under [sandbox.md](sandbox.md)'s cgroup parent pattern — same mechanism as coding delegation's per-task budgets. The task's relay ends the task on wall-clock expiry and the supervisor SIGKILLs its processes. |
 
 Override per skill:
 
@@ -127,54 +127,78 @@ Implementation lives across two trees. The TypeScript host in `src/skills/worker
 | Piece | Responsibility |
 |-|-|
 | **Pool manager** (`SysboxWorkerPool`) | Track each worker's state (`idle` / `busy` / `draining`). Scale between `min` and `max` on demand. Recycle workers after N tasks or T ms age. Sweep idle workers above `min`. |
-| **Worker** (`SysboxSkillWorker`) | One sysbox container with a `SandboxSession`, reused across many tasks. Spawns the python supervisor process ONCE at create-time via `session.execStreaming`; that process stays alive for the worker's lifetime, forking a fresh child per task. The host's `Dispatcher` multiplexes sequential `task_invoke` / `task_result` over the supervisor's stdin/stdout. |
-| **Supervisor** (`supervisor.py`) | Long-lived python process inside the container. Reads `task_invoke` lines from stdin; for each task, `os.fork()`s a child that runs the existing one-shot runner (`runner.py`'s `_main(body, inputs, task_id)`). Parent supervises wall-clock via `os.pidfd_open` + `selectors.select(timeout=...)`; on timeout, SIGKILLs the child and emits `wall_clock_exceeded` on the host's behalf. Child writes `ctx_call` / `task_result` to stdout and reads `ctx_result` from stdin directly (real `os.fork()` inherits FDs cleanly). EOF on stdin = clean shutdown. |
-| **Dispatcher** | One `Dispatcher` per worker (NOT per task), reused across the worker's lifetime over a persistent NDJSON transport. Per-task `CtxHandler` is supplied at each `invoke()` call so the run id, manifest, and audit hooks scope to that task. |
+| **Worker** (`SysboxSkillWorker`) | One sysbox container with a `SandboxSession`, reused across many tasks. Spawns the python supervisor process ONCE at create-time via `session.execStreaming` and refuses it unless it announces the host's protocol version. The host's `Dispatcher` multiplexes sequential tasks over the supervisor's stdin/stdout; `invoke()` returns only after the supervisor's `task_exited`. |
+| **Supervisor** (`supervisor.py`) | Long-lived python process inside the container, and the only one holding the host channel between tasks. Per task it forks a **relay**, which forks the **task process** before reading anything from the host; see [State reset between tasks](#state-reset-between-tasks-confirmed). After the relay exits it kills and reaps its whole subtree, then sends `task_exited`. EOF on stdin = clean shutdown. |
+| **Dispatcher** | One `Dispatcher` per worker (NOT per task), reused across the worker's lifetime over a persistent NDJSON transport. Per-task `CtxHandler` is supplied at each `invoke()` call so the run id, manifest, and audit hooks scope to that task; a ctx call is served only by the handler of the running task that issued it. |
 
 ### Protocol
 
-Bidirectional JSON-RPC over stdin/stdout. One pipe handles four message types, correlated by `id`:
+Bidirectional JSON-RPC over stdin/stdout, one JSON object per line:
 
+- `supervisor_ready` (worker → host) — sent once at startup with `protocolVersion`. The worker refuses a supervisor announcing any version other than `SUPERVISOR_PROTOCOL_VERSION` (`src/skills/protocol.ts`), and one that announces nothing within 30 s.
 - `task_invoke` (host → worker) — starts a task.
-- `task_result` (worker → host) — terminal response for a task.
 - `ctx_call` (worker → host) — `ctx.*` RPCs issued mid-task (e.g. `ctx.secrets.get()`).
 - `ctx_result` (host → worker) — response to a `ctx_call`.
+- `task_result` (worker → host) — the task's outcome.
+- `task_exited` (worker → host) — every process the task started has been killed and reaped. Tier 2 only; the worker is reusable after it and not before.
 
-Each message is one line of NDJSON. Every `*_result` carries the `id` of the request it answers — a single worker may have one `task_invoke` in flight and several `ctx_call`s nested inside it concurrently. The worker-side SDK blocks the skill's Python call on the matching `ctx_result`.
+A worker has one task in flight and possibly several `ctx_call`s nested inside it, correlated by `id`. Every `ctx_call` and `ctx_result` also carries the `taskId` it belongs to, set by the relay (tier 2) or the worker's bridge (tier 1) — never by skill code. The dispatcher serves a `ctx_call` only when it names the in-flight task and that task has not yet returned its `task_result`; anything else is refused and logged. The relay delivers a `ctx_result` only to the task it names.
 
 ```json
+// worker → host (startup)
+{"type": "supervisor_ready", "protocolVersion": 2}
+
 // host → worker
-{"type": "task_invoke", "id": "run-7f3", "skill": "summarize-email", "input": {...}}
+{"type": "task_invoke", "id": "run-7f3", "skill": "summarize-email", "inputs": {...}}
 
 // worker → host (mid-task)
-{"type": "ctx_call", "id": "ctx-9a2", "method": "secrets.get", "args": {"name": "slack_webhook"}}
+{"type": "ctx_call", "taskId": "run-7f3", "id": "ctx-9a2", "method": "secrets.get", "args": {"name": "slack_webhook"}}
 
 // host → worker (answer to ctx-9a2)
-{"type": "ctx_result", "id": "ctx-9a2", "ok": true, "value": "..."}
+{"type": "ctx_result", "taskId": "run-7f3", "id": "ctx-9a2", "ok": true, "value": "..."}
 
-// worker → host (task terminal)
+// worker → host (outcome, then teardown confirmed)
 {"type": "task_result", "id": "run-7f3", "ok": true, "output": {...}}
-{"type": "task_result", "id": "run-7f3", "ok": false, "error": "..."}
+{"type": "task_exited", "id": "run-7f3"}
 ```
 
-stdin/stdout chosen over HTTP / Unix socket for simplicity — one process per worker, no port allocation, no service discovery. Multiplexing on a single pipe is fine because it's plain NDJSON with correlation IDs.
+stdin/stdout chosen over HTTP / Unix socket for simplicity — one process per worker, no port allocation, no service discovery. Inside the container the host channel never reaches skill code; see below.
+
+The protocol version lives in the supervisor, which ships in the `cogmo-skills:<version>` image published with each Cogmo release, and `COGMO_SKILLS_IMAGE` defaults to the matching tag. An image and a host from different releases fail at worker creation rather than run with a mismatched protocol; a protocol change bumps the version on both sides.
 
 ### State reset between tasks `[confirmed]`
 
-Between tasks, "state" means Python module-level globals, library internals (connection pools, engine caches), `sys.modules` entries, monkey-patches, open file handles, background threads. Any of this leaking from task 1 into task 2 is a correctness or security bug.
+Between tasks, "state" means Python module-level globals, library internals (connection pools, engine caches), `sys.modules` entries, monkey-patches, open file handles, background threads, and processes. Any of this leaking from task 1 into task 2 is a correctness or security bug. So is a task still running when the next one starts: it could call `ctx` under the next task's identity, read the next task's input, or forge its result.
 
-**Shipped: pre-fork supervisor — long-lived parent, `os.fork()` per task.** ~10-30 ms per task (COW fork from a parent that's already imported `asyncio`, `json`, `traceback`, `uuid`, the Ctx bridge classes — children inherit those for free). Full process-level isolation: every task runs in a fresh OS process forked from the supervisor's `sys.modules` snapshot at create time, so module-level state, monkey-patches, threading state, and open fds from task 1 cannot leak into task 2. Bounded container drift via the pool's `recycleAfterTasks` / `recycleAfterMs`. Wall-clock kill is `SIGKILL` on the child PID; the supervisor itself stays alive and forks a fresh child for the next task — pool worker stays reusable.
+**Shipped: pre-fork supervisor, a relay per task, and a process-tree kill before release.** Each task runs in fresh processes forked from the supervisor's `sys.modules` snapshot (~ms COW forks from a parent that has already imported the runtime), so module-level state, monkey-patches, threads and open fds cannot leak between tasks. Per task:
+
+```
+supervisor   subreaper, non-dumpable; holds the host channel, never reads it
+  └─ relay   reads the host channel for one task
+       └─ task process   runs the skill; stdin/stdout are private pipes to the relay
+```
+
+- The relay forks the task process before reading anything from the host, so no process that runs skill code ever holds the host channel or inherits host data read for another task. The supervisor never reads host input, so its heap — the image every later fork starts from — holds no task's inputs or ctx traffic.
+- The relay forwards the task's `ctx_call`s stamped with the task id, delivers only `ctx_result`s carrying that id, forwards one `task_result` with the id overwritten, and then stops relaying. It enforces the wall clock. The runner's `ctx` also raises once the result is emitted.
+- When the relay exits, the supervisor SIGKILLs every process in its subtree and reaps them, repeating until the subtree is empty. `PR_SET_CHILD_SUBREAPER` makes orphans reparent to the supervisor, so a double-forked, re-sessioned or daemonised process is still found. Only then does it send `task_exited`; if the subtree won't empty within 2 s it exits, the host sees the channel close, and the worker is discarded.
+- The supervisor and relay are non-dumpable (`PR_SET_DUMPABLE` 0): a task running as the same uid cannot open their host fds through `/proc/<pid>/fd` or ptrace them. It can still signal them; killing either fails its own task (`task_exited_without_result`) or the worker (channel closes), never another task. Task processes start a new session, so `kill(0, …)` stays inside the task, and run with `PR_SET_NO_NEW_PRIVS`.
+
+Bounded container drift via the pool's `recycleAfterTasks` / `recycleAfterMs`. Wall-clock expiry kills the task's processes; the supervisor stays alive and the worker stays reusable.
+
+Not covered: the container filesystem (`/tmp`, `$HOME`, the writable `/skill-venvs` cache) is shared by successive tasks on a worker, and a process outside the supervisor's subtree — the container's `sleep` init — is out of reach, which leans on the host's Yama `ptrace_scope` ≥ 1 to keep a task from injecting into it.
 
 **Why not subinterpreters (PEP 734).** Researched in 2026-05; ecosystem isn't ready. NumPy and pandas don't support `Py_mod_multiple_interpreters` yet (numpy/numpy#24755 estimates "~a year of rewrite"); cross-interp asyncio bridging is hand-rolled (no stdlib recipe); zero production adopters. The latency win (~50ms vs ~10-30ms here) doesn't justify the bridge complexity and ecosystem fragility. Revisit when (a) NumPy ships subinterp support, (b) at least one notable project ships it in production, (c) async-aware queue API lands in stdlib. Probably 3.16+ (late 2027).
 
-**Why not `multiprocessing` / `pebble`.** Tried; rejected. `multiprocessing.process.BaseProcess._bootstrap()` unconditionally calls `util._close_stdin()` in every worker child regardless of `fork` / `forkserver` start method. Workers can't read host stdin, which breaks the ctx-bridge over inherited stdio. Workarounds (dup-and-restore stdin, separate pipe pair with multiplexing supervisor) re-introduce the complexity hand-rolling avoids. Hand-rolled fork supervisor sidesteps the stdlib's design intent and is ~150 LOC of stdlib-only Unix code (`os.fork`, `os.pidfd_open`, `selectors.select`, `os.kill`, `os.waitpid`).
+**Why not recycle every task.** A container per task gives the same guarantees plus a clean filesystem, but costs a container start per invocation (1–2 s local, ~30 s on Daytona) — the latency the warm pool exists to remove. The relay and the process-tree kill cost a few milliseconds per task and keep the pool.
 
-**Per-skill opt-out** — `isolation: recycle` in `SKILL.md` poisons the worker after the task runs, so the pool replaces it on the next acquire. Useful for skills whose imports (e.g. C extensions with module-level threading state) might leave the supervisor's snapshot in a state we don't want subsequent tasks to inherit. The `isolation: subinterpreter` enum value is currently treated as "default" (the shipped fork-per-task model); reserved for a future runtime that actually uses PEP 734.
+**Why not `multiprocessing` / `pebble`.** Tried; rejected. `multiprocessing.process.BaseProcess._bootstrap()` unconditionally calls `util._close_stdin()` in every worker child regardless of `fork` / `forkserver` start method, and neither library kills a task's descendants or keeps the host channel out of the task's reach — the two properties the relay exists for. The hand-rolled supervisor is stdlib-only Unix code (`os.fork`, `os.pidfd_open`, `selectors`, `prctl` through `ctypes`). The supervisor runs a GC pass before each fork: the task process closes every inherited fd and reuses the numbers, so inherited garbage owning an fd would otherwise close one of the task's when finalized.
+
+**Per-skill opt-out** — `isolation: recycle` in `SKILL.md` poisons the worker after the task runs, so the pool replaces it on the next acquire and the next task gets a fresh container, filesystem included. The `isolation: subinterpreter` enum value is treated as the default; reserved for a future runtime that actually uses PEP 734.
 
 | Mode | Today (shipped) | When to use |
 |-|-|-|
-| `subinterpreter` (default) | Fork-per-task isolation; worker stays reusable. | Default for all skills — fork inherits the supervisor's pre-imports cleanly. |
-| `recycle` | Fork-per-task + worker poisoned after task → replaced on next acquire. | Skills whose imports could pollute the supervisor's `sys.modules` snapshot in a way that hurts subsequent forks (rare). |
+| `subinterpreter` (default) | Process-per-task isolation; worker stays reusable. | Default for all skills — fork inherits the supervisor's pre-imports cleanly. |
+| `recycle` | Process-per-task + worker poisoned after task → replaced on next acquire. | Skills that leave files the next task must not see (rare). |
 
 **Not used:** logical reset (`importlib.reload` + globals clear). Too leaky — misses library state and monkey-patches. Present in the option space but never the right answer.
 
@@ -1042,12 +1066,12 @@ Guarantees:
 
 ### Cross-skill leakage in a shared worker
 
-Between tasks, the worker's Python process may still hold a previous task's fetched secret in GC-reachable memory until module cleanup runs. Bounded but not zero.
+A task's processes, and the memory holding its inputs and ctx results, are gone before the next task on the worker starts; the supervisor that every task forks from never reads either (see [State reset between tasks](#state-reset-between-tasks-confirmed)). What successive tasks on one worker still share is the container filesystem: `/tmp`, `$HOME`, and the `/skill-venvs` cache, which tasks can write.
 
 Accepted at personal scale because skills are Cogmo-authored and reviewed. Upgrade paths if the threat model changes:
 
 - **Worker-per-skill-identity** — pool keyed by `(tier, skill_name)`. Skill X and Y never share a worker.
-- **Recycle every task** — pays full import cost per invocation.
+- **Recycle every task** — a fresh container per invocation: 1–2 s local, ~30 s on Daytona, and the warm pool's benefit is gone.
 - **microVM per task** — full cleanup, highest overhead.
 
 ### Secret exposure and egress control `[confirmed]`
@@ -1268,7 +1292,7 @@ interface SkillRunner {
 | Concurrency on register | Advisory lock + pending-deploy check | `pg_advisory_xact_lock` per skill name queues concurrent registers; it doesn't refresh the loser's snapshot (audit filed in `todo.md`). Refuse if a pending-approval deploy exists. Idempotent for no-op SHAs. Standard DB-backed state-machine pattern. |
 | LLM tool surface | One tool per skill (dynamic per-turn tool list) | Matches progressive disclosure — skills appear in the tool list with their own name + description. No `invoke_skill` wrapper (would break discovery). Orchestrator rebuilds tool list each turn from `SkillRunner.list()`. |
 | Manifest | Single `SkillManifestSchema` (Zod) parsed from `SKILL.md` frontmatter | Five consumers read it: register RPC, classifier, dependency populator, dispatcher, tool registrar. One schema prevents field drift. Superset of Anthropic SKILL.md. |
-| State reset | Subinterpreter per task (3.13+), per-skill `recycle` opt-out | Fresh interpreter ≈ no state leakage, ~50ms. Opt-out handles C-extension hostile libraries. Flip default to `recycle` system-wide if widespread breakage. |
+| State reset | Fresh processes per task forked from a pre-imported supervisor, behind a per-task relay; the task's process tree is killed before the worker is released; per-skill `recycle` opt-out | No in-memory state crosses tasks, and a finished task cannot reach the next one's input, ctx or result, for a few ms per task. Recycling every task adds a clean filesystem at a container start per invocation. |
 | Skill discovery | Progressive disclosure (SKILL.md) | Matches Anthropic standard. At <50 skills, tool list stays manageable. Retrieval (`search_skills`) added later when tool-list tokens or selection accuracy forces it. |
 | Resource budgets | Declared in SKILL.md; cgroup slice (container) / V8 isolate limits (WASM) | Container tier reuses sandbox.md cgroup parent. WASM uses host-side timer + isolate memory cap. Per-skill override within tier hard ceilings. |
 | Cost tracking | Wall-clock + peak memory + LLM tokens via `ctx.llm` + declared `cost_per_call_usd` | Measured per `skill_run`. Dispatcher enforces daily/monthly budget from SKILL.md. `auto` tier requires zero paid surface. |

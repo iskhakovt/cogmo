@@ -2,10 +2,11 @@
 
 Two modules carry the runtime:
 
-- `supervisor`: long-lived parent; reads `task_invoke` from stdin,
-  forks a child per task, kills on wall-clock, EOF = clean shutdown.
+- `supervisor`: long-lived parent; per task, a relay process with a
+  task process behind private pipes, then a kill of everything the task
+  left before `task_exited`. EOF = clean shutdown.
 - `runner`: per-task runner; compiles + runs the skill, emits one
-  `task_result`. Forked children execute `runner._main(...)` directly.
+  `task_result`. Task processes execute `runner._main(...)` directly.
 
 The TS host (`src/skills/worker-sysbox/worker.ts`) spawns this package
 via `python3 -u -m cogmo_skills_runtime`. See `design/skills.md` ->
