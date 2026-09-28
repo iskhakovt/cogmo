@@ -343,12 +343,15 @@ export class SysboxSkillWorker {
 
   /**
    * Run one task on this worker's supervisor. The caller must hold the
-   * worker's lease (`tryAcquire`): a task needs the channel to itself.
+   * worker's lease (`tryAcquire`): a task needs the channel to itself. A
+   * worker can die after its lease is taken; its task then fails as a
+   * value, with nothing populated or sent.
    */
   async invoke(params: InvokeParams): Promise<InvokeResult> {
-    if (this.#dispatcher.state !== "leased") {
+    const leased = this.#dispatcher.state === "leased";
+    if (!leased && this.#dispatcher.state !== "dead") {
       throw new Error(
-        `SysboxSkillWorker.invoke called in state '${this.state}' — pool must mark busy first`,
+        `SysboxSkillWorker.invoke called in state '${this.state}' — acquire it first`,
       );
     }
     const wallClockS = params.wallClockS ?? DEFAULT_WALL_CLOCK_S.container;
@@ -356,11 +359,11 @@ export class SysboxSkillWorker {
     // Ensure the skill's venv is populated before sending the task. The
     // populator is idempotent — second-and-later calls with the same
     // lockfile hash on the same worker no-op via the `.ready` marker.
-    // Failure poisons the worker because uv pip sync writes into the
+    // Failure retires the worker because uv pip sync writes into the
     // container's overlay FS; a partial populate could leave the venv
     // in an unreusable state for any future task with the same hash.
     let lockfileHash: string | undefined;
-    if (params.deps) {
+    if (params.deps && leased) {
       const populate = await ensureVenvPopulated({
         session: this.#session,
         lockfileHash: params.deps.lockfileHash,

@@ -564,6 +564,79 @@ describe("SysboxSkillWorker", () => {
       expect(taskInvokes).toHaveLength(0);
     });
 
+    it("fails a task on a worker that died after its lease as a value, populating nothing", async () => {
+      const bundle = buildFakeSandbox();
+      const w = await SysboxSkillWorker.create({
+        workerId: "w-dead-leased",
+        sandbox: bundle.sandbox,
+        image: "cogmo-skills:test",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      w.tryAcquire();
+      bundle.stdout.end();
+      await w.dead;
+
+      const r = await w.invoke({
+        ...invokeParams("t-dead"),
+        deps: { lockfileHash: LOCKFILE_HASH, lockfileContents: "httpx==0.27.0\n" },
+      });
+
+      expect(r).toEqual({
+        ok: false,
+        error: "dispatcher_error: worker is dead: worker closed its output",
+        workerReusable: false,
+      });
+      // Only the supervisor was ever started: no populate ran.
+      expect(bundle.session.execStreaming).toHaveBeenCalledTimes(1);
+    });
+
+    it("fails the task as a value when the supervisor dies during its venv populate", async () => {
+      const bundle = buildFakeSandbox();
+      vi.mocked(bundle.session.execStreaming).mockImplementation(async (cmd) => {
+        if (cmd[3] === "populate") {
+          return {
+            stdin: new PassThrough() as unknown as Writable,
+            stdout: new PassThrough() as unknown as Readable,
+            stderr: new PassThrough() as unknown as Readable,
+            wait: async () => {
+              // The supervisor dies while uv pip sync runs.
+              bundle.stdout.end();
+              await new Promise<void>((r) => setImmediate(r));
+              return { exitCode: 0 };
+            },
+            dispose: async () => {},
+          };
+        }
+        bundle.stdout.write(`${SUPERVISOR_READY}\n`);
+        return {
+          stdin: bundle.stdin as unknown as Writable,
+          stdout: bundle.stdout as unknown as Readable,
+          stderr: new PassThrough() as unknown as Readable,
+          wait: async () => ({ exitCode: 0 }),
+          dispose: async () => {},
+        };
+      });
+      const w = await SysboxSkillWorker.create({
+        workerId: "w-venv-death",
+        sandbox: bundle.sandbox,
+        image: "cogmo-skills:test",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      w.tryAcquire();
+
+      const r = await w.invoke({
+        ...invokeParams("t-venv-death"),
+        deps: { lockfileHash: LOCKFILE_HASH, lockfileContents: "httpx==0.27.0\n" },
+      });
+
+      expect(r).toEqual({
+        ok: false,
+        error: "dispatcher_error: worker is dead: worker closed its output",
+        workerReusable: false,
+      });
+      expect(w.state).toBe("draining");
+    });
+
     it("returns only once the supervisor confirms the task's processes exited", async () => {
       const bundle = buildFakeSandbox();
       const w = await SysboxSkillWorker.create({
