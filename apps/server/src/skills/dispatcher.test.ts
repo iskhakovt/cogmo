@@ -10,7 +10,13 @@ import {
   type WorkerTransport,
 } from "./dispatcher.js";
 import type { HostMessage, TaskInvoke, TaskResult } from "./protocol.js";
-import type { ExitOutcome, Handshake, StartFailure, WorkerFrame } from "./worker-state.js";
+import type {
+  ExitOutcome,
+  Handshake,
+  StartFailure,
+  TaskOutcome,
+  WorkerFrame,
+} from "./worker-state.js";
 
 /**
  * The worker's end of an in-memory channel. `emit` delivers a frame to the
@@ -90,8 +96,14 @@ function flush(): Promise<void> {
   return new Promise((r) => setImmediate(r));
 }
 
-function completed(result: TaskResult, exit: ExitOutcome = { kind: "confirmed" }) {
-  return ok({ result, exit });
+/** A task that delivered `result`. */
+function completed(result: TaskResult, exit: ExitOutcome = { kind: "confirmed" }): TaskOutcome {
+  return { result: ok(result), exit };
+}
+
+/** A task that failed for `reason` without a result, as the worker died under it. */
+function failed(reason: string): TaskOutcome {
+  return { result: err({ kind: "failed", reason }), exit: { kind: "unconfirmed", reason } };
 }
 
 const INVOKE: TaskInvoke = {
@@ -320,9 +332,7 @@ describe("Dispatcher", () => {
     // Failing now surfaces it; waiting would hang until the deadline.
     ch.emit(result(null, "wrong"));
 
-    expect(await outcome).toEqual(
-      err({ kind: "failed", reason: expect.stringMatching(/task_result id mismatch/) }),
-    );
+    expect(await outcome).toEqual(failed(expect.stringMatching(/task_result id mismatch/)));
     expect(d.state).toBe("dead");
   });
 
@@ -331,7 +341,7 @@ describe("Dispatcher", () => {
     const d = await leased(ch);
     const outcome = d.invoke(INVOKE, { ctxHandler: noopHandler(), deadline: NEVER });
     d.close("torn-down");
-    expect(await outcome).toEqual(err({ kind: "failed", reason: "torn-down" }));
+    expect(await outcome).toEqual(failed("torn-down"));
     expect(ch.close).toHaveBeenCalled();
   });
 
@@ -343,7 +353,7 @@ describe("Dispatcher", () => {
       d.invoke({ ...INVOKE, id: "task-2" }, { ctxHandler: noopHandler(), deadline: NEVER }),
     ).toThrow(/in-flight/);
     d.close("done");
-    expect((await first).isErr()).toBe(true);
+    expect((await first).result.isErr()).toBe(true);
   });
 
   it("throws synchronously on an invoke without a lease", async () => {
@@ -362,7 +372,7 @@ describe("Dispatcher", () => {
     const d = await leased(ch);
     d.close("closed");
     expect(await d.invoke(INVOKE, { ctxHandler: noopHandler(), deadline: NEVER })).toEqual(
-      err({ kind: "failed", reason: "worker is dead: closed" }),
+      failed("worker is dead: closed"),
     );
     expect(ch.sent).toEqual([]);
   });
@@ -410,7 +420,7 @@ describe("Dispatcher", () => {
       },
     });
     expect(await d.invoke(INVOKE, { ctxHandler: noopHandler(), deadline: NEVER })).toEqual(
-      err({ kind: "failed", reason: "task_invoke send failed: transport failed" }),
+      failed("task_invoke send failed: transport failed"),
     );
     expect(d.state).toBe("dead");
   });
@@ -422,9 +432,7 @@ describe("Dispatcher", () => {
     const d = await leased(ch);
     const outcome = d.invoke(INVOKE, { ctxHandler: noopHandler(), deadline: NEVER });
     ch.fail(new Error("transport: maximum buffer reached"));
-    expect(await outcome).toEqual(
-      err({ kind: "failed", reason: "transport: maximum buffer reached" }),
-    );
+    expect(await outcome).toEqual(failed("transport: maximum buffer reached"));
   });
 
   it("dies once when the channel fails with no task in flight", async () => {
@@ -494,9 +502,7 @@ describe("Dispatcher", () => {
     const outcome = d.invoke(INVOKE, { ctxHandler: noopHandler(), deadline: NEVER });
     ch.emit({ type: "ctx_call", taskId: "task-1", id: "ctx-1", method: "now", args: {} });
 
-    expect(await outcome).toEqual(
-      err({ kind: "failed", reason: expect.stringMatching(/ctx_result send failed/) }),
-    );
+    expect(await outcome).toEqual(failed(expect.stringMatching(/ctx_result send failed/)));
   });
 
   describe("ctx_call task binding", () => {
@@ -655,14 +661,10 @@ describe("Dispatcher", () => {
       const d = await leased(ch);
       const outcome = d.invoke(INVOKE, { ctxHandler: noopHandler(), deadline: NEVER });
       ch.emit({ type: "task_exited", id: "task-1" });
-      expect(await outcome).toEqual(
-        completed({
-          type: "task_result",
-          id: "task-1",
-          ok: false,
-          error: "task_exited_without_result",
-        }),
-      );
+      expect(await outcome).toEqual({
+        result: err({ kind: "exited_without_result" }),
+        exit: { kind: "confirmed" },
+      });
       expect(d.state).toBe("leased");
     });
 
@@ -730,7 +732,7 @@ describe("Dispatcher", () => {
       const d = await leased(ch);
       const outcome = d.invoke(INVOKE, { ctxHandler: noopHandler(), deadline: NEVER });
       d.close("supervisor unresponsive");
-      expect(await outcome).toEqual(err({ kind: "failed", reason: "supervisor unresponsive" }));
+      expect(await outcome).toEqual(failed("supervisor unresponsive"));
     });
   });
 
@@ -755,7 +757,10 @@ describe("Dispatcher", () => {
       const deadline = new AbortController();
       const outcome = d.invoke(INVOKE, { ctxHandler: noopHandler(), deadline: deadline.signal });
       deadline.abort();
-      expect(await outcome).toEqual(err({ kind: "timed_out" }));
+      expect(await outcome).toEqual({
+        result: err({ kind: "timed_out" }),
+        exit: { kind: "unconfirmed", reason: "task deadline passed" },
+      });
       expect(d.state).toBe("dead");
       expect(ch.close).toHaveBeenCalled();
     });
@@ -799,7 +804,7 @@ describe("Dispatcher", () => {
       const ch = channel();
       const d = await leased(ch);
       const outcome = d.invoke(INVOKE, { ctxHandler: noopHandler(), deadline: NEVER });
-      d.release();
+      expect(d.release()).toBe(false);
       expect(d.state).toBe("running");
       expect(d.tryAcquire()).toBe(false);
 
@@ -807,9 +812,95 @@ describe("Dispatcher", () => {
       ch.emit({ type: "task_exited", id: "task-1" });
       await outcome;
       expect(d.state).toBe("leased");
-      d.release();
+      expect(d.release()).toBe(true);
       expect(d.state).toBe("idle");
       expect(d.tryAcquire()).toBe(true);
+    });
+
+    it("leaves the worker as it was when it refuses a command", async () => {
+      const idle = async (ch: Channel): Promise<Dispatcher> => {
+        const opened = open(ch);
+        ch.emit({ type: "ready" });
+        return unwrap(await opened);
+      };
+      const reach: Record<string, (ch: Channel) => Promise<Dispatcher>> = {
+        idle,
+        leased: (ch) => leased(ch),
+        running: async (ch) => {
+          const d = await leased(ch);
+          d.invoke(INVOKE, { ctxHandler: noopHandler(), deadline: NEVER });
+          return d;
+        },
+        awaiting_exit: async (ch) => {
+          const d = await leased(ch);
+          d.invoke(INVOKE, { ctxHandler: noopHandler(), deadline: NEVER });
+          ch.emit(result(1));
+          await flush();
+          return d;
+        },
+        dead: async (ch) => {
+          const d = await idle(ch);
+          d.close("gone");
+          return d;
+        },
+      };
+      const commands: Record<string, (d: Dispatcher) => boolean> = {
+        tryAcquire: (d) => d.tryAcquire(),
+        release: (d) => d.release(),
+        invoke: (d) => {
+          try {
+            d.invoke({ ...INVOKE, id: "probe" }, { ctxHandler: noopHandler(), deadline: NEVER });
+            return true;
+          } catch {
+            return false;
+          }
+        },
+      };
+      for (const [state, setup] of Object.entries(reach)) {
+        for (const [name, command] of Object.entries(commands)) {
+          const d = await setup(channel());
+          const before = d.state;
+          if (!command(d)) expect(d.state, `${state} × ${name}`).toBe(before);
+        }
+      }
+    });
+
+    it("makes a worker that dies unheld disposable at once", async () => {
+      const ch = channel();
+      const opened = open(ch);
+      ch.emit({ type: "ready" });
+      const d = unwrap(await opened);
+      let disposable = false;
+      void d.disposable.then(() => {
+        disposable = true;
+      });
+
+      d.close("gone");
+      await flush();
+
+      expect(disposable).toBe(true);
+      expect(d.release()).toBe(false);
+    });
+
+    it("keeps a worker that dies held until its caller releases it", async () => {
+      const ch = channel();
+      const d = await leased(ch);
+      let disposable = false;
+      void d.disposable.then(() => {
+        disposable = true;
+      });
+      const outcome = d.invoke(INVOKE, { ctxHandler: noopHandler(), deadline: NEVER });
+
+      ch.fail(new Error("transport: worker closed its output"));
+      await outcome;
+      await flush();
+      expect(await d.dead).toBe("transport: worker closed its output");
+      expect(disposable).toBe(false);
+
+      expect(d.release()).toBe(true);
+      await flush();
+      expect(disposable).toBe(true);
+      expect(d.release()).toBe(false);
     });
 
     it("aborting its signal closes the channel", async () => {
@@ -818,7 +909,7 @@ describe("Dispatcher", () => {
       const d = await leased(ch, { signal: lifetime.signal });
       const outcome = d.invoke(INVOKE, { ctxHandler: noopHandler(), deadline: NEVER });
       lifetime.abort(new Error("pool disposed"));
-      expect(await outcome).toEqual(err({ kind: "failed", reason: "pool disposed" }));
+      expect(await outcome).toEqual(failed("pool disposed"));
       expect(await d.dead).toBe("pool disposed");
       expect(ch.close).toHaveBeenCalled();
     });

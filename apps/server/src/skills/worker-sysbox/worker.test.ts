@@ -297,7 +297,7 @@ describe("SysboxSkillWorker", () => {
       bundle.stdout.write(taskResultLine("t-early", null));
 
       await expect(create(bundle)).rejects.toThrow(
-        /supervisor sent a task frame before supervisor_ready/,
+        /supervisor sent task_result before supervisor_ready/,
       );
       expect(bundle.execDisposeCalls.count).toBe(1);
       expect(bundle.sandbox.delete).toHaveBeenCalledWith(bundle.session);
@@ -384,10 +384,10 @@ describe("SysboxSkillWorker", () => {
       expect(w.state).toBe("idle");
       w.retire();
       w.release();
-      expect(w.state).toBe("draining");
+      expect(w.state).toBe("dead");
     });
 
-    it("retire flips to draining; idempotent; no-op once disposed", async () => {
+    it("retire makes the worker dead; idempotent; no-op once disposed", async () => {
       const { sandbox } = buildFakeSandbox();
       const w = await SysboxSkillWorker.create({
         workerId: "w-5",
@@ -396,9 +396,9 @@ describe("SysboxSkillWorker", () => {
         expiresAt: new Date(Date.now() + 60_000),
       });
       w.retire();
-      expect(w.state).toBe("draining");
+      expect(w.state).toBe("dead");
       w.retire();
-      expect(w.state).toBe("draining");
+      expect(w.state).toBe("dead");
       await w.dispose();
       w.retire();
       expect(w.state).toBe("disposed");
@@ -460,7 +460,7 @@ describe("SysboxSkillWorker", () => {
       expect(w.state).toBe("busy");
     });
 
-    it("`isolation: recycle` poisons the worker after the task runs", async () => {
+    it("`isolation: recycle` retires the worker after the task runs", async () => {
       const bundle = buildFakeSandbox();
       autoRespond(bundle, { ok: true, output: null });
       const w = await SysboxSkillWorker.create({
@@ -473,7 +473,7 @@ describe("SysboxSkillWorker", () => {
       const r = await w.invoke({ ...invokeParams("t-r"), isolation: "recycle" });
       expect(r.ok).toBe(true);
       expect(r.workerReusable).toBe(false);
-      expect(w.state).toBe("draining");
+      expect(w.state).toBe("dead");
     });
 
     it("with deps: populates venv and threads skill_venv into task_invoke", async () => {
@@ -541,7 +541,7 @@ describe("SysboxSkillWorker", () => {
       expect(taskInvokes[0]?.lockfileHash).toBe(LOCKFILE_HASH);
     });
 
-    it("with deps: populate_failed poisons the worker, no task is invoked", async () => {
+    it("with deps: populate_failed retires the worker, no task is invoked", async () => {
       const bundle = buildFakeSandbox();
       vi.mocked(bundle.session.execStreaming).mockImplementation(async (cmd) => {
         if (cmd[3] === "populate") {
@@ -602,7 +602,7 @@ describe("SysboxSkillWorker", () => {
       expect(r.error).toMatch(/skill_venv_populate_failed/);
       expect(r.error).toMatch(/hash mismatch/);
       expect(r.workerReusable).toBe(false);
-      expect(w.state).toBe("draining");
+      expect(w.state).toBe("dead");
       expect(taskInvokes).toHaveLength(0);
     });
 
@@ -676,7 +676,7 @@ describe("SysboxSkillWorker", () => {
         error: "dispatcher_error: worker is dead: worker closed its output",
         workerReusable: false,
       });
-      expect(w.state).toBe("draining");
+      expect(w.state).toBe("dead");
     });
 
     it("returns only once the supervisor confirms the task's processes exited", async () => {
@@ -722,7 +722,7 @@ describe("SysboxSkillWorker", () => {
       bundle.stdout.end();
 
       await expect(pending).resolves.toEqual({ ok: true, output: 1, workerReusable: false });
-      expect(w.state).toBe("draining");
+      expect(w.state).toBe("dead");
     });
 
     it("fails the task when the supervisor's output closes before its result", async () => {
@@ -743,7 +743,7 @@ describe("SysboxSkillWorker", () => {
         error: expect.stringMatching(/worker closed its output/),
         workerReusable: false,
       });
-      expect(w.state).toBe("draining");
+      expect(w.state).toBe("dead");
     });
 
     it("keeps a delivered result when the host watchdog fires before task_exited", async () => {
@@ -765,7 +765,7 @@ describe("SysboxSkillWorker", () => {
       } finally {
         vi.useRealTimers();
       }
-      expect(w.state).toBe("draining");
+      expect(w.state).toBe("dead");
     });
 
     it("retires itself when its supervisor dies while idle", async () => {
@@ -779,7 +779,7 @@ describe("SysboxSkillWorker", () => {
       bundle.stdout.end();
       await new Promise((r) => setImmediate(r));
 
-      expect(w.state).toBe("draining");
+      expect(w.state).toBe("dead");
       expect(w.tryAcquire()).toBe(false);
     });
 
@@ -816,10 +816,10 @@ describe("SysboxSkillWorker", () => {
       expect(handlerB.handle).not.toHaveBeenCalled();
     });
 
-    it("host watchdog fires when supervisor never replies (poisons worker)", async () => {
+    it("host watchdog fires when supervisor never replies (retires worker)", async () => {
       // Supervisor stub never writes a task_result. The host-side watchdog
       // (= wallClockS + 10s grace) fires; worker reports
-      // `supervisor_unresponsive` and goes draining.
+      // `supervisor_unresponsive` and dies.
       const bundle = buildFakeSandbox();
       // No autoRespond — stub stays silent.
       const w = await SysboxSkillWorker.create({
@@ -848,7 +848,7 @@ describe("SysboxSkillWorker", () => {
       } finally {
         vi.useRealTimers();
       }
-      expect(w.state).toBe("draining");
+      expect(w.state).toBe("dead");
     });
   });
 
@@ -941,7 +941,7 @@ describe("SysboxSkillWorker", () => {
       });
       lifetime.abort(new Error("pool disposed"));
       await expect(w.dead).resolves.toBe("pool disposed");
-      expect(w.state).toBe("draining");
+      expect(w.state).toBe("dead");
       expect(bundle.stdin.writableEnded).toBe(true);
     });
 

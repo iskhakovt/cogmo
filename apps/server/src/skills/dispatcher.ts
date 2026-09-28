@@ -25,9 +25,10 @@ const log = logger.child({ component: "skills.dispatcher" });
 
 /**
  * One worker's channel. `messages()` yields the worker's frames in arrival
- * order, each validated: a worker message, or a malformed frame. It ends when the worker closes its end or the host calls
- * `close()`, and throws when the channel fails; unless the host closed it,
- * either means the worker is gone. Iterate it once.
+ * order, each validated: a worker message, or a malformed frame. It ends
+ * when the worker closes its end or the host calls `close()`, and throws
+ * when the channel fails; unless the host closed it, either means the
+ * worker is gone. Iterate it once.
  */
 export interface WorkerTransport {
   /** Send one frame. May throw if the channel cannot carry it; after `close()` it drops the frame. */
@@ -43,8 +44,8 @@ export interface WorkerTransport {
  */
 export interface CtxHandler {
   /**
-   * Resolve a single ctx_call. Return `{ ok: true, value }` on success, or
-   * throw a `CtxError` to surface a typed Python exception in the worker.
+   * Resolve a single ctx_call with the call's value, or throw a `CtxError`
+   * to surface a typed Python exception in the worker.
    */
   handle(call: { method: string; args: unknown }): Promise<unknown>;
 }
@@ -97,8 +98,11 @@ interface PendingTask {
 export class Dispatcher {
   #started = Promise.withResolvers<Result<void, StartFailure>>();
   #dead = Promise.withResolvers<string>();
+  #disposable = Promise.withResolvers<void>();
   /** Resolves with the reason once the channel is dead and can run no further task. */
   readonly dead = this.#dead.promise;
+  /** Resolves once the channel is dead and no caller holds it. */
+  readonly disposable = this.#disposable.promise;
   #transport: WorkerTransport;
   #state: WorkerState<PendingTask>;
   #log: typeof log;
@@ -144,16 +148,19 @@ export class Dispatcher {
     return this.#dispatch({ type: "acquire" }).isOk();
   }
 
-  /** Return a leased worker to idle. A worker with a task on it stays held. */
-  release(): void {
-    this.#dispatch({ type: "release" });
+  /**
+   * Give back a worker this caller holds: a leased one goes idle, a dead one
+   * becomes disposable. False otherwise — a task on it keeps it held.
+   */
+  release(): boolean {
+    return this.#dispatch({ type: "release" }).isOk();
   }
 
   /**
    * Send a task to a leased worker; `ctxHandler` serves this task's ctx calls
    * and no other's. Settles once the task's exit is confirmed or the channel
-   * dies, and never rejects. Throws if the worker is not leased, which is a
-   * caller bug.
+   * dies, and never rejects. Throws if the worker is live but not leased,
+   * which is a caller bug; on a dead worker the task fails as a value.
    */
   invoke(
     message: TaskInvoke,
@@ -205,14 +212,13 @@ export class Dispatcher {
    * the reason when the event is a host command the state refuses.
    */
   #dispatch(event: WorkerEvent<PendingTask>): Result<void, string> {
-    const { state, effects } = transition(this.#state, event);
-    this.#state = state;
+    const next = transition(this.#state, event);
+    if (next.isErr()) return err(next.error);
+    this.#state = next.value.state;
     // Effects run in order; events they raise go through the machine after.
-    const raised: WorkerEvent<PendingTask>[] = [];
-    for (const effect of effects) raised.push(...this.#execute(effect));
-    for (const next of raised) this.#dispatch(next);
-    const refusal = effects.find((e) => e.type === "refused");
-    return refusal ? err(refusal.reason) : ok(undefined);
+    const raised = next.value.effects.flatMap((effect) => this.#execute(effect));
+    for (const followUp of raised) this.#dispatch(followUp);
+    return ok(undefined);
   }
 
   #execute(effect: Effect<PendingTask>): ReadonlyArray<WorkerEvent<PendingTask>> {
@@ -236,11 +242,14 @@ export class Dispatcher {
         this.#dead.resolve(reason);
         return [];
       })
+      .with({ type: "disposable" }, () => {
+        this.#disposable.resolve();
+        return [];
+      })
       .with({ type: "log" }, ({ level, message, fields }) => {
         this.#log[level](fields, message);
         return [];
       })
-      .with({ type: "refused" }, () => [])
       .exhaustive();
   }
 

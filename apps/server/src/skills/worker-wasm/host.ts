@@ -146,27 +146,25 @@ async function runTask(
       },
       { once: true, signal: finished.signal },
     );
-    const outcome = await dispatcher.invoke(
+    const { result } = await dispatcher.invoke(
       { type: "task_invoke", id: params.taskId, skill: params.skillName, inputs: params.inputs },
       {
         ctxHandler: params.ctxHandler,
         deadline: timeoutSignal(wallClockS * 1000 + TERMINATE_GRACE_MS),
       },
     );
-    return outcome.match(
-      ({ result }) => fromTaskResult(result),
-      (failure) => ({
-        ok: false,
-        error: match(failure)
-          .with({ kind: "timed_out" }, () => "wall_clock_exceeded")
-          // The interrupt can kill the thread outright: a task that fails
-          // once the wall clock has passed failed because of it.
-          .with({ kind: "failed" }, ({ reason }) =>
-            wallClock.aborted ? "wall_clock_exceeded" : reason,
-          )
-          .exhaustive(),
-      }),
-    );
+    return result.match(fromTaskResult, (failure) => ({
+      ok: false,
+      error: match(failure)
+        .with({ kind: "timed_out" }, () => "wall_clock_exceeded")
+        // The interrupt can kill the thread outright: a task that fails
+        // once the wall clock has passed failed because of it.
+        .with({ kind: "failed" }, ({ reason }) =>
+          wallClock.aborted ? "wall_clock_exceeded" : reason,
+        )
+        .with({ kind: "exited_without_result" }, () => "task_exited_without_result")
+        .exhaustive(),
+    }));
   } finally {
     finished.abort();
     dispatcher.close("finished");

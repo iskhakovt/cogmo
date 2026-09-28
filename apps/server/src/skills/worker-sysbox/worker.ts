@@ -32,7 +32,7 @@ const SUPERVISOR_CMD = ["python3", "-u", "-m", "cogmo_skills_runtime"] as const;
 const log = logger.child({ component: "skills.worker.sysbox" });
 
 /** A worker as the pool sees it: its channel's state, plus whether its container is gone. */
-export type WorkerStatus = "idle" | "busy" | "draining" | "disposed";
+export type WorkerStatus = "idle" | "busy" | "dead" | "disposed";
 
 export interface SysboxSkillWorkerOptions {
   /** Stable identifier — also doubles as the sandbox `taskId` for label/lineage. */
@@ -91,7 +91,7 @@ function acceptSupervisorReady(first: WorkerFrame): Result<void, string> {
     .with({ type: "malformed" }, ({ issues }) =>
       err(`supervisor sent a malformed frame before supervisor_ready (${issues.join("; ")})`),
     )
-    .otherwise(() => err("supervisor sent a task frame before supervisor_ready"));
+    .otherwise(({ type }) => err(`supervisor sent ${type} before supervisor_ready`));
 }
 
 function describeStartFailure(failure: StartFailure): string {
@@ -117,15 +117,12 @@ function fromTaskResult(result: TaskResult): Omit<InvokeResult, "workerReusable"
   };
 }
 
-function fromTaskFailure(failure: TaskFailure): InvokeResult {
-  return {
-    ok: false,
-    error: match(failure)
-      .with({ kind: "timed_out" }, () => "supervisor_unresponsive")
-      .with({ kind: "failed" }, ({ reason }) => `dispatcher_error: ${reason}`)
-      .exhaustive(),
-    workerReusable: false,
-  };
+function describeTaskFailure(failure: TaskFailure): string {
+  return match(failure)
+    .with({ kind: "timed_out" }, () => "supervisor_unresponsive")
+    .with({ kind: "failed" }, ({ reason }) => `dispatcher_error: ${reason}`)
+    .with({ kind: "exited_without_result" }, () => "task_exited_without_result")
+    .exhaustive();
 }
 
 export interface InvokeParams {
@@ -195,14 +192,17 @@ export interface InvokeResult {
  * `SUPERVISOR_PROTOCOL_VERSION`.
  *
  * `state` is the channel's state (`worker-state.ts`) as the pool sees it:
- * `idle`; `busy` while leased; `draining` once dead; `disposed` once its
- * container is torn down. `dead` resolves the moment it can run no
- * further task, whatever the cause.
+ * `idle`; `busy` while leased or running a task; `dead`; `disposed` once
+ * its container is torn down. `dead` resolves the moment it can run no
+ * further task, whatever the cause; `disposable` once, dead, no caller
+ * holds it any more.
  */
 export class SysboxSkillWorker {
   readonly workerId: string;
   /** Resolves with the reason once the worker can run no further task. */
   readonly dead: Promise<string>;
+  /** Resolves once the worker is dead and no caller holds it: its container can go. */
+  readonly disposable: Promise<void>;
   #sandbox: SandboxClient;
   #session: SandboxSession;
   #exec: ExecStreamingHandle;
@@ -225,6 +225,7 @@ export class SysboxSkillWorker {
     this.#exec = opts.exec;
     this.#dispatcher = opts.dispatcher;
     this.dead = opts.dispatcher.dead;
+    this.disposable = opts.dispatcher.disposable;
     const now = Date.now();
     this.#lastUsedAtMs = now;
     this.#createdAtMs = now;
@@ -329,7 +330,7 @@ export class SysboxSkillWorker {
       .returnType<WorkerStatus>()
       .with("idle", () => "idle")
       .with(P.union("starting", "leased", "running", "awaiting_exit"), () => "busy")
-      .with("dead", () => "draining")
+      .with("dead", () => "dead")
       .exhaustive();
   }
 
@@ -354,12 +355,15 @@ export class SysboxSkillWorker {
    * value, with nothing populated or sent.
    */
   async invoke(params: InvokeParams): Promise<InvokeResult> {
-    const leased = this.#dispatcher.state === "leased";
-    if (!leased && this.#dispatcher.state !== "dead") {
-      throw new Error(
-        `SysboxSkillWorker.invoke called in state '${this.state}' — acquire it first`,
-      );
-    }
+    const leased = match(this.#dispatcher.state)
+      .with("leased", () => true)
+      .with("dead", () => false)
+      .with(P.union("starting", "idle", "running", "awaiting_exit"), () => {
+        throw new Error(
+          `SysboxSkillWorker.invoke called in state '${this.state}' — acquire it first`,
+        );
+      })
+      .exhaustive();
     const wallClockS = params.wallClockS ?? DEFAULT_WALL_CLOCK_S.container;
 
     // Ensure the skill's venv is populated before sending the task. The
@@ -400,7 +404,7 @@ export class SysboxSkillWorker {
       wallClockS,
     };
 
-    const outcome = await this.#dispatcher.invoke(invoke, {
+    const { result, exit } = await this.#dispatcher.invoke(invoke, {
       ctxHandler: params.ctxHandler,
       // The relay's wall clock fires first under normal conditions and
       // reports `wall_clock_exceeded` as the task's result; this deadline
@@ -414,12 +418,10 @@ export class SysboxSkillWorker {
     const recycle = params.isolation === "recycle";
     if (recycle) this.retire();
 
-    return outcome.match(
-      ({ result, exit }) => ({
-        ...fromTaskResult(result),
-        workerReusable: exit.kind === "confirmed" && !recycle,
-      }),
-      fromTaskFailure,
+    const workerReusable = exit.kind === "confirmed" && !recycle;
+    return result.match(
+      (delivered) => ({ ...fromTaskResult(delivered), workerReusable }),
+      (failure) => ({ ok: false, error: describeTaskFailure(failure), workerReusable }),
     );
   }
 
@@ -428,9 +430,12 @@ export class SysboxSkillWorker {
     return this.#dispatcher.tryAcquire();
   }
 
-  /** Return a leased worker whose task has exited to idle. */
-  release(): void {
-    this.#dispatcher.release();
+  /**
+   * Return a leased worker to idle once its task has exited; a dead one this
+   * caller held becomes disposable. False if the caller holds nothing.
+   */
+  release(): boolean {
+    return this.#dispatcher.release();
   }
 
   /**
