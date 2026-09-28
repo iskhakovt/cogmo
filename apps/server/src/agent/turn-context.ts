@@ -6,6 +6,7 @@
 import * as R from "remeda";
 import { z } from "zod";
 import type { ContentBlock, Message } from "../llm/types.js";
+import { escapeClosingTags } from "../util/string.js";
 import { blockGroups, formatBlockGroups } from "./core-memory/groups.js";
 import type { CoreMemoryView, ScopedCoreMemoryBlock } from "./core-memory/scope.js";
 
@@ -126,16 +127,9 @@ function formatTime(at: Date, timezone: string): string {
   return `${parts.weekday}, ${parts.month} ${parts.day}, ${parts.year}, ${parts.hour}:${parts.minute} (${timezone})`;
 }
 
-/**
- * Backslash-escapes any closing tag of the block's elements a lenient reader
- * would honor (any case, whitespace at the slash), so a memory or a core
- * memory block can't end its element.
- */
+/** `text` with the block's closing tags escaped, so a memory or a core memory block can't end its element. */
 function escapeEnvelope(text: string): string {
-  return text.replace(
-    /<(\s*)\/(\s*(?:recalled_memories|core_memory_updates|turn_context))/gi,
-    "<$1\\/$2",
-  );
+  return escapeClosingTags(text, ["recalled_memories", "core_memory_updates", "turn_context"]);
 }
 
 /** `message` with `rendered` as its leading block, ahead of the user's own content. */

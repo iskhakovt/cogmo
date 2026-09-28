@@ -61,6 +61,7 @@ import {
   handleVoice,
   type TelegramCommandContext,
 } from "./commands.js";
+import { inboundTextBlock } from "./forwarded.js";
 import { postPipelineGateKeyboard } from "./pipeline-gate-poster.js";
 import { ProfileDialogs } from "./profile-dialog.js";
 import { renderTelegramHtml, stripHtmlTags } from "./render.js";
@@ -1208,8 +1209,12 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
     const addr = String(ctx.chat.id);
     const handle = String(ctx.from.id);
     const platformTs = new Date(ctx.message.date * 1000);
+    // Forwarded text is packed as a marked block; the user's own stays a bare string.
+    const origin = ctx.message.forward_origin;
+    const content: InboundContent =
+      origin === undefined ? ctx.message.text : [inboundTextBlock(ctx.message.text, origin)];
 
-    await dispatchInbound(ctx, addr, handle, ctx.message.text, platformTs);
+    await dispatchInbound(ctx, addr, handle, content, platformTs);
   });
 
   bot.on("message:photo", async (ctx) => {
@@ -1230,7 +1235,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       const caption = ctx.message.caption ?? "";
 
       const content: InboundContent = [];
-      if (caption) content.push({ type: "text", text: caption });
+      if (caption) content.push(inboundTextBlock(caption, ctx.message.forward_origin));
       content.push({ type: "image", path, mediaType: "image/jpeg" });
 
       await dispatchInbound(ctx, addr, handle, content, platformTs);
@@ -1266,7 +1271,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       const isImage = mediaType.startsWith("image/");
 
       const content: InboundContent = [];
-      if (caption) content.push({ type: "text", text: caption });
+      if (caption) content.push(inboundTextBlock(caption, ctx.message.forward_origin));
       if (isImage) {
         content.push({ type: "image", path, mediaType });
       } else {
@@ -1307,7 +1312,7 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       const durationMs = voice.duration ? voice.duration * 1000 : undefined;
 
       const content: InboundContent = [];
-      if (caption) content.push({ type: "text", text: caption });
+      if (caption) content.push(inboundTextBlock(caption, ctx.message.forward_origin));
       content.push({
         type: "voice",
         path,

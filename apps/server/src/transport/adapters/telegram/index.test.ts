@@ -671,6 +671,86 @@ describe("telegram adapter", () => {
     });
   });
 
+  describe("forwarded messages", () => {
+    const forwardOrigin = {
+      type: "user",
+      date: 1600000000,
+      sender_user: { id: 7, is_bot: false, first_name: "Alice" },
+    };
+    const forwarded = { origin: "user", from: "Alice", sentAt: "2020-09-13T12:26:40.000Z" };
+
+    function asForwarded<C extends { message: object }>(ctx: C): C {
+      return { ...ctx, message: { ...ctx.message, forward_origin: forwardOrigin } };
+    }
+
+    beforeEach(() => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+        }),
+      );
+    });
+
+    it("packs forwarded text as a marked text block", async () => {
+      const { transport } = await createAdapter();
+      await handlers.get("on:message:text")!(asForwarded(makeCtx(111, "meet at 8", 42)));
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [{ type: "text", text: "meet at 8", forwarded }],
+        expect.any(Date),
+      );
+    });
+
+    it("marks a forwarded photo's caption", async () => {
+      const { transport } = await createAdapter();
+      await handlers.get("on:message:photo")!(asForwarded(makePhotoCtx(111, "Look at this!")));
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [
+          { type: "text", text: "Look at this!", forwarded },
+          { type: "image", path: "inbound/test.jpg", mediaType: "image/jpeg" },
+        ],
+        expect.any(Date),
+      );
+    });
+
+    it("marks a forwarded document's caption", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeDocumentCtx(111, { file_name: "x.txt", mime_type: "text/plain" }, "notes");
+      await handlers.get("on:message:document")!(asForwarded(ctx));
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [
+          { type: "text", text: "notes", forwarded },
+          { type: "document", path: "inbound/test.jpg", mediaType: "text/plain", name: "x.txt" },
+        ],
+        expect.any(Date),
+      );
+    });
+
+    it("marks a forwarded voice note's caption", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeVoiceCtx(111, { duration: 3 }, "listen up");
+      await handlers.get("on:message:voice")!(asForwarded(ctx));
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [
+          { type: "text", text: "listen up", forwarded },
+          { type: "voice", path: "inbound/test.jpg", mediaType: "audio/ogg", durationMs: 3000 },
+        ],
+        expect.any(Date),
+      );
+    });
+  });
+
   describe("streaming", () => {
     async function createStreamingAdapter() {
       const { adapter } = await createAdapter();

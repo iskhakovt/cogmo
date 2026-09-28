@@ -3235,6 +3235,55 @@ describe("createHandleMessage", () => {
     });
   });
 
+  describe("forwarded text", () => {
+    const forwarded = {
+      origin: "user",
+      from: "Alice",
+      sentAt: "2020-09-13T12:26:40.000Z",
+    } as const;
+    const wrapped =
+      '<forwarded_message from="Alice" origin="user" sent="2020-09-13T12:26:40.000Z">\n' +
+      "meet at 8\n</forwarded_message>";
+
+    async function persistedUserContent(content: InboundContent): Promise<unknown> {
+      const deps = mockDeps({
+        transportStore: mockTransportStore({
+          getUnbatchedInbound: vi.fn().mockResolvedValue([{ id: "inbound-1", content }]),
+        }),
+      });
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+      const [, message] = expectDefined(vi.mocked(deps.agentStore.insertMessage).mock.calls[0]);
+      return message.content;
+    }
+
+    it("persists forwarded text inside its element", async () => {
+      const content = await persistedUserContent([
+        { type: "text", text: "meet at 8", forwarded },
+        { type: "text", text: "is this right?" },
+      ]);
+
+      expect(content).toBe(`${wrapped}\nis this right?`);
+    });
+
+    it("persists a forwarded caption beside an attachment inside its element", async () => {
+      const content = await persistedUserContent([
+        { type: "text", text: "meet at 8", forwarded },
+        { type: "image", path: "inbound/a.jpg", mediaType: "image/jpeg" },
+      ]);
+
+      expect(content).toBe(
+        JSON.stringify([
+          { type: "text", text: wrapped },
+          { type: "image", path: "inbound/a.jpg", mediaType: "image/jpeg" },
+        ]),
+      );
+    });
+  });
+
   describe("auto-recall failure", () => {
     let add: MockInstance<typeof memoryRecallFailures.add>;
     beforeEach(() => {

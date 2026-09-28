@@ -26,7 +26,7 @@ import type { SkillRunner } from "../skills/runner.js";
 import { buildSkillTools, composeTurnTools } from "../skills/skill-tool-builder.js";
 import { createSkillsService } from "../skills/skills-service.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
-import { contentToBlocks, type InboundContent } from "../transport/content.js";
+import { contentToBlocks, type InboundContent, renderInboundText } from "../transport/content.js";
 import type { DeliveryRouter } from "../transport/delivery-router.js";
 import type { TransportStore } from "../transport/store/index.js";
 import { resolveVoiceMode } from "../voice/mode.js";
@@ -466,19 +466,24 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           : [];
 
       // Single source of truth for "what does each inbound row look like
-      // after voice transcription?". Both consumers below (userContentText
-      // for persistence; resolvedBlocks for the LLM call) derive from this
-      // — eliminates the parallel-cursor pattern that was fragile under
-      // walk-order changes. Cursor advances across rows in the same order
-      // `transcripts` was produced (inboundMessages.flatMap order, voice
-      // refs only).
+      // after voice transcription, with forwarded text inside its
+      // `<forwarded_message>` element?". Both consumers below
+      // (userContentText for persistence; resolvedBlocks for the LLM call)
+      // derive from this — eliminates the parallel-cursor pattern that was
+      // fragile under walk-order changes. Cursor advances across rows in the
+      // same order `transcripts` was produced (inboundMessages.flatMap order,
+      // voice refs only).
       const substitutedMessages = ((): ReadonlyArray<{ content: InboundContent }> => {
         let cursor = 0;
         return inboundMessages.map((m) => {
           if (typeof m.content === "string") return { content: m.content };
-          const blocks = m.content.map((b) =>
-            b.type === "voice" ? ({ type: "text", text: transcripts[cursor++] ?? "" } as const) : b,
-          );
+          const blocks = m.content.map((b) => {
+            if (b.type === "voice") {
+              return { type: "text", text: transcripts[cursor++] ?? "" } as const;
+            }
+            if (b.type === "text") return { type: "text", text: renderInboundText(b) } as const;
+            return b;
+          });
           return { content: blocks };
         });
       })();

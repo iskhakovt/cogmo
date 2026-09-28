@@ -1,10 +1,24 @@
 import { z } from "zod";
 import type { ContentBlock } from "../llm/types.js";
+import { escapeClosingTags } from "../util/string.js";
+
+/**
+ * Where forwarded text came from: the kind of sender, its display name (a
+ * person's name, or a chat or channel title with the author's signature when
+ * there is one) and when the original was sent.
+ */
+const ForwardedOriginSchema = z.object({
+  origin: z.enum(["user", "hidden_user", "chat", "channel"]),
+  from: z.string(),
+  sentAt: z.string().datetime(),
+});
+export type ForwardedOrigin = z.infer<typeof ForwardedOriginSchema>;
 
 /**
  * Inbound block shapes — what adapters pack into `inbound_messages.content`.
- * `text` is a plain text run; `image` carries either an S3 path (after
- * `uploadAttachment`) or inline base64/url data.
+ * `text` is a plain text run, carrying `forwarded` when someone other than the
+ * user wrote it; `image` carries either an S3 path (after `uploadAttachment`)
+ * or inline base64/url data.
  *
  * The two image variants share `type: "image"`, so they live in a single
  * object schema with `path` and `data` both optional and a `refine` that
@@ -15,7 +29,9 @@ import type { ContentBlock } from "../llm/types.js";
 const InboundTextBlockSchema = z.object({
   type: z.literal("text"),
   text: z.string(),
+  forwarded: ForwardedOriginSchema.optional(),
 });
+export type InboundTextBlock = z.infer<typeof InboundTextBlockSchema>;
 
 const InboundImageBlockSchema = z
   .object({
@@ -118,7 +134,7 @@ export function contentToBlocks(content: InboundContent): InboundBlock[] {
 
   return content.flatMap<InboundBlock>((block) => {
     if (block.type === "text") {
-      return [{ type: "text", text: block.text }];
+      return [{ type: "text", text: renderInboundText(block) }];
     }
     if (block.type === "image") {
       if (block.path != null) {
@@ -170,6 +186,34 @@ export function contentToBlocks(content: InboundContent): InboundBlock[] {
     }
     return [];
   });
+}
+
+/**
+ * A text block as the transcript carries it: its own text, or forwarded text
+ * inside a `<forwarded_message>` element naming its sender, so the model never
+ * reads it as the user's words. A pure function of the block, so the user
+ * message it lands in stores the same bytes on every turn.
+ */
+export function renderInboundText(block: InboundTextBlock): string {
+  const { forwarded } = block;
+  if (forwarded === undefined) return block.text;
+  const attributes = [
+    `from="${attributeValue(forwarded.from)}"`,
+    `origin="${attributeValue(forwarded.origin)}"`,
+    `sent="${attributeValue(forwarded.sentAt)}"`,
+  ].join(" ");
+  const body = escapeClosingTags(block.text, ["forwarded_message"]);
+  return `<forwarded_message ${attributes}>\n${body}\n</forwarded_message>`;
+}
+
+/** `value` inside a double-quoted attribute: markup characters as entities, whitespace runs as one space. */
+function attributeValue(value: string): string {
+  return value
+    .replace(/\s+/g, " ")
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 /**
