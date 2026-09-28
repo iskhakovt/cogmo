@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { expectDefined } from "../../test/assertions.js";
+import { expectDefined, resolvesWithin } from "../../test/assertions.js";
 import { CogmoSocketProxy } from "./index.js";
 import type { TaskScope } from "./types.js";
 
@@ -290,6 +290,67 @@ describe("CogmoSocketProxy", () => {
     expect(err.message).toMatch(/ENOENT|connect/);
   });
 
+  it("unregisterTask ends a hijacked stream instead of waiting on it", async () => {
+    const daemon = holdUpstreamOpen();
+    const sock = await proxy.registerTask(SCOPE);
+    const client = openStream(sock, "GET /events HTTP/1.1\r\nHost: docker\r\n\r\n");
+    await resolvesWithin(daemon.held, 1_000, "the request to reach the daemon");
+
+    await resolvesWithin(proxy.unregisterTask(SCOPE.taskId), 1_000, "unregisterTask");
+    await resolvesWithin(client.closed, 1_000, "the client connection to close");
+    await resolvesWithin(daemon.closed, 1_000, "the daemon connection to close");
+  });
+
+  it("unregisterTask ends a forwarded request still waiting on the daemon", async () => {
+    const daemon = holdUpstreamOpen();
+    const sock = await proxy.registerTask(SCOPE);
+    const client = openStream(
+      sock,
+      "POST /containers/abc/wait HTTP/1.1\r\nHost: docker\r\nContent-Length: 0\r\n\r\n",
+    );
+    await resolvesWithin(daemon.held, 1_000, "the request to reach the daemon");
+
+    await resolvesWithin(proxy.unregisterTask(SCOPE.taskId), 1_000, "unregisterTask");
+    await resolvesWithin(client.closed, 1_000, "the client connection to close");
+    await resolvesWithin(daemon.closed, 1_000, "the daemon connection to close");
+  });
+
+  it("unregisterTask leaves another task's streams open", async () => {
+    const daemon = holdUpstreamOpen();
+    await proxy.registerTask(SCOPE);
+    const sock = await proxy.registerTask({
+      ...SCOPE,
+      taskId: "019d0000-0000-7000-8000-0000000000b2",
+    });
+    const client = openStream(sock, "GET /events HTTP/1.1\r\nHost: docker\r\n\r\n");
+    const events = await resolvesWithin(daemon.held, 1_000, "the request to reach the daemon");
+
+    await proxy.unregisterTask(SCOPE.taskId);
+
+    events.write('{"status":"start"}\n');
+    await vi.waitFor(() => expect(client.received()).toContain('"status":"start"'), {
+      timeout: 1_000,
+    });
+  });
+
+  it("a close() racing registerTask leaves no listener behind", async () => {
+    const registering = expect(proxy.registerTask(SCOPE)).rejects.toThrow("proxy is closed");
+    await proxy.close();
+
+    await registering;
+    expect(await socketExists(join(baseDir, "sockets", `${SCOPE.taskId}.sock`))).toBe(false);
+  });
+
+  it("an unregisterTask racing registerTask leaves no listener behind", async () => {
+    const registering = expect(proxy.registerTask(SCOPE)).rejects.toThrow(
+      "task socket unregistered",
+    );
+    await proxy.unregisterTask(SCOPE.taskId);
+
+    await registering;
+    expect(await socketExists(join(baseDir, "sockets", `${SCOPE.taskId}.sock`))).toBe(false);
+  });
+
   it("close() tears down all task sockets", async () => {
     const sockA = await proxy.registerTask({
       ...SCOPE,
@@ -423,6 +484,41 @@ describe("CogmoSocketProxy hijack/forward — fuzz the transcript", () => {
     expect(r.status).toBe(200);
   });
 });
+
+/**
+ * Make the daemon answer with headers and hold the response open, as it does
+ * for `GET /events`, `logs -f` and `POST /containers/{id}/wait`. `held`
+ * resolves with the response once the request reaches the daemon; `closed`
+ * once the daemon-side connection closes.
+ */
+function holdUpstreamOpen(): { held: Promise<http.ServerResponse>; closed: Promise<void> } {
+  const held = Promise.withResolvers<http.ServerResponse>();
+  const closed = Promise.withResolvers<void>();
+  upstreamResponder = (req, res) => {
+    req.socket.once("close", () => closed.resolve());
+    res.writeHead(200, { "content-type": "application/json" });
+    res.flushHeaders();
+    held.resolve(res);
+  };
+  return { held: held.promise, closed: closed.promise };
+}
+
+/** Send a raw request on a task socket; `received` is everything read back so far. */
+function openStream(
+  socketPath: string,
+  request: string,
+): { closed: Promise<void>; received: () => string } {
+  const socket = net.createConnection({ path: socketPath });
+  const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+  // A reset is an acceptable way for the proxy to end the stream.
+  socket.on("error", () => {});
+  let received = "";
+  socket.on("data", (chunk: Buffer) => {
+    received += chunk.toString("utf8");
+  });
+  socket.once("connect", () => socket.write(request));
+  return { closed, received: () => received };
+}
 
 async function socketExists(p: string): Promise<boolean> {
   try {
