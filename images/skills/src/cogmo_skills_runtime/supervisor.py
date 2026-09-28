@@ -4,33 +4,50 @@ Architecture (see design/skills.md "Warm pool"):
 
   - The TS worker (`src/skills/worker-sysbox/worker.ts`) spawns this
     module via `python3 -u -m cogmo_skills_runtime` once at create
-    time. It stays alive across the worker's lifetime, forking a
-    fresh child per `task_invoke`.
-  - Per-task isolation: every task runs in a fresh OS process forked
-    from the supervisor's `sys.modules` snapshot at create time.
-    Module-level state, monkey-patches, threading state, and open
-    fds from task 1 cannot leak into task 2.
-  - Wall-clock kill: `os.pidfd_open` + `selectors.select(timeout=...)`
-    gives a single-syscall bounded wait. On timeout the supervisor
-    SIGKILLs the child and emits `wall_clock_exceeded` on the host's
-    behalf; the supervisor itself stays alive for the next task.
-  - Children inherit stdin/stdout from the supervisor (real
-    `os.fork()` inherits FDs cleanly), so `runner._main`'s NDJSON
-    bridge reads/writes the host's pipes directly.
+    time. It announces `supervisor_ready` with its protocol version and
+    stays alive across the worker's lifetime.
+  - Two processes per task, both forked from the supervisor's clean
+    `sys.modules` snapshot:
+
+      supervisor (subreaper, non-dumpable; owns the host channel, never reads it)
+        └─ relay    (one per task; reads the host channel, relays one task)
+             └─ task (runs the skill; stdin/stdout are private pipes to the relay)
+
+    The relay forks the task process *before* it reads anything from the
+    host, so no task's process ever inherits host data read on another
+    task's behalf. The supervisor never reads host input at all.
+  - The relay forwards the task's `ctx_call`s stamped with the task id,
+    delivers only `ctx_result`s carrying that id, forwards the task's one
+    `task_result`, and stops. It enforces the wall clock. A `ctx_result`
+    with no task id comes from a host that predates task binding and
+    fails the task with `host_protocol_mismatch`.
+  - Once the relay exits, the supervisor SIGKILLs every process still
+    in its subtree — the task, anything the task forked, detached or
+    re-sessioned — and reaps them. Orphans reparent to the supervisor
+    (`PR_SET_CHILD_SUBREAPER`), so the subtree is complete. Only when it
+    is empty does the supervisor send `task_exited`, which is what
+    releases the worker host-side. A subtree it cannot empty makes the
+    supervisor exit, which the host treats as a dead worker.
+  - The supervisor and relay are non-dumpable (`PR_SET_DUMPABLE` 0), so
+    a task running as the same uid cannot open their host fds through
+    `/proc/<pid>/fd` or ptrace them. Task processes start a new session
+    (so `kill(0, …)` stays inside the task) with `PR_SET_NO_NEW_PRIVS`.
+    Their stderr is the supervisor's: a write-only log pipe the host never
+    parses for frames.
 
 Why hand-rolled (vs `multiprocessing` / `pebble`):
 `multiprocessing.process.BaseProcess._bootstrap()` unconditionally
-calls `util._close_stdin()` in every worker child regardless of `fork`
-/ `forkserver` start method. Workers can't read host stdin, which
-breaks the ctx-bridge over inherited stdio. Hand-rolling sidesteps
-that — we own the fork lifecycle and inherit fds intact. PEP 734
-subinterpreters considered too; ecosystem isn't ready (numpy/pandas
-don't support `Py_mod_multiple_interpreters`, async bridge is
-hand-rolled, no production adopters). Revisit at 3.16+.
+calls `util._close_stdin()` in every worker child, and neither library
+kills a task's descendants or gives the relay a channel the task cannot
+write to. PEP 734 subinterpreters considered too; ecosystem isn't ready
+(numpy/pandas don't support `Py_mod_multiple_interpreters`, async bridge
+is hand-rolled, no production adopters). Revisit at 3.16+.
 """
 
 import asyncio
+import ctypes
 import errno
+import gc
 import json
 import os
 import re
@@ -38,21 +55,112 @@ import selectors
 import signal
 import sys
 import time
-from collections.abc import Callable, Mapping
+import traceback
+from collections.abc import Mapping
+from typing import Any
 
 from cogmo_skills_runtime.runner import _main as _run_main
 
+# Wire protocol version announced in `supervisor_ready`. The host refuses
+# a supervisor announcing any other version (`SUPERVISOR_PROTOCOL_VERSION`
+# in `src/skills/protocol.ts`).
+PROTOCOL_VERSION = 2
+
 DEFAULT_WALL_CLOCK_S = 60
 SIGKILL_GRACE_S = 2.0
+# Supervisor backstop past the relay's own wall clock, for a relay that
+# stopped responding (e.g. SIGSTOPped by the task it serves).
+RELAY_GRACE_S = 2.0
+# How long the supervisor keeps killing a task's subtree before giving up
+# on the worker.
+SWEEP_DEADLINE_S = 2.0
+
+# Matches the runner's frame cap: a `ctx.http` body travels in both
+# directions, up to the host's 5 MiB cap plus JSON escaping.
+MAX_FRAME_BYTES = 16 * 1024 * 1024
+_READ_CHUNK = 1 << 16
+
+_HOST_IN = 0
+_HOST_OUT = 1
+
+# Relay exit codes, read by the supervisor.
+_RELAY_DONE = 0
+_RELAY_HOST_CLOSED = 3
+
+# linux/prctl.h
+_PR_SET_DUMPABLE = 4
+_PR_SET_CHILD_SUBREAPER = 36
+_PR_SET_NO_NEW_PRIVS = 38
+
+
+def _prctl(option: int, arg: int) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    zero = ctypes.c_ulong(0)
+    if libc.prctl(ctypes.c_int(option), ctypes.c_ulong(arg), zero, zero, zero) != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+
+
+class FrameTooLargeError(Exception):
+    """A peer sent more than `MAX_FRAME_BYTES` without a newline."""
+
+
+class _LineReader:
+    """Splits NDJSON frames off a raw fd, holding a partial frame between reads."""
+
+    def __init__(self, fd: int) -> None:
+        self.fd = fd
+        self.eof = False
+        # Set when the last read on a non-blocking fd found the pipe empty.
+        self.drained = False
+        self._buf = bytearray()
+
+    def read(self) -> list[bytes]:
+        """One `read(2)`; returns the frames it completed. Sets `eof` when the writer closed."""
+        try:
+            chunk = os.read(self.fd, _READ_CHUNK)
+        except BlockingIOError:
+            self.drained = True
+            return []
+        self.drained = False
+        if not chunk:
+            self.eof = True
+            return []
+        # The held partial frame has no newline, so only the new chunk is
+        # searched — a multi-MB frame costs one pass, not one per chunk.
+        self._buf += chunk
+        frames: list[bytes] = []
+        nl = self._buf.find(b"\n", len(self._buf) - len(chunk))
+        while nl >= 0:
+            frames.append(bytes(self._buf[:nl]))
+            del self._buf[: nl + 1]
+            nl = self._buf.find(b"\n")
+        if len(self._buf) > MAX_FRAME_BYTES:
+            raise FrameTooLargeError()
+        return frames
+
+
+def _parse(frame: bytes) -> dict[str, Any] | None:
+    try:
+        msg = json.loads(frame)
+    except ValueError:
+        return None
+    return msg if isinstance(msg, dict) else None
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view) :]
 
 
 def _send(obj: Mapping[str, object]) -> None:
-    """Write a single JSON object to host stdout. Used only for results
-    the supervisor synthesises (timeout, child died); normal task_results
-    come from the child writing directly to its inherited stdout.
-    """
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
+    """Write one frame to the host. Only the supervisor and the relay hold the host fds."""
+    _write_all(_HOST_OUT, (json.dumps(obj) + "\n").encode())
+
+
+def _failure(task_id: str, error: str) -> dict[str, object]:
+    return {"type": "task_result", "id": task_id, "ok": False, "error": error}
 
 
 def _wait_with_timeout(pid: int, timeout_s: float) -> int:
@@ -63,9 +171,11 @@ def _wait_with_timeout(pid: int, timeout_s: float) -> int:
     """
     pidfd = os.pidfd_open(pid)
     try:
-        sel = selectors.DefaultSelector()
-        sel.register(pidfd, selectors.EVENT_READ)
-        events = sel.select(timeout=timeout_s)
+        # Closed explicitly: a selector and its key map form a reference
+        # cycle, so dropping it leaves the epoll fd to a later GC pass.
+        with selectors.DefaultSelector() as sel:
+            sel.register(pidfd, selectors.EVENT_READ)
+            events = sel.select(timeout=timeout_s)
         if not events:
             raise TimeoutError()
         # Child is exit-ready; reap it.
@@ -101,6 +211,70 @@ def _kill_and_reap(pid: int) -> None:
         os.waitpid(pid, 0)
     except ChildProcessError:
         pass
+
+
+def _exit_detail(status: int) -> str:
+    if os.WIFSIGNALED(status):
+        return f"signal={os.WTERMSIG(status)}"
+    return f"exit={os.WEXITSTATUS(status)}"
+
+
+def _descendants(root: int) -> list[int]:
+    """Every live or zombie process below `root`, from a `/proc` scan."""
+    children: dict[int, list[int]] = {}
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/stat", "rb") as f:
+                stat = f.read()
+        except OSError:
+            continue  # exited mid-scan
+        # `comm` may hold spaces and parens; ppid is the second field after the last ')'.
+        ppid = int(stat[stat.rindex(b")") + 2 :].split()[1])
+        children.setdefault(ppid, []).append(int(name))
+    found: list[int] = []
+    stack = [root]
+    while stack:
+        for child in children.get(stack.pop(), ()):
+            found.append(child)
+            stack.append(child)
+    return found
+
+
+def _reap_children() -> None:
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if pid == 0:
+            return
+
+
+def _sweep_descendants(deadline_s: float) -> bool:
+    """SIGKILL and reap every process below the supervisor. True once none remain.
+
+    Loops because a process can fork between a scan and its kill; every
+    round kills everything that existed at its scan, so a forking tree
+    runs out of survivors within a few rounds.
+    """
+    me = os.getpid()
+    deadline = time.monotonic() + deadline_s
+    while True:
+        _reap_children()
+        pids = _descendants(me)
+        if not pids:
+            return True
+        if time.monotonic() >= deadline:
+            sys.stderr.write(f"supervisor: {len(pids)} task process(es) survived the sweep: {pids}\n")
+            return False
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        time.sleep(0.001)
 
 
 # In-container root for the deps-cache volume mount. Mirrors
@@ -141,7 +315,7 @@ def _skill_venv_path(lockfile_hash: str) -> str:
 def _activate_skill_venv(lockfile_hash: str) -> None:
     """Activate the skill venv for `lockfile_hash` in the current process.
 
-    Must run in the forked child *before* any skill code imports. We
+    Must run in the task process *before* any skill code imports. We
     prepend the venv's `site-packages` to `sys.path`, set
     `VIRTUAL_ENV`, and prepend `<venv>/bin` to PATH. The supervisor's
     own runtime venv (where `cogmo_skills_runtime` lives) stays on
@@ -170,10 +344,8 @@ def _activate_skill_venv(lockfile_hash: str) -> None:
 
 
 def _run_one_task_in_child(task: Mapping[str, object]) -> None:
-    """Runs in the forked child. Returns nothing; the runner writes its
-    own task_result to stdout. Child exits with code 0 on normal
-    completion (including ctx-error / skill-exception paths — those
-    still lead to a task_result before exit).
+    """Runs in the task process. Returns nothing; the runner writes its
+    own task_result to stdout (the private pipe to the relay).
     """
     body = str(task.get("body", ""))
     inputs = task.get("inputs")
@@ -189,143 +361,275 @@ def _run_one_task_in_child(task: Mapping[str, object]) -> None:
         # surfaces a synthetic task_result so the host doesn't hang.
         try:
             sys.stdout.write(
-                json.dumps(
-                    {
-                        "type": "task_result",
-                        "id": task_id,
-                        "ok": False,
-                        "error": f"supervisor_child_aborted: {type(e).__name__}: {e}",
-                    }
-                )
-                + "\n"
+                json.dumps(_failure(task_id, f"supervisor_child_aborted: {type(e).__name__}: {e}")) + "\n"
             )
             sys.stdout.flush()
         except Exception:
             pass
 
 
-def main() -> None:
-    """Long-lived task-dispatch loop. Reads task_invoke lines from host
-    stdin, forks a child per task, supervises wall-clock + reaping.
-    EOF on stdin = clean shutdown.
-
-    Reads via `sys.stdin.buffer` (the underlying `BufferedReader`, not
-    the `TextIOWrapper`). The child uses `asyncio.connect_read_pipe`
-    against `sys.stdin.buffer` too, and connect_read_pipe operates on
-    the file descriptor directly — bytes parked in the parent's
-    `TextIOWrapper` decode buffer would be invisible to the child's
-    asyncio reader. By keeping both sides on the same `BufferedReader`
-    we avoid that whole class of buffering surprise.
-    """
-    stdin = sys.stdin.buffer
-    while True:
-        try:
-            line_bytes = stdin.readline()
-        except KeyboardInterrupt:
+def _task_process(to_task_r: int, from_task_w: int) -> None:
+    """Body of the task process: private stdio, then one task."""
+    os.setsid()
+    _prctl(_PR_SET_NO_NEW_PRIVS, 1)
+    os.dup2(to_task_r, 0)
+    os.dup2(from_task_w, 1)
+    # Drop every other inherited fd: the relay's pipe ends and the
+    # supervisor's status pipe. The host channel is gone once 0/1 are
+    # replaced. CPython closes the range with close_range(2), so a large
+    # RLIMIT_NOFILE costs nothing (0.03 ms at 524288 in the runtime image).
+    os.closerange(3, os.sysconf("SC_OPEN_MAX"))
+    reader = _LineReader(0)
+    while not reader.eof:
+        frames = reader.read()
+        if frames:
+            task = _parse(frames[0])
+            if task is not None and isinstance(task.get("id"), str):
+                _run_one_task_in_child(task)
             return
-        if not line_bytes:
-            return  # EOF — host closed stdin, clean shutdown.
-        line = line_bytes.decode("utf-8", errors="replace").strip()
-        if not line:
-            continue
-        try:
-            task = json.loads(line)
-        except json.JSONDecodeError:
-            sys.stderr.write("supervisor: ignoring malformed line\n")
-            continue
-        if not isinstance(task, dict) or task.get("type") != "task_invoke":
-            kind_repr = task.get("type") if isinstance(task, dict) else type(task).__name__
-            sys.stderr.write(f"supervisor: ignoring non-task message: {kind_repr}\n")
-            continue
-        task_id = task.get("id")
-        if not isinstance(task_id, str) or not task_id:
-            sys.stderr.write("supervisor: task_invoke missing 'id'\n")
-            continue
-        _dispatch_one_task(task, task_id, _send)
 
 
-def _dispatch_one_task(
-    task: Mapping[str, object],
-    task_id: str,
-    send: Callable[[Mapping[str, object]], None],
-) -> None:
-    """Fork + run one task, supervise wall-clock + reaping, synthesize a
-    `task_result` for the abnormal exit / timeout / waitpid-error paths.
-    Extracted from `main()` so tests can drive a single dispatch with a
-    captured `send` callback.
+def _await_task_invoke(host: _LineReader) -> tuple[bytes, dict[str, Any]] | None:
+    """Read host frames until a `task_invoke`. Stale frames (a late
+    `ctx_result` for an earlier task) are dropped. None on EOF.
     """
-    wall_clock_s = task.get("wallClockS") or DEFAULT_WALL_CLOCK_S
-    if not isinstance(wall_clock_s, int | float):
-        wall_clock_s = DEFAULT_WALL_CLOCK_S
+    while not host.eof:
+        for frame in host.read():
+            msg = _parse(frame)
+            if msg is None or msg.get("type") != "task_invoke":
+                continue
+            task_id = msg.get("id")
+            if isinstance(task_id, str) and task_id:
+                return frame, msg
+            sys.stderr.write("supervisor: task_invoke missing 'id'\n")
+    return None
 
-    # Fork. The child inherits stdin/stdout, the parent's pre-imports,
-    # and the runner's globals. Sequential per-supervisor — only one
-    # child at a time, no race on stdio.
-    pid = os.fork()
-    if pid == 0:
-        # Child — runs one task, exits.
+
+class _Relay:
+    """Relays one task between the host channel and the task's private pipes."""
+
+    def __init__(self, task_id: str, task_pid: int, host: _LineReader, to_task_w: int, from_task_r: int) -> None:
+        self.task_id = task_id
+        self.task_pid = task_pid
+        self.host = host
+        self.to_task_w = to_task_w
+        self.task_out = _LineReader(from_task_r)
+
+    def run(self, wall_clock_s: float) -> int:
+        os.set_blocking(self.task_out.fd, False)
+        pidfd = os.pidfd_open(self.task_pid)
+        sel = selectors.DefaultSelector()
+        sel.register(self.task_out.fd, selectors.EVENT_READ, "task")
+        sel.register(self.host.fd, selectors.EVENT_READ, "host")
+        sel.register(pidfd, selectors.EVENT_READ, "exited")
+        deadline = time.monotonic() + wall_clock_s
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                sys.stderr.write(f"supervisor: wall-clock {wall_clock_s}s exceeded for task {self.task_id}\n")
+                _send(_failure(self.task_id, "wall_clock_exceeded"))
+                return _RELAY_DONE
+            ready = {key.data for key, _ in sel.select(remaining)}
+            # Task output first: a task_result written just before exit
+            # must win over the exit itself.
+            if "task" in ready:
+                if self._pump_task():
+                    return _RELAY_DONE
+                if self.task_out.eof:
+                    sel.unregister(self.task_out.fd)
+            if "host" in ready and (code := self._pump_host()) is not None:
+                return code
+            if "exited" in ready:
+                return self._on_task_exit()
+
+    def _pump_task(self) -> bool:
+        """Forward what the task wrote. True once its task_result is out."""
         try:
-            _run_one_task_in_child(task)
+            frames = self.task_out.read()
+        except FrameTooLargeError:
+            _send(_failure(self.task_id, "task_frame_too_large"))
+            return True
+        for frame in frames:
+            msg = _parse(frame)
+            if msg is None:
+                continue
+            kind = msg.get("type")
+            if kind == "task_result":
+                msg.pop("taskId", None)
+                _send({**msg, "id": self.task_id})
+                return True
+            if kind == "ctx_call":
+                call_id, method = msg.get("id"), msg.get("method")
+                if isinstance(call_id, str) and call_id and isinstance(method, str) and method:
+                    _send(
+                        {
+                            "type": "ctx_call",
+                            "taskId": self.task_id,
+                            "id": call_id,
+                            "method": method,
+                            "args": msg.get("args"),
+                        }
+                    )
+        return False
+
+    def _pump_host(self) -> int | None:
+        """Deliver this task's ctx_results. Returns the relay's exit code once it must stop."""
+        try:
+            frames = self.host.read()
+        except FrameTooLargeError:
+            sys.stderr.write("supervisor: oversized frame from host\n")
+            return _RELAY_HOST_CLOSED
+        if self.host.eof:
+            return _RELAY_HOST_CLOSED
+        for frame in frames:
+            msg = _parse(frame)
+            if msg is None or msg.get("type") != "ctx_result":
+                continue
+            if "taskId" not in msg:
+                # The host predates task binding and will never tag a reply;
+                # waiting would stall every ctx call until the wall clock.
+                _send(_failure(self.task_id, "host_protocol_mismatch: ctx_result without taskId"))
+                return _RELAY_DONE
+            if msg["taskId"] != self.task_id:
+                continue
+            try:
+                _write_all(self.to_task_w, frame + b"\n")
+            except BrokenPipeError:
+                pass  # task already closed its stdin
+        return None
+
+    def _on_task_exit(self) -> int:
+        """The task process exited: forward a result it left in the pipe, else report the death."""
+        # Bounded: a descendant may still hold the write end and keep writing.
+        for _ in range(2 * MAX_FRAME_BYTES // _READ_CHUNK):
+            if self._pump_task():
+                return _RELAY_DONE
+            if self.task_out.eof or self.task_out.drained:
+                break
+        _, status = os.waitpid(self.task_pid, 0)
+        detail = _exit_detail(status)
+        sys.stderr.write(f"supervisor: task {self.task_id} exited without a result: {detail}\n")
+        _send(_failure(self.task_id, f"child_died: {detail}"))
+        return _RELAY_DONE
+
+
+def _relay(status_w: int) -> int:
+    """Body of the relay process. Returns its exit code."""
+    to_task_r, to_task_w = os.pipe()
+    from_task_r, from_task_w = os.pipe()
+    # Fork the task process before reading anything from the host, so it
+    # inherits no host data.
+    task_pid = os.fork()
+    if task_pid == 0:
+        try:
+            _task_process(to_task_r, from_task_w)
+        except BaseException:
+            traceback.print_exc()
         finally:
             # _exit, not sys.exit — skip atexit/finalizers that could
-            # double-flush the inherited stdout (we already flushed
-            # the task_result line) or interfere with other in-flight
-            # state in the parent.
+            # double-flush inherited buffers.
             os._exit(0)
+    os.close(to_task_r)
+    os.close(from_task_w)
 
-    # Parent — wait for the child with timeout.
+    host = _LineReader(_HOST_IN)
     try:
-        status = _wait_with_timeout(pid, wall_clock_s)
+        invoke = _await_task_invoke(host)
+    except FrameTooLargeError:
+        sys.stderr.write("supervisor: oversized frame from host\n")
+        return _RELAY_HOST_CLOSED
+    if invoke is None:
+        return _RELAY_HOST_CLOSED
+    frame, task = invoke
+    task_id = str(task["id"])
+    wall_clock_s = task.get("wallClockS")
+    if not isinstance(wall_clock_s, int | float) or isinstance(wall_clock_s, bool) or wall_clock_s <= 0:
+        wall_clock_s = DEFAULT_WALL_CLOCK_S
+    _write_all(status_w, json.dumps({"id": task_id, "wallClockS": wall_clock_s}).encode())
+    os.close(status_w)
+    try:
+        _write_all(to_task_w, frame + b"\n")
+    except BrokenPipeError:
+        pass  # task process died before its task arrived; the exit path reports it
+    return _Relay(task_id, task_pid, host, to_task_w, from_task_r).run(wall_clock_s)
+
+
+def _read_all(fd: int) -> bytes:
+    chunks: list[bytes] = []
+    while chunk := os.read(fd, _READ_CHUNK):
+        chunks.append(chunk)
+    os.close(fd)
+    return b"".join(chunks)
+
+
+def _serve_one_task() -> bool:
+    """Fork a relay, wait for it to serve one task, then clear the task's
+    processes and confirm with `task_exited`. False once the host closed
+    the channel.
+    """
+    # The task process closes every inherited fd and reuses the numbers.
+    # Garbage inherited from here that owns an fd would close the task's
+    # reused fd when a GC pass in the task finalizes it, so none may cross
+    # the fork.
+    gc.collect()
+    status_r, status_w = os.pipe()
+    relay_pid = os.fork()
+    if relay_pid == 0:
+        code = 1
+        try:
+            os.close(status_r)
+            code = _relay(status_w)
+        except BaseException:
+            traceback.print_exc()
+        finally:
+            os._exit(code)
+    os.close(status_w)
+
+    header = _parse(_read_all(status_r))
+    if header is None:
+        # The relay exited without taking a task: the host closed the channel.
+        _, status = os.waitpid(relay_pid, 0)
+        _sweep_descendants(SWEEP_DEADLINE_S)
+        if not (os.WIFEXITED(status) and os.WEXITSTATUS(status) == _RELAY_HOST_CLOSED):
+            sys.stderr.write(f"supervisor: relay exited before taking a task: {_exit_detail(status)}\n")
+        return False
+
+    task_id = str(header["id"])
+    wall_clock_s = float(header["wallClockS"])
+    host_closed = False
+    try:
+        status = _wait_with_timeout(relay_pid, wall_clock_s + RELAY_GRACE_S)
     except TimeoutError:
-        sys.stderr.write(f"supervisor: wall-clock {wall_clock_s}s exceeded for task {task_id}; killing child\n")
-        _kill_and_reap(pid)
-        send(
-            {
-                "type": "task_result",
-                "id": task_id,
-                "ok": False,
-                "error": "wall_clock_exceeded",
-            }
-        )
+        sys.stderr.write(f"supervisor: relay for task {task_id} unresponsive; killing it\n")
+        _kill_and_reap(relay_pid)
     except OSError as e:
-        # pidfd_open / waitpid raised — should be very rare. ECHILD
-        # means the child was already reaped by something else (we're
-        # the only reaper, so this is "really shouldn't happen"); skip
-        # the redundant kill on that path. For any other OSError we
-        # SIGKILL as a precaution in case the process is still alive.
         if e.errno != errno.ECHILD:
-            sys.stderr.write(f"supervisor: wait error for task {task_id}: {e}\n")
-            _kill_and_reap(pid)
-        send(
-            {
-                "type": "task_result",
-                "id": task_id,
-                "ok": False,
-                "error": f"supervisor_wait_error: {e}",
-            }
-        )
+            _kill_and_reap(relay_pid)
     else:
-        # Child exited on its own. Exit code 0 = task ran the runner's
-        # full lifecycle and emitted its own task_result on stdout.
-        # Non-zero = child died abnormally (SIGSEGV from a buggy C
-        # extension, OOM-killer, SIGKILL from outside, ...) — task_result
-        # was *not* written, so synthesize one here. Without this branch
-        # the host would only learn via the wallClockS + 5 s watchdog,
-        # which can be 65+ s for a default-budget skill.
-        if not (os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0):
-            if os.WIFSIGNALED(status):
-                detail = f"signal={os.WTERMSIG(status)}"
-            else:
-                detail = f"exit={os.WEXITSTATUS(status)}"
-            sys.stderr.write(f"supervisor: child died abnormally for task {task_id}: {detail}\n")
-            send(
-                {
-                    "type": "task_result",
-                    "id": task_id,
-                    "ok": False,
-                    "error": f"child_died: {detail}",
-                }
-            )
+        host_closed = os.WIFEXITED(status) and os.WEXITSTATUS(status) == _RELAY_HOST_CLOSED
+        if not os.WIFEXITED(status) or os.WEXITSTATUS(status) not in (_RELAY_DONE, _RELAY_HOST_CLOSED):
+            sys.stderr.write(f"supervisor: relay for task {task_id} died: {_exit_detail(status)}\n")
+
+    if not _sweep_descendants(SWEEP_DEADLINE_S):
+        # The worker can't be proven clean; exiting closes the host
+        # channel, and the host discards the worker.
+        raise SystemExit(1)
+    if host_closed:
+        return False
+    _send({"type": "task_exited", "id": task_id})
+    return True
+
+
+def main() -> None:
+    """Announce the protocol version, then serve tasks until the host
+    closes stdin. Never reads the host channel itself — each task's relay
+    does.
+    """
+    _prctl(_PR_SET_CHILD_SUBREAPER, 1)
+    _prctl(_PR_SET_DUMPABLE, 0)
+    _send({"type": "supervisor_ready", "protocolVersion": PROTOCOL_VERSION})
+    while _serve_one_task():
+        pass
 
 
 if __name__ == "__main__":

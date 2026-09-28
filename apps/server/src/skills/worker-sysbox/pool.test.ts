@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { SandboxClient } from "../../sandbox/index.js";
+import { expectDefined } from "../../test/assertions.js";
 import type { CtxHandler } from "../dispatcher.js";
 import { DEFAULT_POOL_OPTIONS, SysboxWorkerPool, type WorkerHandle } from "./pool.js";
 import type { InvokeParams, InvokeResult } from "./worker.js";
@@ -384,6 +385,97 @@ describe("SysboxWorkerPool", () => {
     await new Promise<void>((r) => setTimeout(r, 0));
     expect(h.spawnCount()).toBe(2);
     expect(h.spawned[0]?.state).toBe("disposed");
+    await pool.dispose();
+  });
+
+  it("retires a worker that died while idle and runs the next task on a fresh one", async () => {
+    const h = buildPoolHarness({ poolOptions: { min: 1, max: 2 } });
+    const pool = await h.pool;
+    const dead = expectDefined(h.spawned[0], "eager worker");
+    // What the worker does when its supervisor's channel fails between tasks.
+    dead.markPoisoned();
+
+    const result = await pool.invoke(invokeParams("t-after-death"));
+
+    expect(result.ok).toBe(true);
+    expect(dead.state).toBe("disposed");
+    expect(h.spawnCount()).toBe(2);
+    expect(pool.stats()).toMatchObject({ total: 1, idle: 1, draining: 0 });
+    await pool.dispose();
+  });
+
+  it("the sweep retires a worker that died while idle and keeps `min` warm", async () => {
+    const h = buildPoolHarness({ poolOptions: { min: 1, max: 3 } });
+    const pool = await h.pool;
+    const dead = expectDefined(h.spawned[0], "eager worker");
+    dead.markPoisoned();
+
+    h.triggerSweep();
+    await vi.waitFor(() => expect(h.spawnCount()).toBe(2));
+
+    expect(dead.state).toBe("disposed");
+    expect(pool.stats()).toMatchObject({ total: 1, idle: 1, draining: 0 });
+    await pool.dispose();
+  });
+
+  it("hands a replenishing spawn to an acquire that queued behind it", async () => {
+    // Every invoke holds its worker until released; the third spawn (the
+    // sweep's replacement) completes only when the test says so.
+    const releases: Array<() => void> = [];
+    const spawned: WorkerHandle[] = [];
+    let finishReplacement: () => void = () => {};
+    const replacementGate = new Promise<void>((r) => {
+      finishReplacement = r;
+    });
+    const sweeps: Array<() => void> = [];
+    const pool = await SysboxWorkerPool.create({
+      sandbox: mock<SandboxClient>(),
+      image: "fake:test",
+      ...DEFAULT_POOL_OPTIONS,
+      min: 2,
+      max: 2,
+      createWorker: async ({ workerId }) => {
+        if (spawned.length === 2) await replacementGate;
+        const w = makeFakeWorker(workerId);
+        const held: WorkerHandle = {
+          ...w,
+          get state() {
+            return w.state;
+          },
+          get taskCount() {
+            return w.taskCount;
+          },
+          invoke: async (params) => {
+            await new Promise<void>((r) => releases.push(r));
+            return w.invoke(params);
+          },
+        };
+        spawned.push(held);
+        return held;
+      },
+      setInterval: (cb: () => void): unknown => {
+        sweeps.push(cb);
+        return {};
+      },
+      clearInterval: () => {},
+    });
+
+    const long = pool.invoke(invokeParams("t-long"));
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    expectDefined(spawned[1], "second worker").markPoisoned();
+    for (const sweep of sweeps) sweep();
+    // The replacement is in flight and counts toward max, so this queues.
+    const queued = pool.invoke(invokeParams("t-queued"));
+    await vi.waitFor(() => expect(pool.stats()).toMatchObject({ queued: 1 }));
+
+    finishReplacement();
+
+    // The queued task starts on the replacement while the long one still runs.
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    expect(pool.stats()).toMatchObject({ total: 2, busy: 2, queued: 0 });
+    for (const release of releases) release();
+    await expect(queued).resolves.toMatchObject({ ok: true });
+    await expect(long).resolves.toMatchObject({ ok: true });
     await pool.dispose();
   });
 

@@ -189,3 +189,28 @@ class TestCtxBridge:
         bridge.fail_pending(RuntimeError("stdin closed"))
         with pytest.raises(RuntimeError, match="stdin closed"):
             await future
+
+
+class TestAfterResult:
+    @pytest.mark.asyncio
+    async def test_ctx_refuses_calls_once_the_result_is_out(self) -> None:
+        body = (
+            "import asyncio\n"
+            "async def _late(ctx, seen):\n"
+            "    await asyncio.sleep(0.01)\n"
+            "    try:\n"
+            "        await ctx.now()\n"
+            "    except Exception as e:\n"
+            "        seen.append(getattr(e, 'kind', type(e).__name__))\n"
+            "async def run(inputs, ctx):\n"
+            "    asyncio.get_running_loop().create_task(_late(ctx, inputs['seen']))\n"
+            "    return 'done'\n"
+        )
+        seen: list[str] = []
+        stdout = io.StringIO()
+        await _main(body, {"seen": seen}, "t-after", stdin=io.BytesIO(b""), stdout=stdout, stderr=io.StringIO())
+        await asyncio.sleep(0.05)
+
+        frames = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        assert [f["type"] for f in frames] == ["task_result"]
+        assert seen == ["task_finished"]
