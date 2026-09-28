@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database, Transactor } from "../../db/index.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../../secrets/store/index.js";
+import { skills } from "../../skills/store/schema.js";
 import { expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { inboundMessages } from "../../transport/store/schema.js";
@@ -2181,6 +2182,53 @@ describe("DrizzleAgentStore", () => {
       await expect(tx((trx) => store.deleteProfile(trx, oldProfileId))).rejects.toThrow(
         ProfileInUseError,
       );
+    });
+
+    it("deleteProfile throws ProfileInUseError while a scheduled task runs as it", async () => {
+      const userId = await seedUser();
+      const profileId = await seedProfile();
+      await tx((trx) =>
+        store.createScheduledTask(trx, {
+          userId,
+          profileId,
+          kind: "recurring",
+          cron: "0 9 * * *",
+          timezone: "UTC",
+          prompt: "brief me",
+          nextRunAt: new Date("2026-06-01T09:00:00Z"),
+          enabled: true,
+          catchupMissed: false,
+          source: "agent",
+        }),
+      );
+      const { ProfileInUseError } = await import("./errors.js");
+
+      await expect(tx((trx) => store.deleteProfile(trx, profileId))).rejects.toMatchObject(
+        new ProfileInUseError({ conversations: 0, messages: 0, schedules: 1 }),
+      );
+    });
+
+    it("deleteProfile throws ProfileInUseError while a scheduled skill runs as it", async () => {
+      const userId = await seedUser();
+      const profileId = await seedProfile();
+      await db.insert(skills).values({
+        name: "briefing",
+        tier: "wasm",
+        riskTier: "notify",
+        effects: [],
+        schedule: "0 9 * * *",
+        nextRunAt: new Date("2026-06-01T09:00:00Z"),
+        runAsUserId: userId,
+        runAsProfileId: profileId,
+        gitSha: "sha",
+        inputs: { type: "object" },
+      });
+      const { ProfileInUseError } = await import("./errors.js");
+
+      await expect(tx((trx) => store.deleteProfile(trx, profileId))).rejects.toMatchObject(
+        new ProfileInUseError({ conversations: 0, messages: 0, schedules: 1 }),
+      );
+      expect(await tx((trx) => store.getProfile(trx, profileId))).toBeDefined();
     });
   });
 

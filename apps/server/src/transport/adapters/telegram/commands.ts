@@ -2145,7 +2145,7 @@ function errorMessage(err: TransportError): string {
       // for most of the callers.
       return "Profile not found. Use /profile list to see what's available.";
     case "profile_in_use":
-      return "Profile has active conversations. Switch them first.";
+      return "Profile is still used by a conversation or a schedule. Move those first.";
     case "profile_name_taken":
       return "A profile with that name already exists.";
     case "model_unavailable":

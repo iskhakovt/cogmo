@@ -1576,7 +1576,11 @@ describe("createTransport", () => {
       const { ProfileInUseError } = await import("../agent/store/errors.js");
       const agentStore = mockAgentStore({
         getProfileOwner: vi.fn().mockResolvedValue({ userId: "user-1" }),
-        deleteProfile: vi.fn().mockRejectedValue(new ProfileInUseError(1, 4)),
+        deleteProfile: vi
+          .fn()
+          .mockRejectedValue(
+            new ProfileInUseError({ conversations: 1, messages: 4, schedules: 0 }),
+          ),
       });
       const { transport } = setup({ agentStore });
       const res = await transport.profiles.delete("handle", "p-mine");

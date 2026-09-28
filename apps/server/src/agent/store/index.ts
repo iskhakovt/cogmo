@@ -18,6 +18,7 @@ import * as R from "remeda";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
 import type { ContentBlock, Message } from "../../llm/types.js";
+import { skills } from "../../skills/store/schema.js";
 import { inboundMessages } from "../../transport/store/schema.js";
 import { truncate } from "../../util/string.js";
 import { IDENTITY_BLOCK_KEY, type ScopedCoreMemoryBlock } from "../core-memory/scope.js";
@@ -672,9 +673,10 @@ export interface AgentStore {
   ): Promise<{ conversations: number; messages: number }>;
 
   /**
-   * Delete a profile atomically: checks `conversations` and `messages` references inside the
-   * same transaction and throws `ProfileInUseError` if any exist. Historical messages pin the
-   * profile as audit data — a profile that has ever been used in a turn stays undeletable.
+   * Delete a profile atomically: checks `conversations`, `messages`, and the schedules that run
+   * as it (`scheduled_tasks`, `skills.run_as_profile_id`) inside the same transaction and throws
+   * `ProfileInUseError` if any exist. Historical messages pin the profile as audit data — a
+   * profile that has ever been used in a turn stays undeletable.
    */
   deleteProfile(tx: Transaction, profileId: string): Promise<void>;
 
@@ -1997,17 +1999,25 @@ export class DrizzleAgentStore implements AgentStore {
     // Check refs + delete in one transaction so a concurrent conversation create / message insert
     // can't sneak in between count and delete. Without this, callers would see a raw FK error
     // instead of the typed ProfileInUseError.
-    const [convRows, msgRows] = await Promise.all([
+    const [convRows, msgRows, taskRows, skillRows] = await Promise.all([
       tx
         .select({ value: count() })
         .from(conversations)
         .where(eq(conversations.profileId, profileId)),
       tx.select({ value: count() }).from(messages).where(eq(messages.profileId, profileId)),
+      tx
+        .select({ value: count() })
+        .from(scheduledTasks)
+        .where(eq(scheduledTasks.profileId, profileId)),
+      tx.select({ value: count() }).from(skills).where(eq(skills.runAsProfileId, profileId)),
     ]);
-    const convCount = convRows[0]?.value ?? 0;
-    const msgCount = msgRows[0]?.value ?? 0;
-    if (convCount > 0 || msgCount > 0) {
-      throw new ProfileInUseError(convCount, msgCount);
+    const refs = {
+      conversations: convRows[0]?.value ?? 0,
+      messages: msgRows[0]?.value ?? 0,
+      schedules: (taskRows[0]?.value ?? 0) + (skillRows[0]?.value ?? 0),
+    };
+    if (refs.conversations > 0 || refs.messages > 0 || refs.schedules > 0) {
+      throw new ProfileInUseError(refs);
     }
     await tx.delete(profiles).where(eq(profiles.id, profileId));
   }
