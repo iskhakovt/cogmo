@@ -89,9 +89,9 @@ export type TaskInvoke = z.infer<typeof TaskInvokeSchema>;
  * `runner.py` populates `peakMemoryBytes` from `getrusage(RUSAGE_SELF)`
  * just before emitting `task_result`; tier 1 (Pyodide WASM) leaves it
  * unset because `getrusage` is process-wide and would inflate under
- * concurrent workers. Synthesised `task_result`s — the relay's (wall-clock
- * kill, task process died) and the dispatcher's (`task_exited_without_result`)
- * — also leave it unset. The host fills in `wallClockMs` separately and
+ * concurrent workers. Synthesised outcomes — the relay's `task_result`
+ * (wall-clock kill, task process died) and the state machine's
+ * `exited_without_result` — also leave it unset. The host fills in `wallClockMs` separately and
  * writes the combined blob to `skill_runs.resource_usage`.
  *
  * Boundary translation: this protocol schema uses `.optional()` (field

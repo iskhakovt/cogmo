@@ -128,7 +128,7 @@ The worker needs a stdin-attached exec that streams both ways. Daytona's PTY exe
 
 | Piece | Responsibility |
 |-|-|
-| **Pool manager** (`SysboxWorkerPool`) | Read each worker's state (`idle` / `busy` / `draining`). Scale between `min` and `max` on demand. Retire and replace a worker the moment it dies. Recycle workers after N tasks or T ms age. Sweep idle workers above `min`. |
+| **Pool manager** (`SysboxWorkerPool`) | Lease idle workers to tasks; queue beyond `max`. Scale between `min` and `max` on demand. Replace a worker the moment it dies. Retire workers after N tasks or T ms age. Sweep idle workers above `min`. |
 | **Worker** (`SysboxSkillWorker`) | One sysbox container with a `SandboxSession`, reused across many tasks. Spawns the python supervisor process ONCE at create-time via `session.execStreaming` and refuses it unless it announces the host's protocol version. `invoke()` returns once the supervisor's `task_exited` confirms the task's processes are gone, or the worker dies. |
 | **Supervisor** (`supervisor.py`) | Long-lived python process inside the container; it holds the host channel but never reads it. Per task it forks a **relay**, which forks the **task process** before reading anything from the host; see [State reset between tasks](#state-reset-between-tasks-confirmed). After the relay exits it kills and reaps its whole subtree, then sends `task_exited`. EOF on stdin = clean shutdown. |
 | **Dispatcher** | The shell around a worker's state machine; see [Host-side worker lifecycle](#host-side-worker-lifecycle-confirmed). One per worker (NOT per task), reused across the worker's lifetime. Per-task `CtxHandler` is supplied at each `invoke()` call so the run id, manifest, and audit hooks scope to that task; a ctx call is served only by the handler of the running task that issued it. |
@@ -170,7 +170,7 @@ The supervisor ships in the `cogmo-skills:<version>` image published with each r
 
 ### Host-side worker lifecycle `[confirmed]`
 
-Each worker channel, in both tiers, is one pure state machine (`src/skills/worker-state.ts`): `transition(state, event)` returns the next state and the effects to carry out — send a frame, serve a ctx call, settle a task, report the handshake, die. The `Dispatcher` is its shell: it feeds in the worker's frames, host commands and deadlines, and executes the effects.
+Each worker channel, in both tiers, is one pure state machine (`src/skills/worker-state.ts`): `transition(state, event)` returns the next state and the effects to carry out — send a frame, serve a ctx call, settle a task, report the handshake, die, become disposable, log — or, for a host command the state does not allow, the reason it refuses, leaving the state as it was. The `Dispatcher` is its shell: it feeds in the worker's frames, host commands and deadlines, and executes the effects.
 
 | State | Meaning |
 |-|-|
@@ -179,12 +179,12 @@ Each worker channel, in both tiers, is one pure state machine (`src/skills/worke
 | `leased` | Held for one task: through a venv populate before its `task_invoke`, and after its exit until the pool releases it. Only `leased` takes a task. |
 | `running` | The task is on the worker. The only state that serves ctx calls, and only those naming the task. |
 | `awaiting_exit` | The task returned its result; its processes may still be alive. Only its own `task_exited` moves it back to `leased`. |
-| `dead` | Final. Entered when the handshake is refused or times out, the message stream ends, a send fails, the task's deadline passes, a `task_result` or `task_exited` names another task, or the host closes the channel. |
+| `dead` | Final. Entered when the handshake is refused or times out, the message stream ends, a send fails, the task's deadline passes, a `task_result` or `task_exited` names another task, or the host closes the channel. A worker that dies while its caller holds it stays held until that caller releases it; only then is it disposable. |
 
 - A transport exposes the worker's frames as `messages(): AsyncIterable<WorkerFrame>`: each a validated worker message, or a malformed frame, which the handshake refuses and a live worker logs and ignores. The stream ending or failing is the worker going away. Tier 2 reads NDJSON from the supervisor's stdout. Tier 1 reads the thread's `MessagePort`, which fails when the thread errors or exits, and emits `task_exited` after each `task_result`, since the thread never outlives its one task.
-- `invoke()` resolves a `Result`: the task's result with its exit outcome (`confirmed`, or `unconfirmed` with a reason), or why it has none. A result delivered before the worker died is kept; the worker is reusable only on a confirmed exit.
+- `invoke()` resolves the task's outcome: its result, or why it has none, and its exit (`confirmed`, or `unconfirmed` with a reason). A result delivered before the worker died is kept; the worker is reusable only on a confirmed exit.
 - The handshake timeout and the task deadline (wall clock plus a grace) are `AbortSignal`s that feed events in; a deadline for a task already settled is ignored.
-- The pool subscribes to each worker's `dead` as it spawns it and retires and replaces the worker the moment it dies, handing the replacement to a queued acquirer first. A worker that dies while a task holds it keeps its container until that task returns. Disposing the pool aborts one signal: a live worker's channel closes on it, and a spawn stops at its next step.
+- The pool subscribes to each worker's `dead` and `disposable` as it spawns it. It replaces a worker the moment it dies, and removes the worker and tears its container down once it is disposable — at once, or once the task holding it returns; until then it counts toward `max`. A freed slot goes to a queued acquirer first. After three deaths in a row of workers that completed no task, only the sweep replaces dead workers, and queued acquirers fail. Disposing the pool aborts one signal: a live worker's channel closes on it, and a spawn stops at its next step.
 
 ### State reset between tasks `[confirmed]`
 

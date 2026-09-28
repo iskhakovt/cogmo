@@ -399,7 +399,7 @@ function onChannelLost<T extends TaskRef>(
     .with({ kind: P.union(...BETWEEN_TASKS) }, (s) =>
       ok(
         diesBetweenTasks(s, reason, [
-          logEffect("warn", "worker channel lost between tasks — retiring it", { reason }),
+          logEffect("warn", "worker channel lost between tasks — the worker dies", { reason }),
         ]),
       ),
     )
@@ -428,7 +428,7 @@ function onDeadlinePassed<T extends TaskRef>(
       (s) =>
         ok(
           diesUnderTask(s, "task deadline passed", { kind: "timed_out" }, [
-            logEffect("warn", "task deadline passed — retiring the worker", { taskId: task.id }),
+            logEffect("warn", "task deadline passed — the worker dies", { taskId: task.id }),
           ]),
         ),
     )
@@ -469,7 +469,7 @@ function mismatch<T extends TaskRef>(
   const reason = `${frame} id mismatch (expected ${expected}, got ${got})`;
   return ok(
     diesUnderTask(state, reason, { kind: "failed", reason }, [
-      logEffect("warn", `${frame} names another task — retiring the worker`, { expected, got }),
+      logEffect("warn", `${frame} names another task — the worker dies`, { expected, got }),
     ]),
   );
 }
