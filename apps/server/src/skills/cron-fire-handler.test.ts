@@ -131,6 +131,18 @@ describe("createSkillCronFireHandler", () => {
     expect(runner.invoke).not.toHaveBeenCalled();
   });
 
+  it("propagates a failure to build the run-as services, so Inngest retries without invoking", async () => {
+    const runner = mock<SkillRunner>();
+    const d = deps(runner);
+    d.resolveRunAs.mockRejectedValue(new Error("skill run-as profile p-1 not found"));
+    const fn = createSkillCronFireHandler(d, inngest);
+
+    const { error } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
+
+    expect((error as { message?: string } | undefined)?.message).toMatch(/profile p-1 not found/);
+    expect(runner.invoke).not.toHaveBeenCalled();
+  });
+
   it("skips with reason 'skill_not_found' when the row is gone before its identity is read", async () => {
     const runner = mock<SkillRunner>();
     const d = deps(runner, null);

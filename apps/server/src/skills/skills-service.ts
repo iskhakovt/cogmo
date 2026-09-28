@@ -2,6 +2,7 @@ import type { Inngest } from "inngest";
 import { skillsDeployApprovalRequested } from "../inngest/events.js";
 import { logger } from "../logger.js";
 import type { RegisterResult, SkillApprover, SkillRunner } from "./runner.js";
+import type { SkillRunIdentity } from "./store/index.js";
 
 const log = logger.child({ component: "skills.service" });
 
@@ -43,12 +44,17 @@ export interface SkillsServiceDeps {
    * chat to post into.
    */
   conversationId: string;
+  /**
+   * The turn's user and profile — the origin of every deploy this service
+   * requests, and so who a schedule it puts live runs as.
+   */
+  origin: SkillRunIdentity;
 }
 
 export function createSkillsService(deps: SkillsServiceDeps): SkillsService {
   return {
     async register(opts) {
-      const result = await deps.runner.register(opts);
+      const result = await deps.runner.register({ ...opts, origin: deps.origin });
       if (result.status === "pending_approval" && result.pendingId) {
         // Fire-and-forget: an event-emit failure shouldn't poison the
         // register (the deploy is already in pending_approval state on
@@ -73,8 +79,8 @@ export function createSkillsService(deps: SkillsServiceDeps): SkillsService {
       }
       return result;
     },
-    approveDeploy: (opts) => deps.runner.approveDeploy(opts),
+    approveDeploy: (opts) => deps.runner.approveDeploy({ ...opts, origin: deps.origin }),
     denyDeploy: (opts) => deps.runner.denyDeploy(opts),
-    rollback: (opts) => deps.runner.rollback(opts),
+    rollback: (opts) => deps.runner.rollback({ ...opts, origin: deps.origin }),
   };
 }

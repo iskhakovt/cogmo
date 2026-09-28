@@ -1,10 +1,8 @@
 /**
  * Inngest handler for `skills/cron.fire`. Resolves the skill row, no-ops if
  * the skill was disabled, deregistered or unscheduled between tick and fire,
- * and otherwise dispatches a tier-appropriate invocation via
- * {@link SkillRunner} as the identity stored on the row
- * (`run_as_user_id` / `run_as_profile_id`), through that identity's scoped
- * services.
+ * and otherwise invokes it via {@link SkillRunner} as the row's run-as
+ * identity.
  *
  * Parallel to `src/agent/scheduling/fire-handler.ts`. Same per-row
  * `concurrency: { limit: 1, key: "event.data.skillId" }` posture: if the
@@ -85,8 +83,10 @@ export function createSkillCronFireHandler(deps: SkillCronFireDeps, inngest: Inn
         if (!skill) {
           return { status: "skipped", reason: "skill_not_found" };
         }
+        // Checks both columns to narrow their types; the CHECK makes this the
+        // same as `schedule === null`, i.e. a deploy dropped the schedule
+        // after the tick locked the row.
         if (skill.runAsUserId === null || skill.runAsProfileId === null) {
-          // A deploy dropped the schedule after the tick locked the row.
           return { status: "skipped", reason: "not_scheduled" };
         }
         const runAs = await deps.resolveRunAs({

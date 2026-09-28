@@ -693,6 +693,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             runner: deps.skillRunner,
             inngest,
             conversationId,
+            origin: { userId, profileId },
           })
         : undefined;
       // Scheduling service is scoped per-turn to (userId, profileId)

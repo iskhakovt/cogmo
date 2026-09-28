@@ -31,6 +31,8 @@ const KNOWN_HANDLE = "tg-987";
 const UNKNOWN_HANDLE = "tg-impostor";
 const USER_ID = "019d0000-0000-7000-8000-000000000001";
 const IDENTITY_ID = "019d0000-0000-7000-8000-000000000011";
+/** The chat the approval keyboard was tapped in. */
+const CHAT = "chat-42";
 
 function makeTransportStore(): TransportStore {
   const ts = mockTransportStore();
@@ -288,7 +290,7 @@ describe("Transport.skills.approveDeploy", () => {
     store.getDeployById.mockResolvedValue(makeDeployRow());
     const transport = makeTransport({ runner, store });
 
-    const result = await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE);
+    const result = await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE, CHAT);
 
     expect(result._unsafeUnwrap()).toEqual({
       pendingId: PENDING_ID,
@@ -297,15 +299,64 @@ describe("Transport.skills.approveDeploy", () => {
     });
     // The tapper's identity row and user: `approved_by` references
     // `user_identities`, and a schedule this approval sets runs as the user.
+    // No session in the chat, so no conversation to take a profile from.
     expect(runner.approveDeploy).toHaveBeenCalledWith({
       pendingId: PENDING_ID,
       approvedBy: { identityId: IDENTITY_ID, userId: USER_ID },
     });
   });
 
+  it("passes the conversation of the chat the tap came from as the approval's origin", async () => {
+    const runner = mock<SkillRunner>();
+    runner.approveDeploy.mockResolvedValue({
+      name: "echo",
+      riskTier: "approve",
+      status: "live",
+      gitSha: "1111111111111111111111111111111111111111",
+    });
+    const store = mock<SkillStore>();
+    store.getDeployById.mockResolvedValue(makeDeployRow());
+    const transportStore = makeTransportStore();
+    vi.mocked(transportStore.resolveSession).mockImplementation(async (_tx, _channelId, address) =>
+      address === CHAT
+        ? {
+            id: "session-1",
+            channelId: "ch-1",
+            platformAddress: CHAT,
+            conversationId: "conv-9",
+            status: "active",
+            receive: "routed",
+          }
+        : undefined,
+    );
+    const agentStore = mockAgentStore({
+      getConversation: vi.fn().mockImplementation(async (_tx: unknown, id: string) =>
+        id === "conv-9"
+          ? {
+              id,
+              userId: USER_ID,
+              profileId: "profile-9",
+              isPrivate: true,
+              cooldownState: null,
+              voiceMode: null,
+            }
+          : undefined,
+      ),
+    });
+    const transport = makeTransport({ runner, store, transportStore, agentStore });
+
+    await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE, CHAT);
+
+    expect(runner.approveDeploy).toHaveBeenCalledWith({
+      pendingId: PENDING_ID,
+      approvedBy: { identityId: IDENTITY_ID, userId: USER_ID },
+      origin: { userId: USER_ID, profileId: "profile-9" },
+    });
+  });
+
   it("returns skills_disabled when runner/store are unwired", async () => {
     const transport = makeTransport({});
-    const result = await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE);
+    const result = await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE, CHAT);
     expect(result._unsafeUnwrapErr()).toEqual({ code: "skills_disabled" });
   });
 
@@ -314,7 +365,7 @@ describe("Transport.skills.approveDeploy", () => {
     const store = mock<SkillStore>();
     const transport = makeTransport({ runner, store });
 
-    const result = await transport.skills.approveDeploy(PENDING_ID, UNKNOWN_HANDLE);
+    const result = await transport.skills.approveDeploy(PENDING_ID, UNKNOWN_HANDLE, CHAT);
 
     expect(result._unsafeUnwrapErr()).toEqual({ code: "identity_rejected" });
     expect(store.getDeployById).not.toHaveBeenCalled();
@@ -327,7 +378,7 @@ describe("Transport.skills.approveDeploy", () => {
     store.getDeployById.mockResolvedValue(undefined);
     const transport = makeTransport({ runner, store });
 
-    const result = await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE);
+    const result = await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE, CHAT);
 
     expect(result._unsafeUnwrapErr()).toEqual({
       code: "skill_deploy_not_found",
@@ -342,7 +393,7 @@ describe("Transport.skills.approveDeploy", () => {
     store.getDeployById.mockResolvedValue(makeDeployRow({ status: "live" }));
     const transport = makeTransport({ runner, store });
 
-    const result = await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE);
+    const result = await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE, CHAT);
 
     expect(result._unsafeUnwrapErr()).toEqual({
       code: "skill_deploy_not_pending",
@@ -369,7 +420,7 @@ describe("Transport.skills.approveDeploy", () => {
     store.getDeployById.mockResolvedValue(makeDeployRow());
     const transport = makeTransport({ runner, store });
 
-    const result = await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE);
+    const result = await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE, CHAT);
 
     expect(result._unsafeUnwrapErr()).toEqual({
       code: "skill_deploy_register_failed",
@@ -393,7 +444,7 @@ describe("Transport.skills.approveDeploy", () => {
     store.getDeployById.mockResolvedValue(makeDeployRow());
     const transport = makeTransport({ runner, store });
 
-    const result = await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE);
+    const result = await transport.skills.approveDeploy(PENDING_ID, KNOWN_HANDLE, CHAT);
 
     const e = result._unsafeUnwrapErr();
     expect(e.code).toBe("skill_deploy_register_failed");

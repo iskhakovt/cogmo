@@ -895,6 +895,7 @@ export async function bootstrapRuntime(
         {
           runInTx: core.runInTx,
           store: core.codingStore,
+          agentStore: core.agentStore,
           secretsStore: core.secretsStore,
           skillRunner,
           skillsRepoPath: env.COGMO_SKILLS_PATH,
@@ -1269,16 +1270,7 @@ export async function bootstrapRuntime(
       runner: skillRunner,
       runInTx: core.runInTx,
       store: core.skillStore,
-      resolveRunAs: (identity) =>
-        resolveSkillRunAs(
-          {
-            runInTx: core.runInTx,
-            agentStore: core.agentStore,
-            memory: core.memory,
-            fileService: core.fileService,
-          },
-          identity,
-        ),
+      resolveRunAs: (identity) => resolveSkillRunAs(core, identity),
     },
     inngest,
   );

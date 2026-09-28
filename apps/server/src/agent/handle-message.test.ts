@@ -1743,6 +1743,47 @@ describe("createHandleMessage", () => {
       );
     });
 
+    it("registers a skill with the conversation's user and profile as its origin", async () => {
+      const skillRunner = mock<SkillRunner>();
+      skillRunner.listToolDefs.mockResolvedValue([]);
+      skillRunner.register.mockResolvedValue({
+        name: "echo",
+        riskTier: "notify",
+        status: "live",
+        gitSha: "abc1234",
+      });
+      const deps = mockDeps({
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue(profileWithAllTools()),
+          getConversation: vi.fn().mockResolvedValue({
+            id: "conv-1",
+            userId: "user-2",
+            profileId: "profile-9",
+            isPrivate: true,
+            cooldownState: null,
+            voiceMode: null,
+          }),
+        }),
+        skillRunner,
+      });
+
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+      const loop = expectDefined(
+        vi.mocked(deps.runStreamingAgentLoop).mock.calls[0],
+        "runStreamingAgentLoop call",
+      )[0];
+      await expectDefined(loop.service.skills, "skills service").register({ branch: "skill/echo" });
+
+      expect(skillRunner.register).toHaveBeenCalledWith({
+        branch: "skill/echo",
+        origin: { userId: "user-2", profileId: "profile-9" },
+      });
+    });
+
     it("surfaces MCP tools in the toolDefinitions arg", async () => {
       const mcpRegistry = mock<McpRegistry>();
       mcpRegistry.resolveTools.mockResolvedValue([

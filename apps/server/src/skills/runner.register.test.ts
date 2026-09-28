@@ -769,7 +769,43 @@ ${effects}
       return { identityId: expectDefined(identity, "identity").id, userId };
     }
 
-    it("a scheduled register runs as the install owner with the default profile", async () => {
+    /** A conversation's identity: a user of its own with a persona profile. */
+    async function seedConversationIdentity(): Promise<SkillRunIdentity> {
+      const userId = await seedUser();
+      return { userId, profileId: await seedPersona(userId) };
+    }
+
+    async function seedPersona(userId: string): Promise<string> {
+      const [profile] = await db
+        .insert(profiles)
+        .values({ userId, name: "persona", basePrompt: "", model: "m", toolSet: [] })
+        .returning({ id: profiles.id });
+      return expectDefined(profile, "persona").id;
+    }
+
+    async function runAsOfBriefing(): Promise<[string | null, string | null]> {
+      const row = expectDefined(
+        await tx((trx) => store.getSkillByName(trx, "briefing")),
+        "briefing",
+      );
+      return [row.runAsUserId, row.runAsProfileId];
+    }
+
+    async function pendingBriefing(runner: SkillRunnerImpl): Promise<string> {
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/briefing",
+        manifest: scheduledManifest("effects:\n  - sends_message"),
+        body: ECHO_BODY,
+      });
+      const reg = await runner.register({ branch: "skill/briefing" });
+      if (reg.status !== "pending_approval" || !reg.pendingId) {
+        throw new Error(`expected pending_approval, got ${reg.status}`);
+      }
+      return reg.pendingId;
+    }
+
+    it("a scheduled register with no origin runs as the install owner with the default profile", async () => {
       const owner = await seedOwner();
       const runner = await makeRunner({ defaultRunAs: owner });
       await pushFeatureBranch({
@@ -781,35 +817,91 @@ ${effects}
 
       expect((await runner.register({ branch: "skill/briefing" })).status).toBe("live");
 
-      const row = await tx((trx) => store.getSkillByName(trx, "briefing"));
-      expect([row?.runAsUserId, row?.runAsProfileId]).toEqual([owner.userId, owner.profileId]);
+      expect(await runAsOfBriefing()).toEqual([owner.userId, owner.profileId]);
     });
 
-    it("an approved scheduled deploy runs as the approver with the default profile", async () => {
-      const owner = await seedOwner();
-      const approver = await seedApprover();
-      const runner = await makeRunner({ defaultRunAs: owner });
+    it("a scheduled register from a conversation runs as that conversation's user and profile", async () => {
+      const runner = await makeRunner({ defaultRunAs: await seedOwner() });
+      const origin = await seedConversationIdentity();
       await pushFeatureBranch({
         work: repo.work,
         branch: "skill/briefing",
-        manifest: scheduledManifest("effects:\n  - sends_message"),
+        manifest: scheduledManifest(""),
         body: ECHO_BODY,
       });
-      const reg = await runner.register({ branch: "skill/briefing" });
-      if (reg.status !== "pending_approval" || !reg.pendingId) {
-        throw new Error(`expected pending_approval, got ${reg.status}`);
-      }
 
-      const approved = await runner.approveDeploy({
-        pendingId: reg.pendingId,
-        approvedBy: approver,
-      });
+      expect((await runner.register({ branch: "skill/briefing", origin })).status).toBe("live");
+
+      expect(await runAsOfBriefing()).toEqual([origin.userId, origin.profileId]);
+    });
+
+    it("an approval with no conversation runs as the approver with the default profile", async () => {
+      const owner = await seedOwner();
+      const approver = await seedApprover();
+      const runner = await makeRunner({ defaultRunAs: owner });
+      const pendingId = await pendingBriefing(runner);
+
+      const approved = await runner.approveDeploy({ pendingId, approvedBy: approver });
 
       expect(approved.status).toBe("live");
-      const row = await tx((trx) => store.getSkillByName(trx, "briefing"));
-      expect([row?.runAsUserId, row?.runAsProfileId]).toEqual([approver.userId, owner.profileId]);
-      const deploy = await tx((trx) => store.getDeployById(trx, reg.pendingId ?? ""));
+      expect(await runAsOfBriefing()).toEqual([approver.userId, owner.profileId]);
+      const deploy = await tx((trx) => store.getDeployById(trx, pendingId));
       expect(deploy?.approvedBy).toBe(approver.identityId);
+    });
+
+    it("an approval in the approver's own conversation takes that conversation's profile", async () => {
+      const approver = await seedApprover();
+      const runner = await makeRunner({ defaultRunAs: await seedOwner() });
+      const pendingId = await pendingBriefing(runner);
+      const origin = { userId: approver.userId, profileId: await seedPersona(approver.userId) };
+
+      await runner.approveDeploy({ pendingId, approvedBy: approver, origin });
+
+      expect(await runAsOfBriefing()).toEqual([approver.userId, origin.profileId]);
+    });
+
+    it("an approval in another user's conversation keeps the approver, not that profile", async () => {
+      const owner = await seedOwner();
+      const approver = await seedApprover();
+      const runner = await makeRunner({ defaultRunAs: owner });
+      const pendingId = await pendingBriefing(runner);
+
+      await runner.approveDeploy({
+        pendingId,
+        approvedBy: approver,
+        origin: await seedConversationIdentity(),
+      });
+
+      expect(await runAsOfBriefing()).toEqual([approver.userId, owner.profileId]);
+    });
+
+    it("a rollback from a conversation runs as that conversation, not the deploy it restores", async () => {
+      const runner = await makeRunner({ defaultRunAs: await seedOwner() });
+      const author = await seedConversationIdentity();
+      const firstSha = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/briefing",
+        manifest: scheduledManifest(""),
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/briefing", origin: author });
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/briefing-v2",
+        manifest: scheduledManifest(""),
+        body: `${ECHO_BODY}\n# v2\n`,
+      });
+      await runner.register({ branch: "skill/briefing-v2", origin: author });
+      const rollbackOrigin = await seedConversationIdentity();
+
+      const rolled = await runner.rollback({
+        name: "briefing",
+        toGitSha: firstSha,
+        origin: rollbackOrigin,
+      });
+
+      expect(rolled.status).toBe("live");
+      expect(await runAsOfBriefing()).toEqual([rollbackOrigin.userId, rollbackOrigin.profileId]);
     });
   });
 

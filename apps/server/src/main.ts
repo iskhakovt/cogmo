@@ -56,27 +56,19 @@ async function dispatch(cmd: string): Promise<number> {
     }
     case "skills": {
       const { runSkillsCli } = await import("./skills/cli.js");
+      const { resolveSkillRunAs } = await import("./skills/run-as.js");
       const { bootstrapCore, bootstrapSkillRunner, NO_SANDBOX } = await import("./index.js");
       // CLI mode: skip bootstrapSandbox (no instance row, no
       // reconcileCrashedInstances). Tier-2 skill execution requires the
       // sandbox and will throw at call time; tier-1 skills + every admin
       // subcommand (list / register / approve / deny / rollback /
       // deregister) run fine.
-      const { resolveSkillRunAs } = await import("./skills/run-as.js");
       const core = await bootstrapCore();
       const { skillRunner } = await bootstrapSkillRunner(core, NO_SANDBOX);
       return runSkillsCli(process.argv.slice(3), {
         runner: skillRunner,
         ownerRunAs: () =>
-          resolveSkillRunAs(
-            {
-              runInTx: core.runInTx,
-              agentStore: core.agentStore,
-              memory: core.memory,
-              fileService: core.fileService,
-            },
-            { userId: core.user.id, profileId: core.profile.id },
-          ),
+          resolveSkillRunAs(core, { userId: core.user.id, profileId: core.profile.id }),
       });
     }
     case "provider": {

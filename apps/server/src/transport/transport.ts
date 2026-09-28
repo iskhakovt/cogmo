@@ -776,11 +776,14 @@ export interface Transport {
      * Approve a pending-approval deploy by its `skill_deploys.id`. Calls
      * `runner.approveDeploy` which advances main + flips the row live.
      * Idempotent on already-resolved deploys via the underlying store
-     * method.
+     * method. The tapper is the approver; the conversation in
+     * `platformAddress`, the chat the tap came from, is the approval's
+     * origin.
      */
     approveDeploy(
       pendingId: string,
       tapperPlatformHandle: string,
+      platformAddress: string,
     ): Promise<Result<{ pendingId: string; skillName: string; gitSha: string }, TransportError>>;
     /**
      * Deny a pending-approval deploy. Resolves the row to `denied`; the
@@ -2299,11 +2302,23 @@ export function createTransport(deps: {
     },
 
     skills: {
-      async approveDeploy(pendingId, tapperPlatformHandle) {
+      async approveDeploy(pendingId, tapperPlatformHandle, platformAddress) {
         if (!skillRunner || !skillStore) return err({ code: "skills_disabled" as const });
-        const approver = await runInTx((tx) =>
-          transportStore.resolveIdentity(tx, channelId, tapperPlatformHandle),
-        );
+        const { approver, origin } = await runInTx(async (tx) => {
+          const identity = await transportStore.resolveIdentity(
+            tx,
+            channelId,
+            tapperPlatformHandle,
+          );
+          const session = await transportStore.resolveSession(tx, channelId, platformAddress);
+          const conv = session
+            ? await agentStore.getConversation(tx, session.conversationId)
+            : undefined;
+          return {
+            approver: identity,
+            origin: conv ? { userId: conv.userId, profileId: conv.profileId } : undefined,
+          };
+        });
         if (!approver) return err({ code: "identity_rejected" as const });
 
         // Pre-check the deploy's status so we can return a precise error
@@ -2323,7 +2338,11 @@ export function createTransport(deps: {
           });
         }
 
-        const result = await skillRunner.approveDeploy({ pendingId, approvedBy: approver });
+        const result = await skillRunner.approveDeploy({
+          pendingId,
+          approvedBy: approver,
+          ...(origin !== undefined && { origin }),
+        });
         if (result.status === "live") {
           return ok({
             pendingId,
@@ -2734,9 +2753,10 @@ export function createTransport(deps: {
   }
 
   /**
-   * Identity check for skills-deploy callbacks. Skills aren't bound to a
-   * conversation (they live on the user, not on a chat), so the check is
-   * "is the tapper a known user of this channel". `resolveUser` returns
+   * Identity check for the skills admin surface (deny, list, disable,
+   * enable; approve resolves the approver's identity row itself). Skills are
+   * deployment-wide, so the check is "is the tapper a known user of this
+   * channel". `resolveUser` returns
    * non-null iff the platform handle is allowlisted; that's the same gate
    * the inbound message path already enforces.
    *
@@ -2758,9 +2778,8 @@ export function createTransport(deps: {
   }
 
   /**
-   * Variant of `checkSkillsTapper` that returns the resolved userId
-   * (the skills variant returns `void` because skills aren't
-   * per-user; scheduling rows are). Takes an existing `tx` so the
+   * Variant of `checkSkillsTapper` that returns the resolved userId,
+   * for operations on per-user rows. Takes an existing `tx` so the
    * identity check shares a transaction with the main operation —
    * one BEGIN/COMMIT pair, atomic snapshot. Same identity-rejection
    * semantics.

@@ -24,6 +24,8 @@ import { describeResolveIdentityError, resolveGitHubIdentity } from "../../secre
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { SKILLS_CODING_REPO_NAME } from "../../skills/repo.js";
 import type { RegisterResult, SkillRunner } from "../../skills/runner.js";
+import type { SkillRunIdentity } from "../../skills/store/index.js";
+import type { AgentStore } from "../store/index.js";
 import type { CodingStore } from "./store/index.js";
 
 const log = logger.child({ component: "coding.auto-register-skill" });
@@ -31,6 +33,8 @@ const log = logger.child({ component: "coding.auto-register-skill" });
 export interface AutoRegisterSkillDeps {
   runInTx: Transactor;
   store: CodingStore;
+  /** Reads the task's conversation: its user and profile are the deploy's origin. */
+  agentStore: Pick<AgentStore, "getConversation">;
   secretsStore: SecretsStore;
   skillRunner: SkillRunner;
   /**
@@ -48,7 +52,7 @@ export async function autoRegisterSkill(
   deps: AutoRegisterSkillDeps,
   args: { taskId: string },
 ): Promise<AutoRegisterResult> {
-  // One tx for (task, repo, identity) — atomic snapshot, one round-trip.
+  // One tx for (task, repo, identity, conversation) — atomic snapshot.
   const snapshot = await deps.runInTx(async (tx) => {
     const task = await deps.store.getTask(tx, args.taskId);
     if (!task) return { kind: "skipped" as const, reason: "task row not found" };
@@ -70,15 +74,26 @@ export async function autoRegisterSkill(
         reason: describeResolveIdentityError(identityResult.error),
       };
     }
+    // The conversation that asked for the skill. A task with none (an
+    // automated trigger) has no origin, and a schedule runs as the owner.
+    const conversation =
+      task.conversationId === null
+        ? undefined
+        : await deps.agentStore.getConversation(tx, task.conversationId);
+    const origin: SkillRunIdentity | undefined = conversation && {
+      userId: conversation.userId,
+      profileId: conversation.profileId,
+    };
     return {
       kind: "ok" as const,
       repo,
       identity: identityResult.value,
       branch: task.worktreeAssignment.branch,
+      origin,
     };
   });
   if (snapshot.kind === "skipped") return snapshot;
-  const { repo, identity, branch } = snapshot;
+  const { repo, identity, branch, origin } = snapshot;
   // Refuse anything outside the orchestrator's per-task namespace —
   // `git fetch +<branch>:<branch>` against `main` would clobber the bare repo's main.
   if (!branch.startsWith("cogmo/") || branch === "cogmo/" || branch.includes("..")) {
@@ -95,7 +110,7 @@ export async function autoRegisterSkill(
   let timeoutHandle: NodeJS.Timeout | undefined;
   try {
     const result = await Promise.race([
-      deps.skillRunner.register({ branch }),
+      deps.skillRunner.register({ branch, ...(origin !== undefined && { origin }) }),
       new Promise<never>((_, reject) => {
         timeoutHandle = setTimeout(
           () => reject(new Error(`register exceeded ${REGISTER_TIMEOUT_MS}ms wall-clock cap`)),

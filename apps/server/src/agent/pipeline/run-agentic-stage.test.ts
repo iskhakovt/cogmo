@@ -452,6 +452,72 @@ describe("runAgenticStage", () => {
     expect(second).toEqual(first);
   });
 
+  describe("skills run as the run conversation's user", () => {
+    async function stageWithEcho() {
+      const h = await harness();
+      vi.mocked(h.agentStore.getConversation).mockResolvedValue({
+        id: "conv-1",
+        userId: "user-2",
+        profileId: "profile-7",
+        isPrivate: true,
+        cooldownState: null,
+        voiceMode: null,
+      });
+      const skillRunner = mock<SkillRunner>();
+      skillRunner.listToolDefs.mockResolvedValue([
+        {
+          name: "echo",
+          description: "echo a number",
+          inputs: { type: "object", properties: {} },
+          tier: "wasm",
+          riskTier: "notify",
+          gitSha: "abc1234",
+        },
+      ]);
+      skillRunner.invoke.mockResolvedValue({ runId: "run-1", status: "success", output: {} });
+      skillRunner.register.mockResolvedValue({
+        name: "echo",
+        riskTier: "notify",
+        status: "live",
+        gitSha: "abc1234",
+      });
+      h.deps.skillRunner = skillRunner;
+      const stage: Stage = {
+        id: "draft",
+        kind: "agentic",
+        instructions: "Draft a plan.",
+        tools: ["echo"],
+        output: { kind: "text" },
+      };
+      await runAgenticStage(h.deps, stageArgs(stage), recordingSteps().steps, log);
+      const [params] = expectDefined(h.runStreamingAgentLoop.mock.calls[0], "loop call");
+      return { skillRunner, params };
+    }
+
+    it("invokes a skill as that user, through the stage's scoped service", async () => {
+      const { skillRunner, params } = await stageWithEcho();
+
+      await expectDefined(params.tools.get("echo"), "echo tool").handler({}, params.service);
+
+      expect(skillRunner.invoke).toHaveBeenCalledWith(
+        expect.objectContaining({ runAs: { userId: "user-2", service: params.service } }),
+      );
+    });
+
+    it("registers a skill with that user and profile as its origin", async () => {
+      const { skillRunner, params } = await stageWithEcho();
+
+      await expectDefined(params.service.skills, "skills service").register({
+        branch: "skill/echo",
+      });
+
+      expect(skillRunner.register).toHaveBeenCalledWith({
+        branch: "skill/echo",
+        origin: { userId: "user-2", profileId: "profile-7" },
+      });
+    });
+  });
+
   it("sends byte-identical tools when replayed from the server's copy of its frozen table", async () => {
     // The server returns memoized step output with object keys sorted at every
     // depth (as `canonicalKeyOrder` does) and strings unchanged. A table

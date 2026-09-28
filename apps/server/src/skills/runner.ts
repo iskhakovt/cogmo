@@ -180,16 +180,47 @@ export interface SkillApprover {
 }
 
 /**
+ * Who a schedule runs as once a deploy puts it live: the approver's user when
+ * one signed it off, else the originating conversation's user, else the
+ * install owner. The profile is the originating conversation's when that
+ * conversation belongs to the chosen user, else the default: an approver's
+ * persona is known only from a conversation of theirs.
+ */
+function deployRunAs(
+  defaultRunAs: SkillRunIdentity,
+  origin: SkillRunIdentity | undefined,
+  approver?: SkillApprover,
+): SkillRunIdentity {
+  const userId = approver?.userId ?? origin?.userId ?? defaultRunAs.userId;
+  const profileId =
+    origin !== undefined && origin.userId === userId ? origin.profileId : defaultRunAs.profileId;
+  return { userId, profileId };
+}
+
+/**
  * Public contract for the skills runtime. P3.3 fills in the deployment-pipeline
  * RPCs (`register` / `approveDeploy` / `denyDeploy` / `rollback` / `deregister`)
  * around the P3.1 invocation loop. The interface is the boundary the CLI, agent
  * tool, and dynamic-tool registrar all depend on.
  */
 export interface SkillRunner {
-  register(opts: { branch: string }): Promise<RegisterResult>;
-  approveDeploy(opts: { pendingId: string; approvedBy?: SkillApprover }): Promise<RegisterResult>;
+  /**
+   * `origin` on the deploy RPCs is the user and profile of the conversation
+   * the request came from, absent when there is none (the CLI). It decides
+   * who a schedule the deploy puts live runs as (`deployRunAs`).
+   */
+  register(opts: { branch: string; origin?: SkillRunIdentity }): Promise<RegisterResult>;
+  approveDeploy(opts: {
+    pendingId: string;
+    approvedBy?: SkillApprover;
+    origin?: SkillRunIdentity;
+  }): Promise<RegisterResult>;
   denyDeploy(opts: { pendingId: string; reason?: string }): Promise<void>;
-  rollback(opts: { name: string; toGitSha: string }): Promise<RegisterResult>;
+  rollback(opts: {
+    name: string;
+    toGitSha: string;
+    origin?: SkillRunIdentity;
+  }): Promise<RegisterResult>;
   /**
    * Soft-disable a skill. Idempotent on already-disabled rows (returns
    * `kind: "deregistered"` either way — soft-disable already supports
@@ -286,7 +317,7 @@ export interface SkillRunnerOptions {
   userTimezone: string;
   /**
    * The install owner with the default profile — who a schedule runs as when
-   * the deploy that sets it had no approver.
+   * the deploy that puts it live has neither an approver nor an origin.
    */
   defaultRunAs: SkillRunIdentity;
   /**
@@ -643,7 +674,7 @@ export class SkillRunnerImpl implements SkillRunner {
 
   // --- Deployment pipeline ---
 
-  async register(opts: { branch: string }): Promise<RegisterResult> {
+  async register(opts: { branch: string; origin?: SkillRunIdentity }): Promise<RegisterResult> {
     const repoPath = this.#requireRepoPath("register");
 
     // Reject branch=main at the boundary. Without this guard, the register
@@ -773,7 +804,7 @@ export class SkillRunnerImpl implements SkillRunner {
         inputs: manifest.inputs,
         outputs: manifest.outputs ?? null,
         classifierLog,
-        runAs: this.#defaultRunAs,
+        runAs: deployRunAs(this.#defaultRunAs, opts.origin),
         applyFilesystem: async () => {
           await updateRef(repoPath, "refs/heads/main", branchSha, mainSha ?? ZERO_SHA);
           await deleteRef(repoPath, `refs/heads/${opts.branch}`);
@@ -802,6 +833,7 @@ export class SkillRunnerImpl implements SkillRunner {
   async approveDeploy(opts: {
     pendingId: string;
     approvedBy?: SkillApprover;
+    origin?: SkillRunIdentity;
   }): Promise<RegisterResult> {
     const repoPath = this.#requireRepoPath("approveDeploy");
 
@@ -895,10 +927,7 @@ export class SkillRunnerImpl implements SkillRunner {
         lockfileHash: lockfile?.hash ?? null,
         inputs: manifest.inputs,
         outputs: manifest.outputs ?? null,
-        runAs: {
-          userId: opts.approvedBy?.userId ?? this.#defaultRunAs.userId,
-          profileId: this.#defaultRunAs.profileId,
-        },
+        runAs: deployRunAs(this.#defaultRunAs, opts.origin, opts.approvedBy),
         applyFilesystem: async () => {
           await updateRef(repoPath, "refs/heads/main", deploy.gitSha, mainSha ?? ZERO_SHA);
         },
@@ -943,7 +972,11 @@ export class SkillRunnerImpl implements SkillRunner {
     );
   }
 
-  async rollback(opts: { name: string; toGitSha: string }): Promise<RegisterResult> {
+  async rollback(opts: {
+    name: string;
+    toGitSha: string;
+    origin?: SkillRunIdentity;
+  }): Promise<RegisterResult> {
     const repoPath = this.#requireRepoPath("rollback");
 
     let targetSha: string;
@@ -1040,7 +1073,7 @@ export class SkillRunnerImpl implements SkillRunner {
         inputs: manifest.inputs,
         outputs: manifest.outputs ?? null,
         classifierLog,
-        runAs: this.#defaultRunAs,
+        runAs: deployRunAs(this.#defaultRunAs, opts.origin),
         applyFilesystem: async () => {
           // Rollback rewrites main backward — pre-receive hook would normally
           // reject this, but `update-ref` bypasses hooks by design (see

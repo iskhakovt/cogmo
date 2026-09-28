@@ -286,7 +286,12 @@ export async function runAgenticStage(
       coreMemoryScope,
       coding: deps.codingServiceFactory?.(conversationId),
       skills: deps.skillRunner
-        ? createSkillsService({ runner: deps.skillRunner, inngest, conversationId })
+        ? createSkillsService({
+            runner: deps.skillRunner,
+            inngest,
+            conversationId,
+            origin: { userId: ctx.userId, profileId: ctx.profileId },
+          })
         : undefined,
       scheduling: createSchedulingService({
         runInTx: deps.runInTx,

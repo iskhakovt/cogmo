@@ -1,7 +1,7 @@
 /**
  * Who a skill run acts for. A chat invocation runs as the turn's user through
  * the turn's scoped `Service`; `cogmo skills run` and cron fires build the
- * same scoped services for a stored identity (`resolveSkillRunAs`).
+ * same scoped services for a given identity (`resolveSkillRunAs`).
  */
 
 import type { Service } from "../agent/service.js";

@@ -3033,9 +3033,10 @@ describe("handleSkillsApprovalCallback", () => {
       transport,
       { pendingId, action: "approve" },
       "user-tg-1",
+      "chat-1",
     );
 
-    expect(approve).toHaveBeenCalledWith(pendingId, "user-tg-1");
+    expect(approve).toHaveBeenCalledWith(pendingId, "user-tg-1", "chat-1");
     expect(outcome.editText).toMatch(/Approved/);
     expect(outcome.editText).toMatch(/echo/);
     expect(outcome.editText).toMatch(/abcdef0/);
@@ -3055,6 +3056,7 @@ describe("handleSkillsApprovalCallback", () => {
       transport,
       { pendingId, action: "deny" },
       "user-tg-1",
+      "chat-1",
     );
 
     expect(deny).toHaveBeenCalledWith(pendingId, "user-tg-1");
@@ -3076,6 +3078,7 @@ describe("handleSkillsApprovalCallback", () => {
       transport,
       { pendingId, action: "approve" },
       "wrong-user",
+      "chat-1",
     );
 
     expect(outcome.editText).toMatch(/not authorized/);
@@ -3101,6 +3104,7 @@ describe("handleSkillsApprovalCallback", () => {
       transport,
       { pendingId, action: "approve" },
       "user-tg-1",
+      "chat-1",
     );
 
     expect(outcome.editText).toMatch(/can't be acted on/);
@@ -3126,6 +3130,7 @@ describe("handleSkillsApprovalCallback", () => {
       transport,
       { pendingId, action: "approve" },
       "user-tg-1",
+      "chat-1",
     );
 
     expect(outcome.editText).toMatch(/non_fast_forward_at_approve_time/);

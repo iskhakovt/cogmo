@@ -26,6 +26,11 @@ function makeInngest(): { inngest: Inngest; send: ReturnType<typeof vi.fn> } {
 
 const PENDING_ID = "019d0000-0000-7000-8000-000000000001";
 const CONV_ID = "019d0000-0000-7000-8000-000000000777";
+/** The turn's user and profile. */
+const ORIGIN = {
+  userId: "019d0000-0000-7000-8000-0000000000a7",
+  profileId: "019d0000-0000-7000-8000-0000000000b7",
+};
 
 describe("createSkillsService.register", () => {
   it("emits skills/deploy/approval-requested when the runner returns pending_approval", async () => {
@@ -39,7 +44,12 @@ describe("createSkillsService.register", () => {
     const runner = makeRunner({ register: vi.fn().mockResolvedValue(runnerResult) });
     const { inngest, send } = makeInngest();
 
-    const service = createSkillsService({ runner, inngest, conversationId: CONV_ID });
+    const service = createSkillsService({
+      runner,
+      inngest,
+      conversationId: CONV_ID,
+      origin: ORIGIN,
+    });
     const result = await service.register({ branch: "skill/notifier" });
 
     expect(result).toEqual(runnerResult);
@@ -65,7 +75,12 @@ describe("createSkillsService.register", () => {
     const runner = makeRunner({ register: vi.fn().mockResolvedValue(runnerResult) });
     const { inngest, send } = makeInngest();
 
-    const service = createSkillsService({ runner, inngest, conversationId: CONV_ID });
+    const service = createSkillsService({
+      runner,
+      inngest,
+      conversationId: CONV_ID,
+      origin: ORIGIN,
+    });
     await service.register({ branch: "skill/echo" });
 
     expect(send).not.toHaveBeenCalled();
@@ -82,7 +97,12 @@ describe("createSkillsService.register", () => {
     const runner = makeRunner({ register: vi.fn().mockResolvedValue(runnerResult) });
     const { inngest, send } = makeInngest();
 
-    const service = createSkillsService({ runner, inngest, conversationId: CONV_ID });
+    const service = createSkillsService({
+      runner,
+      inngest,
+      conversationId: CONV_ID,
+      origin: ORIGIN,
+    });
     await service.register({ branch: "skill/missing" });
 
     expect(send).not.toHaveBeenCalled();
@@ -100,12 +120,43 @@ describe("createSkillsService.register", () => {
     const send = vi.fn().mockRejectedValue(new Error("inngest unreachable"));
     const inngest = { send } as unknown as Inngest;
 
-    const service = createSkillsService({ runner, inngest, conversationId: CONV_ID });
+    const service = createSkillsService({
+      runner,
+      inngest,
+      conversationId: CONV_ID,
+      origin: ORIGIN,
+    });
     const result = await service.register({ branch: "skill/notifier" });
 
     // Register itself succeeds — the deploy is pending in the DB regardless
     // of whether the keyboard was posted. Operator can approve via CLI.
     expect(result).toEqual(runnerResult);
     expect(send).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("createSkillsService origin", () => {
+  it("passes the turn's user and profile as the origin of every deploy it requests", async () => {
+    const live: RegisterResult = { name: "echo", riskTier: "notify", status: "live", gitSha: "a" };
+    const runner = makeRunner({
+      register: vi.fn().mockResolvedValue(live),
+      approveDeploy: vi.fn().mockResolvedValue(live),
+      rollback: vi.fn().mockResolvedValue(live),
+    });
+    const { inngest } = makeInngest();
+    const service = createSkillsService({
+      runner,
+      inngest,
+      conversationId: CONV_ID,
+      origin: ORIGIN,
+    });
+
+    await service.register({ branch: "skill/echo" });
+    await service.approveDeploy({ pendingId: PENDING_ID });
+    await service.rollback({ name: "echo", toGitSha: "a" });
+
+    expect(runner.register).toHaveBeenCalledWith({ branch: "skill/echo", origin: ORIGIN });
+    expect(runner.approveDeploy).toHaveBeenCalledWith({ pendingId: PENDING_ID, origin: ORIGIN });
+    expect(runner.rollback).toHaveBeenCalledWith({ name: "echo", toGitSha: "a", origin: ORIGIN });
   });
 });

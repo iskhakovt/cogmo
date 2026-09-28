@@ -1551,6 +1551,7 @@ describe("telegram adapter", () => {
     function makeCallbackCtx(data: string, fromId = 111) {
       return {
         from: { id: fromId },
+        chat: { id: 555 },
         callbackQuery: { data },
         editMessageText: vi.fn().mockResolvedValue({}),
         answerCallbackQuery: vi.fn().mockResolvedValue(true),
@@ -1610,7 +1611,7 @@ describe("telegram adapter", () => {
       const handler = handlers.get(`callbackQuery:${SKILLS_APPROVAL_CALLBACK_REGEX.source}`);
       await handler(ctx);
 
-      expect(transport.skills.approveDeploy).toHaveBeenCalledWith(PENDING_ID, "111");
+      expect(transport.skills.approveDeploy).toHaveBeenCalledWith(PENDING_ID, "111", "555");
       const editArgs = ctx.editMessageText.mock.calls[0];
       expect(editArgs?.[0]).toContain("echo"); // skillName from mock
       expect(editArgs?.[0]).toContain("abc1234"); // gitSha from mock

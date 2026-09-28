@@ -1,3 +1,11 @@
+/**
+ * `resolveSkillRunAs` promises a skill run the same memory scoping and
+ * staging a chat turn gets, so this runs it over the real agent store and
+ * the real `buildTurnService` on PGlite: the profile's `memoryScope`, the
+ * restricted classes and the `pending_memories` row all come from the
+ * database, as in a turn. Only Hindsight and the file store are mocked.
+ */
+
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { DrizzleAgentStore } from "../agent/store/index.js";
 import { type ProfileMemoryScope, pendingMemories } from "../agent/store/schema.js";

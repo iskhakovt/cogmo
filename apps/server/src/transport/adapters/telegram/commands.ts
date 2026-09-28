@@ -615,16 +615,22 @@ export interface SkillsApprovalCallbackOutcome {
 /**
  * Skills-deploy approve-tier callback handler — translates a parsed Approve /
  * Deny tap into a `transport.skills.{approveDeploy,denyDeploy}` call and an
- * outcome the adapter renders. Identity check happens inside the Transport
- * layer (`checkSkillsTapper`).
+ * outcome the adapter renders. The Transport resolves the tapper's identity;
+ * an approval also takes the chat the tap came from (`platformAddress`),
+ * whose conversation is its origin.
  */
 export async function handleSkillsApprovalCallback(
   transport: Transport,
   parsed: { pendingId: string; action: "approve" | "deny" },
   tapperPlatformHandle: string,
+  platformAddress: string,
 ): Promise<SkillsApprovalCallbackOutcome> {
   if (parsed.action === "approve") {
-    const res = await transport.skills.approveDeploy(parsed.pendingId, tapperPlatformHandle);
+    const res = await transport.skills.approveDeploy(
+      parsed.pendingId,
+      tapperPlatformHandle,
+      platformAddress,
+    );
     if (res.isErr()) {
       return { editText: errorMessage(res.error), toast: errorMessage(res.error) };
     }

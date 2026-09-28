@@ -987,11 +987,17 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   bot.callbackQuery(SKILLS_APPROVAL_CALLBACK_REGEX, async (ctx) => {
     const data = ctx.callbackQuery?.data;
     const fromId = ctx.from?.id;
-    if (!data || fromId === undefined) return;
+    const chatId = ctx.chat?.id;
+    if (!data || fromId === undefined || chatId === undefined) return;
     const parsed = parseSkillsApprovalCallback(data);
     if (!parsed) return;
 
-    const outcome = await handleSkillsApprovalCallback(transport, parsed, String(fromId));
+    const outcome = await handleSkillsApprovalCallback(
+      transport,
+      parsed,
+      String(fromId),
+      String(chatId),
+    );
     try {
       await ctx.editMessageText(outcome.editText, {
         reply_markup: { inline_keyboard: [] },
