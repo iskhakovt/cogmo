@@ -2204,7 +2204,7 @@ describe("DrizzleAgentStore", () => {
       const { ProfileInUseError } = await import("./errors.js");
 
       await expect(tx((trx) => store.deleteProfile(trx, profileId))).rejects.toMatchObject(
-        new ProfileInUseError({ conversations: 0, messages: 0, schedules: 1 }),
+        new ProfileInUseError({ conversations: 0, messages: 0, schedules: 1, steeringRules: 0 }),
       );
     });
 
@@ -2226,9 +2226,28 @@ describe("DrizzleAgentStore", () => {
       const { ProfileInUseError } = await import("./errors.js");
 
       await expect(tx((trx) => store.deleteProfile(trx, profileId))).rejects.toMatchObject(
-        new ProfileInUseError({ conversations: 0, messages: 0, schedules: 1 }),
+        new ProfileInUseError({ conversations: 0, messages: 0, schedules: 1, steeringRules: 0 }),
       );
       expect(await tx((trx) => store.getProfile(trx, profileId))).toBeDefined();
+    });
+
+    it("deleteProfile throws ProfileInUseError while a steering rule is scoped to it", async () => {
+      const profileId = await seedProfile();
+      const { steeringRules } = await import("./schema.js");
+      await db.insert(steeringRules).values({
+        rule: "Be concise",
+        category: "style",
+        active: true,
+        source: "manual",
+        priority: 2,
+        observationCount: 0,
+        profileId,
+      });
+      const { ProfileInUseError } = await import("./errors.js");
+
+      await expect(tx((trx) => store.deleteProfile(trx, profileId))).rejects.toMatchObject(
+        new ProfileInUseError({ conversations: 0, messages: 0, schedules: 0, steeringRules: 1 }),
+      );
     });
   });
 

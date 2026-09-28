@@ -2145,7 +2145,11 @@ function errorMessage(err: TransportError): string {
       // for most of the callers.
       return "Profile not found. Use /profile list to see what's available.";
     case "profile_in_use":
-      return "Profile is still used by a conversation or a schedule. Move those first.";
+      return (
+        "Profile is still in use. Switch its conversations to another profile (/profile switch), " +
+        "/disable skills scheduled to run as it, and delete its /schedules. A profile with message " +
+        "history or its own steering rules can't be deleted."
+      );
     case "profile_name_taken":
       return "A profile with that name already exists.";
     case "model_unavailable":

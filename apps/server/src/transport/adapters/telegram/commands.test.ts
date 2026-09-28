@@ -704,6 +704,37 @@ describe("handleProfile", () => {
     expect(ctx.reply).toHaveBeenCalledWith('Profile "temp" deleted.');
   });
 
+  it("names what to clear when the profile is still in use", async () => {
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(
+          ok([
+            {
+              id: "p1",
+              userId: "u",
+              name: "temp",
+              basePrompt: "",
+              model: "m",
+              summarizationModel: null,
+              extractionModel: null,
+              autoRecall: "heuristic",
+              toolSet: [],
+            },
+          ]),
+        ),
+        create: vi.fn().mockResolvedValue(ok({} as never)),
+        update: vi.fn().mockResolvedValue(ok({} as never)),
+        delete: vi.fn().mockResolvedValue(err({ code: "profile_in_use" as const })),
+      },
+    });
+    const ctx = mkCtx("delete temp");
+    await handleProfile(transport, ctx, mkDialogs());
+    const reply = String(ctx.reply.mock.calls[0]?.[0]);
+    expect(reply).toContain("/profile switch");
+    expect(reply).toContain("/disable");
+    expect(reply).toContain("/schedules");
+  });
+
   it("delegates /profile new to dialogs.startNew", async () => {
     const transport = transportWith({
       profiles: {

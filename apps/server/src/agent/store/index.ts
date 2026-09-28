@@ -673,9 +673,9 @@ export interface AgentStore {
   ): Promise<{ conversations: number; messages: number }>;
 
   /**
-   * Delete a profile atomically: checks `conversations`, `messages`, and the schedules that run
-   * as it (`scheduled_tasks`, `skills.run_as_profile_id`) inside the same transaction and throws
-   * `ProfileInUseError` if any exist. Historical messages pin the profile as audit data — a
+   * Delete a profile atomically: checks `conversations`, `messages`, the schedules that run as
+   * it (`scheduled_tasks`, `skills.run_as_profile_id`) and the steering rules scoped to it inside
+   * the same transaction and throws `ProfileInUseError` if any exist. Historical messages pin the profile as audit data — a
    * profile that has ever been used in a turn stays undeletable.
    */
   deleteProfile(tx: Transaction, profileId: string): Promise<void>;
@@ -1999,7 +1999,7 @@ export class DrizzleAgentStore implements AgentStore {
     // Check refs + delete in one transaction so a concurrent conversation create / message insert
     // can't sneak in between count and delete. Without this, callers would see a raw FK error
     // instead of the typed ProfileInUseError.
-    const [convRows, msgRows, taskRows, skillRows] = await Promise.all([
+    const [convRows, msgRows, taskRows, skillRows, ruleRows] = await Promise.all([
       tx
         .select({ value: count() })
         .from(conversations)
@@ -2010,13 +2010,18 @@ export class DrizzleAgentStore implements AgentStore {
         .from(scheduledTasks)
         .where(eq(scheduledTasks.profileId, profileId)),
       tx.select({ value: count() }).from(skills).where(eq(skills.runAsProfileId, profileId)),
+      tx
+        .select({ value: count() })
+        .from(steeringRules)
+        .where(eq(steeringRules.profileId, profileId)),
     ]);
     const refs = {
       conversations: convRows[0]?.value ?? 0,
       messages: msgRows[0]?.value ?? 0,
       schedules: (taskRows[0]?.value ?? 0) + (skillRows[0]?.value ?? 0),
+      steeringRules: ruleRows[0]?.value ?? 0,
     };
-    if (refs.conversations > 0 || refs.messages > 0 || refs.schedules > 0) {
+    if (Object.values(refs).some((n) => n > 0)) {
       throw new ProfileInUseError(refs);
     }
     await tx.delete(profiles).where(eq(profiles.id, profileId));
