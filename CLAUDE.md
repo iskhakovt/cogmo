@@ -95,6 +95,7 @@ Other tracking docs:
 | `src/inngest/` | Inngest client, event definitions | Orchestration infrastructure — client setup and event schemas only, no business logic |
 | `src/llm/` | LLM provider interface, SDK adapters (Anthropic, OpenAI-compatible), canonical types (ContentBlock, StreamEvent, ImageBlock) | Single LLM call — provider abstraction, request/response translation |
 | `src/memory/` | Memory provider interface, Hindsight adapter | Memory access — provider abstraction, HTTP client |
+| `src/cli/` | `cogmo` operator commands — cmd-ts command trees, the shared runner (`run.ts`) and argument parsers (`args.ts`) | Transport edge — parses the command line and calls use-cases; a handler loads its own dependencies and resolves to the exit code |
 | `src/web/` | Web UI server — promoted health router, oRPC admin API over `Transport`, fail-closed session auth (`web_sessions`), static SPA serving | Transport edge — a thin HTTP/RPC adapter that calls `Transport`/use-cases, no domain logic |
 | `src/util/` | Cross-cutting pure helpers (retry, etc.) | Stateless utilities only — no I/O ownership, no domain logic. If a helper needs DI, it belongs in a domain module instead. |
 
