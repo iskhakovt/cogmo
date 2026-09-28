@@ -119,6 +119,8 @@ describe("resolveSkillRunAs", () => {
     const runAs = await resolveSkillRunAs(d, identity);
     await runAs.service.memory.stageRetain("the build is green", {
       context: "from skill 'ci_watch'",
+      source: "skill",
+      skillName: "ci_watch",
     });
 
     expect(d.memory.retain).not.toHaveBeenCalled();
@@ -129,11 +131,12 @@ describe("resolveSkillRunAs", () => {
         profileId: identity.profileId,
         content: "the build is green",
         context: "from skill 'ci_watch'",
-        source: "live_retain",
+        source: "skill",
+        skillName: "ci_watch",
       },
     ]);
     const pending = await tx((trx) => agentStore.getPendingMemories(trx, identity.userId));
-    expect(pending.map((p) => p.profileClass)).toEqual(["work"]);
+    expect(pending.map((p) => [p.profileClass, p.skillName])).toEqual([["work", "ci_watch"]]);
   });
 
   it("refuses a profile that no longer exists rather than run unscoped", async () => {

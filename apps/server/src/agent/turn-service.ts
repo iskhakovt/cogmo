@@ -14,8 +14,8 @@ import { createCoreMemoryNamespace } from "./core-memory/core-memory-namespace.j
 import type { CoreMemoryScope } from "./core-memory/scope.js";
 import type { PipelinesService } from "./pipeline/pipelines-service.js";
 import type { SchedulingService } from "./scheduling/scheduling-service.js";
-import { createService, type Service } from "./service.js";
-import type { AgentStore, Profile } from "./store/index.js";
+import { createService, type Service, type StageRetainOptions } from "./service.js";
+import type { AgentStore, PendingMemoryOrigin, Profile } from "./store/index.js";
 
 export interface TurnServiceDeps {
   runInTx: Transactor;
@@ -86,7 +86,7 @@ export async function buildTurnService(
           profileId: profile?.id ?? null,
           content,
           ...(opts?.context !== undefined && { context: opts.context }),
-          source: "live_retain",
+          ...stagingOrigin(opts),
         }),
       );
     },
@@ -95,4 +95,11 @@ export async function buildTurnService(
     args.scheduling,
     args.pipelines,
   );
+}
+
+/** A skill's write stages as `skill`, naming it; every other write as `live_retain`. */
+function stagingOrigin(opts: StageRetainOptions | undefined): PendingMemoryOrigin {
+  return opts?.source === "skill"
+    ? { source: "skill", skillName: opts.skillName }
+    : { source: "live_retain" };
 }

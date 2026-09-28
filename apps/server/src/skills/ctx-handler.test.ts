@@ -867,7 +867,7 @@ describe("DefaultCtxHandler", () => {
       ).rejects.toMatchObject({ kind: "missing_effect" });
     });
 
-    it("remember stages the fact for the Observer, naming the skill and its tags", async () => {
+    it("remember stages the fact as source skill, naming the skill and its tags", async () => {
       const m = manifest("effects:\n  - writes_memory");
       const d = deps();
       const h = makeHandler(m, d);
@@ -878,6 +878,8 @@ describe("DefaultCtxHandler", () => {
       });
       expect(d.memory.stageRetain).toHaveBeenCalledWith("remember this", {
         context: "from skill 'test-skill', tagged world, work",
+        source: "skill",
+        skillName: "test-skill",
       });
     });
   });
@@ -1165,6 +1167,8 @@ describe("DefaultCtxHandler", () => {
       await h.handle({ method: "memory.remember", args: { content: "x" } });
       expect(d.memory.stageRetain).toHaveBeenCalledWith("x", {
         context: "from skill 'test-skill'",
+        source: "skill",
+        skillName: "test-skill",
       });
     });
 

@@ -54,10 +54,15 @@ export interface CoreMemoryBlock {
   content: string;
 }
 
-/** Options for staging a live retain. Only `context` for now; future tag overrides land here. */
-export interface StageRetainOptions {
-  context?: string;
-}
+/**
+ * Options for staging a retain. The agent's `memory_retain` omits `source`
+ * and stages as `live_retain`; a skill's `ctx.memory.remember` stages as
+ * `skill`, naming the skill.
+ */
+export type StageRetainOptions = { context?: string } & (
+  | { source?: "live_retain" }
+  | { source: "skill"; skillName: string }
+);
 
 /**
  * Stage a memory write to the agent store's pending_memories table.
