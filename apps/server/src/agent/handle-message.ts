@@ -73,12 +73,12 @@ import {
 import type { ToolRegistry } from "./tools.js";
 import { turnCacheIntent } from "./turn-cache-intent.js";
 import {
+  announcedInView,
   findTurnContext,
   newMemories,
   renderTurnContext,
   replaceTurnContext,
   shownMemories,
-  turnContextsInView,
   withTurnContext,
 } from "./turn-context.js";
 import { buildTurnService } from "./turn-service.js";
@@ -816,7 +816,6 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // An upper bound on the stored block, which compaction counts: every
       // recalled memory and every core-memory change since the snapshot. The
       // stored block leaves out what earlier turns still in view show.
-      const candidateUpdates = coreMemoryChanges.map(({ updatedAt: _, ...block }) => block);
       const provisionalTurnContext = renderTurnContext({
         handledAt,
         timezone: deps.userTimezone,
@@ -824,12 +823,13 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           recalledMemories,
           voiceMode: turnInputs.voiceMode,
           channelTypes,
-          announcedCoreMemoryBlocks: candidateUpdates.map(({ profileClass, key }) => ({
+          announcedCoreMemoryBlocks: coreMemoryChanges.map(({ profileClass, key, updatedAt }) => ({
             profileClass,
             key,
+            updatedAt,
           })),
         },
-        coreMemoryUpdates: { scope: coreMemoryScope, blocks: candidateUpdates },
+        coreMemoryUpdates: { scope: coreMemoryScope, blocks: coreMemoryChanges },
       });
 
       // The epoch continues unless the configuration or the summary the history
@@ -1125,14 +1125,10 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // opening turn's snapshot shows core memory as it is, so it announces
       // nothing.
       const earlierInView = historyMessages.toSpliced(turnPosition, 1);
-      const visibleContexts = turnContextsInView(earlierInView, turnHistory);
       const announced =
         epoch.openedBy === turn.id
           ? []
-          : unannounced(
-              coreMemoryChanges,
-              loadedSystemPrompt.announcements.filter((a) => visibleContexts.has(a.messageId)),
-            );
+          : unannounced(coreMemoryChanges, announcedInView(earlierInView, turnHistory));
       const renderedTurnContext = await step.run("render-turn-context", () =>
         storeTurnContext(
           { runInTx: deps.runInTx, agentStore },

@@ -4300,52 +4300,76 @@ describe("system prompt snapshot", () => {
   });
 
   /** The stored turn context leading m1, which announced `identity`. */
-  const M1_CONTEXT = {
-    messageId: "m1",
-    rendered: "<turn_context>\nm1 announced identity\n</turn_context>\n\n",
-    context: {
-      recalledMemories: [],
-      voiceMode: false,
-      channelTypes: [],
-      announcedCoreMemoryBlocks: [{ profileClass: null, key: "identity" }],
-    },
-  };
+  /** `identity` changed a minute into the epoch, to this version. */
+  const IDENTITY_CHANGED_AT = new Date(OPENED_AT.getTime() + 60_000);
 
-  /** `identity` changed a minute into the epoch; `announcedAt` minutes in, m1's context announced it. */
-  function identityChanged(configDigest: string, announcedAt: number | null) {
+  /** The stored turn context leading m1, which announced `identity` as it was at `version`. */
+  function m1Announced(version: Date) {
+    return {
+      messageId: "m1",
+      rendered: "<turn_context>\nm1 announced identity\n</turn_context>\n\n",
+      context: {
+        recalledMemories: [],
+        voiceMode: false,
+        channelTypes: [],
+        announcedCoreMemoryBlocks: [
+          { profileClass: null, key: "identity", updatedAt: version.toISOString() },
+        ],
+      },
+    };
+  }
+
+  /** `identity` changed since the epoch opened; m1's context announced that version if `announced`. */
+  function identityChanged(configDigest: string, announced: boolean) {
     return {
       getLatestSystemPromptSnapshot: vi.fn().mockResolvedValue(snapshot({ configDigest })),
       getCoreMemoryBlocks: vi
         .fn()
         .mockResolvedValue([{ profileClass: null, key: "identity", content: "Home: Lisbon" }]),
-      getCoreMemoryUpdateTimes: vi.fn().mockResolvedValue([
-        {
-          profileClass: null,
-          key: "identity",
-          updatedAt: new Date(OPENED_AT.getTime() + 60_000),
-        },
-      ]),
-      listTurnContexts: vi.fn().mockResolvedValue(announcedAt === null ? [] : [M1_CONTEXT]),
-      listCoreMemoryAnnouncements: vi.fn().mockResolvedValue(
-        announcedAt === null
-          ? []
-          : [
-              {
-                messageId: "m1",
-                createdAt: new Date(OPENED_AT.getTime() + announcedAt * 60_000),
-                blocks: M1_CONTEXT.context.announcedCoreMemoryBlocks,
-              },
-            ],
-      ),
+      getCoreMemoryUpdateTimes: vi
+        .fn()
+        .mockResolvedValue([
+          { profileClass: null, key: "identity", updatedAt: IDENTITY_CHANGED_AT },
+        ]),
+      listTurnContexts: vi
+        .fn()
+        .mockResolvedValue(announced ? [m1Announced(IDENTITY_CHANGED_AT)] : []),
     };
   }
+
+  it("announces a change written while the turn announcing the block's earlier version ran", async () => {
+    // m1 announced `identity` as it was a minute into the epoch; another
+    // conversation wrote it again at two minutes, before m1's context was stored.
+    const configDigest = await defaultDigest();
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        listMessages: vi.fn().mockResolvedValue(HISTORY),
+        getLatestSystemPromptSnapshot: vi.fn().mockResolvedValue(snapshot({ configDigest })),
+        getCoreMemoryBlocks: vi
+          .fn()
+          .mockResolvedValue([{ profileClass: null, key: "identity", content: "Home: Porto" }]),
+        getCoreMemoryUpdateTimes: vi.fn().mockResolvedValue([
+          {
+            profileClass: null,
+            key: "identity",
+            updatedAt: new Date(OPENED_AT.getTime() + 120_000),
+          },
+        ]),
+        listTurnContexts: vi.fn().mockResolvedValue([m1Announced(IDENTITY_CHANGED_AT)]),
+      }),
+    });
+
+    await run(deps);
+
+    expect(turnContextSent(deps)).toContain("## identity\nHome: Porto");
+  });
 
   it("announces a core-memory change once, in the next turn context, with its content", async () => {
     const configDigest = await defaultDigest();
     const next = mockDeps({
       agentStore: mockAgentStore({
         listMessages: vi.fn().mockResolvedValue(HISTORY),
-        ...identityChanged(configDigest, null),
+        ...identityChanged(configDigest, false),
       }),
     });
 
@@ -4353,25 +4377,23 @@ describe("system prompt snapshot", () => {
 
     expect(turnContextSent(next)).toContain("<core_memory_updates>");
     expect(turnContextSent(next)).toContain("## identity\nHome: Lisbon");
+    // Recorded with the version it shows.
     expect(next.agentStore.insertOrRecoverTurnContext).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
         context: expect.objectContaining({
-          announcedCoreMemoryBlocks: [{ profileClass: null, key: "identity" }],
+          announcedCoreMemoryBlocks: [
+            { profileClass: null, key: "identity", updatedAt: IDENTITY_CHANGED_AT.toISOString() },
+          ],
         }),
       }),
     );
-    expect(next.agentStore.listCoreMemoryAnnouncements).toHaveBeenCalledWith(
-      expect.anything(),
-      "conv-1",
-      "m1",
-    );
 
-    // m1's context, still in the transcript, announced it after the change.
+    // m1's context, still in the transcript, announced this version.
     const after = mockDeps({
       agentStore: mockAgentStore({
         listMessages: vi.fn().mockResolvedValue(HISTORY),
-        ...identityChanged(configDigest, 2),
+        ...identityChanged(configDigest, true),
       }),
     });
     await run(after);
@@ -4391,7 +4413,7 @@ describe("system prompt snapshot", () => {
       agentStore: mockAgentStore({
         getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 800_000, outputTokens: 2_000 }),
         listMessages: vi.fn().mockResolvedValue(HISTORY),
-        ...identityChanged(configDigest, 2),
+        ...identityChanged(configDigest, true),
       }),
     });
 
@@ -4585,7 +4607,7 @@ describe("system prompt snapshot", () => {
       // output cap and not stored, replaces m1, so the request no longer shows it.
       const configDigest = await defaultDigest();
       const deps = summarizingDeps(configDigest, "max_tokens");
-      Object.assign(deps.agentStore, identityChanged(configDigest, 2));
+      Object.assign(deps.agentStore, identityChanged(configDigest, true));
 
       await run(deps);
 

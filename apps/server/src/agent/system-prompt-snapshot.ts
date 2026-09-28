@@ -38,13 +38,6 @@ export interface CoreMemoryChange extends ScopedCoreMemoryBlock {
   updatedAt: string;
 }
 
-/** The blocks one turn context announced, and when it was stored (ISO text). */
-export interface Announcement {
-  messageId: string;
-  createdAt: string;
-  blocks: ReadonlyArray<{ profileClass: string | null; key: string }>;
-}
-
 /**
  * The digest of everything a snapshot renders but core memory: the prompt
  * source's configuration, the tool table the turn offers, and the core-memory
@@ -147,19 +140,19 @@ export function coreMemoryChangesSince(
 }
 
 /**
- * The changes no announcement in `announcements` covers: a block is covered by
- * one stored after its change. Pass the announcements the turn's request still
- * shows, so one that compaction dropped is made again.
+ * The changes no entry in `announced` covers: an announcement covers a block
+ * when it showed the block's current version or a later one. Pass what the
+ * turn's request still shows, so an announcement compaction dropped is made
+ * again.
  */
 export function unannounced(
   changes: ReadonlyArray<CoreMemoryChange>,
-  announcements: ReadonlyArray<Announcement>,
-): ScopedCoreMemoryBlock[] {
-  return changes.flatMap(({ updatedAt, ...block }) =>
-    announcements.some(
-      (a) => Date.parse(a.createdAt) > Date.parse(updatedAt) && a.blocks.some(sameBlock(block)),
-    )
-      ? []
-      : [block],
+  announced: ReadonlyArray<{ profileClass: string | null; key: string; updatedAt: string }>,
+): CoreMemoryChange[] {
+  return changes.filter(
+    (change) =>
+      !announced.some(
+        (a) => sameBlock(change)(a) && Date.parse(a.updatedAt) >= Date.parse(change.updatedAt),
+      ),
   );
 }

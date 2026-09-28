@@ -81,7 +81,6 @@ export function mockAgentStore(overrides?: Partial<AgentStore>): AgentStore {
     // Echoes the insert, as a first attempt does.
     insertOrRecoverTurnContext: vi.fn().mockImplementation(async (_tx, params) => params),
     listTurnContexts: vi.fn().mockResolvedValue([]),
-    listCoreMemoryAnnouncements: vi.fn().mockResolvedValue([]),
     getLatestSystemPromptSnapshot: vi.fn().mockResolvedValue(undefined),
     // Echoes the insert as a first attempt stores it.
     insertOrRecoverSystemPromptSnapshot: vi.fn().mockImplementation(async (_tx, params) => ({

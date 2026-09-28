@@ -4,6 +4,7 @@ import { expectDefined } from "../test/assertions.js";
 import type { CoreMemoryView } from "./core-memory/scope.js";
 import { formatUserContext } from "./prompt.js";
 import {
+  announcedInView,
   CORE_MEMORY_UPDATES_HEADER,
   findTurnContext,
   NO_CORE_MEMORY_UPDATES,
@@ -14,7 +15,6 @@ import {
   shownMemories,
   type TurnContext,
   TurnContextSchema,
-  turnContextsInView,
   withTurnContext,
 } from "./turn-context.js";
 
@@ -222,11 +222,29 @@ describe("TurnContextSchema", () => {
   it("round-trips the stored shape, announced blocks keyed by profile class", () => {
     const stored = context({
       announcedCoreMemoryBlocks: [
-        { profileClass: null, key: "identity" },
-        { profileClass: "work", key: "identity" },
+        { profileClass: null, key: "identity", updatedAt: "2026-09-27T10:01:00.000Z" },
+        { profileClass: "work", key: "identity", updatedAt: "2026-09-27T10:02:00.000Z" },
       ],
     });
     expect(TurnContextSchema.parse(JSON.parse(JSON.stringify(stored)))).toEqual(stored);
+  });
+
+  it("reads a context that announced nothing, as every row before versioned entries did", () => {
+    const stored = {
+      recalledMemories: [],
+      voiceMode: false,
+      channelTypes: [],
+      announcedCoreMemoryBlocks: [],
+    };
+    expect(TurnContextSchema.parse(stored)).toEqual(stored);
+  });
+
+  it("rejects an announced block without the version it showed", () => {
+    expect(() =>
+      TurnContextSchema.parse(
+        context({ announcedCoreMemoryBlocks: [{ profileClass: null, key: "identity" }] as never }),
+      ),
+    ).toThrow();
   });
 
   it("rejects a context missing a field", () => {
@@ -323,21 +341,32 @@ describe("shownMemories / newMemories", () => {
     ).toEqual(["likes rust", "new fact"]);
   });
 });
-describe("turnContextsInView", () => {
+describe("announcedInView", () => {
+  const block = (key: string) => ({
+    profileClass: null,
+    key,
+    updatedAt: "2026-09-27T10:01:00.000Z",
+  });
   const earlier = withTurnContext({ role: "user", content: "q1" }, "CTX-1");
   const later = withTurnContext({ role: "user", content: "q2" }, "CTX-2");
   const history = {
     messages: [earlier, { role: "assistant", content: "a1" } as Message, later],
-    messageIds: ["m1", "m2", "m3"],
-    turnContexts: [context(), null, context()],
+    turnContexts: [
+      context({ announcedCoreMemoryBlocks: [block("identity")] }),
+      null,
+      context({ announcedCoreMemoryBlocks: [block("preferences")] }),
+    ],
   };
 
-  it("names the rows whose stored context still leads a message in view", () => {
-    expect([...turnContextsInView(history.messages, history)]).toEqual(["m1", "m3"]);
+  it("collects what every stored context still in view announced, with its version", () => {
+    expect(announcedInView(history.messages, history)).toEqual([
+      block("identity"),
+      block("preferences"),
+    ]);
   });
 
   it("leaves out a context compaction removed from view", () => {
     const truncated: Message[] = [later];
-    expect([...turnContextsInView(truncated, history)]).toEqual(["m3"]);
+    expect(announcedInView(truncated, history)).toEqual([block("preferences")]);
   });
 });

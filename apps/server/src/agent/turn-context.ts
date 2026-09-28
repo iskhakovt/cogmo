@@ -12,15 +12,20 @@ import type { CoreMemoryView, ScopedCoreMemoryBlock } from "./core-memory/scope.
 /**
  * A stored turn context's inputs. `recalledMemories` is what the block shows,
  * after deduplication; `channelTypes` the delivery channels it names; and
- * `announcedCoreMemoryBlocks` the core-memory blocks it announced
- * (design/prompt-caching.md → System Prompt Snapshot).
+ * `announcedCoreMemoryBlocks` the core-memory blocks it announced, each with
+ * the `updated_at` of the version it showed (design/prompt-caching.md →
+ * System Prompt Snapshot).
  */
 export const TurnContextSchema = z.object({
   recalledMemories: z.array(z.string()),
   voiceMode: z.boolean(),
   channelTypes: z.array(z.string()),
   announcedCoreMemoryBlocks: z.array(
-    z.object({ profileClass: z.string().nullable(), key: z.string() }),
+    z.object({
+      profileClass: z.string().nullable(),
+      key: z.string(),
+      updatedAt: z.string().datetime(),
+    }),
   ),
 });
 
@@ -44,7 +49,10 @@ Each message the user sends opens with a <turn_context> block the system adds: w
 When it says "Reply modality: voice", your reply will be spoken aloud. Keep it short and natural — one or two sentences when possible. Skip routine acknowledgments ("saved", "noted", "I'll remember") unless the acknowledgment IS the entire answer. Don't narrate background work (memory saves, file writes, web searches) — the user assumes those happened. Avoid markdown, lists, code fences, and tables — they don't translate to speech.`;
 
 /** No core memory to announce. */
-export const NO_CORE_MEMORY_UPDATES: CoreMemoryView = { scope: { kind: "none" }, blocks: [] };
+export const NO_CORE_MEMORY_UPDATES = {
+  scope: { kind: "none" },
+  blocks: [],
+} as const satisfies CoreMemoryView;
 
 export interface TurnContextInput {
   /** When the turn was handled: the `created_at` of its user row. */
@@ -191,49 +199,43 @@ export function shownMemories(
     turnContexts: ReadonlyArray<TurnContext | null>;
   },
 ): ReadonlySet<string> {
+  return new Set(contextsInView(view, history).flatMap((c) => c.recalledMemories));
+}
+
+/**
+ * The core-memory blocks the stored turn contexts still in `view` announced,
+ * each with the version it showed: what the turn's request still tells the
+ * model beyond the snapshot. Identified as `shownMemories` identifies them.
+ */
+export function announcedInView(
+  view: ReadonlyArray<Message>,
+  history: {
+    messages: ReadonlyArray<Message>;
+    turnContexts: ReadonlyArray<TurnContext | null>;
+  },
+): TurnContext["announcedCoreMemoryBlocks"] {
+  return contextsInView(view, history).flatMap((c) => c.announcedCoreMemoryBlocks);
+}
+
+/** The stored contexts in `history` whose rendered text still leads a message in `view`. */
+function contextsInView(
+  view: ReadonlyArray<Message>,
+  history: {
+    messages: ReadonlyArray<Message>;
+    turnContexts: ReadonlyArray<TurnContext | null>;
+  },
+): TurnContext[] {
   const byRendered = new Map<string, TurnContext>();
   for (const [i, message] of history.messages.entries()) {
     const context = history.turnContexts[i];
     const rendered = leadingText(message);
     if (context && rendered !== undefined) byRendered.set(rendered, context);
   }
-  return new Set(
-    view.flatMap((m) => {
-      const rendered = leadingText(m);
-      return (
-        (rendered === undefined ? undefined : byRendered.get(rendered))?.recalledMemories ?? []
-      );
-    }),
-  );
-}
-
-/**
- * The ids of the rows whose stored turn context is still in `view`, the
- * transcript after this turn's compaction, identified as `shownMemories`
- * identifies them.
- */
-export function turnContextsInView(
-  view: ReadonlyArray<Message>,
-  history: {
-    messages: ReadonlyArray<Message>;
-    messageIds: ReadonlyArray<string | null>;
-    turnContexts: ReadonlyArray<TurnContext | null>;
-  },
-): ReadonlySet<string> {
-  const byRendered = new Map<string, string[]>();
-  for (const [i, message] of history.messages.entries()) {
-    const id = history.messageIds[i];
-    const rendered = leadingText(message);
-    if (history.turnContexts[i] && id && rendered !== undefined) {
-      byRendered.set(rendered, [...(byRendered.get(rendered) ?? []), id]);
-    }
-  }
-  return new Set(
-    view.flatMap((m) => {
-      const rendered = leadingText(m);
-      return (rendered === undefined ? undefined : byRendered.get(rendered)) ?? [];
-    }),
-  );
+  return view.flatMap((m) => {
+    const rendered = leadingText(m);
+    const context = rendered === undefined ? undefined : byRendered.get(rendered);
+    return context ? [context] : [];
+  });
 }
 
 /** `recalled` in order, without repeats and without anything already `shown`. */

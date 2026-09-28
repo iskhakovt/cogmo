@@ -140,13 +140,11 @@ describe("coreMemoryChangesSince / unannounced", () => {
     }));
   const changes = (times: Record<string, number>) =>
     coreMemoryChangesSince(view, updates(times), OPENED_AT);
-  const announcement = (
-    minute: number,
-    blocks: Array<{ profileClass: string | null; key: string }>,
-  ) => ({
-    messageId: `m${minute}`,
-    createdAt: at(minute).toISOString(),
-    blocks,
+  /** An announcement of the block's version changed at `minute`. */
+  const announced = (profileClass: string | null, minute: number) => ({
+    profileClass,
+    key: "identity",
+    updatedAt: at(minute).toISOString(),
   });
 
   it("finds nothing the snapshot already shows", () => {
@@ -177,18 +175,22 @@ describe("coreMemoryChangesSince / unannounced", () => {
     expect(found).toEqual([]);
   });
 
-  it("announces a change once, and again after a later change", () => {
-    const announced = [announcement(6, [{ profileClass: "game", key: "identity" }])];
-    expect(unannounced(changes({ "game/identity": 5 }), announced)).toEqual([]);
-    expect(unannounced(changes({ "game/identity": 7 }), announced)).toEqual([
-      { profileClass: "game", key: "identity", content: "Name: Thorin" },
+  it("announces a change until an announcement shows its version", () => {
+    expect(unannounced(changes({ "game/identity": 5 }), [announced("game", 5)])).toEqual([]);
+    // A version written after the one announced, whenever that announcement was stored.
+    expect(unannounced(changes({ "game/identity": 7 }), [announced("game", 5)])).toEqual([
+      {
+        profileClass: "game",
+        key: "identity",
+        content: "Name: Thorin",
+        updatedAt: at(7).toISOString(),
+      },
     ]);
   });
 
   it("tells the shared block from a class's block of the same key", () => {
-    const announced = [announcement(6, [{ profileClass: null, key: "identity" }])];
-    expect(unannounced(changes({ "game/identity": 5 }), announced)).toEqual([
-      { profileClass: "game", key: "identity", content: "Name: Thorin" },
-    ]);
+    expect(
+      unannounced(changes({ "game/identity": 5 }), [announced(null, 5)]).map((c) => c.profileClass),
+    ).toEqual(["game"]);
   });
 });

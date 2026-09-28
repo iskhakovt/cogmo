@@ -6,7 +6,6 @@ import {
   eq,
   getTableColumns,
   gt,
-  gte,
   inArray,
   isNotNull,
   isNull,
@@ -269,13 +268,6 @@ export interface StoredTurnContext {
   messageId: string;
   rendered: string;
   context: TurnContext;
-}
-
-/** The core-memory blocks one turn context announced, and when it was stored. */
-export interface CoreMemoryAnnouncement {
-  messageId: string;
-  createdAt: Date;
-  blocks: TurnContext["announcedCoreMemoryBlocks"];
 }
 
 /** A row from `system_prompt_snapshots`: one epoch's system prompt. */
@@ -614,16 +606,6 @@ export interface AgentStore {
     conversationId: string,
     afterMessageId: string | null,
   ): Promise<ReadonlyArray<StoredTurnContext>>;
-
-  /**
-   * The core-memory blocks each stored turn context announced, and when it was
-   * stored, for the conversation's messages from `fromMessageId` on.
-   */
-  listCoreMemoryAnnouncements(
-    tx: Transaction,
-    conversationId: string,
-    fromMessageId: string,
-  ): Promise<ReadonlyArray<CoreMemoryAnnouncement>>;
 
   /** The conversation's current epoch: the snapshot opened latest in the transcript. */
   getLatestSystemPromptSnapshot(
@@ -1868,27 +1850,6 @@ export class DrizzleAgentStore implements AgentStore {
           afterMessageId === null ? undefined : gt(messages.id, afterMessageId),
         ),
       );
-  }
-
-  async listCoreMemoryAnnouncements(
-    tx: Transaction,
-    conversationId: string,
-    fromMessageId: string,
-  ): Promise<ReadonlyArray<CoreMemoryAnnouncement>> {
-    const rows = await tx
-      .select({
-        messageId: turnContexts.messageId,
-        createdAt: turnContexts.createdAt,
-        context: turnContexts.context,
-      })
-      .from(turnContexts)
-      .innerJoin(messages, eq(messages.id, turnContexts.messageId))
-      .where(and(eq(messages.conversationId, conversationId), gte(messages.id, fromMessageId)));
-    return rows.map((r) => ({
-      messageId: r.messageId,
-      createdAt: r.createdAt,
-      blocks: r.context.announcedCoreMemoryBlocks,
-    }));
   }
 
   async getLatestSystemPromptSnapshot(

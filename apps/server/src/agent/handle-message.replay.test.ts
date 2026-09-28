@@ -144,7 +144,6 @@ const LOADED_SYSTEM_PROMPT = {
   snapshot: EPOCH,
   channelTypes: [],
   coreMemoryChanges: [],
-  announcements: [],
 };
 
 /** The system prompt the agent loop was given. */

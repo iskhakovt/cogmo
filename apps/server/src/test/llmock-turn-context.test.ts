@@ -22,6 +22,7 @@ function rendered(
       announcedCoreMemoryBlocks: delivery.coreMemoryUpdates.blocks.map(({ profileClass, key }) => ({
         profileClass,
         key,
+        updatedAt: "2026-09-25T08:00:00.000Z",
       })),
     },
     coreMemoryUpdates: delivery.coreMemoryUpdates,

@@ -4321,7 +4321,9 @@ describe("turn contexts", () => {
     recalledMemories: ["runs Proxmox"],
     voiceMode: false,
     channelTypes: [],
-    announcedCoreMemoryBlocks: [{ profileClass: null, key: "identity" }],
+    announcedCoreMemoryBlocks: [
+      { profileClass: null, key: "identity", updatedAt: "2026-09-27T10:01:00.000Z" },
+    ],
   };
 
   async function seedUserRow() {
@@ -4464,6 +4466,16 @@ describe("turn contexts", () => {
       sql`INSERT INTO turn_contexts (message_id, rendered, context) VALUES (${row.id}, 'raw', '{"voiceMode": "yes"}'::jsonb)`,
     );
     await expect(tx((trx) => store.listTurnContexts(trx, conversationId, null))).rejects.toThrow();
+  });
+
+  it("reads a row that announced nothing, as every row before versioned announcements did", async () => {
+    const { conversationId, row } = await seedUserRow();
+    await db.execute(
+      sql`INSERT INTO turn_contexts (message_id, rendered, context) VALUES (${row.id}, 'raw', '{"recalledMemories": [], "voiceMode": false, "channelTypes": [], "announcedCoreMemoryBlocks": []}'::jsonb)`,
+    );
+
+    const [stored] = await tx((trx) => store.listTurnContexts(trx, conversationId, null));
+    expect(stored?.context.announcedCoreMemoryBlocks).toEqual([]);
   });
 
   it("finds a turn's user row by its inbound, not a later tool result, in its own conversation", async () => {
@@ -4615,45 +4627,5 @@ describe("system prompt snapshots", () => {
         ),
       ),
     ).rejects.toThrow();
-  });
-
-  it("lists the core-memory blocks each turn context announced from a message on", async () => {
-    const { conversationId, stamp } = await seedConversation();
-    const [before, from, after] = [
-      await userRow(conversationId, stamp),
-      await userRow(conversationId, stamp),
-      await userRow(conversationId, stamp),
-    ];
-    const context = (announced: Array<{ profileClass: string | null; key: string }>) => ({
-      recalledMemories: [],
-      voiceMode: false,
-      channelTypes: [],
-      announcedCoreMemoryBlocks: announced,
-    });
-    for (const [messageId, announced] of [
-      [before, [{ profileClass: null, key: "stale" }]],
-      [from, [{ profileClass: null, key: "identity" }]],
-      [after, [{ profileClass: "game", key: "preferences" }]],
-    ] as const) {
-      await tx((trx) =>
-        store.insertOrRecoverTurnContext(trx, {
-          messageId,
-          rendered: messageId,
-          context: context([...announced]),
-        }),
-      );
-    }
-
-    const listed = await tx((trx) => store.listCoreMemoryAnnouncements(trx, conversationId, from));
-
-    // In no particular order, and without the context before `from`.
-    expect(listed).toHaveLength(2);
-    expect(listed.map(({ messageId, blocks }) => ({ messageId, blocks }))).toEqual(
-      expect.arrayContaining([
-        { messageId: from, blocks: [{ profileClass: null, key: "identity" }] },
-        { messageId: after, blocks: [{ profileClass: "game", key: "preferences" }] },
-      ]),
-    );
-    expect(listed.every((l) => l.createdAt instanceof Date)).toBe(true);
   });
 });
