@@ -18,6 +18,8 @@ const TASK: TaskRef = { id: "t1" };
 const OTHER: TaskRef = { id: "t2" };
 /** A new task handed to the worker. */
 const NEXT: TaskRef = { id: "t3" };
+/** A different task object that shares the running task's id: a stale one, reusing it. */
+const SAME_ID: TaskRef = { id: "t1" };
 
 const RESULT: TaskResult = { type: "task_result", id: "t1", ok: true, output: 1 };
 const INVOKE: TaskInvoke = { type: "task_invoke", id: "t3", skill: "s", inputs: {} };
@@ -54,6 +56,7 @@ const EVENTS = {
   send_failed: { type: "send_failed", reason: "send failed" },
   deadline_own: { type: "deadline_passed", task: TASK },
   deadline_other: { type: "deadline_passed", task: OTHER },
+  deadline_same_id: { type: "deadline_passed", task: SAME_ID },
   handshake_timed_out: { type: "handshake_timed_out" },
   channel_ended: { type: "channel_ended", reason: "ended" },
   close: { type: "close", reason: "closed" },
@@ -61,6 +64,10 @@ const EVENTS = {
 
 type StateName = keyof typeof STATES;
 type EventName = keyof typeof EVENTS;
+
+/** Fails to compile when an event type has no fixture, and so no row in the table. */
+type UncoveredEvent = Exclude<WorkerEvent<TaskRef>["type"], (typeof EVENTS)[EventName]["type"]>;
+const EVERY_EVENT_COVERED: [UncoveredEvent] extends [never] ? true : never = true;
 type Row = readonly [next: WorkerStateKind, effects: ReadonlyArray<Effect<TaskRef>["type"]>];
 
 /** Starting judges its first frame: `ready` passes, anything else is refused. */
@@ -88,6 +95,7 @@ const TABLE: Record<StateName, Record<EventName, Row>> = {
     send_failed: ["dead", ["started", "died"]],
     deadline_own: ["starting", []],
     deadline_other: ["starting", []],
+    deadline_same_id: ["starting", []],
     handshake_timed_out: ["dead", ["started", "died"]],
     channel_ended: ["dead", ["started", "died"]],
     close: ["dead", ["started", "died"]],
@@ -111,6 +119,7 @@ const TABLE: Record<StateName, Record<EventName, Row>> = {
     send_failed: ["dead", ["log", "died"]],
     deadline_own: ["idle", []],
     deadline_other: ["idle", []],
+    deadline_same_id: ["idle", []],
     handshake_timed_out: ["idle", []],
     channel_ended: ["dead", ["log", "died"]],
     close: ["dead", ["died"]],
@@ -134,6 +143,7 @@ const TABLE: Record<StateName, Record<EventName, Row>> = {
     send_failed: ["dead", ["log", "died"]],
     deadline_own: ["leased", []],
     deadline_other: ["leased", []],
+    deadline_same_id: ["leased", []],
     handshake_timed_out: ["leased", []],
     channel_ended: ["dead", ["log", "died"]],
     close: ["dead", ["died"]],
@@ -157,6 +167,7 @@ const TABLE: Record<StateName, Record<EventName, Row>> = {
     send_failed: DIES_WITH_TASK,
     deadline_own: DIES_WITH_TASK,
     deadline_other: ["running", []],
+    deadline_same_id: ["running", []],
     handshake_timed_out: ["running", []],
     channel_ended: DIES_WITH_TASK,
     close: ["dead", ["settle", "died"]],
@@ -180,6 +191,7 @@ const TABLE: Record<StateName, Record<EventName, Row>> = {
     send_failed: DIES_WITH_TASK,
     deadline_own: DIES_WITH_TASK,
     deadline_other: ["awaiting_exit", []],
+    deadline_same_id: ["awaiting_exit", []],
     handshake_timed_out: ["awaiting_exit", []],
     channel_ended: DIES_WITH_TASK,
     close: ["dead", ["settle", "died"]],
@@ -203,6 +215,7 @@ const TABLE: Record<StateName, Record<EventName, Row>> = {
     send_failed: ["dead", []],
     deadline_own: ["dead", []],
     deadline_other: ["dead", []],
+    deadline_same_id: ["dead", []],
     handshake_timed_out: ["dead", []],
     channel_ended: ["dead", []],
     close: ["dead", []],
@@ -229,8 +242,10 @@ function emits(pair: (typeof PAIRS)[number], type: Effect<TaskRef>["type"]): boo
 }
 
 describe("transition", () => {
-  it("covers every (state, event) pair", () => {
-    expect(PAIRS).toHaveLength(R.keys(STATES).length * R.keys(EVENTS).length);
+  it("has a fixture for every state and every event type", () => {
+    // `STATES` satisfies a record over every state; `EVERY_EVENT_COVERED`
+    // only compiles when `EVENTS` spans every event type.
+    expect(EVERY_EVENT_COVERED).toBe(true);
   });
 
   it.each(PAIRS)("$stateName × $eventName", ({ stateName, eventName, after }) => {
@@ -398,6 +413,13 @@ describe("transition", () => {
           }),
         },
       ]);
+    });
+
+    it("running: a deadline counts only for the task object on the worker, not its id", () => {
+      expect(transition<TaskRef>(STATES.running, EVENTS.deadline_same_id)).toEqual({
+        state: STATES.running,
+        effects: [],
+      });
     });
 
     it("running: a passed deadline fails the task as timed out", () => {

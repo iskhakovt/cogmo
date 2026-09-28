@@ -77,7 +77,9 @@ async function leased(ch: Channel, opts: Partial<DispatcherOptions> = {}): Promi
 }
 
 function noopHandler(): CtxHandler {
-  return { handle: vi.fn().mockResolvedValue(null) };
+  const handler = mock<CtxHandler>();
+  handler.handle.mockResolvedValue(null);
+  return handler;
 }
 
 function ctxResultsOf(ch: Channel): HostMessage[] {
@@ -184,12 +186,11 @@ describe("Dispatcher", () => {
 
   it("services a ctx_call mid-task and routes to the handler", async () => {
     const ch = channel();
-    const handler: CtxHandler = {
-      handle: vi.fn(async ({ method, args }) => {
-        if (method === "secrets.get" && (args as { name: string }).name === "foo") return "bar";
-        throw new Error("unexpected call");
-      }),
-    };
+    const handler = mock<CtxHandler>();
+    handler.handle.mockImplementation(async ({ method, args }) => {
+      if (method === "secrets.get" && (args as { name: string }).name === "foo") return "bar";
+      throw new Error("unexpected call");
+    });
     const d = await leased(ch);
 
     const outcome = d.invoke(INVOKE, { ctxHandler: handler, deadline: NEVER });
@@ -214,11 +215,8 @@ describe("Dispatcher", () => {
 
   it("surfaces CtxError as a typed ctx_result with errorKind", async () => {
     const ch = channel();
-    const handler: CtxHandler = {
-      handle: vi.fn(async () => {
-        throw new CtxError("not_in_allowlist", "secret 'x' not declared");
-      }),
-    };
+    const handler = mock<CtxHandler>();
+    handler.handle.mockRejectedValue(new CtxError("not_in_allowlist", "secret 'x' not declared"));
     const d = await leased(ch);
 
     d.invoke(INVOKE, { ctxHandler: handler, deadline: NEVER });
@@ -246,11 +244,8 @@ describe("Dispatcher", () => {
 
   it("wraps non-CtxError exceptions as errorKind: internal", async () => {
     const ch = channel();
-    const handler: CtxHandler = {
-      handle: vi.fn(async () => {
-        throw new Error("boom");
-      }),
-    };
+    const handler = mock<CtxHandler>();
+    handler.handle.mockRejectedValue(new Error("boom"));
     const d = await leased(ch);
 
     d.invoke(INVOKE, { ctxHandler: handler, deadline: NEVER });
@@ -273,12 +268,11 @@ describe("Dispatcher", () => {
   it("handles concurrent in-flight ctx calls correlated by id", async () => {
     const ch = channel();
     const resolvers = new Map<string, (v: unknown) => void>();
-    const handler: CtxHandler = {
-      handle: vi.fn(({ args }) => {
-        const id = (args as { id: string }).id;
-        return new Promise((resolve) => resolvers.set(id, resolve));
-      }),
-    };
+    const handler = mock<CtxHandler>();
+    handler.handle.mockImplementation(({ args }) => {
+      const id = (args as { id: string }).id;
+      return new Promise((resolve) => resolvers.set(id, resolve));
+    });
     const d = await leased(ch);
 
     d.invoke(INVOKE, { ctxHandler: handler, deadline: NEVER });
@@ -301,9 +295,8 @@ describe("Dispatcher", () => {
 
   it("handles 100 concurrent ctx calls without dropping any", async () => {
     const ch = channel();
-    const handler: CtxHandler = {
-      handle: vi.fn(async ({ args }) => (args as { i: number }).i * 2),
-    };
+    const handler = mock<CtxHandler>();
+    handler.handle.mockImplementation(async ({ args }) => (args as { i: number }).i * 2);
     const d = await leased(ch);
 
     d.invoke(INVOKE, { ctxHandler: handler, deadline: NEVER });
@@ -459,8 +452,10 @@ describe("Dispatcher", () => {
     const ch = channel();
     const d = await leased(ch);
 
-    const handlerA: CtxHandler = { handle: vi.fn().mockResolvedValue("A") };
-    const handlerB: CtxHandler = { handle: vi.fn().mockResolvedValue("B") };
+    const handlerA = mock<CtxHandler>();
+    handlerA.handle.mockResolvedValue("A");
+    const handlerB = mock<CtxHandler>();
+    handlerB.handle.mockResolvedValue("B");
 
     ch.onSend((m) => {
       if (m.type === "task_invoke") {
@@ -553,13 +548,16 @@ describe("Dispatcher", () => {
       const d = await leased(ch);
       const handler = mock<CtxHandler>();
 
-      d.invoke(INVOKE, { ctxHandler: handler, deadline: NEVER });
+      const outcome = d.invoke(INVOKE, { ctxHandler: handler, deadline: NEVER });
       ch.emit({ type: "ctx_call", taskId: "task-2", id: "c", method: "now", args: {} });
       await flush();
 
       expect(handler.handle).not.toHaveBeenCalled();
       expect(ctxResultsOf(ch)).toEqual([]);
-      d.close("done");
+      // The refusal leaves the running task untouched.
+      ch.emit(result(null));
+      ch.emit({ type: "task_exited", id: "task-1" });
+      expect(await outcome).toEqual(completed(result(null)));
     });
 
     it("refuses a ctx_call from a task that has returned but not yet exited", async () => {
