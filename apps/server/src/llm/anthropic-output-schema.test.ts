@@ -559,31 +559,15 @@ describe("restoreLiteralCasing", () => {
     expect(restoreLiteralCasing(schema, value)).toBe(value);
   });
 
-  it("restores a tuple position by position, and its rest items", () => {
-    const Tuple = z.object({
-      pair: z.tuple([z.enum(["east", "west"]), z.enum(["up", "down"])]),
-      rest: z.tuple([z.literal("head")], z.enum(["tail"])),
-    });
+  it("leaves a tuple as it is", () => {
+    const reply = { list: ["A", "bee"] };
 
-    const restored = restoreLiteralCasing(toObjectJsonSchema(Tuple), {
-      pair: ["East", "Up"],
-      rest: ["Head", "TAIL", "Tail"],
-    });
-
-    expect(restored).toEqual({ pair: ["east", "up"], rest: ["head", "tail", "tail"] });
-    expect(Tuple.safeParse(restored).success).toBe(true);
-  });
-
-  it("keeps a tuple variant that admits the value as it is", () => {
-    const Either = z.object({
-      v: z.union([z.tuple([z.enum(["a"])]), z.array(z.enum(["A"])).min(2)]),
-    });
-    const reply = { v: ["a"] };
-
-    const restored = restoreLiteralCasing(toObjectJsonSchema(Either), reply);
-
-    expect(restored).toBe(reply);
-    expect(Either.safeParse(restored).success).toBe(true);
+    expect(
+      restoreLiteralCasing(
+        toObjectJsonSchema(z.object({ list: z.tuple([z.literal("a")], z.enum(["Bee"])) })),
+        reply,
+      ),
+    ).toBe(reply);
   });
 
   it("restores through every allOf member", () => {

@@ -9,7 +9,7 @@
  * or word boundaries, and `minItems` of 0 or 1. Numeric bounds, length bounds
  * and every other array constraint are unsupported, as is an object not
  * closed with `additionalProperties: false`; sending one is a 400. Nor can it
- * express a recursive schema or a tuple (`prefixItems`).
+ * express a recursive schema or a tuple.
  */
 
 import * as R from "remeda";
@@ -61,8 +61,10 @@ export function hasOpenObject(node: unknown): boolean {
 
 /**
  * Whether any node of a JSON Schema is a tuple: `prefixItems`, or draft-07's
- * array-form `items`. The grammar rejects `prefixItems` with a 400 and reads
- * the `items: false` Zod emits beside it as admitting any value.
+ * array-form `items`. {@link toStructuredOutputSchema} moves `prefixItems`
+ * into the description and keeps `items`, which then constrains every
+ * position: a tuple's rest schema overrides its leading entries, and the
+ * `items: false` of a plain tuple reads to the grammar as any value.
  */
 export function hasTuple(node: unknown): boolean {
   if (!R.isPlainObject(node)) return false;
@@ -117,10 +119,10 @@ function localRefs(node: unknown): ReadonlyArray<string> {
  * compare case-insensitively (platform docs, Structured outputs → Invalid
  * outputs). A string that matches no member exactly and one member
  * case-insensitively takes that member. In an `anyOf` or `oneOf`, a variant
- * that admits the value as it is wins over one that restores it. A tuple
- * restores each position against its `prefixItems` entry. Returns `value`
- * itself when nothing changes. The schema must not be recursive
- * ({@link hasRecursiveRef}).
+ * that admits the value as it is wins over one that restores it. Returns
+ * `value` itself when nothing changes. The schema must not be recursive
+ * ({@link hasRecursiveRef}). A tuple takes the tool path ({@link hasTuple})
+ * and never reaches this; one that did would stay as it is.
  */
 export function restoreLiteralCasing(schema: JsonSchema, value: unknown): unknown {
   return restore(schema, value, schema).value;
@@ -215,18 +217,15 @@ function restoreProperties(
   };
 }
 
-/** Each element against its `prefixItems` entry, and `items` past those. */
+/** Each element against `items`. A tuple's elements stay as they are. */
 function restoreItems(
   node: Readonly<Record<string, unknown>>,
   value: unknown,
   root: JsonSchema,
 ): Restored {
-  if (!Array.isArray(value)) return kept(value);
-  const prefix = Array.isArray(node.prefixItems) ? node.prefixItems : [];
-  const restored = value.map((item, position) => {
-    const schema = position < prefix.length ? prefix[position] : node.items;
-    return schema === undefined ? kept(item) : restore(schema, item, root);
-  });
+  const items = node.items;
+  if (items === undefined || "prefixItems" in node || !Array.isArray(value)) return kept(value);
+  const restored = value.map((item) => restore(items, item, root));
   const changed = restored.some((r) => r.changed);
   return {
     value: changed ? restored.map((r) => r.value) : value,
