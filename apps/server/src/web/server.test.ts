@@ -7,7 +7,7 @@ import { err } from "neverthrow";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { DrizzleAgentStore } from "../agent/store/index.js";
 import type { Database, Transactor } from "../db/index.js";
-import { expectDefined } from "../test/assertions.js";
+import { expectDefined, resolvesWithin } from "../test/assertions.js";
 import { mockTransportDeep } from "../test/factories.js";
 import { createTestDatabase } from "../test/pglite.js";
 import { WebStreamRegistry } from "../transport/adapters/web/stream-registry.js";
@@ -18,6 +18,8 @@ import { DrizzleWebSessionStore } from "./store/index.js";
 import { webSessions } from "./store/schema.js";
 
 const VALID_TOKEN = "secret-token";
+/** For the servers whose tests never shut down a stream. */
+const NO_SHUTDOWN = new AbortController().signal;
 
 let db: Database;
 let tx: Transactor;
@@ -35,6 +37,7 @@ beforeAll(async () => {
     webTransport: mockTransportDeep({ models: { list: async () => ["gpt", "claude"] } }),
     webSessionStore: new DrizzleWebSessionStore(),
     webStreamRegistry: new WebStreamRegistry(),
+    shutdownSignal: NO_SHUTDOWN,
     runInTx: tx,
     verifyLoginToken: (candidate) => candidate === VALID_TOKEN,
     ownerUserId,
@@ -192,6 +195,7 @@ describe("web server", () => {
         webTransport: null,
         webSessionStore: new DrizzleWebSessionStore(),
         webStreamRegistry: new WebStreamRegistry(),
+        shutdownSignal: NO_SHUTDOWN,
         runInTx: tx,
         verifyLoginToken: (candidate) => candidate === VALID_TOKEN,
         ownerUserId,
@@ -257,6 +261,7 @@ describe("web server", () => {
           webTransport: null,
           webSessionStore: new DrizzleWebSessionStore(),
           webStreamRegistry: new WebStreamRegistry(),
+          shutdownSignal: NO_SHUTDOWN,
           runInTx: tx,
           verifyLoginToken: () => false,
           ownerUserId,
@@ -278,6 +283,7 @@ describe("web chat routes", () => {
   let chatServer: ReturnType<typeof createWebServer>;
   let chatBase: string;
   let chatRegistry: WebStreamRegistry;
+  let chatShutdown: AbortController;
   let transport: ReturnType<typeof mockTransportDeep>;
 
   const session = {
@@ -292,11 +298,13 @@ describe("web chat routes", () => {
   /** Start a chat server with a fresh registry + transport mock (default or overridden). */
   async function start(overrides: Parameters<typeof mockTransportDeep>[0] = {}): Promise<void> {
     chatRegistry = new WebStreamRegistry();
+    chatShutdown = new AbortController();
     transport = mockTransportDeep(overrides);
     chatServer = createWebServer({
       webTransport: transport,
       webSessionStore: new DrizzleWebSessionStore(),
       webStreamRegistry: chatRegistry,
+      shutdownSignal: chatShutdown.signal,
       runInTx: tx,
       verifyLoginToken: (candidate) => candidate === VALID_TOKEN,
       ownerUserId,
@@ -310,12 +318,12 @@ describe("web chat routes", () => {
   }
 
   afterEach(async () => {
-    if (chatServer?.listening) {
-      await new Promise<void>((resolve) => {
-        chatServer.closeIdleConnections();
-        chatServer.close(() => resolve());
-      });
-    }
+    if (!chatServer) return;
+    const closing = chatServer.listening
+      ? new Promise<void>((resolve) => chatServer.close(() => resolve()))
+      : Promise.resolve();
+    chatServer.closeAllConnections();
+    await closing;
   });
 
   it("creates a conversation and returns its id", async () => {
@@ -441,6 +449,26 @@ describe("web chat routes", () => {
     });
   });
 
+  it("ends open streams on shutdown so close() drains", async () => {
+    await start();
+    const cookie = await login();
+    const res = await fetch(`${chatBase}/api/chat/conv-1/stream?tab=tab-1`, {
+      headers: { cookie, "sec-fetch-site": "same-origin" },
+    });
+    const reader = expectDefined(res.body, "sse body").getReader();
+    await reader.read(); // stream established + tab registered
+
+    chatShutdown.abort();
+    const closed = new Promise<void>((resolve) => chatServer.close(() => resolve()));
+
+    await resolvesWithin(closed, 2_000, "the server to close");
+    // A clean end of stream, not a reset: the client reconnects instead of erroring.
+    let chunk = await reader.read();
+    while (!chunk.done) chunk = await reader.read();
+    expect(chatRegistry.size).toBe(0);
+    expect(transport.closeSession).toHaveBeenCalledWith("session-resumed");
+  });
+
   it("401s the stream without a session cookie (fail-closed)", async () => {
     await start();
     const res = await fetch(`${chatBase}/api/chat/conv-1/stream?tab=tab-1`, {
@@ -470,6 +498,7 @@ describe("dev CORS (WEB_DEV_ALLOW_ORIGIN)", () => {
       webTransport: mockTransportDeep(),
       webSessionStore: new DrizzleWebSessionStore(),
       webStreamRegistry: new WebStreamRegistry(),
+      shutdownSignal: NO_SHUTDOWN,
       runInTx: tx,
       verifyLoginToken: (candidate) => candidate === VALID_TOKEN,
       ownerUserId,
@@ -539,6 +568,7 @@ describe("dev CORS (WEB_DEV_ALLOW_ORIGIN)", () => {
       webTransport: mockTransportDeep(),
       webSessionStore: new DrizzleWebSessionStore(),
       webStreamRegistry: new WebStreamRegistry(),
+      shutdownSignal: NO_SHUTDOWN,
       runInTx: tx,
       verifyLoginToken: (candidate) => candidate === VALID_TOKEN,
       ownerUserId,

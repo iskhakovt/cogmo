@@ -202,10 +202,12 @@ async function serve(): Promise<number> {
     webLoginToken,
     user,
   } = await bootstrap();
+  const webShutdown = new AbortController();
   const webServer = await startWebServer({
     webTransport,
     webSessionStore,
     webStreamRegistry,
+    shutdownSignal: webShutdown.signal,
     runInTx,
     verifyLoginToken: (candidate) => verifyWebLoginToken(candidate, webLoginToken),
     ownerUserId: user.id,
@@ -242,9 +244,10 @@ async function serve(): Promise<number> {
     }
   } finally {
     // Drain HTTP first — stop accepting requests before the Transport and
-    // stores the oRPC layer depends on are torn down. `closeIdleConnections`
-    // drops idle keep-alive sockets (a browser holding one open would otherwise
-    // make `close()` wait indefinitely); in-flight requests still drain.
+    // stores the oRPC layer depends on are torn down. The abort ends open chat
+    // streams; `closeIdleConnections` drops idle keep-alive sockets; in-flight
+    // requests still drain.
+    webShutdown.abort();
     await new Promise<void>((resolve) => {
       webServer.close(() => resolve());
       webServer.closeIdleConnections();

@@ -33,6 +33,11 @@ export interface CreateWebServerDeps {
   webSessionStore: WebSessionStore;
   /** SSE bridge the chat routes register tab connections on; the WebUiAdapter writes through it. */
   webStreamRegistry: WebStreamRegistry;
+  /**
+   * Aborted at shutdown, before `close()`: ends every open chat stream, which
+   * `close()` would otherwise wait on forever.
+   */
+  shutdownSignal: AbortSignal;
   runInTx: Transactor;
   /** Constant-time compare of a presented bootstrap token to the derived one. */
   verifyLoginToken: (candidate: string) => boolean;
@@ -222,6 +227,7 @@ export function createWebServer(deps: CreateWebServerDeps): Server {
           transport: deps.webTransport,
           registry: deps.webStreamRegistry,
           ownerHandle: identity.platformUserHandle,
+          shutdownSignal: deps.shutdownSignal,
         });
         return;
       }

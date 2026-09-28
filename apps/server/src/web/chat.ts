@@ -41,6 +41,8 @@ export interface ChatRouteDeps {
   registry: WebStreamRegistry;
   /** Owner handle resolved by the gate — passed to identity-checked Transport calls. */
   ownerHandle: string;
+  /** Server-lifetime signal; aborting it ends every open stream. */
+  shutdownSignal: AbortSignal;
 }
 
 /** SSE response headers — disable caching + proxy buffering so frames flush immediately. */
@@ -65,7 +67,7 @@ function sseConnection(res: ServerResponse): SseConnection {
   return {
     send(frame) {
       // `destroyed` is the precise "socket gone" signal — `writableEnded` only
-      // flips on our own `end()`, which never happens for a long-lived stream.
+      // flips on our own `end()`, at shutdown.
       // Reported back to the caller: this connection stays registered until
       // the response's `close` handler runs a tick later, so a dropped frame
       // here is invisible to the registry's "is anyone registered" check.
@@ -200,6 +202,13 @@ async function handleStream(
     closeSessionBestEffort(deps.transport, sessionId);
     return;
   }
+  // Shutdown began during the resume: its abort has already fired, so a
+  // stream opened now would never be ended.
+  if (deps.shutdownSignal.aborted) {
+    closeSessionBestEffort(deps.transport, sessionId);
+    sendText(res, 503, "shutting down");
+    return;
+  }
 
   res.writeHead(200, SSE_HEADERS);
   res.flushHeaders();
@@ -210,16 +219,29 @@ async function handleStream(
     if (!res.destroyed && !res.writableEnded) res.write(": ping\n\n");
   }, HEARTBEAT_MS);
 
-  // Anchor disconnect cleanup on the long-lived RESPONSE stream: we never call
-  // `res.end()`, so `res` `close` fires only when the connection drops. (`req`
-  // `close` is ambiguous for a bodyless GET — it can also signal that the
-  // request was fully received.) Closing the session keeps abandoned tabs from
-  // accumulating `receive:"all"` sessions; a reconnect resumes a fresh one.
-  res.on("close", () => {
+  // Runs once, whichever ends the stream first: the connection dropping or
+  // shutdown. Closing the session keeps abandoned tabs from accumulating
+  // `receive:"all"` sessions; a reconnect resumes a fresh one.
+  let open = true;
+  const teardown = () => {
+    if (!open) return;
+    open = false;
     clearInterval(heartbeat);
     deregister();
+    deps.shutdownSignal.removeEventListener("abort", onShutdown);
     closeSessionBestEffort(deps.transport, sessionId);
-  });
+  };
+  // A clean end rather than a reset, so the client reconnects instead of erroring.
+  const onShutdown = () => {
+    teardown();
+    res.end();
+  };
+  deps.shutdownSignal.addEventListener("abort", onShutdown, { once: true });
+  // Anchor disconnect cleanup on the long-lived RESPONSE stream: `res` `close`
+  // fires when the connection drops or after `onShutdown` ends it. (`req`
+  // `close` is ambiguous for a bodyless GET — it can also signal that the
+  // request was fully received.)
+  res.on("close", teardown);
 }
 
 /** Fire-and-forget session close — a failed close is logged, not surfaced (the socket is gone). */

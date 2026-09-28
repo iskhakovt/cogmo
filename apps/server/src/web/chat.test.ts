@@ -5,11 +5,14 @@ import { describe, expect, it, vi } from "vitest";
 // the SSE handler is unit-testable without a real socket (the disconnect race is
 // otherwise non-deterministic over the wire).
 import { mock } from "vitest-mock-extended";
+import { expectDefined } from "../test/assertions.js";
 import { mockTransportDeep } from "../test/factories.js";
 import { WebStreamRegistry } from "../transport/adapters/web/stream-registry.js";
 import { handleChat, serializeFrame } from "./chat.js";
 
 const OWNER = "web-owner";
+/** For the cases that never open a stream. */
+const NO_SHUTDOWN = new AbortController().signal;
 
 /** A minimal GET-stream request; `destroyed` simulates a disconnect during the resume await. */
 function streamReq(destroyed = false): IncomingMessage {
@@ -30,6 +33,7 @@ describe("handleChat — stream route", () => {
       transport,
       registry,
       ownerHandle: OWNER,
+      shutdownSignal: NO_SHUTDOWN,
     });
 
     expect(transport.closeSession).toHaveBeenCalledWith("session-resumed");
@@ -48,6 +52,7 @@ describe("handleChat — stream route", () => {
       transport,
       registry: new WebStreamRegistry(),
       ownerHandle: OWNER,
+      shutdownSignal: NO_SHUTDOWN,
     });
     expect(res.writeHead).toHaveBeenCalledWith(404, expect.anything());
   });
@@ -63,8 +68,80 @@ describe("handleChat — stream route", () => {
       transport,
       registry: new WebStreamRegistry(),
       ownerHandle: OWNER,
+      shutdownSignal: NO_SHUTDOWN,
     });
     expect(res.writeHead).toHaveBeenCalledWith(403, expect.anything());
+  });
+
+  it("ends the stream, stops the heartbeat and closes the session on shutdown", async () => {
+    vi.useFakeTimers();
+    try {
+      const registry = new WebStreamRegistry();
+      const transport = mockTransportDeep({});
+      // A live response: `end()` on the mock emits no `close`, so the shutdown
+      // path has to tear down on its own.
+      const res = mock<ServerResponse>({ destroyed: false, writableEnded: false });
+      const shutdown = new AbortController();
+      await handleChat(streamReq(), res, "/api/chat/conv-1/stream", {
+        transport,
+        registry,
+        ownerHandle: OWNER,
+        shutdownSignal: shutdown.signal,
+      });
+      expect(registry.size).toBe(1);
+
+      shutdown.abort();
+
+      expect(res.end).toHaveBeenCalledTimes(1);
+      expect(registry.size).toBe(0);
+      expect(transport.closeSession).toHaveBeenCalledWith("session-resumed");
+      res.write.mockClear();
+      vi.advanceTimersByTime(60_000);
+      expect(res.write).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refuses a stream that resumes after shutdown began", async () => {
+    const registry = new WebStreamRegistry();
+    const transport = mockTransportDeep({});
+    const res = mock<ServerResponse>({ destroyed: false, writableEnded: false });
+
+    await handleChat(streamReq(), res, "/api/chat/conv-1/stream", {
+      transport,
+      registry,
+      ownerHandle: OWNER,
+      shutdownSignal: AbortSignal.abort(),
+    });
+
+    expect(res.writeHead).toHaveBeenCalledWith(503, expect.anything());
+    expect(transport.closeSession).toHaveBeenCalledWith("session-resumed");
+    expect(registry.size).toBe(0);
+  });
+
+  it("stops listening for shutdown once the client disconnects", async () => {
+    const registry = new WebStreamRegistry();
+    const transport = mockTransportDeep({});
+    const res = mock<ServerResponse>({ destroyed: false, writableEnded: false });
+    const shutdown = new AbortController();
+    await handleChat(streamReq(), res, "/api/chat/conv-1/stream", {
+      transport,
+      registry,
+      ownerHandle: OWNER,
+      shutdownSignal: shutdown.signal,
+    });
+    const [, onClose] = expectDefined(
+      res.on.mock.calls.find(([event]) => event === "close"),
+      "close listener",
+    );
+
+    onClose();
+    shutdown.abort();
+
+    expect(res.end).not.toHaveBeenCalled();
+    expect(transport.closeSession).toHaveBeenCalledTimes(1);
+    expect(registry.size).toBe(0);
   });
 });
 
