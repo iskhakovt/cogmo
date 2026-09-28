@@ -1,17 +1,13 @@
-import { on } from "node:events";
+import type { EventEmitter } from "node:events";
 import { MessageChannel, type MessagePort, Worker } from "node:worker_threads";
 import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
-import {
-  type CtxHandler,
-  Dispatcher,
-  parseWorkerFrame,
-  type WorkerTransport,
-} from "../dispatcher.js";
+import { type CtxHandler, Dispatcher } from "../dispatcher.js";
 import type { RuntimeRusage, TaskResult } from "../protocol.js";
 import { DEFAULT_WALL_CLOCK_S, timeoutSignal } from "../wall-clock.js";
 import type { StartFailure, WorkerFrame } from "../worker-state.js";
+import { createPortTransport } from "./transport.js";
 
 const log = logger.child({ component: "skills.worker.wasm" });
 
@@ -70,6 +66,17 @@ export interface RunOnWorkerResult {
   rusage?: RuntimeRusage;
 }
 
+/** A Pyodide worker thread, as `runOnThread` drives it. */
+export interface PyodideThread {
+  /** The host's end of the thread's channel. */
+  port: MessagePort;
+  /** The thread's own `error` and `exit`. */
+  events: EventEmitter;
+  /** Stop cooperative Python code: the SAB interrupt. */
+  interrupt(): void;
+  terminate(): Promise<unknown>;
+}
+
 /**
  * Spawn a one-shot Pyodide worker, drive its single task through a
  * `Dispatcher`, and tear it down. Enforces a host-side wall clock: when it
@@ -78,10 +85,42 @@ export interface RunOnWorkerResult {
  * that the task fails and `worker.terminate()` ends it — the documented
  * Pyodide fallback for tight CPU loops.
  */
-export async function runOnWorker(params: RunOnWorkerParams): Promise<RunOnWorkerResult> {
-  const readyTimeoutMs = params.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
-  const interruptBuffer = new SharedArrayBuffer(1);
+export function runOnWorker(params: RunOnWorkerParams): Promise<RunOnWorkerResult> {
+  return runOnThread(spawnThread(params), params);
+}
 
+/**
+ * Drive `thread` through its handshake and its one task, then terminate
+ * it. `runOnWorker` hands it a Pyodide thread; tests hand it a stand-in.
+ */
+export async function runOnThread(
+  thread: PyodideThread,
+  params: RunOnWorkerParams,
+): Promise<RunOnWorkerResult> {
+  const readyTimeoutMs = params.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
+  try {
+    const opened = await Dispatcher.open({
+      transport: createPortTransport(thread.port, thread.events),
+      handshake: acceptWorkerReady,
+      // Bounds a hung micropip install (slow PyPI, resolver dead-end); the
+      // task's own deadline starts only after the handshake.
+      handshakeDeadline: timeoutSignal(readyTimeoutMs),
+      logContext: { taskId: params.taskId },
+    });
+    return await opened.match(
+      (dispatcher) => runTask(dispatcher, params, thread),
+      (failure) =>
+        Promise.resolve({ ok: false, error: describeStartFailure(failure, readyTimeoutMs) }),
+    );
+  } finally {
+    await thread.terminate().catch(() => {
+      /* terminate after exit is benign */
+    });
+  }
+}
+
+function spawnThread(params: RunOnWorkerParams): PyodideThread {
+  const interruptBuffer = new SharedArrayBuffer(1);
   const channel = new MessageChannel();
   const worker = new Worker(workerEntryUrl(), {
     workerData: {
@@ -96,33 +135,24 @@ export async function runOnWorker(params: RunOnWorkerParams): Promise<RunOnWorke
     },
     transferList: [channel.port2],
   });
-
-  try {
-    const opened = await Dispatcher.open({
-      transport: createPortTransport(channel.port1, worker),
-      handshake: acceptWorkerReady,
-      // Bounds a hung micropip install (slow PyPI, resolver dead-end); the
-      // task's own deadline starts only after the handshake.
-      handshakeDeadline: timeoutSignal(readyTimeoutMs),
-      logContext: { taskId: params.taskId },
-    });
-    return await opened.match(
-      (dispatcher) => runTask(dispatcher, params, interruptBuffer),
-      (failure) =>
-        Promise.resolve({ ok: false, error: describeStartFailure(failure, readyTimeoutMs) }),
-    );
-  } finally {
-    await worker.terminate().catch(() => {
-      /* terminate after exit is benign */
-    });
-  }
+  return {
+    port: channel.port1,
+    events: worker,
+    // Writing 2 fires SIGINT-equivalent on the next JS↔WASM boundary. Pure
+    // CPU loops with no boundary won't yield; the grace window +
+    // terminate() is the documented fallback.
+    interrupt: () => {
+      new Uint8Array(interruptBuffer)[0] = 2;
+    },
+    terminate: () => worker.terminate(),
+  };
 }
 
-/** Run the worker's one task under the wall clock, then close its channel. */
+/** Run the thread's one task under the wall clock, then close its channel. */
 async function runTask(
   dispatcher: Dispatcher,
   params: RunOnWorkerParams,
-  interruptBuffer: SharedArrayBuffer,
+  thread: PyodideThread,
 ): Promise<RunOnWorkerResult> {
   const wallClockS = params.wallClockS ?? DEFAULT_WALL_CLOCK_S.wasm;
   const finished = new AbortController();
@@ -139,10 +169,7 @@ async function runTask(
           { taskId: params.taskId, skillName: params.skillName, wallClockS },
           "wall-clock exceeded — interrupting worker",
         );
-        // Cooperative interrupt: writing 2 fires SIGINT-equivalent on the
-        // next JS↔WASM boundary. Pure CPU loops with no boundary won't yield;
-        // the grace window + worker.terminate() is the documented fallback.
-        new Uint8Array(interruptBuffer)[0] = 2;
+        thread.interrupt();
       },
       { once: true, signal: finished.signal },
     );
@@ -195,49 +222,6 @@ function fromTaskResult(result: TaskResult): RunOnWorkerResult {
   return {
     ...(result.ok ? { ok: true, output: result.output } : { ok: false, error: result.error }),
     ...(result.rusage !== undefined && { rusage: result.rusage }),
-  };
-}
-
-/**
- * The worker thread's `MessagePort` as a transport. Its messages fail once
- * the thread errors or exits. The thread runs one task and is terminated
- * after it, so nothing the task started can outlive it: each `task_result`
- * comes with the task's `task_exited`.
- */
-function createPortTransport(port: MessagePort, worker: Worker): WorkerTransport {
-  const closed = new AbortController();
-  const gone = new AbortController();
-  // Also keeps late errors after teardown — Pyodide's KeyboardInterrupt
-  // after the SAB interrupt, libuv handle-close races — from escaping to
-  // the process as unhandled.
-  worker.on("error", (e: Error) => {
-    log.debug({ err: e.message }, "worker thread error");
-    gone.abort(new Error(`worker crashed: ${e.message}`));
-  });
-  worker.once("exit", (code: number) => gone.abort(new Error(`worker exited (code ${code})`)));
-
-  async function* messages(): AsyncGenerator<WorkerFrame> {
-    try {
-      for await (const [raw] of on(port, "message", {
-        signal: AbortSignal.any([closed.signal, gone.signal]),
-      })) {
-        const frame = parseWorkerFrame(raw);
-        yield frame;
-        if (frame.type === "task_result") yield { type: "task_exited", id: frame.id };
-      }
-    } catch (e) {
-      if (closed.signal.aborted) return;
-      throw gone.signal.aborted ? gone.signal.reason : e;
-    }
-  }
-
-  return {
-    send: (message) => port.postMessage(message),
-    messages,
-    close(): void {
-      closed.abort();
-      port.close();
-    },
   };
 }
 
