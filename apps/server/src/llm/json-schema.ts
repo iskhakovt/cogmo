@@ -1,5 +1,22 @@
+import * as R from "remeda";
 import { type ZodType, z } from "zod";
 import type { JsonSchema } from "./types.js";
+
+/** Keywords that hold definitions for `$ref` to name. */
+export const DEFINITION_KEYWORDS: ReadonlySet<string> = new Set(["$defs", "definitions"]);
+
+/** The definitions a schema holds, under the keywords that hold them. */
+export function definitionsOf(schema: Readonly<Record<string, unknown>>): Record<string, unknown> {
+  return R.pickBy(
+    schema,
+    (value, keyword) => DEFINITION_KEYWORDS.has(keyword) && value !== undefined,
+  );
+}
+
+/** Whether a node's `type` names `object`, alone or in a list. */
+export function isObjectNode(node: Readonly<Record<string, unknown>>): boolean {
+  return node.type === "object" || (Array.isArray(node.type) && node.type.includes("object"));
+}
 
 /**
  * Convert a Zod object schema to the project's `JsonSchema` shape.

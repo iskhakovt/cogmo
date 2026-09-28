@@ -13,6 +13,7 @@
  */
 
 import * as R from "remeda";
+import { DEFINITION_KEYWORDS, isObjectNode } from "./json-schema.js";
 import type { JsonSchema } from "./types.js";
 
 /** The string formats the grammar supports. */
@@ -36,10 +37,7 @@ const UNSUPPORTED_REGEX = /\\[1-9bB]|\(\?<?[=!]/;
 const TYPING_KEYWORDS = ["type", "anyOf", "oneOf", "allOf", "$ref", "enum", "const"] as const;
 
 /** Keywords whose value maps names to subschemas. */
-const SUBSCHEMA_MAPS: ReadonlySet<string> = new Set(["properties", "$defs", "definitions"]);
-
-/** Keywords that hold definitions for `$ref` to name. */
-const DEFINITIONS: ReadonlySet<string> = new Set(["$defs", "definitions"]);
+const SUBSCHEMA_MAPS: ReadonlySet<string> = new Set(["properties", ...DEFINITION_KEYWORDS]);
 
 /** Keywords whose value is a subschema or a list of them. */
 const SUBSCHEMA_LISTS: ReadonlySet<string> = new Set(["anyOf", "oneOf", "allOf", "items"]);
@@ -107,7 +105,7 @@ function localRefs(node: unknown): ReadonlyArray<string> {
   return [
     ...own,
     ...Object.entries(node).flatMap(([keyword, value]) =>
-      DEFINITIONS.has(keyword) ? [] : subschemasOf(keyword, value).flatMap(localRefs),
+      DEFINITION_KEYWORDS.has(keyword) ? [] : subschemasOf(keyword, value).flatMap(localRefs),
     ),
   ];
 }
@@ -375,10 +373,6 @@ function subschemasOf(keyword: string, value: unknown): ReadonlyArray<unknown> {
   if (SUBSCHEMA_MAPS.has(keyword) && R.isPlainObject(value)) return Object.values(value);
   if (SUBSCHEMA_LISTS.has(keyword)) return Array.isArray(value) ? value : [value];
   return [];
-}
-
-function isObjectNode(node: Readonly<Record<string, unknown>>): boolean {
-  return node.type === "object" || (Array.isArray(node.type) && node.type.includes("object"));
 }
 
 /** The form the SDK's transform writes: `{minLength: 1, maxLength: 80}`. */

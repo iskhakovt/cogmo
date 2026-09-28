@@ -1,4 +1,4 @@
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, { BadRequestError } from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { logger } from "../logger.js";
 import {
@@ -16,6 +16,7 @@ import {
   parseToolArgs,
   ToolArgsCutOffError,
 } from "./errors.js";
+import { definitionsOf } from "./json-schema.js";
 import { withFailureLogging } from "./logging-fetch.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
@@ -25,9 +26,9 @@ import {
   type ContentBlock,
   type CountTokensParams,
   DEFAULT_MAX_TOKENS,
-  type JsonSchema,
   type LlmResponse,
   type Message,
+  type ResponseFormat,
   type StopReason,
   type StreamEvent,
   type ToolDefinition,
@@ -276,7 +277,7 @@ export class AnthropicProvider implements LlmProvider {
       return {
         content:
           format && !toolPath
-            ? content.map((block) => withLiteralCasing(block, format.schema))
+            ? content.map((block) => withLiteralCasing(block, format, response.model))
             : content,
         stopReason,
         model: response.model,
@@ -477,12 +478,7 @@ function takesToolPath(params: ChatParams): boolean {
   );
 }
 
-/**
- * What the 400s for a schema past the grammar's compile limits say: the
- * documented message for the internal grammar-size limit, the one the API
- * sends for it, the explicit limits on optional and union-typed parameters,
- * and a `pattern` too costly to compile.
- */
+/** Substrings of the 400 messages for a schema past the grammar's compile limits. */
 const GRAMMAR_LIMIT_MESSAGES = [
   "Schema is too complex for compilation",
   "The compiled grammar is too large",
@@ -491,20 +487,13 @@ const GRAMMAR_LIMIT_MESSAGES = [
   "pattern is too complex for structured output",
 ] as const;
 
-/** The body of an Anthropic API error for an invalid request. */
-const InvalidRequestBodySchema = z.object({
-  error: z.object({ type: z.literal("invalid_request_error"), message: z.string() }),
-});
+/** The message in an Anthropic API error's body. */
+const ErrorMessageBodySchema = z.object({ error: z.object({ message: z.string() }) });
 
-/**
- * Whether an SDK error is a 400 for a schema past the grammar's compile
- * limits. Duck-typed on `status` and the parsed body, as the SDK's
- * `APIError` carries them.
- */
+/** Whether the client's error is a 400 for a schema past the grammar's compile limits. */
 function isGrammarLimitError(err: unknown): boolean {
-  if (!(err instanceof Error) || !("status" in err) || err.status !== 400) return false;
-  if (!("error" in err)) return false;
-  const body = InvalidRequestBodySchema.safeParse(err.error);
+  if (!(err instanceof BadRequestError) || err.type !== "invalid_request_error") return false;
+  const body = ErrorMessageBodySchema.safeParse(err.error);
   return (
     body.success &&
     GRAMMAR_LIMIT_MESSAGES.some((message) => body.data.error.message.includes(message))
@@ -517,7 +506,11 @@ function isGrammarLimitError(err: unknown): boolean {
  * JSON, as in a cut-off or refused reply, passes through for the caller to
  * judge.
  */
-function withLiteralCasing(block: ContentBlock, schema: JsonSchema): ContentBlock {
+function withLiteralCasing(
+  block: ContentBlock,
+  format: ResponseFormat,
+  model: string,
+): ContentBlock {
   if (block.type !== "text") return block;
   let reply: unknown;
   try {
@@ -525,9 +518,12 @@ function withLiteralCasing(block: ContentBlock, schema: JsonSchema): ContentBloc
   } catch {
     return block;
   }
-  const restored = restoreLiteralCasing(schema, reply);
+  const restored = restoreLiteralCasing(format.schema, reply);
   if (restored === reply) return block;
-  logger.debug("restored the capitalization of enum or const values in a structured-output reply");
+  logger.debug(
+    { model, format: format.name },
+    "restored the capitalization of enum or const values in a structured-output reply",
+  );
   return { ...block, text: JSON.stringify(restored) };
 }
 
@@ -650,24 +646,18 @@ function toAnthropicBlock(
   }
 }
 
+/** The tool with its schema's definitions, without which its `$ref`s dangle. */
 function toAnthropicTool(tool: ToolDefinition): Anthropic.Tool {
-  const inputSchema: Anthropic.Tool["input_schema"] = {
-    type: "object" as const,
-  };
-  if (tool.parameters.properties !== undefined) {
-    inputSchema.properties = tool.parameters.properties;
-  }
-  if (tool.parameters.required !== undefined) {
-    inputSchema.required = tool.parameters.required;
-  }
-  // The definitions a `$ref` names, without which the ref dangles.
-  for (const keyword of ["$defs", "definitions"]) {
-    if (tool.parameters[keyword] !== undefined) inputSchema[keyword] = tool.parameters[keyword];
-  }
+  const { properties, required } = tool.parameters;
   return {
     name: tool.name,
     description: tool.description,
-    input_schema: inputSchema,
+    input_schema: {
+      type: "object",
+      ...(properties !== undefined && { properties }),
+      ...(required !== undefined && { required }),
+      ...definitionsOf(tool.parameters),
+    },
   };
 }
 

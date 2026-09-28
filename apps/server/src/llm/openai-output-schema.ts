@@ -3,13 +3,17 @@
  *
  * `response_format` with `strict: true` constrains decoding to a subset of
  * JSON Schema (developers.openai.com, Structured model outputs → Supported
- * schemas): every object closed with `additionalProperties: false` and every
- * property listed in `required`; `anyOf` but not `oneOf`, `allOf`, `not` or
- * the conditionals; a fixed list of string formats; numeric bounds, `pattern`,
+ * schemas): every node typed; every object closed with
+ * `additionalProperties: false` and every property listed in `required`;
+ * `anyOf`, but no `anyOf` at the root, and no `oneOf`, `allOf`, `not` or
+ * conditionals; a fixed list of string formats; numeric bounds, `pattern`,
  * `minItems` and `maxItems`. A schema outside it is a 400 under strict mode.
+ * The SDK's `toStrictJsonSchema` is no check for this: it passes an untyped
+ * node and an unlisted `format`, both 400s.
  */
 
 import * as R from "remeda";
+import { isObjectNode } from "./json-schema.js";
 import type { JsonSchema } from "./types.js";
 
 /** The string formats strict mode supports. */
@@ -51,9 +55,8 @@ const STRICT_KEYWORDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Whether strict mode takes the schema. A schema it can't, such as a
- * pipeline stage's open JSON output schema, an optional property or a
- * discriminated union's `oneOf`, goes with `strict: false`.
+ * Whether strict mode takes the schema. A pipeline stage's open output
+ * schema, an optional property or a `oneOf` puts it outside.
  */
 export function fitsStrictMode(schema: JsonSchema): boolean {
   return !("anyOf" in schema) && fitsNode(schema);
@@ -91,8 +94,4 @@ function isClosedWithAllRequired(node: Readonly<Record<string, unknown>>): boole
   const required = Array.isArray(node.required) ? node.required : [];
   const properties = R.isPlainObject(node.properties) ? Object.keys(node.properties) : [];
   return properties.every((name) => required.includes(name));
-}
-
-function isObjectNode(node: Readonly<Record<string, unknown>>): boolean {
-  return node.type === "object" || (Array.isArray(node.type) && node.type.includes("object"));
 }

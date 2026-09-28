@@ -1,3 +1,4 @@
+import { APIError } from "@anthropic-ai/sdk";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { CorrectionExtractionSchema } from "../agent/evolution/extraction-schema.js";
@@ -9,21 +10,21 @@ import { MissingToolCallError, ProviderProtocolError, ToolArgsCutOffError } from
 import { toObjectJsonSchema } from "./json-schema.js";
 import type { CacheIntent, ResponseFormat, StreamEvent, ToolDefinition } from "./types.js";
 
-// Mock the Anthropic SDK — use a class so `new Anthropic()` works
+// Mock the Anthropic client — use a class so `new Anthropic()` works — and
+// keep the SDK's error classes.
 const mockCreate = vi.fn();
 const mockCountTokens = vi.fn();
 // Constructor options each client was built with, newest last.
 const clientOptions: Array<{ fetch?: typeof fetch }> = [];
-vi.mock("@anthropic-ai/sdk", () => {
-  return {
-    default: class MockAnthropic {
-      messages = { create: mockCreate, countTokens: mockCountTokens };
-      constructor(opts: { fetch?: typeof fetch }) {
-        clientOptions.push(opts);
-      }
-    },
-  };
-});
+vi.mock("@anthropic-ai/sdk", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@anthropic-ai/sdk")>()),
+  default: class MockAnthropic {
+    messages = { create: mockCreate, countTokens: mockCountTokens };
+    constructor(opts: { fetch?: typeof fetch }) {
+      clientOptions.push(opts);
+    }
+  },
+}));
 
 /** Create a mock async iterable that yields Anthropic stream events. */
 function mockStream(events: unknown[]): AsyncIterable<unknown> {
@@ -2027,13 +2028,14 @@ describe("AnthropicProvider", () => {
       },
     );
 
-    /** An SDK `APIError` as the grammar's compile limits raise it. */
+    /** The body of an Anthropic API error. */
+    function errorBody(type: string, message: string) {
+      return { type: "error", error: { type, message }, request_id: "req_1" };
+    }
+
+    /** The SDK's error for a response, as the client raises it. */
     function apiError(status: number, type: string, message: string): Error {
-      const body = { type: "error", error: { type, message }, request_id: "req_1" };
-      return Object.assign(new Error(`${status} ${JSON.stringify(body)}`), {
-        status,
-        error: body,
-      });
+      return APIError.generate(status, errorBody(type, message), undefined, new Headers());
     }
 
     it.each([
@@ -2096,6 +2098,14 @@ describe("AnthropicProvider", () => {
         apiError(500, "invalid_request_error", "Schema is too complex for compilation."),
       ],
       ["an error without a body", new Error("Schema is too complex for compilation.")],
+      [
+        "a lookalike that isn't the SDK's error",
+        Object.assign(new Error("400"), {
+          status: 400,
+          type: "invalid_request_error",
+          error: errorBody("invalid_request_error", "Schema is too complex for compilation."),
+        }),
+      ],
     ])("surfaces %s without a retry", async (_label, error) => {
       const provider = createProvider();
       mockCreate.mockRejectedValueOnce(error);
@@ -2185,6 +2195,32 @@ describe("AnthropicProvider", () => {
           }),
         },
       ]);
+    });
+
+    it("logs a casing restore with the model and format name", async () => {
+      const debugSpy = vi.spyOn(logger, "debug").mockImplementation(() => undefined);
+      try {
+        const provider = createProvider();
+        mockCreate.mockResolvedValueOnce(textReply("claude-opus-5-5", '{"value":"New"}'));
+
+        await provider.chat({
+          model: "claude-opus-5-5",
+          system: "sys",
+          messages: [{ role: "user", content: "hi" }],
+          responseFormat: {
+            type: "json_schema",
+            name: "action",
+            schema: toObjectJsonSchema(z.object({ value: z.literal("new") })),
+          },
+        });
+
+        expect(debugSpy).toHaveBeenCalledWith(
+          { model: "claude-opus-5-5", format: "action" },
+          expect.stringContaining("restored the capitalization"),
+        );
+      } finally {
+        debugSpy.mockRestore();
+      }
     });
 
     it("passes a structured-output reply's text through, whatever it says", async () => {
