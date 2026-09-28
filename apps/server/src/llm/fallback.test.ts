@@ -386,6 +386,31 @@ describe("FallbackLlmProvider.chatStream", () => {
     await expect(handle.response).rejects.toBeInstanceOf(AllProvidersFailedError);
   });
 
+  it("returns the candidate's stream when the consumer abandons it", async () => {
+    const cleanup = vi.fn();
+    async function* gen(): AsyncIterable<StreamEvent> {
+      try {
+        yield { type: "text_delta", text: "one" };
+        yield { type: "text_delta", text: "two" };
+      } finally {
+        cleanup();
+      }
+    }
+    const primary = mockProvider({
+      name: "primary",
+      chatStream: vi.fn().mockReturnValue({
+        events: gen(),
+        response: new Promise(() => {}),
+      }),
+    });
+
+    const handle = new FallbackLlmProvider([primary]).chatStream(chatParams);
+    for await (const _ of handle.events) break;
+
+    expect(cleanup).toHaveBeenCalledOnce();
+    await expect(handle.response).rejects.toThrow(/abandoned/);
+  });
+
   it("exposes the underlying provider when the list contains a single entry", () => {
     const only: LlmProvider = mockProvider({ name: "anthropic" });
     const fb = new FallbackLlmProvider([only]);

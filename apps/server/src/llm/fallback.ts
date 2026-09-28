@@ -255,6 +255,7 @@ export class FallbackLlmProvider implements LlmProvider {
         // Successfully established the stream. Forward the first event and
         // then drain the iterator. Any further errors propagate — fallback
         // is no longer an option.
+        let drained = false;
         try {
           if (!activeFirstEvent.done) {
             yield activeFirstEvent.value;
@@ -264,6 +265,7 @@ export class FallbackLlmProvider implements LlmProvider {
               yield next.value;
             }
           }
+          drained = true;
           const meta = await activeResult.response;
           resolveResponse(meta);
           return;
@@ -271,9 +273,18 @@ export class FallbackLlmProvider implements LlmProvider {
           // Mid-stream drain failed. `activeResult.response` is still
           // dangling (we only await it on the success path above); detach
           // so the adapter's independent rejection doesn't leak.
+          drained = true;
           activeResult.response.catch(noop);
           rejectResponse(err);
           throw err;
+        } finally {
+          if (!drained) {
+            // The consumer abandoned the stream: return the candidate's
+            // iterator so its cleanup runs (SDK request abort, span end).
+            activeResult.response.catch(noop);
+            rejectResponse(new Error("chatStream consumer abandoned the stream"));
+            await activeIterator.return?.();
+          }
         }
       }
 
