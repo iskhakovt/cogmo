@@ -645,6 +645,25 @@ describe("SysboxWorkerPool", () => {
       await pool.dispose();
     });
 
+    it("count on past a task that returns with its worker dead", async () => {
+      // Spawns 1 and 2 die. Spawn 3 dies under its task, which says nothing
+      // about the image, so spawn 4 dying is the third early death in a row.
+      const task = gate();
+      const h = crashing({ min: 1, max: 1, dies: (n) => n !== 3, task: task.promise });
+      const pool = await h.pool;
+      await vi.waitFor(() => expect(pool.stats()).toMatchObject({ idle: 1 }));
+      const invoked = pool.invoke(invokeParams("t-1"));
+      await vi.waitFor(() => expect(pool.stats()).toMatchObject({ busy: 1 }));
+      expectDefined(h.spawned[2], "third worker").die("supervisor exited");
+      task.open();
+      await invoked;
+
+      await vi.waitFor(() => expect(h.spawned).toHaveLength(4));
+      await settle();
+      expect(h.spawned).toHaveLength(4);
+      await pool.dispose();
+    });
+
     it("leave an acquire queued behind a busy worker to wait for it", async () => {
       const task = gate();
       const h = crashing({ min: 1, max: 1, dies: (n) => n <= 3, task: task.promise });
@@ -983,6 +1002,26 @@ describe("SysboxWorkerPool", () => {
     expect(tornDown).toBe(true);
   });
 
+  it("dispose returns to a second caller only once every container is gone", async () => {
+    const teardown = gate();
+    const pool = await poolWith({
+      min: 1,
+      max: 1,
+      createWorker: async ({ workerId }) =>
+        fakeWorker(workerId, { onDispose: () => teardown.promise }),
+    }).pool;
+    const first = pool.dispose();
+    let secondReturned = false;
+    const second = pool.dispose().then(() => {
+      secondReturned = true;
+    });
+    await new Promise<void>((r) => setTimeout(r, 20));
+    expect(secondReturned).toBe(false);
+
+    teardown.open();
+    await Promise.all([first, second]);
+  });
+
   it("dispose is idempotent", async () => {
     const h = buildPoolHarness({ poolOptions: { min: 1, max: 1 } });
     const pool = await h.pool;
@@ -1076,6 +1115,36 @@ describe("SysboxWorkerPool", () => {
     );
     if (spawnedWorkers.length > 0) {
       expect(spawnedWorkers[0]?.state).toBe("disposed");
+    }
+  });
+
+  it("settles an acquire whose own spawn completes into a dispose, whenever it lands", async () => {
+    // Sweep the dispose across the microtasks between the spawn resolving
+    // and the acquire resuming on it.
+    for (let delay = 0; delay <= 20; delay++) {
+      const spawn = gate();
+      const pool = await poolWith({
+        min: 0,
+        max: 1,
+        createWorker: async ({ workerId }) => {
+          await spawn.promise;
+          return fakeWorker(workerId);
+        },
+      }).pool;
+      let settled = false;
+      const settle = (): void => {
+        settled = true;
+      };
+      void pool.invoke(invokeParams("t-1")).then(settle, settle);
+      await new Promise<void>((r) => setImmediate(r));
+
+      spawn.open();
+      for (let i = 0; i < delay; i++) await Promise.resolve();
+      await pool.dispose();
+
+      await vi.waitFor(() => expect({ delay, settled }).toEqual({ delay, settled: true }), {
+        timeout: 200,
+      });
     }
   });
 
@@ -1219,9 +1288,18 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
     for (let i = 0; i < n; i++) await new Promise<void>((r) => setImmediate(r));
   }
 
+  async function microtasks(n: number): Promise<void> {
+    for (let i = 0; i < n; i++) await Promise.resolve();
+  }
+
   /**
-   * Run one seeded schedule of tasks, worker deaths, spawn failures and
-   * sweeps against a pool, and return every invariant it broke.
+   * Run one seeded schedule against a pool and return every invariant it
+   * broke. Tasks arrive over time while workers die (idle, under a task,
+   * or right after their handshake), spawns fail and sweeps run. Some
+   * schedules pass through a crash loop, every new worker dying at once,
+   * and recover from it. Some dispose the pool midway, a few microtasks
+   * after a spawn or a task completes. Workers honour the pool's signal as
+   * the real one does.
    */
   async function fuzzPool(seed: number): Promise<ReadonlyArray<string>> {
     const random = seeded(seed);
@@ -1229,6 +1307,10 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
     const upTo = (n: number): number => Math.floor(random() * (n + 1));
     const max = 1 + upTo(3);
     const min = upTo(max);
+    const tasks = 5 + upTo(15);
+    const crashFrom = chance(0.3) ? upTo(tasks - 1) : tasks;
+    const crashTo = crashFrom + upTo(4);
+    const disposeAt = chance(0.5) ? upTo(tasks - 1) : tasks;
     const violations: string[] = [];
     const workers: FakeWorker[] = [];
     const running = new Set<FakeWorker>();
@@ -1236,8 +1318,22 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
     const gone = new Set<FakeWorker>();
     let creating = 0;
     let booted = false;
-    let disposed = false;
+    let crashLoop = false;
     let now = 0;
+    let pool: SysboxWorkerPool | undefined;
+    let disposeCalled = false;
+    let disposing: Promise<void> | undefined;
+    /** Microtasks from the next spawn or task completion to the midway dispose. */
+    let armed: number | undefined;
+    const fireDispose = (): void => {
+      if (armed === undefined) return;
+      const delay = armed;
+      armed = undefined;
+      void microtasks(delay).then(() => {
+        disposeCalled = true;
+        disposing = pool?.dispose();
+      });
+    };
 
     const { pool: created, sweep } = poolWith({
       min,
@@ -1245,7 +1341,7 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
       recycleAfterTasks: 1 + upTo(3),
       idleShutdownMs: 1000,
       now: () => now,
-      createWorker: async ({ workerId }) => {
+      createWorker: async ({ workerId, signal }) => {
         const open = workers.filter((w) => w.state !== "disposed").length;
         if (open + creating >= max) {
           violations.push(`created a worker with ${open} open and ${creating} creating`);
@@ -1253,6 +1349,7 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
         creating += 1;
         try {
           await ticks(upTo(2));
+          signal.throwIfAborted();
           if (booted && chance(0.15)) throw new Error("spawn failed");
           const w: FakeWorker = fakeWorker(workerId, {
             now: () => now,
@@ -1266,29 +1363,35 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
                   : succeed();
               } finally {
                 running.delete(w);
+                fireDispose();
               }
             },
             onDispose: async () => {
-              if (running.has(w) && !disposed)
+              if (running.has(w) && !disposeCalled)
                 violations.push(`${workerId} torn down under its task`);
               await ticks(upTo(2));
               gone.add(w);
             },
           });
           workers.push(w);
-          if (booted && chance(0.1)) queueMicrotask(() => w.die("supervisor exited"));
+          signal.addEventListener("abort", () => w.die("pool disposed"), { once: true });
+          if (booted && (crashLoop || chance(0.1))) {
+            queueMicrotask(() => w.die("supervisor exited"));
+          }
+          fireDispose();
           return w;
         } finally {
           creating -= 1;
         }
       },
     });
-    const pool = await created;
+    pool = await created;
     booted = true;
 
     const settled: boolean[] = [];
-    const tasks = 5 + upTo(15);
     for (let i = 0; i < tasks; i++) {
+      crashLoop = i >= crashFrom && i < crashTo;
+      if (i === disposeAt) armed = upTo(12);
       settled.push(false);
       const settle = (): void => {
         settled[i] = true;
@@ -1304,15 +1407,19 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
         }
       }
     }
+    crashLoop = false;
     // Every task settles on its own: none waits on a sweep.
     for (let i = 0; i < 1000 && settled.includes(false); i++) await ticks(1);
     const hung = settled.filter((s) => !s).length;
     if (hung > 0) violations.push(`${hung} task(s) never settled; ${JSON.stringify(pool.stats())}`);
 
-    disposed = true;
+    // A second caller of `dispose()` waits for the first one's teardowns.
+    disposeCalled = true;
+    disposing ??= pool.dispose();
     await pool.dispose();
     const leaked = workers.filter((w) => !gone.has(w)).length;
     if (leaked > 0) violations.push(`${leaked} container(s) outlived dispose`);
+    await disposing;
     return violations.map((v) => `seed ${seed} (min ${min}, max ${max}): ${v}`);
   }
 

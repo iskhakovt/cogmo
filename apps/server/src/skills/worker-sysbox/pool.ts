@@ -221,6 +221,7 @@ export class SysboxWorkerPool {
   #leasedOrRetired = new WeakSet<WorkerHandle>();
   /** Aborted by `dispose()`. Every worker is created with its signal. */
   #lifetime = new AbortController();
+  #disposal: Promise<void> | undefined;
   #createWorker: NonNullable<SysboxWorkerPoolOptions["createWorker"]>;
   #setInterval: (cb: () => void, ms: number) => unknown;
   #clearInterval: (handle: unknown) => void;
@@ -348,8 +349,13 @@ export class SysboxWorkerPool {
     };
   }
 
-  async dispose(): Promise<void> {
-    if (this.#lifetime.signal.aborted) return;
+  /** Every call returns the one disposal. */
+  dispose(): Promise<void> {
+    this.#disposal ??= this.#dispose();
+    return this.#disposal;
+  }
+
+  async #dispose(): Promise<void> {
     this.#lifetime.abort(new Error("SysboxWorkerPool: disposed"));
     if (this.#sweepHandle !== null) {
       this.#clearInterval(this.#sweepHandle);
@@ -378,21 +384,22 @@ export class SysboxWorkerPool {
     // thundering herd of invokes from overshooting `max` while one spawn is
     // still resolving.
     if (this.#hasRoom()) {
-      let w: WorkerHandle;
-      try {
-        w = await this.#spawnOne();
-      } catch (e) {
+      const w = await this.#spawnOne().catch((e: unknown) => {
         // The slot the spawn held is free again; an acquire queued behind
         // it would otherwise wait on nothing.
         this.#serveQueue();
         throw e;
-      }
+      });
       if (this.#lease(w)) return w;
       // Lost the race for the worker we just spawned, or it is already
       // dead. Some *other* worker may have gone idle while we awaited the
       // spawn (a parallel task finished, queue handover took ours).
       const other = this.#acquireIdle();
       if (other) return other;
+    }
+    // `dispose()` drains the queue once; it may have while the spawn above was awaited.
+    if (this.#lifetime.signal.aborted) {
+      throw new Error("SysboxWorkerPool: disposed before worker available");
     }
     const waiting = new Promise<WorkerHandle>((resolve, reject) => {
       this.#queue.push({ resolve, reject });
