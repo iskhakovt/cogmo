@@ -1,5 +1,5 @@
 /**
- * Inngest wrapper for {@link refreshModelCatalog}: every six hours, and on
+ * Inngest wrapper for the model catalog refresh: every six hours, and on
  * `model-catalog/refresh.requested` for an operator who wants a model that
  * shipped since the last tick.
  *
@@ -9,16 +9,20 @@
  * that didn't run the step installs the stored row at its next boot.
  */
 import { type Inngest, NonRetriableError } from "inngest";
+import type { Result } from "neverthrow";
 import { modelCatalogRefreshRequested } from "../../inngest/events.js";
 import { logger } from "../../logger.js";
-import { type RefreshModelCatalogDeps, refreshModelCatalog } from "./refresh-model-catalog.js";
+import type { ModelCatalogRefreshError, ModelCatalogRefreshed } from "./refresh-model-catalog.js";
 
 const log = logger.child({ component: "model-catalog.refresh" });
 
 /** Minute 17 keeps it off the top of the hour, where the other crons cluster. */
 export const MODEL_CATALOG_REFRESH_CRON = "17 */6 * * *";
 
-export function createModelCatalogRefresh(deps: RefreshModelCatalogDeps, inngest: Inngest) {
+export function createModelCatalogRefresh(
+  refresh: () => Promise<Result<ModelCatalogRefreshed, ModelCatalogRefreshError>>,
+  inngest: Inngest,
+) {
   return inngest.createFunction(
     {
       id: "model-catalog-refresh",
@@ -30,7 +34,7 @@ export function createModelCatalogRefresh(deps: RefreshModelCatalogDeps, inngest
     },
     async ({ step }) =>
       step.run("refresh", async () => {
-        const result = await refreshModelCatalog(deps);
+        const result = await refresh();
         if (result.isErr()) {
           const { kind, message } = result.error;
           throw kind === "rejected" ? new NonRetriableError(message) : new Error(message);

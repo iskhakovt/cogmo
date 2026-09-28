@@ -227,7 +227,7 @@ export async function chatTyped<T>(params: TypedChatParams<T>): Promise<TypedCha
 }
 
 /**
- * Twice `cap`, held to the model's maximum output where the LiteLLM snapshot
+ * Twice `cap`, held to the model's maximum output where the LiteLLM catalog
  * knows it; `undefined` when that leaves no room above `cap`.
  */
 function raisedOutputCap(model: string, cap: number): number | undefined {

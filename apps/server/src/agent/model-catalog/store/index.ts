@@ -1,4 +1,4 @@
-import { desc, ne } from "drizzle-orm";
+import { desc, eq, ne, sql } from "drizzle-orm";
 import { single } from "../../../db/helpers.js";
 import type { Transaction } from "../../../db/index.js";
 import type { LitellmCatalog } from "../../../llm/litellm-data.js";
@@ -16,6 +16,12 @@ export interface ModelCatalogStore {
   /** The newest catalog, or `null` before the first refresh. */
   latest(tx: Transaction): Promise<StoredModelCatalog | null>;
 
+  /**
+   * The model ids in the newest catalog, or `null` before the first refresh.
+   * Reads the keys only, so a row that no longer parses still answers.
+   */
+  latestModelIds(tx: Transaction): Promise<string[] | null>;
+
   /** Store `entries` as the newest catalog and delete every older one. */
   replace(tx: Transaction, entries: LitellmCatalog): Promise<{ id: string; createdAt: Date }>;
 }
@@ -30,6 +36,20 @@ export class DrizzleModelCatalogStore implements ModelCatalogStore {
       .orderBy(desc(modelCatalogs.createdAt), desc(modelCatalogs.id))
       .limit(1);
     return rows[0] ?? null;
+  }
+
+  async latestModelIds(tx: Transaction): Promise<string[] | null> {
+    const [newest] = await tx
+      .select({ id: modelCatalogs.id })
+      .from(modelCatalogs)
+      .orderBy(desc(modelCatalogs.createdAt), desc(modelCatalogs.id))
+      .limit(1);
+    if (!newest) return null;
+    const rows = await tx
+      .select({ modelId: sql<string>`jsonb_object_keys(${modelCatalogs.entries})` })
+      .from(modelCatalogs)
+      .where(eq(modelCatalogs.id, newest.id));
+    return rows.map((row) => row.modelId);
   }
 
   async replace(

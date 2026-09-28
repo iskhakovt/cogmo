@@ -14,6 +14,7 @@ import type { AgentStore } from "../agent/store/index.js";
 import type { Transactor } from "../db/index.js";
 import { liveCatalogStatus } from "../llm/litellm-data.js";
 import { resolveLimits } from "../llm/models.js";
+import { describeError } from "../util/describe-error.js";
 import { identifier, intAtLeast, optionalOption } from "./args.js";
 import type { CliIo, LoadDeps } from "./run.js";
 
@@ -208,8 +209,8 @@ async function listModels(args: ListArgs, deps: ModelCliDeps, io: CliIo): Promis
       ].join("\t"),
     );
   }
-  io.out("");
-  io.out(describeCatalog());
+  // stderr keeps stdout to the rows, for anything reading them.
+  io.err(describeCatalog());
   return 0;
 }
 
@@ -236,7 +237,7 @@ async function refreshCatalog(deps: ModelCliDeps, io: CliIo): Promise<number> {
   try {
     await deps.requestCatalogRefresh();
   } catch (err) {
-    io.err(`Failed to request a catalog refresh: ${(err as Error).message}`);
+    io.err(`Failed to request a catalog refresh: ${describeError(err)}`);
     return 1;
   }
   io.out("Requested a model catalog refresh from `cogmo serve`.");

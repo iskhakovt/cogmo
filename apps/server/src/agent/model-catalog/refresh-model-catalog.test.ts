@@ -1,43 +1,47 @@
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
-import { bundledSnapshot, type LitellmCatalog, type LiveCatalog } from "../../llm/litellm-data.js";
+import type { LitellmCatalog, LiveCatalog } from "../../llm/litellm-data.js";
 import { fakeRunInTx } from "../../test/factories.js";
 import { type RefreshModelCatalogDeps, refreshModelCatalog } from "./refresh-model-catalog.js";
 import type { ModelCatalogStore } from "./store/index.js";
 
 const URL = "https://registry.test/models.json";
 const FETCHED_AT = new Date("2026-09-28T06:17:00.000Z");
+const LIMITS = { contextWindow: 200_000, maxOutputTokens: 8_192 };
 
-/** An upstream registry: every bundled id, plus `extra` ids. */
-function upstream(extra: ReadonlyArray<string> = []): Record<string, unknown> {
-  const ids = [...Object.keys(bundledSnapshot()), ...extra];
+/** A four-model bundled snapshot, so the refresh's floor is two entries. */
+const BUNDLED: LitellmCatalog = Object.fromEntries(
+  ["model-a", "model-b", "model-c", "model-d"].map((id) => [id, LIMITS]),
+);
+
+/** An upstream registry holding `ids`. */
+function upstream(ids: ReadonlyArray<string>): Record<string, unknown> {
   return Object.fromEntries(
     ids.map((id) => [id, { max_input_tokens: 200_000, max_output_tokens: 8_192 }]),
   );
 }
 
 function makeDeps(
-  opts: { response?: Response | Error; previous?: LitellmCatalog | null } = {},
+  opts: { response?: Response | Error; previousIds?: string[] | null; url?: string } = {},
 ): RefreshModelCatalogDeps & {
   store: ReturnType<typeof mock<ModelCatalogStore>>;
   installed: LiveCatalog[];
 } {
   const store = mock<ModelCatalogStore>();
-  store.latest.mockResolvedValue(
-    opts.previous ? { id: "old", entries: opts.previous, createdAt: new Date(0) } : null,
-  );
+  store.latestModelIds.mockResolvedValue(opts.previousIds ?? null);
   store.replace.mockResolvedValue({ id: "new", createdAt: FETCHED_AT });
   const installed: LiveCatalog[] = [];
-  const response = opts.response ?? Response.json(upstream());
+  const response = opts.response ?? Response.json(upstream(Object.keys(BUNDLED)));
   return {
     runInTx: fakeRunInTx,
     modelCatalogStore: store,
-    url: URL,
+    url: opts.url ?? URL,
     fetch: vi.fn(async () => {
       if (response instanceof Error) throw response;
       return response;
     }),
     installCatalog: (catalog) => installed.push(catalog),
+    bundled: BUNDLED,
     store,
     installed,
   };
@@ -45,43 +49,38 @@ function makeDeps(
 
 describe("refreshModelCatalog", () => {
   it("stores the pruned registry, installs it, and reports its size", async () => {
-    const deps = makeDeps({ response: Response.json(upstream(["claude-next-6"])) });
+    const deps = makeDeps({ response: Response.json(upstream(["model-a", "model-b", "next"])) });
 
     const result = (await refreshModelCatalog(deps))._unsafeUnwrap();
 
-    const models = Object.keys(bundledSnapshot()).length + 1;
-    expect(result.models).toBe(models);
+    expect(result.models).toBe(3);
     expect(result.fetchedAt).toBe(FETCHED_AT.toISOString());
     expect(deps.fetch).toHaveBeenCalledWith(URL, expect.anything());
     const stored = deps.store.replace.mock.calls[0]?.[1];
-    expect(stored?.["claude-next-6"]).toEqual({ contextWindow: 200_000, maxOutputTokens: 8_192 });
+    expect(stored).toEqual({ "model-a": LIMITS, "model-b": LIMITS, next: LIMITS });
     expect(deps.installed).toEqual([{ entries: stored, fetchedAt: FETCHED_AT }]);
   });
 
   it("names ids the bundled snapshot lacks on the first refresh", async () => {
-    const deps = makeDeps({ response: Response.json(upstream(["claude-next-6", "a-new-model"])) });
-
-    const result = (await refreshModelCatalog(deps))._unsafeUnwrap();
-
-    expect(result.added).toEqual(["a-new-model", "claude-next-6"]);
-    expect(result.addedCount).toBe(2);
-  });
-
-  it("names ids the previous catalog lacked on later refreshes", async () => {
-    const previous = Object.fromEntries(
-      [...Object.keys(bundledSnapshot()), "claude-next-6"].map((id) => [
-        id,
-        { contextWindow: 200_000, maxOutputTokens: 8_192 },
-      ]),
-    );
     const deps = makeDeps({
-      response: Response.json(upstream(["claude-next-6", "claude-next-7"])),
-      previous,
+      response: Response.json(upstream([...Object.keys(BUNDLED), "next", "a-new-model"])),
     });
 
     const result = (await refreshModelCatalog(deps))._unsafeUnwrap();
 
-    expect(result.added).toEqual(["claude-next-7"]);
+    expect(result.added).toEqual(["a-new-model", "next"]);
+    expect(result.addedCount).toBe(2);
+  });
+
+  it("names ids the previous catalog lacked on later refreshes", async () => {
+    const deps = makeDeps({
+      response: Response.json(upstream([...Object.keys(BUNDLED), "next", "after-next"])),
+      previousIds: [...Object.keys(BUNDLED), "next"],
+    });
+
+    const result = (await refreshModelCatalog(deps))._unsafeUnwrap();
+
+    expect(result.added).toEqual(["after-next"]);
   });
 
   it("caps the named ids and counts the rest", async () => {
@@ -112,6 +111,17 @@ describe("refreshModelCatalog", () => {
     },
   );
 
+  it("leaves the URL's query string, where a mirror's token would sit, out of its errors", async () => {
+    const deps = makeDeps({
+      url: "https://mirror.test/models.json?token=s3cret",
+      response: new Response("nope", { status: 403 }),
+    });
+
+    const error = (await refreshModelCatalog(deps))._unsafeUnwrapErr();
+
+    expect(error.message).toBe("https://mirror.test/models.json returned 403");
+  });
+
   it("rejects a registry that isn't an object", async () => {
     const deps = makeDeps({ response: Response.json([1, 2, 3]) });
 
@@ -122,15 +132,11 @@ describe("refreshModelCatalog", () => {
   });
 
   it("rejects a registry with under half the bundled snapshot's entries", async () => {
-    const half = Object.keys(bundledSnapshot()).slice(0, 100);
-    const small = Object.fromEntries(
-      half.map((id) => [id, { max_input_tokens: 200_000, max_output_tokens: 8_192 }]),
-    );
-    const deps = makeDeps({ response: Response.json(small) });
+    const deps = makeDeps({ response: Response.json(upstream(["model-a"])) });
 
     const error = (await refreshModelCatalog(deps))._unsafeUnwrapErr();
 
-    expect(error).toMatchObject({ kind: "rejected", message: expect.stringMatching(/only 100/) });
+    expect(error).toMatchObject({ kind: "rejected", message: expect.stringMatching(/only 1 /) });
     expect(deps.store.replace).not.toHaveBeenCalled();
     expect(deps.installed).toEqual([]);
   });

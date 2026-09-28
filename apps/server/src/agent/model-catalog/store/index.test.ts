@@ -68,11 +68,20 @@ describe("DrizzleModelCatalogStore", () => {
     expect(latest.entries).toEqual(first);
   });
 
-  it("fails the read when a stored row no longer parses", async () => {
+  it("lists the newest catalog's model ids, none before the first replace", async () => {
+    expect(await tx((trx) => store.latestModelIds(trx))).toBeNull();
+    await tx((trx) => store.replace(trx, first));
+    await tx((trx) => store.replace(trx, second));
+    const ids = await tx((trx) => store.latestModelIds(trx));
+    expect(ids?.toSorted()).toEqual(["claude-sonnet-5", "claude-sonnet-5-5"]);
+  });
+
+  it("fails the read when a stored row no longer parses, while its ids still list", async () => {
     // Bypasses the write-side parse: a row written under an older schema.
     await db.execute(
       sql`INSERT INTO model_catalogs (entries) VALUES (${JSON.stringify({ m: { contextWindow: "big" } })}::jsonb)`,
     );
     await expect(tx((trx) => store.latest(trx))).rejects.toBeInstanceOf(z.ZodError);
+    expect(await tx((trx) => store.latestModelIds(trx))).toEqual(["m"]);
   });
 });

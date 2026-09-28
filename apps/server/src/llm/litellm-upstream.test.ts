@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { expectDefined } from "../test/assertions.js";
+import { LitellmCatalogSchema } from "./litellm-data.js";
 import { pruneLitellmRegistry } from "./litellm-upstream.js";
 
 function prune(raw: unknown) {
@@ -68,6 +69,26 @@ describe("pruneLitellmRegistry", () => {
   it("skips entries whose budget after the output cap is not positive", () => {
     const pruned = prune({ tiny: { max_input_tokens: 8_192, max_output_tokens: 2_048 } });
     expect(pruned.entries).toEqual({});
-    expect(pruned.skippedNonPositiveBudget).toBe(1);
+    expect(pruned.skippedUnusable).toBe(1);
+  });
+
+  it.each([
+    ["an output limit of zero, as moderation endpoints report", { max_output_tokens: 0 }],
+    ["a negative output limit", { max_output_tokens: -1 }],
+    ["an output limit that truncates to zero", { max_output_tokens: 0.5 }],
+  ])("skips %s", (_label, output) => {
+    const pruned = prune({ m: { max_input_tokens: 32_768, ...output } });
+    expect(pruned.entries).toEqual({});
+    expect(pruned.skippedUnusable).toBe(1);
+  });
+
+  it("keeps only entries the catalog schema accepts", () => {
+    const { entries } = prune({
+      zeroOutput: { max_input_tokens: 32_768, max_output_tokens: 0 },
+      negativeContext: { max_input_tokens: -1, max_output_tokens: 4_096 },
+      good: { max_input_tokens: 100_000, max_output_tokens: 4_096 },
+    });
+    expect(Object.keys(entries)).toEqual(["good"]);
+    expect(LitellmCatalogSchema.safeParse(entries).success).toBe(true);
   });
 });

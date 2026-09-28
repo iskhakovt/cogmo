@@ -11,10 +11,11 @@
  *      on `model_providers`. Set by the setup wizard or `cogmo model add`
  *      when the operator wants explicit control. Highest priority — when
  *      either column is set we trust it without further lookup.
- *   2. **LiteLLM bundled snapshot** — `data/litellm-models.json`, refreshed
- *      manually via `scripts/refresh-litellm-models.ts`. Covers a few
- *      thousand models from the community-curated registry; bridges OpenRouter
- *      slugs to vendor-direct ids via key normalization.
+ *   2. **LiteLLM catalog** — the live copy a scheduled refresh keeps in
+ *      `model_catalogs`, then `data/litellm-models.json`, the snapshot shipped
+ *      with the release (`src/llm/litellm-data.ts`). Covers a few thousand
+ *      models from the community-curated registry; bridges OpenRouter slugs
+ *      to vendor-direct ids via key normalization.
  *   3. **Conservative default** — 128k context, 4k max output, with a
  *      `WARN` log so operators see the fallback fire and can pin explicit
  *      limits if compaction quality matters.
@@ -62,7 +63,7 @@ export interface PartialLimits {
 
 /**
  * Conservative fallback when a model is unknown to both DB overrides and
- * the LiteLLM snapshot. 128k / 4k is a safe lower bound: it under-uses
+ * the LiteLLM catalog. 128k / 4k is a safe lower bound: it under-uses
  * larger models (compaction fires earlier than necessary) but never
  * over-promises capacity that the upstream would reject. Compaction
  * quality is the only thing that suffers — operators can pin the real
@@ -139,7 +140,7 @@ function warnFallbackOnce(model: string): void {
       defaultContextWindow: DEFAULT_LIMITS.contextWindow,
       defaultMaxOutputTokens: DEFAULT_LIMITS.maxOutputTokens,
     },
-    `model "${model}" not in LiteLLM snapshot — using conservative default. ` +
+    `model "${model}" not in the LiteLLM catalog — using conservative default. ` +
       `Set explicit limits via the setup wizard or \`cogmo model add --context N --max-output N\` ` +
       `for accurate compaction.`,
   );

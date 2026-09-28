@@ -12,7 +12,8 @@
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { LITELLM_REGISTRY_URL, pruneLitellmRegistry } from "../src/llm/litellm-upstream.js";
+import { LITELLM_REGISTRY_URL } from "../src/llm/litellm-registry-url.js";
+import { pruneLitellmRegistry } from "../src/llm/litellm-upstream.js";
 
 const OUTPUT = resolve(import.meta.dirname, "../data/litellm-models.json");
 
@@ -24,12 +25,12 @@ async function main(): Promise<void> {
   }
   const pruned = pruneLitellmRegistry(await res.json());
   if (pruned.isErr()) throw new Error(pruned.error);
-  const { entries, skippedNoTokenData, skippedNonPositiveBudget } = pruned.value;
+  const { entries, skippedNoTokenData, skippedUnusable } = pruned.value;
 
   mkdirSync(dirname(OUTPUT), { recursive: true });
   writeFileSync(OUTPUT, `${JSON.stringify(entries, null, 2)}\n`);
   console.log(
-    `Wrote ${Object.keys(entries).length} entries to ${OUTPUT} (skipped ${skippedNoTokenData} without token data, ${skippedNonPositiveBudget} with non-positive budget)`,
+    `Wrote ${Object.keys(entries).length} entries to ${OUTPUT} (skipped ${skippedNoTokenData} without token data, ${skippedUnusable} with unusable limits)`,
   );
 }
 

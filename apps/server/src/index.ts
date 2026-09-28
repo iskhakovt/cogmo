@@ -31,6 +31,7 @@ import { ImageToolsLoader } from "./agent/image-tools-loader.js";
 import { runStreamingAgentLoop } from "./agent/loop.js";
 import { loadModelCatalog } from "./agent/model-catalog/load-model-catalog.js";
 import { createModelCatalogRefresh } from "./agent/model-catalog/refresh-function.js";
+import { refreshModelCatalog } from "./agent/model-catalog/refresh-model-catalog.js";
 import { DrizzleModelCatalogStore } from "./agent/model-catalog/store/index.js";
 import { createPipelineGateResolver } from "./agent/pipeline/gate-resolver.js";
 import { createPipelineGateWaiter } from "./agent/pipeline/gate-waiter.js";
@@ -66,7 +67,7 @@ import { type BootstrapLock, bootstrapLock } from "./db/bootstrap-lock.js";
 import { type Database, db, type Transactor, transactor } from "./db/index.js";
 import { env } from "./env.js";
 import { inboundArrived, inngest } from "./inngest/index.js";
-import { installLiveCatalog } from "./llm/litellm-data.js";
+import { bundledSnapshot, installLiveCatalog } from "./llm/litellm-data.js";
 import type { LlmProvider } from "./llm/provider.js";
 import {
   constantResolver,
@@ -372,9 +373,6 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
     }
     return { user: u, profile: p };
   });
-
-  // Limits resolve from the last catalog refresh, in `serve` and in every CLI.
-  await loadModelCatalog({ runInTx: tx, modelCatalogStore, installCatalog: installLiveCatalog });
 
   // Per-turn provider dispatch: handle-message and observer call this
   // resolver with the snapshot's model on every fire. The DB-backed
@@ -1107,18 +1105,30 @@ export async function bootstrapRuntime(
     defaultProfileId: core.profile.id,
     gracePeriodMs: env.BOUNDARY_PROMPT_TIMEOUT_SECONDS * 2 * 1000,
   });
+  // With the refresh off, limits come from the bundled snapshot alone: a
+  // catalog stored before it was turned off stays in the table, unread.
+  const catalogUrl = env.MODEL_CATALOG_URL;
+  if (catalogUrl !== "off") {
+    await loadModelCatalog({
+      runInTx: core.runInTx,
+      modelCatalogStore: core.modelCatalogStore,
+      installCatalog: installLiveCatalog,
+    });
+  }
   const modelCatalogFunctions =
-    env.MODEL_CATALOG_URL === "off"
+    catalogUrl === "off"
       ? []
       : [
           createModelCatalogRefresh(
-            {
-              runInTx: core.runInTx,
-              modelCatalogStore: core.modelCatalogStore,
-              url: env.MODEL_CATALOG_URL,
-              fetch: globalThis.fetch,
-              installCatalog: installLiveCatalog,
-            },
+            () =>
+              refreshModelCatalog({
+                runInTx: core.runInTx,
+                modelCatalogStore: core.modelCatalogStore,
+                url: catalogUrl,
+                fetch: globalThis.fetch,
+                installCatalog: installLiveCatalog,
+                bundled: bundledSnapshot(),
+              }),
             inngest,
           ),
         ];

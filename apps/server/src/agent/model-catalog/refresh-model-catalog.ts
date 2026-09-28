@@ -6,7 +6,7 @@
  */
 import { err, ok, type Result } from "neverthrow";
 import type { Transactor } from "../../db/index.js";
-import { bundledSnapshot, type LiveCatalog } from "../../llm/litellm-data.js";
+import type { LitellmCatalog, LiveCatalog } from "../../llm/litellm-data.js";
 import { pruneLitellmRegistry } from "../../llm/litellm-upstream.js";
 import { describeError } from "../../util/describe-error.js";
 import type { ModelCatalogStore } from "./store/index.js";
@@ -24,6 +24,8 @@ export interface RefreshModelCatalogDeps {
   url: string;
   fetch: typeof globalThis.fetch;
   installCatalog: (catalog: LiveCatalog) => void;
+  /** The snapshot shipped with the release: the size floor, and the baseline for `added` before the first refresh. */
+  bundled: LitellmCatalog;
 }
 
 /** JSON-serializable: it is an Inngest step result. */
@@ -44,13 +46,14 @@ export type ModelCatalogRefreshError =
 export async function refreshModelCatalog(
   deps: RefreshModelCatalogDeps,
 ): Promise<Result<ModelCatalogRefreshed, ModelCatalogRefreshError>> {
+  const source = withoutQuery(deps.url);
   let raw: unknown;
   try {
     const res = await deps.fetch(deps.url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-    if (!res.ok) return err({ kind: "unavailable", message: `${deps.url} returned ${res.status}` });
+    if (!res.ok) return err({ kind: "unavailable", message: `${source} returned ${res.status}` });
     raw = await res.json();
   } catch (e) {
-    return err({ kind: "unavailable", message: `fetching ${deps.url}: ${describeError(e)}` });
+    return err({ kind: "unavailable", message: `fetching ${source}: ${describeError(e)}` });
   }
 
   const pruned = pruneLitellmRegistry(raw);
@@ -62,7 +65,7 @@ export async function refreshModelCatalog(
   // anything missing, but a live catalog that small has stopped tracking
   // upstream.
   const models = Object.keys(entries).length;
-  const floor = Math.ceil(Object.keys(bundledSnapshot()).length / 2);
+  const floor = Math.ceil(Object.keys(deps.bundled).length / 2);
   if (models < floor) {
     return err({
       kind: "rejected",
@@ -70,15 +73,15 @@ export async function refreshModelCatalog(
     });
   }
 
-  const { previous, stored } = await deps.runInTx(async (tx) => ({
-    previous: await deps.modelCatalogStore.latest(tx),
+  const { previousIds, stored } = await deps.runInTx(async (tx) => ({
+    previousIds: await deps.modelCatalogStore.latestModelIds(tx),
     stored: await deps.modelCatalogStore.replace(tx, entries),
   }));
   deps.installCatalog({ entries, fetchedAt: stored.createdAt });
 
-  const baseline = previous?.entries ?? bundledSnapshot();
+  const baseline = new Set(previousIds ?? Object.keys(deps.bundled));
   const added = Object.keys(entries)
-    .filter((id) => !Object.hasOwn(baseline, id))
+    .filter((id) => !baseline.has(id))
     .sort();
   return ok({
     models,
@@ -86,4 +89,10 @@ export async function refreshModelCatalog(
     added: added.slice(0, ADDED_SAMPLE),
     addedCount: added.length,
   });
+}
+
+/** The URL minus any query string, which is where a mirror's token would sit. */
+function withoutQuery(url: string): string {
+  const { origin, pathname } = new URL(url);
+  return `${origin}${pathname}`;
 }

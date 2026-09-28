@@ -213,12 +213,11 @@ describe("cogmo model list", () => {
     });
     const { io, out } = captureIo();
     await run(["list"], deps, io);
-    // Header, one row, then the catalog line after a blank.
-    expect(out.length).toBe(4);
+    // Header + one row; the catalog line goes to stderr.
+    expect(out.length).toBe(2);
     expect(out[0]).toMatch(/model\tprovider\tposition\tcontext\tmax_output\tsource/);
     // Both columns came from LiteLLM → source collapses to the shared tag.
     expect(out[1]).toMatch(/^claude-sonnet-4-6\tanthropic\t0\t1000000\t64000\tlitellm$/);
-    expect(out[2]).toBe("");
   });
 
   describe("catalog line", () => {
@@ -227,10 +226,12 @@ describe("cogmo model list", () => {
     const deps = () =>
       makeDeps({ rowsByModel: { "claude-sonnet-4-6": [routingRow("r1", "anthropic", 0)] } });
 
-    it("says limits come from the bundled snapshot before any refresh", async () => {
-      const { io, out } = captureIo();
+    it("says on stderr that limits come from the bundled snapshot before any refresh", async () => {
+      const { io, err } = captureIo();
       await run(["list"], deps(), io);
-      expect(out.at(-1)).toMatch(/^litellm: bundled snapshot only; no catalog refresh has run/);
+      expect(err).toEqual([
+        "litellm: bundled snapshot only; no catalog refresh has run (`cogmo model refresh`)",
+      ]);
     });
 
     it("names the live catalog's fetch time and size once one is installed", async () => {
@@ -238,11 +239,11 @@ describe("cogmo model list", () => {
         entries: { "claude-sonnet-4-6": { contextWindow: 1_000_000, maxOutputTokens: 64_000 } },
         fetchedAt: new Date("2026-09-28T06:17:00.000Z"),
       });
-      const { io, out } = captureIo();
+      const { io, err } = captureIo();
       await run(["list"], deps(), io);
-      expect(out.at(-1)).toBe(
+      expect(err).toEqual([
         "litellm: catalog fetched 2026-09-28T06:17:00.000Z (1 models), bundled snapshot behind it",
-      );
+      ]);
     });
   });
 

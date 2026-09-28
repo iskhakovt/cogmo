@@ -3,6 +3,7 @@ import {
   bundledSnapshot,
   candidateKeys,
   installLiveCatalog,
+  LitellmCatalogSchema,
   liveCatalogStatus,
   lookupLitellm,
 } from "./litellm-data.js";
@@ -84,6 +85,12 @@ describe("bundledSnapshot", () => {
     // Sanity check that the snapshot file is wired in. Exact count drifts
     // every refresh; only assert a healthy lower bound.
     expect(Object.keys(bundledSnapshot()).length).toBeGreaterThan(1_000);
+  });
+
+  it("is a catalog the live store would accept", () => {
+    // Real upstream data, pruned by the same function a live refresh uses:
+    // an entry the store's schema refuses would fail every refresh.
+    expect(LitellmCatalogSchema.safeParse(bundledSnapshot()).error).toBeUndefined();
   });
 });
 
