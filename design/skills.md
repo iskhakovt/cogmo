@@ -805,15 +805,15 @@ Every run acts for a user: `ctx.user()` returns them, and `ctx.memory` / `ctx.fi
 | `cogmo skills run` | The install owner with the default profile. |
 | Cron | `skills.run_as_user_id` / `run_as_profile_id`, built by `resolveSkillRunAs` inside the fire's `dispatch` step. |
 
-The cron identity is set iff `schedule` is. Every deploy that puts a schedule live writes it afresh, so new code never runs as whoever vouched for the code before it; a deploy that drops the schedule clears it. A deploy's identity comes from where it came from:
+The cron identity is set iff the schedule is live — `schedule` set on an enabled row (`chk_skills_run_as_iff_live_schedule`). Whoever puts a schedule live is who it runs as: every deploy and every `/enable` that does so writes the identity afresh, so code never runs as whoever vouched for the code before it, and disabling or dropping the schedule clears it. Each request names its origin (`SkillDeployOrigin`); none falls back to the owner by omission.
 
-| Deploy | User | Profile |
+| Request | User | Profile |
 |-|-|-|
 | `register_skill`, or a skill-repo coding task's auto-register | The requesting conversation's user | That conversation's profile |
-| Approval (Telegram tap) | The approver | The profile of the conversation in the chat the tap came from, when that conversation is the approver's; otherwise the default |
+| Approval tap, or `/enable` | The user who acted | The profile of the conversation the chat's active session points at, when that conversation is theirs; otherwise the default |
 | CLI `register` / `approve` / `rollback`, or a coding task with no conversation | The install owner | The default profile |
 
-An approver's persona is known only from a conversation of theirs. The keyboard is posted into the requesting conversation's chat, so an approval tapped there by the requester keeps the requesting profile.
+A user's persona is known only from a conversation of theirs. The approval keyboard is posted into the requesting conversation's chat, so a tap there by the requester takes the requesting profile while the chat's session still points at that conversation; after a boundary or expiry it takes the new conversation's profile, or the default when the chat has no session. For a scheduled skill, the approval prompt shows the pending deploy's schedule and says it will run as whoever approves.
 
 A cron run's `ctx.memory.remember` waits in `pending_memories` until the Observer next drains that user's rows, on a `conversation/idle` long enough to pass the `too_short` gate. A user who rarely chats sees a scheduled skill's writes late.
 
@@ -1101,7 +1101,7 @@ skills (
   risk_tier         skill_risk_tier NOT NULL,        -- computed by classifier at deploy
   effects           JSONB NOT NULL,                  -- SkillEffectsSchema (declared effects list)
   schedule          TEXT,                            -- nullable: cron expression; null = not scheduled
-  run_as_user_id    UUID REFERENCES users(id),       -- nullable: set iff schedule is (chk_skills_run_as_iff_schedule).
+  run_as_user_id    UUID REFERENCES users(id),       -- nullable: set iff schedule is set and the row enabled (chk_skills_run_as_iff_live_schedule).
   run_as_profile_id UUID REFERENCES profiles(id),    -- nullable: same. Who a cron fire runs as; see Run-as identity.
   git_sha           TEXT NOT NULL,                   -- commit hash of current live version
   lockfile_hash     TEXT,                            -- nullable: null when manifest.dependencies is empty.
