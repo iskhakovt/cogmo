@@ -11,7 +11,7 @@ import { toObjectJsonSchema } from "./json-schema.js";
 import type { JsonSchema } from "./types.js";
 
 /** A closed object with one property, `value`, carrying `node`. */
-function wrap(node: Record<string, unknown>): JsonSchema {
+function wrap(node: unknown): JsonSchema {
   return {
     type: "object",
     properties: { value: node },
@@ -509,7 +509,56 @@ describe("restoreLiteralCasing", () => {
     ],
     ["a property the schema doesn't name", TOPICS, { other: "conversation topic 1" }],
     ["a value of another type", wrap({ type: "string", enum: ["1"] }), { value: 1 }],
+    ["a value the true schema admits", wrap(true), { value: "Anything" }],
+    [
+      "a value the true schema admits in a variant",
+      wrap({ anyOf: [true, { type: "string", enum: ["low"] }] }),
+      { value: "Low" },
+    ],
   ])("leaves %s as it is", (_label, schema, value) => {
     expect(restoreLiteralCasing(schema, value)).toBe(value);
+  });
+
+  it("restores a tuple position by position, and its rest items", () => {
+    const Tuple = z.object({
+      pair: z.tuple([z.enum(["east", "west"]), z.enum(["up", "down"])]),
+      rest: z.tuple([z.literal("head")], z.enum(["tail"])),
+    });
+
+    const restored = restoreLiteralCasing(toObjectJsonSchema(Tuple), {
+      pair: ["East", "Up"],
+      rest: ["Head", "TAIL", "Tail"],
+    });
+
+    expect(restored).toEqual({ pair: ["east", "up"], rest: ["head", "tail", "tail"] });
+    expect(Tuple.safeParse(restored).success).toBe(true);
+  });
+
+  it("keeps a tuple variant that admits the value as it is", () => {
+    const Either = z.object({
+      v: z.union([z.tuple([z.enum(["a"])]), z.array(z.enum(["A"])).min(2)]),
+    });
+    const reply = { v: ["a"] };
+
+    const restored = restoreLiteralCasing(toObjectJsonSchema(Either), reply);
+
+    expect(restored).toBe(reply);
+    expect(Either.safeParse(restored).success).toBe(true);
+  });
+
+  it("restores through every allOf member", () => {
+    expect(
+      restoreLiteralCasing(wrap({ allOf: [{ type: "string" }, { enum: ["low", "high"] }] }), {
+        value: "High",
+      }),
+    ).toEqual({ value: "high" });
+  });
+
+  it("skips a variant the false schema rejects", () => {
+    expect(
+      restoreLiteralCasing(wrap({ anyOf: [false, { type: "string", enum: ["low"] }] }), {
+        value: "Low",
+      }),
+    ).toEqual({ value: "low" });
   });
 });

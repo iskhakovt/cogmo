@@ -105,9 +105,10 @@ function localRefs(node: unknown): ReadonlyArray<string> {
  * compare case-insensitively (platform docs, Structured outputs → Invalid
  * outputs). A string that matches no member exactly and one member
  * case-insensitively takes that member. In an `anyOf` or `oneOf`, a variant
- * that admits the value as it is wins over one that restores it. Returns
- * `value` itself when nothing changes. The schema must pass
- * {@link hasRecursiveRef}.
+ * that admits the value as it is wins over one that restores it. A tuple
+ * restores each position against its `prefixItems` entry. Returns `value`
+ * itself when nothing changes. The schema must not be recursive
+ * ({@link hasRecursiveRef}).
  */
 export function restoreLiteralCasing(schema: JsonSchema, value: unknown): unknown {
   return restore(schema, value, schema).value;
@@ -133,7 +134,7 @@ function restore(node: unknown, value: unknown, root: JsonSchema): Restored {
       (current) => restoreLiteral("const" in node ? [node.const] : undefined, current),
       (current) => restoreLiteral(Array.isArray(node.enum) ? node.enum : undefined, current),
       (current) => restoreProperties(node, current, root),
-      (current) => restoreItems(node.items, current, root),
+      (current) => restoreItems(node, current, root),
       (current) => restoreVariant([node.anyOf, node.oneOf].flatMap(asList), current, root),
       ...asList(node.allOf).map(
         (member): RestoreStep =>
@@ -202,9 +203,18 @@ function restoreProperties(
   };
 }
 
-function restoreItems(items: unknown, value: unknown, root: JsonSchema): Restored {
-  if (items === undefined || !Array.isArray(value)) return kept(value);
-  const restored = value.map((item) => restore(items, item, root));
+/** Each element against its `prefixItems` entry, and `items` past those. */
+function restoreItems(
+  node: Readonly<Record<string, unknown>>,
+  value: unknown,
+  root: JsonSchema,
+): Restored {
+  if (!Array.isArray(value)) return kept(value);
+  const prefix = Array.isArray(node.prefixItems) ? node.prefixItems : [];
+  const restored = value.map((item, position) => {
+    const schema = position < prefix.length ? prefix[position] : node.items;
+    return schema === undefined ? kept(item) : restore(schema, item, root);
+  });
   const changed = restored.some((r) => r.changed);
   return {
     value: changed ? restored.map((r) => r.value) : value,
