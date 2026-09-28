@@ -1,6 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import type { Transactor } from "../../db/index.js";
+import { coreMemoryEdits } from "../../metrics.js";
 import { fakeRunInTx, mockAgentStore } from "../../test/factories.js";
+import type { CoreMemoryUpsertOutcome } from "../store/index.js";
 import type { CoreMemoryScope, ScopedCoreMemoryBlock } from "./scope.js";
 import { type CoreMemoryWrite, writeCoreMemoryBlock } from "./write-core-memory-block.js";
 
@@ -70,6 +72,125 @@ describe("writeCoreMemoryBlock", () => {
     const { result } = await write(RESTRICTED, "Identity");
 
     expect(result._unsafeUnwrap()).toEqual({ kind: "class", profileClass: "game" });
+  });
+});
+
+describe("writeCoreMemoryBlock: the edit counter", () => {
+  let add: MockInstance<typeof coreMemoryEdits.add>;
+  beforeEach(() => {
+    add = vi.spyOn(coreMemoryEdits, "add");
+  });
+  afterEach(() => {
+    add.mockRestore();
+  });
+
+  async function writeWith(
+    scope: CoreMemoryScope,
+    key: string,
+    store: {
+      upsert?: CoreMemoryUpsertOutcome;
+      deleted?: boolean;
+      rows?: ReadonlyArray<ScopedCoreMemoryBlock>;
+    },
+  ) {
+    const agentStore = mockAgentStore({
+      getCoreMemoryBlocks: vi.fn().mockResolvedValue(store.rows ?? []),
+      upsertCoreMemoryBlock: vi.fn().mockResolvedValue(store.upsert ?? "created"),
+      deleteCoreMemoryBlock: vi.fn().mockResolvedValue(store.deleted ?? false),
+    });
+    return writeCoreMemoryBlock(
+      { runInTx: fakeRunInTx, agentStore },
+      { userId: "user-1", scope, key, content: "Name: Sam" },
+    );
+  }
+
+  it.each<[string, CoreMemoryScope, string, CoreMemoryUpsertOutcome, Record<string, string>]>([
+    [
+      "a created unclassed block",
+      UNCLASSED,
+      "user_profile",
+      "created",
+      { key: "user_profile", target: "unclassed", change: "created" },
+    ],
+    [
+      "an updated shared identity",
+      CLASSED,
+      "identity",
+      "updated",
+      { key: "identity", target: "shared", change: "updated" },
+    ],
+    [
+      "an updated class block",
+      CLASSED,
+      "preferences",
+      "updated",
+      { key: "preferences", target: "class", change: "updated" },
+    ],
+    [
+      "a created override",
+      RESTRICTED,
+      "identity",
+      "created",
+      { key: "identity", target: "override", change: "created" },
+    ],
+  ])("counts %s once, after the write commits", async (_name, scope, key, upsert, attributes) => {
+    await writeWith(scope, key, { upsert });
+
+    expect(add).toHaveBeenCalledTimes(1);
+    expect(add).toHaveBeenCalledWith(1, attributes);
+  });
+
+  it.each<[string, CoreMemoryScope]>([
+    ["a block", UNCLASSED],
+    ["an override", RESTRICTED],
+  ])("does not count a write that leaves %s as it was", async (_name, scope) => {
+    const result = await writeWith(scope, "identity", { upsert: "unchanged" });
+
+    expect(result.isOk()).toBe(true);
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it("counts deleting an override that matches the shared identity", async () => {
+    const result = await writeWith(RESTRICTED, "identity", {
+      rows: [{ profileClass: null, key: "identity", content: "Name: Sam" }],
+      deleted: true,
+    });
+
+    expect(result._unsafeUnwrap()).toEqual({
+      kind: "override-matches-shared",
+      profileClass: "game",
+    });
+    expect(add).toHaveBeenCalledTimes(1);
+    expect(add).toHaveBeenCalledWith(1, { key: "identity", target: "override", change: "deleted" });
+  });
+
+  it("does not count a delete that finds no override", async () => {
+    await writeWith(RESTRICTED, "identity", {
+      rows: [{ profileClass: null, key: "identity", content: "Name: Sam" }],
+      deleted: false,
+    });
+
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it("does not count a refused write", async () => {
+    await writeWith({ kind: "none" }, "identity", { upsert: "created" });
+
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it("does not count a write whose transaction fails", async () => {
+    const agentStore = mockAgentStore({
+      upsertCoreMemoryBlock: vi.fn().mockRejectedValue(new Error("serialization failure")),
+    });
+    await expect(
+      writeCoreMemoryBlock(
+        { runInTx: fakeRunInTx, agentStore },
+        { userId: "user-1", scope: UNCLASSED, key: "identity", content: "Name: Sam" },
+      ),
+    ).rejects.toThrow("serialization failure");
+
+    expect(add).not.toHaveBeenCalled();
   });
 });
 

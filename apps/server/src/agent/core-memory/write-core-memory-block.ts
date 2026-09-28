@@ -2,6 +2,7 @@ import { err, ok, type Result } from "neverthrow";
 import * as R from "remeda";
 import { match } from "ts-pattern";
 import type { Transaction, Transactor } from "../../db/index.js";
+import { coreMemoryEdits } from "../../metrics.js";
 import type { AgentStore } from "../store/index.js";
 import { type CoreMemoryScope, IDENTITY_BLOCK_KEY } from "./scope.js";
 
@@ -26,6 +27,9 @@ export interface CoreMemoryUnavailable {
   code: "core_memory_unavailable";
 }
 
+/** A write's effect on the stored block; null when it left the block as it was. */
+type BlockChange = "created" | "updated" | "deleted" | null;
+
 type CoreMemoryWriteStore = Pick<
   AgentStore,
   "getCoreMemoryBlocks" | "upsertCoreMemoryBlock" | "deleteCoreMemoryBlock"
@@ -40,11 +44,13 @@ export async function writeCoreMemoryBlock(
   if (target === null) return err({ code: "core_memory_unavailable" });
   if (target.kind === "override") {
     const { profileClass } = target;
-    return ok(
-      await deps.runInTx((tx) => writeOverride(tx, deps.agentStore, { ...args, profileClass })),
+    const { write, change } = await deps.runInTx((tx) =>
+      writeOverride(tx, deps.agentStore, { ...args, profileClass }),
     );
+    countEdit(args.key, target, change);
+    return ok(write);
   }
-  await deps.runInTx((tx) =>
+  const upserted = await deps.runInTx((tx) =>
     deps.agentStore.upsertCoreMemoryBlock(tx, {
       userId: args.userId,
       profileClass: target.kind === "class" ? target.profileClass : null,
@@ -52,7 +58,14 @@ export async function writeCoreMemoryBlock(
       content: args.content,
     }),
   );
+  countEdit(args.key, target, upserted === "unchanged" ? null : upserted);
   return ok(target);
+}
+
+/** Count a committed change in `cogmo.core_memory.edits`; a no-op write counts nothing. */
+function countEdit(key: string, target: CoreMemoryWriteTarget, change: BlockChange): void {
+  if (change === null) return;
+  coreMemoryEdits.add(1, { key, target: target.kind, change });
 }
 
 /**
@@ -65,7 +78,7 @@ async function writeOverride(
   tx: Transaction,
   store: CoreMemoryWriteStore,
   args: { userId: string; profileClass: string; content: string },
-): Promise<CoreMemoryWrite> {
+): Promise<{ write: CoreMemoryWrite; change: BlockChange }> {
   const { userId, profileClass } = args;
   const shared = (await store.getCoreMemoryBlocks(tx, userId, profileClass)).find(
     (b) => b.profileClass === null && b.key === IDENTITY_BLOCK_KEY,
@@ -73,11 +86,17 @@ async function writeOverride(
   const { content, leftOut } = withoutSharedLines(args.content, shared?.content ?? "");
   const block = { userId, profileClass, key: IDENTITY_BLOCK_KEY };
   if (content === null) {
-    await store.deleteCoreMemoryBlock(tx, block);
-    return { kind: "override-matches-shared", profileClass };
+    const deleted = await store.deleteCoreMemoryBlock(tx, block);
+    return {
+      write: { kind: "override-matches-shared", profileClass },
+      change: deleted ? "deleted" : null,
+    };
   }
-  await store.upsertCoreMemoryBlock(tx, { ...block, content });
-  return { kind: "override", profileClass, leftOut };
+  const upserted = await store.upsertCoreMemoryBlock(tx, { ...block, content });
+  return {
+    write: { kind: "override", profileClass, leftOut },
+    change: upserted === "unchanged" ? null : upserted,
+  };
 }
 
 /**

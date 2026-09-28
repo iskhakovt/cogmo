@@ -15,6 +15,7 @@ interface Instruments {
   debounceWaitMs: Histogram;
   agentIterations: Histogram;
   memoryRecallFailures: Counter;
+  coreMemoryEdits: Counter;
 }
 
 let cached: Instruments | null = null;
@@ -37,6 +38,10 @@ function instruments(): Instruments {
     memoryRecallFailures: meter.createCounter("cogmo.memory.recall.failures", {
       description: "Auto-recall calls that failed and left the turn without recalled context",
       unit: "{failure}",
+    }),
+    coreMemoryEdits: meter.createCounter("cogmo.core_memory.edits", {
+      description: "Core memory writes that created, changed or deleted a block",
+      unit: "{edit}",
     }),
   };
   return cached;
@@ -92,6 +97,21 @@ export const agentIterations = {
 export const memoryRecallFailures = {
   add(value: number, attrs?: MetricAttributes): void {
     instruments().memoryRecallFailures.add(value, attrs);
+  },
+};
+
+/**
+ * Core-memory edits, labeled by `key`, `target` (`shared` | `unclassed` |
+ * `class` | `override`: the group of `# User` the block is in) and `change`
+ * (`created` | `updated` | `deleted`). A write that leaves the block as it was
+ * is not counted. Each edit is announced in the next turn rather than
+ * re-rendering the system prompt, so the rate sizes what the snapshot saves
+ * (design/prompt-caching.md → Open questions). Incremented after the write's
+ * transaction commits, inside the `core_memory_update` tool's step.
+ */
+export const coreMemoryEdits = {
+  add(value: number, attrs?: MetricAttributes): void {
+    instruments().coreMemoryEdits.add(value, attrs);
   },
 };
 
