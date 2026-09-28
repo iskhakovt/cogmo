@@ -912,6 +912,23 @@ describe("stepConfigureSkillsRemote", () => {
     expect(heldDuringInit).toBe(true);
   });
 
+  it("releases the bootstrap lock before prompting", async () => {
+    // A held lock would stall every concurrent boot until the operator answers.
+    const deps = buildDeps();
+    let heldAtPrompt: boolean | undefined;
+    bootstrapSkillsRepoSpy.mockResolvedValueOnce({ initialized: false });
+    readOriginUrlSpy.mockResolvedValueOnce("git@github.com:me/cogmo-skills.git");
+    vi.mocked(p.select).mockImplementationOnce(async () => {
+      heldAtPrompt = lockHeld;
+      return "keep";
+    });
+    ensureSkillsCodingRepoSpy.mockResolvedValueOnce({ kind: "unchanged" });
+
+    await stepConfigureSkillsRemote(deps);
+
+    expect(heldAtPrompt).toBe(false);
+  });
+
   it("when origin is already set and operator picks 'keep', syncs DB row and returns", async () => {
     const deps = buildDeps();
     bootstrapSkillsRepoSpy.mockResolvedValueOnce({ initialized: false });
