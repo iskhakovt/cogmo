@@ -17,6 +17,7 @@ import {
 import * as R from "remeda";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
+import type { CacheDialect } from "../../llm/cache-dialect.js";
 import type { ContentBlock, Message } from "../../llm/types.js";
 import { inboundMessages } from "../../transport/store/schema.js";
 import { truncate } from "../../util/string.js";
@@ -59,6 +60,7 @@ import {
   modelProviders,
   type ProfileMemoryScope,
   type ProviderAttrs,
+  ProviderAttrsSchema,
   pendingMemories,
   profileClasses,
   profiles,
@@ -953,8 +955,20 @@ export interface AgentStore {
       id: string;
       name: string;
       type: LlmProviderTypeValue;
+      baseUrl: string | null;
+      attrs: ProviderAttrs;
     }>
   >;
+
+  /**
+   * Set a provider's `attrs.cacheDialect`, keeping its other attrs. False when
+   * no provider has this id.
+   */
+  setProviderCacheDialect(
+    tx: Transaction,
+    providerId: string,
+    cacheDialect: CacheDialect,
+  ): Promise<boolean>;
 
   /** Delete a provider by ID (cascades to model_providers). */
   deleteProvider(tx: Transaction, providerId: string): Promise<void>;
@@ -2640,6 +2654,8 @@ export class DrizzleAgentStore implements AgentStore {
       id: string;
       name: string;
       type: LlmProviderTypeValue;
+      baseUrl: string | null;
+      attrs: ProviderAttrs;
     }>
   > {
     return tx
@@ -2647,8 +2663,26 @@ export class DrizzleAgentStore implements AgentStore {
         id: llmProviders.id,
         name: llmProviders.name,
         type: llmProviders.type,
+        baseUrl: llmProviders.baseUrl,
+        attrs: llmProviders.attrs,
       })
       .from(llmProviders);
+  }
+
+  async setProviderCacheDialect(
+    tx: Transaction,
+    providerId: string,
+    cacheDialect: CacheDialect,
+  ): Promise<boolean> {
+    // JSONB `||` merges the key into the row's attrs in one UPDATE, bypassing
+    // the column's write validation, so the patch is validated here.
+    const patch = ProviderAttrsSchema.parse({ cacheDialect });
+    const rows = await tx
+      .update(llmProviders)
+      .set({ attrs: sql`${llmProviders.attrs} || ${JSON.stringify(patch)}::jsonb` })
+      .where(eq(llmProviders.id, providerId))
+      .returning({ id: llmProviders.id });
+    return rows.length > 0;
   }
 
   async deleteProvider(tx: Transaction, providerId: string): Promise<void> {
