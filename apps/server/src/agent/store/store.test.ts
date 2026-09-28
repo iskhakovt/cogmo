@@ -3309,6 +3309,16 @@ describe("DrizzleAgentStore", () => {
       expect(rows).toMatchObject([{ source: "skill", skillName: "ci_watch" }]);
     });
 
+    it("types a skill row as naming its skill, and bulk staging as refusing skill rows", () => {
+      type StageParams = Parameters<DrizzleAgentStore["stagePendingMemory"]>[1];
+      type BulkRow = Parameters<DrizzleAgentStore["bulkStagePendingMemories"]>[1][number];
+      // @ts-expect-error — a skill row names its skill
+      const nameless: StageParams = { userId: "u", profileId: null, content: "x", source: "skill" };
+      // @ts-expect-error — a bulk stage takes no skill rows
+      const bulkSkill: BulkRow = { userId: "u", content: "x", source: "skill" };
+      expect([nameless, bulkSkill]).toHaveLength(2);
+    });
+
     it("getPendingMemories surfaces the staging profile's CURRENT class via JOIN", async () => {
       // Regression for the speaker-isolation leak: rows staged by
       // profile A must drain with A's class, not the class of whichever

@@ -111,13 +111,20 @@ export type VoiceMode = "auto" | "always" | "never";
 /** Mirrors the `pending_memory_source` PG enum. */
 export type PendingMemorySource = "live_retain" | "migration" | "skill";
 
+/** The sources that name no skill. */
+export type UnnamedMemorySource = Exclude<PendingMemorySource, "skill">;
+
+/** A skill's write: a `skill` row names its skill. */
+export interface SkillMemoryOrigin {
+  source: "skill";
+  skillName: string;
+}
+
 /**
- * Who staged a pending row. A `skill` row names its skill, and no other
- * source carries one (`chk_pending_memories_skill_name`).
+ * Who staged a pending row. Only a `skill` row names a skill
+ * (`chk_pending_memories_skill_name`).
  */
-export type PendingMemoryOrigin =
-  | { source: Exclude<PendingMemorySource, "skill"> }
-  | { source: "skill"; skillName: string };
+export type PendingMemoryOrigin = { source: UnnamedMemorySource } | SkillMemoryOrigin;
 
 /** Mirrors the `schedule_kind` PG enum. */
 export type ScheduleKind = "recurring" | "one_off";
@@ -1300,7 +1307,9 @@ export interface AgentStore {
    * `profileId` snapshots which profile staged the row so the Observer
    * drain stamps the correct `profile_class:<class>` tag at retain
    * time. Pass `null` for non-conversational stages (the migration
-   * backfill loop) where there's no staging profile.
+   * backfill loop) where there's no staging profile. A `skill` row names
+   * its skill in `skillName`, and no other source carries one
+   * (`chk_pending_memories_skill_name`).
    */
   stagePendingMemory(
     tx: Transaction,
@@ -1323,7 +1332,7 @@ export interface AgentStore {
       userId: string;
       content: string;
       context?: string;
-      source: Exclude<PendingMemorySource, "skill">;
+      source: UnnamedMemorySource;
     }>,
   ): Promise<void>;
 
@@ -3296,7 +3305,7 @@ export class DrizzleAgentStore implements AgentStore {
       userId: string;
       content: string;
       context?: string;
-      source: Exclude<PendingMemorySource, "skill">;
+      source: UnnamedMemorySource;
     }>,
   ): Promise<void> {
     if (rows.length === 0) return;

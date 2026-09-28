@@ -3,7 +3,7 @@ import { mock } from "vitest-mock-extended";
 import type { MemoryProvider } from "../memory/provider.js";
 import { expectDefined } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
-import type { Service } from "./service.js";
+import type { Service, StageRetainOptions } from "./service.js";
 import { createService } from "./service.js";
 import type { ProfileMemoryScope } from "./store/schema.js";
 
@@ -310,6 +310,12 @@ describe("createService — stageRetain", () => {
     await svc.memory.stageRetain("a fact");
 
     expect(memory.retain).not.toHaveBeenCalled();
+  });
+
+  it("types a skill's staging options as naming the skill", () => {
+    // @ts-expect-error — a skill's write names the skill
+    const nameless: StageRetainOptions = { context: "x", source: "skill" };
+    expect(nameless).toBeDefined();
   });
 });
 

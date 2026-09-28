@@ -18,6 +18,7 @@ import type {
 } from "./core-memory/write-core-memory-block.js";
 import type { PipelinesService } from "./pipeline/pipelines-service.js";
 import type { SchedulingService } from "./scheduling/scheduling-service.js";
+import type { SkillMemoryOrigin } from "./store/index.js";
 import type { ProfileMemoryScope } from "./store/schema.js";
 
 /**
@@ -61,7 +62,7 @@ export interface CoreMemoryBlock {
  */
 export type StageRetainOptions = { context?: string } & (
   | { source?: "live_retain" }
-  | { source: "skill"; skillName: string }
+  | SkillMemoryOrigin
 );
 
 /**
