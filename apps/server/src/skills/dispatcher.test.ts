@@ -1,6 +1,13 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
-import { CtxError, type CtxHandler, Dispatcher, type RpcTransport } from "./dispatcher.js";
+import { mock } from "vitest-mock-extended";
+import {
+  CtxError,
+  type CtxHandler,
+  Dispatcher,
+  ExitUnconfirmedError,
+  type RpcTransport,
+} from "./dispatcher.js";
 import type { TaskInvoke } from "./protocol.js";
 
 /**
@@ -36,6 +43,28 @@ function noopHandler(): CtxHandler {
   return { handle: vi.fn().mockResolvedValue(null) };
 }
 
+/** A dispatcher that settles on `task_result`, as the Tier 1 worker uses. */
+function onResult(transport: RpcTransport): Dispatcher {
+  return new Dispatcher({ transport, awaitTaskExited: false });
+}
+
+/** A dispatcher that settles on `task_exited`, as the Tier 2 worker uses. */
+function onExit(transport: RpcTransport): Dispatcher {
+  return new Dispatcher({ transport, awaitTaskExited: true });
+}
+
+function ctxResultsFrom(worker: RpcTransport): unknown[] {
+  const captured: unknown[] = [];
+  worker.onMessage((m) => {
+    if ((m as { type: string }).type === "ctx_result") captured.push(m);
+  });
+  return captured;
+}
+
+function flush(): Promise<void> {
+  return new Promise((r) => setImmediate(r));
+}
+
 const INVOKE: TaskInvoke = {
   type: "task_invoke",
   id: "task-1",
@@ -46,12 +75,12 @@ const INVOKE: TaskInvoke = {
 describe("Dispatcher", () => {
   it("resolves a task when the worker replies with task_result", async () => {
     const { host, worker } = makeTransportPair();
-    const d = new Dispatcher({ transport: host, ctxHandler: noopHandler() });
+    const d = onResult(host);
 
     const captured: unknown[] = [];
     worker.onMessage((m) => captured.push(m));
 
-    const promise = d.invoke(INVOKE);
+    const promise = d.invoke(INVOKE, { ctxHandler: noopHandler() });
     worker.postMessage({
       type: "task_result",
       id: "task-1",
@@ -73,30 +102,27 @@ describe("Dispatcher", () => {
         throw new Error("unexpected call");
       }),
     };
-    const d = new Dispatcher({ transport: host, ctxHandler: handler });
+    const d = onResult(host);
+    const ctxResults = ctxResultsFrom(worker);
 
-    const ctxResults: unknown[] = [];
-    worker.onMessage((m) => {
-      const msg = m as { type: string };
-      if (msg.type === "ctx_result") ctxResults.push(m);
-    });
-
-    const promise = d.invoke(INVOKE);
+    const promise = d.invoke(INVOKE, { ctxHandler: handler });
 
     worker.postMessage({
       type: "ctx_call",
+      taskId: "task-1",
       id: "ctx-1",
       method: "secrets.get",
       args: { name: "foo" },
     });
-    // Wait a microtask cycle for the handler promise to flush.
-    await new Promise((r) => setImmediate(r));
+    await flush();
 
     expect(handler.handle).toHaveBeenCalledWith({
       method: "secrets.get",
       args: { name: "foo" },
     });
-    expect(ctxResults).toEqual([{ type: "ctx_result", id: "ctx-1", ok: true, value: "bar" }]);
+    expect(ctxResults).toEqual([
+      { type: "ctx_result", taskId: "task-1", id: "ctx-1", ok: true, value: "bar" },
+    ]);
 
     worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: null });
     await promise;
@@ -110,26 +136,23 @@ describe("Dispatcher", () => {
         throw new CtxError("not_in_allowlist", "secret 'x' not declared");
       }),
     };
-    const d = new Dispatcher({ transport: host, ctxHandler: handler });
+    const d = onResult(host);
+    const ctxResults = ctxResultsFrom(worker);
 
-    const captured: unknown[] = [];
-    worker.onMessage((m) => {
-      const msg = m as { type: string };
-      if (msg.type === "ctx_result") captured.push(m);
-    });
-
-    const promise = d.invoke(INVOKE);
+    const promise = d.invoke(INVOKE, { ctxHandler: handler });
     worker.postMessage({
       type: "ctx_call",
+      taskId: "task-1",
       id: "ctx-2",
       method: "secrets.get",
       args: { name: "x" },
     });
-    await new Promise((r) => setImmediate(r));
+    await flush();
 
-    expect(captured).toEqual([
+    expect(ctxResults).toEqual([
       {
         type: "ctx_result",
+        taskId: "task-1",
         id: "ctx-2",
         ok: false,
         errorKind: "not_in_allowlist",
@@ -149,30 +172,29 @@ describe("Dispatcher", () => {
         throw new Error("boom");
       }),
     };
-    const d = new Dispatcher({ transport: host, ctxHandler: handler });
+    const d = onResult(host);
+    const ctxResults = ctxResultsFrom(worker);
 
-    let last: unknown;
-    worker.onMessage((m) => {
-      const msg = m as { type: string };
-      if (msg.type === "ctx_result") last = m;
-    });
-
-    const promise = d.invoke(INVOKE);
+    const promise = d.invoke(INVOKE, { ctxHandler: handler });
     worker.postMessage({
       type: "ctx_call",
+      taskId: "task-1",
       id: "ctx-3",
       method: "secrets.get",
       args: {},
     });
-    await new Promise((r) => setImmediate(r));
+    await flush();
 
-    expect(last).toEqual({
-      type: "ctx_result",
-      id: "ctx-3",
-      ok: false,
-      errorKind: "internal",
-      message: "boom",
-    });
+    expect(ctxResults).toEqual([
+      {
+        type: "ctx_result",
+        taskId: "task-1",
+        id: "ctx-3",
+        ok: false,
+        errorKind: "internal",
+        message: "boom",
+      },
+    ]);
 
     worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: null });
     await promise;
@@ -188,27 +210,34 @@ describe("Dispatcher", () => {
         return new Promise((resolve) => resolvers.set(id, resolve));
       }),
     };
-    const d = new Dispatcher({ transport: host, ctxHandler: handler });
+    const d = onResult(host);
+    const ctxResults = ctxResultsFrom(worker) as { id: string }[];
 
-    const captured: { type: string; id: string; value?: unknown }[] = [];
-    worker.onMessage((m) => {
-      const msg = m as { type: string; id: string };
-      if (msg.type === "ctx_result") captured.push(m as never);
+    const promise = d.invoke(INVOKE, { ctxHandler: handler });
+    worker.postMessage({
+      type: "ctx_call",
+      taskId: "task-1",
+      id: "a",
+      method: "now",
+      args: { id: "a" },
     });
-
-    const promise = d.invoke(INVOKE);
-    worker.postMessage({ type: "ctx_call", id: "a", method: "now", args: { id: "a" } });
-    worker.postMessage({ type: "ctx_call", id: "b", method: "now", args: { id: "b" } });
-    await new Promise((r) => setImmediate(r));
+    worker.postMessage({
+      type: "ctx_call",
+      taskId: "task-1",
+      id: "b",
+      method: "now",
+      args: { id: "b" },
+    });
+    await flush();
 
     // Resolve b first, then a — out of order.
     resolvers.get("b")?.("BBB");
-    await new Promise((r) => setImmediate(r));
+    await flush();
     resolvers.get("a")?.("AAA");
-    await new Promise((r) => setImmediate(r));
+    await flush();
 
-    expect(captured.find((c) => c.id === "a")).toMatchObject({ ok: true, value: "AAA" });
-    expect(captured.find((c) => c.id === "b")).toMatchObject({ ok: true, value: "BBB" });
+    expect(ctxResults.find((c) => c.id === "a")).toMatchObject({ ok: true, value: "AAA" });
+    expect(ctxResults.find((c) => c.id === "b")).toMatchObject({ ok: true, value: "BBB" });
 
     worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: null });
     await promise;
@@ -217,21 +246,21 @@ describe("Dispatcher", () => {
 
   it("rejects the in-flight task on task_result id mismatch", async () => {
     const { host, worker } = makeTransportPair();
-    const d = new Dispatcher({ transport: host, ctxHandler: noopHandler() });
+    const d = onResult(host);
 
-    const promise = d.invoke(INVOKE);
+    const promise = d.invoke(INVOKE, { ctxHandler: noopHandler() });
     // The worker is in an inconsistent state (sent the wrong task id).
     // Rejecting surfaces the bug; logging+waiting would hang indefinitely.
     worker.postMessage({ type: "task_result", id: "wrong", ok: true, output: null });
 
-    await expect(promise).rejects.toThrow(/id mismatch/);
+    await expect(promise).rejects.toThrow(/task_result id mismatch/);
     d.close();
   });
 
   it("rejects malformed messages without crashing", async () => {
     const { host, worker } = makeTransportPair();
-    const d = new Dispatcher({ transport: host, ctxHandler: noopHandler() });
-    const promise = d.invoke(INVOKE);
+    const d = onResult(host);
+    const promise = d.invoke(INVOKE, { ctxHandler: noopHandler() });
 
     worker.postMessage({ type: "garbage" });
     worker.postMessage(null);
@@ -244,42 +273,44 @@ describe("Dispatcher", () => {
 
   it("close() rejects an in-flight task", async () => {
     const { host } = makeTransportPair();
-    const d = new Dispatcher({ transport: host, ctxHandler: noopHandler() });
-    const promise = d.invoke(INVOKE);
+    const d = onResult(host);
+    const promise = d.invoke(INVOKE, { ctxHandler: noopHandler() });
     d.close("torn-down");
     await expect(promise).rejects.toThrow(/torn-down/);
   });
 
   it("throws synchronously on second invoke before first completes", async () => {
     const { host } = makeTransportPair();
-    const d = new Dispatcher({ transport: host, ctxHandler: noopHandler() });
-    const first = d.invoke(INVOKE);
-    expect(() => d.invoke({ ...INVOKE, id: "task-2" })).toThrow(/in-flight/);
+    const d = onResult(host);
+    const first = d.invoke(INVOKE, { ctxHandler: noopHandler() });
+    expect(() => d.invoke({ ...INVOKE, id: "task-2" }, { ctxHandler: noopHandler() })).toThrow(
+      /in-flight/,
+    );
     d.close();
     await expect(first).rejects.toThrow();
   });
 
   it("invoke() after close() throws synchronously", () => {
     const { host } = makeTransportPair();
-    const d = new Dispatcher({ transport: host, ctxHandler: noopHandler() });
+    const d = onResult(host);
     d.close();
-    expect(() => d.invoke(INVOKE)).toThrow(/closed/);
+    expect(() => d.invoke(INVOKE, { ctxHandler: noopHandler() })).toThrow(/closed/);
   });
 
   it("close() is idempotent", () => {
     const { host } = makeTransportPair();
-    const d = new Dispatcher({ transport: host, ctxHandler: noopHandler() });
+    const d = onResult(host);
     d.close();
     expect(() => d.close()).not.toThrow();
   });
 
   it("ignores task_result that arrives with no pending task", async () => {
     const { host, worker } = makeTransportPair();
-    const d = new Dispatcher({ transport: host, ctxHandler: noopHandler() });
+    const d = onResult(host);
     // No invoke() yet — fire a stale result.
     worker.postMessage({ type: "task_result", id: "stale", ok: true, output: 1 });
     // Then invoke; the previous result was dropped.
-    const promise = d.invoke(INVOKE);
+    const promise = d.invoke(INVOKE, { ctxHandler: noopHandler() });
     worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: 7 });
     const result = await promise;
     expect(result).toMatchObject({ output: 7 });
@@ -287,37 +318,15 @@ describe("Dispatcher", () => {
   });
 
   it("propagates a transport postMessage exception synchronously", () => {
-    const throwingTransport = {
+    const throwingTransport: RpcTransport = {
       postMessage: () => {
         throw new Error("transport failed");
       },
       onMessage: () => {},
       close: () => {},
     };
-    const d = new Dispatcher({ transport: throwingTransport, ctxHandler: noopHandler() });
-    expect(() => d.invoke(INVOKE)).toThrow(/transport failed/);
-    d.close();
-  });
-
-  it("ctx handler returning a non-promise value is wrapped correctly", async () => {
-    const { host, worker } = makeTransportPair();
-    const handler: CtxHandler = {
-      handle: async () => "raw-string-value",
-    };
-    const d = new Dispatcher({ transport: host, ctxHandler: handler });
-
-    let last: unknown;
-    worker.onMessage((m) => {
-      const msg = m as { type: string };
-      if (msg.type === "ctx_result") last = m;
-    });
-
-    const promise = d.invoke(INVOKE);
-    worker.postMessage({ type: "ctx_call", id: "c", method: "now", args: {} });
-    await new Promise((r) => setImmediate(r));
-    expect(last).toMatchObject({ ok: true, value: "raw-string-value" });
-    worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: null });
-    await promise;
+    const d = onResult(throwingTransport);
+    expect(() => d.invoke(INVOKE, { ctxHandler: noopHandler() })).toThrow(/transport failed/);
     d.close();
   });
 
@@ -326,29 +335,27 @@ describe("Dispatcher", () => {
     const handler: CtxHandler = {
       handle: vi.fn(async ({ args }) => (args as { i: number }).i * 2),
     };
-    const d = new Dispatcher({ transport: host, ctxHandler: handler });
+    const d = onResult(host);
+    const ctxResults = ctxResultsFrom(worker) as { id: string; value: number }[];
 
-    const ctxResults: { id: string; value: number }[] = [];
-    worker.onMessage((m) => {
-      const msg = m as { type: string };
-      if (msg.type === "ctx_result") ctxResults.push(m as never);
-    });
-
-    const promise = d.invoke(INVOKE);
+    const promise = d.invoke(INVOKE, { ctxHandler: handler });
     const N = 100;
     for (let i = 0; i < N; i++) {
-      worker.postMessage({ type: "ctx_call", id: `c-${i}`, method: "now", args: { i } });
+      worker.postMessage({
+        type: "ctx_call",
+        taskId: "task-1",
+        id: `c-${i}`,
+        method: "now",
+        args: { i },
+      });
     }
     // Drain microtasks until all results have arrived.
     for (let attempt = 0; attempt < 10 && ctxResults.length < N; attempt++) {
-      await new Promise((r) => setImmediate(r));
+      await flush();
     }
     expect(ctxResults).toHaveLength(N);
-    // Verify each call's value matches its input id.
     for (let i = 0; i < N; i++) {
-      const r = ctxResults.find((c) => c.id === `c-${i}`);
-      expect(r).toBeDefined();
-      expect((r! as unknown as { value: number }).value).toBe(i * 2);
+      expect(ctxResults.find((c) => c.id === `c-${i}`)).toMatchObject({ value: i * 2 });
     }
 
     worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: null });
@@ -356,37 +363,13 @@ describe("Dispatcher", () => {
     d.close();
   });
 
-  it("ctx_result for unknown id is silently dropped", async () => {
+  it("ignores ctx_result and task_invoke messages flowing back from the worker", async () => {
+    // Both are host→worker only. The dispatcher logs and ignores them.
     const { host, worker } = makeTransportPair();
-    const d = new Dispatcher({ transport: host, ctxHandler: noopHandler() });
-    const promise = d.invoke(INVOKE);
-    // No ctx_call was issued — this stray ctx_result should be ignored.
-    // (Dispatcher only routes ctx_results emitted by the worker; the host
-    // never sees its own ctx_result, but the schema allows the message.)
-    worker.postMessage({
-      type: "ctx_result",
-      id: "unknown",
-      ok: true,
-      value: null,
-    });
-    worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: 99 });
-    const result = await promise;
-    expect(result).toMatchObject({ output: 99 });
-    d.close();
-  });
-
-  it("ignores task_invoke messages flowing back from the worker", async () => {
-    // Defensive — task_invoke is host→worker only. If the worker echoes one,
-    // the dispatcher logs and ignores. Asserts no crash + task still resolves.
-    const { host, worker } = makeTransportPair();
-    const d = new Dispatcher({ transport: host, ctxHandler: noopHandler() });
-    const promise = d.invoke(INVOKE);
-    worker.postMessage({
-      type: "task_invoke",
-      id: "echo",
-      skill: "x",
-      inputs: {},
-    });
+    const d = onResult(host);
+    const promise = d.invoke(INVOKE, { ctxHandler: noopHandler() });
+    worker.postMessage({ type: "ctx_result", taskId: "task-1", id: "x", ok: true, value: null });
+    worker.postMessage({ type: "task_invoke", id: "echo", skill: "x", inputs: {} });
     worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: 1 });
     const result = await promise;
     expect(result).toMatchObject({ output: 1 });
@@ -394,11 +377,9 @@ describe("Dispatcher", () => {
   });
 
   it("rejects pending invoke when transport reports a fatal error", async () => {
-    // Regression test: an earlier sysbox transport surfaced overflow as a
-    // synthetic `{ type: "fatal" }` frame on `onMessage`, but `fatal` isn't
-    // in the worker protocol so the dispatcher dropped it silently and the
-    // task hung until host wall-clock fired. The fix routes fatal errors
-    // through `onError` and the dispatcher rejects immediately.
+    // Fatal transport conditions arrive on `onError`, not as a frame on
+    // `onMessage`: the dispatcher rejects straight away instead of leaving
+    // the task to the wall clock.
     const errorHandlers: Array<(err: Error) => void> = [];
     const transport: RpcTransport = {
       postMessage: () => {},
@@ -408,36 +389,80 @@ describe("Dispatcher", () => {
       },
       close: () => {},
     };
-    const d = new Dispatcher({ transport, ctxHandler: noopHandler() });
-    const promise = d.invoke(INVOKE);
+    const d = onResult(transport);
+    const promise = d.invoke(INVOKE, { ctxHandler: noopHandler() });
     const fireError = errorHandlers[0];
     if (!fireError) throw new Error("expected onError to have been wired");
     fireError(new Error("transport: maximum buffer reached"));
     await expect(promise).rejects.toThrow(/transport: maximum buffer reached/);
   });
 
+  it("closes and reports once when the transport fails with no task in flight", () => {
+    let fireError: ((err: Error) => void) | undefined;
+    const transport: RpcTransport = {
+      postMessage: () => {},
+      onMessage: () => {},
+      onError: (h) => {
+        fireError = h;
+      },
+      close: () => {},
+    };
+    const onTransportFailure = vi.fn();
+    const d = new Dispatcher({ transport, awaitTaskExited: true, onTransportFailure });
+    if (!fireError) throw new Error("expected onError to have been wired");
+    fireError(new Error("transport: worker closed its output"));
+    fireError(new Error("transport: again"));
+
+    expect(onTransportFailure).toHaveBeenCalledTimes(1);
+    expect(() => d.invoke(INVOKE, { ctxHandler: noopHandler() })).toThrow(/dispatcher is closed/);
+  });
+
+  it("does not report a transport failure after close()", () => {
+    let fireError: ((err: Error) => void) | undefined;
+    const transport: RpcTransport = {
+      postMessage: () => {},
+      onMessage: () => {},
+      onError: (h) => {
+        fireError = h;
+      },
+      close: () => {},
+    };
+    const onTransportFailure = vi.fn();
+    const d = new Dispatcher({ transport, awaitTaskExited: true, onTransportFailure });
+    d.close();
+    fireError?.(new Error("transport: worker closed its output"));
+    expect(onTransportFailure).not.toHaveBeenCalled();
+  });
+
   it("dispatches sequential tasks on a persistent transport (per-task ctxHandler)", async () => {
-    // The tier-2 supervisor reuses one Dispatcher across many tasks. Each
-    // `invoke()` passes its own ctxHandler. This pins the contract:
-    // ctx_calls during task N route to handler N, not to handler N-1 or
-    // a stale default. Regression target: someone "simplifies" the
-    // dispatcher by caching the constructor handler and dropping the
-    // per-task plumbing.
+    // One Dispatcher serves many tasks; each `invoke()` passes its own
+    // ctxHandler, and ctx_calls during task N route to handler N only.
     const { host, worker } = makeTransportPair();
-    const d = new Dispatcher({ transport: host });
+    const d = onResult(host);
 
     const handlerA: CtxHandler = { handle: vi.fn().mockResolvedValue("A") };
     const handlerB: CtxHandler = { handle: vi.fn().mockResolvedValue("B") };
 
-    // Task A: emits one ctx_call before resolving.
     worker.onMessage((m) => {
       const msg = m as { type: string; id?: string };
       if (msg.type === "task_invoke" && msg.id === "task-A") {
-        worker.postMessage({ type: "ctx_call", id: "ctx-A", method: "now", args: {} });
+        worker.postMessage({
+          type: "ctx_call",
+          taskId: "task-A",
+          id: "ctx-A",
+          method: "now",
+          args: {},
+        });
       } else if (msg.type === "ctx_result" && msg.id === "ctx-A") {
         worker.postMessage({ type: "task_result", id: "task-A", ok: true, output: "doneA" });
       } else if (msg.type === "task_invoke" && msg.id === "task-B") {
-        worker.postMessage({ type: "ctx_call", id: "ctx-B", method: "now", args: {} });
+        worker.postMessage({
+          type: "ctx_call",
+          taskId: "task-B",
+          id: "ctx-B",
+          method: "now",
+          args: {},
+        });
       } else if (msg.type === "ctx_result" && msg.id === "ctx-B") {
         worker.postMessage({ type: "task_result", id: "task-B", ok: true, output: "doneB" });
       }
@@ -448,10 +473,8 @@ describe("Dispatcher", () => {
     expect(handlerA.handle).toHaveBeenCalledTimes(1);
     expect(handlerB.handle).not.toHaveBeenCalled();
 
-    // Same dispatcher, second task — must work without close/recreate.
     const b = await d.invoke({ ...INVOKE, id: "task-B" }, { ctxHandler: handlerB });
     expect(b).toMatchObject({ id: "task-B", output: "doneB" });
-    // handler B fired exactly once for task B; handler A still at 1.
     expect(handlerA.handle).toHaveBeenCalledTimes(1);
     expect(handlerB.handle).toHaveBeenCalledTimes(1);
 
@@ -459,19 +482,15 @@ describe("Dispatcher", () => {
   });
 
   it("rejects the pending task when ctx_result send fails (transport closed mid-task)", async () => {
-    // Worker emits a ctx_call. CtxHandler resolves. We try to send the
-    // ctx_result back, but postMessage throws (port closed). Without
-    // surfacing this as a task failure, `invoke()` would hang forever on
-    // a worker that's still awaiting a ctx_result it'll never get.
+    // Without surfacing this as a task failure, `invoke()` would hang on a
+    // worker still awaiting a ctx_result it will never get.
     let postMessageThrows = false;
-    const captured: unknown[] = [];
     let messageHandler: ((m: unknown) => void) | undefined;
     const transport: RpcTransport = {
       postMessage: (m) => {
         if (postMessageThrows && (m as { type: string }).type === "ctx_result") {
           throw new Error("transport: closed");
         }
-        captured.push(m);
       },
       onMessage: (h) => {
         messageHandler = h;
@@ -479,31 +498,267 @@ describe("Dispatcher", () => {
       close: () => {},
     };
     const handler: CtxHandler = { handle: vi.fn().mockResolvedValue("v") };
-    const d = new Dispatcher({ transport, ctxHandler: handler });
+    const d = onResult(transport);
 
-    const promise = d.invoke(INVOKE);
-    // The worker emits a ctx_call. Mid-task, the transport closes — the
-    // next ctx_result send will throw.
+    const promise = d.invoke(INVOKE, { ctxHandler: handler });
     postMessageThrows = true;
     if (!messageHandler) throw new Error("expected onMessage to have been wired");
-    messageHandler({ type: "ctx_call", id: "ctx-1", method: "now", args: {} });
+    messageHandler({ type: "ctx_call", taskId: "task-1", id: "ctx-1", method: "now", args: {} });
 
     await expect(promise).rejects.toThrow(/ctx_result send failed/);
     d.close();
   });
 
-  it("rejects the pending task when ctx_call arrives with no ctxHandler configured", async () => {
-    // Defensive path: someone constructs a Dispatcher without
-    // `ctxHandler` and calls `invoke()` without `{ ctxHandler }` either.
-    // If the worker emits a ctx_call, there's nothing to handle it —
-    // the dispatcher must reject the pending task with a clear error
-    // rather than letting the caller hang on a ctx_result that never
-    // arrives.
-    const { host, worker } = makeTransportPair();
-    const d = new Dispatcher({ transport: host });
-    const promise = d.invoke(INVOKE);
-    worker.postMessage({ type: "ctx_call", id: "ctx-orphan", method: "now", args: {} });
-    await expect(promise).rejects.toThrow(/no ctxHandler/);
-    d.close();
+  describe("ctx_call task binding", () => {
+    it("does not serve a finished task's late ctx_call with the next task's handler", async () => {
+      const { host, worker } = makeTransportPair();
+      const d = onResult(host);
+      const handlerA = mock<CtxHandler>();
+      const handlerB = mock<CtxHandler>();
+      const ctxResults = ctxResultsFrom(worker);
+
+      const a = d.invoke({ ...INVOKE, id: "task-A" }, { ctxHandler: handlerA });
+      worker.postMessage({ type: "task_result", id: "task-A", ok: true, output: null });
+      await a;
+      const b = d.invoke({ ...INVOKE, id: "task-B" }, { ctxHandler: handlerB });
+      // Task A's code outlived its result and calls ctx while B is in flight.
+      worker.postMessage({
+        type: "ctx_call",
+        id: "ctx-late",
+        taskId: "task-A",
+        method: "secrets.get",
+        args: { name: "token" },
+      });
+      await new Promise((r) => setImmediate(r));
+
+      expect(handlerA.handle).not.toHaveBeenCalled();
+      expect(handlerB.handle).not.toHaveBeenCalled();
+      expect(ctxResults).toEqual([]);
+      worker.postMessage({ type: "task_result", id: "task-B", ok: true, output: null });
+      await b;
+      d.close();
+    });
+
+    it("refuses a ctx_call when no task is in flight", async () => {
+      const { host, worker } = makeTransportPair();
+      const d = onResult(host);
+      const handler = mock<CtxHandler>();
+      const ctxResults = ctxResultsFrom(worker);
+
+      const a = d.invoke(INVOKE, { ctxHandler: handler });
+      worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: null });
+      await a;
+      worker.postMessage({ type: "ctx_call", taskId: "task-1", id: "c", method: "now", args: {} });
+      await flush();
+
+      expect(handler.handle).not.toHaveBeenCalled();
+      expect(ctxResults).toEqual([]);
+      d.close();
+    });
+
+    it("refuses a ctx_call naming a task other than the running one", async () => {
+      const { host, worker } = makeTransportPair();
+      const d = onResult(host);
+      const handler = mock<CtxHandler>();
+      const ctxResults = ctxResultsFrom(worker);
+
+      const promise = d.invoke(INVOKE, { ctxHandler: handler });
+      worker.postMessage({ type: "ctx_call", taskId: "task-2", id: "c", method: "now", args: {} });
+      await flush();
+
+      expect(handler.handle).not.toHaveBeenCalled();
+      expect(ctxResults).toEqual([]);
+      worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: null });
+      await promise;
+      d.close();
+    });
+
+    it("refuses a ctx_call from a task that has returned but not yet exited", async () => {
+      const { host, worker } = makeTransportPair();
+      const d = onExit(host);
+      const handler = mock<CtxHandler>();
+
+      const promise = d.invoke(INVOKE, { ctxHandler: handler });
+      worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: null });
+      worker.postMessage({ type: "ctx_call", taskId: "task-1", id: "c", method: "now", args: {} });
+      await flush();
+
+      expect(handler.handle).not.toHaveBeenCalled();
+      worker.postMessage({ type: "task_exited", id: "task-1" });
+      await promise;
+      d.close();
+    });
+
+    it("drops the reply to a call whose task returned while it was being served", async () => {
+      const { host, worker } = makeTransportPair();
+      const d = onResult(host);
+      let release: (v: unknown) => void = () => {};
+      const handler = mock<CtxHandler>();
+      handler.handle.mockImplementation(() => new Promise((resolve) => (release = resolve)));
+      const ctxResults = ctxResultsFrom(worker);
+
+      const promise = d.invoke(INVOKE, { ctxHandler: handler });
+      worker.postMessage({ type: "ctx_call", taskId: "task-1", id: "c", method: "now", args: {} });
+      await flush();
+      worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: null });
+      await promise;
+      release("late");
+      await flush();
+
+      expect(handler.handle).toHaveBeenCalledTimes(1);
+      expect(ctxResults).toEqual([]);
+      d.close();
+    });
+
+    it("drops the reply to a call whose task returned but has not yet exited", async () => {
+      const { host, worker } = makeTransportPair();
+      const d = onExit(host);
+      let release: (v: unknown) => void = () => {};
+      const handler = mock<CtxHandler>();
+      handler.handle.mockImplementation(() => new Promise((resolve) => (release = resolve)));
+      const ctxResults = ctxResultsFrom(worker);
+
+      const promise = d.invoke(INVOKE, { ctxHandler: handler });
+      worker.postMessage({ type: "ctx_call", taskId: "task-1", id: "c", method: "now", args: {} });
+      await flush();
+      // Still the in-flight task: it awaits task_exited.
+      worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: null });
+      release("late");
+      await flush();
+
+      expect(ctxResults).toEqual([]);
+      worker.postMessage({ type: "task_exited", id: "task-1" });
+      await promise;
+      d.close();
+    });
+  });
+
+  describe("awaitTaskExited", () => {
+    it("settles on task_exited with the task's result", async () => {
+      const { host, worker } = makeTransportPair();
+      const d = onExit(host);
+      let settled = false;
+      const promise = d.invoke(INVOKE, { ctxHandler: noopHandler() }).then((r) => {
+        settled = true;
+        return r;
+      });
+
+      worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: 5 });
+      await flush();
+      expect(settled).toBe(false);
+      expect(() => d.invoke({ ...INVOKE, id: "task-2" }, { ctxHandler: noopHandler() })).toThrow(
+        /in-flight/,
+      );
+
+      worker.postMessage({ type: "task_exited", id: "task-1" });
+      await expect(promise).resolves.toEqual({
+        type: "task_result",
+        id: "task-1",
+        ok: true,
+        output: 5,
+      });
+      d.close();
+    });
+
+    it("keeps the first of duplicate task_results", async () => {
+      const { host, worker } = makeTransportPair();
+      const d = onExit(host);
+      const promise = d.invoke(INVOKE, { ctxHandler: noopHandler() });
+      worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: "first" });
+      worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: "second" });
+      worker.postMessage({ type: "task_exited", id: "task-1" });
+      await expect(promise).resolves.toMatchObject({ output: "first" });
+      d.close();
+    });
+
+    it("reports a task that exited without a result as failed", async () => {
+      const { host, worker } = makeTransportPair();
+      const d = onExit(host);
+      const promise = d.invoke(INVOKE, { ctxHandler: noopHandler() });
+      worker.postMessage({ type: "task_exited", id: "task-1" });
+      await expect(promise).resolves.toEqual({
+        type: "task_result",
+        id: "task-1",
+        ok: false,
+        error: "task_exited_without_result",
+      });
+      d.close();
+    });
+
+    it("rejects the in-flight task on task_exited id mismatch", async () => {
+      const { host, worker } = makeTransportPair();
+      const d = onExit(host);
+      const promise = d.invoke(INVOKE, { ctxHandler: noopHandler() });
+      worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: null });
+      worker.postMessage({ type: "task_exited", id: "other" });
+      await expect(promise).rejects.toThrow(/task_exited id mismatch/);
+      // The delivered result survives the mismatch.
+      await expect(promise).rejects.toBeInstanceOf(ExitUnconfirmedError);
+      await expect(promise).rejects.toMatchObject({
+        result: { type: "task_result", id: "task-1", ok: true, output: null },
+      });
+      d.close();
+    });
+
+    it("keeps a delivered result when a second task_result names another task", async () => {
+      const { host, worker } = makeTransportPair();
+      const d = onExit(host);
+      const promise = d.invoke(INVOKE, { ctxHandler: noopHandler() });
+      worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: "mine" });
+      worker.postMessage({ type: "task_result", id: "other", ok: true, output: "forged" });
+      await expect(promise).rejects.toThrow(/task_result id mismatch/);
+      await expect(promise).rejects.toBeInstanceOf(ExitUnconfirmedError);
+      await expect(promise).rejects.toMatchObject({
+        result: { type: "task_result", id: "task-1", ok: true, output: "mine" },
+      });
+      d.close();
+    });
+
+    it("keeps a delivered result when the transport fails before task_exited", async () => {
+      const errorHandlers: Array<(err: Error) => void> = [];
+      const { host, worker } = makeTransportPair();
+      const d = onExit({ ...host, onError: (h) => errorHandlers.push(h) });
+      const promise = d.invoke(INVOKE, { ctxHandler: noopHandler() });
+      worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: 7 });
+      for (const fire of errorHandlers) fire(new Error("transport: worker closed its output"));
+
+      await expect(promise).rejects.toBeInstanceOf(ExitUnconfirmedError);
+      await expect(promise).rejects.toMatchObject({
+        result: { type: "task_result", id: "task-1", ok: true, output: 7 },
+      });
+    });
+
+    it("keeps a delivered result when closed before task_exited", async () => {
+      const { host, worker } = makeTransportPair();
+      const d = onExit(host);
+      const promise = d.invoke(INVOKE, { ctxHandler: noopHandler() });
+      worker.postMessage({ type: "task_result", id: "task-1", ok: false, error: "boom" });
+      d.close("supervisor unresponsive");
+
+      await expect(promise).rejects.toMatchObject({
+        name: "ExitUnconfirmedError",
+        result: { type: "task_result", id: "task-1", ok: false, error: "boom" },
+      });
+    });
+
+    it("rejects with a plain error when the transport fails before the result", async () => {
+      const { host } = makeTransportPair();
+      const d = onExit(host);
+      const promise = d.invoke(INVOKE, { ctxHandler: noopHandler() });
+      d.close("supervisor unresponsive");
+
+      await expect(promise).rejects.toThrow(/supervisor unresponsive/);
+      await expect(promise).rejects.not.toBeInstanceOf(ExitUnconfirmedError);
+    });
+
+    it("ignores task_exited on a dispatcher that settles on the result", async () => {
+      const { host, worker } = makeTransportPair();
+      const d = onResult(host);
+      const promise = d.invoke(INVOKE, { ctxHandler: noopHandler() });
+      worker.postMessage({ type: "task_exited", id: "task-1" });
+      worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: 3 });
+      await expect(promise).resolves.toMatchObject({ output: 3 });
+      d.close();
+    });
   });
 });

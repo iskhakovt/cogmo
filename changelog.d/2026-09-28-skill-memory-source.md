@@ -1,0 +1,1 @@
+A skill's `ctx.memory.remember` stages with `source = 'skill'` and the skill's name in `pending_memories.skill_name`; the Observer's drain writes the name to Hindsight as `metadata.skill` beside `metadata.source`, so every memory a skill writes names the skill.

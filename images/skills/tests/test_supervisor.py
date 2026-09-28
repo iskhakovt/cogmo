@@ -1,22 +1,22 @@
 """Unit tests for the supervisor's stdlib primitives.
 
-The full task-dispatch loop is covered by the TS-side sysbox-e2e
-integration test (which spawns the supervisor in a real container);
-these tests pin the building blocks: pidfd-based wait, SIGKILL+reap,
-and child entry point.
+The task-dispatch loop is covered end to end by `test_task_isolation.py`,
+which runs the supervisor as a subprocess; these tests pin the building
+blocks: pidfd-based wait, SIGKILL+reap, venv activation, and the task
+process entry point.
 """
 
+import gc
 import json
 import os
 import time
-from collections.abc import Generator, Mapping
+from collections.abc import Generator
 
 import pytest
 
 from cogmo_skills_runtime import supervisor
 from cogmo_skills_runtime.supervisor import (
     _activate_skill_venv,
-    _dispatch_one_task,
     _kill_and_reap,
     _run_one_task_in_child,
     _skill_venv_path,
@@ -62,13 +62,21 @@ class TestWaitWithTimeout:
             # leak it when the suite ends.
             _kill_and_reap(pid)
 
-    def test_closes_pidfd_on_normal_path(self) -> None:
-        # Approximate fd-leak detection: if pidfd_open leaked, we'd
-        # eventually run out of fds. Open many in succession and assert
-        # we don't ENFILE.
-        for _ in range(64):
-            pid = _fork_sleeper(0.01)
-            _wait_with_timeout(pid, timeout_s=2.0)
+    def test_leaves_no_fd_open(self) -> None:
+        # With the collector off, only explicit closes release the pidfd
+        # and the selector's epoll fd: every later fork would inherit a
+        # leftover one.
+        slow = _fork_sleeper(2.0)
+        gc.disable()
+        try:
+            before = sorted(os.listdir("/proc/self/fd"))
+            _wait_with_timeout(_fork_sleeper(0.01), timeout_s=2.0)
+            with pytest.raises(TimeoutError):
+                _wait_with_timeout(slow, timeout_s=0.01)
+            assert sorted(os.listdir("/proc/self/fd")) == before
+        finally:
+            gc.enable()
+            _kill_and_reap(slow)
 
 
 class TestKillAndReap:
@@ -326,84 +334,4 @@ class TestSupervisorImportSafety:
 
         assert callable(main)
         # We don't actually call it — that would block on stdin forever.
-        # The smoke test (TS sysbox-e2e job) covers the full loop.
-
-
-@_pidfd_required
-class TestDispatchOneTask:
-    """Drive `_dispatch_one_task` with a captured `send` so we can inspect
-    the synthesized `task_result` for abnormal-exit / wall-clock paths
-    without spinning up the full main loop.
-    """
-
-    def test_normal_exit_does_not_synthesize_task_result(self) -> None:
-        # Skill runs to completion; child writes its own task_result and
-        # exits 0. Supervisor should NOT also write one (would double-emit).
-        # Child stdout isn't observable from this process via capsys —
-        # capsys replaces `sys.stdout` in the parent, but after fork the
-        # child has its own copy and writes to a buffer the parent never
-        # sees. The contract this test pins is "supervisor does not also
-        # call send" on the happy path; the integration sysbox-e2e job
-        # covers the child's task_result reaching the host.
-        sent: list[Mapping[str, object]] = []
-        task = {
-            "type": "task_invoke",
-            "id": "t-ok",
-            "skill": "ok",
-            "inputs": {},
-            "body": "async def run(inputs, ctx):\n    return {'done': True}\n",
-            "wallClockS": 5,
-        }
-        _dispatch_one_task(task, "t-ok", sent.append)
-        assert sent == []
-
-    def test_child_exits_nonzero_synthesizes_child_died(self, capsys: pytest.CaptureFixture[str]) -> None:
-        # Skill calls `os._exit(139)` — simulates SIGSEGV exit code from a
-        # crashed C extension. Process exits before runner can write
-        # task_result. Supervisor must synthesize `child_died: exit=139`.
-        sent: list[Mapping[str, object]] = []
-        task = {
-            "type": "task_invoke",
-            "id": "t-die",
-            "skill": "die",
-            "inputs": {},
-            "body": "import os\nasync def run(inputs, ctx):\n    os._exit(139)\n",
-            "wallClockS": 5,
-        }
-        _dispatch_one_task(task, "t-die", sent.append)
-        # Child wrote nothing to stdout — no task_result before _exit.
-        # Supervisor's `send` got called once with child_died.
-        assert sent == [
-            {
-                "type": "task_result",
-                "id": "t-die",
-                "ok": False,
-                "error": "child_died: exit=139",
-            }
-        ]
-        # Supervisor logs the abnormal exit to its own stderr (the parent
-        # process's stderr — capsys captures this just fine).
-        assert "child died abnormally" in capsys.readouterr().err
-
-    def test_child_killed_by_signal_synthesizes_child_died_signal(self) -> None:
-        # Skill sleeps; we kill it externally to force a signal-based exit.
-        # Supervisor sees `WIFSIGNALED` and reports `signal=N`.
-        sent: list[Mapping[str, object]] = []
-        # The body sends SIGKILL to itself; status will say `signal=9`.
-        body = "import os, signal\nasync def run(inputs, ctx):\n    os.kill(os.getpid(), signal.SIGKILL)\n"
-        task = {
-            "type": "task_invoke",
-            "id": "t-sig",
-            "skill": "sig",
-            "inputs": {},
-            "body": body,
-            "wallClockS": 5,
-        }
-        _dispatch_one_task(task, "t-sig", sent.append)
-        assert len(sent) == 1
-        result = sent[0]
-        assert result["id"] == "t-sig"
-        assert result["ok"] is False
-        error = result["error"]
-        assert isinstance(error, str)
-        assert "child_died: signal=" in error
+        # test_task_isolation.py runs the full loop in a subprocess.

@@ -214,7 +214,11 @@ async def run(inputs, ctx):
 
     expect(result.output).toEqual({ user: "user-42", timezone: "UTC", count: 1 });
     expect(memory.recall).toHaveBeenCalledWith("hello");
-    expect(memory.stageRetain).toHaveBeenCalledWith("seen", { context: "from skill 'whoami'" });
+    expect(memory.stageRetain).toHaveBeenCalledWith("seen", {
+      context: "from skill 'whoami'",
+      source: "skill",
+      skillName: "whoami",
+    });
   });
 
   it("round-trips ctx.files.{write,read,list} through the Python SDK", async () => {

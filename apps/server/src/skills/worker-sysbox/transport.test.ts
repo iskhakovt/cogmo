@@ -110,6 +110,35 @@ describe("createNdjsonTransport", () => {
     expect(handler).toHaveBeenCalledTimes(1);
   });
 
+  it("fires onError and closes when the worker closes its output", async () => {
+    const { stdin, stdout } = pair();
+    const t = createNdjsonTransport(stdin, stdout);
+    const messageHandler = vi.fn();
+    t.onMessage(messageHandler);
+    const errorHandler = vi.fn();
+    t.onError?.(errorHandler);
+
+    stdout.end(`{"type":"task_result","id":"x","ok":true}\n`);
+    await new Promise((r) => setImmediate(r));
+
+    expect(messageHandler).toHaveBeenCalledTimes(1);
+    expect(errorHandler).toHaveBeenCalledWith(new Error("transport: worker closed its output"));
+    expect(stdin.writableEnded).toBe(true);
+  });
+
+  it("does not report the output closing after close()", async () => {
+    const { stdin, stdout } = pair();
+    const t = createNdjsonTransport(stdin, stdout);
+    const errorHandler = vi.fn();
+    t.onError?.(errorHandler);
+
+    t.close();
+    stdout.end();
+    await new Promise((r) => setImmediate(r));
+
+    expect(errorHandler).not.toHaveBeenCalled();
+  });
+
   it("fires onError and closes when the buffer exceeds the limit without a newline", async () => {
     const { stdin, stdout } = pair();
     const t = createNdjsonTransport(stdin, stdout);

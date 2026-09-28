@@ -208,7 +208,12 @@ async def run(inputs, ctx):
       .from(pendingMemories)
       .where(eq(pendingMemories.userId, runAs.userId));
     expect(staged).toMatchObject([
-      { content: fact, context: `from skill '${name}', tagged test`, source: "live_retain" },
+      {
+        content: fact,
+        context: `from skill '${name}', tagged test`,
+        source: "skill",
+        skillName: name,
+      },
     ]);
   });
 

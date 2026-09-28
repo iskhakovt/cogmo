@@ -1,10 +1,11 @@
 """Per-task skill runner.
 
-Imported by both the supervisor (forked child calls `_main`) and the
-test suite (drives `_main` directly with fake streams). The runner
+Imported by both the supervisor (the task process calls `_main`) and
+the test suite (drives `_main` directly with fake streams). The runner
 owns the NDJSON-on-stdin/stdout bridge for `await ctx.<method>(...)`
 calls during a task and emits exactly one `task_result` line on
-completion.
+completion, after which `ctx` refuses every call. In the task process
+stdin/stdout are private pipes to the task's relay.
 
 Multiple `ctx_call`s may be in flight from the user's coroutine at the
 same time; the bridge correlates host replies by `id`.
@@ -60,8 +61,15 @@ class _Bridge:
         self._pending: dict[str, asyncio.Future[Any]] = {}
         self._stdout_lock = asyncio.Lock()
         self._stdout = stdout
+        self._closed = False
+
+    def close(self) -> None:
+        """End of task: every later `ctx` call raises `CtxError("task_finished")`."""
+        self._closed = True
 
     async def call(self, method: str, args: object) -> Any:
+        if self._closed:
+            raise CtxError("task_finished", f"ctx.{method} called after the task returned")
         call_id = "ctx-" + uuid.uuid4().hex[:12]
         future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         self._pending[call_id] = future
@@ -238,7 +246,7 @@ async def _read_stdin_lines(bridge: _Bridge, stdin: BinaryIO, stderr: TextIO) ->
             # A frame past `_MAX_FRAME_BYTES` makes `readline` raise, and
             # letting that escape kills this task silently: nothing calls
             # `fail_pending`, so an awaiting `ctx.*` call never returns and
-            # the skill hangs until the supervisor's wall clock kills it.
+            # the skill hangs until the relay's wall clock kills it.
             # Surfacing it as a failed call turns a hang into an error the
             # skill can catch. The read stream is unusable afterwards —
             # the oversized frame is still buffered — so this returns
@@ -261,13 +269,16 @@ async def _read_stdin_lines(bridge: _Bridge, stdin: BinaryIO, stderr: TextIO) ->
         kind = message.get("type")
         if kind == "ctx_result":
             bridge.deliver(message)
-        # task_invoke / task_result / ctx_call are not expected here under
-        # the supervisor model; drop silently to avoid coupling to host bugs.
+        # The relay delivers only this task's ctx_results; anything else is
+        # dropped.
 
 
-def _send_sync(stdout: TextIO, obj: Mapping[str, object]) -> None:
-    """Synchronous send used after the event loop ends (final task_result)."""
-    stdout.write(json.dumps(obj) + "\n")
+def _emit_result(bridge: _Bridge, stdout: TextIO, result: Mapping[str, object]) -> None:
+    """Emit the task's one `task_result`, closing `ctx` first so nothing
+    the skill left running reaches the host after it.
+    """
+    bridge.close()
+    stdout.write(json.dumps(result) + "\n")
     stdout.flush()
 
 
@@ -307,7 +318,8 @@ async def _main(
     try:
         exec(compile(skill_body, "<skill>", "exec"), skill_module)
     except SyntaxError as e:
-        _send_sync(
+        _emit_result(
+            bridge,
             out,
             {
                 "type": "task_result",
@@ -322,7 +334,8 @@ async def _main(
 
     run_fn = skill_module.get("run")
     if not callable(run_fn) or not inspect.iscoroutinefunction(run_fn):
-        _send_sync(
+        _emit_result(
+            bridge,
             out,
             {
                 "type": "task_result",
@@ -338,7 +351,8 @@ async def _main(
     ctx = Ctx(bridge)
     try:
         output = await run_fn(inputs, ctx)
-        _send_sync(
+        _emit_result(
+            bridge,
             out,
             {
                 "type": "task_result",
@@ -349,7 +363,8 @@ async def _main(
             },
         )
     except CtxError as e:
-        _send_sync(
+        _emit_result(
+            bridge,
             out,
             {
                 "type": "task_result",
@@ -360,7 +375,8 @@ async def _main(
             },
         )
     except Exception as e:
-        _send_sync(
+        _emit_result(
+            bridge,
             out,
             {
                 "type": "task_result",

@@ -45,10 +45,9 @@ const PAGE_SIZE = 100;
  *   - retainBatch's `MemoryItemInput` takes `content` and `timestamp`.
  * We read the read-side names here and translate at the retain
  * boundary. `context` comes back as `""` (empty string) when absent
- * — treat that as null. `metadata` (optional) carries any
- * `{source: "conversation"|"live_retain"|"migration"}`-style stamp
- * the original retain set; we round-trip it so the post-backfill
- * memory keeps the same provenance. Unknown fields are tolerated
+ * — treat that as null. `metadata` (optional) carries the original
+ * retain's provenance (`source`, plus `skill` on a skill's write); we
+ * round-trip it so the post-backfill memory keeps it. Unknown fields are tolerated
  * (`passthrough`) because the response carries server-stamped extras
  * (`id`, `chunk_id`, `mentioned_at`, etc.) we don't propagate.
  */

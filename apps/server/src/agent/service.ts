@@ -18,6 +18,7 @@ import type {
 } from "./core-memory/write-core-memory-block.js";
 import type { PipelinesService } from "./pipeline/pipelines-service.js";
 import type { SchedulingService } from "./scheduling/scheduling-service.js";
+import type { SkillMemoryOrigin } from "./store/index.js";
 import type { ProfileMemoryScope } from "./store/schema.js";
 
 /**
@@ -54,10 +55,15 @@ export interface CoreMemoryBlock {
   content: string;
 }
 
-/** Options for staging a live retain. Only `context` for now; future tag overrides land here. */
-export interface StageRetainOptions {
-  context?: string;
-}
+/**
+ * Options for staging a retain. The agent's `memory_retain` omits `source`
+ * and stages as `live_retain`; a skill's `ctx.memory.remember` stages as
+ * `skill`, naming the skill.
+ */
+export type StageRetainOptions = { context?: string } & (
+  | { source?: "live_retain" }
+  | SkillMemoryOrigin
+);
 
 /**
  * Stage a memory write to the agent store's pending_memories table.

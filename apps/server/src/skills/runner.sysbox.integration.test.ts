@@ -41,7 +41,10 @@ const DEFAULT_RUN_AS = { userId: "u-1", profileId: "p-1" };
  *   - Container creation without worktree/home (skills tier-2 contract).
  *   - NDJSON-over-stdio RPC against real Python.
  *   - `ctx.now` round-trip (bridge correctness).
- *   - Wall-clock kill via `deleteByTaskId`.
+ *   - Wall-clock expiry reported as `wall_clock_exceeded`.
+ *   - Task isolation on a warm worker: a process a skill leaves behind is
+ *     gone before the next skill runs, and a skill cannot open its relay's
+ *     or the supervisor's host channel through `/proc`.
  *
  * Gated by `SANDBOX_RUNTIME=sysbox`. Skipped on dev machines without
  * sysbox; runs in the GHA `sysbox-e2e` job. Mirrors the supervisor's own
@@ -155,14 +158,22 @@ async def run(inputs, ctx):
 
 /**
  * Returns the container's hostname (= docker short container ID by
- * default) and the supervisor's PID. Two invocations from the same warm
- * worker share both — the container survives across tasks AND the
- * supervisor process survives across tasks (forking children per task).
+ * default), the task's parent (its relay) and grandparent (the
+ * supervisor). Two invocations on the same warm worker share the
+ * container and the supervisor, and each gets its own relay.
  */
 const HOSTNAME_BODY = `
 import os, socket
+
+def _ppid(pid):
+    with open(f"/proc/{pid}/stat") as f:
+        stat = f.read()
+    # Field 4; the command name before it may contain spaces or parens.
+    return int(stat[stat.rindex(")") + 2:].split()[1])
+
 async def run(inputs, ctx):
-    return {"host": socket.gethostname(), "ppid": os.getppid()}
+    relay = os.getppid()
+    return {"host": socket.gethostname(), "relay": relay, "supervisor": _ppid(relay)}
 `;
 
 /**
@@ -190,6 +201,84 @@ inputs:
 ---
 `;
 
+/**
+ * Leaves a grandchild in a new session with stdin/stdout/stderr closed, so
+ * no pipe EOF or hangup ends it — only the supervisor's sweep can.
+ */
+const LEAVE_SLEEPER_BODY = `
+import os, socket, time
+
+async def run(inputs, ctx):
+    r, w = os.pipe()
+    if os.fork() == 0:
+        os.setsid()
+        if os.fork() == 0:
+            for fd in (0, 1, 2):
+                os.close(fd)
+            os.write(w, str(os.getpid()).encode())
+            os.close(w)
+            time.sleep(300)
+        os._exit(0)
+    os.close(w)
+    return {"host": socket.gethostname(), "pid": int(os.read(r, 32))}
+`;
+
+/** Whether `inputs.pid` is still a live (non-zombie) process. */
+const CHECK_PID_BODY = `
+import socket
+
+async def run(inputs, ctx):
+    try:
+        with open(f"/proc/{inputs['pid']}/stat") as f:
+            stat = f.read()
+    except FileNotFoundError:
+        return {"host": socket.gethostname(), "alive": False}
+    return {"host": socket.gethostname(), "alive": stat[stat.rindex(")") + 2] != "Z"}
+`;
+
+const checkPidManifest = `---
+name: tier2-check-pid
+description: reports whether a pid is alive
+tier: container
+inputs:
+  type: object
+  properties:
+    pid:
+      type: integer
+---
+`;
+
+/**
+ * Tries to open stdin and stdout of the task's relay and of the supervisor
+ * through `/proc`. `control` opens the task's own stdin the same way, so
+ * an empty `opened` means refused rather than unreachable.
+ */
+const PROC_FD_PROBE_BODY = `
+import os
+
+def _ppid(pid):
+    with open(f"/proc/{pid}/stat") as f:
+        stat = f.read()
+    return int(stat[stat.rindex(")") + 2:].split()[1])
+
+def _can_open(path, flags):
+    try:
+        os.close(os.open(path, flags))
+        return True
+    except PermissionError:
+        return False
+
+async def run(inputs, ctx):
+    relay = os.getppid()
+    opened = [
+        f"{pid}/{fd}"
+        for pid in (relay, _ppid(relay))
+        for fd, flags in ((0, os.O_RDONLY), (1, os.O_WRONLY))
+        if _can_open(f"/proc/{pid}/fd/{fd}", flags)
+    ]
+    return {"opened": opened, "control": _can_open(f"/proc/{os.getpid()}/fd/0", os.O_RDONLY)}
+`;
+
 describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl tier-2 (sysbox runtime, GHA only)", () => {
   it("invokes a tier-2 skill end-to-end against cogmo-skills:test", async () => {
     const runner = await SkillRunnerImpl.create({
@@ -202,17 +291,23 @@ describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl tier-2 (sysbox runtime, GHA only)"
       defaultRunAs: DEFAULT_RUN_AS,
     });
 
-    await runner.__registerForTests({
-      name: "tier2-now",
-      manifestSource: containerManifest("tier2-now"),
-      body: NOW_BODY,
-    });
+    try {
+      await runner.__registerForTests({
+        name: "tier2-now",
+        manifestSource: containerManifest("tier2-now"),
+        body: NOW_BODY,
+      });
 
-    const result = await runner.invoke({ name: "tier2-now", inputs: { x: 7 }, runAs: RUN_AS });
-    expect(result.status).toBe("success");
-    expect(result.output).toMatchObject({ echoed: 8 });
-    // ctx.now returns an ISO-8601 string from the host's clock.
-    expect((result.output as { got: string }).got).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+      const result = await runner.invoke({ name: "tier2-now", inputs: { x: 7 }, runAs: RUN_AS });
+      expect(result.status).toBe("success");
+      expect(result.output).toMatchObject({ echoed: 8 });
+      // ctx.now returns an ISO-8601 string from the host's clock.
+      expect((result.output as { got: string }).got).toMatch(
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/,
+      );
+    } finally {
+      await runner.shutdown();
+    }
   }, 180_000);
 
   it("kills a tier-2 container that exceeds wall_clock_s", async () => {
@@ -269,26 +364,30 @@ resources:
       // Tighter idle/recycle caps don't matter for a two-task test.
     });
 
-    await runner.__registerForTests({
-      name: "tier2-host",
-      manifestSource: containerManifest("tier2-host"),
-      body: HOSTNAME_BODY,
-    });
+    try {
+      await runner.__registerForTests({
+        name: "tier2-host",
+        manifestSource: containerManifest("tier2-host"),
+        body: HOSTNAME_BODY,
+      });
 
-    const r1 = await runner.invoke({ name: "tier2-host", inputs: {}, runAs: RUN_AS });
-    const r2 = await runner.invoke({ name: "tier2-host", inputs: {}, runAs: RUN_AS });
-    expect(r1.status).toBe("success");
-    expect(r2.status).toBe("success");
-    const o1 = r1.output as { host: string; ppid: number };
-    const o2 = r2.output as { host: string; ppid: number };
-    // Same container — pool reused the warm worker.
-    expect(o1.host).toBe(o2.host);
-    expect(o1.host).toMatch(/^[0-9a-f]{12}$/);
-    // Same supervisor process — children forked from it across tasks.
-    // If supervisors are spawning per task, ppid would differ.
-    expect(o1.ppid).toBe(o2.ppid);
-
-    await runner.shutdown();
+      const r1 = await runner.invoke({ name: "tier2-host", inputs: {}, runAs: RUN_AS });
+      const r2 = await runner.invoke({ name: "tier2-host", inputs: {}, runAs: RUN_AS });
+      expect(r1.status).toBe("success");
+      expect(r2.status).toBe("success");
+      const o1 = r1.output as { host: string; relay: number; supervisor: number };
+      const o2 = r2.output as { host: string; relay: number; supervisor: number };
+      // Same container — pool reused the warm worker.
+      expect(o1.host).toBe(o2.host);
+      expect(o1.host).toMatch(/^[0-9a-f]{12}$/);
+      // Same supervisor across tasks: it is long-lived, and a supervisor
+      // per task would show a different grandparent.
+      expect(o1.supervisor).toBe(o2.supervisor);
+      // A relay per task: the task's parent is new each time.
+      expect(o1.relay).not.toBe(o2.relay);
+    } finally {
+      await runner.shutdown();
+    }
   }, 180_000);
 
   it("invokes a tier-2 skill with declared deps — populator + venv activation end-to-end", async () => {
@@ -405,5 +504,68 @@ async def run(inputs, ctx):
     expect((r2.output as { seen_before: boolean }).seen_before).toBe(false);
 
     await runner.shutdown();
+  }, 180_000);
+
+  it("kills a process a skill leaves behind before the next skill runs on the worker", async () => {
+    const runner = await SkillRunnerImpl.create({
+      runInTx: tx,
+      store: skillStore,
+      secretsStore: stubSecrets(),
+      sandbox,
+      tier2Image: SKILLS_IMAGE,
+      userTimezone: "UTC",
+      defaultRunAs: DEFAULT_RUN_AS,
+    });
+    try {
+      await runner.__registerForTests({
+        name: "tier2-leave-sleeper",
+        manifestSource: containerManifest("tier2-leave-sleeper"),
+        body: LEAVE_SLEEPER_BODY,
+      });
+      await runner.__registerForTests({
+        name: "tier2-check-pid",
+        manifestSource: checkPidManifest,
+        body: CHECK_PID_BODY,
+      });
+
+      const left = await runner.invoke({ name: "tier2-leave-sleeper", inputs: {}, runAs: RUN_AS });
+      expect(left.status, JSON.stringify(left)).toBe("success");
+      const { host, pid } = left.output as { host: string; pid: number };
+      const checked = await runner.invoke({
+        name: "tier2-check-pid",
+        inputs: { pid },
+        runAs: RUN_AS,
+      });
+      expect(checked.status, JSON.stringify(checked)).toBe("success");
+      // Same container, so the pid names the same process namespace.
+      expect(checked.output).toEqual({ host, alive: false });
+    } finally {
+      await runner.shutdown();
+    }
+  }, 180_000);
+
+  it("a skill cannot open its relay's or the supervisor's host channel through /proc", async () => {
+    const runner = await SkillRunnerImpl.create({
+      runInTx: tx,
+      store: skillStore,
+      secretsStore: stubSecrets(),
+      sandbox,
+      tier2Image: SKILLS_IMAGE,
+      userTimezone: "UTC",
+      defaultRunAs: DEFAULT_RUN_AS,
+    });
+    try {
+      await runner.__registerForTests({
+        name: "tier2-proc-probe",
+        manifestSource: containerManifest("tier2-proc-probe"),
+        body: PROC_FD_PROBE_BODY,
+      });
+
+      const result = await runner.invoke({ name: "tier2-proc-probe", inputs: {}, runAs: RUN_AS });
+      expect(result.status, JSON.stringify(result)).toBe("success");
+      expect(result.output).toEqual({ opened: [], control: true });
+    } finally {
+      await runner.shutdown();
+    }
   }, 180_000);
 });

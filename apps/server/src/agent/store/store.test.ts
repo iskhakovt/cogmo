@@ -3287,8 +3287,36 @@ describe("DrizzleAgentStore", () => {
         context: null,
         source: "live_retain",
         profileClass: null,
+        skillName: null,
       });
       expect(rows[0]!.createdAt).toBeInstanceOf(Date);
+    });
+
+    it("stages a skill's row naming the skill", async () => {
+      const userId = await seedUser();
+
+      await tx((trx) =>
+        store.stagePendingMemory(trx, {
+          userId,
+          profileId: null,
+          content: "the build is green",
+          source: "skill",
+          skillName: "ci_watch",
+        }),
+      );
+
+      const rows = await tx((trx) => store.getPendingMemories(trx, userId));
+      expect(rows).toMatchObject([{ source: "skill", skillName: "ci_watch" }]);
+    });
+
+    it("types a skill row as naming its skill, and bulk staging as refusing skill rows", () => {
+      type StageParams = Parameters<DrizzleAgentStore["stagePendingMemory"]>[1];
+      type BulkRow = Parameters<DrizzleAgentStore["bulkStagePendingMemories"]>[1][number];
+      // @ts-expect-error — a skill row names its skill
+      const nameless: StageParams = { userId: "u", profileId: null, content: "x", source: "skill" };
+      // @ts-expect-error — a bulk stage takes no skill rows
+      const bulkSkill: BulkRow = { userId: "u", content: "x", source: "skill" };
+      expect([nameless, bulkSkill]).toHaveLength(2);
     });
 
     it("getPendingMemories surfaces the staging profile's CURRENT class via JOIN", async () => {

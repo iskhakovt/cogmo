@@ -158,7 +158,8 @@ export async function runOnWorker(params: RunOnWorkerParams): Promise<RunOnWorke
     // so we wrap the port to filter them out. The ready handler above
     // detached itself before invoke runs.
     const transport = adaptPort(hostPort);
-    const dispatcher = new Dispatcher({ transport, ctxHandler: params.ctxHandler });
+    // One worker per task, torn down with it: the task settles on its result.
+    const dispatcher = new Dispatcher({ transport, awaitTaskExited: false });
 
     const invoke: TaskInvoke = {
       type: "task_invoke",
@@ -167,7 +168,7 @@ export async function runOnWorker(params: RunOnWorkerParams): Promise<RunOnWorke
       inputs: params.inputs,
     };
 
-    const taskPromise = dispatcher.invoke(invoke);
+    const taskPromise = dispatcher.invoke(invoke, { ctxHandler: params.ctxHandler });
 
     const timeoutPromise = new Promise<"timeout">((resolve) => {
       setTimeout(() => resolve("timeout"), wallClockS * 1000);

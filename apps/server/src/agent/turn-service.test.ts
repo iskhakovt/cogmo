@@ -123,6 +123,26 @@ describe("buildTurnService", () => {
     });
   });
 
+  it("stages a skill's retain as source skill, naming the skill", async () => {
+    const { deps, agentStore, profile } = await harness();
+
+    const service = await buildTurnService(deps, { userId: "user-7", profile, ...noNamespaces });
+    await service.memory.stageRetain("the build is green", {
+      context: "from skill 'ci_watch'",
+      source: "skill",
+      skillName: "ci_watch",
+    });
+
+    expect(agentStore.stagePendingMemory).toHaveBeenCalledWith(expect.anything(), {
+      userId: "user-7",
+      profileId: "profile-1",
+      content: "the build is green",
+      context: "from skill 'ci_watch'",
+      source: "skill",
+      skillName: "ci_watch",
+    });
+  });
+
   it("exposes exactly the optional namespaces the caller supplies", async () => {
     const { deps, profile } = await harness();
     const scheduling = mock<SchedulingService>();

@@ -53,6 +53,7 @@ function buildFakeSandbox(): FakeSandboxBundle {
     exec: vi.fn(),
     execStreaming: vi.fn(async (cmd) => {
       calls.push(`exec:${cmd[0]}:${cmd[1]}`);
+      stdout.write(`${JSON.stringify({ type: "supervisor_ready", protocolVersion: 2 })}\n`);
       return exec;
     }),
   };
@@ -92,7 +93,7 @@ function buildFakeSandbox(): FakeSandboxBundle {
 
 const noopCtx: CtxHandler = { handle: async () => null };
 
-/** Auto-respond to any `task_invoke` line by echoing a matching `task_result`. */
+/** Auto-respond to any `task_invoke` line with a matching `task_result` and `task_exited`. */
 function autoRespond(
   bundle: FakeSandboxBundle,
   result: { ok: boolean; output?: unknown; error?: string },
@@ -108,6 +109,7 @@ function autoRespond(
           bundle.stdout.write(
             `${JSON.stringify({ type: "task_result", id: msg.id, ...result })}\n`,
           );
+          bundle.stdout.write(`${JSON.stringify({ type: "task_exited", id: msg.id })}\n`);
         }
       } catch {
         // ignore non-json

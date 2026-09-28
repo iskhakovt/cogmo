@@ -215,6 +215,7 @@ describe("CtxCallSchema", () => {
   it("accepts canonical ctx_call", () => {
     const r = CtxCallSchema.parse({
       type: "ctx_call",
+      taskId: "t",
       id: "ctx-1",
       method: "secrets.get",
       args: { name: "foo" },
@@ -224,7 +225,13 @@ describe("CtxCallSchema", () => {
 
   it("rejects empty method", () => {
     expect(() =>
-      CtxCallSchema.parse({ type: "ctx_call", id: "c", method: "", args: {} }),
+      CtxCallSchema.parse({ type: "ctx_call", taskId: "t", id: "c", method: "", args: {} }),
+    ).toThrow();
+  });
+
+  it("rejects a ctx_call that names no task", () => {
+    expect(() =>
+      CtxCallSchema.parse({ type: "ctx_call", id: "c", method: "now", args: {} }),
     ).toThrow();
   });
 
@@ -232,6 +239,7 @@ describe("CtxCallSchema", () => {
     expect(() =>
       CtxCallSchema.parse({
         type: "ctx_call",
+        taskId: "t",
         id: "c",
         method: "now",
         args: undefined,
@@ -244,6 +252,7 @@ describe("CtxResultSchema (discriminated)", () => {
   it("ok:true requires value", () => {
     const r = CtxResultSchema.parse({
       type: "ctx_result",
+      taskId: "t",
       id: "c",
       ok: true,
       value: "secret-value",
@@ -254,6 +263,7 @@ describe("CtxResultSchema (discriminated)", () => {
   it("ok:false requires errorKind AND message", () => {
     const r = CtxResultSchema.parse({
       type: "ctx_result",
+      taskId: "t",
       id: "c",
       ok: false,
       errorKind: "not_in_allowlist",
@@ -262,10 +272,17 @@ describe("CtxResultSchema (discriminated)", () => {
     expect(r).toMatchObject({ ok: false, errorKind: "not_in_allowlist" });
   });
 
+  it("rejects a ctx_result that names no task", () => {
+    expect(() =>
+      CtxResultSchema.parse({ type: "ctx_result", id: "c", ok: true, value: 1 }),
+    ).toThrow();
+  });
+
   it("ok:false rejects missing errorKind", () => {
     expect(() =>
       CtxResultSchema.parse({
         type: "ctx_result",
+        taskId: "t",
         id: "c",
         ok: false,
         message: "x",
@@ -277,6 +294,7 @@ describe("CtxResultSchema (discriminated)", () => {
     expect(() =>
       CtxResultSchema.parse({
         type: "ctx_result",
+        taskId: "t",
         id: "c",
         ok: false,
         errorKind: "x",
@@ -288,6 +306,7 @@ describe("CtxResultSchema (discriminated)", () => {
     expect(() =>
       CtxResultSchema.parse({
         type: "ctx_result",
+        taskId: "t",
         id: "c",
         ok: false,
         errorKind: "",
@@ -313,21 +332,26 @@ describe("WorkerMessageSchema (discriminated union)", () => {
     },
     {
       name: "ctx_call",
-      msg: { type: "ctx_call", id: "c", method: "now", args: {} },
+      msg: { type: "ctx_call", taskId: "t", id: "c", method: "now", args: {} },
     },
     {
       name: "ctx_result ok",
-      msg: { type: "ctx_result", id: "c", ok: true, value: 1 },
+      msg: { type: "ctx_result", taskId: "t", id: "c", ok: true, value: 1 },
     },
     {
       name: "ctx_result err",
       msg: {
         type: "ctx_result",
+        taskId: "t",
         id: "c",
         ok: false,
         errorKind: "internal",
         message: "x",
       },
+    },
+    {
+      name: "task_exited",
+      msg: { type: "task_exited", id: "t" },
     },
   ])("accepts $name", ({ msg }) => {
     expect(() => WorkerMessageSchema.parse(msg)).not.toThrow();
