@@ -1,7 +1,7 @@
 /**
- * Migration 0061 adds `skills.run_as_user_id` / `run_as_profile_id`, backfills
- * every scheduled skill with the install owner and the default profile, then
- * pins `chk_skills_run_as_iff_schedule`. Runs the raw migration SQL against
+ * Migration 0063 adds `skills.run_as_user_id` / `run_as_profile_id`, backfills
+ * every live (scheduled, enabled) skill with the install owner and the default
+ * profile, then pins `chk_skills_run_as_iff_live_schedule`. Runs the raw migration SQL against
  * PGlite over rows written in the pre-migration shape (the columns dropped
  * first, since the pushed schema already has them).
  */
@@ -17,7 +17,7 @@ import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import type { Database } from "./index.js";
 
 const MIGRATION_SQL = await readFile(
-  fileURLToPath(new URL("../../migrations/0061_skills_run_as.sql", import.meta.url)),
+  fileURLToPath(new URL("../../migrations/0063_skills_run_as.sql", import.meta.url)),
   "utf8",
 );
 
@@ -40,7 +40,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await truncateAll(db);
-  await db.execute(sql`ALTER TABLE skills DROP CONSTRAINT chk_skills_run_as_iff_schedule`);
+  await db.execute(sql`ALTER TABLE skills DROP CONSTRAINT chk_skills_run_as_iff_live_schedule`);
   await db.execute(sql`ALTER TABLE skills DROP COLUMN run_as_user_id`);
   await db.execute(sql`ALTER TABLE skills DROP COLUMN run_as_profile_id`);
 });
@@ -63,11 +63,12 @@ async function insertProfile(name: string): Promise<string> {
 }
 
 /** A skills row as the pre-migration table takes it. */
-async function insertSkill(name: string, schedule: string | null): Promise<void> {
+async function insertSkill(name: string, schedule: string | null, disabled = false): Promise<void> {
   await db.execute(sql`
-    INSERT INTO skills (name, tier, risk_tier, effects, schedule, next_run_at, git_sha, inputs)
+    INSERT INTO skills (name, tier, risk_tier, effects, schedule, next_run_at, git_sha, inputs, disabled)
     VALUES (${name}, 'wasm', 'auto', '[]'::jsonb, ${schedule},
-      ${schedule === null ? null : "2026-06-01T09:00:00Z"}, 'sha', '{"type":"object"}'::jsonb)
+      ${schedule === null ? null : "2026-06-01T09:00:00Z"}, 'sha', '{"type":"object"}'::jsonb,
+      ${disabled})
   `);
 }
 
@@ -87,8 +88,8 @@ async function runAsByName(): Promise<Record<string, [string | null, string | nu
   return Object.fromEntries(rows.map((r) => [r.name, [r.run_as_user_id, r.run_as_profile_id]]));
 }
 
-describe("migration 0061 — skills run-as", () => {
-  it("backfills scheduled skills with the owner and default profile, and only those", async () => {
+describe("migration 0063 — skills run-as", () => {
+  it("backfills live scheduled skills with the owner and default profile, and only those", async () => {
     const owner = await insertUser();
     await insertUser();
     const defaultProfile = await insertProfile("default");
@@ -96,6 +97,7 @@ describe("migration 0061 — skills run-as", () => {
     await insertSkill("daily", "0 9 * * *");
     await insertSkill("hourly", "0 * * * *");
     await insertSkill("manual", null);
+    await insertSkill("paused", "0 9 * * *", true);
 
     await applyMigration();
 
@@ -103,6 +105,7 @@ describe("migration 0061 — skills run-as", () => {
       daily: [owner, defaultProfile],
       hourly: [owner, defaultProfile],
       manual: [null, null],
+      paused: [null, null],
     });
   });
 
@@ -112,7 +115,7 @@ describe("migration 0061 — skills run-as", () => {
     await applyMigration();
 
     await expect(insertSkill("unowned", "0 9 * * *")).rejects.toMatchObject({
-      cause: { message: expect.stringMatching(/chk_skills_run_as_iff_schedule/) },
+      cause: { message: expect.stringMatching(/chk_skills_run_as_iff_live_schedule/) },
     });
     await expect(
       db.execute(sql`
@@ -120,7 +123,7 @@ describe("migration 0061 — skills run-as", () => {
         VALUES ('stray', 'wasm', 'auto', '[]'::jsonb, 'sha', '{"type":"object"}'::jsonb, ${owner}, ${profile})
       `),
     ).rejects.toMatchObject({
-      cause: { message: expect.stringMatching(/chk_skills_run_as_iff_schedule/) },
+      cause: { message: expect.stringMatching(/chk_skills_run_as_iff_live_schedule/) },
     });
   });
 });

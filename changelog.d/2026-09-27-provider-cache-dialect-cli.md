@@ -1,0 +1,1 @@
+`cogmo provider list` shows each provider's base URL and cache dialect, and `cogmo provider set <name> --cache-dialect <dialect>` changes an OpenAI-compatible provider's dialect in place, keeping its model rows. `cogmo serve` picks the change up on restart.

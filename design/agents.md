@@ -171,7 +171,7 @@ steering_rules (
 );
 ```
 
-Query at prompt assembly: `(profile_id = $p OR profile_id IS NULL) AND (channel_type IN $activeChannels OR channel_type IS NULL) AND active = true`. `# Rules` renders the result in sections by `source`, and within a section by scope, then priority, then id ([evolution.md](evolution.md#precedence-confirmed) → Precedence). The `id` tie-breaker keeps the rendered rules byte-stable: priorities are shared, and an in-place update moves a row in the heap. Cross-channel conversations union rules from all active channels.
+Query at prompt assembly: `(profile_id = $p OR profile_id IS NULL) AND active = true`, every channel's rules included. `# Rules` renders the result in sections by `source`, and within a section by scope, then priority, then id ([evolution.md](evolution.md#precedence-confirmed) → Precedence), each channel-scoped rule labelled with its channel ("On telegram: …"); the turn context names the channels a reply goes to, so sessions coming and going leave the system prompt as it is ([prompt-caching.md](prompt-caching.md#system-prompt-snapshot-confirmed) → System Prompt Snapshot). The `id` tie-breaker keeps the rendered rules byte-stable: priorities are shared, and an in-place update moves a row in the heap.
 
 All behavioral instructions — global, profile-scoped, and channel-scoped — live in this one table. Default channel rules (e.g., "avoid tables on Telegram", "prefer concise replies") are seeded as `seed` rows when a channel is configured, same pattern as profile seeding. Adapters own only mechanical output rendering (`renderOutput`), not behavioral guidance. See [transport/adapters.md](transport/adapters.md) → Response Rendering.
 

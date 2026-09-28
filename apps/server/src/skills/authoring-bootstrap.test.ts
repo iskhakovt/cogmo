@@ -266,7 +266,7 @@ describe("skill authoring bootstrap — boot → fetch → register chain", () =
       skillsRepoPath: repos.skillsBare,
     });
 
-    const registerResult = await runner.register({ branch });
+    const registerResult = await runner.register({ branch, origin: { kind: "owner" } });
     expect(registerResult.status).toBe("live");
     expect(registerResult.name).toBe("hn_digest");
     expect(registerResult.gitSha).toBe(sha);

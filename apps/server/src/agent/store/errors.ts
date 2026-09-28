@@ -18,18 +18,23 @@ export class UniqueViolationError extends Error {
 
 /**
  * Thrown by `deleteProfile` when the profile is still referenced by a conversation, a message,
- * or a schedule that runs as it (`scheduled_tasks.profile_id`, `skills.run_as_profile_id`).
- * Messages reference profiles via `messages.profile_id` for audit stamping — once a profile has
- * ever been used in a turn, it stays pinned until that history is deleted.
- * Transport catches this and surfaces `profile_in_use`.
+ * a schedule that runs as it (`scheduled_tasks.profile_id`, `skills.run_as_profile_id`), or a
+ * steering rule scoped to it. Messages reference profiles via `messages.profile_id` for audit
+ * stamping — once a profile has ever been used in a turn, it stays pinned until that history is
+ * deleted. Transport catches this and surfaces `profile_in_use`.
  */
 export class ProfileInUseError extends Error {
   constructor(
-    public readonly refs: { conversations: number; messages: number; schedules: number },
+    public readonly refs: {
+      conversations: number;
+      messages: number;
+      schedules: number;
+      steeringRules: number;
+    },
   ) {
     super(
       `profile in use: ${refs.conversations} conversation(s), ${refs.messages} message(s), ` +
-        `${refs.schedules} schedule(s) reference it`,
+        `${refs.schedules} schedule(s), ${refs.steeringRules} steering rule(s) reference it`,
     );
     this.name = "ProfileInUseError";
   }

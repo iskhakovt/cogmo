@@ -2120,7 +2120,7 @@ export async function handleEnable(
     return;
   }
   const handle = String(ctx.from.id);
-  const res = await transport.skills.enable(handle, name);
+  const res = await transport.skills.enable(handle, name, String(ctx.chat.id));
   if (res.isErr()) {
     await ctx.reply(errorMessage(res.error));
     return;
@@ -2128,7 +2128,12 @@ export async function handleEnable(
   if (res.value.alreadyEnabled) {
     await ctx.reply(`Skill "${res.value.name}" is already enabled.`);
   } else {
-    await ctx.reply(`Skill "${res.value.name}" enabled.`);
+    // Enabling moves a schedule onto the enabler; say so, as the approval prompt does.
+    const runAs =
+      res.value.schedule === undefined
+        ? ""
+        : ` Its schedule ${res.value.schedule} now runs as you.`;
+    await ctx.reply(`Skill "${res.value.name}" enabled.${runAs}`);
   }
 }
 
@@ -2145,7 +2150,11 @@ function errorMessage(err: TransportError): string {
       // for most of the callers.
       return "Profile not found. Use /profile list to see what's available.";
     case "profile_in_use":
-      return "Profile is still used by a conversation or a schedule. Move those first.";
+      return (
+        "Profile is still in use. Switch its conversations to another profile (/profile switch), " +
+        "/disable skills scheduled to run as it, and delete its /schedules. A profile with message " +
+        "history or its own steering rules can't be deleted."
+      );
     case "profile_name_taken":
       return "A profile with that name already exists.";
     case "model_unavailable":

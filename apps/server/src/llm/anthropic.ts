@@ -1,6 +1,13 @@
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, { BadRequestError } from "@anthropic-ai/sdk";
+import { z } from "zod";
 import { logger } from "../logger.js";
-import { hasOpenObject, toStructuredOutputSchema } from "./anthropic-output-schema.js";
+import {
+  hasOpenObject,
+  hasRecursiveRef,
+  hasTuple,
+  restoreLiteralCasing,
+  toStructuredOutputSchema,
+} from "./anthropic-output-schema.js";
 import { cacheMarker } from "./cache-marker.js";
 import { extractText } from "./content.js";
 import {
@@ -9,6 +16,7 @@ import {
   parseToolArgs,
   ToolArgsCutOffError,
 } from "./errors.js";
+import { definitionsOf } from "./json-schema.js";
 import { withFailureLogging } from "./logging-fetch.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
@@ -59,7 +67,7 @@ export class AnthropicProvider implements LlmProvider {
       throw new Error("responseFormat and tools are mutually exclusive");
     }
 
-    const anthropicParams = buildCreateParams(params);
+    const anthropicParams = buildCreateParams(params, takesToolPath(params));
     let resolveResponse: (v: { stopReason: StopReason; model: string; usage: Usage }) => void;
     let rejectResponse: (err: unknown) => void;
     const response = new Promise<{ stopReason: StopReason; model: string; usage: Usage }>(
@@ -214,7 +222,7 @@ export class AnthropicProvider implements LlmProvider {
   }
 
   async countTokens(params: CountTokensParams): Promise<number> {
-    const built = buildCreateParams({ ...params, maxTokens: 1 });
+    const built = buildCreateParams({ ...params, maxTokens: 1 }, takesToolPath(params));
     const countParams: Anthropic.MessageCountTokensParams = {
       model: built.model,
       messages: built.messages,
@@ -233,9 +241,7 @@ export class AnthropicProvider implements LlmProvider {
 
     const span = startChatSpan(this.name, params.model);
     try {
-      const response = await this.#client.messages.create(
-        buildCreateParams(clampForNonStreaming(params)),
-      );
+      const { response, toolPath } = await this.#create(clampForNonStreaming(params));
 
       const usage = fromAnthropicUsage(response.usage);
 
@@ -247,7 +253,7 @@ export class AnthropicProvider implements LlmProvider {
       // structured-output reply; any other stop reason passes through.
       const format = params.responseFormat;
       const content = response.content.flatMap(fromAnthropicBlock);
-      if (format && !takesStructuredOutput(format)) {
+      if (format && toolPath) {
         const toolUse = response.content.find((b) => b.type === "tool_use");
         if (toolUse && toolUse.type === "tool_use") {
           return {
@@ -268,12 +274,41 @@ export class AnthropicProvider implements LlmProvider {
         }
       }
 
-      return { content, stopReason, model: response.model, usage };
+      return {
+        content:
+          format && !toolPath
+            ? content.map((block) => withLiteralCasing(block, format, response.model))
+            : content,
+        stopReason,
+        model: response.model,
+        usage,
+      };
     } catch (err) {
       failChatSpan(span, err);
       throw err;
     } finally {
       span.end();
+    }
+  }
+
+  /**
+   * Send a non-streaming request. A structured-output schema past the
+   * grammar's compile limits ({@link isGrammarLimitError}) goes once more on
+   * the tool path: a pre-check can't foresee the internal grammar-size limit.
+   */
+  async #create(params: ChatParams): Promise<{ response: Anthropic.Message; toolPath: boolean }> {
+    const toolPath = takesToolPath(params);
+    try {
+      const response = await this.#client.messages.create(buildCreateParams(params, toolPath));
+      return { response, toolPath };
+    } catch (err) {
+      if (toolPath || params.responseFormat === undefined || !isGrammarLimitError(err)) throw err;
+      logger.warn(
+        { model: params.model, format: params.responseFormat.name, err },
+        "structured output can't compile the schema, retrying on the tool path",
+      );
+      const response = await this.#client.messages.create(buildCreateParams(params, true));
+      return { response, toolPath: true };
     }
   }
 }
@@ -342,7 +377,14 @@ function dropSamplingParams(params: ChatParams): void {
   );
 }
 
-function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNonStreaming {
+/**
+ * The request for `params`. With `toolPath`, a `responseFormat` goes as a
+ * synthetic tool rather than as structured outputs.
+ */
+function buildCreateParams(
+  params: ChatParams,
+  toolPath: boolean,
+): Anthropic.MessageCreateParamsNonStreaming {
   dropSamplingParams(params);
 
   // A structured-output call is one-shot — nothing re-sends its transcript —
@@ -361,7 +403,7 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
   const format = params.responseFormat;
   if (format) {
     const maxTokens = params.maxTokens ?? DEFAULT_MAX_TOKENS;
-    if (takesStructuredOutput(format)) {
+    if (!toolPath) {
       return {
         model: params.model,
         max_tokens: maxTokens,
@@ -424,12 +466,65 @@ function buildCreateParams(params: ChatParams): Anthropic.MessageCreateParamsNon
 // --- Structured output ---
 
 /**
- * Whether a `responseFormat` request goes through structured outputs. A
- * schema with an open node ({@link hasOpenObject}), which the grammar can't
- * express, takes the tool path: a synthetic tool carrying the schema.
+ * Whether a `responseFormat` request takes the tool path, a synthetic tool
+ * carrying the schema, rather than structured outputs: its schema is one the
+ * grammar can't express, with an open node ({@link hasOpenObject}), a
+ * recursive `$ref` ({@link hasRecursiveRef}) or a tuple ({@link hasTuple}).
  */
-function takesStructuredOutput(format: ResponseFormat): boolean {
-  return !hasOpenObject(format.schema);
+function takesToolPath(params: ChatParams): boolean {
+  const schema = params.responseFormat?.schema;
+  return (
+    schema !== undefined && (hasOpenObject(schema) || hasRecursiveRef(schema) || hasTuple(schema))
+  );
+}
+
+/** Substrings of the 400 messages for a schema past the grammar's compile limits. */
+const GRAMMAR_LIMIT_MESSAGES = [
+  "Schema is too complex for compilation",
+  "The compiled grammar is too large",
+  "too many optional parameters",
+  "too many parameters with union types",
+  "pattern is too complex for structured output",
+] as const;
+
+/** The message in an Anthropic API error's body. */
+const ErrorMessageBodySchema = z.object({ error: z.object({ message: z.string() }) });
+
+/** Whether the client's error is a 400 for a schema past the grammar's compile limits. */
+function isGrammarLimitError(err: unknown): boolean {
+  if (!(err instanceof BadRequestError) || err.type !== "invalid_request_error") return false;
+  const body = ErrorMessageBodySchema.safeParse(err.error);
+  return (
+    body.success &&
+    GRAMMAR_LIMIT_MESSAGES.some((message) => body.data.error.message.includes(message))
+  );
+}
+
+/**
+ * A structured-output text block with its `enum` and `const` values in the
+ * schema's capitalization ({@link restoreLiteralCasing}). Text that isn't
+ * JSON, as in a cut-off or refused reply, passes through for the caller to
+ * judge.
+ */
+function withLiteralCasing(
+  block: ContentBlock,
+  format: ResponseFormat,
+  model: string,
+): ContentBlock {
+  if (block.type !== "text") return block;
+  let reply: unknown;
+  try {
+    reply = JSON.parse(block.text);
+  } catch {
+    return block;
+  }
+  const restored = restoreLiteralCasing(format.schema, reply);
+  if (restored === reply) return block;
+  logger.debug(
+    { model, format: format.name },
+    "restored the capitalization of enum or const values in a structured-output reply",
+  );
+  return { ...block, text: JSON.stringify(restored) };
 }
 
 /** The tool path's request for its call, in the system prompt and in a re-ask. */
@@ -551,20 +646,18 @@ function toAnthropicBlock(
   }
 }
 
+/** The tool with its schema's definitions, without which its `$ref`s dangle. */
 function toAnthropicTool(tool: ToolDefinition): Anthropic.Tool {
-  const inputSchema: Anthropic.Tool["input_schema"] = {
-    type: "object" as const,
-  };
-  if (tool.parameters.properties !== undefined) {
-    inputSchema.properties = tool.parameters.properties;
-  }
-  if (tool.parameters.required !== undefined) {
-    inputSchema.required = tool.parameters.required;
-  }
+  const { properties, required } = tool.parameters;
   return {
     name: tool.name,
     description: tool.description,
-    input_schema: inputSchema,
+    input_schema: {
+      type: "object",
+      ...(properties !== undefined && { properties }),
+      ...(required !== undefined && { required }),
+      ...definitionsOf(tool.parameters),
+    },
   };
 }
 

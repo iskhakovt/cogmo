@@ -1,6 +1,6 @@
 {
-  "id": "74317cb9-7201-4109-b7cf-ffff746e7247",
-  "prevId": "80920bcc-ffeb-42c9-bbc1-842299b22fdf",
+  "id": "6065057f-c19a-4ea5-84de-ae14af10a2d0",
+  "prevId": "869bf737-39ae-4a45-9f0f-be14356e1b81",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1525,12 +1525,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "skill_name": {
-          "name": "skill_name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -2132,6 +2126,97 @@
           "name": "uq_sub_agents_user_name",
           "nullsNotDistinct": false,
           "columns": ["user_id", "name"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.system_prompt_snapshots": {
+      "name": "system_prompt_snapshots",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "uuidv7()"
+        },
+        "conversation_id": {
+          "name": "conversation_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "opened_by": {
+          "name": "opened_by",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "history_start": {
+          "name": "history_start",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "rendered": {
+          "name": "rendered",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "config_digest": {
+          "name": "config_digest",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "system_prompt_snapshots_conversation_id_conversations_id_fk": {
+          "name": "system_prompt_snapshots_conversation_id_conversations_id_fk",
+          "tableFrom": "system_prompt_snapshots",
+          "tableTo": "conversations",
+          "columnsFrom": ["conversation_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "system_prompt_snapshots_opened_by_messages_id_fk": {
+          "name": "system_prompt_snapshots_opened_by_messages_id_fk",
+          "tableFrom": "system_prompt_snapshots",
+          "tableTo": "messages",
+          "columnsFrom": ["opened_by"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "system_prompt_snapshots_history_start_messages_id_fk": {
+          "name": "system_prompt_snapshots_history_start_messages_id_fk",
+          "tableFrom": "system_prompt_snapshots",
+          "tableTo": "messages",
+          "columnsFrom": ["history_start"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "uq_system_prompt_snapshots_conv_opened_by": {
+          "name": "uq_system_prompt_snapshots_conv_opened_by",
+          "nullsNotDistinct": false,
+          "columns": ["conversation_id", "opened_by"]
         }
       },
       "policies": {},
@@ -3469,18 +3554,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "run_as_user_id": {
-          "name": "run_as_user_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "run_as_profile_id": {
-          "name": "run_as_profile_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
         "last_fired_at": {
           "name": "last_fired_at",
           "type": "timestamp with time zone",
@@ -3544,26 +3617,7 @@
           "with": {}
         }
       },
-      "foreignKeys": {
-        "skills_run_as_user_id_users_id_fk": {
-          "name": "skills_run_as_user_id_users_id_fk",
-          "tableFrom": "skills",
-          "tableTo": "users",
-          "columnsFrom": ["run_as_user_id"],
-          "columnsTo": ["id"],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "skills_run_as_profile_id_profiles_id_fk": {
-          "name": "skills_run_as_profile_id_profiles_id_fk",
-          "tableFrom": "skills",
-          "tableTo": "profiles",
-          "columnsFrom": ["run_as_profile_id"],
-          "columnsTo": ["id"],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
+      "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "skills_name_unique": {
@@ -3577,10 +3631,6 @@
         "chk_skills_next_run_at_iff_schedule": {
           "name": "chk_skills_next_run_at_iff_schedule",
           "value": "(\"skills\".\"schedule\" IS NULL) = (\"skills\".\"next_run_at\" IS NULL)"
-        },
-        "chk_skills_run_as_iff_schedule": {
-          "name": "chk_skills_run_as_iff_schedule",
-          "value": "(\"skills\".\"schedule\" IS NULL) = (\"skills\".\"run_as_user_id\" IS NULL) AND (\"skills\".\"schedule\" IS NULL) = (\"skills\".\"run_as_profile_id\" IS NULL)"
         }
       },
       "isRLSEnabled": false
@@ -3851,7 +3901,24 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "uq_channels_fixed_type": {
+          "name": "uq_channels_fixed_type",
+          "columns": [
+            {
+              "expression": "type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "identity_mode = 'fixed'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
@@ -4289,7 +4356,7 @@
     "public.pending_memory_source": {
       "name": "pending_memory_source",
       "schema": "public",
-      "values": ["live_retain", "migration", "skill"]
+      "values": ["live_retain", "migration"]
     },
     "public.schedule_kind": {
       "name": "schedule_kind",

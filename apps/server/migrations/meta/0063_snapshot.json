@@ -1,6 +1,6 @@
 {
-  "id": "77cadda7-64e0-41c3-846c-499a8eea5d0d",
-  "prevId": "74317cb9-7201-4109-b7cf-ffff746e7247",
+  "id": "4bcd468c-5a87-4efa-8f0c-23b6fac641be",
+  "prevId": "6065057f-c19a-4ea5-84de-ae14af10a2d0",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1525,12 +1525,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "skill_name": {
-          "name": "skill_name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -1585,12 +1579,7 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {
-        "chk_pending_memories_skill_name": {
-          "name": "chk_pending_memories_skill_name",
-          "value": "(\"pending_memories\".\"source\" = 'skill') = (\"pending_memories\".\"skill_name\" IS NOT NULL)"
-        }
-      },
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.profile_classes": {
@@ -2137,6 +2126,97 @@
           "name": "uq_sub_agents_user_name",
           "nullsNotDistinct": false,
           "columns": ["user_id", "name"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.system_prompt_snapshots": {
+      "name": "system_prompt_snapshots",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "uuidv7()"
+        },
+        "conversation_id": {
+          "name": "conversation_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "opened_by": {
+          "name": "opened_by",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "history_start": {
+          "name": "history_start",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "rendered": {
+          "name": "rendered",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "config_digest": {
+          "name": "config_digest",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "system_prompt_snapshots_conversation_id_conversations_id_fk": {
+          "name": "system_prompt_snapshots_conversation_id_conversations_id_fk",
+          "tableFrom": "system_prompt_snapshots",
+          "tableTo": "conversations",
+          "columnsFrom": ["conversation_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "system_prompt_snapshots_opened_by_messages_id_fk": {
+          "name": "system_prompt_snapshots_opened_by_messages_id_fk",
+          "tableFrom": "system_prompt_snapshots",
+          "tableTo": "messages",
+          "columnsFrom": ["opened_by"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "system_prompt_snapshots_history_start_messages_id_fk": {
+          "name": "system_prompt_snapshots_history_start_messages_id_fk",
+          "tableFrom": "system_prompt_snapshots",
+          "tableTo": "messages",
+          "columnsFrom": ["history_start"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "uq_system_prompt_snapshots_conv_opened_by": {
+          "name": "uq_system_prompt_snapshots_conv_opened_by",
+          "nullsNotDistinct": false,
+          "columns": ["conversation_id", "opened_by"]
         }
       },
       "policies": {},
@@ -3583,9 +3663,9 @@
           "name": "chk_skills_next_run_at_iff_schedule",
           "value": "(\"skills\".\"schedule\" IS NULL) = (\"skills\".\"next_run_at\" IS NULL)"
         },
-        "chk_skills_run_as_iff_schedule": {
-          "name": "chk_skills_run_as_iff_schedule",
-          "value": "(\"skills\".\"schedule\" IS NULL) = (\"skills\".\"run_as_user_id\" IS NULL) AND (\"skills\".\"schedule\" IS NULL) = (\"skills\".\"run_as_profile_id\" IS NULL)"
+        "chk_skills_run_as_iff_live_schedule": {
+          "name": "chk_skills_run_as_iff_live_schedule",
+          "value": "(\"skills\".\"schedule\" IS NOT NULL AND NOT \"skills\".\"disabled\") = (\"skills\".\"run_as_user_id\" IS NOT NULL) AND (\"skills\".\"schedule\" IS NOT NULL AND NOT \"skills\".\"disabled\") = (\"skills\".\"run_as_profile_id\" IS NOT NULL)"
         }
       },
       "isRLSEnabled": false
@@ -3856,7 +3936,24 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "uq_channels_fixed_type": {
+          "name": "uq_channels_fixed_type",
+          "columns": [
+            {
+              "expression": "type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "identity_mode = 'fixed'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
@@ -4294,7 +4391,7 @@
     "public.pending_memory_source": {
       "name": "pending_memory_source",
       "schema": "public",
-      "values": ["live_retain", "migration", "skill"]
+      "values": ["live_retain", "migration"]
     },
     "public.schedule_kind": {
       "name": "schedule_kind",

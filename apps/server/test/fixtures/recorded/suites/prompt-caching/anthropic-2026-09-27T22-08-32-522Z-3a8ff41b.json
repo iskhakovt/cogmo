@@ -4,50 +4,47 @@
       "match": {
         "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nHere's the picture I ended up printing. What's in it?",
         "model": "claude-sonnet-5",
-        "turnIndex": 4,
+        "turnIndex": 6,
         "hasToolResult": false
       },
       "response": {
-        "content": "It's a cheerful cartoon-style ginger tabby kitten with big green eyes, wearing a purple top hat with a red band — sitting against a warm golden-orange background. Cute, playful vibe!"
+        "content": "It's a whimsical cartoon-style illustration of an orange tabby kitten wearing a tall purple top hat with a red band. The kitten has big green eyes, an open mouth mid-meow or smile, and is sitting on a warm golden/tan background with soft lighting."
       },
       "recordedTimings": {
-        "ttftMs": 853,
+        "ttftMs": 1105,
         "interChunkDelaysMs": [
           0,
-          644,
+          0,
+          0,
+          317,
+          3,
           0,
           0,
           0,
           0,
-          0,
-          44,
-          46,
-          43,
-          46,
-          67,
-          32,
-          41,
+          13,
           45,
-          47,
-          44,
-          46,
+          49,
           45,
-          732,
+          49,
+          84,
+          344,
           0,
           0,
           0,
           0,
           0,
           0,
-          8,
-          8,
+          11,
+          6,
+          0,
           0
         ],
-        "totalDurationMs": 2791
+        "totalDurationMs": 2071
       },
       "metadata": {
-        "systemHash": "a479dde7",
-        "toolsHash": "5d271761"
+        "systemHash": "b881c548",
+        "toolsHash": "994a1d95"
       }
     }
   ]

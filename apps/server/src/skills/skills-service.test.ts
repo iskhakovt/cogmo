@@ -40,6 +40,7 @@ describe("createSkillsService.register", () => {
       status: "pending_approval",
       gitSha: "abcdef0123456789",
       pendingId: PENDING_ID,
+      schedule: "0 9 * * *",
     };
     const runner = makeRunner({ register: vi.fn().mockResolvedValue(runnerResult) });
     const { inngest, send } = makeInngest();
@@ -61,6 +62,7 @@ describe("createSkillsService.register", () => {
         skillName: "notifier",
         gitSha: "abcdef0123456789",
         conversationId: CONV_ID,
+        schedule: "0 9 * * *",
       },
     });
   });
@@ -136,13 +138,9 @@ describe("createSkillsService.register", () => {
 });
 
 describe("createSkillsService origin", () => {
-  it("passes the turn's user and profile as the origin of every deploy it requests", async () => {
+  it("registers with the turn's conversation as the origin", async () => {
     const live: RegisterResult = { name: "echo", riskTier: "notify", status: "live", gitSha: "a" };
-    const runner = makeRunner({
-      register: vi.fn().mockResolvedValue(live),
-      approveDeploy: vi.fn().mockResolvedValue(live),
-      rollback: vi.fn().mockResolvedValue(live),
-    });
+    const runner = makeRunner({ register: vi.fn().mockResolvedValue(live) });
     const { inngest } = makeInngest();
     const service = createSkillsService({
       runner,
@@ -152,11 +150,10 @@ describe("createSkillsService origin", () => {
     });
 
     await service.register({ branch: "skill/echo" });
-    await service.approveDeploy({ pendingId: PENDING_ID });
-    await service.rollback({ name: "echo", toGitSha: "a" });
 
-    expect(runner.register).toHaveBeenCalledWith({ branch: "skill/echo", origin: ORIGIN });
-    expect(runner.approveDeploy).toHaveBeenCalledWith({ pendingId: PENDING_ID, origin: ORIGIN });
-    expect(runner.rollback).toHaveBeenCalledWith({ name: "echo", toGitSha: "a", origin: ORIGIN });
+    expect(runner.register).toHaveBeenCalledWith({
+      branch: "skill/echo",
+      origin: { kind: "conversation", ...ORIGIN },
+    });
   });
 });

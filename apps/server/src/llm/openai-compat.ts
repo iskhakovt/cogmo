@@ -8,6 +8,7 @@ import { cacheMarker } from "./cache-marker.js";
 import { ProviderProtocolError, parseToolArgs, ToolArgsCutOffError } from "./errors.js";
 import { RefusalError } from "./fallback.js";
 import { withFailureLogging } from "./logging-fetch.js";
+import { fitsStrictMode } from "./openai-output-schema.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
 import {
@@ -98,7 +99,7 @@ export class OpenAICompatibleProvider implements LlmProvider {
     try {
       const createParams: OpenAI.ChatCompletionCreateParamsNonStreaming & CacheHintFields = {
         model: params.model,
-        ...outputCap(params.model, params.maxTokens ?? DEFAULT_MAX_TOKENS),
+        ...modelFamilyParams(params.model, params),
         messages: buildMessages(params.system, params.messages, hints.systemMarker),
         ...hints.fields,
       };
@@ -107,17 +108,15 @@ export class OpenAICompatibleProvider implements LlmProvider {
         createParams.tools = params.tools.map(toOpenAITool);
       }
 
-      if (params.temperature !== undefined) {
-        createParams.temperature = params.temperature;
-      }
-
+      // A schema outside strict mode's subset goes with `strict: false`: the
+      // schema still guides the reply, and the caller validates it.
       if (params.responseFormat) {
         createParams.response_format = {
           type: "json_schema",
           json_schema: {
             name: params.responseFormat.name,
             schema: params.responseFormat.schema,
-            strict: true,
+            strict: fitsStrictMode(params.responseFormat.schema),
           },
         };
       }
@@ -181,11 +180,10 @@ export class OpenAICompatibleProvider implements LlmProvider {
           .create(
             {
               model: params.model,
-              ...outputCap(params.model, params.maxTokens ?? DEFAULT_MAX_TOKENS),
+              ...modelFamilyParams(params.model, params),
               messages: buildMessages(params.system, params.messages, hints.systemMarker),
               ...hints.fields,
               ...(params.tools?.length && { tools: params.tools.map(toOpenAITool) }),
-              ...(params.temperature !== undefined && { temperature: params.temperature }),
               stream: true,
               stream_options: { include_usage: true },
             },
@@ -279,27 +277,64 @@ export class OpenAICompatibleProvider implements LlmProvider {
   }
 }
 
-// --- Output cap ---
+// --- Model-family parameters ---
 
-type OutputCap = { max_tokens: number } | { max_completion_tokens: number };
+/** The request fields whose accepted form depends on the model's family. */
+type FamilyParams = ({ max_tokens: number } | { max_completion_tokens: number }) & {
+  reasoning_effort?: "none";
+  temperature?: number;
+};
 
 /**
- * OpenAI's reasoning models (the o-series and GPT-5 onward, by bare or
- * fine-tuned id) reject `max_tokens` and take the cap as
- * `max_completion_tokens`, which also bounds reasoning. Every other id keeps
- * `max_tokens`, OpenRouter's `openai/…` slugs included.
+ * The output cap, reasoning effort and temperature for `model`'s family on
+ * Chat Completions — see design/providers.md → Architecture.
  */
-export function outputCap(model: string, maxTokens: number): OutputCap {
-  return takesMaxCompletionTokens(model)
-    ? { max_completion_tokens: maxTokens }
-    : { max_tokens: maxTokens };
+export function modelFamilyParams(
+  model: string,
+  request: Pick<ChatParams, "maxTokens" | "temperature" | "tools">,
+): FamilyParams {
+  const cap = request.maxTokens ?? DEFAULT_MAX_TOKENS;
+  const temperature = request.temperature === undefined ? {} : { temperature: request.temperature };
+  const family = openAIFamily(model);
+  if (family === "other") return { max_tokens: cap, ...temperature };
+  if (
+    family === "reasoning-with-none" &&
+    (request.tools?.length || request.temperature !== undefined)
+  ) {
+    return { max_completion_tokens: cap, reasoning_effort: "none", ...temperature };
+  }
+  if (request.temperature !== undefined) warnDroppedTemperature(model, request.temperature);
+  return { max_completion_tokens: cap };
 }
 
-function takesMaxCompletionTokens(model: string): boolean {
+/**
+ * `reasoning` for OpenAI's reasoning models (the o-series, GPT-5 onward and
+ * the `chat-latest` ids, by bare or fine-tuned id), and `reasoning-with-none`
+ * for those with a `none` effort: GPT-5.1 onward, except the Astra tier and
+ * `chat-latest`.
+ */
+function openAIFamily(model: string): "other" | "reasoning" | "reasoning-with-none" {
   const id = model.replace(/^ft:/, "");
-  if (/^o\d/.test(id)) return true;
-  const major = /^gpt-(\d+)/.exec(id)?.[1];
-  return major !== undefined && Number(major) >= 5;
+  if (/^o\d/.test(id) || /^(gpt-[\d.]+-)?chat-latest$/.test(id)) return "reasoning";
+  const version = /^gpt-(\d+)(?:\.(\d+))?/.exec(id);
+  if (!version) return "other";
+  const major = Number(version[1]);
+  const minor = Number(version[2] ?? 0);
+  if (major < 5) return "other";
+  if (/^gpt-[\d.]+-astra/.test(id)) return "reasoning";
+  return major > 5 || minor >= 1 ? "reasoning-with-none" : "reasoning";
+}
+
+const warnedTemperatureModels = new Set<string>();
+
+function warnDroppedTemperature(model: string, temperature: number): void {
+  if (warnedTemperatureModels.has(model)) return;
+  warnedTemperatureModels.add(model);
+  logger.warn(
+    { model, temperature },
+    `dropping temperature for "${model}" — OpenAI's reasoning models take one only at ` +
+      `reasoning effort "none", which this model doesn't have.`,
+  );
 }
 
 // --- Cache hints ---

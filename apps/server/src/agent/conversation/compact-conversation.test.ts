@@ -2,13 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { LlmProvider } from "../../llm/provider.js";
 import type { Message } from "../../llm/types.js";
-import {
-  fakeRunInTx,
-  mockAgentStore,
-  mockProvider,
-  mockResolver,
-  mockTransportStore,
-} from "../../test/factories.js";
+import { fakeRunInTx, mockAgentStore, mockProvider, mockResolver } from "../../test/factories.js";
 import type { PromptSource } from "../prompt.js";
 import type { AgentStore, CompactionSummary, Profile } from "../store/index.js";
 import { type CompactConversationDeps, compactConversation } from "./compact-conversation.js";
@@ -52,13 +46,13 @@ function deps(
 ): CompactConversationDeps {
   const promptSource =
     overrides.promptSource ??
-    ({ assemble: vi.fn().mockResolvedValue("SYSTEM PROMPT") } satisfies PromptSource);
+    ({
+      assemble: vi.fn().mockResolvedValue("SYSTEM PROMPT"),
+      configuration: vi.fn().mockResolvedValue("CONFIGURATION"),
+    } satisfies PromptSource);
   return {
     runInTx: fakeRunInTx,
     agentStore: overrides.agentStore ?? mockAgentStore(),
-    transportStore: mockTransportStore({
-      getActiveChannelTypes: vi.fn().mockResolvedValue(["telegram"]),
-    }),
     resolveProvider: mockResolver(overrides.provider ?? mockProvider()),
     promptSource,
   };
@@ -389,7 +383,7 @@ describe("compactConversation", () => {
       voiceMode: null,
     });
     vi.mocked(agentStore.getActiveRules).mockResolvedValue([
-      { rule: "Be terse", section: "learned" },
+      { rule: "Be terse", section: "learned", channelType: null },
     ]);
     const blocksByUser = new Map([
       ["user-1", [{ profileClass: null, key: "user_profile", content: "Name: Ana" }]],
@@ -405,7 +399,7 @@ describe("compactConversation", () => {
 
     expect(promptSource.assemble).toHaveBeenCalledWith({
       profile: profile(),
-      rules: [{ rule: "Be terse", section: "learned" }],
+      rules: [{ rule: "Be terse", section: "learned", channelType: null }],
       coreMemory: {
         scope: { kind: "unclassed" },
         blocks: [{ profileClass: null, key: "user_profile", content: "Name: Ben" }],

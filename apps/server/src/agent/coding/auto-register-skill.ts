@@ -23,8 +23,7 @@ import { runGit, withGitAskpass } from "../../secrets/git-askpass.js";
 import { describeResolveIdentityError, resolveGitHubIdentity } from "../../secrets/github.js";
 import type { SecretsStore } from "../../secrets/store/index.js";
 import { SKILLS_CODING_REPO_NAME } from "../../skills/repo.js";
-import type { RegisterResult, SkillRunner } from "../../skills/runner.js";
-import type { SkillRunIdentity } from "../../skills/store/index.js";
+import type { RegisterResult, SkillDeployOrigin, SkillRunner } from "../../skills/runner.js";
 import type { AgentStore } from "../store/index.js";
 import type { CodingStore } from "./store/index.js";
 
@@ -74,16 +73,21 @@ export async function autoRegisterSkill(
         reason: describeResolveIdentityError(identityResult.error),
       };
     }
-    // The conversation that asked for the skill. A task with none (an
-    // automated trigger) has no origin, and a schedule runs as the owner.
-    const conversation =
-      task.conversationId === null
-        ? undefined
-        : await deps.agentStore.getConversation(tx, task.conversationId);
-    const origin: SkillRunIdentity | undefined = conversation && {
-      userId: conversation.userId,
-      profileId: conversation.profileId,
-    };
+    // The conversation that asked for the skill; a task with none (an
+    // automated trigger) deploys as the owner. One that doesn't resolve is an
+    // error, never a fallback to the owner.
+    let origin: SkillDeployOrigin = { kind: "owner" };
+    if (task.conversationId !== null) {
+      const conversation = await deps.agentStore.getConversation(tx, task.conversationId);
+      if (!conversation) {
+        throw new Error(`auto-register: conversation ${task.conversationId} not found`);
+      }
+      origin = {
+        kind: "conversation",
+        userId: conversation.userId,
+        profileId: conversation.profileId,
+      };
+    }
     return {
       kind: "ok" as const,
       repo,
@@ -110,7 +114,7 @@ export async function autoRegisterSkill(
   let timeoutHandle: NodeJS.Timeout | undefined;
   try {
     const result = await Promise.race([
-      deps.skillRunner.register({ branch, ...(origin !== undefined && { origin }) }),
+      deps.skillRunner.register({ branch, origin }),
       new Promise<never>((_, reject) => {
         timeoutHandle = setTimeout(
           () => reject(new Error(`register exceeded ${REGISTER_TIMEOUT_MS}ms wall-clock cap`)),

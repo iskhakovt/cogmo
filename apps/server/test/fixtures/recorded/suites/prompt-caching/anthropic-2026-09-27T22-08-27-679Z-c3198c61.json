@@ -1,0 +1,32 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nI've just moved to Lisbon. Please save that to my core memory.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 4,
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "Got it — saved Lisbon as your home. Welcome to your new city!"
+      },
+      "recordedTimings": {
+        "ttftMs": 2618,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          285,
+          8,
+          4,
+          1
+        ],
+        "totalDurationMs": 2916
+      },
+      "metadata": {
+        "systemHash": "b881c548",
+        "toolsHash": "994a1d95"
+      }
+    }
+  ]
+}

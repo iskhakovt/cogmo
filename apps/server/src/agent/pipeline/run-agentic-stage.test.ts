@@ -145,7 +145,10 @@ async function harness(opts: { existingInbound?: { id: string; conversationId: s
     resolveProvider: vi.fn().mockResolvedValue({ provider, limits: {} }),
     tools,
     memory: mockMemoryProvider(),
-    promptSource: { assemble: vi.fn().mockResolvedValue("SYSTEM PROMPT") },
+    promptSource: {
+      assemble: vi.fn().mockResolvedValue("SYSTEM PROMPT"),
+      configuration: vi.fn().mockResolvedValue("CONFIGURATION"),
+    },
     fileService: mockFilesService(),
     deliveryRouter,
     runStreamingAgentLoop,
@@ -348,6 +351,25 @@ describe("runAgenticStage", () => {
     expect(h.deps.memory.recall).not.toHaveBeenCalled();
   });
 
+  it("names the delivery channels, and announces no core memory in its own system prompt", async () => {
+    const h = await harness();
+    vi.mocked(h.transportStore.getActiveChannelTypes).mockResolvedValue(["telegram", "web"]);
+    vi.mocked(h.agentStore.getCoreMemoryUpdateTimes).mockResolvedValue([
+      { profileClass: null, key: "identity", updatedAt: new Date() },
+    ]);
+
+    await runAgenticStage(h.deps, stageArgs(), recordingSteps().steps, log);
+
+    const [, stored] = expectDefined(
+      vi.mocked(h.agentStore.insertOrRecoverTurnContext).mock.calls[0],
+      "insertOrRecoverTurnContext call",
+    );
+    expect(stored.context.channelTypes).toEqual(["telegram", "web"]);
+    expect(stored.rendered).toContain("Reply modality: text\nDelivery channels: telegram, web\n");
+    expect(stored.context.announcedCoreMemoryBlocks).toEqual([]);
+    expect(h.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
+  });
+
   it("plans the same step ids on every invocation", async () => {
     const first = recordingSteps();
     const second = recordingSteps();
@@ -513,7 +535,7 @@ describe("runAgenticStage", () => {
 
       expect(skillRunner.register).toHaveBeenCalledWith({
         branch: "skill/echo",
-        origin: { userId: "user-2", profileId: "profile-7" },
+        origin: { kind: "conversation", userId: "user-2", profileId: "profile-7" },
       });
     });
   });

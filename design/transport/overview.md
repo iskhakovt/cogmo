@@ -38,7 +38,8 @@ channels (
   type             TEXT NOT NULL,              -- 'direct', 'telegram', 'slack', 'web'
   credentials      JSONB NOT NULL,             -- encrypted: token, OAuth, etc.
   identity_mode    TEXT NOT NULL,              -- 'fixed' | 'mapped' | 'create'. See identity.md.
-  created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (type) WHERE identity_mode = 'fixed'  -- one fixed-identity channel per type; key of `insertOrRecoverFixedChannel`
 );
 
 profiles (

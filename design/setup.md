@@ -116,7 +116,8 @@ Provider and model management after first-run lives in dedicated subcommands so 
 | Command | Purpose |
 |-|-|
 | `cogmo provider add <type> <name> <api-key> [base-url] [--cache-dialect <dialect>]` | Register a new provider. Validates the key the same way the wizard does. `--cache-dialect` overrides the default dialect, as `COGMO_LLM_CACHE_DIALECT` does, and is rejected for `anthropic`. |
-| `cogmo provider list` | Show registered providers (name, type, base URL). |
+| `cogmo provider list` | Show registered providers (name, type, base URL, cache dialect). |
+| `cogmo provider set <name> --cache-dialect <dialect>` | Change an OpenAI-compatible provider's cache dialect in place, keeping its `model_providers` rows. Rejected for `anthropic`. Takes effect on restart. |
 | `cogmo provider remove <name>` | Delete a provider; cascades to its `model_providers` rows. |
 | `cogmo model add <id> --provider <name> [--context N --max-output N --position N]` | Insert a routing row. `--context` / `--max-output` override the bundled LiteLLM defaults; omit to let the resolver pick. |
 | `cogmo model list [--model <id>] [--provider <name>]` | Show routing rows with effective limits and source (`db`/`litellm`/`default`). |
@@ -152,4 +153,8 @@ The wizard never constructs providers or starts adapters — it only persists co
 Two-layer check, no dedicated marker table:
 
 1. **Migration state:** Drizzle's `__drizzle_migrations` table. `migrate()` is idempotent — always safe to run.
-2. **Bootstrap state:** `SELECT EXISTS(SELECT 1 FROM users)`. If false → fresh install. The wizard's seed step handles this.
+2. **Bootstrap state:** `SELECT EXISTS(SELECT 1 FROM users)`. If false → fresh install. `migrateAndSeed` seeds it before the wizard starts.
+
+## Concurrent runs
+
+`cogmo serve`, `cogmo seed` and `cogmo setup` migrate and seed under one session-level advisory lock (`bootstrapLock`, `src/db/bootstrap-lock.ts`), taken on a reserved connection before any transaction opens, so concurrent runs migrate one at a time and each sees what the previous holder seeded. The lock needs a pool of at least two connections. postgres-js keeps a `max` from the URL or `PGMAX` as a string and then opens one, so the lock refuses those; set the pool size in code or leave the default of 10. `cogmo setup` holds it across migrate, `--reset` and the default seed, and again around the wizard's skills-repo init, not across the interactive prompts. The default profile's insert is also keyed on `uq_profiles_user_name`, and the direct and web channels' on `uq_channels_fixed_type`.

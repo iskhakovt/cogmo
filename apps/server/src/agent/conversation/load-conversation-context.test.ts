@@ -1,9 +1,7 @@
-import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Transactor } from "../../db/index.js";
-import { mockAgentStore, mockTransportStore } from "../../test/factories.js";
+import { mockAgentStore } from "../../test/factories.js";
 import { createTestDatabase } from "../../test/pglite.js";
-import { DrizzleTransportStore } from "../../transport/store/index.js";
 import type { CoreMemoryScope } from "../core-memory/scope.js";
 import { DrizzleAgentStore, type Profile } from "../store/index.js";
 import { loadConversationContext } from "./load-conversation-context.js";
@@ -36,23 +34,21 @@ function profile(overrides: Partial<Profile> = {}): Profile {
 describe("loadConversationContext", () => {
   it("does not re-read the profile — uses the row passed in by the caller", async () => {
     const agentStore = mockAgentStore({
-      getActiveRules: vi.fn().mockResolvedValue([{ rule: "Be concise", section: "learned" }]),
+      getActiveRules: vi
+        .fn()
+        .mockResolvedValue([{ rule: "Be concise", section: "learned", channelType: "telegram" }]),
       getCoreMemoryBlocks: vi
         .fn()
         .mockResolvedValue([{ profileClass: null, key: "user_profile", content: "Sam" }]),
     });
-    const transportStore = mockTransportStore({
-      getActiveChannelTypes: vi.fn().mockResolvedValue(["telegram"]),
-    });
 
     const result = await loadConversationContext(
-      { runInTx: fakeRunInTx, agentStore, transportStore },
-      { conversationId: "c1", userId: "u1", coreMemoryScope: UNCLASSED, profile: profile() },
+      { runInTx: fakeRunInTx, agentStore },
+      { userId: "u1", coreMemoryScope: UNCLASSED, profile: profile() },
     );
 
     expect(result).toEqual({
-      channelTypes: ["telegram"],
-      rules: [{ rule: "Be concise", section: "learned" }],
+      rules: [{ rule: "Be concise", section: "learned", channelType: "telegram" }],
       coreMemory: {
         scope: UNCLASSED,
         blocks: [{ profileClass: null, key: "user_profile", content: "Sam" }],
@@ -60,38 +56,17 @@ describe("loadConversationContext", () => {
     });
 
     expect(agentStore.getProfile).not.toHaveBeenCalled();
-    expect(transportStore.getActiveChannelTypes).toHaveBeenCalledWith(FAKE_TX, "c1");
-    expect(agentStore.getActiveRules).toHaveBeenCalledWith(FAKE_TX, "p1", ["telegram"]);
+    expect(agentStore.getActiveRules).toHaveBeenCalledWith(FAKE_TX, "p1");
     expect(agentStore.getCoreMemoryBlocks).toHaveBeenCalledWith(FAKE_TX, "u1", null);
-  });
-
-  it("threads channelTypes from transport into agentStore.getActiveRules", async () => {
-    const agentStore = mockAgentStore({
-      getActiveRules: vi.fn().mockResolvedValue([]),
-    });
-    const transportStore = mockTransportStore({
-      getActiveChannelTypes: vi.fn().mockResolvedValue(["telegram", "slack"]),
-    });
-
-    await loadConversationContext(
-      { runInTx: fakeRunInTx, agentStore, transportStore },
-      { conversationId: "c1", userId: "u1", coreMemoryScope: UNCLASSED, profile: profile() },
-    );
-
-    expect(agentStore.getActiveRules).toHaveBeenCalledWith(FAKE_TX, "p1", ["telegram", "slack"]);
   });
 
   it("skips the rules lookup when profile is undefined", async () => {
     const agentStore = mockAgentStore({
       getActiveRules: vi.fn().mockResolvedValue([]),
     });
-    const transportStore = mockTransportStore({
-      getActiveChannelTypes: vi.fn().mockResolvedValue(["telegram"]),
-    });
-
     const result = await loadConversationContext(
-      { runInTx: fakeRunInTx, agentStore, transportStore },
-      { conversationId: "c1", userId: "u1", coreMemoryScope: UNCLASSED, profile: undefined },
+      { runInTx: fakeRunInTx, agentStore },
+      { userId: "u1", coreMemoryScope: UNCLASSED, profile: undefined },
     );
 
     expect(result.rules).toEqual([]);
@@ -104,9 +79,8 @@ describe("loadConversationContext core memory scope", () => {
     const agentStore = mockAgentStore();
 
     await loadConversationContext(
-      { runInTx: fakeRunInTx, agentStore, transportStore: mockTransportStore() },
+      { runInTx: fakeRunInTx, agentStore },
       {
-        conversationId: "c1",
         userId: "u1",
         coreMemoryScope: { kind: "classed", profileClass: "coder", restricted: false },
         profile: profile(),
@@ -120,8 +94,8 @@ describe("loadConversationContext core memory scope", () => {
     const agentStore = mockAgentStore();
 
     const result = await loadConversationContext(
-      { runInTx: fakeRunInTx, agentStore, transportStore: mockTransportStore() },
-      { conversationId: "c1", userId: "u1", coreMemoryScope: { kind: "none" }, profile: profile() },
+      { runInTx: fakeRunInTx, agentStore },
+      { userId: "u1", coreMemoryScope: { kind: "none" }, profile: profile() },
     );
 
     expect(result.coreMemory).toEqual({ scope: { kind: "none" }, blocks: [] });
@@ -133,7 +107,6 @@ describe("loadConversationContext core memory (PGlite)", () => {
   let runInTx: Transactor;
   let close: () => Promise<void>;
   const agentStore = new DrizzleAgentStore();
-  const transportStore = new DrizzleTransportStore();
 
   beforeAll(async () => {
     ({ tx: runInTx, close } = await createTestDatabase());
@@ -170,9 +143,8 @@ describe("loadConversationContext core memory (PGlite)", () => {
     });
 
     const context = await loadConversationContext(
-      { runInTx, agentStore, transportStore },
+      { runInTx, agentStore },
       {
-        conversationId: randomUUID(),
         userId: second.id,
         coreMemoryScope: UNCLASSED,
         profile: undefined,

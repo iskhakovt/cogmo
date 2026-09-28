@@ -217,10 +217,9 @@ export function createSchedulingService(deps: SchedulingServiceDeps): Scheduling
       // doesn't predicate-lock, so two concurrent creates can each see
       // `count = cap - 1` and both insert successfully, exceeding the
       // cap by one. Accepted at single-user scale (cap exceeded by 1 is
-      // benign). When multi-tenant arrives, prefer
-      // `pg_advisory_xact_lock(user_id)` or a unique partial index on
-      // `(user_id, row_number)` over SERIALIZABLE — predicate races
-      // want prevention, not retry-on-detection.
+      // benign). When multi-tenant arrives, prevent it with an advisory
+      // lock taken before the snapshot, not SERIALIZABLE — see
+      // `.claude/rules/store-pattern.md`.
       //
       // Count includes disabled rows so a graveyard can't bypass the
       // cap by toggling. Uses `countScheduledTasks` (SELECT COUNT(*))

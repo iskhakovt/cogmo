@@ -17,7 +17,13 @@ Two provider adapters exist:
 
 Both implement `LlmProvider` — the agent loop and orchestrator are provider-agnostic.
 
-`OpenAICompatibleProvider` sends the output cap as `max_completion_tokens` to OpenAI's reasoning models (the o-series and GPT-5 onward, matched by bare or fine-tuned model id on any host) and as `max_tokens` to every other id.
+`OpenAICompatibleProvider` maps three request parameters by OpenAI model family, matched by bare or fine-tuned model id on any host (`modelFamilyParams`):
+
+- **Output cap.** OpenAI's reasoning models (the o-series, GPT-5 onward and the `chat-latest` ids) take it as `max_completion_tokens`; every other id as `max_tokens`.
+- **Reasoning effort.** From GPT-5.5, Chat Completions rejects function tools at any effort but `none` (GPT-5.6 onward also at their default), and every reasoning model rejects a `temperature` other than 1 except at `none`. A request with tools or a temperature to a model with a `none` effort (GPT-5.1 onward, except the Astra tier and `chat-latest`) goes at `none`; any other request keeps the model's default. So those models' tool turns run without reasoning, and the degraded-reply synthesis (`temperature: 0`) answers quickly within its 5-second cap.
+- **Temperature.** Sent at `none`, and dropped with a once-per-model warning from every other request to a reasoning model.
+
+The Responses API keeps reasoning on tool calls but is a separate wire protocol this adapter doesn't speak. GPT-6 Astra has no `none` effort and takes tools only there, so it can't serve chat turns.
 
 ## Data Model
 
@@ -202,8 +208,8 @@ The wrapper does not deduplicate requests, rate-limit transitions, or track heal
 
 | Adapter | Request |
 |-|-|
-| Anthropic | Structured outputs (`output_config.format`), which constrain decoding to the schema. `src/llm/anthropic-output-schema.ts` keeps what Anthropic's JSON Schema limitations list as supported, `enum` and `const` included, closes every object and turns `oneOf` into `anyOf`; every other constraint, such as numeric and length bounds, moves into its node's description. A schema the grammar can't express, with an open object (`z.record`, as in a pipeline stage's JSON output schema) or an untyped node (`z.unknown()`), takes the tool path: one synthetic tool carrying the schema, left unforced (`tool_choice: auto`) and named in a system block, since forcing it is a 400 on Opus 5.5 and Fable 5.1. A reply that makes no call (`MissingToolCallError`) spends `chatTyped`'s feedback retry on a re-ask repeating that instruction, as Anthropic advises for an unforced tool. |
-| OpenAI-compatible | `response_format: { type: "json_schema", strict: true }` with the schema as given. |
+| Anthropic | Structured outputs (`output_config.format`), which constrain decoding to the schema. `src/llm/anthropic-output-schema.ts` keeps what Anthropic's JSON Schema limitations list as supported, `enum` and `const` included, closes every object and turns `oneOf` into `anyOf`; every other constraint, such as numeric and length bounds, moves into its node's description. The grammar doesn't guarantee `enum` and `const` casing, so a reply string matching exactly one member case-insensitively, and none exactly, takes that member's casing. A schema the grammar can't express, with an open object (`z.record`, as in a pipeline stage's JSON output schema), an untyped node (`z.unknown()`), a recursive `$ref` (a Zod schema nested in itself) or a tuple (`z.tuple`: the transform keeps only `items`, so a rest schema constrains every position and a plain tuple's `items: false` admits anything), takes the tool path: one synthetic tool carrying the schema and its definitions, left unforced (`tool_choice: auto`) and named in a system block, since forcing it is a 400 on Opus 5.5 and Fable 5.1. `chat` re-sends a schema past the grammar's compile limits (24 optional or 16 union-typed parameters, an internal grammar size, a costly `pattern`) once on the tool path, matching the 400 by message. A reply that makes no call (`MissingToolCallError`) spends `chatTyped`'s feedback retry on a re-ask repeating that instruction, as Anthropic advises for an unforced tool. |
+| OpenAI-compatible | `response_format: { type: "json_schema" }` with the schema as given. `strict: true` only when the schema fits the subset OpenAI's strict mode takes (`src/llm/openai-output-schema.ts`): every object closed and every property required, no `oneOf`, `allOf` or untyped node, listed formats only. Otherwise `strict: false`, which takes any schema as unenforced guidance; `chatTyped` validates the reply. Pipeline compilation (an open stage-output object, `oneOf`), correction extraction (`oneOf`) and memory extraction (an optional property) fall outside the subset. |
 
 Models that think by default (adaptive on Sonnet 5, always on Opus 5.5 and Fable 5.1) think on these calls too, and the thinking counts toward `max_tokens`.
 

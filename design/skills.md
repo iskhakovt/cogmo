@@ -217,7 +217,7 @@ $COGMO_SKILLS_PATH/                # default /var/lib/cogmo/skills (configurable
 ```
 
 - Path configured via env var or `settings.local.json`.
-- Cogmo initializes the bare repo on first boot if the path doesn't exist; `HEAD = refs/heads/main` and the `pre-receive` hook are reconciled on every boot so upgrades take effect.
+- Cogmo initializes the bare repo on first boot if the path doesn't exist; `HEAD = refs/heads/main` and the `pre-receive` hook are reconciled on every boot so upgrades take effect. The callers that can create it, boot and the setup wizard, hold the bootstrap lock ([setup.md → Concurrent runs](setup.md#concurrent-runs)): two first-time `git init --bare` on one path can fail on git's config lock. Reconciling the hook is safe concurrently: each call writes its own temp file and renames it into place.
 - **A remote is required.** Any user-owned git URL (private GitHub repo, self-hosted Gitea, Forgejo, etc.) works — Cogmo treats `coding_repos.remote_url` as opaque transport material. Setup collects the URL via one of three operator choices:
   - **Use my own remote** — operator pastes a pre-created URL they've granted Cogmo's credentials access to. Validated via `git ls-remote` before persisting.
   - **Auto-provision on GitHub** — Cogmo calls `octokit.repos.createForAuthenticatedUser({ name: "cogmo-skills", private: true, auto_init: true })` and attaches the result as origin. Only available when a GitHub identity is already configured; gated to that one provider because the convenience lives in the wizard only — no permanent provider-specific surface.
@@ -534,7 +534,7 @@ cogmo skills register --branch skill/summarize-email-<date>
 
 The `register` RPC:
 
-1. **Acquire advisory lock** `pg_advisory_xact_lock(hashtext("skill_register:" + name))`. Serializes concurrent registers on the same skill name.
+1. **Acquire advisory lock** `pg_advisory_xact_lock(hashtext("skill_register:" + name))`. Queues concurrent registers on the same skill name, but under REPEATABLE READ the checks below can still read state from before the winner's commit ([store-pattern rule](../.claude/rules/store-pattern.md); audit filed in `todo.md`).
 2. **Fast-forward check.** Verify `main` is an ancestor of the branch tip. If not → return `{ status: "rejected", errors: ["main has advanced; rebase branch and retry"] }`.
 3. **No-op check.** If `current skills.git_sha == branch tip sha` → return `{ status: "live", … }` with no side effects (idempotent).
 4. **Pending-approval check.** If any `skill_deploys` row for this skill has `status = 'pending_approval'` → return `{ status: "rejected", errors: ["pending deploy exists; approve or deny first"] }`.
@@ -550,16 +550,23 @@ RPC signature:
 
 ```typescript
 interface SkillRunner {
-  register(opts: { branch: string }): Promise<RegisterResult>;
-  approveDeploy(opts: { pendingId: string }): Promise<RegisterResult>;
+  // `origin` (required) decides who a schedule the request puts live runs as —
+  // see Run-as identity.
+  register(opts: { branch: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
+  approveDeploy(opts: { pendingId: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
   denyDeploy(opts: { pendingId: string; reason?: string }): Promise<void>;
-  rollback(opts: { name: string; toGitSha?: string }): Promise<RegisterResult>;
+  rollback(opts: { name: string; toGitSha: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
   deregister(opts: { name: string }): Promise<DeregisterResult>;
-  enable(opts: { name: string }): Promise<EnableResult>;
+  enable(opts: { name: string; origin: SkillDeployOrigin }): Promise<EnableResult>;
   list(): Promise<readonly SkillSummary[]>;
   listAll(): Promise<readonly SkillSummary[]>;  // includes disabled
-  invoke(opts: { name: string; inputs: unknown }): Promise<SkillRunResult>;
+  invoke(opts: { name: string; inputs: unknown; runAs: SkillRunAs }): Promise<SkillRunResult>;
 }
+
+type SkillDeployOrigin =
+  | { kind: "conversation"; userId: string; profileId: string }   // register_skill, auto-register
+  | { kind: "user"; actor: SkillActor; conversation: SkillRunIdentity | null }  // approval tap, /enable
+  | { kind: "owner" };                                              // CLI, conversation-less coding task
 
 interface RegisterResult {
   name: string;
@@ -588,7 +595,7 @@ type EnableResult =
 
 - **Branch ≠ deploy.** Agent can push any feature branch freely. Only `register` advances `main`.
 - **`main` is authoritative.** `refs/heads/main` in the bare repo and `skills.git_sha` in the DB always agree — both are written together inside the register transaction.
-- **No race via direct push.** Pre-receive hook rejects non-Cogmo writes to `main`; advisory lock serializes Cogmo's own writes.
+- **No race via direct push.** Pre-receive hook rejects non-Cogmo writes to `main`; Cogmo's own registers queue on the advisory lock, with the snapshot caveat in register step 1.
 - **Idempotent.** Registering a branch whose tip is already `main` is a no-op. Safe to retry on network timeouts.
 - **Git push is orthogonal.** Pushing branches to a user-configured remote (backup, multi-machine) neither triggers nor depends on registration.
 
@@ -805,15 +812,15 @@ Every run acts for a user: `ctx.user()` returns them, and `ctx.memory` / `ctx.fi
 | `cogmo skills run` | The install owner with the default profile. |
 | Cron | `skills.run_as_user_id` / `run_as_profile_id`, built by `resolveSkillRunAs` inside the fire's `dispatch` step. |
 
-The cron identity is set iff `schedule` is. Every deploy that puts a schedule live writes it afresh, so new code never runs as whoever vouched for the code before it; a deploy that drops the schedule clears it. A deploy's identity comes from where it came from:
+The cron identity is set iff the schedule is live — `schedule` set on an enabled row (`chk_skills_run_as_iff_live_schedule`). Whoever puts a schedule live is who it runs as: every deploy and every `/enable` that does so writes the identity afresh, so code never runs as whoever vouched for the code before it, and disabling or dropping the schedule clears it. Each request names its origin (`SkillDeployOrigin`); none falls back to the owner by omission.
 
-| Deploy | User | Profile |
+| Request | User | Profile |
 |-|-|-|
 | `register_skill`, or a skill-repo coding task's auto-register | The requesting conversation's user | That conversation's profile |
-| Approval (Telegram tap) | The approver | The profile of the conversation in the chat the tap came from, when that conversation is the approver's; otherwise the default |
+| Approval tap, or `/enable` | The user who acted | The profile of the conversation the chat's active session points at, when that conversation is theirs; otherwise the default |
 | CLI `register` / `approve` / `rollback`, or a coding task with no conversation | The install owner | The default profile |
 
-An approver's persona is known only from a conversation of theirs. The keyboard is posted into the requesting conversation's chat, so an approval tapped there by the requester keeps the requesting profile.
+A user's persona is known only from a conversation of theirs. The approval keyboard is posted into the requesting conversation's chat, so a tap there by the requester takes the requesting profile while the chat's session still points at that conversation; after a boundary or expiry it takes the new conversation's profile, or the default when the chat has no session. For a scheduled skill, the approval prompt shows the pending deploy's schedule and says it will run as whoever approves, and the `/enable` reply says the schedule now runs as the enabler.
 
 A cron run's `ctx.memory.remember` waits in `pending_memories` until the Observer next drains that user's rows, on a `conversation/idle` long enough to pass the `too_short` gate. A user who rarely chats sees a scheduled skill's writes late.
 
@@ -1101,7 +1108,7 @@ skills (
   risk_tier         skill_risk_tier NOT NULL,        -- computed by classifier at deploy
   effects           JSONB NOT NULL,                  -- SkillEffectsSchema (declared effects list)
   schedule          TEXT,                            -- nullable: cron expression; null = not scheduled
-  run_as_user_id    UUID REFERENCES users(id),       -- nullable: set iff schedule is (chk_skills_run_as_iff_schedule).
+  run_as_user_id    UUID REFERENCES users(id),       -- nullable: set iff schedule is set and the row enabled (chk_skills_run_as_iff_live_schedule).
   run_as_profile_id UUID REFERENCES profiles(id),    -- nullable: same. Who a cron fire runs as; see Run-as identity.
   git_sha           TEXT NOT NULL,                   -- commit hash of current live version
   lockfile_hash     TEXT,                            -- nullable: null when manifest.dependencies is empty.
@@ -1220,13 +1227,14 @@ Public interface (canonical — see [Where the classifier runs](#where-the-class
 
 ```typescript
 interface SkillRunner {
-  register(opts: { branch: string }): Promise<RegisterResult>;
-  approveDeploy(opts: { pendingId: string }): Promise<RegisterResult>;
+  register(opts: { branch: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
+  approveDeploy(opts: { pendingId: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
   denyDeploy(opts: { pendingId: string; reason?: string }): Promise<void>;
-  rollback(opts: { name: string; toGitSha?: string }): Promise<RegisterResult>;
-  deregister(opts: { name: string }): Promise<void>;
-  list(): Promise<readonly SkillRow[]>;
-  invoke(opts: { name: string; inputs: unknown }): Promise<SkillRunResult>;
+  rollback(opts: { name: string; toGitSha: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
+  deregister(opts: { name: string }): Promise<DeregisterResult>;
+  enable(opts: { name: string; origin: SkillDeployOrigin }): Promise<EnableResult>;
+  list(): Promise<readonly SkillSummary[]>;
+  invoke(opts: { name: string; inputs: unknown; runAs: SkillRunAs }): Promise<SkillRunResult>;
 }
 ```
 
@@ -1257,7 +1265,7 @@ interface SkillRunner {
 | Review model | Risk-tiered auto-apply (`auto` / `notify` / `approve`) | Review-everything is friction. Classifier makes the "what's safe to auto-apply" function explicit; matches evolution graduation model and integrations.md permission tiers. |
 | Classifier execution | Branch + `register` RPC | No repo-watching. Branch ≠ deploy. Atomic, synchronous, authoritative. Pre-commit hook deferred unless ~30s feedback lag becomes painful. |
 | Who advances `main` | Only Cogmo's `register` RPC | Pre-receive hook rejects direct pushes to `main`. Makes "live on main" atomic with "classified and approved"; collapses transient "committed-but-rejected" states; structurally prevents force push. |
-| Concurrency on register | Advisory lock + pending-deploy check | `pg_advisory_xact_lock` per skill name serializes concurrent registers. Refuse if a pending-approval deploy exists. Idempotent for no-op SHAs. Standard DB-backed state-machine pattern. |
+| Concurrency on register | Advisory lock + pending-deploy check | `pg_advisory_xact_lock` per skill name queues concurrent registers; it doesn't refresh the loser's snapshot (audit filed in `todo.md`). Refuse if a pending-approval deploy exists. Idempotent for no-op SHAs. Standard DB-backed state-machine pattern. |
 | LLM tool surface | One tool per skill (dynamic per-turn tool list) | Matches progressive disclosure — skills appear in the tool list with their own name + description. No `invoke_skill` wrapper (would break discovery). Orchestrator rebuilds tool list each turn from `SkillRunner.list()`. |
 | Manifest | Single `SkillManifestSchema` (Zod) parsed from `SKILL.md` frontmatter | Five consumers read it: register RPC, classifier, dependency populator, dispatcher, tool registrar. One schema prevents field drift. Superset of Anthropic SKILL.md. |
 | State reset | Subinterpreter per task (3.13+), per-skill `recycle` opt-out | Fresh interpreter ≈ no state leakage, ~50ms. Opt-out handles C-extension hostile libraries. Flip default to `recycle` system-wide if widespread breakage. |

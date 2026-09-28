@@ -1073,3 +1073,36 @@ export const turnContexts = pgTable(
   },
   (t) => [unique("uq_turn_contexts_message").on(t.messageId)],
 );
+
+/**
+ * The system prompt a conversation's chat turns send for one epoch: rendered
+ * when the epoch opens, sent unchanged until the next. Immutable; unique on
+ * `opened_by`, the opening step's idempotency key. See
+ * design/prompt-caching.md → System Prompt Snapshot.
+ */
+export const systemPromptSnapshots = pgTable(
+  "system_prompt_snapshots",
+  {
+    id: pk(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id),
+    /** The turn-starting user row that opened the epoch. */
+    openedBy: uuid("opened_by")
+      .notNull()
+      .references(() => messages.id),
+    /** The first message the epoch's history holds after the conversation's latest summary. */
+    historyStart: uuid("history_start")
+      .notNull()
+      .references(() => messages.id),
+    rendered: text("rendered").notNull(),
+    /** Digest of everything `rendered` holds but core memory. */
+    configDigest: text("config_digest").notNull(),
+    createdAt: ts(),
+  },
+  // `opened_by` alone identifies an epoch, since a message belongs to one
+  // conversation; pairing it with the conversation makes the unique double as
+  // the read path: scanned backwards, it serves "the epoch opened latest in the
+  // transcript". No second index needed.
+  (t) => [unique("uq_system_prompt_snapshots_conv_opened_by").on(t.conversationId, t.openedBy)],
+);

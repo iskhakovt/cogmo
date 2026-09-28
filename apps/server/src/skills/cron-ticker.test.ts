@@ -165,7 +165,7 @@ describe("runSkillCronTick", () => {
     const row = await seedScheduled({
       scheduleNextRunAt: new Date("2026-01-01T09:00:00Z"),
     });
-    await tx((trx) => store.setSkillDisabled(trx, { id: row.id, disabled: true }));
+    await tx((trx) => store.disableSkill(trx, row.id));
 
     const events = await runSkillCronTick(
       {

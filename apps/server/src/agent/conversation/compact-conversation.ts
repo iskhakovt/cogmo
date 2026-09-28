@@ -1,7 +1,6 @@
 import type { Transactor } from "../../db/index.js";
 import { resolveLimits } from "../../llm/models.js";
 import type { LlmProviderResolver } from "../../llm/resolver.js";
-import type { TransportStore } from "../../transport/store/index.js";
 import {
   compactSameToolClusters,
   DEFAULT_KEEP_TURNS,
@@ -22,7 +21,6 @@ import { loadTurnHistory, summarizedSpan } from "./load-turn-history.js";
 export interface CompactConversationDeps {
   runInTx: Transactor;
   agentStore: AgentStore;
-  transportStore: TransportStore;
   resolveProvider: LlmProviderResolver;
   promptSource: PromptSource;
 }
@@ -154,12 +152,8 @@ export async function compactConversation(
     { userId, profile },
   );
   const context = await loadConversationContext(
-    {
-      runInTx: deps.runInTx,
-      agentStore: deps.agentStore,
-      transportStore: deps.transportStore,
-    },
-    { conversationId, userId, coreMemoryScope, profile },
+    { runInTx: deps.runInTx, agentStore: deps.agentStore },
+    { userId, coreMemoryScope, profile },
   );
   // Tool definitions are omitted: resolving the per-turn catalog means
   // composing MCP and skill tools, and the summarizer uses the system prompt

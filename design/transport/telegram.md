@@ -39,7 +39,7 @@ Implements `AdapterModule` contract (`channelType` + `setup()`). Token extracted
 | `/profile switch <name>` | `conversations.setProfile` | Change the active profile of the current conversation. Effective next turn. |
 | `/profile new <name>` | `profiles.create` | Interactive flow to collect prompt/model/tools, then create. |
 | `/profile edit <name>` | `profiles.update` | Interactive flow to change fields. |
-| `/profile delete <name>` | `profiles.delete` | Errors if conversations still reference it. |
+| `/profile delete <name>` | `profiles.delete` | Errors while conversations, message history, schedules that run as it, or steering rules scoped to it reference it; the reply names what to clear. |
 | `/model [<model>]` | `models.list`, `profiles.update({ model })` | Without arg: show current + list. With arg: change the active profile's model. |
 
 Errors from Transport (`profile_not_found`, `model_unavailable`, `alias_taken`, etc.) are mapped to user-friendly Telegram replies.

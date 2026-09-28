@@ -87,7 +87,7 @@ type TransportError =
   | { code: "identity_rejected" }
   | { code: "conversation_not_found" }
   | { code: "profile_not_found" }
-  | { code: "profile_in_use" }            // delete blocked: conversations still reference it
+  | { code: "profile_in_use" }            // delete blocked: conversations, messages, schedules or steering rules reference it
   | { code: "profile_name_taken" }
   | { code: "model_unavailable"; model: string }  // no model_providers row for this model
   | { code: "alias_taken" }
@@ -129,7 +129,7 @@ Methods:
 - `profiles.list` — returns the union of (a) all org profiles and (b) caller's user profiles. Other users' profiles are never visible.
 - `profiles.create` — always sets `user_id = caller`. Org profiles cannot be created via Transport.
 - `profiles.update` — caller must own the profile (`profile.user_id = caller.userId`). Org profiles always reject with `access_denied`. Validates `model` against `model_providers` (`user_selectable = true` only — see [providers.md](../providers.md)) and unique `(user_id, name)`.
-- `profiles.delete` — caller must own the profile. Rejects with `profile_in_use` if any conversation still references it; callers must migrate conversations (via `conversations.setProfile`) first.
+- `profiles.delete` — caller must own the profile. Rejects with `profile_in_use` while a conversation, stamped message history, a schedule that runs as it (`scheduled_tasks`, a live scheduled skill) or a steering rule scoped to it references it; callers migrate conversations (via `conversations.setProfile`) and remove or disable the schedules first. Message history pins a profile for good.
 
 Adapters never touch store rows directly. All profile mutations go through Transport so the ownership check and validation live in one place. There is no admin bypass in Transport — admin ops happen out-of-band.
 
@@ -259,7 +259,7 @@ All behavioral instructions — global, profile-scoped, and channel-scoped — l
 | null | set | all profiles, one channel |
 | set | set | one profile on one channel |
 
-Query at prompt assembly: `(profile_id = $p OR IS NULL) AND (channel_type IN $activeChannels OR IS NULL) AND active = true`. Cross-channel conversations union rules from all active channels.
+Query at prompt assembly: `(profile_id = $p OR IS NULL) AND active = true`. Every channel's rules render, each labelled with its channel, and the turn context names the channel types of the conversation's active sessions ([prompt-caching.md](../prompt-caching.md#system-prompt-snapshot-confirmed) → System Prompt Snapshot).
 
 Default channel rules are seeded when a channel is configured (setup wizard, same pattern as profile seeding), with `source = 'seed'`. They render last in `# Rules`, under Channel defaults, so a user's instruction or learned rule outranks them ([evolution.md](../evolution.md) → Explicit Instructions → Precedence); the Observer and consolidation leave them alone.
 
@@ -293,7 +293,7 @@ Each adapter picks the rendering path that suits its platform:
 A conversation can have sessions on multiple channels simultaneously (e.g., Telegram DM + web UI). Two implications:
 
 1. **Output** — `DeliveryRouter` calls each adapter's `renderOutput` per session. Same canonical markdown, different renders per channel. No special logic needed in the orchestrator.
-2. **Prompt** — Steering rules for all active channel types are unioned via the query's `IN` clause and rendered by section ([Channel-specific instructions](#channel-specific-instructions)).
+2. **Prompt** — The turn context lists every active channel type, and a labelled rule applies when its channel is among them ([Channel-specific instructions](#channel-specific-instructions)).
 
 ### Why this design
 
