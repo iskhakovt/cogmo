@@ -461,10 +461,9 @@ export class DefaultCtxHandler implements CtxHandler {
         "memory.remember requires effects: [writes_memory] in SKILL.md",
       );
     }
-    // Staged like the agent's `memory_retain`, as `source = 'skill'` naming
-    // the skill: the Observer classifies the fact and tags it. The skill's own
-    // tags reach it only as context, beside the skill's name, so a fact a
-    // skill fetched is not read as the user's.
+    // Staged for the Observer to classify and tag, as `source = 'skill'` with
+    // the skill's name. The skill's own tags reach it only as context, beside
+    // the name, so a fact a skill fetched is not read as the user's.
     const skillName = this.#manifest.name;
     const tags = parsed.data.tags ?? [];
     const fromSkill = `from skill '${skillName}'`;

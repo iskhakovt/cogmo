@@ -445,8 +445,8 @@ describe("buildRetainItems", () => {
   });
 
   it("names no skill when a replayed row has no skillName (Inngest replay safety)", () => {
-    // A classify step memoized before `skillName` joined `ClassifiedRow`
-    // deserializes without the key.
+    // A classify step memoized by an earlier deploy deserializes without
+    // `skillName`.
     const { skillName: _dropped, ...withoutSkill } = classified();
     void _dropped;
     const items = buildRetainItems([withoutSkill as ClassifiedRow]);

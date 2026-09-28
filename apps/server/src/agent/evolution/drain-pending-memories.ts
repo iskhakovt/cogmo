@@ -90,10 +90,8 @@ export interface ClassifyPendingResult {
  * Subset of `PendingMemory` the classifier actually reads. Declared
  * separately so callers can pass rows that have already been through
  * Inngest step memoization (where `createdAt` is a JSON string, not a
- * `Date`) — we don't use the timestamp here. Includes `profileClass`
- * and `skillName` so the post-classification retain step can stamp each
- * row with the class of the profile that staged it and the skill that
- * wrote it.
+ * `Date`) — we don't use the timestamp here. Includes `profileClass` and
+ * `skillName`, which the retain step stamps on each row.
  */
 export type ClassifierInput = Pick<
   PendingMemory,
