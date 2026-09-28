@@ -69,6 +69,7 @@ messages (
   profile_id               UUID FK → profiles NOT NULL,  -- active profile for the turn this row belongs to
   model                    TEXT NOT NULL,        -- model active for the turn; legacy backfill = '<legacy>' sentinel
   last_inbound_message_id  UUID NOT NULL,        -- attribution cursor. See debounce.md.
+  transcript_head          JSONB,                -- TranscriptHeadSchema; assistant rows. See prompt-caching.md → Head check.
   created_at               TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 -- Index: (conversation_id, id) — primary query for context assembly

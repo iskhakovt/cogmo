@@ -135,7 +135,7 @@ Tool handlers run in the loop, in the bare body unless marked durable — so a n
 - `get_current_time` returns a new millisecond timestamp on each re-execution.
 - A read re-executed after a same-turn write returns the written state: `read_file` after `edit_file`, `list_tasks` after `schedule_task`, `core_memory_read` after `core_memory_update`.
 - Later iterations and the persisted row then carry output the model never saw: a cache miss, and where preserved thinking is enforced, a 400 for every later thinking block ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (g)).
-- Step state holds their outputs, bounded by each tool's cap; `read_file` stops at 100,000 characters.
+- Step state holds their outputs: `read_file` stops at 100,000 characters, and the list tools return every entry or row they match.
 - A run in flight at that deploy gains `tool-iter<N>-<P>` steps for reads that ran in the bare body. Each read runs once more, is memoized, and can differ once from what the model saw. A run that has planned a parallel group meets the `step-not-found` residual under [Turn inputs are frozen](#handle-message-durability-map-confirmed).
 
 **Non-durable:** a handler whose output is a pure function of its input. After step 2, no built-in tool qualifies.

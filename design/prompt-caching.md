@@ -243,7 +243,7 @@ system_prompt_snapshots
 
 `opened_by` alone identifies an epoch, since a message belongs to one conversation; pairing it with the conversation makes the unique both the insert's conflict target and the read path for the current epoch, the snapshot opened latest in the transcript. Rows are immutable. Owned by `agent/store/`.
 
-`[confirmed]` `reason` is a `pgEnum` ([Head check](#head-check-confirmed) → Epoch rule). The migration that adds it fills existing rows from their order: a conversation's first snapshot gets `first_turn`, a later one whose `history_start` differs from its predecessor's gets `summary`, and the rest get `configuration`. The table's row in [data-model.md](data-model.md) changes with it.
+`[confirmed]` `reason` is a `pgEnum` ([Head check](#head-check-confirmed) → Epoch rule). The migration adds it nullable, fills existing rows, then sets NOT NULL, the backfill edited into the generated file as 0059's is. It fills them from their order: a conversation's first snapshot gets `first_turn`, a later one whose `history_start` differs from its predecessor's gets `summary`, and the rest get `configuration`. The table's row in [data-model.md](data-model.md) changes with it.
 
 On Opus 5, 5.5 and Fable, a rule change could instead be a mid-conversation `role: "system"` message, which has operator authority and avoids the rewrite. Sonnet 5 has none, so an epoch is the one path that works on every model.
 
@@ -294,12 +294,18 @@ A model switch is not an edit. A model that can't read a block drops it unbilled
 | d | An image or document turn sends resolved blocks; later turns reload the row as a JSON string | The turn row stores attachment reference blocks, and every request renders them the same way: base64 of the write-once object | Image tokens stay as cache reads until a summary; one object read per attachment per invocation, until the per-run memo | `[confirmed]`: data model |
 | e | Strategy 0 rewrites an earlier `tool_result` whenever a same-tool cluster crosses its trigger | Retired from turns and `/compact` | Clusters stay verbatim until clearing or a summary | `[confirmed]` |
 | f | Stage turns send a narrower tool set | [One Prefix per Conversation](#one-prefix-per-conversation-proposed) | Nothing | `[proposed]` |
-| g | Non-durable tools re-execute on every invocation, so later iterations and the persisted row can carry output the model never saw: a new timestamp, a read after a same-turn write | Every tool whose output can change during the turn is durable, which is every tool ([crash-recovery.md](crash-recovery.md#tool-durability-policy)) | A step boundary per call; outputs in step state, bounded by each tool's cap | `[confirmed]` |
+| g | Non-durable tools re-execute on every invocation, so later iterations and the persisted row can carry output the model never saw: a new timestamp, a read after a same-turn write | Every tool whose output can change during the turn is durable, which is every tool ([crash-recovery.md](crash-recovery.md#tool-durability-policy)) | A step boundary per call; outputs in step state | `[confirmed]` |
 | h | Forks, meaning the summarization call and degraded-reply synthesis, replay the conversation's thinking without its `system` or `tools` | Every fork, on any model, sends the snapshot `system` and the frozen `tools` with `tool_choice: none` (a new `ChatParams.toolChoice`) and appends its instruction as a user message. A model that can't read the blocks drops them, unbilled | The fork's messages miss the cache: `tool_choice: none` invalidates it | `[confirmed]`; the 400 without `tools` and the 200 with `tool_choice: none` are measured |
 
 - **(b)** While summarization keeps failing, every truncating turn opens an epoch ([Strategy 3](context-management.md#strategy-3-truncate-trigger-95)).
-- **(d)** This is also a quality fix: later turns see the image, not a JSON string naming its object path. The cost is size: every request re-sends each attachment's bytes until a summary replaces its turn, against Anthropic's 32 MB request cap. `[confirmed]` A turn whose view carries more attachment bytes than a budget under that cap opens an epoch (`compaction`) that replaces attachments before its opening row, oldest first, with a placeholder naming the file; later turns of the epoch do the same to the same rows. Anthropic's Files API (`file_id`) would take the bytes out of the request; it is `[research]` and Anthropic-only.
+- **(d)** This is also a quality fix: later turns see the image, not a JSON string naming its object path. The cost is size: every request re-sends each attachment's bytes until a summary replaces its turn, against Anthropic's 32 MB request cap. `[confirmed]` A turn whose view carries more than 24 MB of attachment base64 opens an epoch (`compaction`) that replaces attachments before its opening row, oldest first, with a placeholder naming the file; later turns of the epoch do the same to the same rows. Anthropic's Files API (`file_id`) would take the bytes out of the request; it is `[research]` and Anthropic-only.
 - **(e)** Decision and open alternative: [Retirement](context-management.md#retirement-confirmed).
+
+### Stored shapes `[confirmed]`
+
+- **Harness tag.** Text and `tool_result` blocks take an optional `harness`: `continuation` (the empty-reply continuation prompt, a user text block), `volume_nudge` (the volume-cluster nudge on a `tool_result`) or `truncation_notice` (an assistant text block). `MessageContentSchema` validates it. Adapters map blocks field by field, so it never reaches the wire, and the head check, which digests the request as sent, ignores it. The web history, the Observer's extraction and the failure-reflector drop tagged blocks.
+- **Attachment references.** A turn row stores `image_ref` and `document_ref` blocks (`path`, `mediaType`, and `name` for a document), the shapes `contentToBlocks` produces. The renderer resolves each to base64 of its write-once object on every request.
+- **The turn row.** `findUserMessageByInbound` matches the user row with the turn's inbound cursor and no harness block, from step 3. Content type can't tell them apart: an attachment turn's row is a block array, and the continuation prompt shares the turn's cursor.
 
 ### One renderer `[confirmed]`
 
@@ -341,11 +347,11 @@ A digest chain runs over the provider-neutral request: `h₀ = H(system, tools)`
   - `first_turn`;
   - `configuration`: prompt text, rules including `rule_set`/`rule_remove`, tools or scope;
   - `summary`;
-  - `compaction`: this turn's Strategy 3 or unstored summary, or the previous turn's;
+  - `compaction`: this turn's Strategy 3, unstored summary or attachment budget ((d)), or the previous turn's;
   - `prefix_violation`.
 
   When several apply, the first in this list is recorded.
-- **Replay safety.** Every input is memoized or derived from memoized values: the iteration outcomes, `load-turn-transcript`, the frozen tool table and the snapshot. `persist-new-messages` writes the head, and the verdict gates `open-system-prompt-epoch` on memoized state alone. The only bare-body cost is re-running the hash. The head is optional in `llm-iter<N>`'s outcome and in `load-turn-transcript`'s result, because a memo written before the deploy lacks it. Absent means skip: an iteration without a head gets no comparison, a turn whose last request has none stores no head, and the next turn, like one whose latest row predates the column, skips the check.
+- **Replay safety.** Every input is memoized or derived from memoized values: the iteration outcomes, `load-turn-transcript`, the frozen tool table, the snapshot, and `count-tokens-<n>` and `summarize-prefix-outcome`, which decide a `compacted` head and source (b)'s epoch. `persist-new-messages` writes the head, and the verdict gates `open-system-prompt-epoch` on memoized state alone. The only bare-body cost is re-running the hash. The head is optional in `llm-iter<N>`'s outcome and in `load-turn-transcript`'s result, because a memo written before the deploy lacks it. Absent means skip: an iteration without a head gets no comparison, a turn whose last request has none stores no head, and the next turn, like one whose latest row predates the column, skips the check.
 
 `transcript_head` is a nullable JSONB column on `messages` (`TranscriptHeadSchema`), set on assistant rows as they are written. The `messages` schema in [transport/overview.md](transport/overview.md) and its row in [data-model.md](data-model.md) change with it.
 
@@ -365,7 +371,7 @@ The policy is injected as `prefixViolation: "reopen" | "throw"`. Production wiri
 
 The adapter also reports what the provider sees, the last layer and the ground truth. The guard sees cogmo's canonical request; only the server checks what the provider binds: the adapter's serialization, attachment bytes, and what counts as an edit. `input_transformations` is the signal Anthropic says to count and alert on. An explicit `prefix_mismatch_behavior` makes behaviour independent of account age: on an account enforced by default, a missed edit with no setting is a 400 on every later turn of that conversation.
 
-**The header first** (Rollout step 5). The adapter sends `thinking-binding-controls-2026-08-01` on every first-party request and sets no field. On this account the header alone drops nothing and reports each mismatch as `thinking_mismatch_allowed`, and Sonnet 5, Haiku 4.5 and Opus 5.5 all accept it ([Validation](#validation-confirmed)). Anthropic-compatible third-party endpoints get no header, since they may reject an unknown beta. Every request carries the header from the first one, which keeps the beta set constant for cache diagnostics.
+**The header first** (Rollout step 5). The adapter sends `thinking-binding-controls-2026-08-01` on every first-party request and sets no field. On this account the header alone drops nothing and reports each mismatch as `thinking_mismatch_allowed`, and Sonnet 5, Haiku 4.5 and Opus 5.5 all accept it ([Validation](#validation-confirmed)). Anthropic-compatible third-party endpoints get no header, since they may reject an unknown beta. Every request carries the header from the first one, which keeps the beta set constant for cache diagnostics. That makes this step telemetry only on an account not enforced by default: Anthropic's migration guide gives the header alone the beta's default, `drop_block`, so on an enforced account it already drops blocks as step 8 would.
 
 **`drop_block` later** (step 8). Setting the field to either value opts this account into enforcement. It waits until (a), (b), (d) and (h) are closed and a soak shows no unexplained mismatch. Production then sends `drop_block`, a setting on the provider row (`llm_providers.attrs.prefixMismatchBehavior`), so a deployment on an account enforced by default can set it from the start. Where the field is sent, the integration and live tiers send `"error"` from step 5.
 
@@ -569,6 +575,7 @@ llmock's request journal can't serve here: it stores its own OpenAI-shaped conve
   - a view over the attachment budget opens a `compaction` epoch that replaces the oldest attachments before its opening row with placeholders, and later turns of the epoch replace the same ones;
   - a turn whose compaction truncates opens an epoch, and so does the next one when it can't reproduce the view; a chat turn after a stage turn records `configuration`;
   - the summarization and degraded-reply requests carry the snapshot `system` and the frozen `tools` with `tool_choice: none`, and a summarization on a turn that opens an epoch carries no thinking block;
+  - the `input_transformations` parser sets `diverged` and counts once for each of `thinking_mismatch_allowed`, `thinking_dropped` and `model_binding_mismatch`;
   - under `throw`, each of the above fails the test at the request that diverges.
 
 ### Integration tier (replay, every PR)
@@ -643,7 +650,7 @@ Recorded fixtures match on the last user message (`match: { userMessage }`), so 
 ## Open questions
 
 - **Core-memory edit frequency.** Few edits so far, from little use and from the previous guidance, which missed most core facts mentioned in passing ([memory.md](memory.md) → Core Memory vs Hindsight → Evaluation); re-measure edits per conversation-day on data collected under the current guidance to size what the snapshot saves.
-- **Anthropic-compatible endpoints.** OpenRouter's `/api/v1/messages` accepts the Anthropic SDK's `x-api-key` and top-level `cache_control`: on `anthropic/claude-haiku-4.5`, a repeated request read its whole prefix from cache (measured 2026-09-28). Any other endpoint an Anthropic-protocol `llm_providers` row points at needs the same check, or an explicit tail marker for that row.
+- **Anthropic-compatible endpoints.** OpenRouter's `/api/v1/messages` accepts the Anthropic SDK's `x-api-key` and top-level `cache_control`: on `anthropic/claude-haiku-4.5`, a repeated request read its whole prefix from cache (measured 2026-09-28). Any other endpoint an Anthropic-protocol `llm_providers` row points at needs the same check, or an explicit tail marker for that row. Such a row also needs `context_management` and the beta header checked; OpenRouter documents `context_management`, unmeasured.
 - **Live tier in CI.** The scheduled workflow needs Anthropic, OpenAI and OpenRouter API keys as repository secrets (xAI optional, reached through OpenRouter until a direct key exists); until they exist, the live tier runs locally only.
 - **GPT-5.6 cache accounting.** Scenario D's OpenAI route runs gpt-5.4-nano, so what `prompt_cache_key` does to GPT-5.6's cache accounting, which bills writes, is unmeasured; a GPT-5.6 route would measure it.
 - **The xAI header.** `x-grok-conv-id` goes out as xAI documents it but has never met the real endpoint; a direct xAI key would add an xAI route to scenario D.
