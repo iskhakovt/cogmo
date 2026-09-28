@@ -155,14 +155,22 @@ async def run(inputs, ctx):
 
 /**
  * Returns the container's hostname (= docker short container ID by
- * default) and the supervisor's PID. Two invocations from the same warm
- * worker share both — the container survives across tasks AND the
- * supervisor process survives across tasks (forking children per task).
+ * default), the task's parent (its relay) and grandparent (the
+ * supervisor). Two invocations on the same warm worker share the
+ * container and the supervisor, and each gets its own relay.
  */
 const HOSTNAME_BODY = `
 import os, socket
+
+def _ppid(pid):
+    with open(f"/proc/{pid}/stat") as f:
+        stat = f.read()
+    # Field 4; the command name before it may contain spaces or parens.
+    return int(stat[stat.rindex(")") + 2:].split()[1])
+
 async def run(inputs, ctx):
-    return {"host": socket.gethostname(), "ppid": os.getppid()}
+    relay = os.getppid()
+    return {"host": socket.gethostname(), "relay": relay, "supervisor": _ppid(relay)}
 `;
 
 /**
@@ -202,17 +210,23 @@ describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl tier-2 (sysbox runtime, GHA only)"
       defaultRunAs: DEFAULT_RUN_AS,
     });
 
-    await runner.__registerForTests({
-      name: "tier2-now",
-      manifestSource: containerManifest("tier2-now"),
-      body: NOW_BODY,
-    });
+    try {
+      await runner.__registerForTests({
+        name: "tier2-now",
+        manifestSource: containerManifest("tier2-now"),
+        body: NOW_BODY,
+      });
 
-    const result = await runner.invoke({ name: "tier2-now", inputs: { x: 7 }, runAs: RUN_AS });
-    expect(result.status).toBe("success");
-    expect(result.output).toMatchObject({ echoed: 8 });
-    // ctx.now returns an ISO-8601 string from the host's clock.
-    expect((result.output as { got: string }).got).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+      const result = await runner.invoke({ name: "tier2-now", inputs: { x: 7 }, runAs: RUN_AS });
+      expect(result.status).toBe("success");
+      expect(result.output).toMatchObject({ echoed: 8 });
+      // ctx.now returns an ISO-8601 string from the host's clock.
+      expect((result.output as { got: string }).got).toMatch(
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/,
+      );
+    } finally {
+      await runner.shutdown();
+    }
   }, 180_000);
 
   it("kills a tier-2 container that exceeds wall_clock_s", async () => {
@@ -269,26 +283,30 @@ resources:
       // Tighter idle/recycle caps don't matter for a two-task test.
     });
 
-    await runner.__registerForTests({
-      name: "tier2-host",
-      manifestSource: containerManifest("tier2-host"),
-      body: HOSTNAME_BODY,
-    });
+    try {
+      await runner.__registerForTests({
+        name: "tier2-host",
+        manifestSource: containerManifest("tier2-host"),
+        body: HOSTNAME_BODY,
+      });
 
-    const r1 = await runner.invoke({ name: "tier2-host", inputs: {}, runAs: RUN_AS });
-    const r2 = await runner.invoke({ name: "tier2-host", inputs: {}, runAs: RUN_AS });
-    expect(r1.status).toBe("success");
-    expect(r2.status).toBe("success");
-    const o1 = r1.output as { host: string; ppid: number };
-    const o2 = r2.output as { host: string; ppid: number };
-    // Same container — pool reused the warm worker.
-    expect(o1.host).toBe(o2.host);
-    expect(o1.host).toMatch(/^[0-9a-f]{12}$/);
-    // Same supervisor process — children forked from it across tasks.
-    // If supervisors are spawning per task, ppid would differ.
-    expect(o1.ppid).toBe(o2.ppid);
-
-    await runner.shutdown();
+      const r1 = await runner.invoke({ name: "tier2-host", inputs: {}, runAs: RUN_AS });
+      const r2 = await runner.invoke({ name: "tier2-host", inputs: {}, runAs: RUN_AS });
+      expect(r1.status).toBe("success");
+      expect(r2.status).toBe("success");
+      const o1 = r1.output as { host: string; relay: number; supervisor: number };
+      const o2 = r2.output as { host: string; relay: number; supervisor: number };
+      // Same container — pool reused the warm worker.
+      expect(o1.host).toBe(o2.host);
+      expect(o1.host).toMatch(/^[0-9a-f]{12}$/);
+      // Same supervisor across tasks: it is long-lived, and a supervisor
+      // per task would show a different grandparent.
+      expect(o1.supervisor).toBe(o2.supervisor);
+      // A relay per task: the task's parent is new each time.
+      expect(o1.relay).not.toBe(o2.relay);
+    } finally {
+      await runner.shutdown();
+    }
   }, 180_000);
 
   it("invokes a tier-2 skill with declared deps — populator + venv activation end-to-end", async () => {
