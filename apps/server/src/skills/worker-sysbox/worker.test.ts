@@ -365,9 +365,9 @@ describe("SysboxSkillWorker", () => {
         image: "python:3.14-slim",
         expiresAt: new Date(Date.now() + 60_000),
       });
-      expect(w.tryAcquire()).toBe(true);
+      expect(w.tryAcquire().isOk()).toBe(true);
       expect(w.state).toBe("busy");
-      expect(w.tryAcquire()).toBe(false);
+      expect(w.tryAcquire().isErr()).toBe(true);
     });
 
     it("release flips busy → idle (and is a no-op from any other state)", async () => {
@@ -430,7 +430,7 @@ describe("SysboxSkillWorker", () => {
         expiresAt: new Date(Date.now() + 60_000),
       });
 
-      expect(w.tryAcquire()).toBe(true);
+      expect(w.tryAcquire().isOk()).toBe(true);
       const r = await w.invoke(invokeParams("t-7"));
       expect(r).toMatchObject({ ok: true, output: { x: 1 }, workerReusable: true });
       expect(w.taskCount).toBe(1);
@@ -812,7 +812,7 @@ describe("SysboxSkillWorker", () => {
       await new Promise((r) => setImmediate(r));
 
       expect(w.state).toBe("dead");
-      expect(w.tryAcquire()).toBe(false);
+      expect(w.tryAcquire().isErr()).toBe(true);
     });
 
     it("does not serve the previous task's late ctx_call with the next task's handler", async () => {

@@ -1,3 +1,4 @@
+import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { SandboxClient } from "../../sandbox/index.js";
@@ -48,17 +49,17 @@ function fakeWorker(workerId: string, opts: FakeWorkerOptions = {}): FakeWorker 
     idleMs: (n) => Math.max(0, n - lastUsed),
     ageMs: (n) => Math.max(0, n - createdAt),
     tryAcquire: () => {
-      if (status !== "idle") return false;
+      if (status !== "idle") return err(`cannot acquire a worker that is ${status}`);
       status = "busy";
       held = true;
-      return true;
+      return ok(undefined);
     },
     release: () => {
-      if (!held) return false;
+      if (!held) return err("no task holds the worker");
       held = false;
       if (status === "busy") status = "idle";
       else disposable.resolve();
-      return true;
+      return ok(undefined);
     },
     die: (reason) => {
       if (status === "dead" || status === "disposed") return;

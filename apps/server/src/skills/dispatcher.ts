@@ -153,17 +153,17 @@ export class Dispatcher {
     return admits(this.#state);
   }
 
-  /** Lease an idle worker for one task. False unless it is idle. */
-  tryAcquire(): boolean {
-    return this.#command({ type: "acquire" }).isOk();
+  /** Lease an idle worker for one task; errs with why any other can't be. */
+  tryAcquire(): Result<void, string> {
+    return this.#command({ type: "acquire" });
   }
 
   /**
    * Give back a worker this caller holds: a leased one goes idle, a dead one
-   * becomes disposable. False otherwise — a task on it keeps it held.
+   * becomes disposable. Errs with why otherwise — a task on it keeps it held.
    */
-  release(): boolean {
-    return this.#command({ type: "release" }).isOk();
+  release(): Result<void, string> {
+    return this.#command({ type: "release" });
   }
 
   /**

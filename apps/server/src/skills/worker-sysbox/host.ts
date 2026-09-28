@@ -115,9 +115,10 @@ export async function runOnSysboxContainer(
         depsCacheVolumeName: params.depsCacheVolumeName,
       }),
     });
-    if (!worker.tryAcquire()) {
+    const leased = worker.tryAcquire();
+    if (leased.isErr()) {
       // Brand-new worker should always be idle; this is a programmer error.
-      throw new Error("invariant: fresh worker not acquirable");
+      throw new Error(`invariant: fresh worker not acquirable: ${leased.error}`);
     }
     return await worker.invoke({
       taskId: params.taskId,

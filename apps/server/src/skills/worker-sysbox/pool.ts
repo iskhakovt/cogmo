@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { Result } from "neverthrow";
 import { logger } from "../../logger.js";
 import type { ResourceLimits, SandboxClient } from "../../sandbox/index.js";
 import {
@@ -97,9 +98,10 @@ export interface WorkerHandle {
   readonly disposable: Promise<void>;
   idleMs(now: number): number;
   ageMs(now: number): number;
-  tryAcquire(): boolean;
-  /** Give back what `tryAcquire` took. False if nothing was held. */
-  release(): boolean;
+  /** Lease the worker for one task; errs with why it can't be. */
+  tryAcquire(): Result<void, string>;
+  /** Give back what `tryAcquire` took; errs with why if nothing was held. */
+  release(): Result<void, string>;
   retire(): void;
   invoke(params: InvokeParams): Promise<InvokeResult>;
   dispose(): Promise<void>;
@@ -420,7 +422,7 @@ export class SysboxWorkerPool {
 
   /** Lease `worker` for a task, if it is idle. */
   #lease(worker: WorkerHandle): boolean {
-    if (!worker.tryAcquire()) return false;
+    if (worker.tryAcquire().isErr()) return false;
     this.#leasedOrRetired.add(worker);
     return true;
   }
@@ -521,8 +523,12 @@ export class SysboxWorkerPool {
         this.#retire(worker);
       }
     }
-    if (!worker.release()) {
-      log.warn({ workerId: worker.workerId }, "released a worker no task held");
+    const released = worker.release();
+    if (released.isErr()) {
+      log.warn(
+        { workerId: worker.workerId, reason: released.error },
+        "released a worker no task held",
+      );
     }
     if (worker.state !== "idle") return;
     // Hand the just-released worker to a queued waiter, if any.

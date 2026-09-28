@@ -428,16 +428,16 @@ export class SysboxSkillWorker {
     );
   }
 
-  /** Lease an idle worker for one task. False unless it is idle. */
-  tryAcquire(): boolean {
+  /** Lease an idle worker for one task; errs with why any other can't be. */
+  tryAcquire(): Result<void, string> {
     return this.#dispatcher.tryAcquire();
   }
 
   /**
    * Return a leased worker to idle once its task has exited; a dead one this
-   * caller held becomes disposable. False if the caller holds nothing.
+   * caller held becomes disposable. Errs with why if the caller holds nothing.
    */
-  release(): boolean {
+  release(): Result<void, string> {
     return this.#dispatcher.release();
   }
 

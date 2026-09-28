@@ -157,9 +157,9 @@ async function runTask(
   const wallClockS = params.wallClockS ?? DEFAULT_WALL_CLOCK_S.wasm;
   const finished = new AbortController();
   try {
-    // False only if the thread died since its handshake; the invoke below
+    // Refused only if the thread died since its handshake; the invoke below
     // then fails the task as a value.
-    dispatcher.tryAcquire();
+    void dispatcher.tryAcquire();
 
     const wallClock = timeoutSignal(wallClockS * 1000);
     wallClock.addEventListener(

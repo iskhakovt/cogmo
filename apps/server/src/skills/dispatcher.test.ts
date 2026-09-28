@@ -78,7 +78,7 @@ async function leased(ch: Channel, opts: Partial<DispatcherOptions> = {}): Promi
   const opened = open(ch, opts);
   ch.emit({ type: "ready" });
   const d = unwrap(await opened);
-  expect(d.tryAcquire()).toBe(true);
+  expect(d.tryAcquire().isOk()).toBe(true);
   return d;
 }
 
@@ -443,7 +443,7 @@ describe("Dispatcher", () => {
 
     expect(await d.dead).toBe("transport: worker closed its output");
     expect(ch.close).toHaveBeenCalledTimes(1);
-    expect(d.tryAcquire()).toBe(false);
+    expect(d.tryAcquire().isErr()).toBe(true);
   });
 
   it("keeps the close reason when the stream ends after close()", async () => {
@@ -804,17 +804,17 @@ describe("Dispatcher", () => {
       const ch = channel();
       const d = await leased(ch);
       const outcome = d.invoke(INVOKE, { ctxHandler: noopHandler(), deadline: NEVER });
-      expect(d.release()).toBe(false);
+      expect(d.release().isErr()).toBe(true);
       expect(d.state).toBe("running");
-      expect(d.tryAcquire()).toBe(false);
+      expect(d.tryAcquire().isErr()).toBe(true);
 
       ch.emit(result(1));
       ch.emit({ type: "task_exited", id: "task-1" });
       await outcome;
       expect(d.state).toBe("leased");
-      expect(d.release()).toBe(true);
+      expect(d.release().isOk()).toBe(true);
       expect(d.state).toBe("idle");
-      expect(d.tryAcquire()).toBe(true);
+      expect(d.tryAcquire().isOk()).toBe(true);
     });
 
     it("makes a worker that dies unheld disposable at once", async () => {
@@ -831,7 +831,7 @@ describe("Dispatcher", () => {
       await flush();
 
       expect(disposable).toBe(true);
-      expect(d.release()).toBe(false);
+      expect(d.release().isErr()).toBe(true);
     });
 
     it("keeps a worker that dies held until its caller releases it", async () => {
@@ -849,10 +849,10 @@ describe("Dispatcher", () => {
       expect(await d.dead).toBe("transport: worker closed its output");
       expect(disposable).toBe(false);
 
-      expect(d.release()).toBe(true);
+      expect(d.release().isOk()).toBe(true);
       await flush();
       expect(disposable).toBe(true);
-      expect(d.release()).toBe(false);
+      expect(d.release().isErr()).toBe(true);
     });
 
     it("aborting its signal closes the channel", async () => {
