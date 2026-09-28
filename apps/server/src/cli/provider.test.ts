@@ -172,6 +172,29 @@ describe("cogmo provider add — cache dialect", () => {
     expect(err.join("\n")).toMatch(/--cache-dialect applies to OpenAI-compatible providers only/);
     expect(addProviderSpy).not.toHaveBeenCalled();
   });
+
+  it("reports addProvider's failure as a failed add, exit 1", async () => {
+    addProviderSpy.mockRejectedValue(new Error("duplicate provider name"));
+    const { io, err } = makeIo();
+
+    const code = await run(["add", "openrouter", "or", "sk-or-1234567890"], makeDeps(), io);
+
+    expect(code).toBe(1);
+    expect(err).toEqual(["Failed to add provider: duplicate provider name"]);
+  });
+
+  it("lets a bootstrap failure propagate instead of reporting a failed add", async () => {
+    const { io, err } = makeIo();
+    const cli = providerCli(io, async () => {
+      throw new Error("DATABASE_URL unreachable");
+    });
+
+    await expect(runCli(cli, ["add", "openrouter", "or", "sk-or-1234567890"], io)).rejects.toThrow(
+      "DATABASE_URL unreachable",
+    );
+    expect(err).toEqual([]);
+    expect(addProviderSpy).not.toHaveBeenCalled();
+  });
 });
 
 const CLAUDE = {

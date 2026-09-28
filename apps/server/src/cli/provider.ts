@@ -162,9 +162,10 @@ async function addProviderCmd(
   }
   const dialect = defaultCacheDialect(providerType, cacheDialect);
 
+  const deps = await loadDeps();
   let result: AddProviderResult;
   try {
-    result = await addProvider(await loadDeps(), {
+    result = await addProvider(deps, {
       name,
       type: adapterType,
       ...(baseUrl && { baseUrl }),
