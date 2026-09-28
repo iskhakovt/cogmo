@@ -17,7 +17,7 @@ import {
   SetupEnvError,
   validateNonInteractive,
 } from "./non-interactive.js";
-import { type ResetScope, VALID_RESETS } from "./reset.js";
+import type { ResetScope } from "./reset-scopes.js";
 import { runWizard, WizardCancelled } from "./wizard.js";
 
 export interface SetupOptions {
@@ -33,11 +33,6 @@ export interface SetupOptions {
  * non-interactive mode.
  */
 export async function runSetup(opts: SetupOptions = {}): Promise<void> {
-  if (opts.reset && !VALID_RESETS.has(opts.reset)) {
-    console.error(`Invalid --reset value: "${opts.reset}". Use: secrets, channels, or all`);
-    process.exit(1);
-  }
-
   // Master key is required for setup
   const masterKey = resolveEnvFile(process.env, "COGMO_MASTER_KEY");
   if (!masterKey) {

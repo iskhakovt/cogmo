@@ -3,7 +3,7 @@
  *
  * Two entry points dispatched from `src/main.ts`:
  *
- *   `cogmo migrate-memories <bankId>` — reclassifies a Hindsight bank's
+ *   `cogmo migrate-memories [bankId]` — reclassifies a Hindsight bank's
  *     un-classified memories through the Observer pipeline (existing
  *     `migrate-untagged-memories.ts` path). Stages every row into
  *     `pending_memories`, clears the bank, lets the next
@@ -24,27 +24,40 @@
  *
  * `bankId` defaults to the first user's id (Cogmo's `bankId == userId`
  * convention) when omitted, matching the single-user-per-deployment
- * model. Operators with multiple users in one DB pass `--bankId=<id>`.
+ * model. Operators with multiple users in one DB name the bank.
  */
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type Client, type HindsightClient, sdk } from "@vectorize-io/hindsight-client";
-import type { Transactor } from "../../db/index.js";
-import { logger } from "../../logger.js";
-import { createHindsightClients, describeHindsightError } from "../../memory/hindsight-clients.js";
-import type { AgentStore } from "../store/index.js";
+import {
+  command,
+  extendType,
+  option,
+  optional,
+  positional,
+  string,
+  subcommands,
+  type Type,
+} from "cmd-ts";
+import * as R from "remeda";
 import {
   type BackfillDeps,
   type RawBankMemory as BackfillRawBankMemory,
   backfillProfileClass,
   type RetainItem,
-} from "./backfill-profile-class.js";
+} from "../agent/evolution/backfill-profile-class.js";
 import {
   type MigrationDeps,
   migrateUntaggedMemories,
   type RawBankMemory,
-} from "./migrate-untagged-memories.js";
+} from "../agent/evolution/migrate-untagged-memories.js";
+import type { AgentStore } from "../agent/store/index.js";
+import type { Transactor } from "../db/index.js";
+import { logger } from "../logger.js";
+import { createHindsightClients, describeHindsightError } from "../memory/hindsight-clients.js";
+import { identifier, optionalOption } from "./args.js";
+import type { LoadDeps } from "./run.js";
 
 export interface MigrationCliDeps {
   hindsightUrl: string;
@@ -57,7 +70,7 @@ export interface MigrationCliDeps {
    */
   verifyHindsight: () => Promise<void>;
   /**
-   * Resolves the default bank id when `--bankId` is omitted. Returns
+   * Resolves the default bank id when none is given. Returns
    * the first user's id by convention. Returns `null` when no user
    * exists yet — the CLI surfaces a friendly usage line instead of
    * a thrown stack (operators run `cogmo seed` or the setup wizard
@@ -91,12 +104,80 @@ function makeHindsightShared(deps: MigrationCliDeps): {
   return { hindsight: client, sdkClient };
 }
 
-/** `cogmo migrate-memories <bankId>` */
-export async function runMigrateMemoriesCli(
-  args: ReadonlyArray<string>,
+const BANK_ID_HELP = "The Hindsight bank; defaults to the first user's id.";
+
+/** Comma-separated class names, trimmed and de-duplicated; at least one. */
+const classTagList: Type<string, string[]> = extendType(string, {
+  displayName: "a,b",
+  async from(value) {
+    const classTags = R.pipe(
+      value.split(","),
+      R.map((t) => t.trim()),
+      R.filter((t) => t.length > 0),
+      R.unique(),
+    );
+    if (classTags.length === 0) {
+      throw new Error("--tag=<a,b> must contain at least one non-empty class name.");
+    }
+    return classTags;
+  },
+});
+
+export function migrateMemoriesCli(loadDeps: LoadDeps<MigrationCliDeps>) {
+  return command({
+    name: "migrate-memories",
+    description:
+      "Reclassify a bank's memories through the Observer: back up and clear the bank, staging every row in pending_memories for the next conversation/idle drain.",
+    args: {
+      bankId: positional({
+        type: optional(identifier("bankId")),
+        displayName: "bankId",
+        description: BANK_ID_HELP,
+      }),
+    },
+    handler: async ({ bankId }) => runMigrateMemoriesCli({ bankId }, await loadDeps()),
+  });
+}
+
+export function backfillCli(loadDeps: LoadDeps<MigrationCliDeps>) {
+  return subcommands({
+    name: "backfill",
+    description: "One-shot backfills over a Hindsight bank.",
+    cmds: {
+      "profile-class": command({
+        name: "profile-class",
+        description:
+          "Stamp profile_class:<tag> onto a bank's memories without reclassifying them. Rows already carrying any profile_class:* tag are skipped, so pass every class on the first run.",
+        args: {
+          classTags: option({
+            long: "tag",
+            type: classTagList,
+            description: "Comma-separated class names to stamp.",
+          }),
+          bankId: optionalOption({
+            long: "bankId",
+            type: identifier("bankId"),
+            description: BANK_ID_HELP,
+          }),
+        },
+        examples: [
+          {
+            description: "Opt the default bank into two classes",
+            command: "cogmo backfill profile-class --tag=general,legacy",
+          },
+        ],
+        handler: async (args) => runBackfillProfileClassCli(args, await loadDeps()),
+      }),
+    },
+  });
+}
+
+/** `cogmo migrate-memories [bankId]` */
+async function runMigrateMemoriesCli(
+  args: { bankId: string | undefined },
   deps: MigrationCliDeps,
 ): Promise<number> {
-  const bankId = args[0] ?? (await deps.resolveDefaultBankId());
+  const bankId = args.bankId ?? (await deps.resolveDefaultBankId());
   if (!bankId) {
     console.error(
       "Usage: cogmo migrate-memories <bankId>\n" +
@@ -131,60 +212,13 @@ export async function runMigrateMemoriesCli(
   return 0;
 }
 
-/**
- * Parse `cogmo backfill profile-class --tag=a,b [--bankId=X]`. Returns
- * the parsed shape or a usage-error string. `--tag` is required; class
- * names are split on comma, trimmed, and de-duplicated. Empty class
- * names rejected.
- */
-export interface ParsedBackfillArgs {
-  classTags: string[];
-  bankIdOverride: string | null;
-}
-
-export function parseBackfillArgs(args: ReadonlyArray<string>): ParsedBackfillArgs | string {
-  // First positional arg must be `profile-class` — a forward-compatible
-  // namespace so future backfill subcommands don't collide on flags.
-  if (args[0] !== "profile-class") {
-    return "Usage: cogmo backfill profile-class --tag=<a,b> [--bankId=<id>]";
-  }
-  let bankIdOverride: string | null = null;
-  let tagArg: string | null = null;
-  for (const arg of args.slice(1)) {
-    if (arg.startsWith("--tag=")) tagArg = arg.slice("--tag=".length);
-    else if (arg.startsWith("--bankId=")) bankIdOverride = arg.slice("--bankId=".length);
-    else
-      return `Unknown argument "${arg}". Usage: cogmo backfill profile-class --tag=<a,b> [--bankId=<id>]`;
-  }
-  if (tagArg === null) {
-    return "Missing --tag=<a,b>. At least one class tag is required.";
-  }
-  const classTags = Array.from(
-    new Set(
-      tagArg
-        .split(",")
-        .map((t) => t.trim())
-        .filter((t) => t.length > 0),
-    ),
-  );
-  if (classTags.length === 0) {
-    return "--tag=<a,b> must contain at least one non-empty class name.";
-  }
-  return { classTags, bankIdOverride };
-}
-
-/** `cogmo backfill profile-class --tag=a,b [--bankId=X]` */
-export async function runBackfillProfileClassCli(
-  args: ReadonlyArray<string>,
+/** `cogmo backfill profile-class --tag=<a,b> [--bankId=<id>]` */
+async function runBackfillProfileClassCli(
+  args: { classTags: readonly string[]; bankId: string | undefined },
   deps: MigrationCliDeps,
 ): Promise<number> {
-  const parsed = parseBackfillArgs(args);
-  if (typeof parsed === "string") {
-    console.error(parsed);
-    return 1;
-  }
-
-  const bankId = parsed.bankIdOverride ?? (await deps.resolveDefaultBankId());
+  const { classTags } = args;
+  const bankId = args.bankId ?? (await deps.resolveDefaultBankId());
   if (!bankId) {
     console.error(
       "Usage: cogmo backfill profile-class --tag=<a,b> [--bankId=<id>]\n" +
@@ -195,7 +229,7 @@ export async function runBackfillProfileClassCli(
   await deps.verifyHindsight();
   const { hindsight, sdkClient } = makeHindsightShared(deps);
   const backupPath = makeBackupPath(bankId);
-  console.log(`Backfilling bank "${bankId}" with classes [${parsed.classTags.join(", ")}]`);
+  console.log(`Backfilling bank "${bankId}" with classes [${classTags.join(", ")}]`);
   console.log(`Hindsight ${deps.hindsightUrl}`);
   console.log(`Backup will be written to ${backupPath}`);
   console.warn(PRE_RUN_NOTICE);
@@ -209,7 +243,7 @@ export async function runBackfillProfileClassCli(
   // both on the first invocation if you want both. The note below
   // only fires when there's a real risk of confusion (multi-tag
   // call against a bank that already has any classed rows).
-  if (parsed.classTags.length > 1) {
+  if (classTags.length > 1) {
     const probe = await hindsight.listMemories(bankId, { limit: 100, offset: 0 });
     const anyClassed = probe.items.some((item) => {
       const tags = (item as { tags?: string[] }).tags ?? [];
@@ -242,7 +276,7 @@ export async function runBackfillProfileClassCli(
     writeBackup: writeBackupFn<BackfillRawBankMemory>(backupPath),
   };
 
-  const result = await backfillProfileClass(bankId, backfillDeps, { classTags: parsed.classTags });
+  const result = await backfillProfileClass(bankId, backfillDeps, { classTags });
   console.log(
     `\nBackfill complete — total: ${result.total}, classified: ${result.classified}, skipped: ${result.skipped}`,
   );

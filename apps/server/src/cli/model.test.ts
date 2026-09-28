@@ -1,105 +1,122 @@
 import { describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import type { AgentStore } from "../agent/store/index.js";
-import { runModelCli } from "./model.js";
+import { captureIo, fakeRunInTx } from "../test/factories.js";
+import { type ModelCliDeps, modelCli } from "./model.js";
+import { type CliIo, type LoadDeps, runCli } from "./run.js";
 
-const FAKE_TX = { __mockTx: true } as never;
-const tx = (cb: (t: never) => Promise<unknown>) => cb(FAKE_TX) as Promise<unknown>;
+type Provider = Awaited<ReturnType<AgentStore["listProviders"]>>[number];
+type RoutingRow = Awaited<ReturnType<AgentStore["listProvidersForModel"]>>[number];
 
-interface FakeRoutingRow {
-  id: string;
-  name: string;
-  type: string;
-  baseUrl: string | null;
-  secretId: string;
-  attrs: Record<string, unknown>;
-  position: number;
-  contextWindow: number | null;
-  maxOutputTokens: number | null;
+function run(argv: readonly string[], deps: ModelCliDeps, io: CliIo): Promise<number> {
+  return runCli(
+    modelCli(io, async () => deps),
+    argv,
+    io,
+  );
 }
 
-function makeStore(
-  opts: {
-    providers?: ReadonlyArray<{ id: string; name: string; type: string }>;
-    rowsByModel?: Record<string, ReadonlyArray<FakeRoutingRow>>;
-    allModels?: ReadonlyArray<string>;
-  } = {},
-) {
-  const allModelProviders: Array<{ model: string } & FakeRoutingRow> = [];
-  for (const [model, rows] of Object.entries(opts.rowsByModel ?? {})) {
-    for (const row of rows) allModelProviders.push({ model, ...row });
-  }
-  return {
-    listProviders: vi.fn().mockResolvedValue(opts.providers ?? []),
-    listProvidersForModel: vi.fn().mockImplementation(async (_tx, model: string) => {
-      return opts.rowsByModel?.[model] ?? [];
-    }),
-    listAllModels: vi.fn().mockResolvedValue(opts.allModels ?? []),
-    listAllModelProviders: vi.fn().mockResolvedValue(allModelProviders),
-    addModelProvider: vi.fn().mockResolvedValue({ id: "row-1" }),
-    getNextModelProviderPosition: vi.fn().mockResolvedValue(0),
-    removeModelProvider: vi.fn().mockResolvedValue(undefined),
-  } as unknown as AgentStore;
+function provider(id: string, name: string): Provider {
+  return { id, name, type: "openai_compatible", baseUrl: null, attrs: {} };
 }
 
-function makeIo() {
-  const out: string[] = [];
-  const err: string[] = [];
+function routingRow(
+  id: string,
+  name: string,
+  position: number,
+  limits: Partial<Pick<RoutingRow, "contextWindow" | "maxOutputTokens">> = {},
+): RoutingRow {
   return {
-    io: { out: (line: string) => out.push(line), err: (line: string) => err.push(line) },
-    out,
-    err,
+    id,
+    name,
+    type: "anthropic",
+    baseUrl: null,
+    secretId: "s",
+    attrs: {},
+    position,
+    contextWindow: null,
+    maxOutputTokens: null,
+    ...limits,
   };
 }
 
+function makeDeps(
+  opts: {
+    providers?: ReadonlyArray<Provider>;
+    rowsByModel?: Record<string, ReadonlyArray<RoutingRow>>;
+  } = {},
+) {
+  const rowsByModel = opts.rowsByModel ?? {};
+  const agentStore = mock<AgentStore>();
+  agentStore.listProviders.mockResolvedValue(opts.providers ?? []);
+  agentStore.listProvidersForModel.mockImplementation(
+    async (_tx, model) => rowsByModel[model] ?? [],
+  );
+  agentStore.listAllModelProviders.mockResolvedValue(
+    Object.entries(rowsByModel).flatMap(([model, rows]) => rows.map((row) => ({ model, ...row }))),
+  );
+  agentStore.addModelProvider.mockResolvedValue({ id: "row-1" });
+  agentStore.getNextModelProviderPosition.mockResolvedValue(0);
+  return { runInTx: fakeRunInTx, agentStore };
+}
+
 describe("cogmo model — usage", () => {
-  it("prints usage on no args", async () => {
-    const { io, out } = makeIo();
-    const code = await runModelCli([], { runInTx: tx as never, agentStore: makeStore() }, io);
-    expect(code).toBe(0);
-    expect(out.join("\n")).toMatch(/Usage:/);
+  it.each([[[]], [["--help"]], [["add", "--help"]], [["list", "--help"]], [["remove", "--help"]]])(
+    "prints help for %j on stdout, exits 0, and loads nothing",
+    async (argv) => {
+      const loadDeps = vi.fn<LoadDeps<ModelCliDeps>>(async () => makeDeps());
+      const { io, out, err } = captureIo();
+
+      const code = await runCli(modelCli(io, loadDeps), argv, io);
+
+      expect(code).toBe(0);
+      expect(out.join("\n")).toMatch(/^model/);
+      expect(err).toEqual([]);
+      expect(loadDeps).not.toHaveBeenCalled();
+    },
+  );
+
+  it("documents every add option", async () => {
+    const { io, out } = captureIo();
+
+    await run(["add", "--help"], makeDeps(), io);
+
+    for (const flag of ["--provider", "--context", "--max-output", "--position"]) {
+      expect(out.join("\n")).toContain(flag);
+    }
   });
 });
 
 describe("cogmo model add", () => {
   it("rejects when --provider is missing", async () => {
-    const { io, err } = makeIo();
-    const code = await runModelCli(
-      ["add", "x-ai/grok-4.3"],
-      { runInTx: tx as never, agentStore: makeStore() },
-      io,
-    );
+    const loadDeps = vi.fn<LoadDeps<ModelCliDeps>>(async () => makeDeps());
+    const { io, err } = captureIo();
+
+    const code = await runCli(modelCli(io, loadDeps), ["add", "x-ai/grok-4.3"], io);
+
     expect(code).toBe(2);
-    expect(err.join("\n")).toMatch(/--provider is required/);
+    expect(err.join("\n")).toMatch(/No value provided for --provider/);
+    expect(loadDeps).not.toHaveBeenCalled();
   });
 
   it("rejects when the provider is not registered", async () => {
-    const { io, err } = makeIo();
-    const code = await runModelCli(
-      ["add", "x-ai/grok-4.3", "--provider", "missing"],
-      { runInTx: tx as never, agentStore: makeStore({ providers: [] }) },
-      io,
-    );
+    const { io, err } = captureIo();
+    const code = await run(["add", "x-ai/grok-4.3", "--provider", "missing"], makeDeps(), io);
     expect(code).toBe(1);
     expect(err.join("\n")).toMatch(/No provider named "missing"/);
   });
 
   it("inserts a row and reports effective limits sourced from LiteLLM when no overrides given", async () => {
-    const store = makeStore({
-      providers: [{ id: "p1", name: "openrouter", type: "openai_compatible" }],
-    });
-    const { io, out } = makeIo();
-    const code = await runModelCli(
-      ["add", "x-ai/grok-4.3", "--provider", "openrouter"],
-      { runInTx: tx as never, agentStore: store },
-      io,
-    );
+    const deps = makeDeps({ providers: [provider("p1", "openrouter")] });
+    const { io, out } = captureIo();
+    const code = await run(["add", "x-ai/grok-4.3", "--provider", "openrouter"], deps, io);
     expect(code).toBe(0);
     // Resolver finds x-ai/grok-4.3 in the bundled LiteLLM snapshot.
     expect(out.join("\n")).toMatch(/context=\d+ \(litellm\)/);
     expect(out.join("\n")).toMatch(/max_output=\d+ \(litellm\)/);
     expect(out.join("\n")).toMatch(/Restart `cogmo serve`/);
-    expect(store.addModelProvider).toHaveBeenCalledWith(
-      FAKE_TX,
+    expect(deps.agentStore.addModelProvider).toHaveBeenCalledWith(
+      expect.anything(),
       expect.objectContaining({
         model: "x-ai/grok-4.3",
         providerId: "p1",
@@ -110,11 +127,9 @@ describe("cogmo model add", () => {
   });
 
   it("threads --context and --max-output as explicit overrides", async () => {
-    const store = makeStore({
-      providers: [{ id: "p1", name: "vllm", type: "openai_compatible" }],
-    });
-    const { io, out } = makeIo();
-    const code = await runModelCli(
+    const deps = makeDeps({ providers: [provider("p1", "vllm")] });
+    const { io, out } = captureIo();
+    const code = await run(
       [
         "add",
         "my/local-llama-fine-tune",
@@ -125,12 +140,12 @@ describe("cogmo model add", () => {
         "--max-output",
         "8000",
       ],
-      { runInTx: tx as never, agentStore: store },
+      deps,
       io,
     );
     expect(code).toBe(0);
-    expect(store.addModelProvider).toHaveBeenCalledWith(
-      FAKE_TX,
+    expect(deps.agentStore.addModelProvider).toHaveBeenCalledWith(
+      expect.anything(),
       expect.objectContaining({
         contextWindow: 200_000,
         maxOutputTokens: 8_000,
@@ -141,37 +156,53 @@ describe("cogmo model add", () => {
     expect(out.join("\n")).toMatch(/context=200000 \(db\)/);
     expect(out.join("\n")).toMatch(/max_output=8000 \(db\)/);
   });
+
+  it("accepts --position 0, the primary routing slot", async () => {
+    const deps = makeDeps({ providers: [provider("p1", "vllm")] });
+    const { io } = captureIo();
+    const code = await run(["add", "m", "--provider", "vllm", "--position", "0"], deps, io);
+    expect(code).toBe(0);
+    expect(deps.agentStore.addModelProvider).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ position: 0 }),
+    );
+  });
+
+  it("`--position N` round-trips into addModelRouting", async () => {
+    const deps = makeDeps({ providers: [provider("p1", "openrouter")] });
+    const { io } = captureIo();
+    const code = await run(["add", "m", "--provider", "openrouter", "--position", "3"], deps, io);
+    expect(code).toBe(0);
+    expect(deps.agentStore.addModelProvider).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ position: 3 }),
+    );
+  });
+
+  it("surfaces addModelRouting errors as exit code 1", async () => {
+    const deps = makeDeps({ providers: [provider("p1", "openrouter")] });
+    deps.agentStore.addModelProvider.mockRejectedValue(new Error("conflicting position"));
+    const { io, err } = captureIo();
+    const code = await run(["add", "m", "--provider", "openrouter"], deps, io);
+    expect(code).toBe(1);
+    expect(err.join("\n")).toMatch(/Failed to add model routing: conflicting position/);
+  });
 });
 
 describe("cogmo model list", () => {
   it("prints (no model routing rows) when empty", async () => {
-    const { io, out } = makeIo();
-    const code = await runModelCli(["list"], { runInTx: tx as never, agentStore: makeStore() }, io);
+    const { io, out } = captureIo();
+    const code = await run(["list"], makeDeps(), io);
     expect(code).toBe(0);
     expect(out).toContain("(no model routing rows)");
   });
 
   it("renders one tab-separated line per (model, provider) row with effective limits", async () => {
-    const store = makeStore({
-      allModels: ["claude-sonnet-4-6"],
-      rowsByModel: {
-        "claude-sonnet-4-6": [
-          {
-            id: "r1",
-            name: "anthropic",
-            type: "anthropic",
-            baseUrl: null,
-            secretId: "s",
-            attrs: {},
-            position: 0,
-            contextWindow: null,
-            maxOutputTokens: null,
-          },
-        ],
-      },
+    const deps = makeDeps({
+      rowsByModel: { "claude-sonnet-4-6": [routingRow("r1", "anthropic", 0)] },
     });
-    const { io, out } = makeIo();
-    await runModelCli(["list"], { runInTx: tx as never, agentStore: store }, io);
+    const { io, out } = captureIo();
+    await run(["list"], deps, io);
     // Header + one row.
     expect(out.length).toBe(2);
     expect(out[0]).toMatch(/model\tprovider\tposition\tcontext\tmax_output\tsource/);
@@ -183,428 +214,155 @@ describe("cogmo model list", () => {
     // Partial override: row pins maxOutputTokens but leaves contextWindow
     // to LiteLLM. The list view shows both sources so the operator sees
     // the LiteLLM contribution they'd otherwise have missed.
-    const store = makeStore({
-      allModels: ["claude-sonnet-4-6"],
+    const deps = makeDeps({
       rowsByModel: {
-        "claude-sonnet-4-6": [
-          {
-            id: "r1",
-            name: "anthropic",
-            type: "anthropic",
-            baseUrl: null,
-            secretId: "s",
-            attrs: {},
-            position: 0,
-            contextWindow: null,
-            maxOutputTokens: 8_000,
-          },
-        ],
+        "claude-sonnet-4-6": [routingRow("r1", "anthropic", 0, { maxOutputTokens: 8_000 })],
       },
     });
-    const { io, out } = makeIo();
-    await runModelCli(["list"], { runInTx: tx as never, agentStore: store }, io);
+    const { io, out } = captureIo();
+    await run(["list"], deps, io);
     expect(out[1]).toMatch(/^claude-sonnet-4-6\tanthropic\t0\t1000000\t8000\tcw=litellm,mo=db$/);
   });
 
   it("displays the stored position, not the array index, when positions are non-sequential", async () => {
-    // Row at position 5 with no other rows — array index would render 0,
-    // misleading anyone trying to `cogmo model remove --position`. Stored
-    // position is what `listProvidersForModel` reads from the DB.
-    const store = makeStore({
-      allModels: ["m"],
-      rowsByModel: {
-        m: [
-          {
-            id: "r1",
-            name: "p",
-            type: "anthropic",
-            baseUrl: null,
-            secretId: "s",
-            attrs: {},
-            position: 5,
-            contextWindow: null,
-            maxOutputTokens: null,
-          },
-        ],
-      },
-    });
-    const { io, out } = makeIo();
-    await runModelCli(["list"], { runInTx: tx as never, agentStore: store }, io);
+    // A lone row at position 5: the array index would render 0.
+    const deps = makeDeps({ rowsByModel: { m: [routingRow("r1", "p", 5)] } });
+    const { io, out } = captureIo();
+    await run(["list"], deps, io);
     expect(out[1]).toMatch(/^m\tp\t5\t/);
   });
 
   it("uses one query for the whole routing table — no per-model fanout", async () => {
-    const store = makeStore({
-      allModels: ["m1", "m2", "m3"],
+    const deps = makeDeps({
       rowsByModel: {
-        m1: [
-          {
-            id: "r1",
-            name: "p",
-            type: "anthropic",
-            baseUrl: null,
-            secretId: "s",
-            attrs: {},
-            position: 0,
-            contextWindow: null,
-            maxOutputTokens: null,
-          },
-        ],
-        m2: [
-          {
-            id: "r2",
-            name: "p",
-            type: "anthropic",
-            baseUrl: null,
-            secretId: "s",
-            attrs: {},
-            position: 0,
-            contextWindow: null,
-            maxOutputTokens: null,
-          },
-        ],
-        m3: [
-          {
-            id: "r3",
-            name: "p",
-            type: "anthropic",
-            baseUrl: null,
-            secretId: "s",
-            attrs: {},
-            position: 0,
-            contextWindow: null,
-            maxOutputTokens: null,
-          },
-        ],
+        m1: [routingRow("r1", "p", 0)],
+        m2: [routingRow("r2", "p", 0)],
+        m3: [routingRow("r3", "p", 0)],
       },
     });
-    const { io } = makeIo();
-    await runModelCli(["list"], { runInTx: tx as never, agentStore: store }, io);
-    expect(store.listAllModelProviders).toHaveBeenCalledTimes(1);
-    expect(store.listProvidersForModel).not.toHaveBeenCalled();
+    const { io } = captureIo();
+    await run(["list"], deps, io);
+    expect(deps.agentStore.listAllModelProviders).toHaveBeenCalledTimes(1);
+    expect(deps.agentStore.listProvidersForModel).not.toHaveBeenCalled();
+  });
+
+  it("--model + --provider filter narrows the output", async () => {
+    const deps = makeDeps({
+      rowsByModel: { a: [routingRow("r1", "p1", 0)], b: [routingRow("r2", "p2", 0)] },
+    });
+    const { io, out } = captureIo();
+    await run(["list", "--model", "a", "--provider", "p1"], deps, io);
+    expect(out.join("\n")).toContain("a\tp1");
+    expect(out.join("\n")).not.toContain("b\tp2");
   });
 });
 
 describe("cogmo model remove", () => {
-  function rowFixture(id: string, name: string, position: number): FakeRoutingRow {
-    return {
-      id,
-      name,
-      type: "anthropic",
-      baseUrl: null,
-      secretId: "s",
-      attrs: {},
-      position,
-      contextWindow: null,
-      maxOutputTokens: null,
-    };
-  }
-
   it("removes one row when --provider is given", async () => {
-    const store = makeStore({
-      rowsByModel: { m: [rowFixture("r1", "p1", 0), rowFixture("r2", "p2", 1)] },
+    const deps = makeDeps({
+      rowsByModel: { m: [routingRow("r1", "p1", 0), routingRow("r2", "p2", 1)] },
     });
-    const { io } = makeIo();
-    const code = await runModelCli(
-      ["remove", "m", "--provider", "p2"],
-      { runInTx: tx as never, agentStore: store },
-      io,
-    );
+    const { io } = captureIo();
+    const code = await run(["remove", "m", "--provider", "p2"], deps, io);
     expect(code).toBe(0);
-    expect(store.removeModelProvider).toHaveBeenCalledTimes(1);
-    expect(store.removeModelProvider).toHaveBeenCalledWith(FAKE_TX, "m", "r2");
+    expect(deps.agentStore.removeModelProvider).toHaveBeenCalledTimes(1);
+    expect(deps.agentStore.removeModelProvider).toHaveBeenCalledWith(expect.anything(), "m", "r2");
   });
 
   it("removes every row for the model in one transaction when --provider is omitted", async () => {
-    const store = makeStore({
-      rowsByModel: { m: [rowFixture("r1", "p1", 0), rowFixture("r2", "p2", 1)] },
+    const deps = makeDeps({
+      rowsByModel: { m: [routingRow("r1", "p1", 0), routingRow("r2", "p2", 1)] },
     });
-    const runInTx = vi.fn().mockImplementation((cb) => cb(FAKE_TX));
-    const { io } = makeIo();
-    const code = await runModelCli(["remove", "m"], { runInTx, agentStore: store }, io);
+    const runInTx = vi.spyOn(deps, "runInTx");
+    const { io } = captureIo();
+    const code = await run(["remove", "m"], deps, io);
     expect(code).toBe(0);
-    expect(store.removeModelProvider).toHaveBeenCalledTimes(2);
-    // Both deletes share one outer transaction — the loop runs inside a
-    // single `runInTx` callback rather than starting a new tx per row.
-    // (The initial `listProvidersForModel` call is its own tx.)
+    expect(deps.agentStore.removeModelProvider).toHaveBeenCalledTimes(2);
+    // Both deletes share one outer transaction; the initial
+    // `listProvidersForModel` call is its own tx.
     expect(runInTx).toHaveBeenCalledTimes(2);
   });
-});
 
-describe("cogmo model — flag parsing", () => {
-  it("rejects `--flag` consumed as a value for another flag", async () => {
-    const store = makeStore({
-      providers: [{ id: "p1", name: "openrouter", type: "openai_compatible" }],
-    });
-    const { io, err } = makeIo();
-    // `--context` follows `--provider`, so the buggy parser would set
-    // `provider = "--context"` and silently drop the real provider value.
-    const code = await runModelCli(
-      ["add", "x-ai/grok-4.3", "--provider", "--context", "200000"],
-      { runInTx: tx as never, agentStore: store },
-      io,
-    );
-    expect(code).toBe(2);
-    expect(err.join("\n")).toMatch(/--provider requires a value/);
-    expect(store.addModelProvider).not.toHaveBeenCalled();
-  });
-
-  it("rejects a flag with no following value", async () => {
-    const store = makeStore({
-      providers: [{ id: "p1", name: "openrouter", type: "openai_compatible" }],
-    });
-    const { io, err } = makeIo();
-    const code = await runModelCli(
-      ["add", "x-ai/grok-4.3", "--provider"],
-      { runInTx: tx as never, agentStore: store },
-      io,
-    );
-    expect(code).toBe(2);
-    expect(err.join("\n")).toMatch(/--provider requires a value/);
-  });
-
-  it("rejects a non-numeric --context value", async () => {
-    const store = makeStore({
-      providers: [{ id: "p1", name: "vllm", type: "openai_compatible" }],
-    });
-    const { io, err } = makeIo();
-    const code = await runModelCli(
-      ["add", "m", "--provider", "vllm", "--context", "not-a-number"],
-      { runInTx: tx as never, agentStore: store },
-      io,
-    );
-    expect(code).toBe(2);
-    expect(err.join("\n")).toMatch(/--context expects an integer >= 1/);
-  });
-
-  it.each([["--context"], ["--max-output"]])(
-    "rejects %s 0 at parse, where the flag is still named",
-    async (flag) => {
-      // A zero limit describes no model: `addModelRouting` refuses it and
-      // the resolver ignores one already stored, so nothing downstream can
-      // apply it. Failing here beats an exit-1 from a layer that no longer
-      // knows which flag was wrong.
-      const store = makeStore({
-        providers: [{ id: "p1", name: "vllm", type: "openai_compatible" }],
-      });
-      const { io, err } = makeIo();
-      const code = await runModelCli(
-        ["add", "m", "--provider", "vllm", flag, "0"],
-        { runInTx: tx as never, agentStore: store },
-        io,
-      );
-      expect(code).toBe(2);
-      expect(err.join("\n")).toContain(`${flag} expects an integer >= 1`);
-      expect(store.addModelProvider).not.toHaveBeenCalled();
-    },
-  );
-
-  it("rejects an unknown flag instead of dropping it", async () => {
-    // A swallowed `--max-outputs` registers the model with no override and
-    // still prints a success line carrying the resolver's own number, so
-    // the operator has no way to tell the flag never landed.
-    const store = makeStore({
-      providers: [{ id: "p1", name: "vllm", type: "openai_compatible" }],
-    });
-    const { io, err } = makeIo();
-    const code = await runModelCli(
-      ["add", "m", "--provider", "vllm", "--max-outputs", "64000"],
-      { runInTx: tx as never, agentStore: store },
-      io,
-    );
-    expect(code).toBe(2);
-    expect(err.join("\n")).toContain('Unknown flag "--max-outputs"');
-    expect(store.addModelProvider).not.toHaveBeenCalled();
-  });
-
-  it("accepts --position 0, the primary routing slot", async () => {
-    const store = makeStore({
-      providers: [{ id: "p1", name: "vllm", type: "openai_compatible" }],
-    });
-    const { io } = makeIo();
-    const code = await runModelCli(
-      ["add", "m", "--provider", "vllm", "--position", "0"],
-      { runInTx: tx as never, agentStore: store },
-      io,
-    );
-    expect(code).toBe(0);
-    expect(store.addModelProvider).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ position: 0 }),
-    );
-  });
-
-  it("rejects a --context value with trailing garbage (parseInt would silently accept)", async () => {
-    // `Number.parseInt("200000abc", 10)` returns 200000 and silently drops
-    // the trailing "abc". Number()+isInteger catches it.
-    const store = makeStore({
-      providers: [{ id: "p1", name: "vllm", type: "openai_compatible" }],
-    });
-    const { io, err } = makeIo();
-    const code = await runModelCli(
-      ["add", "m", "--provider", "vllm", "--context", "200000abc"],
-      { runInTx: tx as never, agentStore: store },
-      io,
-    );
-    expect(code).toBe(2);
-    expect(err.join("\n")).toMatch(/--context expects an integer >= 1/);
-    expect(store.addModelProvider).not.toHaveBeenCalled();
-  });
-});
-
-describe("cogmo model — dispatcher", () => {
-  it("rejects unknown commands with exit code 1 and the usage banner", async () => {
-    const { io, err } = makeIo();
-    const code = await runModelCli(
-      ["bogus"],
-      { runInTx: tx as never, agentStore: makeStore() },
-      io,
-    );
-    expect(code).toBe(1);
-    expect(err.join("\n")).toMatch(/Unknown command: bogus/);
-    expect(err.join("\n")).toMatch(/Usage: cogmo model/);
-  });
-
-  it("`model add` with no model name returns 2 and prints usage", async () => {
-    const { io, err } = makeIo();
-    const code = await runModelCli(["add"], { runInTx: tx as never, agentStore: makeStore() }, io);
-    expect(code).toBe(2);
-    expect(err.join("\n")).toMatch(/Usage: cogmo model add/);
-  });
-
-  it("`model remove` with no model name returns 2 and prints usage", async () => {
-    const { io, err } = makeIo();
-    const code = await runModelCli(
-      ["remove"],
-      { runInTx: tx as never, agentStore: makeStore() },
-      io,
-    );
-    expect(code).toBe(2);
-    expect(err.join("\n")).toMatch(/Usage: cogmo model remove/);
-  });
-
-  it("`model remove <m>` with no routing rows returns 1", async () => {
-    const { io, err } = makeIo();
-    const code = await runModelCli(
-      ["remove", "ghost"],
-      { runInTx: tx as never, agentStore: makeStore() },
-      io,
-    );
+  it("returns 1 when the model has no routing rows", async () => {
+    const { io, err } = captureIo();
+    const code = await run(["remove", "ghost"], makeDeps(), io);
     expect(code).toBe(1);
     expect(err.join("\n")).toMatch(/No routing rows for model "ghost"/);
   });
 
-  it("`model remove <m> --provider <p>` where p isn't routed returns 1", async () => {
-    const store = makeStore({
-      rowsByModel: {
-        m: [
-          {
-            id: "r1",
-            name: "p1",
-            type: "anthropic",
-            baseUrl: null,
-            secretId: "s",
-            attrs: {},
-            position: 0,
-            contextWindow: null,
-            maxOutputTokens: null,
-          },
-        ],
-      },
-    });
-    const { io, err } = makeIo();
-    const code = await runModelCli(
-      ["remove", "m", "--provider", "p-other"],
-      { runInTx: tx as never, agentStore: store },
-      io,
-    );
+  it("returns 1 when the model isn't routed via --provider", async () => {
+    const deps = makeDeps({ rowsByModel: { m: [routingRow("r1", "p1", 0)] } });
+    const { io, err } = captureIo();
+    const code = await run(["remove", "m", "--provider", "p-other"], deps, io);
     expect(code).toBe(1);
     expect(err.join("\n")).toMatch(/not routed via provider "p-other"/);
+    expect(deps.agentStore.removeModelProvider).not.toHaveBeenCalled();
   });
+});
 
-  it("traps thrown errors mid-dispatch (parseFlags) and surfaces exit code 2", async () => {
-    const { io, err } = makeIo();
-    const code = await runModelCli(
-      // `--position` requires a value but none follows.
-      ["add", "m", "--provider", "p", "--position"],
-      { runInTx: tx as never, agentStore: makeStore({ providers: [] }) },
-      io,
-    );
+describe("cogmo model — rejected command lines", () => {
+  it.each([
+    [["bogus"], /bogus\n\s+\^ Not a valid subcommand name/],
+    [["help"], /help\n\s+\^ Not a valid subcommand name/],
+    [["add"], /No value provided for model-id/],
+    [["remove"], /No value provided for model-id/],
+    [["remove", "--provider", "p"], /No value provided for model-id/],
+    // A flag after an identifier option is read as its value, then refused.
+    [
+      ["add", "x-ai/grok-4.3", "--provider", "--context", "200000"],
+      /expected a value, got the flag "--context"/,
+    ],
+    [["list", "--provider", "--model", "a"], /expected a value, got the flag "--model"/],
+    [["remove", "m", "--provider", "--all"], /expected a value, got the flag "--all"/],
+    [["add", "x-ai/grok-4.3", "--provider"], /No value provided for --provider/],
+    // An optional option given no value is refused, not read as omitted.
+    [["add", "m", "--provider", "vllm", "--context"], /Expected to get a value, found a flag/],
+    [["add", "m", "--provider", "vllm", "--max-output"], /Expected to get a value, found a flag/],
+    [["add", "m", "--provider", "vllm", "--position"], /Expected to get a value, found a flag/],
+    [["list", "--provider"], /Expected to get a value, found a flag/],
+    [["list", "--model"], /Expected to get a value, found a flag/],
+    [["remove", "m", "--provider"], /Expected to get a value, found a flag/],
+    [
+      ["add", "m", "--provider", "vllm", "--context", "not-a-number"],
+      /expected an integer >= 1, got "not-a-number"/,
+    ],
+    // `Number.parseInt` would read 200000 and drop the "abc".
+    [
+      ["add", "m", "--provider", "vllm", "--context", "200000abc"],
+      /expected an integer >= 1, got "200000abc"/,
+    ],
+    [["add", "m", "--provider", "vllm", "--position", "-1"], /expected an integer >= 0, got "-1"/],
+    // A swallowed `--max-outputs` would register the model with no override
+    // and still print a success line carrying the resolver's own number.
+    [
+      ["add", "m", "--provider", "vllm", "--max-outputs", "64000"],
+      /--max-outputs 64000\n\s+\^ Unknown arguments/,
+    ],
+  ])("rejects %j with exit 2 before loading anything", async (argv, message) => {
+    const loadDeps = vi.fn<LoadDeps<ModelCliDeps>>(async () => makeDeps());
+    const { io, out, err } = captureIo();
+
+    const code = await runCli(modelCli(io, loadDeps), argv, io);
+
     expect(code).toBe(2);
-    expect(err.join("\n")).toMatch(/--position requires a value/);
+    expect(err.join("\n")).toMatch(message);
+    expect(out).toEqual([]);
+    expect(loadDeps).not.toHaveBeenCalled();
   });
 
-  it("surfaces addModelRouting errors as exit code 1", async () => {
-    const store = makeStore({
-      providers: [{ id: "p1", name: "openrouter", type: "openai_compatible" }],
-    });
-    const addModelProvider = vi.spyOn(store, "addModelProvider");
-    addModelProvider.mockRejectedValue(new Error("conflicting position"));
-    const { io, err } = makeIo();
-    const code = await runModelCli(
-      ["add", "m", "--provider", "openrouter"],
-      { runInTx: tx as never, agentStore: store },
-      io,
-    );
-    expect(code).toBe(1);
-    expect(err.join("\n")).toMatch(/Failed to add model routing: conflicting position/);
-  });
-
-  it("--model + --provider filter narrows `list` output", async () => {
-    const store = makeStore({
-      rowsByModel: {
-        a: [
-          {
-            id: "r1",
-            name: "p1",
-            type: "anthropic",
-            baseUrl: null,
-            secretId: "s",
-            attrs: {},
-            position: 0,
-            contextWindow: null,
-            maxOutputTokens: null,
-          },
-        ],
-        b: [
-          {
-            id: "r2",
-            name: "p2",
-            type: "anthropic",
-            baseUrl: null,
-            secretId: "s",
-            attrs: {},
-            position: 0,
-            contextWindow: null,
-            maxOutputTokens: null,
-          },
-        ],
-      },
-    });
-    const { io, out } = makeIo();
-    await runModelCli(
-      ["list", "--model", "a", "--provider", "p1"],
-      { runInTx: tx as never, agentStore: store },
-      io,
-    );
-    expect(out.join("\n")).toContain("a\tp1");
-    expect(out.join("\n")).not.toContain("b\tp2");
-  });
-
-  it("`--position N` flag round-trips into addModelRouting", async () => {
-    const store = makeStore({
-      providers: [{ id: "p1", name: "openrouter", type: "openai_compatible" }],
-    });
-    const { io } = makeIo();
-    const code = await runModelCli(
-      ["add", "m", "--provider", "openrouter", "--position", "3"],
-      { runInTx: tx as never, agentStore: store },
-      io,
-    );
-    expect(code).toBe(0);
-    expect(store.addModelProvider).toHaveBeenCalledWith(
-      FAKE_TX,
-      expect.objectContaining({ position: 3 }),
-    );
-  });
+  it.each([["--context"], ["--max-output"]])(
+    "rejects %s 0 under the flag it came from",
+    async (flag) => {
+      // A zero limit describes no model: `addModelRouting` refuses it and
+      // the resolver ignores one already stored.
+      const deps = makeDeps({ providers: [provider("p1", "vllm")] });
+      const { io, err } = captureIo();
+      const code = await run(["add", "m", "--provider", "vllm", flag, "0"], deps, io);
+      expect(code).toBe(2);
+      expect(err.join("\n")).toMatch(
+        new RegExp(`${flag} 0\\n\\s+\\^ expected an integer >= 1, got "0"`),
+      );
+      expect(deps.agentStore.addModelProvider).not.toHaveBeenCalled();
+    },
+  );
 });

@@ -1247,7 +1247,7 @@ UPDATE recovery_point='finished', status='success'|'error'  ← transitionToFini
 | ctx RPC | `dispatcher.ts`, `ctx-handler.ts`, `protocol.ts` | Bi-directional NDJSON-over-stdio routing between worker + host, Zod-validated frames |
 | Cron scheduler | `cron-ticker.ts`, `cron-fire-handler.ts` | Per-minute Inngest tick + per-skill cron invocation |
 | Git plumbing | `git-ops.ts`, `repo.ts` | Bare-repo bootstrap, remote configuration, plumbing wrappers |
-| Operator CLI | `cli.ts`, `configure-remote*.ts`, `migrations-cli.ts` | `cogmo skill ...` subcommands + bare-repo schema migrations |
+| Remote configuration | `configure-remote*.ts` | Skills-repo remote setup and its prompts, shared by the setup wizard and `cogmo migrate-skills-remote` |
 | Agent surface | `skills-tool.ts`, `skills-service.ts`, `skill-tool-builder.ts`, `skills-keyboard.ts` | Per-turn tool list registration, per-conversation service, Anthropic SDK descriptor build, Telegram approve/deny keyboard |
 | Store | `store/` | DB schema + `SkillStore` interface (`skills`, `skill_deploys`, `skill_runs`, `skill_context_calls` tables) |
 

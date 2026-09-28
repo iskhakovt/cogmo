@@ -16,14 +16,7 @@ import {
   inboundMessages,
   userIdentities,
 } from "../transport/store/schema.js";
-
-export type ResetScope = "secrets" | "channels" | "all";
-
-export const VALID_RESETS: ReadonlySet<ResetScope> = new Set<ResetScope>([
-  "secrets",
-  "channels",
-  "all",
-]);
+import type { ResetScope } from "./reset-scopes.js";
 
 export interface ResetDeps {
   db: Database;

@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
-import type { Transactor } from "../../db/index.js";
-import { expectDefined } from "../../test/assertions.js";
-import type { AgentStore } from "../store/index.js";
+import type { AgentStore } from "../agent/store/index.js";
+import type { Transactor } from "../db/index.js";
+import { expectDefined } from "../test/assertions.js";
+import { captureIo } from "../test/factories.js";
+import { runCli } from "./run.js";
 
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
@@ -48,17 +50,15 @@ const { migrateUntaggedMemoriesSpy, backfillProfileClassSpy } = vi.hoisted(() =>
   backfillProfileClassSpy: vi.fn(),
 }));
 
-vi.mock("./migrate-untagged-memories.js", () => ({
+vi.mock("../agent/evolution/migrate-untagged-memories.js", () => ({
   migrateUntaggedMemories: migrateUntaggedMemoriesSpy,
 }));
 
-vi.mock("./backfill-profile-class.js", () => ({
+vi.mock("../agent/evolution/backfill-profile-class.js", () => ({
   backfillProfileClass: backfillProfileClassSpy,
 }));
 
-const { parseBackfillArgs, runMigrateMemoriesCli, runBackfillProfileClassCli } = await import(
-  "./migrations-cli.js"
-);
+const { backfillCli, migrateMemoriesCli } = await import("./memory-migrations.js");
 
 function buildDeps(opts: { defaultBankId?: string | null } = {}) {
   return {
@@ -71,6 +71,30 @@ function buildDeps(opts: { defaultBankId?: string | null } = {}) {
   };
 }
 
+type Deps = ReturnType<typeof buildDeps>;
+
+/** Drives a command tree through `runCli`, capturing what cmd-ts itself prints. */
+async function runTree(
+  cli: (loadDeps: () => Promise<Deps>) => Parameters<typeof runCli>[0],
+  argv: readonly string[],
+  deps: Deps,
+) {
+  const { io, out, err } = captureIo();
+  const loadDeps = vi.fn(async () => deps);
+  const code = await runCli(cli(loadDeps), argv, io);
+  return { code, out: out.join("\n"), err: err.join("\n"), loadDeps };
+}
+
+/** `cogmo migrate-memories ...argv` */
+function migrate(deps: Deps, ...argv: string[]) {
+  return runTree(migrateMemoriesCli, argv, deps);
+}
+
+/** `cogmo backfill profile-class ...argv` */
+function backfill(deps: Deps, ...argv: string[]) {
+  return runTree(backfillCli, ["profile-class", ...argv], deps);
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.spyOn(console, "log").mockImplementation(() => {});
@@ -78,73 +102,148 @@ beforeEach(() => {
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
-describe("parseBackfillArgs", () => {
-  it("rejects when first positional isn't `profile-class`", () => {
-    const r = parseBackfillArgs(["foo", "--tag=general"]);
-    expect(typeof r).toBe("string");
+describe("backfillCli", () => {
+  it("rejects an unknown backfill with exit 2, loading nothing", async () => {
+    const deps = buildDeps({ defaultBankId: "u" });
+
+    const r = await runTree(backfillCli, ["profile-klass", "--tag=x"], deps);
+
+    expect(r.code).toBe(2);
+    expect(r.err).toMatch(/Not a valid subcommand name/);
+    expect(r.loadDeps).not.toHaveBeenCalled();
+    expect(deps.verifyHindsight).not.toHaveBeenCalled();
   });
 
-  it("rejects missing --tag", () => {
-    const r = parseBackfillArgs(["profile-class"]);
-    expect(typeof r).toBe("string");
-    if (typeof r === "string") expect(r).toContain("--tag");
+  it.each([
+    [["profile-class"], /No value provided for --tag/],
+    [["profile-class", "--tag"], /No value provided for --tag/],
+    [["profile-class", "--tag="], /No value provided for --tag/],
+    [
+      ["profile-class", "--tag=  , ,"],
+      /--tag=<a,b> must contain at least one non-empty class name/,
+    ],
+    [["profile-class", "--tag=x", "--bankId"], /--bankId\n\s+\^ Expected to get a value/],
+    [["profile-class", "--tag=x", "--bankId=a", "--bankId=b"], /Too many times provided/],
+    [["profile-class", "--tag=x", "--frob=baz"], /--frob=baz\n\s+\^ Unknown arguments/],
+  ])("rejects %j with exit 2, loading nothing", async (argv, message) => {
+    const deps = buildDeps({ defaultBankId: "u" });
+
+    const r = await runTree(backfillCli, argv, deps);
+
+    expect(r.code).toBe(2);
+    expect(r.err).toMatch(message);
+    expect(r.loadDeps).not.toHaveBeenCalled();
+    expect(backfillProfileClassSpy).not.toHaveBeenCalled();
   });
 
-  it("rejects --tag with no values", () => {
-    const r = parseBackfillArgs(["profile-class", "--tag="]);
-    expect(typeof r).toBe("string");
-    if (typeof r === "string") expect(r).toContain("non-empty");
+  it("answers --help on stdout without loading dependencies", async () => {
+    const r = await runTree(backfillCli, ["profile-class", "--help"], buildDeps());
+
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/--tag <a,b>/);
+    expect(r.out).toMatch(/--bankId <bankId>/);
+    expect(r.loadDeps).not.toHaveBeenCalled();
   });
 
-  it("rejects --tag with only whitespace/commas", () => {
-    const r = parseBackfillArgs(["profile-class", "--tag=  , ,"]);
-    expect(typeof r).toBe("string");
-    if (typeof r === "string") expect(r).toContain("non-empty");
+  it.each([[["--tag=general, legacy ,general"]], [["--tag", "general, legacy ,general"]]])(
+    "trims and de-duplicates the classes in %j",
+    async (tagArgs) => {
+      const deps = buildDeps({ defaultBankId: "u" });
+      listMemoriesSpy.mockResolvedValueOnce({ items: [], total: 0, limit: 100, offset: 0 });
+      backfillProfileClassSpy.mockResolvedValueOnce({ total: 0, classified: 0, skipped: 0 });
+
+      const r = await runTree(backfillCli, ["profile-class", ...tagArgs], deps);
+
+      expect(r.code).toBe(0);
+      expect(backfillProfileClassSpy).toHaveBeenCalledWith("u", expect.any(Object), {
+        classTags: ["general", "legacy"],
+      });
+    },
+  );
+
+  it.each([[["--bankId=explicit"]], [["--bankId", "explicit"]]])(
+    "backfills the bank %j names instead of the default",
+    async (bankArgs) => {
+      const deps = buildDeps({ defaultBankId: "fallback" });
+      backfillProfileClassSpy.mockResolvedValueOnce({ total: 0, classified: 0, skipped: 0 });
+
+      const r = await runTree(backfillCli, ["profile-class", "--tag=x", ...bankArgs], deps);
+
+      expect(r.code).toBe(0);
+      expect(deps.resolveDefaultBankId).not.toHaveBeenCalled();
+      expect(backfillProfileClassSpy).toHaveBeenCalledWith("explicit", expect.any(Object), {
+        classTags: ["x"],
+      });
+    },
+  );
+});
+
+describe("migrateMemoriesCli", () => {
+  it("migrates the bank it names", async () => {
+    const deps = buildDeps({ defaultBankId: "fallback" });
+    migrateUntaggedMemoriesSpy.mockResolvedValueOnce({ migrated: 0 });
+
+    const r = await runTree(migrateMemoriesCli, ["explicit-bank"], deps);
+
+    expect(r.code).toBe(0);
+    expect(deps.resolveDefaultBankId).not.toHaveBeenCalled();
+    expect(migrateUntaggedMemoriesSpy).toHaveBeenCalledWith("explicit-bank", expect.any(Object));
   });
 
-  it("parses single-tag form", () => {
-    const r = parseBackfillArgs(["profile-class", "--tag=general"]);
-    expect(r).toEqual({ classTags: ["general"], bankIdOverride: null });
+  it("migrates the default bank when none is named", async () => {
+    const deps = buildDeps({ defaultBankId: "user-default" });
+    migrateUntaggedMemoriesSpy.mockResolvedValueOnce({ migrated: 0 });
+
+    const r = await runTree(migrateMemoriesCli, [], deps);
+
+    expect(r.code).toBe(0);
+    expect(deps.resolveDefaultBankId).toHaveBeenCalledOnce();
+    expect(migrateUntaggedMemoriesSpy).toHaveBeenCalledWith("user-default", expect.any(Object));
   });
 
-  it("parses comma-separated tags + dedupes whitespace", () => {
-    const r = parseBackfillArgs(["profile-class", "--tag=general, legacy ,general"]);
-    expect(r).toEqual({ classTags: ["general", "legacy"], bankIdOverride: null });
-  });
+  it.each([
+    [["--frob"], /--frob\n\s+\^ Unknown arguments/],
+    [["a", "b"], /b\n\s+\^ Unknown arguments/],
+  ])("rejects %j with exit 2, loading nothing", async (argv, message) => {
+    const r = await runTree(migrateMemoriesCli, argv, buildDeps({ defaultBankId: "u" }));
 
-  it("parses --bankId override", () => {
-    const r = parseBackfillArgs(["profile-class", "--tag=general", "--bankId=user-42"]);
-    expect(r).toEqual({ classTags: ["general"], bankIdOverride: "user-42" });
-  });
-
-  it("rejects unknown flags", () => {
-    const r = parseBackfillArgs(["profile-class", "--tag=general", "--frob=baz"]);
-    expect(typeof r).toBe("string");
-    if (typeof r === "string") expect(r).toContain('Unknown argument "--frob=baz"');
+    expect(r.code).toBe(2);
+    expect(r.err).toMatch(message);
+    expect(r.loadDeps).not.toHaveBeenCalled();
+    expect(migrateUntaggedMemoriesSpy).not.toHaveBeenCalled();
   });
 });
 
 describe("Hindsight verification in the memory CLIs", () => {
-  it("migrate-memories reports a usage error without probing Hindsight", async () => {
+  it("migrate-memories exits 1 with no bank named and no user, probing nothing", async () => {
     const deps = buildDeps({ defaultBankId: null });
 
-    expect(await runMigrateMemoriesCli([], deps)).toBe(1);
+    expect((await migrate(deps)).code).toBe(1);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringMatching(/Usage: cogmo migrate-memories/),
+    );
     expect(deps.verifyHindsight).not.toHaveBeenCalled();
     expect(hindsightCtor).not.toHaveBeenCalled();
+    expect(migrateUntaggedMemoriesSpy).not.toHaveBeenCalled();
   });
 
-  it("backfill reports bad arguments without probing Hindsight", async () => {
-    const deps = buildDeps({ defaultBankId: "u" });
+  it("backfill exits 1 with no bank named and no user, probing nothing", async () => {
+    const deps = buildDeps({ defaultBankId: null });
 
-    expect(await runBackfillProfileClassCli(["profile-klass", "--tag=x"], deps)).toBe(1);
+    expect((await backfill(deps, "--tag=x")).code).toBe(1);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringMatching(/Usage: cogmo backfill profile-class/),
+    );
     expect(deps.verifyHindsight).not.toHaveBeenCalled();
+    expect(hindsightCtor).not.toHaveBeenCalled();
+    expect(backfillProfileClassSpy).not.toHaveBeenCalled();
   });
 
   it("migrate-memories verifies Hindsight before building a client for the bank", async () => {
     const deps = buildDeps({ defaultBankId: "u" });
     migrateUntaggedMemoriesSpy.mockResolvedValueOnce({ migrated: 0 });
 
-    await runMigrateMemoriesCli([], deps);
+    await migrate(deps);
 
     expect(deps.verifyHindsight).toHaveBeenCalledTimes(1);
     const verifiedAt = expectDefined(deps.verifyHindsight.mock.invocationCallOrder[0], "verify");
@@ -153,17 +252,8 @@ describe("Hindsight verification in the memory CLIs", () => {
   });
 
   it.each([
-    [
-      "migrate-memories",
-      (deps: ReturnType<typeof buildDeps>) => runMigrateMemoriesCli([], deps),
-      migrateUntaggedMemoriesSpy,
-    ],
-    [
-      "backfill",
-      (deps: ReturnType<typeof buildDeps>) =>
-        runBackfillProfileClassCli(["profile-class", "--tag=general"], deps),
-      backfillProfileClassSpy,
-    ],
+    ["migrate-memories", (deps: Deps) => migrate(deps), migrateUntaggedMemoriesSpy],
+    ["backfill", (deps: Deps) => backfill(deps, "--tag=general"), backfillProfileClassSpy],
   ])("%s touches no bank when Hindsight fails verification", async (_name, run, command) => {
     const deps = buildDeps({ defaultBankId: "u" });
     deps.verifyHindsight.mockRejectedValueOnce(new Error("hindsight auth check failed"));
@@ -174,44 +264,12 @@ describe("Hindsight verification in the memory CLIs", () => {
   });
 });
 
-describe("runMigrateMemoriesCli", () => {
-  it("usage-errors when no bankId arg AND no default resolves", async () => {
-    const deps = buildDeps({ defaultBankId: null });
-    const code = await runMigrateMemoriesCli([], deps);
-    expect(code).toBe(1);
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringMatching(/Usage: cogmo migrate-memories/),
-    );
-    expect(migrateUntaggedMemoriesSpy).not.toHaveBeenCalled();
-  });
-
-  it("falls back to resolveDefaultBankId when no positional arg", async () => {
-    const deps = buildDeps({ defaultBankId: "user-default" });
-    migrateUntaggedMemoriesSpy.mockResolvedValueOnce({ migrated: 7 });
-
-    const code = await runMigrateMemoriesCli([], deps);
-
-    expect(code).toBe(0);
-    expect(deps.resolveDefaultBankId).toHaveBeenCalledOnce();
-    expect(migrateUntaggedMemoriesSpy).toHaveBeenCalledWith("user-default", expect.any(Object));
-  });
-
-  it("uses the positional bankId when provided", async () => {
-    const deps = buildDeps({ defaultBankId: "fallback" });
-    migrateUntaggedMemoriesSpy.mockResolvedValueOnce({ migrated: 0 });
-
-    const code = await runMigrateMemoriesCli(["explicit-bank"], deps);
-
-    expect(code).toBe(0);
-    expect(deps.resolveDefaultBankId).not.toHaveBeenCalled();
-    expect(migrateUntaggedMemoriesSpy).toHaveBeenCalledWith("explicit-bank", expect.any(Object));
-  });
-
+describe("migrate-memories", () => {
   it("wires HindsightClient with the configured base URL and API key", async () => {
     const deps = buildDeps({ defaultBankId: "u" });
     migrateUntaggedMemoriesSpy.mockResolvedValueOnce({ migrated: 0 });
 
-    await runMigrateMemoriesCli([], deps);
+    await migrate(deps);
 
     expect(hindsightCtor).toHaveBeenCalledWith({
       baseUrl: "http://hindsight:8080",
@@ -238,7 +296,7 @@ describe("runMigrateMemoriesCli", () => {
       return { migrated: 0 };
     });
 
-    const code = await runMigrateMemoriesCli([], deps);
+    const { code } = await migrate(deps);
     expect(code).toBe(0);
     // Confirm the inner assertion actually ran — guards against a future
     // refactor that bypasses the mock implementation entirely.
@@ -255,7 +313,7 @@ describe("runMigrateMemoriesCli", () => {
       return { migrated: 0 };
     });
 
-    const code = await runMigrateMemoriesCli([], deps);
+    const { code } = await migrate(deps);
     expect(code).toBe(0);
     expect(depAsserted).toBe(true);
   });
@@ -268,7 +326,7 @@ describe("runMigrateMemoriesCli", () => {
       return { migrated: 1 };
     });
 
-    const code = await runMigrateMemoriesCli([], deps);
+    const { code } = await migrate(deps);
     expect(code).toBe(0);
     expect(fs.writeFileSync).toHaveBeenCalledWith(
       expect.stringMatching(/u-.*\.json$/),
@@ -287,50 +345,23 @@ describe("runMigrateMemoriesCli", () => {
       return { migrated: 0 };
     });
 
-    const code = await runMigrateMemoriesCli([], deps);
+    const { code } = await migrate(deps);
     expect(code).toBe(0);
     expect(depAsserted).toBe(true);
   });
 });
 
-describe("runBackfillProfileClassCli", () => {
-  it("returns 1 and prints the parse error when args are invalid", async () => {
-    const code = await runBackfillProfileClassCli(["wrong-subcommand"], buildDeps());
-    expect(code).toBe(1);
-    expect(console.error).toHaveBeenCalledWith(expect.stringMatching(/Usage:/));
-  });
-
-  it("usage-errors when no override AND no default resolves", async () => {
-    const deps = buildDeps({ defaultBankId: null });
-    const code = await runBackfillProfileClassCli(["profile-class", "--tag=general"], deps);
-    expect(code).toBe(1);
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringMatching(/Usage: cogmo backfill profile-class/),
-    );
-  });
-
+describe("backfill profile-class", () => {
   it("happy path: single tag, no multi-tag probe needed", async () => {
     const deps = buildDeps({ defaultBankId: "u" });
     backfillProfileClassSpy.mockResolvedValueOnce({ total: 3, classified: 2, skipped: 1 });
 
-    const code = await runBackfillProfileClassCli(["profile-class", "--tag=general"], deps);
+    const { code } = await backfill(deps, "--tag=general");
 
     expect(code).toBe(0);
     expect(listMemoriesSpy).not.toHaveBeenCalled();
     expect(backfillProfileClassSpy).toHaveBeenCalledWith("u", expect.any(Object), {
       classTags: ["general"],
-    });
-  });
-
-  it("--bankId override wins over default resolver", async () => {
-    const deps = buildDeps({ defaultBankId: "fallback" });
-    backfillProfileClassSpy.mockResolvedValueOnce({ total: 0, classified: 0, skipped: 0 });
-
-    await runBackfillProfileClassCli(["profile-class", "--tag=x", "--bankId=explicit"], deps);
-
-    expect(deps.resolveDefaultBankId).not.toHaveBeenCalled();
-    expect(backfillProfileClassSpy).toHaveBeenCalledWith("explicit", expect.any(Object), {
-      classTags: ["x"],
     });
   });
 
@@ -344,7 +375,7 @@ describe("runBackfillProfileClassCli", () => {
     });
     backfillProfileClassSpy.mockResolvedValueOnce({ total: 1, classified: 0, skipped: 1 });
 
-    const code = await runBackfillProfileClassCli(["profile-class", "--tag=general,legacy"], deps);
+    const { code } = await backfill(deps, "--tag=general,legacy");
 
     expect(code).toBe(0);
     expect(listMemoriesSpy).toHaveBeenCalledWith("u", { limit: 100, offset: 0 });
@@ -363,7 +394,7 @@ describe("runBackfillProfileClassCli", () => {
     });
     backfillProfileClassSpy.mockResolvedValueOnce({ total: 3, classified: 3, skipped: 0 });
 
-    await runBackfillProfileClassCli(["profile-class", "--tag=a,b"], deps);
+    await backfill(deps, "--tag=a,b");
 
     const warnCalls = vi.mocked(console.warn).mock.calls.map((c) => String(c[0]));
     expect(warnCalls.some((s) => /already carry/.test(s))).toBe(false);
@@ -380,7 +411,7 @@ describe("runBackfillProfileClassCli", () => {
       return { total: 0, classified: 0, skipped: 0 };
     });
 
-    const code = await runBackfillProfileClassCli(["profile-class", "--tag=x"], deps);
+    const { code } = await backfill(deps, "--tag=x");
     expect(code).toBe(0);
     expect(depAsserted).toBe(true);
   });
@@ -396,7 +427,7 @@ describe("runBackfillProfileClassCli", () => {
       return { total: 0, classified: 0, skipped: 0 };
     });
 
-    const code = await runBackfillProfileClassCli(["profile-class", "--tag=x"], deps);
+    const { code } = await backfill(deps, "--tag=x");
     expect(code).toBe(0);
     expect(depAsserted).toBe(true);
   });

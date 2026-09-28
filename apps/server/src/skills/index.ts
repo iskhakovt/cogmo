@@ -1,7 +1,6 @@
 /** Skills module public surface. */
 
 export { classifyManifest, STUB_CLASSIFIER_VERSION } from "./classifier.js";
-export { runSkillsCli } from "./cli.js";
 export {
   AUTO_PROVISION_REPO_NAME,
   type ConfigureSkillsRemoteDeps,

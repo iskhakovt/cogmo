@@ -11,11 +11,18 @@
  * model = one provider. Deletion cascades to `image_models`.
  */
 
+import { command, extendType, optional, positional, string, subcommands } from "cmd-ts";
 import { InvalidProviderConfigError } from "../agent/store/errors.js";
 import type { AgentStore } from "../agent/store/index.js";
-import type { ImageProviderTypeValue } from "../agent/store/schema.js";
+import {
+  type ImageGenerationDefaults,
+  type ImageProviderTypeValue,
+  imageProviderType,
+} from "../agent/store/schema.js";
 import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { choice, identifier, optionalOption } from "./args.js";
+import { type CliIo, EXIT_USAGE, type LoadDeps } from "./run.js";
 
 /**
  * Provider names round-trip into `secrets.name` as `<name>_api_key`, so the
@@ -26,81 +33,128 @@ import type { SecretsStore } from "../secrets/store/index.js";
  */
 const PROVIDER_NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 
-const USAGE = `Usage: cogmo image-provider <command> [args]
-
-Commands:
-  add <type> <name> <api-key> [base-url]
-                          Register an image provider. \`type\` is one of:
-                          fal, openai_compatible, venice. base-url is
-                          REQUIRED for openai_compatible (e.g.
-                          https://api.openai.com/v1) and venice
-                          (https://api.venice.ai/api/v1), and FORBIDDEN
-                          for fal.
-
-                          Venice extras (all venice-only; all optional;
-                          stored in image_providers.attrs.imageGenerationDefaults):
-                            --safe-mode true|false    apply a blur
-                                                      (Venice default true; pass
-                                                      false to opt out — the
-                                                      adapter then treats a
-                                                      returned x-venice-is-blurred
-                                                      response as a failed
-                                                      generation).
-                            --cfg-scale 0-20          prompt-adherence dial
-                                                      (higher = stricter).
-                            --hide-watermark true|false
-                                                      strip Venice's watermark.
-                            --style-preset <name>     server-side style preset
-                                                      (e.g. "Photographic").
-  list                    Show registered image providers (name | type | base url).
-  remove <name>           Delete a provider (cascades to its image_models rows).
-`;
-
-export interface CliIo {
-  out(line: string): void;
-  err(line: string): void;
-}
-
-const CONSOLE_IO: CliIo = {
-  out: (line) => console.log(line),
-  err: (line) => console.error(line),
-};
-
 export interface ImageProviderCliDeps {
   runInTx: Transactor;
   agentStore: AgentStore;
   secretsStore: SecretsStore;
 }
 
-export async function runImageProviderCli(
-  argv: readonly string[],
-  deps: ImageProviderCliDeps,
-  io: CliIo = CONSOLE_IO,
-): Promise<number> {
-  const [command, ...rest] = argv;
-  try {
-    switch (command) {
-      case undefined:
-      case "help":
-      case "--help":
-      case "-h":
-        io.out(USAGE);
-        return 0;
-      case "list":
-        return await listProviders(deps, io);
-      case "add":
-        return await addProviderCmd(rest, deps, io);
-      case "remove":
-        return await removeProvider(rest, deps, io);
-      default:
-        io.err(`Unknown command: ${command}\n`);
-        io.err(USAGE);
-        return 1;
+const providerType = choice(imageProviderType.enumValues, "type");
+
+const providerName = extendType(string, {
+  displayName: "name",
+  async from(value) {
+    if (!PROVIDER_NAME_RE.test(value)) {
+      throw new Error(
+        `Invalid name "${value}": must start with a lowercase letter and contain only ` +
+          "lowercase letters, digits, hyphens, or underscores (≤32 chars). " +
+          "This shape is reused as the secret name (`<name>_api_key`) — looser " +
+          "values would let whitespace or shell metacharacters land in `secrets.name`.",
+      );
     }
-  } catch (err) {
-    io.err(`Error: ${(err as Error).message}`);
-    return 2;
-  }
+    return value;
+  },
+});
+
+const trueOrFalse = extendType(
+  choice(["true", "false"], "true|false"),
+  async (value) => value === "true",
+);
+
+const cfgScale = extendType(string, {
+  displayName: "0-20",
+  async from(value) {
+    const n = Number(value.trim());
+    if (value.trim() === "" || !Number.isFinite(n) || n < 0 || n > 20) {
+      throw new Error(`expected a number from 0 to 20, got "${value}"`);
+    }
+    return n;
+  },
+});
+
+export function imageProviderCli(io: CliIo, loadDeps: LoadDeps<ImageProviderCliDeps>) {
+  return subcommands({
+    name: "image-provider",
+    description: "Manage image generation providers (image_providers rows).",
+    cmds: {
+      add: command({
+        name: "add",
+        description:
+          "Register an image provider, storing its API key as the secret <name>_api_key. The venice-only options pin its generation defaults.",
+        args: {
+          type: positional({
+            type: providerType,
+            displayName: "type",
+            description: imageProviderType.enumValues.join(", "),
+          }),
+          name: positional({
+            type: providerName,
+            displayName: "name",
+            description:
+              "What image models route to it by: a lowercase letter, then up to 31 lowercase letters, digits, - or _.",
+          }),
+          apiKey: positional({ type: string, displayName: "api-key", description: "Its API key." }),
+          baseUrl: positional({
+            type: optional(string),
+            displayName: "base-url",
+            description:
+              "Required for openai_compatible (e.g. https://api.openai.com/v1) and venice (https://api.venice.ai/api/v1); refused for fal.",
+          }),
+          safeMode: optionalOption({
+            long: "safe-mode",
+            type: trueOrFalse,
+            description:
+              "Venice only. Blur flagged content (Venice defaults to true); with false, a blurred response counts as a failed generation.",
+          }),
+          cfgScale: optionalOption({
+            long: "cfg-scale",
+            type: cfgScale,
+            description: "Venice only. Prompt adherence; higher is stricter.",
+          }),
+          hideWatermark: optionalOption({
+            long: "hide-watermark",
+            type: trueOrFalse,
+            description: "Venice only. Strip Venice's watermark.",
+          }),
+          stylePreset: optionalOption({
+            long: "style-preset",
+            type: identifier("preset"),
+            description: "Venice only. A server-side style preset, e.g. Photographic.",
+          }),
+        },
+        examples: [
+          {
+            description: "A fal account",
+            command: "cogmo image-provider add fal fal key-...",
+          },
+          {
+            description: "Venice, with safe mode off and a stricter prompt adherence",
+            command:
+              "cogmo image-provider add venice venice key-... https://api.venice.ai/api/v1 --safe-mode false --cfg-scale 12",
+          },
+        ],
+        handler: (args) => addProviderCmd(args, loadDeps, io),
+      }),
+      list: command({
+        name: "list",
+        description: "Show registered image providers (name, type, base URL).",
+        args: {},
+        handler: async () => listProviders(await loadDeps(), io),
+      }),
+      remove: command({
+        name: "remove",
+        description: "Delete an image provider; its image_models rows cascade.",
+        args: {
+          name: positional({
+            type: identifier("name"),
+            displayName: "name",
+            description: "An image provider.",
+          }),
+        },
+        handler: async (args) => removeProvider(args, await loadDeps(), io),
+      }),
+    },
+  });
 }
 
 async function listProviders(deps: ImageProviderCliDeps, io: CliIo): Promise<number> {
@@ -116,113 +170,45 @@ async function listProviders(deps: ImageProviderCliDeps, io: CliIo): Promise<num
   return 0;
 }
 
+interface AddArgs {
+  type: ImageProviderTypeValue;
+  name: string;
+  apiKey: string;
+  baseUrl: string | undefined;
+  safeMode: boolean | undefined;
+  cfgScale: number | undefined;
+  hideWatermark: boolean | undefined;
+  stylePreset: string | undefined;
+}
+
 async function addProviderCmd(
-  args: readonly string[],
-  deps: ImageProviderCliDeps,
+  args: AddArgs,
+  loadDeps: LoadDeps<ImageProviderCliDeps>,
   io: CliIo,
 ): Promise<number> {
-  // Split positional args from named flags so venice extras can appear in
-  // any order after the type/name/api-key triple. Order doesn't matter for
-  // the flags, but the positional triple must come first to preserve the
-  // existing CLI contract.
-  const positional: string[] = [];
-  let safeModeFlag: boolean | undefined;
-  let cfgScaleFlag: number | undefined;
-  let hideWatermarkFlag: boolean | undefined;
-  let stylePresetFlag: string | undefined;
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === "--safe-mode") {
-      const value = args[i + 1];
-      if (value !== "true" && value !== "false") {
-        io.err(`--safe-mode requires "true" or "false" (got "${value ?? ""}")`);
-        return 2;
-      }
-      safeModeFlag = value === "true";
-      i++;
-    } else if (arg === "--cfg-scale") {
-      const value = args[i + 1];
-      const parsed = value === undefined ? Number.NaN : Number(value);
-      if (!Number.isFinite(parsed) || parsed < 0 || parsed > 20) {
-        io.err(`--cfg-scale requires a number 0–20 (got "${value ?? ""}")`);
-        return 2;
-      }
-      cfgScaleFlag = parsed;
-      i++;
-    } else if (arg === "--hide-watermark") {
-      const value = args[i + 1];
-      if (value !== "true" && value !== "false") {
-        io.err(`--hide-watermark requires "true" or "false" (got "${value ?? ""}")`);
-        return 2;
-      }
-      hideWatermarkFlag = value === "true";
-      i++;
-    } else if (arg === "--style-preset") {
-      const value = args[i + 1];
-      if (value === undefined || value.length === 0) {
-        io.err(`--style-preset requires a non-empty string`);
-        return 2;
-      }
-      stylePresetFlag = value;
-      i++;
-    } else if (arg !== undefined) {
-      positional.push(arg);
-    }
-  }
-
-  const [typeArg, name, apiKey, baseUrlArg] = positional;
-  if (!typeArg || !name || !apiKey) {
-    io.err(
-      "Usage: cogmo image-provider add <type> <name> <api-key> [base-url] " +
-        "[--safe-mode true|false] [--cfg-scale 0-20] [--hide-watermark true|false] " +
-        "[--style-preset <name>]",
-    );
-    return 2;
-  }
-  if (typeArg !== "fal" && typeArg !== "openai_compatible" && typeArg !== "venice") {
-    io.err(`Invalid type "${typeArg}" — expected fal|openai_compatible|venice`);
-    return 2;
-  }
-  if (!PROVIDER_NAME_RE.test(name)) {
-    io.err(
-      `Invalid name "${name}": must start with a lowercase letter and contain only ` +
-        `lowercase letters, digits, hyphens, or underscores (≤32 chars). ` +
-        `This shape is reused as the secret name (\`<name>_api_key\`) — looser ` +
-        `values would let whitespace or shell metacharacters land in \`secrets.name\`.`,
-    );
-    return 2;
-  }
-  // All four extras live in `imageGenerationDefaults` and are venice-only
-  // today (the only provider that consumes `safe_mode` / `cfg_scale` /
-  // `hide_watermark` / `style_preset` body fields). Reject up front so
-  // operators don't end up with a fal or openai_compatible row carrying
-  // dead JSONB the runtime won't read.
-  const veniceExtras = {
-    ...(safeModeFlag !== undefined && { safe_mode: safeModeFlag }),
-    ...(cfgScaleFlag !== undefined && { cfg_scale: cfgScaleFlag }),
-    ...(hideWatermarkFlag !== undefined && { hide_watermark: hideWatermarkFlag }),
-    ...(stylePresetFlag !== undefined && { style_preset: stylePresetFlag }),
+  const { type: providerType, name, apiKey } = args;
+  const defaults: ImageGenerationDefaults = {
+    ...(args.safeMode !== undefined && { safe_mode: args.safeMode }),
+    ...(args.cfgScale !== undefined && { cfg_scale: args.cfgScale }),
+    ...(args.hideWatermark !== undefined && { hide_watermark: args.hideWatermark }),
+    ...(args.stylePreset !== undefined && { style_preset: args.stylePreset }),
   };
-  if (Object.keys(veniceExtras).length > 0 && typeArg !== "venice") {
+  const hasDefaults = Object.keys(defaults).length > 0;
+  // Only the venice adapter sends these body fields; on another type they
+  // would be dead JSONB the runtime never reads.
+  if (hasDefaults && providerType !== "venice") {
     io.err(
-      `--safe-mode / --cfg-scale / --hide-watermark / --style-preset are venice-only ` +
-        `(got type=${typeArg})`,
+      "--safe-mode / --cfg-scale / --hide-watermark / --style-preset are venice-only " +
+        `(got type=${providerType})`,
     );
-    return 2;
+    return EXIT_USAGE;
   }
-  const providerType: ImageProviderTypeValue = typeArg;
-  const baseUrl = baseUrlArg ?? null;
-  // Empty `imageGenerationDefaults` would round-trip as `{}` in the row,
-  // which is harmless but noisy in CRUD output — only include it when the
-  // operator actually opted into at least one default.
-  const attrs =
-    Object.keys(veniceExtras).length > 0 ? { imageGenerationDefaults: veniceExtras } : {};
+  // `imageGenerationDefaults` is omitted rather than stored as `{}` when no default is set.
+  const attrs = hasDefaults ? { imageGenerationDefaults: defaults } : {};
 
-  // Materialize the API key into a secret named `<provider-name>_api_key` —
-  // consistent with the canonical `fal_api_key` slot the wizard uses, just
-  // namespaced for arbitrary providers (`venice_api_key`, etc.). One secret
-  // per provider keeps key rotation straightforward.
+  // One secret per provider, named like the wizard's `fal_api_key` slot, keeps key rotation per provider.
   const secretName = `${name}_api_key`;
+  const deps = await loadDeps();
   try {
     const { id: providerId } = await deps.runInTx(async (tx) => {
       const { id: secretId } = await deps.secretsStore.putSecret(tx, {
@@ -233,7 +219,7 @@ async function addProviderCmd(
       return deps.agentStore.createImageProvider(tx, {
         name,
         type: providerType,
-        baseUrl,
+        baseUrl: args.baseUrl ?? null,
         secretId,
         attrs,
       });
@@ -244,7 +230,7 @@ async function addProviderCmd(
   } catch (err) {
     if (err instanceof InvalidProviderConfigError) {
       io.err(`Invalid config: ${err.reason}`);
-      return 2;
+      return EXIT_USAGE;
     }
     io.err(`Failed to add image provider: ${(err as Error).message}`);
     return 1;
@@ -252,15 +238,11 @@ async function addProviderCmd(
 }
 
 async function removeProvider(
-  args: readonly string[],
+  args: { name: string },
   deps: ImageProviderCliDeps,
   io: CliIo,
 ): Promise<number> {
-  const [name] = args;
-  if (!name) {
-    io.err("Usage: cogmo image-provider remove <name>");
-    return 2;
-  }
+  const { name } = args;
   const provider = await deps.runInTx((tx) => deps.agentStore.findImageProviderByName(tx, name));
   if (!provider) {
     io.err(`No image provider named "${name}".`);
