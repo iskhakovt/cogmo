@@ -797,7 +797,7 @@ Manual invocations are synchronous from the LLM's perspective — tool result re
 
 ### Run-as identity `[confirmed]`
 
-Every run acts for a user: `ctx.user()` returns them, and `ctx.memory` / `ctx.files` go through a scoped `Service` built for them (`SkillRunner.invoke({ runAs })`). `ctx.memory` gets exactly what the agent's own memory tools get — the profile's `memoryScope`, the restricted-class exclusion, and writes staged in `pending_memories` for the Observer.
+Every run acts for a user: `ctx.user()` returns them, and `ctx.memory` / `ctx.files` go through a scoped `Service` built for them (`SkillRunner.invoke({ runAs })`). `ctx.memory` gets exactly what the agent's own memory tools get — the profile's `memoryScope`, the restricted-class exclusion, and writes staged in `pending_memories` for the Observer. `ctx.files` is the deployment-wide workspace (see [File workspace](#file-workspace-confirmed)).
 
 | Trigger | Runs as |
 |-|-|
@@ -805,7 +805,17 @@ Every run acts for a user: `ctx.user()` returns them, and `ctx.memory` / `ctx.fi
 | `cogmo skills run` | The install owner with the default profile. |
 | Cron | `skills.run_as_user_id` / `run_as_profile_id`, built by `resolveSkillRunAs` inside the fire's `dispatch` step. |
 
-The cron identity is set iff `schedule` is, and captured by the deploy that sets or changes the live schedule: the approver's user for an approved deploy, otherwise the install owner, with the default profile. A deploy that keeps the schedule keeps the identity; one that drops it clears it. The profile is the default because no deploy path records a conversation: the approval tap carries only the tapper, auto-register starts from a coding task, and the CLI has none.
+The cron identity is set iff `schedule` is. Every deploy that puts a schedule live writes it afresh, so new code never runs as whoever vouched for the code before it; a deploy that drops the schedule clears it. A deploy's identity comes from where it came from:
+
+| Deploy | User | Profile |
+|-|-|-|
+| `register_skill`, or a skill-repo coding task's auto-register | The requesting conversation's user | That conversation's profile |
+| Approval (Telegram tap) | The approver | The profile of the conversation in the chat the tap came from, when that conversation is the approver's; otherwise the default |
+| CLI `register` / `approve` / `rollback`, or a coding task with no conversation | The install owner | The default profile |
+
+An approver's persona is known only from a conversation of theirs. The keyboard is posted into the requesting conversation's chat, so an approval tapped there by the requester keeps the requesting profile.
+
+A cron run's `ctx.memory.remember` waits in `pending_memories` until the Observer next drains that user's rows, on a `conversation/idle` long enough to pass the `too_short` gate. A user who rarely chats sees a scheduled skill's writes late.
 
 ### One tool per skill
 
@@ -817,7 +827,7 @@ Each registered skill appears as its own entry in the LLM's tool list — the sk
 
 ```typescript
 // orchestrator, per turn
-async function buildToolList(): Promise<ToolSpec[]> {
+async function buildToolList(turn: { userId: string }): Promise<ToolSpec[]> {
   const builtIn = [...coreTools, ...webTools, ...imageTools];
   const skills = await skillRunner.list();  // DB read, live + enabled skills
   const skillTools = skills.map((s) => defineTool({
@@ -894,7 +904,7 @@ def run(inputs: dict, ctx) -> dict:
 | `ctx.files.list(prefix=None)` | List workspace entries |
 | `ctx.llm.complete(prompt, model=...)` | LLM call via Cogmo's provider routing (cost-tracked, provider-fallback, prompt-cache aware) |
 | `ctx.now()` | Canonical time (mockable in tests) |
-| `ctx.user` | The run's user — `id`, `timezone`, `email` where available |
+| `ctx.user()` | The run's user — `id`, and the deployment's `timezone` (`USER_TIMEZONE`) |
 | `ctx.notify(channel, message)` | Send a message to the user via their preferred channel (Telegram in v1) |
 | `ctx.log.info(msg, **fields)` | Structured logging to `skill_runs.logs` |
 | `ctx.http.request(method, url, ...)` | Outbound HTTP performed by the host; `get` / `post` wrap it. Tier 1's only network path — Pyodide has no sockets, so `httpx` and `requests` cannot run there. Present in tier 2 as well, so a skill does not break when adding a dependency moves it across the boundary; tier 2 may use `httpx` directly instead. Returns `{status, headers, body}`; a 4xx/5xx is a value, not an exception. Every destination must appear in the manifest's `network.allow` list, checked on the hostname ahead of resolution — a skill with no `network:` block reaches nothing. `http`/`https` only, capped at 5 MiB, and timed out under the skill's own `wall_clock_s` so a hung request stays catchable. Redirects are not followed — the 3xx comes back with its `location` so the next hop is a fresh, separately-checked call. Destinations resolving to loopback, link-local or private ranges are refused: `fetch` runs in the host process, so without that check a skill would reach internal services (Hindsight takes no auth) that a tier-2 sandbox cannot see. Audited to `skill_context_calls` by origin and path, never the query string. |
@@ -936,7 +946,7 @@ The RPC surface (`Service["files"]` mirrored to Python) is unchanged from prior 
 | `ctx.files.list(prefix=None)` | `list[FileEntry]` with `path`, `size`, `last_modified` |
 | `ctx.files.delete(path)` | `None` — idempotent; no error if the path is already absent |
 
-Paths are logical (`notes/meeting.md`). The host enforces ACL — a skill cannot escape its user's prefix. The 100 KB read cap on `ctx.files.read` (matching the agent's `read_file` tool) is an LLM-output guardrail — its job is preventing a 50 MB string from landing in a tool result the LLM will then re-include in its context. POSIX `open()` does NOT inherit this cap and is bounded only by the substrate (Pyodide MEMFS by worker memory, sysbox tmpfs by mount size, Daytona Volume by quota); skills that need to materialise a large file end-to-end should use POSIX. Writes have no explicit cap on either path (bounded by S3 object limits).
+Paths are logical (`notes/meeting.md`). The per-user prefix, once built, is where the host enforces ACL. The 100 KB read cap on `ctx.files.read` (matching the agent's `read_file` tool) is an LLM-output guardrail — its job is preventing a 50 MB string from landing in a tool result the LLM will then re-include in its context. POSIX `open()` does NOT inherit this cap and is bounded only by the substrate (Pyodide MEMFS by worker memory, sysbox tmpfs by mount size, Daytona Volume by quota); skills that need to materialise a large file end-to-end should use POSIX. Writes have no explicit cap on either path (bounded by S3 object limits).
 
 #### Per-tier POSIX shim — stage + reconcile
 
@@ -1085,25 +1095,23 @@ CREATE TYPE skill_run_trigger AS ENUM ('manual', 'cron', 'event');
 CREATE TYPE skill_deploy_status AS ENUM ('pending_approval', 'approved', 'denied', 'live', 'rolled_back');
 
 skills (
-  id            UUID v7 PK,
-  name          TEXT NOT NULL UNIQUE,        -- matches dir name
-  tier          skill_tier NOT NULL,
-  risk_tier     skill_risk_tier NOT NULL,    -- computed by classifier at deploy
-  effects       JSONB NOT NULL,              -- SkillEffectsSchema (declared effects list)
-  schedule      TEXT,                        -- nullable: cron expression; null = not scheduled
-  run_as_user_id    UUID REFERENCES users(id) ON DELETE CASCADE,  -- nullable: set iff schedule is
-  run_as_profile_id UUID REFERENCES profiles(id),                 -- nullable: set iff schedule is; RESTRICT
-                                             -- Who a cron fire runs as (chk_skills_run_as_iff_schedule).
-                                             -- See Run-as identity.
-  git_sha       TEXT NOT NULL,               -- commit hash of current live version
-  lockfile_hash TEXT,                        -- nullable: null when manifest.dependencies is empty.
-                                             -- sha256(requirements.lock @ git_sha). Drives venv cache
-                                             -- key + reachability GC; updated atomically with git_sha.
-                                             -- See Dependencies.
-  inputs        JSONB NOT NULL,              -- SkillIoSchema (opaque JSON Schema — see Manifest)
-  outputs       JSONB,                       -- nullable: side-effect-only skills have no structured output. SkillIoSchema when present.
-  disabled      BOOLEAN NOT NULL DEFAULT false,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  id                UUID v7 PK,
+  name              TEXT NOT NULL UNIQUE,            -- matches dir name
+  tier              skill_tier NOT NULL,
+  risk_tier         skill_risk_tier NOT NULL,        -- computed by classifier at deploy
+  effects           JSONB NOT NULL,                  -- SkillEffectsSchema (declared effects list)
+  schedule          TEXT,                            -- nullable: cron expression; null = not scheduled
+  run_as_user_id    UUID REFERENCES users(id),       -- nullable: set iff schedule is (chk_skills_run_as_iff_schedule).
+  run_as_profile_id UUID REFERENCES profiles(id),    -- nullable: same. Who a cron fire runs as; see Run-as identity.
+  git_sha           TEXT NOT NULL,                   -- commit hash of current live version
+  lockfile_hash     TEXT,                            -- nullable: null when manifest.dependencies is empty.
+                                                     -- sha256(requirements.lock @ git_sha). Drives venv cache
+                                                     -- key + reachability GC; updated atomically with git_sha.
+                                                     -- See Dependencies.
+  inputs            JSONB NOT NULL,                  -- SkillIoSchema (opaque JSON Schema — see Manifest)
+  outputs           JSONB,                           -- nullable: side-effect-only skills have no structured output. SkillIoSchema when present.
+  disabled          BOOLEAN NOT NULL DEFAULT false,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 
 skill_deploys (
