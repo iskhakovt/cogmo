@@ -171,6 +171,27 @@ export function command<T extends TaskRef>(
     .exhaustive();
 }
 
+/** How a worker takes a task it admits. */
+export type Admission = { kind: "runs" } | { kind: "fails"; reason: string };
+
+/**
+ * Whether a worker in `state` takes a task, and how: a `leased` one runs
+ * it, and a `dead` one fails it as a value — the worker can die between its
+ * lease and its task, which is an expected race. Any other state refuses it.
+ */
+export function admits<T extends TaskRef>(state: WorkerState<T>): Result<Admission, string> {
+  return match<WorkerState<T>, Result<Admission, string>>(state)
+    .with({ kind: "leased" }, () => ok({ kind: "runs" }))
+    .with({ kind: "dead" }, (s) => ok({ kind: "fails", reason: `worker is dead: ${s.reason}` }))
+    .with({ kind: P.union(...WITH_TASK) }, () =>
+      err("a task is already in-flight — one task at a time"),
+    )
+    .with({ kind: P.union("starting", "idle") }, (s) =>
+      err(`cannot invoke on a worker that is ${s.kind}: acquire it first`),
+    )
+    .exhaustive();
+}
+
 /** Take in a fact: the next state and its effects. `dead` is final and ignores every fact. */
 export function observe<T extends TaskRef>(state: WorkerState<T>, fact: Fact<T>): Transition<T> {
   return match<[WorkerState<T>, Fact<T>], Transition<T>>([state, fact])
@@ -300,23 +321,18 @@ function onRelease<T extends TaskRef>(state: WorkerState<T>): Result<Transition<
     .exhaustive();
 }
 
-/**
- * A task handed to a dead worker fails as a value: the worker can die
- * between its lease and its task, which is an expected race.
- */
+/** See `admits`. */
 function onInvoke<T extends TaskRef>(
   state: WorkerState<T>,
   task: T,
   message: TaskInvoke,
 ): Result<Transition<T>, string> {
-  return match<WorkerState<T>, Result<Transition<T>, string>>(state)
-    .with({ kind: "leased" }, () =>
-      ok(step({ kind: "running", task }, [{ type: "send", message }])),
-    )
-    .with({ kind: "dead" }, (s) => {
-      const reason = `worker is dead: ${s.reason}`;
-      return ok(
-        step(s, [
+  return admits(state).map((admission) =>
+    match(admission)
+      .returnType<Transition<T>>()
+      .with({ kind: "runs" }, () => step({ kind: "running", task }, [{ type: "send", message }]))
+      .with({ kind: "fails" }, ({ reason }) =>
+        step(state, [
           {
             type: "settle",
             task,
@@ -326,15 +342,9 @@ function onInvoke<T extends TaskRef>(
             },
           },
         ]),
-      );
-    })
-    .with({ kind: P.union(...WITH_TASK) }, () =>
-      err("a task is already in-flight — one task at a time"),
-    )
-    .with({ kind: P.union("starting", "idle") }, (s) =>
-      err(`cannot invoke on a worker that is ${s.kind}: acquire it first`),
-    )
-    .exhaustive();
+      )
+      .exhaustive(),
+  );
 }
 
 // --- channel facts ---

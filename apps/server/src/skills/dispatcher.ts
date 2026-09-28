@@ -10,6 +10,8 @@ import {
   WorkerMessageSchema,
 } from "./protocol.js";
 import {
+  type Admission,
+  admits,
   type Command,
   command,
   type Effect,
@@ -144,6 +146,11 @@ export class Dispatcher {
 
   get state(): WorkerStateKind {
     return this.#state.kind;
+  }
+
+  /** Whether the worker takes a task now, and how; see `admits`. */
+  admission(): Result<Admission, string> {
+    return admits(this.#state);
   }
 
   /** Lease an idle worker for one task. False unless it is idle. */

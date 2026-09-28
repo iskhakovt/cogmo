@@ -361,15 +361,10 @@ export class SysboxSkillWorker {
    * value, with nothing populated or sent.
    */
   async invoke(params: InvokeParams): Promise<InvokeResult> {
-    const leased = match(this.#dispatcher.state)
-      .with("leased", () => true)
-      .with("dead", () => false)
-      .with(P.union("starting", "idle", "running", "awaiting_exit"), () => {
-        throw new Error(
-          `SysboxSkillWorker.invoke called in state '${this.state}' — acquire it first`,
-        );
-      })
-      .exhaustive();
+    const admission = this.#dispatcher.admission();
+    if (admission.isErr()) {
+      throw new Error(`SysboxSkillWorker.invoke: ${admission.error}`);
+    }
     const wallClockS = params.wallClockS ?? DEFAULT_WALL_CLOCK_S.container;
 
     // Ensure the skill's venv is populated before sending the task. The
@@ -378,8 +373,10 @@ export class SysboxSkillWorker {
     // Failure retires the worker because uv pip sync writes into the
     // container's overlay FS; a partial populate could leave the venv
     // in an unreusable state for any future task with the same hash.
+    // A worker that dies during the populate is the dispatcher's to judge:
+    // it admits the task again when it is sent, and fails it as a value.
     let lockfileHash: string | undefined;
-    if (params.deps && leased) {
+    if (params.deps && admission.value.kind === "runs") {
       const populate = await ensureVenvPopulated({
         session: this.#session,
         lockfileHash: params.deps.lockfileHash,

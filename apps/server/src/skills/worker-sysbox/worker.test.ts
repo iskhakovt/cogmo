@@ -416,7 +416,7 @@ describe("SysboxSkillWorker", () => {
         expiresAt: new Date(Date.now() + 60_000),
       });
       await expect(w.invoke(invokeParams("t-1"))).rejects.toThrow(
-        /SysboxSkillWorker.invoke called in state 'idle'/,
+        /SysboxSkillWorker.invoke: cannot invoke on a worker that is idle: acquire it first/,
       );
     });
 

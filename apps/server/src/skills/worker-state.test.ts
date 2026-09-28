@@ -3,6 +3,7 @@ import * as R from "remeda";
 import { describe, expect, it } from "vitest";
 import type { CtxResult, TaskInvoke, TaskResult } from "./protocol.js";
 import {
+  admits,
   type Command,
   command,
   type Effect,
@@ -373,6 +374,30 @@ describe("the worker machine", () => {
       expect(
         pairsWhere((p) => p.before.kind !== "running" && p.after.state.kind === "running"),
       ).toEqual([["leased", "invoke"]]);
+    });
+
+    it("takes a task exactly where `admits` says: runs it when leased, fails it when dead", () => {
+      const admissions = R.mapValues(STATES, (s: WorkerState<TaskRef>) =>
+        admits(s).match(
+          (a) => a.kind,
+          () => "refused",
+        ),
+      );
+      expect(admissions).toEqual({
+        starting: "refused",
+        idle: "refused",
+        leased: "runs",
+        running: "refused",
+        awaiting_exit: "refused",
+        dead_held: "fails",
+        dead: "fails",
+      });
+      for (const p of PAIRS.filter((pair) => pair.eventName === "invoke")) {
+        expect({ state: p.stateName, refused: p.refused }).toEqual({
+          state: p.stateName,
+          refused: admissions[p.stateName] === "refused",
+        });
+      }
     });
 
     it("keeps dead final, and announces death exactly once", () => {
