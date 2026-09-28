@@ -16,10 +16,17 @@ import { z } from "zod";
  */
 export const SUPERVISOR_PROTOCOL_VERSION = 2;
 
+/** Tier 2 only: the supervisor's first frame, announcing its protocol version. */
 export const SupervisorReadySchema = z.object({
   type: z.literal("supervisor_ready"),
   protocolVersion: z.number().int(),
 });
+
+/** Tier 1 only: the Pyodide worker's first frame once it has loaded. */
+export const WorkerReadySchema = z.object({ type: z.literal("ready") });
+
+/** Tier 1 only: the Pyodide worker's first frame when it failed to load. */
+export const WorkerFatalSchema = z.object({ type: z.literal("fatal"), error: z.string() });
 
 export const TaskInvokeSchema = z.object({
   type: z.literal("task_invoke"),
@@ -163,11 +170,16 @@ export const TaskExitedSchema = z.object({
 });
 export type TaskExited = z.infer<typeof TaskExitedSchema>;
 
+/** Every frame a worker sends the host. A worker's first frame is its handshake. */
 export const WorkerMessageSchema = z.union([
-  TaskInvokeSchema,
+  SupervisorReadySchema,
+  WorkerReadySchema,
+  WorkerFatalSchema,
   TaskResultSchema,
   TaskExitedSchema,
   CtxCallSchema,
-  CtxResultSchema,
 ]);
 export type WorkerMessage = z.infer<typeof WorkerMessageSchema>;
+
+/** Every frame the host sends a worker. */
+export type HostMessage = TaskInvoke | CtxResult;

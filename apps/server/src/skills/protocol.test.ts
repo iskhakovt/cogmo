@@ -319,8 +319,16 @@ describe("CtxResultSchema (discriminated)", () => {
 describe("WorkerMessageSchema (discriminated union)", () => {
   it.each([
     {
-      name: "task_invoke",
-      msg: { type: "task_invoke", id: "t", skill: "s", inputs: {} },
+      name: "supervisor_ready",
+      msg: { type: "supervisor_ready", protocolVersion: 2 },
+    },
+    {
+      name: "ready",
+      msg: { type: "ready" },
+    },
+    {
+      name: "fatal",
+      msg: { type: "fatal", error: "micropip failed" },
     },
     {
       name: "task_result ok",
@@ -335,26 +343,24 @@ describe("WorkerMessageSchema (discriminated union)", () => {
       msg: { type: "ctx_call", taskId: "t", id: "c", method: "now", args: {} },
     },
     {
-      name: "ctx_result ok",
-      msg: { type: "ctx_result", taskId: "t", id: "c", ok: true, value: 1 },
-    },
-    {
-      name: "ctx_result err",
-      msg: {
-        type: "ctx_result",
-        taskId: "t",
-        id: "c",
-        ok: false,
-        errorKind: "internal",
-        message: "x",
-      },
-    },
-    {
       name: "task_exited",
       msg: { type: "task_exited", id: "t" },
     },
   ])("accepts $name", ({ msg }) => {
     expect(() => WorkerMessageSchema.parse(msg)).not.toThrow();
+  });
+
+  it.each([
+    {
+      name: "task_invoke",
+      msg: { type: "task_invoke", id: "t", skill: "s", inputs: {} },
+    },
+    {
+      name: "ctx_result",
+      msg: { type: "ctx_result", taskId: "t", id: "c", ok: true, value: 1 },
+    },
+  ])("rejects $name, which only the host sends", ({ msg }) => {
+    expect(() => WorkerMessageSchema.parse(msg)).toThrow();
   });
 
   it.each([null, undefined, 42, "string", [], { type: "garbage" }, {}, { type: "ctx_call" }])(

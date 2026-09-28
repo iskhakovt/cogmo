@@ -1,6 +1,8 @@
 import type { Readable, Writable } from "node:stream";
+import { Result } from "neverthrow";
 import split2 from "split2";
-import type { RpcTransport } from "../dispatcher.js";
+import { parseWorkerMessage, type WorkerTransport } from "../dispatcher.js";
+import type { WorkerMessage } from "../protocol.js";
 
 /**
  * Maximum unframed buffer size before the transport gives up. Real protocol
@@ -12,9 +14,8 @@ import type { RpcTransport } from "../dispatcher.js";
  * without newlines (e.g. a stray `print()` of a giant blob, or a wheel
  * leaking binary data into stdout instead of stderr) so the host doesn't
  * grow memory unbounded waiting for a `\n` that may never arrive. Enforced
- * by `split2`'s `maxLength` (it throws once the per-line buffer crosses
- * this; we surface that via `onError` so the dispatcher rejects the
- * pending task immediately instead of sitting on the wall-clock timer).
+ * by `split2`'s `maxLength`; crossing it fails the message stream, so the
+ * pending task fails at once instead of sitting on the wall-clock timer.
  */
 // Sized against the host's 5 MiB `http.request` response cap, not against
 // "protocol messages are small": a `ctx.http` body travels this pipe in
@@ -23,78 +24,63 @@ import type { RpcTransport } from "../dispatcher.js";
 // narrower one.
 export const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 
+const parseJson = Result.fromThrowable(
+  (line: string): unknown => JSON.parse(line),
+  () => "not JSON",
+);
+
 /**
- * NDJSON-over-streams adapter. Frames messages as one JSON object per line
- * on `stdin`, parses one JSON object per line from `stdout`. Plugs into the
- * generic `Dispatcher` used by both worker tiers.
- *
- * Tier-1 (Pyodide) uses a `MessagePort`-based transport; tier-2 (sysbox) uses
- * this one because docker exec gives us raw stdin/stdout streams.
+ * NDJSON-over-streams transport for the Tier 2 supervisor: one JSON object
+ * per line on `stdin`, one per line from `stdout`.
  *
  * Inbound framing is delegated to `split2` (Node-TSC-maintained, ISC, zero
- * deps, the line splitter pino is built on). We hand it a raw splitter
- * (no JSON.parse mapper) so we can swallow malformed lines silently — a
- * stray `print()` from skill code shouldn't fatally crash the protocol.
- * Buffer overflow does fail the task, by design: it's the only condition
- * where a misbehaving worker can otherwise bleed memory.
+ * deps, the line splitter pino is built on). A line that isn't JSON — a
+ * stray `print()` from skill code, a wheel writing to the wrong stream — is
+ * dropped silently. Buffer overflow fails the stream, by design: it's the
+ * only condition where a misbehaving worker can otherwise bleed memory.
  */
-export function createNdjsonTransport(stdin: Writable, stdout: Readable): RpcTransport {
-  let messageHandler: ((message: unknown) => void) | null = null;
-  let errorHandler: ((err: Error) => void) | null = null;
+export function createNdjsonTransport(stdin: Writable, stdout: Readable): WorkerTransport {
+  const lines = stdout.pipe(split2({ maxLength: MAX_BUFFER_BYTES }));
   let closed = false;
 
   function close(): void {
     if (closed) return;
     closed = true;
-    splitter.destroy();
+    lines.destroy();
     stdin.end();
   }
 
-  // split2 with no mapper emits one decoded string per line. We do JSON
-  // parsing ourselves so a single bad line is a no-op rather than a
-  // splitter `error` event that races teardown.
-  const splitter = stdout.pipe(split2({ maxLength: MAX_BUFFER_BYTES }));
-  splitter.on("data", (line: string) => {
-    // After close(), drop any remaining stdout. The dispatcher has already
-    // torn down its pending task; routing a late `task_result` /
-    // `ctx_call` past it could either fire a no-op or — worse — invoke
-    // the handler against a service the host has already cleaned up.
-    if (closed || !messageHandler) return;
-    if (line.length === 0) return;
+  async function* messages(): AsyncGenerator<WorkerMessage> {
     try {
-      messageHandler(JSON.parse(line));
-    } catch {
-      // Non-JSON line (stray print(), stderr crossing pipes from a
-      // misbehaving wheel, etc.) — drop silently. Schema validation in
-      // Dispatcher catches structurally valid but wrong-shape payloads.
+      for await (const line of lines) {
+        // Nothing read after close() reaches the host: its task and ctx
+        // services may already be gone.
+        if (closed) return;
+        const message = typeof line === "string" && line.length > 0 ? toMessage(line) : undefined;
+        if (message !== undefined) yield message;
+      }
+    } catch (e) {
+      if (closed) return;
+      close();
+      throw new Error(`transport: ${e instanceof Error ? e.message : String(e)}`);
     }
-  });
-  splitter.on("error", (err: Error) => {
     if (closed) return;
-    // Report through the typed error channel so the dispatcher rejects the
-    // pending task immediately.
-    errorHandler?.(new Error(`transport: ${err.message}`));
+    // The worker closed its output: the supervisor exited or was killed, so
+    // nothing more can arrive — including a `task_exited`.
     close();
-  });
-  // The worker closed its output: the supervisor exited (or was killed),
-  // so nothing more can arrive — including a `task_exited`.
-  splitter.on("end", () => {
-    if (closed) return;
-    errorHandler?.(new Error("transport: worker closed its output"));
-    close();
-  });
+    throw new Error("transport: worker closed its output");
+  }
 
   return {
-    postMessage(message: unknown): void {
+    send(message): void {
       if (closed) return;
       stdin.write(`${JSON.stringify(message)}\n`);
     },
-    onMessage(h: (message: unknown) => void): void {
-      messageHandler = h;
-    },
-    onError(h: (err: Error) => void): void {
-      errorHandler = h;
-    },
+    messages,
     close,
   };
+}
+
+function toMessage(line: string): WorkerMessage | undefined {
+  return parseJson(line).match(parseWorkerMessage, () => undefined);
 }

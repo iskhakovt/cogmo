@@ -1,36 +1,39 @@
+import type { Result } from "neverthrow";
+import { match } from "ts-pattern";
 import { logger } from "../logger.js";
+import { describeError } from "../util/describe-error.js";
 import {
   type CtxCall,
   type CtxResult,
-  type TaskExited,
+  type HostMessage,
   type TaskInvoke,
-  type TaskResult,
+  type WorkerMessage,
   WorkerMessageSchema,
 } from "./protocol.js";
+import {
+  type Effect,
+  type Handshake,
+  type StartFailure,
+  type TaskOutcome,
+  transition,
+  type WorkerEvent,
+  type WorkerState,
+  type WorkerStateKind,
+} from "./worker-state.js";
 
 const log = logger.child({ component: "skills.dispatcher" });
 
 /**
- * Transport contract — same shape `MessagePort` exposes natively. The Tier 2
- * (NDJSON over stdio) worker plugs in by providing a thin wrapper that frames
- * lines and dispatches to a single `message` handler.
+ * One worker's channel. `messages()` yields the worker's frames, validated,
+ * in arrival order. It returns once the host calls `close()` and throws once
+ * the worker's end closes or fails: either way the worker is gone. Iterate
+ * it once.
  */
-export interface RpcTransport {
-  postMessage(message: unknown): void;
-  /** Receive parsed messages. Same callback shape `MessagePort.on('message', …)` uses. */
-  onMessage(handler: (message: unknown) => void): void;
-  /**
-   * Subscribe to fatal transport errors — conditions where the transport
-   * cannot deliver any more messages (line-framing overflow, the worker
-   * closing its output, underlying stream error). Transports without a
-   * meaningful error path (e.g. the in-process Pyodide MessagePort adapter,
-   * where the worker thread's error flows up via the host's own
-   * worker.on('error') handler) may leave this unimplemented. When set, the
-   * Dispatcher uses it to reject the pending task immediately so the caller
-   * doesn't sit on the wall-clock timeout for a transport that already gave
-   * up.
-   */
-  onError?(handler: (err: Error) => void): void;
+export interface WorkerTransport {
+  /** Send one frame. Throws if the channel can no longer carry it. */
+  send(message: HostMessage): void;
+  messages(): AsyncIterable<WorkerMessage>;
+  /** Stop sending and receiving. Idempotent. */
   close(): void;
 }
 
@@ -59,282 +62,201 @@ export class CtxError extends Error {
   }
 }
 
+/** Validate a frame from a worker. Anything else is logged and dropped. */
+export function parseWorkerMessage(raw: unknown): WorkerMessage | undefined {
+  const parsed = WorkerMessageSchema.safeParse(raw);
+  if (parsed.success) return parsed.data;
+  log.warn(
+    { issues: parsed.error.issues.map((i) => i.message) },
+    "discarding malformed worker message",
+  );
+  return undefined;
+}
+
 export interface DispatcherOptions {
-  transport: RpcTransport;
-  /**
-   * Settle each task on the supervisor's `task_exited` rather than on its
-   * `task_result`. The Tier 2 worker sets it: it is reusable only once the
-   * supervisor has killed and reaped every process the task started. The
-   * Tier 1 worker is torn down with its task, so it settles on the result.
-   */
-  awaitTaskExited: boolean;
-  /**
-   * Called once when the transport fails, after any in-flight task is
-   * rejected. The Tier 2 worker uses it to retire a worker whose supervisor
-   * died while idle.
-   */
-  onTransportFailure?: (err: Error) => void;
+  transport: WorkerTransport;
+  /** Judges the worker's first frame. */
+  handshake: Handshake;
+  /** Aborts once the worker has had long enough to complete its handshake. */
+  handshakeDeadline: AbortSignal;
+  /** Aborting it closes the channel. */
+  signal?: AbortSignal;
+  /** Bound onto every log line. */
+  logContext?: Record<string, unknown>;
+}
+
+interface PendingTask {
+  readonly id: string;
+  readonly ctxHandler: CtxHandler;
+  readonly settle: (outcome: TaskOutcome) => void;
 }
 
 /**
- * The task delivered its `task_result`, but the channel failed or was
- * closed before the supervisor confirmed its processes exited. `result` is
- * the task's real outcome — any side effects it reports happened — while
- * the worker can no longer be trusted.
- */
-export class ExitUnconfirmedError extends Error {
-  readonly result: TaskResult;
-  constructor(result: TaskResult, reason: string) {
-    super(`dispatcher: task ${result.id} returned but its exit was not confirmed: ${reason}`);
-    this.name = "ExitUnconfirmedError";
-    this.result = result;
-  }
-}
-
-interface InFlightTask {
-  id: string;
-  ctxHandler: CtxHandler;
-  /** Set when the task's `task_result` arrives; from then on it serves no ctx calls. */
-  result: TaskResult | undefined;
-  resolve: (result: TaskResult) => void;
-  reject: (e: Error) => void;
-}
-
-/**
- * Drives skill tasks to completion over a transport, one task at a time.
- * For each task: sends `task_invoke`, services the task's `ctx_call`s with
- * the handler passed to `invoke()`, and settles on the task's `task_result`
- * (or, with `awaitTaskExited`, on its `task_exited`). Multiple ctx calls may
- * be in flight concurrently within a task — the dispatcher correlates them
- * by the ctx_call's `id`.
- *
- * A ctx call is served only while its task is running: it must name the
- * in-flight task, and that task must not have returned its result yet.
- * Anything else — a late call from a finished task, a call naming another
- * task, a call with no task in flight — is refused and logged.
- *
- * The transport outlives tasks: after a task settles the dispatcher is ready
- * for the next `invoke()`. `close()` is the boundary.
+ * Drives one worker channel through `transition` (`worker-state.ts`): feeds
+ * it the worker's frames, host commands and deadlines, and carries out the
+ * effects it returns. The machine's state is the only state it keeps. Both
+ * tiers use it; the transport and the handshake are what differ.
  */
 export class Dispatcher {
-  #transport: RpcTransport;
-  #awaitTaskExited: boolean;
-  #onTransportFailure: ((err: Error) => void) | undefined;
-  #task: InFlightTask | null = null;
-  #closed = false;
+  /** Settles once the worker completes its handshake or fails to. */
+  readonly started: Promise<Result<void, StartFailure>>;
+  /** Resolves with the reason once the channel is dead and can run no further task. */
+  readonly dead: Promise<string>;
+  #transport: WorkerTransport;
+  #state: WorkerState<PendingTask>;
+  #log: typeof log;
+  /** Aborted on death; removes every listener the dispatcher holds. */
+  #alive = new AbortController();
+  #onStarted: (outcome: Result<void, StartFailure>) => void;
+  #onDead: (reason: string) => void;
 
   constructor(opts: DispatcherOptions) {
+    const started = Promise.withResolvers<Result<void, StartFailure>>();
+    const dead = Promise.withResolvers<string>();
+    this.started = started.promise;
+    this.dead = dead.promise;
+    this.#onStarted = started.resolve;
+    this.#onDead = dead.resolve;
     this.#transport = opts.transport;
-    this.#awaitTaskExited = opts.awaitTaskExited;
-    this.#onTransportFailure = opts.onTransportFailure;
-    this.#transport.onMessage((raw) => this.#onMessage(raw));
-    this.#transport.onError?.((err) => this.#onTransportError(err));
-  }
-
-  #onTransportError(err: Error): void {
-    if (this.#closed) return;
-    this.#closed = true;
-    const task = this.#task;
-    this.#task = null;
-    // Never reached on a clean teardown: `close()` marks the dispatcher
-    // closed before the worker's output ends. With no task in flight this
-    // is a worker that died while idle.
-    log.warn(
-      { err: err.message, taskId: task?.id ?? null },
-      task ? "transport failed — rejecting the in-flight task" : "transport failed while idle",
+    this.#state = { kind: "starting", handshake: opts.handshake };
+    this.#log = opts.logContext ? log.child(opts.logContext) : log;
+    this.#whenAborted(opts.handshakeDeadline, () =>
+      this.#dispatch({ type: "handshake_timed_out" }),
     );
-    // The transport already closed itself by reporting fatal.
-    if (task) this.#fail(task, `transport error: ${err.message}`);
-    this.#onTransportFailure?.(err);
+    const signal = opts.signal;
+    if (signal) this.#whenAborted(signal, () => this.close(describeError(signal.reason)));
+    void this.#pump();
+  }
+
+  get state(): WorkerStateKind {
+    return this.#state.kind;
+  }
+
+  /** Lease an idle worker for one task. False unless it is idle. */
+  tryAcquire(): boolean {
+    return !this.#dispatch({ type: "acquire" }).some((e) => e.type === "refused");
+  }
+
+  /** Return a leased worker to idle. A worker with a task on it stays held. */
+  release(): void {
+    this.#dispatch({ type: "release" });
   }
 
   /**
-   * Reject an in-flight task. A result it already delivered survives as
-   * `ExitUnconfirmedError`: only the confirmation of its exit is missing.
+   * Send a task to a leased worker; `ctxHandler` serves this task's ctx calls
+   * and no other's. Settles once the task's exit is confirmed or the channel
+   * dies, and never rejects. Throws if the worker is not leased, which is a
+   * caller bug.
    */
-  #fail(task: InFlightTask, reason: string): void {
-    task.reject(
-      task.result !== undefined
-        ? new ExitUnconfirmedError(task.result, reason)
-        : new Error(`dispatcher: ${reason}`),
+  invoke(
+    message: TaskInvoke,
+    opts: { ctxHandler: CtxHandler; deadline: AbortSignal },
+  ): Promise<TaskOutcome> {
+    const outcome = Promise.withResolvers<TaskOutcome>();
+    const task: PendingTask = {
+      id: message.id,
+      ctxHandler: opts.ctxHandler,
+      settle: outcome.resolve,
+    };
+    const refusal = this.#dispatch({ type: "invoke", task, message }).find(
+      (e) => e.type === "refused",
     );
+    if (refusal) throw new Error(`dispatcher: ${refusal.reason}`);
+    this.#whenAborted(opts.deadline, () => this.#dispatch({ type: "deadline_passed", task }));
+    return outcome.promise;
   }
 
-  /**
-   * Send a `task_invoke` and resolve when the task settles. `ctxHandler`
-   * serves this task's ctx calls and nothing else.
-   */
-  invoke(invoke: TaskInvoke, opts: { ctxHandler: CtxHandler }): Promise<TaskResult> {
-    if (this.#task) {
-      throw new Error("dispatcher already has an in-flight task — one task at a time");
-    }
-    if (this.#closed) {
-      throw new Error("dispatcher is closed");
-    }
-    const promise = new Promise<TaskResult>((resolve, reject) => {
-      this.#task = {
-        id: invoke.id,
-        ctxHandler: opts.ctxHandler,
-        result: undefined,
-        resolve,
-        reject,
-      };
-    });
+  /** Close the channel. A task on it settles with `reason`. Idempotent. */
+  close(reason: string): void {
+    this.#dispatch({ type: "close", reason });
+  }
+
+  async #pump(): Promise<void> {
+    const reason = await this.#drain().then(() => "channel closed", describeError);
+    this.#dispatch({ type: "channel_ended", reason });
+  }
+
+  async #drain(): Promise<void> {
+    for await (const message of this.#transport.messages()) this.#dispatch(message);
+  }
+
+  /** Run `event` through the machine and carry out its effects; returns them. */
+  #dispatch(event: WorkerEvent<PendingTask>): ReadonlyArray<Effect<PendingTask>> {
+    const { state, effects } = transition(this.#state, event);
+    this.#state = state;
+    // Effects run in order; events they raise go through the machine after.
+    const raised: WorkerEvent<PendingTask>[] = [];
+    for (const effect of effects) raised.push(...this.#execute(effect));
+    for (const next of raised) this.#dispatch(next);
+    return effects;
+  }
+
+  #execute(effect: Effect<PendingTask>): ReadonlyArray<WorkerEvent<PendingTask>> {
+    return match(effect)
+      .with({ type: "send" }, ({ message }) => this.#send(message))
+      .with({ type: "serve" }, ({ task, call }) => {
+        this.#serve(task, call);
+        return [];
+      })
+      .with({ type: "settle" }, ({ task, outcome }) => {
+        task.settle(outcome);
+        return [];
+      })
+      .with({ type: "started" }, ({ outcome }) => {
+        this.#onStarted(outcome);
+        return [];
+      })
+      .with({ type: "died" }, ({ reason }) => {
+        this.#alive.abort();
+        this.#transport.close();
+        this.#onDead(reason);
+        return [];
+      })
+      .with({ type: "log" }, ({ level, message, fields }) => {
+        this.#log[level](fields, message);
+        return [];
+      })
+      .with({ type: "refused" }, () => [])
+      .exhaustive();
+  }
+
+  #send(message: HostMessage): ReadonlyArray<WorkerEvent<PendingTask>> {
     try {
-      this.#transport.postMessage(invoke);
+      this.#transport.send(message);
+      return [];
     } catch (e) {
-      // Roll back so a subsequent `close()` doesn't reject a promise the
-      // caller never observed (they got the synchronous exception instead).
-      this.#task = null;
-      throw e;
-    }
-    return promise;
-  }
-
-  /**
-   * Tear down the transport. Any in-flight task is rejected — as
-   * `ExitUnconfirmedError` if it had delivered its result — and subsequent
-   * `invoke` calls throw synchronously.
-   */
-  close(reason = "closed"): void {
-    if (this.#closed) return;
-    this.#closed = true;
-    const task = this.#task;
-    this.#task = null;
-    if (task) this.#fail(task, reason);
-    this.#transport.close();
-  }
-
-  #onMessage(raw: unknown): void {
-    const parsed = WorkerMessageSchema.safeParse(raw);
-    if (!parsed.success) {
-      log.warn(
-        { issues: parsed.error.issues.map((i) => i.message) },
-        "discarding malformed worker message",
-      );
-      return;
-    }
-    const message = parsed.data;
-    switch (message.type) {
-      case "task_result":
-        this.#handleTaskResult(message);
-        return;
-      case "task_exited":
-        this.#handleTaskExited(message);
-        return;
-      case "ctx_call":
-        // Fire-and-forget — the awaitable lives on the worker side, blocked
-        // on the matching ctx_result. Errors thrown during handling are
-        // surfaced to the worker as `ctx_result.ok = false`, never as host
-        // exceptions.
-        void this.#handleCtxCall(message);
-        return;
-      case "task_invoke":
-      case "ctx_result":
-        log.warn({ type: message.type }, "received host-bound message from worker — ignoring");
-        return;
+      return [{ type: "send_failed", reason: `${message.type} send failed: ${describeError(e)}` }];
     }
   }
 
   /**
-   * The worker named a different task than the one in flight: it is in an
-   * inconsistent state. Fail the task now rather than on the wall clock.
+   * Serve one ctx call. The awaitable lives on the worker side, blocked on
+   * the matching `ctx_result`; a handler that throws answers with
+   * `ok: false`. The reply goes back through the machine, which sends it
+   * only if the task is still running.
    */
-  #rejectMismatch(task: InFlightTask, kind: "task_result" | "task_exited", got: string): void {
-    log.warn({ expected: task.id, got }, `${kind} id does not match in-flight task — rejecting`);
-    this.#task = null;
-    this.#fail(task, `${kind} id mismatch (expected ${task.id}, got ${got})`);
+  #serve(task: PendingTask, call: CtxCall): void {
+    const frame = { type: "ctx_result", taskId: task.id, id: call.id } as const;
+    void Promise.resolve()
+      .then(() => task.ctxHandler.handle({ method: call.method, args: call.args }))
+      .then(
+        (value): CtxResult => ({ ...frame, ok: true, value }),
+        (e: unknown): CtxResult => ({
+          ...frame,
+          ok: false,
+          ...(e instanceof CtxError
+            ? { errorKind: e.kind, message: e.message }
+            : { errorKind: "internal", message: e instanceof Error ? e.message : String(e) }),
+        }),
+      )
+      .then((reply) => {
+        this.#dispatch({ type: "ctx_replied", task, reply });
+      });
   }
 
-  #handleTaskResult(message: TaskResult): void {
-    const task = this.#task;
-    if (!task) {
-      log.warn({ id: message.id }, "received task_result with no pending task");
-      return;
-    }
-    if (task.id !== message.id) {
-      this.#rejectMismatch(task, "task_result", message.id);
-      return;
-    }
-    if (task.result !== undefined) {
-      log.warn({ id: message.id }, "duplicate task_result — keeping the first");
-      return;
-    }
-    task.result = message;
-    if (!this.#awaitTaskExited) {
-      this.#task = null;
-      task.resolve(message);
-    }
-  }
-
-  #handleTaskExited(message: TaskExited): void {
-    const task = this.#task;
-    if (!this.#awaitTaskExited || !task) {
-      log.warn({ id: message.id }, "received task_exited with no task awaiting it");
-      return;
-    }
-    if (task.id !== message.id) {
-      this.#rejectMismatch(task, "task_exited", message.id);
-      return;
-    }
-    this.#task = null;
-    // Without a result, the task's relay died before forwarding one; its
-    // processes are gone all the same, so the worker stays reusable.
-    task.resolve(
-      task.result ?? {
-        type: "task_result",
-        id: task.id,
-        ok: false,
-        error: "task_exited_without_result",
-      },
-    );
-  }
-
-  async #handleCtxCall(call: CtxCall): Promise<void> {
-    const task = this.#task;
-    if (!task || task.result !== undefined || task.id !== call.taskId) {
-      log.warn(
-        {
-          ctxId: call.id,
-          method: call.method,
-          taskId: call.taskId,
-          running: task && task.result === undefined ? task.id : null,
-        },
-        "refusing ctx_call from a task that is not running",
-      );
-      return;
-    }
-    let response: CtxResult;
-    try {
-      const value = await task.ctxHandler.handle({ method: call.method, args: call.args });
-      response = { type: "ctx_result", taskId: task.id, id: call.id, ok: true, value };
-    } catch (e) {
-      response = {
-        type: "ctx_result",
-        taskId: task.id,
-        id: call.id,
-        ok: false,
-        ...(e instanceof CtxError
-          ? { errorKind: e.kind, message: e.message }
-          : { errorKind: "internal", message: e instanceof Error ? e.message : String(e) }),
-      };
-    }
-    if (this.#task !== task || task.result !== undefined) {
-      // The task finished while its call was being served; nothing is left
-      // to read the reply.
-      log.debug({ ctxId: call.id, taskId: task.id }, "dropping ctx_result for a finished task");
-      return;
-    }
-    try {
-      this.#transport.postMessage(response);
-    } catch (e) {
-      // Send failed (port closed mid-task, e.g.). Surface as a task failure
-      // so `invoke()` rejects rather than hanging on the worker awaiting a
-      // ctx_result that never arrives.
-      const sendError = e instanceof Error ? e.message : String(e);
-      log.warn({ ctxId: call.id, err: sendError }, "ctx_result send failed");
-      this.#task = null;
-      task.reject(new Error(`dispatcher: ctx_result send failed: ${sendError}`));
-    }
+  /** Call `fn` once `signal` aborts, unless the channel has died first. */
+  #whenAborted(signal: AbortSignal, fn: () => void): void {
+    if (signal.aborted) fn();
+    else signal.addEventListener("abort", fn, { once: true, signal: this.#alive.signal });
   }
 }
