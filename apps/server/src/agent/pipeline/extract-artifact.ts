@@ -6,10 +6,10 @@
  * back — the same repair shape as `chatTyped`, which can't be used directly
  * because the schema here is user-shaped JSON Schema, not a Zod type.
  *
- * The schema travels in the prompt, not as provider structured output:
- * providers that enforce strict mode reject ordinary schemas (optional
- * properties, open objects), and a user's definition is under no obligation
- * to be strict-compatible. ajv is the authority on the result either way.
+ * The schema travels in the prompt, not as `responseFormat`: it is
+ * user-written JSON Schema in any draft ajv takes, which each provider's
+ * structured output takes only in part, and ajv is the authority on the
+ * result.
  *
  * The agent loop itself can't produce the JSON: a stage that uses tools
  * needs them until its last iteration.

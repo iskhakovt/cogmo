@@ -1,11 +1,13 @@
 import { getEncoding } from "js-tiktoken";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { PipelineDefinitionSchema } from "../agent/pipeline/types.js";
 import { logger } from "../logger.js";
 import { expectDefined } from "../test/assertions.js";
 import type { CacheDialect } from "./cache-dialect.js";
 import { ProviderProtocolError, ToolArgsCutOffError } from "./errors.js";
 import { isRetriableProviderError, RefusalError } from "./fallback.js";
+import { toObjectJsonSchema } from "./json-schema.js";
 import { modelFamilyParams, OpenAICompatibleProvider } from "./openai-compat.js";
 import type { CacheIntent, ChatParams, ImageBlock, StreamEvent, ToolDefinition } from "./types.js";
 
@@ -1977,27 +1979,25 @@ describe("OpenAICompatibleProvider", () => {
   });
 
   describe("responseFormat", () => {
-    it("passes native json_schema response_format", async () => {
+    it("passes native json_schema response_format, strict for a schema inside the subset", async () => {
       const provider = createProvider();
       mockCreate.mockResolvedValueOnce({
         choices: [{ message: { content: '{"name":"Alice","age":30}' }, finish_reason: "stop" }],
         model: "gpt-4o",
         usage: { prompt_tokens: 20, completion_tokens: 10 },
       });
+      const schema = {
+        type: "object" as const,
+        properties: { name: { type: "string" }, age: { type: "number" } },
+        required: ["name", "age"],
+        additionalProperties: false,
+      };
 
       const result = await provider.chat({
         model: "gpt-4o",
         system: "Extract data",
         messages: [{ role: "user", content: "Alice is 30" }],
-        responseFormat: {
-          type: "json_schema",
-          name: "extract_data",
-          schema: {
-            type: "object",
-            properties: { name: { type: "string" }, age: { type: "number" } },
-            required: ["name", "age"],
-          },
-        },
+        responseFormat: { type: "json_schema", name: "extract_data", schema },
       });
 
       expect(result.content).toEqual([{ type: "text", text: '{"name":"Alice","age":30}' }]);
@@ -2005,18 +2005,32 @@ describe("OpenAICompatibleProvider", () => {
       const args = firstCreateArgs();
       expect(args.response_format).toEqual({
         type: "json_schema",
-        json_schema: {
-          name: "extract_data",
-          schema: {
-            type: "object",
-            properties: { name: { type: "string" }, age: { type: "number" } },
-            required: ["name", "age"],
-          },
-          strict: true,
-        },
+        json_schema: { name: "extract_data", schema, strict: true },
       });
       // No tools when using responseFormat
       expect(args.tools).toBeUndefined();
+    });
+
+    it("turns strict mode off for a schema outside its subset, sending the schema as given", async () => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce({
+        choices: [{ message: { content: '{"name":"news"}' }, finish_reason: "stop" }],
+        model: "gpt-5.4-nano",
+        usage: { prompt_tokens: 20, completion_tokens: 10 },
+      });
+      const schema = toObjectJsonSchema(PipelineDefinitionSchema);
+
+      await provider.chat({
+        model: "gpt-5.4-nano",
+        system: "Compile the pipeline",
+        messages: [{ role: "user", content: "hi" }],
+        responseFormat: { type: "json_schema", name: "pipeline_definition", schema },
+      });
+
+      expect(firstCreateArgs().response_format).toEqual({
+        type: "json_schema",
+        json_schema: { name: "pipeline_definition", schema, strict: false },
+      });
     });
 
     it("throws when both responseFormat and tools are provided", async () => {

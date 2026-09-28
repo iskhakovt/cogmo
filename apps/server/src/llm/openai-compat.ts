@@ -8,6 +8,7 @@ import { cacheMarker } from "./cache-marker.js";
 import { ProviderProtocolError, parseToolArgs, ToolArgsCutOffError } from "./errors.js";
 import { RefusalError } from "./fallback.js";
 import { withFailureLogging } from "./logging-fetch.js";
+import { fitsStrictMode } from "./openai-output-schema.js";
 import { failChatSpan, recordChatUsage, startChatSpan } from "./otel.js";
 import type { LlmProvider } from "./provider.js";
 import {
@@ -107,13 +108,15 @@ export class OpenAICompatibleProvider implements LlmProvider {
         createParams.tools = params.tools.map(toOpenAITool);
       }
 
+      // A schema outside strict mode's subset goes with `strict: false`: the
+      // schema still guides the reply, and the caller validates it.
       if (params.responseFormat) {
         createParams.response_format = {
           type: "json_schema",
           json_schema: {
             name: params.responseFormat.name,
             schema: params.responseFormat.schema,
-            strict: true,
+            strict: fitsStrictMode(params.responseFormat.schema),
           },
         };
       }

@@ -8,10 +8,12 @@
  * fixed list of string formats, `pattern` without backreferences, lookaround
  * or word boundaries, and `minItems` of 0 or 1. Numeric bounds, length bounds
  * and every other array constraint are unsupported, as is an object not
- * closed with `additionalProperties: false`; sending one is a 400.
+ * closed with `additionalProperties: false`; sending one is a 400. Nor can it
+ * express a recursive schema or a tuple.
  */
 
 import * as R from "remeda";
+import { DEFINITION_KEYWORDS, isObjectNode } from "./json-schema.js";
 import type { JsonSchema } from "./types.js";
 
 /** The string formats the grammar supports. */
@@ -35,7 +37,7 @@ const UNSUPPORTED_REGEX = /\\[1-9bB]|\(\?<?[=!]/;
 const TYPING_KEYWORDS = ["type", "anyOf", "oneOf", "allOf", "$ref", "enum", "const"] as const;
 
 /** Keywords whose value maps names to subschemas. */
-const SUBSCHEMA_MAPS: ReadonlySet<string> = new Set(["properties", "$defs", "definitions"]);
+const SUBSCHEMA_MAPS: ReadonlySet<string> = new Set(["properties", ...DEFINITION_KEYWORDS]);
 
 /** Keywords whose value is a subschema or a list of them. */
 const SUBSCHEMA_LISTS: ReadonlySet<string> = new Set(["anyOf", "oneOf", "allOf", "items"]);
@@ -55,6 +57,236 @@ export function hasOpenObject(node: unknown): boolean {
   return Object.entries(node).some(([keyword, value]) =>
     subschemasOf(keyword, value).some(hasOpenObject),
   );
+}
+
+/**
+ * Whether any node of a JSON Schema is a tuple: `prefixItems`, or draft-07's
+ * array-form `items`. {@link toStructuredOutputSchema} moves `prefixItems`
+ * into the description and keeps `items`, which then constrains every
+ * position: a tuple's rest schema overrides its leading entries, and the
+ * `items: false` of a plain tuple reads to the grammar as any value.
+ */
+export function hasTuple(node: unknown): boolean {
+  if (!R.isPlainObject(node)) return false;
+  if ("prefixItems" in node || Array.isArray(node.items)) return true;
+  return Object.entries(node).some(([keyword, value]) =>
+    subschemasOf(keyword, value).some(hasTuple),
+  );
+}
+
+/**
+ * Whether a schema refers to itself: a local `$ref` whose target, followed
+ * through the refs inside it, leads back to itself. Zod emits one for a
+ * schema nested in itself: `$ref: "#"` at the root, a `$defs` entry below
+ * it. The grammar takes neither. A cycle through definitions is a 400; a
+ * root that refers to itself is accepted, but the reply can't contain the
+ * nested value. A ref that resolves nowhere counts as no cycle.
+ */
+export function hasRecursiveRef(schema: JsonSchema): boolean {
+  const explored = new Set<string>();
+  const leadsBack = (pointer: string, path: ReadonlySet<string>): boolean => {
+    if (path.has(pointer)) return true;
+    if (explored.has(pointer)) return false;
+    const target = resolvePointer(schema, pointer);
+    if (target === undefined) return false;
+    const onPath = new Set(path).add(pointer);
+    if (localRefs(target).some((ref) => leadsBack(ref, onPath))) return true;
+    explored.add(pointer);
+    return false;
+  };
+  return leadsBack("#", new Set());
+}
+
+/**
+ * The local refs a node's grammar would expand: those in its own subschemas,
+ * but not in the definitions it holds, which count only where referenced.
+ */
+function localRefs(node: unknown): ReadonlyArray<string> {
+  if (!R.isPlainObject(node)) return [];
+  const own = typeof node.$ref === "string" && node.$ref.startsWith("#") ? [node.$ref] : [];
+  return [
+    ...own,
+    ...Object.entries(node).flatMap(([keyword, value]) =>
+      DEFINITION_KEYWORDS.has(keyword) ? [] : subschemasOf(keyword, value).flatMap(localRefs),
+    ),
+  ];
+}
+
+/**
+ * The value with its string `enum` and `const` values in the schema's
+ * capitalization. Structured outputs don't guarantee it: a reply can differ
+ * from a member in capitalization alone, and Anthropic's advice is to
+ * compare case-insensitively (platform docs, Structured outputs → Invalid
+ * outputs). A string that matches no member exactly and one member
+ * case-insensitively takes that member. In an `anyOf` or `oneOf`, a variant
+ * that admits the value as it is wins over one that restores it. Returns
+ * `value` itself when nothing changes. The schema must not be recursive
+ * ({@link hasRecursiveRef}). A tuple takes the tool path ({@link hasTuple})
+ * and never reaches this; one that did would stay as it is.
+ */
+export function restoreLiteralCasing(schema: JsonSchema, value: unknown): unknown {
+  return restore(schema, value, schema).value;
+}
+
+/** A value after {@link restore}, with whether its node admits it. */
+interface Restored {
+  value: unknown;
+  /** Whether the node's types, literals and required properties admit the value. */
+  fits: boolean;
+  changed: boolean;
+}
+
+type RestoreStep = (value: unknown) => Restored;
+
+/** `value` restored against every keyword of `node`: all must admit it. */
+function restore(node: unknown, value: unknown, root: JsonSchema): Restored {
+  if (!R.isPlainObject(node)) return { value, fits: node !== false, changed: false };
+  return chain(
+    [
+      (current) => restoreRef(node.$ref, current, root),
+      (current) => ({ value: current, fits: admitsType(node.type, current), changed: false }),
+      (current) => restoreLiteral("const" in node ? [node.const] : undefined, current),
+      (current) => restoreLiteral(Array.isArray(node.enum) ? node.enum : undefined, current),
+      (current) => restoreProperties(node, current, root),
+      (current) => restoreItems(node, current, root),
+      (current) => restoreVariant([node.anyOf, node.oneOf].flatMap(asList), current, root),
+      ...asList(node.allOf).map(
+        (member): RestoreStep =>
+          (current) =>
+            restore(member, current, root),
+      ),
+    ],
+    value,
+  );
+}
+
+/** `value` through each step in turn, fitting only if every step admits it. */
+function chain(steps: ReadonlyArray<RestoreStep>, value: unknown): Restored {
+  return steps.reduce<Restored>((acc, step) => {
+    const next = step(acc.value);
+    return {
+      value: next.value,
+      fits: acc.fits && next.fits,
+      changed: acc.changed || next.changed,
+    };
+  }, kept(value));
+}
+
+function restoreRef(ref: unknown, value: unknown, root: JsonSchema): Restored {
+  const target = typeof ref === "string" ? resolvePointer(root, ref) : undefined;
+  return target === undefined ? kept(value) : restore(target, value, root);
+}
+
+function restoreLiteral(members: ReadonlyArray<unknown> | undefined, value: unknown): Restored {
+  if (members === undefined || members.some((member) => R.isDeepEqual(member, value))) {
+    return kept(value);
+  }
+  const matches =
+    typeof value === "string"
+      ? members.filter(
+          (member) => typeof member === "string" && member.toLowerCase() === value.toLowerCase(),
+        )
+      : [];
+  return matches.length === 1
+    ? { value: matches[0], fits: true, changed: true }
+    : { value, fits: false, changed: false };
+}
+
+function restoreProperties(
+  node: Readonly<Record<string, unknown>>,
+  value: unknown,
+  root: JsonSchema,
+): Restored {
+  if (!R.isPlainObject(value)) return kept(value);
+  const properties = R.isPlainObject(node.properties) ? node.properties : {};
+  const entries = Object.entries(value).map(
+    ([key, member]) =>
+      [
+        key,
+        Object.hasOwn(properties, key) ? restore(properties[key], member, root) : kept(member),
+      ] as const,
+  );
+  const required = asList(node.required);
+  const changed = entries.some(([, restored]) => restored.changed);
+  return {
+    value: changed ? Object.fromEntries(entries.map(([key, r]) => [key, r.value])) : value,
+    fits:
+      entries.every(([, restored]) => restored.fits) &&
+      required.every((key) => typeof key === "string" && Object.hasOwn(value, key)),
+    changed,
+  };
+}
+
+/** Each element against `items`. A tuple's elements stay as they are. */
+function restoreItems(
+  node: Readonly<Record<string, unknown>>,
+  value: unknown,
+  root: JsonSchema,
+): Restored {
+  const items = node.items;
+  if (items === undefined || "prefixItems" in node || !Array.isArray(value)) return kept(value);
+  const restored = value.map((item) => restore(items, item, root));
+  const changed = restored.some((r) => r.changed);
+  return {
+    value: changed ? restored.map((r) => r.value) : value,
+    fits: restored.every((r) => r.fits),
+    changed,
+  };
+}
+
+function restoreVariant(
+  variants: ReadonlyArray<unknown>,
+  value: unknown,
+  root: JsonSchema,
+): Restored {
+  if (variants.length === 0) return kept(value);
+  const restored = variants.map((variant) => restore(variant, value, root));
+  return (
+    restored.find((r) => r.fits && !r.changed) ??
+    restored.find((r) => r.fits) ?? { value, fits: false, changed: false }
+  );
+}
+
+/** Predicates for the JSON Schema type names. */
+const TYPE_TESTS: ReadonlyMap<string, (value: unknown) => boolean> = new Map([
+  ["null", (value: unknown) => value === null],
+  ["boolean", (value: unknown) => typeof value === "boolean"],
+  ["string", (value: unknown) => typeof value === "string"],
+  ["number", (value: unknown) => typeof value === "number"],
+  ["integer", (value: unknown) => Number.isInteger(value)],
+  ["array", (value: unknown) => Array.isArray(value)],
+  ["object", (value: unknown) => R.isPlainObject(value)],
+]);
+
+/** Whether `type`, one name or a list, admits the value. An unknown name admits anything. */
+function admitsType(type: unknown, value: unknown): boolean {
+  if (type === undefined) return true;
+  return asList(type).some(
+    (name) => typeof name !== "string" || (TYPE_TESTS.get(name)?.(value) ?? true),
+  );
+}
+
+function kept(value: unknown): Restored {
+  return { value, fits: true, changed: false };
+}
+
+function asList(value: unknown): ReadonlyArray<unknown> {
+  if (value === undefined) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+/** The node a local JSON Pointer ref (`#`, `#/$defs/Name`) names, if any. */
+function resolvePointer(root: unknown, pointer: string): unknown {
+  if (pointer === "#") return root;
+  if (!pointer.startsWith("#/")) return undefined;
+  return pointer
+    .slice(2)
+    .split("/")
+    .map((segment) => segment.replaceAll("~1", "/").replaceAll("~0", "~"))
+    .reduce<unknown>((node, segment) => {
+      if (Array.isArray(node)) return node[Number(segment)];
+      return R.isPlainObject(node) && Object.hasOwn(node, segment) ? node[segment] : undefined;
+    }, root);
 }
 
 /**
@@ -140,10 +372,6 @@ function subschemasOf(keyword: string, value: unknown): ReadonlyArray<unknown> {
   if (SUBSCHEMA_MAPS.has(keyword) && R.isPlainObject(value)) return Object.values(value);
   if (SUBSCHEMA_LISTS.has(keyword)) return Array.isArray(value) ? value : [value];
   return [];
-}
-
-function isObjectNode(node: Readonly<Record<string, unknown>>): boolean {
-  return node.type === "object" || (Array.isArray(node.type) && node.type.includes("object"));
 }
 
 /** The form the SDK's transform writes: `{minLength: 1, maxLength: 80}`. */
