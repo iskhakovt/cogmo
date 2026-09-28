@@ -10,12 +10,15 @@ import {
   WorkerMessageSchema,
 } from "./protocol.js";
 import {
+  type Command,
+  command,
   type Effect,
+  type Fact,
   type Handshake,
+  observe,
   type StartFailure,
   type TaskOutcome,
-  transition,
-  type WorkerEvent,
+  type Transition,
   type WorkerFrame,
   type WorkerState,
   type WorkerStateKind,
@@ -90,10 +93,10 @@ interface PendingTask {
 }
 
 /**
- * Drives one worker channel through `transition` (`worker-state.ts`): feeds
- * it the worker's frames, host commands and deadlines, and carries out the
- * effects it returns. Both tiers use it; the transport and the handshake
- * are what differ.
+ * Drives one worker channel through its machine (`worker-state.ts`): puts
+ * host commands to `command` and the worker's frames, deadlines and channel
+ * facts to `observe`, and carries out the effects they return. Both tiers
+ * use it; the transport and the handshake are what differ.
  */
 export class Dispatcher {
   #started = Promise.withResolvers<Result<void, StartFailure>>();
@@ -124,7 +127,7 @@ export class Dispatcher {
     const dispatcher = new Dispatcher(opts);
     dispatcher.#whenAborted(
       opts.handshakeDeadline,
-      () => dispatcher.#dispatch({ type: "handshake_timed_out" }),
+      () => dispatcher.#observe({ type: "handshake_timed_out" }),
       dispatcher.#alive.signal,
     );
     const signal = opts.signal;
@@ -145,7 +148,7 @@ export class Dispatcher {
 
   /** Lease an idle worker for one task. False unless it is idle. */
   tryAcquire(): boolean {
-    return this.#dispatch({ type: "acquire" }).isOk();
+    return this.#command({ type: "acquire" }).isOk();
   }
 
   /**
@@ -153,7 +156,7 @@ export class Dispatcher {
    * becomes disposable. False otherwise — a task on it keeps it held.
    */
   release(): boolean {
-    return this.#dispatch({ type: "release" }).isOk();
+    return this.#command({ type: "release" }).isOk();
   }
 
   /**
@@ -177,11 +180,11 @@ export class Dispatcher {
         outcome.resolve(result);
       },
     };
-    const accepted = this.#dispatch({ type: "invoke", task, message });
+    const accepted = this.#command({ type: "invoke", task, message });
     if (accepted.isErr()) throw new Error(`dispatcher: ${accepted.error}`);
     this.#whenAborted(
       opts.deadline,
-      () => this.#dispatch({ type: "deadline_passed", task }),
+      () => this.#observe({ type: "deadline_passed", task }),
       settled.signal,
     );
     return outcome.promise;
@@ -189,7 +192,7 @@ export class Dispatcher {
 
   /** Close the channel. A task on it settles with `reason`. Idempotent. */
   close(reason: string): void {
-    this.#dispatch({ type: "close", reason });
+    this.#observe({ type: "close", reason });
   }
 
   /**
@@ -200,28 +203,33 @@ export class Dispatcher {
    */
   async #pump(): Promise<void> {
     const reason = await this.#drain().then(() => "worker closed its output", describeError);
-    this.#dispatch({ type: "channel_ended", reason });
+    this.#observe({ type: "channel_ended", reason });
   }
 
   async #drain(): Promise<void> {
-    for await (const frame of this.#transport.messages()) this.#dispatch(frame);
+    for await (const frame of this.#transport.messages()) this.#observe(frame);
   }
 
-  /**
-   * Run `event` through the machine and carry out its effects. Errs with
-   * the reason when the event is a host command the state refuses.
-   */
-  #dispatch(event: WorkerEvent<PendingTask>): Result<void, string> {
-    const next = transition(this.#state, event);
+  /** Carry out a host command, or err with why the state refuses it. */
+  #command(cmd: Command<PendingTask>): Result<void, string> {
+    const next = command(this.#state, cmd);
     if (next.isErr()) return err(next.error);
-    this.#state = next.value.state;
-    // Effects run in order; events they raise go through the machine after.
-    const raised = next.value.effects.flatMap((effect) => this.#execute(effect));
-    for (const followUp of raised) this.#dispatch(followUp);
+    this.#enter(next.value);
     return ok(undefined);
   }
 
-  #execute(effect: Effect<PendingTask>): ReadonlyArray<WorkerEvent<PendingTask>> {
+  #observe(fact: Fact<PendingTask>): void {
+    this.#enter(observe(this.#state, fact));
+  }
+
+  /** Move to the next state and carry out its effects, in order; facts they raise follow. */
+  #enter(next: Transition<PendingTask>): void {
+    this.#state = next.state;
+    const raised = next.effects.flatMap((effect) => this.#execute(effect));
+    for (const followUp of raised) this.#observe(followUp);
+  }
+
+  #execute(effect: Effect<PendingTask>): ReadonlyArray<Fact<PendingTask>> {
     return match(effect)
       .with({ type: "send" }, ({ message }) => this.#send(message))
       .with({ type: "serve" }, ({ task, call }) => {
@@ -253,7 +261,7 @@ export class Dispatcher {
       .exhaustive();
   }
 
-  #send(message: HostMessage): ReadonlyArray<WorkerEvent<PendingTask>> {
+  #send(message: HostMessage): ReadonlyArray<Fact<PendingTask>> {
     try {
       this.#transport.send(message);
       return [];
@@ -283,7 +291,7 @@ export class Dispatcher {
         }),
       )
       .then((reply) => {
-        this.#dispatch({ type: "ctx_replied", task, reply });
+        this.#observe({ type: "ctx_replied", task, reply });
       });
   }
 

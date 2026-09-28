@@ -170,7 +170,7 @@ The supervisor ships in the `cogmo-skills:<version>` image published with each r
 
 ### Host-side worker lifecycle `[confirmed]`
 
-Each worker channel, in both tiers, is one pure state machine (`src/skills/worker-state.ts`): `transition(state, event)` returns the next state and the effects to carry out — send a frame, serve a ctx call, settle a task, report the handshake, die, become disposable, log — or, for a host command the state does not allow, the reason it refuses, leaving the state as it was. The `Dispatcher` is its shell: it feeds in the worker's frames, host commands and deadlines, and executes the effects.
+Each worker channel, in both tiers, is one pure state machine (`src/skills/worker-state.ts`) with two entry points, each returning the next state and the effects to carry out — send a frame, serve a ctx call, settle a task, report the handshake, die, become disposable, log. `command(state, cmd)` takes a host command (acquire, release, invoke) and returns a `Result`: a state that does not allow the command refuses it with a reason, and stays as it was. `observe(state, fact)` takes a fact — a worker frame, a deadline, the channel ending or a send failing, the host closing it — and never refuses one. The `Dispatcher` is its shell: it feeds both, and executes the effects.
 
 | State | Meaning |
 |-|-|

@@ -3,11 +3,14 @@ import * as R from "remeda";
 import { describe, expect, it } from "vitest";
 import type { CtxResult, TaskInvoke, TaskResult } from "./protocol.js";
 import {
+  type Command,
+  command,
   type Effect,
+  type Fact,
   type Handshake,
+  observe,
   type TaskRef,
-  transition,
-  type WorkerEvent,
+  type Transition,
   type WorkerState,
   type WorkerStateKind,
 } from "./worker-state.js";
@@ -38,7 +41,13 @@ const STATES = {
   dead: { kind: "dead", reason: "gone", held: false },
 } satisfies Record<WorkerStateKind | "dead_held", WorkerState<TaskRef>>;
 
-const EVENTS = {
+const COMMANDS = {
+  acquire: { type: "acquire" },
+  release: { type: "release" },
+  invoke: { type: "invoke", task: NEXT, message: INVOKE },
+} satisfies Record<string, Command<TaskRef>>;
+
+const FACTS = {
   ready: { type: "ready" },
   supervisor_ready: { type: "supervisor_ready", protocolVersion: 2 },
   fatal: { type: "fatal", error: "boom" },
@@ -49,9 +58,6 @@ const EVENTS = {
   result_other: { type: "task_result", id: "t2", ok: true, output: 2 },
   exited_own: { type: "task_exited", id: "t1" },
   exited_other: { type: "task_exited", id: "t2" },
-  acquire: { type: "acquire" },
-  release: { type: "release" },
-  invoke: { type: "invoke", task: NEXT, message: INVOKE },
   replied_own: { type: "ctx_replied", task: TASK, reply: REPLY },
   replied_other: { type: "ctx_replied", task: OTHER, reply: REPLY },
   replied_same_id: { type: "ctx_replied", task: SAME_ID, reply: REPLY },
@@ -62,28 +68,34 @@ const EVENTS = {
   handshake_timed_out: { type: "handshake_timed_out" },
   channel_ended: { type: "channel_ended", reason: "ended" },
   close: { type: "close", reason: "closed" },
-} satisfies Record<string, WorkerEvent<TaskRef>>;
+} satisfies Record<string, Fact<TaskRef>>;
 
 type StateName = keyof typeof STATES;
-type EventName = keyof typeof EVENTS;
+type CommandName = keyof typeof COMMANDS;
+type FactName = keyof typeof FACTS;
+type EventName = CommandName | FactName;
 
 /**
- * Compiles only when `EVENTS` has a fixture for every event type — checked
+ * Compiles only when every command and fact type has a fixture — checked
  * by typecheck, not at runtime.
  */
-type UncoveredEvent = Exclude<WorkerEvent<TaskRef>["type"], (typeof EVENTS)[EventName]["type"]>;
-const EVERY_EVENT_COVERED: [UncoveredEvent] extends [never] ? true : never = true;
+type Uncovered =
+  | Exclude<Command<TaskRef>["type"], (typeof COMMANDS)[CommandName]["type"]>
+  | Exclude<Fact<TaskRef>["type"], (typeof FACTS)[FactName]["type"]>;
+const EVERY_EVENT_COVERED: [Uncovered] extends [never] ? true : never = true;
 
 type EffectType = Effect<TaskRef>["type"];
-/** The next state's kind and the effects, in order; or a refused host command. */
-type Row = readonly [next: WorkerStateKind, effects: ReadonlyArray<EffectType>] | "refused";
+/** The next state's kind and the effects, in order. */
+type Moves = readonly [next: WorkerStateKind, effects: ReadonlyArray<EffectType>];
+/** A command may be refused; a fact never is, so its row cannot say so. */
+type Row<E extends EventName> = E extends CommandName ? Moves | "refused" : Moves;
 
 /** Starting judges its first frame: `ready` passes, anything else is refused. */
-const START_FAILS: Row = ["dead", ["started", "died", "disposable"]];
-const DIES_UNDER_TASK: Row = ["dead", ["log", "settle", "died"]];
+const START_FAILS: Moves = ["dead", ["started", "died", "disposable"]];
+const DIES_UNDER_TASK: Moves = ["dead", ["log", "settle", "died"]];
 
 /** Every (state, event) pair. */
-const TABLE: Record<StateName, Record<EventName, Row>> = {
+const TABLE: Record<StateName, { [E in EventName]: Row<E> }> = {
   starting: {
     ready: ["idle", ["started"]],
     supervisor_ready: START_FAILS,
@@ -261,17 +273,33 @@ const TABLE: Record<StateName, Record<EventName, Row>> = {
   },
 };
 
-const PAIRS = R.keys(STATES).flatMap((stateName) =>
-  R.keys(EVENTS).map((eventName) => {
-    const before: WorkerState<TaskRef> = STATES[stateName];
-    const result = transition<TaskRef>(before, EVENTS[eventName]);
+interface Pair {
+  stateName: StateName;
+  eventName: EventName;
+  before: WorkerState<TaskRef>;
+  refused: boolean;
+  after: Transition<TaskRef>;
+}
+
+const PAIRS: Pair[] = R.keys(STATES).flatMap((stateName) => {
+  const before: WorkerState<TaskRef> = STATES[stateName];
+  const commands = R.keys(COMMANDS).map((eventName): Pair => {
+    const result = command<TaskRef>(before, COMMANDS[eventName]);
     // A refused command moves nowhere: the worker stays as it was.
     const after = result.isOk() ? result.value : { state: before, effects: [] };
     return { stateName, eventName, before, refused: result.isErr(), after };
-  }),
-);
-
-type Pair = (typeof PAIRS)[number];
+  });
+  const facts = R.keys(FACTS).map(
+    (eventName): Pair => ({
+      stateName,
+      eventName,
+      before,
+      refused: false,
+      after: observe<TaskRef>(before, FACTS[eventName]),
+    }),
+  );
+  return [...commands, ...facts];
+});
 
 function pairsWhere(predicate: (pair: Pair) => boolean): Array<[StateName, EventName]> {
   return PAIRS.filter(predicate).map((p) => [p.stateName, p.eventName]);
@@ -281,14 +309,14 @@ function emits(pair: Pair, type: EffectType): boolean {
   return pair.after.effects.some((e) => e.type === type);
 }
 
-/** The accepted transition for `event`; throws if it is refused. */
-function next(state: WorkerState<TaskRef>, event: WorkerEvent<TaskRef>) {
-  const result = transition<TaskRef>(state, event);
+/** The accepted transition for `cmd`; throws if it is refused. */
+function commanded(state: WorkerState<TaskRef>, cmd: Command<TaskRef>): Transition<TaskRef> {
+  const result = command<TaskRef>(state, cmd);
   if (result.isErr()) throw new Error(`refused: ${result.error}`);
   return result.value;
 }
 
-describe("transition", () => {
+describe("the worker machine", () => {
   it("has a fixture for every state and every event type", () => {
     // `STATES` satisfies a record over every state kind; `EVERY_EVENT_COVERED`
     // fails typecheck, not this assertion, when an event type has no fixture.
@@ -347,11 +375,6 @@ describe("transition", () => {
       ).toEqual([["leased", "invoke"]]);
     });
 
-    it("refuses only host commands", () => {
-      const refusedEvents = new Set(PAIRS.filter((p) => p.refused).map((p) => p.eventName));
-      expect([...refusedEvents].sort()).toEqual(["acquire", "invoke", "release"]);
-    });
-
     it("keeps dead final, and announces death exactly once", () => {
       for (const p of PAIRS) {
         const died = p.after.effects.filter((e) => e.type === "died").length;
@@ -398,14 +421,14 @@ describe("transition", () => {
 
   describe("effects", () => {
     it("starting: an accepted handshake reports the worker started", () => {
-      expect(next(STATES.starting, EVENTS.ready)).toEqual({
+      expect(observe<TaskRef>(STATES.starting, FACTS.ready)).toEqual({
         state: { kind: "idle" },
         effects: [{ type: "started", outcome: ok(undefined) }],
       });
     });
 
     it("starting: a refused handshake reports why, and dies disposable", () => {
-      expect(next(STATES.starting, EVENTS.fatal)).toEqual({
+      expect(observe<TaskRef>(STATES.starting, FACTS.fatal)).toEqual({
         state: { kind: "dead", reason: "sent fatal before ready", held: false },
         effects: [
           { type: "started", outcome: err({ kind: "refused", reason: "sent fatal before ready" }) },
@@ -416,32 +439,32 @@ describe("transition", () => {
     });
 
     it("starting: a timeout or a lost channel reports its own start failure", () => {
-      expect(next(STATES.starting, EVENTS.handshake_timed_out).effects[0]).toEqual({
+      expect(observe<TaskRef>(STATES.starting, FACTS.handshake_timed_out).effects[0]).toEqual({
         type: "started",
         outcome: err({ kind: "timed_out" }),
       });
-      expect(next(STATES.starting, EVENTS.channel_ended).effects[0]).toEqual({
+      expect(observe<TaskRef>(STATES.starting, FACTS.channel_ended).effects[0]).toEqual({
         type: "started",
         outcome: err({ kind: "ended", reason: "ended" }),
       });
     });
 
     it("starting: a host close reports the start as closed, not as the worker ending", () => {
-      expect(next(STATES.starting, EVENTS.close).effects[0]).toEqual({
+      expect(observe<TaskRef>(STATES.starting, FACTS.close).effects[0]).toEqual({
         type: "started",
         outcome: err({ kind: "closed", reason: "closed" }),
       });
     });
 
     it("leased: invoke sends the task and runs it", () => {
-      expect(next(STATES.leased, EVENTS.invoke)).toEqual({
+      expect(commanded(STATES.leased, COMMANDS.invoke)).toEqual({
         state: { kind: "running", task: NEXT },
         effects: [{ type: "send", message: INVOKE }],
       });
     });
 
     it("leased: a death keeps the worker held for its caller", () => {
-      expect(next(STATES.leased, EVENTS.close).state).toEqual({
+      expect(observe<TaskRef>(STATES.leased, FACTS.close).state).toEqual({
         kind: "dead",
         reason: "closed",
         held: true,
@@ -449,26 +472,26 @@ describe("transition", () => {
     });
 
     it("running: serves the running task's ctx call with that task", () => {
-      expect(next(STATES.running, EVENTS.ctx_call_own).effects).toEqual([
-        { type: "serve", task: TASK, call: EVENTS.ctx_call_own },
+      expect(observe<TaskRef>(STATES.running, FACTS.ctx_call_own).effects).toEqual([
+        { type: "serve", task: TASK, call: FACTS.ctx_call_own },
       ]);
     });
 
     it("running: sends a reply only for the task object on the worker, not one sharing its id", () => {
-      expect(next(STATES.running, EVENTS.replied_same_id).effects).toEqual([
+      expect(observe<TaskRef>(STATES.running, FACTS.replied_same_id).effects).toEqual([
         expect.objectContaining({ type: "log" }),
       ]);
     });
 
     it("running: a result holds the worker until the task exits", () => {
-      expect(next(STATES.running, EVENTS.result_own)).toEqual({
+      expect(observe<TaskRef>(STATES.running, FACTS.result_own)).toEqual({
         state: { kind: "awaiting_exit", task: TASK, result: RESULT },
         effects: [],
       });
     });
 
     it("awaiting_exit: task_exited settles the result with a confirmed exit", () => {
-      expect(next(STATES.awaiting_exit, EVENTS.exited_own)).toEqual({
+      expect(observe<TaskRef>(STATES.awaiting_exit, FACTS.exited_own)).toEqual({
         state: { kind: "leased" },
         effects: [
           {
@@ -481,7 +504,7 @@ describe("transition", () => {
     });
 
     it("running: task_exited without a result settles as exited without one, exit confirmed", () => {
-      expect(next(STATES.running, EVENTS.exited_own).effects).toEqual([
+      expect(observe<TaskRef>(STATES.running, FACTS.exited_own).effects).toEqual([
         {
           type: "settle",
           task: TASK,
@@ -494,14 +517,14 @@ describe("transition", () => {
     });
 
     it("running: a deadline counts only for the task object on the worker, not its id", () => {
-      expect(next(STATES.running, EVENTS.deadline_same_id)).toEqual({
+      expect(observe<TaskRef>(STATES.running, FACTS.deadline_same_id)).toEqual({
         state: STATES.running,
         effects: [],
       });
     });
 
     it("running: a passed deadline fails the task as timed out, exit unconfirmed", () => {
-      expect(next(STATES.running, EVENTS.deadline_own).effects).toContainEqual({
+      expect(observe<TaskRef>(STATES.running, FACTS.deadline_own).effects).toContainEqual({
         type: "settle",
         task: TASK,
         outcome: {
@@ -512,7 +535,7 @@ describe("transition", () => {
     });
 
     it("awaiting_exit: a lost channel keeps the result, exit unconfirmed", () => {
-      expect(next(STATES.awaiting_exit, EVENTS.channel_ended).effects).toContainEqual({
+      expect(observe<TaskRef>(STATES.awaiting_exit, FACTS.channel_ended).effects).toContainEqual({
         type: "settle",
         task: TASK,
         outcome: { result: ok(RESULT), exit: { kind: "unconfirmed", reason: "ended" } },
@@ -521,7 +544,7 @@ describe("transition", () => {
 
     it("running: a result naming another task fails the task and dies", () => {
       const reason = "task_result id mismatch (expected t1, got t2)";
-      const died = next(STATES.running, EVENTS.result_other);
+      const died = observe<TaskRef>(STATES.running, FACTS.result_other);
       expect(died.state).toEqual({ kind: "dead", reason, held: true });
       expect(died.effects).toContainEqual({
         type: "settle",
@@ -535,7 +558,7 @@ describe("transition", () => {
 
     it("dead: invoke fails the new task without sending it", () => {
       const reason = "worker is dead: gone";
-      expect(next(STATES.dead_held, EVENTS.invoke).effects).toEqual([
+      expect(commanded(STATES.dead_held, COMMANDS.invoke).effects).toEqual([
         {
           type: "settle",
           task: NEXT,
@@ -548,7 +571,7 @@ describe("transition", () => {
     });
 
     it("dead: its caller's release makes a held worker disposable", () => {
-      expect(next(STATES.dead_held, EVENTS.release)).toEqual({
+      expect(commanded(STATES.dead_held, COMMANDS.release)).toEqual({
         state: { kind: "dead", reason: "gone", held: false },
         effects: [{ type: "disposable" }],
       });

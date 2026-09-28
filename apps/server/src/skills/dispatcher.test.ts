@@ -817,54 +817,6 @@ describe("Dispatcher", () => {
       expect(d.tryAcquire()).toBe(true);
     });
 
-    it("leaves the worker as it was when it refuses a command", async () => {
-      const idle = async (ch: Channel): Promise<Dispatcher> => {
-        const opened = open(ch);
-        ch.emit({ type: "ready" });
-        return unwrap(await opened);
-      };
-      const reach: Record<string, (ch: Channel) => Promise<Dispatcher>> = {
-        idle,
-        leased: (ch) => leased(ch),
-        running: async (ch) => {
-          const d = await leased(ch);
-          d.invoke(INVOKE, { ctxHandler: noopHandler(), deadline: NEVER });
-          return d;
-        },
-        awaiting_exit: async (ch) => {
-          const d = await leased(ch);
-          d.invoke(INVOKE, { ctxHandler: noopHandler(), deadline: NEVER });
-          ch.emit(result(1));
-          await flush();
-          return d;
-        },
-        dead: async (ch) => {
-          const d = await idle(ch);
-          d.close("gone");
-          return d;
-        },
-      };
-      const commands: Record<string, (d: Dispatcher) => boolean> = {
-        tryAcquire: (d) => d.tryAcquire(),
-        release: (d) => d.release(),
-        invoke: (d) => {
-          try {
-            d.invoke({ ...INVOKE, id: "probe" }, { ctxHandler: noopHandler(), deadline: NEVER });
-            return true;
-          } catch {
-            return false;
-          }
-        },
-      };
-      for (const [state, setup] of Object.entries(reach)) {
-        for (const [name, command] of Object.entries(commands)) {
-          const d = await setup(channel());
-          const before = d.state;
-          if (!command(d)) expect(d.state, `${state} × ${name}`).toBe(before);
-        }
-      }
-    });
-
     it("makes a worker that dies unheld disposable at once", async () => {
       const ch = channel();
       const opened = open(ch);
