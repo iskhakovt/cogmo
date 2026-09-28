@@ -1,0 +1,1 @@
+The skill workers' host side runs on one pure state machine shared by both tiers, reading each worker's frames as a typed stream: a task's result comes back as a value with its exit outcome, and the pool retires and replaces a worker the moment it dies. A Pyodide worker thread that crashes mid-task fails its task at once.
