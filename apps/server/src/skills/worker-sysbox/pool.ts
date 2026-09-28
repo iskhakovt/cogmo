@@ -39,9 +39,9 @@ export interface SysboxWorkerPoolOptions {
   max: number;
   /**
    * Recycle policy. After a worker has run `recycleAfterTasks` tasks it's
-   * retired and replaced. Bounds drift in the
-   * shared container (sys.modules accumulation, allocator fragmentation,
-   * tmpfs growth) independent of per-task python-process restart.
+   * retired and replaced. Bounds drift in the shared container (sys.modules
+   * accumulation, allocator fragmentation, tmpfs growth) independent of
+   * per-task python-process restart.
    */
   recycleAfterTasks: number;
   /**
@@ -154,11 +154,13 @@ export const DEFAULT_POOL_OPTIONS = {
  * Lifecycle:
  *  - The pool subscribes to each worker's `dead` as it spawns it. The
  *    moment a worker dies — its supervisor went away, a task left it
- *    unreusable, or the pool retired it — the pool removes and disposes it
- *    and spawns a replacement: for a queued acquirer first, then up to `min`.
+ *    unreusable, or the pool retired it — the pool removes it and spawns a
+ *    replacement: for a queued acquirer first, then up to `min`. Its
+ *    container goes at once, or once the task holding it returns.
  *  - The pool retires a worker after its task once taskCount ≥
  *    `recycleAfterTasks` or age ≥ `recycleAfterMs`.
- *  - An interval sweep retires idle workers above `min` after `idleShutdownMs`.
+ *  - An interval sweep retires idle workers above `min` after `idleShutdownMs`,
+ *    and spawns back up to `min` when a replacement failed.
  *  - `dispose()` aborts the signal every worker was created with: a live
  *    worker's channel closes, and a spawn stops at its next step. It then
  *    cancels the sweep, rejects all queued waiters, and tears down every
@@ -506,7 +508,7 @@ export class SysboxWorkerPool {
         if (e instanceof PoolDisposedDuringSpawnError) return;
         log.warn(
           { err: e instanceof Error ? e.message : String(e) },
-          "replacement worker spawn failed; pool below min until next invoke",
+          "replacement worker spawn failed; pool below min until the next sweep or invoke",
         );
       });
     }

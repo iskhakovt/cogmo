@@ -45,9 +45,8 @@ export const TaskInvokeSchema = z.object({
   /**
    * Per-task isolation hint from the manifest. Tier 1 ignores it (single-
    * heap WASM). Tier 2 retires the worker after a `recycle` task, and the
-   * pool replaces it. `subinterpreter`
-   * is reserved for a future runtime; it behaves like the default
-   * process-per-task isolation.
+   * pool replaces it. `subinterpreter` is reserved for a future runtime; it
+   * behaves like the default process-per-task isolation.
    */
   isolation: z.enum(["subinterpreter", "recycle"]).optional(),
   /** Wall-clock cap in seconds, enforced by the task's relay inside the container. */

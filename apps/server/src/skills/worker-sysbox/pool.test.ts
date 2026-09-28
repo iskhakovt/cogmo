@@ -988,11 +988,10 @@ describe("SysboxWorkerPool", () => {
   });
 
   // A worker dies after its task, no waiter is queued, but the pool dropped
-  // below min so a *background* replacement spawn is kicked. If that
-  // spawn fails, the catch logs warn
-  // and the pool simply stays below min until the next invoke triggers a
-  // fresh spawn — the failure must NOT propagate to the original invoke's
-  // result (which already completed successfully).
+  // below min so a *background* replacement spawn is kicked. If that spawn
+  // fails, the catch logs a warning and the pool stays below min until the
+  // next sweep or invoke spawns again — the failure must NOT propagate to
+  // the original invoke's result (which already completed successfully).
   it("background replacement spawn failure leaves pool below min without breaking the completed invoke", async () => {
     const h = buildPoolHarness({
       scripts: [
