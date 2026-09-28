@@ -1,6 +1,5 @@
-import type { Sql } from "postgres";
 import type { AgentStore } from "../agent/store/index.js";
-import { withBootstrapLock } from "../db/bootstrap-lock.js";
+import type { BootstrapLock } from "../db/bootstrap-lock.js";
 import type { Database, Transactor } from "../db/index.js";
 import { migratePerFile } from "../db/migrate-per-file.js";
 import { logger } from "../logger.js";
@@ -9,8 +8,7 @@ import { applyReset, type ResetScope } from "./reset.js";
 import { seedDefaults } from "./seed.js";
 
 export interface MigrateAndSeedDeps {
-  /** The client `db` runs on; the bootstrap lock holds one of its connections. */
-  sql: Sql;
+  bootstrapLock: BootstrapLock;
   db: Database;
   runInTx: Transactor;
   agentStore: AgentStore;
@@ -26,7 +24,7 @@ export async function migrateAndSeed(
   deps: MigrateAndSeedDeps,
   args: { reset: ResetScope | null },
 ): Promise<{ userId: string; profileId: string }> {
-  return withBootstrapLock(deps.sql, async () => {
+  return deps.bootstrapLock(async () => {
     await migratePerFile(deps.db, { migrationsFolder: "./migrations" });
     logger.info("migrations applied");
     if (args.reset !== null) await applyReset(args.reset, { db: deps.db });

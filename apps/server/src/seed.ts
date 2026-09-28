@@ -1,6 +1,7 @@
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { DrizzleAgentStore } from "./agent/store/index.js";
+import { bootstrapLock } from "./db/bootstrap-lock.js";
 import { pinoNoticeHandler } from "./db/helpers.js";
 import * as schema from "./db/schemas.js";
 import { transactor } from "./db/transactor.js";
@@ -12,7 +13,7 @@ import { DrizzleTransportStore } from "./transport/store/index.js";
  * Seed the database with default data for single-user deployment.
  *
  * Idempotent — safe to run multiple times.
- * Creates: user, profile, direct channel, wildcard identity.
+ * Creates: user, profile, direct and web channels with their wildcard identities.
  *
  * Only requires DATABASE_URL — no other env vars needed. Reads
  * `process.env` directly (no `env.ts` import) so the seed entrypoint
@@ -28,7 +29,7 @@ export async function seed(): Promise<void> {
   try {
     await migrateAndSeed(
       {
-        sql: client,
+        bootstrapLock: bootstrapLock(client),
         db,
         runInTx: transactor(db),
         agentStore: new DrizzleAgentStore(),

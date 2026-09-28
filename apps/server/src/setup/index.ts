@@ -1,6 +1,7 @@
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { DrizzleAgentStore } from "../agent/store/index.js";
+import { bootstrapLock } from "../db/bootstrap-lock.js";
 import { pinoNoticeHandler } from "../db/helpers.js";
 import * as schema from "../db/schemas.js";
 import { transactor } from "../db/transactor.js";
@@ -68,13 +69,14 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
     }
 
     const tx = transactor(db);
+    const lock = bootstrapLock(client);
     const agentStore = new DrizzleAgentStore();
     const transportStore = new DrizzleTransportStore();
     const encryptionKey = deriveMasterKey(parseMasterKey(masterKey), "cogmo/secrets-at-rest/v1");
     const secretsStore = new DrizzleSecretsStore(encryptionKey);
 
     const { userId } = await migrateAndSeed(
-      { sql: client, db, runInTx: tx, agentStore, transportStore },
+      { bootstrapLock: lock, db, runInTx: tx, agentStore, transportStore },
       { reset: opts.reset ?? null },
     );
 

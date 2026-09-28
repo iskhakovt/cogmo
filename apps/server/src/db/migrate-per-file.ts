@@ -29,7 +29,7 @@
  *
  * **Serialization.** The runner takes no lock itself. Its production callers
  * (`bootstrapCore`, `migrateAndSeed`) run it under the bootstrap advisory
- * lock (`withBootstrapLock`), so concurrent `cogmo serve` / `cogmo seed` /
+ * lock (`bootstrapLock`), so concurrent `cogmo serve` / `cogmo seed` /
  * `cogmo setup` runs migrate one at a time.
  *
  * **Hash validation.** Before applying any pending migration, the

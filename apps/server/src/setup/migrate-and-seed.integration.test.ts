@@ -12,6 +12,7 @@ import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { type AgentStore, DrizzleAgentStore } from "../agent/store/index.js";
 import { profiles, users } from "../agent/store/schema.js";
+import { bootstrapLock } from "../db/bootstrap-lock.js";
 import * as schema from "../db/schemas.js";
 import { transactor } from "../db/transactor.js";
 import { fileDatabaseUrl } from "../test/integration-file.js";
@@ -44,7 +45,7 @@ function run(sql: ReturnType<typeof postgres>, agentStore: AgentStore) {
   const db = drizzle(sql, { schema });
   return migrateAndSeed(
     {
-      sql,
+      bootstrapLock: bootstrapLock(sql),
       db,
       runInTx: transactor(db),
       agentStore,

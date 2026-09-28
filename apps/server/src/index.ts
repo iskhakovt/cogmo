@@ -59,7 +59,7 @@ import {
   runBootChecks,
   runHindsightChecks,
 } from "./boot/checks.js";
-import { withBootstrapLock } from "./db/bootstrap-lock.js";
+import { type BootstrapLock, bootstrapLock } from "./db/bootstrap-lock.js";
 import { type Database, db, type Transactor, transactor } from "./db/index.js";
 import { migratePerFile } from "./db/migrate-per-file.js";
 import { env } from "./env.js";
@@ -197,6 +197,8 @@ export interface BootstrapOptions {
 export interface CoreDeps {
   db: Database;
   runInTx: Transactor;
+  /** The bootstrap lock on `db`'s pool, held by later stages' boot seeding. */
+  bootstrapLock: BootstrapLock;
   agentStore: DrizzleAgentStore;
   transportStore: DrizzleTransportStore;
   sandboxStore: DrizzleSandboxStore;
@@ -322,10 +324,11 @@ export interface RuntimeDeps {
  * with `cogmo serve` can't reap each other's sandboxes, which is the
  * specific race this stage was carved out to prevent. Migrations and the
  * skills-repo bootstrap run under the bootstrap advisory lock
- * (`withBootstrapLock`), so parallel invocations apply them one at a time.
+ * (`bootstrapLock`), so parallel invocations apply them one at a time.
  */
 export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDeps> {
   const tx = transactor(db);
+  const lock = bootstrapLock(db.$client);
   const agentStore = new DrizzleAgentStore();
   const transportStore = new DrizzleTransportStore();
   const sandboxStore = new DrizzleSandboxStore();
@@ -336,7 +339,7 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
   const skillStore = new DrizzleSkillStore();
   const webSessionStore = new DrizzleWebSessionStore();
 
-  await withBootstrapLock(db.$client, async () => {
+  await lock(async () => {
     await migratePerFile(db, { migrationsFolder: "./migrations" });
     logger.info("database migrations applied");
 
@@ -451,6 +454,7 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
   return {
     db,
     runInTx: tx,
+    bootstrapLock: lock,
     agentStore,
     transportStore,
     sandboxStore,
@@ -954,7 +958,7 @@ export async function bootstrapRuntime(
   const webTools = createWebTools(core.tavilyKey, core.openrouterKey);
 
   // Boot seeding runs under the bootstrap lock, one process at a time.
-  await withBootstrapLock(db.$client, async () => {
+  await core.bootstrapLock(async () => {
     // Image gen catalog is DB-driven (image_providers + image_models). At boot
     // we seed the canonical fal catalog if a fal secret exists — handles both
     // wizard-driven setups and the legacy FAL_API_KEY env var path. The
