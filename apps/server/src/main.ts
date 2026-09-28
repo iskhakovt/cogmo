@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
-import { command, flag, oneOf, subcommands } from "cmd-ts";
+import { command, flag, subcommands } from "cmd-ts";
 import type { MigrationCliDeps } from "./agent/evolution/migrations-cli.js";
-import { optionalOption } from "./cli/args.js";
+import { choice, optionalOption } from "./cli/args.js";
 import { CONSOLE_IO, type CommandTree, loadCommandGroups, runCli } from "./cli/run.js";
 import { RESET_SCOPES, type ResetScope } from "./setup/reset-scopes.js";
 import type { SkillsCliDeps } from "./skills/cli.js";
@@ -29,7 +29,7 @@ const BUILT_INS = {
     args: {
       reset: optionalOption({
         long: "reset",
-        type: { ...oneOf(RESET_SCOPES), displayName: "scope" },
+        type: choice(RESET_SCOPES, "scope"),
         description: `Clear stored state first: ${RESET_SCOPES.join(", ")}.`,
       }),
       nonInteractive: flag({

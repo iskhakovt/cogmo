@@ -4,7 +4,7 @@
  * the offending argument.
  */
 
-import { extendType, multioption, string, type Type } from "cmd-ts";
+import { extendType, multioption, oneOf, string, type Type } from "cmd-ts";
 
 /**
  * A name or id. An option always consumes the token after it, so without
@@ -30,18 +30,32 @@ export const text: Type<string, string> = extendType(string, {
   },
 });
 
-/** An integer no lower than `min`, with no trailing characters. */
+/** Postgres `integer`'s maximum — the columns these counts are stored in. */
+const INT4_MAX = 2_147_483_647;
+
+/**
+ * Decimal digits only — `Number()` alone would take `0x10`, `1e3` and `+5` —
+ * from `min` (at least 0) up to Postgres `integer`'s maximum.
+ */
 export function intAtLeast(min: number): Type<string, number> {
   return extendType(string, {
     displayName: "int",
     async from(value) {
-      const n = Number(value.trim());
-      if (value.trim() === "" || !Number.isInteger(n) || n < min) {
-        throw new Error(`expected an integer >= ${min}, got "${value}"`);
-      }
+      const digits = value.trim();
+      const n = /^\d+$/.test(digits) ? Number(digits) : Number.NaN;
+      if (!(n >= min)) throw new Error(`expected an integer >= ${min}, got "${value}"`);
+      if (n > INT4_MAX) throw new Error(`expected an integer <= ${INT4_MAX}, got "${value}"`);
       return n;
     },
   });
+}
+
+/** One of `values`, shown in help as `<displayName>`. */
+export function choice<T extends string>(
+  values: readonly T[],
+  displayName: string,
+): Type<string, T> {
+  return { ...oneOf(values), displayName };
 }
 
 interface OptionalOptionConfig<T> {

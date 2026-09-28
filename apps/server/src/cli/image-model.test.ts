@@ -240,7 +240,7 @@ describe("cogmo image-model add", () => {
       ["add", "fal/x", "--provider", "--model-string", "f", "--description", "d"],
       /got the flag "--model-string"/,
     ],
-    [[...ADD.slice(0, -1), "", "--seed"], /expected text, got ""/],
+    [[...ADD.slice(0, -1), "", "--seed"], /argument 8 is empty/],
     [[...ADD.slice(0, -1), "  ", "--seed"], /expected text, got " {2}"/],
     [[...ADD, "--bogus"], /--bogus\n\s+\^ Unknown arguments/],
     [[...ADD, "--ratios", "horizontal"], /unknown aspect ratio "horizontal"; expected one of 1:1/],

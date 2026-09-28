@@ -11,7 +11,7 @@
  * the `generate_image` tool's `model` enum.
  */
 
-import { command, extendType, flag, oneOf, option, positional, string, subcommands } from "cmd-ts";
+import { command, extendType, flag, option, positional, string, subcommands } from "cmd-ts";
 import type { AgentStore } from "../agent/store/index.js";
 import {
   IMAGE_ALLOWED_ASPECT_RATIOS,
@@ -20,7 +20,7 @@ import {
   ImageModelCapabilitiesSchema,
 } from "../agent/store/schema.js";
 import type { Transactor } from "../db/index.js";
-import { identifier, optionalOption, text } from "./args.js";
+import { choice, identifier, optionalOption, text } from "./args.js";
 import type { CliIo, LoadDeps } from "./run.js";
 
 export interface ImageModelCliDeps {
@@ -48,10 +48,10 @@ const aspectRatios = extendType(string, {
   },
 });
 
-const imageInputMode = {
-  ...oneOf(ImageModelCapabilitiesSchema.shape.imageInput.unwrap().options),
-  displayName: "mode",
-};
+const imageInputMode = choice(
+  ImageModelCapabilitiesSchema.shape.imageInput.unwrap().options,
+  "mode",
+);
 
 export function imageModelCli(io: CliIo, loadDeps: LoadDeps<ImageModelCliDeps>) {
   return subcommands({

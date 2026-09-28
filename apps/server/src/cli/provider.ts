@@ -25,7 +25,7 @@ import {
   PROVIDER_TYPES,
   type ProviderType,
 } from "../setup/providers.js";
-import { identifier, optionalOption } from "./args.js";
+import { choice, identifier, optionalOption } from "./args.js";
 import { type CliIo, EXIT_USAGE, type LoadDeps } from "./run.js";
 
 export interface ProviderCliDeps {
@@ -34,7 +34,7 @@ export interface ProviderCliDeps {
   secretsStore: SecretsStore;
 }
 
-const cacheDialect = { ...oneOf(CacheDialectSchema.options), displayName: "dialect" };
+const cacheDialect = choice(CacheDialectSchema.options, "dialect");
 const CACHE_DIALECT_HELP = `Caching hints an OpenAI-compatible endpoint takes: ${CacheDialectSchema.options.join(", ")}.`;
 
 export function providerCli(io: CliIo, loadDeps: LoadDeps<ProviderCliDeps>) {

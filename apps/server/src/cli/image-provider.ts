@@ -11,7 +11,7 @@
  * model = one provider. Deletion cascades to `image_models`.
  */
 
-import { command, extendType, oneOf, optional, positional, string, subcommands } from "cmd-ts";
+import { command, extendType, optional, positional, string, subcommands } from "cmd-ts";
 import { InvalidProviderConfigError } from "../agent/store/errors.js";
 import type { AgentStore } from "../agent/store/index.js";
 import {
@@ -21,7 +21,7 @@ import {
 } from "../agent/store/schema.js";
 import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
-import { identifier, optionalOption } from "./args.js";
+import { choice, identifier, optionalOption } from "./args.js";
 import { type CliIo, EXIT_USAGE, type LoadDeps } from "./run.js";
 
 /**
@@ -39,7 +39,7 @@ export interface ImageProviderCliDeps {
   secretsStore: SecretsStore;
 }
 
-const providerType = { ...oneOf(imageProviderType.enumValues), displayName: "type" };
+const providerType = choice(imageProviderType.enumValues, "type");
 
 const providerName = extendType(string, {
   displayName: "name",
@@ -56,14 +56,10 @@ const providerName = extendType(string, {
   },
 });
 
-const trueOrFalse = extendType(string, {
-  displayName: "true|false",
-  async from(value) {
-    if (value === "true") return true;
-    if (value === "false") return false;
-    throw new Error(`expected "true" or "false", got "${value}"`);
-  },
-});
+const trueOrFalse = extendType(
+  choice(["true", "false"], "true|false"),
+  async (value) => value === "true",
+);
 
 const cfgScale = extendType(string, {
   displayName: "0-20",

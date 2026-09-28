@@ -1,4 +1,4 @@
-import { command, positional, subcommands } from "cmd-ts";
+import { command, optional, positional, string, subcommands } from "cmd-ts";
 import { describe, expect, it, vi } from "vitest";
 import { type CliIo, EXIT_USAGE, loadCommandGroups, runCli } from "./run.js";
 
@@ -82,6 +82,51 @@ describe("runCli", () => {
     expect(err.join("\n")).toContain("Did you mean provider?");
   });
 
+  it.each([[["", "https://x/v1"]], [["key", "", "https://x/v1"]], [["key", "--", ""]]])(
+    "rejects the empty argument in %j before cmd-ts drops it",
+    async (argv) => {
+      const handler = vi.fn(async () => 0);
+      const cli = command({
+        name: "add",
+        args: {
+          apiKey: positional({ displayName: "api-key" }),
+          baseUrl: positional({ type: optional(string), displayName: "base-url" }),
+        },
+        handler,
+      });
+      const { io, err } = makeIo();
+
+      expect(await runCli(cli, argv, io)).toBe(EXIT_USAGE);
+      expect(err.join("\n")).toMatch(/argument \d is empty/);
+      expect(handler).not.toHaveBeenCalled();
+    },
+  );
+
+  describe("a value starting with a single dash", () => {
+    const handler = vi.fn(async (_args: { apiKey: string }) => 0);
+    const cli = command({
+      name: "add",
+      args: { apiKey: positional({ displayName: "api-key" }) },
+      handler,
+    });
+
+    it("is refused when cmd-ts would read it as flags including -h", async () => {
+      const { io, out, err } = makeIo();
+
+      expect(await runCli(cli, ["-q8hZ"], io)).toBe(EXIT_USAGE);
+      expect(err.join("\n")).toContain('"-q8hZ" reads as short flags, -h among them');
+      expect(out).toEqual([]);
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it("reaches the handler after --", async () => {
+      const { io } = makeIo();
+
+      expect(await runCli(cli, ["--", "-q8hZ"], io)).toBe(0);
+      expect(handler).toHaveBeenCalledWith({ apiKey: "-q8hZ" });
+    });
+  });
+
   it("lets a handler's exception propagate", async () => {
     const cli = command({
       name: "boom",
@@ -124,7 +169,7 @@ describe("loadCommandGroups", () => {
   it("loads only the group the command line names", async () => {
     const load = groups();
 
-    const cmds = await loadCommandGroups(["--verbose", "provider", "list"], builtIns, load);
+    const cmds = await loadCommandGroups(["provider", "list"], builtIns, load);
 
     expect(load.provider).toHaveBeenCalledOnce();
     expect(load.model).not.toHaveBeenCalled();
@@ -154,6 +199,18 @@ describe("loadCommandGroups", () => {
       const { io, out, err } = makeIo();
       await runCli(subcommands({ name: "cogmo", cmds }), argv, io);
       expect([...out, ...err].join("\n")).toMatch(/Manage models\.|Did you mean provider\?/);
+    },
+  );
+
+  it.each([[["toString"]], [["-x", "model", "provider"]]])(
+    "loads every group when %j does not lead with a command",
+    async (argv) => {
+      const load = groups();
+
+      await loadCommandGroups(argv, builtIns, load);
+
+      expect(load.provider).toHaveBeenCalledOnce();
+      expect(load.model).toHaveBeenCalledOnce();
     },
   );
 

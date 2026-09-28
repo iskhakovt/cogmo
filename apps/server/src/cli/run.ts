@@ -33,15 +33,41 @@ type Cli = Parameters<typeof runSafely>[0];
 export type CommandTree = Parameters<typeof subcommands>[0]["cmds"][string];
 
 export async function runCli(cli: Cli, argv: readonly string[], io: CliIo): Promise<number> {
+  // cmd-ts's tokenizer drops an empty argument, shifting every positional
+  // after it — `add openai proxy "$UNSET" <url>` would take the URL as the key.
+  const empty = argv.indexOf("");
+  if (empty !== -1) {
+    io.err(`error: argument ${empty + 1} is empty`);
+    return EXIT_USAGE;
+  }
   const result = await runSafely(cli, [...argv]);
   if (result._tag === "ok") return exitCodeOf(result.value);
   const { message, into, exitCode } = result.error.config;
-  if (into === "stdout") {
-    io.out(message);
-    return exitCode;
+  if (into === "stderr") {
+    io.err(message);
+    return EXIT_USAGE;
   }
-  io.err(message);
-  return EXIT_USAGE;
+  const cluster = helpCluster(argv);
+  if (cluster !== undefined) {
+    io.err(
+      `error: "${cluster}" reads as short flags, -h among them; put \`--\` before a value that starts with "-"`,
+    );
+    return EXIT_USAGE;
+  }
+  io.out(message);
+  return exitCode;
+}
+
+/**
+ * A token before `--` that cmd-ts reads as a cluster of short flags
+ * including `-h`: an API key like `-q8hZ` would otherwise print help and exit
+ * 0 without running the command. A cluster alongside an explicit `-h` or
+ * `--help` never gets here — cmd-ts rejects the repeated help flag.
+ */
+function helpCluster(argv: readonly string[]): string | undefined {
+  const end = argv.indexOf("--");
+  const flags = end === -1 ? argv : argv.slice(0, end);
+  return flags.find((arg) => /^-[^-]+/.test(arg) && arg !== "-h" && arg.includes("h"));
 }
 
 /**
@@ -59,18 +85,20 @@ async function exitCodeOf(outcome: unknown): Promise<number> {
 
 /**
  * The `cmds` of a top-level `subcommands`: `builtIns` as given, and of
- * `groups` only the one `argv` names. cmd-ts builds the whole tree before it
- * parses, so every other group stands in as a placeholder that is never run.
- * With no known command named — help, a typo — every group loads, so the
- * listing and the "did you mean" suggestion see them all.
+ * `groups` only the one `argv[0]` names — the top level takes no options, so
+ * that is the command cmd-ts dispatches to. cmd-ts builds the whole tree
+ * before it parses, so every other group stands in as a placeholder that is
+ * never run. When `argv[0]` names no known command — help, a typo — every
+ * group loads, so the listing and the "did you mean" suggestion see them all.
  */
 export async function loadCommandGroups(
   argv: readonly string[],
   builtIns: Readonly<Record<string, CommandTree>>,
   groups: Readonly<Record<string, () => Promise<CommandTree>>>,
 ): Promise<Record<string, CommandTree>> {
-  const named = argv.find((arg) => !arg.startsWith("-"));
-  const known = named !== undefined && (named in builtIns || named in groups);
+  const [named] = argv;
+  const known =
+    named !== undefined && (Object.hasOwn(builtIns, named) || Object.hasOwn(groups, named));
   const loaded = await Promise.all(
     Object.entries(groups).map(async ([name, load]) => {
       const tree = !known || name === named ? await load() : placeholder(name);

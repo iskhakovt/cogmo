@@ -35,9 +35,19 @@ describe("intAtLeast", () => {
     [1, "not-a-number"],
     [0, ""],
     [0, " "],
+    [1, "0x10"],
+    [1, "1e3"],
+    [1, "+5"],
   ])("rejects min=%d value %j", async (min, value) => {
     await expect(intAtLeast(min).from(value)).rejects.toThrow(
       `expected an integer >= ${min}, got "${value}"`,
+    );
+  });
+
+  it("accepts Postgres integer's maximum and rejects one past it", async () => {
+    await expect(intAtLeast(0).from("2147483647")).resolves.toBe(2147483647);
+    await expect(intAtLeast(0).from("2147483648")).rejects.toThrow(
+      'expected an integer <= 2147483647, got "2147483648"',
     );
   });
 });
