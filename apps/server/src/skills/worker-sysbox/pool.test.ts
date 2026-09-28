@@ -439,6 +439,25 @@ describe("SysboxWorkerPool", () => {
       await pool.dispose();
     });
 
+    it("frees its slot for an acquire queued behind it once its task returns", async () => {
+      // With `min` 0 nothing replenishes: only the freed slot serves the queue.
+      const task = gate();
+      const h = holding({ min: 0, max: 1 }, task.promise);
+      const pool = await h.pool;
+      const dying = pool.invoke(invokeParams("t-dying"));
+      await vi.waitFor(() => expect(pool.stats()).toMatchObject({ busy: 1 }));
+      const queued = pool.invoke(invokeParams("t-queued"));
+      expect(pool.stats().queued).toBe(1);
+      expectDefined(h.spawned[0], "first worker").die("supervisor exited");
+
+      task.open();
+
+      await dying;
+      await expect(queued).resolves.toMatchObject({ ok: false, workerReusable: false });
+      expect(h.spawned).toHaveLength(2);
+      await pool.dispose();
+    });
+
     it("is torn down by dispose even while its task runs", async () => {
       const task = gate();
       const h = holding({ min: 1, max: 2 }, task.promise);
@@ -513,6 +532,39 @@ describe("SysboxWorkerPool", () => {
 
     await expect(pool.invoke(invokeParams("t-1"))).resolves.toMatchObject({ ok: true });
     expect(spawned).toHaveLength(2);
+    await pool.dispose();
+  });
+
+  it("keeps a queued acquire queued when the worker spawned for it dies first", async () => {
+    // The first worker dies under its task; the one spawned for the queued
+    // acquire dies before it can take it, and the next one serves it.
+    const task = gate();
+    const spawned: FakeWorker[] = [];
+    const pool = await poolWith({
+      min: 0,
+      max: 1,
+      createWorker: async ({ workerId }) => {
+        const w = fakeWorker(workerId, {
+          invoke: async () => {
+            await task.promise;
+            return succeed();
+          },
+        });
+        spawned.push(w);
+        if (spawned.length === 2) w.die("supervisor exited");
+        return w;
+      },
+    }).pool;
+    const dying = pool.invoke(invokeParams("t-dying"));
+    await vi.waitFor(() => expect(pool.stats()).toMatchObject({ busy: 1 }));
+    const queued = pool.invoke(invokeParams("t-queued"));
+    expectDefined(spawned[0], "first worker").die("supervisor exited");
+
+    task.open();
+
+    await dying;
+    await expect(queued).resolves.toMatchObject({ ok: true });
+    expect(spawned).toHaveLength(3);
     await pool.dispose();
   });
 
