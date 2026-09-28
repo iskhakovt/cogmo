@@ -57,6 +57,30 @@ The threshold is a constant in the adapter (start with `10`, tune by feel).
 - `deliver()` calls `bot.api.sendMessage(platformAddress, content)`
 - Markdown rendering: Telegram MarkdownV2 with escape function. For v0, plain text (LLM output contains unescaped `_*[]` that breaks Telegram's parser).
 
+## Forwarded Messages
+
+Forwarded text is someone else's words, never the user's: not their statements, not their instructions. When a message carries `forward_origin`, its text, or its caption on a photo, document or voice note, is packed as a text block carrying `forwarded` (`ForwardedOriginSchema` in `src/transport/content.ts`):
+
+| Field | Value |
+|-|-|
+| `origin` | `user`, `hidden_user`, `chat` or `channel`: Telegram's `MessageOrigin` kind |
+| `from` | The sender's name, the hidden user's name, or the chat or channel title, followed by ` (signature)` when the post carries an author signature |
+| `sentAt` | When the original was sent, ISO 8601 |
+
+The user's own text keeps its bare-string form.
+
+The turn renders the block once, when it becomes the user message, into an element the model reads as quoted material:
+
+```
+<forwarded_message from="Alice Smith" origin="user" sent="2023-11-14T22:13:20.000Z">
+see you at 8
+</forwarded_message>
+```
+
+Attribute values carry `&`, `"`, `<` and `>` as entities and whitespace runs as one space. A closing `forwarded_message` tag in the body, in any case and with whitespace at the slash, is backslash-escaped, as the turn context escapes its own. The rendering is a pure function of the block, so the stored `messages.content` is byte-stable across turns ([prompt-caching.md](../prompt-caching.md) → Append-only Transcript), and the Observer, the web transcript and conversation previews read the element as stored.
+
+Only text is marked: a forwarded photo with no caption carries no marking, and a forwarded voice note's transcript reads as the user's. A forwarded message that arrives while a `/profile` or `/repo` dialog is open is dialog input like any other text.
+
 ## Typing Indicator
 
 Send `sendChatAction("typing")` once when a message arrives, before emitting the inbound event. The indicator expires after 5s — good enough for v0. Consider looping the indicator during agent processing later.
@@ -70,6 +94,7 @@ The adapter starts if a Telegram channel row exists in the DB. Bot token is read
 Unit tests use grammY transformers to capture outgoing API calls — no network, no bot token needed. Test:
 - Rejects messages when identity resolution fails (unknown user in `mapped` mode)
 - Calls `transport.emit()` with correct `InboundContent` for resolved users
+- Packs forwarded text and captions as `forwarded` text blocks
 - Handles `/start` (sends welcome, no emit)
 - Handles `/new` (calls `transport.closeSession()` + `transport.createConversation()`, no emit)
 - Sends typing indicator before emit
