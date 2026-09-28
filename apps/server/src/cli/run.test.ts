@@ -1,6 +1,6 @@
 import { command, positional, subcommands } from "cmd-ts";
 import { describe, expect, it, vi } from "vitest";
-import { type CliIo, EXIT_USAGE, runCli } from "./run.js";
+import { type CliIo, EXIT_USAGE, loadCommandGroups, runCli } from "./run.js";
 
 function makeIo() {
   const out: string[] = [];
@@ -102,5 +102,68 @@ describe("runCli", () => {
     await expect(runCli(cli, [], io)).rejects.toThrow(
       "CLI handler resolved to undefined instead of an exit code",
     );
+  });
+});
+
+describe("loadCommandGroups", () => {
+  function groups() {
+    const provider = subcommands({
+      name: "provider",
+      description: "Manage providers.",
+      cmds: { list: exitWith(0) },
+    });
+    const model = subcommands({
+      name: "model",
+      description: "Manage models.",
+      cmds: { list: exitWith(1) },
+    });
+    return { provider: vi.fn(async () => provider), model: vi.fn(async () => model) };
+  }
+  const builtIns = { "gen-key": exitWith(0) };
+
+  it("loads only the group the command line names", async () => {
+    const load = groups();
+
+    const cmds = await loadCommandGroups(["--verbose", "provider", "list"], builtIns, load);
+
+    expect(load.provider).toHaveBeenCalledOnce();
+    expect(load.model).not.toHaveBeenCalled();
+    expect(Object.keys(cmds)).toEqual(["gen-key", "provider", "model"]);
+    const { io } = makeIo();
+    expect(await runCli(subcommands({ name: "cogmo", cmds }), ["provider", "list"], io)).toBe(0);
+  });
+
+  it("loads no group for a built-in command", async () => {
+    const load = groups();
+
+    await loadCommandGroups(["gen-key"], builtIns, load);
+
+    expect(load.provider).not.toHaveBeenCalled();
+    expect(load.model).not.toHaveBeenCalled();
+  });
+
+  it.each([[[]], [["--help"]], [["provder", "list"]]])(
+    "loads every group when %j names no known command",
+    async (argv) => {
+      const load = groups();
+
+      const cmds = await loadCommandGroups(argv, builtIns, load);
+
+      expect(load.provider).toHaveBeenCalledOnce();
+      expect(load.model).toHaveBeenCalledOnce();
+      const { io, out, err } = makeIo();
+      await runCli(subcommands({ name: "cogmo", cmds }), argv, io);
+      expect([...out, ...err].join("\n")).toMatch(/Manage models\.|Did you mean provider\?/);
+    },
+  );
+
+  it("registers every group's name, a placeholder standing in for each unloaded one", async () => {
+    const cmds = await loadCommandGroups(["provider"], builtIns, groups());
+    const { io, err } = makeIo();
+
+    await expect(runCli(subcommands({ name: "cogmo", cmds }), ["model"], io)).rejects.toThrow(
+      "`model` ran without its command group loaded",
+    );
+    expect(err).toEqual([]);
   });
 });

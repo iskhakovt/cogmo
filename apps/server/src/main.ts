@@ -3,12 +3,10 @@
 import { command, flag, oneOf, subcommands } from "cmd-ts";
 import type { MigrationCliDeps } from "./agent/evolution/migrations-cli.js";
 import { optionalOption } from "./cli/args.js";
-import { CONSOLE_IO, runCli } from "./cli/run.js";
+import { CONSOLE_IO, type CommandTree, loadCommandGroups, runCli } from "./cli/run.js";
 import { RESET_SCOPES, type ResetScope } from "./setup/reset-scopes.js";
 import type { SkillsCliDeps } from "./skills/cli.js";
 import type { MigrateSkillsRemoteCliDeps } from "./skills/migrations-cli.js";
-
-type CommandTree = Parameters<typeof subcommands>[0]["cmds"][string];
 
 // Each imports what it runs inside its handler, so `gen-key` and `web-token`
 // work without a configured runtime.
@@ -55,11 +53,7 @@ const BUILT_INS = {
   }),
 };
 
-/**
- * Command groups whose modules import the domain layer. cmd-ts builds the
- * whole tree before it parses, so `loadGroups` imports only the group being
- * run.
- */
+/** Command groups whose modules import the domain layer, imported on demand. */
 const GROUPS: Record<string, () => Promise<CommandTree>> = {
   provider: async () => (await import("./cli/provider.js")).providerCli(CONSOLE_IO, loadCore),
   model: async () => (await import("./cli/model.js")).modelCli(CONSOLE_IO, loadCore),
@@ -81,36 +75,9 @@ const argv = process.argv.length > 2 ? process.argv.slice(2) : ["serve"];
 const cogmo = subcommands({
   name: "cogmo",
   description: "Personal agent runtime. With no command, runs `serve`.",
-  cmds: { ...BUILT_INS, ...(await loadGroups(argv)) },
+  cmds: await loadCommandGroups(argv, BUILT_INS, GROUPS),
 });
 process.exit(await runCli(cogmo, argv, CONSOLE_IO));
-
-/**
- * The named group, and a placeholder for each other one that is never run.
- * With no known command named — help, a typo — every group loads, so the
- * listing and the "did you mean" suggestion see them all.
- */
-async function loadGroups(args: readonly string[]): Promise<Record<string, CommandTree>> {
-  const named = args.find((arg) => !arg.startsWith("-"));
-  const known = named !== undefined && (named in BUILT_INS || named in GROUPS);
-  const groups = await Promise.all(
-    Object.entries(GROUPS).map(async ([name, load]) => {
-      const tree = !known || name === named ? await load() : placeholder(name);
-      return [name, tree] as const;
-    }),
-  );
-  return Object.fromEntries(groups);
-}
-
-function placeholder(name: string): CommandTree {
-  return command({
-    name,
-    args: {},
-    handler: async () => {
-      throw new Error(`\`${name}\` ran without its command group loaded`);
-    },
-  });
-}
 
 /**
  * Data layer only: no sandbox client, no instance row, no reaper — an admin
