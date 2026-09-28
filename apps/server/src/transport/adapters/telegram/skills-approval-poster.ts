@@ -11,10 +11,24 @@ import type { TransportStore } from "../../store/index.js";
  * itself, but still untrusted); a Markdown parse failure would 400 the whole
  * send. Same reasoning as the permission-requested message.
  */
-function buildApprovalText(args: { skillName: string; effects: string; gitSha: string }): string {
+function buildApprovalText(args: {
+  skillName: string;
+  effects: string;
+  gitSha: string;
+  schedule: string | null | undefined;
+}): string {
+  // `undefined`: an event older than the field, so whether it is scheduled
+  // is unknown; the rule is still stated.
+  const runAs =
+    args.schedule === null
+      ? ""
+      : args.schedule === undefined
+        ? "If it runs on a schedule, its runs will run as whoever approves.\n"
+        : `Schedule: ${args.schedule} — its runs will run as whoever approves.\n`;
   return (
     `🛡️ Skill deploy awaiting approval: ${args.skillName}\n\n` +
     `Declared effects: ${args.effects}\n` +
+    runAs +
     `Commit: ${args.gitSha.slice(0, 7)}\n\n` +
     `Approve to advance main; deny to leave the deploy pending. ` +
     `You can also re-register a different version.`
@@ -26,6 +40,8 @@ export interface PostSkillsApprovalKeyboardEvent {
   skillName: string;
   gitSha: string;
   conversationId: string;
+  /** The pending manifest's cron schedule, or null; absent on older events. */
+  schedule?: string | null | undefined;
 }
 
 export type SkillsApprovalSendMessage = (
@@ -65,16 +81,21 @@ export async function postSkillsApprovalKeyboard(args: {
     return { posted: false, reason: "no_telegram_session" };
   }
 
-  // Fetch the deploy + skill row to surface declared effects on the prompt.
-  // Either lookup returning null falls back to "(none declared)" rather than
-  // failing the post — the user can still approve / deny based on the
-  // pendingId + commit shown.
+  // The pending deploy's own declared effects — for an upgrade the skills row
+  // is still the live version. A missing deploy falls back to "(none
+  // declared)" rather than failing the post; the user can still approve or
+  // deny from the pendingId + commit shown.
   const deploy = await runInTx((tx) => skillStore.getDeployById(tx, event.pendingId));
-  const skill = deploy ? await runInTx((tx) => skillStore.getSkillById(tx, deploy.skillId)) : null;
-  const effects = skill && skill.effects.length > 0 ? skill.effects.join(", ") : "(none declared)";
+  const declared = deploy?.classifierLog.declared_effects ?? [];
+  const effects = declared.length > 0 ? declared.join(", ") : "(none declared)";
 
   const keyboard = buildSkillsApprovalKeyboard(event.pendingId);
-  const text = buildApprovalText({ skillName: event.skillName, effects, gitSha: event.gitSha });
+  const text = buildApprovalText({
+    skillName: event.skillName,
+    effects,
+    gitSha: event.gitSha,
+    schedule: event.schedule,
+  });
 
   // Guard the send: a closed chat / blocked bot / network blip shouldn't
   // take the function down silently. retries=0 on the Inngest function

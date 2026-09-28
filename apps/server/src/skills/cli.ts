@@ -1,10 +1,12 @@
-import type { SkillRunner } from "./runner.js";
+import type { SkillRunAs } from "./run-as.js";
+import type { SkillDeployOrigin, SkillRunner } from "./runner.js";
 
 const USAGE = `Usage: cogmo skills <command> [args]
 
 Commands:
   list                       List enabled skills (name | tier | risk | git_sha).
-  run <name> <jsonInputs>    Invoke a skill with the given JSON input.
+  run <name> <jsonInputs>    Invoke a skill with the given JSON input, as the
+                             install owner with the default profile.
   register <branch>          Classify + merge a feature branch in the skills repo.
   approve <pendingId>        Approve a pending-approval deploy by id.
   deny <pendingId> [reason]  Deny a pending-approval deploy by id.
@@ -16,6 +18,15 @@ export interface CliIo {
   out(line: string): void;
   err(line: string): void;
 }
+
+export interface SkillsCliDeps {
+  runner: SkillRunner;
+  /** The install owner with the default profile — whom `run` runs as. */
+  ownerRunAs(): Promise<SkillRunAs>;
+}
+
+/** The CLI is the operator's: a schedule it puts live runs as the owner. */
+const OWNER: SkillDeployOrigin = { kind: "owner" };
 
 const CONSOLE_IO: CliIo = {
   out: (line) => console.log(line),
@@ -29,9 +40,10 @@ const CONSOLE_IO: CliIo = {
  */
 export async function runSkillsCli(
   argv: readonly string[],
-  runner: SkillRunner,
+  deps: SkillsCliDeps,
   io: CliIo = CONSOLE_IO,
 ): Promise<number> {
+  const { runner } = deps;
   const [command, ...rest] = argv;
 
   switch (command) {
@@ -69,7 +81,8 @@ export async function runSkillsCli(
         return 2;
       }
       try {
-        const result = await runner.invoke({ name, inputs, trigger: "manual" });
+        const runAs = await deps.ownerRunAs();
+        const result = await runner.invoke({ name, inputs, trigger: "manual", runAs });
         io.out(JSON.stringify(result, null, 2));
         return result.status === "success" ? 0 : 1;
       } catch (e) {
@@ -84,7 +97,7 @@ export async function runSkillsCli(
         io.err("Usage: cogmo skills register <branch>");
         return 2;
       }
-      const result = await runner.register({ branch });
+      const result = await runner.register({ branch, origin: OWNER });
       io.out(JSON.stringify(result, null, 2));
       return result.status === "rejected" ? 1 : 0;
     }
@@ -95,7 +108,7 @@ export async function runSkillsCli(
         io.err("Usage: cogmo skills approve <pendingId>");
         return 2;
       }
-      const result = await runner.approveDeploy({ pendingId });
+      const result = await runner.approveDeploy({ pendingId, origin: OWNER });
       io.out(JSON.stringify(result, null, 2));
       return result.status === "rejected" ? 1 : 0;
     }
@@ -118,7 +131,7 @@ export async function runSkillsCli(
         io.err("Usage: cogmo skills rollback <name> <toGitSha>");
         return 2;
       }
-      const result = await runner.rollback({ name, toGitSha });
+      const result = await runner.rollback({ name, toGitSha, origin: OWNER });
       io.out(JSON.stringify(result, null, 2));
       return result.status === "rejected" ? 1 : 0;
     }

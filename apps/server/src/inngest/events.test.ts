@@ -8,6 +8,7 @@ import {
   pipelineGatePending,
   pipelineStageDue,
   responseReady,
+  skillsDeployApprovalRequested,
 } from "./events.js";
 
 describe("inboundArrived", () => {
@@ -122,5 +123,27 @@ describe("pipeline/gate.pending bounds", () => {
     });
     expect(accepts(remind(MAX_GATE_REMINDERS))).toBe(true);
     expect(accepts(remind(MAX_GATE_REMINDERS + 1))).toBe(false);
+  });
+});
+
+describe("skills/deploy/approval-requested", () => {
+  const base = {
+    pendingId: "deploy-1",
+    skillName: "briefing",
+    gitSha: "abc1234",
+    conversationId: "conv-1",
+  };
+
+  it("accepts an event queued before the schedule field existed", () => {
+    // Inngest validates event data against the trigger schema before the
+    // handler runs, so a queued event without the field must still parse.
+    expect(skillsDeployApprovalRequested.schema.safeParse(base).success).toBe(true);
+  });
+
+  it("accepts a schedule or null", () => {
+    const parse = (schedule: string | null) =>
+      skillsDeployApprovalRequested.schema.safeParse({ ...base, schedule }).success;
+    expect(parse("0 9 * * *")).toBe(true);
+    expect(parse(null)).toBe(true);
   });
 });

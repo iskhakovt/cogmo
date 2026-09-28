@@ -761,6 +761,37 @@ describe("DrizzleTransportStore", () => {
       const channelId = await seedChannel();
       expect(await tx((trx) => store.resolveUser(trx, channelId, "unknown"))).toBeUndefined();
     });
+
+    it("resolveIdentity returns the matched identity row with its user", async () => {
+      const userId = (await tx((trx) => agentStore.createUser(trx))).id;
+      const channelId = await seedChannel();
+      const { userIdentities } = await import("./schema.js");
+      const [row] = await db
+        .insert(userIdentities)
+        .values({
+          userId,
+          channelId,
+          platformHandle: "carol",
+          isWildcard: false,
+          autoCreated: false,
+        })
+        .returning({ id: userIdentities.id });
+
+      const resolved = await tx((trx) => store.resolveIdentity(trx, channelId, "carol"));
+
+      expect(resolved).toEqual({ identityId: row?.id, userId });
+      expect(await tx((trx) => store.resolveIdentity(trx, channelId, "nobody"))).toBeUndefined();
+    });
+
+    it("resolveIdentity returns the wildcard row on a wildcard channel", async () => {
+      const userId = (await tx((trx) => agentStore.createUser(trx))).id;
+      const channelId = await seedChannel();
+      const wildcard = await tx((trx) => store.createWildcardIdentity(trx, { userId, channelId }));
+
+      const resolved = await tx((trx) => store.resolveIdentity(trx, channelId, "any-handle"));
+
+      expect(resolved).toEqual({ identityId: wildcard.id, userId });
+    });
   });
 
   describe("getActiveChannelTypes", () => {

@@ -7,15 +7,18 @@ import { sql } from "drizzle-orm";
 import { err, ok } from "neverthrow";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { profiles, users } from "../agent/store/schema.js";
 import type { Database, Transactor } from "../db/index.js";
-import type { MemoryProvider } from "../memory/provider.js";
 import type { SecretsStore } from "../secrets/store/index.js";
+import { expectDefined } from "../test/assertions.js";
 import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { makePopulatedBareRepo } from "../test/skills-bare-repo.js";
+import { channels, userIdentities } from "../transport/store/schema.js";
 import { bootstrapSkillsRepo } from "./repo.js";
-import { SkillRunnerImpl } from "./runner.js";
-import { DrizzleSkillStore } from "./store/index.js";
+import type { SkillRunAs, SkillRunServices } from "./run-as.js";
+import { type SkillActor, type SkillDeployOrigin, SkillRunnerImpl } from "./runner.js";
+import { DrizzleSkillStore, type SkillRunIdentity } from "./store/index.js";
 
 const execFileP = promisify(execFile);
 
@@ -37,11 +40,19 @@ afterAll(async () => {
   await close();
 });
 
-function makeMockMemory(): MemoryProvider {
-  const memory = mock<MemoryProvider>();
-  memory.recall.mockResolvedValue({ memories: [] });
-  return memory;
-}
+/** Owner + default profile; only a scheduled skill writes them to a row. */
+const DEFAULT_RUN_AS = {
+  userId: "019d0000-0000-7000-8000-0000000000a1",
+  profileId: "019d0000-0000-7000-8000-0000000000b1",
+};
+
+/** The CLI's origin: the install owner with the default profile. */
+const OWNER: SkillDeployOrigin = { kind: "owner" };
+
+const RUN_AS: SkillRunAs = {
+  userId: "user-1",
+  service: { memory: mock<SkillRunServices["memory"]>(), files: mockFilesService() },
+};
 
 function makeMockSecrets(): SecretsStore {
   return mock<SecretsStore>();
@@ -192,11 +203,9 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
     return SkillRunnerImpl.create({
       store,
       runInTx: tx,
-      memory: makeMockMemory(),
       secretsStore: makeMockSecrets(),
-      files: mockFilesService(),
-      user: { id: "user-1", timezone: "UTC" },
-      memoryBankId: "bank-1",
+      userTimezone: "UTC",
+      defaultRunAs: DEFAULT_RUN_AS,
       skillsRepoPath: repo.bare,
       ...overrides,
     });
@@ -211,7 +220,7 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
       body: ECHO_BODY,
     });
 
-    const result = await runner.register({ branch: "skill/echo" });
+    const result = await runner.register({ branch: "skill/echo", origin: OWNER });
     expect(result.status).toBe("live");
     expect(result.name).toBe("echo");
     expect(result.gitSha).toBe(sha);
@@ -243,7 +252,7 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
       manifest: ECHO_MANIFEST,
       body: ECHO_BODY,
     });
-    const first = await runner.register({ branch: "skill/echo" });
+    const first = await runner.register({ branch: "skill/echo", origin: OWNER });
     expect(first.status).toBe("live");
 
     // Push the same content under a fresh branch (same tree, new commit since
@@ -268,7 +277,7 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
       "origin",
       `refs/heads/at-main:refs/heads/at-main`,
     ]);
-    const second = await runner.register({ branch: "at-main" });
+    const second = await runner.register({ branch: "at-main", origin: OWNER });
     expect(second.status).toBe("no_op");
   });
 
@@ -280,7 +289,7 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
       manifest: ECHO_MANIFEST,
       body: ECHO_BODY,
     });
-    await runner.register({ branch: "skill/echo" });
+    await runner.register({ branch: "skill/echo", origin: OWNER });
 
     // Build a divergent branch: reset work to a fresh root commit (no
     // ancestor of main), push as `divergent`.
@@ -291,14 +300,14 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
     await execFileP("git", ["-C", repo.work, "commit", "-m", "fresh root"]);
     await execFileP("git", ["-C", repo.work, "push", "origin", "fresh:refs/heads/divergent"]);
 
-    const result = await runner.register({ branch: "divergent" });
+    const result = await runner.register({ branch: "divergent", origin: OWNER });
     expect(result.status).toBe("rejected");
     expect(result.errors?.[0]).toMatch(/non_fast_forward/);
   });
 
   it("rejects a missing branch", async () => {
     const runner = await makeRunner();
-    const result = await runner.register({ branch: "nope" });
+    const result = await runner.register({ branch: "nope", origin: OWNER });
     expect(result.status).toBe("rejected");
     expect(result.errors?.[0]).toMatch(/branch_not_found/);
   });
@@ -309,7 +318,7 @@ describe("SkillRunnerImpl.register (P3.3)", { timeout: 60_000 }, () => {
     await execFileP("git", ["-C", repo.work, "add", "."]);
     await execFileP("git", ["-C", repo.work, "commit", "-m", "no manifest"]);
     await execFileP("git", ["-C", repo.work, "push", "origin", "main:refs/heads/no-manifest"]);
-    const result = await runner.register({ branch: "no-manifest" });
+    const result = await runner.register({ branch: "no-manifest", origin: OWNER });
     expect(result.status).toBe("rejected");
     expect(result.errors?.[0]).toMatch(/missing_skill_md/);
   });
@@ -328,7 +337,7 @@ tier: wasm
       manifest: badManifest,
       body: ECHO_BODY,
     });
-    const result = await runner.register({ branch: "bad" });
+    const result = await runner.register({ branch: "bad", origin: OWNER });
     expect(result.status).toBe("rejected");
     expect(result.errors?.length).toBeGreaterThan(0);
   });
@@ -344,7 +353,7 @@ tier: wasm
         manifest: ECHO_WITH_DEPS,
         body: ECHO_BODY,
       });
-      const result = await runner.register({ branch: "skill/echo-deps" });
+      const result = await runner.register({ branch: "skill/echo-deps", origin: OWNER });
       expect(result.status).toBe("rejected");
       expect(result.errors?.[0]).toMatch(/requirements_lock_missing/);
       // main did not move — register failed before any update-ref.
@@ -374,7 +383,7 @@ tier: wasm
         "origin",
         "HEAD:refs/heads/skill/echo-empty-lock",
       ]);
-      const result = await runner.register({ branch: "skill/echo-empty-lock" });
+      const result = await runner.register({ branch: "skill/echo-empty-lock", origin: OWNER });
       expect(result.status).toBe("rejected");
       expect(result.errors?.[0]).toMatch(/requirements_lock_empty/);
     });
@@ -401,7 +410,7 @@ tier: wasm
         "origin",
         "HEAD:refs/heads/skill/echo-locked",
       ]);
-      const result = await runner.register({ branch: "skill/echo-locked" });
+      const result = await runner.register({ branch: "skill/echo-locked", origin: OWNER });
       expect(result.status).toBe("live");
       const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
       // sha256(ECHO_LOCKFILE) — hex length 64 is the schema-level shape.
@@ -416,7 +425,7 @@ tier: wasm
         manifest: ECHO_MANIFEST,
         body: ECHO_BODY,
       });
-      const result = await runner.register({ branch: "skill/echo-nodeps" });
+      const result = await runner.register({ branch: "skill/echo-nodeps", origin: OWNER });
       expect(result.status).toBe("live");
       const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
       expect(skill?.lockfileHash).toBeNull();
@@ -454,7 +463,7 @@ tier: wasm
         const runner = await makeRunner({ lockfileCompiler: compiler });
         await commitWithLockfile("skill/echo-verified", lockfile);
 
-        const result = await runner.register({ branch: "skill/echo-verified" });
+        const result = await runner.register({ branch: "skill/echo-verified", origin: OWNER });
         expect(result.status).toBe("live");
         expect(compiler.compile).toHaveBeenCalledWith(["httpx==0.27.0"]);
       });
@@ -466,7 +475,7 @@ tier: wasm
         const runner = await makeRunner({ lockfileCompiler: compiler });
         await commitWithLockfile("skill/echo-stale", committed);
 
-        const result = await runner.register({ branch: "skill/echo-stale" });
+        const result = await runner.register({ branch: "skill/echo-stale", origin: OWNER });
         expect(result.status).toBe("rejected");
         expect(result.errors?.[0]).toMatch(/requirements_lock_stale/);
         // main did NOT advance — the skill never went live.
@@ -486,7 +495,7 @@ tier: wasm
         const runner = await makeRunner({ lockfileCompiler: compiler });
         await commitWithLockfile("skill/echo-bad", "anything\n");
 
-        const result = await runner.register({ branch: "skill/echo-bad" });
+        const result = await runner.register({ branch: "skill/echo-bad", origin: OWNER });
         expect(result.status).toBe("rejected");
         expect(result.errors?.[0]).toMatch(/requirements_lock_resolver_failed/);
         expect(result.errors?.[0]).toMatch(/Distribution not found/);
@@ -500,7 +509,7 @@ tier: wasm
         const runner = await makeRunner();
         await commitWithLockfile("skill/echo-no-compiler", lockfile);
 
-        const result = await runner.register({ branch: "skill/echo-no-compiler" });
+        const result = await runner.register({ branch: "skill/echo-no-compiler", origin: OWNER });
         expect(result.status).toBe("live");
         const skill = await tx((trx) => store.getSkillByName(trx, "echo"));
         expect(skill?.lockfileHash).toMatch(/^[0-9a-f]{64}$/);
@@ -516,9 +525,9 @@ tier: wasm
       manifest: ECHO_MANIFEST,
       body: ECHO_BODY,
     });
-    await runner.register({ branch: "skill/echo" });
+    await runner.register({ branch: "skill/echo", origin: OWNER });
 
-    const result = await runner.invoke({ name: "echo", inputs: { x: 7 } });
+    const result = await runner.invoke({ name: "echo", inputs: { x: 7 }, runAs: RUN_AS });
     expect(result.status).toBe("success");
     expect(result.output).toEqual({ echo: 8 });
   });
@@ -534,10 +543,10 @@ tier: wasm
       manifest: ECHO_MANIFEST,
       body: ECHO_BODY,
     });
-    await r1.register({ branch: "skill/echo" });
+    await r1.register({ branch: "skill/echo", origin: OWNER });
 
     const r2 = await makeRunner();
-    const result = await r2.invoke({ name: "echo", inputs: { x: 7 } });
+    const result = await r2.invoke({ name: "echo", inputs: { x: 7 }, runAs: RUN_AS });
     expect(result.status).toBe("success");
     expect(result.output).toEqual({ echo: 8 });
   });
@@ -550,8 +559,8 @@ tier: wasm
       manifest: ECHO_MANIFEST.replace("name: echo", "name: bad-out"),
       body: ECHO_BODY_BAD_OUTPUT,
     });
-    await runner.register({ branch: "skill/bad-out" });
-    const result = await runner.invoke({ name: "bad-out", inputs: { x: 1 } });
+    await runner.register({ branch: "skill/bad-out", origin: OWNER });
+    const result = await runner.invoke({ name: "bad-out", inputs: { x: 1 }, runAs: RUN_AS });
     expect(result.status).toBe("error");
     expect(result.error).toMatch(/output failed schema/);
   });
@@ -564,7 +573,7 @@ tier: wasm
       manifest: ECHO_MANIFEST,
       body: ECHO_BODY,
     });
-    await runner.register({ branch: "skill/echo" });
+    await runner.register({ branch: "skill/echo", origin: OWNER });
 
     const defs = await runner.listToolDefs();
     expect(defs).toHaveLength(1);
@@ -581,7 +590,7 @@ tier: wasm
       manifest: ECHO_MANIFEST,
       body: ECHO_BODY,
     });
-    await runner.register({ branch: "skill/echo" });
+    await runner.register({ branch: "skill/echo", origin: OWNER });
 
     const updatedManifest = ECHO_MANIFEST.replace(
       "a tier-1 skill that echoes one int field",
@@ -593,7 +602,7 @@ tier: wasm
       manifest: updatedManifest,
       body: ECHO_BODY,
     });
-    const second = await runner.register({ branch: "skill/echo-v2" });
+    const second = await runner.register({ branch: "skill/echo-v2", origin: OWNER });
     expect(second.status).toBe("live");
 
     const defs = await runner.listToolDefs();
@@ -609,7 +618,7 @@ tier: wasm
         manifest: ECHO_MANIFEST,
         body: ECHO_BODY,
       });
-      await runner.register({ branch: "skill/echo-v1" });
+      await runner.register({ branch: "skill/echo-v1", origin: OWNER });
 
       const updatedManifest = ECHO_MANIFEST.replace(
         "a tier-1 skill that echoes one int field",
@@ -621,9 +630,9 @@ tier: wasm
         manifest: updatedManifest,
         body: ECHO_BODY,
       });
-      await runner.register({ branch: "skill/echo-v2" });
+      await runner.register({ branch: "skill/echo-v2", origin: OWNER });
 
-      const result = await runner.rollback({ name: "echo", toGitSha: v1 });
+      const result = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
       expect(result.status).toBe("live");
       expect(result.gitSha).toBe(v1);
 
@@ -640,9 +649,9 @@ tier: wasm
         manifest: ECHO_MANIFEST,
         body: ECHO_BODY,
       });
-      await runner.register({ branch: "skill/echo" });
+      await runner.register({ branch: "skill/echo", origin: OWNER });
 
-      const result = await runner.rollback({ name: "echo", toGitSha: v1 });
+      const result = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
       expect(result.status).toBe("no_op");
     });
 
@@ -675,7 +684,7 @@ tier: wasm
         "origin",
         "HEAD:refs/heads/skill/echo-deps-v1",
       ]);
-      const v1Result = await runner.register({ branch: "skill/echo-deps-v1" });
+      const v1Result = await runner.register({ branch: "skill/echo-deps-v1", origin: OWNER });
       expect(v1Result.status).toBe("live");
       const v1Sha = v1Result.gitSha;
 
@@ -696,11 +705,15 @@ tier: wasm
         "HEAD:refs/heads/skill/echo-deps-v2",
       ]);
       compiler.compile.mockResolvedValueOnce(ok(lockfile));
-      const v2Result = await runner.register({ branch: "skill/echo-deps-v2" });
+      const v2Result = await runner.register({ branch: "skill/echo-deps-v2", origin: OWNER });
       expect(v2Result.status).toBe("live");
 
       // Rollback — compiler stub now reports yanked-wheel. Must still succeed.
-      const rollbackResult = await runner.rollback({ name: "echo", toGitSha: v1Sha });
+      const rollbackResult = await runner.rollback({
+        name: "echo",
+        toGitSha: v1Sha,
+        origin: OWNER,
+      });
       expect(rollbackResult.status).toBe("live");
       expect(rollbackResult.gitSha).toBe(v1Sha);
     });
@@ -713,6 +726,266 @@ tier: wasm
       await expect(
         runner.denyDeploy({ pendingId: "00000000-0000-0000-0000-000000000000" }),
       ).resolves.toBeUndefined();
+    });
+  });
+
+  describe("schedule run-as", () => {
+    const scheduledManifest = (effects: string) => `---
+name: briefing
+description: a scheduled skill
+tier: wasm
+inputs:
+  type: object
+  properties: {}
+triggers: [manual, cron]
+schedule: "0 9 * * *"
+${effects}
+---
+`;
+
+    async function seedUser(): Promise<string> {
+      const [row] = await db.insert(users).values({}).returning({ id: users.id });
+      return expectDefined(row, "user").id;
+    }
+
+    async function seedOwner(): Promise<SkillRunIdentity> {
+      const userId = await seedUser();
+      const [profile] = await db
+        .insert(profiles)
+        .values({ userId: null, name: "default", basePrompt: "", model: "m", toolSet: [] })
+        .returning({ id: profiles.id });
+      return { userId, profileId: expectDefined(profile, "profile").id };
+    }
+
+    async function seedActor(): Promise<SkillActor> {
+      const userId = await seedUser();
+      const [channel] = await db
+        .insert(channels)
+        .values({ type: "telegram", credentials: {}, identityMode: "mapped" })
+        .returning({ id: channels.id });
+      const [identity] = await db
+        .insert(userIdentities)
+        .values({
+          userId,
+          channelId: expectDefined(channel, "channel").id,
+          platformHandle: `tg-${userId}`,
+          isWildcard: false,
+          autoCreated: false,
+        })
+        .returning({ id: userIdentities.id });
+      return { identityId: expectDefined(identity, "identity").id, userId };
+    }
+
+    /** A conversation's identity: a user of its own with a persona profile. */
+    async function seedConversationIdentity(): Promise<SkillRunIdentity> {
+      const userId = await seedUser();
+      return { userId, profileId: await seedPersona(userId) };
+    }
+
+    async function seedPersona(userId: string): Promise<string> {
+      const [profile] = await db
+        .insert(profiles)
+        .values({ userId, name: "persona", basePrompt: "", model: "m", toolSet: [] })
+        .returning({ id: profiles.id });
+      return expectDefined(profile, "persona").id;
+    }
+
+    function fromConversation(identity: SkillRunIdentity): SkillDeployOrigin {
+      return { kind: "conversation", ...identity };
+    }
+
+    async function runAsOfBriefing(): Promise<[string | null, string | null]> {
+      const row = expectDefined(
+        await tx((trx) => store.getSkillByName(trx, "briefing")),
+        "briefing",
+      );
+      return [row.runAsUserId, row.runAsProfileId];
+    }
+
+    async function pendingBriefing(runner: SkillRunnerImpl): Promise<string> {
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/briefing",
+        manifest: scheduledManifest("effects:\n  - sends_message"),
+        body: ECHO_BODY,
+      });
+      const reg = await runner.register({ branch: "skill/briefing", origin: OWNER });
+      if (reg.status !== "pending_approval" || !reg.pendingId) {
+        throw new Error(`expected pending_approval, got ${reg.status}`);
+      }
+      return reg.pendingId;
+    }
+
+    async function liveBriefing(runner: SkillRunnerImpl, origin: SkillDeployOrigin): Promise<void> {
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/briefing",
+        manifest: scheduledManifest(""),
+        body: ECHO_BODY,
+      });
+      expect((await runner.register({ branch: "skill/briefing", origin })).status).toBe("live");
+    }
+
+    it("a scheduled register from the owner runs as the install owner with the default profile", async () => {
+      const owner = await seedOwner();
+      const runner = await makeRunner({ defaultRunAs: owner });
+
+      await liveBriefing(runner, OWNER);
+
+      expect(await runAsOfBriefing()).toEqual([owner.userId, owner.profileId]);
+    });
+
+    it("a scheduled register from a conversation runs as that conversation's user and profile", async () => {
+      const runner = await makeRunner({ defaultRunAs: await seedOwner() });
+      const origin = await seedConversationIdentity();
+
+      await liveBriefing(runner, fromConversation(origin));
+
+      expect(await runAsOfBriefing()).toEqual([origin.userId, origin.profileId]);
+    });
+
+    it("an approval with no conversation runs as the approver with the default profile", async () => {
+      const owner = await seedOwner();
+      const approver = await seedActor();
+      const runner = await makeRunner({ defaultRunAs: owner });
+      const pendingId = await pendingBriefing(runner);
+
+      const approved = await runner.approveDeploy({
+        pendingId,
+        origin: { kind: "user", actor: approver, conversation: null },
+      });
+
+      expect(approved.status).toBe("live");
+      expect(await runAsOfBriefing()).toEqual([approver.userId, owner.profileId]);
+      const deploy = await tx((trx) => store.getDeployById(trx, pendingId));
+      expect(deploy?.approvedBy).toBe(approver.identityId);
+    });
+
+    it("an approval in the approver's own conversation takes that conversation's profile", async () => {
+      const approver = await seedActor();
+      const runner = await makeRunner({ defaultRunAs: await seedOwner() });
+      const pendingId = await pendingBriefing(runner);
+      const conversation = {
+        userId: approver.userId,
+        profileId: await seedPersona(approver.userId),
+      };
+
+      await runner.approveDeploy({
+        pendingId,
+        origin: { kind: "user", actor: approver, conversation },
+      });
+
+      expect(await runAsOfBriefing()).toEqual([approver.userId, conversation.profileId]);
+    });
+
+    it("an approval in another user's conversation keeps the approver, not that profile", async () => {
+      const owner = await seedOwner();
+      const approver = await seedActor();
+      const runner = await makeRunner({ defaultRunAs: owner });
+      const pendingId = await pendingBriefing(runner);
+
+      await runner.approveDeploy({
+        pendingId,
+        origin: { kind: "user", actor: approver, conversation: await seedConversationIdentity() },
+      });
+
+      expect(await runAsOfBriefing()).toEqual([approver.userId, owner.profileId]);
+    });
+
+    it("a pending result carries the pending manifest's schedule for the approval prompt", async () => {
+      const runner = await makeRunner({ defaultRunAs: await seedOwner() });
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/briefing",
+        manifest: scheduledManifest("effects:\n  - sends_message"),
+        body: ECHO_BODY,
+      });
+
+      const reg = await runner.register({ branch: "skill/briefing", origin: OWNER });
+
+      expect(reg).toMatchObject({ status: "pending_approval", schedule: "0 9 * * *" });
+    });
+
+    it("an owner approval records no approver and runs as the owner", async () => {
+      const owner = await seedOwner();
+      const runner = await makeRunner({ defaultRunAs: owner });
+      const pendingId = await pendingBriefing(runner);
+
+      await runner.approveDeploy({ pendingId, origin: OWNER });
+
+      expect(await runAsOfBriefing()).toEqual([owner.userId, owner.profileId]);
+      const deploy = await tx((trx) => store.getDeployById(trx, pendingId));
+      expect(deploy?.approvedBy).toBeNull();
+    });
+
+    it("a rollback from a conversation runs as that conversation, not the deploy it restores", async () => {
+      const runner = await makeRunner({ defaultRunAs: await seedOwner() });
+      const author = fromConversation(await seedConversationIdentity());
+      const firstSha = await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/briefing",
+        manifest: scheduledManifest(""),
+        body: ECHO_BODY,
+      });
+      await runner.register({ branch: "skill/briefing", origin: author });
+      await pushFeatureBranch({
+        work: repo.work,
+        branch: "skill/briefing-v2",
+        manifest: scheduledManifest(""),
+        body: `${ECHO_BODY}\n# v2\n`,
+      });
+      await runner.register({ branch: "skill/briefing-v2", origin: author });
+      const rollbackOrigin = await seedConversationIdentity();
+
+      const rolled = await runner.rollback({
+        name: "briefing",
+        toGitSha: firstSha,
+        origin: fromConversation(rollbackOrigin),
+      });
+
+      expect(rolled.status).toBe("live");
+      expect(await runAsOfBriefing()).toEqual([rollbackOrigin.userId, rollbackOrigin.profileId]);
+    });
+
+    it("deregister leaves the schedule running as no one", async () => {
+      const runner = await makeRunner({ defaultRunAs: await seedOwner() });
+      await liveBriefing(runner, fromConversation(await seedConversationIdentity()));
+
+      await runner.deregister({ name: "briefing" });
+
+      expect(await runAsOfBriefing()).toEqual([null, null]);
+    });
+
+    it("enable runs the schedule as the enabler, not whoever deployed it", async () => {
+      const owner = await seedOwner();
+      const runner = await makeRunner({ defaultRunAs: owner });
+      await liveBriefing(runner, OWNER);
+      await runner.deregister({ name: "briefing" });
+      const enabler = await seedActor();
+
+      const result = await runner.enable({
+        name: "briefing",
+        origin: { kind: "user", actor: enabler, conversation: null },
+      });
+
+      // The schedule is returned so the reply can say it now runs as the enabler.
+      expect(result).toMatchObject({ kind: "enabled", schedule: "0 9 * * *" });
+      expect(await runAsOfBriefing()).toEqual([enabler.userId, owner.profileId]);
+    });
+
+    it("enable in the enabler's own conversation takes that conversation's profile", async () => {
+      const runner = await makeRunner({ defaultRunAs: await seedOwner() });
+      await liveBriefing(runner, OWNER);
+      await runner.deregister({ name: "briefing" });
+      const enabler = await seedActor();
+      const conversation = { userId: enabler.userId, profileId: await seedPersona(enabler.userId) };
+
+      await runner.enable({
+        name: "briefing",
+        origin: { kind: "user", actor: enabler, conversation },
+      });
+
+      expect(await runAsOfBriefing()).toEqual([enabler.userId, conversation.profileId]);
     });
   });
 
@@ -741,7 +1014,7 @@ effects:
         manifest: APPROVE_MANIFEST,
         body: ECHO_BODY,
       });
-      const reg = await runner.register({ branch: "skill/notifier" });
+      const reg = await runner.register({ branch: "skill/notifier", origin: OWNER });
       if (reg.status !== "pending_approval" || !reg.pendingId) {
         throw new Error(`expected pending_approval, got ${reg.status}`);
       }
@@ -752,6 +1025,7 @@ effects:
       const runner = await makeRunner();
       const result = await runner.approveDeploy({
         pendingId: "00000000-0000-0000-0000-000000000099",
+        origin: OWNER,
       });
       expect(result.status).toBe("rejected");
       expect(result.errors?.[0]).toMatch(/deploy_not_found/);
@@ -765,10 +1039,10 @@ effects:
       // a silent no-op.
       const runner = await makeRunner();
       const pendingId = await makePendingDeploy(runner);
-      const first = await runner.approveDeploy({ pendingId });
+      const first = await runner.approveDeploy({ pendingId, origin: OWNER });
       expect(first.status).toBe("live");
 
-      const second = await runner.approveDeploy({ pendingId });
+      const second = await runner.approveDeploy({ pendingId, origin: OWNER });
       expect(second.status).toBe("rejected");
       expect(second.errors?.[0]).toMatch(/deploy_not_pending/);
       expect(second.errors?.[0]).toMatch(/live/);
@@ -789,11 +1063,11 @@ effects:
         manifest: ECHO_MANIFEST,
         body: ECHO_BODY,
       });
-      const leap = await runner.register({ branch: "skill/echo-leap" });
+      const leap = await runner.register({ branch: "skill/echo-leap", origin: OWNER });
       expect(leap.status).toBe("live");
 
       // Now approve the original pending — main has moved.
-      const result = await runner.approveDeploy({ pendingId });
+      const result = await runner.approveDeploy({ pendingId, origin: OWNER });
       expect(result.status).toBe("rejected");
       expect(result.errors?.[0]).toMatch(/non_fast_forward_at_approve_time/);
     });
@@ -834,7 +1108,7 @@ effects:
         );
       });
 
-      const result = await runner.approveDeploy({ pendingId });
+      const result = await runner.approveDeploy({ pendingId, origin: OWNER });
       expect(result.status).toBe("rejected");
       expect(result.errors?.[0]).toMatch(/target_missing_source/);
     });
@@ -850,7 +1124,7 @@ effects:
         manifest: ECHO_MANIFEST,
         body: ECHO_BODY,
       });
-      await runner.register({ branch: "skill/echo" });
+      await runner.register({ branch: "skill/echo", origin: OWNER });
 
       // A non-hex ref name that doesn't resolve. (Sha-shaped hex strings
       // pass `git rev-parse --verify` regardless of whether the object
@@ -859,6 +1133,7 @@ effects:
       const result = await runner.rollback({
         name: "echo",
         toGitSha: "refs/heads/totally-missing-ref",
+        origin: OWNER,
       });
       expect(result.status).toBe("rejected");
       expect(result.errors?.[0]).toMatch(/target_sha_not_found/);
@@ -872,7 +1147,7 @@ effects:
         manifest: ECHO_MANIFEST,
         body: ECHO_BODY,
       });
-      await runner.register({ branch: "skill/echo" });
+      await runner.register({ branch: "skill/echo", origin: OWNER });
 
       // Push a commit with no SKILL.md to a parallel branch.
       await execFileP("git", ["-C", repo.work, "rm", "SKILL.md", "skill.py"]);
@@ -895,7 +1170,7 @@ effects:
         `HEAD:refs/heads/scratch-nofiles`,
       ]);
 
-      const result = await runner.rollback({ name: "echo", toGitSha: noFilesSha });
+      const result = await runner.rollback({ name: "echo", toGitSha: noFilesSha, origin: OWNER });
       expect(result.status).toBe("rejected");
       expect(result.errors?.[0]).toMatch(/target_missing_source/);
     });
@@ -910,7 +1185,7 @@ effects:
         manifest: ECHO_MANIFEST,
         body: ECHO_BODY,
       });
-      await runner.register({ branch: "skill/echo" });
+      await runner.register({ branch: "skill/echo", origin: OWNER });
 
       const result = await runner.deregister({ name: "echo" });
       expect(result).toEqual({ kind: "deregistered", name: "echo" });
@@ -934,7 +1209,7 @@ effects:
   describe("safety: register is locked away from main", () => {
     it("rejects branch == 'main' before touching git or DB", async () => {
       const runner = await makeRunner();
-      const result = await runner.register({ branch: "main" });
+      const result = await runner.register({ branch: "main", origin: OWNER });
       expect(result.status).toBe("rejected");
       expect(result.errors?.[0]).toMatch(/invalid_branch/);
       // No skills row created.
@@ -943,7 +1218,7 @@ effects:
 
     it("rejects branch == 'refs/heads/main' too", async () => {
       const runner = await makeRunner();
-      const result = await runner.register({ branch: "refs/heads/main" });
+      const result = await runner.register({ branch: "refs/heads/main", origin: OWNER });
       expect(result.status).toBe("rejected");
       expect(result.errors?.[0]).toMatch(/invalid_branch/);
     });
@@ -970,7 +1245,7 @@ inputs:
         body: ECHO_BODY,
       });
       const before = await getMainSha(repo.bare);
-      const result = await runner.register({ branch: "skill/bad-schema" });
+      const result = await runner.register({ branch: "skill/bad-schema", origin: OWNER });
       expect(result.status).toBe("rejected");
       expect(result.errors?.[0]).toMatch(/inputs\.type/);
       // main is unchanged — no half-deploy.
@@ -1000,7 +1275,7 @@ inputs:
         body: ECHO_BODY,
       });
       const before = await getMainSha(repo.bare);
-      const result = await runner.register({ branch: "skill/bad-properties" });
+      const result = await runner.register({ branch: "skill/bad-properties", origin: OWNER });
       expect(result.status).toBe("rejected");
       // Either layer is acceptable — what matters is no main advance.
       expect(result.errors?.length).toBeGreaterThan(0);
@@ -1030,7 +1305,7 @@ effects:
         body: ECHO_BODY,
       });
       const before = await getMainSha(repo.bare);
-      const result = await runner.register({ branch: "skill/notifier" });
+      const result = await runner.register({ branch: "skill/notifier", origin: OWNER });
       expect(result.status).toBe("pending_approval");
       expect(result.riskTier).toBe("approve");
       expect(result.pendingId).toBeTruthy();
@@ -1057,12 +1332,12 @@ effects:
         manifest: sendingManifest,
         body: ECHO_BODY,
       });
-      const reg = await runner.register({ branch: "skill/notifier" });
+      const reg = await runner.register({ branch: "skill/notifier", origin: OWNER });
       expect(reg.status).toBe("pending_approval");
       const pendingId = reg.pendingId;
       if (!pendingId) throw new Error("expected pendingId");
 
-      const approved = await runner.approveDeploy({ pendingId });
+      const approved = await runner.approveDeploy({ pendingId, origin: OWNER });
       expect(approved.status).toBe("live");
       expect(approved.gitSha).toBe(sha);
 
@@ -1096,7 +1371,7 @@ async def run(inputs, ctx):
         body: offendingBody,
       });
       const before = await getMainSha(repo.bare);
-      const result = await runner.register({ branch: "skill/echo" });
+      const result = await runner.register({ branch: "skill/echo", origin: OWNER });
 
       expect(result.status).toBe("rejected");
       expect(result.errors?.[0]).toMatch(/undeclared effect 'financial'/);
@@ -1124,7 +1399,7 @@ async def run(inputs, ctx):
         manifest: okManifest,
         body: okBody,
       });
-      const result = await runner.register({ branch: "skill/echo" });
+      const result = await runner.register({ branch: "skill/echo", origin: OWNER });
       expect(result.status).toBe("pending_approval");
       expect(result.riskTier).toBe("approve");
     });
@@ -1148,7 +1423,7 @@ async def run(inputs, ctx):
         body: networkBody,
       });
       const before = await getMainSha(repo.bare);
-      const result = await runner.register({ branch: "skill/echo" });
+      const result = await runner.register({ branch: "skill/echo", origin: OWNER });
 
       expect(result.status).toBe("rejected");
       expect(result.errors?.[0]).toMatch(/stdlib networking/);
@@ -1170,7 +1445,7 @@ async def run(inputs, ctx):
         manifest: ECHO_MANIFEST,
         body: subprocessBody,
       });
-      const result = await runner.register({ branch: "skill/echo" });
+      const result = await runner.register({ branch: "skill/echo", origin: OWNER });
       expect(result.status).toBe("rejected");
       expect(result.errors?.[0]).toMatch(/subprocess/);
     });
@@ -1186,7 +1461,7 @@ async def run(inputs, ctx):
         manifest: ECHO_MANIFEST.replace("name: echo", "name: alpha"),
         body: ECHO_BODY,
       });
-      await runner.register({ branch: "skill/alpha" });
+      await runner.register({ branch: "skill/alpha", origin: OWNER });
 
       // Register skill B (separate name, different sha).
       const bSha = await pushFeatureBranch({
@@ -1195,11 +1470,11 @@ async def run(inputs, ctx):
         manifest: ECHO_MANIFEST.replace("name: echo", "name: beta"),
         body: ECHO_BODY,
       });
-      await runner.register({ branch: "skill/beta" });
+      await runner.register({ branch: "skill/beta", origin: OWNER });
 
       // Try to roll back A to B's sha — must reject; otherwise A would
       // silently start running B's code.
-      const result = await runner.rollback({ name: "alpha", toGitSha: bSha });
+      const result = await runner.rollback({ name: "alpha", toGitSha: bSha, origin: OWNER });
       expect(result.status).toBe("rejected");
       expect(result.errors?.[0]).toMatch(/target_skill_mismatch/);
 
@@ -1233,9 +1508,9 @@ effects:
         manifest: v1Manifest,
         body: ECHO_BODY,
       });
-      const reg = await runner.register({ branch: "skill/shapeshift-v1" });
+      const reg = await runner.register({ branch: "skill/shapeshift-v1", origin: OWNER });
       if (!reg.pendingId) throw new Error("expected pendingId for sends_message skill");
-      await runner.approveDeploy({ pendingId: reg.pendingId });
+      await runner.approveDeploy({ pendingId: reg.pendingId, origin: OWNER });
 
       // Now stage v2 with a different inputs schema + extra effect.
       const v2Manifest = `---
@@ -1260,9 +1535,9 @@ effects:
         manifest: v2Manifest,
         body: ECHO_BODY,
       });
-      const reg2 = await runner.register({ branch: "skill/shapeshift-v2" });
+      const reg2 = await runner.register({ branch: "skill/shapeshift-v2", origin: OWNER });
       if (!reg2.pendingId) throw new Error("expected pendingId for v2 register");
-      const approved = await runner.approveDeploy({ pendingId: reg2.pendingId });
+      const approved = await runner.approveDeploy({ pendingId: reg2.pendingId, origin: OWNER });
       expect(approved.status).toBe("live");
 
       const skill = await tx((trx) => store.getSkillByName(trx, "shapeshift"));
@@ -1282,7 +1557,7 @@ effects:
         manifest: v1Manifest,
         body: ECHO_BODY,
       });
-      await runner.register({ branch: "skill/shape-v1" });
+      await runner.register({ branch: "skill/shape-v1", origin: OWNER });
 
       const v2Manifest = `---
 name: shape
@@ -1303,9 +1578,9 @@ inputs:
         manifest: v2Manifest,
         body: ECHO_BODY,
       });
-      await runner.register({ branch: "skill/shape-v2" });
+      await runner.register({ branch: "skill/shape-v2", origin: OWNER });
 
-      const result = await runner.rollback({ name: "shape", toGitSha: v1Sha });
+      const result = await runner.rollback({ name: "shape", toGitSha: v1Sha, origin: OWNER });
       expect(result.status).toBe("live");
 
       const skill = await tx((trx) => store.getSkillByName(trx, "shape"));
@@ -1341,7 +1616,7 @@ effects:
         manifest: sendingManifest,
         body: ECHO_BODY,
       });
-      const reg = await runner.register({ branch: "skill/notify-skill" });
+      const reg = await runner.register({ branch: "skill/notify-skill", origin: OWNER });
       expect(reg.status).toBe("pending_approval");
       expect(reg.gitSha).toBe(sha);
       if (!reg.pendingId) throw new Error("expected pendingId");
@@ -1366,7 +1641,7 @@ effects:
       // status: "no_op" and the skill would stay dark forever. With the
       // guard, the disabled row is treated as "not no_op" and a fresh
       // pending_approval row is created.
-      const reg2 = await runner.register({ branch: "skill/notify-skill" });
+      const reg2 = await runner.register({ branch: "skill/notify-skill", origin: OWNER });
       expect(reg2.status).toBe("pending_approval");
       expect(reg2.gitSha).toBe(sha);
       expect(reg2.pendingId).toBeTruthy();
@@ -1383,7 +1658,7 @@ effects:
         manifest: v1Manifest,
         body: ECHO_BODY,
       });
-      const reg1 = await runner.register({ branch: "skill/upgradable-v1" });
+      const reg1 = await runner.register({ branch: "skill/upgradable-v1", origin: OWNER });
       expect(reg1.status).toBe("live");
 
       const liveBefore = await tx((trx) => store.getSkillByName(trx, "upgradable"));
@@ -1413,7 +1688,7 @@ effects:
         manifest: v2Manifest,
         body: ECHO_BODY,
       });
-      const reg2 = await runner.register({ branch: "skill/upgradable-v2" });
+      const reg2 = await runner.register({ branch: "skill/upgradable-v2", origin: OWNER });
       expect(reg2.status).toBe("pending_approval");
       if (!reg2.pendingId) throw new Error("expected pendingId for v2");
 
@@ -1448,6 +1723,7 @@ effects:
             effects: [],
             schedule: null,
             scheduleNextRunAt: null,
+            runAs: DEFAULT_RUN_AS,
             branchTipSha: "0000000000000000000000000000000000000abc",
             lockfileHash: null,
             inputs: { type: "object", properties: {} },
@@ -1516,11 +1792,9 @@ effects:
         const runner = await SkillRunnerImpl.create({
           store,
           runInTx: tx,
-          memory: makeMockMemory(),
           secretsStore: makeMockSecrets(),
-          files: mockFilesService(),
-          user: { id: "user-1", timezone: "UTC" },
-          memoryBankId: "bank-1",
+          userTimezone: "UTC",
+          defaultRunAs: DEFAULT_RUN_AS,
           skillsRepoPath: repoWithRemote.bare,
         });
 
@@ -1531,7 +1805,7 @@ effects:
           body: ECHO_BODY,
         });
 
-        const result = await runner.register({ branch: "skill/echo" });
+        const result = await runner.register({ branch: "skill/echo", origin: OWNER });
         expect(result.status).toBe("live");
         expect(result.gitSha).toBe(sha);
 
@@ -1569,7 +1843,7 @@ effects:
           body: ECHO_BODY,
         });
 
-        const result = await runner.register({ branch: "skill/echo" });
+        const result = await runner.register({ branch: "skill/echo", origin: OWNER });
         expect(result.status).toBe("live");
         expect(result.gitSha).toBe(sha);
         // Local main advanced even though remote push failed.
@@ -1610,7 +1884,7 @@ effects:
 
         // Register lands as pending_approval (sends_message → approve tier)
         // and leaves both local and remote main on the seed commit.
-        const reg = await runner.register({ branch: "skill/notifier" });
+        const reg = await runner.register({ branch: "skill/notifier", origin: OWNER });
         expect(reg.status).toBe("pending_approval");
         const pendingId = reg.pendingId;
         if (!pendingId) throw new Error("expected pendingId");
@@ -1622,7 +1896,7 @@ effects:
         // remote should follow — the regression case is "approve advances
         // local but leaves remote on the seed commit", which would silently
         // break Daytona-backed coding tasks operating on the skill.
-        const approved = await runner.approveDeploy({ pendingId });
+        const approved = await runner.approveDeploy({ pendingId, origin: OWNER });
         expect(approved.status).toBe("live");
         expect(approved.gitSha).toBe(sha);
 
@@ -1648,7 +1922,7 @@ effects:
           manifest: ECHO_MANIFEST,
           body: ECHO_BODY,
         });
-        await runner.register({ branch: "skill/echo-v1" });
+        await runner.register({ branch: "skill/echo-v1", origin: OWNER });
         // v2 → register again, advances further.
         const updatedManifest = ECHO_MANIFEST.replace(
           "a tier-1 skill that echoes one int field",
@@ -1660,7 +1934,7 @@ effects:
           manifest: updatedManifest,
           body: ECHO_BODY,
         });
-        await runner.register({ branch: "skill/echo-v2" });
+        await runner.register({ branch: "skill/echo-v2", origin: OWNER });
 
         // Sanity: remote main is at v2 before rollback.
         expect(
@@ -1671,7 +1945,7 @@ effects:
 
         // Rollback to v1 — rewinds local main backwards. The mirror push
         // uses --force-with-lease so the remote follows.
-        const result = await runner.rollback({ name: "echo", toGitSha: v1 });
+        const result = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
         expect(result.status).toBe("live");
         expect(result.gitSha).toBe(v1);
 
@@ -1701,7 +1975,7 @@ effects:
           manifest: ECHO_MANIFEST,
           body: ECHO_BODY,
         });
-        await runner.register({ branch: "skill/echo-v1" });
+        await runner.register({ branch: "skill/echo-v1", origin: OWNER });
         // Advance main past v1. SHA isn't asserted here — what matters
         // is that the second register sets up the rollback target. The
         // post-rollback divergence push uses `divergent` below, not v2.
@@ -1714,7 +1988,7 @@ effects:
           ),
           body: ECHO_BODY,
         });
-        await runner.register({ branch: "skill/echo-v2" });
+        await runner.register({ branch: "skill/echo-v2", origin: OWNER });
 
         // Out-of-band: someone (a bad actor, a misconfigured CI, an
         // operator running raw git) advances remote main to a divergent
@@ -1739,7 +2013,7 @@ effects:
         // rollback sha). Remote is at `divergent`, lease check fails,
         // push aborts. The mirror is non-blocking, so rollback still
         // reports `live`.
-        const result = await runner.rollback({ name: "echo", toGitSha: v1 });
+        const result = await runner.rollback({ name: "echo", toGitSha: v1, origin: OWNER });
         expect(result.status).toBe("live");
         expect(result.gitSha).toBe(v1);
 
@@ -1766,11 +2040,9 @@ effects:
       return SkillRunnerImpl.create({
         store,
         runInTx: tx,
-        memory: makeMockMemory(),
         secretsStore: makeMockSecrets(),
-        files: mockFilesService(),
-        user: { id: "user-1", timezone: "UTC" },
-        memoryBankId: "bank-1",
+        userTimezone: "UTC",
+        defaultRunAs: DEFAULT_RUN_AS,
         skillsRepoPath,
       });
     }

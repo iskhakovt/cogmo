@@ -704,6 +704,37 @@ describe("handleProfile", () => {
     expect(ctx.reply).toHaveBeenCalledWith('Profile "temp" deleted.');
   });
 
+  it("names what to clear when the profile is still in use", async () => {
+    const transport = transportWith({
+      profiles: {
+        list: vi.fn().mockResolvedValue(
+          ok([
+            {
+              id: "p1",
+              userId: "u",
+              name: "temp",
+              basePrompt: "",
+              model: "m",
+              summarizationModel: null,
+              extractionModel: null,
+              autoRecall: "heuristic",
+              toolSet: [],
+            },
+          ]),
+        ),
+        create: vi.fn().mockResolvedValue(ok({} as never)),
+        update: vi.fn().mockResolvedValue(ok({} as never)),
+        delete: vi.fn().mockResolvedValue(err({ code: "profile_in_use" as const })),
+      },
+    });
+    const ctx = mkCtx("delete temp");
+    await handleProfile(transport, ctx, mkDialogs());
+    const reply = String(ctx.reply.mock.calls[0]?.[0]);
+    expect(reply).toContain("/profile switch");
+    expect(reply).toContain("/disable");
+    expect(reply).toContain("/schedules");
+  });
+
   it("delegates /profile new to dialogs.startNew", async () => {
     const transport = transportWith({
       profiles: {
@@ -3033,9 +3064,10 @@ describe("handleSkillsApprovalCallback", () => {
       transport,
       { pendingId, action: "approve" },
       "user-tg-1",
+      "chat-1",
     );
 
-    expect(approve).toHaveBeenCalledWith(pendingId, "user-tg-1");
+    expect(approve).toHaveBeenCalledWith(pendingId, "user-tg-1", "chat-1");
     expect(outcome.editText).toMatch(/Approved/);
     expect(outcome.editText).toMatch(/echo/);
     expect(outcome.editText).toMatch(/abcdef0/);
@@ -3055,6 +3087,7 @@ describe("handleSkillsApprovalCallback", () => {
       transport,
       { pendingId, action: "deny" },
       "user-tg-1",
+      "chat-1",
     );
 
     expect(deny).toHaveBeenCalledWith(pendingId, "user-tg-1");
@@ -3076,6 +3109,7 @@ describe("handleSkillsApprovalCallback", () => {
       transport,
       { pendingId, action: "approve" },
       "wrong-user",
+      "chat-1",
     );
 
     expect(outcome.editText).toMatch(/not authorized/);
@@ -3101,6 +3135,7 @@ describe("handleSkillsApprovalCallback", () => {
       transport,
       { pendingId, action: "approve" },
       "user-tg-1",
+      "chat-1",
     );
 
     expect(outcome.editText).toMatch(/can't be acted on/);
@@ -3126,6 +3161,7 @@ describe("handleSkillsApprovalCallback", () => {
       transport,
       { pendingId, action: "approve" },
       "user-tg-1",
+      "chat-1",
     );
 
     expect(outcome.editText).toMatch(/non_fast_forward_at_approve_time/);
@@ -4004,8 +4040,21 @@ describe("handleEnable", () => {
     const transport = transportWith({ skills: { enable } });
     const ctx = mkCtx("echo");
     await handleEnable(transport, ctx);
-    expect(enable).toHaveBeenCalledWith("1", "echo");
+    // The chat is passed so the enabler's own conversation can supply a profile.
+    expect(enable).toHaveBeenCalledWith("1", "echo", "42");
     expect(ctx.reply).toHaveBeenCalledWith('Skill "echo" enabled.');
+  });
+
+  it("says a scheduled skill now runs as the enabler", async () => {
+    const enable = vi
+      .fn()
+      .mockResolvedValue(ok({ name: "echo", alreadyEnabled: false, schedule: "0 9 * * *" }));
+    const transport = transportWith({ skills: { enable } });
+    const ctx = mkCtx("echo");
+    await handleEnable(transport, ctx);
+    expect(ctx.reply).toHaveBeenCalledWith(
+      'Skill "echo" enabled. Its schedule 0 9 * * * now runs as you.',
+    );
   });
 
   it("reports idempotent already-enabled state without re-enabling", async () => {

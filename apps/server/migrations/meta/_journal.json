@@ -442,6 +442,13 @@
       "when": 1790591187684,
       "tag": "0062_system_prompt_snapshots",
       "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "7",
+      "when": 1790592394987,
+      "tag": "0063_skills_run_as",
+      "breakpoints": true
     }
   ]
 }

@@ -2,11 +2,11 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { mock } from "vitest-mock-extended";
 import type { Service } from "../agent/service.js";
 import type { Database, Transactor } from "../db/index.js";
-import type { MemoryProvider } from "../memory/provider.js";
 import type { SandboxClient } from "../sandbox/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { mockFilesService } from "../test/factories.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
+import type { SkillRunAs, SkillRunServices } from "./run-as.js";
 import {
   InputValidationError,
   mapManifestResourceLimits,
@@ -41,10 +41,27 @@ afterAll(async () => {
   await close();
 });
 
-function makeMockMemory(): MemoryProvider {
-  const memory = mock<MemoryProvider>();
+function makeMockMemory(): SkillRunServices["memory"] {
+  const memory = mock<SkillRunServices["memory"]>();
   memory.recall.mockResolvedValue({ memories: [] });
   return memory;
+}
+
+/** Owner + default profile; only a scheduled skill writes them to a row. */
+const DEFAULT_RUN_AS = {
+  userId: "019d0000-0000-7000-8000-0000000000a1",
+  profileId: "019d0000-0000-7000-8000-0000000000b1",
+};
+
+/** The identity a test invocation runs as, with mock services unless given. */
+function runAs(services: Partial<SkillRunServices> = {}, userId = "user-1"): SkillRunAs {
+  return {
+    userId,
+    service: {
+      memory: services.memory ?? makeMockMemory(),
+      files: services.files ?? makeMockFiles(),
+    },
+  };
 }
 
 function makeMockSecrets(map: Record<string, string> = {}): SecretsStore {
@@ -55,21 +72,14 @@ function makeMockSecrets(map: Record<string, string> = {}): SecretsStore {
 }
 
 async function makeRunner(
-  opts: {
-    memory?: MemoryProvider;
-    secretsStore?: SecretsStore;
-    files?: Service["files"];
-    ctxHttp?: SkillRunnerCtxHttp;
-  } = {},
+  opts: { secretsStore?: SecretsStore; ctxHttp?: SkillRunnerCtxHttp } = {},
 ) {
   return SkillRunnerImpl.create({
     store,
     runInTx: tx,
-    memory: opts.memory ?? makeMockMemory(),
     secretsStore: opts.secretsStore ?? makeMockSecrets(),
-    files: opts.files ?? makeMockFiles(),
-    user: { id: "user-1", timezone: "UTC" },
-    memoryBankId: "bank-1",
+    userTimezone: "UTC",
+    defaultRunAs: DEFAULT_RUN_AS,
     ...(opts.ctxHttp && { ctxHttp: opts.ctxHttp }),
   });
 }
@@ -116,7 +126,7 @@ describe("SkillRunnerImpl", () => {
       body: ECHO_BODY,
     });
 
-    const result = await runner.invoke({ name: "echo", inputs: { x: 7 } });
+    const result = await runner.invoke({ name: "echo", inputs: { x: 7 }, runAs: runAs() });
     expect(result.status).toBe("success");
     expect(result.output).toEqual({ echo: 8 });
 
@@ -136,7 +146,7 @@ describe("SkillRunnerImpl", () => {
     vi.mocked(memory.recall).mockResolvedValue({
       memories: [{ content: "fact", type: "world", metadata: {} }],
     });
-    const runner = await makeRunner({ memory });
+    const runner = await makeRunner();
 
     const manifest = `---
 name: with-recall
@@ -156,7 +166,11 @@ async def run(inputs, ctx):
 `;
     await runner.__registerForTests({ name: "with-recall", manifestSource: manifest, body });
 
-    const result = await runner.invoke({ name: "with-recall", inputs: {} });
+    const result = await runner.invoke({
+      name: "with-recall",
+      inputs: {},
+      runAs: runAs({ memory }),
+    });
     expect(result.status).toBe("success");
     expect(result.output).toEqual({ count: 1 });
 
@@ -165,13 +179,51 @@ async def run(inputs, ctx):
     expect(calls.find((c) => c.method === "memory.recall")?.ok).toBe(true);
   });
 
+  it("runs as the invocation's identity, through its scoped services", async () => {
+    const memory = makeMockMemory();
+    vi.mocked(memory.recall).mockResolvedValue({
+      memories: [{ content: "fact", type: "world", metadata: {} }],
+    });
+    const runner = await makeRunner();
+    const manifest = `---
+name: whoami
+description: skill that reads its user and memory
+tier: wasm
+inputs:
+  type: object
+  properties: {}
+effects:
+  - reads_memory
+  - writes_memory
+---
+`;
+    const body = `
+async def run(inputs, ctx):
+    u = await ctx.user()
+    r = await ctx.memory.recall("hello")
+    await ctx.memory.remember("seen")
+    return {"user": u["id"], "timezone": u["timezone"], "count": len(r["memories"])}
+`;
+    await runner.__registerForTests({ name: "whoami", manifestSource: manifest, body });
+
+    const result = await runner.invoke({
+      name: "whoami",
+      inputs: {},
+      runAs: runAs({ memory }, "user-42"),
+    });
+
+    expect(result.output).toEqual({ user: "user-42", timezone: "UTC", count: 1 });
+    expect(memory.recall).toHaveBeenCalledWith("hello");
+    expect(memory.stageRetain).toHaveBeenCalledWith("seen", { context: "from skill 'whoami'" });
+  });
+
   it("round-trips ctx.files.{write,read,list} through the Python SDK", async () => {
     const files = makeMockFiles();
     vi.mocked(files.list).mockResolvedValue([
       { path: "notes/draft.md", size: 5, lastModified: new Date("2026-04-01T00:00:00.000Z") },
     ]);
     vi.mocked(files.read).mockResolvedValue("hello");
-    const runner = await makeRunner({ files });
+    const runner = await makeRunner();
 
     const manifest = `---
 name: with-files
@@ -194,7 +246,7 @@ async def run(inputs, ctx):
 `;
     await runner.__registerForTests({ name: "with-files", manifestSource: manifest, body });
 
-    const result = await runner.invoke({ name: "with-files", inputs: {} });
+    const result = await runner.invoke({ name: "with-files", inputs: {}, runAs: runAs({ files }) });
     expect(result.status).toBe("success");
     expect(result.output).toEqual({
       content: "hello",
@@ -247,7 +299,7 @@ async def run(inputs, ctx):
 `;
       await runner.__registerForTests({ name: "with-http", manifestSource: manifest, body });
 
-      const result = await runner.invoke({ name: "with-http", inputs: {} });
+      const result = await runner.invoke({ name: "with-http", inputs: {}, runAs: runAs() });
       expect(result.status).toBe("success");
       expect(result.output).toEqual({ status: 200, n: 42 });
       expect(resolveHost).toHaveBeenCalledWith("api.example.com");
@@ -296,7 +348,7 @@ async def run(inputs, ctx):
 `;
       await runner.__registerForTests({ name: "http-audited", manifestSource: manifest, body });
 
-      const result = await runner.invoke({ name: "http-audited", inputs: {} });
+      const result = await runner.invoke({ name: "http-audited", inputs: {}, runAs: runAs() });
       expect(result.status).toBe("success");
       const calls = await tx((trx) => store.listContextCallsForRun(trx, result.runId));
       expect(calls.find((c) => c.method === "http.request")?.ok).toBe(true);
@@ -322,7 +374,7 @@ async def run(inputs, ctx):
 
   it("rejects ctx.files.read when reads_filesystem is not declared", async () => {
     const files = makeMockFiles();
-    const runner = await makeRunner({ files });
+    const runner = await makeRunner();
 
     const manifest = `---
 name: forbidden-read
@@ -343,7 +395,11 @@ async def run(inputs, ctx):
 `;
     await runner.__registerForTests({ name: "forbidden-read", manifestSource: manifest, body });
 
-    const result = await runner.invoke({ name: "forbidden-read", inputs: {} });
+    const result = await runner.invoke({
+      name: "forbidden-read",
+      inputs: {},
+      runAs: runAs({ files }),
+    });
     expect(result.status).toBe("success");
     expect(result.output).toEqual({ reached: false, kind: "missing_effect" });
     expect(files.read).not.toHaveBeenCalled();
@@ -361,7 +417,7 @@ async def run(inputs, ctx):
       body,
     });
 
-    const result = await runner.invoke({ name: "boom", inputs: { x: 1 } });
+    const result = await runner.invoke({ name: "boom", inputs: { x: 1 }, runAs: runAs() });
     expect(result.status).toBe("error");
     expect(result.error).toContain("kaboom");
 
@@ -389,7 +445,7 @@ async def run(inputs, ctx):
     });
 
     await expect(
-      runner.invoke({ name: "echo", inputs: { x: "not-an-int" } }),
+      runner.invoke({ name: "echo", inputs: { x: "not-an-int" }, runAs: runAs() }),
     ).rejects.toBeInstanceOf(InputValidationError);
 
     // No skill_runs row created — the validator runs before insertRun.
@@ -399,7 +455,9 @@ async def run(inputs, ctx):
 
   it("rejects an unknown skill name", async () => {
     const runner = await makeRunner();
-    await expect(runner.invoke({ name: "missing", inputs: {} })).rejects.toThrow(/not found/);
+    await expect(runner.invoke({ name: "missing", inputs: {}, runAs: runAs() })).rejects.toThrow(
+      /not found/,
+    );
   });
 
   it("rejects a disabled skill", async () => {
@@ -409,17 +467,21 @@ async def run(inputs, ctx):
       manifestSource: ECHO_MANIFEST,
       body: ECHO_BODY,
     });
-    await tx((trx) => store.setSkillDisabled(trx, { id: row.id, disabled: true }));
+    await tx((trx) => store.disableSkill(trx, row.id));
 
-    await expect(runner.invoke({ name: "echo", inputs: { x: 1 } })).rejects.toThrow(/disabled/);
+    await expect(runner.invoke({ name: "echo", inputs: { x: 1 }, runAs: runAs() })).rejects.toThrow(
+      /disabled/,
+    );
   });
 
   it("public register without skillsRepoPath throws clear config error", async () => {
     const runner = await makeRunner();
-    await expect(runner.register({ branch: "x" })).rejects.toThrow(/skillsRepoPath not configured/);
-    await expect(runner.approveDeploy({ pendingId: "x" })).rejects.toThrow(
+    await expect(runner.register({ branch: "x", origin: { kind: "owner" } })).rejects.toThrow(
       /skillsRepoPath not configured/,
     );
+    await expect(
+      runner.approveDeploy({ pendingId: "x", origin: { kind: "owner" } }),
+    ).rejects.toThrow(/skillsRepoPath not configured/);
   });
 
   it("__registerForTests rejects when manifest.name != params.name", async () => {
@@ -451,9 +513,9 @@ inputs:
       manifestSource: containerManifest,
       body: ECHO_BODY,
     });
-    await expect(runner.invoke({ name: "container-skill", inputs: {} })).rejects.toThrow(
-      /no sandbox is configured/,
-    );
+    await expect(
+      runner.invoke({ name: "container-skill", inputs: {}, runAs: runAs() }),
+    ).rejects.toThrow(/no sandbox is configured/);
   });
 
   it("two sequential invokes succeed independently (no shared state)", async () => {
@@ -463,8 +525,8 @@ inputs:
       manifestSource: ECHO_MANIFEST,
       body: ECHO_BODY,
     });
-    const a = await runner.invoke({ name: "echo", inputs: { x: 1 } });
-    const b = await runner.invoke({ name: "echo", inputs: { x: 2 } });
+    const a = await runner.invoke({ name: "echo", inputs: { x: 1 }, runAs: runAs() });
+    const b = await runner.invoke({ name: "echo", inputs: { x: 2 }, runAs: runAs() });
     expect(a.output).toEqual({ echo: 2 });
     expect(b.output).toEqual({ echo: 3 });
     expect(a.runId).not.toBe(b.runId);
@@ -477,16 +539,27 @@ inputs:
       manifestSource: ECHO_MANIFEST,
       body: ECHO_BODY,
     });
-    const result = await runner.invoke({ name: "echo", inputs: { x: 1 }, trigger: "cron" });
+    const result = await runner.invoke({
+      name: "echo",
+      inputs: { x: 1 },
+      trigger: "cron",
+      runAs: runAs(),
+    });
     const run = await tx((trx) => store.getRun(trx, result.runId));
     expect(run?.trigger).toBe("cron");
   });
 
   it("rollback / register / approveDeploy require skillsRepoPath", async () => {
     const runner = await makeRunner();
-    await expect(runner.register({ branch: "x" })).rejects.toThrow(/skillsRepoPath/);
-    await expect(runner.approveDeploy({ pendingId: "x" })).rejects.toThrow(/skillsRepoPath/);
-    await expect(runner.rollback({ name: "x", toGitSha: "y" })).rejects.toThrow(/skillsRepoPath/);
+    await expect(runner.register({ branch: "x", origin: { kind: "owner" } })).rejects.toThrow(
+      /skillsRepoPath/,
+    );
+    await expect(
+      runner.approveDeploy({ pendingId: "x", origin: { kind: "owner" } }),
+    ).rejects.toThrow(/skillsRepoPath/);
+    await expect(
+      runner.rollback({ name: "x", toGitSha: "y", origin: { kind: "owner" } }),
+    ).rejects.toThrow(/skillsRepoPath/);
     // denyDeploy + deregister are pure DB updates — no git access needed.
     // denyDeploy is idempotent on a missing pending id; deregister
     // returns rejected:not_found via DeregisterResult.
@@ -509,7 +582,7 @@ inputs:
       manifestSource: ECHO_MANIFEST.replace("name: echo", "name: beta"),
       body: ECHO_BODY,
     });
-    await tx((trx) => store.setSkillDisabled(trx, { id: a.id, disabled: true }));
+    await tx((trx) => store.disableSkill(trx, a.id));
     const list = await runner.list();
     expect(list.map((s) => s.name)).toEqual(["beta"]);
   });
@@ -527,8 +600,8 @@ inputs:
     });
     expect((await runner.listAll()).find((s) => s.name === "echo")?.disabled).toBe(true);
 
-    const result = await runner.enable({ name: "echo" });
-    expect(result).toEqual({ kind: "enabled", name: "echo", gitSha: row.gitSha });
+    const result = await runner.enable({ name: "echo", origin: { kind: "owner" } });
+    expect(result).toEqual({ kind: "enabled", name: "echo", gitSha: row.gitSha, schedule: null });
     expect((await runner.list()).map((s) => s.name)).toContain("echo");
   });
 
@@ -539,13 +612,13 @@ inputs:
       manifestSource: ECHO_MANIFEST,
       body: ECHO_BODY,
     });
-    const result = await runner.enable({ name: "echo" });
+    const result = await runner.enable({ name: "echo", origin: { kind: "owner" } });
     expect(result).toEqual({ kind: "already_enabled", name: "echo", gitSha: row.gitSha });
   });
 
   it("enable rejects an unknown skill name", async () => {
     const runner = await makeRunner();
-    const result = await runner.enable({ name: "nope" });
+    const result = await runner.enable({ name: "nope", origin: { kind: "owner" } });
     expect(result).toEqual({ kind: "rejected", name: "nope", reason: "not_found" });
   });
 
@@ -563,13 +636,14 @@ inputs:
         effects: [],
         schedule: null,
         scheduleNextRunAt: null,
+        scheduleRunAs: null,
         gitSha: sha,
         lockfileHash: null,
         inputs: { type: "object", properties: {} },
         outputs: null,
       }),
     );
-    await tx((trx) => store.setSkillDisabled(trx, { id: row.id, disabled: true }));
+    await tx((trx) => store.disableSkill(trx, row.id));
     await tx((trx) =>
       store.insertDeploy(trx, {
         skillId: row.id,
@@ -589,7 +663,7 @@ inputs:
       }),
     );
 
-    const result = await runner.enable({ name: "denied-skill" });
+    const result = await runner.enable({ name: "denied-skill", origin: { kind: "owner" } });
     expect(result).toEqual({
       kind: "rejected",
       name: "denied-skill",
@@ -611,7 +685,7 @@ inputs:
       manifestSource: ECHO_MANIFEST.replace("name: echo", "name: beta"),
       body: ECHO_BODY,
     });
-    await tx((trx) => store.setSkillDisabled(trx, { id: a.id, disabled: true }));
+    await tx((trx) => store.disableSkill(trx, a.id));
     const list = await runner.listAll();
     expect(list.map((s) => ({ name: s.name, disabled: s.disabled }))).toEqual([
       { name: "alpha", disabled: true },
@@ -632,13 +706,16 @@ inputs:
         effects: [],
         schedule: null,
         scheduleNextRunAt: null,
+        scheduleRunAs: null,
         gitSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         lockfileHash: null,
         inputs: { type: "object", properties: {} },
         outputs: null,
       }),
     );
-    await expect(runner.invoke({ name: "ghost", inputs: {} })).rejects.toThrow(/no source/);
+    await expect(runner.invoke({ name: "ghost", inputs: {}, runAs: runAs() })).rejects.toThrow(
+      /no source/,
+    );
   });
 
   it("input validator caches per skill (re-invoke doesn't recompile)", async () => {
@@ -652,7 +729,7 @@ inputs:
       body: ECHO_BODY,
     });
     const results = await Promise.all(
-      [1, 2, 3, 4, 5].map((x) => runner.invoke({ name: "echo", inputs: { x } })),
+      [1, 2, 3, 4, 5].map((x) => runner.invoke({ name: "echo", inputs: { x }, runAs: runAs() })),
     );
     expect(results.every((r) => r.status === "success")).toBe(true);
   });
@@ -670,6 +747,7 @@ inputs:
         name: "echo",
         inputs: { x: 10 },
         idempotencyKey: "skill-cron:echo:t1",
+        runAs: runAs(),
       });
       expect(result.status).toBe("success");
       expect(result.output).toEqual({ echo: 11 });
@@ -697,11 +775,13 @@ inputs:
         name: "echo",
         inputs: { x: 7 },
         idempotencyKey: "skill-cron:echo:replay-key",
+        runAs: runAs(),
       });
       const second = await runner.invoke({
         name: "echo",
         inputs: { x: 7 },
         idempotencyKey: "skill-cron:echo:replay-key",
+        runAs: runAs(),
       });
 
       // Same runId proves we recovered the row instead of inserting a new
@@ -752,6 +832,7 @@ inputs:
         name: "echo",
         inputs: { x: 100 },
         idempotencyKey: "skill-cron:echo:executed-replay",
+        runAs: runAs(),
       });
       expect(result.runId).toBe(row.id);
       expect(result.status).toBe("success");
@@ -791,6 +872,7 @@ inputs:
           name: "echo",
           inputs: { x: 1 },
           idempotencyKey: "skill-cron:echo:inflight",
+          runAs: runAs(),
         }),
       ).rejects.toThrow(SkillInflightError);
 
@@ -818,7 +900,7 @@ async def run(inputs, ctx):
       manifestSource: ECHO_MANIFEST.replace("name: echo", "name: unicode"),
       body,
     });
-    const r = await runner.invoke({ name: "unicode", inputs: { x: 1 } });
+    const r = await runner.invoke({ name: "unicode", inputs: { x: 1 }, runAs: runAs() });
     expect(r.status).toBe("success");
     expect(r.output).toEqual({
       emoji: "😀",
@@ -896,11 +978,9 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     const runner = await SkillRunnerImpl.create({
       store,
       runInTx: tx,
-      memory: makeMockMemory(),
       secretsStore: makeMockSecrets(),
-      files: makeMockFiles(),
-      user: { id: "user-1", timezone: "UTC" },
-      memoryBankId: "bank-1",
+      userTimezone: "UTC",
+      defaultRunAs: DEFAULT_RUN_AS,
       sandbox: mock<SandboxClient>(),
     });
     await runner.__registerForTests({
@@ -920,9 +1000,9 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     // Three invokes fire before the pool finishes constructing — all
     // three should queue behind one in-flight `#poolPromise`.
     const pending = [
-      runner.invoke({ name: "tier2-test", inputs: {} }),
-      runner.invoke({ name: "tier2-test", inputs: {} }),
-      runner.invoke({ name: "tier2-test", inputs: {} }),
+      runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() }),
+      runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() }),
+      runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() }),
     ];
     // Drain microtasks so each invoke reaches `#ensurePool`.
     await new Promise<void>((r) => setImmediate(r));
@@ -951,14 +1031,14 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     // outer try/catch wraps `pool.invoke`); the contract under test
     // here is just that the failure happens AND that the second
     // invoke retries — not the shape of the failure surface.
-    await expect(runner.invoke({ name: "tier2-test", inputs: {} })).rejects.toThrow(
+    await expect(runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() })).rejects.toThrow(
       /daytona unreachable/,
     );
 
     // Second invoke triggers a fresh create — pool resolves and the
     // skill runs through normally. Pins the "no permanent poisoning"
     // contract.
-    const ok = await runner.invoke({ name: "tier2-test", inputs: {} });
+    const ok = await runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() });
     expect(ok.status).toBe("success");
     expect(createSpy).toHaveBeenCalledTimes(2);
     expect(fakePool.invoke).toHaveBeenCalledTimes(1);
@@ -970,7 +1050,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     // post-shutdown tier-2 invoke can't lazy-spawn one.
     await runner.shutdown();
 
-    await expect(runner.invoke({ name: "tier2-test", inputs: {} })).rejects.toThrow(
+    await expect(runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() })).rejects.toThrow(
       /pool requested after shutdown/,
     );
     expect(createSpy).not.toHaveBeenCalled();
@@ -994,11 +1074,9 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     const runner = await SkillRunnerImpl.create({
       store,
       runInTx: tx,
-      memory: makeMockMemory(),
       secretsStore: makeMockSecrets(),
-      files: makeMockFiles(),
-      user: { id: "user-1", timezone: "UTC" },
-      memoryBankId: "bank-1",
+      userTimezone: "UTC",
+      defaultRunAs: DEFAULT_RUN_AS,
       sandbox: perSandbox,
       // Operator-configured value flowing in from env — the runner must
       // ignore it because the backend can't honour POSIX semantics.
@@ -1010,7 +1088,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
       body: TIER2_BODY,
     });
 
-    await runner.invoke({ name: "tier2-test", inputs: {} });
+    await runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() });
 
     expect(createSpy).toHaveBeenCalledTimes(1);
     const poolArgs = createSpy.mock.calls[0]?.[0] as { depsCacheVolumeName?: string };
@@ -1035,11 +1113,9 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
     const runner = await SkillRunnerImpl.create({
       store,
       runInTx: tx,
-      memory: makeMockMemory(),
       secretsStore: makeMockSecrets(),
-      files: makeMockFiles(),
-      user: { id: "user-1", timezone: "UTC" },
-      memoryBankId: "bank-1",
+      userTimezone: "UTC",
+      defaultRunAs: DEFAULT_RUN_AS,
       sandbox: sharedVolume,
       depsCacheVolumeName: "cogmo-skills-deps-cache",
     });
@@ -1049,7 +1125,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
       body: TIER2_BODY,
     });
 
-    await runner.invoke({ name: "tier2-test", inputs: {} });
+    await runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() });
 
     expect(createSpy).toHaveBeenCalledTimes(1);
     const poolArgs = createSpy.mock.calls[0]?.[0] as { depsCacheVolumeName?: string };
@@ -1064,7 +1140,7 @@ describe("SkillRunnerImpl tier-2 pool lifecycle", () => {
 
     // Kick off pool init via an invoke — it will hang on the
     // controlled create promise.
-    const inflight = runner.invoke({ name: "tier2-test", inputs: {} });
+    const inflight = runner.invoke({ name: "tier2-test", inputs: {}, runAs: runAs() });
     inflight.catch(() => undefined); // suppress unhandled-rejection — we await it explicitly below
     await new Promise<void>((r) => setImmediate(r));
     expect(createSpy).toHaveBeenCalledTimes(1);

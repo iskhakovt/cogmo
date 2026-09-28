@@ -1,13 +1,20 @@
 import { InngestTestEngine } from "@inngest/test";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { profiles, users } from "../agent/store/schema.js";
 import type { Database, Transactor } from "../db/index.js";
 import { inngest } from "../inngest/client.js";
 import type { StepRun } from "../inngest/index.js";
+import { expectDefined } from "../test/assertions.js";
 import { fakeRunInTx, spyOnInngestSend } from "../test/factories.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { createSkillCronTicker, runSkillCronTick } from "./cron-ticker.js";
-import { DrizzleSkillStore, type InsertSkillParams, type SkillStore } from "./store/index.js";
+import {
+  DrizzleSkillStore,
+  type InsertSkillParams,
+  type SkillRunIdentity,
+  type SkillStore,
+} from "./store/index.js";
 
 let db: Database;
 let tx: Transactor;
@@ -17,6 +24,18 @@ let store: DrizzleSkillStore;
 beforeAll(async () => {
   ({ db, tx, close } = await createTestDatabase());
   store = new DrizzleSkillStore();
+});
+
+/** The identity every seeded schedule runs as. */
+let runAs: SkillRunIdentity;
+
+beforeEach(async () => {
+  const [user] = await db.insert(users).values({}).returning({ id: users.id });
+  const [profile] = await db
+    .insert(profiles)
+    .values({ userId: null, name: "default", basePrompt: "", model: "m", toolSet: [] })
+    .returning({ id: profiles.id });
+  runAs = { userId: expectDefined(user, "user").id, profileId: expectDefined(profile, "p").id };
 });
 
 afterEach(async () => {
@@ -42,6 +61,7 @@ async function seedScheduled(overrides: Partial<InsertSkillParams> = {}) {
       effects: [],
       schedule: overrides.schedule ?? "0 9 * * *",
       scheduleNextRunAt: overrides.scheduleNextRunAt ?? new Date("2026-06-01T09:00:00Z"),
+      scheduleRunAs: runAs,
       gitSha: SHA,
       lockfileHash: null,
       inputs: { type: "object", properties: {} },
@@ -145,7 +165,7 @@ describe("runSkillCronTick", () => {
     const row = await seedScheduled({
       scheduleNextRunAt: new Date("2026-01-01T09:00:00Z"),
     });
-    await tx((trx) => store.setSkillDisabled(trx, { id: row.id, disabled: true }));
+    await tx((trx) => store.disableSkill(trx, row.id));
 
     const events = await runSkillCronTick(
       {
@@ -203,6 +223,8 @@ describe("runSkillCronTick", () => {
         effects: [],
         schedule: null,
         nextRunAt: new Date("2026-06-01T09:00:00Z"),
+        runAsUserId: null,
+        runAsProfileId: null,
         lastFiredAt: null,
         gitSha: SHA,
         lockfileHash: null,
@@ -266,6 +288,8 @@ describe("createSkillCronTicker (Inngest wiring)", () => {
         effects: [],
         schedule: "0 9 * * *",
         nextRunAt: new Date("2026-06-01T08:00:00Z"),
+        runAsUserId: "019d0000-0000-7000-8000-0000000000a1",
+        runAsProfileId: "019d0000-0000-7000-8000-0000000000b1",
         lastFiredAt: null,
         gitSha: SHA,
         lockfileHash: null,
@@ -282,6 +306,8 @@ describe("createSkillCronTicker (Inngest wiring)", () => {
         effects: ["reads_filesystem"],
         schedule: "30 9 * * *",
         nextRunAt: new Date("2026-06-01T08:30:00Z"),
+        runAsUserId: "019d0000-0000-7000-8000-0000000000a1",
+        runAsProfileId: "019d0000-0000-7000-8000-0000000000b1",
         lastFiredAt: null,
         gitSha: SHA,
         lockfileHash: null,

@@ -48,10 +48,16 @@ async function runInflight<T>(
   }
 }
 
+/** The turn a skill tool is built for: the conversation's user, whom a run acts for. */
+export interface SkillToolTurn {
+  userId: string;
+}
+
 /**
  * Convert a registered skill into a per-turn LLM tool. The tool's name + JSON
- * Schema come from the manifest; the handler calls `runner.invoke` and
- * returns the JSON-stringified output (or error).
+ * Schema come from the manifest; the handler calls `runner.invoke` as the
+ * turn's user, through the turn's scoped `Service`, and returns the
+ * JSON-stringified output (or error).
  *
  * One tool per skill — matches the progressive-disclosure design (see
  * `design/skills.md` → Invocation). The orchestrator rebuilds the tool list
@@ -59,7 +65,11 @@ async function runInflight<T>(
  * disabled/rolled-back skills disappear; this builder is the per-skill
  * conversion step.
  */
-export function buildSkillToolSpec(def: SkillToolDef, runner: SkillRunner): ToolSpec {
+export function buildSkillToolSpec(
+  def: SkillToolDef,
+  runner: SkillRunner,
+  turn: SkillToolTurn,
+): ToolSpec {
   return {
     name: def.name,
     description: def.description,
@@ -75,7 +85,7 @@ export function buildSkillToolSpec(def: SkillToolDef, runner: SkillRunner): Tool
     // signature. SkillManifestSchema enforces this at register time, so the
     // assignment needs no cast.
     inputSchema: def.inputs,
-    handler: async (input, _service, ctx) => {
+    handler: async (input, service, ctx) => {
       // A keyed retry whose prior attempt died mid-execute finds its
       // `skill_runs` row at `recovery_point='started'`, and the runner
       // refuses it rather than re-running arbitrary Python with outbound
@@ -89,6 +99,7 @@ export function buildSkillToolSpec(def: SkillToolDef, runner: SkillRunner): Tool
           name: def.name,
           inputs: input,
           trigger: "manual",
+          runAs: { userId: turn.userId, service },
           // Durability covers replay; the key covers the crash between the
           // skill's side effects committing and Inngest recording the step
           // result. `runner.invoke` routes it to the `recovery_point` state
@@ -124,10 +135,13 @@ export function buildSkillToolSpec(def: SkillToolDef, runner: SkillRunner): Tool
  * skip-on-error work for source loading; this wrapper exists so the
  * orchestrator can call one method and get back ToolSpecs ready to register.
  */
-export async function buildSkillTools(runner: SkillRunner): Promise<readonly ToolSpec[]> {
+export async function buildSkillTools(
+  runner: SkillRunner,
+  turn: SkillToolTurn,
+): Promise<readonly ToolSpec[]> {
   try {
     const defs = await runner.listToolDefs();
-    return defs.map((d) => buildSkillToolSpec(d, runner));
+    return defs.map((d) => buildSkillToolSpec(d, runner, turn));
   } catch (e) {
     log.warn({ err: e }, "skill tool list build failed — proceeding with built-in tools only");
     return [];

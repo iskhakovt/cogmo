@@ -11,6 +11,7 @@ import type { SecretsStore } from "../../secrets/store/index.js";
 import { bootstrapSkillsRepo, SKILLS_CODING_REPO_NAME } from "../../skills/repo.js";
 import type { RegisterResult, SkillRunner } from "../../skills/runner.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
+import { DrizzleAgentStore } from "../store/index.js";
 import { autoRegisterSkill } from "./auto-register-skill.js";
 import { DrizzleCodingStore } from "./store/index.js";
 
@@ -20,6 +21,7 @@ let db: Database;
 let tx: Transactor;
 let close: () => Promise<void>;
 let store: DrizzleCodingStore;
+const agentStore = new DrizzleAgentStore();
 let baseDir: string;
 let bareRepoPath: string;
 let upstreamPath: string;
@@ -74,7 +76,7 @@ function fakeSecretsStore(secret: string | undefined): SecretsStore {
 
 async function seedRepoAndTask(
   repoName: string,
-  opts: { withWorktreeAssignment?: boolean } = {},
+  opts: { withWorktreeAssignment?: boolean; conversationId?: string } = {},
 ): Promise<{ taskId: string; branch: string }> {
   const repo = await tx((trx) =>
     store.insertRepo(trx, {
@@ -97,6 +99,7 @@ async function seedRepoAndTask(
       triggerSource: "user",
       backend: "claude",
       allowPrivilegedRunc: false,
+      ...(opts.conversationId !== undefined && { conversationId: opts.conversationId }),
     }),
   );
   const branch = `cogmo/${task.id.replace(/-/g, "").slice(0, 12)}`;
@@ -122,6 +125,7 @@ describe("autoRegisterSkill", () => {
       {
         runInTx: tx,
         store,
+        agentStore,
         secretsStore: fakeSecretsStore(validIdentity),
         skillRunner,
         skillsRepoPath: bareRepoPath,
@@ -140,6 +144,7 @@ describe("autoRegisterSkill", () => {
       {
         runInTx: tx,
         store,
+        agentStore,
         secretsStore: fakeSecretsStore(validIdentity),
         skillRunner,
         skillsRepoPath: bareRepoPath,
@@ -158,6 +163,7 @@ describe("autoRegisterSkill", () => {
       {
         runInTx: tx,
         store,
+        agentStore,
         secretsStore: fakeSecretsStore(undefined),
         skillRunner,
         skillsRepoPath: bareRepoPath,
@@ -177,6 +183,7 @@ describe("autoRegisterSkill", () => {
       {
         runInTx: tx,
         store,
+        agentStore,
         secretsStore: fakeSecretsStore(validIdentity),
         skillRunner,
         skillsRepoPath: bareRepoPath,
@@ -208,6 +215,7 @@ describe("autoRegisterSkill", () => {
       {
         runInTx: tx,
         store,
+        agentStore,
         secretsStore: fakeSecretsStore(validIdentity),
         skillRunner,
         skillsRepoPath: bareRepoPath,
@@ -220,7 +228,8 @@ describe("autoRegisterSkill", () => {
       expect(result.branch).toBe(branch);
       expect(result.result).toBe(registerResult);
     }
-    expect(skillRunner.register).toHaveBeenCalledWith({ branch });
+    // No conversation on the task: the owner is the origin.
+    expect(skillRunner.register).toHaveBeenCalledWith({ branch, origin: { kind: "owner" } });
 
     const { stdout } = await execFileP("git", [
       "-C",
@@ -229,6 +238,90 @@ describe("autoRegisterSkill", () => {
       `refs/heads/${branch}`,
     ]);
     expect(stdout.trim()).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it("registers with the task conversation's user and profile as the origin", async () => {
+    const origin = await tx(async (trx) => {
+      const user = await agentStore.createUser(trx);
+      const profile = await agentStore.createProfile(trx, {
+        userId: user.id,
+        name: "work",
+        basePrompt: "",
+        model: "m",
+        toolSet: [],
+      });
+      const conversation = await agentStore.createConversation(trx, {
+        userId: user.id,
+        profileId: profile.id,
+        isPrivate: true,
+      });
+      return { userId: user.id, profileId: profile.id, conversationId: conversation.id };
+    });
+    const { taskId, branch } = await seedRepoAndTask(SKILLS_CODING_REPO_NAME, {
+      conversationId: origin.conversationId,
+    });
+    await pushBranchToUpstream(branch);
+    const skillRunner = mock<SkillRunner>();
+    skillRunner.register.mockResolvedValue({
+      name: "btc-spot",
+      riskTier: "notify",
+      status: "live",
+      gitSha: "abc123",
+    });
+
+    await autoRegisterSkill(
+      {
+        runInTx: tx,
+        store,
+        agentStore,
+        secretsStore: fakeSecretsStore(validIdentity),
+        skillRunner,
+        skillsRepoPath: bareRepoPath,
+      },
+      { taskId },
+    );
+
+    expect(skillRunner.register).toHaveBeenCalledWith({
+      branch,
+      origin: { kind: "conversation", userId: origin.userId, profileId: origin.profileId },
+    });
+  });
+
+  it("throws rather than deploy as the owner when the task's conversation doesn't resolve", async () => {
+    const conversationId = await tx(async (trx) => {
+      const user = await agentStore.createUser(trx);
+      const profile = await agentStore.createProfile(trx, {
+        userId: user.id,
+        name: "work",
+        basePrompt: "",
+        model: "m",
+        toolSet: [],
+      });
+      const conversation = await agentStore.createConversation(trx, {
+        userId: user.id,
+        profileId: profile.id,
+        isPrivate: true,
+      });
+      return conversation.id;
+    });
+    const { taskId, branch } = await seedRepoAndTask(SKILLS_CODING_REPO_NAME, { conversationId });
+    await pushBranchToUpstream(branch);
+    const skillRunner = mock<SkillRunner>();
+
+    await expect(
+      autoRegisterSkill(
+        {
+          runInTx: tx,
+          store,
+          agentStore: { getConversation: vi.fn().mockResolvedValue(undefined) },
+          secretsStore: fakeSecretsStore(validIdentity),
+          skillRunner,
+          skillsRepoPath: bareRepoPath,
+        },
+        { taskId },
+      ),
+    ).rejects.toThrow(`conversation ${conversationId} not found`);
+    expect(skillRunner.register).not.toHaveBeenCalled();
   });
 
   it("skips on unsafe branch names that would clobber main on fetch", async () => {
@@ -243,6 +336,7 @@ describe("autoRegisterSkill", () => {
       {
         runInTx: tx,
         store,
+        agentStore,
         secretsStore: fakeSecretsStore(validIdentity),
         skillRunner,
         skillsRepoPath: bareRepoPath,
@@ -283,6 +377,7 @@ describe("autoRegisterSkill", () => {
           {
             runInTx: tx,
             store,
+            agentStore,
             secretsStore: fakeSecretsStore(validIdentity),
             skillRunner,
             skillsRepoPath: bareRepoPath,

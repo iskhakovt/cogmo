@@ -84,6 +84,7 @@ import { DrizzleSecretsStore } from "./secrets/store/index.js";
 import { createSkillCronFireHandler } from "./skills/cron-fire-handler.js";
 import { createSkillCronTicker } from "./skills/cron-ticker.js";
 import { createSkillDepsReaper } from "./skills/deps-reaper-function.js";
+import { resolveSkillRunAs } from "./skills/run-as.js";
 import { SkillRunnerImpl, type SkillRunnerOptions } from "./skills/runner.js";
 import { DrizzleSkillStore } from "./skills/store/index.js";
 import { DEFAULT_RESOURCE_LIMITS as SKILLS_DEFAULT_RESOURCE_LIMITS } from "./skills/worker-sysbox/host.js";
@@ -714,13 +715,11 @@ export async function bootstrapSkillRunner(
     store: core.skillStore,
     runInTx: core.runInTx,
     secretsStore: core.secretsStore,
-    memory: core.memory,
-    files: core.fileService,
     ...(sandbox.sandbox && { sandbox: sandbox.sandbox }),
     tier2Image: env.COGMO_SKILLS_IMAGE,
     depsCacheVolumeName: env.COGMO_SKILLS_DEPS_VOLUME,
-    user: { id: core.user.id, timezone: env.USER_TIMEZONE },
-    memoryBankId: core.user.id,
+    userTimezone: env.USER_TIMEZONE,
+    defaultRunAs: { userId: core.user.id, profileId: core.profile.id },
     skillsRepoPath: env.COGMO_SKILLS_PATH,
     // Cache Pyodide's pre-built packages under the skills repo's git dir
     // so JsDelivr fetches don't repeat across worker spawns. Only matters
@@ -876,6 +875,7 @@ export async function bootstrapRuntime(
         {
           runInTx: core.runInTx,
           store: core.codingStore,
+          agentStore: core.agentStore,
           secretsStore: core.secretsStore,
           skillRunner,
           skillsRepoPath: env.COGMO_SKILLS_PATH,
@@ -1235,8 +1235,17 @@ export async function bootstrapRuntime(
   );
 
   // Skill cron fire handler — receives `skills/cron.fire` and invokes
-  // the skill with empty inputs. See `src/skills/cron-fire-handler.ts`.
-  const skillCronFire = createSkillCronFireHandler({ runner: skillRunner }, inngest);
+  // the skill with empty inputs, as the identity stored on its row. See
+  // `src/skills/cron-fire-handler.ts`.
+  const skillCronFire = createSkillCronFireHandler(
+    {
+      runner: skillRunner,
+      runInTx: core.runInTx,
+      store: core.skillStore,
+      resolveRunAs: (identity) => resolveSkillRunAs(core, identity),
+    },
+    inngest,
+  );
 
   // Daily reaper that sweeps unreachable `/skill-venvs/<hash>/` dirs after
   // the grace window. See `src/skills/deps-reaper-function.ts`.

@@ -38,9 +38,6 @@ describe("registerSkillTool", () => {
     });
     const skills: SkillsService = {
       register,
-      approveDeploy: vi.fn(),
-      denyDeploy: vi.fn(),
-      rollback: vi.fn(),
     };
     const result = await registerSkillTool.handler({ branch: "skill/echo" }, makeService(skills));
     expect(register).toHaveBeenCalledWith({ branch: "skill/echo" });
@@ -60,9 +57,6 @@ describe("registerSkillTool", () => {
         gitSha: "",
         errors: ["non_fast_forward: rebase branch onto main and retry"],
       }),
-      approveDeploy: vi.fn(),
-      denyDeploy: vi.fn(),
-      rollback: vi.fn(),
     };
     const result = await registerSkillTool.handler({ branch: "x" }, makeService(skills));
     const parsed = RegisterAckSchema.parse(JSON.parse(result));

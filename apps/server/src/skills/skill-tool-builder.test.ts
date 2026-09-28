@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { mock } from "vitest-mock-extended";
 import type { Service } from "../agent/service.js";
 import type { ToolSpec } from "../agent/tools.js";
 import type { SkillRunner, SkillToolDef } from "./runner.js";
@@ -25,7 +26,9 @@ function makeRunner(overrides: Partial<SkillRunner> = {}): SkillRunner {
   };
 }
 
-const STUB_SERVICE = {} as Service;
+/** The turn's scoped service and user, which a skill run acts through. */
+const TURN_SERVICE = mock<Service>();
+const TURN = { userId: "user-7" };
 
 const ECHO_DEF: SkillToolDef = {
   name: "echo",
@@ -39,7 +42,7 @@ const ECHO_DEF: SkillToolDef = {
 describe("buildSkillToolSpec", () => {
   it("translates a SkillToolDef into a ToolSpec with the manifest's name + schema", () => {
     const runner = makeRunner();
-    const spec = buildSkillToolSpec(ECHO_DEF, runner);
+    const spec = buildSkillToolSpec(ECHO_DEF, runner, TURN);
     expect(spec.name).toBe("echo");
     expect(spec.description).toBe("Echo a number, plus one.");
     expect(spec.inputSchema).toEqual(ECHO_DEF.inputs);
@@ -48,20 +51,21 @@ describe("buildSkillToolSpec", () => {
     expect(spec.durable).toBe(true);
   });
 
-  it("handler invokes the runner and returns success JSON", async () => {
+  it("handler runs the skill as the turn's user, through the turn's scoped service", async () => {
     const invoke = vi.fn().mockResolvedValue({
       runId: "run-1",
       status: "success",
       output: { echo: 8 },
     });
     const runner = makeRunner({ invoke });
-    const spec = buildSkillToolSpec(ECHO_DEF, runner);
+    const spec = buildSkillToolSpec(ECHO_DEF, runner, TURN);
 
-    const result = await spec.handler({ x: 7 }, STUB_SERVICE);
+    const result = await spec.handler({ x: 7 }, TURN_SERVICE);
     expect(invoke).toHaveBeenCalledWith({
       name: "echo",
       inputs: { x: 7 },
       trigger: "manual",
+      runAs: { userId: "user-7", service: TURN_SERVICE },
     });
     expect(JSON.parse(result)).toEqual({
       ok: true,
@@ -77,9 +81,9 @@ describe("buildSkillToolSpec", () => {
       error: "kaboom",
     });
     const runner = makeRunner({ invoke });
-    const spec = buildSkillToolSpec(ECHO_DEF, runner);
+    const spec = buildSkillToolSpec(ECHO_DEF, runner, TURN);
 
-    const result = await spec.handler({ x: 1 }, STUB_SERVICE);
+    const result = await spec.handler({ x: 1 }, TURN_SERVICE);
     expect(JSON.parse(result)).toEqual({
       ok: false,
       error: "kaboom",
@@ -90,9 +94,9 @@ describe("buildSkillToolSpec", () => {
   it("handler propagates a thrown runner error (e.g. invalid inputs)", async () => {
     const invoke = vi.fn().mockRejectedValue(new Error("inputs failed schema"));
     const runner = makeRunner({ invoke });
-    const spec = buildSkillToolSpec(ECHO_DEF, runner);
+    const spec = buildSkillToolSpec(ECHO_DEF, runner, TURN);
 
-    await expect(spec.handler({}, STUB_SERVICE)).rejects.toThrow(/inputs failed schema/);
+    await expect(spec.handler({}, TURN_SERVICE)).rejects.toThrow(/inputs failed schema/);
   });
 });
 
@@ -106,7 +110,7 @@ describe("buildSkillTools", () => {
           { ...ECHO_DEF, name: "double", description: "doubles x", gitSha: "1234567" },
         ]),
     });
-    const tools = await buildSkillTools(runner);
+    const tools = await buildSkillTools(runner, TURN);
     expect(tools.map((t) => t.name)).toEqual(["echo", "double"]);
   });
 
@@ -114,7 +118,7 @@ describe("buildSkillTools", () => {
     const runner = makeRunner({
       listToolDefs: vi.fn().mockRejectedValue(new Error("git unreachable")),
     });
-    const tools = await buildSkillTools(runner);
+    const tools = await buildSkillTools(runner, TURN);
     expect(tools).toEqual([]);
   });
 });

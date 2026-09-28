@@ -262,6 +262,16 @@ export interface TransportStore {
     platformHandle: string,
   ): Promise<{ userId: string } | undefined>;
 
+  /**
+   * `resolveUser` with the matched `user_identities` row, for callers that
+   * record who acted (`skill_deploys.approved_by`).
+   */
+  resolveIdentity(
+    tx: Transaction,
+    channelId: string,
+    platformHandle: string,
+  ): Promise<{ identityId: string; userId: string } | undefined>;
+
   /** Create a wildcard identity for a channel. */
   createWildcardIdentity(
     tx: Transaction,
@@ -780,9 +790,19 @@ export class DrizzleTransportStore implements TransportStore {
     channelId: string,
     platformHandle: string,
   ): Promise<{ userId: string } | undefined> {
+    const identity = await this.resolveIdentity(tx, channelId, platformHandle);
+    return identity && { userId: identity.userId };
+  }
+
+  async resolveIdentity(
+    tx: Transaction,
+    channelId: string,
+    platformHandle: string,
+  ): Promise<{ identityId: string; userId: string } | undefined> {
+    const columns = { identityId: userIdentities.id, userId: userIdentities.userId };
     // Check wildcard first
     const wildcard = await tx
-      .select({ userId: userIdentities.userId })
+      .select(columns)
       .from(userIdentities)
       .where(and(eq(userIdentities.channelId, channelId), eq(userIdentities.isWildcard, true)))
       .limit(1);
@@ -790,7 +810,7 @@ export class DrizzleTransportStore implements TransportStore {
 
     // Then exact match
     const exact = await tx
-      .select({ userId: userIdentities.userId })
+      .select(columns)
       .from(userIdentities)
       .where(
         and(

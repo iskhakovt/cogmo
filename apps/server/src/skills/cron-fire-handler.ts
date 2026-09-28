@@ -1,7 +1,8 @@
 /**
  * Inngest handler for `skills/cron.fire`. Resolves the skill row, no-ops if
- * the skill was disabled or deregistered between tick and fire, and
- * otherwise dispatches a tier-appropriate invocation via {@link SkillRunner}.
+ * the skill was disabled, deregistered or unscheduled between tick and fire,
+ * and otherwise invokes it via {@link SkillRunner} as the row's run-as
+ * identity.
  *
  * Parallel to `src/agent/scheduling/fire-handler.ts`. Same per-row
  * `concurrency: { limit: 1, key: "event.data.skillId" }` posture: if the
@@ -16,8 +17,10 @@
  */
 
 import type { Inngest } from "inngest";
+import type { Transactor } from "../db/index.js";
 import { skillCronFire } from "../inngest/events.js";
 import { logger } from "../logger.js";
+import type { SkillRunAs } from "./run-as.js";
 import {
   InputValidationError,
   SandboxUnavailableError,
@@ -26,11 +29,16 @@ import {
   SkillNotFoundError,
   type SkillRunner,
 } from "./runner.js";
+import type { SkillRunIdentity, SkillStore } from "./store/index.js";
 
 const log = logger.child({ component: "skills.cron-fire-handler" });
 
 export interface SkillCronFireDeps {
   runner: SkillRunner;
+  runInTx: Transactor;
+  store: Pick<SkillStore, "getSkillById">;
+  /** The scoped services for a stored identity (`resolveSkillRunAs`). */
+  resolveRunAs(identity: SkillRunIdentity): Promise<SkillRunAs>;
 }
 
 type DispatchResult =
@@ -39,6 +47,7 @@ type DispatchResult =
       status: "skipped";
       reason:
         | "skill_not_found"
+        | "not_scheduled"
         | "skill_disabled"
         | "invalid_inputs"
         | "sandbox_unavailable"
@@ -68,12 +77,33 @@ export function createSkillCronFireHandler(deps: SkillCronFireDeps, inngest: Inn
       const idempotencyKey = `skill-cron:${skillId}:${scheduledFor}`;
 
       const result = await step.run("dispatch", async (): Promise<DispatchResult> => {
+        // Who the fire runs as is read here, inside the step, so a replay
+        // takes it from the memoized result rather than a fresh read.
+        const skill = await deps.runInTx((tx) => deps.store.getSkillById(tx, skillId));
+        if (!skill) {
+          return { status: "skipped", reason: "skill_not_found" };
+        }
+        // A disabled row runs as no one, so this precedes the run-as check.
+        if (skill.disabled) {
+          return { status: "skipped", reason: "skill_disabled" };
+        }
+        // Checks both columns to narrow their types; on an enabled row the
+        // CHECK makes this the same as `schedule === null`, i.e. a deploy
+        // dropped the schedule after the tick locked the row.
+        if (skill.runAsUserId === null || skill.runAsProfileId === null) {
+          return { status: "skipped", reason: "not_scheduled" };
+        }
+        const runAs = await deps.resolveRunAs({
+          userId: skill.runAsUserId,
+          profileId: skill.runAsProfileId,
+        });
         try {
           const invokeResult = await deps.runner.invoke({
             name: skillName,
             inputs: {},
             trigger: "cron",
             idempotencyKey,
+            runAs,
           });
           return {
             status: "completed",

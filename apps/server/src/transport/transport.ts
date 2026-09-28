@@ -64,7 +64,7 @@ import {
   resolveGitHubIdentity,
 } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
-import type { SkillRunner } from "../skills/runner.js";
+import type { SkillDeployOrigin, SkillRunner } from "../skills/runner.js";
 import type { SkillRiskTier, SkillStore, SkillTier } from "../skills/store/index.js";
 import { isUuid } from "../util/uuid.js";
 import type { AttachmentStore } from "./attachment-store.js";
@@ -776,11 +776,14 @@ export interface Transport {
      * Approve a pending-approval deploy by its `skill_deploys.id`. Calls
      * `runner.approveDeploy` which advances main + flips the row live.
      * Idempotent on already-resolved deploys via the underlying store
-     * method.
+     * method. The tapper is the approver; the conversation in
+     * `platformAddress`, the chat the tap came from, is the approval's
+     * origin.
      */
     approveDeploy(
       pendingId: string,
       tapperPlatformHandle: string,
+      platformAddress: string,
     ): Promise<Result<{ pendingId: string; skillName: string; gitSha: string }, TransportError>>;
     /**
      * Deny a pending-approval deploy. Resolves the row to `denied`; the
@@ -813,12 +816,17 @@ export interface Transport {
      * Re-enable a previously-disabled skill. Refuses with
      * `skill_no_live_deploy` if the skill was never live at its current
      * `gitSha` (denied-on-first-deploy guard — see {@link SkillRunner.enable}).
-     * Idempotent on already-enabled rows.
+     * Idempotent on already-enabled rows. Like an approval, the caller and
+     * the conversation in `platformAddress` are the origin a schedule it
+     * puts live runs as; `schedule` is that schedule, when there is one.
      */
     enable(
       platformUserHandle: string,
       name: string,
-    ): Promise<Result<{ name: string; alreadyEnabled: boolean }, TransportError>>;
+      platformAddress: string,
+    ): Promise<
+      Result<{ name: string; alreadyEnabled: boolean; schedule?: string }, TransportError>
+    >;
   };
 
   /**
@@ -2299,10 +2307,10 @@ export function createTransport(deps: {
     },
 
     skills: {
-      async approveDeploy(pendingId, tapperPlatformHandle) {
+      async approveDeploy(pendingId, tapperPlatformHandle, platformAddress) {
         if (!skillRunner || !skillStore) return err({ code: "skills_disabled" as const });
-        const identityCheck = await checkSkillsTapper(tapperPlatformHandle);
-        if (identityCheck.isErr()) return err(identityCheck.error);
+        const origin = await resolveSkillsActor(tapperPlatformHandle, platformAddress);
+        if (!origin) return err({ code: "identity_rejected" as const });
 
         // Pre-check the deploy's status so we can return a precise error
         // code when it's already resolved (avoids the `runner.approveDeploy
@@ -2321,10 +2329,7 @@ export function createTransport(deps: {
           });
         }
 
-        const result = await skillRunner.approveDeploy({
-          pendingId,
-          approvedBy: tapperPlatformHandle,
-        });
+        const result = await skillRunner.approveDeploy({ pendingId, origin });
         if (result.status === "live") {
           return ok({
             pendingId,
@@ -2406,14 +2411,18 @@ export function createTransport(deps: {
         }
       },
 
-      async enable(platformUserHandle, name) {
-        const identityCheck = await checkSkillsTapper(platformUserHandle);
-        if (identityCheck.isErr()) return err(identityCheck.error);
+      async enable(platformUserHandle, name, platformAddress) {
+        const origin = await resolveSkillsActor(platformUserHandle, platformAddress);
+        if (!origin) return err({ code: "identity_rejected" as const });
         if (!skillRunner) return err({ code: "skills_disabled" as const });
-        const result = await skillRunner.enable({ name });
+        const result = await skillRunner.enable({ name, origin });
         switch (result.kind) {
           case "enabled":
-            return ok({ name: result.name, alreadyEnabled: false });
+            return ok({
+              name: result.name,
+              alreadyEnabled: false,
+              ...(result.schedule !== null && { schedule: result.schedule }),
+            });
           case "already_enabled":
             return ok({ name: result.name, alreadyEnabled: true });
           case "rejected":
@@ -2735,9 +2744,33 @@ export function createTransport(deps: {
   }
 
   /**
-   * Identity check for skills-deploy callbacks. Skills aren't bound to a
-   * conversation (they live on the user, not on a chat), so the check is
-   * "is the tapper a known user of this channel". `resolveUser` returns
+   * The origin of a skills action a user takes in a chat (an approval, an
+   * enable): their identity row, and the conversation the chat's active
+   * session points at. Undefined when the handle is not a known user.
+   */
+  async function resolveSkillsActor(
+    platformUserHandle: string,
+    platformAddress: string,
+  ): Promise<Extract<SkillDeployOrigin, { kind: "user" }> | undefined> {
+    return runInTx(async (tx) => {
+      const actor = await transportStore.resolveIdentity(tx, channelId, platformUserHandle);
+      if (!actor) return undefined;
+      const session = await transportStore.resolveSession(tx, channelId, platformAddress);
+      const conv = session
+        ? await agentStore.getConversation(tx, session.conversationId)
+        : undefined;
+      return {
+        kind: "user" as const,
+        actor,
+        conversation: conv ? { userId: conv.userId, profileId: conv.profileId } : null,
+      };
+    });
+  }
+
+  /**
+   * Identity check for the rest of the skills admin surface (deny, list,
+   * disable). Skills are deployment-wide, so the check is "is the tapper a
+   * known user of this channel". `resolveUser` returns
    * non-null iff the platform handle is allowlisted; that's the same gate
    * the inbound message path already enforces.
    *
@@ -2759,9 +2792,8 @@ export function createTransport(deps: {
   }
 
   /**
-   * Variant of `checkSkillsTapper` that returns the resolved userId
-   * (the skills variant returns `void` because skills aren't
-   * per-user; scheduling rows are). Takes an existing `tx` so the
+   * Variant of `checkSkillsTapper` that returns the resolved userId,
+   * for operations on per-user rows. Takes an existing `tx` so the
    * identity check shares a transaction with the main operation —
    * one BEGIN/COMMIT pair, atomic snapshot. Same identity-rejection
    * semantics.

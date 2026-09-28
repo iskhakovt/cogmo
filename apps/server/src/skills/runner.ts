@@ -1,17 +1,15 @@
 import { Ajv, type ValidateFunction } from "ajv";
 import { err, ok, type Result } from "neverthrow";
 import { computeNextRun } from "../agent/scheduling/cron.js";
-import type { Service } from "../agent/service.js";
 import type { Transactor } from "../db/index.js";
 import { defaultSkillsImage } from "../env.js";
 import { logger } from "../logger.js";
-import type { MemoryProvider } from "../memory/provider.js";
 import type { SandboxClient } from "../sandbox/index.js";
 import { runGit, withGitAskpass } from "../secrets/git-askpass.js";
 import { DEFAULT_GITHUB_IDENTITY_NAME, resolveGitHubIdentity } from "../secrets/github.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { classifyManifest, STUB_CLASSIFIER_VERSION } from "./classifier.js";
-import { type CtxUser, DefaultCtxHandler, type DefaultCtxHandlerOptions } from "./ctx-handler.js";
+import { DefaultCtxHandler, type DefaultCtxHandlerOptions } from "./ctx-handler.js";
 import {
   hashLockfileContents,
   type LockfileCompiler,
@@ -31,11 +29,13 @@ import {
 import { parseManifest } from "./manifest.js";
 import { checkPyodideCompat, formatPyodideCompatIssues } from "./pyodide-compat.js";
 import { readOriginUrl } from "./repo.js";
+import type { SkillRunAs } from "./run-as.js";
 import type {
   ExecuteRegisterResult,
   InsertSkillParams,
   SkillRiskTier,
   SkillRow,
+  SkillRunIdentity,
   SkillRunRecoveryPoint,
   SkillRunStatus,
   SkillRunTrigger,
@@ -105,6 +105,8 @@ export interface RegisterResult {
   gitSha: string;
   errors?: readonly string[];
   pendingId?: string;
+  /** On a `pending_approval` result, the pending manifest's cron schedule, if it declares one. */
+  schedule?: string;
 }
 
 export interface SkillRunResult {
@@ -156,7 +158,8 @@ export interface SkillToolDef {
 export type EnableFailureReason = "not_found" | "no_live_deploy";
 
 export type EnableResult =
-  | { kind: "enabled"; name: string; gitSha: string }
+  /** `schedule`: the schedule this enable put live, now running as its origin. */
+  | { kind: "enabled"; name: string; gitSha: string; schedule: string | null }
   | { kind: "already_enabled"; name: string; gitSha: string }
   | { kind: "rejected"; name: string; reason: EnableFailureReason };
 
@@ -173,6 +176,51 @@ export type DeregisterResult =
   | { kind: "deregistered"; name: string }
   | { kind: "rejected"; name: string; reason: DeregisterFailureReason };
 
+/** The `user_identities` row that acted, and its user. */
+export interface SkillActor {
+  identityId: string;
+  userId: string;
+}
+
+/**
+ * Who asked for a deploy or an enable. A schedule the request puts live runs
+ * as `deployRunAs` derives from it; every caller names one, so none falls
+ * back to the owner by omission.
+ */
+export type SkillDeployOrigin =
+  /** A conversation asked (`register_skill`, a coding task's auto-register). */
+  | { kind: "conversation"; userId: string; profileId: string }
+  /** A user acted in a chat (an approval tap, `/enable`); `conversation` is that chat's. */
+  | { kind: "user"; actor: SkillActor; conversation: SkillRunIdentity | null }
+  /** The CLI, or an automated trigger with no conversation. */
+  | { kind: "owner" };
+
+/**
+ * Who a schedule runs as once a request from `origin` puts it live. A
+ * conversation runs it as its user and profile. A user acting in a chat runs
+ * it as themselves, with that chat's conversation profile when the
+ * conversation is theirs, else the default: their persona is known only from
+ * a conversation of theirs. The owner runs it with the default profile.
+ */
+function deployRunAs(owner: SkillRunIdentity, origin: SkillDeployOrigin): SkillRunIdentity {
+  switch (origin.kind) {
+    case "conversation":
+      return { userId: origin.userId, profileId: origin.profileId };
+    case "user": {
+      const { actor, conversation } = origin;
+      return {
+        userId: actor.userId,
+        profileId:
+          conversation !== null && conversation.userId === actor.userId
+            ? conversation.profileId
+            : owner.profileId,
+      };
+    }
+    case "owner":
+      return owner;
+  }
+}
+
 /**
  * Public contract for the skills runtime. P3.3 fills in the deployment-pipeline
  * RPCs (`register` / `approveDeploy` / `denyDeploy` / `rollback` / `deregister`)
@@ -180,14 +228,21 @@ export type DeregisterResult =
  * tool, and dynamic-tool registrar all depend on.
  */
 export interface SkillRunner {
-  register(opts: { branch: string }): Promise<RegisterResult>;
-  approveDeploy(opts: { pendingId: string; approvedBy?: string }): Promise<RegisterResult>;
+  /** `origin` decides who a schedule the request puts live runs as. */
+  register(opts: { branch: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
+  /** A `user` origin is also recorded as the deploy's `approved_by`. */
+  approveDeploy(opts: { pendingId: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
   denyDeploy(opts: { pendingId: string; reason?: string }): Promise<void>;
-  rollback(opts: { name: string; toGitSha: string }): Promise<RegisterResult>;
+  rollback(opts: {
+    name: string;
+    toGitSha: string;
+    origin: SkillDeployOrigin;
+  }): Promise<RegisterResult>;
   /**
    * Soft-disable a skill. Idempotent on already-disabled rows (returns
    * `kind: "deregistered"` either way — soft-disable already supports
-   * the no-op case at the store layer). See {@link DeregisterResult}.
+   * the no-op case at the store layer). A disabled schedule runs as no
+   * one, so its run-as identity clears. See {@link DeregisterResult}.
    */
   deregister(opts: { name: string }): Promise<DeregisterResult>;
   /**
@@ -195,9 +250,10 @@ export interface SkillRunner {
    * at its current `gitSha` (denied-on-first-deploy case) — re-enabling
    * would otherwise smuggle un-approved code past the approval gate.
    * Idempotent: enabling an already-enabled skill returns `already_enabled`
-   * rather than erroring. See {@link EnableResult}.
+   * rather than erroring. A schedule it puts live runs as `origin` says,
+   * like a deploy's. See {@link EnableResult}.
    */
-  enable(opts: { name: string }): Promise<EnableResult>;
+  enable(opts: { name: string; origin: SkillDeployOrigin }): Promise<EnableResult>;
 
   list(): Promise<readonly SkillSummary[]>;
   /**
@@ -234,6 +290,8 @@ export interface SkillRunner {
      * See design/skills.md → Exactly-once invocation.
      */
     idempotencyKey?: string;
+    /** Who the run acts for: `ctx.user()`, and the services `ctx.memory` / `ctx.files` reach. */
+    runAs: SkillRunAs;
   }): Promise<SkillRunResult>;
 }
 
@@ -274,12 +332,10 @@ export interface SkillRunnerOptions {
   store: SkillStore;
   runInTx: Transactor;
   secretsStore: SecretsStore;
-  memory: MemoryProvider;
-  /** File workspace passed to ctx.files.* — same surface as the agent's file tools. */
-  files: Service["files"];
-  user: CtxUser;
-  /** Memory bank id passed to ctx.memory.* — typically the user's bank. */
-  memoryBankId: string;
+  /** IANA timezone: `ctx.user().timezone`, and the zone manifest schedules fire in. */
+  userTimezone: string;
+  /** The install owner with the default profile — what an `owner` origin runs as. */
+  defaultRunAs: SkillRunIdentity;
   /**
    * Path to the bare skills repo (`$COGMO_SKILLS_PATH`). Required for the
    * register / rollback flows that read SKILL.md from git and advance
@@ -408,10 +464,8 @@ export class SkillRunnerImpl implements SkillRunner {
   #store: SkillStore;
   #runInTx: Transactor;
   #secretsStore: SecretsStore;
-  #memory: MemoryProvider;
-  #files: Service["files"];
-  #user: CtxUser;
-  #memoryBankId: string;
+  #userTimezone: string;
+  #defaultRunAs: SkillRunIdentity;
   #skillsRepoPath: string | undefined;
   #pyodidePackageCacheDir: string | undefined;
   #sandbox: SandboxClient | undefined;
@@ -455,10 +509,8 @@ export class SkillRunnerImpl implements SkillRunner {
     this.#store = opts.store;
     this.#runInTx = opts.runInTx;
     this.#secretsStore = opts.secretsStore;
-    this.#memory = opts.memory;
-    this.#files = opts.files;
-    this.#user = opts.user;
-    this.#memoryBankId = opts.memoryBankId;
+    this.#userTimezone = opts.userTimezone;
+    this.#defaultRunAs = opts.defaultRunAs;
     this.#skillsRepoPath = opts.skillsRepoPath;
     this.#pyodidePackageCacheDir = opts.pyodidePackageCacheDir;
     this.#sandbox = opts.sandbox;
@@ -502,15 +554,13 @@ export class SkillRunnerImpl implements SkillRunner {
 
   /**
    * Compute the first occurrence of the manifest's `schedule` after the
-   * current clock tick, using the user's timezone. Returns null when the
-   * manifest has no schedule — preserves the all-or-none invariant on
-   * `(schedule, scheduleNextRunAt)`. The timezone is sourced from
-   * `this.#user.timezone` (single source of truth — the bootstrap path
-   * sets it from `env.USER_TIMEZONE`).
+   * current clock tick, in `userTimezone`. Returns null when the manifest
+   * has no schedule — preserves the all-or-none invariant on
+   * `(schedule, scheduleNextRunAt)`.
    */
   #computeScheduleNextRunAt(schedule: string | null): Date | null {
     if (schedule === null) return null;
-    return computeNextRun(schedule, this.#user.timezone, this.#clock());
+    return computeNextRun(schedule, this.#userTimezone, this.#clock());
   }
 
   /**
@@ -640,7 +690,7 @@ export class SkillRunnerImpl implements SkillRunner {
 
   // --- Deployment pipeline ---
 
-  async register(opts: { branch: string }): Promise<RegisterResult> {
+  async register(opts: { branch: string; origin: SkillDeployOrigin }): Promise<RegisterResult> {
     const repoPath = this.#requireRepoPath("register");
 
     // Reject branch=main at the boundary. Without this guard, the register
@@ -770,6 +820,7 @@ export class SkillRunnerImpl implements SkillRunner {
         inputs: manifest.inputs,
         outputs: manifest.outputs ?? null,
         classifierLog,
+        runAs: deployRunAs(this.#defaultRunAs, opts.origin),
         applyFilesystem: async () => {
           await updateRef(repoPath, "refs/heads/main", branchSha, mainSha ?? ZERO_SHA);
           await deleteRef(repoPath, `refs/heads/${opts.branch}`);
@@ -795,7 +846,10 @@ export class SkillRunnerImpl implements SkillRunner {
     });
   }
 
-  async approveDeploy(opts: { pendingId: string; approvedBy?: string }): Promise<RegisterResult> {
+  async approveDeploy(opts: {
+    pendingId: string;
+    origin: SkillDeployOrigin;
+  }): Promise<RegisterResult> {
     const repoPath = this.#requireRepoPath("approveDeploy");
 
     const deploy = await this.#runInTx((tx) => this.#store.getDeployById(tx, opts.pendingId));
@@ -876,7 +930,7 @@ export class SkillRunnerImpl implements SkillRunner {
     const result = await this.#runInTx((tx) =>
       this.#store.executeApprove(tx, {
         pendingId: opts.pendingId,
-        approvedBy: opts.approvedBy ?? null,
+        approvedBy: opts.origin.kind === "user" ? opts.origin.actor.identityId : null,
         tier: manifest.tier,
         // Preserve the deploy row's classified tier (which is what the user
         // approved). Re-classifying here could promote an `approve` deploy to a
@@ -888,6 +942,7 @@ export class SkillRunnerImpl implements SkillRunner {
         lockfileHash: lockfile?.hash ?? null,
         inputs: manifest.inputs,
         outputs: manifest.outputs ?? null,
+        runAs: deployRunAs(this.#defaultRunAs, opts.origin),
         applyFilesystem: async () => {
           await updateRef(repoPath, "refs/heads/main", deploy.gitSha, mainSha ?? ZERO_SHA);
         },
@@ -932,7 +987,11 @@ export class SkillRunnerImpl implements SkillRunner {
     );
   }
 
-  async rollback(opts: { name: string; toGitSha: string }): Promise<RegisterResult> {
+  async rollback(opts: {
+    name: string;
+    toGitSha: string;
+    origin: SkillDeployOrigin;
+  }): Promise<RegisterResult> {
     const repoPath = this.#requireRepoPath("rollback");
 
     let targetSha: string;
@@ -1029,6 +1088,7 @@ export class SkillRunnerImpl implements SkillRunner {
         inputs: manifest.inputs,
         outputs: manifest.outputs ?? null,
         classifierLog,
+        runAs: deployRunAs(this.#defaultRunAs, opts.origin),
         applyFilesystem: async () => {
           // Rollback rewrites main backward — pre-receive hook would normally
           // reject this, but `update-ref` bypasses hooks by design (see
@@ -1090,15 +1150,15 @@ export class SkillRunnerImpl implements SkillRunner {
       // Soft-disable rather than physically deleting — preserves the audit
       // trail in skill_deploys and skill_runs. A future hard-delete RPC could
       // exist, but at personal scale soft-disable covers the use case (revoke
-      // an unsafe skill, retain the history). `setSkillDisabled` is
-      // idempotent at the store layer, so calling deregister on an
-      // already-disabled row is a SQL no-op and returns `deregistered`.
-      await this.#store.setSkillDisabled(tx, { id: skill.id, disabled: true });
+      // an unsafe skill, retain the history). `disableSkill` is idempotent
+      // at the store layer, so calling deregister on an already-disabled
+      // row is a SQL no-op and returns `deregistered`.
+      await this.#store.disableSkill(tx, skill.id);
       return { kind: "deregistered", name: skill.name } as const;
     });
   }
 
-  async enable(opts: { name: string }): Promise<EnableResult> {
+  async enable(opts: { name: string; origin: SkillDeployOrigin }): Promise<EnableResult> {
     return this.#runInTx(async (tx) => {
       const skill = await this.#store.getSkillByName(tx, opts.name);
       if (!skill) {
@@ -1125,8 +1185,16 @@ export class SkillRunnerImpl implements SkillRunner {
       if (!hasLive) {
         return { kind: "rejected", name: skill.name, reason: "no_live_deploy" } as const;
       }
-      await this.#store.setSkillDisabled(tx, { id: skill.id, disabled: false });
-      return { kind: "enabled", name: skill.name, gitSha: skill.gitSha } as const;
+      await this.#store.enableSkill(tx, {
+        id: skill.id,
+        runAs: deployRunAs(this.#defaultRunAs, opts.origin),
+      });
+      return {
+        kind: "enabled",
+        name: skill.name,
+        gitSha: skill.gitSha,
+        schedule: skill.schedule,
+      } as const;
     });
   }
 
@@ -1175,6 +1243,7 @@ export class SkillRunnerImpl implements SkillRunner {
     inputs: unknown;
     trigger?: SkillRunTrigger;
     idempotencyKey?: string;
+    runAs: SkillRunAs;
   }): Promise<SkillRunResult> {
     // --- Pre-flight (cheap, idempotent reads; re-runs freely on retry) ---
     // Typed-error throws here happen *before* any DB write. The cron-fire
@@ -1300,12 +1369,10 @@ export class SkillRunnerImpl implements SkillRunner {
       const ctxHandler = new DefaultCtxHandler({
         manifest: cached.manifest,
         runId,
-        user: this.#user,
-        memoryBankId: this.#memoryBankId,
+        user: { id: opts.runAs.userId, timezone: this.#userTimezone },
         secretsStore: this.#secretsStore,
         runInTx: this.#runInTx,
-        memory: this.#memory,
-        files: this.#files,
+        service: opts.runAs.service,
         recordContextCall: (call) => this.#runInTx((tx) => this.#store.recordContextCall(tx, call)),
         // Named fields, not a spread: a wider object is assignable to the
         // option's type, and anything else it carried would override the
@@ -1504,6 +1571,7 @@ export class SkillRunnerImpl implements SkillRunner {
       effects: manifest.effects,
       schedule,
       scheduleNextRunAt: this.#computeScheduleNextRunAt(schedule),
+      scheduleRunAs: schedule === null ? null : this.#defaultRunAs,
       gitSha,
       lockfileHash: lockfileSnapshot?.hash ?? null,
       inputs: manifest.inputs,
@@ -1802,6 +1870,7 @@ export class SkillRunnerImpl implements SkillRunner {
       status: "pending_approval",
       gitSha: branchSha,
       pendingId: result.deploy.id,
+      ...(manifest.schedule !== undefined && { schedule: manifest.schedule }),
     };
   }
 }

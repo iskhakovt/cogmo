@@ -56,6 +56,7 @@ async function dispatch(cmd: string): Promise<number> {
     }
     case "skills": {
       const { runSkillsCli } = await import("./skills/cli.js");
+      const { resolveSkillRunAs } = await import("./skills/run-as.js");
       const { bootstrapCore, bootstrapSkillRunner, NO_SANDBOX } = await import("./index.js");
       // CLI mode: skip bootstrapSandbox (no instance row, no
       // reconcileCrashedInstances). Tier-2 skill execution requires the
@@ -64,7 +65,11 @@ async function dispatch(cmd: string): Promise<number> {
       // deregister) run fine.
       const core = await bootstrapCore();
       const { skillRunner } = await bootstrapSkillRunner(core, NO_SANDBOX);
-      return runSkillsCli(process.argv.slice(3), skillRunner);
+      return runSkillsCli(process.argv.slice(3), {
+        runner: skillRunner,
+        ownerRunAs: () =>
+          resolveSkillRunAs(core, { userId: core.user.id, profileId: core.profile.id }),
+      });
     }
     case "provider": {
       const { runProviderCli } = await import("./cli/provider.js");

@@ -172,11 +172,11 @@ Caller-supplied `tags` / `tagsMatch` and `tagGroups` are folded into the same AN
 
 ### Live Retains via Staging `[confirmed]`
 
-`memory_retain` does not write directly to Hindsight. The tool inserts into a `pending_memories` table; Observer drains pending rows during post-conversation extraction, classifies each (network + compartment + trust) via `chatTyped()`, retains to Hindsight, and deletes the staging row. This guarantees a single classification path — every memory in Hindsight is tagged by the Observer prompt, and live writes cannot bypass policy.
+`memory_retain` and a skill's `ctx.memory.remember` do not write directly to Hindsight. Both insert into a `pending_memories` table (a skill's row names the skill in `context`); Observer drains pending rows during post-conversation extraction, classifies each (network + compartment + trust) via `chatTyped()`, retains to Hindsight, and deletes the staging row. This guarantees a single classification path — every memory in Hindsight is tagged by the Observer prompt, and live writes cannot bypass policy.
 
 **The drain's retain is keyed on the staging row.** Retain and delete are separate steps with no transaction spanning Hindsight and Postgres, so a delete that fails after its retain leaves the row pending and the next drain retains it again. Each row goes to Hindsight under its id (`RetainBatchItem.documentId` → `document_id`), and Hindsight upserts on `document_id` within a bank. A row's content never changes, so repeating a retain Hindsight has processed finds no changed chunk: it keeps the extracted facts, extracts nothing new, and relabels the document and its facts with the repeat's tags and metadata. One copy of the fact remains. Transcript extraction has no durable id per fact and leaves `documentId` unset, so the adapter mints a fresh one per item.
 
-`pending_memories` is user-scoped (FK to `users`, no `conversation_id`): pending rows survive `/reset` and are drained on any subsequent `conversation/idle` for that user. The trade-off is freshness — a live retain isn't searchable in a *different* conversation until the source conversation goes idle. Acceptable because conversations are typically idle within seconds of the last user turn, and within the source conversation the fact is already in the LLM context.
+`pending_memories` is user-scoped (FK to `users`, no `conversation_id`): pending rows survive `/reset` and are drained on any subsequent `conversation/idle` for that user. The trade-off is freshness — a live retain isn't searchable in a *different* conversation until the source conversation goes idle. Acceptable because conversations are typically idle within seconds of the last user turn, and within the source conversation the fact is already in the LLM context. A scheduled skill's write has no source conversation: it waits for the user's next `conversation/idle` that passes the `too_short` gate, however long that is.
 
 ```
 pending_memories (
@@ -324,7 +324,7 @@ Tags are assigned **at extraction time, not retain time**. No production memory 
 | Path | Source | When classified |
 |-|-|-|
 | **Transcript extraction** | Observer reads the conversation history, extracts facts via `chatTyped()` | At `conversation/idle` |
-| **Live retain via staging** | `memory_retain` tool inserts into `pending_memories`; Observer drains pending rows for the user | At `conversation/idle` |
+| **Live retain via staging** | `memory_retain` tool or a skill's `ctx.memory.remember` inserts into `pending_memories`; Observer drains pending rows for the user | At `conversation/idle` |
 
 **Why not agent-chosen tags at retain time:** Adding `network` / `compartment` / `trust` parameters to `memory_retain` forces the agent to reason about taxonomy on every retain call — extra tokens, extra failure mode, no benefit since Observer classifies with full conversation context and a single prompt. Letta, Mem0, and LangMem all treat classification as extraction-time, not retain-time. We extend that principle to compartment and trust as well.
 

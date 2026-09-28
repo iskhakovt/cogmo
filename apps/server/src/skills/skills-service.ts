@@ -2,16 +2,17 @@ import type { Inngest } from "inngest";
 import { skillsDeployApprovalRequested } from "../inngest/events.js";
 import { logger } from "../logger.js";
 import type { RegisterResult, SkillRunner } from "./runner.js";
+import type { SkillRunIdentity } from "./store/index.js";
 
 const log = logger.child({ component: "skills.service" });
 
 /**
  * Service.skills — the agent-facing surface of {@link SkillRunner}.
  *
- * The full SkillRunner has CLI-only methods (deregister, listToolDefs) that
- * the agent shouldn't call mid-conversation. This namespace exposes only the
- * authoring-loop subset: register a freshly-pushed feature branch, optionally
- * follow up with approveDeploy / denyDeploy / rollback if the user requests it.
+ * The full SkillRunner has operator methods (approve, deny, rollback,
+ * deregister) that the agent shouldn't call mid-conversation. This namespace
+ * exposes only the authoring-loop step: register a freshly-pushed feature
+ * branch, with the turn's conversation as the deploy's origin.
  *
  * Approve-tier register also fires the
  * `skills/deploy/approval-requested` Inngest event so the per-channel
@@ -22,9 +23,6 @@ const log = logger.child({ component: "skills.service" });
  */
 export interface SkillsService {
   register(opts: { branch: string }): Promise<RegisterResult>;
-  approveDeploy(opts: { pendingId: string; approvedBy?: string }): Promise<RegisterResult>;
-  denyDeploy(opts: { pendingId: string; reason?: string }): Promise<void>;
-  rollback(opts: { name: string; toGitSha: string }): Promise<RegisterResult>;
 }
 
 /**
@@ -43,12 +41,17 @@ export interface SkillsServiceDeps {
    * chat to post into.
    */
   conversationId: string;
+  /** The turn's user and profile: a schedule this service puts live runs as them. */
+  origin: SkillRunIdentity;
 }
 
 export function createSkillsService(deps: SkillsServiceDeps): SkillsService {
   return {
     async register(opts) {
-      const result = await deps.runner.register(opts);
+      const result = await deps.runner.register({
+        ...opts,
+        origin: { kind: "conversation", ...deps.origin },
+      });
       if (result.status === "pending_approval" && result.pendingId) {
         // Fire-and-forget: an event-emit failure shouldn't poison the
         // register (the deploy is already in pending_approval state on
@@ -62,6 +65,7 @@ export function createSkillsService(deps: SkillsServiceDeps): SkillsService {
               skillName: result.name,
               gitSha: result.gitSha,
               conversationId: deps.conversationId,
+              schedule: result.schedule ?? null,
             },
           });
         } catch (err) {
@@ -73,8 +77,5 @@ export function createSkillsService(deps: SkillsServiceDeps): SkillsService {
       }
       return result;
     },
-    approveDeploy: (opts) => deps.runner.approveDeploy(opts),
-    denyDeploy: (opts) => deps.runner.denyDeploy(opts),
-    rollback: (opts) => deps.runner.rollback(opts),
   };
 }
