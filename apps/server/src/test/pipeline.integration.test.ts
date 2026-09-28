@@ -3,10 +3,10 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { ResourceMetrics } from "@opentelemetry/sdk-metrics";
-import { asc, sql as drizzleSql, eq } from "drizzle-orm";
+import { asc, sql as drizzleSql, eq, isNull } from "drizzle-orm";
 import { connect } from "inngest/connect";
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from "vitest";
-import { conversations, messages, voiceConfig } from "../agent/store/schema.js";
+import { conversations, messages, profiles, voiceConfig } from "../agent/store/schema.js";
 import { db, transactor } from "../db/index.js";
 import { bootstrap } from "../index.js";
 import { directOutbound } from "../inngest/events.js";
@@ -16,6 +16,7 @@ import { createAttachmentStore } from "../transport/attachment-store.js";
 import { channelSessions, channels, inboundMessages } from "../transport/store/schema.js";
 import { OpenAIVoiceProvider } from "../voice/openai.js";
 import { expectDefined } from "./assertions.js";
+import { CASSETTE_CHAT_MODEL } from "./cassette-model.js";
 import { createFalFetch } from "./fal-mock.js";
 import { fileDefaultUserId, fileLlmockUrl } from "./integration-file.js";
 import { createOpenAIVoiceFetch } from "./openai-voice-mock.js";
@@ -81,6 +82,8 @@ beforeAll(async () => {
   // exactly once at boot to construct the OpenAIVoiceProvider. Inserting
   // afterwards has no effect on the running pipeline.
   await seedVoiceConfig();
+  // The seeded org profile carries the cassettes' model, not the shipped default.
+  await db.update(profiles).set({ model: CASSETTE_CHAT_MODEL }).where(isNull(profiles.userId));
 
   const { inngest, functions, profile } = await bootstrap({
     providerOverride: provider,
