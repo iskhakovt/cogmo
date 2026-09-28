@@ -91,7 +91,7 @@ function awaitSupervisorReady(
       () =>
         settle(
           err(
-            `supervisor did not announce protocol v${SUPERVISOR_PROTOCOL_VERSION} within ${timeoutMs / 1000}s — the skills image predates this Cogmo version`,
+            `supervisor did not announce protocol v${SUPERVISOR_PROTOCOL_VERSION} within ${timeoutMs / 1000}s; a skills image older than this Cogmo version never does`,
           ),
         ),
       timeoutMs,

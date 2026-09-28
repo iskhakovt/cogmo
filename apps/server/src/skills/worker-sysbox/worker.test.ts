@@ -270,7 +270,7 @@ describe("SysboxSkillWorker", () => {
         silentSupervisor(bundle);
         const created = create(bundle);
         const outcome = expect(created).rejects.toThrow(
-          /did not announce protocol v2 within 30s — the skills image predates/,
+          /did not announce protocol v2 within 30s; a skills image older than this Cogmo version/,
         );
         await vi.advanceTimersByTimeAsync(30_000);
         await outcome;
