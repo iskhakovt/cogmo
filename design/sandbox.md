@@ -506,7 +506,7 @@ The Daytona backend runs task sandboxes on Daytona's managed cloud (default) or 
 
 **Two phases shipped:** Phase 3a (PR #173) lifted skills tier-2 onto Daytona — worktree-less, ephemeral, ephemeral askpass-less. Phase 3b (PRs #183 / #192 / #196) wired coding-delegation through the `git-remote` working-tree transport: orchestrator force-pushes a `cogmo/run/<task-id>` ref, the SDK's `git.clone` rehydrates it inside the sandbox, askpass material is uploaded via `fs.uploadFiles`. Both flows share the same `SandboxClient` interface; consumers branch on `capabilities.workingTreeTransport`.
 
-Production-ready for skills tier-2 and the coding-delegation `git-remote` flow against a single user's traffic. Subsections that need real-traffic validation before they graduate to fully-trusted status carry their own `[proposed]` markers below — `Streaming exec` and `Keepalive` specifically.
+Production-ready for the coding-delegation `git-remote` flow against a single user's traffic. Skills tier-2 tasks do not run here: their supervisor needs a stdin that streams, which the PTY path buffers until it ends (see [skills.md → Warm pool](skills.md#warm-pool-confirmed)). Subsections that need real-traffic validation before they graduate to fully-trusted status carry their own `[proposed]` markers below — `Streaming exec` and `Keepalive` specifically.
 
 ### Authentication & deployment
 

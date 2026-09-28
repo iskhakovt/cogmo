@@ -6,10 +6,11 @@ Owns the supervisor + runner for tier-2 skills — see `design/skills.md`.
 ## Layout
 
 - `src/cogmo_skills_runtime/supervisor.py` — long-lived parent. Per
-  task, forks a relay that forks the task process with private
-  stdin/stdout pipes, relays that task's frames to and from the host,
-  and enforces the wall clock; then kills and reaps every process the
-  task left and sends `task_exited`. EOF on stdin = clean shutdown.
+  task it forks a relay, which forks the task process behind private
+  stdin/stdout pipes, relays that task's frames to and from the host
+  and enforces the wall clock. Once the relay exits, the supervisor
+  kills and reaps every process the task left and sends `task_exited`.
+  EOF on stdin = clean shutdown.
 - `src/cogmo_skills_runtime/runner.py` — per-task runner. Compiles the
   skill body, runs `async def run(inputs, ctx)`, services `ctx.*`
   RPCs over its stdin/stdout, emits one `task_result`.
@@ -37,5 +38,6 @@ Built into `ghcr.io/iskhakovt/cogmo-skills:<version>` by
 
 The supervisor announces `PROTOCOL_VERSION` on startup and the host
 refuses any other (`SUPERVISOR_PROTOCOL_VERSION` in
-`apps/server/src/skills/protocol.ts`), so an image from another release
-fails at worker creation. Bump both together on a protocol change.
+`apps/server/src/skills/protocol.ts`), so an image speaking another
+protocol version fails at worker creation. Bump both together on a
+protocol change.
