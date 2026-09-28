@@ -58,7 +58,7 @@ export interface SysboxSkillWorkerOptions {
    * container-local cache (overlay FS, lost on recycle).
    */
   depsCacheVolumeName?: string;
-  /** Aborting it closes the supervisor's channel, and the worker dies. */
+  /** Aborting it stops a `create` in progress, or closes a live worker's channel. */
   signal?: AbortSignal;
 }
 
@@ -224,6 +224,11 @@ export class SysboxSkillWorker {
     this.#createdAtMs = now;
   }
 
+  /**
+   * Create the container, start its supervisor and wait for its handshake.
+   * An aborted `signal` stops creation at its next step, tearing down
+   * whatever it had set up.
+   */
   static async create(opts: SysboxSkillWorkerOptions): Promise<SysboxSkillWorker> {
     const resourceLimits: ResourceLimits = {
       cpus: opts.resourceLimits?.cpus ?? DEFAULT_RESOURCE_LIMITS.cpus,
@@ -232,8 +237,10 @@ export class SysboxSkillWorker {
       disk_bytes: opts.resourceLimits?.disk_bytes ?? DEFAULT_RESOURCE_LIMITS.disk_bytes,
     };
 
+    opts.signal?.throwIfAborted();
     // Pass limits so a first warm against a custom image bakes them in.
     await opts.sandbox.ensureImagePresent(opts.image, resourceLimits);
+    opts.signal?.throwIfAborted();
 
     const session = await opts.sandbox.create({
       taskId: opts.workerId,
@@ -247,12 +254,13 @@ export class SysboxSkillWorker {
 
     let exec: ExecStreamingHandle;
     try {
+      opts.signal?.throwIfAborted();
       exec = await session.execStreaming([...SUPERVISOR_CMD], {
         attachStdin: true,
       });
     } catch (e) {
-      // Container created but supervisor couldn't launch — tear the session
-      // down so the container doesn't leak.
+      // The container exists but its supervisor never started — tear the
+      // session down so the container doesn't leak.
       await opts.sandbox.delete(session).catch((err: unknown) => {
         log.warn(
           { workerId: opts.workerId, err: err instanceof Error ? err.message : String(err) },
@@ -277,6 +285,7 @@ export class SysboxSkillWorker {
       transport: createNdjsonTransport(exec.stdin, exec.stdout),
       handshake: acceptSupervisorReady,
       handshakeDeadline: timeoutSignal(SUPERVISOR_READY_TIMEOUT_MS),
+      // From here the signal closes the channel, during the handshake too.
       ...(opts.signal !== undefined && { signal: opts.signal }),
       logContext: { workerId: opts.workerId },
     });

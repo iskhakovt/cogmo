@@ -159,9 +159,10 @@ export const DEFAULT_POOL_OPTIONS = {
  *  - The pool retires a worker after its task once taskCount ≥
  *    `recycleAfterTasks` or age ≥ `recycleAfterMs`.
  *  - An interval sweep retires idle workers above `min` after `idleShutdownMs`.
- *  - `dispose()` aborts the signal every worker was created with, which
- *    closes each supervisor's channel, then cancels the sweep, rejects all
- *    queued waiters, and tears down every container. Idempotent.
+ *  - `dispose()` aborts the signal every worker was created with: a live
+ *    worker's channel closes, and a spawn stops at its next step. It then
+ *    cancels the sweep, rejects all queued waiters, and tears down every
+ *    container. Idempotent.
  */
 export class SysboxWorkerPool {
   #sandbox: SandboxClient;
@@ -181,8 +182,7 @@ export class SysboxWorkerPool {
   >;
   #workers: WorkerHandle[] = [];
   #queue: PendingWaiter[] = [];
-  #disposed = false;
-  /** Every worker is created with its signal; disposal aborts it. */
+  /** Aborted by `dispose()`. Every worker is created with its signal. */
   #lifetime = new AbortController();
   #createWorker: NonNullable<SysboxWorkerPoolOptions["createWorker"]>;
   #setInterval: (cb: () => void, ms: number) => unknown;
@@ -194,7 +194,7 @@ export class SysboxWorkerPool {
    * "have we already committed up to max?" math, and as a set of promises
    * so `dispose()` can wait on every spawn to settle before returning —
    * otherwise a spawn that resolves *after* `dispose()` returns would
-   * dispose its own worker (via the disposed-flag check in `#spawnOne`),
+   * dispose its own worker (via the aborted-signal check in `#runSpawn`),
    * but that teardown happens in the background and the caller's `await
    * dispose()` would have already resolved with the container still in
    * shutdown.
@@ -282,7 +282,7 @@ export class SysboxWorkerPool {
    * `max`), invokes the task, releases or recycles the worker, and returns.
    */
   async invoke(params: InvokeParams): Promise<InvokeResult> {
-    if (this.#disposed) {
+    if (this.#lifetime.signal.aborted) {
       throw new Error("SysboxWorkerPool: invoke after dispose");
     }
     const worker = await this.#acquire();
@@ -312,8 +312,7 @@ export class SysboxWorkerPool {
   }
 
   async dispose(): Promise<void> {
-    if (this.#disposed) return;
-    this.#disposed = true;
+    if (this.#lifetime.signal.aborted) return;
     this.#lifetime.abort(new Error("SysboxWorkerPool: disposed"));
     if (this.#sweepHandle !== null) {
       this.#clearInterval(this.#sweepHandle);
@@ -325,8 +324,8 @@ export class SysboxWorkerPool {
     }
     const workers = this.#workers.splice(0, this.#workers.length);
     // Wait on already-spawned workers in parallel with any in-flight spawns;
-    // the in-flight ones see `#disposed=true` upon resume and tear their own
-    // new workers down. Awaiting both ensures `dispose()` doesn't return
+    // the in-flight ones stop on the aborted signal and tear down whatever
+    // they had set up. Awaiting both ensures `dispose()` doesn't return
     // until every container the pool ever spawned is gone.
     const pending = Array.from(this.#pendingSpawnPromises);
     await Promise.allSettled([...workers.map((w) => w.dispose()), ...pending]);
@@ -370,7 +369,7 @@ export class SysboxWorkerPool {
   }
 
   #spawnOne(): Promise<WorkerHandle> {
-    if (this.#disposed) {
+    if (this.#lifetime.signal.aborted) {
       return Promise.reject(new PoolDisposedDuringSpawnError());
     }
     const promise = this.#runSpawn();
@@ -405,14 +404,14 @@ export class SysboxWorkerPool {
         signal: this.#lifetime.signal,
       }).catch((e: unknown) => {
         // A spawn that disposal cut short fails as one, like any other.
-        throw this.#disposed ? new PoolDisposedDuringSpawnError() : e;
+        throw this.#lifetime.signal.aborted ? new PoolDisposedDuringSpawnError() : e;
       });
       // `createWorker` is async; `dispose()` may have run while we were
       // awaiting it. Pushing the new worker into `#workers` now would leak
       // its container — `dispose()` already iterated and won't see it. Tear
       // down the new worker and surface a typed disposed-error so the
       // caller's invoke / queued waiter rejects cleanly.
-      if (this.#disposed) {
+      if (this.#lifetime.signal.aborted) {
         await w.dispose().catch((e: unknown) => {
           log.warn(
             { workerId, err: e instanceof Error ? e.message : String(e) },
@@ -466,14 +465,17 @@ export class SysboxWorkerPool {
 
   /** Remove a worker the moment it dies, and replace it. */
   #onDead(worker: WorkerHandle, reason: string): void {
-    if (this.#disposed) return;
+    if (this.#lifetime.signal.aborted) return;
     log.debug({ workerId: worker.workerId, reason }, "retiring a dead worker");
     this.#removeAndDispose(worker);
     this.#replenishToMin();
   }
 
   #replenishToMin(): void {
-    if (!this.#disposed && this.#workers.length + this.#pendingSpawns < this.#opts.min) {
+    if (
+      !this.#lifetime.signal.aborted &&
+      this.#workers.length + this.#pendingSpawns < this.#opts.min
+    ) {
       // Don't await — replacement happens in background. An acquire that
       // queued meanwhile (this spawn counts toward `max`) gets the new
       // worker; with nobody queued it stays idle for the next invoke.
@@ -498,7 +500,7 @@ export class SysboxWorkerPool {
     });
     // If a queued waiter is starving and we have headroom, kick a spawn.
     if (
-      !this.#disposed &&
+      !this.#lifetime.signal.aborted &&
       this.#queue.length > 0 &&
       this.#workers.length + this.#pendingSpawns < this.#opts.max
     ) {
@@ -527,7 +529,7 @@ export class SysboxWorkerPool {
    * Each dies on retirement, and `#onDead` removes it.
    */
   #sweepIdle(): void {
-    if (this.#disposed) return;
+    if (this.#lifetime.signal.aborted) return;
     const now = this.#now();
     const candidates = this.#workers.filter(
       (w) => w.state === "idle" && w.idleMs(now) >= this.#opts.idleShutdownMs,

@@ -830,19 +830,38 @@ describe("SysboxSkillWorker", () => {
       expect(bundle.stdin.writableEnded).toBe(true);
     });
 
-    it("refuses to start once its signal has aborted", async () => {
+    it("creates nothing once its signal has aborted", async () => {
       const bundle = buildFakeSandbox();
-      const lifetime = new AbortController();
-      lifetime.abort(new Error("pool disposed"));
       await expect(
         SysboxSkillWorker.create({
           workerId: "w-aborted",
           sandbox: bundle.sandbox,
           image: "cogmo-skills:test",
           expiresAt: new Date(Date.now() + 60_000),
+          signal: AbortSignal.abort(new Error("pool disposed")),
+        }),
+      ).rejects.toThrow(/pool disposed/);
+      expect(bundle.sandbox.ensureImagePresent).not.toHaveBeenCalled();
+      expect(bundle.sandbox.create).not.toHaveBeenCalled();
+    });
+
+    it("stops a spawn whose signal aborts while its container is created, and deletes it", async () => {
+      const bundle = buildFakeSandbox();
+      const lifetime = new AbortController();
+      vi.mocked(bundle.sandbox.create).mockImplementation(async () => {
+        lifetime.abort(new Error("pool disposed"));
+        return bundle.session;
+      });
+      await expect(
+        SysboxSkillWorker.create({
+          workerId: "w-aborting",
+          sandbox: bundle.sandbox,
+          image: "cogmo-skills:test",
+          expiresAt: new Date(Date.now() + 60_000),
           signal: lifetime.signal,
         }),
       ).rejects.toThrow(/pool disposed/);
+      expect(bundle.session.execStreaming).not.toHaveBeenCalled();
       expect(bundle.sandbox.delete).toHaveBeenCalledWith(bundle.session);
     });
   });
