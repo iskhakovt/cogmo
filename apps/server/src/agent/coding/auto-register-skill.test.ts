@@ -287,6 +287,43 @@ describe("autoRegisterSkill", () => {
     });
   });
 
+  it("throws rather than deploy as the owner when the task's conversation doesn't resolve", async () => {
+    const conversationId = await tx(async (trx) => {
+      const user = await agentStore.createUser(trx);
+      const profile = await agentStore.createProfile(trx, {
+        userId: user.id,
+        name: "work",
+        basePrompt: "",
+        model: "m",
+        toolSet: [],
+      });
+      const conversation = await agentStore.createConversation(trx, {
+        userId: user.id,
+        profileId: profile.id,
+        isPrivate: true,
+      });
+      return conversation.id;
+    });
+    const { taskId, branch } = await seedRepoAndTask(SKILLS_CODING_REPO_NAME, { conversationId });
+    await pushBranchToUpstream(branch);
+    const skillRunner = mock<SkillRunner>();
+
+    await expect(
+      autoRegisterSkill(
+        {
+          runInTx: tx,
+          store,
+          agentStore: { getConversation: vi.fn().mockResolvedValue(undefined) },
+          secretsStore: fakeSecretsStore(validIdentity),
+          skillRunner,
+          skillsRepoPath: bareRepoPath,
+        },
+        { taskId },
+      ),
+    ).rejects.toThrow(`conversation ${conversationId} not found`);
+    expect(skillRunner.register).not.toHaveBeenCalled();
+  });
+
   it("skips on unsafe branch names that would clobber main on fetch", async () => {
     const { taskId } = await seedRepoAndTask(SKILLS_CODING_REPO_NAME);
     // Replace the assigned branch with an unsafe value the orchestrator

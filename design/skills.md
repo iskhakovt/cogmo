@@ -550,16 +550,23 @@ RPC signature:
 
 ```typescript
 interface SkillRunner {
-  register(opts: { branch: string }): Promise<RegisterResult>;
-  approveDeploy(opts: { pendingId: string }): Promise<RegisterResult>;
+  // `origin` (required) decides who a schedule the request puts live runs as —
+  // see Run-as identity.
+  register(opts: { branch: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
+  approveDeploy(opts: { pendingId: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
   denyDeploy(opts: { pendingId: string; reason?: string }): Promise<void>;
-  rollback(opts: { name: string; toGitSha?: string }): Promise<RegisterResult>;
+  rollback(opts: { name: string; toGitSha: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
   deregister(opts: { name: string }): Promise<DeregisterResult>;
-  enable(opts: { name: string }): Promise<EnableResult>;
+  enable(opts: { name: string; origin: SkillDeployOrigin }): Promise<EnableResult>;
   list(): Promise<readonly SkillSummary[]>;
   listAll(): Promise<readonly SkillSummary[]>;  // includes disabled
-  invoke(opts: { name: string; inputs: unknown }): Promise<SkillRunResult>;
+  invoke(opts: { name: string; inputs: unknown; runAs: SkillRunAs }): Promise<SkillRunResult>;
 }
+
+type SkillDeployOrigin =
+  | { kind: "conversation"; userId: string; profileId: string }   // register_skill, auto-register
+  | { kind: "user"; actor: SkillActor; conversation: SkillRunIdentity | null }  // approval tap, /enable
+  | { kind: "owner" };                                              // CLI, conversation-less coding task
 
 interface RegisterResult {
   name: string;
@@ -813,7 +820,7 @@ The cron identity is set iff the schedule is live — `schedule` set on an enabl
 | Approval tap, or `/enable` | The user who acted | The profile of the conversation the chat's active session points at, when that conversation is theirs; otherwise the default |
 | CLI `register` / `approve` / `rollback`, or a coding task with no conversation | The install owner | The default profile |
 
-A user's persona is known only from a conversation of theirs. The approval keyboard is posted into the requesting conversation's chat, so a tap there by the requester takes the requesting profile while the chat's session still points at that conversation; after a boundary or expiry it takes the new conversation's profile, or the default when the chat has no session. For a scheduled skill, the approval prompt shows the pending deploy's schedule and says it will run as whoever approves.
+A user's persona is known only from a conversation of theirs. The approval keyboard is posted into the requesting conversation's chat, so a tap there by the requester takes the requesting profile while the chat's session still points at that conversation; after a boundary or expiry it takes the new conversation's profile, or the default when the chat has no session. For a scheduled skill, the approval prompt shows the pending deploy's schedule and says it will run as whoever approves, and the `/enable` reply says the schedule now runs as the enabler.
 
 A cron run's `ctx.memory.remember` waits in `pending_memories` until the Observer next drains that user's rows, on a `conversation/idle` long enough to pass the `too_short` gate. A user who rarely chats sees a scheduled skill's writes late.
 
@@ -1220,13 +1227,14 @@ Public interface (canonical — see [Where the classifier runs](#where-the-class
 
 ```typescript
 interface SkillRunner {
-  register(opts: { branch: string }): Promise<RegisterResult>;
-  approveDeploy(opts: { pendingId: string }): Promise<RegisterResult>;
+  register(opts: { branch: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
+  approveDeploy(opts: { pendingId: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
   denyDeploy(opts: { pendingId: string; reason?: string }): Promise<void>;
-  rollback(opts: { name: string; toGitSha?: string }): Promise<RegisterResult>;
-  deregister(opts: { name: string }): Promise<void>;
-  list(): Promise<readonly SkillRow[]>;
-  invoke(opts: { name: string; inputs: unknown }): Promise<SkillRunResult>;
+  rollback(opts: { name: string; toGitSha: string; origin: SkillDeployOrigin }): Promise<RegisterResult>;
+  deregister(opts: { name: string }): Promise<DeregisterResult>;
+  enable(opts: { name: string; origin: SkillDeployOrigin }): Promise<EnableResult>;
+  list(): Promise<readonly SkillSummary[]>;
+  invoke(opts: { name: string; inputs: unknown; runAs: SkillRunAs }): Promise<SkillRunResult>;
 }
 ```
 

@@ -74,14 +74,20 @@ export async function autoRegisterSkill(
       };
     }
     // The conversation that asked for the skill; a task with none (an
-    // automated trigger) deploys as the owner.
-    const conversation =
-      task.conversationId === null
-        ? undefined
-        : await deps.agentStore.getConversation(tx, task.conversationId);
-    const origin: SkillDeployOrigin = conversation
-      ? { kind: "conversation", userId: conversation.userId, profileId: conversation.profileId }
-      : { kind: "owner" };
+    // automated trigger) deploys as the owner. One that doesn't resolve is an
+    // error, never a fallback to the owner.
+    let origin: SkillDeployOrigin = { kind: "owner" };
+    if (task.conversationId !== null) {
+      const conversation = await deps.agentStore.getConversation(tx, task.conversationId);
+      if (!conversation) {
+        throw new Error(`auto-register: conversation ${task.conversationId} not found`);
+      }
+      origin = {
+        kind: "conversation",
+        userId: conversation.userId,
+        profileId: conversation.profileId,
+      };
+    }
     return {
       kind: "ok" as const,
       repo,
