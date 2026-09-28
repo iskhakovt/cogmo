@@ -5,8 +5,7 @@ the test suite (drives `_main` directly with fake streams). The runner
 owns the NDJSON-on-stdin/stdout bridge for `await ctx.<method>(...)`
 calls during a task and emits exactly one `task_result` line on
 completion, after which `ctx` refuses every call. In the task process
-stdin/stdout are private pipes to the task's relay, not the host
-channel.
+stdin/stdout are private pipes to the task's relay.
 
 Multiple `ctx_call`s may be in flight from the user's coroutine at the
 same time; the bridge correlates host replies by `id`.
@@ -65,7 +64,7 @@ class _Bridge:
         self._closed = False
 
     def close(self) -> None:
-        """End of task: every later `ctx` call raises instead of reaching the host."""
+        """End of task: every later `ctx` call raises `CtxError("task_finished")`."""
         self._closed = True
 
     async def call(self, method: str, args: object) -> Any:

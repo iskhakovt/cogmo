@@ -2,9 +2,9 @@
 
 Two modules carry the runtime:
 
-- `supervisor`: long-lived parent; per task, a relay process with a
-  task process behind private pipes, then a kill of everything the task
-  left before `task_exited`. EOF = clean shutdown.
+- `supervisor`: long-lived parent; per task, forks a relay that runs the
+  task process behind private pipes, then kills everything the task left
+  and sends `task_exited`. EOF = clean shutdown.
 - `runner`: per-task runner; compiles + runs the skill, emits one
   `task_result`. Task processes execute `runner._main(...)` directly.
 

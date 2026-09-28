@@ -6,6 +6,7 @@ blocks: pidfd-based wait, SIGKILL+reap, venv activation, and the task
 process entry point.
 """
 
+import gc
 import json
 import os
 import time
@@ -61,13 +62,21 @@ class TestWaitWithTimeout:
             # leak it when the suite ends.
             _kill_and_reap(pid)
 
-    def test_closes_pidfd_on_normal_path(self) -> None:
-        # Approximate fd-leak detection: if pidfd_open leaked, we'd
-        # eventually run out of fds. Open many in succession and assert
-        # we don't ENFILE.
-        for _ in range(64):
-            pid = _fork_sleeper(0.01)
-            _wait_with_timeout(pid, timeout_s=2.0)
+    def test_leaves_no_fd_open(self) -> None:
+        # With the collector off, only explicit closes release the pidfd
+        # and the selector's epoll fd: every later fork would inherit a
+        # leftover one.
+        slow = _fork_sleeper(2.0)
+        gc.disable()
+        try:
+            before = sorted(os.listdir("/proc/self/fd"))
+            _wait_with_timeout(_fork_sleeper(0.01), timeout_s=2.0)
+            with pytest.raises(TimeoutError):
+                _wait_with_timeout(slow, timeout_s=0.01)
+            assert sorted(os.listdir("/proc/self/fd")) == before
+        finally:
+            gc.enable()
+            _kill_and_reap(slow)
 
 
 class TestKillAndReap:

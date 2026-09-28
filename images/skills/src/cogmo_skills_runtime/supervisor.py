@@ -6,7 +6,7 @@ Architecture (see design/skills.md "Warm pool"):
     module via `python3 -u -m cogmo_skills_runtime` once at create
     time. It announces `supervisor_ready` with its protocol version and
     stays alive across the worker's lifetime.
-  - Three processes per task, all forked from the supervisor's clean
+  - Two processes per task, both forked from the supervisor's clean
     `sys.modules` snapshot:
 
       supervisor (subreaper, non-dumpable; owns the host channel, never reads it)
@@ -18,7 +18,9 @@ Architecture (see design/skills.md "Warm pool"):
     task's behalf. The supervisor never reads host input at all.
   - The relay forwards the task's `ctx_call`s stamped with the task id,
     delivers only `ctx_result`s carrying that id, forwards the task's one
-    `task_result`, and stops. It enforces the wall clock.
+    `task_result`, and stops. It enforces the wall clock. A `ctx_result`
+    with no task id comes from a host that predates task binding and
+    fails the task with `host_protocol_mismatch`.
   - Once the relay exits, the supervisor SIGKILLs every process still
     in its subtree — the task, anything the task forked, detached or
     re-sessioned — and reaps them. Orphans reparent to the supervisor
@@ -30,6 +32,8 @@ Architecture (see design/skills.md "Warm pool"):
     a task running as the same uid cannot open their host fds through
     `/proc/<pid>/fd` or ptrace them. Task processes start a new session
     (so `kill(0, …)` stays inside the task) with `PR_SET_NO_NEW_PRIVS`.
+    Their stderr is the supervisor's: a write-only log pipe the host never
+    parses for frames.
 
 Why hand-rolled (vs `multiprocessing` / `pebble`):
 `multiprocessing.process.BaseProcess._bootstrap()` unconditionally
@@ -372,7 +376,8 @@ def _task_process(to_task_r: int, from_task_w: int) -> None:
     os.dup2(from_task_w, 1)
     # Drop every other inherited fd: the relay's pipe ends and the
     # supervisor's status pipe. The host channel is gone once 0/1 are
-    # replaced.
+    # replaced. CPython closes the range with close_range(2), so a large
+    # RLIMIT_NOFILE costs nothing (0.03 ms at 524288 in the runtime image).
     os.closerange(3, os.sysconf("SC_OPEN_MAX"))
     reader = _LineReader(0)
     while not reader.eof:
@@ -432,8 +437,8 @@ class _Relay:
                     return _RELAY_DONE
                 if self.task_out.eof:
                     sel.unregister(self.task_out.fd)
-            if "host" in ready and not self._pump_host():
-                return _RELAY_HOST_CLOSED
+            if "host" in ready and (code := self._pump_host()) is not None:
+                return code
             if "exited" in ready:
                 return self._on_task_exit()
 
@@ -467,24 +472,31 @@ class _Relay:
                     )
         return False
 
-    def _pump_host(self) -> bool:
-        """Deliver this task's ctx_results. False once the host closed the channel."""
+    def _pump_host(self) -> int | None:
+        """Deliver this task's ctx_results. Returns the relay's exit code once it must stop."""
         try:
             frames = self.host.read()
         except FrameTooLargeError:
             sys.stderr.write("supervisor: oversized frame from host\n")
-            return False
+            return _RELAY_HOST_CLOSED
         if self.host.eof:
-            return False
+            return _RELAY_HOST_CLOSED
         for frame in frames:
             msg = _parse(frame)
-            if msg is None or msg.get("type") != "ctx_result" or msg.get("taskId") != self.task_id:
+            if msg is None or msg.get("type") != "ctx_result":
+                continue
+            if "taskId" not in msg:
+                # The host predates task binding and will never tag a reply;
+                # waiting would stall every ctx call until the wall clock.
+                _send(_failure(self.task_id, "host_protocol_mismatch: ctx_result without taskId"))
+                return _RELAY_DONE
+            if msg["taskId"] != self.task_id:
                 continue
             try:
                 _write_all(self.to_task_w, frame + b"\n")
             except BrokenPipeError:
                 pass  # task already closed its stdin
-        return True
+        return None
 
     def _on_task_exit(self) -> int:
         """The task process exited: forward a result it left in the pipe, else report the death."""

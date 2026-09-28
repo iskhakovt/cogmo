@@ -3,9 +3,12 @@
 Each test runs the real `python -m cogmo_skills_runtime` as a subprocess
 and speaks the host protocol over its stdin/stdout, the way the TS
 worker does. `TestTaskIsolation` pins what one task must not be able to
-do to the next task on the same supervisor: reach the host after its
-result, outlive its own teardown, read the next task's input, forge
-frames, or open the supervisor's host channel through `/proc`.
+do to the next task on the same supervisor: get a frame past the relay
+after its result, leave a process running — a detached, re-sessioned
+grandchild included — that reads the next task's input or forges its
+result, or open the supervisor's host channel through `/proc`.
+`TestSupervisorProtocol` pins the frames, failure reporting and
+teardown around that.
 """
 
 import json
@@ -32,13 +35,20 @@ _SRC_DIR = str(Path(cogmo_skills_runtime.__file__).resolve().parent.parent)
 
 
 class _Supervisor:
-    """A supervisor subprocess plus a reader thread queueing its stdout frames."""
+    """A supervisor subprocess plus a reader thread queueing its stdout frames.
 
-    def __init__(self) -> None:
+    `patch` is Python run against the imported `supervisor` module before
+    `main()`, to stub one of its internals.
+    """
+
+    def __init__(self, patch: str | None = None) -> None:
         env = dict(os.environ)
         env["PYTHONPATH"] = _SRC_DIR
+        argv = ["-m", "cogmo_skills_runtime"]
+        if patch is not None:
+            argv = ["-c", f"from cogmo_skills_runtime import supervisor\n{patch}\nsupervisor.main()\n"]
         self.proc = subprocess.Popen(
-            [sys.executable, "-u", "-m", "cogmo_skills_runtime"],
+            [sys.executable, "-u", *argv],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             env=env,
@@ -70,25 +80,9 @@ class _Supervisor:
         except queue.Empty:
             return None
 
-    def frames_for(self, seconds: float) -> list[dict[str, Any]]:
-        """Every frame arriving within `seconds`."""
-        out: list[dict[str, Any]] = []
-        while (frame := self.next_frame(seconds)) is not None:
-            out.append(frame)
-        return out
-
     def run_task(self, task_id: str, body: str, inputs: object, wall_clock_s: float = 5) -> dict[str, Any]:
         """Send a task and return its `task_result`, answering no ctx calls."""
-        self.send(
-            {
-                "type": "task_invoke",
-                "id": task_id,
-                "skill": task_id,
-                "inputs": inputs,
-                "body": body,
-                "wallClockS": wall_clock_s,
-            }
-        )
+        self.send_task(task_id, body, inputs, wall_clock_s)
         while True:
             frame = self.next_frame(wall_clock_s + 5)
             assert frame is not None, f"no task_result for {task_id}"
@@ -101,6 +95,28 @@ class _Supervisor:
             if frame.get("type") == "task_exited" and frame.get("id") == task_id:
                 return frame
         return None
+
+    def send_task(self, task_id: str, body: str, inputs: object, wall_clock_s: float = 5) -> None:
+        self.send(
+            {
+                "type": "task_invoke",
+                "id": task_id,
+                "skill": task_id,
+                "inputs": inputs,
+                "body": body,
+                "wallClockS": wall_clock_s,
+            }
+        )
+
+    def frames_until_exit(self, timeout: float = 5) -> list[dict[str, Any]]:
+        """Every frame up to and including the next `task_exited`, or up to a
+        `timeout`-long silence or EOF."""
+        frames: list[dict[str, Any]] = []
+        while (frame := self.next_frame(timeout)) is not None:
+            frames.append(frame)
+            if frame.get("type") == "task_exited":
+                break
+        return frames
 
     def close(self) -> None:
         if self.proc.stdin is not None:
@@ -129,23 +145,37 @@ def _alive(pid: int) -> bool:
     return stat[stat.rindex(")") + 2] != "Z"
 
 
-# The runner cancels leftover asyncio tasks when `run` returns; this one
-# swallows the cancel and calls `ctx` after the result is out.
-_LATE_CTX_CALL = """
-import asyncio
-
-async def _linger(ctx):
-    while True:
-        try:
-            await asyncio.sleep(0.05)
-            break
-        except asyncio.CancelledError:
-            continue
-    await ctx.log.info("late")
+# Writes a task_result and a ctx_call behind it in one write, bypassing
+# the runner (whose `ctx` would refuse the call), then stays alive.
+_FRAME_AFTER_RESULT = """
+import asyncio, json, sys
 
 async def run(inputs, ctx):
-    asyncio.get_running_loop().create_task(_linger(ctx))
-    return {"done": True}
+    result = {"type": "task_result", "id": "x", "ok": True, "output": "done"}
+    late = {"type": "ctx_call", "id": "ctx-late", "method": "secrets.get", "args": {"name": "token"}}
+    sys.stdout.write(json.dumps(result) + "\\n" + json.dumps(late) + "\\n")
+    sys.stdout.flush()
+    await asyncio.sleep(30)
+"""
+
+# Leaves a grandchild in a new session with stdin/stdout/stderr closed, so
+# no pipe EOF or hangup ends it; only the supervisor's sweep can.
+_DETACHED_GRANDCHILD = """
+import os, time
+
+async def run(inputs, ctx):
+    r, w = os.pipe()
+    if os.fork() == 0:
+        os.setsid()
+        if os.fork() == 0:
+            for fd in (0, 1, 2):
+                os.close(fd)
+            os.write(w, str(os.getpid()).encode())
+            os.close(w)
+            time.sleep(300)
+        os._exit(0)
+    os.close(w)
+    return {"pid": int(os.read(r, 32))}
 """
 
 # Leaves a detached process behind that reads whatever reaches its stdin
@@ -200,11 +230,17 @@ async def run(inputs, ctx):
 
 
 class TestTaskIsolation:
-    def test_no_ctx_call_reaches_the_host_after_the_task_result(self, sup: _Supervisor) -> None:
-        result = sup.run_task("t-late", _LATE_CTX_CALL, {})
+    def test_the_relay_forwards_nothing_after_the_task_result(self, sup: _Supervisor) -> None:
+        sup.send_task("t-late", _FRAME_AFTER_RESULT, {})
+        frames = sup.frames_until_exit()
+        assert [f.get("type") for f in frames] == ["supervisor_ready", "task_result", "task_exited"]
+        assert frames[1]["id"] == "t-late"
+
+    def test_a_detached_grandchild_is_killed_before_task_exited(self, sup: _Supervisor) -> None:
+        result = sup.run_task("t-detach", _DETACHED_GRANDCHILD, {})
         assert result["ok"] is True, result
-        after = sup.frames_for(1.0)
-        assert [f for f in after if f.get("type") == "ctx_call"] == []
+        assert sup.await_exit("t-detach") == {"type": "task_exited", "id": "t-detach"}
+        assert not _alive(result["output"]["pid"])
 
     def test_a_process_the_task_left_behind_is_gone_before_the_next_task(
         self, sup: _Supervisor, tmp_path: Path
@@ -213,13 +249,18 @@ class TestTaskIsolation:
         result = sup.run_task("t-leave", _LEAVE_A_PROCESS, {"leak": str(leak)})
         assert result["ok"] is True, result
         leftover = result["output"]["pid"]
-        sup.await_exit("t-leave", timeout=1.0)
+        assert sup.await_exit("t-leave") == {"type": "task_exited", "id": "t-leave"}
 
         after = sup.run_task("t-next", _ECHO, {"secret": "for-t-next-only"})
 
         assert after["output"] == {"echo": {"secret": "for-t-next-only"}}
         assert not _alive(leftover)
         assert not leak.exists() or b"for-t-next-only" not in leak.read_bytes()
+
+    def test_the_task_runs_with_no_new_privs(self, sup: _Supervisor) -> None:
+        body = "import ctypes\nasync def run(inputs, ctx):\n    return ctypes.CDLL(None).prctl(39, 0, 0, 0, 0)\n"
+        # 39 = PR_GET_NO_NEW_PRIVS
+        assert sup.run_task("t-nnp", body, {})["output"] == 1
 
     @pytest.mark.skipif(os.geteuid() == 0, reason="root holds CAP_SYS_PTRACE, which bypasses dumpability")
     def test_the_task_cannot_open_the_host_channel_through_proc(self, sup: _Supervisor) -> None:
@@ -299,12 +340,55 @@ class TestSupervisorProtocol:
         assert call["taskId"] == "t-ctx"
         assert call["method"] == "now"
         sup.send({"type": "ctx_result", "taskId": "t-other", "id": call["id"], "ok": True, "value": "wrong"})
-        sup.send({"type": "ctx_result", "id": call["id"], "ok": True, "value": "untagged"})
         sup.send({"type": "ctx_result", "taskId": "t-ctx", "id": call["id"], "ok": True, "value": "right"})
         result = sup.next_frame(5)
         assert result is not None
         assert result["type"] == "task_result"
         assert result["output"] == {"now": "right"}
+
+    def test_fails_the_task_fast_on_a_ctx_result_without_a_task_id(self, sup: _Supervisor) -> None:
+        # What a host that predates task binding sends.
+        sup.send_task("t-old", "async def run(inputs, ctx):\n    return await ctx.now()\n", {}, wall_clock_s=30)
+        call = sup.next_frame(5)
+        while call is not None and call.get("type") != "ctx_call":
+            call = sup.next_frame(5)
+        assert call is not None
+        sup.send({"type": "ctx_result", "id": call["id"], "ok": True, "value": "untagged"})
+        frames = sup.frames_until_exit(timeout=5)
+        assert frames[0] == {
+            "type": "task_result",
+            "id": "t-old",
+            "ok": False,
+            "error": "host_protocol_mismatch: ctx_result without taskId",
+        }
+        assert frames[-1] == {"type": "task_exited", "id": "t-old"}
+
+    def test_exits_without_task_exited_when_the_sweep_cannot_empty_the_subtree(self) -> None:
+        sup = _Supervisor(patch="supervisor._sweep_descendants = lambda deadline_s: False")
+        try:
+            result = sup.run_task("t-stuck", _ECHO, {})
+            assert result["ok"] is True
+            assert sup.frames_until_exit() == []
+            assert sup.proc.wait(timeout=5) == 1
+        finally:
+            sup.close()
+
+    def test_kills_a_relay_the_task_stopped_after_the_grace(self, sup: _Supervisor) -> None:
+        body = (
+            "import asyncio, os, signal\n"
+            "async def run(inputs, ctx):\n"
+            "    os.kill(os.getppid(), signal.SIGSTOP)\n"
+            "    await asyncio.sleep(30)\n"
+        )
+        start = time.monotonic()
+        sup.send_task("t-stop", body, {}, wall_clock_s=0.5)
+        frames = sup.frames_until_exit(timeout=10)
+        elapsed = time.monotonic() - start
+        assert [f.get("type") for f in frames] == ["supervisor_ready", "task_exited"]
+        # The stopped relay can't enforce the wall clock; the supervisor's
+        # backstop fires RELAY_GRACE_S (2 s) after it.
+        assert 2.5 <= elapsed < 8, elapsed
+        assert sup.run_task("t-after", _ECHO, {})["ok"] is True
 
     def test_relays_a_ctx_result_the_size_of_an_http_body(self, sup: _Supervisor) -> None:
         sup.send(
@@ -382,26 +466,14 @@ class TestSupervisorProtocol:
         assert sup.run_task("t-after", _ECHO, {})["ok"] is True
 
     def test_confirms_exit_when_the_task_kills_its_relay(self, sup: _Supervisor) -> None:
-        sup.send(
-            {
-                "type": "task_invoke",
-                "id": "t-relay",
-                "skill": "relay",
-                "inputs": {},
-                "body": (
-                    "import asyncio, os, signal\n"
-                    "async def run(inputs, ctx):\n"
-                    "    os.kill(os.getppid(), signal.SIGKILL)\n"
-                    "    await asyncio.sleep(30)\n"
-                ),
-                "wallClockS": 30,
-            }
+        body = (
+            "import asyncio, os, signal\n"
+            "async def run(inputs, ctx):\n"
+            "    os.kill(os.getppid(), signal.SIGKILL)\n"
+            "    await asyncio.sleep(30)\n"
         )
-        frames: list[dict[str, Any]] = []
-        while (frame := sup.next_frame(5)) is not None:
-            frames.append(frame)
-            if frame.get("type") == "task_exited":
-                break
+        sup.send_task("t-relay", body, {}, wall_clock_s=30)
+        frames = sup.frames_until_exit()
         assert {"type": "task_exited", "id": "t-relay"} in frames
         assert [f for f in frames if f.get("type") == "task_result"] == []
         assert sup.run_task("t-after", _ECHO, {})["ok"] is True
