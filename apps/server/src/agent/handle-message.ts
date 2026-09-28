@@ -479,9 +479,12 @@ export function createHandleMessage(deps: HandleMessageDeps) {
           if (typeof m.content === "string") return { content: m.content };
           const blocks = m.content.map((b) => {
             if (b.type === "voice") {
-              return { type: "text", text: transcripts[cursor++] ?? "" } as const;
+              const transcript = transcripts[cursor++] ?? "";
+              return { type: "text", text: renderInboundText(transcript, b.forwarded) } as const;
             }
-            if (b.type === "text") return { type: "text", text: renderInboundText(b) } as const;
+            if (b.type === "text") {
+              return { type: "text", text: renderInboundText(b.text, b.forwarded) } as const;
+            }
             return b;
           });
           return { content: blocks };

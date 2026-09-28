@@ -64,12 +64,15 @@ const InboundDocumentBlockSchema = z
  * orchestrator transcribes inside a durable `step.run("transcribe-voice")`.
  * Storing the OGG persistently allows future re-transcription with a better
  * model and downstream observability of voice fraction. See design/voice.md.
+ * `forwarded` marks a clip someone other than the user recorded; its
+ * transcript renders as forwarded text.
  */
 const InboundVoiceBlockSchema = z.object({
   type: z.literal("voice"),
   path: z.string(),
   mediaType: z.string(),
   durationMs: z.number().int().nonnegative().optional(),
+  forwarded: ForwardedOriginSchema.optional(),
 });
 
 const InboundBlockSchema = z.union([
@@ -134,7 +137,7 @@ export function contentToBlocks(content: InboundContent): InboundBlock[] {
 
   return content.flatMap<InboundBlock>((block) => {
     if (block.type === "text") {
-      return [{ type: "text", text: renderInboundText(block) }];
+      return [{ type: "text", text: renderInboundText(block.text, block.forwarded) }];
     }
     if (block.type === "image") {
       if (block.path != null) {
@@ -189,20 +192,20 @@ export function contentToBlocks(content: InboundContent): InboundBlock[] {
 }
 
 /**
- * A text block as the transcript carries it: its own text, or forwarded text
- * inside a `<forwarded_message>` element naming its sender, so the model never
- * reads it as the user's words. A pure function of the block, so the user
- * message it lands in stores the same bytes on every turn.
+ * Inbound text — a text block's, or a voice clip's transcript — as the
+ * transcript carries it: as it is, or when `forwarded` inside a
+ * `<forwarded_message>` element naming its sender, so the model never reads it
+ * as the user's words. A pure function of its inputs, so the user message it
+ * lands in stores the same bytes on every turn.
  */
-export function renderInboundText(block: InboundTextBlock): string {
-  const { forwarded } = block;
-  if (forwarded === undefined) return block.text;
+export function renderInboundText(text: string, forwarded: ForwardedOrigin | undefined): string {
+  if (forwarded === undefined) return text;
   const attributes = [
     `from="${attributeValue(forwarded.from)}"`,
     `origin="${attributeValue(forwarded.origin)}"`,
     `sent="${attributeValue(forwarded.sentAt)}"`,
   ].join(" ");
-  const body = escapeClosingTags(block.text, ["forwarded_message"]);
+  const body = escapeClosingTags(text, ["forwarded_message"]);
   return `<forwarded_message ${attributes}>\n${body}\n</forwarded_message>`;
 }
 

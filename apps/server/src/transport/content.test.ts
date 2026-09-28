@@ -297,4 +297,16 @@ describe("forwarded text", () => {
     ];
     expect(InboundContentSchema.safeParse(content).success).toBe(false);
   });
+
+  it("parses a forwarded voice block", () => {
+    const content: InboundContent = [
+      {
+        type: "voice",
+        path: "inbound/v.ogg",
+        mediaType: "audio/ogg",
+        forwarded: { origin: "user", from: "Alice", sentAt: SENT_AT },
+      },
+    ];
+    expect(InboundContentSchema.parse(content)).toEqual(content);
+  });
 });

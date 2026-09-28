@@ -61,7 +61,7 @@ import {
   handleVoice,
   type TelegramCommandContext,
 } from "./commands.js";
-import { inboundTextBlock } from "./forwarded.js";
+import { forwardedFrom, inboundTextBlock } from "./forwarded.js";
 import { postPipelineGateKeyboard } from "./pipeline-gate-poster.js";
 import { ProfileDialogs } from "./profile-dialog.js";
 import { renderTelegramHtml, stripHtmlTags } from "./render.js";
@@ -1310,14 +1310,18 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       const path = await transport.uploadAttachment(buffer, mediaType);
       const caption = ctx.message.caption ?? "";
       const durationMs = voice.duration ? voice.duration * 1000 : undefined;
+      const origin = ctx.message.forward_origin;
 
+      // A forwarded clip is marked on its own block, so its transcript names
+      // the sender whether or not there is a caption.
       const content: InboundContent = [];
-      if (caption) content.push(inboundTextBlock(caption, ctx.message.forward_origin));
+      if (caption) content.push(inboundTextBlock(caption, origin));
       content.push({
         type: "voice",
         path,
         mediaType,
         ...(durationMs !== undefined && { durationMs }),
+        ...(origin !== undefined && { forwarded: forwardedFrom(origin) }),
       });
 
       await dispatchInbound(ctx, addr, handle, content, platformTs);

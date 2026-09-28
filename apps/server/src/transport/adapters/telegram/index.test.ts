@@ -735,7 +735,7 @@ describe("telegram adapter", () => {
       );
     });
 
-    it("marks a forwarded voice note's caption", async () => {
+    it("marks a forwarded voice note and its caption", async () => {
       const { transport } = await createAdapter();
       const ctx = makeVoiceCtx(111, { duration: 3 }, "listen up");
       await handlers.get("on:message:voice")!(asForwarded(ctx));
@@ -744,7 +744,32 @@ describe("telegram adapter", () => {
         "session-1",
         [
           { type: "text", text: "listen up", forwarded },
-          { type: "voice", path: "inbound/test.jpg", mediaType: "audio/ogg", durationMs: 3000 },
+          {
+            type: "voice",
+            path: "inbound/test.jpg",
+            mediaType: "audio/ogg",
+            durationMs: 3000,
+            forwarded,
+          },
+        ],
+        expect.any(Date),
+      );
+    });
+
+    it("marks a captionless forwarded voice note on the voice block alone", async () => {
+      const { transport } = await createAdapter();
+      await handlers.get("on:message:voice")!(asForwarded(makeVoiceCtx(111, { duration: 3 })));
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [
+          {
+            type: "voice",
+            path: "inbound/test.jpg",
+            mediaType: "audio/ogg",
+            durationMs: 3000,
+            forwarded,
+          },
         ],
         expect.any(Date),
       );

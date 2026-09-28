@@ -13,7 +13,8 @@ export function inboundTextBlock(
   return { type: "text", text, ...(origin !== undefined && { forwarded: forwardedFrom(origin) }) };
 }
 
-function forwardedFrom(origin: MessageOrigin): ForwardedOrigin {
+/** The `forwarded` marking for a message whose `forward_origin` is `origin`. */
+export function forwardedFrom(origin: MessageOrigin): ForwardedOrigin {
   const from = match(origin)
     .with({ type: "user" }, (o) => personName(o.sender_user))
     .with({ type: "hidden_user" }, (o) => o.sender_user_name)

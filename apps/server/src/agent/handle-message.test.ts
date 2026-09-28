@@ -3245,11 +3245,15 @@ describe("createHandleMessage", () => {
       '<forwarded_message from="Alice" origin="user" sent="2020-09-13T12:26:40.000Z">\n' +
       "meet at 8\n</forwarded_message>";
 
-    async function persistedUserContent(content: InboundContent): Promise<unknown> {
+    async function persistedUserContent(
+      content: InboundContent,
+      overrides: Partial<HandleMessageDeps> = {},
+    ): Promise<unknown> {
       const deps = mockDeps({
         transportStore: mockTransportStore({
           getUnbatchedInbound: vi.fn().mockResolvedValue([{ id: "inbound-1", content }]),
         }),
+        ...overrides,
       });
       await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
         event: testEvent,
@@ -3281,6 +3285,22 @@ describe("createHandleMessage", () => {
           { type: "image", path: "inbound/a.jpg", mediaType: "image/jpeg" },
         ]),
       );
+    });
+
+    it("persists a forwarded voice note's transcript inside its element", async () => {
+      const stt = { name: "openai", stt: vi.fn().mockResolvedValue({ text: "meet at 8" }) };
+      const content = await persistedUserContent(
+        [{ type: "voice", path: "inbound/v.ogg", mediaType: "audio/ogg", forwarded }],
+        {
+          voiceResolver: mockVoiceResolver(mockVoiceBundle({ stt })),
+          attachments: {
+            upload: vi.fn().mockResolvedValue("inbound/x"),
+            download: vi.fn().mockResolvedValue(Buffer.from("ogg-bytes")),
+          },
+        },
+      );
+
+      expect(content).toBe(wrapped);
     });
   });
 
