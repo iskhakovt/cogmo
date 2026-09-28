@@ -20,6 +20,7 @@ Modern TypeScript/Node.js stack for a long-running backend service. No frontend,
 | Linter/formatter | Biome | Replaces ESLint + Prettier, 20x faster, one tool |
 | Collections | Remeda + ES2025 | Kotlin-feel pipe chains, groupBy, lazy eval |
 | Error handling | neverthrow | Result\<T, E\> without exceptions |
+| CLI parsing | cmd-ts | Typed argument decoders, nested subcommands, generated help — see [decisions.md](decisions.md) |
 | Orchestration | Inngest (self-hosted) | Event-driven durable execution — queues, scheduling, HITL, observability in one tool |
 
 ## Kotlin-Developer Patterns

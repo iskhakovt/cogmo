@@ -4,7 +4,8 @@ import type { Database, Transactor } from "../db/index.js";
 import { migratePerFile } from "../db/migrate-per-file.js";
 import { logger } from "../logger.js";
 import type { TransportStore } from "../transport/store/index.js";
-import { applyReset, type ResetScope } from "./reset.js";
+import { applyReset } from "./reset.js";
+import type { ResetScope } from "./reset-scopes.js";
 import { seedDefaults } from "./seed.js";
 
 export interface MigrateAndSeedDeps {
