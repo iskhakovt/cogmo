@@ -172,7 +172,7 @@ Caller-supplied `tags` / `tagsMatch` and `tagGroups` are folded into the same AN
 
 ### Live Retains via Staging `[confirmed]`
 
-`memory_retain` and a skill's `ctx.memory.remember` do not write directly to Hindsight. Both insert into a `pending_memories` table (a skill's row has `source = 'skill'` and carries the skill's name in `skill_name`, and in `context`); Observer drains pending rows during post-conversation extraction, classifies each (network + compartment + trust) via `chatTyped()`, retains to Hindsight, and deletes the staging row. This guarantees a single classification path — every memory in Hindsight is tagged by the Observer prompt, and live writes cannot bypass policy.
+`memory_retain` and a skill's `ctx.memory.remember` do not write directly to Hindsight. Both insert into a `pending_memories` table (a skill's row has `source = 'skill'` and names the skill in `skill_name` and `context`); Observer drains pending rows during post-conversation extraction, classifies each (network + compartment + trust) via `chatTyped()`, retains to Hindsight, and deletes the staging row. This guarantees a single classification path — every memory in Hindsight is tagged by the Observer prompt, and live writes cannot bypass policy.
 
 **The drain's retain is keyed on the staging row.** Retain and delete are separate steps with no transaction spanning Hindsight and Postgres, so a delete that fails after its retain leaves the row pending and the next drain retains it again. Each row goes to Hindsight under its id (`RetainBatchItem.documentId` → `document_id`), and Hindsight upserts on `document_id` within a bank. A row's content never changes, so repeating a retain Hindsight has processed finds no changed chunk: it keeps the extracted facts, extracts nothing new, and relabels the document and its facts with the repeat's tags and metadata. One copy of the fact remains. Transcript extraction has no durable id per fact and leaves `documentId` unset, so the adapter mints a fresh one per item.
 
@@ -191,7 +191,7 @@ pending_memories (
 )
 ```
 
-`source` records who staged the row: the agent's `memory_retain` (`live_retain`), a skill's `ctx.memory.remember` (`skill`), or a one-off ingestion path such as backfilling untagged Hindsight memories (`migration`). Every source takes the same drain, which writes it to Hindsight's `metadata.source`, and a skill row's name to `metadata.skill`. Cogmo doesn't branch on either; Hindsight's fact extraction sees the metadata in its prompt.
+`source` records who staged the row: the agent's `memory_retain` (`live_retain`), a skill's `ctx.memory.remember` (`skill`), or `cogmo migrate-memories` (`migration`). The drain writes it to Hindsight's `metadata.source`, and a skill row's `skill_name` to `metadata.skill`, so every memory a skill writes names the skill. Cogmo doesn't branch on either key, and Hindsight can't filter on metadata, so there is no per-skill audit or purge; Hindsight's fact extraction sees both keys in its prompt. `migrate-memories` restages every memory as `migration` without its metadata, so a skill's memory loses `skill`.
 
 ## Core Memory Scope by Profile Class `[confirmed]`
 
@@ -671,6 +671,8 @@ Five factors (from A-MAC, arXiv 2603.04549):
 Apply as a lightweight filter in the extraction prompt, not a separate system.
 
 ## Metadata Schema `[proposed]`
+
+Shipped: `source` (`conversation` for transcript extraction, else the staging row's `pending_memory_source`) and `skill` on a skill's write — see [Live Retains via Staging](#live-retains-via-staging-confirmed).
 
 Each memory should carry:
 

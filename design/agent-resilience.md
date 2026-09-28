@@ -290,7 +290,7 @@ Single event name, `ok: boolean` for outcome — no separate `synthesis_failed` 
 
 ### Outside the agent loop
 
-`chatTyped` callsites in evolution background jobs — `drain-pending-memories.ts:194`, `extract-corrections.ts:79`, `extract-memories.ts:67`, `consolidate-rules.ts:121` — and untyped non-loop calls like the summarization step in `handle-message.ts:702` are still Class C surfaces, but they're not inside the agent loop and have no user to degrade to. They use **single-call retry-with-feedback** semantics:
+`chatTyped` callsites in evolution background jobs — `drain-pending-memories.ts` (`classifyOne`), `extract-corrections.ts:79`, `extract-memories.ts:67`, `consolidate-rules.ts:121` — and untyped non-loop calls like the summarization step in `handle-message.ts:702` are still Class C surfaces, but they're not inside the agent loop and have no user to degrade to. They use **single-call retry-with-feedback** semantics:
 
 | Aspect | In-loop | Outside the loop |
 |-|-|-|
