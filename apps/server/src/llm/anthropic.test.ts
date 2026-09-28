@@ -1,3 +1,4 @@
+import { APIError } from "@anthropic-ai/sdk";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { CorrectionExtractionSchema } from "../agent/evolution/extraction-schema.js";
@@ -9,21 +10,21 @@ import { MissingToolCallError, ProviderProtocolError, ToolArgsCutOffError } from
 import { toObjectJsonSchema } from "./json-schema.js";
 import type { CacheIntent, ResponseFormat, StreamEvent, ToolDefinition } from "./types.js";
 
-// Mock the Anthropic SDK — use a class so `new Anthropic()` works
+// Mock the Anthropic client — use a class so `new Anthropic()` works — and
+// keep the SDK's error classes.
 const mockCreate = vi.fn();
 const mockCountTokens = vi.fn();
 // Constructor options each client was built with, newest last.
 const clientOptions: Array<{ fetch?: typeof fetch }> = [];
-vi.mock("@anthropic-ai/sdk", () => {
-  return {
-    default: class MockAnthropic {
-      messages = { create: mockCreate, countTokens: mockCountTokens };
-      constructor(opts: { fetch?: typeof fetch }) {
-        clientOptions.push(opts);
-      }
-    },
-  };
-});
+vi.mock("@anthropic-ai/sdk", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@anthropic-ai/sdk")>()),
+  default: class MockAnthropic {
+    messages = { create: mockCreate, countTokens: mockCountTokens };
+    constructor(opts: { fetch?: typeof fetch }) {
+      clientOptions.push(opts);
+    }
+  },
+}));
 
 /** Create a mock async iterable that yields Anthropic stream events. */
 function mockStream(events: unknown[]): AsyncIterable<unknown> {
@@ -203,6 +204,39 @@ describe("AnthropicProvider", () => {
     expect(callArgs.tools[0].name).toBe("my_tool");
     expect(callArgs.tools[0].input_schema.type).toBe("object");
     expect(callArgs.tools[0].input_schema.properties).toEqual({ x: { type: "string" } });
+  });
+
+  it("carries a tool's definitions so its $refs resolve", async () => {
+    const provider = createProvider();
+    mockCreate.mockResolvedValueOnce({
+      content: [{ type: "text", text: "ok", citations: null }],
+      stop_reason: "end_turn",
+      model: "claude-sonnet-4-6",
+      usage: { input_tokens: 10, output_tokens: 5 },
+    });
+    const $defs = { Point: { type: "object", properties: { x: { type: "number" } } } };
+    const definitions = { Size: { type: "integer" } };
+
+    await provider.chat({
+      model: "claude-sonnet-4-6",
+      system: "sys",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [
+        {
+          name: "plot",
+          description: "plots a point",
+          parameters: {
+            type: "object",
+            properties: { at: { $ref: "#/$defs/Point" }, size: { $ref: "#/definitions/Size" } },
+            $defs,
+            definitions,
+          },
+        },
+      ],
+    });
+
+    const tool = expectDefined(mockCreate.mock.calls[0], "create call")[0].tools[0];
+    expect(tool.input_schema).toMatchObject({ $defs, definitions });
   });
 
   it("translates tool_result blocks correctly", async () => {
@@ -1854,6 +1888,56 @@ describe("AnthropicProvider", () => {
       expect(sentBody().tools).toHaveLength(1);
     });
 
+    it("offers the tool, definitions included, for a recursive schema", async () => {
+      const TreeNode = z.object({
+        name: z.string(),
+        get children() {
+          return z.array(TreeNode);
+        },
+      });
+      const schema = toObjectJsonSchema(z.object({ root: TreeNode }));
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        toolReply("claude-opus-5-5", "tree", { root: { name: "a", children: [] } }),
+      );
+
+      await provider.chat({
+        model: "claude-opus-5-5",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+        responseFormat: { type: "json_schema", name: "tree", schema },
+      });
+
+      expect(sentBody()).not.toHaveProperty("output_config");
+      expect(expectDefined(sentBody().tools[0], "tool").input_schema).toEqual({
+        type: "object",
+        properties: schema.properties,
+        required: ["root"],
+        $defs: schema.$defs,
+      });
+    });
+
+    it("offers the tool for a schema with a tuple", async () => {
+      const schema = toObjectJsonSchema(z.object({ pair: z.tuple([z.string(), z.number()]) }));
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(
+        toolReply("claude-opus-5-5", "point", { pair: ["east", 7] }),
+      );
+
+      const result = await provider.chat({
+        model: "claude-opus-5-5",
+        system: "sys",
+        messages: [{ role: "user", content: "hi" }],
+        responseFormat: { type: "json_schema", name: "point", schema },
+      });
+
+      expect(sentBody()).not.toHaveProperty("output_config");
+      expect(expectDefined(sentBody().tools[0], "tool").input_schema.properties).toEqual(
+        schema.properties,
+      );
+      expect(extractText(result.content)).toBe('{"pair":["east",7]}');
+    });
+
     it.each(["max_tokens", "refusal"])(
       "passes a tool-path reply's %s stop through",
       async (stopReason) => {
@@ -1943,6 +2027,201 @@ describe("AnthropicProvider", () => {
         expect(extractText(result.content)).toBe("Let me think");
       },
     );
+
+    /** The body of an Anthropic API error. */
+    function errorBody(type: string, message: string) {
+      return { type: "error", error: { type, message }, request_id: "req_1" };
+    }
+
+    /** The SDK's error for a response, as the client raises it. */
+    function apiError(status: number, type: string, message: string): Error {
+      return APIError.generate(status, errorBody(type, message), undefined, new Headers());
+    }
+
+    it.each([
+      ["documented", "Schema is too complex for compilation."],
+      [
+        "grammar-size",
+        "The compiled grammar is too large, which would cause performance issues. Simplify your tool schemas or reduce the number of strict tools.",
+      ],
+      [
+        "optional-parameter",
+        "Schemas contains too many optional parameters (25), which would make grammar compilation inefficient. Reduce the number of optional parameters in your tool schemas (limit: 24).",
+      ],
+      [
+        "union-parameter",
+        "Schemas contains too many parameters with union types (17 parameters with type arrays or anyOf). This causes exponential compilation cost. Reduce the number of nullable or union-typed parameters (limit: 16 parameters with unions).",
+      ],
+      [
+        "pattern",
+        "output_config.format.schema: Unsupported regex feature in pattern field: pattern is too complex for structured output: reduce the {n,m} upper bound, narrow the character class range, or avoid nesting quantified groups",
+      ],
+    ])("retries once on the tool path past the grammar's %s limit", async (_limit, message) => {
+      const provider = createProvider();
+      mockCreate
+        .mockRejectedValueOnce(apiError(400, "invalid_request_error", message))
+        .mockResolvedValueOnce(
+          toolReply("claude-opus-5-5", "extract_data", { name: "Alice", age: 30 }),
+        );
+
+      const result = await provider.chat({
+        model: "claude-opus-5-5",
+        system: "Extract structured data",
+        messages: [{ role: "user", content: "Alice is 30" }],
+        responseFormat: PERSON_FORMAT,
+      });
+
+      expect(mockCreate).toHaveBeenCalledTimes(2);
+      expect(sentBody()).toHaveProperty("output_config");
+      const retry = expectDefined(mockCreate.mock.calls[1], "retry")[0];
+      expect(retry).not.toHaveProperty("output_config");
+      expect(retry.tools).toEqual([expect.objectContaining({ name: "extract_data" })]);
+      expect(result.content).toEqual([{ type: "text", text: '{"name":"Alice","age":30}' }]);
+      expect(result.stopReason).toBe("end_turn");
+    });
+
+    it.each([
+      [
+        "another invalid request",
+        apiError(
+          400,
+          "invalid_request_error",
+          "output_config.format.schema: Invalid schema: Unsupported format 'regex'.",
+        ),
+      ],
+      [
+        "a limit's message on another error type",
+        apiError(400, "api_error", "Schema is too complex for compilation."),
+      ],
+      [
+        "a limit's message on another status",
+        apiError(500, "invalid_request_error", "Schema is too complex for compilation."),
+      ],
+      ["an error without a body", new Error("Schema is too complex for compilation.")],
+      [
+        "a lookalike that isn't the SDK's error",
+        Object.assign(new Error("400"), {
+          status: 400,
+          type: "invalid_request_error",
+          error: errorBody("invalid_request_error", "Schema is too complex for compilation."),
+        }),
+      ],
+    ])("surfaces %s without a retry", async (_label, error) => {
+      const provider = createProvider();
+      mockCreate.mockRejectedValueOnce(error);
+
+      await expect(
+        provider.chat({
+          model: "claude-opus-5-5",
+          system: "Extract structured data",
+          messages: [{ role: "user", content: "Alice is 30" }],
+          responseFormat: PERSON_FORMAT,
+        }),
+      ).rejects.toBe(error);
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it("surfaces a tool-path request's compile error without a retry", async () => {
+      const provider = createProvider();
+      const error = apiError(
+        400,
+        "invalid_request_error",
+        "Schema is too complex for compilation.",
+      );
+      mockCreate.mockRejectedValueOnce(error);
+
+      await expect(
+        provider.chat({
+          model: "claude-opus-5-5",
+          system: "Compile the pipeline",
+          messages: [{ role: "user", content: "hi" }],
+          responseFormat: OPEN_FORMAT,
+        }),
+      ).rejects.toBe(error);
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it("surfaces the tool-path retry's own failure", async () => {
+      const provider = createProvider();
+      const retryError = apiError(529, "overloaded_error", "Overloaded");
+      mockCreate
+        .mockRejectedValueOnce(
+          apiError(400, "invalid_request_error", "Schema is too complex for compilation."),
+        )
+        .mockRejectedValueOnce(retryError);
+
+      await expect(
+        provider.chat({
+          model: "claude-opus-5-5",
+          system: "Extract structured data",
+          messages: [{ role: "user", content: "Alice is 30" }],
+          responseFormat: PERSON_FORMAT,
+        }),
+      ).rejects.toBe(retryError);
+      expect(mockCreate).toHaveBeenCalledTimes(2);
+    });
+
+    it("restores the capitalization of a structured-output reply's enum and const values", async () => {
+      const provider = createProvider();
+      const correction = {
+        rule: "Be brief",
+        category: "Style",
+        reasoning: "The user asked twice",
+        action: "New",
+        matchedExistingRuleId: null,
+        channelType: null,
+      };
+      mockCreate.mockResolvedValueOnce(
+        textReply("claude-opus-5-5", JSON.stringify({ corrections: [correction] })),
+      );
+
+      const result = await provider.chat({
+        model: "claude-opus-5-5",
+        system: "Extract corrections",
+        messages: [{ role: "user", content: "transcript" }],
+        responseFormat: {
+          type: "json_schema",
+          name: "correction-extraction",
+          schema: toObjectJsonSchema(CorrectionExtractionSchema),
+        },
+      });
+
+      expect(result.content).toEqual([
+        { type: "thinking", thinking: "", signature: "sig" },
+        {
+          type: "text",
+          text: JSON.stringify({
+            corrections: [{ ...correction, category: "style", action: "new" }],
+          }),
+        },
+      ]);
+    });
+
+    it("logs a casing restore with the model and format name", async () => {
+      const debugSpy = vi.spyOn(logger, "debug").mockImplementation(() => undefined);
+      try {
+        const provider = createProvider();
+        mockCreate.mockResolvedValueOnce(textReply("claude-opus-5-5", '{"value":"New"}'));
+
+        await provider.chat({
+          model: "claude-opus-5-5",
+          system: "sys",
+          messages: [{ role: "user", content: "hi" }],
+          responseFormat: {
+            type: "json_schema",
+            name: "action",
+            schema: toObjectJsonSchema(z.object({ value: z.literal("new") })),
+          },
+        });
+
+        expect(debugSpy).toHaveBeenCalledWith(
+          { model: "claude-opus-5-5", format: "action" },
+          expect.stringContaining("restored the capitalization"),
+        );
+      } finally {
+        debugSpy.mockRestore();
+      }
+    });
 
     it("passes a structured-output reply's text through, whatever it says", async () => {
       const provider = createProvider();

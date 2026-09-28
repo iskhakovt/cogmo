@@ -1,9 +1,12 @@
 /**
- * Auto-recall intention gate — decides whether to skip memory recall.
+ * Auto-recall intention gate — decides whether to skip memory recall, and
+ * what to query with.
  *
- * Pure, stateless function. Used in handle-message to gate the auto-recall
+ * Pure, stateless functions. Used in handle-message to gate the auto-recall
  * call based on the profile's auto_recall setting.
  */
+
+import type { InboundContent } from "../transport/content.js";
 
 export type AutoRecallMode = "off" | "always" | "heuristic" | "llm";
 
@@ -42,12 +45,29 @@ const CONTINUATION_SET = new Set([
 ]);
 
 /**
+ * The text auto-recall queries with for a turn's rows: their text parts
+ * joined by newline, so an image or document contributes only its caption.
+ * Empty when the turn carries no text.
+ */
+export function recallQueryText(rows: ReadonlyArray<{ content: InboundContent }>): string {
+  return rows
+    .flatMap(({ content }) =>
+      typeof content === "string"
+        ? [content]
+        : content.flatMap((b) => (b.type === "text" ? [b.text] : [])),
+    )
+    .join("\n");
+}
+
+/**
  * Returns true if auto-recall should be skipped for this message.
  *
  * Conservative by design — only skips messages with zero informational content.
  * A false positive (unnecessary recall) is cheap; a false negative (missed context) is harmful.
+ * A message with no text skips in every mode: an attachment alone gives recall nothing to embed.
  */
 export function shouldSkipRecall(mode: AutoRecallMode, message: string): boolean {
+  if (message.trim() === "") return true;
   switch (mode) {
     case "off":
       return true;

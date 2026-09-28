@@ -1,8 +1,8 @@
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { DrizzleAgentStore } from "../agent/store/index.js";
+import { bootstrapLock } from "../db/bootstrap-lock.js";
 import { pinoNoticeHandler } from "../db/helpers.js";
-import { migratePerFile } from "../db/migrate-per-file.js";
 import * as schema from "../db/schemas.js";
 import { transactor } from "../db/transactor.js";
 import { logger } from "../logger.js";
@@ -10,13 +10,14 @@ import { deriveMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { resolveEnvFile } from "../secrets/env-file.js";
 import { DrizzleSecretsStore } from "../secrets/store/index.js";
 import { DrizzleTransportStore } from "../transport/store/index.js";
+import { migrateAndSeed } from "./migrate-and-seed.js";
 import {
   NonInteractiveValidationError,
   persistNonInteractive,
   SetupEnvError,
   validateNonInteractive,
 } from "./non-interactive.js";
-import { applyReset, type ResetScope, VALID_RESETS } from "./reset.js";
+import { type ResetScope, VALID_RESETS } from "./reset.js";
 import { runWizard, WizardCancelled } from "./wizard.js";
 
 export interface SetupOptions {
@@ -27,8 +28,9 @@ export interface SetupOptions {
 /**
  * Run the setup wizard or non-interactive setup.
  *
- * Handles its own DB connection (like `seed`), runs migrations,
- * then delegates to the interactive wizard or non-interactive mode.
+ * Handles its own DB connection (like `seed`), migrates and seeds defaults
+ * (`migrateAndSeed`), then delegates to the interactive wizard or
+ * non-interactive mode.
  */
 export async function runSetup(opts: SetupOptions = {}): Promise<void> {
   if (opts.reset && !VALID_RESETS.has(opts.reset)) {
@@ -66,28 +68,28 @@ export async function runSetup(opts: SetupOptions = {}): Promise<void> {
       validatedNonInteractive = result.value;
     }
 
-    await migratePerFile(db, { migrationsFolder: "./migrations" });
-    logger.info("migrations applied");
-
     const tx = transactor(db);
+    const lock = bootstrapLock(client);
     const agentStore = new DrizzleAgentStore();
     const transportStore = new DrizzleTransportStore();
     const encryptionKey = deriveMasterKey(parseMasterKey(masterKey), "cogmo/secrets-at-rest/v1");
     const secretsStore = new DrizzleSecretsStore(encryptionKey);
 
-    if (opts.reset) {
-      await applyReset(opts.reset, { db });
-    }
+    const { userId } = await migrateAndSeed(
+      { bootstrapLock: lock, db, runInTx: tx, agentStore, transportStore },
+      { reset: opts.reset ?? null },
+    );
 
     if (validatedNonInteractive) {
       await persistNonInteractive(
         { runInTx: tx, agentStore, transportStore, secretsStore },
         validatedNonInteractive,
+        userId,
       );
       return;
     }
 
-    await runWizard({ db, agentStore, transportStore, masterKey });
+    await runWizard({ db, agentStore, transportStore, masterKey, userId, bootstrapLock: lock });
   } catch (err) {
     if (err instanceof WizardCancelled) {
       logger.info("setup cancelled by user");

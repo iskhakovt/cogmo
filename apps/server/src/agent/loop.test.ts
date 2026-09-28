@@ -779,6 +779,79 @@ describe("runStreamingAgentLoop", () => {
     });
   });
 
+  it("answers a call to an unknown tool with an error result the model recovers from", async () => {
+    // The model calls one of a tool's parameters as a tool of its own, reads
+    // the error, and retries with the parameter where it belongs.
+    const scripted = mockStreamProvider([
+      {
+        events: [{ type: "tool_start", id: "t1", name: "aspectRatio", input: { value: "16:9" } }],
+        stopReason: "tool_use",
+      },
+      {
+        events: [
+          {
+            type: "tool_start",
+            id: "t2",
+            name: "generate_image",
+            input: { prompt: "a lighthouse", aspectRatio: "16:9" },
+          },
+        ],
+        stopReason: "tool_use",
+      },
+      { events: [{ type: "text_delta", text: "Here it is." }], stopReason: "end_turn" },
+    ]);
+    // Each request's last message, read when it is sent: the loop keeps
+    // appending to the array it passes.
+    const lastSent: unknown[] = [];
+    const provider: LlmProvider = {
+      ...scripted,
+      chatStream: (params) => {
+        lastSent.push(params.messages.at(-1));
+        return scripted.chatStream(params);
+      },
+    };
+    const tools = new ToolRegistry();
+    tools.register(
+      defineTool({
+        name: "generate_image",
+        description: "draws",
+        schema: z.object({ prompt: z.string(), aspectRatio: z.enum(["1:1", "16:9"]).optional() }),
+        durable: true,
+        handler: async (input) => `drew ${input.prompt} at ${input.aspectRatio}`,
+      }),
+    );
+    const stepIds: string[] = [];
+    const stepRun: StepRunner = async (id, fn) => {
+      stepIds.push(id);
+      return fn();
+    };
+
+    const result = await testRunStreamingAgentLoop({
+      provider,
+      messages: [{ role: "user", content: "draw a lighthouse, widescreen" }],
+      tools,
+      onEvent: async () => {},
+      stepRun,
+    });
+
+    const unknownResult = {
+      type: "tool_result",
+      toolUseId: "t1",
+      content: 'Error: unknown tool "aspectRatio"',
+      isError: true,
+    };
+    expect(result.messages[2]?.content).toEqual([unknownResult]);
+    // The next request carries the error back to the model.
+    expect(lastSent[1]).toEqual({ role: "user", content: [unknownResult] });
+    expect(result.messages[4]?.content).toEqual([
+      { type: "tool_result", toolUseId: "t2", content: "drew a lighthouse at 16:9" },
+    ]);
+    expect(result.text).toBe("Here it is.");
+    expect(result.iterations).toBe(3);
+    // The unknown call runs no handler, so it plans no step.
+    expect(stepIds.filter((id) => id.startsWith("tool-"))).toHaveLength(1);
+  });
+
   it("emits onEvent for every event in order", async () => {
     const provider = mockStreamProvider([
       {

@@ -17,6 +17,7 @@ import {
 import * as R from "remeda";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
+import type { CacheDialect } from "../../llm/cache-dialect.js";
 import type { ContentBlock, Message } from "../../llm/types.js";
 import { skills } from "../../skills/store/schema.js";
 import { inboundMessages } from "../../transport/store/schema.js";
@@ -60,6 +61,7 @@ import {
   modelProviders,
   type ProfileMemoryScope,
   type ProviderAttrs,
+  ProviderAttrsSchema,
   pendingMemories,
   profileClasses,
   profiles,
@@ -68,6 +70,7 @@ import {
   scheduledTasks,
   steeringRules,
   subAgents,
+  systemPromptSnapshots,
   type ToolSet,
   type TtsProviderTypeValue,
   turnContexts,
@@ -268,6 +271,17 @@ export interface StoredTurnContext {
   messageId: string;
   rendered: string;
   context: TurnContext;
+}
+
+/** A row from `system_prompt_snapshots`: one epoch's system prompt. */
+export interface SystemPromptSnapshot {
+  id: string;
+  conversationId: string;
+  openedBy: string;
+  historyStart: string;
+  rendered: string;
+  configDigest: string;
+  createdAt: Date;
 }
 
 /**
@@ -596,6 +610,22 @@ export interface AgentStore {
     afterMessageId: string | null,
   ): Promise<ReadonlyArray<StoredTurnContext>>;
 
+  /** The conversation's current epoch: the snapshot opened latest in the transcript. */
+  getLatestSystemPromptSnapshot(
+    tx: Transaction,
+    conversationId: string,
+  ): Promise<SystemPromptSnapshot | undefined>;
+
+  /**
+   * Store the snapshot a turn opens, or return the one already stored for that
+   * turn. `(conversationId, openedBy)` is the opening step's idempotency key: a
+   * retry that re-runs a committed insert gets the first attempt's row back.
+   */
+  insertOrRecoverSystemPromptSnapshot(
+    tx: Transaction,
+    params: Omit<SystemPromptSnapshot, "id" | "createdAt">,
+  ): Promise<SystemPromptSnapshot>;
+
   /**
    * Append a summary, or recover the existing row when this
    * (conversationId, throughMessageId) pair was already written.
@@ -650,6 +680,22 @@ export interface AgentStore {
       memoryScope?: ProfileMemoryScope | null;
     },
   ): Promise<Profile>;
+
+  /**
+   * Keyed insert on `uq_profiles_user_name` (`.claude/rules/inngest.md`): a
+   * repeated `(userId, name)`, including `userId: null`, returns the stored
+   * profile's id as `recovered`, leaving the row as it was.
+   */
+  insertOrRecoverProfile(
+    tx: Transaction,
+    params: {
+      userId: string | null;
+      name: string;
+      basePrompt: string;
+      model: string;
+      toolSet: ToolSet;
+    },
+  ): Promise<{ kind: "new" | "recovered"; id: string }>;
 
   /** List profiles visible to `userId`: org profiles (user_id IS NULL) + the user's own profiles. */
   listProfiles(tx: Transaction, userId: string): Promise<ReadonlyArray<Profile>>;
@@ -741,9 +787,9 @@ export interface AgentStore {
    * REPEATABLE READ (the project default) doesn't catch this predicate
    * race — snapshot isolation doesn't predicate-lock. At single-user
    * scale + UI-only writes the residual race (concurrent inserts both
-   * seeing count=N-1) is acceptable; when multi-tenant lands, prefer
-   * `pg_advisory_xact_lock(user_id)` or a unique partial index over
-   * SERIALIZABLE — predicate races want prevention, not retry.
+   * seeing count=N-1) is acceptable; when multi-tenant lands, prevent it
+   * with an advisory lock taken before the snapshot, not SERIALIZABLE —
+   * see `.claude/rules/store-pattern.md`.
    */
   createCustomCompartment(
     tx: Transaction,
@@ -771,14 +817,11 @@ export interface AgentStore {
   ): Promise<{ id: string; role: string; content: string | ContentBlock[] } | undefined>;
 
   /**
-   * Load active steering rules for a profile + active channels, each with its
-   * `# Rules` section, in the order `# Rules` lists them within a section.
+   * Load a profile's active steering rules, every channel's included, each
+   * with its `# Rules` section and channel, in the order `# Rules` lists them
+   * within a section.
    */
-  getActiveRules(
-    tx: Transaction,
-    profileId: string,
-    channelTypes: ReadonlyArray<string>,
-  ): Promise<ReadonlyArray<SectionedRule>>;
+  getActiveRules(tx: Transaction, profileId: string): Promise<ReadonlyArray<SectionedRule>>;
 
   /**
    * The user's core memory blocks visible to one scope. `profileClass: null`
@@ -803,6 +846,12 @@ export interface AgentStore {
     tx: Transaction,
     params: { userId: string; profileClass: string; key: string },
   ): Promise<void>;
+
+  /** When each of the user's core memory blocks last changed, in every scope. */
+  getCoreMemoryUpdateTimes(
+    tx: Transaction,
+    userId: string,
+  ): Promise<ReadonlyArray<{ profileClass: string | null; key: string; updatedAt: Date }>>;
 
   /** The keys of one class's own blocks, in key order. */
   listCoreMemoryKeys(
@@ -939,8 +988,20 @@ export interface AgentStore {
       id: string;
       name: string;
       type: LlmProviderTypeValue;
+      baseUrl: string | null;
+      attrs: ProviderAttrs;
     }>
   >;
+
+  /**
+   * Set a provider's `attrs.cacheDialect`, keeping its other attrs. False when
+   * no provider has this id.
+   */
+  setProviderCacheDialect(
+    tx: Transaction,
+    providerId: string,
+    cacheDialect: CacheDialect,
+  ): Promise<boolean>;
 
   /** Delete a provider by ID (cascades to model_providers). */
   deleteProvider(tx: Transaction, providerId: string): Promise<void>;
@@ -1823,6 +1884,36 @@ export class DrizzleAgentStore implements AgentStore {
       );
   }
 
+  async getLatestSystemPromptSnapshot(
+    tx: Transaction,
+    conversationId: string,
+  ): Promise<SystemPromptSnapshot | undefined> {
+    const rows = await tx
+      .select()
+      .from(systemPromptSnapshots)
+      .where(eq(systemPromptSnapshots.conversationId, conversationId))
+      .orderBy(desc(systemPromptSnapshots.openedBy))
+      .limit(1);
+    return rows[0];
+  }
+
+  async insertOrRecoverSystemPromptSnapshot(
+    tx: Transaction,
+    params: Omit<SystemPromptSnapshot, "id" | "createdAt">,
+  ): Promise<SystemPromptSnapshot> {
+    // Keyed insert: see `.claude/rules/inngest.md`.
+    return single(
+      await tx
+        .insert(systemPromptSnapshots)
+        .values(params)
+        .onConflictDoUpdate({
+          target: [systemPromptSnapshots.conversationId, systemPromptSnapshots.openedBy],
+          set: { openedBy: params.openedBy },
+        })
+        .returning(),
+    );
+  }
+
   async getHistoryAfter(
     tx: Transaction,
     conversationId: string,
@@ -1908,6 +1999,26 @@ export class DrizzleAgentStore implements AgentStore {
       );
       return row as Profile;
     });
+  }
+
+  async insertOrRecoverProfile(
+    tx: Transaction,
+    params: {
+      userId: string | null;
+      name: string;
+      basePrompt: string;
+      model: string;
+      toolSet: ToolSet;
+    },
+  ): Promise<{ kind: "new" | "recovered"; id: string }> {
+    // Keyed insert: see `.claude/rules/inngest.md`.
+    const rows = await tx
+      .insert(profiles)
+      .values(params)
+      .onConflictDoUpdate({ target: [profiles.userId, profiles.name], set: { name: params.name } })
+      .returning({ id: profiles.id, inserted: sql<boolean>`(xmax = 0)` });
+    const { id, inserted } = single(rows);
+    return { kind: inserted ? "new" : "recovered", id };
   }
 
   async listProfiles(tx: Transaction, userId: string): Promise<ReadonlyArray<Profile>> {
@@ -2225,11 +2336,7 @@ export class DrizzleAgentStore implements AgentStore {
     return rows[0];
   }
 
-  async getActiveRules(
-    tx: Transaction,
-    profileId: string,
-    channelTypes: ReadonlyArray<string>,
-  ): Promise<ReadonlyArray<SectionedRule>> {
+  async getActiveRules(tx: Transaction, profileId: string): Promise<ReadonlyArray<SectionedRule>> {
     // Within a section: `safety` first (only operators write it), then the
     // narrower scope, so it is listed before a wider rule it conflicts with.
     // `id` breaks priority ties, which are common (corrections share 100,
@@ -2237,16 +2344,16 @@ export class DrizzleAgentStore implements AgentStore {
     // it `# Rules` could reorder, invalidating the cached prompt, with no rule
     // changed.
     const rows = await tx
-      .select({ rule: steeringRules.rule, source: steeringRules.source })
+      .select({
+        rule: steeringRules.rule,
+        source: steeringRules.source,
+        channelType: steeringRules.channelType,
+      })
       .from(steeringRules)
       .where(
         and(
           eq(steeringRules.active, true),
           or(isNull(steeringRules.profileId), eq(steeringRules.profileId, profileId)),
-          or(
-            isNull(steeringRules.channelType),
-            ...(channelTypes.length > 0 ? [inArray(steeringRules.channelType, channelTypes)] : []),
-          ),
         ),
       )
       .orderBy(
@@ -2256,7 +2363,11 @@ export class DrizzleAgentStore implements AgentStore {
         asc(steeringRules.priority),
         asc(steeringRules.id),
       );
-    return rows.map((r) => ({ rule: r.rule, section: ruleSection(r.source) }));
+    return rows.map((r) => ({
+      rule: r.rule,
+      section: ruleSection(r.source),
+      channelType: r.channelType,
+    }));
   }
 
   async getCoreMemoryBlocks(
@@ -2307,7 +2418,8 @@ export class DrizzleAgentStore implements AgentStore {
       .values(params)
       .onConflictDoUpdate({
         target: [coreMemoryBlocks.userId, coreMemoryBlocks.profileClass, coreMemoryBlocks.key],
-        set: { content: params.content, updatedAt: new Date() },
+        // The database clock, which also times snapshots and turn contexts.
+        set: { content: params.content, updatedAt: sql`now()` },
       });
   }
 
@@ -2324,6 +2436,20 @@ export class DrizzleAgentStore implements AgentStore {
           eq(coreMemoryBlocks.key, params.key),
         ),
       );
+  }
+
+  async getCoreMemoryUpdateTimes(
+    tx: Transaction,
+    userId: string,
+  ): Promise<ReadonlyArray<{ profileClass: string | null; key: string; updatedAt: Date }>> {
+    return tx
+      .select({
+        profileClass: coreMemoryBlocks.profileClass,
+        key: coreMemoryBlocks.key,
+        updatedAt: coreMemoryBlocks.updatedAt,
+      })
+      .from(coreMemoryBlocks)
+      .where(eq(coreMemoryBlocks.userId, userId));
   }
 
   async listCoreMemoryKeys(
@@ -2619,6 +2745,8 @@ export class DrizzleAgentStore implements AgentStore {
       id: string;
       name: string;
       type: LlmProviderTypeValue;
+      baseUrl: string | null;
+      attrs: ProviderAttrs;
     }>
   > {
     return tx
@@ -2626,8 +2754,26 @@ export class DrizzleAgentStore implements AgentStore {
         id: llmProviders.id,
         name: llmProviders.name,
         type: llmProviders.type,
+        baseUrl: llmProviders.baseUrl,
+        attrs: llmProviders.attrs,
       })
       .from(llmProviders);
+  }
+
+  async setProviderCacheDialect(
+    tx: Transaction,
+    providerId: string,
+    cacheDialect: CacheDialect,
+  ): Promise<boolean> {
+    // JSONB `||` merges the key into the row's attrs in one UPDATE, bypassing
+    // the column's write validation, so the patch is validated here.
+    const patch = ProviderAttrsSchema.parse({ cacheDialect });
+    const rows = await tx
+      .update(llmProviders)
+      .set({ attrs: sql`${llmProviders.attrs} || ${JSON.stringify(patch)}::jsonb` })
+      .where(eq(llmProviders.id, providerId))
+      .returning({ id: llmProviders.id });
+    return rows.length > 0;
   }
 
   async deleteProvider(tx: Transaction, providerId: string): Promise<void> {

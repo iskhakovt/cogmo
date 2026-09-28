@@ -1,5 +1,5 @@
 {
-  "id": "9b4d17a2-1d9d-4c3e-a46c-b787a00b2b2b",
+  "id": "869bf737-39ae-4a45-9f0f-be14356e1b81",
   "prevId": "f6897efa-6e9c-444e-93eb-7ac49e3eed1a",
   "version": "7",
   "dialect": "postgresql",
@@ -3463,18 +3463,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "run_as_user_id": {
-          "name": "run_as_user_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "run_as_profile_id": {
-          "name": "run_as_profile_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
         "last_fired_at": {
           "name": "last_fired_at",
           "type": "timestamp with time zone",
@@ -3538,26 +3526,7 @@
           "with": {}
         }
       },
-      "foreignKeys": {
-        "skills_run_as_user_id_users_id_fk": {
-          "name": "skills_run_as_user_id_users_id_fk",
-          "tableFrom": "skills",
-          "tableTo": "users",
-          "columnsFrom": ["run_as_user_id"],
-          "columnsTo": ["id"],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "skills_run_as_profile_id_profiles_id_fk": {
-          "name": "skills_run_as_profile_id_profiles_id_fk",
-          "tableFrom": "skills",
-          "tableTo": "profiles",
-          "columnsFrom": ["run_as_profile_id"],
-          "columnsTo": ["id"],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
+      "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "skills_name_unique": {
@@ -3571,10 +3540,6 @@
         "chk_skills_next_run_at_iff_schedule": {
           "name": "chk_skills_next_run_at_iff_schedule",
           "value": "(\"skills\".\"schedule\" IS NULL) = (\"skills\".\"next_run_at\" IS NULL)"
-        },
-        "chk_skills_run_as_iff_live_schedule": {
-          "name": "chk_skills_run_as_iff_live_schedule",
-          "value": "(\"skills\".\"schedule\" IS NOT NULL AND NOT \"skills\".\"disabled\") = (\"skills\".\"run_as_user_id\" IS NOT NULL) AND (\"skills\".\"schedule\" IS NOT NULL AND NOT \"skills\".\"disabled\") = (\"skills\".\"run_as_profile_id\" IS NOT NULL)"
         }
       },
       "isRLSEnabled": false
@@ -3845,7 +3810,24 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "uq_channels_fixed_type": {
+          "name": "uq_channels_fixed_type",
+          "columns": [
+            {
+              "expression": "type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "identity_mode = 'fixed'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},

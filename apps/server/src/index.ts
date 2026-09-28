@@ -52,15 +52,15 @@ import {
   checkInngestAuth,
   checkS3Bucket,
   checkS3KeyPair,
-  checkUuidv7,
   type HindsightCompat,
   independentProbeContext,
   loadHindsightCompat,
   runBootChecks,
   runHindsightChecks,
 } from "./boot/checks.js";
+import { prepareDataLayer, seedRuntimeDefaults } from "./boot/locked-bootstrap.js";
+import { type BootstrapLock, bootstrapLock } from "./db/bootstrap-lock.js";
 import { type Database, db, type Transactor, transactor } from "./db/index.js";
-import { migratePerFile } from "./db/migrate-per-file.js";
 import { env } from "./env.js";
 import { inboundArrived, inngest } from "./inngest/index.js";
 import type { LlmProvider } from "./llm/provider.js";
@@ -81,11 +81,9 @@ import { createSandboxReaper } from "./sandbox/reaper.js";
 import { DrizzleSandboxStore } from "./sandbox/store/index.js";
 import { deriveMasterKey, parseMasterKey } from "./secrets/encryption.js";
 import { DrizzleSecretsStore } from "./secrets/store/index.js";
-import { ensureFalImageDefaults, ensureWebChannel } from "./setup/seed.js";
 import { createSkillCronFireHandler } from "./skills/cron-fire-handler.js";
 import { createSkillCronTicker } from "./skills/cron-ticker.js";
 import { createSkillDepsReaper } from "./skills/deps-reaper-function.js";
-import { bootstrapSkillsRepo, ensureSkillsCodingRepo } from "./skills/repo.js";
 import { resolveSkillRunAs } from "./skills/run-as.js";
 import { SkillRunnerImpl, type SkillRunnerOptions } from "./skills/runner.js";
 import { DrizzleSkillStore } from "./skills/store/index.js";
@@ -197,6 +195,8 @@ export interface BootstrapOptions {
 export interface CoreDeps {
   db: Database;
   runInTx: Transactor;
+  /** The bootstrap lock on `db`'s pool, held by later stages' boot seeding. */
+  bootstrapLock: BootstrapLock;
   agentStore: DrizzleAgentStore;
   transportStore: DrizzleTransportStore;
   sandboxStore: DrizzleSandboxStore;
@@ -302,7 +302,7 @@ export interface RuntimeDeps {
   mcpRegistry: McpRegistryImpl;
   /**
    * Web-scoped Transport for the UI server's oRPC layer. `null` is
-   * defensive-only: `ensureWebChannel` runs just above, so a real boot always
+   * defensive-only: `seedRuntimeDefaults` provisions the web channel first, so a real boot always
    * resolves a channel — the null arm backstops a since-deleted channel and is
    * exercised by tests, not a runtime gap.
    */
@@ -320,30 +320,13 @@ export interface RuntimeDeps {
  * the Hindsight memory client. Constructs no sandbox, registers no
  * Inngest functions, starts no background work — concurrent invocations
  * with `cogmo serve` can't reap each other's sandboxes, which is the
- * specific race this stage was carved out to prevent. (Drizzle's PG
- * migrator advisory-locks against parallel migrate runs; the skills-repo
- * bootstrap is idempotent file writes.)
+ * specific race this stage was carved out to prevent. Migrations and the
+ * skills-repo bootstrap run under the bootstrap lock (`prepareDataLayer`), so
+ * parallel invocations apply them one at a time.
  */
 export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDeps> {
-  await migratePerFile(db, { migrationsFolder: "./migrations" });
-  logger.info("database migrations applied");
-
-  // Schema PKs default to `uuidv7()`. Verify the function is callable
-  // before any code path inserts a row — a missing extension turns
-  // every INSERT into a mid-turn `function does not exist` error
-  // instead of a clear boot-time failure.
-  await checkUuidv7(db);
-
-  // Bring the skills bare repo to its expected state on every boot —
-  // idempotent. The pre-receive hook is rewritten unconditionally so a Cogmo
-  // upgrade that tightens the policy takes effect on existing deployments.
-  // See `design/skills.md` → Skill storage.
-  const skillsRepo = await bootstrapSkillsRepo({ path: env.COGMO_SKILLS_PATH });
-  if (skillsRepo.initialized) {
-    logger.info({ path: skillsRepo.path }, "skills bare repo initialized");
-  }
-
   const tx = transactor(db);
+  const lock = bootstrapLock(db.$client);
   const agentStore = new DrizzleAgentStore();
   const transportStore = new DrizzleTransportStore();
   const sandboxStore = new DrizzleSandboxStore();
@@ -354,14 +337,10 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
   const skillStore = new DrizzleSkillStore();
   const webSessionStore = new DrizzleWebSessionStore();
 
-  // DB half of the skills-repo bootstrap: keep `coding_repos.skills.remote_url`
-  // in sync with the bare repo's `origin`. Idempotent — inserts on first run,
-  // updates on subsequent boots after the operator changes origin via the
-  // wizard or `cogmo migrate-skills-remote`, no-ops when already in sync.
-  // When the bare repo has no origin yet, the call returns `skipped_no_origin`
-  // and `delegate_coding({ repo: "skills" })` will fail with a clear message
-  // until the wizard/CLI runs.
-  await ensureSkillsCodingRepo({ runInTx: tx, codingStore }, { skillsRepoPath: skillsRepo.path });
+  await prepareDataLayer(
+    { bootstrapLock: lock, db, runInTx: tx, codingStore },
+    { skillsRepoPath: env.COGMO_SKILLS_PATH },
+  );
 
   if (!env.COGMO_MASTER_KEY) {
     throw new Error(
@@ -449,6 +428,7 @@ export async function bootstrapCore(opts: BootstrapOptions = {}): Promise<CoreDe
   return {
     db,
     runInTx: tx,
+    bootstrapLock: lock,
     agentStore,
     transportStore,
     sandboxStore,
@@ -950,19 +930,18 @@ export async function bootstrapRuntime(
   // exposes credentials as strings; runtime turns them into clients.
   const webTools = createWebTools(core.tavilyKey, core.openrouterKey);
 
-  // Image gen catalog is DB-driven (image_providers + image_models). At boot
-  // we seed the canonical fal catalog if a fal secret exists — handles both
-  // wizard-driven setups and the legacy FAL_API_KEY env var path. The
-  // catalog itself is loaded per-turn by `ImageToolsLoader`, so wizard / CLI
-  // CRUD takes effect immediately without a restart; provider adapters are
-  // memoized inside the loader so we only decrypt + construct each provider's
-  // SDK client once per process.
-  await ensureFalImageDefaults({
-    runInTx: core.runInTx,
-    agentStore: core.agentStore,
-    secretsStore: core.secretsStore,
-    ...(env.FAL_API_KEY && { envFalApiKey: env.FAL_API_KEY }),
-  });
+  // Fal image catalog + web channel, under the bootstrap lock; the web channel
+  // must exist before `startChannels` matches its placeholder adapter.
+  await seedRuntimeDefaults(
+    {
+      bootstrapLock: core.bootstrapLock,
+      runInTx: core.runInTx,
+      agentStore: core.agentStore,
+      transportStore: core.transportStore,
+      secretsStore: core.secretsStore,
+    },
+    { userId: core.user.id, ...(env.FAL_API_KEY && { envFalApiKey: env.FAL_API_KEY }) },
+  );
   const imageToolsLoader = new ImageToolsLoader({
     runInTx: core.runInTx,
     agentStore: core.agentStore,
@@ -1028,16 +1007,9 @@ export async function bootstrapRuntime(
     compactConversation(conversationId, {
       runInTx: core.runInTx,
       agentStore: core.agentStore,
-      transportStore: core.transportStore,
       resolveProvider: core.resolveProvider,
       promptSource,
     });
-
-  // Provision the web channel before startChannels so its placeholder adapter
-  // is matched (no "unknown channel type" warning). Idempotent + boot-time:
-  // seedDefaults runs only under `cogmo setup`, so this gives existing
-  // deployments the channel on upgrade without re-running the wizard.
-  await ensureWebChannel(core.runInTx, core.transportStore, core.user.id);
 
   // Bridge between the WebUiAdapter (streamed turns) and the UI server's SSE
   // routes (open tab connections) — one shared instance, both sides below.

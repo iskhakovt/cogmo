@@ -1,6 +1,33 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { toObjectJsonSchema } from "./json-schema.js";
+import { definitionsOf, isObjectNode, toObjectJsonSchema } from "./json-schema.js";
+
+describe("definitionsOf", () => {
+  it("returns $defs and definitions, and nothing else", () => {
+    const $defs = { A: { type: "string" } };
+    const definitions = { B: { type: "number" } };
+
+    expect(
+      definitionsOf({ type: "object", properties: {}, $defs, definitions, title: "x" }),
+    ).toEqual({ $defs, definitions });
+  });
+
+  it("returns nothing for a schema without definitions", () => {
+    expect(definitionsOf({ type: "object", $defs: undefined })).toEqual({});
+  });
+});
+
+describe("isObjectNode", () => {
+  it.each<[unknown, boolean]>([
+    ["object", true],
+    [["object", "null"], true],
+    ["array", false],
+    [["string", "null"], false],
+    [undefined, false],
+  ])("reads type %j as %s", (type, expected) => {
+    expect(isObjectNode({ type })).toBe(expected);
+  });
+});
 
 describe("toObjectJsonSchema", () => {
   it("returns the narrowed JsonSchema for an object schema", () => {

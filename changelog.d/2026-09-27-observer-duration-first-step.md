@@ -1,0 +1,1 @@
+The Observer's audit row reports how long the whole fire took: `durationMs` runs from the clock read by `record-start-time`, the fire's first step, so every invocation of the function body measures from the same start.

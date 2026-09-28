@@ -38,12 +38,13 @@ import {
   shouldSkipCounting,
   summarizationRequest,
 } from "./context.js";
-import { loadConversationContext } from "./conversation/load-conversation-context.js";
+import { loadSystemPrompt } from "./conversation/load-system-prompt.js";
 import {
   loadTurnHistory,
   summarizedSpan,
   TurnRowMissingError,
 } from "./conversation/load-turn-history.js";
+import { openSystemPromptEpoch } from "./conversation/open-system-prompt-epoch.js";
 import { storeTurnContext } from "./conversation/store-turn-context.js";
 import { buildInCooldownReply, isInCooldown } from "./cooldown.js";
 import { loadCoreMemoryScope } from "./core-memory/load-core-memory-scope.js";
@@ -56,16 +57,23 @@ import { createPipelinesService } from "./pipeline/pipelines-service.js";
 import type { PipelineRunStore, PipelineStore } from "./pipeline/store/index.js";
 import { PIPELINE_TOOL_NAMES } from "./pipeline/tools.js";
 import type { PromptSource } from "./prompt.js";
-import { shouldSkipRecall } from "./recall-gate.js";
+import { recallQueryText, shouldSkipRecall } from "./recall-gate.js";
 import { synthesizeDegradedReply } from "./repair.js";
 import { computeRetraction } from "./retraction.js";
 import { createSchedulingService } from "./scheduling/scheduling-service.js";
 import type { Service } from "./service.js";
 import type { AgentStore } from "./store/index.js";
 import { buildSubAgentTools } from "./subagent/sub-agent-tool-builder.js";
+import {
+  continuesEpoch,
+  historyStart,
+  stripThinkingBefore,
+  unannounced,
+} from "./system-prompt-snapshot.js";
 import type { ToolRegistry } from "./tools.js";
 import { turnCacheIntent } from "./turn-cache-intent.js";
 import {
+  announcedInView,
   findTurnContext,
   newMemories,
   renderTurnContext,
@@ -631,21 +639,22 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const turnTools = bindFrozenTools(turnInputs.tools, liveTools);
       const toolDefs = turnTools.definitions();
 
-      // The `# Tools` section renders from the frozen turn inputs — the same
-      // table the loop sends as `tools` — and the base prompt from the outer
-      // `profile` read.
-      const systemPrompt = await step.run("assemble-prompt", async () => {
-        const ctx = await loadConversationContext(
-          { runInTx: deps.runInTx, agentStore, transportStore },
-          { conversationId, userId, coreMemoryScope, profile: profile },
-        );
-        return promptSource.assemble({
-          profile: profile,
-          rules: ctx.rules,
-          coreMemory: ctx.coreMemory,
-          toolDefinitions: toolDefs,
-        });
-      });
+      // The system prompt as it renders now, and the conversation's current
+      // epoch (design/prompt-caching.md → System Prompt Snapshot). `# Tools`
+      // renders from the frozen turn inputs — the same table the loop sends
+      // as `tools` — and the base prompt from the outer `profile` read.
+      const systemPromptArgs = {
+        conversationId,
+        userId,
+        profile,
+        coreMemoryScope,
+        toolDefinitions: toolDefs,
+        toolTable: turnInputs.tools,
+      };
+      const systemPromptDeps = { runInTx: deps.runInTx, agentStore, promptSource };
+      const loadedSystemPrompt = await step.run("load-system-prompt", () =>
+        loadSystemPrompt({ ...systemPromptDeps, transportStore }, systemPromptArgs),
+      );
 
       // ──── Streaming section: bare-body glue + in-loop durable steps ────
 
@@ -784,10 +793,11 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // settings change mid-turn can flip the step's existence between
       // invocations — same accepted hazard as `summarize-prefix-outcome`,
       // see design/crash-recovery.md.
-      const recallResult = shouldSkipRecall(autoRecallMode, userContentText)
+      const recallQuery = recallQueryText(substitutedMessages);
+      const recallResult = shouldSkipRecall(autoRecallMode, recallQuery)
         ? { memories: [] }
         : await stepRun("auto-recall", async () =>
-            service.memory.recall(userContentText, { maxTokens: 2000 }).catch((err: unknown) => {
+            service.memory.recall(recallQuery, { maxTokens: 2000 }).catch((err: unknown) => {
               turnLogger.warn({ err }, "auto-recall failed, proceeding without recalled context");
               memoryRecallFailures.add(1, { bank_id: userId });
               return { memories: [] };
@@ -804,19 +814,48 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       const hasAttachments = resolvedBlocks.some(
         (b) => b.type === "image" || b.type === "document",
       );
-      const turnContextInput = {
-        handledAt: new Date(turn.createdAt),
+      const handledAt = new Date(turn.createdAt);
+      const recalledMemories = recallResult.memories.map((m) => m.content);
+      const { channelTypes, coreMemoryChanges } = loadedSystemPrompt;
+      // An upper bound on the stored block, which compaction counts: every
+      // recalled memory and every core-memory change since the snapshot. The
+      // stored block leaves out what earlier turns still in view show.
+      const provisionalTurnContext = renderTurnContext({
+        handledAt,
         timezone: deps.userTimezone,
         context: {
-          recalledMemories: recallResult.memories.map((m) => m.content),
+          recalledMemories,
           voiceMode: turnInputs.voiceMode,
-          channelTypes: [],
-          announcedCoreMemoryBlocks: [],
+          channelTypes,
+          announcedCoreMemoryBlocks: coreMemoryChanges.map(({ profileClass, key, updatedAt }) => ({
+            profileClass,
+            key,
+            updatedAt,
+          })),
         },
-      };
-      const provisionalTurnContext = renderTurnContext(turnContextInput);
+        coreMemoryUpdates: { scope: coreMemoryScope, blocks: coreMemoryChanges },
+      });
+
+      // The epoch continues unless the configuration or the summary the history
+      // starts from changed; compaction below can still open one. The turns
+      // before the epoch's opening row lose their thinking blocks, which are
+      // bound to an earlier system prompt or history.
+      const loadedStart = historyStart(turnHistory.messageIds, null);
+      const continuing = continuesEpoch(loadedSystemPrompt.snapshot, {
+        configDigest: loadedSystemPrompt.configDigest,
+        historyStart: loadedStart,
+      })
+        ? loadedSystemPrompt.snapshot
+        : null;
+      // An opener missing from the history belongs to a concurrent turn's epoch,
+      // which opened after everything before this turn.
+      const openerIndex =
+        continuing === null ? -1 : turnHistory.messageIds.indexOf(continuing.openedBy);
       // The row's content, or the resolved image and document blocks it names.
-      let historyMessages: Message[] = history.with(
+      let historyMessages: Message[] = stripThinkingBefore(
+        history,
+        openerIndex === -1 ? turnIndex : openerIndex,
+      ).with(
         turnIndex,
         withTurnContext(
           { role: "user", content: hasAttachments ? resolvedBlocks : turnRow.content },
@@ -898,7 +937,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       let summaryTruncated = false;
 
       const compactResult = await compactMessages(
-        systemPrompt,
+        continuing?.rendered ?? loadedSystemPrompt.rendered,
         historyMessages,
         toolDefs,
         {
@@ -1003,6 +1042,8 @@ export function createHandleMessage(deps: HandleMessageDeps) {
       // among them, while the column stores `span.messageCount`.
       const splitIdx = compactResult.event?.messagesSummarized ?? 0;
       const span = splitIdx > 0 ? summarizedSpan(turnHistory.messageIds, splitIdx) : null;
+      // The cutoff of the summary this turn stored, which later turns' history starts after.
+      let storedCutoff: string | null = null;
       if (summaryText !== null && span !== null && !summaryTruncated) {
         // `text` needs the local because `summaryText` is a `let` whose
         // narrowing TypeScript discards inside the callback below; `span` is a
@@ -1056,28 +1097,58 @@ export function createHandleMessage(deps: HandleMessageDeps) {
             // summarizing turn wrote.
             return { id: row.id };
           });
+          storedCutoff = span.cutoff;
         } catch (err) {
           turnLogger.warn({ err }, "failed to persist conversation summary, continuing the turn");
         }
       }
 
-      // Deduplicated after compaction: before it, a memory whose only earlier
-      // copy compaction then removes would be dropped.
       const turnPosition = findTurnContext(historyMessages, provisionalTurnContext);
       if (turnPosition === -1) throw new Error("compaction dropped the turn's own message");
+
+      // A summary this turn stored moves the history's start, so the turn opens
+      // an epoch on the prefix compaction already rewrote. An opening turn
+      // strips every thinking block before its own message.
+      const epochStart = historyStart(turnHistory.messageIds, storedCutoff);
+      const epoch =
+        continuing !== null && continuing.historyStart === epochStart
+          ? continuing
+          : await step.run("open-system-prompt-epoch", () =>
+              openSystemPromptEpoch(systemPromptDeps, {
+                ...systemPromptArgs,
+                openedBy: turn.id,
+                historyStart: epochStart,
+              }),
+            );
+      if (epoch.openedBy === turn.id) {
+        historyMessages = stripThinkingBefore(historyMessages, turnPosition);
+      }
+
+      // Deduplicated after compaction: before it, a memory or an announcement
+      // whose only earlier copy compaction then removes would be dropped. An
+      // opening turn's snapshot shows core memory as it is, so it announces
+      // nothing.
+      const earlierInView = historyMessages.toSpliced(turnPosition, 1);
+      const announced =
+        epoch.openedBy === turn.id
+          ? []
+          : unannounced(coreMemoryChanges, announcedInView(earlierInView, turnHistory));
       const renderedTurnContext = await step.run("render-turn-context", () =>
         storeTurnContext(
           { runInTx: deps.runInTx, agentStore },
           {
-            ...turnContextInput,
             messageId: turn.id,
+            handledAt,
+            timezone: deps.userTimezone,
             context: {
-              ...turnContextInput.context,
               recalledMemories: newMemories(
-                turnContextInput.context.recalledMemories,
-                shownMemories(historyMessages.toSpliced(turnPosition, 1), turnHistory),
+                recalledMemories,
+                shownMemories(earlierInView, turnHistory),
               ),
+              voiceMode: turnInputs.voiceMode,
+              channelTypes,
             },
+            coreMemoryUpdates: { scope: coreMemoryScope, blocks: announced },
           },
         ),
       );
@@ -1088,7 +1159,7 @@ export function createHandleMessage(deps: HandleMessageDeps) {
         result = await runStreamingAgentLoop({
           provider,
           model,
-          systemPrompt,
+          systemPrompt: epoch.rendered,
           messages: historyMessages,
           tools: turnTools,
           service,

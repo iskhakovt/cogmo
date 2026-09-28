@@ -27,6 +27,7 @@ import {
   type SttProviderTypeValue,
   type TtsProviderTypeValue,
 } from "../agent/store/schema.js";
+import type { BootstrapLock } from "../db/bootstrap-lock.js";
 import { type Transactor, transactor } from "../db/transactor.js";
 import { env } from "../env.js";
 import {
@@ -54,7 +55,7 @@ import type { TransportStore } from "../transport/store/index.js";
 import { ElevenLabsTtsProvider } from "../voice/elevenlabs.js";
 import { OpenAIVoiceProvider } from "../voice/openai.js";
 import type { TtsProvider } from "../voice/types.js";
-import { seedChannelRules, seedDefaults } from "./seed.js";
+import { seedChannelRules } from "./seed.js";
 import {
   type DaytonaProbeOpts,
   validateClaudeCodeOauthToken,
@@ -85,6 +86,7 @@ export interface WizardDeps {
   agentStore: AgentStore;
   transportStore: TransportStore;
   secretsStore: SecretsStore;
+  bootstrapLock: BootstrapLock;
 }
 
 // --- Provider UI metadata (canonical types/URLs come from providers.ts) ---
@@ -142,14 +144,6 @@ const PROVIDER_HELP: Partial<Record<ProviderType, { url: string; path: string; k
 //
 // Naming convention: matches existing `Exported for unit tests` notes
 // elsewhere in the codebase (e.g., `cleanup-orphan-run-branches.ts:108`).
-
-async function stepSeedDefaults(deps: WizardDeps): Promise<{ userId: string; profileId: string }> {
-  const s = p.spinner();
-  s.start("Checking default user and profile...");
-  const result = await seedDefaults(deps.runInTx, deps.agentStore, deps.transportStore);
-  s.stop("Default user and profile ready.");
-  return result;
-}
 
 export async function stepConfigureProvider(deps: WizardDeps): Promise<void> {
   const existing = await deps.runInTx((tx) => deps.agentStore.listProviders(tx));
@@ -1661,8 +1655,10 @@ export async function stepConfigureSkillsRemote(deps: WizardDeps): Promise<void>
   const skillsRepoPath = env.COGMO_SKILLS_PATH;
 
   // Bootstrap the bare repo so we have something to attach `origin` to.
-  // Idempotent — no-op when the repo already exists.
-  const skillsRepo = await bootstrapSkillsRepo({ path: skillsRepoPath });
+  // Idempotent — no-op when the repo already exists. Under the bootstrap lock,
+  // like `cogmo serve`'s: two first-time inits on one path can fail on git's
+  // config lock.
+  const skillsRepo = await deps.bootstrapLock(() => bootstrapSkillsRepo({ path: skillsRepoPath }));
   if (skillsRepo.initialized) {
     p.log.info(`Initialized bare skills repo at ${skillsRepoPath}`);
   }
@@ -1784,6 +1780,9 @@ export async function runWizard(deps: {
   agentStore: AgentStore;
   transportStore: TransportStore;
   masterKey: string;
+  /** The default user `migrateAndSeed` seeded ahead of the wizard. */
+  userId: string;
+  bootstrapLock: BootstrapLock;
 }): Promise<void> {
   const encryptionKey = deriveMasterKey(parseMasterKey(deps.masterKey), "cogmo/secrets-at-rest/v1");
   const tx = transactor(deps.db);
@@ -1794,12 +1793,13 @@ export async function runWizard(deps: {
     agentStore: deps.agentStore,
     transportStore: deps.transportStore,
     secretsStore,
+    bootstrapLock: deps.bootstrapLock,
   };
 
   p.intro("Cogmo Setup");
 
-  // Step 1: Seed defaults
-  const { userId } = await stepSeedDefaults(wizardDeps);
+  // Step 1: defaults, seeded by `migrateAndSeed` before the wizard starts.
+  p.log.success("Default user and profile ready.");
 
   // Step 2: LLM provider (required — loop until configured)
   let hasProvider = false;
@@ -1813,7 +1813,7 @@ export async function runWizard(deps: {
   }
 
   // Step 3: Telegram (optional)
-  const { botUsername } = await stepConfigureTelegram(wizardDeps, userId);
+  const { botUsername } = await stepConfigureTelegram(wizardDeps, deps.userId);
 
   // Step 4: Optional tools (Tavily, fal.ai)
   await stepConfigureOptionalTools(wizardDeps);

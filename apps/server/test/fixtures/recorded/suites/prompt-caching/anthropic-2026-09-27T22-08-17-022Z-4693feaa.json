@@ -1,0 +1,38 @@
+{
+  "fixtures": [
+    {
+      "match": {
+        "userMessage": "<turn_context>\nCurrent time: [NOW]\n\nReply modality: text\n</turn_context>\n\nDraw me a lighthouse on a rocky coast at dusk, for the wall of my study.",
+        "model": "claude-sonnet-5",
+        "turnIndex": 1,
+        "hasToolResult": true
+      },
+      "response": {
+        "content": "Here's your lighthouse on a rocky coast at dusk — hope it suits the study."
+      },
+      "recordedTimings": {
+        "ttftMs": 1079,
+        "interChunkDelaysMs": [
+          0,
+          0,
+          0,
+          220,
+          7,
+          0,
+          0,
+          40,
+          41,
+          41,
+          34,
+          4,
+          0
+        ],
+        "totalDurationMs": 1466
+      },
+      "metadata": {
+        "systemHash": "b881c548",
+        "toolsHash": "994a1d95"
+      }
+    }
+  ]
+}

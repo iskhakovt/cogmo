@@ -1,6 +1,9 @@
 import { eq, sql } from "drizzle-orm";
+import * as R from "remeda";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { z } from "zod";
 import type { Database, Transactor } from "../../db/index.js";
+import type { CacheDialect } from "../../llm/cache-dialect.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../../secrets/encryption.js";
 import { DrizzleSecretsStore } from "../../secrets/store/index.js";
 import { skills } from "../../skills/store/schema.js";
@@ -8,7 +11,13 @@ import { expectDefined } from "../../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../../test/pglite.js";
 import { inboundMessages } from "../../transport/store/schema.js";
 import { DrizzleAgentStore } from "./index.js";
-import { conversationSummaries, coreMemoryBlocks, messages } from "./schema.js";
+import {
+  conversationSummaries,
+  coreMemoryBlocks,
+  messages,
+  type ProviderAttrs,
+  systemPromptSnapshots,
+} from "./schema.js";
 
 let db: Database;
 let tx: Transactor;
@@ -222,6 +231,31 @@ describe("DrizzleAgentStore", () => {
         }),
       );
       // No throw — same name is allowed when (user_id, name) differs.
+    });
+
+    it("insertOrRecoverProfile recovers a repeated org profile name without overwriting it", async () => {
+      const params = { userId: null, name: "assistant", model: "m", toolSet: [] };
+      const first = await tx((trx) =>
+        store.insertOrRecoverProfile(trx, { ...params, basePrompt: "first" }),
+      );
+      const second = await tx((trx) =>
+        store.insertOrRecoverProfile(trx, { ...params, basePrompt: "second" }),
+      );
+
+      expect(first.kind).toBe("new");
+      expect(second).toEqual({ kind: "recovered", id: first.id });
+      const stored = await tx((trx) => store.getProfile(trx, first.id));
+      expect(stored?.basePrompt).toBe("first");
+    });
+
+    it("insertOrRecoverProfile keys on the owner as well as the name", async () => {
+      const userId = await seedUser();
+      const params = { name: "assistant", basePrompt: "p", model: "m", toolSet: [] };
+      const org = await tx((trx) => store.insertOrRecoverProfile(trx, { ...params, userId: null }));
+      const own = await tx((trx) => store.insertOrRecoverProfile(trx, { ...params, userId }));
+
+      expect(own.kind).toBe("new");
+      expect(own.id).not.toBe(org.id);
     });
 
     it("rejects duplicate name within the same user", async () => {
@@ -1137,10 +1171,10 @@ describe("DrizzleAgentStore", () => {
         },
       ]);
 
-      const rules = await tx((trx) => store.getActiveRules(trx, profileId, []));
+      const rules = await tx((trx) => store.getActiveRules(trx, profileId));
       expect(rules).toEqual([
-        { rule: "Global safety rule", section: "always" },
-        { rule: "Be concise", section: "always" },
+        { rule: "Global safety rule", section: "always", channelType: null },
+        { rule: "Be concise", section: "always", channelType: null },
       ]);
     });
 
@@ -1172,7 +1206,7 @@ describe("DrizzleAgentStore", () => {
           rule("Operator", "manual", 200, null),
         ]);
 
-      const rules = await tx((trx) => store.getActiveRules(trx, profileId, ["telegram"]));
+      const rules = await tx((trx) => store.getActiveRules(trx, profileId));
       expect(Object.fromEntries(rules.map((r) => [r.rule, r.section]))).toEqual({
         Operator: "always",
         Stated: "from_user",
@@ -1210,9 +1244,7 @@ describe("DrizzleAgentStore", () => {
           rule("This profile, on telegram", { profileId, channelType: "telegram" }, 100),
         ]);
 
-      expect(
-        (await tx((trx) => store.getActiveRules(trx, profileId, ["telegram"]))).map((r) => r.rule),
-      ).toEqual([
+      expect((await tx((trx) => store.getActiveRules(trx, profileId))).map((r) => r.rule)).toEqual([
         "This profile, on telegram",
         "This profile, all channels",
         "All profiles, on telegram",
@@ -1245,9 +1277,9 @@ describe("DrizzleAgentStore", () => {
         },
       ]);
 
-      expect(await tx((trx) => store.getActiveRules(trx, profileId, []))).toEqual([
-        { rule: "Global safety rule", section: "always" },
-        { rule: "Profile style rule", section: "always" },
+      expect(await tx((trx) => store.getActiveRules(trx, profileId))).toEqual([
+        { rule: "Global safety rule", section: "always", channelType: null },
+        { rule: "Profile style rule", section: "always", channelType: null },
       ]);
     });
 
@@ -1329,9 +1361,9 @@ describe("DrizzleAgentStore", () => {
       await observe("Second rule", second.id);
       await observe("First rule", first.id);
 
-      expect(await tx((trx) => store.getActiveRules(trx, profileId, []))).toEqual([
-        { rule: "First rule", section: "learned" },
-        { rule: "Second rule", section: "learned" },
+      expect(await tx((trx) => store.getActiveRules(trx, profileId))).toEqual([
+        { rule: "First rule", section: "learned", channelType: null },
+        { rule: "Second rule", section: "learned", channelType: null },
       ]);
       expect((await tx((trx) => store.getCorrections(trx, profileId))).map((c) => c.rule)).toEqual([
         "First rule",
@@ -1341,10 +1373,10 @@ describe("DrizzleAgentStore", () => {
 
     it("returns empty array when no active rules", async () => {
       const profileId = await seedProfile();
-      expect(await tx((trx) => store.getActiveRules(trx, profileId, []))).toEqual([]);
+      expect(await tx((trx) => store.getActiveRules(trx, profileId))).toEqual([]);
     });
 
-    it("returns channel-scoped rules when channel is active", async () => {
+    it("returns every channel's rules with their channel, the narrower scope first", async () => {
       const profileId = await seedProfile();
       const { steeringRules: sr } = await import("./schema.js");
       await db.insert(sr).values([
@@ -1380,20 +1412,10 @@ describe("DrizzleAgentStore", () => {
         },
       ]);
 
-      const rules = async (channelTypes: ReadonlyArray<string>) =>
-        (await tx((trx) => store.getActiveRules(trx, profileId, channelTypes))).map((r) => r.rule);
-
-      // No channels active — only null-scoped rules
-      expect(await rules([])).toEqual(["Global rule"]);
-
-      // Telegram active — telegram + global, the narrower scope first
-      expect(await rules(["telegram"])).toEqual(["Telegram rule", "Global rule"]);
-
-      // Both channels — union
-      expect(await rules(["telegram", "slack"])).toEqual([
-        "Telegram rule",
-        "Slack rule",
-        "Global rule",
+      expect(await tx((trx) => store.getActiveRules(trx, profileId))).toEqual([
+        { rule: "Telegram rule", section: "always", channelType: "telegram" },
+        { rule: "Slack rule", section: "always", channelType: "slack" },
+        { rule: "Global rule", section: "always", channelType: null },
       ]);
     });
   });
@@ -1552,6 +1574,54 @@ describe("DrizzleAgentStore", () => {
       );
       expect(blocks).toEqual([]);
     });
+
+    it("stamps a replaced block with its transaction's database time", async () => {
+      // Snapshots and turn contexts are timed by the same clock, so a change
+      // reads as before or after them.
+      const userId = await seedUser();
+      await upsert(userId, null, "identity", "Name: Tim");
+
+      const { updatedAt, now } = await tx(async (trx) => {
+        const {
+          rows: [{ now }],
+        } = z
+          .object({ rows: z.tuple([z.object({ now: z.coerce.date() })]) })
+          .parse(await trx.execute(sql`SELECT now() AS now`));
+        await store.upsertCoreMemoryBlock(trx, {
+          userId,
+          profileClass: null,
+          key: "identity",
+          content: "Name: Tim\nHome: Lisbon",
+        });
+        const [row] = await trx
+          .select({ updatedAt: coreMemoryBlocks.updatedAt })
+          .from(coreMemoryBlocks)
+          .where(eq(coreMemoryBlocks.userId, userId));
+        return { updatedAt: expectDefined(row, "block").updatedAt, now };
+      });
+
+      expect(updatedAt).toEqual(now);
+    });
+
+    it("lists when each of the user's blocks last changed, in every scope", async () => {
+      const userId = await seedUser();
+      const otherUser = await seedUser();
+      await seedClass(userId, "game");
+      await upsert(userId, null, "identity", "Name: Tim");
+      await upsert(userId, "game", "preferences", "Dice");
+      await upsert(otherUser, null, "identity", "Name: Ada");
+
+      const times = await tx((trx) => store.getCoreMemoryUpdateTimes(trx, userId));
+
+      expect(times.map(({ profileClass, key }) => ({ profileClass, key }))).toEqual(
+        expect.arrayContaining([
+          { profileClass: null, key: "identity" },
+          { profileClass: "game", key: "preferences" },
+        ]),
+      );
+      expect(times).toHaveLength(2);
+      expect(times.every((t) => t.updatedAt instanceof Date)).toBe(true);
+    });
   });
 
   describe("getLastMessageTime", () => {
@@ -1666,6 +1736,93 @@ describe("DrizzleAgentStore", () => {
       await seedProvider("p2");
       const list = await tx((trx) => store.listProviders(trx));
       expect(list.map((p) => p.name).sort()).toEqual(["p1", "p2"]);
+    });
+
+    async function seedGateway(attrs: ProviderAttrs) {
+      const { id: secretId } = await tx((trx) =>
+        secretsStore.putSecret(trx, { name: "gateway_key", plaintext: "sk-test" }),
+      );
+      return tx((trx) =>
+        store.createProvider(trx, {
+          name: "gateway",
+          type: "openai_compatible",
+          baseUrl: "https://gateway.internal/v1",
+          secretId,
+          attrs,
+        }),
+      );
+    }
+
+    it("lists each provider's base URL and attrs", async () => {
+      await seedProvider("claude");
+      await seedGateway({ cacheDialect: "openrouter" });
+
+      const list = await tx((trx) => store.listProviders(trx));
+
+      expect(R.sortBy(list, (p) => p.name)).toEqual([
+        expect.objectContaining({ name: "claude", type: "anthropic", baseUrl: null, attrs: {} }),
+        expect.objectContaining({
+          name: "gateway",
+          type: "openai_compatible",
+          baseUrl: "https://gateway.internal/v1",
+          attrs: { cacheDialect: "openrouter" },
+        }),
+      ]);
+    });
+
+    describe("setProviderCacheDialect", () => {
+      it("sets the dialect and keeps the provider's other attrs", async () => {
+        const { id } = await seedGateway({
+          cacheDialect: "openrouter",
+          headers: { "HTTP-Referer": "https://cogmo.example" },
+        });
+
+        const updated = await tx((trx) => store.setProviderCacheDialect(trx, id, "none"));
+
+        expect(updated).toBe(true);
+        const provider = await tx((trx) => store.getProvider(trx, id));
+        expect(provider?.attrs).toEqual({
+          cacheDialect: "none",
+          headers: { "HTTP-Referer": "https://cogmo.example" },
+        });
+      });
+
+      it("adds a dialect to a row that has none", async () => {
+        const { id } = await seedGateway({});
+
+        await tx((trx) => store.setProviderCacheDialect(trx, id, "openai"));
+
+        const provider = await tx((trx) => store.getProvider(trx, id));
+        expect(provider?.attrs).toEqual({ cacheDialect: "openai" });
+      });
+
+      it("leaves other providers alone", async () => {
+        const { id } = await seedGateway({ cacheDialect: "openrouter" });
+        const { id: otherId } = await seedProvider("claude");
+
+        await tx((trx) => store.setProviderCacheDialect(trx, id, "none"));
+
+        const other = await tx((trx) => store.getProvider(trx, otherId));
+        expect(other?.attrs).toEqual({});
+      });
+
+      it("returns false when no provider has the id", async () => {
+        const updated = await tx((trx) =>
+          store.setProviderCacheDialect(trx, "01900000-0000-7000-8000-000000000000", "none"),
+        );
+
+        expect(updated).toBe(false);
+      });
+
+      it("rejects a dialect outside the schema", async () => {
+        const { id } = await seedGateway({ cacheDialect: "openrouter" });
+
+        await expect(
+          tx((trx) => store.setProviderCacheDialect(trx, id, "bogus" as unknown as CacheDialect)),
+        ).rejects.toThrow();
+        const provider = await tx((trx) => store.getProvider(trx, id));
+        expect(provider?.attrs).toEqual({ cacheDialect: "openrouter" });
+      });
     });
 
     it("deleteProvider cascades to model_providers", async () => {
@@ -2900,8 +3057,10 @@ describe("DrizzleAgentStore", () => {
         }),
       );
 
-      const rules = await tx((trx) => store.getActiveRules(trx, profileId, []));
-      expect(rules).toEqual([{ rule: "New consolidated rule", section: "learned" }]);
+      const rules = await tx((trx) => store.getActiveRules(trx, profileId));
+      expect(rules).toEqual([
+        { rule: "New consolidated rule", section: "learned", channelType: null },
+      ]);
     });
   });
 
@@ -4344,7 +4503,9 @@ describe("turn contexts", () => {
     recalledMemories: ["runs Proxmox"],
     voiceMode: false,
     channelTypes: [],
-    announcedCoreMemoryBlocks: [{ profileClass: null, key: "identity" }],
+    announcedCoreMemoryBlocks: [
+      { profileClass: null, key: "identity", updatedAt: "2026-09-27T10:01:00.000Z" },
+    ],
   };
 
   async function seedUserRow() {
@@ -4489,6 +4650,16 @@ describe("turn contexts", () => {
     await expect(tx((trx) => store.listTurnContexts(trx, conversationId, null))).rejects.toThrow();
   });
 
+  it("reads a row that announced nothing, as every row before versioned announcements did", async () => {
+    const { conversationId, row } = await seedUserRow();
+    await db.execute(
+      sql`INSERT INTO turn_contexts (message_id, rendered, context) VALUES (${row.id}, 'raw', '{"recalledMemories": [], "voiceMode": false, "channelTypes": [], "announcedCoreMemoryBlocks": []}'::jsonb)`,
+    );
+
+    const [stored] = await tx((trx) => store.listTurnContexts(trx, conversationId, null));
+    expect(stored?.context.announcedCoreMemoryBlocks).toEqual([]);
+  });
+
   it("finds a turn's user row by its inbound, not a later tool result, in its own conversation", async () => {
     const { userId, profileId, conversationId, stamp, row } = await seedUserRow();
     // The turn's reply and its tool results cursor on the same inbound, the
@@ -4540,5 +4711,103 @@ describe("turn contexts", () => {
     await expect(
       tx((trx) => store.findUserMessageByInbound(trx, conversationId, INBOUND)),
     ).resolves.toEqual({ id: second.id, createdAt: second.createdAt });
+  });
+});
+
+describe("system prompt snapshots", () => {
+  async function userRow(conversationId: string, stamp: { profileId: string; model: string }) {
+    return (
+      await tx((trx) =>
+        store.insertMessage(trx, {
+          conversationId,
+          role: "user",
+          content: "hello",
+          lastInboundMessageId: "019d0000-0000-7000-8000-0000000000fe",
+          ...stamp,
+        }),
+      )
+    ).id;
+  }
+
+  function snapshot(conversationId: string, openedBy: string, rendered: string) {
+    return {
+      conversationId,
+      openedBy,
+      historyStart: openedBy,
+      rendered,
+      configDigest: `digest of ${rendered}`,
+    };
+  }
+
+  it("stores the snapshot a turn opens and reads it back as the conversation's latest", async () => {
+    const { conversationId, stamp } = await seedConversation();
+    const opener = await userRow(conversationId, stamp);
+
+    const row = await tx((trx) =>
+      store.insertOrRecoverSystemPromptSnapshot(trx, snapshot(conversationId, opener, "first")),
+    );
+
+    expect(row).toMatchObject(snapshot(conversationId, opener, "first"));
+    expect(row.createdAt).toBeInstanceOf(Date);
+    await expect(
+      tx((trx) => store.getLatestSystemPromptSnapshot(trx, conversationId)),
+    ).resolves.toEqual(row);
+  });
+
+  it("recovers the stored row when the same turn opens an epoch twice", async () => {
+    const { conversationId, stamp } = await seedConversation();
+    const opener = await userRow(conversationId, stamp);
+    const first = await tx((trx) =>
+      store.insertOrRecoverSystemPromptSnapshot(trx, snapshot(conversationId, opener, "first")),
+    );
+
+    const retry = await tx((trx) =>
+      store.insertOrRecoverSystemPromptSnapshot(trx, snapshot(conversationId, opener, "retry")),
+    );
+
+    expect(retry).toEqual(first);
+    const rows = await db.select().from(systemPromptSnapshots);
+    expect(rows).toHaveLength(1);
+  });
+
+  it("returns the epoch opened latest in the transcript, and only the conversation's own", async () => {
+    const { userId, profileId, conversationId, stamp } = await seedConversation();
+    const earlier = await userRow(conversationId, stamp);
+    const later = await userRow(conversationId, stamp);
+    const other = (
+      await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: true }))
+    ).id;
+    const otherRow = await userRow(other, stamp);
+    // Inserted out of transcript order.
+    for (const [conversation, opener, text] of [
+      [conversationId, later, "later"],
+      [conversationId, earlier, "earlier"],
+      [other, otherRow, "other"],
+    ] as const) {
+      await tx((trx) =>
+        store.insertOrRecoverSystemPromptSnapshot(trx, snapshot(conversation, opener, text)),
+      );
+    }
+
+    const latest = await tx((trx) => store.getLatestSystemPromptSnapshot(trx, conversationId));
+    expect(latest?.rendered).toBe("later");
+    const none = (
+      await tx((trx) => store.createConversation(trx, { userId, profileId, isPrivate: true }))
+    ).id;
+    await expect(
+      tx((trx) => store.getLatestSystemPromptSnapshot(trx, none)),
+    ).resolves.toBeUndefined();
+  });
+
+  it("refuses a snapshot opened by a message that doesn't exist", async () => {
+    const { conversationId } = await seedConversation();
+    await expect(
+      tx((trx) =>
+        store.insertOrRecoverSystemPromptSnapshot(
+          trx,
+          snapshot(conversationId, "019d0000-0000-7000-8000-000000000999", "orphan"),
+        ),
+      ),
+    ).rejects.toThrow();
   });
 });

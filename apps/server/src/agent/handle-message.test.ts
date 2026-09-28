@@ -38,12 +38,14 @@ import {
   mockVoiceResolver,
   turnContextSent,
 } from "../test/factories.js";
+import type { InboundContent } from "../transport/content.js";
 import { coreMemoryTools } from "./core-memory-tools.js";
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
 import type { ImageToolsLoader } from "./image-tools-loader.js";
 import { runStreamingAgentLoop } from "./loop.js";
 import { memoryTools } from "./memory-tools.js";
+import { DefaultPromptSource } from "./prompt.js";
 import { ToolRegistry } from "./tools.js";
 
 type InboundReadyData = z.infer<typeof inboundReady.schema>;
@@ -80,7 +82,10 @@ function mockDeps(overrides?: Partial<HandleMessageDeps>): HandleMessageDeps {
     resolveProvider: mockResolver(),
     tools: mockToolRegistry(),
     memory: mockMemoryProvider(),
-    promptSource: { assemble: vi.fn().mockResolvedValue("system prompt") },
+    promptSource: {
+      assemble: vi.fn().mockResolvedValue("system prompt"),
+      configuration: vi.fn().mockResolvedValue("configuration"),
+    },
     fileService: mockFilesService(),
     attachments: {
       upload: vi.fn().mockResolvedValue("inbound/test.jpg"),
@@ -3168,6 +3173,68 @@ describe("createHandleMessage", () => {
     });
   });
 
+  describe("auto-recall query on a turn with attachments", () => {
+    const inboundWith = (content: InboundContent) =>
+      mockTransportStore({
+        getUnbatchedInbound: vi.fn().mockResolvedValue([{ id: "inbound-1", content }]),
+      });
+    const PICTURE: InboundContent = [
+      { type: "image", path: "inbound/cat.jpg", mediaType: "image/jpeg" },
+      { type: "text", text: "what breed is the cat in this picture?" },
+    ];
+
+    it("queries with the turn's text, not its blocks", async () => {
+      const memory = mockMemoryProvider();
+      const deps = mockDeps({ memory, transportStore: inboundWith(PICTURE) });
+
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(memory.recall).toHaveBeenCalledWith(
+        "user-1",
+        "what breed is the cat in this picture?",
+        { maxTokens: 2000 },
+      );
+    });
+
+    it("skips recall for a turn with no text, even when the profile always recalls", async () => {
+      const memory = mockMemoryProvider();
+      const deps = mockDeps({
+        memory,
+        transportStore: inboundWith([
+          { type: "image", path: "inbound/cat.jpg", mediaType: "image/jpeg" },
+        ]),
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({
+            id: "profile-1",
+            userId: null,
+            name: "default",
+            basePrompt: "test",
+            model: "claude-sonnet-4-6",
+            summarizationModel: null,
+            extractionModel: null,
+            autoRecall: "always" as const,
+            toolSet: [],
+            memoryScope: null,
+          }),
+        }),
+      });
+
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(memory.recall).not.toHaveBeenCalled();
+      // Non-vacuity: the turn ran.
+      expect(deps.runStreamingAgentLoop).toHaveBeenCalled();
+    });
+  });
+
   describe("auto-recall failure", () => {
     let add: MockInstance<typeof memoryRecallFailures.add>;
     beforeEach(() => {
@@ -4283,6 +4350,432 @@ describe("durable conversation summaries", () => {
         ],
       });
       expect(messages[7]).toEqual({ role: "assistant", content: "turn 8" });
+    });
+  });
+});
+describe("system prompt snapshot", () => {
+  const OPENED_AT = new Date("2026-09-25T08:00:00.000Z");
+  const thinking = { type: "thinking", thinking: "", signature: "sig" } as const;
+
+  async function run(deps: HandleMessageDeps): Promise<void> {
+    await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+      event: testEvent,
+      step: mockStep(),
+      runId: testRunId,
+    });
+  }
+
+  function loopParams(deps: HandleMessageDeps) {
+    return expectDefined(vi.mocked(deps.runStreamingAgentLoop).mock.calls[0], "agent loop call")[0];
+  }
+
+  /** The digest a first turn on the default deps stores: the configuration they render. */
+  async function defaultDigest(): Promise<string> {
+    const deps = mockDeps();
+    await run(deps);
+    const [, params] = expectDefined(
+      vi.mocked(deps.agentStore.insertOrRecoverSystemPromptSnapshot).mock.calls[0],
+      "snapshot insert",
+    );
+    return params.configDigest;
+  }
+
+  function snapshot(overrides: { configDigest: string; historyStart?: string }) {
+    return {
+      id: "snapshot-0",
+      conversationId: "conv-1",
+      openedBy: "m1",
+      historyStart: "m1",
+      rendered: "EPOCH PROMPT",
+      createdAt: OPENED_AT,
+      ...overrides,
+    };
+  }
+
+  /** An earlier turn whose reply carries a thinking block, then this turn's row. */
+  const HISTORY: (Message & { id: string })[] = [
+    { id: "m1", role: "user", content: "first" },
+    { id: "m2", role: "assistant", content: [thinking, { type: "text", text: "reply" }] },
+    { id: "msg-1", role: "user", content: "hello" },
+  ];
+
+  it("opens an epoch at a conversation's first turn and sends the prompt it stored", async () => {
+    const deps = mockDeps({
+      promptSource: {
+        assemble: vi.fn().mockResolvedValue("FIRST PROMPT"),
+        configuration: vi.fn().mockResolvedValue("configuration"),
+      },
+    });
+
+    await run(deps);
+
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
+      expect.anything(),
+      {
+        conversationId: "conv-1",
+        openedBy: "msg-1",
+        historyStart: "msg-1",
+        rendered: "FIRST PROMPT",
+        configDigest: expect.any(String),
+      },
+    );
+    expect(loopParams(deps).systemPrompt).toBe("FIRST PROMPT");
+  });
+
+  it("continues the epoch: sends its prompt and keeps the thinking after its opening row", async () => {
+    const configDigest = await defaultDigest();
+    const deps = mockDeps({
+      promptSource: {
+        // Core memory changed since the epoch opened; its configuration didn't.
+        assemble: vi.fn().mockResolvedValue("PROMPT WITH NEW CORE MEMORY"),
+        configuration: vi.fn().mockResolvedValue("configuration"),
+      },
+      agentStore: mockAgentStore({
+        listMessages: vi.fn().mockResolvedValue(HISTORY),
+        getLatestSystemPromptSnapshot: vi.fn().mockResolvedValue(snapshot({ configDigest })),
+      }),
+    });
+
+    await run(deps);
+
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
+    const { systemPrompt, messages } = loopParams(deps);
+    expect(systemPrompt).toBe("EPOCH PROMPT");
+    expect(messages[1]).toEqual({
+      role: "assistant",
+      content: [thinking, { type: "text", text: "reply" }],
+    });
+  });
+
+  /** The stored turn context leading m1, which announced `identity`. */
+  /** `identity` changed a minute into the epoch, to this version. */
+  const IDENTITY_CHANGED_AT = new Date(OPENED_AT.getTime() + 60_000);
+
+  /** The stored turn context leading m1, which announced `identity` as it was at `version`. */
+  function m1Announced(version: Date) {
+    return {
+      messageId: "m1",
+      rendered: "<turn_context>\nm1 announced identity\n</turn_context>\n\n",
+      context: {
+        recalledMemories: [],
+        voiceMode: false,
+        channelTypes: [],
+        announcedCoreMemoryBlocks: [
+          { profileClass: null, key: "identity", updatedAt: version.toISOString() },
+        ],
+      },
+    };
+  }
+
+  /** `identity` changed since the epoch opened; m1's context announced that version if `announced`. */
+  function identityChanged(configDigest: string, announced: boolean) {
+    return {
+      getLatestSystemPromptSnapshot: vi.fn().mockResolvedValue(snapshot({ configDigest })),
+      getCoreMemoryBlocks: vi
+        .fn()
+        .mockResolvedValue([{ profileClass: null, key: "identity", content: "Home: Lisbon" }]),
+      getCoreMemoryUpdateTimes: vi
+        .fn()
+        .mockResolvedValue([
+          { profileClass: null, key: "identity", updatedAt: IDENTITY_CHANGED_AT },
+        ]),
+      listTurnContexts: vi
+        .fn()
+        .mockResolvedValue(announced ? [m1Announced(IDENTITY_CHANGED_AT)] : []),
+    };
+  }
+
+  it("announces a change written while the turn announcing the block's earlier version ran", async () => {
+    // m1 announced `identity` as it was a minute into the epoch; another
+    // conversation wrote it again at two minutes, before m1's context was stored.
+    const configDigest = await defaultDigest();
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        listMessages: vi.fn().mockResolvedValue(HISTORY),
+        getLatestSystemPromptSnapshot: vi.fn().mockResolvedValue(snapshot({ configDigest })),
+        getCoreMemoryBlocks: vi
+          .fn()
+          .mockResolvedValue([{ profileClass: null, key: "identity", content: "Home: Porto" }]),
+        getCoreMemoryUpdateTimes: vi.fn().mockResolvedValue([
+          {
+            profileClass: null,
+            key: "identity",
+            updatedAt: new Date(OPENED_AT.getTime() + 120_000),
+          },
+        ]),
+        listTurnContexts: vi.fn().mockResolvedValue([m1Announced(IDENTITY_CHANGED_AT)]),
+      }),
+    });
+
+    await run(deps);
+
+    expect(turnContextSent(deps)).toContain("## identity\nHome: Porto");
+  });
+
+  it("announces a core-memory change once, in the next turn context, with its content", async () => {
+    const configDigest = await defaultDigest();
+    const next = mockDeps({
+      agentStore: mockAgentStore({
+        listMessages: vi.fn().mockResolvedValue(HISTORY),
+        ...identityChanged(configDigest, false),
+      }),
+    });
+
+    await run(next);
+
+    expect(turnContextSent(next)).toContain("<core_memory_updates>");
+    expect(turnContextSent(next)).toContain("## identity\nHome: Lisbon");
+    // Recorded with the version it shows.
+    expect(next.agentStore.insertOrRecoverTurnContext).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        context: expect.objectContaining({
+          announcedCoreMemoryBlocks: [
+            { profileClass: null, key: "identity", updatedAt: IDENTITY_CHANGED_AT.toISOString() },
+          ],
+        }),
+      }),
+    );
+
+    // m1's context, still in the transcript, announced this version.
+    const after = mockDeps({
+      agentStore: mockAgentStore({
+        listMessages: vi.fn().mockResolvedValue(HISTORY),
+        ...identityChanged(configDigest, true),
+      }),
+    });
+    await run(after);
+    expect(turnContextSent(after)).not.toContain("<core_memory_updates>");
+  });
+
+  it("counts the delivery channels and every candidate announcement in compaction", async () => {
+    // The final block announces nothing (m1 still shows the change), but the
+    // count compaction runs includes the change, so it bounds what is sent.
+    const configDigest = await defaultDigest();
+    const countTokens = vi.fn().mockResolvedValue(1_000);
+    const deps = mockDeps({
+      resolveProvider: mockResolver(mockProvider({ countTokens })),
+      transportStore: mockTransportStore({
+        getActiveChannelTypes: vi.fn().mockResolvedValue(["telegram"]),
+      }),
+      agentStore: mockAgentStore({
+        getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 800_000, outputTokens: 2_000 }),
+        listMessages: vi.fn().mockResolvedValue(HISTORY),
+        ...identityChanged(configDigest, true),
+      }),
+    });
+
+    await run(deps);
+
+    const [counted] = expectDefined(countTokens.mock.calls[0], "count-tokens call");
+    const countedTurn = JSON.stringify(counted.messages.at(-1));
+    expect(countedTurn).toContain("Home: Lisbon");
+    expect(countedTurn).toContain("Delivery channels: telegram");
+    expect(turnContextSent(deps)).not.toContain("<core_memory_updates>");
+    expect(turnContextSent(deps)).toContain("Delivery channels: telegram");
+  });
+
+  it("strips the thinking before the turn when the epoch's opening row is not in its history", async () => {
+    // A concurrent turn opened the epoch after this turn's history was loaded.
+    const configDigest = await defaultDigest();
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        listMessages: vi.fn().mockResolvedValue(HISTORY),
+        getLatestSystemPromptSnapshot: vi
+          .fn()
+          .mockResolvedValue({ ...snapshot({ configDigest }), openedBy: "m-concurrent" }),
+      }),
+    });
+
+    await run(deps);
+
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
+    const { systemPrompt, messages } = loopParams(deps);
+    expect(systemPrompt).toBe("EPOCH PROMPT");
+    expect(messages[1]).toEqual({ role: "assistant", content: [{ type: "text", text: "reply" }] });
+  });
+
+  it("opens an epoch at a new user's first core-memory write, ending onboarding", async () => {
+    const promptSource = new DefaultPromptSource();
+    const first = mockDeps({ promptSource });
+    await run(first);
+    const [, opened] = expectDefined(
+      vi.mocked(first.agentStore.insertOrRecoverSystemPromptSnapshot).mock.calls[0],
+      "first epoch",
+    );
+    expect(opened.rendered).toContain("You don't know your user yet.");
+
+    // Turn 1 saved `identity`.
+    const next = mockDeps({
+      promptSource,
+      agentStore: mockAgentStore({
+        listMessages: vi.fn().mockResolvedValue(HISTORY),
+        getLatestSystemPromptSnapshot: vi.fn().mockResolvedValue({
+          ...snapshot({ configDigest: opened.configDigest }),
+          rendered: opened.rendered,
+        }),
+        getCoreMemoryBlocks: vi
+          .fn()
+          .mockResolvedValue([{ profileClass: null, key: "identity", content: "Name: Sam" }]),
+      }),
+    });
+    await run(next);
+
+    expect(next.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ openedBy: "msg-1" }),
+    );
+    expect(loopParams(next).systemPrompt).toContain("## identity\nName: Sam");
+    expect(loopParams(next).systemPrompt).not.toContain("You don't know your user yet.");
+  });
+
+  it("names the delivery channels in the turn context", async () => {
+    const deps = mockDeps({
+      transportStore: mockTransportStore({
+        getActiveChannelTypes: vi.fn().mockResolvedValue(["telegram", "web"]),
+      }),
+    });
+
+    await run(deps);
+
+    expect(turnContextSent(deps)).toContain("Delivery channels: telegram, web\n");
+  });
+
+  it("opens an epoch when the configuration changes, stripping the thinking before the turn", async () => {
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        listMessages: vi.fn().mockResolvedValue(HISTORY),
+        getLatestSystemPromptSnapshot: vi
+          .fn()
+          .mockResolvedValue(snapshot({ configDigest: "a rule has changed since" })),
+      }),
+    });
+
+    await run(deps);
+
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ openedBy: "msg-1", historyStart: "m1" }),
+    );
+    const { systemPrompt, messages } = loopParams(deps);
+    expect(systemPrompt).toBe("system prompt");
+    expect(messages[1]).toEqual({ role: "assistant", content: [{ type: "text", text: "reply" }] });
+  });
+
+  it("opens an epoch when the history starts from a summary the epoch didn't", async () => {
+    // `/compact` stored a summary through m2 between turns.
+    const configDigest = await defaultDigest();
+    const deps = mockDeps({
+      agentStore: mockAgentStore({
+        getLatestSummary: vi.fn().mockResolvedValue({
+          id: "sum-1",
+          conversationId: "conv-1",
+          summary: "everything before this",
+          throughMessageId: "m2",
+          messagesSummarized: 2,
+          model: "claude-haiku-4-5",
+          source: "manual",
+          createdAt: new Date(),
+        }),
+        getHistoryAfter: vi.fn().mockResolvedValue([
+          { id: "m3", role: "user", content: "later" },
+          { id: "m4", role: "assistant", content: [thinking, { type: "text", text: "kept" }] },
+          { id: "msg-1", role: "user", content: "hello" },
+        ]),
+        getLatestSystemPromptSnapshot: vi.fn().mockResolvedValue(snapshot({ configDigest })),
+      }),
+    });
+
+    await run(deps);
+
+    expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ openedBy: "msg-1", historyStart: "m3" }),
+    );
+    expect(loopParams(deps).messages[2]).toEqual({
+      role: "assistant",
+      content: [{ type: "text", text: "kept" }],
+    });
+  });
+
+  describe("compaction", () => {
+    /** Eight messages, the turn's row m7, and compaction reaching Strategy 2. */
+    function summarizingDeps(configDigest: string, stopReason: StopReason = "end_turn") {
+      const rows: (Message & { id: string })[] = Array.from({ length: 8 }, (_, i) =>
+        i % 2 === 0
+          ? { id: `m${i + 1}`, role: "user", content: `turn ${i + 1}` }
+          : {
+              id: `m${i + 1}`,
+              role: "assistant",
+              content: [thinking, { type: "text", text: `turn ${i + 1}` }],
+            },
+      );
+      return mockDeps({
+        resolveProvider: mockResolver(
+          mockProvider({
+            countTokens: vi.fn().mockResolvedValue(800_000),
+            chat: vi.fn().mockResolvedValue({
+              content: [{ type: "text", text: "the earlier discussion" }],
+              stopReason,
+              model: "mock-model",
+              usage: { inputTokens: 10, outputTokens: 5 },
+            }),
+          }),
+        ),
+        agentStore: mockAgentStore({
+          getLastTokens: vi.fn().mockResolvedValue({ inputTokens: 800_000, outputTokens: 2_000 }),
+          listMessages: vi.fn().mockResolvedValue(rows),
+          findUserMessageByInbound: vi
+            .fn()
+            .mockResolvedValue({ id: "m7", createdAt: MOCK_MESSAGE_CREATED_AT }),
+          getLatestSystemPromptSnapshot: vi.fn().mockResolvedValue(snapshot({ configDigest })),
+        }),
+      });
+    }
+
+    it("opens an epoch at a turn whose compaction stored a summary, starting after its cutoff", async () => {
+      const deps = summarizingDeps(await defaultDigest());
+
+      await run(deps);
+
+      // 8 messages, 6 retained: the summary covers m1 and m2.
+      expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ openedBy: "m7", historyStart: "m3" }),
+      );
+      // The retained turns before m7 replay without the thinking bound to the
+      // old prefix; m8, after it, keeps its own.
+      const { messages } = loopParams(deps);
+      expect(JSON.stringify(messages.slice(0, -2))).not.toContain('"thinking"');
+      expect(messages.at(-1)?.content).toEqual([thinking, { type: "text", text: "turn 8" }]);
+    });
+
+    it("announces again a change whose announcement an unstored summary took out of view", async () => {
+      // m1's context announced `identity`; this turn's summary, cut at its
+      // output cap and not stored, replaces m1, so the request no longer shows it.
+      const configDigest = await defaultDigest();
+      const deps = summarizingDeps(configDigest, "max_tokens");
+      Object.assign(deps.agentStore, identityChanged(configDigest, true));
+
+      await run(deps);
+
+      expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
+      const [, stored] = expectDefined(
+        vi.mocked(deps.agentStore.insertOrRecoverTurnContext).mock.calls[0],
+        "stored turn context",
+      );
+      expect(stored.rendered).toContain("<core_memory_updates>");
+      expect(stored.rendered).toContain("Home: Lisbon");
+    });
+
+    it("keeps the epoch when compaction stored no summary", async () => {
+      const deps = summarizingDeps(await defaultDigest(), "max_tokens");
+
+      await run(deps);
+
+      expect(deps.agentStore.insertOrRecoverSummary).not.toHaveBeenCalled();
+      expect(deps.agentStore.insertOrRecoverSystemPromptSnapshot).not.toHaveBeenCalled();
+      expect(loopParams(deps).systemPrompt).toBe("EPOCH PROMPT");
     });
   });
 });

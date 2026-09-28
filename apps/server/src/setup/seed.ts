@@ -53,7 +53,12 @@ export async function ensureDefaultUser(
   });
 }
 
-/** Create the default org profile if none exists. Returns the profile ID. Org profiles have `userId: null` — visible to all users, read-only via Transport. */
+/**
+ * Create the default org profile if none exists. Returns the profile ID. Org profiles have `userId: null` — visible to all users, read-only via Transport.
+ *
+ * A miss writes through a keyed insert (`.claude/rules/inngest.md`), so
+ * concurrent seeds converge on one profile.
+ */
 export async function ensureDefaultProfile(
   runInTx: Transactor,
   agentStore: AgentStore,
@@ -61,14 +66,14 @@ export async function ensureDefaultProfile(
   return runInTx(async (tx) => {
     const existing = await agentStore.getDefaultProfile(tx);
     if (existing) return existing.id;
-    const { id } = await agentStore.createProfile(tx, {
+    const { kind, id } = await agentStore.insertOrRecoverProfile(tx, {
       userId: null,
       name: "assistant",
       basePrompt: DEFAULT_BASE_PROMPT,
       model: DEFAULT_PROFILE_MODEL,
       toolSet: DEFAULT_TOOL_SET,
     });
-    logger.info({ profileId: id }, "created default org profile");
+    if (kind === "new") logger.info({ profileId: id }, "created default org profile");
     return id;
   });
 }
@@ -78,6 +83,10 @@ export async function ensureDefaultProfile(
  * identity if none exists. Both the direct (CLI) and web channels are
  * single-owner with the same fixed/wildcard wiring; a future single-owner
  * channel type reuses this directly.
+ *
+ * A miss writes through a keyed insert (`.claude/rules/inngest.md`), so
+ * concurrent seeds converge on one channel; only the inserting seed creates
+ * the wildcard identity.
  */
 async function ensureFixedChannel(
   runInTx: Transactor,
@@ -88,11 +97,8 @@ async function ensureFixedChannel(
   await runInTx(async (tx) => {
     const existing = await transportStore.getChannelByType(tx, type);
     if (existing) return;
-    const { id: channelId } = await transportStore.createChannel(tx, {
-      type,
-      credentials: {},
-      identityMode: "fixed",
-    });
+    const { kind, id: channelId } = await transportStore.insertOrRecoverFixedChannel(tx, type);
+    if (kind === "recovered") return;
     await transportStore.createWildcardIdentity(tx, { userId, channelId });
     logger.info({ channelId, type }, "created fixed-identity channel");
   });
