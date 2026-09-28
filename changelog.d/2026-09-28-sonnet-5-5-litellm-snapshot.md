@@ -1,0 +1,5 @@
+**Claude Sonnet 5.5 resolves its real limits.** `data/litellm-models.json` is refreshed from upstream LiteLLM (3,182 entries, 170 new, none dropped), so `claude-sonnet-5-5` resolves to a 1M context window and the 64k output budget cap instead of the 128k/4k fallback. `litellm-data.test.ts` pins the context window of each model in Anthropic's current lineup, so a refresh that loses one fails.
+
+The Anthropic adapter needs no change for the model. It sends no `thinking` parameter, no sampling parameters and no forced `tool_choice`, which covers what Sonnet 5.5 rejects. Like Opus 5.5 and Fable 5.1, it binds thinking blocks to the prefix that produced them. Unlike Sonnet 5, it supports mid-conversation system messages and `clear_at`, and it caches from 512 tokens. `design/prompt-caching.md`, `design/providers.md` and `todo.md` now include it in those model lists.
+
+A fresh install still starts on `claude-sonnet-5`, and `/model` moves a profile to `claude-sonnet-5-5` once a routing row exists (`cogmo model add claude-sonnet-5-5 --provider <name>`).
