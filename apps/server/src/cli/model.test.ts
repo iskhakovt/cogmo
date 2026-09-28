@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { AgentStore } from "../agent/store/index.js";
+import { installLiveCatalog } from "../llm/litellm-data.js";
 import { captureIo, fakeRunInTx } from "../test/factories.js";
 import { type ModelCliDeps, modelCli } from "./model.js";
 import { type CliIo, type LoadDeps, runCli } from "./run.js";
@@ -44,6 +45,7 @@ function makeDeps(
   opts: {
     providers?: ReadonlyArray<Provider>;
     rowsByModel?: Record<string, ReadonlyArray<RoutingRow>>;
+    requestCatalogRefresh?: ModelCliDeps["requestCatalogRefresh"];
   } = {},
 ) {
   const rowsByModel = opts.rowsByModel ?? {};
@@ -57,24 +59,32 @@ function makeDeps(
   );
   agentStore.addModelProvider.mockResolvedValue({ id: "row-1" });
   agentStore.getNextModelProviderPosition.mockResolvedValue(0);
-  return { runInTx: fakeRunInTx, agentStore };
+  return {
+    runInTx: fakeRunInTx,
+    agentStore,
+    requestCatalogRefresh: opts.requestCatalogRefresh ?? null,
+  };
 }
 
 describe("cogmo model — usage", () => {
-  it.each([[[]], [["--help"]], [["add", "--help"]], [["list", "--help"]], [["remove", "--help"]]])(
-    "prints help for %j on stdout, exits 0, and loads nothing",
-    async (argv) => {
-      const loadDeps = vi.fn<LoadDeps<ModelCliDeps>>(async () => makeDeps());
-      const { io, out, err } = captureIo();
+  it.each([
+    [[]],
+    [["--help"]],
+    [["add", "--help"]],
+    [["list", "--help"]],
+    [["remove", "--help"]],
+    [["refresh", "--help"]],
+  ])("prints help for %j on stdout, exits 0, and loads nothing", async (argv) => {
+    const loadDeps = vi.fn<LoadDeps<ModelCliDeps>>(async () => makeDeps());
+    const { io, out, err } = captureIo();
 
-      const code = await runCli(modelCli(io, loadDeps), argv, io);
+    const code = await runCli(modelCli(io, loadDeps), argv, io);
 
-      expect(code).toBe(0);
-      expect(out.join("\n")).toMatch(/^model/);
-      expect(err).toEqual([]);
-      expect(loadDeps).not.toHaveBeenCalled();
-    },
-  );
+    expect(code).toBe(0);
+    expect(out.join("\n")).toMatch(/^model/);
+    expect(err).toEqual([]);
+    expect(loadDeps).not.toHaveBeenCalled();
+  });
 
   it("documents every add option", async () => {
     const { io, out } = captureIo();
@@ -203,11 +213,37 @@ describe("cogmo model list", () => {
     });
     const { io, out } = captureIo();
     await run(["list"], deps, io);
-    // Header + one row.
-    expect(out.length).toBe(2);
+    // Header, one row, then the catalog line after a blank.
+    expect(out.length).toBe(4);
     expect(out[0]).toMatch(/model\tprovider\tposition\tcontext\tmax_output\tsource/);
     // Both columns came from LiteLLM → source collapses to the shared tag.
     expect(out[1]).toMatch(/^claude-sonnet-4-6\tanthropic\t0\t1000000\t64000\tlitellm$/);
+    expect(out[2]).toBe("");
+  });
+
+  describe("catalog line", () => {
+    afterEach(() => installLiveCatalog(null));
+
+    const deps = () =>
+      makeDeps({ rowsByModel: { "claude-sonnet-4-6": [routingRow("r1", "anthropic", 0)] } });
+
+    it("says limits come from the bundled snapshot before any refresh", async () => {
+      const { io, out } = captureIo();
+      await run(["list"], deps(), io);
+      expect(out.at(-1)).toMatch(/^litellm: bundled snapshot only; no catalog refresh has run/);
+    });
+
+    it("names the live catalog's fetch time and size once one is installed", async () => {
+      installLiveCatalog({
+        entries: { "claude-sonnet-4-6": { contextWindow: 1_000_000, maxOutputTokens: 64_000 } },
+        fetchedAt: new Date("2026-09-28T06:17:00.000Z"),
+      });
+      const { io, out } = captureIo();
+      await run(["list"], deps(), io);
+      expect(out.at(-1)).toBe(
+        "litellm: catalog fetched 2026-09-28T06:17:00.000Z (1 models), bundled snapshot behind it",
+      );
+    });
   });
 
   it("renders a split `cw=…,mo=…` source tag when the two columns disagree", async () => {
@@ -297,6 +333,42 @@ describe("cogmo model remove", () => {
     expect(code).toBe(1);
     expect(err.join("\n")).toMatch(/not routed via provider "p-other"/);
     expect(deps.agentStore.removeModelProvider).not.toHaveBeenCalled();
+  });
+});
+
+describe("cogmo model refresh", () => {
+  it("sends the refresh request", async () => {
+    const requestCatalogRefresh = vi.fn(async () => {});
+    const { io, out, err } = captureIo();
+
+    const code = await run(["refresh"], makeDeps({ requestCatalogRefresh }), io);
+
+    expect(code).toBe(0);
+    expect(requestCatalogRefresh).toHaveBeenCalledTimes(1);
+    expect(out[0]).toMatch(/Requested a model catalog refresh/);
+    expect(err).toEqual([]);
+  });
+
+  it("exits 1 when the refresh is off", async () => {
+    const { io, out, err } = captureIo();
+
+    const code = await run(["refresh"], makeDeps(), io);
+
+    expect(code).toBe(1);
+    expect(err.join("\n")).toMatch(/MODEL_CATALOG_URL=off/);
+    expect(out).toEqual([]);
+  });
+
+  it("exits 1 when the request can't be sent", async () => {
+    const requestCatalogRefresh = vi.fn(async () => {
+      throw new Error("Inngest unreachable");
+    });
+    const { io, err } = captureIo();
+
+    const code = await run(["refresh"], makeDeps({ requestCatalogRefresh }), io);
+
+    expect(code).toBe(1);
+    expect(err.join("\n")).toMatch(/Inngest unreachable/);
   });
 });
 

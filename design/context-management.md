@@ -29,11 +29,7 @@ These mean compaction can be more aggressive than a system without external memo
 
 ## Model Registry
 
-Context window and output limits are properties of the model, not the profile. A model registry maps model identifiers to capabilities (context window size, max output tokens).
-
-Known models are listed explicitly. Unknown models **fail with a clear error** — no guessing, no silent fallback to conservative defaults. Misconfiguration should be caught at startup, not discovered mid-conversation.
-
-**Registry scope:** Only models we actually use. Not an exhaustive catalog. Adding a model to a profile requires adding it to the registry.
+Context window and output limits are properties of the model, not the profile. `resolveLimits` (`src/llm/models.ts`) takes each from, in order: an operator override on the routing row, LiteLLM's catalog (a live copy refreshed every six hours, then the snapshot bundled with the release), and a conservative 128k / 4k default that logs a warning. An unknown model never fails; it compacts early. See [providers.md](providers.md#limits-resolution).
 
 ## Context Budget
 

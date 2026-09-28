@@ -4,13 +4,15 @@
  * Mirrors the wizard's model picker step at the CLI: register a model
  * against an existing provider (with optional explicit limits), list
  * routing rows with their effective limits and source, or remove a row
- * (or all rows for a model).
+ * (or all rows for a model). `refresh` asks `cogmo serve` to fetch the
+ * model catalog the limits come from.
  */
 
 import { command, option, positional, subcommands } from "cmd-ts";
 import { addModelRouting } from "../agent/provider/add-model-routing.js";
 import type { AgentStore } from "../agent/store/index.js";
 import type { Transactor } from "../db/index.js";
+import { liveCatalogStatus } from "../llm/litellm-data.js";
 import { resolveLimits } from "../llm/models.js";
 import { identifier, intAtLeast, optionalOption } from "./args.js";
 import type { CliIo, LoadDeps } from "./run.js";
@@ -18,6 +20,8 @@ import type { CliIo, LoadDeps } from "./run.js";
 export interface ModelCliDeps {
   runInTx: Transactor;
   agentStore: AgentStore;
+  /** Sends `model-catalog/refresh.requested`; `null` when `MODEL_CATALOG_URL=off`. */
+  requestCatalogRefresh: (() => Promise<void>) | null;
 }
 
 export function modelCli(io: CliIo, loadDeps: LoadDeps<ModelCliDeps>) {
@@ -102,6 +106,13 @@ export function modelCli(io: CliIo, loadDeps: LoadDeps<ModelCliDeps>) {
           }),
         },
         handler: async (args) => removeModel(args, await loadDeps(), io),
+      }),
+      refresh: command({
+        name: "refresh",
+        description:
+          "Ask `cogmo serve` to fetch LiteLLM's model registry now rather than at its next six-hourly refresh.",
+        args: {},
+        handler: async () => refreshCatalog(await loadDeps(), io),
       }),
     },
   });
@@ -197,11 +208,40 @@ async function listModels(args: ListArgs, deps: ModelCliDeps, io: CliIo): Promis
       ].join("\t"),
     );
   }
+  io.out("");
+  io.out(describeCatalog());
   return 0;
+}
+
+/** Where the `litellm` source reads from: the live catalog, or only the bundled snapshot. */
+function describeCatalog(): string {
+  const live = liveCatalogStatus();
+  if (!live) {
+    return "litellm: bundled snapshot only; no catalog refresh has run (`cogmo model refresh`)";
+  }
+  return `litellm: catalog fetched ${live.fetchedAt.toISOString()} (${live.size} models), bundled snapshot behind it`;
 }
 
 function formatSource(cwSource: string, moSource: string): string {
   return cwSource === moSource ? cwSource : `cw=${cwSource},mo=${moSource}`;
+}
+
+async function refreshCatalog(deps: ModelCliDeps, io: CliIo): Promise<number> {
+  if (!deps.requestCatalogRefresh) {
+    io.err(
+      "The catalog refresh is off (MODEL_CATALOG_URL=off); limits come from the bundled snapshot.",
+    );
+    return 1;
+  }
+  try {
+    await deps.requestCatalogRefresh();
+  } catch (err) {
+    io.err(`Failed to request a catalog refresh: ${(err as Error).message}`);
+    return 1;
+  }
+  io.out("Requested a model catalog refresh from `cogmo serve`.");
+  io.out("`cogmo model list` shows the new fetch time once it lands.");
+  return 0;
 }
 
 interface RemoveArgs {

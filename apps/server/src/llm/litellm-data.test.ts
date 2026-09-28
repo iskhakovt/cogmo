@@ -1,5 +1,11 @@
-import { describe, expect, it } from "vitest";
-import { candidateKeys, lookupLitellm, snapshotSize } from "./litellm-data.js";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  bundledSnapshot,
+  candidateKeys,
+  installLiveCatalog,
+  liveCatalogStatus,
+  lookupLitellm,
+} from "./litellm-data.js";
 
 describe("candidateKeys", () => {
   it("returns the bare id when no slash is present", () => {
@@ -73,10 +79,56 @@ describe("lookupLitellm", () => {
   });
 });
 
-describe("snapshotSize", () => {
-  it("loads more than 1000 entries from the bundled snapshot", () => {
+describe("bundledSnapshot", () => {
+  it("loads more than 1000 entries", () => {
     // Sanity check that the snapshot file is wired in. Exact count drifts
     // every refresh; only assert a healthy lower bound.
-    expect(snapshotSize()).toBeGreaterThan(1_000);
+    expect(Object.keys(bundledSnapshot()).length).toBeGreaterThan(1_000);
+  });
+});
+
+describe("live catalog", () => {
+  const fetchedAt = new Date("2026-09-28T06:17:00.000Z");
+
+  afterEach(() => installLiveCatalog(null));
+
+  it("is absent until one is installed", () => {
+    expect(liveCatalogStatus()).toBeNull();
+  });
+
+  it("reports when it was fetched and its size", () => {
+    installLiveCatalog({
+      entries: { a: { contextWindow: 100_000, maxOutputTokens: 4_000 } },
+      fetchedAt,
+    });
+    expect(liveCatalogStatus()).toEqual({ fetchedAt, size: 1 });
+  });
+
+  it("answers a model the bundled snapshot doesn't know", () => {
+    const next = { contextWindow: 2_000_000, maxOutputTokens: 64_000 };
+    installLiveCatalog({ entries: { "claude-next-6": next }, fetchedAt });
+    expect(lookupLitellm("claude-next-6")).toEqual(next);
+  });
+
+  it("wins over the bundled entry for the same id", () => {
+    const corrected = { contextWindow: 500_000, maxOutputTokens: 32_000 };
+    installLiveCatalog({ entries: { "claude-sonnet-4-6": corrected }, fetchedAt });
+    expect(lookupLitellm("claude-sonnet-4-6")).toEqual(corrected);
+  });
+
+  it("wins through a later alias over a bundled entry earlier in the ladder", () => {
+    // `x-ai/grok-4.3`'s ladder tries `openrouter/x-ai/grok-4.3`, which the
+    // bundled snapshot has, before `xai/grok-4.3`.
+    const live = { contextWindow: 3_000_000, maxOutputTokens: 64_000 };
+    installLiveCatalog({ entries: { "xai/grok-4.3": live }, fetchedAt });
+    expect(lookupLitellm("x-ai/grok-4.3")).toEqual(live);
+  });
+
+  it("falls back to the bundled snapshot for a model it lacks", () => {
+    installLiveCatalog({ entries: {}, fetchedAt });
+    expect(lookupLitellm("claude-sonnet-4-6")).toEqual({
+      contextWindow: 1_000_000,
+      maxOutputTokens: 64_000,
+    });
   });
 });

@@ -224,12 +224,16 @@ Validation status is tracked on the **secret** (`secrets.validated_at`), not on 
 Model limits (context window + max output tokens) come from a three-layer resolver in `src/llm/models.ts:resolveLimits(model, rowLimits)`. Layers, in priority order:
 
 1. **DB row override.** `model_providers.context_window` and `model_providers.max_output_tokens` (nullable). Set by the setup wizard or `cogmo model add` when an operator wants to pin explicit limits. Layered per-column: a row that sets only `max_output_tokens` still falls through to the next layer for `context_window`.
-2. **Bundled LiteLLM snapshot.** `data/litellm-models.json`, refreshed manually via `pnpm tsx scripts/refresh-litellm-models.ts`. Pruned to the two fields we consume; ~3,200 models covered. The loader (`src/llm/litellm-data.ts`) normalizes lookup keys through a small alias ladder — `x-ai/grok-4.3` finds `xai/grok-4.3`, `openrouter/<x>` strips the prefix, etc. — so OpenRouter slugs resolve against vendor-direct entries.
+2. **LiteLLM catalog.** LiteLLM's community registry pruned to the two fields we consume (`src/llm/litellm-upstream.ts`), ~3,200 models. It has two copies, consulted in order:
+   - **Live.** The `model-catalog-refresh` Inngest function (`src/agent/model-catalog/`) fetches the registry every six hours and on `model-catalog/refresh.requested`, which `cogmo model refresh` sends. It stores the result as the one `model_catalogs` row and installs it in the process that ran the refresh; every other process loads the stored row at boot. A model that ships between releases therefore resolves at the next refresh. A failed fetch retries three times. A registry that isn't a JSON object, or that prunes to under half the bundled snapshot's entries, is rejected without retrying, and the stored catalog stays. `MODEL_CATALOG_URL` points the fetch at a mirror, or `off` disables it.
+   - **Bundled.** `data/litellm-models.json`, regenerated with `pnpm tsx scripts/refresh-litellm-models.ts` and shipped with each release. It answers before the first refresh, when the refresh is off, and for ids the live copy lacks (retired or dropped upstream).
+
+   The loader (`src/llm/litellm-data.ts`) normalizes lookup keys through a small alias ladder — `x-ai/grok-4.3` finds `xai/grok-4.3`, `openrouter/<x>` strips the prefix, etc. — so OpenRouter slugs resolve against vendor-direct entries. The whole ladder runs against the live copy before the bundled one, so a live entry under any alias beats a bundled one.
 3. **Conservative default.** 128k context / 4k max output, with a one-time `WARN` log per unknown model. Compaction errs on the side of firing too early rather than overrunning the upstream's real limit.
 
 `resolveLimits` never throws — unknown models silently fall to the default. `getModelLimits` no longer exists; callers receive limits as a `ResolvedLlm` from `LlmProviderResolver` (the resolver loads `model_providers` once per turn and surfaces the primary row's columns alongside the adapter).
 
-`cogmo model list` prints each routing row's effective limits with the source (`db`/`litellm`/`default`) so operators can see why compaction behaves the way it does. Re-record the LiteLLM snapshot when a new flagship lands by running the refresh script and committing the diff.
+`cogmo model list` prints each routing row's effective limits with the source (`db`/`litellm`/`default`), so operators can see why compaction behaves the way it does. Below the rows, it says whether `litellm` read a live catalog, and when that catalog was fetched.
 
 ## Ecosystem context
 

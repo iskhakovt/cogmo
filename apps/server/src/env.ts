@@ -1,5 +1,6 @@
 import { createEnv } from "@t3-oss/env-core";
 import { z } from "zod";
+import { LITELLM_REGISTRY_URL } from "./llm/litellm-upstream.js";
 import { resolveEnvFile } from "./secrets/env-file.js";
 
 /**
@@ -148,6 +149,12 @@ export const env = createEnv({
     OPENROUTER_API_KEY: z.string().optional(),
     FAL_API_KEY: z.string().optional(),
     USER_TIMEZONE: z.string().default("UTC"),
+    /**
+     * Where the model catalog refresh fetches LiteLLM's registry, or `off`
+     * to resolve limits from the bundled snapshot alone (air-gapped hosts,
+     * and the integration and e2e tiers, which must not reach GitHub).
+     */
+    MODEL_CATALOG_URL: z.union([z.literal("off"), z.string().url()]).default(LITELLM_REGISTRY_URL),
     S3_ENDPOINT: z.string().optional(),
     S3_BUCKET: z.string().default("cogmo-files"),
     S3_ACCESS_KEY: z.string().optional(),

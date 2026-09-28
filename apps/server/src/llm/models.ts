@@ -73,7 +73,7 @@ export const DEFAULT_LIMITS: ModelLimits = {
   maxOutputTokens: 4_096,
 };
 
-const DEFAULT_SAFETY_BUFFER = 10_000;
+export const DEFAULT_SAFETY_BUFFER = 10_000;
 
 /**
  * Resolve the effective limits for a model.

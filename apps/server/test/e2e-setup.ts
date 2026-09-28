@@ -263,6 +263,8 @@ export async function setup({ provide }: GlobalSetupContext) {
       // Surface transient container/network blips as hard failures
       // instead of letting withRetry mask them. See src/util/with-retry.ts.
       RETRY_DISABLED: "true",
+      // No fetch from GitHub on the dev server's cron tick.
+      MODEL_CATALOG_URL: "off",
     })
     .withWaitStrategy(Wait.forLogMessage(/inngest connected/i))
     .withStartupTimeout(60_000)
