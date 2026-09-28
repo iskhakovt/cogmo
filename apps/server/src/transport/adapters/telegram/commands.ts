@@ -2120,7 +2120,7 @@ export async function handleEnable(
     return;
   }
   const handle = String(ctx.from.id);
-  const res = await transport.skills.enable(handle, name);
+  const res = await transport.skills.enable(handle, name, String(ctx.chat.id));
   if (res.isErr()) {
     await ctx.reply(errorMessage(res.error));
     return;

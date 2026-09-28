@@ -4040,7 +4040,8 @@ describe("handleEnable", () => {
     const transport = transportWith({ skills: { enable } });
     const ctx = mkCtx("echo");
     await handleEnable(transport, ctx);
-    expect(enable).toHaveBeenCalledWith("1", "echo");
+    // The chat is passed so the enabler's own conversation can supply a profile.
+    expect(enable).toHaveBeenCalledWith("1", "echo", "42");
     expect(ctx.reply).toHaveBeenCalledWith('Skill "echo" enabled.');
   });
 

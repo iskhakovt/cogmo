@@ -116,6 +116,17 @@ describe("createSkillCronFireHandler", () => {
     expect(runner.invoke).toHaveBeenCalledWith(expect.objectContaining({ runAs: RUN_AS }));
   });
 
+  it("skips with reason 'skill_disabled' when the skill was disabled between tick and fire", async () => {
+    const runner = mock<SkillRunner>();
+    const d = deps(runner, skillRow({ disabled: true, runAsUserId: null, runAsProfileId: null }));
+    const fn = createSkillCronFireHandler(d, inngest);
+
+    const { result } = await new InngestTestEngine({ function: fn, events: [baseEvent] }).execute();
+
+    expect(result).toMatchObject({ status: "skipped", reason: "skill_disabled" });
+    expect(runner.invoke).not.toHaveBeenCalled();
+  });
+
   it("skips with reason 'not_scheduled' when the schedule was dropped between tick and fire", async () => {
     const runner = mock<SkillRunner>();
     const d = deps(

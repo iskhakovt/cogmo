@@ -83,9 +83,13 @@ export function createSkillCronFireHandler(deps: SkillCronFireDeps, inngest: Inn
         if (!skill) {
           return { status: "skipped", reason: "skill_not_found" };
         }
-        // Checks both columns to narrow their types; the CHECK makes this the
-        // same as `schedule === null`, i.e. a deploy dropped the schedule
-        // after the tick locked the row.
+        // A disabled row runs as no one, so this precedes the run-as check.
+        if (skill.disabled) {
+          return { status: "skipped", reason: "skill_disabled" };
+        }
+        // Checks both columns to narrow their types; on an enabled row the
+        // CHECK makes this the same as `schedule === null`, i.e. a deploy
+        // dropped the schedule after the tick locked the row.
         if (skill.runAsUserId === null || skill.runAsProfileId === null) {
           return { status: "skipped", reason: "not_scheduled" };
         }

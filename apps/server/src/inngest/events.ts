@@ -591,6 +591,8 @@ export const skillsDeployApprovalRequested = eventType("skills/deploy/approval-r
     skillName: z.string(),
     gitSha: z.string(),
     conversationId: z.string(),
+    /** The pending manifest's cron schedule; the prompt says who it will run as. */
+    schedule: z.string().nullable(),
   }),
 });
 

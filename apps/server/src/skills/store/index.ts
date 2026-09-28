@@ -26,7 +26,8 @@ function assertScheduleInvariant(schedule: string | null, scheduleNextRunAt: Dat
 
 /**
  * The user and profile a scheduled skill runs as. Stored on the skills row
- * (`run_as_user_id`, `run_as_profile_id`) iff `schedule` is set.
+ * (`run_as_user_id`, `run_as_profile_id`) iff the schedule is live: set, on
+ * an enabled row.
  */
 export interface SkillRunIdentity {
   userId: string;
@@ -34,15 +35,16 @@ export interface SkillRunIdentity {
 }
 
 /**
- * The run-as columns a deploy writes with its schedule: the deploy's own
- * identity, so code that goes live never runs as whoever vouched for the
- * code before it.
+ * The run-as columns for a row with `schedule`: `runAs` when the write puts
+ * the schedule live, none when there is no schedule or the row stays
+ * disabled. Whoever puts a schedule live is who it runs as, so code never
+ * runs as whoever vouched for the code before it.
  */
 function runAsColumns(
   schedule: string | null,
-  runAs: SkillRunIdentity,
+  runAs: SkillRunIdentity | null,
 ): { runAsUserId: string | null; runAsProfileId: string | null } {
-  return schedule === null
+  return schedule === null || runAs === null
     ? { runAsUserId: null, runAsProfileId: null }
     : { runAsUserId: runAs.userId, runAsProfileId: runAs.profileId };
 }
@@ -68,7 +70,7 @@ export interface SkillRow {
    * The ticker queries this column.
    */
   nextRunAt: Date | null;
-  /** Who a cron fire runs as. Both set iff `schedule` is (`chk_skills_run_as_iff_schedule`). */
+  /** Who a cron fire runs as. Both set iff the schedule is live (`chk_skills_run_as_iff_live_schedule`). */
   runAsUserId: string | null;
   runAsProfileId: string | null;
   /** Last fire timestamp. Null = never fired. */
@@ -157,7 +159,7 @@ export interface InsertSkillParams {
    * mismatch as a clear TypeError instead of a Postgres CHECK violation.
    */
   scheduleNextRunAt: Date | null;
-  /** Non-null iff `schedule` is non-null — `chk_skills_run_as_iff_schedule`. */
+  /** Non-null iff `schedule` is non-null (an inserted row is enabled). */
   scheduleRunAs: SkillRunIdentity | null;
   gitSha: string;
   /** sha256 of `requirements.lock` at `gitSha`, or null when no deps. */
@@ -342,7 +344,10 @@ export interface SkillStore {
     params: { skillId: string; gitSha: string },
   ): Promise<boolean>;
   updateSkillSha(tx: Transaction, params: { id: string; gitSha: string }): Promise<void>;
-  setSkillDisabled(tx: Transaction, params: { id: string; disabled: boolean }): Promise<void>;
+  /** Disable a skill. A schedule that is not live runs as no one, so its identity clears. */
+  disableSkill(tx: Transaction, id: string): Promise<void>;
+  /** Enable a skill; a schedule it puts live runs as `runAs`. */
+  enableSkill(tx: Transaction, params: { id: string; runAs: SkillRunIdentity }): Promise<void>;
 
   /**
    * Lock and return up to `limit` rows whose `next_run_at <= now`, are not
@@ -542,11 +547,28 @@ export class DrizzleSkillStore implements SkillStore {
     await tx.update(skills).set({ gitSha: params.gitSha }).where(eq(skills.id, params.id));
   }
 
-  async setSkillDisabled(
+  async disableSkill(tx: Transaction, id: string): Promise<void> {
+    await tx
+      .update(skills)
+      .set({ disabled: true, runAsUserId: null, runAsProfileId: null })
+      .where(eq(skills.id, id));
+  }
+
+  async enableSkill(
     tx: Transaction,
-    params: { id: string; disabled: boolean },
+    params: { id: string; runAs: SkillRunIdentity },
   ): Promise<void> {
-    await tx.update(skills).set({ disabled: params.disabled }).where(eq(skills.id, params.id));
+    const rows = await tx
+      .select({ schedule: skills.schedule })
+      .from(skills)
+      .where(eq(skills.id, params.id))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return;
+    await tx
+      .update(skills)
+      .set({ disabled: false, ...runAsColumns(row.schedule, params.runAs) })
+      .where(eq(skills.id, params.id));
   }
 
   async lockDueScheduledSkills(
@@ -687,7 +709,7 @@ export class DrizzleSkillStore implements SkillStore {
           effects: params.effects,
           schedule: params.schedule,
           nextRunAt: params.scheduleNextRunAt,
-          ...runAsColumns(params.schedule, params.runAs),
+          ...runAsColumns(params.schedule, goesLive ? params.runAs : null),
           gitSha: params.branchTipSha,
           lockfileHash: params.lockfileHash,
           inputs: params.inputs,

@@ -1780,7 +1780,7 @@ describe("createHandleMessage", () => {
 
       expect(skillRunner.register).toHaveBeenCalledWith({
         branch: "skill/echo",
-        origin: { userId: "user-2", profileId: "profile-9" },
+        origin: { kind: "conversation", userId: "user-2", profileId: "profile-9" },
       });
     });
 

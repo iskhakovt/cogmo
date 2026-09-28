@@ -95,9 +95,9 @@ export const skills = pgTable(
      */
     nextRunAt: timestamp("next_run_at", { withTimezone: true }),
     /**
-     * Who a cron fire runs as. Set iff `schedule` is
-     * (`chk_skills_run_as_iff_schedule`); see design/skills.md → Run-as
-     * identity.
+     * Who a cron fire runs as. Set iff the schedule is live — `schedule` set
+     * on an enabled row (`chk_skills_run_as_iff_live_schedule`); see
+     * design/skills.md → Run-as identity.
      */
     runAsUserId: uuid("run_as_user_id").references(() => users.id),
     runAsProfileId: uuid("run_as_profile_id").references(() => profiles.id),
@@ -129,8 +129,8 @@ export const skills = pgTable(
       sql`(${t.schedule} IS NULL) = (${t.nextRunAt} IS NULL)`,
     ),
     check(
-      "chk_skills_run_as_iff_schedule",
-      sql`(${t.schedule} IS NULL) = (${t.runAsUserId} IS NULL) AND (${t.schedule} IS NULL) = (${t.runAsProfileId} IS NULL)`,
+      "chk_skills_run_as_iff_live_schedule",
+      sql`(${t.schedule} IS NOT NULL AND NOT ${t.disabled}) = (${t.runAsUserId} IS NOT NULL) AND (${t.schedule} IS NOT NULL AND NOT ${t.disabled}) = (${t.runAsProfileId} IS NOT NULL)`,
     ),
   ],
 );

@@ -119,7 +119,7 @@ describe("DrizzleSkillStore", () => {
       await seedSkill({ name: "zebra" });
       await seedSkill({ name: "alpha" });
       const disabled = await seedSkill({ name: "mango" });
-      await tx((trx) => store.setSkillDisabled(trx, { id: disabled.id, disabled: true }));
+      await tx((trx) => store.disableSkill(trx, disabled.id));
 
       const live = await tx((trx) => store.listEnabledSkills(trx));
       expect(live.map((s) => s.name)).toEqual(["alpha", "zebra"]);
@@ -129,7 +129,7 @@ describe("DrizzleSkillStore", () => {
       await seedSkill({ name: "zebra" });
       await seedSkill({ name: "alpha" });
       const disabled = await seedSkill({ name: "mango" });
-      await tx((trx) => store.setSkillDisabled(trx, { id: disabled.id, disabled: true }));
+      await tx((trx) => store.disableSkill(trx, disabled.id));
 
       const all = await tx((trx) => store.listAllSkills(trx));
       expect(all.map((s) => ({ name: s.name, disabled: s.disabled }))).toEqual([
@@ -202,11 +202,11 @@ describe("DrizzleSkillStore", () => {
       await expect(seedSkill({ name: "echo" })).rejects.toThrow();
     });
 
-    it("setSkillDisabled toggles both directions", async () => {
+    it("disableSkill / enableSkill toggle both directions", async () => {
       const row = await seedSkill();
-      await tx((trx) => store.setSkillDisabled(trx, { id: row.id, disabled: true }));
+      await tx((trx) => store.disableSkill(trx, row.id));
       expect((await tx((trx) => store.getSkillById(trx, row.id)))?.disabled).toBe(true);
-      await tx((trx) => store.setSkillDisabled(trx, { id: row.id, disabled: false }));
+      await tx((trx) => store.enableSkill(trx, { id: row.id, runAs: owner }));
       expect((await tx((trx) => store.getSkillById(trx, row.id)))?.disabled).toBe(false);
     });
 
@@ -706,7 +706,7 @@ describe("DrizzleSkillStore", () => {
         schedule: "0 9 * * *",
         scheduleNextRunAt: new Date("2026-06-01T09:00:00Z"),
       });
-      await tx((trx) => store.setSkillDisabled(trx, { id: row.id, disabled: true }));
+      await tx((trx) => store.disableSkill(trx, row.id));
       const due = await tx((trx) =>
         store.lockDueScheduledSkills(trx, {
           now: new Date("2026-06-01T10:00:00Z"),
@@ -990,6 +990,47 @@ describe("DrizzleSkillStore", () => {
       );
     });
 
+    it("the CHECK refuses a disabled row keeping its run-as identity", async () => {
+      const row = await seedSkill({
+        schedule: "0 9 * * *",
+        scheduleNextRunAt: new Date("2026-06-01T09:00:00Z"),
+      });
+      await expect(
+        db.update(skills).set({ disabled: true }).where(eq(skills.id, row.id)),
+      ).rejects.toMatchObject({
+        cause: { message: expect.stringMatching(/chk_skills_run_as_iff_live_schedule/) },
+      });
+    });
+
+    it("disabling a scheduled skill clears its identity and keeps the schedule", async () => {
+      const row = await seedSkill({
+        schedule: "0 9 * * *",
+        scheduleNextRunAt: new Date("2026-06-01T09:00:00Z"),
+      });
+      await tx((trx) => store.disableSkill(trx, row.id));
+      const after = await reload(row.name);
+      expect(runAsOf(after)).toEqual([null, null]);
+      expect(after?.schedule).toBe("0 9 * * *");
+    });
+
+    it("enabling a scheduled skill writes the enabler's identity", async () => {
+      const row = await seedSkill({
+        schedule: "0 9 * * *",
+        scheduleNextRunAt: new Date("2026-06-01T09:00:00Z"),
+      });
+      await tx((trx) => store.disableSkill(trx, row.id));
+      const enabler = await seedIdentity("enabler");
+      await tx((trx) => store.enableSkill(trx, { id: row.id, runAs: enabler }));
+      expect(runAsOf(await reload(row.name))).toEqual([enabler.userId, enabler.profileId]);
+    });
+
+    it("enabling an unscheduled skill writes no identity", async () => {
+      const row = await seedSkill();
+      await tx((trx) => store.disableSkill(trx, row.id));
+      await tx((trx) => store.enableSkill(trx, { id: row.id, runAs: owner }));
+      expect(runAsOf(await reload(row.name))).toEqual([null, null]);
+    });
+
     it("the CHECK refuses a scheduled row losing its run-as identity", async () => {
       const row = await seedSkill({
         schedule: "0 9 * * *",
@@ -998,7 +1039,7 @@ describe("DrizzleSkillStore", () => {
       await expect(
         db.update(skills).set({ runAsProfileId: null }).where(eq(skills.id, row.id)),
       ).rejects.toMatchObject({
-        cause: { message: expect.stringMatching(/chk_skills_run_as_iff_schedule/) },
+        cause: { message: expect.stringMatching(/chk_skills_run_as_iff_live_schedule/) },
       });
     });
 
@@ -1087,10 +1128,10 @@ describe("DrizzleSkillStore", () => {
       expect(runAsOf(await reload("cron-skill"))).toEqual([owner.userId, owner.profileId]);
     });
 
-    it("approving a first deploy captures the approver even though register stored the schedule", async () => {
+    it("a pending first deploy has no identity until approved, then the approver's", async () => {
       const pending = await register({ riskTier: "approve", classifierLog: APPROVE_LOG });
       if (pending.kind !== "pending_approval") throw new Error(`got ${pending.kind}`);
-      expect(runAsOf(pending.skill)).toEqual([owner.userId, owner.profileId]);
+      expect(runAsOf(pending.skill)).toEqual([null, null]);
 
       const approver = await seedIdentity("approver");
       expect((await approve(pending.deploy.id, approver)).kind).toBe("live");

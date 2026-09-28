@@ -1618,6 +1618,17 @@ describe("telegram adapter", () => {
       expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: "Approved" });
     });
 
+    it("skill approval: a tap with no chat is answered, not dispatched", async () => {
+      const { transport } = await createAdapter();
+      const { chat: _chat, ...ctx } = makeCallbackCtx(`skill:${PENDING_ID}:approve`);
+
+      const handler = handlers.get(`callbackQuery:${SKILLS_APPROVAL_CALLBACK_REGEX.source}`);
+      await handler(ctx);
+
+      expect(transport.skills.approveDeploy).not.toHaveBeenCalled();
+      expect(ctx.answerCallbackQuery).toHaveBeenCalledTimes(1);
+    });
+
     it("skill approval: deny → skills.denyDeploy", async () => {
       const { transport } = await createAdapter();
       const ctx = makeCallbackCtx(`skill:${PENDING_ID}:deny`);

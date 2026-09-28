@@ -987,10 +987,15 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
   bot.callbackQuery(SKILLS_APPROVAL_CALLBACK_REGEX, async (ctx) => {
     const data = ctx.callbackQuery?.data;
     const fromId = ctx.from?.id;
-    const chatId = ctx.chat?.id;
-    if (!data || fromId === undefined || chatId === undefined) return;
+    if (!data || fromId === undefined) return;
     const parsed = parseSkillsApprovalCallback(data);
     if (!parsed) return;
+    const chatId = ctx.chat?.id;
+    if (chatId === undefined) {
+      // No chat, no conversation to act from; answer so the button stops spinning.
+      await ctx.answerCallbackQuery({ text: "Open this approval in its chat." });
+      return;
+    }
 
     const outcome = await handleSkillsApprovalCallback(
       transport,

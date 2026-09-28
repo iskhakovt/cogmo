@@ -196,7 +196,7 @@ describe("runSkillsCli", () => {
         cli(makeRunner({ register })),
         io,
       );
-      expect(register).toHaveBeenCalledWith({ branch: "skill/echo" });
+      expect(register).toHaveBeenCalledWith({ branch: "skill/echo", origin: { kind: "owner" } });
       expect(code).toBe(0);
       expect(io.stdout.join("\n")).toContain('"status": "live"');
     });
@@ -233,7 +233,10 @@ describe("runSkillsCli", () => {
         cli(makeRunner({ approveDeploy })),
         io,
       );
-      expect(approveDeploy).toHaveBeenCalledWith({ pendingId: "deploy-1" });
+      expect(approveDeploy).toHaveBeenCalledWith({
+        pendingId: "deploy-1",
+        origin: { kind: "owner" },
+      });
       expect(code).toBe(0);
     });
 
@@ -265,7 +268,11 @@ describe("runSkillsCli", () => {
         cli(makeRunner({ rollback })),
         io,
       );
-      expect(rollback).toHaveBeenCalledWith({ name: "echo", toGitSha: "older" });
+      expect(rollback).toHaveBeenCalledWith({
+        name: "echo",
+        toGitSha: "older",
+        origin: { kind: "owner" },
+      });
       expect(code).toBe(0);
     });
 

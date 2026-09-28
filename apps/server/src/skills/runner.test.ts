@@ -467,7 +467,7 @@ async def run(inputs, ctx):
       manifestSource: ECHO_MANIFEST,
       body: ECHO_BODY,
     });
-    await tx((trx) => store.setSkillDisabled(trx, { id: row.id, disabled: true }));
+    await tx((trx) => store.disableSkill(trx, row.id));
 
     await expect(runner.invoke({ name: "echo", inputs: { x: 1 }, runAs: runAs() })).rejects.toThrow(
       /disabled/,
@@ -476,10 +476,12 @@ async def run(inputs, ctx):
 
   it("public register without skillsRepoPath throws clear config error", async () => {
     const runner = await makeRunner();
-    await expect(runner.register({ branch: "x" })).rejects.toThrow(/skillsRepoPath not configured/);
-    await expect(runner.approveDeploy({ pendingId: "x" })).rejects.toThrow(
+    await expect(runner.register({ branch: "x", origin: { kind: "owner" } })).rejects.toThrow(
       /skillsRepoPath not configured/,
     );
+    await expect(
+      runner.approveDeploy({ pendingId: "x", origin: { kind: "owner" } }),
+    ).rejects.toThrow(/skillsRepoPath not configured/);
   });
 
   it("__registerForTests rejects when manifest.name != params.name", async () => {
@@ -549,9 +551,15 @@ inputs:
 
   it("rollback / register / approveDeploy require skillsRepoPath", async () => {
     const runner = await makeRunner();
-    await expect(runner.register({ branch: "x" })).rejects.toThrow(/skillsRepoPath/);
-    await expect(runner.approveDeploy({ pendingId: "x" })).rejects.toThrow(/skillsRepoPath/);
-    await expect(runner.rollback({ name: "x", toGitSha: "y" })).rejects.toThrow(/skillsRepoPath/);
+    await expect(runner.register({ branch: "x", origin: { kind: "owner" } })).rejects.toThrow(
+      /skillsRepoPath/,
+    );
+    await expect(
+      runner.approveDeploy({ pendingId: "x", origin: { kind: "owner" } }),
+    ).rejects.toThrow(/skillsRepoPath/);
+    await expect(
+      runner.rollback({ name: "x", toGitSha: "y", origin: { kind: "owner" } }),
+    ).rejects.toThrow(/skillsRepoPath/);
     // denyDeploy + deregister are pure DB updates — no git access needed.
     // denyDeploy is idempotent on a missing pending id; deregister
     // returns rejected:not_found via DeregisterResult.
@@ -574,7 +582,7 @@ inputs:
       manifestSource: ECHO_MANIFEST.replace("name: echo", "name: beta"),
       body: ECHO_BODY,
     });
-    await tx((trx) => store.setSkillDisabled(trx, { id: a.id, disabled: true }));
+    await tx((trx) => store.disableSkill(trx, a.id));
     const list = await runner.list();
     expect(list.map((s) => s.name)).toEqual(["beta"]);
   });
@@ -592,7 +600,7 @@ inputs:
     });
     expect((await runner.listAll()).find((s) => s.name === "echo")?.disabled).toBe(true);
 
-    const result = await runner.enable({ name: "echo" });
+    const result = await runner.enable({ name: "echo", origin: { kind: "owner" } });
     expect(result).toEqual({ kind: "enabled", name: "echo", gitSha: row.gitSha });
     expect((await runner.list()).map((s) => s.name)).toContain("echo");
   });
@@ -604,13 +612,13 @@ inputs:
       manifestSource: ECHO_MANIFEST,
       body: ECHO_BODY,
     });
-    const result = await runner.enable({ name: "echo" });
+    const result = await runner.enable({ name: "echo", origin: { kind: "owner" } });
     expect(result).toEqual({ kind: "already_enabled", name: "echo", gitSha: row.gitSha });
   });
 
   it("enable rejects an unknown skill name", async () => {
     const runner = await makeRunner();
-    const result = await runner.enable({ name: "nope" });
+    const result = await runner.enable({ name: "nope", origin: { kind: "owner" } });
     expect(result).toEqual({ kind: "rejected", name: "nope", reason: "not_found" });
   });
 
@@ -635,7 +643,7 @@ inputs:
         outputs: null,
       }),
     );
-    await tx((trx) => store.setSkillDisabled(trx, { id: row.id, disabled: true }));
+    await tx((trx) => store.disableSkill(trx, row.id));
     await tx((trx) =>
       store.insertDeploy(trx, {
         skillId: row.id,
@@ -655,7 +663,7 @@ inputs:
       }),
     );
 
-    const result = await runner.enable({ name: "denied-skill" });
+    const result = await runner.enable({ name: "denied-skill", origin: { kind: "owner" } });
     expect(result).toEqual({
       kind: "rejected",
       name: "denied-skill",
@@ -677,7 +685,7 @@ inputs:
       manifestSource: ECHO_MANIFEST.replace("name: echo", "name: beta"),
       body: ECHO_BODY,
     });
-    await tx((trx) => store.setSkillDisabled(trx, { id: a.id, disabled: true }));
+    await tx((trx) => store.disableSkill(trx, a.id));
     const list = await runner.listAll();
     expect(list.map((s) => ({ name: s.name, disabled: s.disabled }))).toEqual([
       { name: "alpha", disabled: true },

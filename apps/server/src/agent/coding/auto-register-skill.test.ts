@@ -228,8 +228,8 @@ describe("autoRegisterSkill", () => {
       expect(result.branch).toBe(branch);
       expect(result.result).toBe(registerResult);
     }
-    // No conversation on the task: nothing to take a run-as identity from.
-    expect(skillRunner.register).toHaveBeenCalledWith({ branch });
+    // No conversation on the task: the owner is the origin.
+    expect(skillRunner.register).toHaveBeenCalledWith({ branch, origin: { kind: "owner" } });
 
     const { stdout } = await execFileP("git", [
       "-C",
@@ -283,7 +283,7 @@ describe("autoRegisterSkill", () => {
 
     expect(skillRunner.register).toHaveBeenCalledWith({
       branch,
-      origin: { userId: origin.userId, profileId: origin.profileId },
+      origin: { kind: "conversation", userId: origin.userId, profileId: origin.profileId },
     });
   });
 

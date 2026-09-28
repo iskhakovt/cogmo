@@ -1,5 +1,5 @@
 {
-  "id": "80920bcc-ffeb-42c9-bbc1-842299b22fdf",
+  "id": "9b4d17a2-1d9d-4c3e-a46c-b787a00b2b2b",
   "prevId": "f6897efa-6e9c-444e-93eb-7ac49e3eed1a",
   "version": "7",
   "dialect": "postgresql",
@@ -3572,9 +3572,9 @@
           "name": "chk_skills_next_run_at_iff_schedule",
           "value": "(\"skills\".\"schedule\" IS NULL) = (\"skills\".\"next_run_at\" IS NULL)"
         },
-        "chk_skills_run_as_iff_schedule": {
-          "name": "chk_skills_run_as_iff_schedule",
-          "value": "(\"skills\".\"schedule\" IS NULL) = (\"skills\".\"run_as_user_id\" IS NULL) AND (\"skills\".\"schedule\" IS NULL) = (\"skills\".\"run_as_profile_id\" IS NULL)"
+        "chk_skills_run_as_iff_live_schedule": {
+          "name": "chk_skills_run_as_iff_live_schedule",
+          "value": "(\"skills\".\"schedule\" IS NOT NULL AND NOT \"skills\".\"disabled\") = (\"skills\".\"run_as_user_id\" IS NOT NULL) AND (\"skills\".\"schedule\" IS NOT NULL AND NOT \"skills\".\"disabled\") = (\"skills\".\"run_as_profile_id\" IS NOT NULL)"
         }
       },
       "isRLSEnabled": false
