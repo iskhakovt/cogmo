@@ -9,7 +9,7 @@
  * two surfaces.
  */
 
-import { err, ok, type Result } from "neverthrow";
+import { command, oneOf, option, optional, positional, string, subcommands } from "cmd-ts";
 import {
   type AdapterType,
   type AddProviderResult,
@@ -19,38 +19,14 @@ import type { AgentStore } from "../agent/store/index.js";
 import type { Transactor } from "../db/index.js";
 import { type CacheDialect, CacheDialectSchema } from "../llm/cache-dialect.js";
 import type { SecretsStore } from "../secrets/store/index.js";
-import { defaultCacheDialect, PROVIDER_BASE_URLS, type ProviderType } from "../setup/providers.js";
-
-const USAGE = `Usage: cogmo provider <command> [args]
-
-Commands:
-  add <type> <name> <api-key> [base-url] [--cache-dialect <dialect>]
-                          Register a provider. \`type\` is one of:
-                          anthropic, openrouter, openai, custom.
-                          base-url required for type=custom; optional
-                          for the rest (defaults baked in).
-                          --cache-dialect (openrouter|openai|xai|none)
-                          sets the caching hints an OpenAI-compatible
-                          endpoint takes. Omitted, type=openrouter
-                          takes openrouter and the rest follow the
-                          base URL's host.
-  list                    Show registered providers (name | type | base url |
-                          cache dialect).
-  set <name> --cache-dialect <dialect>
-                          Change an OpenAI-compatible provider's cache
-                          dialect, keeping its model rows.
-  remove <name>           Delete a provider (cascades to its model rows).
-`;
-
-export interface CliIo {
-  out(line: string): void;
-  err(line: string): void;
-}
-
-const CONSOLE_IO: CliIo = {
-  out: (line) => console.log(line),
-  err: (line) => console.error(line),
-};
+import {
+  defaultCacheDialect,
+  PROVIDER_BASE_URLS,
+  PROVIDER_TYPES,
+  type ProviderType,
+} from "../setup/providers.js";
+import { identifier, optionalOption } from "./args.js";
+import { type CliIo, EXIT_USAGE, type LoadDeps } from "./run.js";
 
 export interface ProviderCliDeps {
   runInTx: Transactor;
@@ -58,38 +34,90 @@ export interface ProviderCliDeps {
   secretsStore: SecretsStore;
 }
 
-export async function runProviderCli(
-  argv: readonly string[],
-  deps: ProviderCliDeps,
-  io: CliIo = CONSOLE_IO,
-): Promise<number> {
-  const [command, ...rest] = argv;
+const cacheDialect = { ...oneOf(CacheDialectSchema.options), displayName: "dialect" };
+const CACHE_DIALECT_HELP = `Caching hints an OpenAI-compatible endpoint takes: ${CacheDialectSchema.options.join(", ")}.`;
 
-  switch (command) {
-    case undefined:
-    case "help":
-    case "--help":
-    case "-h":
-      io.out(USAGE);
-      return 0;
-
-    case "list":
-      return listProviders(deps, io);
-
-    case "add":
-      return addProviderCmd(rest, deps, io);
-
-    case "set":
-      return setProvider(rest, deps, io);
-
-    case "remove":
-      return removeProvider(rest, deps, io);
-
-    default:
-      io.err(`Unknown command: ${command}\n`);
-      io.err(USAGE);
-      return 1;
-  }
+export function providerCli(io: CliIo, loadDeps: LoadDeps<ProviderCliDeps>) {
+  return subcommands({
+    name: "provider",
+    description: "Manage LLM providers (llm_providers rows).",
+    cmds: {
+      add: command({
+        name: "add",
+        description: "Register a provider, validating its API key.",
+        args: {
+          type: positional({
+            type: oneOf(PROVIDER_TYPES),
+            displayName: "type",
+            description: PROVIDER_TYPES.join(", "),
+          }),
+          name: positional({
+            type: identifier("name"),
+            displayName: "name",
+            description: "What models route to it by.",
+          }),
+          apiKey: positional({ type: string, displayName: "api-key", description: "Its API key." }),
+          baseUrl: positional({
+            type: optional(string),
+            displayName: "base-url",
+            description: "Required for type custom; the rest default to their own endpoint.",
+          }),
+          cacheDialect: optionalOption({
+            long: "cache-dialect",
+            type: cacheDialect,
+            description: `${CACHE_DIALECT_HELP} Omitted, type openrouter takes openrouter and the rest follow the base URL's host.`,
+          }),
+        },
+        examples: [
+          {
+            description: "An OpenRouter account",
+            command: "cogmo provider add openrouter or sk-or-...",
+          },
+          {
+            description: "A self-hosted OpenAI-compatible endpoint",
+            command: "cogmo provider add custom vllm sk-... http://vllm:8000/v1",
+          },
+        ],
+        handler: (args) => addProviderCmd(args, loadDeps, io),
+      }),
+      list: command({
+        name: "list",
+        description: "Show registered providers (name, type, base URL, cache dialect).",
+        args: {},
+        handler: async () => listProviders(await loadDeps(), io),
+      }),
+      set: command({
+        name: "set",
+        description:
+          "Change an OpenAI-compatible provider's cache dialect, keeping its model rows.",
+        args: {
+          name: positional({
+            type: identifier("name"),
+            displayName: "name",
+            description: "A provider.",
+          }),
+          cacheDialect: option({
+            long: "cache-dialect",
+            type: cacheDialect,
+            description: CACHE_DIALECT_HELP,
+          }),
+        },
+        handler: async (args) => setProvider(args, await loadDeps(), io),
+      }),
+      remove: command({
+        name: "remove",
+        description: "Delete a provider; its model routing rows cascade.",
+        args: {
+          name: positional({
+            type: identifier("name"),
+            displayName: "name",
+            description: "A provider.",
+          }),
+        },
+        handler: async (args) => removeProvider(args, await loadDeps(), io),
+      }),
+    },
+  });
 }
 
 async function listProviders(deps: ProviderCliDeps, io: CliIo): Promise<number> {
@@ -107,52 +135,36 @@ async function listProviders(deps: ProviderCliDeps, io: CliIo): Promise<number> 
   return 0;
 }
 
+interface AddArgs {
+  type: ProviderType;
+  name: string;
+  apiKey: string;
+  baseUrl: string | undefined;
+  cacheDialect: CacheDialect | undefined;
+}
+
 async function addProviderCmd(
-  args: readonly string[],
-  deps: ProviderCliDeps,
+  args: AddArgs,
+  loadDeps: LoadDeps<ProviderCliDeps>,
   io: CliIo,
 ): Promise<number> {
-  const parsed = splitArgs(args);
-  if (parsed.isErr()) {
-    io.err(parsed.error);
-    return 2;
-  }
-  const { positional, flags } = parsed.value;
-  const { cacheDialect } = flags;
-
-  const [providerTypeArg, name, apiKey, baseUrlArg] = positional;
-  if (!providerTypeArg || !name || !apiKey) {
-    io.err(
-      "Usage: cogmo provider add <type> <name> <api-key> [base-url] [--cache-dialect <dialect>]",
-    );
-    return 2;
-  }
-  if (
-    providerTypeArg !== "anthropic" &&
-    providerTypeArg !== "openrouter" &&
-    providerTypeArg !== "openai" &&
-    providerTypeArg !== "custom"
-  ) {
-    io.err(`Invalid type "${providerTypeArg}" — expected anthropic|openrouter|openai|custom`);
-    return 2;
-  }
-  const providerType: ProviderType = providerTypeArg;
+  const { type: providerType, name, apiKey, cacheDialect } = args;
   const adapterType: AdapterType = providerType === "anthropic" ? "anthropic" : "openai_compatible";
   if (adapterType === "anthropic" && cacheDialect) {
     io.err("--cache-dialect applies to OpenAI-compatible providers only");
-    return 2;
+    return EXIT_USAGE;
   }
 
-  const baseUrl = baseUrlArg ?? PROVIDER_BASE_URLS[providerType];
+  const baseUrl = args.baseUrl ?? PROVIDER_BASE_URLS[providerType];
   if (adapterType === "openai_compatible" && !baseUrl) {
     io.err(`type=${providerType} requires a base-url argument`);
-    return 2;
+    return EXIT_USAGE;
   }
   const dialect = defaultCacheDialect(providerType, cacheDialect);
 
   let result: AddProviderResult;
   try {
-    result = await addProvider(deps, {
+    result = await addProvider(await loadDeps(), {
       name,
       type: adapterType,
       ...(baseUrl && { baseUrl }),
@@ -173,53 +185,13 @@ async function addProviderCmd(
   return 0;
 }
 
-interface ProviderFlags {
-  cacheDialect?: CacheDialect;
+interface SetArgs {
+  name: string;
+  cacheDialect: CacheDialect;
 }
 
-/** Positional arguments up to the first `--flag`, and the flags after it. */
-function splitArgs(
-  args: readonly string[],
-): Result<{ positional: readonly string[]; flags: ProviderFlags }, string> {
-  const flagAt = args.findIndex((arg) => arg.startsWith("--"));
-  const positional = flagAt === -1 ? args : args.slice(0, flagAt);
-  return parseFlags(flagAt === -1 ? [] : args.slice(flagAt)).map((flags) => ({
-    positional,
-    flags,
-  }));
-}
-
-function parseFlags(flags: readonly string[]): Result<ProviderFlags, string> {
-  const [flag, value, ...rest] = flags;
-  if (flag === undefined) return ok({});
-  if (flag !== "--cache-dialect") {
-    return err(`Unknown flag "${flag}". Run \`cogmo provider --help\` for accepted flags.`);
-  }
-  if (value === undefined || value.startsWith("--")) return err("--cache-dialect needs a value");
-  const dialect = CacheDialectSchema.safeParse(value);
-  if (!dialect.success) {
-    return err(`--cache-dialect must be one of ${CacheDialectSchema.options.join(", ")}`);
-  }
-  return parseFlags(rest).map((more) => ({ ...more, cacheDialect: dialect.data }));
-}
-
-async function setProvider(
-  args: readonly string[],
-  deps: ProviderCliDeps,
-  io: CliIo,
-): Promise<number> {
-  const parsed = splitArgs(args);
-  if (parsed.isErr()) {
-    io.err(parsed.error);
-    return 2;
-  }
-  const [name] = parsed.value.positional;
-  const { cacheDialect } = parsed.value.flags;
-  if (!name || !cacheDialect) {
-    io.err("Usage: cogmo provider set <name> --cache-dialect <dialect>");
-    return 2;
-  }
-
+async function setProvider(args: SetArgs, deps: ProviderCliDeps, io: CliIo): Promise<number> {
+  const { name, cacheDialect } = args;
   const rows = await deps.runInTx((tx) => deps.agentStore.listProviders(tx));
   const match = rows.find((r) => r.name === name);
   if (!match) {
@@ -228,7 +200,7 @@ async function setProvider(
   }
   if (match.type === "anthropic") {
     io.err("--cache-dialect applies to OpenAI-compatible providers only");
-    return 2;
+    return EXIT_USAGE;
   }
 
   const updated = await deps.runInTx((tx) =>
@@ -244,15 +216,11 @@ async function setProvider(
 }
 
 async function removeProvider(
-  args: readonly string[],
+  args: { name: string },
   deps: ProviderCliDeps,
   io: CliIo,
 ): Promise<number> {
-  const [name] = args;
-  if (!name) {
-    io.err("Usage: cogmo provider remove <name>");
-    return 2;
-  }
+  const { name } = args;
   const rows = await deps.runInTx((tx) => deps.agentStore.listProviders(tx));
   const match = rows.find((r) => r.name === name);
   if (!match) {
