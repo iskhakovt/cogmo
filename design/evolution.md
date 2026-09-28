@@ -278,7 +278,7 @@ The design takes the agent tools' split between instructions and facts, since an
 
 ### Precedence `[confirmed]`
 
-A user's instruction beats a channel default: a default is the operator's guess about a medium, and the instruction is the user deciding. Operator rules beat both, as deliberate configuration that chat can't change. `# Rules` renders in sections by `source`, earlier sections winning, and says so; empty sections are left out. Within a section, rules order by `profile_id IS NULL`, then `channel_type IS NULL`, then `priority`, then `id`: the narrower of two conflicting rules is listed first. `[proposed]` On equal scope and priority, newest first (`id` descending), so a later instruction supersedes an earlier one ([Research Base](#research-base-research)); step 2 changes the order, which also lists a consolidated rule, a new row, first in Learned. In Always, `safety` rules come first.
+A user's instruction beats a channel default: a default is the operator's guess about a medium, and the instruction is the user deciding. Operator rules beat both, as deliberate configuration that chat can't change. `# Rules` renders in sections by `source`, earlier sections winning, and says so; empty sections are left out. Within a section, rules order by `profile_id IS NULL`, then `channel_type IS NULL`, then `priority`, then `id`: the narrower of two conflicting rules is listed first. `[confirmed]` On equal scope and priority, newest first (`id` descending), so a later instruction supersedes an earlier one ([Research Base](#research-base-research)); step 2 changes the order, which also lists a consolidated rule, a new row, first in Learned. In Always, `safety` rules come first.
 
 | Section | `source` |
 |-|-|
@@ -399,7 +399,7 @@ Retiring sets `active = false` and `retracted_at`, which tells a retired rule fr
 
 - **This turn.** The tool result is in the transcript, so the reply that follows applies the rule. The system prompt is the epoch's [snapshot](prompt-caching.md#system-prompt-snapshot-confirmed), fixed for the turn.
 - **From the next turn.** A rule change alters the configuration digest, so the next turn of each of the user's open conversations opens an epoch and the rule keeps system authority ([prompt-caching.md](prompt-caching.md#system-prompt-snapshot-confirmed) → Rules open an epoch). A reinforcement changes no rendered text and opens none.
-- **Cost.** The epoch rewrites the system prompt and transcript at the 1-hour write rate (2×) where they would have been read (0.1× on Sonnet 5), about two uncached requests' worth of input per change and open conversation, and strips earlier turns' thinking blocks. It is recorded as a `configuration` epoch ([Head check](prompt-caching.md#head-check-proposed)). Rule changes are occasional, like graduations.
+- **Cost.** The epoch rewrites the system prompt and transcript at the 1-hour write rate (2×) where they would have been read (0.1× on Sonnet 5), about two uncached requests' worth of input per change and open conversation, and strips earlier turns' thinking blocks. It is recorded as a `configuration` epoch ([Head check](prompt-caching.md#head-check-confirmed)). Rule changes are occasional, like graduations.
 
 ### Data Model
 

@@ -69,7 +69,7 @@ Surveyed September 2026.
 ## Principles `[proposed]`
 
 1. **The system prompt is a stored snapshot.** It is rendered once per conversation epoch and sent unchanged until the next one. Nothing per-turn goes in it. Core memory that changes during an epoch is announced in the next turn; a change to instructions — rules, prompt text, tools — starts a new epoch, so instructions always carry system authority.
-2. **The transcript is append-only within an epoch.** What the model saw on one request, it sees again byte-identical on every later request. The only rewrite is an epoch transition ([Append-only Transcript](#append-only-transcript-proposed)). Byte-identical includes key order inside tool-call inputs.
+2. **The transcript is append-only within an epoch.** What the model saw on one request, it sees again byte-identical on every later request. The only rewrite is an epoch transition ([Append-only Transcript](#append-only-transcript-confirmed)). Byte-identical includes key order inside tool-call inputs.
 3. **Per-turn state belongs to its turn.** It is rendered once, stored as the exact text sent, and re-sent as those bytes on every later request.
 4. **One prefix per conversation.** Every turn in a conversation — chat or pipeline stage — sends the same `tools` and system prompt. Modes are expressed in messages and enforced at dispatch, never by changing what the request advertises.
 5. **Cache intent is provider-neutral; wire format is the adapter's.** Domain code says "this transcript will be re-sent"; adapters decide what that means on the wire.
@@ -208,9 +208,9 @@ What may be announced is limited by authority. An announcement is user content, 
 - **Rules open an epoch.** A rule added, changed or retired changes the system prompt at the next turn, with system authority intact. Rule changes come from the Observer's graduation, from operators and from the user's explicit instructions ([evolution.md](evolution.md) → Explicit Instructions), so they are occasional.
 - **Channel-scoped rules stay in the system prompt**, all of them, each labelled with its channel ("On telegram: …"), whether or not that channel is active, under a line saying such a rule applies only when the turn context lists its channel. The turn context names the channel types of the conversation's active sessions. Rendering only the active channels' rules would change the system prompt whenever a session expires or opens; moving the rules into user content would demote them, and a channel-scoped rule can be a `safety` rule.
 - **Voice style is standing guidance.** The system prompt always carries the voice-style section, which applies when a turn context says `Reply modality: voice`, so alternating voice and text turns change only data.
-- **Rule order** `[confirmed]`. `# Rules` lists rules by section, and within a section by scope, then priority, then id ([evolution.md](evolution.md#precedence-confirmed) → Precedence). The id keeps correction rules, which all share priority 100, in their order across the in-place updates the Observer makes. `[proposed]` Ties on scope and priority go newest first, which also lists consolidation's merged row first in its section ([evolution.md](evolution.md#precedence-confirmed) → Precedence); the change reorders `# Rules`, so each conversation opens one `configuration` epoch at the deploy.
+- **Rule order** `[confirmed]`. `# Rules` lists rules by section, and within a section by scope, then priority, then id ([evolution.md](evolution.md#precedence-confirmed) → Precedence). The id keeps correction rules, which all share priority 100, in their order across the in-place updates the Observer makes. `[confirmed]` Ties on scope and priority go newest first, which also lists consolidation's merged row first in its section ([evolution.md](evolution.md#precedence-confirmed) → Precedence); the change reorders `# Rules`, so each conversation opens one `configuration` epoch at the deploy.
 
-**An epoch opens** at a conversation's first chat turn, at a turn whose configuration digest differs from the snapshot's, and at a turn whose history starts after a different summary than the snapshot's — one this turn's compaction stored, or one `/compact` stored between turns. `[proposed]` It also opens at a turn whose Strategy 3 or unstored summary rewrote its history, and at a turn whose history fails the [head check](#head-check-proposed) or follows a non-intact head. `src/agent/system-prompt-snapshot.ts` holds the rules:
+**An epoch opens** at a conversation's first chat turn, at a turn whose configuration digest differs from the snapshot's, and at a turn whose history starts after a different summary than the snapshot's — one this turn's compaction stored, or one `/compact` stored between turns. `[confirmed]` It also opens at a turn whose Strategy 3 or unstored summary rewrote its history, and at a turn whose history fails the [head check](#head-check-confirmed) or follows a non-intact head. `src/agent/system-prompt-snapshot.ts` holds the rules:
 
 - **The digest** covers everything the snapshot renders except the blocks' keys and content: the prompt source's `configuration()` — the base prompt or code-owned identity, the shape of `# User` (onboarding, or which group leads render), `# Tools`, the capabilities guidance, the rules and the turn-context guidance — and the frozen tool table, whose `tools` every turn of the epoch sends. It also covers the core-memory scope: the profile class, its restricted flag and whether the profile's trust admits `first-party`, which decide which blocks `# User` renders; and whether a restricted class has its own `identity`, since a write deletes that block when no line differs from the shared one and an announcement can't express a removal. The shape is in the digest so the snapshot never keeps what `# User` no longer shows: a new user's first write ends onboarding at the next turn, and a restricted persona's first shared `identity` brings in its shared group's lead. A deploy that edits prompt text reaches existing conversations at their next turn, as does a rule change or a new skill.
 - **The history's start** is the first message the loaded history holds after the conversation's latest summary. The snapshot records it (`history_start`), so a stored summary opens an epoch on the turn that stored it, or after `/compact` on the next turn. Compaction already rewrites the prefix, so its refresh costs nothing extra; the others are deliberate full rewrites.
@@ -226,7 +226,7 @@ What may be announced is limited by authority. An announcement is user content, 
 - A turn whose `persist-summary` recovers a row `/compact` stored for the same span sends its own summary, while later turns load `/compact`'s with the same history start.
 - A kept tail under an unstored summary or Strategy 3 truncation keeps its thinking blocks.
 
-[Append-only Transcript](#append-only-transcript-proposed) closes both. The head check catches the first and counts it as a violation, since the turn sent a summary no row holds. The compaction epoch and the `compacted` head status close the second.
+[Append-only Transcript](#append-only-transcript-confirmed) closes both. The head check catches the first and counts it as a violation, since the turn sent a summary no row holds. The compaction epoch and the `compacted` head status close the second.
 
 ```
 system_prompt_snapshots
@@ -236,14 +236,14 @@ system_prompt_snapshots
   history_start    UUID NOT NULL REFERENCES messages(id)         -- the first message after the latest summary
   rendered         TEXT NOT NULL                                 -- the exact system prompt sent
   config_digest    TEXT NOT NULL                                 -- digest of everything rendered but core memory
-  reason           system_prompt_epoch_reason NOT NULL           -- first_turn | configuration | summary | compaction | prefix_violation  [proposed]
+  reason           system_prompt_epoch_reason NOT NULL           -- first_turn | configuration | summary | compaction | prefix_violation  [confirmed]
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now()            -- when the core memory it shows was read
   UNIQUE (conversation_id, opened_by)
 ```
 
 `opened_by` alone identifies an epoch, since a message belongs to one conversation; pairing it with the conversation makes the unique both the insert's conflict target and the read path for the current epoch, the snapshot opened latest in the transcript. Rows are immutable. Owned by `agent/store/`.
 
-`[proposed]` `reason` is a `pgEnum` ([Head check](#head-check-proposed) → Epoch rule). The migration that adds it fills existing rows from their order: a conversation's first snapshot gets `first_turn`, a later one whose `history_start` differs from its predecessor's gets `summary`, and the rest get `configuration`.
+`[confirmed]` `reason` is a `pgEnum` ([Head check](#head-check-confirmed) → Epoch rule). The migration that adds it fills existing rows from their order: a conversation's first snapshot gets `first_turn`, a later one whose `history_start` differs from its predecessor's gets `summary`, and the rest get `configuration`.
 
 On Opus 5, 5.5 and Fable, a rule change could instead be a mid-conversation `role: "system"` message, which has operator authority and avoids the rewrite. Sonnet 5 has none, so an epoch is the one path that works on every model.
 
@@ -266,7 +266,7 @@ A `tool_use` block's `input` is put into canonical key order — keys sorted by 
 
 The model never sees its own emission order again, only the canonical one, and that is safe: iteration 1's cache entry ends at the user message, and the preserved-thinking check ignores key order (measured, see [Validation](#validation-confirmed)). Handlers receive the same values; only key order changes.
 
-## Append-only Transcript `[proposed]`
+## Append-only Transcript `[confirmed]`
 
 A thinking block on Opus 5.5 and Fable 5.1 is bound to `system`, `tools` and every earlier message; where the check is enforced, an edited history is a 400 on every later turn. This account isn't enforced ([Validation](#validation-confirmed)), so each edit below costs cache hits here and is an outage on a new key or organization. The snapshot and frozen tool definitions remove the edits configuration causes; this section removes the rest and detects new ones.
 
@@ -288,24 +288,24 @@ A model switch is not an edit. A model that can't read a block drops it unbilled
 
 | | Source | Fix | Cost | Marker |
 |-|-|-|-|-|
-| a | The `empty_end_turn` repair drops its continuation prompt before persisting | Persist the prompt, tagged harness-authored ([agent-resilience.md](agent-resilience.md#per-subtype-repair)) | None | `[proposed]`: data model |
-| b | Compaction that rewrites without storing a summary: Strategy 3, a capped or unpersisted summary, or a span `/compact` stored first | A turn whose Strategy 3 or unstored summary rewrote its history opens an epoch and stores its [head](#head-check-proposed) as `compacted`, so the next turn opens another | Thinking, and the messages cache from the first stripped block, on turns that already rewrote from the cut | `[proposed]` |
-| c | Strategy 1 clears tool results client-side, a set that moves as the conversation grows | A request-level edit intent. Anthropic clears server-side (`clear_tool_uses_20250919`). The OpenAI-compatible adapter clears on the wire, since those routes replay no reasoning | A cache write from each newly cleared result; thinking kept | `[proposed]` |
-| d | An image or document turn sends resolved blocks; later turns reload the row as a JSON string | The turn row stores attachment reference blocks, and every request renders them the same way: base64 of the write-once object | Image tokens stay as cache reads until a summary; one object read per attachment per invocation, until the per-run memo | `[proposed]`: data model |
-| e | Strategy 0 rewrites an earlier `tool_result` whenever a same-tool cluster crosses its trigger | Retired from turns and `/compact` | Clusters stay verbatim until clearing or a summary | `[proposed]` |
+| a | The `empty_end_turn` repair drops its continuation prompt before persisting | Persist the prompt, tagged harness-authored ([agent-resilience.md](agent-resilience.md#per-subtype-repair)) | None | `[confirmed]`: data model |
+| b | Compaction that rewrites without storing a summary: Strategy 3, a capped or unpersisted summary, or a span `/compact` stored first | A turn whose Strategy 3 or unstored summary rewrote its history opens an epoch and stores its [head](#head-check-confirmed) as `compacted`, so the next turn opens another | Thinking, and the messages cache from the first stripped block, on turns that already rewrote from the cut | `[confirmed]` |
+| c | Strategy 1 clears tool results client-side, a set that moves as the conversation grows | A request-level edit intent. Anthropic clears server-side (`clear_tool_uses_20250919`). The OpenAI-compatible adapter clears on the wire, since those routes replay no reasoning | A cache write from each newly cleared result; thinking kept | `[confirmed]` |
+| d | An image or document turn sends resolved blocks; later turns reload the row as a JSON string | The turn row stores attachment reference blocks, and every request renders them the same way: base64 of the write-once object | Image tokens stay as cache reads until a summary; one object read per attachment per invocation, until the per-run memo | `[confirmed]`: data model |
+| e | Strategy 0 rewrites an earlier `tool_result` whenever a same-tool cluster crosses its trigger | Retired from turns and `/compact` | Clusters stay verbatim until clearing or a summary | `[confirmed]` |
 | f | Stage turns send a narrower tool set | [One Prefix per Conversation](#one-prefix-per-conversation-proposed) | Nothing | `[proposed]` |
 | g | Non-durable tools re-execute on every invocation. `get_current_time` returns a new millisecond timestamp, and a read re-run after a same-turn write returns the written state. Later iterations and the persisted row carry output the model never saw | Every tool whose output can change during the turn is durable, which is every tool ([crash-recovery.md](crash-recovery.md#tool-durability-policy)) | A step boundary per call; outputs in step state, bounded by each tool's cap | `[confirmed]` |
-| h | Forks, meaning the summarization call and degraded-reply synthesis, replay the conversation's thinking without its `system` or `tools` | Every fork, on any model, sends the snapshot `system` and the frozen `tools` with `tool_choice: none` (a new `ChatParams.toolChoice`) and appends its instruction as a user message. A model that can't read the blocks drops them, unbilled | The fork's messages miss the cache: `tool_choice: none` invalidates it | `[proposed]`; the 400 without `tools` and the 200 with `tool_choice: none` are measured |
+| h | Forks, meaning the summarization call and degraded-reply synthesis, replay the conversation's thinking without its `system` or `tools` | Every fork, on any model, sends the snapshot `system` and the frozen `tools` with `tool_choice: none` (a new `ChatParams.toolChoice`) and appends its instruction as a user message. A model that can't read the blocks drops them, unbilled | The fork's messages miss the cache: `tool_choice: none` invalidates it | `[confirmed]`; the 400 without `tools` and the 200 with `tool_choice: none` are measured |
 
 - **(b)** While summarization keeps failing, every truncating turn opens an epoch ([Strategy 3](context-management.md#strategy-3-truncate-trigger-95)).
-- **(d)** This is also a quality fix: later turns see the image, not a JSON string naming its object path. The cost is size: every request re-sends each attachment's bytes until a summary replaces its turn, against Anthropic's 32 MB request cap. `[proposed]` A turn whose view carries more attachment bytes than a budget under that cap opens an epoch (`compaction`) that replaces attachments before its opening row, oldest first, with a placeholder naming the file; later turns of the epoch apply the same rule to the same rows. Anthropic's Files API (`file_id`) would take the bytes out of the request; it is `[research]` and Anthropic-only.
-- **(e)** Decision and open alternative: [Retirement](context-management.md#retirement-proposed).
+- **(d)** This is also a quality fix: later turns see the image, not a JSON string naming its object path. The cost is size: every request re-sends each attachment's bytes until a summary replaces its turn, against Anthropic's 32 MB request cap. `[confirmed]` A turn whose view carries more attachment bytes than a budget under that cap opens an epoch (`compaction`) that replaces attachments before its opening row, oldest first, with a placeholder naming the file; later turns of the epoch apply the same rule to the same rows. Anthropic's Files API (`file_id`) would take the bytes out of the request; it is `[research]` and Anthropic-only.
+- **(e)** Decision and open alternative: [Retirement](context-management.md#retirement-confirmed).
 
-### One renderer `[proposed]`
+### One renderer `[confirmed]`
 
 A request is the epoch's snapshot, the frozen tool table and durable rows, each rendered by one function (content, stored turn context, resolved attachments, history sanitization), with the epoch's summary overlay and thinking strip on top. The turn's own message and every message the loop appends render from their rows to the bytes sent, so compaction and the head check see the request.
 
-### Transcript type `[proposed]`
+### Transcript type `[confirmed]`
 
 The loop and the orchestrator pass around a `Transcript`, not a `Message[]`:
 
@@ -316,7 +316,7 @@ The loop and the orchestrator pass around a `Transcript`, not a `Message[]`:
 
 No method edits a sent message. Compaction returns the view unchanged or a rewrite, and only an epoch opening accepts a rewrite. A loader rendering a row differently from how a turn built it, and a replay rebuilding a request the step never sent, are the head check's.
 
-### Head check `[proposed]`
+### Head check `[confirmed]`
 
 A digest chain runs over the provider-neutral request: `h₀ = H(system, tools)`, `hᵢ = H(hᵢ₋₁, H(messageᵢ))`, each part as canonical JSON. Key order is the byte-level tests' concern ([Canonical Tool Inputs](#canonical-tool-inputs-confirmed)). A request's head is `(length, hₙ)`. Hashing is incremental, one pass per message per invocation.
 
@@ -361,7 +361,7 @@ A `model_binding_mismatch` entry follows a model switch: it is counted under its
 
 The policy is injected as `prefixViolation: "reopen" | "throw"`. Production wiring passes `reopen`; the unit factories and the integration bootstrap pass `throw`.
 
-### Server-side controls `[proposed]`
+### Server-side controls `[confirmed]`
 
 The adapter also reports what the provider sees. That is the last layer and the ground truth:
 
@@ -495,9 +495,9 @@ The persisted per-turn input is the sum across the turn's iterations, which over
 
 ## Interactions `[proposed]`
 
-- **Compaction.** Strategies 2 and 3 rewrite history and invalidate the cache from the first rewritten position ([context-management.md](context-management.md)). A stored summary opens an epoch; the rest is [Append-only Transcript](#append-only-transcript-proposed).
+- **Compaction.** Strategies 2 and 3 rewrite history and invalidate the cache from the first rewritten position ([context-management.md](context-management.md)). A stored summary opens an epoch; the rest is [Append-only Transcript](#append-only-transcript-confirmed).
 - **Inngest replays.** Every byte of `system` and `messages` derives from step results or the event payload, so a replayed invocation sends the same prefix; no bare-body clock or non-durable read may reach them. The turn context's inputs are listed under [Rendering](#rendering); `handle-message.replay.test.ts` holds `llm-iter2`'s request bytes equal between a fresh run and one replaying every earlier step as the server returns it. The `tools` array is built from live reads of the image, skill, sub-agent and MCP catalogs, which a catalog edit mid-run — or a transient failure, since `buildSkillTools` catches a skill-list error and returns `[]` — can change between invocations, moving position 0 for the rest of the turn. Each turn's tool definitions and dispatch policy are therefore frozen in the `freeze-turn-inputs` step, in chat and stage turns alike; the bare body still builds the handlers and binds them to the frozen table (`src/agent/turn-tools.ts`), and a call to a tool whose handler didn't load on this invocation returns an `is_error` result. Between turns, a changed catalog starts a new snapshot epoch.
-- **Preserved thinking and image turns.** See [Append-only Transcript](#append-only-transcript-proposed).
+- **Preserved thinking and image turns.** See [Append-only Transcript](#append-only-transcript-confirmed).
 - **Model switches.** Caches are per model. A `/model` change or a fallback to another provider starts cold.
 
 ## Validation `[confirmed]`
@@ -546,7 +546,7 @@ Replay cannot prove the third. llmock records usage for OpenAI-shaped responses 
 - **Injectable `fetch`** on `AnthropicProvider` and `OpenAICompatibleProvider`, as `OpenAIVoiceProvider` already takes for record/replay. Production passes the logging fetch it builds today.
 - **`createWireRecorder()`** (`src/test/`) wraps a fetch and records each request's URL, headers and body exactly as sent. It tees the response to keep the usage object: Anthropic's `message_start` usage including the `cache_creation` TTL breakdown, and the OpenAI final chunk's `usage`. An optional request mutator lets the live tier add headers and fields without production code.
 - **`assertAppendOnly(prev, next)`**, with `cache_control` stripped everywhere: `tools` and `system` equal, and `next.messages` starting with every message of `prev` byte-for-byte. A failure names the first diverging path (`system`, `tools[3]`, `messages[7].content[1].input`). It also counts the positions each request appends — a run of `tool_use` or `tool_result` blocks counting once — and fails past 20, the lookback window.
-- **`assertEpochOpening(prev, next, opener)`** `[proposed]`, for a pair that crosses a declared epoch opening: `next` carries no thinking block from before the opening row. Over a whole conversation, `assertThinkingNeverReturns(requests)` fails when a thinking block missing from one request appears in a later one. A pair is either append-only or a declared opening; nothing else passes.
+- **`assertEpochOpening(prev, next, opener)`** `[confirmed]`, for a pair that crosses a declared epoch opening: `next` carries no thinking block from before the opening row. Over a whole conversation, `assertThinkingNeverReturns(requests)` fails when a thinking block missing from one request appears in a later one. A pair is either append-only or a declared opening; nothing else passes.
 
 llmock's request journal can't serve here: it stores its own OpenAI-shaped conversion of an Anthropic request, without `cache_control`, system blocks or the top-level field.
 
@@ -568,7 +568,7 @@ llmock's request journal can't serve here: it stores its own OpenAI-shaped conve
 - OpenAI-compatible adapter, per dialect: `prompt_cache_key`, the `x-grok-conv-id` header, OpenRouter's `session_id` and markers, and nothing for `none`; usage from `prompt_tokens_details`.
 - The loop passes the caller's intent on every iteration and to the in-step replay; summarization, degraded-reply synthesis, sub-agents and `chatTyped` send none.
 - `shouldSkipCounting` does not skip for a large conversation whose usage is mostly cache reads.
-- `[proposed]` The append-only transcript (`transcript.test.ts`, `system-prompt-snapshot.test.ts`, `loop.test.ts`, `handle-message.replay.test.ts`):
+- `[confirmed]` The append-only transcript (`transcript.test.ts`, `system-prompt-snapshot.test.ts`, `loop.test.ts`, `handle-message.replay.test.ts`):
   - the chain ignores key order, changes with any content, and keeps positions;
   - the epoch rule continues on a matching head; opens under `configuration`, `summary` or `compaction` for a different `base`, a different `historyStart` or a `compacted` head, counting nothing; counts `prefix_violation` only for a matching head whose digest diverges, naming the first diverging message; and skips the check for a row without a head, or a memo without one;
   - `amendUnsent` and `discardUnsent` throw once a request carried the message, and a rewrite reaches a request only through an epoch opening;
@@ -602,7 +602,7 @@ llmock's request journal can't serve here: it stores its own OpenAI-shaped conve
 - **A voice turn** changing only the turn context's modality. The voice path is covered at the unit tier (the prompt takes no voice input) and live, by scenario A's voice turn.
 - **A pipeline run conversation:** chat turns and a stage turn alternate, and `assertAppendOnly` holds across each switch — same `tools`, same `system`, same `1h` TTL. Step 5; a stage turn narrows `tools` and `# Tools` and caches for 5 minutes until then.
 - **OpenAI-compatible:** the recorded xAI-via-OpenRouter route runs a two-turn conversation with a tool call. `assertAppendOnly` holds over the Chat Completions bodies, which catches a reordered `arguments` string, and the dialect's fields are present.
-- **The append-only transcript** ([Append-only Transcript](#append-only-transcript-proposed) → Rollout). The suite runs under `throw`, and the image turn's declared exception goes with source (d). New turns cover the remaining sources: a `get_current_time` call followed by another iteration; an empty `end_turn` from a fixture, so the continuation prompt is replayed on the next turn; a budget small enough to truncate, where the pair after it is a declared opening and the turn after that extends it; and a `/compact` between turns. Every request carries `context_management`, whose trigger is the clearing threshold, and `prefix_mismatch_behavior: "error"`, each with its beta header.
+- **The append-only transcript** ([Append-only Transcript](#append-only-transcript-confirmed) → Rollout). The suite runs under `throw`, and the image turn's declared exception goes with source (d). New turns cover the remaining sources: a `get_current_time` call followed by another iteration; an empty `end_turn` from a fixture, so the continuation prompt is replayed on the next turn; a budget small enough to truncate, where the pair after it is a declared opening and the turn after that extends it; and a `/compact` between turns. Every request carries `context_management`, whose trigger is the clearing threshold, and `prefix_mismatch_behavior: "error"`, each with its beta header.
 
 The suite follows `.claude/rules/testing.md`: it runs alongside its noisiest peers before it counts as stable.
 
@@ -622,7 +622,7 @@ Step 2 adds `src/test/prompt-caching.live.test.ts` `[confirmed]`: a five-turn co
 - `cache_creation.ephemeral_1h_input_tokens` is non-zero and `ephemeral_5m_input_tokens` is zero on the chat path.
 - `input_tokens` covers only the tail after the last breakpoint.
 
-**B. Opus 5.5 with preserved thinking enforced.** The same conversation as A. The recorder adds `thinking-binding-controls-2026-08-01` and `thinking.block_binding.prefix_mismatch_behavior: "error"`, so any history edit is a 400. The conversation completes, `input_transformations` (which the wire recorder captures) stays empty, and the last request replays thinking blocks from earlier turns, so the check isn't vacuous. Key order needs no check here: the binding ignores it, and A's exact relation already fails on a reordered input. `[proposed]` B grows an image turn and a summarization fork once sources (d) and (h) land, and a turn over server-side tool-result clearing with (c).
+**B. Opus 5.5 with preserved thinking enforced.** The same conversation as A. The recorder adds `thinking-binding-controls-2026-08-01` and `thinking.block_binding.prefix_mismatch_behavior: "error"`, so any history edit is a 400. The conversation completes, `input_transformations` (which the wire recorder captures) stays empty, and the last request replays thinking blocks from earlier turns, so the check isn't vacuous. Key order needs no check here: the binding ignores it, and A's exact relation already fails on a reordered input. `[confirmed]` B grows an image turn and a summarization fork once sources (d) and (h) land, and a turn over server-side tool-result clearing with (c).
 
 **C. TTL survival (nightly only).** Turn 1, a six-and-a-half-minute wait, then turn 2, whose first request reads turn 1's whole prefix. Only the 1-hour TTL makes that possible.
 
