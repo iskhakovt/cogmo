@@ -1233,9 +1233,11 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
 
       const path = await transport.uploadAttachment(buffer, "image/jpeg");
       const caption = ctx.message.caption ?? "";
+      const origin = ctx.message.forward_origin;
 
+      // Forwarded without a caption, the marked block is empty and names the sender.
       const content: InboundContent = [];
-      if (caption) content.push(inboundTextBlock(caption, ctx.message.forward_origin));
+      if (caption || origin !== undefined) content.push(inboundTextBlock(caption, origin));
       content.push({ type: "image", path, mediaType: "image/jpeg" });
 
       await dispatchInbound(ctx, addr, handle, content, platformTs);
@@ -1269,9 +1271,11 @@ export async function setup(deps: AdapterDeps): Promise<AdapterSetupResult> {
       // — Anthropic's `document` content block doesn't accept image media
       // types and would 400-fail.
       const isImage = mediaType.startsWith("image/");
+      const origin = ctx.message.forward_origin;
 
+      // Forwarded without a caption, the marked block is empty and names the sender.
       const content: InboundContent = [];
-      if (caption) content.push(inboundTextBlock(caption, ctx.message.forward_origin));
+      if (caption || origin !== undefined) content.push(inboundTextBlock(caption, origin));
       if (isImage) {
         content.push({ type: "image", path, mediaType });
       } else {

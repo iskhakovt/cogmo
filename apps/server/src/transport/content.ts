@@ -205,8 +205,9 @@ export function renderInboundText(text: string, forwarded: ForwardedOrigin | und
     `origin="${attributeValue(forwarded.origin)}"`,
     `sent="${attributeValue(forwarded.sentAt)}"`,
   ].join(" ");
-  const body = escapeClosingTags(text, ["forwarded_message"]);
-  return `<forwarded_message ${attributes}>\n${body}\n</forwarded_message>`;
+  // Empty for captionless forwarded media, where the element only names the sender.
+  const body = text === "" ? "" : `\n${escapeClosingTags(text, ["forwarded_message"])}\n`;
+  return `<forwarded_message ${attributes}>${body}</forwarded_message>`;
 }
 
 /** `value` inside a double-quoted attribute: markup characters as entities, whitespace runs as one space. */

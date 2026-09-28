@@ -720,6 +720,40 @@ describe("telegram adapter", () => {
       );
     });
 
+    it("puts an empty forwarded text block ahead of a captionless forwarded photo", async () => {
+      const { transport } = await createAdapter();
+      await handlers.get("on:message:photo")!(asForwarded(makePhotoCtx(111)));
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [
+          { type: "text", text: "", forwarded },
+          { type: "image", path: "inbound/test.jpg", mediaType: "image/jpeg" },
+        ],
+        expect.any(Date),
+      );
+    });
+
+    it("puts an empty forwarded text block ahead of a captionless forwarded document", async () => {
+      const { transport } = await createAdapter();
+      const ctx = makeDocumentCtx(111, { file_name: "x.pdf", mime_type: "application/pdf" });
+      await handlers.get("on:message:document")!(asForwarded(ctx));
+
+      expect(transport.emit).toHaveBeenCalledWith(
+        "session-1",
+        [
+          { type: "text", text: "", forwarded },
+          {
+            type: "document",
+            path: "inbound/test.jpg",
+            mediaType: "application/pdf",
+            name: "x.pdf",
+          },
+        ],
+        expect.any(Date),
+      );
+    });
+
     it("marks a forwarded document's caption", async () => {
       const { transport } = await createAdapter();
       const ctx = makeDocumentCtx(111, { file_name: "x.txt", mime_type: "text/plain" }, "notes");

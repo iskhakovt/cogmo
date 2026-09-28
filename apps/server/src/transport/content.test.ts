@@ -298,6 +298,12 @@ describe("forwarded text", () => {
     expect(InboundContentSchema.safeParse(content).success).toBe(false);
   });
 
+  it("renders forwarded text with no body as an empty element", () => {
+    expect(renderedText(forwarded(""))).toBe(
+      `<forwarded_message from="Alice" origin="user" sent="${SENT_AT}"></forwarded_message>`,
+    );
+  });
+
   it("parses a forwarded voice block", () => {
     const content: InboundContent = [
       {
