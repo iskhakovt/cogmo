@@ -103,6 +103,10 @@ function describeStartFailure(failure: StartFailure): string {
         `supervisor did not announce protocol v${SUPERVISOR_PROTOCOL_VERSION} within ${SUPERVISOR_READY_TIMEOUT_MS / 1000}s; a skills image without the handshake never does`,
     )
     .with({ kind: "ended" }, ({ reason }) => `supervisor exited before announcing: ${reason}`)
+    .with(
+      { kind: "closed" },
+      ({ reason }) => `the host closed the supervisor's channel before it announced: ${reason}`,
+    )
     .exhaustive();
 }
 

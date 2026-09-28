@@ -333,6 +333,26 @@ describe("SysboxSkillWorker", () => {
       await expect(create(bundle)).rejects.toThrow(/supervisor exited before announcing/);
       expect(bundle.sandbox.delete).toHaveBeenCalledWith(bundle.session);
     });
+
+    it("reports a handshake the host cut short as closed, not as the supervisor exiting", async () => {
+      const bundle = buildFakeSandbox();
+      silentSupervisor(bundle);
+      const lifetime = new AbortController();
+      const created = SysboxSkillWorker.create({
+        workerId: "w-closed",
+        sandbox: bundle.sandbox,
+        image: "cogmo-skills:test",
+        expiresAt: new Date(Date.now() + 60_000),
+        signal: lifetime.signal,
+      });
+      await vi.waitFor(() => expect(bundle.session.execStreaming).toHaveBeenCalled());
+      lifetime.abort(new Error("pool disposed"));
+
+      await expect(created).rejects.toThrow(
+        /host closed the supervisor's channel before it announced: pool disposed/,
+      );
+      expect(bundle.sandbox.delete).toHaveBeenCalledWith(bundle.session);
+    });
   });
 
   describe("state transitions", () => {

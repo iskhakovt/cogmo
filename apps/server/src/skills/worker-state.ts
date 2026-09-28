@@ -89,7 +89,10 @@ export type TaskOutcome = Result<TaskCompletion, TaskFailure>;
 export type StartFailure =
   | { kind: "refused"; reason: string }
   | { kind: "timed_out" }
-  | { kind: "ended"; reason: string };
+  /** The worker's channel ended or failed. */
+  | { kind: "ended"; reason: string }
+  /** The host closed the channel. */
+  | { kind: "closed"; reason: string };
 
 /** Host commands and channel facts. A worker's frames are events as they arrive. */
 export type HostEvent<T extends TaskRef> =
@@ -157,7 +160,7 @@ export function transition<T extends TaskRef>(
     .with([{ kind: ALIVE }, { type: P.union("send_failed", "channel_ended") }], ([s, { reason }]) =>
       onChannelLost(s, reason),
     )
-    .with([{ kind: ALIVE }, { type: "close" }], ([s, { reason }]) => die(s, reason, "lost", []))
+    .with([{ kind: ALIVE }, { type: "close" }], ([s, { reason }]) => die(s, reason, "closed", []))
     .exhaustive();
 }
 
@@ -415,13 +418,14 @@ function released<T extends TaskRef>(task: T, result: TaskResult): Transition<T>
 function die<T extends TaskRef>(
   state: Alive<T>,
   reason: string,
-  cause: "lost" | "timed_out" | "refused",
+  cause: "lost" | "closed" | "timed_out" | "refused",
   logs: ReadonlyArray<Effect<T>>,
 ): Transition<T> {
   const failure: TaskFailure =
     cause === "timed_out" ? { kind: "timed_out" } : { kind: "failed", reason };
   const startFailure: StartFailure = match(cause)
     .with("lost", () => ({ kind: "ended", reason }) as const)
+    .with("closed", () => ({ kind: "closed", reason }) as const)
     .with("timed_out", () => ({ kind: "timed_out" }) as const)
     .with("refused", () => ({ kind: "refused", reason }) as const)
     .exhaustive();

@@ -150,7 +150,7 @@ describe("Dispatcher", () => {
     it("closes the channel at once when opened with an aborted signal", async () => {
       const ch = channel();
       const opened = open(ch, { signal: AbortSignal.abort(new Error("pool disposed")) });
-      expect(await opened).toEqual(err({ kind: "ended", reason: "pool disposed" }));
+      expect(await opened).toEqual(err({ kind: "closed", reason: "pool disposed" }));
       expect(ch.close).toHaveBeenCalledTimes(1);
     });
 

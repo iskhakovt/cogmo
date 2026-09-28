@@ -189,6 +189,7 @@ function describeStartFailure(failure: StartFailure, readyTimeoutMs: number): st
     .with({ kind: "refused" }, ({ reason }) => reason)
     .with({ kind: "timed_out" }, () => `worker_init_timeout after ${readyTimeoutMs}ms`)
     .with({ kind: "ended" }, ({ reason }) => `worker init failed: ${reason}`)
+    .with({ kind: "closed" }, ({ reason }) => `worker closed before ready: ${reason}`)
     .exhaustive();
 }
 

@@ -334,6 +334,13 @@ describe("transition", () => {
       });
     });
 
+    it("starting: a host close reports the start as closed, not as the worker ending", () => {
+      expect(transition(STATES.starting, EVENTS.close).effects[0]).toEqual({
+        type: "started",
+        outcome: err({ kind: "closed", reason: "closed" }),
+      });
+    });
+
     it("leased: invoke sends the task and runs it", () => {
       expect(transition<TaskRef>(STATES.leased, EVENTS.invoke)).toEqual({
         state: { kind: "running", task: NEXT },
