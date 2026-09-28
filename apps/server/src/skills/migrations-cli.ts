@@ -23,7 +23,9 @@
  */
 
 import * as p from "@clack/prompts";
+import { command } from "cmd-ts";
 import type { CodingStore } from "../agent/coding/store/index.js";
+import type { LoadDeps } from "../cli/run.js";
 import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { configureSkillsRemote } from "./configure-remote.js";
@@ -42,22 +44,24 @@ export interface MigrateSkillsRemoteCliDeps {
   skillsRepoPath: string;
 }
 
+export function migrateSkillsRemoteCli(loadDeps: LoadDeps<MigrateSkillsRemoteCliDeps>) {
+  return command({
+    name: "migrate-skills-remote",
+    description:
+      "Point the skills repo at a remote, interactively: bring your own, auto-provision, or skip.",
+    args: {},
+    handler: async () => runMigrateSkillsRemoteCli(await loadDeps()),
+  });
+}
+
 /**
- * `cogmo migrate-skills-remote` entry point. Returns a process exit code:
+ * Returns a process exit code:
  *
  *   - `0` — configured successfully OR operator explicitly skipped
  *   - `1` — error (URL invalid, remote unreachable, auto-provision failed)
  *   - `130` — operator cancelled (Ctrl-C / Esc on a prompt; standard SIGINT exit code)
  */
-export async function runMigrateSkillsRemoteCli(
-  args: ReadonlyArray<string>,
-  deps: MigrateSkillsRemoteCliDeps,
-): Promise<number> {
-  if (args.length > 0) {
-    console.error("Usage: cogmo migrate-skills-remote (interactive)");
-    return 1;
-  }
-
+async function runMigrateSkillsRemoteCli(deps: MigrateSkillsRemoteCliDeps): Promise<number> {
   p.intro("Cogmo: configure skills repo remote");
 
   // Bootstrap the bare repo so the helper has somewhere to attach origin.

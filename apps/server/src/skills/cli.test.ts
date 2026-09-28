@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
+import { type CliIo, runCli } from "../cli/run.js";
 import { mockFilesService } from "../test/factories.js";
-import { type CliIo, runSkillsCli, type SkillsCliDeps } from "./cli.js";
+import { type SkillsCliDeps, skillsCli } from "./cli.js";
 import type { SkillRunAs, SkillRunServices } from "./run-as.js";
 import type { SkillRunner } from "./runner.js";
 
@@ -17,17 +18,7 @@ function makeIo(): CliIo & { stdout: string[]; stderr: string[] } {
 }
 
 function makeRunner(overrides: Partial<SkillRunner> = {}): SkillRunner {
-  return {
-    register: vi.fn(),
-    approveDeploy: vi.fn(),
-    denyDeploy: vi.fn(),
-    rollback: vi.fn(),
-    deregister: vi.fn(),
-    list: vi.fn().mockResolvedValue([]),
-    listToolDefs: vi.fn().mockResolvedValue([]),
-    invoke: vi.fn(),
-    ...overrides,
-  } as any;
+  return mock<SkillRunner>({ list: vi.fn().mockResolvedValue([]), ...overrides });
 }
 
 /** The install owner with the default profile, as `main.ts` resolves them. */
@@ -36,21 +27,42 @@ const OWNER_RUN_AS: SkillRunAs = {
   service: { memory: mock<SkillRunServices["memory"]>(), files: mockFilesService() },
 };
 
-function cli(runner: SkillRunner): SkillsCliDeps & { ownerRunAs: ReturnType<typeof vi.fn> } {
+function depsFor(runner: SkillRunner) {
   return { runner, ownerRunAs: vi.fn().mockResolvedValue(OWNER_RUN_AS) };
 }
 
-describe("runSkillsCli", () => {
-  it("prints usage when no command given", async () => {
+function run(argv: readonly string[], deps: SkillsCliDeps, io: CliIo): Promise<number> {
+  return runCli(
+    skillsCli(io, async () => deps),
+    argv,
+    io,
+  );
+}
+
+describe("skillsCli", () => {
+  it("prints help when no command given", async () => {
     const io = makeIo();
-    const code = await runSkillsCli([], cli(makeRunner()), io);
+    const code = await run([], depsFor(makeRunner()), io);
     expect(code).toBe(0);
-    expect(io.stdout.join("\n")).toContain("Usage: cogmo skills");
+    expect(io.stdout.join("\n")).toMatch(/skills <subcommand>/);
   });
+
+  it.each([["--help"], ["-h"], ["run", "--help"]])(
+    "answers %j with help on stdout, exit 0, and no dependencies loaded",
+    async (...argv) => {
+      const io = makeIo();
+      const loadDeps = vi.fn(async () => depsFor(makeRunner()));
+      const code = await runCli(skillsCli(io, loadDeps), argv, io);
+      expect(code).toBe(0);
+      expect(io.stdout.join("\n")).toMatch(/skills/);
+      expect(io.stderr).toEqual([]);
+      expect(loadDeps).not.toHaveBeenCalled();
+    },
+  );
 
   it("prints (no enabled skills) when list is empty", async () => {
     const io = makeIo();
-    const code = await runSkillsCli(["list"], cli(makeRunner()), io);
+    const code = await run(["list"], depsFor(makeRunner()), io);
     expect(code).toBe(0);
     expect(io.stdout.join("\n")).toContain("(no enabled skills)");
   });
@@ -68,25 +80,34 @@ describe("runSkillsCli", () => {
         },
       ]),
     });
-    const code = await runSkillsCli(["list"], cli(runner), io);
+    const code = await run(["list"], depsFor(runner), io);
     expect(code).toBe(0);
     const out = io.stdout.join("\n");
     expect(out).toContain("name\ttier\trisk\tdisabled\tgit_sha");
     expect(out).toContain("echo\twasm\tauto\tno\tabc12345");
   });
 
-  it("rejects `run` without inputs", async () => {
+  it("rejects `run` without a name", async () => {
     const io = makeIo();
-    const code = await runSkillsCli(["run"], cli(makeRunner()), io);
+    const code = await run(["run"], depsFor(makeRunner()), io);
     expect(code).toBe(2);
-    expect(io.stderr.join("\n")).toMatch(/Usage:/);
+    expect(io.stderr.join("\n")).toMatch(/No value provided for name/);
   });
 
-  it("rejects `run` with non-JSON inputs", async () => {
+  it("rejects `run` with a name but no inputs", async () => {
     const io = makeIo();
-    const code = await runSkillsCli(["run", "echo", "{not json"], cli(makeRunner()), io);
+    const code = await run(["run", "echo"], depsFor(makeRunner()), io);
     expect(code).toBe(2);
-    expect(io.stderr.join("\n")).toMatch(/invalid JSON/);
+    expect(io.stderr.join("\n")).toMatch(/No value provided for jsonInputs/);
+  });
+
+  it("rejects `run` with non-JSON inputs before loading dependencies", async () => {
+    const io = makeIo();
+    const loadDeps = vi.fn(async () => depsFor(makeRunner()));
+    const code = await runCli(skillsCli(io, loadDeps), ["run", "echo", "{not json"], io);
+    expect(code).toBe(2);
+    expect(io.stderr.join("\n")).toMatch(/invalid JSON inputs/);
+    expect(loadDeps).not.toHaveBeenCalled();
   });
 
   it("invokes the runner and prints success result with exit 0", async () => {
@@ -98,7 +119,7 @@ describe("runSkillsCli", () => {
         output: { echo: 2 },
       }),
     });
-    const code = await runSkillsCli(["run", "echo", `{"x":1}`], cli(runner), io);
+    const code = await run(["run", "echo", `{"x":1}`], depsFor(runner), io);
     expect(code).toBe(0);
     expect(runner.invoke).toHaveBeenCalledWith({
       name: "echo",
@@ -112,8 +133,8 @@ describe("runSkillsCli", () => {
   });
 
   it("resolves the owner's identity only for `run`", async () => {
-    const deps = cli(makeRunner());
-    await runSkillsCli(["list"], deps, makeIo());
+    const deps = depsFor(makeRunner());
+    await run(["list"], deps, makeIo());
     expect(deps.ownerRunAs).not.toHaveBeenCalled();
   });
 
@@ -126,35 +147,22 @@ describe("runSkillsCli", () => {
         error: "boom",
       }),
     });
-    const code = await runSkillsCli(["run", "echo", "{}"], cli(runner), io);
+    const code = await run(["run", "echo", "{}"], depsFor(runner), io);
     expect(code).toBe(1);
   });
 
-  it("returns exit 1 on unknown command", async () => {
+  it("returns exit 2 on unknown command", async () => {
     const io = makeIo();
-    const code = await runSkillsCli(["nonsense"], cli(makeRunner()), io);
-    expect(code).toBe(1);
-    expect(io.stderr.join("\n")).toMatch(/Unknown skills command/);
-  });
-
-  it.each(["help", "--help", "-h"])("prints usage on '%s'", async (alias) => {
-    const io = makeIo();
-    const code = await runSkillsCli([alias], cli(makeRunner()), io);
-    expect(code).toBe(0);
-    expect(io.stdout.join("\n")).toContain("Usage: cogmo skills");
-  });
-
-  it("`run` without name and without inputs returns exit 2", async () => {
-    const io = makeIo();
-    const code = await runSkillsCli(["run"], cli(makeRunner()), io);
+    const code = await run(["nonsense"], depsFor(makeRunner()), io);
     expect(code).toBe(2);
+    expect(io.stderr.join("\n")).toMatch(/Not a valid subcommand name/);
   });
 
-  it("`run` with name but no inputs returns exit 2", async () => {
+  it("returns exit 2 on an unknown flag", async () => {
     const io = makeIo();
-    const code = await runSkillsCli(["run", "echo"], cli(makeRunner()), io);
+    const code = await run(["list", "--verbose"], depsFor(makeRunner()), io);
     expect(code).toBe(2);
-    expect(io.stderr.join("\n")).toMatch(/Usage:/);
+    expect(io.stderr.join("\n")).toMatch(/--verbose\n\s+\^ Unknown arguments/);
   });
 
   it("accepts a JSON array as inputs (validation deferred to runner)", async () => {
@@ -162,7 +170,7 @@ describe("runSkillsCli", () => {
     const runner = makeRunner({
       invoke: vi.fn().mockResolvedValue({ runId: "r", status: "success", output: null }),
     });
-    const code = await runSkillsCli(["run", "echo", "[1,2,3]"], cli(runner), io);
+    const code = await run(["run", "echo", "[1,2,3]"], depsFor(runner), io);
     expect(code).toBe(0);
     expect(runner.invoke).toHaveBeenCalledWith({
       name: "echo",
@@ -177,7 +185,7 @@ describe("runSkillsCli", () => {
     const runner = makeRunner({
       invoke: vi.fn().mockRejectedValue(new Error("not found")),
     });
-    const code = await runSkillsCli(["run", "echo", "{}"], cli(runner), io);
+    const code = await run(["run", "echo", "{}"], depsFor(runner), io);
     expect(code).toBe(1);
     expect(io.stderr.join("\n")).toMatch(/invoke failed: not found/);
   });
@@ -191,11 +199,7 @@ describe("runSkillsCli", () => {
         status: "live",
         gitSha: "abc",
       });
-      const code = await runSkillsCli(
-        ["register", "skill/echo"],
-        cli(makeRunner({ register })),
-        io,
-      );
+      const code = await run(["register", "skill/echo"], depsFor(makeRunner({ register })), io);
       expect(register).toHaveBeenCalledWith({ branch: "skill/echo", origin: { kind: "owner" } });
       expect(code).toBe(0);
       expect(io.stdout.join("\n")).toContain('"status": "live"');
@@ -210,14 +214,15 @@ describe("runSkillsCli", () => {
         gitSha: "",
         errors: ["non_fast_forward"],
       });
-      const code = await runSkillsCli(["register", "x"], cli(makeRunner({ register })), io);
+      const code = await run(["register", "x"], depsFor(makeRunner({ register })), io);
       expect(code).toBe(1);
     });
 
     it("`register` without branch exits 2", async () => {
       const io = makeIo();
-      const code = await runSkillsCli(["register"], cli(makeRunner()), io);
+      const code = await run(["register"], depsFor(makeRunner()), io);
       expect(code).toBe(2);
+      expect(io.stderr.join("\n")).toMatch(/No value provided for branch/);
     });
 
     it("`approve <pendingId>` calls runner.approveDeploy and exits 0 on live", async () => {
@@ -228,11 +233,7 @@ describe("runSkillsCli", () => {
         status: "live",
         gitSha: "abc",
       });
-      const code = await runSkillsCli(
-        ["approve", "deploy-1"],
-        cli(makeRunner({ approveDeploy })),
-        io,
-      );
+      const code = await run(["approve", "deploy-1"], depsFor(makeRunner({ approveDeploy })), io);
       expect(approveDeploy).toHaveBeenCalledWith({
         pendingId: "deploy-1",
         origin: { kind: "owner" },
@@ -243,9 +244,9 @@ describe("runSkillsCli", () => {
     it("`deny <pendingId> reason words` joins reason and exits 0", async () => {
       const io = makeIo();
       const denyDeploy = vi.fn().mockResolvedValue(undefined);
-      const code = await runSkillsCli(
+      const code = await run(
         ["deny", "deploy-1", "looks", "sketchy"],
-        cli(makeRunner({ denyDeploy })),
+        depsFor(makeRunner({ denyDeploy })),
         io,
       );
       expect(denyDeploy).toHaveBeenCalledWith({
@@ -253,6 +254,7 @@ describe("runSkillsCli", () => {
         reason: "looks sketchy",
       });
       expect(code).toBe(0);
+      expect(io.stdout.join("\n")).toContain('"reason": "looks sketchy"');
     });
 
     it("`rollback <name> <sha>` calls runner.rollback", async () => {
@@ -263,11 +265,7 @@ describe("runSkillsCli", () => {
         status: "live",
         gitSha: "older",
       });
-      const code = await runSkillsCli(
-        ["rollback", "echo", "older"],
-        cli(makeRunner({ rollback })),
-        io,
-      );
+      const code = await run(["rollback", "echo", "older"], depsFor(makeRunner({ rollback })), io);
       expect(rollback).toHaveBeenCalledWith({
         name: "echo",
         toGitSha: "older",
@@ -279,7 +277,7 @@ describe("runSkillsCli", () => {
     it("`deregister <name>` calls runner.deregister and surfaces the disabled status", async () => {
       const io = makeIo();
       const deregister = vi.fn().mockResolvedValue({ kind: "deregistered", name: "echo" });
-      const code = await runSkillsCli(["deregister", "echo"], cli(makeRunner({ deregister })), io);
+      const code = await run(["deregister", "echo"], depsFor(makeRunner({ deregister })), io);
       expect(deregister).toHaveBeenCalledWith({ name: "echo" });
       expect(code).toBe(0);
       expect(io.stdout.join("\n")).toContain('"status": "disabled"');
@@ -290,7 +288,7 @@ describe("runSkillsCli", () => {
       const deregister = vi
         .fn()
         .mockResolvedValue({ kind: "rejected", name: "ghost", reason: "not_found" });
-      const code = await runSkillsCli(["deregister", "ghost"], cli(makeRunner({ deregister })), io);
+      const code = await run(["deregister", "ghost"], depsFor(makeRunner({ deregister })), io);
       expect(code).toBe(1);
       expect(io.stderr.join("\n")).toContain("skill not found: ghost");
     });
@@ -305,17 +303,26 @@ describe("runSkillsCli", () => {
         output: { nested: { deep: [1, 2, 3] } },
       }),
     });
-    await runSkillsCli(["run", "echo", "{}"], cli(runner), io);
+    await run(["run", "echo", "{}"], depsFor(runner), io);
     const last = io.stdout.join("\n");
     // The pretty-printed JSON spans multiple lines; reparse.
     expect(() => JSON.parse(last)).not.toThrow();
   });
 
-  it("`approve` without pendingId exits 2 with usage hint", async () => {
+  it("`approve` without pendingId exits 2 naming the missing argument", async () => {
     const io = makeIo();
-    const code = await runSkillsCli(["approve"], cli(makeRunner()), io);
+    const code = await run(["approve"], depsFor(makeRunner()), io);
     expect(code).toBe(2);
-    expect(io.stderr.join("\n")).toContain("Usage: cogmo skills approve");
+    expect(io.stderr.join("\n")).toMatch(/No value provided for pendingId/);
+  });
+
+  it("`approve` refuses a flag in place of the pendingId", async () => {
+    const io = makeIo();
+    const approveDeploy = vi.fn();
+    const code = await run(["approve", "--", "--all"], depsFor(makeRunner({ approveDeploy })), io);
+    expect(code).toBe(2);
+    expect(io.stderr.join("\n")).toMatch(/expected a value, got the flag "--all"/);
+    expect(approveDeploy).not.toHaveBeenCalled();
   });
 
   it("`approve` exits 1 when runner.approveDeploy returns rejected", async () => {
@@ -323,58 +330,51 @@ describe("runSkillsCli", () => {
     const approveDeploy = vi
       .fn()
       .mockResolvedValue({ status: "rejected", reason: "schema_mismatch" });
-    const code = await runSkillsCli(["approve", "p-1"], cli(makeRunner({ approveDeploy })), io);
+    const code = await run(["approve", "p-1"], depsFor(makeRunner({ approveDeploy })), io);
     expect(code).toBe(1);
   });
 
-  it("`deny` without pendingId exits 2 with usage hint", async () => {
+  it("`deny` without pendingId exits 2 naming the missing argument", async () => {
     const io = makeIo();
-    const code = await runSkillsCli(["deny"], cli(makeRunner()), io);
+    const code = await run(["deny"], depsFor(makeRunner()), io);
     expect(code).toBe(2);
-    expect(io.stderr.join("\n")).toContain("Usage: cogmo skills deny");
+    expect(io.stderr.join("\n")).toMatch(/No value provided for pendingId/);
   });
 
   it("`deny` without reason words emits reason=null in the JSON", async () => {
     const io = makeIo();
     const denyDeploy = vi.fn().mockResolvedValue(undefined);
-    const code = await runSkillsCli(["deny", "p-1"], cli(makeRunner({ denyDeploy })), io);
+    const code = await run(["deny", "p-1"], depsFor(makeRunner({ denyDeploy })), io);
     expect(code).toBe(0);
     expect(denyDeploy).toHaveBeenCalledWith({ pendingId: "p-1" });
     expect(io.stdout.join("\n")).toContain('"reason": null');
   });
 
-  it("`rollback` without args exits 2 with usage hint", async () => {
+  it("`rollback` without args exits 2 naming the missing argument", async () => {
     const io = makeIo();
-    const code = await runSkillsCli(["rollback"], cli(makeRunner()), io);
+    const code = await run(["rollback"], depsFor(makeRunner()), io);
     expect(code).toBe(2);
-    expect(io.stderr.join("\n")).toContain("Usage: cogmo skills rollback");
+    expect(io.stderr.join("\n")).toMatch(/No value provided for name/);
   });
 
   it("`rollback` with only one arg exits 2", async () => {
     const io = makeIo();
-    const code = await runSkillsCli(["rollback", "echo"], cli(makeRunner()), io);
+    const code = await run(["rollback", "echo"], depsFor(makeRunner()), io);
     expect(code).toBe(2);
-    expect(io.stderr.join("\n")).toContain("Usage: cogmo skills rollback");
+    expect(io.stderr.join("\n")).toMatch(/No value provided for toGitSha/);
   });
 
   it("`rollback` exits 1 when runner.rollback returns rejected", async () => {
     const io = makeIo();
     const rollback = vi.fn().mockResolvedValue({ status: "rejected", reason: "git_sha_not_known" });
-    const code = await runSkillsCli(["rollback", "echo", "sha"], cli(makeRunner({ rollback })), io);
+    const code = await run(["rollback", "echo", "sha"], depsFor(makeRunner({ rollback })), io);
     expect(code).toBe(1);
   });
 
-  it("`deregister` without name exits 2 with usage hint", async () => {
+  it("`deregister` without name exits 2 naming the missing argument", async () => {
     const io = makeIo();
-    const code = await runSkillsCli(["deregister"], cli(makeRunner()), io);
+    const code = await run(["deregister"], depsFor(makeRunner()), io);
     expect(code).toBe(2);
-    expect(io.stderr.join("\n")).toContain("Usage: cogmo skills deregister");
-  });
-
-  it("`register` exits 0 on live (already-tested live status — confirmed exit code)", async () => {
-    const io = makeIo();
-    const register = vi.fn().mockResolvedValue({ status: "live", name: "echo" });
-    const code = await runSkillsCli(["register", "feat/echo"], cli(makeRunner({ register })), io);
-    expect(code).toBe(0);
+    expect(io.stderr.join("\n")).toMatch(/No value provided for name/);
   });
 });

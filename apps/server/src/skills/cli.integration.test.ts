@@ -179,10 +179,10 @@ beforeAll(async () => {
 }, 60_000);
 
 describe("cogmo skills CLI (integration)", { timeout: 60_000 }, () => {
-  it("`skills` with no args prints usage and exits 0", async () => {
+  it("`skills` with no args prints help and exits 0", async () => {
     const r = await runCli([]);
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain("Usage: cogmo skills");
+    expect(r.stdout).toContain("cogmo skills <subcommand>");
   });
 
   it("`skills list` prints registered skills", async () => {
@@ -223,9 +223,9 @@ describe("cogmo skills CLI (integration)", { timeout: 60_000 }, () => {
     expect(r.stderr).toMatch(/invalid JSON/);
   });
 
-  it("`skills nonsense` exits 1 with stderr usage message", async () => {
+  it("`skills nonsense` exits 2 with the error on stderr", async () => {
     const r = await runCli(["nonsense"]);
-    expect(r.code).toBe(1);
-    expect(r.stderr).toMatch(/Unknown skills command/);
+    expect(r.code).toBe(2);
+    expect(r.stderr).toMatch(/Not a valid subcommand name/);
   });
 });
