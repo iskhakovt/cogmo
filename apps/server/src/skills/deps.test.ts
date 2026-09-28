@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PassThrough, type Readable, type Writable } from "node:stream";
+import { PassThrough } from "node:stream";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { type MockProxy, mock } from "vitest-mock-extended";
@@ -135,9 +135,9 @@ function makeFakeExec(): FakeExec {
     rejectWait = rej;
   });
   const handle: ExecStreamingHandle = {
-    stdin: stdinSink as unknown as Writable,
-    stdout: stdoutSource as unknown as Readable,
-    stderr: stderrSource as unknown as Readable,
+    stdin: stdinSink,
+    stdout: stdoutSource,
+    stderr: stderrSource,
     wait: () => waitPromise,
     dispose: async () => {
       stdoutSource.end();
@@ -283,8 +283,8 @@ describe("makeSandboxLockfileCompiler", () => {
     // Override execStreaming to return a handle with no stdin (e.g. backend
     // misconfiguration that silently dropped attachStdin).
     h.session.execStreaming.mockResolvedValueOnce({
-      stdout: new PassThrough() as unknown as Readable,
-      stderr: new PassThrough() as unknown as Readable,
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
       wait: vi.fn(),
       dispose: vi.fn().mockResolvedValue(undefined),
     });
@@ -588,8 +588,8 @@ describe("ensureVenvPopulated", () => {
   it("returns transport_failed when execStreaming returns without stdin", async () => {
     const session = mock<SandboxSession>();
     session.execStreaming.mockResolvedValueOnce({
-      stdout: new PassThrough() as unknown as Readable,
-      stderr: new PassThrough() as unknown as Readable,
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
       wait: vi.fn(),
       dispose: vi.fn().mockResolvedValue(undefined),
     });

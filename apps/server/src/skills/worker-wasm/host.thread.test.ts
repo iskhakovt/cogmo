@@ -68,7 +68,7 @@ async function readyAndInvoked(t: StandIn): Promise<void> {
 }
 
 /** Track whether `promise` has settled. */
-function watch<T>(promise: Promise<T>): { settled: () => boolean } {
+function watch(promise: Promise<unknown>): { settled: () => boolean } {
   let settled = false;
   void promise.then(() => {
     settled = true;

@@ -1,4 +1,4 @@
-import { PassThrough, type Readable, type Writable } from "node:stream";
+import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import {
@@ -38,9 +38,9 @@ function buildFakeSandbox(): FakeSandboxBundle {
   const execDisposeCalls = { count: 0 };
 
   const exec: ExecStreamingHandle = {
-    stdin: stdin as unknown as Writable,
-    stdout: stdout as unknown as Readable,
-    stderr: stderr as unknown as Readable,
+    stdin: stdin,
+    stdout: stdout,
+    stderr: stderr,
     wait: async () => ({ exitCode: 0 }),
     dispose: async () => {
       execDisposeCalls.count += 1;
@@ -243,9 +243,9 @@ describe("SysboxSkillWorker", () => {
     /** A supervisor exec whose stdout the test drives, announcing nothing by itself. */
     function silentSupervisor(bundle: FakeSandboxBundle): void {
       vi.mocked(bundle.session.execStreaming).mockImplementation(async () => ({
-        stdin: bundle.stdin as unknown as Writable,
-        stdout: bundle.stdout as unknown as Readable,
-        stderr: new PassThrough() as unknown as Readable,
+        stdin: bundle.stdin,
+        stdout: bundle.stdout,
+        stderr: new PassThrough(),
         wait: async () => ({ exitCode: 0 }),
         dispose: async () => {
           bundle.execDisposeCalls.count += 1;
@@ -489,9 +489,9 @@ describe("SysboxSkillWorker", () => {
         if (cmd[3] === "populate") {
           // Populate exec — wait resolves immediately to exit 0.
           return {
-            stdin: new PassThrough() as unknown as Writable,
-            stdout: new PassThrough() as unknown as Readable,
-            stderr: populateStderr as unknown as Readable,
+            stdin: new PassThrough(),
+            stdout: new PassThrough(),
+            stderr: populateStderr,
             wait: async () => ({ exitCode: 0 }),
             dispose: async () => {},
           };
@@ -499,9 +499,9 @@ describe("SysboxSkillWorker", () => {
         // Supervisor exec — same shape as buildFakeSandbox's default.
         bundle.stdout.write(`${SUPERVISOR_READY}\n`);
         return {
-          stdin: bundle.stdin as unknown as Writable,
-          stdout: bundle.stdout as unknown as Readable,
-          stderr: new PassThrough() as unknown as Readable,
+          stdin: bundle.stdin,
+          stdout: bundle.stdout,
+          stderr: new PassThrough(),
           wait: async () => ({ exitCode: 0 }),
           dispose: async () => {
             bundle.execDisposeCalls.count += 1;
@@ -554,9 +554,9 @@ describe("SysboxSkillWorker", () => {
           populateStderr.write("error: hash mismatch on httpx-0.27.0\n");
           populateStderr.end();
           return {
-            stdin: new PassThrough() as unknown as Writable,
-            stdout: new PassThrough() as unknown as Readable,
-            stderr: populateStderr as unknown as Readable,
+            stdin: new PassThrough(),
+            stdout: new PassThrough(),
+            stderr: populateStderr,
             wait: async () => {
               // Drain the stderr stream's queued chunks into the
               // listener before resolving. One macrotask is enough.
@@ -568,9 +568,9 @@ describe("SysboxSkillWorker", () => {
         }
         bundle.stdout.write(`${SUPERVISOR_READY}\n`);
         return {
-          stdin: bundle.stdin as unknown as Writable,
-          stdout: bundle.stdout as unknown as Readable,
-          stderr: new PassThrough() as unknown as Readable,
+          stdin: bundle.stdin,
+          stdout: bundle.stdout,
+          stderr: new PassThrough(),
           wait: async () => ({ exitCode: 0 }),
           dispose: async () => {
             bundle.execDisposeCalls.count += 1;
@@ -638,9 +638,9 @@ describe("SysboxSkillWorker", () => {
       vi.mocked(bundle.session.execStreaming).mockImplementation(async (cmd) => {
         if (cmd[3] === "populate") {
           return {
-            stdin: new PassThrough() as unknown as Writable,
-            stdout: new PassThrough() as unknown as Readable,
-            stderr: new PassThrough() as unknown as Readable,
+            stdin: new PassThrough(),
+            stdout: new PassThrough(),
+            stderr: new PassThrough(),
             wait: async () => {
               // The supervisor dies while uv pip sync runs.
               bundle.stdout.end();
@@ -652,9 +652,9 @@ describe("SysboxSkillWorker", () => {
         }
         bundle.stdout.write(`${SUPERVISOR_READY}\n`);
         return {
-          stdin: bundle.stdin as unknown as Writable,
-          stdout: bundle.stdout as unknown as Readable,
-          stderr: new PassThrough() as unknown as Readable,
+          stdin: bundle.stdin,
+          stdout: bundle.stdout,
+          stderr: new PassThrough(),
           wait: async () => ({ exitCode: 0 }),
           dispose: async () => {},
         };
@@ -925,9 +925,9 @@ describe("SysboxSkillWorker", () => {
       const failingStdout = new PassThrough();
       failingStdout.write(`${SUPERVISOR_READY}\n`);
       const failingExec: ExecStreamingHandle = {
-        stdin: new PassThrough() as unknown as Writable,
-        stdout: failingStdout as unknown as Readable,
-        stderr: new PassThrough() as unknown as Readable,
+        stdin: new PassThrough(),
+        stdout: failingStdout,
+        stderr: new PassThrough(),
         wait: async () => ({ exitCode: 0 }),
         dispose: async () => {
           throw new Error("exec dispose failed");
