@@ -116,7 +116,8 @@ Provider and model management after first-run lives in dedicated subcommands so 
 | Command | Purpose |
 |-|-|
 | `cogmo provider add <type> <name> <api-key> [base-url] [--cache-dialect <dialect>]` | Register a new provider. Validates the key the same way the wizard does. `--cache-dialect` overrides the default dialect, as `COGMO_LLM_CACHE_DIALECT` does, and is rejected for `anthropic`. |
-| `cogmo provider list` | Show registered providers (name, type, base URL). |
+| `cogmo provider list` | Show registered providers (name, type, base URL, cache dialect). |
+| `cogmo provider set <name> --cache-dialect <dialect>` | Change an OpenAI-compatible provider's cache dialect in place, keeping its `model_providers` rows. Rejected for `anthropic`. Takes effect on restart. |
 | `cogmo provider remove <name>` | Delete a provider; cascades to its `model_providers` rows. |
 | `cogmo model add <id> --provider <name> [--context N --max-output N --position N]` | Insert a routing row. `--context` / `--max-output` override the bundled LiteLLM defaults; omit to let the resolver pick. |
 | `cogmo model list [--model <id>] [--provider <name>]` | Show routing rows with effective limits and source (`db`/`litellm`/`default`). |
