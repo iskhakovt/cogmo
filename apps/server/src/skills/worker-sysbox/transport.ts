@@ -1,4 +1,4 @@
-import type { Readable, Writable } from "node:stream";
+import { addAbortSignal, type Readable, type Writable } from "node:stream";
 import { Result } from "neverthrow";
 import split2 from "split2";
 import { describeError } from "../../util/describe-error.js";
@@ -15,8 +15,8 @@ import type { WorkerMessage } from "../protocol.js";
  * without newlines (e.g. a stray `print()` of a giant blob, or a wheel
  * leaking binary data into stdout instead of stderr) so the host doesn't
  * grow memory unbounded waiting for a `\n` that may never arrive. Enforced
- * by `split2`'s `maxLength`; crossing it fails the message stream, so the
- * pending task fails at once instead of sitting on the wall-clock timer.
+ * by `split2`'s `maxLength`; crossing it fails the message stream, and with
+ * it the pending task.
  */
 // Sized against the host's 5 MiB `http.request` response cap, not against
 // "protocol messages are small": a `ctx.http` body travels this pipe in
@@ -32,7 +32,9 @@ const parseJson = Result.fromThrowable(
 
 /**
  * NDJSON-over-streams transport for the Tier 2 supervisor: one JSON object
- * per line on `stdin`, one per line from `stdout`.
+ * per line on `stdin`, one per line from `stdout`. The message stream ends
+ * when the supervisor closes its output or the host calls `close()`, and
+ * fails on a stream error or a buffer overflow.
  *
  * Inbound framing is delegated to `split2` (Node-TSC-maintained, ISC, zero
  * deps, the line splitter pino is built on). A line that isn't JSON — a
@@ -41,44 +43,32 @@ const parseJson = Result.fromThrowable(
  * only condition where a misbehaving worker can otherwise bleed memory.
  */
 export function createNdjsonTransport(stdin: Writable, stdout: Readable): WorkerTransport {
-  const lines = stdout.pipe(split2({ maxLength: MAX_BUFFER_BYTES }));
-  let closed = false;
-
-  function close(): void {
-    if (closed) return;
-    closed = true;
-    lines.destroy();
-    stdin.end();
-  }
+  const closed = new AbortController();
+  // Closing aborts the stream, so nothing read after close() reaches the
+  // host: its task and ctx services may already be gone.
+  const lines = addAbortSignal(closed.signal, stdout.pipe(split2({ maxLength: MAX_BUFFER_BYTES })));
+  closed.signal.addEventListener("abort", () => stdin.end(), { once: true });
 
   async function* messages(): AsyncGenerator<WorkerMessage> {
     try {
       for await (const line of lines) {
-        // Nothing read after close() reaches the host: its task and ctx
-        // services may already be gone.
-        if (closed) return;
         const message = typeof line === "string" && line.length > 0 ? toMessage(line) : undefined;
         if (message !== undefined) yield message;
       }
     } catch (e) {
-      if (closed) return;
-      close();
+      // The abort is the host's own close, not a failure.
+      if (closed.signal.aborted) return;
       throw new Error(`transport: ${describeError(e)}`);
     }
-    if (closed) return;
-    // The worker closed its output: the supervisor exited or was killed, so
-    // nothing more can arrive — including a `task_exited`.
-    close();
-    throw new Error("transport: worker closed its output");
   }
 
   return {
     send(message): void {
-      if (closed) return;
+      if (closed.signal.aborted) return;
       stdin.write(`${JSON.stringify(message)}\n`);
     },
     messages,
-    close,
+    close: () => closed.abort(),
   };
 }
 

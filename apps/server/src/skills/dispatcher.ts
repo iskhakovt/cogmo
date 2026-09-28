@@ -25,9 +25,9 @@ const log = logger.child({ component: "skills.dispatcher" });
 
 /**
  * One worker's channel. `messages()` yields the worker's frames, validated,
- * in arrival order. It returns once the host calls `close()` and throws once
- * the worker's end closes or fails: either way the worker is gone. Iterate
- * it once.
+ * in arrival order. It ends when the worker closes its end or the host calls
+ * `close()`, and throws when the channel fails; unless the host closed it,
+ * either means the worker is gone. Iterate it once.
  */
 export interface WorkerTransport {
   /** Send one frame. May throw if the channel cannot carry it; after `close()` it drops the frame. */
@@ -188,8 +188,14 @@ export class Dispatcher {
     this.#dispatch({ type: "close", reason });
   }
 
+  /**
+   * Feed the worker's frames to the machine until the stream stops. A stream
+   * that ends is the worker closing its output (after a host close the
+   * machine is already dead and ignores it); one that throws names its own
+   * reason.
+   */
   async #pump(): Promise<void> {
-    const reason = await this.#drain().then(() => "channel closed", describeError);
+    const reason = await this.#drain().then(() => "worker closed its output", describeError);
     this.#dispatch({ type: "channel_ended", reason });
   }
 

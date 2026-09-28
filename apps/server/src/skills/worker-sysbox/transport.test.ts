@@ -126,17 +126,13 @@ describe("createNdjsonTransport", () => {
     expect((await drain(t.messages())).received).toEqual([RESULT]);
   });
 
-  it("fails the stream and closes when the worker closes its output", async () => {
+  it("ends the stream when the worker closes its output", async () => {
     const { stdin, stdout } = pair();
     const t = createNdjsonTransport(stdin, stdout);
 
     stdout.end(line(RESULT));
 
-    expect(await drain(t.messages())).toEqual({
-      received: [RESULT],
-      error: new Error("transport: worker closed its output"),
-    });
-    expect(stdin.writableEnded).toBe(true);
+    expect(await drain(t.messages())).toEqual({ received: [RESULT], error: undefined });
   });
 
   it("ends the stream without an error when the output closes after close()", async () => {
@@ -149,7 +145,7 @@ describe("createNdjsonTransport", () => {
     expect(await drain(t.messages())).toEqual({ received: [], error: undefined });
   });
 
-  it("fails the stream and closes when the buffer exceeds the limit without a newline", async () => {
+  it("fails the stream when the buffer exceeds the limit without a newline", async () => {
     const { stdin, stdout } = pair();
     const t = createNdjsonTransport(stdin, stdout);
 
@@ -164,6 +160,5 @@ describe("createNdjsonTransport", () => {
     // Nothing is yielded: the stream fails, and the dispatcher fails the
     // pending task at once rather than on the wall clock.
     expect(received).toEqual([]);
-    expect(stdin.writableEnded).toBe(true);
   });
 });
