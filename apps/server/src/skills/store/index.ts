@@ -34,27 +34,17 @@ export interface SkillRunIdentity {
 }
 
 /**
- * The run-as columns a deploy leaves on the row. A deploy that sets the live
- * schedule (the row was absent or disabled) or changes it captures
- * `deployRunAs`; one that keeps it keeps the stored identity; no schedule, no
- * identity.
+ * The run-as columns a deploy writes with its schedule: the deploy's own
+ * identity, so code that goes live never runs as whoever vouched for the
+ * code before it.
  */
-function nextRunAs(
-  current: SkillRow | undefined,
+function runAsColumns(
   schedule: string | null,
-  deployRunAs: SkillRunIdentity,
+  runAs: SkillRunIdentity,
 ): { runAsUserId: string | null; runAsProfileId: string | null } {
-  if (schedule === null) return { runAsUserId: null, runAsProfileId: null };
-  if (
-    current !== undefined &&
-    !current.disabled &&
-    current.schedule === schedule &&
-    current.runAsUserId !== null &&
-    current.runAsProfileId !== null
-  ) {
-    return { runAsUserId: current.runAsUserId, runAsProfileId: current.runAsProfileId };
-  }
-  return { runAsUserId: deployRunAs.userId, runAsProfileId: deployRunAs.profileId };
+  return schedule === null
+    ? { runAsUserId: null, runAsProfileId: null }
+    : { runAsUserId: runAs.userId, runAsProfileId: runAs.profileId };
 }
 
 export type SkillTier = "wasm" | "container";
@@ -233,7 +223,7 @@ export interface ExecuteRegisterParams {
   inputs: SkillInputs;
   outputs: SkillIo | null;
   classifierLog: ClassifierLog;
-  /** Who the schedule runs as if this deploy sets or changes it. */
+  /** Who the schedule runs as once this deploy is live. */
   runAs: SkillRunIdentity;
   /**
    * Called inside the register transaction *after* DB rows are written and
@@ -288,7 +278,7 @@ export interface ExecuteApproveParams {
   lockfileHash: string | null;
   inputs: SkillInputs;
   outputs: SkillIo | null;
-  /** Who the schedule runs as if this deploy sets or changes it. */
+  /** Who the schedule runs as once this deploy is live. */
   runAs: SkillRunIdentity;
   applyFilesystem(): Promise<void>;
 }
@@ -313,7 +303,7 @@ export interface ExecuteRollbackParams {
   inputs: SkillInputs;
   outputs: SkillIo | null;
   classifierLog: ClassifierLog;
-  /** Who the schedule runs as if this deploy sets or changes it. */
+  /** Who the schedule runs as once this deploy is live. */
   runAs: SkillRunIdentity;
   applyFilesystem(): Promise<void>;
 }
@@ -668,7 +658,7 @@ export class DrizzleSkillStore implements SkillStore {
             effects: params.effects,
             schedule: params.schedule,
             nextRunAt: params.scheduleNextRunAt,
-            ...nextRunAs(existing, params.schedule, params.runAs),
+            ...runAsColumns(params.schedule, params.runAs),
             gitSha: params.branchTipSha,
             lockfileHash: params.lockfileHash,
             inputs: params.inputs,
@@ -697,7 +687,7 @@ export class DrizzleSkillStore implements SkillStore {
           effects: params.effects,
           schedule: params.schedule,
           nextRunAt: params.scheduleNextRunAt,
-          ...nextRunAs(undefined, params.schedule, params.runAs),
+          ...runAsColumns(params.schedule, params.runAs),
           gitSha: params.branchTipSha,
           lockfileHash: params.lockfileHash,
           inputs: params.inputs,
@@ -783,7 +773,7 @@ export class DrizzleSkillStore implements SkillStore {
         effects: params.effects,
         schedule: params.schedule,
         nextRunAt: params.scheduleNextRunAt,
-        ...nextRunAs(skill, params.schedule, params.runAs),
+        ...runAsColumns(params.schedule, params.runAs),
         inputs: params.inputs,
         outputs: params.outputs,
       })
@@ -877,7 +867,7 @@ export class DrizzleSkillStore implements SkillStore {
         effects: params.effects,
         schedule: params.schedule,
         nextRunAt: params.scheduleNextRunAt,
-        ...nextRunAs(existing, params.schedule, params.runAs),
+        ...runAsColumns(params.schedule, params.runAs),
         inputs: params.inputs,
         outputs: params.outputs,
       })

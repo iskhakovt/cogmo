@@ -1,5 +1,5 @@
 {
-  "id": "4e337bbc-a33a-4750-9940-739aeff51516",
+  "id": "80920bcc-ffeb-42c9-bbc1-842299b22fdf",
   "prevId": "f6897efa-6e9c-444e-93eb-7ac49e3eed1a",
   "version": "7",
   "dialect": "postgresql",
@@ -3545,7 +3545,7 @@
           "tableTo": "users",
           "columnsFrom": ["run_as_user_id"],
           "columnsTo": ["id"],
-          "onDelete": "cascade",
+          "onDelete": "no action",
           "onUpdate": "no action"
         },
         "skills_run_as_profile_id_profiles_id_fk": {

@@ -95,14 +95,11 @@ export const skills = pgTable(
      */
     nextRunAt: timestamp("next_run_at", { withTimezone: true }),
     /**
-     * Who a cron fire runs as: the user and profile its `ctx.memory` is
-     * scoped to. Set iff `schedule` is (`chk_skills_run_as_iff_schedule`),
-     * captured by the deploy that sets or changes the live schedule — the
-     * approver's user when one signed it off, otherwise the install owner,
-     * with the default profile.
+     * Who a cron fire runs as. Set iff `schedule` is
+     * (`chk_skills_run_as_iff_schedule`); see design/skills.md → Run-as
+     * identity.
      */
-    runAsUserId: uuid("run_as_user_id").references(() => users.id, { onDelete: "cascade" }),
-    // RESTRICT — deleting a profile fails while a schedule runs as it.
+    runAsUserId: uuid("run_as_user_id").references(() => users.id),
     runAsProfileId: uuid("run_as_profile_id").references(() => profiles.id),
     /** Last fire timestamp. Null = never fired. */
     lastFiredAt: timestamp("last_fired_at", { withTimezone: true }),

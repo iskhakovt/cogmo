@@ -50,6 +50,7 @@ afterAll(async () => {
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const SHA_NEW = "fedcba9876543210fedcba9876543210fedcba98";
+const SHA_THIRD = "1111111111111111111111111111111111111111";
 
 const INPUTS_SCHEMA: SkillInputs = {
   type: "object",
@@ -1001,41 +1002,10 @@ describe("DrizzleSkillStore", () => {
       });
     });
 
-    it("a first deploy with a schedule captures the deploy's identity", async () => {
-      const result = await register();
-      expect(result.kind).toBe("live");
-      expect(runAsOf(await reload("cron-skill"))).toEqual([owner.userId, owner.profileId]);
-    });
-
-    it("a redeploy keeping the schedule keeps the stored identity", async () => {
-      await register();
-      const other = await seedIdentity("other");
-      await register({ branchTipSha: SHA_NEW, runAs: other });
-      expect(runAsOf(await reload("cron-skill"))).toEqual([owner.userId, owner.profileId]);
-    });
-
-    it("a redeploy changing the schedule captures the new deploy's identity", async () => {
-      await register();
-      const other = await seedIdentity("other");
-      await register({ branchTipSha: SHA_NEW, schedule: "0 10 * * *", runAs: other });
-      expect(runAsOf(await reload("cron-skill"))).toEqual([other.userId, other.profileId]);
-    });
-
-    it("a redeploy dropping the schedule clears the identity", async () => {
-      await register();
-      await register({ branchTipSha: SHA_NEW, schedule: null, scheduleNextRunAt: null });
-      expect(runAsOf(await reload("cron-skill"))).toEqual([null, null]);
-    });
-
-    it("approving a first deploy captures the approver even though register stored the schedule", async () => {
-      const pending = await register({ riskTier: "approve", classifierLog: APPROVE_LOG });
-      if (pending.kind !== "pending_approval") throw new Error(`got ${pending.kind}`);
-      expect(runAsOf(pending.skill)).toEqual([owner.userId, owner.profileId]);
-
-      const approver = await seedIdentity("approver");
-      const approved = await tx((trx) =>
+    function approve(pendingId: string, runAs: SkillRunIdentity) {
+      return tx((trx) =>
         store.executeApprove(trx, {
-          pendingId: pending.deploy.id,
+          pendingId,
           approvedBy: null,
           tier: "wasm",
           riskTier: "approve",
@@ -1045,22 +1015,17 @@ describe("DrizzleSkillStore", () => {
           lockfileHash: null,
           inputs: INPUTS_SCHEMA,
           outputs: null,
-          runAs: approver,
+          runAs,
           applyFilesystem: noFs,
         }),
       );
-      expect(approved.kind).toBe("live");
-      expect(runAsOf(await reload("cron-skill"))).toEqual([approver.userId, approver.profileId]);
-    });
+    }
 
-    it("a rollback that changes the schedule captures the rollback's identity", async () => {
-      await register();
-      await register({ branchTipSha: SHA_NEW, schedule: "0 10 * * *" });
-      const other = await seedIdentity("other");
-      const rolled = await tx((trx) =>
+    function rollback(toGitSha: string, runAs: SkillRunIdentity) {
+      return tx((trx) =>
         store.executeRollback(trx, {
           name: "cron-skill",
-          toGitSha: SHA,
+          toGitSha,
           tier: "wasm",
           riskTier: "notify",
           effects: [],
@@ -1070,12 +1035,91 @@ describe("DrizzleSkillStore", () => {
           inputs: INPUTS_SCHEMA,
           outputs: null,
           classifierLog: NOTIFY_LOG,
-          runAs: other,
+          runAs,
           applyFilesystem: noFs,
         }),
       );
-      expect(rolled.kind).toBe("live");
+    }
+
+    /** A live `cron-skill` at `SHA_NEW`, approved by a user of its own. */
+    async function approvedUpgrade(): Promise<SkillRunIdentity> {
+      await register();
+      const pending = await register({
+        branchTipSha: SHA_NEW,
+        riskTier: "approve",
+        classifierLog: APPROVE_LOG,
+      });
+      if (pending.kind !== "pending_approval") throw new Error(`got ${pending.kind}`);
+      const approver = await seedIdentity("approver");
+      expect((await approve(pending.deploy.id, approver)).kind).toBe("live");
+      expect(runAsOf(await reload("cron-skill"))).toEqual([approver.userId, approver.profileId]);
+      return approver;
+    }
+
+    it("a first deploy with a schedule captures the deploy's identity", async () => {
+      const result = await register();
+      expect(result.kind).toBe("live");
+      expect(runAsOf(await reload("cron-skill"))).toEqual([owner.userId, owner.profileId]);
+    });
+
+    it("a redeploy keeping the schedule captures its own identity", async () => {
+      await register();
+      const other = await seedIdentity("other");
+      await register({ branchTipSha: SHA_NEW, runAs: other });
       expect(runAsOf(await reload("cron-skill"))).toEqual([other.userId, other.profileId]);
+    });
+
+    it("a redeploy dropping the schedule clears the identity", async () => {
+      await register();
+      await register({ branchTipSha: SHA_NEW, schedule: null, scheduleNextRunAt: null });
+      expect(runAsOf(await reload("cron-skill"))).toEqual([null, null]);
+    });
+
+    it("a pending deploy leaves the live identity alone until approved", async () => {
+      await register();
+      const other = await seedIdentity("other");
+      await register({
+        branchTipSha: SHA_NEW,
+        riskTier: "approve",
+        classifierLog: APPROVE_LOG,
+        runAs: other,
+      });
+      expect(runAsOf(await reload("cron-skill"))).toEqual([owner.userId, owner.profileId]);
+    });
+
+    it("approving a first deploy captures the approver even though register stored the schedule", async () => {
+      const pending = await register({ riskTier: "approve", classifierLog: APPROVE_LOG });
+      if (pending.kind !== "pending_approval") throw new Error(`got ${pending.kind}`);
+      expect(runAsOf(pending.skill)).toEqual([owner.userId, owner.profileId]);
+
+      const approver = await seedIdentity("approver");
+      expect((await approve(pending.deploy.id, approver)).kind).toBe("live");
+      expect(runAsOf(await reload("cron-skill"))).toEqual([approver.userId, approver.profileId]);
+    });
+
+    it("an unapproved redeploy after an approval runs as its own identity, not the approver", async () => {
+      await approvedUpgrade();
+      const author = await seedIdentity("author");
+      const redeploy = await register({ branchTipSha: SHA_THIRD, runAs: author });
+      expect(redeploy.kind).toBe("live");
+      expect(runAsOf(await reload("cron-skill"))).toEqual([author.userId, author.profileId]);
+    });
+
+    it("a rollback does not inherit a previous approver", async () => {
+      await approvedUpgrade();
+      expect((await rollback(SHA, owner)).kind).toBe("live");
+      expect(runAsOf(await reload("cron-skill"))).toEqual([owner.userId, owner.profileId]);
+    });
+
+    it("deleting the run-as user is refused, not cascaded into the skill", async () => {
+      const row = await seedSkill({
+        schedule: "0 9 * * *",
+        scheduleNextRunAt: new Date("2026-06-01T09:00:00Z"),
+      });
+      await expect(db.delete(users).where(eq(users.id, owner.userId))).rejects.toMatchObject({
+        cause: { code: "23503" },
+      });
+      expect(await tx((trx) => store.getSkillById(trx, row.id))).toBeDefined();
     });
   });
 });
