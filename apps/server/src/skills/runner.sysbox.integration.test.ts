@@ -41,7 +41,10 @@ const DEFAULT_RUN_AS = { userId: "u-1", profileId: "p-1" };
  *   - Container creation without worktree/home (skills tier-2 contract).
  *   - NDJSON-over-stdio RPC against real Python.
  *   - `ctx.now` round-trip (bridge correctness).
- *   - Wall-clock kill via `deleteByTaskId`.
+ *   - Wall-clock expiry reported as `wall_clock_exceeded`.
+ *   - Task isolation on a warm worker: a process a skill leaves behind is
+ *     gone before the next skill runs, and a skill cannot open its relay's
+ *     or the supervisor's host channel through `/proc`.
  *
  * Gated by `SANDBOX_RUNTIME=sysbox`. Skipped on dev machines without
  * sysbox; runs in the GHA `sysbox-e2e` job. Mirrors the supervisor's own
@@ -196,6 +199,84 @@ inputs:
     x:
       type: integer
 ---
+`;
+
+/**
+ * Leaves a grandchild in a new session with stdin/stdout/stderr closed, so
+ * no pipe EOF or hangup ends it — only the supervisor's sweep can.
+ */
+const LEAVE_SLEEPER_BODY = `
+import os, socket, time
+
+async def run(inputs, ctx):
+    r, w = os.pipe()
+    if os.fork() == 0:
+        os.setsid()
+        if os.fork() == 0:
+            for fd in (0, 1, 2):
+                os.close(fd)
+            os.write(w, str(os.getpid()).encode())
+            os.close(w)
+            time.sleep(300)
+        os._exit(0)
+    os.close(w)
+    return {"host": socket.gethostname(), "pid": int(os.read(r, 32))}
+`;
+
+/** Whether `inputs.pid` is still a live (non-zombie) process. */
+const CHECK_PID_BODY = `
+import socket
+
+async def run(inputs, ctx):
+    try:
+        with open(f"/proc/{inputs['pid']}/stat") as f:
+            stat = f.read()
+    except FileNotFoundError:
+        return {"host": socket.gethostname(), "alive": False}
+    return {"host": socket.gethostname(), "alive": stat[stat.rindex(")") + 2] != "Z"}
+`;
+
+const checkPidManifest = `---
+name: tier2-check-pid
+description: reports whether a pid is alive
+tier: container
+inputs:
+  type: object
+  properties:
+    pid:
+      type: integer
+---
+`;
+
+/**
+ * Tries to open stdin and stdout of the task's relay and of the supervisor
+ * through `/proc`. `control` opens the task's own stdin the same way, so
+ * an empty `opened` means refused rather than unreachable.
+ */
+const PROC_FD_PROBE_BODY = `
+import os
+
+def _ppid(pid):
+    with open(f"/proc/{pid}/stat") as f:
+        stat = f.read()
+    return int(stat[stat.rindex(")") + 2:].split()[1])
+
+def _can_open(path, flags):
+    try:
+        os.close(os.open(path, flags))
+        return True
+    except PermissionError:
+        return False
+
+async def run(inputs, ctx):
+    relay = os.getppid()
+    opened = [
+        f"{pid}/{fd}"
+        for pid in (relay, _ppid(relay))
+        for fd, flags in ((0, os.O_RDONLY), (1, os.O_WRONLY))
+        if _can_open(f"/proc/{pid}/fd/{fd}", flags)
+    ]
+    return {"opened": opened, "control": _can_open(f"/proc/{os.getpid()}/fd/0", os.O_RDONLY)}
 `;
 
 describe.skipIf(!SHOULD_RUN)("SkillRunnerImpl tier-2 (sysbox runtime, GHA only)", () => {
@@ -423,5 +504,68 @@ async def run(inputs, ctx):
     expect((r2.output as { seen_before: boolean }).seen_before).toBe(false);
 
     await runner.shutdown();
+  }, 180_000);
+
+  it("kills a process a skill leaves behind before the next skill runs on the worker", async () => {
+    const runner = await SkillRunnerImpl.create({
+      runInTx: tx,
+      store: skillStore,
+      secretsStore: stubSecrets(),
+      sandbox,
+      tier2Image: SKILLS_IMAGE,
+      userTimezone: "UTC",
+      defaultRunAs: DEFAULT_RUN_AS,
+    });
+    try {
+      await runner.__registerForTests({
+        name: "tier2-leave-sleeper",
+        manifestSource: containerManifest("tier2-leave-sleeper"),
+        body: LEAVE_SLEEPER_BODY,
+      });
+      await runner.__registerForTests({
+        name: "tier2-check-pid",
+        manifestSource: checkPidManifest,
+        body: CHECK_PID_BODY,
+      });
+
+      const left = await runner.invoke({ name: "tier2-leave-sleeper", inputs: {}, runAs: RUN_AS });
+      expect(left.status, JSON.stringify(left)).toBe("success");
+      const { host, pid } = left.output as { host: string; pid: number };
+      const checked = await runner.invoke({
+        name: "tier2-check-pid",
+        inputs: { pid },
+        runAs: RUN_AS,
+      });
+      expect(checked.status, JSON.stringify(checked)).toBe("success");
+      // Same container, so the pid names the same process namespace.
+      expect(checked.output).toEqual({ host, alive: false });
+    } finally {
+      await runner.shutdown();
+    }
+  }, 180_000);
+
+  it("a skill cannot open its relay's or the supervisor's host channel through /proc", async () => {
+    const runner = await SkillRunnerImpl.create({
+      runInTx: tx,
+      store: skillStore,
+      secretsStore: stubSecrets(),
+      sandbox,
+      tier2Image: SKILLS_IMAGE,
+      userTimezone: "UTC",
+      defaultRunAs: DEFAULT_RUN_AS,
+    });
+    try {
+      await runner.__registerForTests({
+        name: "tier2-proc-probe",
+        manifestSource: containerManifest("tier2-proc-probe"),
+        body: PROC_FD_PROBE_BODY,
+      });
+
+      const result = await runner.invoke({ name: "tier2-proc-probe", inputs: {}, runAs: RUN_AS });
+      expect(result.status, JSON.stringify(result)).toBe("success");
+      expect(result.output).toEqual({ opened: [], control: true });
+    } finally {
+      await runner.shutdown();
+    }
   }, 180_000);
 });
