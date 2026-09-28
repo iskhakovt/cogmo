@@ -15,7 +15,7 @@
  *
  * Backup before mutate: dumps the current row to
  * `.dev/skills-backups/<timestamp>.json` (matches the convention in
- * `src/agent/evolution/migrations-cli.ts`).
+ * `src/cli/memory-migrations.ts`).
  *
  * Interactive-only in v1. Future scripted use (CI provisioning) would add
  * `--mode=own --url=...` flags; the underlying `configureSkillsRemote`
@@ -25,16 +25,16 @@
 import * as p from "@clack/prompts";
 import { command } from "cmd-ts";
 import type { CodingStore } from "../agent/coding/store/index.js";
-import type { LoadDeps } from "../cli/run.js";
 import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
-import { configureSkillsRemote } from "./configure-remote.js";
+import { configureSkillsRemote } from "../skills/configure-remote.js";
 import {
   collectSkillsRemoteMode,
   readLocalMainSha,
   renderConfigureError,
-} from "./configure-remote-prompts.js";
-import { bootstrapSkillsRepo, readOriginUrl, SKILLS_CODING_REPO_NAME } from "./repo.js";
+} from "../skills/configure-remote-prompts.js";
+import { bootstrapSkillsRepo, readOriginUrl, SKILLS_CODING_REPO_NAME } from "../skills/repo.js";
+import type { LoadDeps } from "./run.js";
 
 export interface MigrateSkillsRemoteCliDeps {
   runInTx: Transactor;

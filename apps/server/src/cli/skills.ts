@@ -12,10 +12,10 @@ import {
   subcommands,
   type Type,
 } from "cmd-ts";
-import { identifier } from "../cli/args.js";
-import type { CliIo, LoadDeps } from "../cli/run.js";
-import type { SkillRunAs } from "./run-as.js";
-import type { RegisterResult, SkillDeployOrigin, SkillRunner } from "./runner.js";
+import type { SkillRunAs } from "../skills/run-as.js";
+import type { RegisterResult, SkillDeployOrigin, SkillRunner } from "../skills/runner.js";
+import { identifier } from "./args.js";
+import type { CliIo, LoadDeps } from "./run.js";
 
 export interface SkillsCliDeps {
   runner: SkillRunner;

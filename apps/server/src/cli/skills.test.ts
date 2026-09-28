@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
-import { type CliIo, runCli } from "../cli/run.js";
+import type { SkillRunAs, SkillRunServices } from "../skills/run-as.js";
+import type { SkillRunner } from "../skills/runner.js";
 import { mockFilesService } from "../test/factories.js";
-import { type SkillsCliDeps, skillsCli } from "./cli.js";
-import type { SkillRunAs, SkillRunServices } from "./run-as.js";
-import type { SkillRunner } from "./runner.js";
+import { type CliIo, runCli } from "./run.js";
+import { type SkillsCliDeps, skillsCli } from "./skills.js";
 
 function makeIo(): CliIo & { stdout: string[]; stderr: string[] } {
   const stdout: string[] = [];

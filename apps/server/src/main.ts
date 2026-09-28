@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
 import { command, flag, subcommands } from "cmd-ts";
-import type { MigrationCliDeps } from "./agent/evolution/migrations-cli.js";
 import { choice, optionalOption } from "./cli/args.js";
+import type { MigrationCliDeps } from "./cli/memory-migrations.js";
+import type { MigrateSkillsRemoteCliDeps } from "./cli/migrate-skills-remote.js";
 import { CONSOLE_IO, type CommandTree, loadCommandGroups, runCli } from "./cli/run.js";
+import type { SkillsCliDeps } from "./cli/skills.js";
 import { RESET_SCOPES, type ResetScope } from "./setup/reset-scopes.js";
-import type { SkillsCliDeps } from "./skills/cli.js";
-import type { MigrateSkillsRemoteCliDeps } from "./skills/migrations-cli.js";
 
 // Each imports what it runs inside its handler, so `gen-key` and `web-token`
 // work without a configured runtime.
@@ -62,13 +62,12 @@ const GROUPS: Record<string, () => Promise<CommandTree>> = {
     (await import("./cli/image-provider.js")).imageProviderCli(CONSOLE_IO, loadCore),
   "image-model": async () =>
     (await import("./cli/image-model.js")).imageModelCli(CONSOLE_IO, loadCore),
-  skills: async () => (await import("./skills/cli.js")).skillsCli(CONSOLE_IO, loadSkillsDeps),
+  skills: async () => (await import("./cli/skills.js")).skillsCli(CONSOLE_IO, loadSkillsDeps),
   "migrate-memories": async () =>
-    (await import("./agent/evolution/migrations-cli.js")).migrateMemoriesCli(loadMigrationDeps),
-  backfill: async () =>
-    (await import("./agent/evolution/migrations-cli.js")).backfillCli(loadMigrationDeps),
+    (await import("./cli/memory-migrations.js")).migrateMemoriesCli(loadMigrationDeps),
+  backfill: async () => (await import("./cli/memory-migrations.js")).backfillCli(loadMigrationDeps),
   "migrate-skills-remote": async () =>
-    (await import("./skills/migrations-cli.js")).migrateSkillsRemoteCli(loadSkillsRemoteDeps),
+    (await import("./cli/migrate-skills-remote.js")).migrateSkillsRemoteCli(loadSkillsRemoteDeps),
 };
 
 const argv = process.argv.length > 2 ? process.argv.slice(2) : ["serve"];

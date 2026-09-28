@@ -41,23 +41,23 @@ import {
   type Type,
 } from "cmd-ts";
 import * as R from "remeda";
-import { identifier, optionalOption } from "../../cli/args.js";
-import type { LoadDeps } from "../../cli/run.js";
-import type { Transactor } from "../../db/index.js";
-import { logger } from "../../logger.js";
-import { createHindsightClients, describeHindsightError } from "../../memory/hindsight-clients.js";
-import type { AgentStore } from "../store/index.js";
 import {
   type BackfillDeps,
   type RawBankMemory as BackfillRawBankMemory,
   backfillProfileClass,
   type RetainItem,
-} from "./backfill-profile-class.js";
+} from "../agent/evolution/backfill-profile-class.js";
 import {
   type MigrationDeps,
   migrateUntaggedMemories,
   type RawBankMemory,
-} from "./migrate-untagged-memories.js";
+} from "../agent/evolution/migrate-untagged-memories.js";
+import type { AgentStore } from "../agent/store/index.js";
+import type { Transactor } from "../db/index.js";
+import { logger } from "../logger.js";
+import { createHindsightClients, describeHindsightError } from "../memory/hindsight-clients.js";
+import { identifier, optionalOption } from "./args.js";
+import type { LoadDeps } from "./run.js";
 
 export interface MigrationCliDeps {
   hindsightUrl: string;

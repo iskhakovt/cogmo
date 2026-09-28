@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
-import { type CliIo, runCli } from "../../cli/run.js";
-import type { Transactor } from "../../db/index.js";
-import { expectDefined } from "../../test/assertions.js";
-import type { AgentStore } from "../store/index.js";
+import type { AgentStore } from "../agent/store/index.js";
+import type { Transactor } from "../db/index.js";
+import { expectDefined } from "../test/assertions.js";
+import { type CliIo, runCli } from "./run.js";
 
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
@@ -49,16 +49,16 @@ const { migrateUntaggedMemoriesSpy, backfillProfileClassSpy } = vi.hoisted(() =>
   backfillProfileClassSpy: vi.fn(),
 }));
 
-vi.mock("./migrate-untagged-memories.js", () => ({
+vi.mock("../agent/evolution/migrate-untagged-memories.js", () => ({
   migrateUntaggedMemories: migrateUntaggedMemoriesSpy,
 }));
 
-vi.mock("./backfill-profile-class.js", () => ({
+vi.mock("../agent/evolution/backfill-profile-class.js", () => ({
   backfillProfileClass: backfillProfileClassSpy,
 }));
 
 const { backfillCli, migrateMemoriesCli, runMigrateMemoriesCli, runBackfillProfileClassCli } =
-  await import("./migrations-cli.js");
+  await import("./memory-migrations.js");
 
 function buildDeps(opts: { defaultBankId?: string | null } = {}) {
   return {
