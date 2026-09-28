@@ -46,8 +46,8 @@ const CONTINUATION_SET = new Set([
 
 /**
  * The text auto-recall queries with for a turn's rows: their text parts
- * joined by newline, so an image or document contributes its caption rather
- * than its block. Empty when the turn carries no text.
+ * joined by newline, so an image or document contributes only its caption.
+ * Empty when the turn carries no text.
  */
 export function recallQueryText(rows: ReadonlyArray<{ content: InboundContent }>): string {
   return rows
