@@ -37,8 +37,7 @@ async function insertUser(): Promise<string> {
   return expectDefined(row, "user").id;
 }
 
-// Replaying the whole journal takes seconds under parallel forks.
-describe("migration — pending_memories skill source", { timeout: 30_000 }, () => {
+describe("migrations 0064–0065 — pending_memories skill source", () => {
   it("adds skill to pending_memory_source", async () => {
     const { rows } = EnumLabelsSchema.parse(
       await db.execute(sql`

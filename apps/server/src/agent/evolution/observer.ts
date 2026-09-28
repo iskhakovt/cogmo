@@ -296,8 +296,8 @@ export async function runObserver(
       }),
   );
 
-  // Phase 3: drain pending_memories — staged live retains and any
-  // migration backfill — through the same classifier prompt. Split
+  // Phase 3: drain pending_memories — staged live retains, skill writes
+  // and any migration backfill — through the same classifier prompt. Split
   // across multiple step.runs so Inngest memoizes each: a delete
   // failure after a successful retain re-runs only the delete on
   // retry, not the LLM classifier or the retainBatch write. A step
