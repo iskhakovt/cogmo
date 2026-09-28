@@ -10,6 +10,8 @@ import {
 import type { CtxHandler } from "../dispatcher.js";
 import { type InvokeParams, SysboxSkillWorker } from "./worker.js";
 
+const SUPERVISOR_READY = JSON.stringify({ type: "supervisor_ready", protocolVersion: 2 });
+
 interface FakeSandboxBundle {
   sandbox: SandboxClient<LocalDockerSessionState>;
   session: SandboxSession<LocalDockerSessionState>;
@@ -55,6 +57,7 @@ function buildFakeSandbox(): FakeSandboxBundle {
     })),
     execStreaming: vi.fn(async (cmd) => {
       calls.push(`exec:${cmd[0]}`);
+      stdout.write(`${SUPERVISOR_READY}\n`);
       return exec;
     }),
   };
@@ -104,10 +107,15 @@ function invokeParams(taskId: string): InvokeParams {
   };
 }
 
+/** What the supervisor sends once a task's processes are all gone. */
+function taskExited(id: string): string {
+  return `${JSON.stringify({ type: "task_exited", id })}\n`;
+}
+
 /**
- * Auto-respond to any `task_invoke` line by echoing a matching `task_result`
- * back on stdout. Used by happy-path tests that don't care about ctx
- * bridging. Optionally pre-set the result shape.
+ * Auto-respond to any `task_invoke` line with a matching `task_result` and
+ * `task_exited` on stdout. Used by happy-path tests that don't care about
+ * ctx bridging. Optionally pre-set the result shape.
  */
 function autoRespond(
   bundle: FakeSandboxBundle,
@@ -123,6 +131,7 @@ function autoRespond(
           bundle.stdout.write(
             `${JSON.stringify({ type: "task_result", id: msg.id, ...result })}\n`,
           );
+          bundle.stdout.write(taskExited(msg.id));
         }
       } catch {
         // ignore non-json (test harness shouldn't send non-json)
@@ -217,6 +226,68 @@ describe("SysboxSkillWorker", () => {
     // Session must be cleaned up so the container doesn't leak when the
     // supervisor process couldn't even start.
     expect(bundle.sandbox.delete).toHaveBeenCalled();
+  });
+
+  describe("supervisor handshake", () => {
+    /** A supervisor exec whose stdout the test drives, announcing nothing by itself. */
+    function silentSupervisor(bundle: FakeSandboxBundle): void {
+      vi.mocked(bundle.session.execStreaming).mockImplementation(async () => ({
+        stdin: bundle.stdin as unknown as Writable,
+        stdout: bundle.stdout as unknown as Readable,
+        stderr: new PassThrough() as unknown as Readable,
+        wait: async () => ({ exitCode: 0 }),
+        dispose: async () => {
+          bundle.execDisposeCalls.count += 1;
+        },
+      }));
+    }
+
+    function create(bundle: FakeSandboxBundle): Promise<SysboxSkillWorker> {
+      return SysboxSkillWorker.create({
+        workerId: "w-hs",
+        sandbox: bundle.sandbox,
+        image: "cogmo-skills:old",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+    }
+
+    it("refuses a supervisor announcing another protocol version", async () => {
+      const bundle = buildFakeSandbox();
+      silentSupervisor(bundle);
+      bundle.stdout.write(`${JSON.stringify({ type: "supervisor_ready", protocolVersion: 1 })}\n`);
+
+      await expect(create(bundle)).rejects.toThrow(
+        /supervisor speaks protocol v1; this Cogmo requires v2/,
+      );
+      expect(bundle.execDisposeCalls.count).toBe(1);
+      expect(bundle.sandbox.delete).toHaveBeenCalledWith(bundle.session);
+    });
+
+    it("refuses an image whose supervisor never announces a protocol", async () => {
+      vi.useFakeTimers();
+      try {
+        const bundle = buildFakeSandbox();
+        silentSupervisor(bundle);
+        const created = create(bundle);
+        const outcome = expect(created).rejects.toThrow(
+          /did not announce protocol v2 within 30s — the skills image predates/,
+        );
+        await vi.advanceTimersByTimeAsync(30_000);
+        await outcome;
+        expect(bundle.sandbox.delete).toHaveBeenCalledWith(bundle.session);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("refuses a supervisor that exits before announcing", async () => {
+      const bundle = buildFakeSandbox();
+      silentSupervisor(bundle);
+      bundle.stdout.end();
+
+      await expect(create(bundle)).rejects.toThrow(/supervisor exited before announcing/);
+      expect(bundle.sandbox.delete).toHaveBeenCalledWith(bundle.session);
+    });
   });
 
   describe("state transitions", () => {
@@ -360,6 +431,7 @@ describe("SysboxSkillWorker", () => {
           };
         }
         // Supervisor exec — same shape as buildFakeSandbox's default.
+        bundle.stdout.write(`${SUPERVISOR_READY}\n`);
         return {
           stdin: bundle.stdin as unknown as Writable,
           stdout: bundle.stdout as unknown as Readable,
@@ -386,6 +458,7 @@ describe("SysboxSkillWorker", () => {
               bundle.stdout.write(
                 `${JSON.stringify({ type: "task_result", id: msg.id, ok: true, output: { ok: 1 } })}\n`,
               );
+              bundle.stdout.write(taskExited(msg.id));
             }
           } catch {}
         }
@@ -438,6 +511,7 @@ describe("SysboxSkillWorker", () => {
             dispose: async () => {},
           };
         }
+        bundle.stdout.write(`${SUPERVISOR_READY}\n`);
         return {
           stdin: bundle.stdin as unknown as Writable,
           stdout: bundle.stdout as unknown as Readable,
@@ -487,11 +561,99 @@ describe("SysboxSkillWorker", () => {
       expect(taskInvokes).toHaveLength(0);
     });
 
+    it("returns only once the supervisor confirms the task's processes exited", async () => {
+      const bundle = buildFakeSandbox();
+      const w = await SysboxSkillWorker.create({
+        workerId: "w-exit",
+        sandbox: bundle.sandbox,
+        image: "cogmo-skills:test",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      w.tryAcquire();
+      let settled = false;
+      const pending = w.invoke(invokeParams("t-exit")).then((r) => {
+        settled = true;
+        return r;
+      });
+      await new Promise((r) => setImmediate(r));
+      bundle.stdout.write(
+        `${JSON.stringify({ type: "task_result", id: "t-exit", ok: true, output: 1 })}\n`,
+      );
+      await new Promise((r) => setTimeout(r, 20));
+      expect(settled).toBe(false);
+
+      bundle.stdout.write(taskExited("t-exit"));
+      await expect(pending).resolves.toMatchObject({ ok: true, output: 1, workerReusable: true });
+    });
+
+    it("fails the task and poisons the worker when the supervisor's output closes", async () => {
+      const bundle = buildFakeSandbox();
+      const w = await SysboxSkillWorker.create({
+        workerId: "w-eof",
+        sandbox: bundle.sandbox,
+        image: "cogmo-skills:test",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      w.tryAcquire();
+      const pending = w.invoke(invokeParams("t-eof"));
+      await new Promise((r) => setImmediate(r));
+      bundle.stdout.write(
+        `${JSON.stringify({ type: "task_result", id: "t-eof", ok: true, output: 1 })}\n`,
+      );
+      bundle.stdout.end();
+
+      await expect(pending).resolves.toMatchObject({
+        ok: false,
+        error: expect.stringMatching(/worker closed its output/),
+        workerReusable: false,
+      });
+      expect(w.state).toBe("draining");
+    });
+
+    it("does not serve the previous task's late ctx_call with the next task's handler", async () => {
+      const bundle = buildFakeSandbox();
+      bundle.stdin.on("data", (chunk: Buffer) => {
+        for (const line of chunk
+          .toString()
+          .split("\n")
+          .filter((l) => l.length > 0)) {
+          const msg = JSON.parse(line) as { type?: unknown; id?: unknown };
+          if (msg.type !== "task_invoke" || typeof msg.id !== "string") continue;
+          if (msg.id === "t-B") {
+            // Task A's code is still running and calls ctx while B is in flight.
+            bundle.stdout.write(
+              `${JSON.stringify({ type: "ctx_call", id: "ctx-late", taskId: "t-A", method: "secrets.get", args: { name: "token" } })}\n`,
+            );
+          }
+          bundle.stdout.write(
+            `${JSON.stringify({ type: "task_result", id: msg.id, ok: true, output: msg.id })}\n`,
+          );
+          bundle.stdout.write(taskExited(msg.id));
+        }
+      });
+      const w = await SysboxSkillWorker.create({
+        workerId: "w-late",
+        sandbox: bundle.sandbox,
+        image: "cogmo-skills:test",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      const handlerA: CtxHandler = { handle: vi.fn().mockResolvedValue("A") };
+      const handlerB: CtxHandler = { handle: vi.fn().mockResolvedValue("B") };
+
+      w.tryAcquire();
+      await w.invoke({ ...invokeParams("t-A"), ctxHandler: handlerA });
+      w.release();
+      w.tryAcquire();
+      await w.invoke({ ...invokeParams("t-B"), ctxHandler: handlerB });
+
+      expect(handlerA.handle).not.toHaveBeenCalled();
+      expect(handlerB.handle).not.toHaveBeenCalled();
+    });
+
     it("host watchdog fires when supervisor never replies (poisons worker)", async () => {
       // Supervisor stub never writes a task_result. The host-side watchdog
-      // (= wallClockS + 5s grace) fires; worker reports
-      // `supervisor_unresponsive` and goes draining. wallClockS=0.05 keeps
-      // the test under 6 seconds total.
+      // (= wallClockS + 10s grace) fires; worker reports
+      // `supervisor_unresponsive` and goes draining.
       const bundle = buildFakeSandbox();
       // No autoRespond — stub stays silent.
       const w = await SysboxSkillWorker.create({
@@ -501,14 +663,27 @@ describe("SysboxSkillWorker", () => {
         expiresAt: new Date(Date.now() + 60_000),
       });
       w.tryAcquire();
-      const r = await w.invoke({ ...invokeParams("t-hung"), wallClockS: 0.05 });
-      expect(r).toMatchObject({
-        ok: false,
-        error: "supervisor_unresponsive",
-        workerReusable: false,
-      });
+      vi.useFakeTimers();
+      try {
+        const pending = w.invoke({ ...invokeParams("t-hung"), wallClockS: 1 });
+        await vi.advanceTimersByTimeAsync(10_999);
+        let settled = false;
+        void pending.then(() => {
+          settled = true;
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(pending).resolves.toMatchObject({
+          ok: false,
+          error: "supervisor_unresponsive",
+          workerReusable: false,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
       expect(w.state).toBe("draining");
-    }, 10_000);
+    });
   });
 
   describe("dispose", () => {
@@ -549,9 +724,11 @@ describe("SysboxSkillWorker", () => {
       const bundle = buildFakeSandbox();
       // Re-create the session with a failing exec.dispose. Ugly because
       // execDisposeCalls is wired in buildFakeSandbox; just override.
+      const failingStdout = new PassThrough();
+      failingStdout.write(`${SUPERVISOR_READY}\n`);
       const failingExec: ExecStreamingHandle = {
         stdin: new PassThrough() as unknown as Writable,
-        stdout: new PassThrough() as unknown as Readable,
+        stdout: failingStdout as unknown as Readable,
         stderr: new PassThrough() as unknown as Readable,
         wait: async () => ({ exitCode: 0 }),
         dispose: async () => {

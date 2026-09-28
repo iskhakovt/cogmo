@@ -72,11 +72,15 @@ export function createNdjsonTransport(stdin: Writable, stdout: Readable): RpcTra
   splitter.on("error", (err: Error) => {
     if (closed) return;
     // Notify the dispatcher via the typed error channel so it rejects the
-    // pending task immediately. Earlier rev of this code emitted a
-    // synthetic `{ type: "fatal" }` frame — but `fatal` isn't a valid
-    // worker protocol message, so the dispatcher's `WorkerMessageSchema`
-    // dropped it and the task hung until the host wall-clock fired.
+    // pending task immediately instead of waiting out the wall clock.
     errorHandler?.(new Error(`transport: ${err.message}`));
+    close();
+  });
+  // The worker closed its output: the supervisor exited (or was killed),
+  // so nothing more can arrive — including a `task_exited`.
+  splitter.on("end", () => {
+    if (closed) return;
+    errorHandler?.(new Error("transport: worker closed its output"));
     close();
   });
 

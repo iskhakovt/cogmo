@@ -46,24 +46,29 @@ class HostCtxError extends Error {
   }
 }
 
-/** Bridge object exposed to Python via `pyodide.registerJsModule`. */
-const bridge = {
-  call(method: string, args: unknown): Promise<unknown> {
-    const id = `ctx-${nextCtxId++}`;
-    return new Promise((resolve, reject) => {
-      pendingCtxCalls.set(id, { resolve, reject });
-      try {
-        port.postMessage({ type: "ctx_call", id, method, args });
-      } catch (e) {
-        // Send failed (port closed, transferable detached) — drop the
-        // pending entry so it doesn't leak, and reject the awaiting Python
-        // coroutine instead of leaving it hung on a never-arriving result.
-        pendingCtxCalls.delete(id);
-        reject(e instanceof Error ? e : new Error(String(e)));
-      }
-    });
-  },
-};
+/**
+ * Bridge object exposed to Python via `pyodide.registerJsModule`. Every call
+ * names `taskId`: the host serves a ctx call only for the task it belongs to.
+ */
+function bridgeFor(taskId: string): { call(method: string, args: unknown): Promise<unknown> } {
+  return { call: (method, args) => callHost(taskId, method, args) };
+}
+
+function callHost(taskId: string, method: string, args: unknown): Promise<unknown> {
+  const id = `ctx-${nextCtxId++}`;
+  return new Promise((resolve, reject) => {
+    pendingCtxCalls.set(id, { resolve, reject });
+    try {
+      port.postMessage({ type: "ctx_call", taskId, id, method, args });
+    } catch (e) {
+      // Send failed (port closed, transferable detached) — drop the
+      // pending entry so it doesn't leak, and reject the awaiting Python
+      // coroutine instead of leaving it hung on a never-arriving result.
+      pendingCtxCalls.delete(id);
+      reject(e instanceof Error ? e : new Error(String(e)));
+    }
+  });
+}
 
 let pyodide: PyodideInterface | null = null;
 
@@ -86,7 +91,7 @@ async function runTask(invoke: { id: string; inputs: unknown }): Promise<TaskRes
   const py = pyodide;
 
   // The bridge module gives Python access to host RPCs.
-  py.registerJsModule("__cogmo_bridge__", { bridge });
+  py.registerJsModule("__cogmo_bridge__", { bridge: bridgeFor(invoke.id) });
 
   // Materialize ctx SDK + skill body into module-level globals. Each worker
   // is one-shot in this slice (warm pool with per-task reset lands in P3.2),

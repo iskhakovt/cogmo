@@ -2,10 +2,24 @@ import { z } from "zod";
 
 /**
  * Worker JSON-RPC protocol — transport-agnostic message shapes used by the
- * Tier 1 (postMessage over MessageChannel) and future Tier 2 (NDJSON over
- * stdin/stdout) workers. One pipe carries four message types correlated by
- * `id`. See `design/skills.md` → Worker JSON-RPC protocol.
+ * Tier 1 (postMessage over MessageChannel) and Tier 2 (NDJSON over the
+ * supervisor's stdin/stdout) workers. Tasks and ctx calls correlate by
+ * `id`; every ctx message also names the task it belongs to. See
+ * `design/skills.md` → Protocol.
  */
+
+/**
+ * Tier 2 supervisor protocol version. The supervisor announces it in
+ * `supervisor_ready`; the worker refuses a supervisor announcing anything
+ * else, so an image predating the per-task relay is never used. Bump with
+ * `PROTOCOL_VERSION` in `images/skills/src/cogmo_skills_runtime/supervisor.py`.
+ */
+export const SUPERVISOR_PROTOCOL_VERSION = 2;
+
+export const SupervisorReadySchema = z.object({
+  type: z.literal("supervisor_ready"),
+  protocolVersion: z.number().int(),
+});
 
 export const TaskInvokeSchema = z.object({
   type: z.literal("task_invoke"),
@@ -16,27 +30,26 @@ export const TaskInvokeSchema = z.object({
   /**
    * Skill source. Tier 1 (Pyodide) reads it through the runner's
    * `__skill_body__` global — pre-baked at exec time, so the field is
-   * accepted but ignored. Tier 2 (sysbox supervisor) takes the body from
-   * here for every task because the supervisor is long-lived across tasks
-   * and can't pre-bake any one body.
+   * accepted but ignored. Tier 2 takes the body from here for every task
+   * because the supervisor is long-lived across tasks and can't pre-bake
+   * any one body.
    */
   body: z.string().optional(),
   /**
    * Per-task isolation hint from the manifest. Tier 1 ignores it (single-
-   * heap WASM). Tier 2 supervisor uses `recycle` to mark the worker
-   * non-reusable after the task — pool replaces it on next acquire.
-   * `subinterpreter` is reserved for a future runtime; for B.2 it
-   * behaves like the default fresh-process-per-task isolation supervisor
-   * already provides.
+   * heap WASM). Tier 2 uses `recycle` to mark the worker non-reusable
+   * after the task — pool replaces it on next acquire. `subinterpreter`
+   * is reserved for a future runtime; it behaves like the default
+   * process-per-task isolation.
    */
   isolation: z.enum(["subinterpreter", "recycle"]).optional(),
-  /** Wall-clock cap in seconds for the supervisor's per-task pebble timeout. */
+  /** Wall-clock cap in seconds, enforced by the task's relay inside the container. */
   wallClockS: z.number().positive().optional(),
   /**
-   * sha256 of `requirements.lock`. When present, the tier-2 supervisor
+   * sha256 of `requirements.lock`. When present, the tier-2 task process
    * activates `/skill-venvs/<lockfileHash>-py<major>.<minor>/` before
-   * forking the task child — sets `VIRTUAL_ENV`, prepends `<venv>/bin`
-   * to PATH, prepends `<venv>/lib/pythonX.Y/site-packages` to `sys.path`.
+   * running the skill — sets `VIRTUAL_ENV`, prepends `<venv>/bin` to
+   * PATH, prepends `<venv>/lib/pythonX.Y/site-packages` to `sys.path`.
    * The supervisor's own runtime venv (where `cogmo_skills_runtime` lives)
    * stays unchanged.
    *
@@ -106,6 +119,12 @@ export type TaskResult = z.infer<typeof TaskResultSchema>;
 
 export const CtxCallSchema = z.object({
   type: z.literal("ctx_call"),
+  /**
+   * The task that issued the call. Set by the side that knows which task
+   * it is running — the Tier 2 relay, the Tier 1 worker's bridge — never
+   * by skill code. The dispatcher serves a call only for the running task.
+   */
+  taskId: z.string().min(1),
   id: z.string().min(1),
   /** Dotted RPC name: `secrets.get`, `memory.recall`, `now`, etc. */
   method: z.string().min(1),
@@ -115,12 +134,15 @@ export type CtxCall = z.infer<typeof CtxCallSchema>;
 
 const CtxResultOkSchema = z.object({
   type: z.literal("ctx_result"),
+  /** Echoes the call's `taskId`; the Tier 2 relay delivers only its own task's results. */
+  taskId: z.string().min(1),
   id: z.string().min(1),
   ok: z.literal(true),
   value: z.unknown(),
 });
 const CtxResultErrSchema = z.object({
   type: z.literal("ctx_result"),
+  taskId: z.string().min(1),
   id: z.string().min(1),
   ok: z.literal(false),
   /** Typed error code surfaced to Python as a specific exception class. */
@@ -130,9 +152,21 @@ const CtxResultErrSchema = z.object({
 export const CtxResultSchema = z.union([CtxResultOkSchema, CtxResultErrSchema]);
 export type CtxResult = z.infer<typeof CtxResultSchema>;
 
+/**
+ * Tier 2 only: the supervisor has killed and reaped every process the task
+ * started. Sent after the task's `task_result` (or in place of one, when
+ * the task's relay died first); the worker is reusable only after it.
+ */
+export const TaskExitedSchema = z.object({
+  type: z.literal("task_exited"),
+  id: z.string().min(1),
+});
+export type TaskExited = z.infer<typeof TaskExitedSchema>;
+
 export const WorkerMessageSchema = z.union([
   TaskInvokeSchema,
   TaskResultSchema,
+  TaskExitedSchema,
   CtxCallSchema,
   CtxResultSchema,
 ]);
