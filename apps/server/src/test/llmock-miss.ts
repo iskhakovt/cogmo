@@ -53,11 +53,28 @@ function fixtureText(fixture: Fixture): string | undefined {
   return typeof text === "string" ? text : undefined;
 }
 
+/**
+ * Whether a fixture recorded on `fixtureModel` answers `requestModel`: the
+ * same id, or that id's dated snapshot (`claude-haiku-4-5-20251001`).
+ */
 function modelMatches(fixtureModel: string, requestModel: string): boolean {
   if (fixtureModel === requestModel) return true;
   return (
-    requestModel.startsWith(fixtureModel) && /^-\d/.test(requestModel.slice(fixtureModel.length))
+    requestModel.startsWith(fixtureModel) &&
+    /^-\d{8}$/.test(requestModel.slice(fixtureModel.length))
   );
+}
+
+/**
+ * Hold a loaded fixture's `model` to {@link modelMatches}. aimock alone
+ * accepts the recorded id followed by any `-<digit>…`, so a `claude-sonnet-5`
+ * cassette would answer `claude-sonnet-5-5` with another model's recording.
+ * Mutates the fixture aimock holds, which is what its router reads.
+ */
+export function narrowModelMatch(fixture: Fixture): void {
+  const recorded = fixture.match.model;
+  if (typeof recorded !== "string") return;
+  fixture.match.predicate = (req) => req.model === undefined || modelMatches(recorded, req.model);
 }
 
 function differences(req: ChatCompletionRequest, fixture: Fixture, text: string): string[] {

@@ -45,7 +45,7 @@ import type { LlmProvider } from "../llm/provider.js";
 import type { Message, Usage } from "../llm/types.js";
 import { sumUsage, ZERO_USAGE } from "../llm/usage.js";
 import { logger } from "../logger.js";
-import { DEFAULT_BASE_PROMPT, DEFAULT_PROFILE_MODEL } from "../setup/seed.js";
+import { DEFAULT_BASE_PROMPT } from "../setup/seed.js";
 import type { AttachmentStore } from "../transport/attachment-store.js";
 import { type EvalFailure, type EvalMetric, summariseRates } from "./eval-checks.js";
 
@@ -56,7 +56,12 @@ export { isFailure } from "./eval-checks.js";
 export const LIVE_API_KEY =
   (process.env.LIVE === "1" && process.env.ANTHROPIC_API_KEY) || undefined;
 
-export const EVAL_MODEL = process.env.LIVE_MODEL ?? DEFAULT_PROFILE_MODEL;
+/**
+ * The model the evals' documented baselines were measured on
+ * (design/memory.md, design/evolution.md), so a run compares like with like.
+ * `LIVE_MODEL` measures another, the shipped default included.
+ */
+export const EVAL_MODEL = process.env.LIVE_MODEL ?? "claude-sonnet-5";
 
 /** Samples per case. An empty `EVAL_REPEATS=` counts as unset. */
 export const EVAL_REPEATS = z.coerce

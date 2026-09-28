@@ -1,3 +1,7 @@
+import { isNull } from "drizzle-orm";
+import { profiles } from "../agent/store/schema.js";
+import type { Transaction } from "../db/transactor.js";
+
 /**
  * The chat model the recorded chat turns are keyed on: skill-authoring,
  * learning-loop, prompt-caching, both pipeline suites and the e2e smoke test.
@@ -22,3 +26,21 @@
  * see `.claude/rules/testing.md` → Record/replay mocks.
  */
 export const CASSETTE_CHAT_MODEL = "claude-sonnet-5";
+
+/**
+ * Point the seeded org profile (`user_id IS NULL`), which `bootstrap()`
+ * resolves as the default, at {@link CASSETTE_CHAT_MODEL}. A user-owned
+ * profile a suite creates keeps the model it asked for. Throws unless exactly
+ * one row changed: a pin that matches nothing would leave the suite on the
+ * shipped default.
+ */
+export async function pinOrgProfileToCassetteModel(tx: Transaction): Promise<void> {
+  const updated = await tx
+    .update(profiles)
+    .set({ model: CASSETTE_CHAT_MODEL })
+    .where(isNull(profiles.userId))
+    .returning({ id: profiles.id });
+  if (updated.length !== 1) {
+    throw new Error(`expected one seeded org profile to pin, updated ${updated.length}`);
+  }
+}

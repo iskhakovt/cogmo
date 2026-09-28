@@ -230,7 +230,7 @@ system_prompt_snapshots
 
 `opened_by` alone identifies an epoch, since a message belongs to one conversation; pairing it with the conversation makes the unique both the insert's conflict target and the read path for the current epoch, the snapshot opened latest in the transcript. Rows are immutable. Owned by `agent/store/`.
 
-On Opus 5, 5.5 and Fable, a rule change could instead be a mid-conversation `role: "system"` message, which has operator authority and avoids the rewrite. Sonnet 5 has none, so an epoch is the one path that works on every model.
+On Opus 5, 5.5, Sonnet 5.5 and Fable, a rule change could instead be a mid-conversation `role: "system"` message, which has operator authority and avoids the rewrite. Sonnet 5 has none, so an epoch is the one path that works on every model.
 
 ## One Prefix per Conversation `[proposed]`
 
@@ -240,7 +240,7 @@ Stage turns instead send the conversation's snapshot and the same frozen tool de
 
 Keeping every tool in every request and restricting at dispatch is what Claude Code (plan mode as tools), Manus ("mask, don't remove"), OpenAI (`allowed_tools`) and Anthropic's guidance describe ([Research Base](#research-base-research)).
 
-Anthropic has no per-request `allowed_tools`, and changing `tool_choice` invalidates the messages cache. Its append-only alternative is mid-conversation tool changes: `tool_addition` / `tool_removal` blocks in a `role: "system"` message withdraw or re-offer a declared tool without touching the cached prefix (beta `inline-tools-2026-09-15`; the older `mid-conversation-tool-changes-2026-07-01` still works by reference). They exist only on models with mid-conversation system messages, not Sonnet 5, so dispatch enforcement is the portable path; on Opus 5, 5.5 and Fable a stage turn can also withdraw its disallowed tools this way. On OpenAI routes the adapter can send `allowed_tools` as well.
+Anthropic has no per-request `allowed_tools`, and changing `tool_choice` invalidates the messages cache. Its append-only alternative is mid-conversation tool changes: `tool_addition` / `tool_removal` blocks in a `role: "system"` message withdraw or re-offer a declared tool without touching the cached prefix (beta `inline-tools-2026-09-15`; the older `mid-conversation-tool-changes-2026-07-01` still works by reference). They exist only on models with mid-conversation system messages, not Sonnet 5, so dispatch enforcement is the portable path; on Opus 5, 5.5, Sonnet 5.5 and Fable a stage turn can also withdraw its disallowed tools this way. On OpenAI routes the adapter can send `allowed_tools` as well.
 
 ## Canonical Tool Inputs `[confirmed]`
 
