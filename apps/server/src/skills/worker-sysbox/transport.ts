@@ -1,6 +1,7 @@
 import type { Readable, Writable } from "node:stream";
 import { Result } from "neverthrow";
 import split2 from "split2";
+import { describeError } from "../../util/describe-error.js";
 import { parseWorkerMessage, type WorkerTransport } from "../dispatcher.js";
 import type { WorkerMessage } from "../protocol.js";
 
@@ -62,7 +63,7 @@ export function createNdjsonTransport(stdin: Writable, stdout: Readable): Worker
     } catch (e) {
       if (closed) return;
       close();
-      throw new Error(`transport: ${e instanceof Error ? e.message : String(e)}`);
+      throw new Error(`transport: ${describeError(e)}`);
     }
     if (closed) return;
     // The worker closed its output: the supervisor exited or was killed, so

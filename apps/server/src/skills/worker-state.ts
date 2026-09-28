@@ -54,7 +54,7 @@ export type WorkerStateKind = WorkerState<TaskRef>["kind"];
 export type ExitOutcome = { kind: "confirmed" } | { kind: "unconfirmed"; reason: string };
 
 /** A task that delivered a result. Its side effects happened, whatever its exit. */
-export interface TaskCompletion {
+interface TaskCompletion {
   result: TaskResult;
   exit: ExitOutcome;
 }

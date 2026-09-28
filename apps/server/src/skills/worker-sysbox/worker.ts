@@ -32,7 +32,8 @@ const SUPERVISOR_CMD = ["python3", "-u", "-m", "cogmo_skills_runtime"] as const;
 
 const log = logger.child({ component: "skills.worker.sysbox" });
 
-export type WorkerState = "idle" | "busy" | "draining" | "disposed";
+/** A worker as the pool sees it: its channel's state, plus whether its container is gone. */
+export type WorkerStatus = "idle" | "busy" | "draining" | "disposed";
 
 export interface SysboxSkillWorkerOptions {
   /** Stable identifier — also doubles as the sandbox `taskId` for label/lineage. */
@@ -308,10 +309,10 @@ export class SysboxSkillWorker {
     });
   }
 
-  get state(): WorkerState {
+  get state(): WorkerStatus {
     if (this.#disposal !== undefined) return "disposed";
     return match(this.#dispatcher.state)
-      .returnType<WorkerState>()
+      .returnType<WorkerStatus>()
       .with("idle", () => "idle")
       .with(P.union("starting", "leased", "running", "awaiting_exit"), () => "busy")
       .with("dead", () => "draining")
@@ -361,7 +362,7 @@ export class SysboxSkillWorker {
       if (populate.isErr()) {
         this.#taskCount += 1;
         this.#lastUsedAtMs = Date.now();
-        this.markPoisoned();
+        this.retire();
         return {
           ok: false,
           error: `skill_venv_${populate.error.kind}: ${populate.error.message}`,
@@ -394,7 +395,7 @@ export class SysboxSkillWorker {
     // `isolation: recycle` — the manifest declared the task can't share
     // state with another task on the same supervisor.
     const recycle = params.isolation === "recycle";
-    if (recycle) this.markPoisoned();
+    if (recycle) this.retire();
 
     return outcome.match(
       ({ result, exit }) => ({
@@ -420,7 +421,7 @@ export class SysboxSkillWorker {
    * channel (EOF on its stdin, so it exits cleanly); the container stays
    * until `dispose()`. Idempotent.
    */
-  markPoisoned(): void {
+  retire(): void {
     this.#dispatcher.close("retired");
   }
 

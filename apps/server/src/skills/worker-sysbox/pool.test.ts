@@ -53,7 +53,7 @@ function makeFakeWorker(
     release: () => {
       if (state === "busy") state = "idle";
     },
-    markPoisoned: () => {
+    retire: () => {
       if (state !== "disposed") state = "draining";
       die("poisoned");
     },
@@ -261,7 +261,7 @@ describe("SysboxWorkerPool", () => {
         release: () => {
           if (state === "busy") state = "idle";
         },
-        markPoisoned: () => {
+        retire: () => {
           if (state !== "disposed") state = "draining";
           die("poisoned");
         },
@@ -406,7 +406,7 @@ describe("SysboxWorkerPool", () => {
     const pool = await h.pool;
     const dead = expectDefined(h.spawned[0], "eager worker");
     // What the worker does when its supervisor's channel fails between tasks.
-    dead.markPoisoned();
+    dead.retire();
 
     const result = await pool.invoke(invokeParams("t-after-death"));
 
@@ -422,7 +422,7 @@ describe("SysboxWorkerPool", () => {
     const pool = await h.pool;
     const dead = expectDefined(h.spawned[0], "eager worker");
     // No acquire and no sweep: the pool reacts to the death itself.
-    dead.markPoisoned();
+    dead.retire();
 
     await vi.waitFor(() => expect(h.spawnCount()).toBe(2));
 
@@ -471,7 +471,7 @@ describe("SysboxWorkerPool", () => {
 
     const long = pool.invoke(invokeParams("t-long"));
     await vi.waitFor(() => expect(releases).toHaveLength(1));
-    expectDefined(spawned[1], "second worker").markPoisoned();
+    expectDefined(spawned[1], "second worker").retire();
     await vi.waitFor(() => expect(pool.stats()).toMatchObject({ total: 1 }));
     // The replacement is in flight and counts toward max, so this queues.
     const queued = pool.invoke(invokeParams("t-queued"));
@@ -565,7 +565,7 @@ describe("SysboxWorkerPool", () => {
         release: () => {
           state = "idle";
         },
-        markPoisoned: () => {
+        retire: () => {
           state = "draining";
           die("poisoned");
         },
@@ -776,7 +776,7 @@ describe("SysboxWorkerPool", () => {
           release: () => {
             if (state === "busy") state = "idle";
           },
-          markPoisoned: () => {
+          retire: () => {
             if (state !== "disposed") state = "draining";
             die("poisoned");
           },
@@ -849,7 +849,7 @@ describe("SysboxWorkerPool", () => {
         release: () => {
           if (state === "busy") state = "idle";
         },
-        markPoisoned: () => {
+        retire: () => {
           if (state !== "disposed") state = "draining";
           die("poisoned");
         },

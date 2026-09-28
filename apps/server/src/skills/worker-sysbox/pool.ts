@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { logger } from "../../logger.js";
 import type { ResourceLimits, SandboxClient } from "../../sandbox/index.js";
-import { type InvokeParams, type InvokeResult, SysboxSkillWorker } from "./worker.js";
+import {
+  type InvokeParams,
+  type InvokeResult,
+  SysboxSkillWorker,
+  type WorkerStatus,
+} from "./worker.js";
 
 const log = logger.child({ component: "skills.worker.sysbox.pool" });
 
@@ -82,7 +87,7 @@ export interface SysboxWorkerPoolOptions {
  */
 export interface WorkerHandle {
   readonly workerId: string;
-  readonly state: "idle" | "busy" | "draining" | "disposed";
+  readonly state: WorkerStatus;
   readonly taskCount: number;
   /** Resolves with the reason once the worker can run no further task, whatever the cause. */
   readonly dead: Promise<string>;
@@ -90,7 +95,7 @@ export interface WorkerHandle {
   ageMs(now: number): number;
   tryAcquire(): boolean;
   release(): void;
-  markPoisoned(): void;
+  retire(): void;
   invoke(params: InvokeParams): Promise<InvokeResult>;
   dispose(): Promise<void>;
 }
@@ -288,7 +293,7 @@ export class SysboxWorkerPool {
     } catch (e) {
       // worker.invoke returns its failures as ok=false — this path is for
       // bugs (precondition asserts, etc.). Retire the worker.
-      worker.markPoisoned();
+      worker.retire();
       throw e;
     }
   }
@@ -443,7 +448,7 @@ export class SysboxWorkerPool {
         { workerId: worker.workerId, taskCount: worker.taskCount, taskCap, ageCap },
         "recycling worker — cap reached",
       );
-      worker.markPoisoned();
+      worker.retire();
       return;
     }
     worker.release();
@@ -532,7 +537,7 @@ export class SysboxWorkerPool {
     const surplus = Math.max(0, idleCount - this.#opts.min);
     for (const w of candidates.slice(0, surplus)) {
       log.debug({ workerId: w.workerId, idleMs: w.idleMs(now) }, "sweeping idle worker");
-      w.markPoisoned();
+      w.retire();
     }
   }
 }

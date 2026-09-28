@@ -340,12 +340,12 @@ describe("SysboxSkillWorker", () => {
       w.tryAcquire();
       w.release();
       expect(w.state).toBe("idle");
-      w.markPoisoned();
+      w.retire();
       w.release();
       expect(w.state).toBe("draining");
     });
 
-    it("markPoisoned flips to draining; idempotent; no-op once disposed", async () => {
+    it("retire flips to draining; idempotent; no-op once disposed", async () => {
       const { sandbox } = buildFakeSandbox();
       const w = await SysboxSkillWorker.create({
         workerId: "w-5",
@@ -353,12 +353,12 @@ describe("SysboxSkillWorker", () => {
         image: "python:3.14-slim",
         expiresAt: new Date(Date.now() + 60_000),
       });
-      w.markPoisoned();
+      w.retire();
       expect(w.state).toBe("draining");
-      w.markPoisoned();
+      w.retire();
       expect(w.state).toBe("draining");
       await w.dispose();
-      w.markPoisoned();
+      w.retire();
       expect(w.state).toBe("disposed");
     });
   });

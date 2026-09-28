@@ -246,7 +246,7 @@ export class Dispatcher {
           ok: false,
           ...(e instanceof CtxError
             ? { errorKind: e.kind, message: e.message }
-            : { errorKind: "internal", message: e instanceof Error ? e.message : String(e) }),
+            : { errorKind: "internal", message: describeError(e) }),
         }),
       )
       .then((reply) => {

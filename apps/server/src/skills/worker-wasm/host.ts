@@ -4,7 +4,6 @@ import { err, ok, type Result } from "neverthrow";
 import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
 import {
-  CtxError,
   type CtxHandler,
   Dispatcher,
   parseWorkerMessage,
@@ -239,5 +238,3 @@ function workerEntryUrl(): URL {
   const isSource = import.meta.url.endsWith(".ts");
   return new URL(isSource ? "./boot.mjs" : "./worker-entry.js", import.meta.url);
 }
-
-export { CtxError };
