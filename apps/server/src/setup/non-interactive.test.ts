@@ -16,16 +16,17 @@ import type { Database, Transactor } from "../db/index.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../secrets/encryption.js";
 import { GitHubIdentitySchema } from "../secrets/github.js";
 import { DrizzleSecretsStore } from "../secrets/store/index.js";
-import { secrets as secretsTable } from "../secrets/store/schema.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { DrizzleTransportStore } from "../transport/store/index.js";
-import { channels, userIdentities as userIdentitiesTable } from "../transport/store/schema.js";
+import { userIdentities as userIdentitiesTable } from "../transport/store/schema.js";
 import { SetupEnvError } from "./env.js";
 import {
   NonInteractiveValidationError,
-  runNonInteractive,
+  persistNonInteractive,
   type Validators,
+  validateNonInteractive,
 } from "./non-interactive.js";
+import { seedDefaults } from "./seed.js";
 import type { ValidationResult } from "./validate.js";
 
 let db: Database;
@@ -82,6 +83,28 @@ function baseEnv(overrides?: Record<string, string | undefined>): Record<string,
   >;
 }
 
+/** Validate `env` as `runSetup` does, then persist it for the seeded default user. */
+async function persist(env: Record<string, string | undefined>, v: Validators): Promise<void> {
+  const validated = await validateNonInteractive(env, v);
+  if (validated.isErr()) throw validated.error;
+  const { userId } = await seedDefaults(tx, agentStore, transportStore);
+  await persistNonInteractive(
+    { runInTx: tx, agentStore, transportStore, secretsStore },
+    validated.value,
+    userId,
+  );
+}
+
+/** The error `validateNonInteractive` returns for `env`; fails the test if it validates. */
+async function rejection(
+  env: Record<string, string | undefined>,
+  v: Validators,
+): Promise<SetupEnvError | NonInteractiveValidationError> {
+  const result = await validateNonInteractive(env, v);
+  if (result.isOk()) throw new Error("expected validation to fail");
+  return result.error;
+}
+
 function tempFile(content: string): string {
   const dir = mkdtempSync(join(tmpdir(), "cogmo-ni-test-"));
   const path = join(dir, "secret.txt");
@@ -89,32 +112,12 @@ function tempFile(content: string): string {
   return path;
 }
 
-async function rowCount(
-  db: Database,
-  table:
-    | typeof llmProviders
-    | typeof modelProviders
-    | typeof channels
-    | typeof userIdentitiesTable
-    | typeof secretsTable,
-): Promise<number> {
-  const rows = await db.select().from(table);
-  return rows.length;
-}
+// --- validateNonInteractive + persistNonInteractive ---
 
-// --- runNonInteractive ---
-
-describe("runNonInteractive", () => {
+describe("non-interactive setup", () => {
   it("writes provider + model_providers + secret with only the required vars", async () => {
     const v = validators();
-    await runNonInteractive({
-      runInTx: tx,
-      agentStore,
-      transportStore,
-      secretsStore,
-      env: baseEnv(),
-      validators: v,
-    });
+    await persist(baseEnv(), v);
 
     const providers = await tx((trx) => agentStore.listProviders(trx));
     expect(providers).toHaveLength(1);
@@ -134,17 +137,13 @@ describe("runNonInteractive", () => {
   it("persists from the _FILE secret path", async () => {
     const path = tempFile("sk-from-secret-file-xxxxx");
     const v = validators();
-    await runNonInteractive({
-      runInTx: tx,
-      agentStore,
-      transportStore,
-      secretsStore,
-      env: {
+    await persist(
+      {
         COGMO_LLM_PROVIDER_TYPE: "anthropic",
         COGMO_LLM_API_KEY_FILE: path,
       },
-      validators: v,
-    });
+      v,
+    );
 
     expect(v.llmAnthropic).toHaveBeenCalledWith("sk-from-secret-file-xxxxx", undefined);
     const stored = await tx((trx) => secretsStore.getSecret(trx, "anthropic_api_key"));
@@ -153,17 +152,13 @@ describe("runNonInteractive", () => {
 
   it("writes Telegram channel + identities when bot token + allowed users supplied", async () => {
     const v = validators();
-    await runNonInteractive({
-      runInTx: tx,
-      agentStore,
-      transportStore,
-      secretsStore,
-      env: baseEnv({
+    await persist(
+      baseEnv({
         COGMO_TELEGRAM_BOT_TOKEN: "123456:ABCdefGHIjkl",
         COGMO_TELEGRAM_ALLOWED_USERS: "100,200",
       }),
-      validators: v,
-    });
+      v,
+    );
 
     const tg = await tx((trx) => transportStore.getChannelByType(trx, "telegram"));
     expect(tg).not.toBeNull();
@@ -179,82 +174,43 @@ describe("runNonInteractive", () => {
     expect(secretMeta?.description).toBe("Telegram bot token (@cogmo_test_bot)");
   });
 
-  it("fails fast with no DB writes when required env vars are missing", async () => {
-    await expect(
-      runNonInteractive({
-        runInTx: tx,
-        agentStore,
-        transportStore,
-        secretsStore,
-        env: {},
-        validators: validators(),
-      }),
-    ).rejects.toBeInstanceOf(SetupEnvError);
-
-    expect(await rowCount(db, llmProviders)).toBe(0);
-    expect(await rowCount(db, modelProviders)).toBe(0);
-    expect(await rowCount(db, channels)).toBe(0);
-    expect(await rowCount(db, secretsTable)).toBe(0);
+  it("fails validation when required env vars are missing", async () => {
+    expect(await rejection({}, validators())).toBeInstanceOf(SetupEnvError);
   });
 
-  it("fails fast with no DB writes when the LLM key is rejected", async () => {
+  it("fails validation when the LLM key is rejected", async () => {
     const v = validators({
       llmAnthropic: vi.fn().mockResolvedValue({ valid: false, error: "Invalid API key" }),
     });
 
-    await expect(
-      runNonInteractive({
-        runInTx: tx,
-        agentStore,
-        transportStore,
-        secretsStore,
-        env: baseEnv(),
-        validators: v,
-      }),
-    ).rejects.toBeInstanceOf(NonInteractiveValidationError);
-
-    expect(await rowCount(db, llmProviders)).toBe(0);
-    expect(await rowCount(db, secretsTable)).toBe(0);
+    expect(await rejection(baseEnv(), v)).toBeInstanceOf(NonInteractiveValidationError);
   });
 
-  it("fails fast with no DB writes when the Telegram token is rejected", async () => {
+  it("fails validation when the Telegram token is rejected", async () => {
     const v = validators({
       telegram: vi.fn().mockResolvedValue({ valid: false, error: "Unauthorized" }),
     });
 
-    await expect(
-      runNonInteractive({
-        runInTx: tx,
-        agentStore,
-        transportStore,
-        secretsStore,
-        env: baseEnv({
+    expect(
+      await rejection(
+        baseEnv({
           COGMO_TELEGRAM_BOT_TOKEN: "123:WRONG",
           COGMO_TELEGRAM_ALLOWED_USERS: "100",
         }),
-        validators: v,
-      }),
-    ).rejects.toBeInstanceOf(NonInteractiveValidationError);
-
-    expect(await rowCount(db, llmProviders)).toBe(0);
-    expect(await rowCount(db, channels)).toBe(0);
-    expect(await rowCount(db, userIdentitiesTable)).toBe(0);
-    expect(await rowCount(db, secretsTable)).toBe(0);
+        v,
+      ),
+    ).toBeInstanceOf(NonInteractiveValidationError);
   });
 
   it("gives an OpenRouter provider the openrouter cache dialect", async () => {
     const v = validators();
-    await runNonInteractive({
-      runInTx: tx,
-      agentStore,
-      transportStore,
-      secretsStore,
-      env: baseEnv({
+    await persist(
+      baseEnv({
         COGMO_LLM_PROVIDER_TYPE: "openrouter",
         COGMO_LLM_API_KEY: "sk-or-test-0123456789",
       }),
-      validators: v,
-    });
+      v,
+    );
 
     const rows = await db.select().from(llmProviders);
     expect(rows).toHaveLength(1);
@@ -305,14 +261,7 @@ describe("runNonInteractive", () => {
     ],
     [{ COGMO_LLM_PROVIDER_TYPE: "anthropic" }, {}],
   ])("persists %j with attrs %j", async (env, attrs) => {
-    await runNonInteractive({
-      runInTx: tx,
-      agentStore,
-      transportStore,
-      secretsStore,
-      env: baseEnv({ COGMO_LLM_API_KEY: "sk-test-0123456789", ...env }),
-      validators: validators(),
-    });
+    await persist(baseEnv({ COGMO_LLM_API_KEY: "sk-test-0123456789", ...env }), validators());
 
     const rows = await db.select().from(llmProviders);
     expect(rows.map((r) => r.attrs)).toEqual([attrs]);
@@ -324,18 +273,14 @@ describe("runNonInteractive", () => {
 
   it("uses custom baseUrl when provider type is custom", async () => {
     const v = validators();
-    await runNonInteractive({
-      runInTx: tx,
-      agentStore,
-      transportStore,
-      secretsStore,
-      env: baseEnv({
+    await persist(
+      baseEnv({
         COGMO_LLM_PROVIDER_TYPE: "custom",
         COGMO_LLM_API_KEY: "sk-custom-0123456789",
         COGMO_LLM_BASE_URL: "https://my.llm.test/v1",
       }),
-      validators: v,
-    });
+      v,
+    );
 
     const rows = await db.select().from(llmProviders);
     expect(rows[0]?.baseUrl).toBe("https://my.llm.test/v1");
@@ -347,14 +292,7 @@ describe("runNonInteractive", () => {
 
   it("persists COGMO_CLAUDE_CODE_OAUTH_TOKEN as the claude_code_oauth_token secret", async () => {
     const v = validators();
-    await runNonInteractive({
-      runInTx: tx,
-      agentStore,
-      transportStore,
-      secretsStore,
-      env: baseEnv({ COGMO_CLAUDE_CODE_OAUTH_TOKEN: "sk-test-claude-oauth-token-1234" }),
-      validators: v,
-    });
+    await persist(baseEnv({ COGMO_CLAUDE_CODE_OAUTH_TOKEN: "sk-test-claude-oauth-token-1234" }), v);
 
     const stored = await tx((trx) => secretsStore.getSecret(trx, "claude_code_oauth_token"));
     expect(stored).toBe("sk-test-claude-oauth-token-1234");
@@ -362,14 +300,7 @@ describe("runNonInteractive", () => {
 
   it("persists COGMO_DAYTONA_API_KEY as the daytona_api_key secret", async () => {
     const v = validators();
-    await runNonInteractive({
-      runInTx: tx,
-      agentStore,
-      transportStore,
-      secretsStore,
-      env: baseEnv({ COGMO_DAYTONA_API_KEY: "dtn_test_api_key_abcdef0123456789" }),
-      validators: v,
-    });
+    await persist(baseEnv({ COGMO_DAYTONA_API_KEY: "dtn_test_api_key_abcdef0123456789" }), v);
 
     const stored = await tx((trx) => secretsStore.getSecret(trx, "daytona_api_key"));
     expect(stored).toBe("dtn_test_api_key_abcdef0123456789");
@@ -381,14 +312,7 @@ describe("runNonInteractive", () => {
     vi.stubEnv("DAYTONA_ORGANIZATION_ID", "org-7");
 
     const v = validators();
-    await runNonInteractive({
-      runInTx: tx,
-      agentStore,
-      transportStore,
-      secretsStore,
-      env: baseEnv({ COGMO_DAYTONA_API_KEY: "dtn_test_api_key_abcdef0123456789" }),
-      validators: v,
-    });
+    await persist(baseEnv({ COGMO_DAYTONA_API_KEY: "dtn_test_api_key_abcdef0123456789" }), v);
 
     expect(v.daytonaApiKey).toHaveBeenCalledWith("dtn_test_api_key_abcdef0123456789", {
       apiUrl: "https://daytona.example.com/api",
@@ -396,73 +320,40 @@ describe("runNonInteractive", () => {
     });
   });
 
-  it("fails fast with no DB writes when the Daytona key is rejected", async () => {
+  it("fails validation when the Daytona key is rejected", async () => {
     const v = validators({
       daytonaApiKey: vi
         .fn()
         .mockResolvedValue({ valid: false, error: "API key rejected (401 Unauthorized)" }),
     });
 
-    await expect(
-      runNonInteractive({
-        runInTx: tx,
-        agentStore,
-        transportStore,
-        secretsStore,
-        env: baseEnv({ COGMO_DAYTONA_API_KEY: "dtn_test_api_key_abcdef0123456789" }),
-        validators: v,
-      }),
-    ).rejects.toBeInstanceOf(NonInteractiveValidationError);
-
-    expect(await rowCount(db, secretsTable)).toBe(0);
-    expect(await rowCount(db, llmProviders)).toBe(0);
+    expect(
+      await rejection(baseEnv({ COGMO_DAYTONA_API_KEY: "dtn_test_api_key_abcdef0123456789" }), v),
+    ).toBeInstanceOf(NonInteractiveValidationError);
   });
 
   it("persists the Tavily key when supplied and validated", async () => {
     const v = validators();
-    await runNonInteractive({
-      runInTx: tx,
-      agentStore,
-      transportStore,
-      secretsStore,
-      env: baseEnv({ COGMO_TAVILY_API_KEY: "tvly-0123456789" }),
-      validators: v,
-    });
+    await persist(baseEnv({ COGMO_TAVILY_API_KEY: "tvly-0123456789" }), v);
 
     const stored = await tx((trx) => secretsStore.getSecret(trx, "tavily_api_key"));
     expect(stored).toBe("tvly-0123456789");
     expect(v.tavily).toHaveBeenCalled();
   });
 
-  it("fails fast with no DB writes when Tavily key is rejected", async () => {
+  it("fails validation when Tavily key is rejected", async () => {
     const v = validators({
       tavily: vi.fn().mockResolvedValue({ valid: false, error: "Invalid API key" }),
     });
 
-    await expect(
-      runNonInteractive({
-        runInTx: tx,
-        agentStore,
-        transportStore,
-        secretsStore,
-        env: baseEnv({ COGMO_TAVILY_API_KEY: "tvly-wrong-01234" }),
-        validators: v,
-      }),
-    ).rejects.toBeInstanceOf(NonInteractiveValidationError);
-
-    expect(await rowCount(db, secretsTable)).toBe(0);
+    expect(
+      await rejection(baseEnv({ COGMO_TAVILY_API_KEY: "tvly-wrong-01234" }), v),
+    ).toBeInstanceOf(NonInteractiveValidationError);
   });
 
   it("persists a GitHub identity bundle when COGMO_GITHUB_PAT is supplied", async () => {
     const v = validators();
-    await runNonInteractive({
-      runInTx: tx,
-      agentStore,
-      transportStore,
-      secretsStore,
-      env: baseEnv({ COGMO_GITHUB_PAT: "ghp_test_xxxxxxxxxxxxxxxxxxxx" }),
-      validators: v,
-    });
+    await persist(baseEnv({ COGMO_GITHUB_PAT: "ghp_test_xxxxxxxxxxxxxxxxxxxx" }), v);
 
     expect(v.githubPat).toHaveBeenCalledWith("ghp_test_xxxxxxxxxxxxxxxxxxxx");
 
@@ -482,14 +373,7 @@ describe("runNonInteractive", () => {
 
   it("does not store a GitHub identity when no PAT is supplied", async () => {
     const v = validators();
-    await runNonInteractive({
-      runInTx: tx,
-      agentStore,
-      transportStore,
-      secretsStore,
-      env: baseEnv(),
-      validators: v,
-    });
+    await persist(baseEnv(), v);
 
     expect(v.githubPat).not.toHaveBeenCalled();
     expect(
@@ -503,17 +387,13 @@ describe("runNonInteractive", () => {
     // without a PAT (no identity gets persisted), so silently dropping
     // it is the friendly behaviour.
     const v = validators();
-    await runNonInteractive({
-      runInTx: tx,
-      agentStore,
-      transportStore,
-      secretsStore,
-      env: baseEnv({
+    await persist(
+      baseEnv({
         COGMO_GITHUB_SSH_PRIVATE_KEY:
           "-----BEGIN OPENSSH PRIVATE KEY-----\nfoo\n-----END OPENSSH PRIVATE KEY-----",
       }),
-      validators: v,
-    });
+      v,
+    );
 
     expect(v.githubPat).not.toHaveBeenCalled();
     expect(
@@ -523,47 +403,30 @@ describe("runNonInteractive", () => {
 
   it("rejects COGMO_GITHUB_SSH_PRIVATE_KEY loudly (importing keys not yet supported)", async () => {
     const v = validators();
-    await expect(
-      runNonInteractive({
-        runInTx: tx,
-        agentStore,
-        transportStore,
-        secretsStore,
-        env: baseEnv({
-          COGMO_GITHUB_PAT: "ghp_test_xxxxxxxxxxxxxxxxxxxx",
-          COGMO_GITHUB_SSH_PRIVATE_KEY:
-            "-----BEGIN OPENSSH PRIVATE KEY-----\nfoo\n-----END OPENSSH PRIVATE KEY-----",
-        }),
-        validators: v,
-      }),
-    ).rejects.toThrowError(/COGMO_GITHUB_SSH_PRIVATE_KEY.*supported/);
-
-    // No identity persisted — the validation gate aborts before any DB write.
     expect(
-      await tx((trx) => secretsStore.getSecret(trx, "github_identity:default")),
-    ).toBeUndefined();
+      (
+        await rejection(
+          baseEnv({
+            COGMO_GITHUB_PAT: "ghp_test_xxxxxxxxxxxxxxxxxxxx",
+            COGMO_GITHUB_SSH_PRIVATE_KEY:
+              "-----BEGIN OPENSSH PRIVATE KEY-----\nfoo\n-----END OPENSSH PRIVATE KEY-----",
+          }),
+          v,
+        )
+      ).message,
+    ).toMatch(/COGMO_GITHUB_SSH_PRIVATE_KEY.*supported/);
   });
 
-  it("fails fast with no DB writes when COGMO_GITHUB_PAT is rejected", async () => {
+  it("fails validation when COGMO_GITHUB_PAT is rejected", async () => {
     const v = validators({
       githubPat: vi
         .fn()
         .mockResolvedValue({ valid: false, error: "PAT rejected (401 Unauthorized)" }),
     });
 
-    await expect(
-      runNonInteractive({
-        runInTx: tx,
-        agentStore,
-        transportStore,
-        secretsStore,
-        env: baseEnv({ COGMO_GITHUB_PAT: "ghp_invalid_xxxxxxxxxxxxxxx" }),
-        validators: v,
-      }),
-    ).rejects.toBeInstanceOf(NonInteractiveValidationError);
-
-    expect(await rowCount(db, llmProviders)).toBe(0);
-    expect(await rowCount(db, secretsTable)).toBe(0);
+    expect(
+      await rejection(baseEnv({ COGMO_GITHUB_PAT: "ghp_invalid_xxxxxxxxxxxxxxx" }), v),
+    ).toBeInstanceOf(NonInteractiveValidationError);
   });
 
   // Sessions + channels leave data around on re-run unless --reset channels is used.
@@ -575,27 +438,16 @@ describe("runNonInteractive", () => {
       COGMO_TELEGRAM_ALLOWED_USERS: "100",
     });
 
-    await runNonInteractive({
-      runInTx: tx,
-      agentStore,
-      transportStore,
-      secretsStore,
-      env,
-      validators: v,
-    });
+    await persist(env, v);
     const firstId = (await tx((trx) => transportStore.getChannelByType(trx, "telegram")))?.id;
 
-    await runNonInteractive({
-      runInTx: tx,
-      agentStore,
-      transportStore,
-      secretsStore,
-      env: baseEnv({
+    await persist(
+      baseEnv({
         COGMO_TELEGRAM_BOT_TOKEN: "222:DEF",
         COGMO_TELEGRAM_ALLOWED_USERS: "100,200",
       }),
-      validators: v,
-    });
+      v,
+    );
     const secondId = (await tx((trx) => transportStore.getChannelByType(trx, "telegram")))?.id;
 
     expect(secondId).toBeDefined();
