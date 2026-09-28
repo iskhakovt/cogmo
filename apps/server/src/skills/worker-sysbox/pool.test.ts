@@ -571,6 +571,25 @@ describe("SysboxWorkerPool", () => {
     await pool.dispose();
   });
 
+  it("retries a failed replacement spawn on the next sweep", async () => {
+    const h = buildPoolHarness({
+      scripts: [{ invokes: [{ ok: true, output: null, workerReusable: false }] }],
+      spawnFails: [1],
+      poolOptions: { min: 1, max: 1 },
+    });
+    const pool = await h.pool;
+    await pool.invoke(invokeParams("t-1"));
+    // The dead worker's replacement was tried, and failed.
+    await vi.waitFor(() => expect(h.spawnCount()).toBe(2));
+    expect(pool.stats().total).toBe(0);
+
+    h.triggerSweep();
+
+    await vi.waitFor(() => expect(pool.stats()).toMatchObject({ total: 1, idle: 1 }));
+    expect(h.spawnCount()).toBe(3);
+    await pool.dispose();
+  });
+
   it("keeps `min` warm — sweep never drains below it", async () => {
     const h = buildPoolHarness({
       poolOptions: {

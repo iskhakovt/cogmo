@@ -551,11 +551,13 @@ export class SysboxWorkerPool {
   }
 
   /**
-   * Retire idle workers above `min` that have sat past `idleShutdownMs`.
-   * Each dies on retirement, and `#onDead` removes it.
+   * Retire idle workers above `min` that have sat past `idleShutdownMs` —
+   * each dies on retirement, and `#onDead` removes it — and spawn back up
+   * to `min`, retrying a replacement that failed.
    */
   #sweepIdle(): void {
     if (this.#lifetime.signal.aborted) return;
+    this.#replenishToMin();
     const now = this.#now();
     const candidates = this.#workers.filter(
       (w) => w.state === "idle" && w.idleMs(now) >= this.#opts.idleShutdownMs,
