@@ -7,6 +7,7 @@
  * profile's tool set.
  */
 
+import { command, extendType, option, positional, string, subcommands } from "cmd-ts";
 import {
   InvalidNameError,
   UniqueViolationError,
@@ -14,96 +15,110 @@ import {
 } from "../agent/store/errors.js";
 import type { AgentStore } from "../agent/store/index.js";
 import { createSubAgent } from "../agent/subagent/create-sub-agent.js";
-import { subAgentToolName } from "../agent/subagent/sub-agent-tool-builder.js";
+import { SUB_AGENT_NAME_RE, subAgentToolName } from "../agent/subagent/sub-agent-tool-builder.js";
 import type { Transactor } from "../db/index.js";
-
-const USAGE = `Usage: cogmo subagent <command> [args]
-
-Commands:
-  add <name> --model <id> --description <text> [--system-prompt <text>]
-                                    Register a sub-agent the orchestrator can
-                                    call as a \`subagent__<name>\` tool. <name>
-                                    is lowercase letters/digits/-/_, letter-led,
-                                    ≤32 chars. --description is the routing
-                                    signal (when to delegate). --system-prompt
-                                    is an optional standing persona; omit it for
-                                    a pure model-as-tool. The model must be
-                                    routable (see \`cogmo model list\`); it need
-                                    not be user-selectable.
-  list                              Show configured sub-agents.
-  remove <name>                     Delete a sub-agent.
-`;
-
-export interface CliIo {
-  out(line: string): void;
-  err(line: string): void;
-}
-
-const CONSOLE_IO: CliIo = {
-  out: (line) => console.log(line),
-  err: (line) => console.error(line),
-};
+import { identifier, optionalOption } from "./args.js";
+import type { CliIo, LoadDeps } from "./run.js";
 
 export interface SubAgentCliDeps {
   runInTx: Transactor;
   agentStore: AgentStore;
 }
 
-export async function runSubAgentCli(
-  argv: readonly string[],
-  deps: SubAgentCliDeps,
-  io: CliIo = CONSOLE_IO,
-): Promise<number> {
-  const [command, ...rest] = argv;
-  try {
-    switch (command) {
-      case undefined:
-      case "help":
-      case "--help":
-      case "-h":
-        io.out(USAGE);
-        return 0;
-      case "add":
-        return await addSubAgent(rest, deps, io);
-      case "list":
-        return await listSubAgents(deps, io);
-      case "remove":
-        return await removeSubAgent(rest, deps, io);
-      default:
-        io.err(`Unknown command: ${command}\n`);
-        io.err(USAGE);
-        return 1;
-    }
-  } catch (err) {
-    // takeValue throws on operator error (missing flag value) — surface as a
-    // clean exit-2 rather than unwinding with a stack trace.
-    io.err(`Error: ${(err as Error).message}`);
-    return 2;
-  }
+/** A name that makes `subagent__<name>` a legal tool name. */
+const subAgentName = extendType(identifier("name"), {
+  async from(name) {
+    if (!SUB_AGENT_NAME_RE.test(name)) throw new InvalidNameError(name, "sub_agent");
+    return name;
+  },
+});
+
+/** The routing signal the orchestrator reads; blank text gives it nothing to route on. */
+const routingSignal = extendType(string, {
+  displayName: "text",
+  async from(text) {
+    if (text.trim().length === 0) throw new Error("expected the routing signal, got blank text");
+    return text;
+  },
+});
+
+export function subAgentCli(io: CliIo, loadDeps: LoadDeps<SubAgentCliDeps>) {
+  return subcommands({
+    name: "subagent",
+    description: "Manage sub-agents the orchestrator can delegate a subtask to.",
+    cmds: {
+      add: command({
+        name: "add",
+        description:
+          "Register a sub-agent, callable as a subagent__<name> tool. Takes effect on the next turn.",
+        args: {
+          name: positional({
+            type: subAgentName,
+            displayName: "name",
+            description: "Lowercase letters, digits, - and _, letter-led, at most 32 chars.",
+          }),
+          model: option({
+            long: "model",
+            type: identifier("model-id"),
+            description:
+              "The model it runs on: routable (see `cogmo model list`), not necessarily user-selectable.",
+          }),
+          description: option({
+            long: "description",
+            type: routingSignal,
+            description: "The routing signal: when the orchestrator should delegate to it.",
+          }),
+          systemPrompt: optionalOption({
+            long: "system-prompt",
+            type: { ...string, displayName: "text" },
+            description: "A standing persona. Omitted, it is a pure model-as-tool.",
+          }),
+        },
+        examples: [
+          {
+            description: "A pure model-as-tool",
+            command:
+              'cogmo subagent add researcher --model x-ai/grok-4.3 --description "Web research"',
+          },
+          {
+            description: "A sub-agent with a standing persona",
+            command:
+              'cogmo subagent add writer --model claude-sonnet-5 --description "Long-form prose" --system-prompt "Write in plain British English."',
+          },
+        ],
+        handler: async (args) => addSubAgent(args, await loadDeps(), io),
+      }),
+      list: command({
+        name: "list",
+        description: "Show configured sub-agents.",
+        args: {},
+        handler: async () => listSubAgents(await loadDeps(), io),
+      }),
+      remove: command({
+        name: "remove",
+        description: "Delete a sub-agent.",
+        args: {
+          name: positional({
+            type: identifier("name"),
+            displayName: "name",
+            description: "A sub-agent.",
+          }),
+        },
+        handler: async (args) => removeSubAgent(args, await loadDeps(), io),
+      }),
+    },
+  });
 }
 
-async function addSubAgent(
-  args: readonly string[],
-  deps: SubAgentCliDeps,
-  io: CliIo,
-): Promise<number> {
-  const [name, ...flags] = args;
-  if (!name) {
-    io.err(
-      "Usage: cogmo subagent add <name> --model <id> --description <text> [--system-prompt <text>]",
-    );
-    return 2;
-  }
-  const opts = parseFlags(flags);
-  if (!opts.model) {
-    io.err("--model is required");
-    return 2;
-  }
-  if (!opts.description || opts.description.trim().length === 0) {
-    io.err("--description is required (it's the routing signal the orchestrator reads)");
-    return 2;
-  }
+interface AddArgs {
+  name: string;
+  model: string;
+  description: string;
+  systemPrompt: string | undefined;
+}
 
+async function addSubAgent(args: AddArgs, deps: SubAgentCliDeps, io: CliIo): Promise<number> {
+  const { name, model, description, systemPrompt } = args;
   const user = await deps.runInTx((tx) => deps.agentStore.getFirstUser(tx));
   if (!user) {
     io.err("No user found. Run `cogmo setup` first.");
@@ -114,17 +129,13 @@ async function addSubAgent(
     await createSubAgent(deps, {
       userId: user.id,
       name,
-      description: opts.description,
-      systemPrompt: opts.systemPrompt ?? null,
-      model: opts.model,
+      description,
+      systemPrompt: systemPrompt ?? null,
+      model,
     });
   } catch (err) {
     if (err instanceof UniqueViolationError) {
       io.err(`A sub-agent named "${name}" already exists.`);
-      return 1;
-    }
-    if (err instanceof InvalidNameError) {
-      io.err(err.message);
       return 1;
     }
     if (err instanceof UnknownModelError) {
@@ -137,7 +148,7 @@ async function addSubAgent(
     return 1;
   }
 
-  io.out(`Added sub-agent "${name}" → model "${opts.model}" (tool: ${subAgentToolName(name)}).`);
+  io.out(`Added sub-agent "${name}" → model "${model}" (tool: ${subAgentToolName(name)}).`);
   io.out(
     `Enable it for a profile by adding "${subAgentToolName(name)}" (or "subagent__*") to its tool set.`,
   );
@@ -175,15 +186,11 @@ async function listSubAgents(deps: SubAgentCliDeps, io: CliIo): Promise<number> 
 }
 
 async function removeSubAgent(
-  args: readonly string[],
+  args: { name: string },
   deps: SubAgentCliDeps,
   io: CliIo,
 ): Promise<number> {
-  const [name] = args;
-  if (!name) {
-    io.err("Usage: cogmo subagent remove <name>");
-    return 2;
-  }
+  const { name } = args;
   const user = await deps.runInTx((tx) => deps.agentStore.getFirstUser(tx));
   if (!user) {
     io.err("No user found. Run `cogmo setup` first.");
@@ -196,68 +203,4 @@ async function removeSubAgent(
   }
   io.out(`Removed sub-agent "${name}".`);
   return 0;
-}
-
-interface ParsedFlags {
-  model?: string;
-  description?: string;
-  systemPrompt?: string;
-}
-
-function parseFlags(args: readonly string[]): ParsedFlags {
-  const out: ParsedFlags = {};
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i] ?? "";
-    // Support both `--flag value` and `--flag=value`. The `=` form is the
-    // unambiguous way to pass a value that itself starts with `-` (e.g. a
-    // system prompt opening with a markdown rule), which the space form rejects
-    // to avoid swallowing the next flag.
-    const eq = arg.startsWith("--") ? arg.indexOf("=") : -1;
-    const flag = eq === -1 ? arg : arg.slice(0, eq);
-    if (flag !== "--model" && flag !== "--description" && flag !== "--system-prompt") {
-      // Surface a typo (`--modle`) directly instead of letting it fall through
-      // to a confusing "--model is required". Bare positionals are ignored.
-      if (flag.startsWith("--")) {
-        throw new Error(`unknown flag: ${flag}`);
-      }
-      continue;
-    }
-    let value: string;
-    if (eq !== -1) {
-      value = arg.slice(eq + 1);
-    } else {
-      value = takeValue(args, i, flag);
-      i += 1;
-    }
-    switch (flag) {
-      case "--model":
-        out.model = value;
-        break;
-      case "--description":
-        out.description = value;
-        break;
-      case "--system-prompt":
-        out.systemPrompt = value;
-        break;
-    }
-  }
-  return out;
-}
-
-/**
- * Read the value following a space-separated flag, refusing the case where the
- * next token is itself a flag (so `--model --description x` doesn't silently
- * set `model = "--description"`). The space form therefore can't carry a value
- * that legitimately starts with `--` — shell quoting preserves the dashes, it
- * doesn't strip them — so use the `--flag=value` form for those.
- */
-function takeValue(args: readonly string[], i: number, flag: string | undefined): string {
-  const next = args[i + 1];
-  if (next === undefined) {
-    throw new Error(`${flag ?? "flag"} requires a value`);
-  }
-  if (next.startsWith("--")) {
-    throw new Error(`${flag ?? "flag"} requires a value (got next flag "${next}" instead)`);
-  }
-  return next;
 }
