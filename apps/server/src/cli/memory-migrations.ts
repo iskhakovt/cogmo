@@ -173,7 +173,7 @@ export function backfillCli(loadDeps: LoadDeps<MigrationCliDeps>) {
 }
 
 /** `cogmo migrate-memories [bankId]` */
-export async function runMigrateMemoriesCli(
+async function runMigrateMemoriesCli(
   args: { bankId: string | undefined },
   deps: MigrationCliDeps,
 ): Promise<number> {
@@ -213,7 +213,7 @@ export async function runMigrateMemoriesCli(
 }
 
 /** `cogmo backfill profile-class --tag=<a,b> [--bankId=<id>]` */
-export async function runBackfillProfileClassCli(
+async function runBackfillProfileClassCli(
   args: { classTags: readonly string[]; bankId: string | undefined },
   deps: MigrationCliDeps,
 ): Promise<number> {

@@ -10,7 +10,7 @@ describe("identifier", () => {
   });
 
   it.each([
-    ["", "expected a value, got an empty string"],
+    [" ", 'expected a value, got " "'],
     ["--all", 'expected a value, got the flag "--all"'],
     ["-v", 'expected a value, got the flag "-v"'],
   ])("rejects %j", async (value, message) => {
@@ -33,7 +33,6 @@ describe("intAtLeast", () => {
     [1, "200000abc"],
     [1, "1.5"],
     [1, "not-a-number"],
-    [0, ""],
     [0, " "],
     [1, "0x10"],
     [1, "1e3"],

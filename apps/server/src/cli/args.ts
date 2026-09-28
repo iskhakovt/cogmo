@@ -1,20 +1,21 @@
 /**
  * cmd-ts argument parsers and value types shared by `cogmo` subcommands. A
  * decoder that throws fails the parse, and cmd-ts prints its message under
- * the offending argument.
+ * the offending argument. No decoder sees an empty string: `runCli` refuses
+ * an empty argument, and cmd-ts reads `--flag=` as no value.
  */
 
 import { extendType, multioption, oneOf, string, type Type } from "cmd-ts";
 
 /**
- * A name or id. An option always consumes the token after it, so without
- * this check `--provider --all` reads `--all` as the provider's name.
+ * A name or id, not blank. An option always consumes the token after it, so
+ * without this check `--provider --all` reads `--all` as the provider's name.
  */
 export function identifier(displayName: string): Type<string, string> {
   return extendType(string, {
     displayName,
     async from(value) {
-      if (value.length === 0) throw new Error("expected a value, got an empty string");
+      if (value.trim() === "") throw new Error(`expected a value, got "${value}"`);
       if (value.startsWith("-")) throw new Error(`expected a value, got the flag "${value}"`);
       return value;
     },

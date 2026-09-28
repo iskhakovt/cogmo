@@ -230,7 +230,10 @@ describe("cogmo image-provider add", () => {
     [["add", "fal", "fal", "sk", "https://x", "extra"], /extra\n\s+\^ Unknown arguments/],
     [[...VENICE, "--cfg-scale", "25"], /expected a number from 0 to 20, got "25"/],
     [[...VENICE, "--cfg-scale", "7x"], /expected a number from 0 to 20, got "7x"/],
-    [[...VENICE, "--cfg-scale", "", "--safe-mode", "true"], /argument 7 is empty/],
+    [
+      [...VENICE, "--cfg-scale", " ", "--safe-mode", "true"],
+      /expected a number from 0 to 20, got " "/,
+    ],
     [
       [...VENICE, "--safe-mode", "maybe"],
       /Invalid value 'maybe'. Expected one of: 'true', 'false'/,
@@ -242,7 +245,7 @@ describe("cogmo image-provider add", () => {
     [[...VENICE, "--safe-mode"], /--safe-mode\n\s+\^ Expected to get a value, found a flag/],
     [[...VENICE, "--cfg-scale"], /--cfg-scale\n\s+\^ Expected to get a value, found a flag/],
     [[...VENICE, "--style-preset"], /--style-preset\n\s+\^ Expected to get a value, found a flag/],
-    [[...VENICE, "--style-preset", "", "--safe-mode", "true"], /argument 7 is empty/],
+    [[...VENICE, "--style-preset", " ", "--safe-mode", "true"], /expected a value, got " "/],
     [[...VENICE, "--style-preset", "--safe-mode", "true"], /got the flag "--safe-mode"/],
     [[...VENICE, "--safe-mode", "true", "--safe-mode", "false"], /Too many times provided/],
   ])("rejects %j with exit 2 and writes nothing", async (argv, message) => {
