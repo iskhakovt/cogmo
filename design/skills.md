@@ -797,7 +797,7 @@ Manual invocations are synchronous from the LLM's perspective — tool result re
 
 ### Run-as identity `[confirmed]`
 
-Every run acts for a user: `ctx.user()` returns them, and `ctx.memory` / `ctx.files` go through a scoped `Service` built for them (`SkillRunner.invoke({ runAs })`). `ctx.memory` gets exactly what the agent's own memory tools get — the profile's `memoryScope`, the restricted-class exclusion, and writes staged in `pending_memories` for the Observer. `ctx.files` is the deployment-wide workspace (see [File workspace](#file-workspace-confirmed)).
+Every run acts for a user: `ctx.user()` returns them, and `ctx.memory` / `ctx.files` go through a scoped `Service` built for them (`SkillRunner.invoke({ runAs })`). `ctx.memory` gets exactly what the agent's own memory tools get — the profile's `memoryScope`, the restricted-class exclusion, and writes staged in `pending_memories` for the Observer (as `source = 'skill'`). `ctx.files` is the deployment-wide workspace (see [File workspace](#file-workspace-confirmed)).
 
 | Trigger | Runs as |
 |-|-|
@@ -896,7 +896,7 @@ def run(inputs: dict, ctx) -> dict:
 |-|-|
 | `ctx.secrets.get(name)` | Fetch a declared secret value (manifest-gated) |
 | `ctx.memory.recall(query, ...)` | Semantic search of the run's user's memory, under the run's profile scope (see [Run-as identity](#run-as-identity-confirmed)) |
-| `ctx.memory.remember(content, ...)` | Stage a fact in `pending_memories` for the Observer to classify and retain. The skill's name and tags reach the Observer as context, not as memory tags. |
+| `ctx.memory.remember(content, ...)` | Stage a fact in `pending_memories` as `source = 'skill'` for the Observer to classify and retain; the retained memory's metadata names the skill. The skill's name and tags reach the Observer as context, not as memory tags. |
 | `ctx.attachments.upload(data, media_type)` | Upload to `AttachmentStore`, return path |
 | `ctx.attachments.download(path)` | Fetch bytes |
 | `ctx.files.read(path)` | Read UTF-8 text from the workspace (see [File workspace](#file-workspace-confirmed)) |
