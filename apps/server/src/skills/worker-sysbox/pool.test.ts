@@ -596,6 +596,68 @@ describe("SysboxWorkerPool", () => {
     await pool.dispose();
   });
 
+  it("spawns for the next queued acquire after a failed spawn rejects the one ahead of it", async () => {
+    const task = gate();
+    const spawned: FakeWorker[] = [];
+    let spawns = 0;
+    const pool = await poolWith({
+      min: 0,
+      max: 1,
+      createWorker: async ({ workerId }) => {
+        spawns += 1;
+        if (spawns === 2) throw new Error("replacement spawn failed");
+        const w = fakeWorker(workerId, {
+          invoke: async () => {
+            if (spawned.length === 1) await task.promise;
+            return succeed();
+          },
+        });
+        spawned.push(w);
+        return w;
+      },
+    }).pool;
+    const a = pool.invoke(invokeParams("t-A"));
+    await vi.waitFor(() => expect(pool.stats()).toMatchObject({ busy: 1 }));
+    const b = pool.invoke(invokeParams("t-B"));
+    const c = pool.invoke(invokeParams("t-C"));
+    expect(pool.stats().queued).toBe(2);
+
+    expectDefined(spawned[0], "first worker").die("supervisor exited");
+    task.open();
+    await a;
+
+    await expect(b).rejects.toThrow(/replacement spawn failed/);
+    await expect(c).resolves.toMatchObject({ ok: true });
+    await pool.dispose();
+  });
+
+  it("spawns for an acquire queued behind another's own spawn that fails", async () => {
+    const spawn = gate();
+    let spawns = 0;
+    const pool = await poolWith({
+      min: 0,
+      max: 1,
+      createWorker: async ({ workerId }) => {
+        spawns += 1;
+        if (spawns === 1) {
+          await spawn.promise;
+          throw new Error("spawn failed");
+        }
+        return fakeWorker(workerId);
+      },
+    }).pool;
+    const a = pool.invoke(invokeParams("t-A"));
+    // A's spawn is in flight and fills the pool's one slot, so this queues.
+    const b = pool.invoke(invokeParams("t-B"));
+    expect(pool.stats().queued).toBe(1);
+
+    spawn.open();
+
+    await expect(a).rejects.toThrow(/spawn failed/);
+    await expect(b).resolves.toMatchObject({ ok: true });
+    await pool.dispose();
+  });
+
   it("retries a failed replacement spawn on the next sweep", async () => {
     const h = buildPoolHarness({
       scripts: [[{ ok: true, output: null, workerReusable: false }]],
@@ -885,5 +947,121 @@ describe("SysboxWorkerPool", () => {
     await disposed;
     await first;
     await expect(second).rejects.toThrow(/disposed during worker spawn/);
+  });
+});
+
+describe("SysboxWorkerPool under random deaths and spawn failures", () => {
+  /** mulberry32: a seeded PRNG, so a failing seed replays exactly. */
+  function seeded(seed: number): () => number {
+    let a = seed;
+    return () => {
+      a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  async function ticks(n: number): Promise<void> {
+    for (let i = 0; i < n; i++) await new Promise<void>((r) => setImmediate(r));
+  }
+
+  /**
+   * Run one seeded schedule of tasks, worker deaths, spawn failures and
+   * sweeps against a pool, and return every invariant it broke.
+   */
+  async function fuzzPool(seed: number): Promise<ReadonlyArray<string>> {
+    const random = seeded(seed);
+    const chance = (p: number): boolean => random() < p;
+    const upTo = (n: number): number => Math.floor(random() * (n + 1));
+    const max = 1 + upTo(3);
+    const min = upTo(max);
+    const violations: string[] = [];
+    const workers: FakeWorker[] = [];
+    const running = new Set<FakeWorker>();
+    let creating = 0;
+    let booted = false;
+    let disposed = false;
+    let now = 0;
+
+    const { pool: created, sweep } = poolWith({
+      min,
+      max,
+      recycleAfterTasks: 1 + upTo(3),
+      idleShutdownMs: 1000,
+      now: () => now,
+      createWorker: async ({ workerId }) => {
+        const open = workers.filter((w) => w.state !== "disposed").length;
+        if (open + creating >= max) {
+          violations.push(`created a worker with ${open} open and ${creating} creating`);
+        }
+        creating += 1;
+        try {
+          await ticks(upTo(2));
+          if (booted && chance(0.15)) throw new Error("spawn failed");
+          const w: FakeWorker = fakeWorker(workerId, {
+            now: () => now,
+            invoke: async () => {
+              running.add(w);
+              try {
+                await ticks(upTo(3));
+                if (chance(0.1)) w.die("supervisor exited");
+                return chance(0.1)
+                  ? { ok: false, error: "wall_clock_exceeded", workerReusable: false }
+                  : succeed();
+              } finally {
+                running.delete(w);
+              }
+            },
+            onDispose: async () => {
+              if (running.has(w) && !disposed)
+                violations.push(`${workerId} torn down under its task`);
+            },
+          });
+          workers.push(w);
+          if (booted && chance(0.1)) queueMicrotask(() => w.die("supervisor exited"));
+          return w;
+        } finally {
+          creating -= 1;
+        }
+      },
+    });
+    const pool = await created;
+    booted = true;
+
+    const settled: boolean[] = [];
+    const tasks = 5 + upTo(15);
+    for (let i = 0; i < tasks; i++) {
+      settled.push(false);
+      const settle = (): void => {
+        settled[i] = true;
+      };
+      void pool.invoke(invokeParams(`t-${i}`)).then(settle, settle);
+      for (let k = upTo(3); k > 0; k--) {
+        await ticks(1);
+        now += chance(0.05) ? 61_000 : 100;
+        if (chance(0.1)) workers[upTo(workers.length - 1)]?.die("supervisor exited");
+        if (chance(0.1)) {
+          now += 1500;
+          sweep();
+        }
+      }
+    }
+    // Every task settles on its own: none waits on a sweep.
+    for (let i = 0; i < 1000 && settled.includes(false); i++) await ticks(1);
+    const hung = settled.filter((s) => !s).length;
+    if (hung > 0) violations.push(`${hung} task(s) never settled; ${JSON.stringify(pool.stats())}`);
+
+    disposed = true;
+    await pool.dispose();
+    const leaked = workers.filter((w) => w.state !== "disposed").length;
+    if (leaked > 0) violations.push(`${leaked} container(s) outlived dispose`);
+    return violations.map((v) => `seed ${seed} (min ${min}, max ${max}): ${v}`);
+  }
+
+  it("settles every task, never creates past `max` and leaks no container", async () => {
+    const violations: string[] = [];
+    for (let seed = 1; seed <= 1000; seed++) violations.push(...(await fuzzPool(seed)));
+    expect(violations).toEqual([]);
   });
 });

@@ -362,7 +362,15 @@ export class SysboxWorkerPool {
     // thundering herd of invokes from overshooting `max` while one spawn is
     // still resolving.
     if (this.#hasRoom()) {
-      const w = await this.#spawnOne();
+      let w: WorkerHandle;
+      try {
+        w = await this.#spawnOne();
+      } catch (e) {
+        // The slot the spawn held is free again; an acquire queued behind
+        // it would otherwise wait on nothing.
+        this.#serveQueue();
+        throw e;
+      }
       if (w.tryAcquire()) return w;
       // Lost the race for the worker we just spawned, or it is already
       // dead. Some *other* worker may have gone idle while we awaited the
@@ -561,7 +569,8 @@ export class SysboxWorkerPool {
   /**
    * Spawn a worker in the background and hand it to the head of the queue,
    * or leave it idle. A spawn that fails fails the head waiter, which would
-   * otherwise wait on a worker that is never coming.
+   * otherwise wait on a worker that is never coming, and spawns for the next
+   * one: each failure takes one waiter with it.
    */
   #spawnForQueue(): void {
     void this.#spawnOne().then(
@@ -581,6 +590,7 @@ export class SysboxWorkerPool {
         const waiter = this.#queue.shift();
         if (waiter) {
           waiter.reject(e instanceof Error ? e : new Error(String(e)));
+          this.#serveQueue();
           return;
         }
         log.warn(
