@@ -1,5 +1,5 @@
-import { EventEmitter, on } from "node:events";
-import { err, ok } from "neverthrow";
+import { EventEmitter, getEventListeners, on } from "node:events";
+import { err, ok, type Result } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import {
@@ -10,7 +10,7 @@ import {
   type WorkerTransport,
 } from "./dispatcher.js";
 import type { HostMessage, TaskInvoke, TaskResult, WorkerMessage } from "./protocol.js";
-import type { ExitOutcome, Handshake } from "./worker-state.js";
+import type { ExitOutcome, Handshake, StartFailure } from "./worker-state.js";
 
 /**
  * The worker's end of an in-memory channel. `emit` delivers a frame to the
@@ -50,8 +50,11 @@ const NEVER = new AbortController().signal;
 const acceptReady: Handshake = (first) =>
   first.type === "ready" ? ok(undefined) : err(`sent ${first.type} before ready`);
 
-function dispatcherOn(ch: Channel, opts: Partial<DispatcherOptions> = {}): Dispatcher {
-  return new Dispatcher({
+function open(
+  ch: Channel,
+  opts: Partial<DispatcherOptions> = {},
+): Promise<Result<Dispatcher, StartFailure>> {
+  return Dispatcher.open({
     transport: ch.transport,
     handshake: acceptReady,
     handshakeDeadline: NEVER,
@@ -59,11 +62,16 @@ function dispatcherOn(ch: Channel, opts: Partial<DispatcherOptions> = {}): Dispa
   });
 }
 
+function unwrap(opened: Result<Dispatcher, StartFailure>): Dispatcher {
+  if (opened.isErr()) throw new Error(`dispatcher failed to open: ${JSON.stringify(opened.error)}`);
+  return opened.value;
+}
+
 /** A dispatcher past its handshake and leased for a task. */
 async function leased(ch: Channel, opts: Partial<DispatcherOptions> = {}): Promise<Dispatcher> {
-  const d = dispatcherOn(ch, opts);
+  const opened = open(ch, opts);
   ch.emit({ type: "ready" });
-  expect(await d.started).toEqual(ok(undefined));
+  const d = unwrap(await opened);
   expect(d.tryAcquire()).toBe(true);
   return d;
 }
@@ -97,42 +105,46 @@ function result(output: unknown, id = "task-1"): TaskResult {
 
 describe("Dispatcher", () => {
   describe("handshake", () => {
-    it("accepts a worker whose first frame passes the handshake", async () => {
+    it("opens once the worker's first frame passes the handshake", async () => {
       const ch = channel();
-      const d = dispatcherOn(ch);
-      expect(d.state).toBe("starting");
+      const opened = open(ch);
       ch.emit({ type: "ready" });
-      expect(await d.started).toEqual(ok(undefined));
-      expect(d.state).toBe("idle");
+      expect(unwrap(await opened).state).toBe("idle");
     });
 
     it("refuses a worker whose first frame fails the handshake, and closes its channel", async () => {
       const ch = channel();
-      const d = dispatcherOn(ch);
+      const opened = open(ch);
       ch.emit(result(null));
-      expect(await d.started).toEqual(
+      expect(await opened).toEqual(
         err({ kind: "refused", reason: "sent task_result before ready" }),
       );
-      expect(await d.dead).toBe("sent task_result before ready");
       expect(ch.close).toHaveBeenCalled();
     });
 
     it("refuses a worker still silent at its handshake deadline", async () => {
       const ch = channel();
       const deadline = new AbortController();
-      const d = dispatcherOn(ch, { handshakeDeadline: deadline.signal });
+      const opened = open(ch, { handshakeDeadline: deadline.signal });
       deadline.abort();
-      expect(await d.started).toEqual(err({ kind: "timed_out" }));
-      expect(d.state).toBe("dead");
+      expect(await opened).toEqual(err({ kind: "timed_out" }));
+      expect(ch.close).toHaveBeenCalled();
     });
 
     it("reports a worker whose channel ends before its handshake", async () => {
       const ch = channel();
-      const d = dispatcherOn(ch);
-      ch.fail(new Error("transport: worker closed its output"));
-      expect(await d.started).toEqual(
-        err({ kind: "ended", reason: "transport: worker closed its output" }),
+      const opened = open(ch);
+      ch.fail(new Error("transport: maximum buffer reached"));
+      expect(await opened).toEqual(
+        err({ kind: "ended", reason: "transport: maximum buffer reached" }),
       );
+    });
+
+    it("closes the channel at once when opened with an aborted signal", async () => {
+      const ch = channel();
+      const opened = open(ch, { signal: AbortSignal.abort(new Error("pool disposed")) });
+      expect(await opened).toEqual(err({ kind: "ended", reason: "pool disposed" }));
+      expect(ch.close).toHaveBeenCalledTimes(1);
     });
 
     it("ignores the handshake deadline once the handshake is done", async () => {
@@ -336,9 +348,9 @@ describe("Dispatcher", () => {
 
   it("throws synchronously on an invoke without a lease", async () => {
     const ch = channel();
-    const d = dispatcherOn(ch);
+    const opened = open(ch);
     ch.emit({ type: "ready" });
-    await d.started;
+    const d = unwrap(await opened);
     expect(() => d.invoke(INVOKE, { ctxHandler: noopHandler(), deadline: NEVER })).toThrow(
       /acquire it first/,
     );
@@ -708,6 +720,20 @@ describe("Dispatcher", () => {
   });
 
   describe("deadline", () => {
+    it("stops watching a task's deadline once the task settles", async () => {
+      const ch = channel();
+      const d = await leased(ch);
+      const deadline = new AbortController();
+      const outcome = d.invoke(INVOKE, { ctxHandler: noopHandler(), deadline: deadline.signal });
+      expect(getEventListeners(deadline.signal, "abort")).toHaveLength(1);
+
+      ch.emit(result(1));
+      ch.emit({ type: "task_exited", id: "task-1" });
+      await outcome;
+
+      expect(getEventListeners(deadline.signal, "abort")).toEqual([]);
+    });
+
     it("fails a running task whose deadline passes, and dies", async () => {
       const ch = channel();
       const d = await leased(ch);

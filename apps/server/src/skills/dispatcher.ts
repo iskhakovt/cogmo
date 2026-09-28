@@ -30,7 +30,7 @@ const log = logger.child({ component: "skills.dispatcher" });
  * it once.
  */
 export interface WorkerTransport {
-  /** Send one frame. Throws if the channel can no longer carry it. */
+  /** Send one frame. May throw if the channel cannot carry it; after `close()` it drops the frame. */
   send(message: HostMessage): void;
   messages(): AsyncIterable<WorkerMessage>;
   /** Stop sending and receiving. Idempotent. */
@@ -94,38 +94,48 @@ interface PendingTask {
 /**
  * Drives one worker channel through `transition` (`worker-state.ts`): feeds
  * it the worker's frames, host commands and deadlines, and carries out the
- * effects it returns. The machine's state is the only state it keeps. Both
- * tiers use it; the transport and the handshake are what differ.
+ * effects it returns. Both tiers use it; the transport and the handshake
+ * are what differ.
  */
 export class Dispatcher {
-  /** Settles once the worker completes its handshake or fails to. */
-  readonly started: Promise<Result<void, StartFailure>>;
+  #started = Promise.withResolvers<Result<void, StartFailure>>();
+  #dead = Promise.withResolvers<string>();
   /** Resolves with the reason once the channel is dead and can run no further task. */
-  readonly dead: Promise<string>;
+  readonly dead = this.#dead.promise;
   #transport: WorkerTransport;
   #state: WorkerState<PendingTask>;
   #log: typeof log;
   /** Aborted on death; removes every listener the dispatcher holds. */
   #alive = new AbortController();
-  #onStarted: (outcome: Result<void, StartFailure>) => void;
-  #onDead: (reason: string) => void;
 
-  constructor(opts: DispatcherOptions) {
-    const started = Promise.withResolvers<Result<void, StartFailure>>();
-    const dead = Promise.withResolvers<string>();
-    this.started = started.promise;
-    this.dead = dead.promise;
-    this.#onStarted = started.resolve;
-    this.#onDead = dead.resolve;
+  private constructor(opts: DispatcherOptions) {
     this.#transport = opts.transport;
     this.#state = { kind: "starting", handshake: opts.handshake };
     this.#log = opts.logContext ? log.child(opts.logContext) : log;
-    this.#whenAborted(opts.handshakeDeadline, () =>
-      this.#dispatch({ type: "handshake_timed_out" }),
+  }
+
+  /**
+   * Open a worker's channel and wait for its handshake. Resolves with the
+   * dispatcher once the worker is ready, or with why it never was; the
+   * channel is closed by then.
+   */
+  static async open(opts: DispatcherOptions): Promise<Result<Dispatcher, StartFailure>> {
+    const dispatcher = new Dispatcher(opts);
+    dispatcher.#whenAborted(
+      opts.handshakeDeadline,
+      () => dispatcher.#dispatch({ type: "handshake_timed_out" }),
+      dispatcher.#alive.signal,
     );
     const signal = opts.signal;
-    if (signal) this.#whenAborted(signal, () => this.close(describeError(signal.reason)));
-    void this.#pump();
+    if (signal) {
+      dispatcher.#whenAborted(
+        signal,
+        () => dispatcher.close(describeError(signal.reason)),
+        dispatcher.#alive.signal,
+      );
+    }
+    void dispatcher.#pump();
+    return (await dispatcher.#started.promise).map(() => dispatcher);
   }
 
   get state(): WorkerStateKind {
@@ -153,14 +163,23 @@ export class Dispatcher {
     opts: { ctxHandler: CtxHandler; deadline: AbortSignal },
   ): Promise<TaskOutcome> {
     const outcome = Promise.withResolvers<TaskOutcome>();
+    /** Aborted when the task settles, which it does on every path, death included. */
+    const settled = new AbortController();
     const task: PendingTask = {
       id: message.id,
       ctxHandler: opts.ctxHandler,
-      settle: outcome.resolve,
+      settle: (result) => {
+        settled.abort();
+        outcome.resolve(result);
+      },
     };
     const accepted = this.#dispatch({ type: "invoke", task, message });
     if (accepted.isErr()) throw new Error(`dispatcher: ${accepted.error}`);
-    this.#whenAborted(opts.deadline, () => this.#dispatch({ type: "deadline_passed", task }));
+    this.#whenAborted(
+      opts.deadline,
+      () => this.#dispatch({ type: "deadline_passed", task }),
+      settled.signal,
+    );
     return outcome.promise;
   }
 
@@ -205,13 +224,13 @@ export class Dispatcher {
         return [];
       })
       .with({ type: "started" }, ({ outcome }) => {
-        this.#onStarted(outcome);
+        this.#started.resolve(outcome);
         return [];
       })
       .with({ type: "died" }, ({ reason }) => {
         this.#alive.abort();
         this.#transport.close();
-        this.#onDead(reason);
+        this.#dead.resolve(reason);
         return [];
       })
       .with({ type: "log" }, ({ level, message, fields }) => {
@@ -256,9 +275,10 @@ export class Dispatcher {
       });
   }
 
-  /** Call `fn` once `signal` aborts, unless the channel has died first. */
-  #whenAborted(signal: AbortSignal, fn: () => void): void {
+  /** Call `fn` once `signal` aborts, unless `until` aborts first. */
+  #whenAborted(signal: AbortSignal, fn: () => void, until: AbortSignal): void {
+    if (until.aborted) return;
     if (signal.aborted) fn();
-    else signal.addEventListener("abort", fn, { once: true, signal: this.#alive.signal });
+    else signal.addEventListener("abort", fn, { once: true, signal: until });
   }
 }

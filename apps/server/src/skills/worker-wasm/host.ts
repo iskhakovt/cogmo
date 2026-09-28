@@ -79,7 +79,6 @@ export interface RunOnWorkerResult {
  * Pyodide fallback for tight CPU loops.
  */
 export async function runOnWorker(params: RunOnWorkerParams): Promise<RunOnWorkerResult> {
-  const wallClockS = params.wallClockS ?? DEFAULT_WALL_CLOCK_S.wasm;
   const readyTimeoutMs = params.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
   const interruptBuffer = new SharedArrayBuffer(1);
 
@@ -97,21 +96,39 @@ export async function runOnWorker(params: RunOnWorkerParams): Promise<RunOnWorke
     },
     transferList: [channel.port2],
   });
-  const dispatcher = new Dispatcher({
-    transport: createPortTransport(channel.port1, worker),
-    handshake: acceptWorkerReady,
-    // Bounds a hung micropip install (slow PyPI, resolver dead-end); the
-    // task's own deadline starts only after the handshake.
-    handshakeDeadline: timeoutSignal(readyTimeoutMs),
-    logContext: { taskId: params.taskId },
-  });
-  const finished = new AbortController();
 
   try {
-    const started = await dispatcher.started;
-    if (started.isErr()) {
-      return { ok: false, error: describeStartFailure(started.error, readyTimeoutMs) };
-    }
+    const opened = await Dispatcher.open({
+      transport: createPortTransport(channel.port1, worker),
+      handshake: acceptWorkerReady,
+      // Bounds a hung micropip install (slow PyPI, resolver dead-end); the
+      // task's own deadline starts only after the handshake.
+      handshakeDeadline: timeoutSignal(readyTimeoutMs),
+      logContext: { taskId: params.taskId },
+    });
+    return await opened.match(
+      (dispatcher) => runTask(dispatcher, params, interruptBuffer),
+      (failure) =>
+        Promise.resolve({ ok: false, error: describeStartFailure(failure, readyTimeoutMs) }),
+    );
+  } finally {
+    await worker.terminate().catch(() => {
+      /* terminate after exit is benign */
+    });
+  }
+}
+
+/** Run the worker's one task under the wall clock, then close its channel. */
+async function runTask(
+  dispatcher: Dispatcher,
+  params: RunOnWorkerParams,
+  interruptBuffer: SharedArrayBuffer,
+): Promise<RunOnWorkerResult> {
+  const wallClockS = params.wallClockS ?? DEFAULT_WALL_CLOCK_S.wasm;
+  const finished = new AbortController();
+  try {
+    // False only if the thread died since its handshake; the invoke below
+    // then fails the task as a value.
     dispatcher.tryAcquire();
 
     const wallClock = timeoutSignal(wallClockS * 1000);
@@ -153,9 +170,6 @@ export async function runOnWorker(params: RunOnWorkerParams): Promise<RunOnWorke
   } finally {
     finished.abort();
     dispatcher.close("finished");
-    await worker.terminate().catch(() => {
-      /* terminate after exit is benign */
-    });
   }
 }
 

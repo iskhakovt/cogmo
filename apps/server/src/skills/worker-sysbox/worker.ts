@@ -273,15 +273,14 @@ export class SysboxSkillWorker {
       log.debug({ workerId: opts.workerId }, chunk.trimEnd());
     });
 
-    const dispatcher = new Dispatcher({
+    const opened = await Dispatcher.open({
       transport: createNdjsonTransport(exec.stdin, exec.stdout),
       handshake: acceptSupervisorReady,
       handshakeDeadline: timeoutSignal(SUPERVISOR_READY_TIMEOUT_MS),
       ...(opts.signal !== undefined && { signal: opts.signal }),
       logContext: { workerId: opts.workerId },
     });
-    const started = await dispatcher.started;
-    if (started.isErr()) {
+    if (opened.isErr()) {
       await exec.dispose().catch((e: unknown) => {
         log.warn(
           { workerId: opts.workerId, err: e instanceof Error ? e.message : String(e) },
@@ -295,7 +294,7 @@ export class SysboxSkillWorker {
         );
       });
       throw new Error(
-        `skills worker ${opts.workerId} (${opts.image}): ${describeStartFailure(started.error)}`,
+        `skills worker ${opts.workerId} (${opts.image}): ${describeStartFailure(opened.error)}`,
       );
     }
 
@@ -305,7 +304,7 @@ export class SysboxSkillWorker {
       sandbox: opts.sandbox,
       session,
       exec,
-      dispatcher,
+      dispatcher: opened.value,
     });
   }
 
