@@ -1590,7 +1590,10 @@ describe("OpenAICompatibleProvider", () => {
         "gpt-5-nano-2025-08-07",
         "gpt-5.4-nano",
         "gpt-5.6-luna",
+        "gpt-5.10",
         "gpt-6-luna",
+        "gpt-5.3-chat-latest",
+        "chat-latest",
         "o1",
         "o3-mini",
         "o4-mini-2025-04-16",
@@ -1625,65 +1628,73 @@ describe("OpenAICompatibleProvider", () => {
   });
 
   // Chat Completions answers function tools alongside reasoning with a 400
-  // on GPT-5.5 onward, and reasoning models answer a temperature other than 1
-  // with a 400 — which the degraded-reply synthesis turns into its fixed
-  // fallback string.
+  // from GPT-5.5, and a temperature other than 1 outside effort `none` with a 400.
   describe("reasoning models", () => {
+    // Models with a `none` effort.
+    const WITH_NONE = [
+      "gpt-5.1",
+      "gpt-5.4-nano",
+      "gpt-5.5",
+      "gpt-5.5-2026-04-23",
+      "gpt-5.6-luna",
+      "gpt-5.10",
+      "gpt-6-sol",
+      "ft:gpt-5.6-luna:org::id",
+    ];
+    // Reasoning models without one: before GPT-5.1, the Astra tier, and the
+    // `chat-latest` ids, which take only `medium`.
+    const WITHOUT_NONE = [
+      "gpt-5",
+      "gpt-5-nano",
+      "o4-mini",
+      "gpt-6-astra",
+      "chat-latest",
+      "gpt-5-chat-latest",
+      "gpt-5.5-chat-latest",
+    ];
+
     describe("modelFamilyParams", () => {
-      it.each([
-        "gpt-5.5",
-        "gpt-5.5-2026-04-23",
-        "gpt-5.6-luna",
-        "gpt-6-sol",
-        "ft:gpt-5.6-luna:org::id",
-      ])("runs %s at reasoning effort none when the request has tools", (model) => {
+      it.each(WITH_NONE)("runs %s at reasoning effort none when the request has tools", (model) => {
         expect(modelFamilyParams(model, { maxTokens: 1024, tools: [GET_TIME] })).toEqual({
           max_completion_tokens: 1024,
           reasoning_effort: "none",
         });
       });
 
+      it.each(WITH_NONE)("runs %s at reasoning effort none to keep a temperature", (model) => {
+        expect(modelFamilyParams(model, { maxTokens: 1024, temperature: 0 })).toEqual({
+          max_completion_tokens: 1024,
+          reasoning_effort: "none",
+          temperature: 0,
+        });
+      });
+
       it.each([
-        // Reasoning models that take tools with reasoning, or have no `none` effort.
-        "gpt-5",
-        "gpt-5-nano",
-        "gpt-5.4",
-        "gpt-5.4-nano",
-        "o4-mini",
+        ...WITHOUT_NONE,
         // Not reasoning models, or routed by a host that maps its own parameters.
         "gpt-4.1-nano",
         "openai/gpt-5.6-luna",
         "grok-4.3",
-      ])("leaves %s's reasoning effort unset when the request has tools", (model) => {
-        expect(modelFamilyParams(model, { maxTokens: 1024, tools: [GET_TIME] })).not.toHaveProperty(
-          "reasoning_effort",
-        );
+      ])("leaves %s's reasoning effort unset", (model) => {
+        const params = modelFamilyParams(model, {
+          maxTokens: 1024,
+          tools: [GET_TIME],
+          temperature: 0,
+        });
+
+        expect(params).not.toHaveProperty("reasoning_effort");
       });
 
-      it("leaves the reasoning effort unset without tools", () => {
+      it("leaves the reasoning effort at the model's default without tools or temperature", () => {
         expect(modelFamilyParams("gpt-5.6-luna", { maxTokens: 1024, tools: [] })).toEqual({
           max_completion_tokens: 1024,
         });
       });
 
-      it.each([
-        "gpt-5",
-        "gpt-5-nano",
-        "gpt-5.4-nano",
-        "gpt-5.5",
-        "gpt-5.6-luna",
-        "gpt-6-luna",
-        "o4-mini",
-      ])("drops %s's temperature when it reasons", (model) => {
+      it.each(WITHOUT_NONE)("drops %s's temperature", (model) => {
         expect(modelFamilyParams(model, { maxTokens: 1024, temperature: 0 })).toEqual({
           max_completion_tokens: 1024,
         });
-      });
-
-      it("keeps the temperature at reasoning effort none", () => {
-        expect(
-          modelFamilyParams("gpt-5.6-luna", { maxTokens: 1024, temperature: 0, tools: [GET_TIME] }),
-        ).toEqual({ max_completion_tokens: 1024, reasoning_effort: "none", temperature: 0 });
       });
 
       it.each(["gpt-4.1-nano", "openai/gpt-5.6-luna", "grok-4.3"])(
@@ -1713,49 +1724,65 @@ describe("OpenAICompatibleProvider", () => {
         expect(body.reasoning_effort).toBe("none");
         expect(body.tools).toHaveLength(1);
       });
-    });
 
-    // The request `synthesizeDegradedReply` (agent/repair.ts) sends.
-    it("sends the degraded-reply synthesis without its temperature", async () => {
-      const body = await sentBody(
-        "chat",
-        {
-          model: "gpt-5.6-luna",
-          system: "sys",
-          messages: [{ role: "user", content: "hi" }],
-          tools: [],
-          temperature: 0,
-          maxTokens: 4096,
-        },
-        "openai",
-      );
+      // The request `synthesizeDegradedReply` (agent/repair.ts) sends.
+      it("sends the degraded-reply synthesis at reasoning effort none with its temperature", async () => {
+        const body = await sentBody(
+          path,
+          {
+            model: "gpt-5.6-luna",
+            system: "sys",
+            messages: [{ role: "user", content: "hi" }],
+            tools: [],
+            temperature: 0,
+            maxTokens: 4096,
+          },
+          "openai",
+        );
 
-      expect(body).not.toHaveProperty("temperature");
-      expect(body).not.toHaveProperty("reasoning_effort");
-      expect(body).not.toHaveProperty("tools");
-      expect(body.max_completion_tokens).toBe(4096);
-    });
+        expect(body.reasoning_effort).toBe("none");
+        expect(body.temperature).toBe(0);
+        expect(body).not.toHaveProperty("tools");
+        expect(body.max_completion_tokens).toBe(4096);
+      });
 
-    it("sends a temperature to a model that takes one", async () => {
-      const body = await sentBody(
-        "chatStream",
-        {
-          model: "gpt-4.1-nano",
-          system: "sys",
-          messages: [{ role: "user", content: "hi" }],
-          temperature: 0,
-        },
-        "openai",
-      );
+      it("drops the temperature for a model without a none effort", async () => {
+        const body = await sentBody(
+          path,
+          {
+            model: "o4-mini",
+            system: "sys",
+            messages: [{ role: "user", content: "hi" }],
+            temperature: 0,
+          },
+          "openai",
+        );
 
-      expect(body.temperature).toBe(0);
+        expect(body).not.toHaveProperty("temperature");
+        expect(body).not.toHaveProperty("reasoning_effort");
+      });
+
+      it("sends a temperature to a model that takes one", async () => {
+        const body = await sentBody(
+          path,
+          {
+            model: "gpt-4.1-nano",
+            system: "sys",
+            messages: [{ role: "user", content: "hi" }],
+            temperature: 0,
+          },
+          "openai",
+        );
+
+        expect(body.temperature).toBe(0);
+      });
     });
 
     it("warns once per model when it drops a temperature", async () => {
       const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
       try {
         // Unique per run: the warn-once cache is module-level.
-        const model = `gpt-5.6-warn-once-${Math.random()}`;
+        const model = `o4-warn-once-${Math.random()}`;
         for (let i = 0; i < 2; i++) {
           await sentBody(
             "chat",

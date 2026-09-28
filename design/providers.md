@@ -17,10 +17,13 @@ Two provider adapters exist:
 
 Both implement `LlmProvider` — the agent loop and orchestrator are provider-agnostic.
 
-`OpenAICompatibleProvider` sends the output cap as `max_completion_tokens` to OpenAI's reasoning models (the o-series and GPT-5 onward, matched by bare or fine-tuned model id on any host) and as `max_tokens` to every other id. Two more of their parameters depend on reasoning effort:
+`OpenAICompatibleProvider` maps three request parameters by OpenAI model family, matched by bare or fine-tuned model id on any host (`modelFamilyParams`):
 
-- **Tools.** From GPT-5.5, Chat Completions takes function tools only at `reasoning_effort: "none"` (a 400 otherwise, and GPT-5.6 onward reason by default), so a request with tools to those models goes at `none`: tool turns run without reasoning. OpenAI's other documented route, the Responses API, keeps reasoning on tool calls but is a separate wire protocol this adapter doesn't speak. GPT-6 Astra has no `none` effort and takes tools only on Responses, so it can't serve chat turns here.
-- **Temperature.** Reasoning models accept a `temperature` other than 1 only at `none`. The adapter keeps it on a request it sends at `none` and drops it, warning once per model, from every other request to them — the degraded-reply synthesis's `temperature: 0` among them.
+- **Output cap.** OpenAI's reasoning models (the o-series, GPT-5 onward and the `chat-latest` ids) take it as `max_completion_tokens`; every other id as `max_tokens`.
+- **Reasoning effort.** On Chat Completions these models take function tools only at `reasoning_effort: "none"` (a 400 otherwise from GPT-5.5, and GPT-5.6 onward reason by default), and a `temperature` other than 1 only at `none`. A request with tools or a temperature to a model with a `none` effort (GPT-5.1 onward, except the Astra tier and `chat-latest`) goes at `none`; any other request keeps the model's default. So tool turns run without reasoning, and the degraded-reply synthesis (`temperature: 0`) answers quickly within its 5-second cap.
+- **Temperature.** Sent at `none`, and dropped with a once-per-model warning from every other request to a reasoning model.
+
+The Responses API keeps reasoning on tool calls but is a separate wire protocol this adapter doesn't speak. GPT-6 Astra has no `none` effort and takes tools only there, so it can't serve chat turns.
 
 ## Data Model
 

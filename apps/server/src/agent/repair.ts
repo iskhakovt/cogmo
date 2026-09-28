@@ -526,8 +526,9 @@ export interface SynthesizeDegradedReplyResult {
  * - `temperature: 0` — predictability matters more than variety on a
  *   failure reply. Best-effort: dropped by the Anthropic adapter (the
  *   Messages API rejects sampling parameters) and for OpenAI's reasoning
- *   models, honoured elsewhere. The reply is one to three sentences either
- *   way.
+ *   models without a `none` effort; those with one run at `none` to keep it
+ *   (design/providers.md → Architecture). The reply is one to three
+ *   sentences either way.
  * - Single attempt, no Class C repair — if it fails for any reason
  *   (timeout, refusal, provider outage), fall back to the fixed string
  *   and emit `agent.degrade.synthesis` with `ok: false`.

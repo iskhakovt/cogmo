@@ -255,10 +255,10 @@ export interface ChatParams {
    * Best-effort, not a guarantee: the Anthropic Messages API rejects
    * sampling parameters outright, so `AnthropicProvider` drops this and
    * logs once per model. OpenAI's reasoning models take it only at
-   * reasoning effort `none`, so `OpenAICompatibleProvider` drops it from
-   * their other requests the same way. Other OpenAI-compatible models
-   * honour it — range is 0–2 there, so stick to 0–1 for portability across
-   * a fallback chain that may span both.
+   * reasoning effort `none`: `OpenAICompatibleProvider` runs those with a
+   * `none` effort there and drops it for the rest the same way. Other
+   * OpenAI-compatible models honour it — range is 0–2 there, so stick to 0–1
+   * for portability across a fallback chain that may span both.
    */
   temperature?: number;
   /** Cache the transcript for the next request. Adapters without a mapping ignore it. */
