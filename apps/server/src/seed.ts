@@ -1,19 +1,19 @@
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { DrizzleAgentStore } from "./agent/store/index.js";
+import { bootstrapLock } from "./db/bootstrap-lock.js";
 import { pinoNoticeHandler } from "./db/helpers.js";
-import { migratePerFile } from "./db/migrate-per-file.js";
 import * as schema from "./db/schemas.js";
 import { transactor } from "./db/transactor.js";
 import { logger } from "./logger.js";
-import { seedDefaults } from "./setup/seed.js";
+import { migrateAndSeed } from "./setup/migrate-and-seed.js";
 import { DrizzleTransportStore } from "./transport/store/index.js";
 
 /**
  * Seed the database with default data for single-user deployment.
  *
  * Idempotent — safe to run multiple times.
- * Creates: user, profile, direct channel, wildcard identity.
+ * Creates: user, profile, direct and web channels with their wildcard identities.
  *
  * Only requires DATABASE_URL — no other env vars needed. Reads
  * `process.env` directly (no `env.ts` import) so the seed entrypoint
@@ -27,14 +27,16 @@ export async function seed(): Promise<void> {
   const db = drizzle({ client, schema });
 
   try {
-    await migratePerFile(db, { migrationsFolder: "./migrations" });
-    logger.info("migrations applied");
-
-    const tx = transactor(db);
-    const agentStore = new DrizzleAgentStore();
-    const transportStore = new DrizzleTransportStore();
-
-    await seedDefaults(tx, agentStore, transportStore);
+    await migrateAndSeed(
+      {
+        bootstrapLock: bootstrapLock(client),
+        db,
+        runInTx: transactor(db),
+        agentStore: new DrizzleAgentStore(),
+        transportStore: new DrizzleTransportStore(),
+      },
+      { reset: null },
+    );
     logger.info("seed complete");
   } finally {
     await db.$client.end();

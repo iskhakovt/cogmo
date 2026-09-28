@@ -229,6 +229,31 @@ describe("DrizzleAgentStore", () => {
       // No throw — same name is allowed when (user_id, name) differs.
     });
 
+    it("insertOrRecoverProfile recovers a repeated org profile name without overwriting it", async () => {
+      const params = { userId: null, name: "assistant", model: "m", toolSet: [] };
+      const first = await tx((trx) =>
+        store.insertOrRecoverProfile(trx, { ...params, basePrompt: "first" }),
+      );
+      const second = await tx((trx) =>
+        store.insertOrRecoverProfile(trx, { ...params, basePrompt: "second" }),
+      );
+
+      expect(first.kind).toBe("new");
+      expect(second).toEqual({ kind: "recovered", id: first.id });
+      const stored = await tx((trx) => store.getProfile(trx, first.id));
+      expect(stored?.basePrompt).toBe("first");
+    });
+
+    it("insertOrRecoverProfile keys on the owner as well as the name", async () => {
+      const userId = await seedUser();
+      const params = { name: "assistant", basePrompt: "p", model: "m", toolSet: [] };
+      const org = await tx((trx) => store.insertOrRecoverProfile(trx, { ...params, userId: null }));
+      const own = await tx((trx) => store.insertOrRecoverProfile(trx, { ...params, userId }));
+
+      expect(own.kind).toBe("new");
+      expect(own.id).not.toBe(org.id);
+    });
+
     it("rejects duplicate name within the same user", async () => {
       const u = await seedUser();
       await tx((trx) =>

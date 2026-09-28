@@ -1,6 +1,6 @@
 {
-  "id": "869bf737-39ae-4a45-9f0f-be14356e1b81",
-  "prevId": "f6897efa-6e9c-444e-93eb-7ac49e3eed1a",
+  "id": "6065057f-c19a-4ea5-84de-ae14af10a2d0",
+  "prevId": "869bf737-39ae-4a45-9f0f-be14356e1b81",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -2126,6 +2126,97 @@
           "name": "uq_sub_agents_user_name",
           "nullsNotDistinct": false,
           "columns": ["user_id", "name"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.system_prompt_snapshots": {
+      "name": "system_prompt_snapshots",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "uuidv7()"
+        },
+        "conversation_id": {
+          "name": "conversation_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "opened_by": {
+          "name": "opened_by",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "history_start": {
+          "name": "history_start",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "rendered": {
+          "name": "rendered",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "config_digest": {
+          "name": "config_digest",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "system_prompt_snapshots_conversation_id_conversations_id_fk": {
+          "name": "system_prompt_snapshots_conversation_id_conversations_id_fk",
+          "tableFrom": "system_prompt_snapshots",
+          "tableTo": "conversations",
+          "columnsFrom": ["conversation_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "system_prompt_snapshots_opened_by_messages_id_fk": {
+          "name": "system_prompt_snapshots_opened_by_messages_id_fk",
+          "tableFrom": "system_prompt_snapshots",
+          "tableTo": "messages",
+          "columnsFrom": ["opened_by"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "system_prompt_snapshots_history_start_messages_id_fk": {
+          "name": "system_prompt_snapshots_history_start_messages_id_fk",
+          "tableFrom": "system_prompt_snapshots",
+          "tableTo": "messages",
+          "columnsFrom": ["history_start"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "uq_system_prompt_snapshots_conv_opened_by": {
+          "name": "uq_system_prompt_snapshots_conv_opened_by",
+          "nullsNotDistinct": false,
+          "columns": ["conversation_id", "opened_by"]
         }
       },
       "policies": {},

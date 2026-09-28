@@ -38,6 +38,7 @@ import {
   mockVoiceResolver,
   turnContextSent,
 } from "../test/factories.js";
+import type { InboundContent } from "../transport/content.js";
 import { coreMemoryTools } from "./core-memory-tools.js";
 import type { HandleMessageDeps } from "./handle-message.js";
 import { createHandleMessage } from "./handle-message.js";
@@ -3084,6 +3085,68 @@ describe("createHandleMessage", () => {
 
     expect(memory.recall).toHaveBeenCalledWith("user-1", expect.any(String), {
       maxTokens: 2000,
+    });
+  });
+
+  describe("auto-recall query on a turn with attachments", () => {
+    const inboundWith = (content: InboundContent) =>
+      mockTransportStore({
+        getUnbatchedInbound: vi.fn().mockResolvedValue([{ id: "inbound-1", content }]),
+      });
+    const PICTURE: InboundContent = [
+      { type: "image", path: "inbound/cat.jpg", mediaType: "image/jpeg" },
+      { type: "text", text: "what breed is the cat in this picture?" },
+    ];
+
+    it("queries with the turn's text, not its blocks", async () => {
+      const memory = mockMemoryProvider();
+      const deps = mockDeps({ memory, transportStore: inboundWith(PICTURE) });
+
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(memory.recall).toHaveBeenCalledWith(
+        "user-1",
+        "what breed is the cat in this picture?",
+        { maxTokens: 2000 },
+      );
+    });
+
+    it("skips recall for a turn with no text, even when the profile always recalls", async () => {
+      const memory = mockMemoryProvider();
+      const deps = mockDeps({
+        memory,
+        transportStore: inboundWith([
+          { type: "image", path: "inbound/cat.jpg", mediaType: "image/jpeg" },
+        ]),
+        agentStore: mockAgentStore({
+          getProfile: vi.fn().mockResolvedValue({
+            id: "profile-1",
+            userId: null,
+            name: "default",
+            basePrompt: "test",
+            model: "claude-sonnet-4-6",
+            summarizationModel: null,
+            extractionModel: null,
+            autoRecall: "always" as const,
+            toolSet: [],
+            memoryScope: null,
+          }),
+        }),
+      });
+
+      await invokeInngestFn<HandleMessageCtx>(createHandleMessage(deps), {
+        event: testEvent,
+        step: mockStep(),
+        runId: testRunId,
+      });
+
+      expect(memory.recall).not.toHaveBeenCalled();
+      // Non-vacuity: the turn ran.
+      expect(deps.runStreamingAgentLoop).toHaveBeenCalled();
     });
   });
 

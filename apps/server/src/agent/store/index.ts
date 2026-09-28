@@ -678,6 +678,22 @@ export interface AgentStore {
     },
   ): Promise<Profile>;
 
+  /**
+   * Keyed insert on `uq_profiles_user_name` (`.claude/rules/inngest.md`): a
+   * repeated `(userId, name)`, including `userId: null`, returns the stored
+   * profile's id as `recovered`, leaving the row as it was.
+   */
+  insertOrRecoverProfile(
+    tx: Transaction,
+    params: {
+      userId: string | null;
+      name: string;
+      basePrompt: string;
+      model: string;
+      toolSet: ToolSet;
+    },
+  ): Promise<{ kind: "new" | "recovered"; id: string }>;
+
   /** List profiles visible to `userId`: org profiles (user_id IS NULL) + the user's own profiles. */
   listProfiles(tx: Transaction, userId: string): Promise<ReadonlyArray<Profile>>;
 
@@ -767,9 +783,9 @@ export interface AgentStore {
    * REPEATABLE READ (the project default) doesn't catch this predicate
    * race — snapshot isolation doesn't predicate-lock. At single-user
    * scale + UI-only writes the residual race (concurrent inserts both
-   * seeing count=N-1) is acceptable; when multi-tenant lands, prefer
-   * `pg_advisory_xact_lock(user_id)` or a unique partial index over
-   * SERIALIZABLE — predicate races want prevention, not retry.
+   * seeing count=N-1) is acceptable; when multi-tenant lands, prevent it
+   * with an advisory lock taken before the snapshot, not SERIALIZABLE —
+   * see `.claude/rules/store-pattern.md`.
    */
   createCustomCompartment(
     tx: Transaction,
@@ -1967,6 +1983,26 @@ export class DrizzleAgentStore implements AgentStore {
       );
       return row as Profile;
     });
+  }
+
+  async insertOrRecoverProfile(
+    tx: Transaction,
+    params: {
+      userId: string | null;
+      name: string;
+      basePrompt: string;
+      model: string;
+      toolSet: ToolSet;
+    },
+  ): Promise<{ kind: "new" | "recovered"; id: string }> {
+    // Keyed insert: see `.claude/rules/inngest.md`.
+    const rows = await tx
+      .insert(profiles)
+      .values(params)
+      .onConflictDoUpdate({ target: [profiles.userId, profiles.name], set: { name: params.name } })
+      .returning({ id: profiles.id, inserted: sql<boolean>`(xmax = 0)` });
+    const { id, inserted } = single(rows);
+    return { kind: inserted ? "new" : "recovered", id };
   }
 
   async listProfiles(tx: Transaction, userId: string): Promise<ReadonlyArray<Profile>> {

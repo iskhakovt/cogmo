@@ -1,10 +1,20 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdtemp, readFile, rm, stat, unlink } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { CodingRepoRow, CodingStore } from "../agent/coding/store/index.js";
 import type { Transactor } from "../db/index.js";
@@ -15,6 +25,11 @@ import {
   SKILLS_CODING_REPO_NAME,
 } from "./repo.js";
 
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, writeFile: vi.fn(actual.writeFile), rename: vi.fn(actual.rename) };
+});
+
 const execFileP = promisify(execFile);
 
 let workDir: string;
@@ -24,6 +39,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.mocked(writeFile).mockReset();
+  vi.mocked(rename).mockReset();
   await rm(workDir, { recursive: true, force: true });
 });
 
@@ -60,6 +77,12 @@ async function gitFails(
     const err = e as { stdout?: string; stderr?: string };
     return { stdout: err.stdout ?? "", stderr: err.stderr ?? "" };
   }
+}
+
+/** The installed `pre-receive` hook plus any temp files left beside it; git's `.sample` excluded. */
+async function preReceiveEntries(repoPath: string): Promise<string[]> {
+  const entries = await readdir(join(repoPath, "hooks"));
+  return entries.filter((e) => e.startsWith("pre-receive") && !e.endsWith(".sample")).sort();
 }
 
 async function setupClone(bareRepo: string, cloneDir: string): Promise<void> {
@@ -178,6 +201,45 @@ describe("bootstrapSkillsRepo", () => {
     expect((await stat(hookPath)).mode & 0o777).toBe(0o644);
     await bootstrapSkillsRepo({ path: repoPath });
     expect((await stat(hookPath)).mode & 0o777).toBe(0o755);
+  });
+
+  it("installs the hook from two concurrent calls on one path", async () => {
+    const repoPath = join(workDir, "skills");
+    await bootstrapSkillsRepo({ path: repoPath });
+
+    // Each call waits after writing its temp file until the other has written
+    // too, so both reach chmod + rename with both writes on disk.
+    const { writeFile: realWriteFile } =
+      await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    const { promise: bothWritten, resolve } = Promise.withResolvers<void>();
+    let written = 0;
+    const gated: typeof realWriteFile = async (...args) => {
+      await realWriteFile(...args);
+      written += 1;
+      if (written === 2) resolve();
+      await bothWritten;
+    };
+    vi.mocked(writeFile).mockImplementationOnce(gated).mockImplementationOnce(gated);
+
+    await Promise.all([
+      bootstrapSkillsRepo({ path: repoPath }),
+      bootstrapSkillsRepo({ path: repoPath }),
+    ]);
+
+    expect(written).toBe(2);
+    expect(await preReceiveEntries(repoPath)).toEqual(["pre-receive"]);
+    const hookPath = join(repoPath, "hooks", "pre-receive");
+    expect(await readFile(hookPath, "utf8")).toBe(PRE_RECEIVE_HOOK_CONTENT);
+    expect((await stat(hookPath)).mode & 0o777).toBe(0o755);
+  });
+
+  it("removes its temp file when the hook install fails", async () => {
+    const repoPath = join(workDir, "skills");
+    await bootstrapSkillsRepo({ path: repoPath });
+    vi.mocked(rename).mockRejectedValueOnce(new Error("rename failed"));
+
+    await expect(bootstrapSkillsRepo({ path: repoPath })).rejects.toThrow("rename failed");
+    expect(await preReceiveEntries(repoPath)).toEqual(["pre-receive"]);
   });
 
   it("accepts a tag push (refs/tags/* not subject to main-protection)", async () => {
@@ -309,8 +371,8 @@ describe("ensureSkillsCodingRepo", () => {
     if (result.kind === "skipped_no_origin") {
       expect(result.localPath).toBe(repoPath);
     }
-    expect(codingStore.getRepoByName).not.toHaveBeenCalled();
     expect(codingStore.insertOrRecoverRepo).not.toHaveBeenCalled();
+    expect(codingStore.updateRepoRemoteUrl).not.toHaveBeenCalled();
   });
 
   it("inserts a `skills` row with the bare repo's origin URL on first run", async () => {
@@ -418,6 +480,38 @@ describe("ensureSkillsCodingRepo", () => {
     );
   });
 
+  it("keeps an origin the wizard committed just before this call's snapshot", async () => {
+    const oldUrl = "git@github.com:user/old-skills.git";
+    const newUrl = "git@github.com:user/new-skills.git";
+    const repoPath = await skillsRepoWithOrigin(oldUrl);
+    // One `skills` row that reads and writes go through, standing in for the table.
+    let row = storedSkillsRow(repoPath, oldUrl);
+    const codingStore = mock<CodingStore>();
+    codingStore.getRepoByName.mockImplementation(async () => row);
+    codingStore.updateRepoRemoteUrl.mockImplementation(async (_tx, _id, remoteUrl) => {
+      row = { ...row, remoteUrl };
+    });
+    // The boot's first read is where its snapshot is taken. The wizard runs to
+    // completion just ahead of it: re-point origin, then sync the row, as
+    // `configureSkillsRemote` does.
+    codingStore.getRepoByName.mockImplementationOnce(async () => {
+      await execFileP("git", ["-C", repoPath, "remote", "set-url", "origin", newUrl]);
+      await ensureSkillsCodingRepo(
+        { runInTx: fakeRunInTx, codingStore },
+        { skillsRepoPath: repoPath },
+      );
+      return row;
+    });
+
+    const result = await ensureSkillsCodingRepo(
+      { runInTx: fakeRunInTx, codingStore },
+      { skillsRepoPath: repoPath },
+    );
+
+    expect(result).toMatchObject({ kind: "unchanged", remoteUrl: newUrl });
+    expect(row.remoteUrl).toBe(newUrl);
+  });
+
   it("propagates unexpected git failures (not just missing origin)", async () => {
     const codingStore = mock<CodingStore>();
 
@@ -429,6 +523,7 @@ describe("ensureSkillsCodingRepo", () => {
         { skillsRepoPath: join(workDir, "does-not-exist") },
       ),
     ).rejects.toThrow();
-    expect(codingStore.getRepoByName).not.toHaveBeenCalled();
+    expect(codingStore.insertOrRecoverRepo).not.toHaveBeenCalled();
+    expect(codingStore.updateRepoRemoteUrl).not.toHaveBeenCalled();
   });
 });

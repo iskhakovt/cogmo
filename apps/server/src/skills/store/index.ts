@@ -174,12 +174,14 @@ export interface RecordContextCallParams {
  *
  * The store opens one transaction, takes a per-skill-name advisory lock,
  * runs the no-op + pending-deploy checks, writes DB rows, then invokes the
- * callback. Both DB-write failure and filesystem failure roll the entire
- * transaction back. The only remaining inconsistency window is "tx commit
- * fails after applyFilesystem succeeded" — narrower than the reverse
- * ordering, where any DB write after FS would leave main advanced with no
- * skills row. Logged + reconcilable manually via the `skill_deploys` audit
- * history.
+ * callback. The lock queues concurrent registers but doesn't refresh the
+ * loser's snapshot, so those checks can read state from before the winner's
+ * commit (`.claude/rules/store-pattern.md`; audit filed in todo.md). Both
+ * DB-write failure and filesystem failure roll the entire transaction back.
+ * The only remaining inconsistency window is "tx commit fails after
+ * applyFilesystem succeeded" — narrower than the reverse ordering, where any
+ * DB write after FS would leave main advanced with no skills row. Logged +
+ * reconcilable manually via the `skill_deploys` audit history.
  */
 export interface ExecuteRegisterParams {
   name: string;

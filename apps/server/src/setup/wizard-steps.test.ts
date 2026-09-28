@@ -36,6 +36,7 @@ import * as p from "@clack/prompts";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { AgentStore } from "../agent/store/index.js";
+import type { BootstrapLock } from "../db/bootstrap-lock.js";
 import type { Transactor } from "../db/index.js";
 import type { SecretsStore } from "../secrets/store/index.js";
 import { runClackValidate } from "../test/assertions.js";
@@ -94,7 +95,6 @@ vi.mock("./validate.js", () => ({
 }));
 
 vi.mock("./seed.js", () => ({
-  seedDefaults: vi.fn().mockResolvedValue({ userId: "u-1", profileId: "prof-1" }),
   seedChannelRules: vi.fn().mockResolvedValue(undefined),
   ensureFalImageDefaults: vi.fn().mockResolvedValue(undefined),
 }));
@@ -188,7 +188,19 @@ interface TestDeps {
   secretsStore: ReturnType<typeof mock<SecretsStore>>;
   transportStore: ReturnType<typeof mock<TransportStore>>;
   runInTx: Transactor;
+  bootstrapLock: BootstrapLock;
 }
+
+/** Whether `recordingLock` is held right now. */
+let lockHeld = false;
+const recordingLock: BootstrapLock = async (fn) => {
+  lockHeld = true;
+  try {
+    return await fn();
+  } finally {
+    lockHeld = false;
+  }
+};
 
 function buildDeps(): TestDeps {
   const agentStore = mock<AgentStore>();
@@ -197,7 +209,13 @@ function buildDeps(): TestDeps {
   secretsStore.putSecret.mockResolvedValue({ id: "s-1" });
   secretsStore.markValidated.mockResolvedValue(undefined);
   secretsStore.getSecretMeta.mockResolvedValue(undefined);
-  return { agentStore, secretsStore, transportStore, runInTx: fakeRunInTx };
+  return {
+    agentStore,
+    secretsStore,
+    transportStore,
+    runInTx: fakeRunInTx,
+    bootstrapLock: recordingLock,
+  };
 }
 
 beforeEach(() => {
@@ -877,6 +895,40 @@ describe("stepConfigureGitHubIdentity", () => {
 });
 
 describe("stepConfigureSkillsRemote", () => {
+  it("initializes the bare repo under the bootstrap lock", async () => {
+    // Two first-time inits on one path can fail on git's config lock;
+    // `cogmo serve` initializes under the same lock.
+    const deps = buildDeps();
+    let heldDuringInit: boolean | undefined;
+    bootstrapSkillsRepoSpy.mockImplementationOnce(async () => {
+      heldDuringInit = lockHeld;
+      return { initialized: true };
+    });
+    readOriginUrlSpy.mockResolvedValueOnce(null);
+    configureSkillsRemoteSpy.mockResolvedValueOnce(ok({ kind: "skipped" }));
+
+    await stepConfigureSkillsRemote(deps);
+
+    expect(heldDuringInit).toBe(true);
+  });
+
+  it("releases the bootstrap lock before prompting", async () => {
+    // A held lock would stall every concurrent boot until the operator answers.
+    const deps = buildDeps();
+    let heldAtPrompt: boolean | undefined;
+    bootstrapSkillsRepoSpy.mockResolvedValueOnce({ initialized: false });
+    readOriginUrlSpy.mockResolvedValueOnce("git@github.com:me/cogmo-skills.git");
+    vi.mocked(p.select).mockImplementationOnce(async () => {
+      heldAtPrompt = lockHeld;
+      return "keep";
+    });
+    ensureSkillsCodingRepoSpy.mockResolvedValueOnce({ kind: "unchanged" });
+
+    await stepConfigureSkillsRemote(deps);
+
+    expect(heldAtPrompt).toBe(false);
+  });
+
   it("when origin is already set and operator picks 'keep', syncs DB row and returns", async () => {
     const deps = buildDeps();
     bootstrapSkillsRepoSpy.mockResolvedValueOnce({ initialized: false });

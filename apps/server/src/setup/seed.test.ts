@@ -1,7 +1,7 @@
 import { asc, eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { DrizzleAgentStore } from "../agent/store/index.js";
-import { imageModels, steeringRules } from "../agent/store/schema.js";
+import { imageModels, profiles, steeringRules } from "../agent/store/schema.js";
 import type { Database, Transactor } from "../db/index.js";
 import { resolveLimits } from "../llm/models.js";
 import { deriveMasterKey, generateMasterKey, parseMasterKey } from "../secrets/encryption.js";
@@ -9,8 +9,10 @@ import { DrizzleSecretsStore } from "../secrets/store/index.js";
 import { expectDefined } from "../test/assertions.js";
 import { createTestDatabase, truncateAll } from "../test/pglite.js";
 import { DrizzleTransportStore } from "../transport/store/index.js";
+import { channels, userIdentities } from "../transport/store/schema.js";
 import {
   DEFAULT_PROFILE_MODEL,
+  ensureDefaultProfile,
   ensureDefaultUser,
   ensureFalImageDefaults,
   ensureWebChannel,
@@ -187,6 +189,35 @@ describe("ensureFalImageDefaults", () => {
   });
 });
 
+describe("ensureDefaultProfile", () => {
+  it("creates the org profile once", async () => {
+    const first = await ensureDefaultProfile(tx, agentStore);
+    const second = await ensureDefaultProfile(tx, agentStore);
+
+    expect(second).toBe(first);
+    const profile = expectDefined(await tx((trx) => agentStore.getProfile(trx, first)), "profile");
+    expect(profile).toMatchObject({
+      userId: null,
+      name: "assistant",
+      model: DEFAULT_PROFILE_MODEL,
+    });
+  });
+
+  it("lands on a profile its snapshot cannot see", async () => {
+    // Stands in for a concurrent seed whose profile this transaction's snapshot
+    // can't see: PGlite has one connection, so the read is stubbed empty.
+    // `seed.integration.test.ts` races two real connections.
+    const first = await ensureDefaultProfile(tx, agentStore);
+    const staleRead = vi.spyOn(agentStore, "getDefaultProfile").mockResolvedValue(undefined);
+    try {
+      expect(await ensureDefaultProfile(tx, agentStore)).toBe(first);
+    } finally {
+      staleRead.mockRestore();
+    }
+    expect(await db.$count(profiles)).toBe(1);
+  });
+});
+
 describe("ensureWebChannel", () => {
   it("creates a fixed-identity web channel with a wildcard identity", async () => {
     const userId = await ensureDefaultUser(tx, agentStore);
@@ -207,6 +238,22 @@ describe("ensureWebChannel", () => {
     await ensureWebChannel(tx, transportStore, userId);
     await ensureWebChannel(tx, transportStore, userId);
     expect(await tx((trx) => transportStore.getChannelByType(trx, "web"))).toBeDefined();
+  });
+
+  it("lands on a channel its snapshot cannot see", async () => {
+    // Stands in for a concurrent run whose channel this transaction's snapshot
+    // can't see: PGlite has one connection, so the read is stubbed empty.
+    // `seed.integration.test.ts` races two real connections.
+    const userId = await ensureDefaultUser(tx, agentStore);
+    await ensureWebChannel(tx, transportStore, userId);
+    const staleRead = vi.spyOn(transportStore, "getChannelByType").mockResolvedValue(undefined);
+    try {
+      await ensureWebChannel(tx, transportStore, userId);
+    } finally {
+      staleRead.mockRestore();
+    }
+    expect(await db.$count(channels, eq(channels.type, "web"))).toBe(1);
+    expect(await db.$count(userIdentities)).toBe(1);
   });
 
   it("seedDefaults provisions both the direct and web channels", async () => {
