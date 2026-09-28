@@ -498,6 +498,24 @@ describe("SysboxWorkerPool", () => {
     await pool.dispose();
   });
 
+  it("serves an acquire whose own spawn died before it could lease it", async () => {
+    const spawned: FakeWorker[] = [];
+    const pool = await poolWith({
+      min: 0,
+      max: 1,
+      createWorker: async ({ workerId }) => {
+        const w = fakeWorker(workerId);
+        spawned.push(w);
+        if (spawned.length === 1) w.die("supervisor exited");
+        return w;
+      },
+    }).pool;
+
+    await expect(pool.invoke(invokeParams("t-1"))).resolves.toMatchObject({ ok: true });
+    expect(spawned).toHaveLength(2);
+    await pool.dispose();
+  });
+
   it("sweeps idle workers above `min` after idleShutdownMs", async () => {
     const h = buildPoolHarness({
       poolOptions: {

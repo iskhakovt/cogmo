@@ -357,9 +357,13 @@ export class SysboxWorkerPool {
       const other = this.#acquireIdle();
       if (other) return other;
     }
-    return new Promise<WorkerHandle>((resolve, reject) => {
+    const waiting = new Promise<WorkerHandle>((resolve, reject) => {
       this.#queue.push({ resolve, reject });
     });
+    // With room left — the spawn above died before it could be leased, say
+    // — a queued acquirer would wait on nothing; spawn for it.
+    this.#serveQueue();
+    return waiting;
   }
 
   /** Lease the first idle worker, if any. */
