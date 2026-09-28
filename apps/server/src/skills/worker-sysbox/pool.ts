@@ -181,6 +181,12 @@ export class SysboxWorkerPool {
     >
   >;
   #workers: WorkerHandle[] = [];
+  /**
+   * Workers an `invoke` holds, from acquisition until its task returns. A
+   * leased worker that dies leaves `#workers` at once, but its container
+   * stays until its `invoke` is done with it.
+   */
+  #leased = new Set<WorkerHandle>();
   #queue: PendingWaiter[] = [];
   /** Aborted by `dispose()`. Every worker is created with its signal. */
   #lifetime = new AbortController();
@@ -287,14 +293,14 @@ export class SysboxWorkerPool {
     }
     const worker = await this.#acquire();
     try {
-      const result = await worker.invoke(params);
-      this.#postInvoke(worker);
-      return result;
+      return await worker.invoke(params);
     } catch (e) {
       // worker.invoke returns its failures as ok=false — this path is for
       // bugs (precondition asserts, etc.). Retire the worker.
       worker.retire();
       throw e;
+    } finally {
+      this.#postInvoke(worker);
     }
   }
 
@@ -322,13 +328,14 @@ export class SysboxWorkerPool {
     for (const w of queued) {
       w.reject(new Error("SysboxWorkerPool: disposed before worker available"));
     }
-    const workers = this.#workers.splice(0, this.#workers.length);
+    // A leased worker that died has left `#workers` but not been disposed.
+    const workers = new Set([...this.#workers.splice(0, this.#workers.length), ...this.#leased]);
     // Wait on already-spawned workers in parallel with any in-flight spawns;
     // the in-flight ones stop on the aborted signal and tear down whatever
     // they had set up. Awaiting both ensures `dispose()` doesn't return
     // until every container the pool ever spawned is gone.
     const pending = Array.from(this.#pendingSpawnPromises);
-    await Promise.allSettled([...workers.map((w) => w.dispose()), ...pending]);
+    await Promise.allSettled([...Array.from(workers, (w) => w.dispose()), ...pending]);
   }
 
   // --- internals ---
@@ -336,7 +343,7 @@ export class SysboxWorkerPool {
   async #acquire(): Promise<WorkerHandle> {
     // Fast path: an existing idle worker.
     for (const w of this.#workers) {
-      if (w.tryAcquire()) {
+      if (this.#lease(w)) {
         return w;
       }
     }
@@ -348,7 +355,7 @@ export class SysboxWorkerPool {
       const w = await this.#spawnOne();
       // Worker was just spawned and may be in the workers list; race with
       // another acquirer is fine — tryAcquire is atomic at the state level.
-      if (w.tryAcquire()) {
+      if (this.#lease(w)) {
         return w;
       }
       // Lost the race for the worker we just spawned. Some *other* worker
@@ -357,7 +364,7 @@ export class SysboxWorkerPool {
       // Re-scan before queuing — at max=3 this is a 3-iteration loop and
       // saves a queue round-trip when one is available.
       for (const other of this.#workers) {
-        if (other.tryAcquire()) {
+        if (this.#lease(other)) {
           return other;
         }
       }
@@ -439,6 +446,10 @@ export class SysboxWorkerPool {
    * came back" case.
    */
   #postInvoke(worker: WorkerHandle): void {
+    this.#leased.delete(worker);
+    // Dead under its task: `#onDead` removes and replaces it; its container
+    // goes now that the task is done with it.
+    if (worker.state === "draining") this.#dispose(worker);
     if (worker.state !== "busy") return;
     const taskCap = worker.taskCount >= this.#opts.recycleAfterTasks;
     const ageCap = worker.ageMs(this.#now()) >= this.#opts.recycleAfterMs;
@@ -454,7 +465,7 @@ export class SysboxWorkerPool {
     // Hand the just-released worker to a queued waiter, if any.
     const waiter = this.#queue.shift();
     if (waiter) {
-      if (worker.tryAcquire()) {
+      if (this.#lease(worker)) {
         waiter.resolve(worker);
       } else {
         // Shouldn't happen — we just released it. Re-queue defensively.
@@ -463,12 +474,24 @@ export class SysboxWorkerPool {
     }
   }
 
-  /** Remove a worker the moment it dies, and replace it. */
+  /**
+   * Remove a worker the moment it dies, and replace it. Its container goes
+   * now, unless a task still holds it: then `#postInvoke` disposes it once
+   * the task returns, so nothing is deleted under a running venv populate.
+   */
   #onDead(worker: WorkerHandle, reason: string): void {
     if (this.#lifetime.signal.aborted) return;
     log.debug({ workerId: worker.workerId, reason }, "retiring a dead worker");
-    this.#removeAndDispose(worker);
+    this.#remove(worker);
+    if (!this.#leased.has(worker)) this.#dispose(worker);
     this.#replenishToMin();
+  }
+
+  /** Acquire `worker` for an `invoke`. False unless it is idle. */
+  #lease(worker: WorkerHandle): boolean {
+    if (!worker.tryAcquire()) return false;
+    this.#leased.add(worker);
+    return true;
   }
 
   #replenishToMin(): void {
@@ -489,15 +512,18 @@ export class SysboxWorkerPool {
     }
   }
 
-  #removeAndDispose(worker: WorkerHandle): void {
-    const idx = this.#workers.indexOf(worker);
-    if (idx >= 0) this.#workers.splice(idx, 1);
+  #dispose(worker: WorkerHandle): void {
     void worker.dispose().catch((e: unknown) => {
       log.warn(
         { workerId: worker.workerId, err: e instanceof Error ? e.message : String(e) },
         "worker dispose failed during recycle",
       );
     });
+  }
+
+  #remove(worker: WorkerHandle): void {
+    const idx = this.#workers.indexOf(worker);
+    if (idx >= 0) this.#workers.splice(idx, 1);
     // If a queued waiter is starving and we have headroom, kick a spawn.
     if (
       !this.#lifetime.signal.aborted &&
@@ -516,7 +542,7 @@ export class SysboxWorkerPool {
     const w = await this.#spawnOne();
     const waiter = this.#queue.shift();
     if (!waiter) return;
-    if (w.tryAcquire()) {
+    if (this.#lease(w)) {
       waiter.resolve(w);
     } else {
       // Lost the race to another acquirer; back into the queue.

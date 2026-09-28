@@ -421,13 +421,65 @@ describe("SysboxWorkerPool", () => {
     const h = buildPoolHarness({ poolOptions: { min: 1, max: 3 } });
     const pool = await h.pool;
     const dead = expectDefined(h.spawned[0], "eager worker");
-    // No acquire and no sweep: the pool reacts to the death itself.
     dead.retire();
 
     await vi.waitFor(() => expect(h.spawnCount()).toBe(2));
 
     expect(dead.state).toBe("disposed");
     expect(pool.stats()).toMatchObject({ total: 1, idle: 1, draining: 0 });
+    await pool.dispose();
+  });
+
+  it("replaces a worker that dies under its task at once, and disposes it once the task returns", async () => {
+    // The supervisor dies while the task holds the worker — during a venv
+    // populate, say. Its container must outlive the task's own use of it.
+    let finishTask: () => void = () => {};
+    const taskGate = new Promise<void>((r) => {
+      finishTask = r;
+    });
+    const spawned: WorkerHandle[] = [];
+    const pool = await SysboxWorkerPool.create({
+      sandbox: mock<SandboxClient>(),
+      image: "fake:test",
+      ...DEFAULT_POOL_OPTIONS,
+      min: 1,
+      max: 1,
+      createWorker: async ({ workerId }) => {
+        const w = makeFakeWorker(workerId);
+        const held: WorkerHandle = {
+          ...w,
+          get state() {
+            return w.state;
+          },
+          get taskCount() {
+            return w.taskCount;
+          },
+          invoke: async () => {
+            await taskGate;
+            return { ok: false, error: "dispatcher_error: worker is dead", workerReusable: false };
+          },
+        };
+        spawned.push(held);
+        return held;
+      },
+      setInterval: (): unknown => ({}),
+      clearInterval: () => {},
+    });
+    const first = expectDefined(spawned[0], "eager worker");
+
+    const task = pool.invoke(invokeParams("t-dying"));
+    await vi.waitFor(() => expect(pool.stats()).toMatchObject({ busy: 1 }));
+    first.retire();
+
+    // Replaced at once: the dead worker no longer counts toward `max`.
+    await vi.waitFor(() => expect(spawned).toHaveLength(2));
+    expect(pool.stats()).toMatchObject({ total: 1, idle: 1 });
+    // But its container stays until its task is done with it.
+    expect(first.state).toBe("draining");
+
+    finishTask();
+    await expect(task).resolves.toMatchObject({ ok: false, workerReusable: false });
+    expect(first.state).toBe("disposed");
     await pool.dispose();
   });
 
