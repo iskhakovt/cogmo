@@ -390,6 +390,22 @@ describe("Dispatcher", () => {
     await expect(promise).rejects.toThrow(/transport: maximum buffer reached/);
   });
 
+  it("closes when the transport fails with no task in flight", () => {
+    let fireError: ((err: Error) => void) | undefined;
+    const transport: RpcTransport = {
+      postMessage: () => {},
+      onMessage: () => {},
+      onError: (h) => {
+        fireError = h;
+      },
+      close: () => {},
+    };
+    const d = onExit(transport);
+    if (!fireError) throw new Error("expected onError to have been wired");
+    fireError(new Error("transport: worker closed its output"));
+    expect(() => d.invoke(INVOKE, { ctxHandler: noopHandler() })).toThrow(/dispatcher is closed/);
+  });
+
   it("dispatches sequential tasks on a persistent transport (per-task ctxHandler)", async () => {
     // One Dispatcher serves many tasks; each `invoke()` passes its own
     // ctxHandler, and ctx_calls during task N route to handler N only.

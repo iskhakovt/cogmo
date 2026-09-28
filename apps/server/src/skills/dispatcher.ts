@@ -114,7 +114,13 @@ export class Dispatcher {
     this.#closed = true;
     const task = this.#task;
     this.#task = null;
-    log.warn({ err: err.message }, "transport reported fatal error — rejecting pending task");
+    // Never reached on a clean teardown: `close()` marks the dispatcher
+    // closed before the worker's output ends. With no task in flight this
+    // is a worker that died while idle, and its next `invoke()` throws.
+    log.warn(
+      { err: err.message, taskId: task?.id ?? null },
+      task ? "transport failed — rejecting the in-flight task" : "transport failed while idle",
+    );
     // The transport already closed itself by reporting fatal.
     task?.reject(new Error(`dispatcher: transport error: ${err.message}`));
   }
