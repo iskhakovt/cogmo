@@ -1,6 +1,13 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
-import { CtxError, type CtxHandler, Dispatcher, type RpcTransport } from "./dispatcher.js";
+import { mock } from "vitest-mock-extended";
+import {
+  CtxError,
+  type CtxHandler,
+  Dispatcher,
+  ExitUnconfirmedError,
+  type RpcTransport,
+} from "./dispatcher.js";
 import type { TaskInvoke } from "./protocol.js";
 
 /**
@@ -390,7 +397,7 @@ describe("Dispatcher", () => {
     await expect(promise).rejects.toThrow(/transport: maximum buffer reached/);
   });
 
-  it("closes when the transport fails with no task in flight", () => {
+  it("closes and reports once when the transport fails with no task in flight", () => {
     let fireError: ((err: Error) => void) | undefined;
     const transport: RpcTransport = {
       postMessage: () => {},
@@ -400,10 +407,31 @@ describe("Dispatcher", () => {
       },
       close: () => {},
     };
-    const d = onExit(transport);
+    const onTransportFailure = vi.fn();
+    const d = new Dispatcher({ transport, awaitTaskExited: true, onTransportFailure });
     if (!fireError) throw new Error("expected onError to have been wired");
     fireError(new Error("transport: worker closed its output"));
+    fireError(new Error("transport: again"));
+
+    expect(onTransportFailure).toHaveBeenCalledTimes(1);
     expect(() => d.invoke(INVOKE, { ctxHandler: noopHandler() })).toThrow(/dispatcher is closed/);
+  });
+
+  it("does not report a transport failure after close()", () => {
+    let fireError: ((err: Error) => void) | undefined;
+    const transport: RpcTransport = {
+      postMessage: () => {},
+      onMessage: () => {},
+      onError: (h) => {
+        fireError = h;
+      },
+      close: () => {},
+    };
+    const onTransportFailure = vi.fn();
+    const d = new Dispatcher({ transport, awaitTaskExited: true, onTransportFailure });
+    d.close();
+    fireError?.(new Error("transport: worker closed its output"));
+    expect(onTransportFailure).not.toHaveBeenCalled();
   });
 
   it("dispatches sequential tasks on a persistent transport (per-task ctxHandler)", async () => {
@@ -484,13 +512,10 @@ describe("Dispatcher", () => {
   describe("ctx_call task binding", () => {
     it("does not serve a finished task's late ctx_call with the next task's handler", async () => {
       const { host, worker } = makeTransportPair();
-      const d = new Dispatcher({ transport: host, awaitTaskExited: false });
-      const handlerA: CtxHandler = { handle: vi.fn().mockResolvedValue("A") };
-      const handlerB: CtxHandler = { handle: vi.fn().mockResolvedValue("B") };
-      const ctxResults: unknown[] = [];
-      worker.onMessage((m) => {
-        if ((m as { type: string }).type === "ctx_result") ctxResults.push(m);
-      });
+      const d = onResult(host);
+      const handlerA = mock<CtxHandler>();
+      const handlerB = mock<CtxHandler>();
+      const ctxResults = ctxResultsFrom(worker);
 
       const a = d.invoke({ ...INVOKE, id: "task-A" }, { ctxHandler: handlerA });
       worker.postMessage({ type: "task_result", id: "task-A", ok: true, output: null });
@@ -517,7 +542,7 @@ describe("Dispatcher", () => {
     it("refuses a ctx_call when no task is in flight", async () => {
       const { host, worker } = makeTransportPair();
       const d = onResult(host);
-      const handler: CtxHandler = { handle: vi.fn().mockResolvedValue("v") };
+      const handler = mock<CtxHandler>();
       const ctxResults = ctxResultsFrom(worker);
 
       const a = d.invoke(INVOKE, { ctxHandler: handler });
@@ -534,7 +559,7 @@ describe("Dispatcher", () => {
     it("refuses a ctx_call naming a task other than the running one", async () => {
       const { host, worker } = makeTransportPair();
       const d = onResult(host);
-      const handler: CtxHandler = { handle: vi.fn().mockResolvedValue("v") };
+      const handler = mock<CtxHandler>();
       const ctxResults = ctxResultsFrom(worker);
 
       const promise = d.invoke(INVOKE, { ctxHandler: handler });
@@ -551,7 +576,7 @@ describe("Dispatcher", () => {
     it("refuses a ctx_call from a task that has returned but not yet exited", async () => {
       const { host, worker } = makeTransportPair();
       const d = onExit(host);
-      const handler: CtxHandler = { handle: vi.fn().mockResolvedValue("v") };
+      const handler = mock<CtxHandler>();
 
       const promise = d.invoke(INVOKE, { ctxHandler: handler });
       worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: null });
@@ -568,9 +593,8 @@ describe("Dispatcher", () => {
       const { host, worker } = makeTransportPair();
       const d = onResult(host);
       let release: (v: unknown) => void = () => {};
-      const handler: CtxHandler = {
-        handle: vi.fn(() => new Promise((resolve) => (release = resolve))),
-      };
+      const handler = mock<CtxHandler>();
+      handler.handle.mockImplementation(() => new Promise((resolve) => (release = resolve)));
       const ctxResults = ctxResultsFrom(worker);
 
       const promise = d.invoke(INVOKE, { ctxHandler: handler });
@@ -583,6 +607,28 @@ describe("Dispatcher", () => {
 
       expect(handler.handle).toHaveBeenCalledTimes(1);
       expect(ctxResults).toEqual([]);
+      d.close();
+    });
+
+    it("drops the reply to a call whose task returned but has not yet exited", async () => {
+      const { host, worker } = makeTransportPair();
+      const d = onExit(host);
+      let release: (v: unknown) => void = () => {};
+      const handler = mock<CtxHandler>();
+      handler.handle.mockImplementation(() => new Promise((resolve) => (release = resolve)));
+      const ctxResults = ctxResultsFrom(worker);
+
+      const promise = d.invoke(INVOKE, { ctxHandler: handler });
+      worker.postMessage({ type: "ctx_call", taskId: "task-1", id: "c", method: "now", args: {} });
+      await flush();
+      // Still the in-flight task: it awaits task_exited.
+      worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: null });
+      release("late");
+      await flush();
+
+      expect(ctxResults).toEqual([]);
+      worker.postMessage({ type: "task_exited", id: "task-1" });
+      await promise;
       d.close();
     });
   });
@@ -647,6 +693,43 @@ describe("Dispatcher", () => {
       worker.postMessage({ type: "task_exited", id: "other" });
       await expect(promise).rejects.toThrow(/task_exited id mismatch/);
       d.close();
+    });
+
+    it("keeps a delivered result when the transport fails before task_exited", async () => {
+      const errorHandlers: Array<(err: Error) => void> = [];
+      const { host, worker } = makeTransportPair();
+      const d = onExit({ ...host, onError: (h) => errorHandlers.push(h) });
+      const promise = d.invoke(INVOKE, { ctxHandler: noopHandler() });
+      worker.postMessage({ type: "task_result", id: "task-1", ok: true, output: 7 });
+      for (const fire of errorHandlers) fire(new Error("transport: worker closed its output"));
+
+      await expect(promise).rejects.toBeInstanceOf(ExitUnconfirmedError);
+      await expect(promise).rejects.toMatchObject({
+        result: { type: "task_result", id: "task-1", ok: true, output: 7 },
+      });
+    });
+
+    it("keeps a delivered result when closed before task_exited", async () => {
+      const { host, worker } = makeTransportPair();
+      const d = onExit(host);
+      const promise = d.invoke(INVOKE, { ctxHandler: noopHandler() });
+      worker.postMessage({ type: "task_result", id: "task-1", ok: false, error: "boom" });
+      d.close("supervisor unresponsive");
+
+      await expect(promise).rejects.toMatchObject({
+        name: "ExitUnconfirmedError",
+        result: { type: "task_result", id: "task-1", ok: false, error: "boom" },
+      });
+    });
+
+    it("rejects with a plain error when the transport fails before the result", async () => {
+      const { host } = makeTransportPair();
+      const d = onExit(host);
+      const promise = d.invoke(INVOKE, { ctxHandler: noopHandler() });
+      d.close("supervisor unresponsive");
+
+      await expect(promise).rejects.toThrow(/supervisor unresponsive/);
+      await expect(promise).rejects.not.toBeInstanceOf(ExitUnconfirmedError);
     });
 
     it("ignores task_exited on a dispatcher that settles on the result", async () => {

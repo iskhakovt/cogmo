@@ -68,6 +68,27 @@ export interface DispatcherOptions {
    * Tier 1 worker is torn down with its task, so it settles on the result.
    */
   awaitTaskExited: boolean;
+  /**
+   * Called once when the transport fails, after any in-flight task is
+   * rejected. The Tier 2 worker uses it to retire a worker whose supervisor
+   * died while idle.
+   */
+  onTransportFailure?: (err: Error) => void;
+}
+
+/**
+ * The task delivered its `task_result`, but the channel failed or was
+ * closed before the supervisor confirmed its processes exited. `result` is
+ * the task's real outcome — any side effects it reports happened — while
+ * the worker can no longer be trusted.
+ */
+export class ExitUnconfirmedError extends Error {
+  readonly result: TaskResult;
+  constructor(result: TaskResult, reason: string) {
+    super(`dispatcher: task ${result.id} returned but its exit was not confirmed: ${reason}`);
+    this.name = "ExitUnconfirmedError";
+    this.result = result;
+  }
 }
 
 interface InFlightTask {
@@ -90,8 +111,7 @@ interface InFlightTask {
  * A ctx call is served only while its task is running: it must name the
  * in-flight task, and that task must not have returned its result yet.
  * Anything else — a late call from a finished task, a call naming another
- * task, a call with no task in flight — is refused and logged. There is no
- * fallback handler.
+ * task, a call with no task in flight — is refused and logged.
  *
  * The transport outlives tasks: after a task settles the dispatcher is ready
  * for the next `invoke()`. `close()` is the boundary.
@@ -99,12 +119,14 @@ interface InFlightTask {
 export class Dispatcher {
   #transport: RpcTransport;
   #awaitTaskExited: boolean;
+  #onTransportFailure: ((err: Error) => void) | undefined;
   #task: InFlightTask | null = null;
   #closed = false;
 
   constructor(opts: DispatcherOptions) {
     this.#transport = opts.transport;
     this.#awaitTaskExited = opts.awaitTaskExited;
+    this.#onTransportFailure = opts.onTransportFailure;
     this.#transport.onMessage((raw) => this.#onMessage(raw));
     this.#transport.onError?.((err) => this.#onTransportError(err));
   }
@@ -116,13 +138,26 @@ export class Dispatcher {
     this.#task = null;
     // Never reached on a clean teardown: `close()` marks the dispatcher
     // closed before the worker's output ends. With no task in flight this
-    // is a worker that died while idle, and its next `invoke()` throws.
+    // is a worker that died while idle.
     log.warn(
       { err: err.message, taskId: task?.id ?? null },
       task ? "transport failed — rejecting the in-flight task" : "transport failed while idle",
     );
     // The transport already closed itself by reporting fatal.
-    task?.reject(new Error(`dispatcher: transport error: ${err.message}`));
+    if (task) this.#fail(task, `transport error: ${err.message}`);
+    this.#onTransportFailure?.(err);
+  }
+
+  /**
+   * Reject an in-flight task. A result it already delivered survives as
+   * `ExitUnconfirmedError`: only the confirmation of its exit is missing.
+   */
+  #fail(task: InFlightTask, reason: string): void {
+    task.reject(
+      task.result !== undefined
+        ? new ExitUnconfirmedError(task.result, reason)
+        : new Error(`dispatcher: ${reason}`),
+    );
   }
 
   /**
@@ -157,15 +192,16 @@ export class Dispatcher {
   }
 
   /**
-   * Tear down the transport. Any in-flight task is rejected with
-   * `dispatcher closed`; subsequent `invoke` calls throw synchronously.
+   * Tear down the transport. Any in-flight task is rejected — as
+   * `ExitUnconfirmedError` if it had delivered its result — and subsequent
+   * `invoke` calls throw synchronously.
    */
   close(reason = "closed"): void {
     if (this.#closed) return;
     this.#closed = true;
     const task = this.#task;
     this.#task = null;
-    task?.reject(new Error(`dispatcher ${reason}`));
+    if (task) this.#fail(task, reason);
     this.#transport.close();
   }
 
@@ -207,7 +243,7 @@ export class Dispatcher {
   #rejectMismatch(task: InFlightTask, kind: "task_result" | "task_exited", got: string): void {
     log.warn({ expected: task.id, got }, `${kind} id does not match in-flight task — rejecting`);
     this.#task = null;
-    task.reject(new Error(`dispatcher: ${kind} id mismatch (expected ${task.id}, got ${got})`));
+    this.#fail(task, `${kind} id mismatch (expected ${task.id}, got ${got})`);
   }
 
   #handleTaskResult(message: TaskResult): void {

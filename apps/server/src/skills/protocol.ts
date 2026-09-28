@@ -11,8 +11,8 @@ import { z } from "zod";
 /**
  * Tier 2 supervisor protocol version. The supervisor announces it in
  * `supervisor_ready`; the worker refuses a supervisor announcing anything
- * else, so an image predating the per-task relay is never used. Bump with
- * `PROTOCOL_VERSION` in `images/skills/src/cogmo_skills_runtime/supervisor.py`.
+ * else. Bump with `PROTOCOL_VERSION` in
+ * `images/skills/src/cogmo_skills_runtime/supervisor.py`.
  */
 export const SUPERVISOR_PROTOCOL_VERSION = 2;
 
@@ -53,12 +53,12 @@ export const TaskInvokeSchema = z.object({
    * The supervisor's own runtime venv (where `cogmo_skills_runtime` lives)
    * stays unchanged.
    *
-   * The supervisor constructs the path from the hash + its own
+   * The task process constructs the path from the hash + its own
    * `sys.version_info` so an image upgrade that changes Python minor
    * (e.g. `python:3.14-slim` -> `python:3.15-slim`) automatically
    * routes to a fresh `<hash>-py3.15/` venv; the stale `<hash>-py3.14/`
    * dir is reaped by the per-hash sweep on its next cron tick. Host
-   * doesn't need to know the image's Python ABI -- the supervisor +
+   * doesn't need to know the image's Python ABI -- the task process +
    * populate script (same image, same runtime) agree by construction.
    *
    * Populated by the host via `ensureVenvPopulated` (see deps.ts) when the
@@ -83,10 +83,10 @@ export type TaskInvoke = z.infer<typeof TaskInvokeSchema>;
  * `runner.py` populates `peakMemoryBytes` from `getrusage(RUSAGE_SELF)`
  * just before emitting `task_result`; tier 1 (Pyodide WASM) leaves it
  * unset because `getrusage` is process-wide and would inflate under
- * concurrent workers. Synthesised `task_result`s from the supervisor
- * (wall-clock kill, child died abnormally) also leave it unset — they
- * never saw the child's rusage. The host fills in `wallClockMs`
- * separately and writes the combined blob to `skill_runs.resource_usage`.
+ * concurrent workers. Synthesised `task_result`s — the relay's (wall-clock
+ * kill, task process died) and the dispatcher's (`task_exited_without_result`)
+ * — also leave it unset. The host fills in `wallClockMs` separately and
+ * writes the combined blob to `skill_runs.resource_usage`.
  *
  * Boundary translation: this protocol schema uses `.optional()` (field
  * may be absent on the wire) while the storage schema

@@ -71,8 +71,8 @@ export function createNdjsonTransport(stdin: Writable, stdout: Readable): RpcTra
   });
   splitter.on("error", (err: Error) => {
     if (closed) return;
-    // Notify the dispatcher via the typed error channel so it rejects the
-    // pending task immediately instead of waiting out the wall clock.
+    // Report through the typed error channel so the dispatcher rejects the
+    // pending task immediately.
     errorHandler?.(new Error(`transport: ${err.message}`));
     close();
   });

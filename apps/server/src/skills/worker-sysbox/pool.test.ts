@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import type { SandboxClient } from "../../sandbox/index.js";
+import { expectDefined } from "../../test/assertions.js";
 import type { CtxHandler } from "../dispatcher.js";
 import { DEFAULT_POOL_OPTIONS, SysboxWorkerPool, type WorkerHandle } from "./pool.js";
 import type { InvokeParams, InvokeResult } from "./worker.js";
@@ -384,6 +385,36 @@ describe("SysboxWorkerPool", () => {
     await new Promise<void>((r) => setTimeout(r, 0));
     expect(h.spawnCount()).toBe(2);
     expect(h.spawned[0]?.state).toBe("disposed");
+    await pool.dispose();
+  });
+
+  it("retires a worker that died while idle and runs the next task on a fresh one", async () => {
+    const h = buildPoolHarness({ poolOptions: { min: 1, max: 2 } });
+    const pool = await h.pool;
+    const dead = expectDefined(h.spawned[0], "eager worker");
+    // What the worker does when its supervisor's channel fails between tasks.
+    dead.markPoisoned();
+
+    const result = await pool.invoke(invokeParams("t-after-death"));
+
+    expect(result.ok).toBe(true);
+    expect(dead.state).toBe("disposed");
+    expect(h.spawnCount()).toBe(2);
+    expect(pool.stats()).toMatchObject({ total: 1, idle: 1, draining: 0 });
+    await pool.dispose();
+  });
+
+  it("the sweep retires a worker that died while idle and keeps `min` warm", async () => {
+    const h = buildPoolHarness({ poolOptions: { min: 1, max: 3 } });
+    const pool = await h.pool;
+    const dead = expectDefined(h.spawned[0], "eager worker");
+    dead.markPoisoned();
+
+    h.triggerSweep();
+    await vi.waitFor(() => expect(h.spawnCount()).toBe(2));
+
+    expect(dead.state).toBe("disposed");
+    expect(pool.stats()).toMatchObject({ total: 1, idle: 1, draining: 0 });
     await pool.dispose();
   });
 
