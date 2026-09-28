@@ -516,6 +516,34 @@ describe("SysboxWorkerPool", () => {
     await pool.dispose();
   });
 
+  it("stops replacing workers that die before their first task, and leaves them to the sweep", async () => {
+    // An image whose supervisor dies right after its handshake.
+    const spawned: FakeWorker[] = [];
+    const { pool: created, sweep } = poolWith({
+      min: 1,
+      max: 1,
+      createWorker: async ({ workerId }) => {
+        await new Promise<void>((r) => setImmediate(r));
+        const w = fakeWorker(workerId);
+        spawned.push(w);
+        queueMicrotask(() => w.die("supervisor exited"));
+        return w;
+      },
+    });
+    const pool = await created;
+    await vi.waitFor(() => expect(spawned).toHaveLength(3));
+    await new Promise<void>((r) => setTimeout(r, 20));
+    expect(spawned).toHaveLength(3);
+    // An acquirer fails rather than waits on an image that cannot run.
+    await expect(pool.invoke(invokeParams("t-1"))).rejects.toThrow(
+      /keep dying before their first task/,
+    );
+
+    sweep();
+    await vi.waitFor(() => expect(spawned.length).toBeGreaterThanOrEqual(4));
+    await pool.dispose();
+  });
+
   it("sweeps idle workers above `min` after idleShutdownMs", async () => {
     const h = buildPoolHarness({
       poolOptions: {

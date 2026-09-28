@@ -120,6 +120,15 @@ interface PendingWaiter {
 const REAPER_BACKSTOP_MS = 60 * 60 * 1000;
 
 /**
+ * Deaths in a row, each of a worker that never completed a task, after
+ * which a dead worker is no longer replaced at once. An image whose
+ * supervisor dies right after its handshake would otherwise create and
+ * delete containers back to back; the sweep still retries once per
+ * `idleSweepIntervalMs`.
+ */
+const CRASH_LOOP_DEATHS = 3;
+
+/**
  * Internal sentinel for `dispose()` racing an in-flight `#spawnOne()`. Caller
  * paths (eager `create()`, on-demand acquire, replacement on death) all unwind
  * uniformly: foreground awaits surface it; background `void.catch` paths
@@ -162,6 +171,8 @@ export const DEFAULT_POOL_OPTIONS = {
  *    goes once it is disposable: at once, or once the task holding it
  *    returns; until then it still counts toward `max`. Its freed slot goes
  *    to a queued acquirer first.
+ *  - Workers that keep dying before their first task stop being replaced
+ *    at once; see `CRASH_LOOP_DEATHS`.
  *  - The pool retires a worker after its task once taskCount ≥
  *    `recycleAfterTasks` or age ≥ `recycleAfterMs`.
  *  - An interval sweep retires idle workers above `min` after `idleShutdownMs`,
@@ -190,6 +201,8 @@ export class SysboxWorkerPool {
   /** Every worker whose container lives, dead ones a task still holds included. */
   #workers: WorkerHandle[] = [];
   #queue: PendingWaiter[] = [];
+  /** See `CRASH_LOOP_DEATHS`. */
+  #deathsWithoutTask = 0;
   /** Aborted by `dispose()`. Every worker is created with its signal. */
   #lifetime = new AbortController();
   #createWorker: NonNullable<SysboxWorkerPoolOptions["createWorker"]>;
@@ -481,12 +494,22 @@ export class SysboxWorkerPool {
   /**
    * Replace a worker the moment it dies. Its container stays, still
    * counted toward `max`, until `disposable` — while a task holds it, the
-   * task may still be using it.
+   * task may still be using it. Workers that keep dying before their first
+   * task are an image that cannot run: from `CRASH_LOOP_DEATHS` on, only the
+   * sweep replaces them, and queued acquirers fail rather than wait.
    */
   #onDead(worker: WorkerHandle, reason: string): void {
     if (this.#lifetime.signal.aborted) return;
     log.debug({ workerId: worker.workerId, reason }, "worker died");
-    this.#replenishToMin();
+    this.#deathsWithoutTask = worker.taskCount === 0 ? this.#deathsWithoutTask + 1 : 0;
+    if (this.#deathsWithoutTask === CRASH_LOOP_DEATHS) {
+      log.warn(
+        { deaths: this.#deathsWithoutTask, reason },
+        "workers keep dying before their first task — replacing them on the sweep only",
+      );
+    }
+    if (this.#crashLooping()) this.#serveQueue();
+    else this.#replenishToMin();
   }
 
   /** Tear a dead worker down once no task holds it, and fill the slot it frees. */
@@ -502,7 +525,11 @@ export class SysboxWorkerPool {
       );
     });
     this.#serveQueue();
-    this.#replenishToMin();
+    if (!this.#crashLooping()) this.#replenishToMin();
+  }
+
+  #crashLooping(): boolean {
+    return this.#deathsWithoutTask >= CRASH_LOOP_DEATHS;
   }
 
   #replenishToMin(): void {
@@ -515,11 +542,20 @@ export class SysboxWorkerPool {
     }
   }
 
-  /** A queued acquirer and room to spawn for it: spawn. */
+  /**
+   * Spawn for a queued acquirer, room permitting. While workers keep dying
+   * before their first task, fail queued acquirers instead: a spawn would
+   * only die too.
+   */
   #serveQueue(): void {
-    if (!this.#lifetime.signal.aborted && this.#queue.length > 0 && this.#hasRoom()) {
-      this.#spawnForQueue();
+    if (this.#lifetime.signal.aborted || this.#queue.length === 0) return;
+    if (this.#crashLooping()) {
+      for (const waiter of this.#queue.splice(0, this.#queue.length)) {
+        waiter.reject(new Error("skills workers keep dying before their first task"));
+      }
+      return;
     }
+    if (this.#hasRoom()) this.#spawnForQueue();
   }
 
   /**
@@ -558,7 +594,8 @@ export class SysboxWorkerPool {
   /**
    * Retire idle workers above `min` that have sat past `idleShutdownMs` —
    * each dies on retirement, and is torn down as it becomes disposable —
-   * and spawn back up to `min`, retrying a replacement that failed.
+   * and spawn back up to `min`, retrying a replacement that failed or that
+   * `#onDead` left to the sweep.
    */
   #sweepIdle(): void {
     if (this.#lifetime.signal.aborted) return;
