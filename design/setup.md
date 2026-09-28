@@ -152,4 +152,8 @@ The wizard never constructs providers or starts adapters — it only persists co
 Two-layer check, no dedicated marker table:
 
 1. **Migration state:** Drizzle's `__drizzle_migrations` table. `migrate()` is idempotent — always safe to run.
-2. **Bootstrap state:** `SELECT EXISTS(SELECT 1 FROM users)`. If false → fresh install. The wizard's seed step handles this.
+2. **Bootstrap state:** `SELECT EXISTS(SELECT 1 FROM users)`. If false → fresh install. `migrateAndSeed` seeds it before the wizard starts.
+
+## Concurrent runs
+
+`cogmo serve`, `cogmo seed` and `cogmo setup` migrate and seed under one session-level advisory lock (`bootstrapLock`, `src/db/bootstrap-lock.ts`), taken on a reserved connection before any transaction opens, so concurrent runs migrate one at a time and each sees what the previous holder seeded. The lock needs a pool of at least two connections. postgres-js keeps a `max` from the URL or `PGMAX` as a string and then opens one, so the lock refuses those; set the pool size in code or leave the default of 10. `cogmo setup` holds it across migrate, `--reset` and the default seed, and again around the wizard's skills-repo init, not across the interactive prompts. The default profile's insert is also keyed on `uq_profiles_user_name`, and the direct and web channels' on `uq_channels_fixed_type`.

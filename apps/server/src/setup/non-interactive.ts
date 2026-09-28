@@ -33,7 +33,7 @@ import type { TransportStore } from "../transport/store/index.js";
 import type { NonInteractiveAnswers } from "./env.js";
 import { parseNonInteractiveEnv, SetupEnvError } from "./env.js";
 import { defaultCacheDialect, PROVIDER_BASE_URLS, type ProviderType } from "./providers.js";
-import { seedChannelRules, seedDefaults } from "./seed.js";
+import { seedChannelRules } from "./seed.js";
 import {
   type DaytonaProbeOpts,
   type ValidationResult,
@@ -71,11 +71,6 @@ export interface PersistDeps {
   secretsStore: SecretsStore;
 }
 
-export interface NonInteractiveDeps extends PersistDeps {
-  env: Record<string, string | undefined>;
-  validators?: Validators;
-}
-
 /** Output of `validateNonInteractive` — the answers and any meta from validators. */
 export interface ValidatedNonInteractive {
   answers: NonInteractiveAnswers;
@@ -99,10 +94,8 @@ export class NonInteractiveValidationError extends Error {
 /**
  * Validate non-interactive setup input without touching the database.
  *
- * Used by `runSetup` to fail fast before destructive actions like
- * `applyReset`, and by `runNonInteractive` as the first phase of its
- * end-to-end flow. Composing this separately means we never mutate
- * persistent state on bad input.
+ * `runSetup` calls it before `migrateAndSeed`, so bad input fails before
+ * migrations or a destructive `--reset` touch the database.
  */
 export async function validateNonInteractive(
   env: Record<string, string | undefined>,
@@ -125,17 +118,18 @@ export async function validateNonInteractive(
 }
 
 /**
- * Persist a pre-validated non-interactive setup to the database.
+ * Persist a pre-validated non-interactive setup to the database for the
+ * seeded default user.
  *
- * Caller must have validated via `validateNonInteractive` first.
+ * Caller must have validated via `validateNonInteractive` and seeded the
+ * defaults first.
  */
 export async function persistNonInteractive(
   deps: PersistDeps,
   validated: ValidatedNonInteractive,
+  userId: string,
 ): Promise<void> {
   const { answers, telegramBotUsername, githubLogin, githubUserId } = validated;
-
-  const { userId } = await seedDefaults(deps.runInTx, deps.agentStore, deps.transportStore);
 
   await persistProvider(deps, answers);
 
@@ -225,23 +219,6 @@ export async function persistNonInteractive(
       ].join("\n"),
     );
   }
-}
-
-/**
- * Run non-interactive setup end-to-end.
- *
- * Flow:
- *  1. Parse env (fail fast on missing/malformed).
- *  2. Validate every credential against live APIs (fail fast on invalid).
- *  3. Seed defaults (user + profile + direct channel).
- *  4. Persist provider, model_providers, channel, identities, secrets.
- *
- * Any failure in steps 1-2 aborts before any writes happen.
- */
-export async function runNonInteractive(deps: NonInteractiveDeps): Promise<void> {
-  const validated = await validateNonInteractive(deps.env, deps.validators ?? defaultValidators);
-  if (validated.isErr()) throw validated.error;
-  await persistNonInteractive(deps, validated.value);
 }
 
 interface ValidationSummary {

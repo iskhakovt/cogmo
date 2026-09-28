@@ -201,10 +201,11 @@ export function createCodingService(
       // exceeding `maxConcurrentTasks`. REPEATABLE READ (the project
       // default) doesn't catch this predicate race either — snapshot
       // isolation doesn't predicate-lock — but at single-user scale
-      // the residual race is acceptable. If multi-tenant lands, prefer
-      // `SELECT ... FOR UPDATE` on the `coding_repos` row inside the
-      // count over SERIALIZABLE — row-locking prevents the race
-      // outright instead of detecting and retrying it.
+      // the residual race is acceptable. If multi-tenant lands, prevent it
+      // with an advisory lock taken before the snapshot, not SERIALIZABLE
+      // — see `.claude/rules/store-pattern.md`. `SELECT ... FOR UPDATE` on
+      // the `coding_repos` row would not: the winner never updates that
+      // row, so the loser's count still reads its earlier snapshot.
       const admit = await deps.runInTx(async (tx) => {
         if (input.idempotencyKey !== undefined) {
           const prior = await deps.codingStore.getTaskByIdempotencyKey(tx, input.idempotencyKey);

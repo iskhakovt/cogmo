@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import type { CodingStore } from "../agent/coding/store/index.js";
@@ -64,7 +65,9 @@ export interface BootstrapSkillsRepoResult {
  * Idempotently bring the skills bare repo to its expected state. Safe to call
  * on every boot — the hook is rewritten unconditionally so a Cogmo upgrade
  * that tightens the policy takes effect on existing deployments. The repo
- * itself is only created on first call.
+ * itself is only created on first call, which callers serialize with the
+ * bootstrap lock: two first-time `git init --bare` on one path can fail on
+ * git's config lock. The hook install is safe concurrently.
  *
  * HEAD is pinned to `refs/heads/main` unconditionally via `symbolic-ref`.
  * `git init` honours the host's `init.defaultBranch` config (still `master`
@@ -96,18 +99,26 @@ export async function bootstrapSkillsRepo(params: {
 }
 
 /**
- * Atomically write a hook file and chmod it executable. Atomicity (write to
- * `.tmp` + rename) prevents a half-written hook from being executed if the
+ * Atomically write a hook file and chmod it executable. Atomicity (write to a
+ * temp file + rename) prevents a half-written hook from being executed if the
  * process is killed mid-boot — Linux `rename(2)` is atomic on the same
- * filesystem.
+ * filesystem. The temp name is unique per call, so concurrent bootstraps on
+ * one path (boot racing the wizard) each rename their own file and the last
+ * rename wins with identical content. Git runs only exact hook names, so a
+ * temp file a crash leaves behind is inert.
  */
 async function installHook(repoPath: string, name: string, content: string): Promise<void> {
   const hookPath = join(repoPath, "hooks", name);
-  const tmpPath = `${hookPath}.tmp`;
+  const tmpPath = `${hookPath}.${randomUUID()}.tmp`;
   await mkdir(dirname(hookPath), { recursive: true });
-  await writeFile(tmpPath, content, { encoding: "utf8", mode: 0o755 });
-  await chmod(tmpPath, 0o755);
-  await rename(tmpPath, hookPath);
+  try {
+    await writeFile(tmpPath, content, { encoding: "utf8", mode: 0o755 });
+    await chmod(tmpPath, 0o755);
+    await rename(tmpPath, hookPath);
+  } catch (e) {
+    await rm(tmpPath, { force: true });
+    throw e;
+  }
 }
 
 /** Exported for tests so they can assert the hook content matches what was installed. */
@@ -189,6 +200,10 @@ export interface EnsureSkillsCodingRepoArgs {
  *     `coding_repos` table; see `CodingStore.updateRepoRemoteUrl`.
  *   - `unchanged` — row present and in sync.
  *
+ * Reads the row, then `origin`, in one transaction: the snapshot predates the
+ * `origin` read, so a boot racing the wizard can't write an older URL back; a
+ * concurrent write fails this one with `40001`, and the retry re-reads both.
+ *
  * Defaults on first insert match the per-repo knobs `Transport.repos.add`
  * uses for user-added repos. `maxConcurrentTasks: 1` is intentional — register
  * is single-writer on `refs/heads/main` and parallel skill-author tasks would
@@ -198,21 +213,20 @@ export async function ensureSkillsCodingRepo(
   deps: EnsureSkillsCodingRepoDeps,
   args: EnsureSkillsCodingRepoArgs,
 ): Promise<EnsureSkillsCodingRepoResult> {
-  const remoteUrl = await readOriginUrl(args.skillsRepoPath);
-
-  if (!remoteUrl) {
-    log.warn(
-      { localPath: args.skillsRepoPath },
-      "skills bare repo has no `origin` configured — `delegate_coding({repo:'skills'})` " +
-        "will fail until the wizard or `cogmo migrate-skills-remote` runs",
-    );
-    return { kind: "skipped_no_origin", localPath: args.skillsRepoPath };
-  }
-
-  // Read first; on a miss, a keyed insert, so concurrent bootstraps converge
-  // on one row (`.claude/rules/inngest.md`).
   return deps.runInTx(async (tx) => {
     const existing = await deps.codingStore.getRepoByName(tx, SKILLS_CODING_REPO_NAME);
+    const remoteUrl = await readOriginUrl(args.skillsRepoPath);
+    if (!remoteUrl) {
+      log.warn(
+        { localPath: args.skillsRepoPath },
+        "skills bare repo has no `origin` configured — `delegate_coding({repo:'skills'})` " +
+          "will fail until the wizard or `cogmo migrate-skills-remote` runs",
+      );
+      return { kind: "skipped_no_origin", localPath: args.skillsRepoPath };
+    }
+
+    // On a miss, a keyed insert, so concurrent bootstraps converge on one row
+    // (`.claude/rules/inngest.md`).
     const { kind, row } =
       existing === undefined
         ? await deps.codingStore.insertOrRecoverRepo(tx, {

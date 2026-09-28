@@ -102,7 +102,7 @@ Keys don't close every route — see `DEPLOYMENT.md` → Securing internal servi
 `cogmo serve` boot is staged (`bootstrapCore` → `bootstrapSandbox` → `bootstrapSkillRunner` → `bootstrapRuntime`); each stage blocks only on work that the *first inbound request* genuinely needs. Slow or recoverable work is fire-and-forget with structured error logging.
 
 **Stays blocking** (every later path depends on it):
-- DB migrations (`migrate(db, ...)`)
+- DB migrations and boot seeding, under the bootstrap advisory lock ([setup.md → Concurrent runs](setup.md#concurrent-runs))
 - Master-key presence (`COGMO_MASTER_KEY` check)
 - User + profile load
 - Dependency probes — they fail loudly at deploy time and, against healthy dependencies, finish in well under a second.

@@ -103,13 +103,40 @@ describe("DrizzleTransportStore", () => {
     });
 
     it("getChannelByType stays on the oldest channel of a type after it is updated", async () => {
-      const oldest = await seedChannel("telegram");
-      await seedChannel("telegram");
+      const telegram = () =>
+        tx((trx) =>
+          store.createChannel(trx, { type: "telegram", credentials: {}, identityMode: "mapped" }),
+        );
+      const { id: oldest } = await telegram();
+      await telegram();
       // Adversarial setup: an in-place UPDATE writes a new row version after the
       // second channel's.
       await db.execute(sql`UPDATE channels SET identity_mode = identity_mode WHERE id = ${oldest}`);
 
       expect((await tx((trx) => store.getChannelByType(trx, "telegram")))?.id).toBe(oldest);
+    });
+
+    it("insertOrRecoverFixedChannel recovers the stored channel for a repeated type", async () => {
+      const first = await tx((trx) => store.insertOrRecoverFixedChannel(trx, "web"));
+      const second = await tx((trx) => store.insertOrRecoverFixedChannel(trx, "web"));
+
+      expect(first.kind).toBe("new");
+      expect(second).toEqual({ kind: "recovered", id: first.id });
+      const channel = await tx((trx) => store.getChannelByType(trx, "web"));
+      expect(channel).toEqual({ id: first.id, identityMode: "fixed", credentials: {} });
+    });
+
+    it("keys only fixed channels on their type", async () => {
+      const mapped = () =>
+        tx((trx) =>
+          store.createChannel(trx, { type: "web", credentials: {}, identityMode: "mapped" }),
+        );
+      await mapped();
+      await mapped();
+
+      const fixed = await tx((trx) => store.insertOrRecoverFixedChannel(trx, "web"));
+      expect(fixed.kind).toBe("new");
+      await expect(seedChannel("web")).rejects.toThrow();
     });
   });
 
