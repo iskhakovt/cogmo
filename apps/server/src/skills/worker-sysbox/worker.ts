@@ -1,4 +1,5 @@
 import { err, ok, type Result } from "neverthrow";
+import { match, P } from "ts-pattern";
 import { logger } from "../../logger.js";
 import type {
   ExecStreamingHandle,
@@ -7,20 +8,15 @@ import type {
   SandboxSession,
 } from "../../sandbox/index.js";
 import { ensureVenvPopulated } from "../deps.js";
-import {
-  type CtxHandler,
-  Dispatcher,
-  ExitUnconfirmedError,
-  type RpcTransport,
-} from "../dispatcher.js";
+import { type CtxHandler, Dispatcher } from "../dispatcher.js";
 import {
   type RuntimeRusage,
   SUPERVISOR_PROTOCOL_VERSION,
-  SupervisorReadySchema,
   type TaskInvoke,
   type TaskResult,
 } from "../protocol.js";
-import { DEFAULT_WALL_CLOCK_S } from "../wall-clock.js";
+import { DEFAULT_WALL_CLOCK_S, timeoutSignal } from "../wall-clock.js";
+import type { StartFailure, TaskFailure, WorkerFrame } from "../worker-state.js";
 import { DEFAULT_RESOURCE_LIMITS } from "./host.js";
 import { createNdjsonTransport } from "./transport.js";
 
@@ -35,7 +31,8 @@ const SUPERVISOR_CMD = ["python3", "-u", "-m", "cogmo_skills_runtime"] as const;
 
 const log = logger.child({ component: "skills.worker.sysbox" });
 
-export type WorkerState = "idle" | "busy" | "draining" | "disposed";
+/** A worker as the pool sees it: its channel's state, or `disposed` once its teardown has started. */
+export type WorkerStatus = "idle" | "busy" | "dead" | "disposed";
 
 export interface SysboxSkillWorkerOptions {
   /** Stable identifier — also doubles as the sandbox `taskId` for label/lineage. */
@@ -60,15 +57,17 @@ export interface SysboxSkillWorkerOptions {
    * container-local cache (overlay FS, lost on recycle).
    */
   depsCacheVolumeName?: string;
+  /** Aborting it stops a `create` in progress, or closes a live worker's channel. */
+  signal?: AbortSignal;
 }
 
 /**
  * Buffer added on top of the per-task `wallClockS` for the host-side
- * dispatcher timeout. Inside the container the task's relay enforces the
- * wall clock; the supervisor kills an unresponsive relay 2 s later (reaping
- * it takes up to 2 s) and spends up to 2 s clearing the task's processes
- * before `task_exited`. This is the safety net for a supervisor that itself
- * hung or was stopped.
+ * deadline. Inside the container the task's relay enforces the wall clock;
+ * the supervisor kills an unresponsive relay 2 s later (reaping it takes up
+ * to 2 s) and spends up to 2 s clearing the task's processes before
+ * `task_exited`. This is the safety net for a supervisor that itself hung
+ * or was stopped.
  */
 const SUPERVISOR_GRACE_S = 10;
 
@@ -78,45 +77,37 @@ const SUPERVISOR_GRACE_S = 10;
  */
 const SUPERVISOR_READY_TIMEOUT_MS = 30_000;
 
-/**
- * Wait for the supervisor's `supervisor_ready` and check its protocol
- * version. Another version, none within the timeout, or an exit first
- * fails worker creation.
- */
-function awaitSupervisorReady(
-  transport: RpcTransport,
-  timeoutMs: number,
-): Promise<Result<void, string>> {
-  return new Promise((resolve) => {
-    const settle = (result: Result<void, string>): void => {
-      clearTimeout(timer);
-      resolve(result);
-    };
-    const timer = setTimeout(
+/** The supervisor's first frame must announce `SUPERVISOR_PROTOCOL_VERSION`. */
+function acceptSupervisorReady(first: WorkerFrame): Result<void, string> {
+  return match(first)
+    .with({ type: "supervisor_ready", protocolVersion: SUPERVISOR_PROTOCOL_VERSION }, () =>
+      ok(undefined),
+    )
+    .with({ type: "supervisor_ready" }, ({ protocolVersion }) =>
+      err(
+        `supervisor speaks protocol v${protocolVersion}; this Cogmo requires v${SUPERVISOR_PROTOCOL_VERSION} — use the skills image matching this Cogmo version`,
+      ),
+    )
+    .with({ type: "malformed" }, ({ issues }) =>
+      err(`supervisor sent a malformed frame before supervisor_ready (${issues.join("; ")})`),
+    )
+    .otherwise(({ type }) => err(`supervisor sent ${type} before supervisor_ready`));
+}
+
+function describeStartFailure(failure: StartFailure): string {
+  return match(failure)
+    .with({ kind: "refused" }, ({ reason }) => reason)
+    .with(
+      { kind: "timed_out" },
       () =>
-        settle(
-          err(
-            `supervisor did not announce protocol v${SUPERVISOR_PROTOCOL_VERSION} within ${timeoutMs / 1000}s; a skills image without the handshake never does`,
-          ),
-        ),
-      timeoutMs,
-    );
-    transport.onError?.((e) => settle(err(`supervisor exited before announcing: ${e.message}`)));
-    transport.onMessage((raw) => {
-      const ready = SupervisorReadySchema.safeParse(raw);
-      if (!ready.success) {
-        settle(err("supervisor sent a task frame before supervisor_ready"));
-      } else if (ready.data.protocolVersion !== SUPERVISOR_PROTOCOL_VERSION) {
-        settle(
-          err(
-            `supervisor speaks protocol v${ready.data.protocolVersion}; this Cogmo requires v${SUPERVISOR_PROTOCOL_VERSION} — use the skills image matching this Cogmo version`,
-          ),
-        );
-      } else {
-        settle(ok(undefined));
-      }
-    });
-  });
+        `supervisor did not announce protocol v${SUPERVISOR_PROTOCOL_VERSION} within ${SUPERVISOR_READY_TIMEOUT_MS / 1000}s; a skills image without the handshake never does`,
+    )
+    .with({ kind: "ended" }, ({ reason }) => `supervisor exited before announcing: ${reason}`)
+    .with(
+      { kind: "closed" },
+      ({ reason }) => `the host closed the supervisor's channel before it announced: ${reason}`,
+    )
+    .exhaustive();
 }
 
 function fromTaskResult(result: TaskResult): Omit<InvokeResult, "workerReusable"> {
@@ -124,6 +115,14 @@ function fromTaskResult(result: TaskResult): Omit<InvokeResult, "workerReusable"
     ...(result.ok ? { ok: true, output: result.output } : { ok: false, error: result.error }),
     ...(result.rusage !== undefined && { rusage: result.rusage }),
   };
+}
+
+function describeTaskFailure(failure: TaskFailure): string {
+  return match(failure)
+    .with({ kind: "timed_out" }, () => "supervisor_unresponsive")
+    .with({ kind: "failed" }, ({ reason }) => `dispatcher_error: ${reason}`)
+    .with({ kind: "exited_without_result" }, () => "task_exited_without_result")
+    .exhaustive();
 }
 
 export interface InvokeParams {
@@ -138,8 +137,8 @@ export interface InvokeParams {
   /**
    * Manifest's isolation declaration. Threaded through to the supervisor
    * (via `task_invoke.isolation`) so the task process knows; on the host side, a
-   * `recycle` task poisons the worker after completion regardless of the
-   * task's success — pool replaces it on next acquire.
+   * `recycle` task retires the worker once it completes, whatever its
+   * outcome, and the pool replaces it.
    */
   isolation?: "subinterpreter" | "recycle";
   /**
@@ -173,10 +172,9 @@ export interface InvokeResult {
   rusage?: RuntimeRusage;
   /**
    * True when the worker is safe to reuse for another task: the supervisor
-   * confirmed the task's processes exited. False on an unresponsive
-   * supervisor, a transport error, a failed venv populate, or an
-   * `isolation: recycle` declaration — the worker has already marked itself
-   * poisoned, and the pool replaces it.
+   * confirmed the task's processes exited and the skill did not declare
+   * `isolation: recycle`. When false the worker is already dead, and the
+   * pool replaces it.
    */
   workerReusable: boolean;
 }
@@ -184,40 +182,30 @@ export interface InvokeResult {
 /**
  * One sysbox container with a long-lived python supervisor process,
  * reused across many skill tasks. Owns the underlying `SandboxSession`,
- * an `ExecStreamingHandle` running the supervisor, and a single
- * `Dispatcher` that multiplexes sequential tasks over the supervisor's
- * stdin/stdout. The supervisor stays alive across tasks so common imports
- * are paid only once; each task runs in fresh processes forked from it,
- * behind a per-task relay (see `supervisor.py`). `invoke()` returns only
- * after the supervisor's `task_exited` confirms every process the task
- * started is gone, so the worker is never released while one survives.
+ * an `ExecStreamingHandle` running the supervisor, and the `Dispatcher`
+ * that drives the supervisor's channel. The supervisor stays alive across
+ * tasks so common imports are paid only once; each task runs in fresh
+ * processes forked from it, behind a per-task relay (see `supervisor.py`).
+ * `invoke()` returns only once the supervisor's `task_exited` confirms
+ * every process the task started is gone, or the worker has died.
  * `create()` refuses a supervisor that does not announce
  * `SUPERVISOR_PROTOCOL_VERSION`.
  *
- * State machine:
- *
- * ```
- *   spawn                 acquire        invoke()         release
- *  ─────► idle ──────────► busy ─────────────────► idle
- *           │                  │
- *           │   non-reusable   │
- *           │   result, or     │
- *           │   markPoisoned   │
- *           ▼                  ▼
- *         draining ───── dispose() ─────► disposed
- * ```
- *
- * Once `draining`, the worker accepts no further invocations; the pool
- * will call `dispose()` to close the transport (EOFs the supervisor's
- * stdin → supervisor exits cleanly) and tear down the session.
+ * `state` is the channel's state (`worker-state.ts`) as the pool sees it:
+ * `idle`; `busy` while leased or running a task; `dead`; `disposed` once
+ * its teardown has started.
  */
 export class SysboxSkillWorker {
   readonly workerId: string;
+  /** Resolves with the reason once the worker can run no further task. */
+  readonly dead: Promise<string>;
+  /** Resolves once the worker is dead and no caller holds it: its container can go. */
+  readonly disposable: Promise<void>;
   #sandbox: SandboxClient;
   #session: SandboxSession;
   #exec: ExecStreamingHandle;
   #dispatcher: Dispatcher;
-  #state: WorkerState = "idle";
+  #disposal: Promise<void> | undefined;
   #taskCount = 0;
   #lastUsedAtMs: number;
   #createdAtMs: number;
@@ -227,22 +215,25 @@ export class SysboxSkillWorker {
     sandbox: SandboxClient;
     session: SandboxSession;
     exec: ExecStreamingHandle;
-    transport: RpcTransport;
+    dispatcher: Dispatcher;
   }) {
     this.workerId = opts.workerId;
     this.#sandbox = opts.sandbox;
     this.#session = opts.session;
     this.#exec = opts.exec;
-    this.#dispatcher = new Dispatcher({
-      transport: opts.transport,
-      awaitTaskExited: true,
-      onTransportFailure: () => this.#onSupervisorLost(),
-    });
+    this.#dispatcher = opts.dispatcher;
+    this.dead = opts.dispatcher.dead;
+    this.disposable = opts.dispatcher.disposable;
     const now = Date.now();
     this.#lastUsedAtMs = now;
     this.#createdAtMs = now;
   }
 
+  /**
+   * Create the container, start its supervisor and wait for its handshake.
+   * An aborted `signal` stops creation at its next step, tearing down
+   * whatever it had set up.
+   */
   static async create(opts: SysboxSkillWorkerOptions): Promise<SysboxSkillWorker> {
     const resourceLimits: ResourceLimits = {
       cpus: opts.resourceLimits?.cpus ?? DEFAULT_RESOURCE_LIMITS.cpus,
@@ -251,8 +242,10 @@ export class SysboxSkillWorker {
       disk_bytes: opts.resourceLimits?.disk_bytes ?? DEFAULT_RESOURCE_LIMITS.disk_bytes,
     };
 
+    opts.signal?.throwIfAborted();
     // Pass limits so a first warm against a custom image bakes them in.
     await opts.sandbox.ensureImagePresent(opts.image, resourceLimits);
+    opts.signal?.throwIfAborted();
 
     const session = await opts.sandbox.create({
       taskId: opts.workerId,
@@ -266,12 +259,13 @@ export class SysboxSkillWorker {
 
     let exec: ExecStreamingHandle;
     try {
+      opts.signal?.throwIfAborted();
       exec = await session.execStreaming([...SUPERVISOR_CMD], {
         attachStdin: true,
       });
     } catch (e) {
-      // Container created but supervisor couldn't launch — tear the session
-      // down so the container doesn't leak.
+      // The container exists but its supervisor never started — tear the
+      // session down so the container doesn't leak.
       await opts.sandbox.delete(session).catch((err: unknown) => {
         log.warn(
           { workerId: opts.workerId, err: err instanceof Error ? err.message : String(err) },
@@ -291,11 +285,22 @@ export class SysboxSkillWorker {
     exec.stderr.on("data", (chunk: string) => {
       log.debug({ workerId: opts.workerId }, chunk.trimEnd());
     });
+    // A failing exec fails stderr along with stdout. Stdout's failure ends
+    // the channel and settles any task; stderr's must not go unhandled, or
+    // it crashes the process.
+    exec.stderr.on("error", (e: Error) => {
+      log.warn({ workerId: opts.workerId, err: e.message }, "supervisor stderr failed");
+    });
 
-    const transport = createNdjsonTransport(exec.stdin, exec.stdout);
-    const ready = await awaitSupervisorReady(transport, SUPERVISOR_READY_TIMEOUT_MS);
-    if (ready.isErr()) {
-      transport.close();
+    const opened = await Dispatcher.open({
+      transport: createNdjsonTransport(exec.stdin, exec.stdout),
+      handshake: acceptSupervisorReady,
+      handshakeDeadline: timeoutSignal(SUPERVISOR_READY_TIMEOUT_MS),
+      // From here the signal closes the channel, during the handshake too.
+      ...(opts.signal !== undefined && { signal: opts.signal }),
+      logContext: { workerId: opts.workerId },
+    });
+    if (opened.isErr()) {
       await exec.dispose().catch((e: unknown) => {
         log.warn(
           { workerId: opts.workerId, err: e instanceof Error ? e.message : String(e) },
@@ -308,7 +313,9 @@ export class SysboxSkillWorker {
           "session.delete failed while cleaning up after a refused supervisor",
         );
       });
-      throw new Error(`skills worker ${opts.workerId} (${opts.image}): ${ready.error}`);
+      throw new Error(
+        `skills worker ${opts.workerId} (${opts.image}): ${describeStartFailure(opened.error)}`,
+      );
     }
 
     log.debug({ workerId: opts.workerId, image: opts.image }, "skills worker spawned");
@@ -317,26 +324,18 @@ export class SysboxSkillWorker {
       sandbox: opts.sandbox,
       session,
       exec,
-      transport,
+      dispatcher: opened.value,
     });
   }
 
-  /**
-   * The supervisor's channel failed. An idle worker is poisoned here, so
-   * the pool retires it instead of handing it the next task. A busy one is
-   * left to `invoke()`, which poisons it on the way out: its in-flight task
-   * is rejected, or — if the channel failed during `ensureVenvPopulated`,
-   * before any task was sent — the send finds the dispatcher closed and the
-   * task fails with `worker_dispatch_failed`.
-   */
-  #onSupervisorLost(): void {
-    if (this.#state !== "idle") return;
-    log.warn({ workerId: this.workerId }, "supervisor lost while idle; retiring worker");
-    this.markPoisoned();
-  }
-
-  get state(): WorkerState {
-    return this.#state;
+  get state(): WorkerStatus {
+    if (this.#disposal !== undefined) return "disposed";
+    return match(this.#dispatcher.state)
+      .returnType<WorkerStatus>()
+      .with("idle", () => "idle")
+      .with(P.union("starting", "leased", "running", "awaiting_exit"), () => "busy")
+      .with("dead", () => "dead")
+      .exhaustive();
   }
 
   get taskCount(): number {
@@ -354,28 +353,28 @@ export class SysboxSkillWorker {
   }
 
   /**
-   * Run one task on this worker's supervisor. Caller must hold a busy lease
-   * (acquired via the pool's bookkeeping) — concurrent invocations would
-   * step on each other's NDJSON frames sharing one stdin/stdout. The pool
-   * enforces single-flight via state transitions; this method asserts the
-   * precondition.
+   * Run one task on this worker's supervisor. The caller must hold the
+   * worker's lease (`tryAcquire`): a task needs the channel to itself. A
+   * worker can die after its lease is taken; its task then fails as a
+   * value, with nothing populated or sent.
    */
   async invoke(params: InvokeParams): Promise<InvokeResult> {
-    if (this.#state !== "busy") {
-      throw new Error(
-        `SysboxSkillWorker.invoke called in state '${this.#state}' — pool must mark busy first`,
-      );
+    const admission = this.#dispatcher.admission();
+    if (admission.isErr()) {
+      throw new Error(`SysboxSkillWorker.invoke: ${admission.error}`);
     }
     const wallClockS = params.wallClockS ?? DEFAULT_WALL_CLOCK_S.container;
 
     // Ensure the skill's venv is populated before sending the task. The
     // populator is idempotent — second-and-later calls with the same
     // lockfile hash on the same worker no-op via the `.ready` marker.
-    // Failure poisons the worker because uv pip sync writes into the
+    // Failure retires the worker because uv pip sync writes into the
     // container's overlay FS; a partial populate could leave the venv
     // in an unreusable state for any future task with the same hash.
+    // A worker that dies during the populate is the dispatcher's to judge:
+    // it admits the task again when it is sent, and fails it as a value.
     let lockfileHash: string | undefined;
-    if (params.deps) {
+    if (params.deps && admission.value.kind === "runs") {
       const populate = await ensureVenvPopulated({
         session: this.#session,
         lockfileHash: params.deps.lockfileHash,
@@ -385,7 +384,7 @@ export class SysboxSkillWorker {
       if (populate.isErr()) {
         this.#taskCount += 1;
         this.#lastUsedAtMs = Date.now();
-        this.markPoisoned();
+        this.retire();
         return {
           ok: false,
           error: `skill_venv_${populate.error.kind}: ${populate.error.message}`,
@@ -406,125 +405,61 @@ export class SysboxSkillWorker {
       wallClockS,
     };
 
-    // Settles on the supervisor's `task_exited`, with the task's
-    // `task_result`. Tracking the type through the race keeps `winner.r`
-    // typed as `TaskResult` so the discriminated union narrows on `.ok`
-    // without a cast.
-    let taskPromise: Promise<TaskResult>;
-    try {
-      taskPromise = this.#dispatcher.invoke(invoke, { ctxHandler: params.ctxHandler });
-    } catch (e) {
-      // Synchronous failure (dispatcher closed, transport write threw).
-      this.#taskCount += 1;
-      this.#lastUsedAtMs = Date.now();
-      this.markPoisoned();
-      return {
-        ok: false,
-        error: `worker_dispatch_failed: ${e instanceof Error ? e.message : String(e)}`,
-        workerReusable: false,
-      };
-    }
-
-    // Host-side safety-net timeout. The relay's wall clock fires first under
-    // normal conditions and emits `wall_clock_exceeded` via task_result;
-    // this hits only if the supervisor itself hung.
-    let timeoutHandle: NodeJS.Timeout | undefined;
-    const timeoutPromise = new Promise<"timeout">((resolve) => {
-      timeoutHandle = setTimeout(
-        () => resolve("timeout"),
-        (wallClockS + SUPERVISOR_GRACE_S) * 1000,
-      );
+    const { result, exit } = await this.#dispatcher.invoke(invoke, {
+      ctxHandler: params.ctxHandler,
+      // The relay's wall clock fires first under normal conditions and
+      // reports `wall_clock_exceeded` as the task's result; this deadline
+      // passes only if the supervisor itself hung.
+      deadline: timeoutSignal((wallClockS + SUPERVISOR_GRACE_S) * 1000),
     });
-    const wrappedTask = taskPromise.then(
-      (r) => ({ kind: "ok" as const, r }),
-      (err: unknown) => ({ kind: "err" as const, err }),
-    );
-    let winner = await Promise.race([wrappedTask, timeoutPromise]);
-    if (timeoutHandle) clearTimeout(timeoutHandle);
-    const timedOut = winner === "timeout";
-    if (winner === "timeout") {
-      log.warn(
-        { workerId: this.workerId, taskId: params.taskId, wallClockS },
-        "host-side supervisor watchdog fired — supervisor hung; recycling worker",
-      );
-      // Settles the task: a result it already delivered comes back as
-      // `ExitUnconfirmedError`.
-      this.#dispatcher.close("supervisor unresponsive");
-      this.markPoisoned();
-      winner = await wrappedTask;
-    }
-
     this.#taskCount += 1;
     this.#lastUsedAtMs = Date.now();
+    // `isolation: recycle` — the manifest declared the task can't share
+    // state with another task on the same supervisor.
+    const recycle = params.isolation === "recycle";
+    if (recycle) this.retire();
 
-    if (winner.kind === "err") {
-      this.markPoisoned();
-      if (winner.err instanceof ExitUnconfirmedError) {
-        // The task finished — its side effects happened — but the worker
-        // can't be proven clean. Report the result; retire the worker.
-        return { ...fromTaskResult(winner.err.result), workerReusable: false };
-      }
-      if (timedOut) {
-        return { ok: false, error: "supervisor_unresponsive", workerReusable: false };
-      }
-      const message = winner.err instanceof Error ? winner.err.message : String(winner.err);
-      return { ok: false, error: `dispatcher_error: ${message}`, workerReusable: false };
-    }
+    const workerReusable = exit.kind === "confirmed" && !recycle;
+    return result.match(
+      (delivered) => ({ ...fromTaskResult(delivered), workerReusable }),
+      (failure) => ({ ok: false, error: describeTaskFailure(failure), workerReusable }),
+    );
+  }
 
-    // `isolation: recycle` poisons the worker after the task regardless of
-    // success — the manifest declared it can't share state with another
-    // task on the same supervisor.
-    if (params.isolation === "recycle") {
-      this.markPoisoned();
-    }
-    return { ...fromTaskResult(winner.r), workerReusable: this.#state === "busy" };
+  /** Lease an idle worker for one task; errs with why any other can't be. */
+  tryAcquire(): Result<void, string> {
+    return this.#dispatcher.tryAcquire();
   }
 
   /**
-   * Pool-side state transition: idle → busy. Returns false if the worker
-   * isn't acquirable (already busy, draining, or disposed).
+   * Return a leased worker to idle once its task has exited; a dead one this
+   * caller held becomes disposable. Errs with why if the caller holds nothing.
    */
-  tryAcquire(): boolean {
-    if (this.#state !== "idle") return false;
-    this.#state = "busy";
-    return true;
-  }
-
-  /** Pool-side state transition: busy → idle (worker still healthy). */
-  release(): void {
-    if (this.#state === "busy") {
-      this.#state = "idle";
-    }
+  release(): Result<void, string> {
+    return this.#dispatcher.release();
   }
 
   /**
-   * One-way trip to `draining`. Idempotent. Used after a non-reusable
-   * result, an explicit recycle decision (taskCount cap, isolation:recycle),
-   * or idle-shutdown. The container is not torn down until `dispose()`;
-   * until then the worker simply refuses new acquisitions.
+   * Retire the worker: it takes no further task. Closes the supervisor's
+   * channel (EOF on its stdin, so it exits cleanly); the container stays
+   * until `dispose()`. Idempotent.
    */
-  markPoisoned(): void {
-    if (this.#state === "disposed") return;
-    this.#state = "draining";
+  retire(): void {
+    this.#dispatcher.close("retired");
   }
 
   /**
-   * Tear down the worker. Closes the dispatcher (which EOFs the
-   * supervisor's stdin → supervisor exits its main loop cleanly), waits
-   * briefly for the supervisor process to exit, and deletes the sandbox
-   * session. Idempotent.
+   * Tear down the worker. Closes the supervisor's channel, waits briefly for
+   * the supervisor process to exit, and deletes the sandbox session.
+   * Idempotent.
    */
-  async dispose(): Promise<void> {
-    if (this.#state === "disposed") return;
-    this.#state = "disposed";
-    try {
-      this.#dispatcher.close();
-    } catch (e) {
-      log.warn(
-        { workerId: this.workerId, err: e instanceof Error ? e.message : String(e) },
-        "dispatcher close threw during dispose",
-      );
-    }
+  dispose(): Promise<void> {
+    this.#disposal ??= this.#teardown();
+    return this.#disposal;
+  }
+
+  async #teardown(): Promise<void> {
+    this.#dispatcher.close("disposed");
     // Wait for the supervisor to actually exit so we know the python
     // process is gone before we delete the session — otherwise the
     // delete races teardown of an in-flight syscall. Bounded by the

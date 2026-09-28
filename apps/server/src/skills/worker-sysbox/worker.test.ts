@@ -1,4 +1,4 @@
-import { PassThrough, type Readable, type Writable } from "node:stream";
+import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import {
@@ -23,6 +23,7 @@ interface FakeSandboxBundle {
   /** stdin we hand to the worker; the test pushes mock task_result lines into stdout. */
   stdin: PassThrough;
   stdout: PassThrough;
+  stderr: PassThrough;
   /** exec.dispose call count — the worker calls dispose during teardown. */
   execDisposeCalls: { count: number };
   /** Calls captured for assertion. */
@@ -37,9 +38,9 @@ function buildFakeSandbox(): FakeSandboxBundle {
   const execDisposeCalls = { count: 0 };
 
   const exec: ExecStreamingHandle = {
-    stdin: stdin as unknown as Writable,
-    stdout: stdout as unknown as Readable,
-    stderr: stderr as unknown as Readable,
+    stdin: stdin,
+    stdout: stdout,
+    stderr: stderr,
     wait: async () => ({ exitCode: 0 }),
     dispose: async () => {
       execDisposeCalls.count += 1;
@@ -97,7 +98,7 @@ function buildFakeSandbox(): FakeSandboxBundle {
     shutdown: vi.fn(),
   };
 
-  return { sandbox, session, stdin, stdout, execDisposeCalls, calls };
+  return { sandbox, session, stdin, stdout, stderr, execDisposeCalls, calls };
 }
 
 const noopCtx: CtxHandler = { handle: async () => null };
@@ -242,9 +243,9 @@ describe("SysboxSkillWorker", () => {
     /** A supervisor exec whose stdout the test drives, announcing nothing by itself. */
     function silentSupervisor(bundle: FakeSandboxBundle): void {
       vi.mocked(bundle.session.execStreaming).mockImplementation(async () => ({
-        stdin: bundle.stdin as unknown as Writable,
-        stdout: bundle.stdout as unknown as Readable,
-        stderr: new PassThrough() as unknown as Readable,
+        stdin: bundle.stdin,
+        stdout: bundle.stdout,
+        stderr: new PassThrough(),
         wait: async () => ({ exitCode: 0 }),
         dispose: async () => {
           bundle.execDisposeCalls.count += 1;
@@ -297,10 +298,32 @@ describe("SysboxSkillWorker", () => {
       bundle.stdout.write(taskResultLine("t-early", null));
 
       await expect(create(bundle)).rejects.toThrow(
-        /supervisor sent a task frame before supervisor_ready/,
+        /supervisor sent task_result before supervisor_ready/,
       );
       expect(bundle.execDisposeCalls.count).toBe(1);
       expect(bundle.sandbox.delete).toHaveBeenCalledWith(bundle.session);
+    });
+
+    it("refuses a supervisor whose first frame is malformed at once", async () => {
+      vi.useFakeTimers();
+      try {
+        const bundle = buildFakeSandbox();
+        silentSupervisor(bundle);
+        bundle.stdout.write(`${JSON.stringify({ type: "supervisor_ready" })}\n`);
+        let outcome: unknown;
+        const created = create(bundle).catch((e: unknown) => {
+          outcome = e;
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        // Refused on the frame itself, not at the handshake deadline.
+        expect(String(outcome)).toMatch(
+          /supervisor sent a malformed frame before supervisor_ready/,
+        );
+        await created;
+        expect(bundle.sandbox.delete).toHaveBeenCalledWith(bundle.session);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("refuses a supervisor that exits before announcing", async () => {
@@ -309,6 +332,26 @@ describe("SysboxSkillWorker", () => {
       bundle.stdout.end();
 
       await expect(create(bundle)).rejects.toThrow(/supervisor exited before announcing/);
+      expect(bundle.sandbox.delete).toHaveBeenCalledWith(bundle.session);
+    });
+
+    it("reports a handshake the host cut short as closed, not as the supervisor exiting", async () => {
+      const bundle = buildFakeSandbox();
+      silentSupervisor(bundle);
+      const lifetime = new AbortController();
+      const created = SysboxSkillWorker.create({
+        workerId: "w-closed",
+        sandbox: bundle.sandbox,
+        image: "cogmo-skills:test",
+        expiresAt: new Date(Date.now() + 60_000),
+        signal: lifetime.signal,
+      });
+      await vi.waitFor(() => expect(bundle.session.execStreaming).toHaveBeenCalled());
+      lifetime.abort(new Error("pool disposed"));
+
+      await expect(created).rejects.toThrow(
+        /host closed the supervisor's channel before it announced: pool disposed/,
+      );
       expect(bundle.sandbox.delete).toHaveBeenCalledWith(bundle.session);
     });
   });
@@ -322,9 +365,9 @@ describe("SysboxSkillWorker", () => {
         image: "python:3.14-slim",
         expiresAt: new Date(Date.now() + 60_000),
       });
-      expect(w.tryAcquire()).toBe(true);
+      expect(w.tryAcquire().isOk()).toBe(true);
       expect(w.state).toBe("busy");
-      expect(w.tryAcquire()).toBe(false);
+      expect(w.tryAcquire().isErr()).toBe(true);
     });
 
     it("release flips busy → idle (and is a no-op from any other state)", async () => {
@@ -340,12 +383,12 @@ describe("SysboxSkillWorker", () => {
       w.tryAcquire();
       w.release();
       expect(w.state).toBe("idle");
-      w.markPoisoned();
+      w.retire();
       w.release();
-      expect(w.state).toBe("draining");
+      expect(w.state).toBe("dead");
     });
 
-    it("markPoisoned flips to draining; idempotent; no-op once disposed", async () => {
+    it("retire makes the worker dead; idempotent; no-op once disposed", async () => {
       const { sandbox } = buildFakeSandbox();
       const w = await SysboxSkillWorker.create({
         workerId: "w-5",
@@ -353,12 +396,12 @@ describe("SysboxSkillWorker", () => {
         image: "python:3.14-slim",
         expiresAt: new Date(Date.now() + 60_000),
       });
-      w.markPoisoned();
-      expect(w.state).toBe("draining");
-      w.markPoisoned();
-      expect(w.state).toBe("draining");
+      w.retire();
+      expect(w.state).toBe("dead");
+      w.retire();
+      expect(w.state).toBe("dead");
       await w.dispose();
-      w.markPoisoned();
+      w.retire();
       expect(w.state).toBe("disposed");
     });
   });
@@ -373,7 +416,7 @@ describe("SysboxSkillWorker", () => {
         expiresAt: new Date(Date.now() + 60_000),
       });
       await expect(w.invoke(invokeParams("t-1"))).rejects.toThrow(
-        /SysboxSkillWorker.invoke called in state 'idle'/,
+        /SysboxSkillWorker.invoke: cannot invoke on a worker that is idle: acquire it first/,
       );
     });
 
@@ -387,7 +430,7 @@ describe("SysboxSkillWorker", () => {
         expiresAt: new Date(Date.now() + 60_000),
       });
 
-      expect(w.tryAcquire()).toBe(true);
+      expect(w.tryAcquire().isOk()).toBe(true);
       const r = await w.invoke(invokeParams("t-7"));
       expect(r).toMatchObject({ ok: true, output: { x: 1 }, workerReusable: true });
       expect(w.taskCount).toBe(1);
@@ -396,10 +439,9 @@ describe("SysboxSkillWorker", () => {
     });
 
     it("supervisor-emitted error keeps the worker reusable (supervisor still alive)", async () => {
-      // In B.2 the supervisor handles wall-clock kill internally and emits
-      // the wall_clock_exceeded task_result; the supervisor process itself
-      // stays alive and ready for the next task. This is a behaviour
-      // change from B.1 where wall-clock killed the whole container.
+      // The supervisor handles a wall-clock kill itself and emits the
+      // wall_clock_exceeded task_result; the supervisor process stays alive
+      // and ready for the next task.
       const bundle = buildFakeSandbox();
       autoRespond(bundle, { ok: false, error: "wall_clock_exceeded" });
       const w = await SysboxSkillWorker.create({
@@ -418,7 +460,7 @@ describe("SysboxSkillWorker", () => {
       expect(w.state).toBe("busy");
     });
 
-    it("`isolation: recycle` poisons the worker after the task runs", async () => {
+    it("`isolation: recycle` retires the worker after the task runs", async () => {
       const bundle = buildFakeSandbox();
       autoRespond(bundle, { ok: true, output: null });
       const w = await SysboxSkillWorker.create({
@@ -431,7 +473,7 @@ describe("SysboxSkillWorker", () => {
       const r = await w.invoke({ ...invokeParams("t-r"), isolation: "recycle" });
       expect(r.ok).toBe(true);
       expect(r.workerReusable).toBe(false);
-      expect(w.state).toBe("draining");
+      expect(w.state).toBe("dead");
     });
 
     it("with deps: populates venv and threads skill_venv into task_invoke", async () => {
@@ -446,9 +488,9 @@ describe("SysboxSkillWorker", () => {
         if (cmd[3] === "populate") {
           // Populate exec — wait resolves immediately to exit 0.
           return {
-            stdin: new PassThrough() as unknown as Writable,
-            stdout: new PassThrough() as unknown as Readable,
-            stderr: populateStderr as unknown as Readable,
+            stdin: new PassThrough(),
+            stdout: new PassThrough(),
+            stderr: populateStderr,
             wait: async () => ({ exitCode: 0 }),
             dispose: async () => {},
           };
@@ -456,9 +498,9 @@ describe("SysboxSkillWorker", () => {
         // Supervisor exec — same shape as buildFakeSandbox's default.
         bundle.stdout.write(`${SUPERVISOR_READY}\n`);
         return {
-          stdin: bundle.stdin as unknown as Writable,
-          stdout: bundle.stdout as unknown as Readable,
-          stderr: new PassThrough() as unknown as Readable,
+          stdin: bundle.stdin,
+          stdout: bundle.stdout,
+          stderr: new PassThrough(),
           wait: async () => ({ exitCode: 0 }),
           dispose: async () => {
             bundle.execDisposeCalls.count += 1;
@@ -499,7 +541,7 @@ describe("SysboxSkillWorker", () => {
       expect(taskInvokes[0]?.lockfileHash).toBe(LOCKFILE_HASH);
     });
 
-    it("with deps: populate_failed poisons the worker, no task is invoked", async () => {
+    it("with deps: populate_failed retires the worker, no task is invoked", async () => {
       const bundle = buildFakeSandbox();
       vi.mocked(bundle.session.execStreaming).mockImplementation(async (cmd) => {
         if (cmd[3] === "populate") {
@@ -511,9 +553,9 @@ describe("SysboxSkillWorker", () => {
           populateStderr.write("error: hash mismatch on httpx-0.27.0\n");
           populateStderr.end();
           return {
-            stdin: new PassThrough() as unknown as Writable,
-            stdout: new PassThrough() as unknown as Readable,
-            stderr: populateStderr as unknown as Readable,
+            stdin: new PassThrough(),
+            stdout: new PassThrough(),
+            stderr: populateStderr,
             wait: async () => {
               // Drain the stderr stream's queued chunks into the
               // listener before resolving. One macrotask is enough.
@@ -525,9 +567,9 @@ describe("SysboxSkillWorker", () => {
         }
         bundle.stdout.write(`${SUPERVISOR_READY}\n`);
         return {
-          stdin: bundle.stdin as unknown as Writable,
-          stdout: bundle.stdout as unknown as Readable,
-          stderr: new PassThrough() as unknown as Readable,
+          stdin: bundle.stdin,
+          stdout: bundle.stdout,
+          stderr: new PassThrough(),
           wait: async () => ({ exitCode: 0 }),
           dispose: async () => {
             bundle.execDisposeCalls.count += 1;
@@ -560,8 +602,81 @@ describe("SysboxSkillWorker", () => {
       expect(r.error).toMatch(/skill_venv_populate_failed/);
       expect(r.error).toMatch(/hash mismatch/);
       expect(r.workerReusable).toBe(false);
-      expect(w.state).toBe("draining");
+      expect(w.state).toBe("dead");
       expect(taskInvokes).toHaveLength(0);
+    });
+
+    it("fails a task on a worker that died after its lease as a value, populating nothing", async () => {
+      const bundle = buildFakeSandbox();
+      const w = await SysboxSkillWorker.create({
+        workerId: "w-dead-leased",
+        sandbox: bundle.sandbox,
+        image: "cogmo-skills:test",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      w.tryAcquire();
+      bundle.stdout.end();
+      await w.dead;
+
+      const r = await w.invoke({
+        ...invokeParams("t-dead"),
+        deps: { lockfileHash: LOCKFILE_HASH, lockfileContents: "httpx==0.27.0\n" },
+      });
+
+      expect(r).toEqual({
+        ok: false,
+        error: "dispatcher_error: worker is dead: worker closed its output",
+        workerReusable: false,
+      });
+      // Only the supervisor was ever started: no populate ran.
+      expect(bundle.session.execStreaming).toHaveBeenCalledTimes(1);
+    });
+
+    it("fails the task as a value when the supervisor dies during its venv populate", async () => {
+      const bundle = buildFakeSandbox();
+      vi.mocked(bundle.session.execStreaming).mockImplementation(async (cmd) => {
+        if (cmd[3] === "populate") {
+          return {
+            stdin: new PassThrough(),
+            stdout: new PassThrough(),
+            stderr: new PassThrough(),
+            wait: async () => {
+              // The supervisor dies while uv pip sync runs.
+              bundle.stdout.end();
+              await new Promise<void>((r) => setImmediate(r));
+              return { exitCode: 0 };
+            },
+            dispose: async () => {},
+          };
+        }
+        bundle.stdout.write(`${SUPERVISOR_READY}\n`);
+        return {
+          stdin: bundle.stdin,
+          stdout: bundle.stdout,
+          stderr: new PassThrough(),
+          wait: async () => ({ exitCode: 0 }),
+          dispose: async () => {},
+        };
+      });
+      const w = await SysboxSkillWorker.create({
+        workerId: "w-venv-death",
+        sandbox: bundle.sandbox,
+        image: "cogmo-skills:test",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      w.tryAcquire();
+
+      const r = await w.invoke({
+        ...invokeParams("t-venv-death"),
+        deps: { lockfileHash: LOCKFILE_HASH, lockfileContents: "httpx==0.27.0\n" },
+      });
+
+      expect(r).toEqual({
+        ok: false,
+        error: "dispatcher_error: worker is dead: worker closed its output",
+        workerReusable: false,
+      });
+      expect(w.state).toBe("dead");
     });
 
     it("returns only once the supervisor confirms the task's processes exited", async () => {
@@ -607,7 +722,7 @@ describe("SysboxSkillWorker", () => {
       bundle.stdout.end();
 
       await expect(pending).resolves.toEqual({ ok: true, output: 1, workerReusable: false });
-      expect(w.state).toBe("draining");
+      expect(w.state).toBe("dead");
     });
 
     it("fails the task when the supervisor's output closes before its result", async () => {
@@ -628,7 +743,38 @@ describe("SysboxSkillWorker", () => {
         error: expect.stringMatching(/worker closed its output/),
         workerReusable: false,
       });
-      expect(w.state).toBe("draining");
+      expect(w.state).toBe("dead");
+    });
+
+    it("fails the task as a value when its exec's socket fails, with nothing left unhandled", async () => {
+      const uncaught = vi.fn();
+      process.on("uncaughtException", uncaught);
+      try {
+        const bundle = buildFakeSandbox();
+        const w = await SysboxSkillWorker.create({
+          workerId: "w-socket-error",
+          sandbox: bundle.sandbox,
+          image: "cogmo-skills:test",
+          expiresAt: new Date(Date.now() + 60_000),
+        });
+        w.tryAcquire();
+        const pending = w.invoke(invokeParams("t-socket-error"));
+        await new Promise((r) => setImmediate(r));
+        // The sandbox forwards an exec socket error to both demuxed streams.
+        const reset = new Error("read ECONNRESET");
+        bundle.stdout.destroy(reset);
+        bundle.stderr.destroy(reset);
+
+        await expect(pending).resolves.toMatchObject({
+          ok: false,
+          error: expect.stringMatching(/read ECONNRESET/),
+          workerReusable: false,
+        });
+        await new Promise((r) => setImmediate(r));
+        expect(uncaught).not.toHaveBeenCalled();
+      } finally {
+        process.off("uncaughtException", uncaught);
+      }
     });
 
     it("keeps a delivered result when the host watchdog fires before task_exited", async () => {
@@ -650,7 +796,7 @@ describe("SysboxSkillWorker", () => {
       } finally {
         vi.useRealTimers();
       }
-      expect(w.state).toBe("draining");
+      expect(w.state).toBe("dead");
     });
 
     it("retires itself when its supervisor dies while idle", async () => {
@@ -664,8 +810,8 @@ describe("SysboxSkillWorker", () => {
       bundle.stdout.end();
       await new Promise((r) => setImmediate(r));
 
-      expect(w.state).toBe("draining");
-      expect(w.tryAcquire()).toBe(false);
+      expect(w.state).toBe("dead");
+      expect(w.tryAcquire().isErr()).toBe(true);
     });
 
     it("does not serve the previous task's late ctx_call with the next task's handler", async () => {
@@ -701,10 +847,10 @@ describe("SysboxSkillWorker", () => {
       expect(handlerB.handle).not.toHaveBeenCalled();
     });
 
-    it("host watchdog fires when supervisor never replies (poisons worker)", async () => {
+    it("host watchdog fires when supervisor never replies (the worker dies)", async () => {
       // Supervisor stub never writes a task_result. The host-side watchdog
       // (= wallClockS + 10s grace) fires; worker reports
-      // `supervisor_unresponsive` and goes draining.
+      // `supervisor_unresponsive` and dies.
       const bundle = buildFakeSandbox();
       // No autoRespond — stub stays silent.
       const w = await SysboxSkillWorker.create({
@@ -733,7 +879,7 @@ describe("SysboxSkillWorker", () => {
       } finally {
         vi.useRealTimers();
       }
-      expect(w.state).toBe("draining");
+      expect(w.state).toBe("dead");
     });
   });
 
@@ -778,9 +924,9 @@ describe("SysboxSkillWorker", () => {
       const failingStdout = new PassThrough();
       failingStdout.write(`${SUPERVISOR_READY}\n`);
       const failingExec: ExecStreamingHandle = {
-        stdin: new PassThrough() as unknown as Writable,
-        stdout: failingStdout as unknown as Readable,
-        stderr: new PassThrough() as unknown as Readable,
+        stdin: new PassThrough(),
+        stdout: failingStdout,
+        stderr: new PassThrough(),
         wait: async () => ({ exitCode: 0 }),
         dispose: async () => {
           throw new Error("exec dispose failed");
@@ -798,6 +944,71 @@ describe("SysboxSkillWorker", () => {
       expect(w.state).toBe("disposed");
       // sandbox.delete still ran despite exec.dispose throwing.
       expect(bundle.sandbox.delete).toHaveBeenCalled();
+    });
+  });
+
+  describe("death", () => {
+    it("resolves dead the moment its supervisor goes away", async () => {
+      const bundle = buildFakeSandbox();
+      const w = await SysboxSkillWorker.create({
+        workerId: "w-dead",
+        sandbox: bundle.sandbox,
+        image: "cogmo-skills:test",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      bundle.stdout.end();
+      await expect(w.dead).resolves.toMatch(/worker closed its output/);
+    });
+
+    it("dies when its signal aborts, closing the supervisor's stdin", async () => {
+      const bundle = buildFakeSandbox();
+      const lifetime = new AbortController();
+      const w = await SysboxSkillWorker.create({
+        workerId: "w-signal",
+        sandbox: bundle.sandbox,
+        image: "cogmo-skills:test",
+        expiresAt: new Date(Date.now() + 60_000),
+        signal: lifetime.signal,
+      });
+      lifetime.abort(new Error("pool disposed"));
+      await expect(w.dead).resolves.toBe("pool disposed");
+      expect(w.state).toBe("dead");
+      expect(bundle.stdin.writableEnded).toBe(true);
+    });
+
+    it("creates nothing once its signal has aborted", async () => {
+      const bundle = buildFakeSandbox();
+      await expect(
+        SysboxSkillWorker.create({
+          workerId: "w-aborted",
+          sandbox: bundle.sandbox,
+          image: "cogmo-skills:test",
+          expiresAt: new Date(Date.now() + 60_000),
+          signal: AbortSignal.abort(new Error("pool disposed")),
+        }),
+      ).rejects.toThrow(/pool disposed/);
+      expect(bundle.sandbox.ensureImagePresent).not.toHaveBeenCalled();
+      expect(bundle.sandbox.create).not.toHaveBeenCalled();
+    });
+
+    it("stops a spawn whose signal aborts while its container is created, and deletes it", async () => {
+      const bundle = buildFakeSandbox();
+      const lifetime = new AbortController();
+      vi.mocked(bundle.sandbox.create).mockImplementation(async () => {
+        lifetime.abort(new Error("pool disposed"));
+        return bundle.session;
+      });
+      await expect(
+        SysboxSkillWorker.create({
+          workerId: "w-aborting",
+          sandbox: bundle.sandbox,
+          image: "cogmo-skills:test",
+          expiresAt: new Date(Date.now() + 60_000),
+          signal: lifetime.signal,
+        }),
+      ).rejects.toThrow(/pool disposed/);
+      expect(bundle.session.execStreaming).not.toHaveBeenCalled();
+      expect(bundle.sandbox.delete).toHaveBeenCalledWith(bundle.session);
     });
   });
 

@@ -19,3 +19,18 @@ export const DEFAULT_WALL_CLOCK_S: Readonly<Record<SkillManifest["tier"], number
   wasm: 30,
   container: 60,
 };
+
+/**
+ * A signal that aborts with a `TimeoutError` after `ms`. Same contract as
+ * `AbortSignal.timeout`, which runs on Node's internal timers where fake
+ * timers can't reach it; this one is scheduled with `setTimeout`. Unref'd,
+ * so a pending deadline never holds the process open.
+ */
+export function timeoutSignal(ms: number): AbortSignal {
+  const controller = new AbortController();
+  setTimeout(
+    () => controller.abort(new DOMException(`timed out after ${ms}ms`, "TimeoutError")),
+    ms,
+  ).unref();
+  return controller.signal;
+}
