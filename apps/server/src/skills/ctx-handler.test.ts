@@ -1172,6 +1172,21 @@ describe("DefaultCtxHandler", () => {
       });
     });
 
+    it("memory.remember names the running skill whatever source or name the skill passes", async () => {
+      const m = manifest("effects:\n  - writes_memory");
+      const d = deps();
+      const h = makeHandler(m, d);
+      await h.handle({
+        method: "memory.remember",
+        args: { content: "x", skillName: "other", source: "live_retain" },
+      });
+      expect(d.memory.stageRetain).toHaveBeenCalledWith("x", {
+        context: "from skill 'test-skill'",
+        source: "skill",
+        skillName: "test-skill",
+      });
+    });
+
     it("log.info accepts structured fields and emits them on the pino child", async () => {
       const d = deps();
       const h = makeHandler(manifest(), d);

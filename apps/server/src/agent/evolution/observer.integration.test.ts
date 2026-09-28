@@ -619,6 +619,35 @@ describe("runObserver — real PG + recording memory mock", () => {
     expect(remaining[0]?.count).toBe("0");
   });
 
+  it("drains a skill's staged row with source=skill and the skill's name in metadata", async () => {
+    const { conversationId, profileId } = await seedConversation({ messageCount: 4 });
+    // The shape a skill's `ctx.memory.remember` stages.
+    await pgClient.unsafe(
+      `INSERT INTO pending_memories (user_id, profile_id, content, source, skill_name) VALUES ($1, $2, $3, 'skill', 'ci_watch')`,
+      [userId, profileId, "the build is green"],
+    );
+
+    const stub = buildStubProvider({ extractionMemories: [] });
+    const recorder = buildRecordingMemory();
+
+    const result = await runObserver({ data: { conversationId } }, fakeStep, {
+      runInTx: fakeRunInTx,
+      agentStore: store,
+      transportStore,
+      resolveProvider: () =>
+        Promise.resolve({
+          provider: stub.provider,
+          limits: { contextWindow: null, maxOutputTokens: null },
+        }),
+      memory: recorder.memory,
+    });
+
+    if (result.status !== "processed") throw new Error("expected processed");
+    expect(result.drained.drained).toBe(1);
+    const drainCall = recorder.calls.find((c) => c.items.length > 0);
+    expect(drainCall?.items[0]?.metadata).toEqual({ source: "skill", skill: "ci_watch" });
+  });
+
   it("staged-row class lineage flows through: a row staged by a classed profile retains profile_class:<class>", async () => {
     // Speaker-isolation invariant under multi-profile drains. The
     // pending row is staged by profile-A (classed `intimate`); the

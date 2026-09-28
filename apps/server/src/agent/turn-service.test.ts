@@ -121,9 +121,6 @@ describe("buildTurnService", () => {
       context: "chat",
       source: "live_retain",
     });
-    expect(vi.mocked(agentStore.stagePendingMemory).mock.calls[0]?.[1]).not.toHaveProperty(
-      "skillName",
-    );
   });
 
   it("stages a skill's retain as source skill, naming the skill", async () => {

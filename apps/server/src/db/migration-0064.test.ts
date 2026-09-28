@@ -1,9 +1,8 @@
 /**
- * `pending_memory_source` gains `skill`, and `chk_pending_memories_skill_name`
- * ties `pending_memories.skill_name` to it. Replays the committed journal
- * through `migratePerFile` on a fresh PGlite: the enum is committed long before
- * the `ADD VALUE`, as on a production upgrade, so a CHECK naming `skill` in the
- * same file would fail with `unsafe use of new value`.
+ * Migrations 0064–0065 add `skill` to `pending_memory_source` and tie
+ * `pending_memories.skill_name` to it with `chk_pending_memories_skill_name`.
+ * Replays the committed journal through `migratePerFile`, as on a production
+ * upgrade.
  */
 
 import { PGlite } from "@electric-sql/pglite";
@@ -54,6 +53,9 @@ describe("migrations 0064–0065 — pending_memories skill source", () => {
     await db
       .insert(pendingMemories)
       .values({ userId, content: "the build is green", source: "skill", skillName: "ci_watch" });
+    await db
+      .insert(pendingMemories)
+      .values({ userId, content: "likes tea", source: "live_retain" });
 
     const violation = {
       cause: { message: expect.stringMatching(/chk_pending_memories_skill_name/) },
