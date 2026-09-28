@@ -122,11 +122,15 @@ class _LineReader:
         if not chunk:
             self.eof = True
             return []
+        # The held partial frame has no newline, so only the new chunk is
+        # searched — a multi-MB frame costs one pass, not one per chunk.
         self._buf += chunk
         frames: list[bytes] = []
-        while (nl := self._buf.find(b"\n")) >= 0:
+        nl = self._buf.find(b"\n", len(self._buf) - len(chunk))
+        while nl >= 0:
             frames.append(bytes(self._buf[:nl]))
             del self._buf[: nl + 1]
+            nl = self._buf.find(b"\n")
         if len(self._buf) > MAX_FRAME_BYTES:
             raise FrameTooLargeError()
         return frames

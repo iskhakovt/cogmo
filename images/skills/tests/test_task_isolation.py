@@ -306,6 +306,39 @@ class TestSupervisorProtocol:
         assert result["type"] == "task_result"
         assert result["output"] == {"now": "right"}
 
+    def test_relays_a_ctx_result_the_size_of_an_http_body(self, sup: _Supervisor) -> None:
+        sup.send(
+            {
+                "type": "task_invoke",
+                "id": "t-big",
+                "skill": "big",
+                "inputs": {},
+                "body": "async def run(inputs, ctx):\n    return {'len': len(await ctx.now())}\n",
+                "wallClockS": 10,
+            }
+        )
+        call = sup.next_frame(5)
+        while call is not None and call.get("type") != "ctx_call":
+            call = sup.next_frame(5)
+        assert call is not None
+        big = "x" * (5 * 1024 * 1024)
+        sup.send({"type": "ctx_result", "taskId": "t-big", "id": call["id"], "ok": True, "value": big})
+        result = sup.next_frame(10)
+        assert result is not None
+        assert result["output"] == {"len": len(big)}
+
+    def test_fails_a_task_whose_frame_exceeds_the_cap(self, sup: _Supervisor) -> None:
+        body = (
+            "import asyncio, sys\n"
+            "async def run(inputs, ctx):\n"
+            "    sys.stdout.write('x' * (16 * 1024 * 1024 + 1))\n"
+            "    sys.stdout.flush()\n"
+            "    await asyncio.sleep(30)\n"
+        )
+        result = sup.run_task("t-flood", body, {}, wall_clock_s=10)
+        assert result == {"type": "task_result", "id": "t-flood", "ok": False, "error": "task_frame_too_large"}
+        assert sup.await_exit("t-flood") is not None
+
     def test_stamps_the_task_result_with_the_task_id(self, sup: _Supervisor) -> None:
         body = (
             "import asyncio, json, sys\n"
