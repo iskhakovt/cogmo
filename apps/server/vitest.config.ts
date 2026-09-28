@@ -37,7 +37,7 @@ const PYODIDE_MAX_WORKERS = (() => {
 const PYODIDE_HEAVY_UNIT_GLOBS: readonly string[] = [
   "src/skills/runner.test.ts",
   "src/skills/runner.register.test.ts",
-  "src/skills/worker-wasm/**/*.test.ts",
+  "src/skills/worker-wasm/host.test.ts",
 ];
 
 /**

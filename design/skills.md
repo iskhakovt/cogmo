@@ -128,10 +128,10 @@ The worker needs a stdin-attached exec that streams both ways. Daytona's PTY exe
 
 | Piece | Responsibility |
 |-|-|
-| **Pool manager** (`SysboxWorkerPool`) | Track each worker's state (`idle` / `busy` / `draining`). Scale between `min` and `max` on demand. Recycle workers after N tasks or T ms age. Sweep idle workers above `min`. |
-| **Worker** (`SysboxSkillWorker`) | One sysbox container with a `SandboxSession`, reused across many tasks. Spawns the python supervisor process ONCE at create-time via `session.execStreaming` and refuses it unless it announces the host's protocol version. The host's `Dispatcher` multiplexes sequential tasks over the supervisor's stdin/stdout; `invoke()` returns only after the supervisor's `task_exited`. |
+| **Pool manager** (`SysboxWorkerPool`) | Lease idle workers to tasks; queue beyond `max`. Scale between `min` and `max` on demand. Replace a dead worker at once, back up to `min`. Retire workers after N tasks or T ms age. Sweep idle workers above `min`. |
+| **Worker** (`SysboxSkillWorker`) | One sysbox container with a `SandboxSession`, reused across many tasks. Spawns the python supervisor process ONCE at create-time via `session.execStreaming` and refuses it unless it announces the host's protocol version. `invoke()` returns once the supervisor's `task_exited` confirms the task's processes are gone, or the worker dies. |
 | **Supervisor** (`supervisor.py`) | Long-lived python process inside the container; it holds the host channel but never reads it. Per task it forks a **relay**, which forks the **task process** before reading anything from the host; see [State reset between tasks](#state-reset-between-tasks-confirmed). After the relay exits it kills and reaps its whole subtree, then sends `task_exited`. EOF on stdin = clean shutdown. |
-| **Dispatcher** | One `Dispatcher` per worker (NOT per task), reused across the worker's lifetime over a persistent NDJSON transport. Per-task `CtxHandler` is supplied at each `invoke()` call so the run id, manifest, and audit hooks scope to that task; a ctx call is served only by the handler of the running task that issued it. |
+| **Dispatcher** | The shell around a worker's state machine; see [Host-side worker lifecycle](#host-side-worker-lifecycle-confirmed). One per worker (NOT per task), reused across the worker's lifetime. Per-task `CtxHandler` is supplied at each `invoke()` call so the run id, manifest, and audit hooks scope to that task; a ctx call is served only by the handler of the running task that issued it. |
 
 ### Protocol
 
@@ -164,9 +164,27 @@ A worker has one task in flight and possibly several `ctx_call`s nested inside i
 {"type": "task_exited", "id": "run-7f3"}
 ```
 
-stdin/stdout chosen over HTTP / Unix socket for simplicity — one process per worker, no port allocation, no service discovery. Inside the container the host channel never reaches skill code; see below.
+stdin/stdout chosen over HTTP / Unix socket for simplicity — one process per worker, no port allocation, no service discovery. Inside the container the host channel never reaches skill code; see [State reset between tasks](#state-reset-between-tasks-confirmed).
 
 The supervisor ships in the `cogmo-skills:<version>` image published with each release. In the release image `COGMO_SKILLS_IMAGE` defaults to the matching tag; elsewhere to `:latest`. A supervisor announcing another protocol version, or none, fails worker creation; a protocol change bumps `SUPERVISOR_PROTOCOL_VERSION` and `PROTOCOL_VERSION` together. A newer image under a host that predates the handshake runs, since that host checks no version, but every task that calls `ctx` fails with `host_protocol_mismatch`: the host answers without a `taskId`, and the relay fails the task rather than let each call stall until the wall clock.
+
+### Host-side worker lifecycle `[confirmed]`
+
+Each worker channel, in both tiers, is one pure state machine (`src/skills/worker-state.ts`) with two entry points, each returning the next state and the effects to carry out — send a frame, serve a ctx call, settle a task, report the handshake, die, become disposable, log. `command(state, cmd)` takes a host command (acquire, release, invoke) and returns a `Result`: a state that does not allow the command refuses it with a reason, and stays as it was. `observe(state, fact)` takes a fact — a worker frame, a ctx reply ready to send, a deadline, the channel ending or a send failing, the host closing it — and never refuses one. The `Dispatcher` is its shell: it feeds both, and executes the effects.
+
+| State | Meaning |
+|-|-|
+| `starting` | Awaiting the handshake: the worker's first frame, judged per tier (`supervisor_ready` at `SUPERVISOR_PROTOCOL_VERSION` for tier 2, `ready` for tier 1). |
+| `idle` | Ready and free. Only `idle` can be acquired. |
+| `leased` | Held for one task: through a venv populate before its `task_invoke`, and after its exit until its holder releases it. Only `leased` runs a task; a `dead` worker fails one as a value (`worker is dead: <reason>`). |
+| `running` | The task is on the worker. The only state that serves ctx calls, and only those naming the task. |
+| `awaiting_exit` | The task returned its result; its processes may still be alive. Only its own `task_exited` moves it back to `leased`. |
+| `dead` | Final. Entered when the handshake is refused or times out, the message stream ends or fails, a send fails, the task's deadline passes, a `task_result` or `task_exited` names another task, or the host closes the channel. A worker that dies while its caller holds it stays held until that caller releases it; only then is it disposable. |
+
+- A transport exposes the worker's frames as `messages(): AsyncIterable<WorkerFrame>`: each a validated worker message, or a malformed frame, which the handshake refuses and a live worker logs and ignores. The stream ending or failing is the worker going away. Tier 2 reads NDJSON from the supervisor's stdout. Tier 1 reads the thread's `MessagePort`; its stream fails when the thread errors or exits, and yields a `task_exited` after each `task_result`, since the thread never outlives its one task.
+- `invoke()` resolves the task's outcome: its result, or why it has none, and its exit (`confirmed`, or `unconfirmed` with a reason). A result delivered before the worker died is kept; the worker is reusable only on a confirmed exit.
+- The handshake timeout and the task deadline (wall clock plus a grace) are `AbortSignal`s that feed events in; a deadline for a task already settled is ignored.
+- The pool subscribes to each worker's `dead` and `disposable` as it spawns it. It replaces a dead worker at once, back up to `min`, and removes the worker and tears its container down once it is disposable — at once, or once the task holding it returns; until then it counts toward `max`. A container still tearing down does not count, so while teardowns run the sandbox can hold more than `max`. A freed slot goes to a queued acquirer first, and a spawn that fails fails one acquire — its own, or the head of the queue — and spawns for the next queued one. A death is early when the worker dies on its own, never leased, within a minute of its handshake; after three early deaths in a row, only the sweep replaces dead workers, and a queued acquirer waits for a busy worker or fails if there is none. A task that returns with its worker alive clears the count. Disposing the pool aborts one signal: a live worker's channel closes on it, and a spawn stops at its next step. It returns once every container is gone, those already tearing down included.
 
 ### State reset between tasks `[confirmed]`
 
@@ -197,12 +215,12 @@ Not covered: the container filesystem (`/tmp`, `$HOME`, the writable `/skill-ven
 
 **Why not `multiprocessing` / `pebble`.** Tried; rejected. `multiprocessing.process.BaseProcess._bootstrap()` unconditionally calls `util._close_stdin()` in every worker child regardless of `fork` / `forkserver` start method, and neither library kills a task's descendants or keeps the host channel out of the task's reach — the two properties the relay exists for. The hand-rolled supervisor is stdlib-only Unix code (`os.fork`, `os.pidfd_open`, `selectors`, `prctl` through `ctypes`).
 
-**Per-skill opt-out** — `isolation: recycle` in `SKILL.md` poisons the worker after the task runs, so the pool replaces it on the next acquire and the next task gets a fresh container, filesystem included. The `isolation: subinterpreter` enum value is treated as the default; reserved for a future runtime that actually uses PEP 734.
+**Per-skill opt-out** — `isolation: recycle` in `SKILL.md` retires the worker after the task runs, and the pool replaces it, so the next task gets a fresh container, filesystem included. The `isolation: subinterpreter` enum value is treated as the default; reserved for a future runtime that actually uses PEP 734.
 
 | Mode | Today (shipped) | When to use |
 |-|-|-|
 | `subinterpreter` (default) | Process-per-task isolation; worker stays reusable. | Default for all skills — fork inherits the supervisor's pre-imports cleanly. |
-| `recycle` | Process-per-task + worker poisoned after task → replaced on next acquire. | Skills that leave files the next task must not see (rare). |
+| `recycle` | Process-per-task + worker retired after the task and replaced. | Skills that leave files the next task must not see (rare). |
 
 **Not used:** logical reset (`importlib.reload` + globals clear). Too leaky — misses library state and monkey-patches. Present in the option space but never the right answer.
 
@@ -1244,7 +1262,7 @@ UPDATE recovery_point='finished', status='success'|'error'  ← transitionToFini
 | Dependency stack | `deps.ts`, `deps-reaper*.ts`, `pyodide-compat.ts` | Lockfile compile + verify at register, venv populate + activate at invoke, unreachable-venv reaper, tier-1 Pyodide compat check |
 | Workers (tier 2) | `worker-sysbox/` | sysbox container host + in-container supervisor + warm pool |
 | Workers (tier 1) | `worker-wasm/` | Pyodide isolate host + Node Worker entry + WASM-import lint + bundled `ctx` Python SDK |
-| ctx RPC | `dispatcher.ts`, `ctx-handler.ts`, `protocol.ts` | Bi-directional NDJSON-over-stdio routing between worker + host, Zod-validated frames |
+| Worker channel + ctx RPC | `worker-state.ts`, `dispatcher.ts`, `ctx-handler.ts`, `protocol.ts` | Worker channel state machine and the shell that drives it, ctx RPC serving, Zod-validated frames |
 | Cron scheduler | `cron-ticker.ts`, `cron-fire-handler.ts` | Per-minute Inngest tick + per-skill cron invocation |
 | Git plumbing | `git-ops.ts`, `repo.ts` | Bare-repo bootstrap, remote configuration, plumbing wrappers |
 | Remote configuration | `configure-remote*.ts` | Skills-repo remote setup and its prompts, shared by the setup wizard and `cogmo migrate-skills-remote` |

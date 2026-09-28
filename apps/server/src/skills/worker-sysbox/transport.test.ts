@@ -1,168 +1,202 @@
 import { PassThrough } from "node:stream";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
+import type { WorkerFrame } from "../worker-state.js";
 import { createNdjsonTransport, MAX_BUFFER_BYTES } from "./transport.js";
 
 function pair(): { stdin: PassThrough; stdout: PassThrough } {
   return { stdin: new PassThrough(), stdout: new PassThrough() };
 }
 
+const RESULT = { type: "task_result", id: "x", ok: true, output: 1 } as const;
+const CALL = { type: "ctx_call", taskId: "x", id: "y", method: "now", args: {} } as const;
+
+function line(message: unknown): string {
+  return `${JSON.stringify(message)}\n`;
+}
+
+/** Collect what the stream yields until it ends; `error` is what it threw, if anything. */
+async function drain(
+  frames: AsyncIterable<WorkerFrame>,
+): Promise<{ received: WorkerFrame[]; error: unknown }> {
+  const received: WorkerFrame[] = [];
+  try {
+    for await (const frame of frames) received.push(frame);
+    return { received, error: undefined };
+  } catch (error) {
+    return { received, error };
+  }
+}
+
 describe("createNdjsonTransport", () => {
-  it("postMessage frames as one JSON object per line", () => {
+  it("send frames as one JSON object per line", () => {
     const { stdin, stdout } = pair();
     const t = createNdjsonTransport(stdin, stdout);
     const captured: string[] = [];
     stdin.on("data", (chunk) => captured.push(chunk.toString("utf-8")));
 
-    t.postMessage({ type: "task_invoke", id: "x" });
-    t.postMessage({ type: "ctx_result", id: "y", ok: true, value: 42 });
+    t.send({ type: "task_invoke", id: "x", skill: "s", inputs: {} });
+    t.send({ type: "ctx_result", taskId: "x", id: "y", ok: true, value: 42 });
 
     expect(captured.join("")).toBe(
-      `{"type":"task_invoke","id":"x"}\n{"type":"ctx_result","id":"y","ok":true,"value":42}\n`,
+      `{"type":"task_invoke","id":"x","skill":"s","inputs":{}}\n{"type":"ctx_result","taskId":"x","id":"y","ok":true,"value":42}\n`,
     );
   });
 
-  it("onMessage parses one JSON object per stdout line", () => {
+  it("messages yields one parsed message per stdout line", async () => {
     const { stdin, stdout } = pair();
     const t = createNdjsonTransport(stdin, stdout);
-    const handler = vi.fn();
-    t.onMessage(handler);
 
-    stdout.write(`{"type":"task_result","id":"x","ok":true}\n`);
-    stdout.write(`{"type":"ctx_call","id":"y","method":"now","args":{}}\n`);
+    stdout.write(line(RESULT));
+    stdout.end(line(CALL));
 
-    expect(handler).toHaveBeenCalledTimes(2);
-    expect(handler).toHaveBeenNthCalledWith(1, { type: "task_result", id: "x", ok: true });
-    expect(handler).toHaveBeenNthCalledWith(2, {
-      type: "ctx_call",
-      id: "y",
-      method: "now",
-      args: {},
-    });
+    expect((await drain(t.messages())).received).toEqual([RESULT, CALL]);
   });
 
-  it("buffers across chunks split mid-line", () => {
+  it("buffers across chunks split mid-line", async () => {
     const { stdin, stdout } = pair();
     const t = createNdjsonTransport(stdin, stdout);
-    const handler = vi.fn();
-    t.onMessage(handler);
 
-    stdout.write(`{"type":"task_result","i`);
-    stdout.write(`d":"x","ok":tr`);
-    stdout.write(`ue}\n{"type":"ctx_call","id":"y","method":"now","args":{}}\n`);
+    const [a, b] = [line(RESULT).slice(0, 20), line(RESULT).slice(20)];
+    stdout.write(a);
+    stdout.write(b);
+    stdout.end(line(CALL));
 
-    expect(handler).toHaveBeenCalledTimes(2);
+    expect((await drain(t.messages())).received).toEqual([RESULT, CALL]);
   });
 
-  it("drops malformed lines without crashing", () => {
+  it("drops non-JSON lines without failing", async () => {
     const { stdin, stdout } = pair();
     const t = createNdjsonTransport(stdin, stdout);
-    const handler = vi.fn();
-    t.onMessage(handler);
 
-    stdout.write(`not json at all\n`);
-    stdout.write(`{"type":"task_result","id":"x","ok":true}\n`);
+    stdout.write("not json at all\n");
+    stdout.end(line(RESULT));
 
-    expect(handler).toHaveBeenCalledTimes(1);
-    expect(handler).toHaveBeenCalledWith({ type: "task_result", id: "x", ok: true });
+    expect((await drain(t.messages())).received).toEqual([RESULT]);
   });
 
-  it("close ends stdin and silences subsequent postMessage", () => {
+  it("yields JSON that is no worker message as malformed, frames only the host sends included", async () => {
+    const { stdin, stdout } = pair();
+    const t = createNdjsonTransport(stdin, stdout);
+
+    stdout.write(line({ type: "garbage" }));
+    stdout.write(line(null));
+    stdout.write(line({ type: "ctx_result", taskId: "x", id: "y", ok: true, value: null }));
+    stdout.write(line({ type: "task_invoke", id: "x", skill: "s", inputs: {} }));
+    stdout.end(line(RESULT));
+
+    const malformed = { type: "malformed", issues: expect.any(Array) };
+    expect((await drain(t.messages())).received).toEqual([
+      malformed,
+      malformed,
+      malformed,
+      malformed,
+      RESULT,
+    ]);
+  });
+
+  it("close ends stdin and silences subsequent sends", () => {
     const { stdin, stdout } = pair();
     const t = createNdjsonTransport(stdin, stdout);
     const captured: string[] = [];
     stdin.on("data", (chunk) => captured.push(chunk.toString("utf-8")));
 
     t.close();
-    t.postMessage({ type: "task_invoke", id: "x" });
+    t.send({ type: "task_invoke", id: "x", skill: "s", inputs: {} });
 
     expect(captured).toEqual([]);
     expect(stdin.writableEnded).toBe(true);
   });
 
-  it("drops inbound stdout messages that arrive after close()", () => {
+  it("yields nothing that arrives after close()", async () => {
     const { stdin, stdout } = pair();
     const t = createNdjsonTransport(stdin, stdout);
-    const handler = vi.fn();
-    t.onMessage(handler);
+    const messages = t.messages()[Symbol.asyncIterator]();
 
-    // Pre-close message routes normally.
-    stdout.write(`{"type":"task_result","id":"x","ok":true}\n`);
-    expect(handler).toHaveBeenCalledTimes(1);
+    stdout.write(line(RESULT));
+    expect(await messages.next()).toEqual({ done: false, value: RESULT });
 
     t.close();
 
     // Late stdout (e.g. a stray ctx_call from a worker still flushing on
-    // shutdown) must not reach the handler — the dispatcher has already
-    // torn down its pending task, and the host's ctx services may have
-    // been cleaned up.
-    stdout.write(`{"type":"ctx_call","id":"y","method":"now","args":{}}\n`);
-    expect(handler).toHaveBeenCalledTimes(1);
+    // shutdown) must not reach the host — its pending task is torn down,
+    // and its ctx services may have been cleaned up.
+    stdout.write(line(CALL));
+    expect(await messages.next()).toEqual({ done: true, value: undefined });
   });
 
-  it("ignores empty lines", () => {
+  it("ignores empty lines", async () => {
     const { stdin, stdout } = pair();
     const t = createNdjsonTransport(stdin, stdout);
-    const handler = vi.fn();
-    t.onMessage(handler);
 
-    stdout.write(`\n\n{"type":"task_result","id":"x","ok":true}\n\n`);
+    stdout.end(`\n\n${line(RESULT)}\n`);
 
-    expect(handler).toHaveBeenCalledTimes(1);
+    expect((await drain(t.messages())).received).toEqual([RESULT]);
   });
 
-  it("fires onError and closes when the worker closes its output", async () => {
+  it("ends the stream when the worker closes its output", async () => {
     const { stdin, stdout } = pair();
     const t = createNdjsonTransport(stdin, stdout);
-    const messageHandler = vi.fn();
-    t.onMessage(messageHandler);
-    const errorHandler = vi.fn();
-    t.onError?.(errorHandler);
 
-    stdout.end(`{"type":"task_result","id":"x","ok":true}\n`);
-    await new Promise((r) => setImmediate(r));
+    stdout.end(line(RESULT));
 
-    expect(messageHandler).toHaveBeenCalledTimes(1);
-    expect(errorHandler).toHaveBeenCalledWith(new Error("transport: worker closed its output"));
-    expect(stdin.writableEnded).toBe(true);
+    expect(await drain(t.messages())).toEqual({ received: [RESULT], error: undefined });
   });
 
-  it("does not report the output closing after close()", async () => {
+  it("ends the stream without an error when the output closes after close()", async () => {
     const { stdin, stdout } = pair();
     const t = createNdjsonTransport(stdin, stdout);
-    const errorHandler = vi.fn();
-    t.onError?.(errorHandler);
 
     t.close();
     stdout.end();
-    await new Promise((r) => setImmediate(r));
 
-    expect(errorHandler).not.toHaveBeenCalled();
+    expect(await drain(t.messages())).toEqual({ received: [], error: undefined });
   });
 
-  it("fires onError and closes when the buffer exceeds the limit without a newline", async () => {
+  it("fails the stream when the buffer exceeds the limit without a newline", async () => {
     const { stdin, stdout } = pair();
     const t = createNdjsonTransport(stdin, stdout);
-    const messageHandler = vi.fn();
-    t.onMessage(messageHandler);
-    const errorSeen = new Promise<Error>((resolve) => {
-      t.onError?.((err) => resolve(err));
-    });
 
     // Past the limit with no newline — a worker flooding stdout. Sized
     // from the exported constant so raising the limit for `ctx.http`
     // bodies cannot silently stop exercising this path.
     stdout.write("x".repeat(MAX_BUFFER_BYTES + 1024));
 
-    // split2's `error` lands on the next tick, so await the typed callback.
-    const err = await errorSeen;
-    expect(err.message).toMatch(/transport:/);
-    // Crucially: NO message was forwarded. The previous rev surfaced a
-    // synthetic `{ type: "fatal" }` frame on `onMessage`, but that's not a
-    // valid worker protocol type — the dispatcher's WorkerMessageSchema
-    // dropped it silently and the pending task hung until wall-clock fired.
-    // `onError` is the right channel; the dispatcher rejects directly.
-    expect(messageHandler).not.toHaveBeenCalled();
-    // Transport closed itself; subsequent stdout is dropped.
-    expect(stdin.writableEnded).toBe(true);
+    const { received, error } = await drain(t.messages());
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toMatch(/transport:/);
+    // Nothing is yielded: the stream fails, and the dispatcher fails the
+    // pending task at once rather than on the wall clock.
+    expect(received).toEqual([]);
+  });
+
+  it("delivers the frames read before the buffer overflowed, then fails", async () => {
+    const { stdin, stdout } = pair();
+    const t = createNdjsonTransport(stdin, stdout);
+    // Already reading, as the dispatcher is.
+    const drained = drain(t.messages());
+    await new Promise((r) => setImmediate(r));
+
+    // One write: a whole frame, then an unterminated flood.
+    stdout.write(`${line(RESULT)}${"x".repeat(MAX_BUFFER_BYTES + 1024)}`);
+
+    expect(await drained).toEqual({
+      received: [RESULT],
+      error: new Error("transport: maximum buffer reached"),
+    });
+  });
+
+  it("fails the stream when the worker's output errors", async () => {
+    const { stdin, stdout } = pair();
+    const t = createNdjsonTransport(stdin, stdout);
+    const drained = drain(t.messages());
+
+    stdout.write(line(RESULT));
+    // What the sandbox does to stdout when the exec's socket fails.
+    stdout.destroy(new Error("socket hang up"));
+
+    expect(await drained).toEqual({
+      received: [RESULT],
+      error: new Error("transport: socket hang up"),
+    });
   });
 });

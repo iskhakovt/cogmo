@@ -16,10 +16,17 @@ import { z } from "zod";
  */
 export const SUPERVISOR_PROTOCOL_VERSION = 2;
 
-export const SupervisorReadySchema = z.object({
+/** Tier 2 only: the supervisor's first frame, announcing its protocol version. */
+const SupervisorReadySchema = z.object({
   type: z.literal("supervisor_ready"),
   protocolVersion: z.number().int(),
 });
+
+/** Tier 1 only: the Pyodide worker's first frame once it has loaded. */
+const WorkerReadySchema = z.object({ type: z.literal("ready") });
+
+/** Tier 1 only: the Pyodide worker's first frame when it failed to load. */
+const WorkerFatalSchema = z.object({ type: z.literal("fatal"), error: z.string() });
 
 export const TaskInvokeSchema = z.object({
   type: z.literal("task_invoke"),
@@ -37,10 +44,9 @@ export const TaskInvokeSchema = z.object({
   body: z.string().optional(),
   /**
    * Per-task isolation hint from the manifest. Tier 1 ignores it (single-
-   * heap WASM). Tier 2 uses `recycle` to mark the worker non-reusable
-   * after the task — pool replaces it on next acquire. `subinterpreter`
-   * is reserved for a future runtime; it behaves like the default
-   * process-per-task isolation.
+   * heap WASM). Tier 2 retires the worker after a `recycle` task, and the
+   * pool replaces it. `subinterpreter` is reserved for a future runtime; it
+   * behaves like the default process-per-task isolation.
    */
   isolation: z.enum(["subinterpreter", "recycle"]).optional(),
   /** Wall-clock cap in seconds, enforced by the task's relay inside the container. */
@@ -83,10 +89,11 @@ export type TaskInvoke = z.infer<typeof TaskInvokeSchema>;
  * `runner.py` populates `peakMemoryBytes` from `getrusage(RUSAGE_SELF)`
  * just before emitting `task_result`; tier 1 (Pyodide WASM) leaves it
  * unset because `getrusage` is process-wide and would inflate under
- * concurrent workers. Synthesised `task_result`s — the relay's (wall-clock
- * kill, task process died) and the dispatcher's (`task_exited_without_result`)
- * — also leave it unset. The host fills in `wallClockMs` separately and
- * writes the combined blob to `skill_runs.resource_usage`.
+ * concurrent workers. Synthesised outcomes — the relay's `task_result`
+ * (wall-clock kill, task process died) and the state machine's
+ * `exited_without_result` — also leave it unset. The host fills in
+ * `wallClockMs` separately and writes the combined blob to
+ * `skill_runs.resource_usage`.
  *
  * Boundary translation: this protocol schema uses `.optional()` (field
  * may be absent on the wire) while the storage schema
@@ -153,9 +160,10 @@ export const CtxResultSchema = z.union([CtxResultOkSchema, CtxResultErrSchema]);
 export type CtxResult = z.infer<typeof CtxResultSchema>;
 
 /**
- * Tier 2 only: the supervisor has killed and reaped every process the task
- * started. Sent after the task's `task_result` (or in place of one, when
- * the task's relay died first); the worker is reusable only after it.
+ * Every process the task started has been killed and reaped; the worker is
+ * reusable only after it. The tier-2 supervisor sends it after the task's
+ * `task_result`, or in place of one when the task's relay died first. Tier 1
+ * never sends it: its port transport yields one after each `task_result`.
  */
 export const TaskExitedSchema = z.object({
   type: z.literal("task_exited"),
@@ -163,11 +171,16 @@ export const TaskExitedSchema = z.object({
 });
 export type TaskExited = z.infer<typeof TaskExitedSchema>;
 
+/** Every frame a worker sends the host. A worker's first frame is its handshake. */
 export const WorkerMessageSchema = z.union([
-  TaskInvokeSchema,
+  SupervisorReadySchema,
+  WorkerReadySchema,
+  WorkerFatalSchema,
   TaskResultSchema,
   TaskExitedSchema,
   CtxCallSchema,
-  CtxResultSchema,
 ]);
 export type WorkerMessage = z.infer<typeof WorkerMessageSchema>;
+
+/** Every frame the host sends a worker. */
+export type HostMessage = TaskInvoke | CtxResult;
