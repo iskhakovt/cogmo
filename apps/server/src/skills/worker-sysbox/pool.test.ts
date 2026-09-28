@@ -68,8 +68,9 @@ function fakeWorker(workerId: string, opts: FakeWorkerOptions = {}): FakeWorker 
     },
     retire: () => worker.die("retired"),
     invoke: async (params) => {
-      taskCount += 1;
       const result = await (opts.invoke ?? succeed)(params);
+      // Counted once the task returns, as `SysboxSkillWorker` does.
+      taskCount += 1;
       lastUsed = now();
       if (!result.workerReusable) worker.die("not reusable");
       return result;
@@ -371,11 +372,10 @@ describe("SysboxWorkerPool", () => {
 
   describe("a worker that dies under its task", () => {
     /** A pool whose tasks each wait for `task` to open. */
-    function holding(max: number, task: Promise<void>) {
+    function holding(sizing: { min: number; max: number }, task: Promise<void>) {
       const spawned: FakeWorker[] = [];
       const { pool } = poolWith({
-        min: 1,
-        max,
+        ...sizing,
         createWorker: async ({ workerId }) => {
           const w = fakeWorker(workerId, {
             invoke: async () => {
@@ -398,7 +398,7 @@ describe("SysboxWorkerPool", () => {
       // The supervisor dies while the task holds the worker — during a venv
       // populate, say. Its container must outlive the task's own use of it.
       const task = gate();
-      const h = holding(2, task.promise);
+      const h = holding({ min: 1, max: 2 }, task.promise);
       const pool = await h.pool;
       const first = expectDefined(h.spawned[0], "eager worker");
 
@@ -419,7 +419,7 @@ describe("SysboxWorkerPool", () => {
 
     it("still counts toward `max` until its task returns", async () => {
       const task = gate();
-      const h = holding(1, task.promise);
+      const h = holding({ min: 1, max: 1 }, task.promise);
       const pool = await h.pool;
       const first = expectDefined(h.spawned[0], "eager worker");
 
@@ -441,7 +441,7 @@ describe("SysboxWorkerPool", () => {
 
     it("is torn down by dispose even while its task runs", async () => {
       const task = gate();
-      const h = holding(2, task.promise);
+      const h = holding({ min: 1, max: 2 }, task.promise);
       const pool = await h.pool;
       const first = expectDefined(h.spawned[0], "eager worker");
       const invoked = pool.invoke(invokeParams("t-dying"));
@@ -516,32 +516,198 @@ describe("SysboxWorkerPool", () => {
     await pool.dispose();
   });
 
-  it("stops replacing workers that die before their first task, and leaves them to the sweep", async () => {
-    // An image whose supervisor dies right after its handshake.
-    const spawned: FakeWorker[] = [];
-    const { pool: created, sweep } = poolWith({
-      min: 1,
-      max: 1,
-      createWorker: async ({ workerId }) => {
-        await new Promise<void>((r) => setImmediate(r));
-        const w = fakeWorker(workerId);
-        spawned.push(w);
-        queueMicrotask(() => w.die("supervisor exited"));
-        return w;
+  describe("workers that die before their first task", () => {
+    /**
+     * A pool whose `n`th spawn dies right after its handshake when `dies(n)`,
+     * as on an image whose supervisor cannot run. Tasks wait for `task`.
+     */
+    function crashing(opts: {
+      min: number;
+      max: number;
+      dies: (n: number) => boolean;
+      task?: Promise<void>;
+      now?: () => number;
+    }) {
+      const spawned: FakeWorker[] = [];
+      const { pool, sweep } = poolWith({
+        min: opts.min,
+        max: opts.max,
+        ...(opts.now !== undefined && { now: opts.now }),
+        createWorker: async ({ workerId }) => {
+          await new Promise<void>((r) => setImmediate(r));
+          const w = fakeWorker(workerId, {
+            ...(opts.now !== undefined && { now: opts.now }),
+            invoke: async () => {
+              await opts.task;
+              return succeed();
+            },
+          });
+          spawned.push(w);
+          if (opts.dies(spawned.length)) queueMicrotask(() => w.die("supervisor exited"));
+          return w;
+        },
+      });
+      return { pool, sweep, spawned };
+    }
+
+    /** Let the deaths and spawns a test set off play out. */
+    async function settle(): Promise<void> {
+      await new Promise<void>((r) => setTimeout(r, 20));
+    }
+
+    it.each([1, 2])(
+      "stop being replaced at once from the third in a row, with max %i, and are left to the sweep",
+      async (max) => {
+        const h = crashing({ min: 1, max, dies: () => true });
+        const pool = await h.pool;
+        await vi.waitFor(() => expect(h.spawned).toHaveLength(3));
+        await settle();
+        expect(h.spawned).toHaveLength(3);
+        // An acquirer fails rather than waits on an image that cannot run.
+        await expect(pool.invoke(invokeParams("t-1"))).rejects.toThrow(
+          /keep dying before their first task/,
+        );
+
+        const before = h.spawned.length;
+        h.sweep();
+        await vi.waitFor(() => expect(h.spawned).toHaveLength(before + 1));
+        await pool.dispose();
       },
-    });
-    const pool = await created;
-    await vi.waitFor(() => expect(spawned).toHaveLength(3));
-    await new Promise<void>((r) => setTimeout(r, 20));
-    expect(spawned).toHaveLength(3);
-    // An acquirer fails rather than waits on an image that cannot run.
-    await expect(pool.invoke(invokeParams("t-1"))).rejects.toThrow(
-      /keep dying before their first task/,
     );
 
-    sweep();
-    await vi.waitFor(() => expect(spawned.length).toBeGreaterThanOrEqual(4));
-    await pool.dispose();
+    it("count afresh once a task returns with its worker alive", async () => {
+      // Spawns 1–3 die, and the pool stops replacing them. Spawn 4 runs a
+      // task; spawn 5 dying is then the first death of a new run, replaced
+      // at once.
+      const dying = new Set([1, 2, 3, 5]);
+      const h = crashing({ min: 2, max: 2, dies: (n) => dying.has(n) });
+      const pool = await h.pool;
+      await vi.waitFor(() => expect(h.spawned).toHaveLength(4));
+      await settle();
+      expect(h.spawned).toHaveLength(4);
+      await pool.invoke(invokeParams("t-1"));
+
+      h.sweep();
+
+      await vi.waitFor(() => expect(h.spawned).toHaveLength(6));
+      await pool.dispose();
+    });
+
+    it("leave an acquire queued behind a busy worker to wait for it", async () => {
+      const task = gate();
+      const h = crashing({ min: 1, max: 1, dies: (n) => n <= 3, task: task.promise });
+      const pool = await h.pool;
+      await vi.waitFor(() => expect(h.spawned).toHaveLength(3));
+      await settle();
+      h.sweep();
+      await vi.waitFor(() => expect(pool.stats()).toMatchObject({ idle: 1 }));
+
+      // The first task on the healthy worker has not returned yet.
+      const first = pool.invoke(invokeParams("t-1"));
+      const second = pool.invoke(invokeParams("t-2"));
+      expect(pool.stats().queued).toBe(1);
+      task.open();
+
+      await expect(first).resolves.toMatchObject({ ok: true });
+      await expect(second).resolves.toMatchObject({ ok: true });
+      await pool.dispose();
+    });
+
+    it("do not include idle workers killed a minute or more after their handshake", async () => {
+      // A Docker restart kills every idle worker at once.
+      let now = 0;
+      const h = crashing({ min: 3, max: 3, dies: () => false, now: () => now });
+      const pool = await h.pool;
+      now += 60_000;
+      for (const w of h.spawned.slice()) w.die("supervisor exited");
+
+      await vi.waitFor(() => expect(pool.stats()).toMatchObject({ total: 3, idle: 3 }));
+      expect(h.spawned).toHaveLength(6);
+      await pool.dispose();
+    });
+
+    it("do not include workers their first task kills", async () => {
+      const spawned: FakeWorker[] = [];
+      const pool = await poolWith({
+        min: 1,
+        max: 1,
+        createWorker: async ({ workerId }) => {
+          const w: FakeWorker = fakeWorker(workerId, {
+            invoke: async () => {
+              w.die("supervisor exited");
+              return {
+                ok: false,
+                error: "dispatcher_error: worker is dead",
+                workerReusable: false,
+              };
+            },
+          });
+          spawned.push(w);
+          return w;
+        },
+      }).pool;
+      for (const id of ["t-1", "t-2", "t-3"]) await pool.invoke(invokeParams(id));
+
+      // The third worker's replacement comes up at once, not on the sweep.
+      await vi.waitFor(() => expect(spawned).toHaveLength(4));
+      await pool.dispose();
+    });
+
+    it("do not include workers the pool retires itself", async () => {
+      // Five workers die under their tasks while one acquire is queued, so
+      // five spawns go out for it: it takes one, and four stay idle, never
+      // leased. The sweep retires three of them well inside a minute of their
+      // handshake.
+      let now = 0;
+      let spawns = 0;
+      const firstTasks = gate();
+      const heldSpawns = gate();
+      const queuedTask = gate();
+      const spawned: FakeWorker[] = [];
+      const { pool: created, sweep } = poolWith({
+        min: 1,
+        max: 5,
+        idleShutdownMs: 1000,
+        now: () => now,
+        createWorker: async ({ workerId }) => {
+          spawns += 1;
+          if (spawns > 5) await heldSpawns.promise;
+          const w = fakeWorker(workerId, {
+            now: () => now,
+            invoke: async ({ taskId }) => {
+              await (taskId === "t-queued" ? queuedTask.promise : firstTasks.promise);
+              return succeed();
+            },
+          });
+          spawned.push(w);
+          return w;
+        },
+      });
+      const pool = await created;
+      const firsts = ["t-1", "t-2", "t-3", "t-4", "t-5"].map((id) => pool.invoke(invokeParams(id)));
+      await vi.waitFor(() => expect(pool.stats()).toMatchObject({ busy: 5 }));
+      const queued = pool.invoke(invokeParams("t-queued"));
+      for (const w of spawned.slice()) w.die("supervisor exited");
+      firstTasks.open();
+      await Promise.all(firsts);
+      await vi.waitFor(() => expect(spawns).toBe(10));
+      heldSpawns.open();
+      await vi.waitFor(() => expect(pool.stats()).toMatchObject({ busy: 1, idle: 4 }));
+
+      now += 1500;
+      sweep();
+      await vi.waitFor(() => expect(pool.stats()).toMatchObject({ total: 2 }));
+      // The idle worker left dies right after its handshake: the first
+      // death of a run, replaced at once.
+      for (const w of spawned.filter((s) => s.state === "idle" || s.state === "busy")) {
+        w.die("supervisor exited");
+      }
+
+      await vi.waitFor(() => expect(spawns).toBe(11));
+      queuedTask.open();
+      await queued;
+      await pool.dispose();
+    });
   });
 
   it("sweeps idle workers above `min` after idleShutdownMs", async () => {

@@ -120,13 +120,21 @@ interface PendingWaiter {
 const REAPER_BACKSTOP_MS = 60 * 60 * 1000;
 
 /**
- * Deaths in a row, each of a worker that never completed a task, after
- * which a dead worker is no longer replaced at once. An image whose
- * supervisor dies right after its handshake would otherwise create and
- * delete containers back to back; the sweep still retries once per
- * `idleSweepIntervalMs`.
+ * Early deaths in a row after which a dead worker is no longer replaced at
+ * once. A death is early when the worker dies on its own, never leased,
+ * within `CRASH_LOOP_WINDOW_MS` of its handshake. An image whose supervisor
+ * cannot run would otherwise create and delete containers back to back; the
+ * sweep still retries once per `idleSweepIntervalMs`. A task that returns
+ * with its worker alive clears the count.
  */
 const CRASH_LOOP_DEATHS = 3;
+
+/**
+ * How soon after its handshake a worker must die for the death to be early.
+ * A supervisor has no idle timeout, so an idle worker that dies later was
+ * killed from outside (a Docker restart, the reaper), not by its image.
+ */
+const CRASH_LOOP_WINDOW_MS = 60_000;
 
 /**
  * Internal sentinel for `dispose()` racing an in-flight `#spawnOne()`. Caller
@@ -201,8 +209,10 @@ export class SysboxWorkerPool {
   /** Every worker whose container lives, dead ones a task still holds included. */
   #workers: WorkerHandle[] = [];
   #queue: PendingWaiter[] = [];
-  /** See `CRASH_LOOP_DEATHS`. */
-  #deathsWithoutTask = 0;
+  /** Early deaths in a row; see `CRASH_LOOP_DEATHS`. */
+  #earlyDeaths = 0;
+  /** Workers the pool has leased or retired: their deaths are never early. */
+  #leasedOrRetired = new WeakSet<WorkerHandle>();
   /** Aborted by `dispose()`. Every worker is created with its signal. */
   #lifetime = new AbortController();
   #createWorker: NonNullable<SysboxWorkerPoolOptions["createWorker"]>;
@@ -312,7 +322,7 @@ export class SysboxWorkerPool {
     } catch (e) {
       // worker.invoke returns its failures as ok=false — this path is for
       // bugs (precondition asserts, etc.). Retire the worker.
-      worker.retire();
+      this.#retire(worker);
       throw e;
     } finally {
       this.#postInvoke(worker);
@@ -371,7 +381,7 @@ export class SysboxWorkerPool {
         this.#serveQueue();
         throw e;
       }
-      if (w.tryAcquire()) return w;
+      if (this.#lease(w)) return w;
       // Lost the race for the worker we just spawned, or it is already
       // dead. Some *other* worker may have gone idle while we awaited the
       // spawn (a parallel task finished, queue handover took ours).
@@ -390,9 +400,22 @@ export class SysboxWorkerPool {
   /** Lease the first idle worker, if any. */
   #acquireIdle(): WorkerHandle | undefined {
     for (const w of this.#workers) {
-      if (w.tryAcquire()) return w;
+      if (this.#lease(w)) return w;
     }
     return undefined;
+  }
+
+  /** Lease `worker` for a task, if it is idle. */
+  #lease(worker: WorkerHandle): boolean {
+    if (!worker.tryAcquire()) return false;
+    this.#leasedOrRetired.add(worker);
+    return true;
+  }
+
+  /** Retire `worker`: it dies, by the pool's doing. */
+  #retire(worker: WorkerHandle): void {
+    this.#leasedOrRetired.add(worker);
+    worker.retire();
   }
 
   /** Below `max`, counting in-flight spawns and every live container. */
@@ -473,6 +496,8 @@ export class SysboxWorkerPool {
    */
   #postInvoke(worker: WorkerHandle): void {
     if (worker.state === "busy") {
+      // The task returned and its worker lives: the image runs.
+      this.#earlyDeaths = 0;
       const taskCap = worker.taskCount >= this.#opts.recycleAfterTasks;
       const ageCap = worker.ageMs(this.#now()) >= this.#opts.recycleAfterMs;
       if (taskCap || ageCap) {
@@ -480,7 +505,7 @@ export class SysboxWorkerPool {
           { workerId: worker.workerId, taskCount: worker.taskCount, taskCap, ageCap },
           "recycling worker — cap reached",
         );
-        worker.retire();
+        this.#retire(worker);
       }
     }
     if (!worker.release()) {
@@ -490,7 +515,7 @@ export class SysboxWorkerPool {
     // Hand the just-released worker to a queued waiter, if any.
     const waiter = this.#queue.shift();
     if (waiter) {
-      if (worker.tryAcquire()) {
+      if (this.#lease(worker)) {
         waiter.resolve(worker);
       } else {
         // Shouldn't happen — we just released it. Re-queue defensively.
@@ -502,22 +527,29 @@ export class SysboxWorkerPool {
   /**
    * Replace a worker the moment it dies. Its container stays, still
    * counted toward `max`, until `disposable` — while a task holds it, the
-   * task may still be using it. Workers that keep dying before their first
-   * task are an image that cannot run: from `CRASH_LOOP_DEATHS` on, only the
-   * sweep replaces them, and queued acquirers fail rather than wait.
+   * task may still be using it. Workers that keep dying early are an image
+   * that cannot run: from `CRASH_LOOP_DEATHS` on, only the sweep replaces
+   * them.
    */
   #onDead(worker: WorkerHandle, reason: string): void {
     if (this.#lifetime.signal.aborted) return;
     log.debug({ workerId: worker.workerId, reason }, "worker died");
-    this.#deathsWithoutTask = worker.taskCount === 0 ? this.#deathsWithoutTask + 1 : 0;
-    if (this.#deathsWithoutTask === CRASH_LOOP_DEATHS) {
-      log.warn(
-        { deaths: this.#deathsWithoutTask, reason },
-        "workers keep dying before their first task — replacing them on the sweep only",
-      );
+    if (this.#diedEarly(worker)) {
+      this.#earlyDeaths += 1;
+      if (this.#earlyDeaths === CRASH_LOOP_DEATHS) {
+        log.warn(
+          { deaths: this.#earlyDeaths, reason },
+          "workers keep dying before their first task — replacing them on the sweep only",
+        );
+      }
     }
     if (this.#crashLooping()) this.#serveQueue();
     else this.#replenishToMin();
+  }
+
+  /** See `CRASH_LOOP_DEATHS`. */
+  #diedEarly(worker: WorkerHandle): boolean {
+    return !this.#leasedOrRetired.has(worker) && worker.ageMs(this.#now()) < CRASH_LOOP_WINDOW_MS;
   }
 
   /** Tear a dead worker down once no task holds it, and fill the slot it frees. */
@@ -537,7 +569,7 @@ export class SysboxWorkerPool {
   }
 
   #crashLooping(): boolean {
-    return this.#deathsWithoutTask >= CRASH_LOOP_DEATHS;
+    return this.#earlyDeaths >= CRASH_LOOP_DEATHS;
   }
 
   #replenishToMin(): void {
@@ -552,12 +584,13 @@ export class SysboxWorkerPool {
 
   /**
    * Spawn for a queued acquirer, room permitting. While workers keep dying
-   * before their first task, fail queued acquirers instead: a spawn would
-   * only die too.
+   * early, spawn for no one, since a spawn would only die too: a queued
+   * acquirer waits for a busy worker to free, or fails if none is busy.
    */
   #serveQueue(): void {
     if (this.#lifetime.signal.aborted || this.#queue.length === 0) return;
     if (this.#crashLooping()) {
+      if (this.#workers.some((w) => w.state === "busy")) return;
       for (const waiter of this.#queue.splice(0, this.#queue.length)) {
         waiter.reject(new Error("skills workers keep dying before their first task"));
       }
@@ -577,7 +610,7 @@ export class SysboxWorkerPool {
       (w) => {
         const waiter = this.#queue.shift();
         if (!waiter) return;
-        if (w.tryAcquire()) {
+        if (this.#lease(w)) {
           waiter.resolve(w);
         } else {
           // Lost the race to another acquirer, or already dead: back into
@@ -619,7 +652,7 @@ export class SysboxWorkerPool {
     const surplus = Math.max(0, idleCount - this.#opts.min);
     for (const w of candidates.slice(0, surplus)) {
       log.debug({ workerId: w.workerId, idleMs: w.idleMs(now) }, "sweeping idle worker");
-      w.retire();
+      this.#retire(w);
     }
   }
 }
