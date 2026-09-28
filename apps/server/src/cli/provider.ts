@@ -239,8 +239,7 @@ async function setProvider(
     return 1;
   }
   io.out(`Set "${name}" cache dialect: ${match.attrs.cacheDialect ?? "none"} → ${cacheDialect}.`);
-  // The resolver builds each adapter once per process (src/llm/resolver.ts).
-  io.out("Restart `cogmo serve` for the change to take effect (resolver caches per process).");
+  io.out("Restart `cogmo serve` to apply.");
   return 0;
 }
 
