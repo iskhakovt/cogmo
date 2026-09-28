@@ -45,16 +45,22 @@ export const inboundMessageSource = pgEnum("inbound_message_source", [
 ]);
 export type InboundMessageSource = (typeof inboundMessageSource.enumValues)[number];
 
+/**
+ * Predicate of `uq_channels_fixed_type`. An `ON CONFLICT` inferring that
+ * partial index repeats it as `targetWhere`.
+ */
+export const FIXED_IDENTITY_CHANNEL = sql`identity_mode = 'fixed'`;
+
 export const channels = pgTable(
   "channels",
   {
     id: pk(),
-    type: text("type").notNull(), // 'telegram' | 'cli' | 'slack' | 'web'
+    type: text("type").notNull(), // 'telegram' | 'direct' | 'slack' | 'web'
     // OPAQUE — encrypted ciphertext or plaintext credentials handed back to the
     // adapter SDK unchanged (Telegram bot token, OAuth bundle, etc.). Cogmo
     // never inspects the contents, so it stays raw `jsonb` rather than being
-    // gated by a Zod schema (CLAUDE.md JSONB rule explicitly exempts opaque
-    // payloads).
+    // gated by a Zod schema (the JSONB rule in `.claude/rules/architecture-rules.md`
+    // exempts opaque payloads).
     credentials: jsonb("credentials").notNull(),
     identityMode: text("identity_mode").notNull(), // 'fixed' | 'mapped' | 'create'
     /**
@@ -67,9 +73,8 @@ export const channels = pgTable(
     createdAt: ts(),
   },
   (t) => [
-    // One row per single-owner (`fixed`) channel type: the key
-    // `insertOrRecoverFixedChannel` inserts on.
-    uniqueIndex("uq_channels_fixed_type").on(t.type).where(sql`identity_mode = 'fixed'`),
+    // One fixed-identity channel per type; key of `insertOrRecoverFixedChannel`.
+    uniqueIndex("uq_channels_fixed_type").on(t.type).where(FIXED_IDENTITY_CHANNEL),
   ],
 );
 

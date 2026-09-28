@@ -30,6 +30,7 @@ import {
   channelSessions,
   channels,
   chatDefaultProfiles,
+  FIXED_IDENTITY_CHANNEL,
   type InboundMessageSource,
   inboundMessages,
   userIdentities,
@@ -491,7 +492,7 @@ export class DrizzleTransportStore implements TransportStore {
       .values({ type, credentials: {}, identityMode: "fixed" })
       .onConflictDoUpdate({
         target: channels.type,
-        targetWhere: sql`identity_mode = 'fixed'`,
+        targetWhere: FIXED_IDENTITY_CHANNEL,
         set: { type },
       })
       .returning({ id: channels.id, inserted: sql<boolean>`(xmax = 0)` });
