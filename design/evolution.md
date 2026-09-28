@@ -273,7 +273,7 @@ A user's instruction beats a channel default: a default is the operator's guess 
 ```
 # Rules
 
-Standing rules for your replies. Where two rules that apply to this reply conflict, follow the one listed first.
+Standing rules for your replies. Where two rules that apply to this reply conflict, follow the one listed first. A rule that starts with a channel applies only when the turn context lists that channel among its delivery channels.
 
 ## Always
 - …
@@ -289,11 +289,11 @@ Your user asked for these. They take precedence over your default style and the 
 - On telegram: Avoid tables — they don't render on this channel. Use bullet lists instead.
 ```
 
-The channel label ("On telegram: ") is the [snapshot](prompt-caching.md#system-prompt-snapshot-proposed)'s; today's `# Rules` renders bare text, and only the active channels' channel-scoped rules. The seeded rules keep their wording ([Alternatives](#alternatives-considered)). On this rendering the length limit fails ([Stage 1](#stage-1-instruction-evolution-confirmed) → Evaluation): the base prompt's "Be thorough when the topic is complex" competes with it, and "Make learned rules stick" (`todo.md`) tracks it.
+Every channel's rules render, each labelled with its channel ("On telegram: "), and the preamble's second sentence, present when a labelled rule is, says when one applies ([snapshot](prompt-caching.md#system-prompt-snapshot-confirmed)). The seeded rules keep their wording ([Alternatives](#alternatives-considered)). On this rendering the length limit fails ([Stage 1](#stage-1-instruction-evolution-confirmed) → Evaluation): the base prompt's "Be thorough when the topic is complex" competes with it, and "Make learned rules stick" (`todo.md`) tracks it.
 
 ### Tools
 
-`rule_set` and `rule_remove` are built-ins, gated by the profile's `tool_set` like any other, `durable: true` (DB writes) and not `parallelSafe`. As with the core-memory tools ([memory.md](memory.md#boundaries)), a profile whose `memory_scope.trust` excludes `first-party` (a null `memory_scope` admits it), or a turn whose profile can't be loaded, isn't offered them; trust is already in the [configuration digest](prompt-caching.md#system-prompt-snapshot-proposed), so withholding them opens no extra epoch. A turn the user didn't start (inbound `source <> 'user'`: a scheduled fire, a pipeline stage) refuses the call at dispatch instead, so the tool set doesn't change with the turn ([one prefix per conversation](prompt-caching.md#one-prefix-per-conversation-proposed)). The gate reads the scope `freeze-core-memory-scope` records ([memory.md](memory.md#behaviour-by-profile) → Behaviour by Profile).
+`rule_set` and `rule_remove` are built-ins, gated by the profile's `tool_set` like any other, `durable: true` (DB writes) and not `parallelSafe`. As with the core-memory tools ([memory.md](memory.md#boundaries)), a profile whose `memory_scope.trust` excludes `first-party` (a null `memory_scope` admits it), or a turn whose profile can't be loaded, isn't offered them; trust is already in the [configuration digest](prompt-caching.md#system-prompt-snapshot-confirmed), so withholding them opens no extra epoch. A turn the user didn't start (inbound `source <> 'user'`: a scheduled fire, a pipeline stage) refuses the call at dispatch instead, so the tool set doesn't change with the turn ([one prefix per conversation](prompt-caching.md#one-prefix-per-conversation-proposed)). The gate reads the scope `freeze-core-memory-scope` records ([memory.md](memory.md#behaviour-by-profile) → Behaviour by Profile).
 
 | Argument | Tool | Meaning |
 |-|-|-|
@@ -349,8 +349,8 @@ Retiring sets `active = false` and `retracted_at`, which tells a retired rule fr
 
 ### Prompt Caching
 
-- **This turn.** The tool result is in the transcript, so the reply that follows applies the rule. The system prompt is assembled once per turn, and under the [snapshot](prompt-caching.md#system-prompt-snapshot-proposed) frozen for the epoch.
-- **From the next turn.** Today's per-turn assembly renders the rule under `# Rules`. Under the snapshot, a rule change alters the configuration digest, so the next turn of each of the user's open conversations opens an epoch and the rule keeps system authority ([prompt-caching.md](prompt-caching.md#system-prompt-snapshot-proposed) → Rules open an epoch).
+- **This turn.** The tool result is in the transcript, so the reply that follows applies the rule. The system prompt is the epoch's [snapshot](prompt-caching.md#system-prompt-snapshot-confirmed), fixed for the turn.
+- **From the next turn.** A rule change alters the configuration digest, so the next turn of each of the user's open conversations opens an epoch and the rule keeps system authority ([prompt-caching.md](prompt-caching.md#system-prompt-snapshot-confirmed) → Rules open an epoch).
 - **Cost.** An epoch rewrites everything after the tools breakpoint, the system prompt and the transcript, at the write rate (1.25× on the 5-minute TTL, 2× on the 1-hour) where it would have been read at 0.1× on Sonnet 5: roughly one to two uncached requests' worth of input, once per change and open conversation, and it strips earlier turns' thinking blocks. Explicit rule changes are occasional, like the graduations that already open epochs. The mid-conversation `role: "system"` alternative doesn't exist on Sonnet 5, so it is at most a later per-model optimisation.
 
 ### Data Model
@@ -393,7 +393,7 @@ This section moves to `[confirmed]` when both evals meet these targets, with the
 
 | Alternative | Why ruled out |
 |-|-|
-| Instructions in core memory only | Blocks are data. Under the [snapshot](prompt-caching.md#system-prompt-snapshot-proposed) a changed block is announced as user content, which demotes an instruction written mid-epoch. Blocks also carry no channel scope and no precedence, and are rewritten whole. |
+| Instructions in core memory only | Blocks are data. Under the [snapshot](prompt-caching.md#system-prompt-snapshot-confirmed) a changed block is announced as user content, which demotes an instruction written mid-epoch. Blocks also carry no channel scope and no precedence, and are rewritten whole. |
 | Explicit instructions through the Observer, graduating at 2 | "Stop using bullet points" waits for two idle conversations, and meanwhile the agent writes it to core memory. None of the products below makes the user wait. |
 | The Observer promoting explicit instructions on their first observation | Still waits until idle, and leaves the in-turn core write and the lagging retraction as they are |
 | Ordinal labels (`R1` …) or short ids in `# Rules` for retraction | Labels shift whenever a rule is added or removed mid-conversation, and ids put noise in every rendered rule. The text is already in front of the model, and a miss returns the list to retry from. |

@@ -1007,7 +1007,6 @@ export async function bootstrapRuntime(
     compactConversation(conversationId, {
       runInTx: core.runInTx,
       agentStore: core.agentStore,
-      transportStore: core.transportStore,
       resolveProvider: core.resolveProvider,
       promptSource,
     });

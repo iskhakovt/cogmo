@@ -67,6 +67,7 @@ import type { ToolRegistry } from "../tools.js";
 import { turnCacheIntent } from "../turn-cache-intent.js";
 import {
   findTurnContext,
+  NO_CORE_MEMORY_UPDATES,
   renderTurnContext,
   replaceTurnContext,
   withTurnContext,
@@ -223,6 +224,7 @@ export async function runAgenticStage(
       channelTypes: [],
       announcedCoreMemoryBlocks: [],
     },
+    coreMemoryUpdates: NO_CORE_MEMORY_UPDATES,
   };
   const provisionalTurnContext = renderTurnContext(turnContextInput);
   const history = turnHistory.messages.with(
@@ -300,12 +302,8 @@ export async function runAgenticStage(
 
   const systemPrompt = await steps.run("assemble-prompt", async () => {
     const context = await loadConversationContext(
-      {
-        runInTx: deps.runInTx,
-        agentStore: deps.agentStore,
-        transportStore: deps.transportStore,
-      },
-      { conversationId, userId: ctx.userId, coreMemoryScope, profile },
+      { runInTx: deps.runInTx, agentStore: deps.agentStore },
+      { userId: ctx.userId, coreMemoryScope, profile },
     );
     return deps.promptSource.assemble({
       profile,
@@ -402,10 +400,26 @@ export async function runAgenticStage(
 
   const turnPosition = findTurnContext(compacted.messages, provisionalTurnContext);
   if (turnPosition === -1) throw new Error("compaction dropped the stage's own message");
-  const renderedTurnContext = await steps.run("render-turn-context", () =>
+  // The stage sends its own system prompt, not the conversation's snapshot,
+  // so it announces no core memory.
+  const renderedTurnContext = await steps.run("render-turn-context", async () =>
     storeTurnContext(
       { runInTx: deps.runInTx, agentStore: deps.agentStore },
-      { ...turnContextInput, messageId: turn.id },
+      {
+        messageId: turn.id,
+        handledAt: turnContextInput.handledAt,
+        timezone: turnContextInput.timezone,
+        context: {
+          recalledMemories: [],
+          voiceMode: false,
+          channelTypes: [
+            ...(await deps.runInTx((tx) =>
+              deps.transportStore.getActiveChannelTypes(tx, conversationId),
+            )),
+          ],
+        },
+        coreMemoryUpdates: NO_CORE_MEMORY_UPDATES,
+      },
     ),
   );
   const messages = replaceTurnContext(compacted.messages, turnPosition, renderedTurnContext);

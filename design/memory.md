@@ -17,7 +17,7 @@ Hindsight is a client-server system. Our app talks to it via HTTP — no direct 
 
 ## Core Memory vs Hindsight `[confirmed]`
 
-Two stores hold what the agent knows about its user. **Core memory** is a few keyed blocks (`core_memory_blocks`) rendered into every system prompt's `# User` section, so it survives compaction and needs no retrieval. Only the agent writes it, through `core_memory_update`, and a block's scope follows from its key and the writing profile's class ([Core Memory Scope by Profile Class](#core-memory-scope-by-profile-class-confirmed)). **Hindsight** holds everything else and is searched on demand by auto-recall, `memory_recall` and `memory_reflect`. The Observer fills it from every conversation at idle, whether or not the agent called `memory_retain`.
+Two stores hold what the agent knows about its user. **Core memory** is a few keyed blocks (`core_memory_blocks`) rendered into the system prompt's `# User` section, so it needs no retrieval; a change is announced in the next turn context until the next [snapshot](prompt-caching.md#system-prompt-snapshot-confirmed) renders it. Only the agent writes it, through `core_memory_update`, and a block's scope follows from its key and the writing profile's class ([Core Memory Scope by Profile Class](#core-memory-scope-by-profile-class-confirmed)). **Hindsight** holds everything else and is searched on demand by auto-recall, `memory_recall` and `memory_reflect`. The Observer fills it from every conversation at idle, whether or not the agent called `memory_retain`.
 
 **Rule.** Core memory holds what every conversation needs. Everything that can be looked up when the topic comes up goes to Hindsight.
 
@@ -265,15 +265,15 @@ core_memory_blocks (
 ### Interactions
 
 - **Rendering.** The prompt renders the blocks the turn's frozen scope sees. `/compact`, outside a turn, resolves the scope from the profile when it runs.
-- **System prompt snapshot** `[proposed]` ([prompt-caching.md](prompt-caching.md#system-prompt-snapshot-proposed)), landing with [its step 3](prompt-caching.md#implementation-plan-proposed):
+- **System prompt snapshot** `[confirmed]` ([prompt-caching.md](prompt-caching.md#system-prompt-snapshot-confirmed)), in chat turns:
 
 | Concern | Rule |
 |-|-|
 | Snapshot | `# User` renders the blocks visible when the epoch opens. |
-| Announcements | Only blocks visible to the turn: the shared `identity` and the turn's own scope. A write in another class's conversation, or in the unclassed bucket when the turn is classed, is never announced here. |
-| Announced set | `{ profileClass, key }` pairs ([prompt-caching.md](prompt-caching.md#data-model) → Data model). |
-| Digest | Covers the profile class, its restricted flag and whether the profile's trust admits `first-party`, so `/profile switch` to another class, `/profile class`, a `/profile scope` that changes trust, and `/classes restrict` / `unrestrict` open an epoch and re-render `# User`. Otherwise two profiles with the same base prompt and tools would share a snapshot, and a restricted class's blocks would stay in front of another persona. |
-| Removals | A block leaves a turn's view only with a digest change: `/classes unrestrict` changes the restricted flag, and a class can be deleted only once no profile uses it, so every conversation that rendered its blocks has changed class first. An announcement never has to express a removal. |
+| Announcements | Only blocks visible to the turn: the shared `identity` and the turn's own scope. A write in another class's conversation, or in the unclassed bucket when the turn is classed, is never announced here. A classed turn's announcement groups its blocks under the leads `# User` uses, so a shared and an own `identity` stay apart. |
+| Announced set | `{ profileClass, key, updatedAt }` entries: the block and the version announced ([prompt-caching.md](prompt-caching.md#data-model) → Data model). |
+| Digest | Covers the shape of `# User` (onboarding, or which group leads render), so a new user's first write and a restricted persona's first shared `identity` re-render it; and the profile class, its restricted flag and whether the profile's trust admits `first-party`, so `/profile switch` to another class, `/profile class`, a `/profile scope` that changes trust, and `/classes restrict` / `unrestrict` open an epoch and re-render `# User`. Otherwise two profiles with the same base prompt and tools would share a snapshot, and a restricted class's blocks would stay in front of another persona. It also covers whether a restricted class has its own `identity`. |
+| Removals | A block leaves a turn's view only with a digest change: `/classes unrestrict` changes the restricted flag; a class can be deleted only once no profile uses it, so every conversation that rendered its blocks has changed class first; and deleting a restricted class's `identity` override flips the digest's override flag. An announcement never has to express a removal. |
 
 ### Class Lifecycle
 

@@ -20,7 +20,11 @@ import { DefaultPromptSource } from "../agent/prompt.js";
 import type { Service } from "../agent/service.js";
 import { defineTool, ToolRegistry } from "../agent/tools.js";
 import { turnCacheIntent } from "../agent/turn-cache-intent.js";
-import { renderTurnContext, withTurnContext } from "../agent/turn-context.js";
+import {
+  NO_CORE_MEMORY_UPDATES,
+  renderTurnContext,
+  withTurnContext,
+} from "../agent/turn-context.js";
 import { AnthropicProvider } from "../llm/anthropic.js";
 import { type Message, MessageContentSchema } from "../llm/types.js";
 import { logger } from "../logger.js";
@@ -189,6 +193,7 @@ async function converse(params: {
           channelTypes: [],
           announcedCoreMemoryBlocks: [],
         },
+        coreMemoryUpdates: NO_CORE_MEMORY_UPDATES,
       }),
     );
     const before = recorder.exchanges.length;

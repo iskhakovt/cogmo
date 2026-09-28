@@ -280,8 +280,7 @@ describe.skipIf(LIVE_API_KEY === undefined)(
         try {
           const store = new DrizzleAgentStore();
           await seedChannelRules(db.tx, store, CHANNEL);
-          const activeRules = () =>
-            db.tx((tx) => store.getActiveRules(tx, EVAL_PROFILE.id, CHANNEL_TYPES));
+          const activeRules = () => db.tx((tx) => store.getActiveRules(tx, EVAL_PROFILE.id));
           const corrections = async () =>
             (await db.tx((tx) => store.getCorrections(tx, EVAL_PROFILE.id))).map(
               ({ id: _id, ...row }) => row,

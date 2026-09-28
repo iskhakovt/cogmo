@@ -1,0 +1,16 @@
+{
+  "images": [
+    {
+      "url": "https://fal.media-mock.test/fal-ai-flux-pro-v1.1-ultra-f8315847b74a.jpg",
+      "width": 2752,
+      "height": 1536,
+      "content_type": "image/jpeg"
+    }
+  ],
+  "timings": {},
+  "seed": 3501402410,
+  "has_nsfw_concepts": [
+    false
+  ],
+  "prompt": "A tall white lighthouse standing on rugged, dark rocky coastline at dusk. Dramatic sky with deep orange, pink, and purple hues fading into indigo blue, a few scattered clouds catching the last light. The lighthouse beam glows warm gold, cutting across the darkening sky. Waves crash white foam against jagged black rocks in the foreground. Moody, atmospheric, painterly realism style with rich contrast and fine detail, suitable as elegant wall art for a study."
+}

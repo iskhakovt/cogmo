@@ -46,7 +46,7 @@ export function describeIsolationProbe(name: string): void {
           channelType: null,
         }),
       );
-      const rules = await runInTx((tx) => store.getActiveRules(tx, randomUUID(), []));
+      const rules = await runInTx((tx) => store.getActiveRules(tx, randomUUID()));
       expect(rules.map((r) => r.rule).filter((r) => r.startsWith(PROBE))).toEqual([
         `${PROBE} ${name}`,
       ]);

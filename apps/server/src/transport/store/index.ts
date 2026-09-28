@@ -231,7 +231,7 @@ export interface TransportStore {
     conversationId: string,
   ): Promise<ReadonlyArray<Session>>;
 
-  /** Get distinct channel types for a conversation's active sessions. */
+  /** Get distinct channel types for a conversation's active sessions, in name order. */
   getActiveChannelTypes(tx: Transaction, conversationId: string): Promise<ReadonlyArray<string>>;
 
   /**
@@ -694,7 +694,8 @@ export class DrizzleTransportStore implements TransportStore {
           eq(channelSessions.status, "active"),
           or(isNull(channelSessions.expiresAt), gt(channelSessions.expiresAt, sql`now()`)),
         ),
-      );
+      )
+      .orderBy(asc(channels.type));
     return rows.map((r) => r.type);
   }
 
