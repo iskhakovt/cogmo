@@ -948,6 +948,41 @@ describe("SysboxWorkerPool", () => {
     expect(spawned.every((w) => w.state === "disposed")).toBe(true);
   });
 
+  it("dispose waits for a container teardown already under way", async () => {
+    const teardown = gate();
+    let tornDown = false;
+    let spawns = 0;
+    const pool = await poolWith({
+      min: 1,
+      max: 1,
+      createWorker: async ({ workerId }) => {
+        spawns += 1;
+        if (spawns > 1) return fakeWorker(workerId);
+        return fakeWorker(workerId, {
+          invoke: async () => ({ ok: true, output: null, workerReusable: false }),
+          onDispose: async () => {
+            await teardown.promise;
+            tornDown = true;
+          },
+        });
+      },
+    }).pool;
+    await pool.invoke(invokeParams("t-1"));
+    // The first worker's teardown has started, and holds.
+    await vi.waitFor(() => expect(spawns).toBe(2));
+
+    let disposed = false;
+    const disposing = pool.dispose().then(() => {
+      disposed = true;
+    });
+    await new Promise<void>((r) => setTimeout(r, 20));
+    expect(disposed).toBe(false);
+
+    teardown.open();
+    await disposing;
+    expect(tornDown).toBe(true);
+  });
+
   it("dispose is idempotent", async () => {
     const h = buildPoolHarness({ poolOptions: { min: 1, max: 1 } });
     const pool = await h.pool;
@@ -1197,6 +1232,8 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
     const violations: string[] = [];
     const workers: FakeWorker[] = [];
     const running = new Set<FakeWorker>();
+    /** Workers whose teardown has finished: their container is gone. */
+    const gone = new Set<FakeWorker>();
     let creating = 0;
     let booted = false;
     let disposed = false;
@@ -1234,6 +1271,8 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
             onDispose: async () => {
               if (running.has(w) && !disposed)
                 violations.push(`${workerId} torn down under its task`);
+              await ticks(upTo(2));
+              gone.add(w);
             },
           });
           workers.push(w);
@@ -1272,7 +1311,7 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
 
     disposed = true;
     await pool.dispose();
-    const leaked = workers.filter((w) => w.state !== "disposed").length;
+    const leaked = workers.filter((w) => !gone.has(w)).length;
     if (leaked > 0) violations.push(`${leaked} container(s) outlived dispose`);
     return violations.map((v) => `seed ${seed} (min ${min}, max ${max}): ${v}`);
   }

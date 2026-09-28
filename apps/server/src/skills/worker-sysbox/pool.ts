@@ -34,7 +34,9 @@ export interface SysboxWorkerPoolOptions {
   /**
    * Hard ceiling on concurrent workers. Personal-scale skill invocation
    * almost never hits this; it exists so a runaway loop can't fork-bomb the
-   * sandbox. Tasks beyond `max` queue and wait for an idle worker.
+   * sandbox. Tasks beyond `max` queue and wait for an idle worker. A worker
+   * stops counting once its teardown starts, so while teardowns run the
+   * sandbox can hold more than `max` containers.
    */
   max: number;
   /**
@@ -178,7 +180,8 @@ export const DEFAULT_POOL_OPTIONS = {
  *    replacement up to `min`, room permitting. The dead worker's container
  *    goes once it is disposable: at once, or once the task holding it
  *    returns; until then it still counts toward `max`. Its freed slot goes
- *    to a queued acquirer first.
+ *    to a queued acquirer first. Containers still tearing down do not
+ *    count, so while teardowns run the sandbox can hold more than `max`.
  *  - Workers that keep dying before their first task stop being replaced
  *    at once; see `CRASH_LOOP_DEATHS`.
  *  - The pool retires a worker after its task once taskCount ≥
@@ -187,8 +190,9 @@ export const DEFAULT_POOL_OPTIONS = {
  *    and spawns back up to `min` when a replacement failed.
  *  - `dispose()` aborts the signal every worker was created with: a live
  *    worker's channel closes, and a spawn stops at its next step. It then
- *    cancels the sweep, rejects all queued waiters, and tears down every
- *    container. Idempotent.
+ *    cancels the sweep, rejects all queued waiters, tears down every
+ *    container, and returns once every teardown, including those already
+ *    under way, has finished. Idempotent.
  */
 export class SysboxWorkerPool {
   #sandbox: SandboxClient;
@@ -206,8 +210,10 @@ export class SysboxWorkerPool {
       | "idleSweepIntervalMs"
     >
   >;
-  /** Every worker whose container lives, dead ones a task still holds included. */
+  /** Every worker not yet tearing down, dead ones a task still holds included. */
   #workers: WorkerHandle[] = [];
+  /** Teardowns under way of workers that have left `#workers`. */
+  #teardowns = new Set<Promise<void>>();
   #queue: PendingWaiter[] = [];
   /** Early deaths in a row; see `CRASH_LOOP_DEATHS`. */
   #earlyDeaths = 0;
@@ -355,12 +361,12 @@ export class SysboxWorkerPool {
     }
     // Dead workers a task still holds are here too: their containers go now.
     const workers = this.#workers.splice(0, this.#workers.length);
-    // Wait on already-spawned workers in parallel with any in-flight spawns;
-    // the in-flight ones stop on the aborted signal and tear down whatever
-    // they had set up. Awaiting both ensures `dispose()` doesn't return
-    // until every container the pool ever spawned is gone.
+    // Wait on these workers, on in-flight spawns (they stop on the aborted
+    // signal and tear down whatever they had set up) and on teardowns under
+    // way, so `dispose()` returns only once every container the pool ever
+    // spawned is gone.
     const pending = Array.from(this.#pendingSpawnPromises);
-    await Promise.allSettled([...workers.map((w) => w.dispose()), ...pending]);
+    await Promise.allSettled([...workers.map((w) => w.dispose()), ...pending, ...this.#teardowns]);
   }
 
   // --- internals ---
@@ -558,12 +564,18 @@ export class SysboxWorkerPool {
     if (this.#lifetime.signal.aborted) return;
     const idx = this.#workers.indexOf(worker);
     if (idx >= 0) this.#workers.splice(idx, 1);
-    void worker.dispose().catch((e: unknown) => {
-      log.warn(
-        { workerId: worker.workerId, err: e instanceof Error ? e.message : String(e) },
-        "worker dispose failed during recycle",
-      );
-    });
+    const teardown: Promise<void> = worker
+      .dispose()
+      .catch((e: unknown) => {
+        log.warn(
+          { workerId: worker.workerId, err: e instanceof Error ? e.message : String(e) },
+          "worker dispose failed during recycle",
+        );
+      })
+      .finally(() => {
+        this.#teardowns.delete(teardown);
+      });
+    this.#teardowns.add(teardown);
     this.#serveQueue();
     if (!this.#crashLooping()) this.#replenishToMin();
   }
