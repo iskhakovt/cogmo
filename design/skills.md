@@ -903,7 +903,7 @@ def run(inputs: dict, ctx) -> dict:
 |-|-|
 | `ctx.secrets.get(name)` | Fetch a declared secret value (manifest-gated) |
 | `ctx.memory.recall(query, ...)` | Semantic search of the run's user's memory, under the run's profile scope (see [Run-as identity](#run-as-identity-confirmed)) |
-| `ctx.memory.remember(content, ...)` | Stage a fact in `pending_memories` for the Observer to classify and retain. The skill's name and tags reach the Observer as context, not as memory tags. |
+| `ctx.memory.remember(content, ...)` | Stage a fact in `pending_memories` (`source = 'skill'`) for the Observer to classify and retain; Hindsight's `metadata.skill` names the skill. The skill's name and tags reach the Observer as context, not as memory tags. |
 | `ctx.attachments.upload(data, media_type)` | Upload to `AttachmentStore`, return path |
 | `ctx.attachments.download(path)` | Fetch bytes |
 | `ctx.files.read(path)` | Read UTF-8 text from the workspace (see [File workspace](#file-workspace-confirmed)) |

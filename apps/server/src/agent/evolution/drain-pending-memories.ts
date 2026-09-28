@@ -77,6 +77,7 @@ export interface ClassifiedRow {
   context: string | null;
   source: PendingMemorySource;
   profileClass: string | null;
+  skillName: string | null;
   tags: ClassifiedMemory;
 }
 
@@ -89,13 +90,12 @@ export interface ClassifyPendingResult {
  * Subset of `PendingMemory` the classifier actually reads. Declared
  * separately so callers can pass rows that have already been through
  * Inngest step memoization (where `createdAt` is a JSON string, not a
- * `Date`) — we don't use the timestamp here. Includes `profileClass`
- * so the post-classification retain step can stamp each row with the
- * class of the profile that staged it.
+ * `Date`) — we don't use the timestamp here. Includes `profileClass` and
+ * `skillName`, which the retain step stamps on each row.
  */
 export type ClassifierInput = Pick<
   PendingMemory,
-  "id" | "content" | "context" | "source" | "profileClass"
+  "id" | "content" | "context" | "source" | "profileClass" | "skillName"
 >;
 
 /** Run the classifier prompt over a batch of pending rows. Single-row failures are skipped, not propagated. */
@@ -118,8 +118,9 @@ export async function classifyPendingMemories(
 
 /**
  * Map classified rows to `RetainBatchItem`s. `metadata.source` carries the
- * staging origin so live retains and migrations stay distinguishable from
- * transcript extractions.
+ * staging origin so live retains, skill writes and migrations stay
+ * distinguishable from transcript extractions; `metadata.skill` names the
+ * skill on a `skill` row.
  *
  * Each row's `profile_class:<class>` tag (when present) is taken from
  * `r.profileClass` — the staging profile's CURRENT class, captured by
@@ -147,7 +148,11 @@ export function buildRetainItems(rows: ReadonlyArray<ClassifiedRow>): RetainBatc
       // `!== null` would slip through and emit `profile_class:undefined`.
       ...(typeof r.profileClass === "string" ? [`profile_class:${r.profileClass}`] : []),
     ],
-    metadata: { source: r.source },
+    // `typeof` for the same replay reason as `profileClass`.
+    metadata: {
+      source: r.source,
+      ...(typeof r.skillName === "string" && { skill: r.skillName }),
+    },
     observationScopes: "per_tag" as const,
   }));
 }
@@ -209,6 +214,7 @@ async function classifyOne(
       context: p.context,
       source: p.source,
       profileClass: p.profileClass,
+      skillName: p.skillName,
       tags: data,
     };
   } catch (err) {
