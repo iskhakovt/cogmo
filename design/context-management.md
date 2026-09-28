@@ -25,6 +25,8 @@ These mean compaction can be more aggressive than a system without external memo
 
 **Why not optional / heuristic-only:** Heuristic estimation (chars/4) has 20-40% error depending on content type. Tool definitions, images, and structured content skew heavily. Inaccurate counting leads to either premature compaction (wasted cost, cache invalidation) or late compaction (API rejection, degraded quality). Both providers have accurate, free counting methods — use them.
 
+**Images on OpenAI-compatible routes** `[confirmed]`. `countTokens` estimates each image from its dimensions with OpenAI's tile formula, or conservatively when they are unknown. A fixed low-detail figure would undercount: from Append-only step 4 every earlier image is in view ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (d)).
+
 **Why js-tiktoken over alternatives:** `@anthropic-ai/tokenizer` is dead (last update 2023, Claude 1/2 only — Anthropic hasn't published the Claude 3+ tokenizer). `gpt-tokenizer` is 53MB vs js-tiktoken's 22MB at identical accuracy. `tiktoken` (WASM variant) has runtime compatibility concerns. For Claude models, no local tokenizer works — the API is the only accurate option.
 
 ## Model Registry
@@ -47,7 +49,7 @@ budget = contextWindow - maxOutputTokens - safetyBuffer
 
 ## Persistence Model
 
-Compaction is **ephemeral** for Strategies 0, 1 and 3 — applied in-memory when loading messages for the LLM call. The database retains the full, unmodified conversation history.
+Compaction never rewrites the database, which retains the full, unmodified conversation history. Strategy 1 is an edit intent on the request, Strategy 3 cuts the view in memory, and only Strategy 2's summary is stored ([Durable summaries](#durable-summaries-confirmed)).
 
 - The Observer can extract facts from the complete conversation, not just the compacted view.
 - Debounce cursors and message IDs are unaffected — they reference DB rows, not the compacted array.
@@ -81,13 +83,13 @@ The table is **append-only**. Re-compaction inserts a new row summarizing the pr
 
 **Idempotency.** `(conversation_id, through_message_id)` is UNIQUE and the write goes through `ON CONFLICT DO UPDATE` with a no-op SET. `durable: true` buys replay-safety, not exactly-once — a crash between the commit and Inngest recording the step re-runs the write — so the constraint is what keeps a retry from appending a second row for the same span. See [.claude/rules/inngest.md](../.claude/rules/inngest.md) for the shape.
 
-**Cutoff derivation.** `loadTurnHistory` returns `messageIds` positionally aligned with the messages it hands back, `null` for the synthetic summary entry. Strategies 0 and 1 rewrite block content in place and never change the array's length, so `messagesSummarized` indexes that array directly and the cutoff is the last real id inside the summarized span. When that span holds only the previous summary, there is no cutoff to advance to and the write is skipped — re-summarizing a summary while covering nothing new is pure loss.
+**Cutoff derivation.** `loadTurnHistory` returns `messageIds` positionally aligned with the messages it hands back, `null` for the synthetic summary entry. Strategy 1 is an intent on the request, so nothing before Strategy 2 changes the array, and `messagesSummarized` indexes it directly and the cutoff is the last real id inside the summarized span. When that span holds only the previous summary, there is no cutoff to advance to and the write is skipped — re-summarizing a summary while covering nothing new is pure loss.
 
 ### Manual compaction `[confirmed]`
 
 `/compact` forces Strategy 2 immediately, regardless of budget pressure, and stores the result. The next turn then starts from a summary it did not have to wait for. `src/agent/conversation/compact-conversation.ts` drives it synchronously — the same trade-off `/reflect` makes: the user is waiting on the reply, single-user scale means no concurrent fire to race, and errors surface to the caller instead of a retry log.
 
-It picks the same split the budget-triggered path would (`DEFAULT_KEEP_TURNS`) and runs Strategy 0 over the prefix first, matching that ladder's first rung — count-based and structural, so it needs no token count. `[confirmed]` Strategy 0 retires from `/compact` with the rest ([Retirement](#retirement-confirmed)). It does **not** run Strategy 1: clearing tool results would have the summarizer read placeholders instead of the output it is meant to compress, and unlike the turn-time path there is no budget pressure to justify that loss.
+It picks the same split the budget-triggered path would (`DEFAULT_KEEP_TURNS`). `[confirmed]` It renders the prefix through the one renderer, with attachments as placeholders naming the file as in the turn-time fork, so the attachment store joins `compactConversation`'s deps. Outside a turn there is no frozen tool table, so it strips every thinking block from its request ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (h)). It does **not** run Strategy 1: clearing tool results would have the summarizer read placeholders instead of the output it is meant to compress, and unlike the turn-time path there is no budget pressure to justify that loss.
 
 Because there is no budget gate, the manual path carries a floor the automatic one does not need: below `MIN_MESSAGES_TO_COMPACT` **real messages** outside the retain window it returns `too_short` rather than paying for a call. Reaching 80% of the window on that few messages means they are individually enormous and worth summarizing; asking by hand on a short conversation is not. The floor counts messages rather than compaction-view entries, so a re-compaction can't clear it on the strength of the previous summary occupying a slot.
 
@@ -186,7 +188,7 @@ The volume consequence is largest on 1M-window models. There Strategy 1 fires on
 
 Replace old `tool_result` content with a placeholder (`[Cleared — call tool again if needed]`). Keep the `tool_use` block intact so the model knows what was called and with what arguments.
 
-- Walk messages oldest → newest, clearing until under budget
+- Clear oldest first
 - Keep the **last K tool results** intact (default 5) — recent results are likely still relevant
 - Optionally exclude specific tools whose results are persistent references
 
@@ -197,7 +199,7 @@ Replace old `tool_result` content with a placeholder (`[Cleared — call tool ag
 **Where it runs** `[confirmed]`. As a request-level edit intent on `ChatParams`, which leaves the transcript alone; each adapter maps the intent, as with the cache intent.
 
 - **Anthropic.** The adapter sends server-side `clear_tool_uses_20250919` (beta `context-management-2025-06-27`) on every request, which keeps the beta set constant. Its trigger is this threshold in input tokens, `keep` is 5 tool uses, and `clear_at_least` makes each clearing worth its cache write. The client keeps sending the full history, and the preserved-thinking check compares what was sent, so thinking stays valid. Clearing also runs between a turn's iterations.
-- **Token counting.** `countTokens` takes the same intent. The Anthropic endpoint returns the post-clearing count.
+- **Token counting.** `countTokens` applies the same intent on every adapter. The Anthropic endpoint returns the post-clearing count; the OpenAI-compatible adapter clears locally exactly as it clears the wire body.
 - **OpenAI-compatible.** The adapter applies the same clearing to the wire body. Those routes replay no reasoning, so the moving cleared set costs cache only.
 
 ### Strategy 2: Summarize `[trigger: 80%]`
@@ -229,13 +231,13 @@ The summarization call receives the system prompt (or at minimum the core memory
 
 **Iterative compaction:** On subsequent compactions, the conversation starts with the previous summary message + newer turns. The summarization re-summarizes everything (previous summary + accumulated turns) into a fresh summary. Quality degrades compoundingly — Factory.ai data shows multi-session retention drops to ~37% after multiple compactions. Mitigation: the summarization prompt explicitly instructs verbatim preservation of key details, and Hindsight provides a recovery path for facts that drift out of the summary over time.
 
-**Images:** `ImageBlock`s in the summarized prefix are lost — images can't be meaningfully summarized into text. If the model needs to reference an earlier image, it would need to be re-sent. This is an accepted tradeoff; images in old turns are rarely referenced again, and the alternative (carrying all images forward) defeats the purpose of compaction.
+**Images:** `ImageBlock`s in the summarized prefix are lost — images can't be meaningfully summarized into text, so the fork receives them as placeholders naming the file ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (h)). If the model needs to reference an earlier image, it would need to be re-sent. This is an accepted tradeoff; images in old turns are rarely referenced again, and the alternative (carrying all images forward) defeats the purpose of compaction.
 
 **Failure handling:** If the summarization LLM call fails (timeout, rate limit, malformed output), fall through to strategy 3 (truncation). Summarization failure should not block the conversation. Nothing is stored on that path, so the next turn re-attempts rather than inheriting a partial result.
 
 **Durability:** the summary is persisted — see [Durable summaries](#durable-summaries-confirmed). Iterative compaction reads the stored summary back as the head of the prefix it re-summarizes, which is the same shape the in-memory path produced before the table existed.
 
-**Fork shape** `[confirmed]`. Every summarization request, on any model, sends the epoch's snapshot `system` and the frozen `tools` with `tool_choice: none` and appends its instruction after the prefix, so the thinking blocks it replays stay valid ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (h)). Changing `tool_choice` invalidates the messages cache, so the fork reads only the tools and system entries. A turn that opens an epoch for another reason strips every thinking block from the fork's input, since the tools its prefix was bound to aren't stored.
+**Fork shape** `[confirmed]`. Every summarization request, on any model, sends the `system` and `tools` the turn sends with `tool_choice: none` and appends its instruction after the prefix, so the thinking blocks it replays stay valid ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (h)). Changing `tool_choice` invalidates the messages cache, so the fork reads only the tools and system entries. A turn that opens an epoch for another reason strips every thinking block from the fork's input, since the tools its prefix was bound to aren't stored.
 
 **Cleared results in the fork** `[confirmed]`. The fork sends its own Strategy 1 edit intent, triggered at the summarization model's input budget, not at 60%. A prefix that fits is summarized from the full tool results; one that doesn't is cleared as the parent's is, so tool results can't push the request past the window and the summary reads placeholders only when it has to. Without an intent the fork resends every cleared result and can outgrow the window it exists to relieve; with the parent's, every summary is built from placeholders.
 
@@ -253,32 +255,26 @@ Should rarely fire if strategies 1-2 work correctly.
 
 Anthropic requires every `tool_result` block (on a user message) to have a matching `tool_use` block on the immediately preceding assistant message. Both the summarize and truncate strategies respect this invariant via `snapToPairBoundary()` — if a proposed cut point would leave an orphaned `tool_result` at the start of the kept suffix, the cut snaps backward to include the preceding assistant message with the matching `tool_use`. Prefers keeping an extra pair over violating the API contract. Strategy 1 (clear tool results) replaces content with a placeholder but preserves the block structure — pairing is always intact.
 
+**Consecutive user rows** `[confirmed]`. The persisted continuation prompt follows a user row: the turn's own or a tool-result row. `snapToPairBoundary` treats a harness-tagged row like a tool-result row, so a cut never separates it from what precedes it. The OpenAI-compatible adapter merges consecutive user messages, since strict-alternation chat templates reject them.
+
 ## Pipeline Execution
 
 ```
-messages = compactSameToolClusters(messages, retainRecent=2, retainFirst=1, triggerCount=5)   # Strategy 0 (count-based)
+edit = clearToolResults(trigger = budget * 0.60, keep = 5)   # Strategy 1: an intent every request carries
 
-count = countTokens(system, messages, tools)
-
-if count > budget * 0.60:
-  messages = clearToolResults(messages, keep=5)
+count = countTokens(system, messages, tools, edit)           # after clearing
 
 if count > budget * 0.80:
-  count = countTokens(system, messages, tools)
-  if count > budget * 0.80:
-    messages = summarize(messages, keep=6)
+  messages = summarize(messages, keep=6)
+  count = countTokens(system, messages, tools, edit)
 
 if count > budget * 0.95:
-  count = countTokens(system, messages, tools)
-  if count > budget * 0.95:
-    messages = truncate(messages)
+  messages = truncate(messages)
 ```
 
-Strategy 0 is a count-based deterministic transform — no token-count threshold, no LLM call — so its **check** runs unconditionally at the top of every turn. The **mutation** only fires when the per-tool same-tool count reaches `triggerCount` *and* the summary would shrink the aggregate bytes of the middle slice (the size gate, see "Pair-aware" below). Most turns the check finds no cluster over threshold and returns the message array unchanged. Per-turn overhead is dominated by the O(N) scan over messages — negligible at conversation scale. With the size gate in place, the transform doesn't increase total token count, so subsequent threshold checks remain correct.
+Every request carries Strategy 1's intent, the count included, and the adapter clears ([Where it runs](#strategy-1-clear-tool-results-trigger-60)). Strategy 0 is retired ([Retirement](#retirement-confirmed)).
 
-**Skip-counting fast path.** `compactMessages` accepts a `skipBudgetStrategies` flag. When the caller has already decided via `shouldSkipCounting` that the turn is comfortably under the context budget, it passes `true` — `compactMessages` still runs Strategy 0 (cheap, no `countTokens` call) but skips Strategies 1–3 entirely. This preserves Strategy 0's design intent ("runs every turn regardless of budget headroom") while keeping the fast-path's avoidance of the expensive `provider.countTokens` round-trip.
-
-Token counting calls are minimized: one initial count after Strategy 0, then re-count only after a strategy fires and the next threshold needs checking. Tool result clearing doesn't need a re-count (reduction is calculated from cleared content); summarization does (output size varies).
+**Skip-counting fast path.** `compactMessages` accepts a `skipBudgetStrategies` flag. When the caller has already decided via `shouldSkipCounting` that the turn is comfortably under the context budget, it passes `true`, and `compactMessages` returns the view unchanged without the `provider.countTokens` round-trip. Otherwise it counts once, and again only after a summary, whose size varies.
 
 ## Fast Path: Usage Tracking
 
