@@ -46,7 +46,7 @@ const PAGE_SIZE = 100;
  * We read the read-side names here and translate at the retain
  * boundary. `context` comes back as `""` (empty string) when absent
  * — treat that as null. `metadata` (optional) carries any
- * `{source: "conversation"|"live_retain"|"migration"}`-style stamp
+ * `{source: "conversation"|"live_retain"|"skill"|"migration"}`-style stamp
  * the original retain set; we round-trip it so the post-backfill
  * memory keeps the same provenance. Unknown fields are tolerated
  * (`passthrough`) because the response carries server-stamped extras

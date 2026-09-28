@@ -1,0 +1,1 @@
+ALTER TABLE "pending_memories" ADD CONSTRAINT "chk_pending_memories_skill_name" CHECK (("pending_memories"."source" = 'skill') = ("pending_memories"."skill_name" IS NOT NULL));

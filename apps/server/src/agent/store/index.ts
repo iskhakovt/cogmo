@@ -106,7 +106,15 @@ export const UNKNOWN_OUTPUT_TOKENS = -1;
 export type VoiceMode = "auto" | "always" | "never";
 
 /** Mirrors the `pending_memory_source` PG enum. */
-export type PendingMemorySource = "live_retain" | "migration";
+export type PendingMemorySource = "live_retain" | "migration" | "skill";
+
+/**
+ * Who staged a pending row. A `skill` row names its skill, and no other
+ * source carries one (`chk_pending_memories_skill_name`).
+ */
+export type PendingMemoryOrigin =
+  | { source: Exclude<PendingMemorySource, "skill"> }
+  | { source: "skill"; skillName: string };
 
 /** Mirrors the `schedule_kind` PG enum. */
 export type ScheduleKind = "recurring" | "one_off";
@@ -145,7 +153,8 @@ export interface ScheduledTask {
  * row (or worse, per-row group). `null` when either the staging profile
  * was unclassed or the lineage isn't available — pre-feature live
  * retains, migration backfill, or rows whose staging profile was deleted
- * (`profile_id` SET NULL).
+ * (`profile_id` SET NULL). `skillName` names the staging skill on a
+ * `skill` row and is null otherwise.
  */
 export interface PendingMemory {
   id: string;
@@ -153,6 +162,7 @@ export interface PendingMemory {
   context: string | null;
   source: PendingMemorySource;
   profileClass: string | null;
+  skillName: string | null;
   createdAt: Date;
 }
 
@@ -1238,8 +1248,7 @@ export interface AgentStore {
       profileId: string | null;
       content: string;
       context?: string;
-      source: PendingMemorySource;
-    },
+    } & PendingMemoryOrigin,
   ): Promise<{ id: string }>;
 
   /**
@@ -1253,7 +1262,7 @@ export interface AgentStore {
       userId: string;
       content: string;
       context?: string;
-      source: PendingMemorySource;
+      source: Exclude<PendingMemorySource, "skill">;
     }>,
   ): Promise<void>;
 
@@ -3113,8 +3122,7 @@ export class DrizzleAgentStore implements AgentStore {
       profileId: string | null;
       content: string;
       context?: string;
-      source: PendingMemorySource;
-    },
+    } & PendingMemoryOrigin,
   ): Promise<{ id: string }> {
     return single(
       await tx
@@ -3125,6 +3133,7 @@ export class DrizzleAgentStore implements AgentStore {
           content: params.content,
           context: params.context ?? null,
           source: params.source,
+          skillName: params.source === "skill" ? params.skillName : null,
         })
         .returning({ id: pendingMemories.id }),
     );
@@ -3136,7 +3145,7 @@ export class DrizzleAgentStore implements AgentStore {
       userId: string;
       content: string;
       context?: string;
-      source: PendingMemorySource;
+      source: Exclude<PendingMemorySource, "skill">;
     }>,
   ): Promise<void> {
     if (rows.length === 0) return;
@@ -3177,6 +3186,7 @@ export class DrizzleAgentStore implements AgentStore {
         context: pendingMemories.context,
         source: pendingMemories.source,
         profileClass: profiles.profileClass,
+        skillName: pendingMemories.skillName,
         createdAt: pendingMemories.createdAt,
       })
       .from(pendingMemories)

@@ -435,6 +435,20 @@
       "when": 1790580043045,
       "tag": "0061_skills_run_as",
       "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1790589944982,
+      "tag": "0062_pending_memories_skill_source",
+      "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "7",
+      "when": 1790589956107,
+      "tag": "0063_pending_memories_skill_name_check",
+      "breakpoints": true
     }
   ]
 }

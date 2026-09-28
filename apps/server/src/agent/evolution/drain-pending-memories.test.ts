@@ -19,6 +19,7 @@ function pending(overrides: Partial<PendingMemory> = {}): PendingMemory {
     context: null,
     source: "live_retain",
     profileClass: null,
+    skillName: null,
     createdAt: new Date("2026-05-06T10:00:00Z"),
     ...overrides,
   };
@@ -125,6 +126,19 @@ describe("drainPendingMemories", () => {
 
     expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
       expect.objectContaining({ metadata: { source: "migration" } }),
+    ]);
+  });
+
+  it("stamps source:skill and the skill's name in metadata for skill-staged rows", async () => {
+    const rows = [pending({ id: "pm-1", source: "skill", skillName: "ci_watch" })];
+    const deps = mockDeps(rows, [
+      { network: "world", compartment: "technical", trust: "first-party" },
+    ]);
+
+    await drainPendingMemories("user-1", deps);
+
+    expect(deps.memory.retainBatch).toHaveBeenCalledWith("user-1", [
+      expect.objectContaining({ metadata: { source: "skill", skill: "ci_watch" } }),
     ]);
   });
 
@@ -392,6 +406,7 @@ describe("buildRetainItems", () => {
       context: null,
       source: "live_retain",
       profileClass: null,
+      skillName: null,
       tags: { network: "bank", compartment: "personal", trust: "first-party" },
       ...overrides,
     };
@@ -427,6 +442,15 @@ describe("buildRetainItems", () => {
     void _dropped;
     const items = buildRetainItems([withoutClass as ClassifiedRow]);
     expect(items[0]?.tags).not.toContainEqual(expect.stringMatching(/^profile_class:/));
+  });
+
+  it("names no skill when a replayed row has no skillName (Inngest replay safety)", () => {
+    // A classify step memoized before `skillName` joined `ClassifiedRow`
+    // deserializes without the key.
+    const { skillName: _dropped, ...withoutSkill } = classified();
+    void _dropped;
+    const items = buildRetainItems([withoutSkill as ClassifiedRow]);
+    expect(items[0]?.metadata).toStrictEqual({ source: "live_retain" });
   });
 
   it("keys each item on its pending row id, so a repeat drain of a row replaces its document", () => {

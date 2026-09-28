@@ -28,7 +28,17 @@ import { TurnContextSchema } from "../turn-context.js";
 
 export const autoRecallMode = pgEnum("auto_recall_mode", ["off", "always", "heuristic", "llm"]);
 
-export const pendingMemorySource = pgEnum("pending_memory_source", ["live_retain", "migration"]);
+/**
+ * Who staged a `pending_memories` row: the agent's `memory_retain`
+ * (`live_retain`), the untagged-memory backfill (`migration`), or a skill's
+ * `ctx.memory.remember` (`skill`). The drain copies it into Hindsight's
+ * `metadata.source`.
+ */
+export const pendingMemorySource = pgEnum("pending_memory_source", [
+  "live_retain",
+  "migration",
+  "skill",
+]);
 
 /**
  * Voice mode preference. `auto` mirrors inbound modality (voice in → voice out).
@@ -779,6 +789,10 @@ export const coreMemoryBlocks = pgTable(
  * no staging-time profile lineage. `ON DELETE SET NULL` so deleting a
  * profile doesn't cascade-destroy the user's pending writes — the row
  * just loses its class lineage and drains untagged on that dimension.
+ *
+ * `skill_name` names the skill that staged a `skill` row, and is null on
+ * every other source; the drain writes it to Hindsight's `metadata.skill`.
+ * A snapshot, not a FK: the row outlives the skill.
  */
 export const pendingMemories = pgTable(
   "pending_memories",
@@ -791,9 +805,16 @@ export const pendingMemories = pgTable(
     content: text("content").notNull(),
     context: text("context"),
     source: pendingMemorySource("source").notNull(),
+    skillName: text("skill_name"),
     createdAt: ts(),
   },
-  (t) => [index("idx_pending_memories_user").on(t.userId, t.createdAt)],
+  (t) => [
+    index("idx_pending_memories_user").on(t.userId, t.createdAt),
+    check(
+      "chk_pending_memories_skill_name",
+      sql`(${t.source} = 'skill') = (${t.skillName} IS NOT NULL)`,
+    ),
+  ],
 );
 
 /**

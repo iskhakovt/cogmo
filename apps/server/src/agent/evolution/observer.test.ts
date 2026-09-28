@@ -33,6 +33,7 @@ const PENDING: PendingMemory[] = [
     context: null,
     source: "live_retain",
     profileClass: null,
+    skillName: null,
     createdAt: new Date("2026-09-01T00:00:00Z"),
   },
 ];
