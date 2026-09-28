@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { InngestTestEngine } from "@inngest/test";
 import { StepError } from "inngest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Transactor } from "../../db/index.js";
@@ -14,7 +15,12 @@ import {
   mockTransportStore,
 } from "../../test/factories.js";
 import type { AgentStore, PendingMemory } from "../store/index.js";
-import { type ObserverDeps, type ObserverStepHarness, runObserver } from "./observer.js";
+import {
+  createObserver,
+  type ObserverDeps,
+  type ObserverStepHarness,
+  runObserver,
+} from "./observer.js";
 
 const FAKE_TX = { __mockTx: true } as never;
 const fakeRunInTx: Transactor = (cb) => cb(FAKE_TX);
@@ -168,7 +174,16 @@ const EVENT = { data: { conversationId: "conv-1" } };
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
+
+function recordedPayload(deps: { agentStore: AgentStore }): unknown {
+  const call = expectDefined(
+    vi.mocked(deps.agentStore.recordEvolutionEvent).mock.calls[0],
+    "recordEvolutionEvent call",
+  );
+  return call[1].payload;
+}
 
 describe("runObserver phase isolation", () => {
   it("extracts memories and drains pending rows when correction extraction fails", async () => {
@@ -213,6 +228,7 @@ describe("runObserver phase isolation", () => {
 
     expect(failing.ids).toEqual(clean.ids);
     expect(clean.ids).toEqual([
+      "record-start-time",
       "load-conversation",
       "load-profile",
       "load-history",
@@ -321,14 +337,6 @@ describe("runObserver phase isolation", () => {
 });
 
 describe("runObserver phase outcomes", () => {
-  function recordedPayload(deps: { agentStore: AgentStore }): unknown {
-    const call = expectDefined(
-      vi.mocked(deps.agentStore.recordEvolutionEvent).mock.calls[0],
-      "recordEvolutionEvent call",
-    );
-    return call[1].payload;
-  }
-
   it("records no failed phase on a fire where every phase completes", async () => {
     const deps = observerDeps({ provider: routedProvider() });
 
@@ -373,5 +381,27 @@ describe("runObserver phase outcomes", () => {
     expect(recordedPayload(deps)).toMatchObject({
       failedPhases: ["consolidation", "memories", "drain"],
     });
+  });
+});
+
+describe("createObserver duration", () => {
+  it("records the whole fire's duration, though every step boundary re-invokes the body", async () => {
+    const callMs = 30_000;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-27T12:00:00Z"));
+    const routed = routedProvider();
+    const chat = vi.fn(async (params: ChatParams) => {
+      vi.setSystemTime(Date.now() + callMs);
+      return routed.chat(params);
+    });
+    const deps = observerDeps({ provider: { ...routed, chat } });
+
+    await new InngestTestEngine({
+      function: createObserver(deps),
+      events: [{ name: "conversation/idle", data: { conversationId: "conv-1" } }],
+    }).execute();
+
+    expect(chat).toHaveBeenCalled();
+    expect(recordedPayload(deps)).toMatchObject({ durationMs: chat.mock.calls.length * callMs });
   });
 });
