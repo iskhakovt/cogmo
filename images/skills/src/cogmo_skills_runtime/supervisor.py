@@ -43,6 +43,7 @@ is hand-rolled, no production adopters). Revisit at 3.16+.
 import asyncio
 import ctypes
 import errno
+import gc
 import json
 import os
 import re
@@ -162,9 +163,11 @@ def _wait_with_timeout(pid: int, timeout_s: float) -> int:
     """
     pidfd = os.pidfd_open(pid)
     try:
-        sel = selectors.DefaultSelector()
-        sel.register(pidfd, selectors.EVENT_READ)
-        events = sel.select(timeout=timeout_s)
+        # Closed explicitly: a selector and its key map form a reference
+        # cycle, so dropping it leaves the epoll fd to a later GC pass.
+        with selectors.DefaultSelector() as sel:
+            sel.register(pidfd, selectors.EVENT_READ)
+            events = sel.select(timeout=timeout_s)
         if not events:
             raise TimeoutError()
         # Child is exit-ready; reap it.
@@ -548,6 +551,11 @@ def _serve_one_task() -> bool:
     processes and confirm with `task_exited`. False once the host closed
     the channel.
     """
+    # The task process closes every inherited fd and reuses the numbers.
+    # Garbage inherited from here that owns an fd would close the task's
+    # reused fd when a GC pass in the task finalizes it, so none may cross
+    # the fork.
+    gc.collect()
     status_r, status_w = os.pipe()
     relay_pid = os.fork()
     if relay_pid == 0:

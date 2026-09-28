@@ -14,6 +14,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Generator, Mapping
 from pathlib import Path
 from typing import Any
@@ -258,6 +259,28 @@ class TestSupervisorProtocol:
         assert second["output"] == {"echo": {"n": 2}}
         assert sup.await_exit("t-2") is not None
 
+    def test_inherits_no_garbage_that_closes_the_tasks_fds(self, sup: _Supervisor) -> None:
+        # Every task process is forked from the supervisor's heap. Garbage
+        # there owning an fd would be finalized in the task after the fd
+        # number was closed and reused, closing whatever the task opened.
+        body = (
+            "import gc, os\n"
+            "async def run(inputs, ctx):\n"
+            "    fds = [fd for _ in range(16) for fd in os.pipe()]\n"
+            "    gc.collect()\n"
+            "    closed = []\n"
+            "    for fd in fds:\n"
+            "        try:\n"
+            "            os.fstat(fd)\n"
+            "        except OSError:\n"
+            "            closed.append(fd)\n"
+            "    return {'closed': closed}\n"
+        )
+        for i in range(3):
+            result = sup.run_task(f"t-{i}", body, {})
+            assert result.get("output") == {"closed": []}, result
+            assert sup.await_exit(f"t-{i}") is not None
+
     def test_stamps_ctx_calls_and_delivers_only_this_tasks_results(self, sup: _Supervisor) -> None:
         sup.send(
             {
@@ -359,8 +382,12 @@ class TestSupervisorProtocol:
     def test_shuts_down_on_eof_leaving_no_process_behind(self, sup: _Supervisor) -> None:
         sup.run_task("t-1", _ECHO, {})
         assert sup.await_exit("t-1") is not None
-        idle = _descendant_pids(sup.proc.pid)
-        assert idle, "expected the next task's relay and task process to be waiting"
+        # The supervisor forks the next task's relay and task process right
+        # after `task_exited`; wait for both.
+        deadline = time.monotonic() + 5
+        while len(idle := _descendant_pids(sup.proc.pid)) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(idle) == 2, idle
         sup.close()
         assert sup.proc.returncode == 0
         assert [pid for pid in idle if _alive(pid)] == []
