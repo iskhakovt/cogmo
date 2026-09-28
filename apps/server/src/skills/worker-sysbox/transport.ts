@@ -2,8 +2,8 @@ import { addAbortSignal, type Readable, type Writable } from "node:stream";
 import { Result } from "neverthrow";
 import split2 from "split2";
 import { describeError } from "../../util/describe-error.js";
-import { parseWorkerMessage, type WorkerTransport } from "../dispatcher.js";
-import type { WorkerMessage } from "../protocol.js";
+import { parseWorkerFrame, type WorkerTransport } from "../dispatcher.js";
+import type { WorkerFrame } from "../worker-state.js";
 
 /**
  * Maximum unframed buffer size before the transport gives up. Real protocol
@@ -49,11 +49,11 @@ export function createNdjsonTransport(stdin: Writable, stdout: Readable): Worker
   const lines = addAbortSignal(closed.signal, stdout.pipe(split2({ maxLength: MAX_BUFFER_BYTES })));
   closed.signal.addEventListener("abort", () => stdin.end(), { once: true });
 
-  async function* messages(): AsyncGenerator<WorkerMessage> {
+  async function* messages(): AsyncGenerator<WorkerFrame> {
     try {
       for await (const line of lines) {
-        const message = typeof line === "string" && line.length > 0 ? toMessage(line) : undefined;
-        if (message !== undefined) yield message;
+        const frame = typeof line === "string" && line.length > 0 ? toFrame(line) : undefined;
+        if (frame !== undefined) yield frame;
       }
     } catch (e) {
       // The abort is the host's own close, not a failure.
@@ -72,6 +72,6 @@ export function createNdjsonTransport(stdin: Writable, stdout: Readable): Worker
   };
 }
 
-function toMessage(line: string): WorkerMessage | undefined {
-  return parseJson(line).match(parseWorkerMessage, () => undefined);
+function toFrame(line: string): WorkerFrame | undefined {
+  return parseJson(line).match(parseWorkerFrame, () => undefined);
 }

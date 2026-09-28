@@ -1,6 +1,6 @@
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
-import type { WorkerMessage } from "../protocol.js";
+import type { WorkerFrame } from "../worker-state.js";
 import { createNdjsonTransport, MAX_BUFFER_BYTES } from "./transport.js";
 
 function pair(): { stdin: PassThrough; stdout: PassThrough } {
@@ -16,11 +16,11 @@ function line(message: unknown): string {
 
 /** Collect what the stream yields until it ends; `error` is what it threw, if anything. */
 async function drain(
-  messages: AsyncIterable<WorkerMessage>,
-): Promise<{ received: WorkerMessage[]; error: unknown }> {
-  const received: WorkerMessage[] = [];
+  frames: AsyncIterable<WorkerFrame>,
+): Promise<{ received: WorkerFrame[]; error: unknown }> {
+  const received: WorkerFrame[] = [];
   try {
-    for await (const message of messages) received.push(message);
+    for await (const frame of frames) received.push(frame);
     return { received, error: undefined };
   } catch (error) {
     return { received, error };
@@ -74,7 +74,7 @@ describe("createNdjsonTransport", () => {
     expect((await drain(t.messages())).received).toEqual([RESULT]);
   });
 
-  it("drops JSON that is not a worker frame, including frames only the host sends", async () => {
+  it("yields JSON that is no worker message as malformed, frames only the host sends included", async () => {
     const { stdin, stdout } = pair();
     const t = createNdjsonTransport(stdin, stdout);
 
@@ -84,7 +84,14 @@ describe("createNdjsonTransport", () => {
     stdout.write(line({ type: "task_invoke", id: "x", skill: "s", inputs: {} }));
     stdout.end(line(RESULT));
 
-    expect((await drain(t.messages())).received).toEqual([RESULT]);
+    const malformed = { type: "malformed", issues: expect.any(Array) };
+    expect((await drain(t.messages())).received).toEqual([
+      malformed,
+      malformed,
+      malformed,
+      malformed,
+      RESULT,
+    ]);
   });
 
   it("close ends stdin and silences subsequent sends", () => {

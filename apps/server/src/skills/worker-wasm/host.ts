@@ -6,12 +6,12 @@ import { logger } from "../../logger.js";
 import {
   type CtxHandler,
   Dispatcher,
-  parseWorkerMessage,
+  parseWorkerFrame,
   type WorkerTransport,
 } from "../dispatcher.js";
-import type { RuntimeRusage, TaskResult, WorkerMessage } from "../protocol.js";
+import type { RuntimeRusage, TaskResult } from "../protocol.js";
 import { DEFAULT_WALL_CLOCK_S, timeoutSignal } from "../wall-clock.js";
-import type { StartFailure } from "../worker-state.js";
+import type { StartFailure, WorkerFrame } from "../worker-state.js";
 
 const log = logger.child({ component: "skills.worker.wasm" });
 
@@ -174,10 +174,13 @@ async function runTask(
 }
 
 /** The worker's first frame: `ready` once Pyodide has loaded, `fatal` if it could not. */
-function acceptWorkerReady(first: WorkerMessage): Result<void, string> {
+function acceptWorkerReady(first: WorkerFrame): Result<void, string> {
   return match(first)
     .with({ type: "ready" }, () => ok(undefined))
     .with({ type: "fatal" }, ({ error }) => err(`worker init failed: ${error}`))
+    .with({ type: "malformed" }, ({ issues }) =>
+      err(`worker sent a malformed frame before ready (${issues.join("; ")})`),
+    )
     .otherwise(({ type }) => err(`worker sent ${type} before ready`));
 }
 
@@ -214,15 +217,14 @@ function createPortTransport(port: MessagePort, worker: Worker): WorkerTransport
   });
   worker.once("exit", (code: number) => gone.abort(new Error(`worker exited (code ${code})`)));
 
-  async function* messages(): AsyncGenerator<WorkerMessage> {
+  async function* messages(): AsyncGenerator<WorkerFrame> {
     try {
       for await (const [raw] of on(port, "message", {
         signal: AbortSignal.any([closed.signal, gone.signal]),
       })) {
-        const message = parseWorkerMessage(raw);
-        if (message === undefined) continue;
-        yield message;
-        if (message.type === "task_result") yield { type: "task_exited", id: message.id };
+        const frame = parseWorkerFrame(raw);
+        yield frame;
+        if (frame.type === "task_result") yield { type: "task_exited", id: frame.id };
       }
     } catch (e) {
       if (closed.signal.aborted) return;

@@ -9,8 +9,8 @@ import {
   type DispatcherOptions,
   type WorkerTransport,
 } from "./dispatcher.js";
-import type { HostMessage, TaskInvoke, TaskResult, WorkerMessage } from "./protocol.js";
-import type { ExitOutcome, Handshake, StartFailure } from "./worker-state.js";
+import type { HostMessage, TaskInvoke, TaskResult } from "./protocol.js";
+import type { ExitOutcome, Handshake, StartFailure, WorkerFrame } from "./worker-state.js";
 
 /**
  * The worker's end of an in-memory channel. `emit` delivers a frame to the
@@ -37,7 +37,7 @@ function channel() {
     transport,
     sent,
     close,
-    emit: (message: WorkerMessage) => bus.emit("message", message),
+    emit: (frame: WorkerFrame) => bus.emit("message", frame),
     fail: (error: Error) => bus.emit("error", error),
     onSend: (reply: (message: HostMessage) => void) => bus.on("sent", reply),
   };
@@ -129,6 +129,13 @@ describe("Dispatcher", () => {
       deadline.abort();
       expect(await opened).toEqual(err({ kind: "timed_out" }));
       expect(ch.close).toHaveBeenCalled();
+    });
+
+    it("refuses a first frame that fails validation at once", async () => {
+      const ch = channel();
+      const opened = open(ch);
+      ch.emit({ type: "malformed", issues: ["Invalid input"] });
+      expect(await opened).toEqual(err({ kind: "refused", reason: "sent malformed before ready" }));
     });
 
     it("reports a worker whose channel ends before its handshake", async () => {
@@ -374,6 +381,16 @@ describe("Dispatcher", () => {
     d.close("second");
     expect(await d.dead).toBe("first");
     expect(ch.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores a malformed frame after the handshake", async () => {
+    const ch = channel();
+    const d = await leased(ch);
+    const outcome = d.invoke(INVOKE, { ctxHandler: noopHandler(), deadline: NEVER });
+    ch.emit({ type: "malformed", issues: ["Invalid input"] });
+    ch.emit(result(1));
+    ch.emit({ type: "task_exited", id: "task-1" });
+    expect(await outcome).toEqual(completed(result(1)));
   });
 
   it("ignores a task_result that arrives with no task in flight", async () => {

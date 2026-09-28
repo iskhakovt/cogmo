@@ -303,6 +303,28 @@ describe("SysboxSkillWorker", () => {
       expect(bundle.sandbox.delete).toHaveBeenCalledWith(bundle.session);
     });
 
+    it("refuses a supervisor whose first frame is malformed at once", async () => {
+      vi.useFakeTimers();
+      try {
+        const bundle = buildFakeSandbox();
+        silentSupervisor(bundle);
+        bundle.stdout.write(`${JSON.stringify({ type: "supervisor_ready" })}\n`);
+        let outcome: unknown;
+        const created = create(bundle).catch((e: unknown) => {
+          outcome = e;
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        // Refused on the frame itself, not at the handshake deadline.
+        expect(String(outcome)).toMatch(
+          /supervisor sent a malformed frame before supervisor_ready/,
+        );
+        await created;
+        expect(bundle.sandbox.delete).toHaveBeenCalledWith(bundle.session);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("refuses a supervisor that exits before announcing", async () => {
       const bundle = buildFakeSandbox();
       silentSupervisor(bundle);

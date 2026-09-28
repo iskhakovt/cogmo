@@ -36,8 +36,17 @@ export interface TaskRef {
   readonly id: string;
 }
 
-/** Judges a worker's first frame. Each tier defines its own handshake. */
-export type Handshake = (first: WorkerMessage) => Result<void, string>;
+/** A frame that is JSON but no worker message. */
+export interface MalformedFrame {
+  type: "malformed";
+  issues: string[];
+}
+
+/** What a worker's channel delivers: its messages, and frames that failed validation. */
+export type WorkerFrame = WorkerMessage | MalformedFrame;
+
+/** Judges a worker's first frame, whatever it is. Each tier defines its own handshake. */
+export type Handshake = (first: WorkerFrame) => Result<void, string>;
 
 export type WorkerState<T extends TaskRef> =
   | { kind: "starting"; handshake: Handshake }
@@ -95,10 +104,11 @@ export type HostEvent<T extends TaskRef> =
   | { type: "channel_ended"; reason: string }
   | { type: "close"; reason: string };
 
-export type WorkerEvent<T extends TaskRef> = WorkerMessage | HostEvent<T>;
+export type WorkerEvent<T extends TaskRef> = WorkerFrame | HostEvent<T>;
 
 const HANDSHAKE_FRAMES = ["supervisor_ready", "ready", "fatal"] as const;
 const TASK_FRAMES = ["ctx_call", "task_result", "task_exited"] as const;
+const FRAMES = [...HANDSHAKE_FRAMES, ...TASK_FRAMES, "malformed"] as const;
 
 export type Effect<T extends TaskRef> =
   | { type: "send"; message: HostMessage }
@@ -122,12 +132,12 @@ export function transition<T extends TaskRef>(
 ): Transition<T> {
   return match<[WorkerState<T>, WorkerEvent<T>], Transition<T>>([state, event])
     .with([{ kind: "dead" }, P._], ([s, e]) => whileDead(s, e))
-    .with(
-      [{ kind: "starting" }, { type: P.union(...HANDSHAKE_FRAMES, ...TASK_FRAMES) }],
-      ([s, first]) => accept(s, first),
-    )
+    .with([{ kind: "starting" }, { type: P.union(...FRAMES) }], ([s, first]) => accept(s, first))
     .with([{ kind: LIVE }, { type: P.union(...HANDSHAKE_FRAMES) }], ([s, frame]) =>
       stayAndLog(s, "warn", "handshake frame after the handshake — ignoring", { type: frame.type }),
+    )
+    .with([{ kind: LIVE }, { type: "malformed" }], ([s, { issues }]) =>
+      stayAndLog(s, "warn", "discarding malformed worker message", { issues }),
     )
     .with([{ kind: LIVE }, { type: "ctx_call" }], ([s, call]) => onCtxCall(s, call))
     .with([{ kind: LIVE }, { type: "task_result" }], ([s, result]) => onTaskResult(s, result))
@@ -175,8 +185,7 @@ function whileDead<T extends TaskRef>(
     .with(
       {
         type: P.union(
-          ...HANDSHAKE_FRAMES,
-          ...TASK_FRAMES,
+          ...FRAMES,
           "ctx_replied",
           "send_failed",
           "deadline_passed",
@@ -370,7 +379,7 @@ function onHandshakeTimedOut<T extends TaskRef>(state: Alive<T>): Transition<T> 
 
 function accept<T extends TaskRef>(
   state: StateOf<T, "starting">,
-  first: WorkerMessage,
+  first: WorkerFrame,
 ): Transition<T> {
   return state.handshake(first).match<Transition<T>>(
     () => ({ state: { kind: "idle" }, effects: [{ type: "started", outcome: ok(undefined) }] }),

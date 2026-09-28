@@ -14,10 +14,9 @@ import {
   SUPERVISOR_PROTOCOL_VERSION,
   type TaskInvoke,
   type TaskResult,
-  type WorkerMessage,
 } from "../protocol.js";
 import { DEFAULT_WALL_CLOCK_S, timeoutSignal } from "../wall-clock.js";
-import type { StartFailure, TaskFailure } from "../worker-state.js";
+import type { StartFailure, TaskFailure, WorkerFrame } from "../worker-state.js";
 import { DEFAULT_RESOURCE_LIMITS } from "./host.js";
 import { createNdjsonTransport } from "./transport.js";
 
@@ -79,7 +78,7 @@ const SUPERVISOR_GRACE_S = 10;
 const SUPERVISOR_READY_TIMEOUT_MS = 30_000;
 
 /** The supervisor's first frame must announce `SUPERVISOR_PROTOCOL_VERSION`. */
-function acceptSupervisorReady(first: WorkerMessage): Result<void, string> {
+function acceptSupervisorReady(first: WorkerFrame): Result<void, string> {
   return match(first)
     .with({ type: "supervisor_ready", protocolVersion: SUPERVISOR_PROTOCOL_VERSION }, () =>
       ok(undefined),
@@ -88,6 +87,9 @@ function acceptSupervisorReady(first: WorkerMessage): Result<void, string> {
       err(
         `supervisor speaks protocol v${protocolVersion}; this Cogmo requires v${SUPERVISOR_PROTOCOL_VERSION} — use the skills image matching this Cogmo version`,
       ),
+    )
+    .with({ type: "malformed" }, ({ issues }) =>
+      err(`supervisor sent a malformed frame before supervisor_ready (${issues.join("; ")})`),
     )
     .otherwise(() => err("supervisor sent a task frame before supervisor_ready"));
 }

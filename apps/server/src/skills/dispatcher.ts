@@ -7,7 +7,6 @@ import {
   type CtxResult,
   type HostMessage,
   type TaskInvoke,
-  type WorkerMessage,
   WorkerMessageSchema,
 } from "./protocol.js";
 import {
@@ -17,6 +16,7 @@ import {
   type TaskOutcome,
   transition,
   type WorkerEvent,
+  type WorkerFrame,
   type WorkerState,
   type WorkerStateKind,
 } from "./worker-state.js";
@@ -24,15 +24,15 @@ import {
 const log = logger.child({ component: "skills.dispatcher" });
 
 /**
- * One worker's channel. `messages()` yields the worker's frames, validated,
- * in arrival order. It ends when the worker closes its end or the host calls
+ * One worker's channel. `messages()` yields the worker's frames in arrival
+ * order, each validated: a worker message, or a malformed frame. It ends when the worker closes its end or the host calls
  * `close()`, and throws when the channel fails; unless the host closed it,
  * either means the worker is gone. Iterate it once.
  */
 export interface WorkerTransport {
   /** Send one frame. May throw if the channel cannot carry it; after `close()` it drops the frame. */
   send(message: HostMessage): void;
-  messages(): AsyncIterable<WorkerMessage>;
+  messages(): AsyncIterable<WorkerFrame>;
   /** Stop sending and receiving. Idempotent. */
   close(): void;
 }
@@ -62,15 +62,12 @@ export class CtxError extends Error {
   }
 }
 
-/** Validate a frame from a worker. Anything else is logged and dropped. */
-export function parseWorkerMessage(raw: unknown): WorkerMessage | undefined {
+/** Validate a frame from a worker. The machine decides what a malformed one means. */
+export function parseWorkerFrame(raw: unknown): WorkerFrame {
   const parsed = WorkerMessageSchema.safeParse(raw);
-  if (parsed.success) return parsed.data;
-  log.warn(
-    { issues: parsed.error.issues.map((i) => i.message) },
-    "discarding malformed worker message",
-  );
-  return undefined;
+  return parsed.success
+    ? parsed.data
+    : { type: "malformed", issues: parsed.error.issues.map((i) => i.message) };
 }
 
 export interface DispatcherOptions {
@@ -200,7 +197,7 @@ export class Dispatcher {
   }
 
   async #drain(): Promise<void> {
-    for await (const message of this.#transport.messages()) this.#dispatch(message);
+    for await (const frame of this.#transport.messages()) this.#dispatch(frame);
   }
 
   /**
