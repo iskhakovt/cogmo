@@ -573,7 +573,7 @@ Two backends share the `ExecStreamingHandle` contract, selected per call by `opt
 - Sets `NO_COLOR=1` in the PTY's env block to suppress ANSI escapes on stdout (PTY's stdout is still a TTY for the child).
 - Redirects child stderr to `/tmp/cogmo-pty-stderr-<uuid>.log` so the PTY's combined onData channel carries clean stdout JSONL; the wrapper downloads + emits the stderr file via the stderr `Readable` after the PTY exits.
 - On teardown, kills the PTY unless it has exited, disconnects, and deletes both tmpfiles via `fs.deleteFile` (best-effort; sandbox teardown sweeps `/tmp` anyway).
-- Registers `PtyHandle.wait()` as soon as the PTY exists. It settles on the `exited` control frame or on the WS closing; an abnormal close (1006) resolves it with no exit code, which the exec reports as `no_exit_code`, and a `wait()` first called after such a close never settles. `kill()` sets no exit code either.
+- Registers `PtyHandle.wait()` as soon as the PTY exists. In `@daytona/sdk` 0.214 it settles on the `exited` control frame or on the WS closing: a normal close (1000) with no parseable reason reads as exit 0; an abnormal close (1006) resolves it with no exit code, which the exec reports as `no_exit_code` and still kills the PTY, since the remote command may run on; and a `wait()` first called after such a close never settles. `kill()` sets no exit code either, and one that 404s finds the PTY gone.
 
 WS reality the wrapper hides:
 

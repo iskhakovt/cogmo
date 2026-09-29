@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { PtyHandle, PtyResult } from "@daytona/sdk";
+import { DaytonaNotFoundError, type PtyHandle, type PtyResult } from "@daytona/sdk";
 import { err, ok, type Result } from "neverthrow";
 import { logger } from "../../logger.js";
 import { describeError } from "../../util/describe-error.js";
@@ -163,11 +163,12 @@ class DaytonaPtyBackend implements ExecBackend {
       onData: (data) => sink.output("stdout", Buffer.from(data)),
     });
     this.#pty = pty;
-    // `PtyHandle.wait()` settles on the `exited` control frame or on the WS
-    // closing. A close with no exit code (1006, abnormal) resolves it with
-    // none, and a `wait()` first called after such a close never settles,
-    // so register it before anything can close the socket. `kill()` sets no
-    // exit code either.
+    // `PtyHandle.wait()` (@daytona/sdk 0.214) settles on the `exited`
+    // control frame or on the WS closing. A normal close (1000) with no
+    // parseable reason reads as exit 0; an abnormal one (1006) resolves it
+    // with no exit code; and a `wait()` first called after such a close
+    // never settles, so register it before anything can close the socket.
+    // `kill()` sets no exit code either.
     pty.wait().then(
       (exit) => {
         this.#exit = exit;
@@ -225,9 +226,11 @@ class DaytonaPtyBackend implements ExecBackend {
   }
 
   /**
-   * Kill the PTY unless it has exited, drop the local WebSocket, and delete
-   * both tmpfiles. The deletes are best effort: the sandbox's `/tmp` goes
-   * with it.
+   * Kill the PTY unless it reported an exit code, drop the local WebSocket,
+   * and delete both tmpfiles. A close with no exit code (1006) says nothing
+   * about the remote command, which may still run, so that gets the kill
+   * too; a kill that 404s finds the PTY gone already. The deletes are best
+   * effort: the sandbox's `/tmp` goes with it.
    */
   async teardown(): Promise<void> {
     const pty = this.#pty;
@@ -240,11 +243,19 @@ class DaytonaPtyBackend implements ExecBackend {
     );
     if (pty) {
       try {
-        if (this.#exit === undefined) await pty.kill();
+        if (this.#exit?.exitCode === undefined) await killUnlessGone(pty);
       } finally {
         await pty.disconnect().catch(() => undefined);
       }
     }
     await files;
+  }
+}
+
+async function killUnlessGone(pty: PtyHandle): Promise<void> {
+  try {
+    await pty.kill();
+  } catch (e) {
+    if (!(e instanceof DaytonaNotFoundError)) throw e;
   }
 }

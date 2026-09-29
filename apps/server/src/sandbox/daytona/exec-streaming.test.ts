@@ -199,10 +199,9 @@ describe("startExecStreaming", () => {
   });
 
   it("dispose() calls deleteSession and rejects wait() with ExecDisposedError", async () => {
-    // Per the `ExecStreamingHandle` contract, `wait()` must REJECT
-    // (not resolve with a sentinel exit code) after `dispose()` so
-    // backend-agnostic consumers can branch on the dispose path
-    // explicitly. Mirrors the Local-Docker backend's behaviour.
+    // Per the `ExecStreamingHandle` contract, a disposed exec reports
+    // `disposed`, and `wait()` rejects with `ExecDisposedError`, on every
+    // backend.
     let stdoutCb: ((c: string) => void) | undefined;
     const proc = fakeProcess({ wsReject: new Error("ws closed") });
     let resolveWs: (() => void) | undefined;
@@ -267,8 +266,7 @@ describe("startExecStreaming", () => {
     // `getSessionCommand` is in flight, consumer calls dispose() which
     // deletes the session. The in-flight fetch then 404s. Per the
     // ExecStreamingHandle contract, consumers branching on outcome
-    // must see `ExecDisposedError`, not the raw SDK NotFound. Mirrors the
-    // .catch branch's mapping.
+    // must see `ExecDisposedError`, not the raw SDK NotFound.
     const proc = fakeProcess({ wsResolve: {} });
     let resolveFetch!: (v: Awaited<ReturnType<Process["getSessionCommand"]>>) => void;
     let rejectFetch!: (e: Error) => void;
@@ -594,10 +592,8 @@ describe("startExecStreaming", () => {
     );
     vi.mocked(proc.deleteSession).mockImplementation(async () => {
       // Mimic real Daytona — deleteSession tears down the WS, closing
-      // the still-open logs promise. Resolve (rather than reject)
-      // matches what Daytona's SDK does on the success path of a
-      // killed session — and exercises the `.then(timedOut ? reject)`
-      // branch in exec-streaming.ts.
+      // the still-open logs promise. It resolves, as the SDK's does on a
+      // close, after the deadline has already settled the exec.
       resolveWs?.();
     });
 
@@ -724,10 +720,8 @@ describe("startExecStreaming", () => {
   });
 
   it("natural-exit clears timers — a slow exec that finishes under the cap doesn't accidentally fire the timeout after", async () => {
-    // Regression guard: if `clearTimers` weren't called on the
-    // `.then(success)` path, the total/idle timers could fire after
-    // `wait()` already resolved, leaving a stray `deleteSession` call
-    // (and an extra rejection trying to settle a resolved promise).
+    // Settling stops both deadlines: one firing after a natural exit
+    // would leave a stray `deleteSession` call.
     const proc = fakeProcess({ wsResolve: {}, exitCode: 0 });
     const handle = await startExecStreaming({
       process: proc,
