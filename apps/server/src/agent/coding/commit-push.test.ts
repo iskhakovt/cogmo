@@ -1,11 +1,12 @@
 import { PassThrough, type Readable } from "node:stream";
-import { ok } from "neverthrow";
+import { err, ok } from "neverthrow";
 import { describe, expect, it, vi } from "vitest";
-import type {
-  ExecOptions,
-  ExecStreamingHandle,
-  LocalDockerSessionState,
-  SandboxSession,
+import {
+  type ExecOptions,
+  type ExecStreamingHandle,
+  type LocalDockerSessionState,
+  type SandboxSession,
+  unwrapExit,
 } from "../../sandbox/index.js";
 import { runCommitAndPush } from "./commit-push.js";
 
@@ -13,6 +14,8 @@ interface FakeExecResult {
   stdout?: string;
   stderr?: string;
   exitCode?: number;
+  /** The transport fails: both streams fail with this error, and so does the exec. */
+  transportError?: Error;
 }
 
 function fakeExec(result: FakeExecResult): ExecStreamingHandle {
@@ -20,6 +23,21 @@ function fakeExec(result: FakeExecResult): ExecStreamingHandle {
   const stderr = new PassThrough();
   if (result.stdout) stdout.write(result.stdout);
   if (result.stderr) stderr.write(result.stderr);
+  const transportError = result.transportError;
+  if (transportError) {
+    stdout.destroy(transportError);
+    stderr.destroy(transportError);
+    const exited = Promise.resolve(
+      err({ kind: "transport_failed" as const, error: transportError }),
+    );
+    return {
+      stdout: stdout as Readable,
+      stderr: stderr as Readable,
+      exited,
+      wait: () => exited.then(unwrapExit),
+      dispose: vi.fn(async () => {}),
+    };
+  }
   stdout.end();
   stderr.end();
   return {
@@ -236,6 +254,34 @@ describe("runCommitAndPush", () => {
     expect(result.kind).toBe("failed");
     if (result.kind === "failed") {
       expect(result.output).toMatch(/cannot run gpg/);
+    }
+  });
+
+  it("throws a transport failure without leaving a stream reader's rejection unhandled", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const transportError = new Error("hijacked socket reset");
+      const { container } = fakeContainer({ status: { transportError } });
+      await expect(
+        runCommitAndPush({
+          container,
+          worktreeDir: "/workspace",
+          branch: "cogmo/abc",
+          commitMessage: "goal",
+          signingKeyPath: "/tmp/cogmo-askpass/signing-key",
+          askpassEnv: {},
+          author: { name: "a", email: "a@example.com" },
+        }),
+      ).rejects.toBe(transportError);
+      // Node reports an unhandled rejection once the microtask queue drains.
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
     }
   });
 
