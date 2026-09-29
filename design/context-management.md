@@ -89,11 +89,9 @@ The table is **append-only**. Re-compaction inserts a new row summarizing the pr
 
 `/compact` forces Strategy 2 immediately, regardless of budget pressure, and stores the result. The next turn then starts from a summary it did not have to wait for. `src/agent/conversation/compact-conversation.ts` drives it synchronously — the same trade-off `/reflect` makes: the user is waiting on the reply, single-user scale means no concurrent fire to race, and errors surface to the caller instead of a retry log.
 
-It picks the same split the budget-triggered path would (`DEFAULT_KEEP_TURNS`). `[confirmed]` It renders the prefix through the one renderer, with attachments as placeholders naming the file as in the turn-time fork, so the attachment store joins `compactConversation`'s deps. Outside a turn there is no frozen tool table, so it strips every thinking block from its request ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (h)). It does **not** run Strategy 1: clearing tool results would have the summarizer read placeholders instead of the output it is meant to compress, and unlike the turn-time path there is no budget pressure to justify that loss.
+It picks the same split the budget-triggered path would (`DEFAULT_KEEP_TURNS`). `[confirmed]` It renders the prefix through the one renderer, every attachment as a placeholder naming the file, as the turn-time fork does. It carries that fork's Strategy 1 intent, triggered at the summarization model's budget, so a prefix that fits is summarized from the full tool results ([Strategy 2](#strategy-2-summarize-trigger-80) → Cleared results in the fork). Outside a turn there is no frozen tool table, so it strips every thinking block from its request ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (h)).
 
 Because there is no budget gate, the manual path carries a floor the automatic one does not need: below `MIN_MESSAGES_TO_COMPACT` **real messages** outside the retain window it returns `too_short` rather than paying for a call. Reaching 80% of the window on that few messages means they are individually enormous and worth summarizing; asking by hand on a short conversation is not. The floor counts messages rather than compaction-view entries, so a re-compaction can't clear it on the strength of the previous summary occupying a slot.
-
-**Strategy 2's input differs between the paths, and the turn-time one is the weaker.** Strategy 1 fires at 60% and Strategy 2 at 80%, so by the time the turn-time summarizer runs, every tool result outside the most recent five is already a `[Cleared — call tool again if needed]` placeholder — and that is what gets frozen into a durable summary. `/compact` skips Strategy 1 for exactly this reason and reads the real output. The fork's own edit intent corrects it ([Strategy 2](#strategy-2-summarize-trigger-80) → Cleared results in the fork).
 
 Outcomes: `too_short` (nothing outside the retain window, or too little to be worth a call), `nothing_new`, `empty_summary` (the model returned no text — nothing is stored), `truncated`, or the message counts. `nothing_new` also covers an already-compacted conversation, where the only thing outside the window is the stored summary — reporting that as `too_short` would tell someone their 500-message conversation is short. `truncated` is a dead end rather than a retry: the response hit its output cap, re-running feeds the same prefix into the same cap, and the input cap tracked in `todo.md` is what would let that span be compacted at all. `nothing_new` covers both ways a concurrent turn can win the race: taking the same cutoff, where the conflict arm keeps its text, or a wider one, where this row is written but coverage-ordered reads will never return it. The driver re-reads after the write, in a **separate** transaction — under REPEATABLE READ a snapshot is taken at a transaction's first statement, so a read sharing the insert's transaction would be blind to anything committed after it.
 
@@ -107,7 +105,9 @@ A `/compact` racing an in-flight turn is safe by construction: the turn froze it
 
 Three strategies, applied in order from gentlest to most aggressive. Each has a trigger threshold expressed as a fraction of the budget.
 
-### Strategy 0: Same-Tool Supersession `[trigger: count-based] [confirmed]`
+### Strategy 0: Same-Tool Supersession `[trigger: count-based]`
+
+Retired, and kept as the open append-only alternative ([Retirement](#retirement-confirmed)).
 
 The three strategies below are **budget-pressure-triggered** — they fire when the conversation approaches the context limit. They do not fire when a single turn calls the same tool many times at low overall budget utilization: eight `generate_image` results at 30% of the budget evade Strategy 1 entirely.
 
@@ -130,7 +130,6 @@ This strategy is intentionally narrower than Strategy 1:
 | Trigger | New same-tool `tool_result` brings count > K | Total context > 60% budget |
 | Scope | One tool's cluster | All old `tool_result` blocks |
 | Action | Compact prior same-tool results into one summary block | Replace tool_result content with placeholder |
-| Frequency | Per-turn, fires often on tool-heavy turns | Per-turn, fires only as context fills |
 
 #### Rewrite at supersession points only
 
@@ -169,14 +168,6 @@ On the second invocation against an already-compacted array, the per-block apply
 #### Failure mode and rollback
 
 If summary generation needs an LLM call (it shouldn't — the summary is template-based and cheap), Strategy 0 falls through to "leave the cluster alone, let Strategy 1 handle it on the next budget check." Strategy 0 is best-effort optimization; it never blocks a turn.
-
-#### Where it runs
-
-In the same load-time compaction pipeline as Strategies 1–3, applied **before** Strategy 1. Strategy 0 reduces same-tool clutter; Strategy 1 then operates on a cleaner array if budget pressure additionally calls for it.
-
-#### Confidence
-
-Structural shape (supersession-triggered, in-place rewrite, prior-results-only) is `[confirmed]` — that's the design constraint and the implementation matches. The numeric defaults (`retainRecent: 2`, `retainFirst: 1`, `triggerCount: 5`) remain tunable; real data on attention dilution would justify revising them, but the shape stays the same.
 
 #### Retirement `[confirmed]`
 
@@ -231,7 +222,7 @@ The summarization call receives the system prompt (or at minimum the core memory
 
 **Iterative compaction:** On subsequent compactions, the conversation starts with the previous summary message + newer turns. The summarization re-summarizes everything (previous summary + accumulated turns) into a fresh summary. Quality degrades compoundingly — Factory.ai data shows multi-session retention drops to ~37% after multiple compactions. Mitigation: the summarization prompt explicitly instructs verbatim preservation of key details, and Hindsight provides a recovery path for facts that drift out of the summary over time.
 
-**Images:** `ImageBlock`s in the summarized prefix are lost — images can't be meaningfully summarized into text, so the fork receives them as placeholders naming the file ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (h)). If the model needs to reference an earlier image, it would need to be re-sent. This is an accepted tradeoff; images in old turns are rarely referenced again, and the alternative (carrying all images forward) defeats the purpose of compaction.
+**Images:** `ImageBlock`s in the summarized prefix are lost — images can't be meaningfully summarized into text, so the summarization fork receives them as placeholders naming the file. It renders its span from `load-turn-transcript`'s rows under that policy, over the view's index range, since nothing before Strategy 2 changes the array's length ([Durable summaries](#durable-summaries-confirmed) → Cutoff derivation): the view's resolved `image` and `document` blocks carry no path to name. If the model needs to reference an earlier image, it would need to be re-sent. This is an accepted tradeoff; images in old turns are rarely referenced again, and the alternative (carrying all images forward) defeats the purpose of compaction.
 
 **Failure handling:** If the summarization LLM call fails (timeout, rate limit, malformed output), fall through to strategy 3 (truncation). Summarization failure should not block the conversation. Nothing is stored on that path, so the next turn re-attempts rather than inheriting a partial result.
 
@@ -260,6 +251,8 @@ Anthropic requires every `tool_result` block (on a user message) to have a match
 ## Pipeline Execution
 
 ```
+cutoff = attachmentCutoff(epoch, sizes)                      # before counting: fits attachments to their budget
+messages = render(rows, cutoff)                              # attachments up to the cutoff as placeholders
 edit = clearToolResults(trigger = budget * 0.60, keep = 5)   # Strategy 1: an intent every request carries
 
 count = countTokens(system, messages, tools, edit)           # after clearing
@@ -272,7 +265,7 @@ if count > budget * 0.95:
   messages = truncate(messages)
 ```
 
-Every request carries Strategy 1's intent, the count included, and the adapter clears ([Where it runs](#strategy-1-clear-tool-results-trigger-60)). Strategy 0 is retired ([Retirement](#retirement-confirmed)).
+The attachment cutoff comes first, so no count sends a view over the request cap ([prompt-caching.md](prompt-caching.md#sources-and-fixes) → source (d)). Every request carries Strategy 1's intent, the count included, and the adapter clears ([Where it runs](#strategy-1-clear-tool-results-trigger-60)). Strategy 0 is retired ([Retirement](#retirement-confirmed)).
 
 **Skip-counting fast path.** `compactMessages` accepts a `skipBudgetStrategies` flag. When the caller has already decided via `shouldSkipCounting` that the turn is comfortably under the context budget, it passes `true`, and `compactMessages` returns the view unchanged without the `provider.countTokens` round-trip. Otherwise it counts once, and again only after a summary, whose size varies.
 
