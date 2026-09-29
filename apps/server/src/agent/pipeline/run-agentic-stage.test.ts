@@ -2,6 +2,7 @@ import { NonRetriableError } from "inngest";
 import { describe, expect, it, vi } from "vitest";
 import { mock } from "vitest-mock-extended";
 import { z } from "zod";
+import { installLiveCatalog } from "../../llm/litellm-data.js";
 import type { LlmProvider } from "../../llm/provider.js";
 import type { ToolDefinition } from "../../llm/types.js";
 import { logger } from "../../logger.js";
@@ -386,6 +387,7 @@ describe("runAgenticStage", () => {
         "freeze-core-memory-scope",
         "freeze-turn-inputs",
         "assemble-prompt",
+        "freeze-model-limits",
         "load-last-tokens",
         "render-turn-context",
         "persist-new-messages",
@@ -421,6 +423,25 @@ describe("runAgenticStage", () => {
       key: "preferences",
       content: "Dice",
     });
+  });
+
+  it("keeps the limits it froze when a catalog refresh lands between invocations", async () => {
+    const h = await harness();
+    const { steps } = memoizingSteps();
+    await runAgenticStage(h.deps, stageArgs(), steps, log);
+
+    installLiveCatalog({
+      entries: { "claude-sonnet-4-6": { contextWindow: 200_000, maxOutputTokens: 1_234 } },
+      fetchedAt: new Date("2026-09-28T06:17:00.000Z"),
+    });
+    try {
+      await runAgenticStage(h.deps, stageArgs(), steps, log);
+    } finally {
+      installLiveCatalog(null);
+    }
+
+    const maxTokens = h.runStreamingAgentLoop.mock.calls.map(([params]) => params.maxTokens);
+    expect(maxTokens).toEqual([64_000, 64_000]);
   });
 
   it("offers no core-memory tools in a stage without core memory", async () => {

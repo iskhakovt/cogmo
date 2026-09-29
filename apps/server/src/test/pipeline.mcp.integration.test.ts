@@ -4,9 +4,10 @@ import { and, desc, eq } from "drizzle-orm";
 import { connect } from "inngest/connect";
 import { afterAll, beforeAll, describe, expect, inject, it, vi } from "vitest";
 import { conversations, messages } from "../agent/store/schema.js";
-import { db } from "../db/index.js";
+import { db, transactor } from "../db/index.js";
 import { bootstrap } from "../index.js";
 import { channelSessions, inboundMessages } from "../transport/store/schema.js";
+import { pinOrgProfileToCassetteModel } from "./cassette-model.js";
 import { fileDefaultUserId, fileLlmockUrl } from "./integration-file.js";
 import { workerInngestBaseUrl } from "./worker-inngest.js";
 
@@ -55,6 +56,7 @@ beforeAll(async () => {
     process.env.RECORD === "1" ? (process.env.ANTHROPIC_API_KEY ?? "test-key") : "test-key";
   const provider = new AnthropicProvider(anthropicKey, fileLlmockUrl());
 
+  await transactor(db)(pinOrgProfileToCassetteModel);
   bootstrapped = await bootstrap({ providerOverride: provider });
   const { inngest, functions } = bootstrapped;
 
