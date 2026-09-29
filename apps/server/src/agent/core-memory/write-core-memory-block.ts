@@ -3,8 +3,8 @@ import * as R from "remeda";
 import { match } from "ts-pattern";
 import type { Transaction, Transactor } from "../../db/index.js";
 import { coreMemoryEdits } from "../../metrics.js";
-import type { AgentStore } from "../store/index.js";
-import { type CoreMemoryScope, IDENTITY_BLOCK_KEY } from "./scope.js";
+import type { AgentStore, CoreMemoryUpsertOutcome } from "../store/index.js";
+import { type CoreMemoryScope, DOCUMENTED_BLOCK_KEYS, IDENTITY_BLOCK_KEY } from "./scope.js";
 
 type CoreMemoryWriteTarget =
   | { kind: "shared" }
@@ -27,8 +27,11 @@ export interface CoreMemoryUnavailable {
   code: "core_memory_unavailable";
 }
 
-/** A write's effect on the stored block; null when it left the block as it was. */
-type BlockChange = "created" | "updated" | "deleted" | null;
+/** A write's effect on the stored block. */
+type BlockChange = CoreMemoryUpsertOutcome | "deleted";
+
+/** Keys the edit counter records as themselves; any other is `other`. */
+const LABELLED_KEYS: ReadonlySet<string> = new Set(DOCUMENTED_BLOCK_KEYS);
 
 type CoreMemoryWriteStore = Pick<
   AgentStore,
@@ -58,14 +61,22 @@ export async function writeCoreMemoryBlock(
       content: args.content,
     }),
   );
-  countEdit(args.key, target, upserted === "unchanged" ? null : upserted);
+  countEdit(args.key, target, upserted);
   return ok(target);
 }
 
-/** Count a committed change in `cogmo.core_memory.edits`; a no-op write counts nothing. */
+/**
+ * Count a committed change in `cogmo.core_memory.edits`. The key is free text
+ * the model picks, so an undocumented one is labelled `other`, keeping content
+ * out of the label and its cardinality bounded.
+ */
 function countEdit(key: string, target: CoreMemoryWriteTarget, change: BlockChange): void {
-  if (change === null) return;
-  coreMemoryEdits.add(1, { key, target: target.kind, change });
+  if (change === "unchanged") return;
+  coreMemoryEdits.add(1, {
+    key: LABELLED_KEYS.has(key) ? key : "other",
+    target: target.kind,
+    change,
+  });
 }
 
 /**
@@ -89,13 +100,12 @@ async function writeOverride(
     const deleted = await store.deleteCoreMemoryBlock(tx, block);
     return {
       write: { kind: "override-matches-shared", profileClass },
-      change: deleted ? "deleted" : null,
+      change: deleted ? "deleted" : "unchanged",
     };
   }
-  const upserted = await store.upsertCoreMemoryBlock(tx, { ...block, content });
   return {
     write: { kind: "override", profileClass, leftOut },
-    change: upserted === "unchanged" ? null : upserted,
+    change: await store.upsertCoreMemoryBlock(tx, { ...block, content }),
   };
 }
 

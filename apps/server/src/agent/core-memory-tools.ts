@@ -1,6 +1,6 @@
 import { match } from "ts-pattern";
 import { z } from "zod";
-import type { CoreMemoryScope } from "./core-memory/scope.js";
+import { type CoreMemoryScope, DOCUMENTED_BLOCK_KEYS } from "./core-memory/scope.js";
 import type { CoreMemoryWrite } from "./core-memory/write-core-memory-block.js";
 import { formatUserContext } from "./prompt.js";
 import { defineTool, type ToolSpec } from "./tools.js";
@@ -27,9 +27,7 @@ export const coreMemoryUpdate = defineTool({
   schema: z.object({
     key: z
       .string()
-      .describe(
-        "Block identifier (e.g. 'identity', 'user_profile', 'active_projects', 'preferences')",
-      ),
+      .describe(`Block identifier (e.g. ${DOCUMENTED_BLOCK_KEYS.map((k) => `'${k}'`).join(", ")})`),
     content: z.string().describe("Full block content (replaces previous content)"),
   }),
   handler: async (input, service) => {
