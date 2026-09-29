@@ -50,6 +50,11 @@ const STATES = {
   booting_died: { ...emptyPool<WorkerRef, Waiter>(SIZING), workers: [at(W1, "dead")] },
   warm: { ...EMPTY, workers: [at(W1, "idle")] },
   warm_pair: { ...EMPTY, workers: [at(W1, "idle"), at(W2, "idle")] },
+  /** Idle beside a dead worker a task still holds. */
+  idle_and_dying: { ...EMPTY, workers: [at(W1, "idle"), at(W2, "dead")] },
+  idle_and_busy: { ...EMPTY, workers: [at(W1, "idle"), at(W2, "leased")] },
+  /** `min` 2, below it after a failed spawn. */
+  short_of_two: { ...EMPTY, sizing: { ...SIZING, min: 2 }, spawnFailed: true },
   /** One early death short of the crash-loop cap. */
   nearly_looping: {
     ...EMPTY,
@@ -72,6 +77,14 @@ const STATES = {
     queue: ["q1"],
   },
   looping_empty: { ...EMPTY, earlyDeaths: CRASH_LOOP_DEATHS },
+  /** The sweep's probe is under way. */
+  looping_spawning: { ...EMPTY, earlyDeaths: CRASH_LOOP_DEATHS, spawning: 1 },
+  looping_spawning_min_two: {
+    ...EMPTY,
+    sizing: { ...SIZING, min: 2 },
+    earlyDeaths: CRASH_LOOP_DEATHS,
+    spawning: 1,
+  },
   /** A probe under way for the waiter. */
   probing: { ...EMPTY, earlyDeaths: CRASH_LOOP_DEATHS, spawning: 1, queue: ["q1"] },
   /** The probe refused the waiter's grant: its death is on the way. */
@@ -171,6 +184,9 @@ const TABLE: ReadonlyArray<Row> = [
   ["warm", "sweep", [], "w1:idle | q[] | s0 | e0"],
   ["warm", "dispose", ["teardown"], "- | q[] | s0 | e0 | disposed"],
   ["warm_pair", "sweep", ["log", "retire"], "w1:dead w2:idle | q[] | s0 | e0"],
+  ["idle_and_dying", "sweep", [], "w1:idle w2:dead | q[] | s0 | e0"],
+  ["idle_and_busy", "sweep", [], "w1:idle w2:leased | q[] | s0 | e0"],
+  ["short_of_two", "sweep", ["spawn", "spawn"], "- | q[] | s2 | e0"],
   ["nearly_looping", "died_early", ["log", "log"], "w1:dead | q[] | s0 | e3"],
   ["busy", "acquire", ["spawn"], "w1:leased | q[q2] | s1 | e0"],
   ["busy", "died_early", ["log", "spawn"], "w1:dead | q[] | s1 | e0"],
@@ -212,6 +228,8 @@ const TABLE: ReadonlyArray<Row> = [
   ["looping_empty", "acquire", ["spawn"], "- | q[q2] | s1 | e3"],
   ["looping_empty", "sweep", ["spawn"], "- | q[] | s1 | e3"],
   ["looping_empty", "died_early", [], "- | q[] | s0 | e3"],
+  ["looping_spawning", "sweep", [], "- | q[] | s1 | e3"],
+  ["looping_spawning_min_two", "sweep", [], "- | q[] | s1 | e3"],
   ["probing", "acquire", [], "- | q[q1 q2] | s1 | e3"],
   ["probing", "spawned", ["grant"], "w3:leased | q[] | s0 | e3"],
   ["probing", "spawn_failed", ["reject"], "- | q[] | s0 | e3 | spawn failed"],
@@ -324,6 +342,7 @@ type Property =
   | "no teardown of a held worker"
   | "every waiter settles once workers and spawns do"
   | "a waiter is served once workers live again"
+  | "the pool refills to min once nothing holds it back"
   | "the pool's view matches its workers";
 
 interface World {
@@ -338,6 +357,8 @@ interface World {
   tasks: WorkerRef[];
   waiters: Map<Waiter, "waiting" | "granted" | "rejected">;
   broken: Map<Property, string>;
+  /** A spawn failed, and no spawn has landed, no known worker died and no sweep ran since. */
+  hold: boolean;
 }
 
 function real(world: World, worker: WorkerRef): TrueWorker {
@@ -436,10 +457,15 @@ function check(world: World): void {
   }
   const untorn = [...world.workers].filter(([, w]) => !w.torn).map(([worker]) => worker);
   const viewed = state.workers.map((w) => w.worker);
+  // A worker the pool counts out of service must really be dead.
+  const deadButAlive = state.workers.some(
+    (w) => (w.status === "dead" || w.status === "refused") && real(world, w.worker).alive,
+  );
   if (
     state.spawning !== world.spawns ||
     untorn.length !== viewed.length ||
-    untorn.some((w) => !viewed.includes(w))
+    untorn.some((w) => !viewed.includes(w)) ||
+    deadButAlive
   ) {
     breaks(world, "the pool's view matches its workers", at);
   }
@@ -466,6 +492,7 @@ function walk(seed: number): World {
     tasks: [],
     waiters: new Map(),
     broken: new Map(),
+    hold: false,
   };
   let ids = 0;
   const loopFrom = upTo(200);
@@ -474,6 +501,7 @@ function walk(seed: number): World {
   const land = (dies: boolean, fails: boolean): void => {
     world.spawns -= 1;
     if (fails) {
+      if (world.state.phase === "running") world.hold = true;
       feed(world, { type: "spawn_failed", error: new Error("spawn failed") });
       return;
     }
@@ -491,6 +519,7 @@ function walk(seed: number): World {
     const diesFirst = dies && chance(0.5);
     if (diesFirst) kill(world, worker, "worker");
     feed(world, { type: "spawned", worker });
+    world.hold = false;
     if (dies && !diesFirst) kill(world, worker, "worker");
   };
 
@@ -498,7 +527,11 @@ function walk(seed: number): World {
     const picked = expectDefined(world.inbox[index], "inbox entry");
     const first = world.inbox.findIndex((e) => e.worker === picked.worker);
     const [entry] = world.inbox.splice(first, 1);
-    feed(world, expectDefined(entry, "first inbox entry").event);
+    const { event } = expectDefined(entry, "first inbox entry");
+    if (event.type === "died" && world.state.workers.some((w) => w.worker === event.worker)) {
+      world.hold = false;
+    }
+    feed(world, event);
   };
 
   const finish = (index: number, alive: boolean): void => {
@@ -547,6 +580,7 @@ function walk(seed: number): World {
           world.now - real(world, worker).lastUsed,
         ]),
       );
+      world.hold = false;
       feed(world, { type: "sweep", idleMs });
     } else if (roll < 0.995) {
       world.now += chance(0.05) ? CRASH_LOOP_WINDOW_MS + 1 : 100;
@@ -574,6 +608,17 @@ function walk(seed: number): World {
       "every waiter settles once workers and spawns do",
       `${waiting.join(", ")} in ${summary(world.state)}`,
     );
+  }
+
+  const { state } = world;
+  const live = state.workers.filter((w) => w.status === "idle" || w.status === "leased").length;
+  if (
+    state.phase === "running" &&
+    state.earlyDeaths < CRASH_LOOP_DEATHS &&
+    !world.hold &&
+    live < state.sizing.min
+  ) {
+    breaks(world, "the pool refills to min once nothing holds it back", summary(state));
   }
 
   if (world.state.phase === "running") {
@@ -606,6 +651,7 @@ describe("the pool machine over random schedules", () => {
     "no teardown of a held worker",
     "every waiter settles once workers and spawns do",
     "a waiter is served once workers live again",
+    "the pool refills to min once nothing holds it back",
     "the pool's view matches its workers",
   ])("%s", (property) => {
     expect(broken.get(property)?.slice(0, 3) ?? []).toEqual([]);

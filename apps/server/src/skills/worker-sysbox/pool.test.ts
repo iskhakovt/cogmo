@@ -1190,44 +1190,55 @@ describe("SysboxWorkerPool", () => {
     },
   );
 
-  it("disposes a worker spawned mid-flight when the pool is disposed during spawn", async () => {
-    // Gate the spawn so `dispose()` runs while `createWorker` is still
-    // awaiting. Without the guard in `#admit`, the new worker
-    // would be pushed into `#workers` *after* dispose spliced it empty,
-    // and its container would never be torn down.
-    const spawnedWorkers: FakeWorker[] = [];
+  it("tears down a worker that lands after the pool is disposed", async () => {
+    const spawned: FakeWorker[] = [];
     const spawn = gate();
-
     const pool = await poolWith({
-      min: 0, // eager spawn off so we control timing precisely
+      min: 0,
       max: 1,
       createWorker: async ({ workerId }) => {
         await spawn.promise;
         const w = fakeWorker(workerId);
-        spawnedWorkers.push(w);
+        spawned.push(w);
         return w;
       },
     }).pool;
-
-    // Kick a foreground invoke that triggers a spawn (no idle worker).
-    const invokePromise = pool.invoke(invokeParams("t-1"));
-    await Promise.resolve();
-    await Promise.resolve();
-
-    // Race dispose against the spawn: dispose first, then unblock the
-    // spawn. The spawn resolves into a disposed pool — its worker must be
-    // disposed by `#admit`, not pushed into the (already-empty) `#workers`
-    // array.
-    const disposePromise = pool.dispose();
-    spawn.open();
-    await disposePromise;
-
-    await expect(invokePromise).rejects.toThrow(
-      /(disposed during worker spawn|disposed before worker available)/,
+    // No worker is idle, so this spawns one, held until the pool is disposed.
+    const fails = expect(pool.invoke(invokeParams("t-1"))).rejects.toThrow(
+      /disposed before worker available/,
     );
-    if (spawnedWorkers.length > 0) {
-      expect(spawnedWorkers[0]?.state).toBe("disposed");
-    }
+
+    const disposing = pool.dispose();
+    spawn.open();
+    await disposing;
+
+    await fails;
+    expect(spawned).toHaveLength(1);
+    expect(spawned[0]?.state).toBe("disposed");
+  });
+
+  it("carries on when a container's teardown fails", async () => {
+    let spawns = 0;
+    const pool = await poolWith({
+      min: 1,
+      max: 1,
+      createWorker: async ({ workerId }) => {
+        spawns += 1;
+        if (spawns > 1) return fakeWorker(workerId);
+        return fakeWorker(workerId, {
+          invoke: async () => ({ ok: true, output: null, workerReusable: false }),
+          onDispose: async () => {
+            throw new Error("sandbox delete failed");
+          },
+        });
+      },
+    }).pool;
+
+    await pool.invoke(invokeParams("t-1"));
+
+    await vi.waitFor(() => expect(pool.stats()).toMatchObject({ total: 1, idle: 1 }));
+    await expect(pool.invoke(invokeParams("t-2"))).resolves.toMatchObject({ ok: true });
+    await pool.dispose();
   });
 
   it("settles an acquire whose own spawn completes into a dispose, whenever it lands", async () => {
