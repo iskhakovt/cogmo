@@ -586,21 +586,25 @@ function execStreaming(
  * Runs the command under `sh`, which first records its own PID in the file
  * named by `$0`. A `docker exec` process leads its own session and process
  * group, so that PID is the group the command and its children run in. `sh`
- * removes the file once the command exits, and exits with its status.
+ * removes the file once the command exits, and exits with its status. A file
+ * it cannot create costs the kill, not the command's output: `2>` comes first,
+ * so the redirect's own error goes to /dev/null.
  */
-const RECORD_GROUP = 'echo $$ > "$0" 2>/dev/null; "$@"; s=$?; rm -f "$0"; exit $s';
+const RECORD_GROUP = 'echo $$ 2>/dev/null > "$0"; "$@"; s=$?; rm -f "$0"; exit $s';
 
 /**
  * Stops the group recorded in the file named by `$1`: waits up to 1 s for a
  * command that has not recorded it yet, sends TERM, and once the group's
  * leader has gone (2 s at most) sends KILL to whatever of the group is left.
+ * `kill -s SIG -- -PGID` is the one form busybox, dash and bash all parse;
+ * dash rejects `kill -SIG -- -PGID`.
  */
 const KILL_GROUP = [
   'p=$1; n=0; while [ ! -s "$p" ] && [ "$n" -lt 10 ]; do sleep 0.1; n=$((n + 1)); done',
   'g=$(cat "$p" 2>/dev/null) || exit 0; [ -n "$g" ] || exit 0',
-  'kill -TERM -- "-$g" 2>/dev/null || kill -TERM "$g" 2>/dev/null',
+  'kill -s TERM -- "-$g" 2>/dev/null || kill -s TERM "$g" 2>/dev/null',
   'n=0; while kill -0 "$g" 2>/dev/null && [ "$n" -lt 20 ]; do sleep 0.1; n=$((n + 1)); done',
-  'kill -KILL -- "-$g" 2>/dev/null || kill -KILL "$g" 2>/dev/null',
+  'kill -s KILL -- "-$g" 2>/dev/null || kill -s KILL "$g" 2>/dev/null',
   'rm -f "$p"; exit 0',
 ].join("\n");
 
