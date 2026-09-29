@@ -185,7 +185,43 @@ describe("splitForwarded", () => {
     ]);
   });
 
+  it("decodes &amp; last, so an escaped entity in the name stays as written", () => {
+    const text = `<forwarded_message from="a &amp;lt; b" origin="user" sent="2023-11-14T22:13:20.000Z"></forwarded_message>`;
+
+    expect(splitForwarded(text)).toEqual([
+      { kind: "forwarded", from: "a &lt; b", body: "", at: 0 },
+    ]);
+  });
+
+  it("keeps the user's own text ahead of a forward", () => {
+    const text = `fyi\n${open}\nsee you at 8\n</forwarded_message>`;
+
+    expect(splitForwarded(text)).toEqual([
+      { kind: "text", text: "fyi", at: 0 },
+      { kind: "forwarded", from: "Alice Smith", body: "see you at 8", at: 4 },
+    ]);
+  });
+
+  it("splits two forwards in a row rather than merging them", () => {
+    const second =
+      '<forwarded_message from="Bob" origin="hidden_user" sent="2023-11-14T22:14:00.000Z">';
+    const text = `${open}\none\n</forwarded_message>\n${second}\ntwo\n</forwarded_message>`;
+
+    expect(splitForwarded(text)).toEqual([
+      { kind: "forwarded", from: "Alice Smith", body: "one", at: 0 },
+      { kind: "forwarded", from: "Bob", body: "two", at: text.indexOf(second) },
+    ]);
+  });
+
   it.each([
+    [
+      "a raw angle bracket in the name",
+      '<forwarded_message from="a<b" origin="user" sent="x">\nhi\n</forwarded_message>',
+    ],
+    [
+      "a raw quote in the name",
+      '<forwarded_message from="a"b" origin="user" sent="x">\nhi\n</forwarded_message>',
+    ],
     [
       "an unknown origin",
       '<forwarded_message from="A" origin="bot" sent="x">\nhi\n</forwarded_message>',
