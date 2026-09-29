@@ -122,15 +122,17 @@ Keys don't close every route — see `DEPLOYMENT.md` → Securing internal servi
 
 ## Shutdown `[confirmed]`
 
-On `SIGTERM` or `SIGINT`, once the Inngest connection closes, `cogmo serve` tears down in this order (`src/shutdown.ts`):
+On `SIGTERM` or `SIGINT`, the Inngest connection closes first, waiting for every request in flight with no deadline. Then `cogmo serve` tears down in this order (`src/shutdown.ts`), each step finishing before the next starts:
 
-1. **Web server.** Abort the server-lifetime signal, which ends every chat stream cleanly so the browser reconnects to the next process, then `close()`, which refuses new connections and reaps idle keep-alive ones. A request still in flight after 3 s has its connection closed (`closeAllConnections()`, called after `close()` as Node's docs recommend).
-2. **Channel adapters**, concurrently. Telegram confirms its last update offset, so the batch isn't redelivered on restart.
+1. **Web server** (`close(drainMs)` in `src/web/server.ts`). End every chat stream cleanly: the browser reconnects to the next process either way, and a clean end avoids a network error. Then `close()`, which refuses new connections, while idle keep-alive connections are closed every 50 ms as their requests finish. A request still in flight after 3 s has its connection closed (`closeAllConnections()`, called after `close()` as Node's docs recommend). Last, wait for the session closes the ended streams started.
+2. **Channel adapters**, concurrently. Telegram confirms the update offset past every update it handled, so none is redelivered on restart.
 3. **MCP** connection pool.
 4. **Sandbox.** On local-Docker this closes the socket proxy, which ends every connection a task opened through it, hijacked streams included.
 5. **Instance row.** Sets `cogmo_instances.stopped_at` ([sandbox.md → Data Model](sandbox.md#data-model-confirmed)).
 
-The web server goes first so no request reaches a stopped dependency. Every other step is capped at 5 s; one that overruns or throws is logged and the next step still runs, so a hung dependency costs its cap, not the rest of the teardown.
+The web server goes first so no request reaches a stopped dependency. It gets its 3 s drain plus 5 s; every other step is capped at 5 s. A step that overruns or throws doesn't stop the next, and `serve` logs each step's outcome and exits 0 regardless: the process did stop, and the log says what didn't.
+
+**Time budget.** After Inngest's drain, the teardown takes at most 28 s: 8 s for the web server and 5 s each for the adapters, MCP, the sandbox and the instance row. Docker's default stop grace is 10 s, after which it sends `SIGKILL`, so cogmo's container sets a longer one: `--stop-timeout 60` (`stop_grace_period: 60s` in compose), which leaves about 30 s for runs in flight ([DEPLOYMENT.md → Stopping](../DEPLOYMENT.md#stopping)).
 
 ## Deployment `[proposed]`
 
