@@ -192,6 +192,7 @@ The pool's bookkeeping is a second pure state machine (`src/skills/worker-sysbox
 
 | Event | From |
 |-|-|
+| `boot`, `booted` | `create()`, before its `min` spawns and once they land |
 | `acquire` | `invoke()` |
 | `spawned`, `spawn_failed` | a spawn settling |
 | `grant_refused` | a worker refusing a grant: it died before the pool heard |
@@ -200,6 +201,7 @@ The pool's bookkeeping is a second pure state machine (`src/skills/worker-sysbox
 | `sweep` | the interval, with each worker's idle time |
 | `dispose` | `dispose()` |
 
+- `boot` spawns `min` workers, and the pool stays `booting` until `booted`: nothing reconciles, and a spawn that fails fails `create()`, which disposes the pool. Boot creates exactly `min` containers.
 - Every transition ends in `reconcile`, which reads only the state: it grants idle workers to the oldest waiters, then spawns for every waiter and every worker still short of `min` — a waiter's worker counts toward `min` once granted — less the spawns under way, room permitting. Whichever event queued it, a waiter has something to wait on: a spawn under way or a full pool, or, while the crash-loop cap holds, a busy worker, a probe under way, or the death of a probe that refused its grant.
 - The worker stays authoritative for leases: the shell grants with `tryAcquire`, and a refusal comes back as `grant_refused`, which marks the worker `refused` and puts the waiter back at the head of the queue.
 - A dead worker counts toward `max` until it is disposable — at once, or once the task holding it returns — and its container is then torn down. A container tearing down does not count, so while teardowns run the sandbox can hold more than `max`.

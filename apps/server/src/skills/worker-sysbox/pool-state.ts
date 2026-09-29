@@ -67,8 +67,12 @@ export interface PoolWorker<W extends WorkerRef> {
 
 export interface PoolState<W extends WorkerRef, Q> {
   readonly sizing: PoolSizing;
-  /** `disposed` is final: waiters are rejected, workers torn down, and nothing spawns. */
-  readonly phase: "running" | "disposed";
+  /**
+   * `booting` until `create()` has its `min` workers: nothing reconciles, and
+   * a failed spawn fails the boot rather than being retried. `disposed` is
+   * final: waiters are rejected, workers torn down, and nothing spawns.
+   */
+  readonly phase: "booting" | "running" | "disposed";
   /** Every worker not yet torn down, oldest first. */
   readonly workers: ReadonlyArray<PoolWorker<W>>;
   /** Spawns under way; each counts toward `max`. */
@@ -94,6 +98,10 @@ export type TaskReturn =
   | { kind: "threw" };
 
 export type PoolEvent<W extends WorkerRef, Q> =
+  /** `create()` spawns the `min` workers. */
+  | { type: "boot" }
+  /** Every boot spawn landed. */
+  | { type: "booted" }
   | { type: "acquire"; waiter: Q }
   | { type: "spawned"; worker: W }
   | { type: "spawn_failed"; error: unknown }
@@ -135,7 +143,7 @@ export interface PoolTransition<W extends WorkerRef, Q> {
 export function emptyPool<W extends WorkerRef, Q>(sizing: PoolSizing): PoolState<W, Q> {
   return {
     sizing,
-    phase: "running",
+    phase: "booting",
     workers: [],
     spawning: 0,
     queue: [],
@@ -149,7 +157,12 @@ export function transition<W extends WorkerRef, Q>(
   state: PoolState<W, Q>,
   event: PoolEvent<W, Q>,
 ): PoolTransition<W, Q> {
-  const next = state.phase === "disposed" ? afterDisposal(state, event) : onEvent(state, event);
+  const next = match(state.phase)
+    .returnType<PoolTransition<W, Q>>()
+    .with("booting", () => whileBooting(state, event))
+    .with("running", () => onEvent(state, event))
+    .with("disposed", () => afterDisposal(state, event))
+    .exhaustive();
   const settled = reconcile(next.state);
   return step(settled.state, [...next.effects, ...settled.effects]);
 }
@@ -161,7 +174,7 @@ export function transition<W extends WorkerRef, Q>(
  * is idempotent.
  */
 export function reconcile<W extends WorkerRef, Q>(state: PoolState<W, Q>): PoolTransition<W, Q> {
-  if (state.phase === "disposed") return step(state, []);
+  if (state.phase !== "running") return step(state, []);
   const granted = grantIdle(state);
   const next = crashLooping(granted.state)
     ? waitOrProbe(granted.state)
@@ -169,11 +182,33 @@ export function reconcile<W extends WorkerRef, Q>(state: PoolState<W, Q>): PoolT
   return step(next.state, [...granted.effects, ...next.effects]);
 }
 
+/**
+ * `create()` spawns `min` workers and waits for every spawn. One that fails
+ * fails the boot, which disposes the pool, so nothing is retried or
+ * replaced, and nothing reconciles, until `booted`.
+ */
+function whileBooting<W extends WorkerRef, Q>(
+  state: PoolState<W, Q>,
+  event: PoolEvent<W, Q>,
+): PoolTransition<W, Q> {
+  return match<PoolEvent<W, Q>, PoolTransition<W, Q>>(event)
+    .with({ type: "boot" }, () =>
+      step(
+        { ...state, spawning: state.spawning + state.sizing.min },
+        R.times(state.sizing.min, () => SPAWN),
+      ),
+    )
+    .with({ type: "booted" }, () => step({ ...state, phase: "running" }, []))
+    .with({ type: "spawn_failed" }, () => step({ ...state, spawning: state.spawning - 1 }, []))
+    .otherwise(() => onEvent(state, event));
+}
+
 function onEvent<W extends WorkerRef, Q>(
   state: PoolState<W, Q>,
   event: PoolEvent<W, Q>,
 ): PoolTransition<W, Q> {
   return match<PoolEvent<W, Q>, PoolTransition<W, Q>>(event)
+    .with({ type: P.union("boot", "booted") }, () => step(state, []))
     .with({ type: "acquire" }, ({ waiter }) =>
       step({ ...state, queue: [...state.queue, waiter] }, []),
     )
@@ -238,7 +273,9 @@ function afterDisposal<W extends WorkerRef, Q>(
     )
     .with({ type: "spawn_failed" }, () => step({ ...state, spawning: state.spawning - 1 }, []))
     .with({ type: "task_returned" }, ({ worker }) => step(state, [{ type: "release", worker }]))
-    .with({ type: P.union("died", "disposable", "sweep", "dispose") }, () => step(state, []))
+    .with({ type: P.union("boot", "booted", "died", "disposable", "sweep", "dispose") }, () =>
+      step(state, []),
+    )
     .exhaustive();
 }
 

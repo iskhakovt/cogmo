@@ -1155,6 +1155,41 @@ describe("SysboxWorkerPool", () => {
     expect(spawned[0]?.state).toBe("disposed");
   });
 
+  it.each(["before", "after"] as const)(
+    "creates exactly `min` workers when a boot spawn fails %s another lands",
+    async (order) => {
+      const failing = gate();
+      const landing = gate();
+      const spawned: FakeWorker[] = [];
+      let spawns = 0;
+      const created = poolWith({
+        min: 2,
+        max: 3,
+        createWorker: async ({ workerId }) => {
+          spawns += 1;
+          if (spawns === 1) {
+            await failing.promise;
+            throw new Error("boot spawn failed");
+          }
+          await landing.promise;
+          const w = fakeWorker(workerId);
+          spawned.push(w);
+          return w;
+        },
+      }).pool;
+      const fails = expect(created).rejects.toThrow(/boot spawn failed/);
+      const [first, second] = order === "before" ? [failing, landing] : [landing, failing];
+
+      first.open();
+      await new Promise<void>((r) => setTimeout(r, 0));
+      second.open();
+
+      await fails;
+      expect(spawns).toBe(2);
+      expect(spawned.map((w) => w.state)).toEqual(["disposed"]);
+    },
+  );
+
   it("disposes a worker spawned mid-flight when the pool is disposed during spawn", async () => {
     // Gate the spawn so `dispose()` runs while `createWorker` is still
     // awaiting. Without the guard in `#admit`, the new worker

@@ -38,10 +38,16 @@ function at(worker: WorkerRef, status: PoolWorker<WorkerRef>["status"]): PoolWor
   return { worker, status, served: false };
 }
 
-const EMPTY = emptyPool<WorkerRef, Waiter>(SIZING);
+/** A pool that has booted. */
+const EMPTY: State = { ...emptyPool<WorkerRef, Waiter>(SIZING), phase: "running" };
 
 /** Pools at rest: `reconcile` leaves each as it is. */
 const STATES = {
+  /** Before `create()` spawns anything. */
+  fresh: emptyPool<WorkerRef, Waiter>(SIZING),
+  booting: { ...emptyPool<WorkerRef, Waiter>(SIZING), spawning: 1 },
+  /** A boot worker died before `create()` returned. */
+  booting_died: { ...emptyPool<WorkerRef, Waiter>(SIZING), workers: [at(W1, "dead")] },
   warm: { ...EMPTY, workers: [at(W1, "idle")] },
   warm_pair: { ...EMPTY, workers: [at(W1, "idle"), at(W2, "idle")] },
   /** One early death short of the crash-loop cap. */
@@ -119,6 +125,8 @@ const EVENTS = {
   /** W1 has sat idle `idleShutdownMs`; the rest have not. */
   sweep: { type: "sweep", idleMs: new Map([[W1, SIZING.idleShutdownMs]]) },
   dispose: { type: "dispose" },
+  boot: { type: "boot" },
+  booted: { type: "booted" },
 } satisfies Record<string, Event>;
 
 type StateName = keyof typeof STATES;
@@ -142,7 +150,7 @@ function summary(state: State): string {
     `s${state.spawning}`,
     `e${state.earlyDeaths}`,
     ...(state.spawnFailed ? ["spawn failed"] : []),
-    ...(state.phase === "disposed" ? ["disposed"] : []),
+    ...(state.phase === "running" ? [] : [state.phase]),
   ].join(" | ");
 }
 
@@ -150,6 +158,12 @@ type Row = readonly [StateName, EventName, ReadonlyArray<Effect["type"]>, string
 
 /** Each event's branches, from the pools at rest above. */
 const TABLE: ReadonlyArray<Row> = [
+  ["fresh", "boot", ["spawn"], "- | q[] | s1 | e0 | booting"],
+  ["booting", "spawned", [], "w3:idle | q[] | s0 | e0 | booting"],
+  ["booting", "spawn_failed", [], "- | q[] | s0 | e0 | booting"],
+  ["booting_died", "booted", ["spawn"], "w1:dead | q[] | s1 | e0"],
+  ["warm", "boot", [], "w1:idle | q[] | s0 | e0"],
+  ["warm", "booted", [], "w1:idle | q[] | s0 | e0"],
   ["warm", "acquire", ["grant"], "w1:leased | q[] | s0 | e0"],
   ["warm", "died_early", ["log", "spawn"], "w1:dead | q[] | s1 | e1"],
   ["warm", "died_late", ["log", "spawn"], "w1:dead | q[] | s1 | e0"],
@@ -506,7 +520,8 @@ function walk(seed: number): World {
     });
   };
 
-  feed(world, { type: "sweep", idleMs: new Map() });
+  feed(world, { type: "boot" });
+  feed(world, { type: "booted" });
   for (let i = 0; i < 250 && world.state.phase === "running"; i++) {
     const looping = i >= loopFrom && i < loopTo;
     const roll = random();

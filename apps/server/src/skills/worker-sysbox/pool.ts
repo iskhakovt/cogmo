@@ -12,7 +12,6 @@ import {
   type PoolState,
   type PoolTransition,
   type Rejection,
-  reconcile,
   type TaskReturn,
   transition,
 } from "./pool-state.js";
@@ -230,12 +229,13 @@ export class SysboxWorkerPool {
     // pool (bad image, sandbox unreachable) should not lurk until the first
     // invocation — once every spawn has settled, and after disposing the
     // pool, so no container that did come up outlives it.
-    pool.#enter(reconcile(pool.#state));
+    pool.#feed({ type: "boot" });
     const booted = Result.combine(await Promise.all(pool.#spawns));
     if (booted.isErr()) {
       await pool.dispose();
       throw booted.error instanceof Error ? booted.error : new Error(String(booted.error));
     }
+    pool.#feed({ type: "booted" });
     pool.#sweepHandle = pool.#setInterval(() => pool.#sweep(), pool.#idleSweepIntervalMs);
     return pool;
   }
