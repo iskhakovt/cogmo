@@ -939,7 +939,10 @@ describe("SysboxSkillWorker", () => {
         expiresAt: new Date(Date.now() + 60_000),
       });
       bundle.stdout.end();
-      await expect(w.dead).resolves.toMatch(/worker closed its output/);
+      await expect(w.dead).resolves.toEqual({
+        cause: "worker",
+        reason: expect.stringMatching(/worker closed its output/),
+      });
     });
 
     it("dies when its signal aborts, closing the supervisor's stdin", async () => {
@@ -953,7 +956,7 @@ describe("SysboxSkillWorker", () => {
         signal: lifetime.signal,
       });
       lifetime.abort(new Error("pool disposed"));
-      await expect(w.dead).resolves.toBe("pool disposed");
+      await expect(w.dead).resolves.toEqual({ cause: "host", reason: "pool disposed" });
       expect(w.state).toBe("dead");
       expect(bundle.stdin.writableEnded).toBe(true);
     });

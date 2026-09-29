@@ -14,6 +14,7 @@ import {
   admits,
   type Command,
   command,
+  type Death,
   type Effect,
   type Fact,
   type Handshake,
@@ -102,9 +103,9 @@ interface PendingTask {
  */
 export class Dispatcher {
   #started = Promise.withResolvers<Result<void, StartFailure>>();
-  #dead = Promise.withResolvers<string>();
+  #dead = Promise.withResolvers<Death>();
   #disposable = Promise.withResolvers<void>();
-  /** Resolves with the reason once the channel is dead and can run no further task. */
+  /** Resolves with who ended the channel, and why, once it can run no further task. */
   readonly dead = this.#dead.promise;
   /** Resolves once the channel is dead and no caller holds it. */
   readonly disposable = this.#disposable.promise;
@@ -251,10 +252,10 @@ export class Dispatcher {
         this.#started.resolve(outcome);
         return [];
       })
-      .with({ type: "died" }, ({ reason }) => {
+      .with({ type: "died" }, ({ death }) => {
         this.#alive.abort();
         this.#transport.close();
-        this.#dead.resolve(reason);
+        this.#dead.resolve(death);
         return [];
       })
       .with({ type: "disposable" }, () => {

@@ -409,6 +409,15 @@ describe("the worker machine", () => {
       }
     });
 
+    it("blames a death on the host exactly when the host closed the channel", () => {
+      expect(
+        pairsWhere((p) =>
+          p.after.effects.some((e) => e.type === "died" && e.death.cause === "host"),
+        ),
+      ).toEqual(pairsWhere((p) => p.eventName === "close" && emits(p, "died")));
+      expect(pairsWhere((p) => p.eventName === "close" && emits(p, "died"))).toHaveLength(5);
+    });
+
     it("makes a worker disposable exactly once: when it is dead and nobody holds it", () => {
       const heldBefore = (p: Pair): boolean =>
         p.before.kind === "leased" ||
@@ -457,7 +466,7 @@ describe("the worker machine", () => {
         state: { kind: "dead", reason: "sent fatal before ready", held: false },
         effects: [
           { type: "started", outcome: err({ kind: "refused", reason: "sent fatal before ready" }) },
-          { type: "died", reason: "sent fatal before ready" },
+          { type: "died", death: { cause: "worker", reason: "sent fatal before ready" } },
           { type: "disposable" },
         ],
       });

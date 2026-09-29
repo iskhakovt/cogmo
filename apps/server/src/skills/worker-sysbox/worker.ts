@@ -16,7 +16,7 @@ import {
   type TaskResult,
 } from "../protocol.js";
 import { DEFAULT_WALL_CLOCK_S, timeoutSignal } from "../wall-clock.js";
-import type { StartFailure, TaskFailure, WorkerFrame } from "../worker-state.js";
+import type { Death, StartFailure, TaskFailure, WorkerFrame } from "../worker-state.js";
 import { DEFAULT_RESOURCE_LIMITS } from "./host.js";
 import { createNdjsonTransport } from "./transport.js";
 
@@ -197,8 +197,12 @@ export interface InvokeResult {
  */
 export class SysboxSkillWorker {
   readonly workerId: string;
-  /** Resolves with the reason once the worker can run no further task. */
-  readonly dead: Promise<string>;
+  /**
+   * Resolves once the worker can run no further task: with `host` when it
+   * was retired or disposed, with `worker` when its supervisor went away,
+   * hung or broke protocol.
+   */
+  readonly dead: Promise<Death>;
   /** Resolves once the worker is dead and no caller holds it: its container can go. */
   readonly disposable: Promise<void>;
   #sandbox: SandboxClient;
