@@ -142,10 +142,11 @@ type ExecResult = {
  * `ExecTimeoutError`, `ExecDisposedError`, the transport's own error, or
  * an `Error` naming why there is no exit code.
  *
- * `dispose()` tears the exec down by closing its transport (Docker: the
- * hijacked socket, which lets the daemon reap the process; Daytona:
- * `deleteSession` or the PTY kill). It sends no signal. Idempotent;
- * resolves once the teardown has finished or given up.
+ * `dispose()` tears the exec down. Local-Docker stops the command's process
+ * group (TERM, then KILL) from a second exec and closes the attach socket;
+ * the Daytona PTY kills its process; a Daytona session command has its
+ * session deleted. Idempotent. Resolves once every teardown it caused has
+ * finished or given up.
  */
 interface ExecStreamingHandle {
   stdin?: Writable;
@@ -194,7 +195,7 @@ any live state ─ deadline · dispose · start_failed · stream_failed ─► s
 - **The exit code is fetched before teardown,** which can erase it (Daytona's `getSessionCommand` 404s once the session is deleted). Local-Docker re-inspects until the daemon has reaped the exec, since its attach stream can end while `ExitCode` is still null, and reports `no_exit_code` if it never is.
 - **Deadlines bound the whole exec,** start included: an upload, `createPty` or `sendInput` that never returns settles as `timed_out`. A start still in flight sees the settlement on its `AbortSignal` and stops before its next remote step; whatever it acquires late is torn down again.
 - **The first settling event wins.** Output after settlement is dropped and restarts nothing; only output while `running` restarts the idle deadline. What the transport reports while the start is in flight is delivered after the start's own outcome, so the order never depends on microtask timing.
-- **A failed teardown is retried by the next `dispose()`,** and changes no outcome.
+- **A failed teardown is retried** by the next `dispose()`, or by one that arrived while it ran, and changes no outcome. `dispose()` resolves once the teardowns it caused, retries and a late start's included, have finished or given up.
 
 ### Discriminated options and state
 
@@ -572,7 +573,7 @@ Two backends share the `ExecStreamingHandle` contract, selected per call by `opt
 - Sends one shell line into the PTY: `exec bash --norc --noprofile -c 'cat <stdinPath> | exec <argv> 2> <stderrPath>'`. The outer `bash --norc --noprofile -c` swap replaces Daytona's default interactive shell atomically with a non-interactive bash — no readline, no `PROMPT_COMMAND`, so the OSC title / mode-reset chain bash normally emits when transitioning out of interactive mode doesn't pollute stdout. The inner `cat <stdinPath> | exec <argv>` pipes stdin: claude 2.1.138 silently exits 0 with no output when stream-json input arrives via a regular file FD (`cmd < file`), so the `cat | exec` pattern hands the CLI a real pipe FD whose EOF arrives when `cat` drains. `exec` replaces the inner bash with the target binary so PTY exit = target binary exit, no marker parsing.
 - Sets `NO_COLOR=1` in the PTY's env block to suppress ANSI escapes on stdout (PTY's stdout is still a TTY for the child).
 - Redirects child stderr to `/tmp/cogmo-pty-stderr-<uuid>.log` so the PTY's combined onData channel carries clean stdout JSONL; the wrapper downloads + emits the stderr file via the stderr `Readable` after the PTY exits.
-- On teardown, kills the PTY unless it has exited, disconnects, and deletes both tmpfiles via `fs.deleteFile` (best-effort; sandbox teardown sweeps `/tmp` anyway).
+- On teardown, kills the PTY unless it reported an exit code, disconnects, and deletes both tmpfiles via `fs.deleteFile` (best-effort; sandbox teardown sweeps `/tmp` anyway).
 - Registers `PtyHandle.wait()` as soon as the PTY exists. In `@daytona/sdk` 0.214 it settles on the `exited` control frame or on the WS closing: a normal close (1000) with no parseable reason reads as exit 0; an abnormal close (1006) resolves it with no exit code, which the exec reports as `no_exit_code` and still kills the PTY, since the remote command may run on; and a `wait()` first called after such a close never settles. `kill()` sets no exit code either, and one that 404s finds the PTY gone.
 
 WS reality the wrapper hides:

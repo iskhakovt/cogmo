@@ -159,9 +159,9 @@ class ExecRun {
   /**
    * Once everything a dispose can have set off is done: a start in flight
    * has settled (or `TEARDOWN_TIMEOUT_MS` passed waiting for it), and every
-   * teardown so far, retries included, has finished or given up. Nothing is
-   * read before the first `await`: a dispose raised while effects run is
-   * only queued, and the queue drains synchronously before it resumes.
+   * teardown so far, retries included, has finished or given up. A dispose
+   * raised while effects run is only queued; `#teardowns` is read after the
+   * first `await`, once the queue has drained.
    */
   async #quiesced(): Promise<void> {
     await settledWithin(this.#starting, TEARDOWN_TIMEOUT_MS);
