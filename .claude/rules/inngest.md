@@ -89,9 +89,7 @@ contract**. Design every function for the per-boundary model.
   re-executes once per remaining step boundary — a DB write duplicates, a
   paid API re-bills, a read after a same-turn write returns output the
   model never saw. Only a handler whose output is a pure function of its
-  input stays non-durable. Justify both sides of the flag in the PR. The
-  read tools that are still non-durable move with step 2 of
-  design/prompt-caching.md → Append-only Transcript → Rollout.
+  input stays non-durable. Justify both sides of the flag in the PR.
 - **`durable: true` buys replay-safety, not exactly-once.** A crash after
   the side effect commits but before Inngest records the step result
   leaves no evidence the step ran, so the retry re-runs it — and no
