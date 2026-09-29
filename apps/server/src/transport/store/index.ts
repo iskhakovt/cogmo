@@ -21,7 +21,7 @@ import type { JsonValue } from "type-fest";
 import { aliases, conversations, messages } from "../../agent/store/schema.js";
 import { single } from "../../db/helpers.js";
 import type { Transaction } from "../../db/index.js";
-import type { InboundContent } from "../content.js";
+import { type InboundContent, previewInboundText } from "../content.js";
 import {
   type BufferedInboundEntry,
   boundaryPending,
@@ -427,12 +427,12 @@ function snippetFromMessageContent(
   maxChars: number,
 ): string | null {
   if (typeof content === "string") {
-    return truncate(content.trim(), maxChars);
+    return truncate(previewInboundText(content.trim()), maxChars);
   }
   for (const block of content) {
     if (block.type === "text" && typeof block.text === "string") {
       const trimmed = block.text.trim();
-      if (trimmed.length > 0) return truncate(trimmed, maxChars);
+      if (trimmed.length > 0) return truncate(previewInboundText(trimmed), maxChars);
     }
   }
   return null;

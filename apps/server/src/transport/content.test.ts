@@ -6,6 +6,8 @@ import {
   type InboundContent,
   InboundContentSchema,
   isVoiceContent,
+  previewInboundText,
+  renderInboundText,
 } from "./content.js";
 
 describe("contentToText", () => {
@@ -319,4 +321,33 @@ describe("forwarded text", () => {
     ];
     expect(InboundContentSchema.parse(content)).toEqual(content);
   });
+});
+
+describe("previewInboundText", () => {
+  function wrap(text: string, from = "Alice"): string {
+    return renderInboundText(text, { origin: "user", from, sentAt: "2023-11-14T22:13:20.000Z" });
+  }
+
+  it("reduces a leading forwarded element to its sender and body", () => {
+    expect(previewInboundText(`${wrap("see you at 8")}\nis this right?`)).toBe(
+      "Fwd from Alice: see you at 8\nis this right?",
+    );
+  });
+
+  it("names the sender of an empty element", () => {
+    expect(previewInboundText(wrap(""))).toBe("Fwd from Alice");
+  });
+
+  it("shows the sender's name as written", () => {
+    expect(previewInboundText(wrap("hi", 'Eve "E" <x> & co'))).toBe(
+      'Fwd from Eve "E" <x> & co: hi',
+    );
+  });
+
+  it.each(["hello", `fyi ${wrap("hi")}`, '<forwarded_message from="A">hi</forwarded_message>'])(
+    "leaves %j as it is",
+    (text) => {
+      expect(previewInboundText(text)).toBe(text);
+    },
+  );
 });

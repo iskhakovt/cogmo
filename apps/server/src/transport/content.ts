@@ -219,6 +219,28 @@ function escapeForwardedTags(text: string): string {
   return text.replace(/<(?=[\s\\/]*forwarded_message)/gi, "&lt;");
 }
 
+/** A leading element exactly as `renderInboundText` writes it. */
+const LEADING_FORWARDED_MESSAGE =
+  /^<forwarded_message from="([^"<>]*)" origin="[a-z_]+" sent="[^"<>]*">(?:\n([\s\S]*?)\n)?<\/forwarded_message>/;
+
+/**
+ * Stored user text for a one-line label: a leading `<forwarded_message>`
+ * element as `Fwd from {from}: {body}`, so a short snippet shows the message
+ * rather than markup. Anything else comes back as it is.
+ */
+export function previewInboundText(text: string): string {
+  const match = LEADING_FORWARDED_MESSAGE.exec(text);
+  if (match === null) return text;
+  const from = (match[1] ?? "")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+  const body = match[2] ?? "";
+  const rest = text.slice(match[0].length);
+  return `${body === "" ? `Fwd from ${from}` : `Fwd from ${from}: ${body}`}${rest}`;
+}
+
 /** `value` inside a double-quoted attribute: markup characters as entities, whitespace runs as one space. */
 function attributeValue(value: string): string {
   return value
