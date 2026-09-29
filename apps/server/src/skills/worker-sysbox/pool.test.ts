@@ -1277,13 +1277,15 @@ describe("SysboxWorkerPool", () => {
     // The eager worker is busy, so this one spawns a second.
     const second = pool.invoke(invokeParams("t-second"));
     await vi.waitFor(() => expect(signals).toHaveLength(2));
+    // Disposal fails the acquire waiting on that spawn.
+    const secondFails = expect(second).rejects.toThrow(/disposed before worker available/);
 
     const disposed = pool.dispose();
     expect(signals.map((s) => s.aborted)).toEqual([true, true]);
     spawn.open();
     await disposed;
     await first;
-    await expect(second).rejects.toThrow(/disposed before worker available/);
+    await secondFails;
   });
 });
 
