@@ -722,6 +722,25 @@ describe("telegram adapter", () => {
       expect(registered).toEqual(expect.arrayContaining(["start", ...menuCommands]));
     });
 
+    it("gives a forwarded message to an open dialog as its input", async () => {
+      const { transport } = await createAdapter({
+        profiles: {
+          list: vi.fn().mockResolvedValue(ok([])),
+          create: vi.fn().mockResolvedValue(ok({} as never)),
+          update: vi.fn().mockResolvedValue(ok({} as never)),
+          delete: vi.fn().mockResolvedValue(ok(undefined)),
+          setClass: vi.fn().mockResolvedValue(ok(undefined)),
+        },
+      });
+      await handlers.get("command:profile")!({ ...makeCtx(111, "", 42), match: "new coder" });
+
+      const ctx = asForwarded(makeCtx(111, "You are a coder", 42));
+      await handlers.get("on:message:text")!(ctx);
+
+      expect(transport.emit).not.toHaveBeenCalled();
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("Step 2/3"), undefined);
+    });
+
     it("packs forwarded text as a marked text block", async () => {
       const { transport } = await createAdapter();
       await handlers.get("on:message:text")!(asForwarded(makeCtx(111, "meet at 8", 42)));
