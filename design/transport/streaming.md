@@ -101,13 +101,15 @@ interface StreamOpts {
 }
 
 interface StreamHandle {
-  push(event: StreamEvent): Promise<void>;
-  finish(): Promise<void>;
-  abort(error: string): Promise<void>;
+  push(event: StreamEvent): Promise<Result<void, string>>;
+  finish(): Promise<Result<void, string>>;   // resolves once the stream has settled
+  abort(error: string): Promise<Result<void, string>>;
 }
 ```
 
 No inheritance between `Adapter` and `StreamingAdapter` — they are separate interfaces for separate delivery paths. The stream router checks which one the adapter implements and uses the right path.
+
+A handle reports delivery failures as values, never as rejections. Once it fails it writes nothing more: every later call errs with the same reason, and the adapter's next `openStream` for the run returns a fresh handle.
 
 ### Per-Profile Presentation Knobs `[confirmed]`
 
@@ -130,6 +132,7 @@ Each adapter decides how to render `StreamEvent`s. The interface delivers typed 
 - First push in append-only mode also kicks `sendChatAction("typing")` on a 3.5s refresh loop, cleared on `finish` / `abort`
 - `finish()` → emit any remaining buffer with HTML formatting; in edit mode this is the final `editMessage`, in append-only mode it's a fresh `sendMessage`
 - `abort(error)` → append `⚠️ ${error}` and emit (edit in edit mode, fresh send in append-only mode)
+- Write failures: see [Telegram stream handle](#telegram-stream-handle-confirmed)
 
 **Web UI (future):**
 - All events pushed as SSE, rendered as rich components (tool cards, streaming text)
@@ -203,14 +206,24 @@ inngest.createFunction({
   try {
     const result = await runStreamingAgentLoop({
       provider, model, systemPrompt, history, tools, service,
-      onEvent: (event) => delivery.push(event),
+      onEvent: (event) => pushOrThrow(delivery, event),
     });
-    await delivery.finish();
+    const finished = await delivery.finish();
+    if (finished.isErr()) log.warn({ err: finished.error }, "stream delivery failed at finish");
   } catch (err) {
-    await delivery.abort(err instanceof Error ? err.message : "Unknown error");
-    throw err; // re-throw for Inngest retry
+    const aborted = await delivery.abort(err instanceof Error ? err.message : "Unknown error");
+    if (aborted.isErr()) log.warn({ err: aborted.error }, "stream delivery failed at abort");
+    throw classify(err); // the loop's error decides the retry
   }
 ```
+
+A delivery failure is handled by where it happens:
+
+| Call | On a failed target | Why |
+|-|-|-|
+| `push` | `pushOrThrow` throws, failing the step that pushed | The step's retry re-streams the iteration into a fresh handle. |
+| `finish` | Logged; the reply persists | Every token already went out live, and replayed iterations re-emit nothing, so a retry delivers nothing more. |
+| `abort` | Logged; the loop's error is rethrown with its classification | A delivery failure must not turn a deterministic 4xx retriable, or the reverse. |
 
 **Crash behavior:** If the process crashes mid-stream, the `llm-iter<N>` step never completed, so the retry re-runs that iteration's body and re-streams it from the top; completed iterations replay from cache without re-emitting. The adapter deduplicates the handle via `runId` — see Retry Deduplication below.
 
@@ -221,11 +234,11 @@ Unified delivery for both streaming and batch. Lives in the transport layer. The
 ```typescript
 interface DeliveryHandle {
   /** Fan out a stream event to all streaming targets. */
-  push(event: StreamEvent): Promise<void>;
+  push(event: StreamEvent): Promise<Result<void, StreamDeliveryError>>;
   /** Signal stream completion — calls finish() on all stream handles. */
-  finish(): Promise<void>;
+  finish(): Promise<Result<void, StreamDeliveryError>>;
   /** Signal stream failure — calls abort() on all stream handles. */
-  abort(error: string): Promise<void>;
+  abort(error: string): Promise<Result<void, StreamDeliveryError>>;
   /** Deliver final content to all batch targets. Called after persist. */
   deliverBatch(content: string): Promise<void>;
 }
@@ -258,21 +271,9 @@ function createDeliveryRouter(deps: {
       }
 
       return {
-        async push(event) {
-          for (const handle of streamHandles.values()) {
-            await handle.push(event);
-          }
-        },
-        async finish() {
-          for (const handle of streamHandles.values()) {
-            await handle.finish();
-          }
-        },
-        async abort(error) {
-          for (const handle of streamHandles.values()) {
-            await handle.abort(error);
-          }
-        },
+        push: (event) => fanOut(streamHandles, (h) => h.push(event)),
+        finish: () => fanOut(streamHandles, (h) => h.finish()),
+        abort: (error) => fanOut(streamHandles, (h) => h.abort(error)),
         async deliverBatch(content) {
           for (const { platformAddress, adapter } of batchTargets) {
             await adapter.deliver(platformAddress, content);
@@ -286,6 +287,8 @@ function createDeliveryRouter(deps: {
 
 `resolveRoutingTargets()` is the shared routing logic extracted from [response-routing.md](response-routing.md) — find active sessions, apply routing strategy (`source`, `lastInbound`, or `all`), return session list. One function, one query, used by both paths.
 
+`fanOut` calls every handle at once under `Promise.allSettled` and errs with a `StreamDeliveryError` listing each target that failed, whether it returned its failure or rejected. One failing target never keeps the others from an event, their finish, or their `turn-abort`.
+
 ## Retry Deduplication
 
 Inngest re-invokes the function at every step boundary (and on retries), and `deliveryRouter.prepare()` re-executes each time — calling `openStream()` again. Without dedup, each re-invocation that pushes anything would open a second message.
@@ -296,20 +299,20 @@ Inngest re-invokes the function at every step boundary (and on retries), and `de
 // Inside TelegramAdapter
 #activeStreams = new Map<string, TelegramStreamHandle>();
 
-async openStream(platformAddress: string, runId: string): Promise<StreamHandle> {
+async openStream(platformAddress: string, runId: string, opts?: StreamOpts): Promise<StreamHandle> {
   const existing = this.#activeStreams.get(runId);
-  if (existing) return existing; // retry — reuse existing Telegram message
+  if (existing) return existing; // re-invocation — keep writing the same message
 
-  const msg = await this.#bot.api.sendMessage(chatId, "...");
-  const handle = new TelegramStreamHandle(this.#bot, chatId, msg.message_id);
+  const handle = new TelegramStreamHandle(this.#bot, this.#attachments, chatId, runId, opts);
   this.#activeStreams.set(runId, handle);
+  void handle.done.then(() => this.#activeStreams.delete(runId));
   return handle;
 }
 ```
 
 This works because Inngest connect mode runs in a long-lived process — the in-memory map survives across retries. If the process itself crashes, the map is lost but the old Telegram message is also unreachable (we don't know its ID), so creating a new one is correct.
 
-Clean up: remove entries from `#activeStreams` after `finish()` or `abort()` to prevent unbounded growth.
+A handle leaves the map once it settles — finished, aborted, or failed. A failed handle leaving is what lets a retry recover: the retry of the step whose push failed opens a fresh handle and streams into a new message.
 
 ## LLM Provider: `chatStream()`
 
@@ -379,55 +382,35 @@ async function runStreamingAgentLoop(params: {
 
 ## Telegram Specifics
 
-Rate limits: Telegram allows ~30 edits/sec globally, ~2-3/sec per message recommended. The Telegram `StreamHandle` implementation throttles edits internally.
+### Telegram stream handle `[confirmed]`
 
-```typescript
-// TelegramStreamHandle (sketch)
-class TelegramStreamHandle implements StreamHandle {
-  #bot: Bot;
-  #chatId: string;
-  #messageId: number | null = null;
-  #accumulated = "";
-  #lastEdit = 0;
-  #editInterval = 500; // ms
+Rate limits: Telegram allows ~30 messages/sec globally and about one per second in one chat; edits count. grammY's guidance ([flood limits](https://grammy.dev/advanced/flood), [auto-retry](https://grammy.dev/plugins/auto-retry)) is not to throttle ahead of the limits, and on a 429 to wait `retry_after` seconds and retry. The handle coalesces previews to one per 500ms, which spares Telegram edits the next one would supersede, and otherwise follows that guidance itself rather than through the auto-retry transformer: a retry that waits without bound would hold the turn open, and a preview needs no retry at all.
 
-  async push(event: StreamEvent): Promise<void> {
-    if (event.type === "text_delta") {
-      this.#accumulated += event.text;
-    } else if (event.type === "tool_start") {
-      this.#accumulated += `\n🔍 ${event.name}...\n`;
-    }
-    // tool_result: skip — LLM will summarize
+`TelegramStreamHandle` (`stream-handle.ts`) drives a pure machine (`stream-state.ts`): `transition(state, input, opts)` returns the next state and its effects as data, and the handle carries them out.
 
-    await this.#throttledEdit();
-  }
-
-  async finish(): Promise<void> {
-    // Final edit with full content + formatting
-    await this.#edit(this.#accumulated);
-  }
-
-  async abort(error: string): Promise<void> {
-    await this.#edit(this.#accumulated + `\n\n⚠️ ${error}`);
-  }
-
-  async #throttledEdit(): Promise<void> {
-    const now = Date.now();
-    if (now - this.#lastEdit < this.#editInterval) return;
-    await this.#edit(this.#accumulated);
-  }
-
-  async #edit(text: string): Promise<void> {
-    if (!this.#messageId) {
-      const msg = await this.#bot.api.sendMessage(this.#chatId, text);
-      this.#messageId = msg.message_id;
-    } else {
-      await this.#bot.api.editMessageText(this.#chatId, this.#messageId, text);
-    }
-    this.#lastEdit = Date.now();
-  }
-}
 ```
+ idle ─push─► streaming ─finish · abort─► finalizing ─last write lands─► done
+  │               │                            │
+  │               └──── a write fails ─────────┴──────────────────────► failed
+  └─finish─► done
+```
+
+- **State.** `streaming` and `finalizing` carry the live message (`messageId?`), the buffer (`segments`), the chunks cut from it at `chunkChars` and not yet written, `lastEditAt`, and the write in flight.
+- **Inputs.** `push`, `retract`, `media_sent`, `finish`, `abort`, and each write's result: `api_ok(messageId)` or `api_failed(failure)`, and `throttle_elapsed` once a wait ends.
+- **Effects.** `write`, `wait(ms)`, `start_typing`, `stopped`, `settled(Result)`, `log`.
+- **One write at a time.** The machine starts a write only when none is in flight, and takes its result back as an input before choosing the next: chunks in order, then the abort's error tail, then a preview once 500ms have passed since the last. `push` resolves once no write is in flight, so on the happy path its writes have landed when it returns.
+
+Each failure has one answer:
+
+| Failure | Preview | Chunk or error tail |
+|-|-|-|
+| `message is not modified` | Landed | Landed |
+| 429 with `retry_after` ≤ 30s | Wait; the first preview after it carries the latest text | Wait, then write it again |
+| 429 the fifth time in a row, or `retry_after` > 30s | Fail | Fail |
+| `can't parse entities` | — (previews are plain) | Write the source as plain text; fail if that is rejected too |
+| Anything else | Fail | Fail |
+
+A failed handle settles `done` with the reason, stops the typing heartbeat, leaves `#activeStreams`, and answers every later call with its failure without writing. The heartbeat is bound to the handle's `AbortSignal`, which aborts once the stream takes no more content, and its interval is unref'd.
 
 ## Routing
 

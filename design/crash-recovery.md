@@ -194,7 +194,7 @@ async openStream(platformAddress, runId) {
 }
 ```
 
-The map lives in memory in the long-running Inngest connect-mode worker, so it survives within-process retries. See [transport/streaming.md](transport/streaming.md) → "Retry Deduplication".
+The map lives in memory in the long-running Inngest connect-mode worker, so it survives within-process retries. A handle leaves it once it settles, failure included, so the retry of a step whose push failed streams into a fresh handle. See [transport/streaming.md](transport/streaming.md) → "Retry Deduplication".
 
 ### Process death
 
