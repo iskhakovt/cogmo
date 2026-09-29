@@ -1840,49 +1840,52 @@ describe("AnthropicProvider", () => {
       return expectDefined(mockCreate.mock.calls[0], "create call")[0];
     }
 
-    it.each(["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5", "claude-haiku-4-5"])(
-      "asks %s for structured output rather than forcing a tool",
-      async (model) => {
-        const provider = createProvider();
-        mockCreate.mockResolvedValueOnce(textReply(model, '{"name":"Alice","age":30}'));
+    it.each([
+      "claude-opus-5-5",
+      "claude-fable-5-1",
+      "claude-sonnet-5-5",
+      "claude-sonnet-5",
+      "claude-haiku-4-5",
+    ])("asks %s for structured output rather than forcing a tool", async (model) => {
+      const provider = createProvider();
+      mockCreate.mockResolvedValueOnce(textReply(model, '{"name":"Alice","age":30}'));
 
-        const result = await provider.chat({
-          model,
-          system: "Extract structured data",
-          messages: [{ role: "user", content: "Alice is 30" }],
-          responseFormat: PERSON_FORMAT,
-        });
+      const result = await provider.chat({
+        model,
+        system: "Extract structured data",
+        messages: [{ role: "user", content: "Alice is 30" }],
+        responseFormat: PERSON_FORMAT,
+      });
 
-        const body = sentBody();
-        expect(body).not.toHaveProperty("tools");
-        expect(body).not.toHaveProperty("tool_choice");
-        expect(body.output_config).toEqual({
-          format: {
-            type: "json_schema",
-            schema: {
-              type: "object",
-              properties: {
-                // The grammar takes no length bounds, so they move into
-                // the description.
-                name: { type: "string", description: "{minLength: 1}" },
-                age: { type: "number" },
-              },
-              additionalProperties: false,
-              required: ["name", "age"],
+      const body = sentBody();
+      expect(body).not.toHaveProperty("tools");
+      expect(body).not.toHaveProperty("tool_choice");
+      expect(body.output_config).toEqual({
+        format: {
+          type: "json_schema",
+          schema: {
+            type: "object",
+            properties: {
+              // The grammar takes no length bounds, so they move into
+              // the description.
+              name: { type: "string", description: "{minLength: 1}" },
+              age: { type: "number" },
             },
+            additionalProperties: false,
+            required: ["name", "age"],
           },
-        });
-        expect(body.system).toEqual([
-          { type: "text", text: "Extract structured data", cache_control: { type: "ephemeral" } },
-        ]);
+        },
+      });
+      expect(body.system).toEqual([
+        { type: "text", text: "Extract structured data", cache_control: { type: "ephemeral" } },
+      ]);
 
-        expect(result.stopReason).toBe("end_turn");
-        expect(PersonSchema.parse(JSON.parse(extractText(result.content)))).toEqual({
-          name: "Alice",
-          age: 30,
-        });
-      },
-    );
+      expect(result.stopReason).toBe("end_turn");
+      expect(PersonSchema.parse(JSON.parse(extractText(result.content)))).toEqual({
+        name: "Alice",
+        age: 30,
+      });
+    });
 
     it("sends the grammar the correction schema's const and enum", async () => {
       const provider = createProvider();

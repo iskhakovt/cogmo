@@ -152,6 +152,9 @@ export default defineConfig({
             // Surface transient container/network blips as hard failures
             // instead of letting withRetry mask them. See src/util/with-retry.ts.
             RETRY_DISABLED: "true",
+            // The dev server fires crons on schedule; the catalog refresh would
+            // fetch from GitHub mid-run and swap every file's limits.
+            MODEL_CATALOG_URL: "off",
             ...GIT_NO_BACKGROUND_MAINTENANCE,
           },
         },

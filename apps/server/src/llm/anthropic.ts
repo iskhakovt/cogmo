@@ -417,7 +417,7 @@ function buildCreateParams(
     }
 
     // The system prompt asks for the call: forcing it (`tool_choice` of
-    // type `tool` or `any`) is a 400 on Opus 5.5 and Fable 5.1.
+    // type `tool` or `any`) is a 400 on Opus 5.5, Sonnet 5.5 and Fable 5.1.
     const syntheticTool = toAnthropicTool({
       name: format.name,
       description: "Respond with structured data matching the schema.",
