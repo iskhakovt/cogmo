@@ -211,7 +211,8 @@ On first call to a server's tool:
 ### Tool dispatch
 
 - Per-call timeout (default **30s** — Claude Code's #1 failure mode is the missing timeout, [issue #15945](https://github.com/anthropics/claude-code/issues/15945)).
-- On timeout or transport close: close connection, return tool error to the agent loop, attempt **one** reconnect on next call (Cursor pattern). Second failure: mark server unhealthy, surface to user.
+- On timeout: the SDK sends `notifications/cancelled` and stops waiting, as the MCP spec directs; the connection stays open and the agent loop gets a tool error.
+- On transport close: the pool drops the connection, returns a tool error, and reconnects **once** on the next call (Cursor pattern). A second failure marks the server unhealthy and surfaces it to the user.
 - All MCP tool calls set `durable: true` on the adapted `ToolSpec` → wrapped in Inngest `step.run()`. Step memoization is correct because the MCP server is non-deterministic; retry of `handle-message` reuses the recorded tool result.
 
 ### Hot reload
@@ -287,7 +288,7 @@ Docker's research found 43% of public MCP servers have command-injection flaws (
 
 | Failure | Mitigation |
 |-|-|
-| Tool hang | 30s per-call timeout; close connection on timeout |
+| Tool hang | 30s per-call timeout; the SDK cancels the request |
 | Transport drop (`-32000 Connection closed`) | Auto-reconnect once on next call; second failure marks server unhealthy |
 | Schema rug-pull | SHA256 pin per tool; mismatch → `needs_reapproval`; tool calls fail until re-approved |
 | Stdout pollution | Stdio strictly through SDK transport; server stderr → structured log |
