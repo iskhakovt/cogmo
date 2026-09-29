@@ -306,7 +306,7 @@ describe.skipIf(!RUNNABLE)("skill-authoring e2e", { timeout: 40 * 60_000 }, () =
     if (RECORDABLE && mock) await mock.endScenario();
     if (connection) await connection.close();
     if (bootstrapResult) {
-      for (const adapter of bootstrapResult.adapters) await adapter.stop();
+      for (const { adapter } of bootstrapResult.adapters) await adapter.stop();
       await bootstrapResult.skillRunner.shutdown();
       await bootstrapResult.mcpRegistry.stop();
       if (bootstrapResult.sandbox) await bootstrapResult.sandbox.shutdown();

@@ -1,13 +1,10 @@
-import { logger } from "./logger.js";
 import { finishesWithin } from "./util/finishes-within.js";
-
-const log = logger.child({ component: "shutdown" });
 
 /** What `cogmo serve` tears down on exit. */
 export interface ServeResources {
   /** Ends open chat streams, then drains requests for up to `drainMs`. */
   web: { close(drainMs: number): Promise<void> };
-  adapters: ReadonlyArray<{ stop(): Promise<void> }>;
+  adapters: ReadonlyArray<{ channelType: string; adapter: { stop(): Promise<void> } }>;
   mcpRegistry: { stop(): Promise<void> };
   sandbox: { shutdown(): Promise<void> } | null;
   /** Marks this process's `cogmo_instances` row stopped; `null` without one. */
@@ -17,42 +14,52 @@ export interface ServeResources {
 export interface ShutdownBounds {
   /** How long in-flight web requests get before their connections are closed. */
   webDrainMs: number;
-  /** Cap on every other step. */
+  /** Cap on every other step, and on the web step past its drain. */
   stepMs: number;
 }
 
 export const SERVE_SHUTDOWN_BOUNDS: ShutdownBounds = { webDrainMs: 3_000, stepMs: 5_000 };
 
+export type StepOutcome =
+  | { step: string; outcome: "done" }
+  | { step: string; outcome: "timed_out"; ms: number }
+  | { step: string; outcome: "failed"; error: unknown };
+
 /**
  * Tear down `cogmo serve`: the web server first, so no request reaches a
- * stopped dependency, then the channel adapters, MCP, the sandbox, and the
- * instance row. Each step is bounded; one that overruns or throws is logged
- * and the next still runs. Never rejects.
+ * stopped dependency, then the channel adapters concurrently, MCP, the
+ * sandbox, and the instance row. Each step is bounded, and one that
+ * overruns or throws doesn't stop the next. Never rejects; returns each
+ * step's outcome, in that order.
  */
 export async function shutdownServe(
   resources: ServeResources,
   bounds: ShutdownBounds,
-): Promise<void> {
+): Promise<ReadonlyArray<StepOutcome>> {
   const { web, adapters, mcpRegistry, sandbox, closeInstance } = resources;
-  await bounded("web server", bounds.webDrainMs + bounds.stepMs, () =>
-    web.close(bounds.webDrainMs),
-  );
-  await Promise.all(
-    adapters.map((adapter, index) =>
-      bounded(`channel adapter ${index}`, bounds.stepMs, () => adapter.stop()),
+  const { webDrainMs, stepMs } = bounds;
+  const webOutcome = await bounded("web server", webDrainMs + stepMs, () => web.close(webDrainMs));
+  const adapterOutcomes = await Promise.all(
+    adapters.map(({ channelType, adapter }) =>
+      bounded(`${channelType} adapter`, stepMs, () => adapter.stop()),
     ),
   );
-  await bounded("mcp", bounds.stepMs, () => mcpRegistry.stop());
-  if (sandbox) await bounded("sandbox", bounds.stepMs, () => sandbox.shutdown());
-  if (closeInstance) await bounded("sandbox instance", bounds.stepMs, closeInstance);
+  const mcpOutcome = await bounded("mcp", stepMs, () => mcpRegistry.stop());
+  const sandboxOutcomes = sandbox
+    ? [await bounded("sandbox", stepMs, () => sandbox.shutdown())]
+    : [];
+  const instanceOutcomes = closeInstance
+    ? [await bounded("sandbox instance", stepMs, closeInstance)]
+    : [];
+  return [webOutcome, ...adapterOutcomes, mcpOutcome, ...sandboxOutcomes, ...instanceOutcomes];
 }
 
-async function bounded(step: string, ms: number, run: () => Promise<void>): Promise<void> {
+async function bounded(step: string, ms: number, run: () => Promise<void>): Promise<StepOutcome> {
   try {
-    if (!(await finishesWithin(Promise.try(run), ms))) {
-      log.warn({ step, ms }, "shutdown step timed out; continuing");
-    }
-  } catch (err) {
-    log.error({ err, step }, "shutdown step failed; continuing");
+    return (await finishesWithin(Promise.try(run), ms))
+      ? { step, outcome: "done" }
+      : { step, outcome: "timed_out", ms };
+  } catch (error) {
+    return { step, outcome: "failed", error };
   }
 }

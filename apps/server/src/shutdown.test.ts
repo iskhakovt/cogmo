@@ -1,73 +1,162 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { type ServeResources, type ShutdownBounds, shutdownServe } from "./shutdown.js";
-import { resolvesWithin } from "./test/assertions.js";
 
-const FAST: ShutdownBounds = { webDrainMs: 100, stepMs: 300 };
+const BOUNDS: ShutdownBounds = { webDrainMs: 100, stepMs: 300 };
 
 /** Teardown resources whose steps are healthy stubs unless overridden. */
 function resources(steps: Partial<ServeResources> = {}): ServeResources {
   return {
     web: { close: vi.fn(async () => {}) },
-    adapters: [stoppable()],
-    mcpRegistry: stoppable(),
+    adapters: [channel("telegram", async () => {})],
+    mcpRegistry: { stop: vi.fn(async () => {}) },
     sandbox: { shutdown: vi.fn(async () => {}) },
     closeInstance: vi.fn(async () => {}),
     ...steps,
   };
 }
 
-function stoppable() {
-  return { stop: vi.fn(async () => {}) };
+function channel(channelType: string, stop: () => Promise<void>) {
+  return { channelType, adapter: { stop: vi.fn(stop) } };
 }
 
 function never(): Promise<void> {
   return new Promise(() => {});
 }
 
+/** Steps that record when they start and end, finishing a macrotask after they start. */
+function recorder() {
+  const events: string[] = [];
+  const step = (name: string) => async () => {
+    events.push(`${name} start`);
+    await new Promise((resolve) => setImmediate(resolve));
+    events.push(`${name} end`);
+  };
+  return { events, step };
+}
+
 describe("shutdownServe", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("gives the web server its drain", async () => {
     const web = { close: vi.fn(async () => {}) };
 
-    await shutdownServe(resources({ web }), FAST);
+    await shutdownServe(resources({ web }), BOUNDS);
 
-    expect(web.close).toHaveBeenCalledWith(FAST.webDrainMs);
+    expect(web.close).toHaveBeenCalledWith(BOUNDS.webDrainMs);
   });
 
-  it("moves past a step that never settles", async () => {
-    const healthy = stoppable();
-    const sandbox = { shutdown: vi.fn(async () => {}) };
+  it("finishes each step before the next starts", async () => {
+    const { events, step } = recorder();
+
+    await shutdownServe(
+      resources({
+        web: { close: step("web") },
+        adapters: [channel("telegram", step("telegram"))],
+        mcpRegistry: { stop: step("mcp") },
+        sandbox: { shutdown: step("sandbox") },
+        closeInstance: step("instance"),
+      }),
+      BOUNDS,
+    );
+
+    expect(events).toEqual([
+      "web start",
+      "web end",
+      "telegram start",
+      "telegram end",
+      "mcp start",
+      "mcp end",
+      "sandbox start",
+      "sandbox end",
+      "instance start",
+      "instance end",
+    ]);
+  });
+
+  it("stops the channel adapters concurrently", async () => {
+    const { events, step } = recorder();
+
+    await shutdownServe(
+      resources({ adapters: [channel("telegram", step("telegram")), channel("web", step("web"))] }),
+      BOUNDS,
+    );
+
+    expect(events).toEqual(["telegram start", "web start", "telegram end", "web end"]);
+  });
+
+  it("reports every step, adapters by channel", async () => {
+    const outcomes = await shutdownServe(
+      resources({
+        adapters: [channel("telegram", async () => {}), channel("web", async () => {})],
+      }),
+      BOUNDS,
+    );
+
+    expect(outcomes).toEqual([
+      { step: "web server", outcome: "done" },
+      { step: "telegram adapter", outcome: "done" },
+      { step: "web adapter", outcome: "done" },
+      { step: "mcp", outcome: "done" },
+      { step: "sandbox", outcome: "done" },
+      { step: "sandbox instance", outcome: "done" },
+    ]);
+  });
+
+  it("reports a step that overruns its bound and runs the next", async () => {
+    vi.useFakeTimers();
     const closeInstance = vi.fn(async () => {});
-    const deps = resources({
-      adapters: [{ stop: never }, healthy],
-      mcpRegistry: { stop: never },
-      sandbox,
-      closeInstance,
-    });
 
-    await resolvesWithin(shutdownServe(deps, FAST), 2_500, "shutdown");
+    const shutdown = shutdownServe(
+      resources({ mcpRegistry: { stop: never }, closeInstance }),
+      BOUNDS,
+    );
+    await vi.advanceTimersByTimeAsync(BOUNDS.stepMs);
+    const outcomes = await shutdown;
 
-    expect(healthy.stop).toHaveBeenCalledTimes(1);
-    expect(sandbox.shutdown).toHaveBeenCalledTimes(1);
+    expect(outcomes).toContainEqual({ step: "mcp", outcome: "timed_out", ms: BOUNDS.stepMs });
+    expect(outcomes).toContainEqual({ step: "sandbox instance", outcome: "done" });
     expect(closeInstance).toHaveBeenCalledTimes(1);
   });
 
-  it("moves past a step that throws", async () => {
-    const closeInstance = vi.fn(async () => {});
-    const deps = resources({
-      sandbox: { shutdown: vi.fn().mockRejectedValue(new Error("daemon gone")) },
-      closeInstance,
-    });
+  it("bounds the web step by its drain plus the step cap", async () => {
+    vi.useFakeTimers();
 
-    await expect(shutdownServe(deps, FAST)).resolves.toBeUndefined();
+    const shutdown = shutdownServe(resources({ web: { close: never } }), BOUNDS);
+    await vi.advanceTimersByTimeAsync(BOUNDS.webDrainMs + BOUNDS.stepMs - 1);
+    let settled = false;
+    void shutdown.then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const outcomes = await shutdown;
+
+    expect(outcomes[0]).toEqual({
+      step: "web server",
+      outcome: "timed_out",
+      ms: BOUNDS.webDrainMs + BOUNDS.stepMs,
+    });
+  });
+
+  it("reports a step that throws and runs the next", async () => {
+    const failure = new Error("daemon gone");
+    const closeInstance = vi.fn(async () => {});
+
+    const outcomes = await shutdownServe(
+      resources({ sandbox: { shutdown: vi.fn().mockRejectedValue(failure) }, closeInstance }),
+      BOUNDS,
+    );
+
+    expect(outcomes).toContainEqual({ step: "sandbox", outcome: "failed", error: failure });
     expect(closeInstance).toHaveBeenCalledTimes(1);
   });
 
   it("skips the sandbox steps when there is no sandbox", async () => {
-    const adapter = stoppable();
+    const outcomes = await shutdownServe(resources({ sandbox: null, closeInstance: null }), BOUNDS);
 
-    await expect(
-      shutdownServe(resources({ adapters: [adapter], sandbox: null, closeInstance: null }), FAST),
-    ).resolves.toBeUndefined();
-    expect(adapter.stop).toHaveBeenCalledTimes(1);
+    expect(outcomes.map(({ step }) => step)).toEqual(["web server", "telegram adapter", "mcp"]);
   });
 });

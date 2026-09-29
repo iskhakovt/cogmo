@@ -242,7 +242,7 @@ async function serve(): Promise<number> {
       await connection.closed;
     }
   } finally {
-    await shutdownServe(
+    const outcomes = await shutdownServe(
       {
         web,
         adapters,
@@ -254,8 +254,22 @@ async function serve(): Promise<number> {
       },
       SERVE_SHUTDOWN_BOUNDS,
     );
+    for (const outcome of outcomes) {
+      switch (outcome.outcome) {
+        case "done":
+          logger.debug({ step: outcome.step }, "shutdown step done");
+          break;
+        case "timed_out":
+          logger.warn({ step: outcome.step, ms: outcome.ms }, "shutdown step timed out");
+          break;
+        case "failed":
+          logger.error({ step: outcome.step, err: outcome.error }, "shutdown step failed");
+          break;
+      }
+    }
   }
 
+  // Zero even when a step failed: the process did stop, and its log says what didn't.
   logger.info("cogmo stopped");
   return 0;
 }
