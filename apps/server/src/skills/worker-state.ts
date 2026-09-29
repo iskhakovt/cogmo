@@ -142,13 +142,23 @@ const FRAMES = [
   "malformed",
 ] as const;
 
+/**
+ * Who ended a worker: the host, by closing its channel, or the worker — its
+ * channel ended or failed, it refused or missed its handshake, it hung past
+ * its task's deadline, or it named a task other than its own.
+ */
+export interface Death {
+  cause: "host" | "worker";
+  reason: string;
+}
+
 export type Effect<T extends TaskRef> =
   | { type: "send"; message: HostMessage }
   | { type: "serve"; task: T; call: CtxCall }
   | { type: "settle"; task: T; outcome: TaskOutcome }
   | { type: "started"; outcome: Result<void, StartFailure> }
   /** Entered `dead`: close the channel. Emitted exactly once. */
-  | { type: "died"; reason: string }
+  | { type: "died"; death: Death }
   /** Dead, and no caller holds it: its resources can go. Emitted exactly once, at or after `died`. */
   | { type: "disposable" }
   | { type: "log"; level: "warn" | "debug"; message: string; fields: Record<string, unknown> };
@@ -356,9 +366,11 @@ function onInvoke<T extends TaskRef>(
 function onClose<T extends TaskRef>(state: Alive<T>, reason: string): Transition<T> {
   return match<Alive<T>, Transition<T>>(state)
     .with({ kind: "starting" }, () => startFails(reason, { kind: "closed", reason }))
-    .with({ kind: P.union(...BETWEEN_TASKS) }, (s) => diesBetweenTasks(s, reason, []))
+    .with({ kind: P.union(...BETWEEN_TASKS) }, (s) =>
+      diesBetweenTasks(s, { cause: "host", reason }, []),
+    )
     .with({ kind: P.union(...WITH_TASK) }, (s) =>
-      diesUnderTask(s, reason, { kind: "failed", reason }, []),
+      diesUnderTask(s, { cause: "host", reason }, { kind: "failed", reason }, []),
     )
     .exhaustive();
 }
@@ -388,12 +400,12 @@ function onChannelLost<T extends TaskRef>(state: Alive<T>, reason: string): Tran
   return match<Alive<T>, Transition<T>>(state)
     .with({ kind: "starting" }, () => startFails(reason, { kind: "ended", reason }))
     .with({ kind: P.union(...BETWEEN_TASKS) }, (s) =>
-      diesBetweenTasks(s, reason, [
+      diesBetweenTasks(s, { cause: "worker", reason }, [
         logEffect("warn", "worker channel lost between tasks — the worker dies", { reason }),
       ]),
     )
     .with({ kind: P.union(...WITH_TASK) }, (s) =>
-      diesUnderTask(s, reason, { kind: "failed", reason }, [
+      diesUnderTask(s, { cause: "worker", reason }, { kind: "failed", reason }, [
         logEffect("warn", "worker channel lost with a task in flight", {
           reason,
           taskId: s.task.id,
@@ -410,9 +422,12 @@ function onDeadlinePassed<T extends TaskRef>(state: Alive<T>, task: T): Transiti
       { kind: P.union(...WITH_TASK) },
       (s) => s.task === task,
       (s) =>
-        diesUnderTask(s, "task deadline passed", { kind: "timed_out" }, [
-          logEffect("warn", "task deadline passed — the worker dies", { taskId: task.id }),
-        ]),
+        diesUnderTask(
+          s,
+          { cause: "worker", reason: "task deadline passed" },
+          { kind: "timed_out" },
+          [logEffect("warn", "task deadline passed — the worker dies", { taskId: task.id })],
+        ),
     )
     .with({ kind: P.union(...ALIVE) }, (s) => stay(s))
     .exhaustive();
@@ -451,7 +466,7 @@ function mismatch<T extends TaskRef>(
 ): Transition<T> {
   const expected = state.task.id;
   const reason = `${frame} id mismatch (expected ${expected}, got ${got})`;
-  return diesUnderTask(state, reason, { kind: "failed", reason }, [
+  return diesUnderTask(state, { cause: "worker", reason }, { kind: "failed", reason }, [
     logEffect("warn", `${frame} names another task — the worker dies`, { expected, got }),
   ]);
 }
@@ -466,13 +481,17 @@ function exitedCleanly<T extends TaskRef>(
   ]);
 }
 
-/** Enter `dead` from `starting`: the start fails, and nobody holds the worker. */
+/**
+ * Enter `dead` from `starting`: the start fails, and nobody holds the worker.
+ * Only a host close is the host's doing.
+ */
 function startFails<T extends TaskRef>(reason: string, failure: StartFailure): Transition<T> {
+  const cause = failure.kind === "closed" ? "host" : "worker";
   return {
     state: { kind: "dead", reason, held: false },
     effects: [
       { type: "started", outcome: err(failure) },
-      { type: "died", reason },
+      { type: "died", death: { cause, reason } },
       { type: "disposable" },
     ],
   };
@@ -481,17 +500,13 @@ function startFails<T extends TaskRef>(reason: string, failure: StartFailure): T
 /** Enter `dead` with no task on the worker; a leased one stays held by its caller. */
 function diesBetweenTasks<T extends TaskRef>(
   state: StateOf<T, (typeof BETWEEN_TASKS)[number]>,
-  reason: string,
+  death: Death,
   logs: ReadonlyArray<LogEffect>,
 ): Transition<T> {
   const held = state.kind === "leased";
   return {
-    state: { kind: "dead", reason, held },
-    effects: [
-      ...logs,
-      { type: "died", reason },
-      ...(held ? [] : [{ type: "disposable" } as const]),
-    ],
+    state: { kind: "dead", reason: death.reason, held },
+    effects: [...logs, { type: "died", death }, ...(held ? [] : [{ type: "disposable" } as const])],
   };
 }
 
@@ -502,7 +517,7 @@ function diesBetweenTasks<T extends TaskRef>(
  */
 function diesUnderTask<T extends TaskRef>(
   state: WithTask<T>,
-  reason: string,
+  death: Death,
   failure: TaskFailure,
   logs: ReadonlyArray<LogEffect>,
 ): Transition<T> {
@@ -511,6 +526,7 @@ function diesUnderTask<T extends TaskRef>(
     .with({ kind: "awaiting_exit" }, (s) => ok(s.result))
     .with({ kind: "running" }, () => err(failure))
     .exhaustive();
+  const { reason } = death;
   return {
     state: { kind: "dead", reason, held: true },
     effects: [
@@ -520,7 +536,7 @@ function diesUnderTask<T extends TaskRef>(
         task: state.task,
         outcome: { result, exit: { kind: "unconfirmed", reason } },
       },
-      { type: "died", reason },
+      { type: "died", death },
     ],
   };
 }

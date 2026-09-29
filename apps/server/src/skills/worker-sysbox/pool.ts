@@ -1,8 +1,21 @@
 import { randomUUID } from "node:crypto";
-import type { Result } from "neverthrow";
+import { err, ok, Result } from "neverthrow";
+import { match } from "ts-pattern";
 import { logger } from "../../logger.js";
 import type { ResourceLimits, SandboxClient } from "../../sandbox/index.js";
 import { describeError } from "../../util/describe-error.js";
+import type { Death } from "../worker-state.js";
+import {
+  emptyPool,
+  type PoolEffect,
+  type PoolEvent,
+  type PoolState,
+  type PoolTransition,
+  type Rejection,
+  reconcile,
+  type TaskReturn,
+  transition,
+} from "./pool-state.js";
 import {
   type InvokeParams,
   type InvokeResult,
@@ -94,8 +107,8 @@ export interface WorkerHandle {
   readonly workerId: string;
   readonly state: WorkerStatus;
   readonly taskCount: number;
-  /** Resolves with the reason once the worker can run no further task, whatever the cause. */
-  readonly dead: Promise<string>;
+  /** Resolves once the worker can run no further task, with who ended it and why. */
+  readonly dead: Promise<Death>;
   /** Resolves once the worker is dead and no task holds it: its container can go. */
   readonly disposable: Promise<void>;
   idleMs(now: number): number;
@@ -114,6 +127,8 @@ interface PendingWaiter {
   reject: (err: Error) => void;
 }
 
+type Event = PoolEvent<WorkerHandle, PendingWaiter>;
+
 /**
  * Margin between the pool's wall-clock recycle ceiling and the sandbox
  * reaper's `expiresAt`. Sized so the pool's own recycle policy fires first
@@ -124,35 +139,6 @@ interface PendingWaiter {
  * the margin is hours, not seconds).
  */
 const REAPER_BACKSTOP_MS = 60 * 60 * 1000;
-
-/**
- * Early deaths in a row after which a dead worker is no longer replaced at
- * once. A death is early when the worker dies on its own, never leased,
- * within `CRASH_LOOP_WINDOW_MS` of its handshake. An image whose supervisor
- * cannot run would otherwise create and delete containers back to back; the
- * sweep still retries once per `idleSweepIntervalMs`. A task that returns
- * with its worker alive clears the count.
- */
-const CRASH_LOOP_DEATHS = 3;
-
-/**
- * How soon after its handshake a worker must die for the death to be early.
- * A supervisor has no idle timeout, so an idle worker that dies later was
- * killed from outside (a Docker restart, the reaper), not by its image.
- */
-const CRASH_LOOP_WINDOW_MS = 60_000;
-
-/**
- * A spawn that `dispose()` cut short. `create()` and a foreground acquire
- * surface it; `#spawnForQueue` drops it silently. Not exported: callers see
- * a plain `Error`.
- */
-class PoolDisposedDuringSpawnError extends Error {
-  constructor() {
-    super("SysboxWorkerPool: disposed during worker spawn");
-    this.name = "PoolDisposedDuringSpawnError";
-  }
-}
 
 export const DEFAULT_POOL_OPTIONS = {
   min: 1,
@@ -170,58 +156,29 @@ export const DEFAULT_POOL_OPTIONS = {
  * Pool of warm sysbox containers shared across skill invocations. See
  * `design/skills.md` `## Warm pool`.
  *
- * Concurrency model:
- *  - `invoke` first tries to acquire an existing idle worker.
- *  - If none and the pool hasn't hit `max`, spawn a new worker and acquire it.
- *  - If at `max`, queue and wait for a worker released idle or a freed slot.
+ * The shell around the pool machine (`pool-state.ts`): it feeds the machine
+ * acquires, spawn outcomes, each worker's `dead` and `disposable`, returning
+ * tasks, sweeps and disposal, and carries out the effects it returns —
+ * spawn, grant, reject, retire, release, tear down. Every decision is the
+ * machine's; the shell only asks the workers and reports their answers.
  *
- * Lifecycle:
- *  - The pool subscribes to each worker's `dead` and `disposable` as it
- *    spawns it. The moment a worker dies — its supervisor went away, a task
- *    left it unreusable, or the pool retired it — the pool spawns a
- *    replacement up to `min`, room permitting. The dead worker's container
- *    goes once it is disposable: at once, or once the task holding it
- *    returns; until then it still counts toward `max`. Its freed slot goes
- *    to a queued acquirer first. Containers still tearing down do not
- *    count, so while teardowns run the sandbox can hold more than `max`.
- *  - Workers that keep dying before their first task stop being replaced
- *    at once; see `CRASH_LOOP_DEATHS`.
- *  - The pool retires a worker after its task once taskCount ≥
- *    `recycleAfterTasks` or age ≥ `recycleAfterMs`.
- *  - An interval sweep retires idle workers above `min` after `idleShutdownMs`,
- *    and spawns back up to `min`: a replacement that failed, or one the
- *    crash-loop cap left to it.
- *  - `dispose()` aborts the signal every worker was created with: a live
- *    worker's channel closes, and a spawn stops at its next step. It then
- *    cancels the sweep, rejects all queued waiters, tears down every
- *    container, and returns once every teardown, including those already
- *    under way, has finished. Idempotent.
+ * `dispose()` aborts the signal every worker was created with: a live
+ * worker's channel closes, and a spawn stops at its next step. It rejects
+ * every queued acquire, tears down every container, and returns once every
+ * spawn and teardown, those already under way included, has finished.
+ * Idempotent.
  */
 export class SysboxWorkerPool {
   #sandbox: SandboxClient;
   #image: string;
   #resourceLimits: Partial<ResourceLimits> | undefined;
   #depsCacheVolumeName: string | undefined;
-  #opts: Required<
-    Pick<
-      SysboxWorkerPoolOptions,
-      | "min"
-      | "max"
-      | "recycleAfterTasks"
-      | "recycleAfterMs"
-      | "idleShutdownMs"
-      | "idleSweepIntervalMs"
-    >
-  >;
-  /** Every worker not yet tearing down, dead ones a task still holds included. */
-  #workers: WorkerHandle[] = [];
-  /** Teardowns under way of workers that have left `#workers`. */
+  #idleSweepIntervalMs: number;
+  #state: PoolState<WorkerHandle, PendingWaiter>;
+  /** Spawns under way, each settling once the machine has taken its outcome. */
+  #spawns = new Set<Promise<Result<void, unknown>>>();
+  /** Container teardowns under way. */
   #teardowns = new Set<Promise<void>>();
-  #queue: PendingWaiter[] = [];
-  /** Early deaths in a row; see `CRASH_LOOP_DEATHS`. */
-  #earlyDeaths = 0;
-  /** Workers the pool has leased or retired: their deaths are never early. */
-  #leasedOrRetired = new WeakSet<WorkerHandle>();
   /** Aborted by `dispose()`. Every worker is created with its signal. */
   #lifetime = new AbortController();
   #disposal: Promise<void> | undefined;
@@ -230,26 +187,20 @@ export class SysboxWorkerPool {
   #clearInterval: (handle: unknown) => void;
   #now: () => number;
   #sweepHandle: unknown = null;
-  /**
-   * Spawns under way. Each counts toward `max` until its worker joins
-   * `#workers` or it fails; it leaves this set in the same step its worker
-   * joins, so no worker counts twice. `dispose()` waits for them.
-   */
-  #spawns = new Set<Promise<WorkerHandle>>();
 
   private constructor(opts: SysboxWorkerPoolOptions) {
     this.#sandbox = opts.sandbox;
     this.#image = opts.image;
     this.#resourceLimits = opts.resourceLimits;
     this.#depsCacheVolumeName = opts.depsCacheVolumeName;
-    this.#opts = {
+    this.#idleSweepIntervalMs = opts.idleSweepIntervalMs;
+    this.#state = emptyPool({
       min: opts.min,
       max: opts.max,
       recycleAfterTasks: opts.recycleAfterTasks,
       recycleAfterMs: opts.recycleAfterMs,
       idleShutdownMs: opts.idleShutdownMs,
-      idleSweepIntervalMs: opts.idleSweepIntervalMs,
-    };
+    });
     this.#createWorker = opts.createWorker ?? SysboxSkillWorker.create;
     this.#setInterval =
       opts.setInterval ??
@@ -275,64 +226,54 @@ export class SysboxWorkerPool {
   static async create(opts: SysboxWorkerPoolOptions): Promise<SysboxWorkerPool> {
     const pool = new SysboxWorkerPool(opts);
     // Spawn the always-warm `min` workers eagerly so first-invoke latency is
-    // steady-state, not cold. Spawn failures here propagate — a misconfigured
-    // pool (bad image, sandbox unreachable) should fail boot, not lurk and
-    // surface on the first user invocation.
-    //
-    // Use `allSettled` so one rejection doesn't strand parallel spawns: if
-    // spawn #2 fails after spawn #1 has already pushed its worker into
-    // `#workers`, a bare `Promise.all` would rethrow before disposing #1, and
-    // the caller (whose only handle to the pool was the `create()` return
-    // value they never received) couldn't tear it down. Disposing on any
-    // failure tears down every container that did come up before rethrowing.
-    if (pool.#opts.min > 0) {
-      const settled = await Promise.allSettled(
-        Array.from({ length: pool.#opts.min }, () => pool.#spawnOne()),
-      );
-      const firstFailure = settled.find((r) => r.status === "rejected");
-      if (firstFailure) {
-        await pool.dispose();
-        throw firstFailure.reason instanceof Error
-          ? firstFailure.reason
-          : new Error(String(firstFailure.reason));
-      }
+    // steady-state, not cold. A failed spawn fails boot — a misconfigured
+    // pool (bad image, sandbox unreachable) should not lurk until the first
+    // invocation — once every spawn has settled, and after disposing the
+    // pool, so no container that did come up outlives it.
+    pool.#enter(reconcile(pool.#state));
+    const booted = Result.combine(await Promise.all(pool.#spawns));
+    if (booted.isErr()) {
+      await pool.dispose();
+      throw booted.error instanceof Error ? booted.error : new Error(String(booted.error));
     }
-    pool.#sweepHandle = pool.#setInterval(() => pool.#sweepIdle(), pool.#opts.idleSweepIntervalMs);
+    pool.#sweepHandle = pool.#setInterval(() => pool.#sweep(), pool.#idleSweepIntervalMs);
     return pool;
   }
 
   /**
-   * Run one task. Acquires an idle worker (spawning if needed and below
-   * `max`), invokes the task, retires the worker at a recycle cap and
-   * releases it, and returns.
+   * Run one task. Acquires a worker — idle, spawned for it below `max`, or
+   * freed while it queued — invokes the task, and gives the worker back.
    */
   async invoke(params: InvokeParams): Promise<InvokeResult> {
-    if (this.#lifetime.signal.aborted) {
+    if (this.#state.phase === "disposed") {
       throw new Error("SysboxWorkerPool: invoke after dispose");
     }
     const worker = await this.#acquire();
+    // `worker.invoke` returns a task's failures as `ok: false`; a throw is a bug.
+    let returned: TaskReturn = { kind: "threw" };
     try {
-      return await worker.invoke(params);
-    } catch (e) {
-      // worker.invoke returns its failures as ok=false — this path is for
-      // bugs (precondition asserts, etc.). Retire the worker.
-      this.#retire(worker);
-      throw e;
+      const result = await worker.invoke(params);
+      returned =
+        worker.state === "busy"
+          ? { kind: "alive", taskCount: worker.taskCount, ageMs: worker.ageMs(this.#now()) }
+          : { kind: "dead" };
+      return result;
     } finally {
-      this.#postInvoke(worker);
+      this.#feed({ type: "task_returned", worker, returned });
     }
   }
 
   /** Snapshot of pool size + state for tests / logs. */
   stats(): { total: number; idle: number; busy: number; dead: number; queued: number } {
+    const workers = this.#state.workers.map((w) => w.worker);
     const count = (status: WorkerStatus): number =>
-      this.#workers.filter((w) => w.state === status).length;
+      workers.filter((w) => w.state === status).length;
     return {
-      total: this.#workers.length,
+      total: workers.length,
       idle: count("idle"),
       busy: count("busy"),
       dead: count("dead"),
-      queued: this.#queue.length,
+      queued: this.#state.queue.length,
     };
   }
 
@@ -348,101 +289,98 @@ export class SysboxWorkerPool {
       this.#clearInterval(this.#sweepHandle);
       this.#sweepHandle = null;
     }
-    const queued = this.#queue.splice(0, this.#queue.length);
-    for (const w of queued) {
-      w.reject(new Error("SysboxWorkerPool: disposed before worker available"));
+    this.#feed({ type: "dispose" });
+    // A spawn that lands now is torn down, so wait until neither is left.
+    while (this.#spawns.size + this.#teardowns.size > 0) {
+      await Promise.allSettled([...this.#spawns, ...this.#teardowns]);
     }
-    // Dead workers a task still holds are here too: their containers go now.
-    const workers = this.#workers.splice(0, this.#workers.length);
-    // Wait on these workers, on spawns under way (they stop on the aborted
-    // signal and tear down whatever they had set up) and on teardowns under
-    // way, so `dispose()` returns only once every container the pool ever
-    // spawned is gone.
-    await Promise.allSettled([
-      ...workers.map((w) => w.dispose()),
-      ...this.#spawns,
-      ...this.#teardowns,
-    ]);
   }
 
   // --- internals ---
 
-  async #acquire(): Promise<WorkerHandle> {
-    const idle = this.#acquireIdle();
-    if (idle) return idle;
-    // Spawn if there's room. Counting in-flight spawns prevents a
-    // thundering herd of invokes from overshooting `max` while one spawn is
-    // still resolving.
-    if (this.#hasRoom()) {
-      const w = await this.#spawnOne().catch((e: unknown) => {
-        // The slot the spawn held is free again; an acquire queued behind
-        // it would otherwise wait on nothing.
-        this.#serveQueue();
-        throw e;
-      });
-      if (this.#lease(w)) return w;
-      // Lost the race for the worker we just spawned, or it is already
-      // dead. Some *other* worker may have gone idle while we awaited the
-      // spawn (a parallel task finished, queue handover took ours).
-      const other = this.#acquireIdle();
-      if (other) return other;
-    }
-    // `dispose()` drains the queue once; it may have while the spawn above was awaited.
-    if (this.#lifetime.signal.aborted) {
-      throw new Error("SysboxWorkerPool: disposed before worker available");
-    }
-    const waiting = new Promise<WorkerHandle>((resolve, reject) => {
-      this.#queue.push({ resolve, reject });
-    });
-    // With room left — the spawn above died before it could be leased, say
-    // — a queued acquirer would wait on nothing; spawn for it.
-    this.#serveQueue();
-    return waiting;
+  #acquire(): Promise<WorkerHandle> {
+    const { promise, resolve, reject } = Promise.withResolvers<WorkerHandle>();
+    this.#feed({ type: "acquire", waiter: { resolve, reject } });
+    return promise;
   }
 
-  /** Lease the first idle worker, if any. */
-  #acquireIdle(): WorkerHandle | undefined {
-    for (const w of this.#workers) {
-      if (this.#lease(w)) return w;
-    }
-    return undefined;
-  }
-
-  /** Lease `worker` for a task, if it is idle. */
-  #lease(worker: WorkerHandle): boolean {
-    if (worker.tryAcquire().isErr()) return false;
-    this.#leasedOrRetired.add(worker);
-    return true;
-  }
-
-  /** Retire `worker`: it dies, by the pool's doing. */
-  #retire(worker: WorkerHandle): void {
-    this.#leasedOrRetired.add(worker);
-    worker.retire();
-  }
-
-  /** Below `max`, counting spawns under way and every worker not yet tearing down. */
-  #hasRoom(): boolean {
-    return this.#workers.length + this.#spawns.size < this.#opts.max;
-  }
-
-  #spawnOne(): Promise<WorkerHandle> {
-    if (this.#lifetime.signal.aborted) {
-      return Promise.reject(new PoolDisposedDuringSpawnError());
-    }
-    const spawn: Promise<WorkerHandle> = this.#createOne().then(
-      (w) => {
-        this.#spawns.delete(spawn);
-        return this.#admit(w);
-      },
-      (e: unknown) => {
-        this.#spawns.delete(spawn);
-        // A spawn that disposal cut short fails as one, like any other.
-        throw this.#lifetime.signal.aborted ? new PoolDisposedDuringSpawnError() : e;
-      },
+  #sweep(): void {
+    const now = this.#now();
+    const idleMs = new Map(
+      this.#state.workers.map(({ worker }): [WorkerHandle, number] => [worker, worker.idleMs(now)]),
     );
+    this.#feed({ type: "sweep", idleMs });
+  }
+
+  #feed(event: Event): void {
+    this.#enter(transition(this.#state, event));
+  }
+
+  /** Move to the next state and carry out its effects, in order; events they raise follow. */
+  #enter(next: PoolTransition<WorkerHandle, PendingWaiter>): void {
+    this.#state = next.state;
+    const raised = next.effects.flatMap((effect) => this.#execute(effect));
+    for (const event of raised) this.#feed(event);
+  }
+
+  #execute(effect: PoolEffect<WorkerHandle, PendingWaiter>): ReadonlyArray<Event> {
+    return match(effect)
+      .returnType<ReadonlyArray<Event>>()
+      .with({ type: "spawn" }, () => {
+        this.#spawn();
+        return [];
+      })
+      .with({ type: "grant" }, ({ worker, waiter }) => this.#grant(worker, waiter))
+      .with({ type: "reject" }, ({ waiter, rejection }) => {
+        waiter.reject(rejectionError(rejection));
+        return [];
+      })
+      .with({ type: "retire" }, ({ worker }) => {
+        worker.retire();
+        return [];
+      })
+      .with({ type: "release" }, ({ worker }) => {
+        const released = worker.release();
+        if (released.isErr()) {
+          log.warn({ workerId: worker.workerId, reason: released.error }, "worker release refused");
+        }
+        return [];
+      })
+      .with({ type: "teardown" }, ({ worker }) => {
+        this.#teardown(worker);
+        return [];
+      })
+      .with({ type: "log" }, ({ level, message, fields }) => {
+        log[level](fields, message);
+        return [];
+      })
+      .exhaustive();
+  }
+
+  /**
+   * Create a worker and report how it went. The pool hears of the worker's
+   * death and disposability from the moment it takes the worker in.
+   */
+  #spawn(): void {
+    const spawn: Promise<Result<void, unknown>> = this.#createOne()
+      .then(
+        (worker): Result<void, unknown> => {
+          void worker.dead.then((death) =>
+            this.#feed({ type: "died", worker, death, ageMs: worker.ageMs(this.#now()) }),
+          );
+          void worker.disposable.then(() => this.#feed({ type: "disposable", worker }));
+          this.#feed({ type: "spawned", worker });
+          return ok(undefined);
+        },
+        (error: unknown): Result<void, unknown> => {
+          this.#feed({ type: "spawn_failed", error });
+          return err(error);
+        },
+      )
+      .finally(() => {
+        this.#spawns.delete(spawn);
+      });
     this.#spawns.add(spawn);
-    return spawn;
   }
 
   async #createOne(): Promise<WorkerHandle> {
@@ -456,7 +394,7 @@ export class SysboxWorkerPool {
       sandbox: this.#sandbox,
       image: this.#image,
       ...(this.#resourceLimits !== undefined && { resourceLimits: this.#resourceLimits }),
-      expiresAt: new Date(this.#now() + this.#opts.recycleAfterMs + REAPER_BACKSTOP_MS),
+      expiresAt: new Date(this.#now() + this.#state.sizing.recycleAfterMs + REAPER_BACKSTOP_MS),
       ...(this.#depsCacheVolumeName !== undefined && {
         depsCacheVolumeName: this.#depsCacheVolumeName,
       }),
@@ -464,195 +402,43 @@ export class SysboxWorkerPool {
     });
   }
 
-  /**
-   * Take a new worker into the pool. If `dispose()` ran while it was being
-   * created, tear it down instead: `dispose()` has already emptied
-   * `#workers` and would never see it.
-   */
-  async #admit(w: WorkerHandle): Promise<WorkerHandle> {
-    if (this.#lifetime.signal.aborted) {
-      await w.dispose().catch((e: unknown) => {
-        log.warn(
-          { workerId: w.workerId, err: describeError(e) },
-          "post-dispose orphan worker dispose failed",
-        );
-      });
-      throw new PoolDisposedDuringSpawnError();
+  /** Lease `worker` to `waiter` if the worker takes the lease; its refusal goes back to the machine. */
+  #grant(worker: WorkerHandle, waiter: PendingWaiter): ReadonlyArray<Event> {
+    const lease = worker.tryAcquire();
+    if (lease.isErr()) {
+      log.debug({ workerId: worker.workerId, reason: lease.error }, "worker refused its lease");
+      return [{ type: "grant_refused", worker, waiter }];
     }
-    this.#workers.push(w);
-    void w.dead.then((reason) => this.#onDead(w, reason));
-    void w.disposable.then(() => this.#onDisposable(w));
-    return w;
+    waiter.resolve(worker);
+    return [];
   }
 
-  /**
-   * Give a worker back once its task returns: retire it at a recycle cap,
-   * then release it — a live one goes idle and to the head of the queue, a
-   * dead one becomes disposable. The age cap is checked only here: the sweep
-   * never goes below `min`, so a worker within `min` that ages out idle lives
-   * until its next task; the reaper backstops a crashed host.
-   */
-  #postInvoke(worker: WorkerHandle): void {
-    if (worker.state === "busy") {
-      // The task returned and its worker lives: the image runs.
-      this.#earlyDeaths = 0;
-      const taskCap = worker.taskCount >= this.#opts.recycleAfterTasks;
-      const ageCap = worker.ageMs(this.#now()) >= this.#opts.recycleAfterMs;
-      if (taskCap || ageCap) {
-        log.debug(
-          { workerId: worker.workerId, taskCount: worker.taskCount, taskCap, ageCap },
-          "recycling worker — cap reached",
-        );
-        this.#retire(worker);
-      }
-    }
-    const released = worker.release();
-    if (released.isErr()) {
-      log.warn({ workerId: worker.workerId, reason: released.error }, "worker release refused");
-    }
-    // A worker released idle goes to the head of the queue; a dead one can't be leased.
-    const waiter = this.#queue[0];
-    if (waiter !== undefined && this.#lease(worker)) {
-      this.#queue.shift();
-      waiter.resolve(worker);
-    }
-  }
-
-  /**
-   * Replace a worker the moment it dies. Its container stays, still
-   * counted toward `max`, until `disposable` — while a task holds it, the
-   * task may still be using it. Workers that keep dying early are an image
-   * that cannot run: from `CRASH_LOOP_DEATHS` on, only the sweep replaces
-   * them.
-   */
-  #onDead(worker: WorkerHandle, reason: string): void {
-    if (this.#lifetime.signal.aborted) return;
-    log.debug({ workerId: worker.workerId, reason }, "worker died");
-    if (this.#diedEarly(worker)) {
-      this.#earlyDeaths += 1;
-      if (this.#earlyDeaths === CRASH_LOOP_DEATHS) {
-        log.warn(
-          { deaths: this.#earlyDeaths, reason },
-          "workers keep dying before their first task — replacing them on the sweep only",
-        );
-      }
-    }
-    if (this.#crashLooping()) this.#serveQueue();
-    else this.#replenishToMin();
-  }
-
-  /** See `CRASH_LOOP_DEATHS`. */
-  #diedEarly(worker: WorkerHandle): boolean {
-    return !this.#leasedOrRetired.has(worker) && worker.ageMs(this.#now()) < CRASH_LOOP_WINDOW_MS;
-  }
-
-  /** Tear a dead worker down once no task holds it, and fill the slot it frees. */
-  #onDisposable(worker: WorkerHandle): void {
-    // After `dispose()`, which tears every worker down itself.
-    if (this.#lifetime.signal.aborted) return;
-    const idx = this.#workers.indexOf(worker);
-    if (idx >= 0) this.#workers.splice(idx, 1);
+  #teardown(worker: WorkerHandle): void {
     const teardown: Promise<void> = worker
       .dispose()
       .catch((e: unknown) => {
-        log.warn(
-          { workerId: worker.workerId, err: describeError(e) },
-          "worker dispose failed during recycle",
-        );
+        log.warn({ workerId: worker.workerId, err: describeError(e) }, "worker teardown failed");
       })
       .finally(() => {
         this.#teardowns.delete(teardown);
       });
     this.#teardowns.add(teardown);
-    this.#serveQueue();
-    if (!this.#crashLooping()) this.#replenishToMin();
   }
+}
 
-  #crashLooping(): boolean {
-    return this.#earlyDeaths >= CRASH_LOOP_DEATHS;
-  }
-
-  #replenishToMin(): void {
-    if (this.#lifetime.signal.aborted) return;
-    const live = this.#workers.filter((w) => w.state !== "dead").length;
-    if (live + this.#spawns.size < this.#opts.min && this.#hasRoom()) {
-      // An acquire that queued meanwhile gets the new worker; with nobody
-      // queued it stays idle.
-      this.#spawnForQueue();
-    }
-  }
-
-  /**
-   * Spawn for a queued acquirer, room permitting. While workers keep dying
-   * early, spawn for no one, since a spawn would only die too: a queued
-   * acquirer waits for a busy worker to free, or fails if none is busy.
-   */
-  #serveQueue(): void {
-    if (this.#lifetime.signal.aborted || this.#queue.length === 0) return;
-    if (this.#crashLooping()) {
-      if (this.#workers.some((w) => w.state === "busy")) return;
-      for (const waiter of this.#queue.splice(0, this.#queue.length)) {
-        waiter.reject(new Error("skills workers keep dying before their first task"));
-      }
-      return;
-    }
-    if (this.#hasRoom()) this.#spawnForQueue();
-  }
-
-  /**
-   * Spawn a worker in the background and hand it to the head of the queue,
-   * or leave it idle. A spawn that fails fails the head waiter, which would
-   * otherwise wait on a worker that is never coming, and spawns for the next
-   * one: each failure takes one waiter with it.
-   */
-  #spawnForQueue(): void {
-    void this.#spawnOne().then(
-      (w) => {
-        const waiter = this.#queue.shift();
-        if (!waiter) return;
-        if (this.#lease(w)) {
-          waiter.resolve(w);
-        } else {
-          // Lost the race to another acquirer, or already dead: back into
-          // the queue, served when a worker frees or its slot does.
-          this.#queue.unshift(waiter);
-        }
-      },
-      (e: unknown) => {
-        if (e instanceof PoolDisposedDuringSpawnError) return;
-        const waiter = this.#queue.shift();
-        if (waiter) {
-          waiter.reject(e instanceof Error ? e : new Error(String(e)));
-          this.#serveQueue();
-          return;
-        }
-        log.warn(
-          { err: describeError(e) },
-          "replacement worker spawn failed; pool below min until the next sweep or invoke",
-        );
-      },
-    );
-  }
-
-  /**
-   * Retire idle workers above `min` that have sat past `idleShutdownMs` —
-   * each dies on retirement, and is torn down as it becomes disposable —
-   * and spawn back up to `min`, retrying a replacement that failed or that
-   * `#onDead` left to the sweep.
-   */
-  #sweepIdle(): void {
-    if (this.#lifetime.signal.aborted) return;
-    this.#replenishToMin();
-    const now = this.#now();
-    const candidates = this.#workers.filter(
-      (w) => w.state === "idle" && w.idleMs(now) >= this.#opts.idleShutdownMs,
-    );
-    // Keep at least `min` workers alive; only sweep the surplus.
-    const idleCount = this.#workers.filter((w) => w.state === "idle").length;
-    const surplus = Math.max(0, idleCount - this.#opts.min);
-    for (const w of candidates.slice(0, surplus)) {
-      log.debug({ workerId: w.workerId, idleMs: w.idleMs(now) }, "sweeping idle worker");
-      this.#retire(w);
-    }
-  }
+function rejectionError(rejection: Rejection): Error {
+  return match(rejection)
+    .returnType<Error>()
+    .with(
+      { kind: "disposed" },
+      () => new Error("SysboxWorkerPool: disposed before worker available"),
+    )
+    .with(
+      { kind: "crash_loop" },
+      () => new Error("skills workers keep dying before their first task"),
+    )
+    .with({ kind: "spawn_failed" }, ({ error }) =>
+      error instanceof Error ? error : new Error(String(error)),
+    )
+    .exhaustive();
 }

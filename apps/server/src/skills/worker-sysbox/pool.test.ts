@@ -4,6 +4,7 @@ import { mock } from "vitest-mock-extended";
 import type { SandboxClient } from "../../sandbox/index.js";
 import { expectDefined } from "../../test/assertions.js";
 import type { CtxHandler } from "../dispatcher.js";
+import type { Death } from "../worker-state.js";
 import {
   DEFAULT_POOL_OPTIONS,
   SysboxWorkerPool,
@@ -33,8 +34,14 @@ function fakeWorker(workerId: string, opts: FakeWorkerOptions = {}): FakeWorker 
   let taskCount = 0;
   const createdAt = now();
   let lastUsed = createdAt;
-  const dead = Promise.withResolvers<string>();
+  const dead = Promise.withResolvers<Death>();
   const disposable = Promise.withResolvers<void>();
+  const end = (death: Death): void => {
+    if (status === "dead" || status === "disposed") return;
+    status = "dead";
+    dead.resolve(death);
+    if (!held) disposable.resolve();
+  };
 
   const worker: FakeWorker = {
     workerId,
@@ -61,13 +68,8 @@ function fakeWorker(workerId: string, opts: FakeWorkerOptions = {}): FakeWorker 
       else disposable.resolve();
       return ok(undefined);
     },
-    die: (reason) => {
-      if (status === "dead" || status === "disposed") return;
-      status = "dead";
-      dead.resolve(reason);
-      if (!held) disposable.resolve();
-    },
-    retire: () => worker.die("retired"),
+    die: (reason) => end({ cause: "worker", reason }),
+    retire: () => end({ cause: "host", reason: "retired" }),
     invoke: async (params) => {
       const result = await (opts.invoke ?? succeed)(params);
       // Counted once the task returns, as `SysboxSkillWorker` does.
@@ -77,7 +79,7 @@ function fakeWorker(workerId: string, opts: FakeWorkerOptions = {}): FakeWorker 
       return result;
     },
     dispose: async () => {
-      worker.die("disposed");
+      end({ cause: "host", reason: "disposed" });
       status = "disposed";
       await opts.onDispose?.();
     },
@@ -726,15 +728,14 @@ describe("SysboxWorkerPool", () => {
     });
 
     it("do not include workers the pool retires itself", async () => {
-      // Five workers die under their tasks while one acquire is queued, so
-      // five spawns go out for it: it takes one, and four stay idle, never
-      // leased. The sweep retires three of them well inside a minute of their
-      // handshake.
+      // Four acquires queue behind the one warm worker, and a spawn goes out
+      // for each. The warm worker serves them all before the spawns land, so
+      // four workers come up idle and are never leased. The sweep retires
+      // three of them well inside a minute of their handshake.
       let now = 0;
       let spawns = 0;
-      const firstTasks = gate();
+      const firstTask = gate();
       const heldSpawns = gate();
-      const queuedTask = gate();
       const spawned: FakeWorker[] = [];
       const { pool: created, sweep } = poolWith({
         min: 1,
@@ -743,11 +744,11 @@ describe("SysboxWorkerPool", () => {
         now: () => now,
         createWorker: async ({ workerId }) => {
           spawns += 1;
-          if (spawns > 5) await heldSpawns.promise;
+          if (spawns > 1) await heldSpawns.promise;
           const w = fakeWorker(workerId, {
             now: () => now,
             invoke: async ({ taskId }) => {
-              await (taskId === "t-queued" ? queuedTask.promise : firstTasks.promise);
+              if (taskId === "t-1") await firstTask.promise;
               return succeed();
             },
           });
@@ -756,28 +757,24 @@ describe("SysboxWorkerPool", () => {
         },
       });
       const pool = await created;
-      const firsts = ["t-1", "t-2", "t-3", "t-4", "t-5"].map((id) => pool.invoke(invokeParams(id)));
-      await vi.waitFor(() => expect(pool.stats()).toMatchObject({ busy: 5 }));
-      const queued = pool.invoke(invokeParams("t-queued"));
-      for (const w of spawned.slice()) w.die("supervisor exited");
-      firstTasks.open();
-      await Promise.all(firsts);
-      await vi.waitFor(() => expect(spawns).toBe(10));
+      const tasks = ["t-1", "t-2", "t-3", "t-4", "t-5"].map((id) => pool.invoke(invokeParams(id)));
+      expect(spawns).toBe(5);
+      firstTask.open();
+      await Promise.all(tasks);
       heldSpawns.open();
-      await vi.waitFor(() => expect(pool.stats()).toMatchObject({ busy: 1, idle: 4 }));
+      await vi.waitFor(() => expect(pool.stats()).toMatchObject({ total: 5, idle: 5 }));
 
       now += 1500;
       sweep();
-      await vi.waitFor(() => expect(pool.stats()).toMatchObject({ total: 2 }));
+      await vi.waitFor(() => expect(pool.stats()).toMatchObject({ total: 1 }));
       // The idle worker left dies right after its handshake: the first
       // death of a run, replaced at once.
-      for (const w of spawned.filter((s) => s.state === "idle" || s.state === "busy")) {
-        w.die("supervisor exited");
-      }
+      expectDefined(
+        spawned.find((s) => s.state === "idle"),
+        "idle worker",
+      ).die("supervisor exited");
 
-      await vi.waitFor(() => expect(spawns).toBe(11));
-      queuedTask.open();
-      await queued;
+      await vi.waitFor(() => expect(spawns).toBe(6));
       await pool.dispose();
     });
   });
@@ -885,9 +882,10 @@ describe("SysboxWorkerPool", () => {
       },
     }).pool;
     const a = pool.invoke(invokeParams("t-A"));
-    // A's spawn is in flight and fills the pool's one slot, so this queues.
+    // The spawn for A fills the pool's one slot, so B waits behind A.
     const b = pool.invoke(invokeParams("t-B"));
-    expect(pool.stats().queued).toBe(1);
+    expect(pool.stats().queued).toBe(2);
+    expect(spawns).toBe(1);
 
     spawn.open();
 
@@ -1269,7 +1267,7 @@ describe("SysboxWorkerPool", () => {
     spawn.open();
     await disposed;
     await first;
-    await expect(second).rejects.toThrow(/disposed during worker spawn/);
+    await expect(second).rejects.toThrow(/disposed before worker available/);
   });
 });
 
@@ -1375,7 +1373,7 @@ describe("SysboxWorkerPool under random deaths and spawn failures", () => {
             },
           });
           workers.push(w);
-          signal.addEventListener("abort", () => w.die("pool disposed"), { once: true });
+          signal.addEventListener("abort", () => w.retire(), { once: true });
           if (booted && (crashLoop || chance(0.1))) {
             queueMicrotask(() => w.die("supervisor exited"));
           }
