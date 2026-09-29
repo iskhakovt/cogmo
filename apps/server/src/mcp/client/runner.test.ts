@@ -36,6 +36,16 @@ lines.on("line", (line) => fs.appendFileSync(log, line + "\\n"));
 lines.on("close", () => process.exit(0));
 `;
 
+/** `SILENT_SERVER`, except that it answers `initialize`. */
+const ANSWERING_SERVER = `${SILENT_SERVER}
+lines.on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method !== "initialize") return;
+  const result = { protocolVersion: msg.params.protocolVersion, capabilities: {}, serverInfo: { name: "probe", version: "0" } };
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result }) + "\\n");
+});
+`;
+
 describe("HostRunner.spawn", () => {
   const dirs: string[] = [];
 
@@ -85,6 +95,28 @@ describe("HostRunner.spawn", () => {
     expect(log.lines().filter((line) => line.includes("notifications/cancelled"))).toEqual([]);
     expect(exitedBeforeRejecting).toBe(true);
     expect(result).toMatchObject({ name: "AbortError" });
+  });
+
+  it("ignores the signal once the spawn has resolved", async () => {
+    const log = logFile();
+    const abort = new AbortController();
+    const connection = await new HostRunner().spawn(
+      stdioServer(process.execPath, ["-e", ANSWERING_SERVER, log.path]),
+      mock<SecretsStore>(),
+      fakeRunInTx,
+      abort.signal,
+    );
+    const closed = vi.fn();
+    connection.onClose(closed);
+
+    abort.abort();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(closed).not.toHaveBeenCalled();
+    expect(log.lines()).not.toContain("exit");
+
+    await connection.close();
+    expect(closed).toHaveBeenCalledOnce();
+    expect(log.lines().at(-1)).toBe("exit");
   });
 
   it("starts nothing under a signal that has already aborted", async () => {
