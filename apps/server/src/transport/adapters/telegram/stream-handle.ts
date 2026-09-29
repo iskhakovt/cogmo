@@ -66,7 +66,7 @@ function mediaOf(event: MediaResult): Media | null {
  * The media paths a run has delivered. Every handle the run opens shares it,
  * so the one replacing a failed handle doesn't send them again.
  */
-export interface SentMedia {
+interface SentMedia {
   has(path: string): boolean;
   add(path: string): void;
 }
@@ -105,8 +105,6 @@ export class TelegramStreamHandle implements SettlingStreamHandle {
   readonly #live = new AbortController();
   /** The write Telegram is carrying; settles once its result is back in the machine. */
   #inFlight: Promise<void> | null = null;
-  /** The pending `retry_after` wait. */
-  #wait: ReturnType<typeof setTimeout> | null = null;
   readonly #sentMedia: SentMedia;
 
   constructor(
@@ -167,18 +165,11 @@ export class TelegramStreamHandle implements SettlingStreamHandle {
     match(effect)
       .with({ type: "write" }, ({ write }) => this.#write(write))
       .with({ type: "wait" }, ({ ms }) => {
-        this.#wait = setTimeout(() => {
-          this.#wait = null;
-          this.#input({ type: "throttle_elapsed", now: Date.now() });
-        }, ms);
-        this.#wait.unref();
+        setTimeout(() => this.#input({ type: "throttle_elapsed", now: Date.now() }), ms).unref();
       })
       .with({ type: "start_typing" }, () => this.#startTyping())
       .with({ type: "stopped" }, () => this.#live.abort())
-      .with({ type: "settled" }, ({ outcome }) => {
-        if (this.#wait !== null) clearTimeout(this.#wait);
-        this.#settled.resolve(outcome);
-      })
+      .with({ type: "settled" }, ({ outcome }) => this.#settled.resolve(outcome))
       .with({ type: "log" }, ({ level, message, fields }) => this.#log[level](fields, message))
       .exhaustive();
   }
@@ -222,7 +213,6 @@ export class TelegramStreamHandle implements SettlingStreamHandle {
    */
   #startTyping(): void {
     const signal = this.#live.signal;
-    if (signal.aborted) return;
     const kick = (): void => {
       this.#bot.api.sendChatAction(this.#chatId, "typing").catch((err: unknown) => {
         this.#log.debug({ err }, "telegram: sendChatAction(typing) failed; heartbeat continues");

@@ -63,7 +63,7 @@ import { ProfileDialogs } from "./profile-dialog.js";
 import { renderTelegramHtml, stripHtmlTags } from "./render.js";
 import { RepoDialogs } from "./repo-dialog.js";
 import { postSkillsApprovalKeyboard } from "./skills-approval-poster.js";
-import { TelegramStreamHandle } from "./stream-handle.js";
+import { type SettlingStreamHandle, TelegramStreamHandle } from "./stream-handle.js";
 import { splitAtCap } from "./stream-state.js";
 
 export const channelType = "telegram";
@@ -93,7 +93,7 @@ const BOUNDARY_CALLBACK_REGEX = /^boundary:([0-9a-f-]{36}):(resume|fresh)$/;
 class TelegramAdapter implements Adapter, StreamingAdapter {
   #bot: Bot;
   #attachments: AttachmentStore;
-  #activeStreams = new Map<string, TelegramStreamHandle>();
+  #activeStreams = new Map<string, SettlingStreamHandle>();
   /** Each run's delivered media paths, kept past a failed handle for the one replacing it. */
   #sentMedia = new Map<string, Set<string>>();
   #polling: Promise<void> | undefined;

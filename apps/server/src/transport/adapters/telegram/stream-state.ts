@@ -24,8 +24,8 @@ import { renderTelegramHtml } from "./render.js";
  * An abort from `idle` enters `finalizing` too, to write the error alone.
  *
  * Invariants the table enforces:
- *  - at most one write is in flight, and none starts while Telegram's
- *    `retry_after` runs;
+ *  - at most one write is in flight, and none starts during a wait before a
+ *    retry;
  *  - chunks are written in the order they were cut, each ahead of any later text;
  *  - a write that must land — a chunk, the abort's error tail — is retried
  *    after a rate limit or a transient failure, and falls back to plain text
@@ -48,11 +48,11 @@ export const MAX_WAIT_MS = 30_000;
  * through a delivery step, whose retries hold up nothing. 60s allows two of
  * the longest waits, or a whole transient backoff with room for the writes.
  */
-export const MAX_CLOSE_MS = 60_000;
+const MAX_CLOSE_MS = 60_000;
 /** Failed writes in a row, rate limits and transient failures alike, at which the handle fails. */
 export const MAX_FAILURES_IN_A_ROW = 5;
 /** Wait after a first transient failure; each further one in a row doubles it. */
-export const TRANSIENT_BACKOFF_MS = 1000;
+const TRANSIENT_BACKOFF_MS = 1000;
 /**
  * Floor on the head of a split: anything shorter makes a sliver of a message,
  * so the split cuts later in the source instead. About 3-4 lines in the mobile
@@ -115,7 +115,7 @@ interface Live {
   shown: string;
   /** The write Telegram is carrying. */
   inFlight: Write | null;
-  /** Telegram asked the handle to wait: nothing is written until `throttle_elapsed`. */
+  /** A wait before a retry is running: nothing is written until `throttle_elapsed`. */
   waiting: boolean;
   /** Writes that have failed in a row and been waited out. */
   failedInARow: number;
@@ -134,7 +134,7 @@ export type StreamState =
 type Open = Extract<StreamState, { kind: "streaming" | "finalizing" }>;
 
 /** Why a write failed, as far as the machine tells failures apart. */
-export type WriteFailure =
+type WriteFailure =
   /** An edit that changes nothing: the message already shows the text. */
   | { kind: "not_modified" }
   /** Telegram could not parse the HTML. */
@@ -147,7 +147,7 @@ export type WriteFailure =
   | { kind: "rejected"; reason: string };
 
 /** A stream event the machine renders; retractions and media have inputs of their own. */
-export type RenderedEvent = Exclude<StreamEvent, { type: "retract" }>;
+type RenderedEvent = Exclude<StreamEvent, { type: "retract" }>;
 
 export type StreamInput =
   | { type: "push"; event: RenderedEvent; now: number }
@@ -156,7 +156,7 @@ export type StreamInput =
   | { type: "media_sent"; toolName: string }
   | { type: "api_ok"; messageId: number | undefined; now: number }
   | { type: "api_failed"; failure: WriteFailure; now: number }
-  /** The `retry_after` Telegram asked for has passed. */
+  /** A wait before a retry has passed. */
   | { type: "throttle_elapsed"; now: number }
   | { type: "finish"; now: number }
   | { type: "abort"; error: string; now: number };
@@ -451,12 +451,7 @@ function onWritten(
       // The next message's first preview goes out at once.
       lastEditAt: 0,
     }))
-    .with("tail", () => ({
-      ...landed,
-      segments: [],
-      messageId: write.messageId ?? messageId,
-      shown: write.text,
-    }))
+    .with("tail", () => ({ ...landed, segments: [] }))
     .exhaustive();
   return advance(next, opts, now, []);
 }
